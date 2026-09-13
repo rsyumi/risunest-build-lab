@@ -10,9 +10,18 @@ assert(
   "Usage: commit-snapshot.mjs BUILD_LAB_REPO EXPORTED_SNAPSHOT macos|ios",
 );
 const metadata = verifySnapshot(snapshot, lane);
-assert.equal(
+const origin = new URL(
   git(repo, ["remote", "get-url", "origin"]).toString().trim(),
-  "https://github.com/rsyumi/risunest-build-lab.git",
+);
+assert(
+  origin.protocol === "https:" &&
+    origin.hostname === "github.com" &&
+    origin.pathname === "/rsyumi/risunest-build-lab.git" &&
+    !origin.password &&
+    !origin.port &&
+    !origin.search &&
+    !origin.hash,
+  "Expected build-lab HTTPS origin",
 );
 const branch = `refs/heads/snapshots/${lane}`;
 let previous;

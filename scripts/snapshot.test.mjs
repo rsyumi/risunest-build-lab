@@ -159,7 +159,7 @@ test("snapshot commits retain lane history without changing the shared checkout 
     "remote",
     "add",
     "origin",
-    "https://github.com/rsyumi/risunest-build-lab.git",
+    "https://rsyumi@github.com/rsyumi/risunest-build-lab.git",
   ]);
   writeFileSync(path.join(lab, "LICENSE"), "Synthetic control license");
   git(lab, ["add", "LICENSE"]);
