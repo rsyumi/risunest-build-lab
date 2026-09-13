@@ -93,8 +93,8 @@
     {
       "path": "benchmarks/ios/NativeUITests.swift",
       "mode": "100644",
-      "bytes": 2655,
-      "sha256": "b3d1f4d37ca3a91df38a931e851ac7645ff51a70aaff007d4739f529c4ac7295"
+      "bytes": 2890,
+      "sha256": "88e5106c84dd3adeb188147fede0b4a9286e64d61d58c05bc56d7d20d0a02e62"
     },
     {
       "path": "benchmarks/ios/contracts.ts",
@@ -123,14 +123,14 @@
     {
       "path": "benchmarks/ios/native/Cargo.lock",
       "mode": "100644",
-      "bytes": 186515,
-      "sha256": "ae60ed00e29de6fede5ccfdb56b9d1ce5b813987ac47e3bb8a24bdebbf128f9e"
+      "bytes": 186981,
+      "sha256": "915febae7013341530107080f9037b6cfd6e9b539cdf009fcf2a330cfe909af6"
     },
     {
       "path": "benchmarks/ios/native/Cargo.toml",
       "mode": "100644",
-      "bytes": 904,
-      "sha256": "cc7b0987c9cd6d3d3ff830bc2b7f1743b4f0bf46a594c3524b68ca4c073e3207"
+      "bytes": 934,
+      "sha256": "7b538e5de60670e5e32f045699c33e88715dc559ed7b41f7a4c76205ea85c1de"
     },
     {
       "path": "benchmarks/ios/native/build.rs",
@@ -141,8 +141,8 @@
     {
       "path": "benchmarks/ios/native/capabilities/ios.json",
       "mode": "100644",
-      "bytes": 1552,
-      "sha256": "8356b9e9436db825a456c3ba31f4c37bf9bdfa481f3cdd86a2e7e41b94794126"
+      "bytes": 1669,
+      "sha256": "a2a21b5b6e2c541f0c6e496b00492250218a5d1430fa07e8aa458fee7870542e"
     },
     {
       "path": "benchmarks/ios/native/src/lib.rs",
@@ -159,8 +159,8 @@
     {
       "path": "benchmarks/ios/pickerContracts.ts",
       "mode": "100644",
-      "bytes": 2216,
-      "sha256": "6ecc880d5b4bd5d7baed13da385b1b092e08df7344cb4bd76c27fcceed7f202b"
+      "bytes": 2400,
+      "sha256": "9ff4238dc65a6e8db97a2eba6c78c3b145cf86a3c503b5e72e500a408fbb5769"
     },
     {
       "path": "benchmarks/ios/runtimeContracts.ts",
@@ -1185,8 +1185,8 @@
     {
       "path": "crates/tauri-plugin-ios-native/ios/Sources/IosNativePlugin.swift",
       "mode": "100644",
-      "bytes": 19089,
-      "sha256": "cceeeca1a16f158f607b0e4887d1bb226a90e552d1ff28d8e707d4c0114b3374"
+      "bytes": 19113,
+      "sha256": "8f1e054578819b732dc3d99110cea7c456fdcfde2571c83a08616911b0e809e0"
     },
     {
       "path": "crates/tauri-plugin-ios-native/src/lib.rs",
@@ -1203,14 +1203,14 @@
     {
       "path": "package.json",
       "mode": "100644",
-      "bytes": 7955,
-      "sha256": "c78d4eb4103ea07816b2436dca9c2db4c66f01888e6e3191d18bfdd7fd460b3d"
+      "bytes": 7998,
+      "sha256": "05b53569c235eb2c2bb90e995e7eb4cc820bb7932fcb91618de5e1edd132f800"
     },
     {
       "path": "pnpm-lock.yaml",
       "mode": "100644",
-      "bytes": 172323,
-      "sha256": "2804a46f2175efd86ce5d199663daef40331dda8c20fe59fcd88f7fa8038c86a"
+      "bytes": 172658,
+      "sha256": "ac9b3e129ba9e90179d0cd10560565689364cc23641352f6b254103c45d3664c"
     },
     {
       "path": "public/assets/bergamot-translator-worker.js",
@@ -2535,14 +2535,14 @@
     {
       "path": "src-tauri/Cargo.lock",
       "mode": "100644",
-      "bytes": 191275,
-      "sha256": "64031442e62049b684d32d077bbf17a2a7d50a140d6c1cbca3cc0249b0bf970f"
+      "bytes": 191717,
+      "sha256": "0322ed8e06da2e4233f4f104e71ed9f719fdffba4ab56fa0b4a1a7e0153f0365"
     },
     {
       "path": "src-tauri/Cargo.toml",
       "mode": "100644",
-      "bytes": 4803,
-      "sha256": "12208cb17bd6ada498ca70a1da0c8d72fb53d8adba3767c8a51f3ad4f49ac6a5"
+      "bytes": 4833,
+      "sha256": "bbec91ef8a27000156b2849705863b3f2313c2c343a4b04618593d9166723e1b"
     },
     {
       "path": "src-tauri/build.rs",
@@ -2559,8 +2559,8 @@
     {
       "path": "src-tauri/capabilities/ios.json",
       "mode": "100644",
-      "bytes": 1552,
-      "sha256": "8356b9e9436db825a456c3ba31f4c37bf9bdfa481f3cdd86a2e7e41b94794126"
+      "bytes": 1590,
+      "sha256": "527f09c63353ba76b783a8db7261e8ad0737a127d567f1508606a5a5145fafcb"
     },
     {
       "path": "src-tauri/capabilities/migrated.json",
@@ -3579,8 +3579,8 @@
     {
       "path": "src-tauri/src/lib.rs",
       "mode": "100644",
-      "bytes": 26977,
-      "sha256": "a4621aca6aae55e60a635fa6fafc8d76c8cada33e9903434e7f484d8f0537d60"
+      "bytes": 27104,
+      "sha256": "ed16e36a51638440c3b1361d342fbf781c7daa88f029540b5eaac06cc22332ca"
     },
     {
       "path": "src-tauri/src/local_backup.rs",
@@ -6843,8 +6843,8 @@
     {
       "path": "src/ts/globalApi.svelte.ts",
       "mode": "100644",
-      "bytes": 68580,
-      "sha256": "8311111105925d5f11fb4c5aa0a76a2e7ce12abb6e595eb4a8648e4468a37ea1"
+      "bytes": 68735,
+      "sha256": "bdfcdab2384f3c87c83a04b25eb6edef98e5a6c71e9fe0882b326f30f3fac00f"
     },
     {
       "path": "src/ts/gui/animation.ts",
