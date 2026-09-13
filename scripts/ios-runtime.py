@@ -1,4 +1,5 @@
-import json, os, pathlib, plistlib, subprocess, sys, time
+import json, os, pathlib, plistlib, subprocess, sys, time, threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 root = pathlib.Path.cwd()
 artifacts = root / 'artifacts'
@@ -17,6 +18,17 @@ env['TAURI_ENV_PLATFORM'] = 'ios'
 print(run(['pnpm','exec','vite','build','--mode','agent','--config','benchmarks/ios/vite.config.ts'],env=env))
 print(run(['node',str(root/'node_modules/@tauri-apps/cli/tauri.js'),'ios','init','--ci','--skip-targets-install'],cwd=bench))
 apple = bench / 'gen/apple'
+project = apple / 'project.yml'
+text = project.read_text()
+assert 'node tauri ios xcode-script' in text, 'Unexpected generated Xcode command'
+project.write_text(text.replace('node tauri ios xcode-script', 'node ' + str(root/'node_modules/@tauri-apps/cli/tauri.js') + ' ios xcode-script'))
+print(run(['xcodegen','generate','--spec','project.yml'],cwd=apple))
+for path in apple.glob('*_iOS/Info.plist'):
+    info=plistlib.loads(path.read_bytes())
+    info['BGTaskSchedulerPermittedIdentifiers']=['io.github.rsyumi.risunest.ios.bench.generation']
+    info['UIBackgroundModes']=['processing']
+    path.write_bytes(plistlib.dumps(info))
+
 for path in apple.glob('Sources/**/*'):
     if path.is_file() and path.suffix in ['.mm','.h']:
         path.write_text(path.read_text().replace('start_app', 'ios_bench_start'))
@@ -46,15 +58,34 @@ def collect(phase,timeout=600):
         matches=list(container.rglob('verification-'+phase+'.jsonl'))
         if matches:
             text=matches[0].read_text()
-            records=[json.loads(line) for line in text.splitlines(keepends=True) if line.strip() and line.endswith('\n')]
+            complete_text=text[:text.rfind('\n')+1]
+            records=[json.loads(line) for line in complete_text.splitlines() if line]
             (artifacts/('ios-'+phase+'.jsonl')).write_text(text)
             if any(x['stage']=='failure' for x in records): raise RuntimeError(records[-1])
             if any(x['stage']=='complete' for x in records): return records
         time.sleep(2)
     raise RuntimeError('Timed out: '+phase)
 
+class StreamHandler(BaseHTTPRequestHandler):
+    def log_message(self, *args): pass
+    def do_GET(self):
+        if self.path not in ['/stream','/slow']:
+            self.send_error(404); return
+        payload=('data: {"text":"합성🐿️"}\n\n' * (8 if self.path=='/stream' else 200)).encode()
+        self.send_response(200)
+        self.send_header('Content-Type','text/event-stream')
+        self.send_header('Content-Length',str(len(payload)))
+        self.end_headers()
+        try:
+            for offset in range(0,len(payload),7):
+                self.wfile.write(payload[offset:offset+7]); self.wfile.flush(); time.sleep(.01)
+        except (BrokenPipeError, ConnectionResetError): pass
+server=ThreadingHTTPServer(('127.0.0.1',0),StreamHandler)
+threading.Thread(target=server.serve_forever,daemon=True).start()
+
 def launch(phase):
     child=os.environ.copy();child['SIMCTL_CHILD_RISUNEST_IOS_PHASE']=phase
+    child['SIMCTL_CHILD_RISUNEST_IOS_STREAM_URL']='http://127.0.0.1:'+str(server.server_port)
     print(run(['xcrun','simctl','launch','--terminate-running-process',device,identifier],env=child))
 
 try:
@@ -66,6 +97,7 @@ try:
     before=next(x['result'] for x in first if x['stage']=='persistence')
     after=next(x['result'] for x in second if x['stage']=='reload')
     assert before['finalHash']==after['finalHash'] and before['revision']==after['revision'], 'restart changed stored data'
+    launch('restore');collect('restore',120)
     launch('background');time.sleep(3)
     print(run(['xcrun','simctl','launch',device,'com.apple.Preferences']))
     time.sleep(10)
@@ -78,6 +110,14 @@ try:
     print(run(['xcrun','simctl','launch',device,'io.github.rsyumi.risunest']))
     time.sleep(15)
     print(run(['xcrun','simctl','io',device,'screenshot',str(artifacts/'ios-product-first-launch.png')]))
+    print(run(['xcrun','simctl','shutdown',device]))
+    tablet=[x for x in types if x['name'].startswith('iPad')][-1]
+    device=run(['xcrun','simctl','create','RisuNest synthetic iPad',tablet['identifier'],runtime['identifier']]).strip()
+    print(run(['xcrun','simctl','boot',device]))
+    print(run(['xcrun','simctl','bootstatus',device,'-b']))
+    print(run(['xcrun','simctl','install',device,str(app)]))
+    launch('ipad');collect('ipad',120)
+    print(run(['xcrun','simctl','io',device,'screenshot',str(artifacts/'ios-ipad.png')]))
     (artifacts/'ios-runtime-result.json').write_text(json.dumps({'passed':True,'restartExact':True}))
 finally:
     subprocess.run(['xcrun','simctl','shutdown',device],check=False)

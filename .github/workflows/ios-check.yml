@@ -20,6 +20,7 @@ jobs:
         shell: bash
         working-directory: source
     env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
       CARGO_TARGET_DIR: ${{ github.workspace }}/source/src-tauri/target
       CARGO_INCREMENTAL: "0"
       SNAPSHOT_SHA: ${{ inputs.source_sha }}
