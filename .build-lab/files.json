@@ -87,8 +87,8 @@
     {
       "path": "benchmarks/harnessConfig.ts",
       "mode": "100644",
-      "bytes": 1622,
-      "sha256": "1c0b0d6dac82b710dd2a8c42133b3e6513b9e3f909fe8ea6805eabe95b59c150"
+      "bytes": 1637,
+      "sha256": "a512260d2dff8caca0e05d562fc390df21864fdcc9159c677c61d1a8d87e8f5f"
     },
     {
       "path": "benchmarks/linux/index.html",
@@ -155,6 +155,72 @@
       "mode": "100644",
       "bytes": 708,
       "sha256": "8da37603de58d9ac4017b45dc6b97f3ae891fafa56422bdcde4f34a2b5022c1a"
+    },
+    {
+      "path": "benchmarks/macos/.gitignore",
+      "mode": "100644",
+      "bytes": 67,
+      "sha256": "d851b2e3d69915060464feae1871dd26108e842803912e46a4263ce188ed33b6"
+    },
+    {
+      "path": "benchmarks/macos/contracts.ts",
+      "mode": "100644",
+      "bytes": 7434,
+      "sha256": "7f1cc0826bf91ba95135a550157fd3435b8cc8351ce901998163c5b1a840ee0b"
+    },
+    {
+      "path": "benchmarks/macos/index.html",
+      "mode": "100644",
+      "bytes": 527,
+      "sha256": "482c9d1d9bf57856385be9a7a9b7bc634e03d23a591d83edc6c8162679da37d4"
+    },
+    {
+      "path": "benchmarks/macos/main.ts",
+      "mode": "100644",
+      "bytes": 9107,
+      "sha256": "1582c2ca83bd67c0b72be368ff7a3af19eb25058cd1553a5eacdcec370cb4ef9"
+    },
+    {
+      "path": "benchmarks/macos/native/Cargo.lock",
+      "mode": "100644",
+      "bytes": 186147,
+      "sha256": "e6b9c67e21c9b17c8123c13aaa57986bb5631f5263b2a2977f02b8b4ced74efd"
+    },
+    {
+      "path": "benchmarks/macos/native/Cargo.toml",
+      "mode": "100644",
+      "bytes": 372,
+      "sha256": "e11dbc7539c9e726a396b2de3816319437daf1cb7045497b06aebb083eb0b979"
+    },
+    {
+      "path": "benchmarks/macos/native/build.rs",
+      "mode": "100644",
+      "bytes": 40,
+      "sha256": "6aeeab41bc35efde4e3c2b644a6248f7fc06d24ae30b75c0d33491cbb0c1fa31"
+    },
+    {
+      "path": "benchmarks/macos/native/src/main.rs",
+      "mode": "100644",
+      "bytes": 2465,
+      "sha256": "924d17348346a6e74ae81b0427af2370234e84c67c4b9afd2790aff16711d0b8"
+    },
+    {
+      "path": "benchmarks/macos/prepare.mjs",
+      "mode": "100644",
+      "bytes": 1583,
+      "sha256": "b8cd1694b9ef60565fc5f46dee219c20e6417be4db1e6373735688b348728cdd"
+    },
+    {
+      "path": "benchmarks/macos/run.py",
+      "mode": "100644",
+      "bytes": 5145,
+      "sha256": "d037c0f6673c442714405af2a82869620a03a4a0e5f27fe5828de9d4d8df688f"
+    },
+    {
+      "path": "benchmarks/macos/vite.config.ts",
+      "mode": "100644",
+      "bytes": 89,
+      "sha256": "038105d13666f17c47f1613b27b0390098e9864b7c76a5621d70beacda2478ec"
     },
     {
       "path": "benchmarks/media/windows-memory.ps1",
@@ -531,8 +597,8 @@
     {
       "path": "benchmarks/tsconfig.json",
       "mode": "100644",
-      "bytes": 270,
-      "sha256": "ef7639e30a3407e1a8c8e2eec9a3ed82b7ade6a758739ae304c2219b2a3a88de"
+      "bytes": 293,
+      "sha256": "09433c434be778e06cb1db6aa8f07f85d1bad28fc340c82701d836e7c54e949f"
     },
     {
       "path": "benchmarks/ui-responsiveness/.gitignore",
@@ -1083,8 +1149,8 @@
     {
       "path": "package.json",
       "mode": "100644",
-      "bytes": 7717,
-      "sha256": "a864f4ae7703a23802bf30343a4af24eaa4dcbe1ad3f94e8b2f060e000cd31e3"
+      "bytes": 7987,
+      "sha256": "9708a39fcee37ce1ebf09af699eb71da49176fd200b5050c64bcd207b1acb8ca"
     },
     {
       "path": "pnpm-lock.yaml",
@@ -2421,8 +2487,8 @@
     {
       "path": "src-tauri/Cargo.toml",
       "mode": "100644",
-      "bytes": 4587,
-      "sha256": "0da49bda1e61e510a9653686b4f736b825e3ec972a6bc6287a0b855cdbdb644e"
+      "bytes": 4608,
+      "sha256": "e9b870e2888a0d4f96c915efd177789d77052150b57137beae1b4f578bdc0cec"
     },
     {
       "path": "src-tauri/build.rs",
@@ -3249,8 +3315,8 @@
     {
       "path": "src-tauri/src/lib.rs",
       "mode": "100644",
-      "bytes": 26776,
-      "sha256": "628babe56fd49592d8b9e21ed9ebf0b2fba01e13eea65338dcdad8e88cd5a1e8"
+      "bytes": 27236,
+      "sha256": "2400d273ef6176fa4a1ab93c9875536c9a638fb878a316cd3c4f5a2688430a00"
     },
     {
       "path": "src-tauri/src/local_backup.rs",
@@ -3269,6 +3335,12 @@
       "mode": "100644",
       "bytes": 87739,
       "sha256": "e74b13f78afe7defdcfb8bc38f8a9f2da42c0e8ea2793be1a8c93835b4dd13df"
+    },
+    {
+      "path": "src-tauri/src/macos_lifecycle.rs",
+      "mode": "100644",
+      "bytes": 4996,
+      "sha256": "226f55613177788ba20a75609f7ef77cdc8738f1e83a43dc561a0253d85d9700"
     },
     {
       "path": "src-tauri/src/main.rs",
@@ -3543,8 +3615,8 @@
     {
       "path": "src-tauri/src/opened_files.rs",
       "mode": "100644",
-      "bytes": 13369,
-      "sha256": "8dc05c34f4ccfd3c40321d0060c30dd49c6d3dffc64d14f513c0c5a6e69913b5"
+      "bytes": 13888,
+      "sha256": "3b5a513e71a55dd27e44b1e9cf704e75ee41e597fa8fb1d154e658fee3b05911"
     },
     {
       "path": "src-tauri/src/owner_manifest_codec.rs",
@@ -6111,8 +6183,8 @@
     {
       "path": "src/ts/bootstrap.ts",
       "mode": "100644",
-      "bytes": 39890,
-      "sha256": "1be1d7afdd6e60eee26cc5bb18170ad1c59b84d517d34f3d40098b2a09f4b0c7"
+      "bytes": 41267,
+      "sha256": "58bcc25be94b7e270d74fda364433dd337bbc9f6a7137ae6e26ebcac7fc3c376"
     },
     {
       "path": "src/ts/cbs.operationContext.test.ts",
@@ -6639,8 +6711,20 @@
     {
       "path": "src/ts/hotkey.ts",
       "mode": "100644",
-      "bytes": 12701,
-      "sha256": "3d36088047dd0879adf46e13869a1048c2e54a5f81930c9fa173de7f8be82a8a"
+      "bytes": 12793,
+      "sha256": "ac2e445a169ff530558beaf82cbf8c03260231287c0d6b63d964a483f61da15b"
+    },
+    {
+      "path": "src/ts/hotkeyModifier.test.ts",
+      "mode": "100644",
+      "bytes": 744,
+      "sha256": "c358026eeb8cc98cb6920e98ba0fc5e89d62ce88a32a49656b0dd60fb2291c90"
+    },
+    {
+      "path": "src/ts/hotkeyModifier.ts",
+      "mode": "100644",
+      "bytes": 451,
+      "sha256": "34fdda1313188e99bd21cd865721ab4a07c15f7befb6e082d8831c4477ed2058"
     },
     {
       "path": "src/ts/interchangeability.ts",
@@ -7767,14 +7851,14 @@
     {
       "path": "src/ts/process/nativeRegexBatch.test.ts",
       "mode": "100644",
-      "bytes": 7958,
-      "sha256": "8dd45459672fc647a253bdf72edfa62fe48a5d473e93cf0112a438e5118d0001"
+      "bytes": 7988,
+      "sha256": "4ad5b866ce2b20c98184719d4951f50a7d27eb7f13b78f207558e5838471042e"
     },
     {
       "path": "src/ts/process/nativeRegexBatch.ts",
       "mode": "100644",
-      "bytes": 4957,
-      "sha256": "8e05e327683e6685e46bbb6495a2c7cf823f35880f84e62312298d8e8015ef90"
+      "bytes": 4990,
+      "sha256": "a863c5746cbece541232e4f3618466e1f85b568afaec77d25376ecdad68c1e07"
     },
     {
       "path": "src/ts/process/phase1Algorithms.bench.ts",
@@ -8983,6 +9067,18 @@
       "sha256": "55f98c679cb904ec3adaf0949f9ec2f1068c86cc6b8f4bd8c619a073b1b79fe1"
     },
     {
+      "path": "src/ts/storage/macosLifecycle.test.ts",
+      "mode": "100644",
+      "bytes": 2942,
+      "sha256": "cb8289ec6854e6cd770abf33a07262f5807243efc2efb0e241cf295665a90cfe"
+    },
+    {
+      "path": "src/ts/storage/macosLifecycle.ts",
+      "mode": "100644",
+      "bytes": 2399,
+      "sha256": "ac16e37d99e08c763a6ba35824bc4a74308a352b5bea8f1124525a7bb9fcd6fb"
+    },
+    {
       "path": "src/ts/storage/mutationGatedPersistentDataStore.test.ts",
       "mode": "100644",
       "bytes": 6461,
@@ -9081,14 +9177,14 @@
     {
       "path": "src/ts/storage/nativeCommitTransport.test.ts",
       "mode": "100644",
-      "bytes": 11381,
-      "sha256": "e7d35559eb587461216edcdf503233ad28434f9b2367fc4c24c219920b33f608"
+      "bytes": 12047,
+      "sha256": "d92227c727590a4a395011e11949e1cf30eb34670f3f0939144effd6f5fd8cf4"
     },
     {
       "path": "src/ts/storage/nativeCommitTransport.ts",
       "mode": "100644",
-      "bytes": 9204,
-      "sha256": "eae77f03120c228e1df2169bcdb711505340c5855d8e7c0b3c4fdda668817f53"
+      "bytes": 9647,
+      "sha256": "f7536b46af384c1f503f1cf7ea28e619ba6a6d7412c931dc69837fb05c8f7cbe"
     },
     {
       "path": "src/ts/storage/nativeContentExportPicker.ts",
@@ -10587,8 +10683,8 @@
     {
       "path": "tests/productionBundle.mjs",
       "mode": "100644",
-      "bytes": 4030,
-      "sha256": "e20fc02103a2d847373186051e49fa7d0ad541be77494b70661b4ada87105be4"
+      "bytes": 4078,
+      "sha256": "6d32f4a3d8d24d020e3425c9b054563af92842dfb92958feb0eeda24e4d574e3"
     },
     {
       "path": "tests/productionBundle.node-test.mjs",
