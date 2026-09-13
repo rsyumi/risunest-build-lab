@@ -180,4 +180,7 @@ except Exception:
                             '--predicate','processIdentifier == '+str(current_pid)],stdout=output,stderr=subprocess.STDOUT,check=False)
     raise
 finally:
+    if (artifacts/'ios-ui.xcresult').exists():
+        subprocess.run(['xcrun','xcresulttool','export','attachments','--path',str(artifacts/'ios-ui.xcresult'),
+                        '--output-path',str(artifacts/'ios-ui-attachments')],check=False)
     subprocess.run(['xcrun','simctl','shutdown',device],check=False)
