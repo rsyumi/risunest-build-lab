@@ -183,8 +183,8 @@
     {
       "path": "benchmarks/ios/runtimeContracts.ts",
       "mode": "100644",
-      "bytes": 3448,
-      "sha256": "0a94a0d70be509498907b80357318da03bd16d4d69ea444145d6475f16498516"
+      "bytes": 3770,
+      "sha256": "ed2446b7dcacde60c43c1fcff5f1f508397b469981be08c4d8a12cf9bf4edf88"
     },
     {
       "path": "benchmarks/ios/vite.config.ts",
