@@ -1,0 +1,129 @@
+[package]
+name = "risunest"
+version = "0.0.0"
+description = "RisuNest"
+authors = ["you"]
+license = ""
+repository = "https://github.com/rsyumi/RisuNest"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+axum = "0.8.9"
+tempfile = "3"
+risunest-sync-wire = { path = "../crates/sync-wire" }
+risunest-sync-connect = { path = "../crates/sync-connect" }
+tauri = { version = "2.11.5", features = ["protocol-asset", "devtools"] }
+rusqlite = { version = "0.40.2", features = ["bundled", "backup"] }
+ryu-js = { version = "1.0.3", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+sha2 = "0.10"
+tiktoken-rs = "=0.12.0"
+base64 = "0.21.0"
+cap-primitives = "4.0.3"
+darling = "0.20.3"
+zip = "0.6.6"
+eventsource-client = "0.12.2"
+futures = "0.3.30"
+url = "2.2"
+uuid = { version = "1.9.1", features = [ "v4" ] }
+tauri-plugin-deep-link = "2.4.9"
+tauri-plugin-fs = "2.5.1"
+tauri-plugin-os = "2.3.2"
+tauri-plugin-dialog = "2.7.2"
+tauri-plugin-process = "2.3.1"
+tauri-plugin-shell = "2.3.5"
+# Native callers may supply Cookie, Origin, Referer and other HTTP headers.
+tauri-plugin-http = { version = "2.5.9", features = ["unsafe-headers"] }
+oauth2 = "5.0.0"
+tokio = { version = "1.47.1", features = ["net", "rt", "time", "fs", "io-util", "sync"] }
+tokio-util = { version = "0.7.19", features = ["io"], optional = true }
+libc = { version = "0.2", optional = true }
+hex = "0.4.3"
+image = { version = "0.25.10", default-features = false, features = ["gif", "jpeg", "png", "webp"] }
+webp = "0.3.1"
+flate2 = "1.1.2"
+crc32fast = "1.5.0"
+rmpv = "1.3.0"
+time = { version = "0.3.55", features = ["formatting", "large-dates", "parsing"] }
+[features]
+default = ["native-kei-upload-pilot", "native-official-publication"]
+# this feature is used for production builds or when `devPath` points to the filesystem
+# DO NOT REMOVE!!
+custom-protocol = ["tauri/custom-protocol"]
+native-official-publication = [
+    "dep:libc",
+    "dep:tokio-util",
+    "reqwest/stream",
+    "tokio/fs",
+    "tokio/io-util",
+]
+official-publication-upload-pilot = ["native-official-publication"]
+native-kei-upload-pilot = [
+    "dep:ryu-js",
+    "dep:tokio-util",
+    "reqwest/stream",
+    "tokio/fs",
+    "tokio/io-util",
+]
+
+[lib]
+name = "risunest_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+tauri-plugin-single-instance = { version = "2.4.3", features = ["deep-link"] }
+tauri-plugin-updater = "2.10.1"
+getrandom = "0.2.15"
+reqwest = { version = "0.11.16", features = ["blocking", "json"] }
+
+[target.'cfg(any(windows, target_os = "android", target_os = "linux"))'.dependencies]
+regex = "1.13.1"
+
+[target.'cfg(windows)'.dependencies]
+webview2-com = "0.38.2"
+windows = { version = "0.61.3", features = ["Win32_System_Com", "Win32_Graphics_Dwm", "Win32_UI_Accessibility", "Win32_UI_WindowsAndMessaging"] }
+# Trust internal HTTPS endpoints whose CA is installed in the Windows store.
+# Keep the default public roots and certificate/hostname verification enabled.
+tauri-plugin-http = { version = "2.5.9", features = ["rustls-tls-native-roots"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Cryptography",
+    "Win32_Storage_FileSystem",
+] }
+tauri-plugin-window-state = "2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+security-framework = "2.11.1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+keyring = { version = "3.6.3", default-features = false, features = ["sync-secret-service", "crypto-rust"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+tauri-plugin-barcode-scanner = { path = "../crates/tauri-plugin-barcode-scanner" }
+getrandom = "0.2.15"
+jni = "0.21.1"
+reqwest = { version = "0.11.16", default-features = false, features = ["blocking", "json", "rustls-tls", "stream"] }
+
+[target.'cfg(not(target_os = "android"))'.dependencies]
+reqwest = { version = "0.11.16", features = ["blocking", "json", "stream"] }
+
+[dev-dependencies]
+wry = "=0.55.1"
+tao = "0.35.3"
+rcgen = "0.14"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+tiny_http = "0.12.0"
+risunest-sync-server = { path = "../server/sync" }
+tokio = { version = "1", features = ["rt-multi-thread", "net"] }
+tauri = { version = "2.11.5", features = ["test"] }
+regex = "1.13.1"

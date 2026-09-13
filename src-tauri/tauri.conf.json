@@ -1,0 +1,85 @@
+{
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "beforeBuildCommand": "pnpm tauribuild",
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:5174"
+  },
+  "bundle": {
+    "active": true,
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": [],
+    "targets": ["deb", "rpm", "appimage", "nsis", "app", "dmg"],
+    "createUpdaterArtifacts": false,
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico"
+      }
+    },
+    "fileAssociations": [
+      {
+        "ext": ["risum", "risup", "charx", "risunest", "risudat", "bin"],
+        "mimeType": "application/octet-stream"
+      }
+    ]
+  },
+  "productName": "RisuNest",
+  "mainBinaryName": "RisuNest",
+  "version": "2026.8.250",
+  "identifier": "io.github.rsyumi.risunest",
+  "plugins": {
+    "updater": {
+      "comment": "RisuNest has no update server yet. The endpoint list is intentionally empty and the pubkey is intentionally blank so that check() fails fast with EmptyEndpoints instead of resolving upstream RisuAI releases. Do not delete this block: tauri_plugin_updater is still registered in lib.rs and its Config requires `pubkey`, so a missing `plugins.updater` aborts app startup. To re-enable updates, publish a latest.json, put its URL in `endpoints`, put the matching minisign public key in `pubkey`, set `bundle.createUpdaterArtifacts` back to true, sign the build with TAURI_SIGNING_PRIVATE_KEY, and flip UPDATER_ENDPOINT_CONFIGURED in src/ts/update.ts.",
+      "pubkey": "",
+      "endpoints": [],
+      "windows": {
+        "installMode": "passive"
+      }
+    },
+    "deep-link": {
+      "desktop": {
+        "schemes": ["risunestlocal"]
+      },
+      "mobile": [
+        {
+          "scheme": ["risunestlocal"],
+          "appLink": false
+        }
+      ]
+    }
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "fullscreen": false,
+        "resizable": true,
+        "title": "RisuNest",
+        "width": 1024,
+        "height": 768,
+        "minWidth": 300,
+        "minHeight": 500,
+        "dragDropEnabled": false
+      }
+    ],
+    "security": {
+      "assetProtocol": {
+        "scope": [
+          "asset",
+          "$APPDATA",
+          "$APPDATA/*",
+          "$APPDATA/**/*",
+          "/data/**/*"
+        ],
+        "enable": true
+      },
+      "csp": null
+    }
+  }
+}

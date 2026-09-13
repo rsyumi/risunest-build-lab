@@ -1,0 +1,13 @@
+{
+  "extends": "../tsconfig.json",
+  "include": [
+    "./harnessConfig.ts",
+    "./tokenizer/*.ts",
+    "./streaming/**/*.ts",
+    "./streaming/**/*.svelte",
+    "./linux/**/*.ts",
+    "./device-backup/**/*.ts",
+    "../src/**/*.d.ts"
+  ],
+  "exclude": ["**/dist/**"]
+}
