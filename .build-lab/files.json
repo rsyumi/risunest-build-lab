@@ -129,8 +129,8 @@
     {
       "path": "benchmarks/ios/native/Cargo.toml",
       "mode": "100644",
-      "bytes": 934,
-      "sha256": "7b538e5de60670e5e32f045699c33e88715dc559ed7b41f7a4c76205ea85c1de"
+      "bytes": 889,
+      "sha256": "445a05ccbeaa75f7e2f131e707be72c8379380cb2fc577c9683443c11367fb38"
     },
     {
       "path": "benchmarks/ios/native/build.rs",
@@ -153,8 +153,8 @@
     {
       "path": "benchmarks/ios/native/tauri.conf.json",
       "mode": "100644",
-      "bytes": 312,
-      "sha256": "7af37dc255b4a0a7f93ce288a77ff4bcad12665bbdd65f1425b469af86406a2f"
+      "bytes": 427,
+      "sha256": "26cbd034dd6708c25e23df59b11112997e710e6ec753daf78b7b402094357424"
     },
     {
       "path": "benchmarks/ios/pickerContracts.ts",
@@ -3165,8 +3165,8 @@
     {
       "path": "src-tauri/gen/apple/project.yml",
       "mode": "100644",
-      "bytes": 3604,
-      "sha256": "a9a16af650fd5564fee586c35a1daf5ceac313d6bec28637c5d8ef7b2777644f"
+      "bytes": 3716,
+      "sha256": "204b3def2906549e02ae754e6896ea99b736ac214caa232b81968cf49a0f5abf"
     },
     {
       "path": "src-tauri/gen/apple/risunest.xcodeproj/project.pbxproj",
@@ -3195,8 +3195,8 @@
     {
       "path": "src-tauri/gen/apple/risunest_iOS/Info.plist",
       "mode": "100644",
-      "bytes": 1808,
-      "sha256": "81890ef84b2c195fd961f74fe1672c9aabd1311bc2de4aedba449f0ee0fe7275"
+      "bytes": 1941,
+      "sha256": "37f292c30fed3c70bfd8722eb2ce1e3ed7987f316bee7d150f0ad485e65b70dd"
     },
     {
       "path": "src-tauri/gen/apple/risunest_iOS/risunest_iOS.entitlements",
