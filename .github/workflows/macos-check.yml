@@ -83,6 +83,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: source/src-tauri -> target
+          cache-workspace-crates: true
+          cache-on-failure: true
           key: macos-${{ inputs.runner }}-${{ runner.arch }}-${{ steps.environment.outputs.target }}-${{ steps.environment.outputs.sdk }}
       - name: Install locked frontend inputs
         run: pnpm install --frozen-lockfile
@@ -139,7 +141,7 @@ jobs:
           pnpm benchmark:macos:build:agent 2>&1 | tee artifacts/harness-frontend.log
           node benchmarks/macos/prepare.mjs
           shasum -a 256 benchmarks/macos/native/Cargo.lock >> artifacts/environment.txt
-          (cd benchmarks/macos/native && pnpm exec tauri build --ci --bundles app -- --locked) 2>&1 | tee artifacts/harness-native.log
+          (cd benchmarks/macos/native && node ../../../node_modules/@tauri-apps/cli/tauri.js build --ci --bundles app -- --locked) 2>&1 | tee artifacts/harness-native.log
       - name: Actual WKWebView contracts and desktop lifecycle
         run: |
           set -euo pipefail
