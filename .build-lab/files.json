@@ -93,8 +93,8 @@
     {
       "path": "benchmarks/ios/NativeUITests.swift",
       "mode": "100644",
-      "bytes": 8989,
-      "sha256": "99466259344a6eda148905ad85d84d4e913a3298f510eaa1f909be065b96b962"
+      "bytes": 9455,
+      "sha256": "bd82f500882961eb23feb02df05343508bdf119db5f089f354e83fa461cae421"
     },
     {
       "path": "benchmarks/ios/buildTestLab.py",
@@ -105,8 +105,8 @@
     {
       "path": "benchmarks/ios/cloudContracts.ts",
       "mode": "100644",
-      "bytes": 4966,
-      "sha256": "0e60218c5ac5376aca1f4cc829578a55e393b5effa929b13356edd5b647ff1c9"
+      "bytes": 5211,
+      "sha256": "48e704b711203b73f7908715deb093067ce9d7e5d15658f02c636b5d8108c9e3"
     },
     {
       "path": "benchmarks/ios/contracts.ts",
@@ -123,8 +123,8 @@
     {
       "path": "benchmarks/ios/main.ts",
       "mode": "100644",
-      "bytes": 6289,
-      "sha256": "88e03b99c6ea96af3c94a9339523b4a993fa6df58b88d0c97913a7120eade865"
+      "bytes": 7231,
+      "sha256": "f57fcb8b105f11a86150448fecdbd1db13d852bfccc43850f6f835f8a6b0856c"
     },
     {
       "path": "benchmarks/ios/native/.gitignore",
@@ -7261,6 +7261,18 @@
       "sha256": "d3f5e5ec641b1397cd07dd0f35810438c4049d1f30e8b7d18220a8347cc3c48b"
     },
     {
+      "path": "src/ts/network/requestAbortScope.test.ts",
+      "mode": "100644",
+      "bytes": 1566,
+      "sha256": "18b0b46c53a599a2b89f0934af0390c45d2facfe9573474f893685e8f10d753c"
+    },
+    {
+      "path": "src/ts/network/requestAbortScope.ts",
+      "mode": "100644",
+      "bytes": 1241,
+      "sha256": "d0d28e7cc5e01cee28757e31b67e9e63a9bfb769ab805c134daacfc8935b15d9"
+    },
+    {
       "path": "src/ts/network/tauriHttpStream.test.ts",
       "mode": "100644",
       "bytes": 18851,
@@ -8323,10 +8335,16 @@
       "sha256": "6630fd9d823be9674cd99723857f30cc1a885c8829796707331ffce041233646"
     },
     {
+      "path": "src/ts/process/request/request.ollama.test.ts",
+      "mode": "100644",
+      "bytes": 5873,
+      "sha256": "eac6ce188e9fc3741f7226ef1401b3fad86778b71d26fb42a42d9de322147f0c"
+    },
+    {
       "path": "src/ts/process/request/request.ts",
       "mode": "100644",
-      "bytes": 48359,
-      "sha256": "323fd10ce58c3c92af68de2bc64ccee10059ae3b28a6492f1b4007024fbab4cc"
+      "bytes": 49155,
+      "sha256": "c1a881d35df8ff5e6baaef2c1bd91975a6435712a052cc314643485b549776f1"
     },
     {
       "path": "src/ts/process/request/shared.ts",
