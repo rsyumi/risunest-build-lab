@@ -91,6 +91,12 @@
       "sha256": "8e116abbe6aeec52653d33ad5892ea96cc89cc4ad5408079d9c2519209683f28"
     },
     {
+      "path": "benchmarks/ios/NativeUITests.swift",
+      "mode": "100644",
+      "bytes": 2655,
+      "sha256": "b3d1f4d37ca3a91df38a931e851ac7645ff51a70aaff007d4739f529c4ac7295"
+    },
+    {
       "path": "benchmarks/ios/contracts.ts",
       "mode": "100644",
       "bytes": 7426,
@@ -105,8 +111,8 @@
     {
       "path": "benchmarks/ios/main.ts",
       "mode": "100644",
-      "bytes": 4384,
-      "sha256": "55bb109bd4f6be5bf43cea40eff58615d1664e0015729d276748b6eef4b9bd04"
+      "bytes": 4820,
+      "sha256": "f603294ceaa61fad2f00476d998f4cc8a3dbf20c1b85b115c1a8ff1136bca495"
     },
     {
       "path": "benchmarks/ios/native/.gitignore",
@@ -135,8 +141,8 @@
     {
       "path": "benchmarks/ios/native/capabilities/ios.json",
       "mode": "100644",
-      "bytes": 1511,
-      "sha256": "bc77cf48cf49e51420e75546aa698413c39d72c1798210aff56610e396c5151e"
+      "bytes": 1552,
+      "sha256": "8356b9e9436db825a456c3ba31f4c37bf9bdfa481f3cdd86a2e7e41b94794126"
     },
     {
       "path": "benchmarks/ios/native/src/lib.rs",
@@ -149,6 +155,12 @@
       "mode": "100644",
       "bytes": 312,
       "sha256": "7af37dc255b4a0a7f93ce288a77ff4bcad12665bbdd65f1425b469af86406a2f"
+    },
+    {
+      "path": "benchmarks/ios/pickerContracts.ts",
+      "mode": "100644",
+      "bytes": 2216,
+      "sha256": "6ecc880d5b4bd5d7baed13da385b1b092e08df7344cb4bd76c27fcceed7f202b"
     },
     {
       "path": "benchmarks/ios/runtimeContracts.ts",
@@ -1161,8 +1173,8 @@
     {
       "path": "crates/tauri-plugin-ios-native/build.rs",
       "mode": "100644",
-      "bytes": 337,
-      "sha256": "10fa7139dd79089f60658624e6994845ae09a5076ae04730b7bc93d148485e37"
+      "bytes": 365,
+      "sha256": "e1005a8f1d0cd27db9926d5fa368a0aceb45c9ed5a18387a5a33a8f6a0b868fa"
     },
     {
       "path": "crates/tauri-plugin-ios-native/ios/Package.swift",
@@ -1173,8 +1185,8 @@
     {
       "path": "crates/tauri-plugin-ios-native/ios/Sources/IosNativePlugin.swift",
       "mode": "100644",
-      "bytes": 18061,
-      "sha256": "1f267342b112a99c032269031d401300b7c5c0fd6da4f73ccd953a2a3157d672"
+      "bytes": 19089,
+      "sha256": "cceeeca1a16f158f607b0e4887d1bb226a90e552d1ff28d8e707d4c0114b3374"
     },
     {
       "path": "crates/tauri-plugin-ios-native/src/lib.rs",
@@ -2547,8 +2559,8 @@
     {
       "path": "src-tauri/capabilities/ios.json",
       "mode": "100644",
-      "bytes": 1511,
-      "sha256": "bc77cf48cf49e51420e75546aa698413c39d72c1798210aff56610e396c5151e"
+      "bytes": 1552,
+      "sha256": "8356b9e9436db825a456c3ba31f4c37bf9bdfa481f3cdd86a2e7e41b94794126"
     },
     {
       "path": "src-tauri/capabilities/migrated.json",
@@ -6435,8 +6447,8 @@
     {
       "path": "src/ts/bootstrap.ts",
       "mode": "100644",
-      "bytes": 40094,
-      "sha256": "ad539ed96cd74d6ef4144c067eae4b21ff14400f3036d77bb36ca1fbcf8bfd0a"
+      "bytes": 40151,
+      "sha256": "0592d23d116afa0b145dc630b431b16dbe3ef8e260a2adca9aca4f4c2f4e2a9c"
     },
     {
       "path": "src/ts/cbs.operationContext.test.ts",
@@ -6975,14 +6987,14 @@
     {
       "path": "src/ts/iosNative.test.ts",
       "mode": "100644",
-      "bytes": 3772,
-      "sha256": "55430e7927fa51c574daeffa49599e6fe48a80af406a0d20a0ecd75540d8adc3"
+      "bytes": 5102,
+      "sha256": "994f48f25652d235b38b5984656950e18a0529c071a734fa43043da56a5ccbc2"
     },
     {
       "path": "src/ts/iosNative.ts",
       "mode": "100644",
-      "bytes": 4871,
-      "sha256": "241550ad052120bd84585fde18ad672d34dbc3741bc7dd1ae636af45be461e4e"
+      "bytes": 5126,
+      "sha256": "6e14044dc6bb9733d1339cd68839ebacd3e29587fda998dc353ea839977beceb"
     },
     {
       "path": "src/ts/iris.ts",
@@ -9171,8 +9183,8 @@
     {
       "path": "src/ts/storage/deviceBackup/jobRecovery.ts",
       "mode": "100644",
-      "bytes": 6101,
-      "sha256": "b3b26ec2c9afb5c1a72cea80096be908dc7b8f42150d3d2e538b3446e8f2d6dd"
+      "bytes": 6213,
+      "sha256": "e9e4d908af9575a64cb6cfee26bd76c21f1037b9f3a74c0d7df16720b77d9bcd"
     },
     {
       "path": "src/ts/storage/deviceBackup/maintenance.ts",
@@ -9945,20 +9957,20 @@
     {
       "path": "src/ts/storage/risuSaveFileRoute.test.ts",
       "mode": "100644",
-      "bytes": 32192,
-      "sha256": "4925ae88c5e0b926347021920cc8311752d3f14ed51c6c7b79e4f59298e43ce7"
+      "bytes": 32908,
+      "sha256": "a50105ae2e620007ba702f37896215c60e2c191c56ace3785950ad0d34fa691b"
     },
     {
       "path": "src/ts/storage/risuSaveFileRoute.ts",
       "mode": "100644",
-      "bytes": 18616,
-      "sha256": "088184081b4e983c70ccc5076db8a814f107dcf6b03ab9fef9699c4460c1e9e4"
+      "bytes": 18929,
+      "sha256": "7bc8b3bbbb247081689cc6a6356733af398ed889b49c485f49785d3d4b7ba595"
     },
     {
       "path": "src/ts/storage/risuSaveFileRouteProduction.svelte.ts",
       "mode": "100644",
-      "bytes": 6161,
-      "sha256": "60ae7cd123e62deacfbf91a36e02e698fc04b273ceec9464106b65a257cf14e5"
+      "bytes": 6016,
+      "sha256": "4f02f493e2ef2cdaf37c8e0cbd4980755e7d2f6b47950300ddb0b921f4308d62"
     },
     {
       "path": "src/ts/storage/risuSaveStoreAdapter.ts",
