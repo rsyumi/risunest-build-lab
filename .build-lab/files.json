@@ -177,8 +177,8 @@
     {
       "path": "benchmarks/macos/main.ts",
       "mode": "100644",
-      "bytes": 9107,
-      "sha256": "1582c2ca83bd67c0b72be368ff7a3af19eb25058cd1553a5eacdcec370cb4ef9"
+      "bytes": 11514,
+      "sha256": "9fdf74f92c571022d576c0873535aa964bc5f21da8ba59f1c5d01bea79248a2c"
     },
     {
       "path": "benchmarks/macos/native/Cargo.lock",
@@ -213,8 +213,8 @@
     {
       "path": "benchmarks/macos/run.py",
       "mode": "100644",
-      "bytes": 5145,
-      "sha256": "d037c0f6673c442714405af2a82869620a03a4a0e5f27fe5828de9d4d8df688f"
+      "bytes": 5438,
+      "sha256": "229db044f342dca0b76aed29a97643bd022c2dbb54b44e866ca770895e2e6d88"
     },
     {
       "path": "benchmarks/macos/vite.config.ts",
@@ -3315,8 +3315,8 @@
     {
       "path": "src-tauri/src/lib.rs",
       "mode": "100644",
-      "bytes": 27236,
-      "sha256": "2400d273ef6176fa4a1ab93c9875536c9a638fb878a316cd3c4f5a2688430a00"
+      "bytes": 27353,
+      "sha256": "8575cc1a6bcaf12c63a21df4f01997ef5fe89e6f38b5b427c626325f8b374aa0"
     },
     {
       "path": "src-tauri/src/local_backup.rs",
@@ -3339,8 +3339,8 @@
     {
       "path": "src-tauri/src/macos_lifecycle.rs",
       "mode": "100644",
-      "bytes": 4996,
-      "sha256": "226f55613177788ba20a75609f7ef77cdc8738f1e83a43dc561a0253d85d9700"
+      "bytes": 5819,
+      "sha256": "7c098df7dcc8cc62c7909bbf1a6e224002dfc05a79f481c65d547c2c36695405"
     },
     {
       "path": "src-tauri/src/main.rs",
@@ -5313,8 +5313,8 @@
     {
       "path": "src/lib/Setting/Pages/RisuNestSettings.test.ts",
       "mode": "100644",
-      "bytes": 7413,
-      "sha256": "eaf6929eaa57914ed1c2bc1646cfc6ab67a3e800db1a5d0c52a22b5b333e3902"
+      "bytes": 7766,
+      "sha256": "fe76339ee100196039d56b90567c6d7edfa0f4ff52c5c3fcc4067f949d1467e4"
     },
     {
       "path": "src/lib/Setting/Pages/RisuNestSettingsAccessibility.test.ts",
@@ -6183,8 +6183,8 @@
     {
       "path": "src/ts/bootstrap.ts",
       "mode": "100644",
-      "bytes": 41267,
-      "sha256": "58bcc25be94b7e270d74fda364433dd337bbc9f6a7137ae6e26ebcac7fc3c376"
+      "bytes": 41281,
+      "sha256": "0d787b9d42f168240f5ca153d6ee2f7e83ef51fb252b6aa9d177c8fc1fef75ab"
     },
     {
       "path": "src/ts/cbs.operationContext.test.ts",
@@ -6717,8 +6717,8 @@
     {
       "path": "src/ts/hotkeyModifier.test.ts",
       "mode": "100644",
-      "bytes": 744,
-      "sha256": "c358026eeb8cc98cb6920e98ba0fc5e89d62ce88a32a49656b0dd60fb2291c90"
+      "bytes": 753,
+      "sha256": "960c199954cbc3a93ab66c6e01995dc21571ff662bde1e8abfd42bc28f767df9"
     },
     {
       "path": "src/ts/hotkeyModifier.ts",
@@ -9471,8 +9471,8 @@
     {
       "path": "src/ts/storage/persistentDataRuntime.svelte.ts",
       "mode": "100644",
-      "bytes": 28897,
-      "sha256": "e93236c85659916bd0bb96686d0626d429e93d79c586488820f9e23ce715c715"
+      "bytes": 29034,
+      "sha256": "9400a82c9990c7da69cbe4e333f7b33a3b49f6f304788e12781ea21715aa1fed"
     },
     {
       "path": "src/ts/storage/persistentDataRuntime.test.ts",
@@ -9483,8 +9483,8 @@
     {
       "path": "src/ts/storage/persistentDataRuntime.ts",
       "mode": "100644",
-      "bytes": 40558,
-      "sha256": "aff4b3981f60f097fd25b13ae612fae2b4f84c6a2c84dc415dcb8831dc71548a"
+      "bytes": 42499,
+      "sha256": "0dc1333b21deeeded5719d05b18741f2d665ad731f559742fa1987b428674b5c"
     },
     {
       "path": "src/ts/storage/persistentDataStore.ts",
@@ -10245,8 +10245,8 @@
     {
       "path": "src/ts/storage/tests/persistentProductionIntegration.test.ts",
       "mode": "100644",
-      "bytes": 45420,
-      "sha256": "20125f367bd01f9b36800e5b688def471d4b86003aa8b2fa3c68746d05f86e27"
+      "bytes": 45753,
+      "sha256": "838da0613b4407771bcb56f2c158fc55cd5fcac33cce3ed4548f3da59b8f1be6"
     },
     {
       "path": "src/ts/storage/tests/persistentSaveObserverHarness.svelte.ts",
@@ -10879,6 +10879,13 @@
       "mode": "100644",
       "bytes": 3236,
       "sha256": "690511e93fac5ae85eff52471556fcf9870e9159dce08a8809d4b1f4c5ae52c3",
+      "reason": "explanatory-document"
+    },
+    {
+      "path": "benchmarks/macos/README.md",
+      "mode": "100644",
+      "bytes": 2988,
+      "sha256": "4cbc161422b73817cd385245b8b8b2b9067e6eda34b65ed55888f1727fd412ca",
       "reason": "explanatory-document"
     },
     {
