@@ -93,8 +93,8 @@
     {
       "path": "benchmarks/ios/NativeUITests.swift",
       "mode": "100644",
-      "bytes": 2890,
-      "sha256": "88e5106c84dd3adeb188147fede0b4a9286e64d61d58c05bc56d7d20d0a02e62"
+      "bytes": 3229,
+      "sha256": "2d985240b255364f2694997689ff917d4ca44e5c3b2f40eb09cca23972d8f4e5"
     },
     {
       "path": "benchmarks/ios/contracts.ts",
@@ -159,8 +159,8 @@
     {
       "path": "benchmarks/ios/pickerContracts.ts",
       "mode": "100644",
-      "bytes": 2400,
-      "sha256": "9ff4238dc65a6e8db97a2eba6c78c3b145cf86a3c503b5e72e500a408fbb5769"
+      "bytes": 3111,
+      "sha256": "287f6b45742f18ca73345ab02b2308caa98d4598c2d217dc42c186bcddb78aa2"
     },
     {
       "path": "benchmarks/ios/runtimeContracts.ts",
@@ -6753,14 +6753,14 @@
     {
       "path": "src/ts/drive/drive.test.ts",
       "mode": "100644",
-      "bytes": 16399,
-      "sha256": "eb4e91ee30929ae5cf109e2884edb35cd64d8aaa2334f46e806786808b79ad5d"
+      "bytes": 16910,
+      "sha256": "5a6eab9d057611fcc752a96dd205c7126a7cc879a04ed58768b51d453948c5c2"
     },
     {
       "path": "src/ts/drive/drive.ts",
       "mode": "100644",
-      "bytes": 19534,
-      "sha256": "034605dd4bafebc72642fe721fba6b4c88293d58973607b539ed8c6ff39cba09"
+      "bytes": 19694,
+      "sha256": "92143f5207d76f1b23c72ab33af538bf31e2718a4c42ae4ac967e117707e9fac"
     },
     {
       "path": "src/ts/drive/fixtures/pocket-features.json",
