@@ -1,0 +1,124 @@
+name: macOS check
+run-name: macOS ${{ inputs.runner }} / ${{ inputs.source_sha }}
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full snapshot commit SHA in this build-lab repository
+        type: string
+        required: true
+      runner:
+        type: choice
+        default: macos-15
+        options: [macos-15, macos-14, macos-15-intel, macos-26]
+permissions:
+  contents: read
+concurrency:
+  group: macos-check-snapshots-macos-${{ inputs.runner }}
+  cancel-in-progress: true
+jobs:
+  native:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+        working-directory: source
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/source/src-tauri/target
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_RELEASE_DEBUG: "0"
+      APPLE_SIGNING_IDENTITY: "-"
+      SNAPSHOT_SHA: ${{ inputs.source_sha }}
+      RUNNER_LABEL: ${{ inputs.runner }}
+    steps:
+      - name: Validate dispatch inputs
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          [[ "$SNAPSHOT_SHA" =~ ^[0-9a-f]{40}$ ]]
+          case "$RUNNER_LABEL" in macos-15|macos-14|macos-15-intel|macos-26) ;; *) exit 1;; esac
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Verify snapshot identity and integrity
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SNAPSHOT_SHA"
+          node ../control/scripts/verify-snapshot.mjs . macos
+      - uses: pnpm/action-setup@v5
+        with:
+          version: 10.34.1
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Record environment and cache identity
+        id: environment
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          {
+            printf 'workflow_sha=%s\nsnapshot_sha=%s\nrun_attempt=%s\n' "$GITHUB_SHA" "$SNAPSHOT_SHA" "$GITHUB_RUN_ATTEMPT"
+            printf 'image_os=%s\nimage_version=%s\n' "$ImageOS" "$ImageVersion"
+            sw_vers; uname -a; rustc -Vv; cargo -V; node -v; pnpm -v
+            xcode-select -p; xcodebuild -version; xcrun --sdk macosx --show-sdk-version
+            df -h .
+            shasum -a 256 pnpm-lock.yaml src-tauri/Cargo.lock
+          } > artifacts/environment.txt
+          cat artifacts/environment.txt
+          cp .build-lab/source.json artifacts/source.json
+          cp .build-lab/files.json artifacts/files.json
+          target="$(rustc -Vv | sed -n 's/^host: //p')"
+          sdk="$( { xcodebuild -version; xcrun --sdk macosx --show-sdk-version; } | shasum -a 256 | cut -d' ' -f1)"
+          printf 'target=%s\nsdk=%s\n' "$target" "$sdk" >> "$GITHUB_OUTPUT"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: source/src-tauri -> target
+          key: macos-${{ inputs.runner }}-${{ runner.arch }}-${{ steps.environment.outputs.target }}-${{ steps.environment.outputs.sdk }}
+      - name: Install locked frontend inputs
+        run: pnpm install --frozen-lockfile
+      - name: Build agent frontend once
+        run: pnpm build:agent 2>&1 | tee artifacts/frontend.log
+      - name: Verify agent configuration and frontend
+        run: node ../control/scripts/verify-macos-inputs.mjs .
+      - name: Rust contracts
+        run: cargo test --manifest-path src-tauri/Cargo.toml --release --locked --lib -- --test-threads=1 2>&1 | tee artifacts/rust-contracts.log
+      - name: Build agent app
+        run: |
+          set -euo pipefail
+          printf '%s\n' '{"build":{"beforeBuildCommand":"test -f dist/index.html"}}' > "$RUNNER_TEMP/macos-prebuilt.json"
+          pnpm tauri build --ci --bundles app \
+            --config src-tauri/tauri.agent.conf.json \
+            --config "$RUNNER_TEMP/macos-prebuilt.json" -- --locked 2>&1 | tee artifacts/native-build.log
+      - name: Verify and archive app
+        run: |
+          set -euo pipefail
+          app="$CARGO_TARGET_DIR/release/bundle/macos/RisuNest.app"
+          test -d "$app"
+          plutil -lint "$app/Contents/Info.plist"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")" = io.github.rsyumi.risunest
+          test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$app/Contents/Info.plist")" = 14.0
+          lipo "$app/Contents/MacOS/RisuNest" -verify_arch "$(uname -m)"
+          file "$app/Contents/MacOS/RisuNest" > artifacts/binary.txt
+          codesign --verify --deep --strict "$app" 2>&1 | tee artifacts/codesign.txt
+          codesign -dv --verbose=4 "$app" 2>> artifacts/codesign.txt
+          cp "$app/Contents/Info.plist" artifacts/Info.plist
+          ditto -c -k --sequesterRsrc --keepParent "$app" artifacts/RisuNest-agent.app.zip
+          shasum -a 256 artifacts/RisuNest-agent.app.zip > artifacts/app.sha256
+          cat artifacts/binary.txt artifacts/app.sha256
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: macos-${{ inputs.runner }}-${{ inputs.source_sha }}-${{ github.run_attempt }}
+          path: source/artifacts/
+          retention-days: 3
+          if-no-files-found: warn

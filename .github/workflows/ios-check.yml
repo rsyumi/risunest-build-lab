@@ -1,0 +1,148 @@
+name: iOS simulator check
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full iOS snapshot commit SHA in this build-lab repository
+        type: string
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: ios-check-snapshots-ios-macos-15
+  cancel-in-progress: true
+jobs:
+  simulator:
+    runs-on: macos-15
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+        working-directory: source
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/source/src-tauri/target
+      CARGO_INCREMENTAL: "0"
+      SNAPSHOT_SHA: ${{ inputs.source_sha }}
+    steps:
+      - name: Validate dispatch
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          [[ "$SNAPSHOT_SHA" =~ ^[0-9a-f]{40}$ ]]
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+      - name: Verify snapshot integrity
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SNAPSHOT_SHA"
+          node ../control/scripts/verify-snapshot.mjs . ios
+      - uses: pnpm/action-setup@v5
+        with:
+          version: 10.34.1
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: source/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios-sim
+      - name: Verify source and record environment
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SNAPSHOT_SHA"
+          node -e 'const fs = require("node:fs"); const m = JSON.parse(fs.readFileSync(".build-lab/source.json", "utf8")); if (m.lane !== "ios") throw new Error("Expected ios snapshot lane");'
+          mkdir -p artifacts
+          cp .build-lab/source.json artifacts/source.json
+          {
+            printf 'workflow_sha=%s\nsnapshot_sha=%s\n' "$GITHUB_SHA" "$SNAPSHOT_SHA"
+            sw_vers
+            uname -m
+            xcodebuild -version
+            xcodebuild -showsdks
+            xcrun --sdk iphonesimulator --show-sdk-version
+            xcrun simctl list runtimes --json
+            rustc -Vv
+            node --version
+            pnpm --version
+            df -h .
+            shasum -a 256 pnpm-lock.yaml src-tauri/Cargo.lock
+          } > artifacts/environment.txt
+          test "$(uname -m)" = arm64
+          xcrun simctl list runtimes --json > artifacts/runtimes.json
+          node -e 'const fs = require("node:fs"); const r = JSON.parse(fs.readFileSync("artifacts/runtimes.json", "utf8")).runtimes; if (!r.some(x => x.isAvailable && x.identifier.includes(".iOS-"))) throw new Error("No available iOS simulator runtime");'
+      - name: Prepare Apple project tools
+        run: |
+          set -euo pipefail
+          start=$SECONDS
+          if ! command -v xcodegen >/dev/null; then brew install xcodegen; fi
+          xcodegen --version | tee artifacts/xcodegen.txt
+          printf 'tool_setup_seconds=%s\n' "$((SECONDS-start))" >> artifacts/environment.txt
+      - run: pnpm install --frozen-lockfile
+      - name: Confirm CLI and initialize Apple shell
+        run: |
+          set -euo pipefail
+          pnpm tauri ios build --help > artifacts/ios-build-help.txt
+          grep -q -- '--no-sign' artifacts/ios-build-help.txt
+          if [ ! -d src-tauri/gen/apple ]; then
+            pnpm ios:init:agent 2>&1 | tee artifacts/ios-init.log
+          fi
+      - name: Preserve Apple shell inputs
+        run: |
+          set -euo pipefail
+          python3 ../control/scripts/ios-shell-inputs.py src-tauri/gen/apple artifacts
+      - name: Build simulator app
+        run: |
+          set -euo pipefail
+          pnpm ios:build:simulator:agent 2>&1 | tee artifacts/ios-build.log
+      - name: Inspect and archive simulator app
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json, pathlib, plistlib
+          candidates = []
+          for app in pathlib.Path("src-tauri/gen/apple").rglob("*.app"):
+              info = app / "Info.plist"
+              if not info.is_file():
+                  continue
+              with info.open("rb") as f:
+                  p = plistlib.load(f)
+              if p.get("CFBundleIdentifier") == "io.github.rsyumi.risunest" and "iPhoneSimulator" in p.get("CFBundleSupportedPlatforms", []):
+                  candidates.append((app, p))
+          assert len(candidates) == 1, f"Expected one simulator app, found {len(candidates)}"
+          app, info = candidates[0]
+          assert info.get("MinimumOSVersion") == "16.4", "Unexpected minimum iOS"
+          executable = app / info["CFBundleExecutable"]
+          assert executable.is_file(), "Missing app executable"
+          pathlib.Path("artifacts/app-path.txt").write_text(str(app))
+          pathlib.Path("artifacts/executable-path.txt").write_text(str(executable))
+          pathlib.Path("artifacts/bundle.json").write_text(json.dumps({
+              "identifier": info["CFBundleIdentifier"],
+              "minimumOS": info["MinimumOSVersion"],
+              "platforms": info["CFBundleSupportedPlatforms"],
+          }))
+          PY
+          app="$(cat artifacts/app-path.txt)"
+          executable="$(cat artifacts/executable-path.txt)"
+          plutil -lint "$app/Info.plist"
+          lipo "$executable" -verify_arch arm64
+          xcrun vtool -show-build "$executable" > artifacts/macho-platform.txt
+          grep -Eq 'platform[[:space:]]+IOSSIMULATOR' artifacts/macho-platform.txt
+          ditto -c -k --sequesterRsrc --keepParent "$app" artifacts/RisuNest-ios-simulator-agent.app.zip
+          shasum -a 256 artifacts/RisuNest-ios-simulator-agent.app.zip > artifacts/app.sha256
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ios-simulator-${{ inputs.source_sha }}-${{ github.run_attempt }}
+          path: source/artifacts/
+          retention-days: 3
+          if-no-files-found: warn
