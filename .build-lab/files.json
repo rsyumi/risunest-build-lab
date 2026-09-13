@@ -93,8 +93,8 @@
     {
       "path": "benchmarks/ios/NativeUITests.swift",
       "mode": "100644",
-      "bytes": 9745,
-      "sha256": "fd4b7af1c75d2a9322ee7ac5448652eb141194f74f87019b924d1e2bc10b1388"
+      "bytes": 12324,
+      "sha256": "882a6f4f64fc4516a4f68b7699f2b13253401bd9e015efeaff1b7543525bd22b"
     },
     {
       "path": "benchmarks/ios/buildTestLab.py",
@@ -123,8 +123,8 @@
     {
       "path": "benchmarks/ios/main.ts",
       "mode": "100644",
-      "bytes": 7891,
-      "sha256": "a00a7882e070559e21ae53bf6368d25216aab0b4e946ee16502c5918ec322273"
+      "bytes": 8656,
+      "sha256": "fda9afeba551bfcb40499fdd010660e9df370463701c896abd313007afde6e30"
     },
     {
       "path": "benchmarks/ios/native/.gitignore",
@@ -159,8 +159,14 @@
     {
       "path": "benchmarks/ios/native/src/lib.rs",
       "mode": "100644",
-      "bytes": 2488,
-      "sha256": "696f4a4f610a37fbe456c213098c35aacf1d051235ddaf7c9707da2c1f3e569f"
+      "bytes": 2783,
+      "sha256": "0a54c641a6278a246d59af4981a869a959527dd6839e67d3d72319c44c97fef6"
+    },
+    {
+      "path": "benchmarks/ios/native/src/network_probe.rs",
+      "mode": "100644",
+      "bytes": 2406,
+      "sha256": "dd760182c9457bb32b9f9d634fb91edd1a178570f9b78b051b0525b80d3291f7"
     },
     {
       "path": "benchmarks/ios/native/tauri.conf.json",
@@ -11189,8 +11195,8 @@
     {
       "path": "benchmarks/ios/README.md",
       "mode": "100644",
-      "bytes": 3206,
-      "sha256": "ac1b2d9973ed15e29a0ede058ce6168ae8bbfa05cc738f58141d9355aa7f3590",
+      "bytes": 3725,
+      "sha256": "cb20585ce249927fbeed5d9c9b5a2df0c8915f0c024f8af51ff36f4644c03087",
       "reason": "explanatory-document"
     },
     {
