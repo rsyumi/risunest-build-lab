@@ -93,8 +93,14 @@
     {
       "path": "benchmarks/ios/NativeUITests.swift",
       "mode": "100644",
-      "bytes": 4125,
-      "sha256": "90f65b84e17a35369aeb258275d467074148f3ed35919bb4f13ebb80acd96f69"
+      "bytes": 5146,
+      "sha256": "c5832ad04d0d2b58a7b6d53a9726d869847045b20dcb513a5450880bfdb57aaf"
+    },
+    {
+      "path": "benchmarks/ios/buildTestLab.py",
+      "mode": "100644",
+      "bytes": 7319,
+      "sha256": "12a5f8d49a82278de77614dec90c8344e028f5fb03f3d78d4cada3951683f7b0"
     },
     {
       "path": "benchmarks/ios/contracts.ts",
@@ -111,8 +117,8 @@
     {
       "path": "benchmarks/ios/main.ts",
       "mode": "100644",
-      "bytes": 5103,
-      "sha256": "4b48dcfce680dab04beda7956e278e7b7881161bb30bbceba45edbce4f30c949"
+      "bytes": 5512,
+      "sha256": "ca117267dc1191a5f84ae5cba66ad766a3b1566a8c87b7f23eab8edcd24b7663"
     },
     {
       "path": "benchmarks/ios/native/.gitignore",
@@ -11142,6 +11148,13 @@
       "mode": "100644",
       "bytes": 5008,
       "sha256": "9b0d3394d5f7e8e2be9397deec15223f623283abc8afdec58f82027e44ed4317",
+      "reason": "explanatory-document"
+    },
+    {
+      "path": "benchmarks/ios/README.md",
+      "mode": "100644",
+      "bytes": 2840,
+      "sha256": "4a8ac518df971049fc2f2c5f14c1652f7275fa00d44afa4bc6d62c83e4683d46",
       "reason": "explanatory-document"
     },
     {
