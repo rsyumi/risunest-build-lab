@@ -9,7 +9,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: ios-check-snapshots-ios-macos-15
+  group: ios-check-${{ inputs.source_sha }}-macos-15
   cancel-in-progress: true
 jobs:
   simulator:

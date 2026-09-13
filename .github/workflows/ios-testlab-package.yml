@@ -14,7 +14,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: ios-testlab-package
+  group: ios-testlab-package-${{ inputs.source_sha }}-${{ inputs.xcode_version }}
   cancel-in-progress: false
 jobs:
   package:
