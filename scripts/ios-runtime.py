@@ -30,6 +30,7 @@ for path in apple.glob('*_iOS/Info.plist'):
     info=plistlib.loads(path.read_bytes())
     info['BGTaskSchedulerPermittedIdentifiers']=['io.github.rsyumi.risunest.ios.bench.generation']
     info['UIBackgroundModes']=['processing']
+    info['NSLocalNetworkUsageDescription']='Connect to the synthetic local verification server.'
     info['UIFileSharingEnabled']=True
     info['LSSupportsOpeningDocumentsInPlace']=True
     path.write_bytes(plistlib.dumps(info))
@@ -99,7 +100,9 @@ def launch(phase):
     global current_pid
     child=os.environ.copy();child['SIMCTL_CHILD_RISUNEST_IOS_PHASE']=phase
     child['SIMCTL_CHILD_RISUNEST_IOS_STREAM_URL']='http://127.0.0.1:'+str(server.server_port)
-    output=run(['xcrun','simctl','launch','--terminate-running-process',device,identifier],env=child)
+    output=run(['xcrun','simctl','launch','--terminate-running-process',
+                '--stdout='+str(artifacts/('ios-'+phase+'.stdout.log')),
+                '--stderr='+str(artifacts/('ios-'+phase+'.stderr.log')),device,identifier],env=child)
     print(output)
     current_pid=int(output.strip().rsplit(':',1)[1])
 
