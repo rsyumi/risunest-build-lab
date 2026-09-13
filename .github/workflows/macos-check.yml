@@ -91,7 +91,14 @@ jobs:
       - name: Verify agent configuration and frontend
         run: node ../control/scripts/verify-macos-inputs.mjs .
       - name: Rust contracts
-        run: cargo test --manifest-path src-tauri/Cargo.toml --release --locked --lib -- --test-threads=1 2>&1 | tee artifacts/rust-contracts.log
+        run: |
+          set -euo pipefail
+          # macOS defaults to /var/folders; /var is a symlink rejected by the
+          # storage path contract. Keep that protection and use a physical fixture root.
+          contract_tmp="$(mktemp -d "$RUNNER_TEMP/risunest-contracts.XXXXXX")"
+          export TMPDIR="$(cd "$contract_tmp" && pwd -P)"
+          printf 'rust_test_tmpdir=%s\n' "$TMPDIR" >> artifacts/environment.txt
+          cargo test --manifest-path src-tauri/Cargo.toml --release --locked --lib -- --test-threads=1 2>&1 | tee artifacts/rust-contracts.log
       - name: Build agent app
         run: |
           set -euo pipefail
