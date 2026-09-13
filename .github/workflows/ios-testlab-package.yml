@@ -1,0 +1,105 @@
+name: iOS Test Lab package
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full audited iOS snapshot commit SHA
+        type: string
+        required: true
+      xcode_version:
+        description: Match this version to the Test Lab device catalog before upload
+        type: choice
+        options: ['26.3', '16.4']
+        default: '26.3'
+permissions:
+  contents: read
+concurrency:
+  group: ios-testlab-package
+  cancel-in-progress: false
+jobs:
+  package:
+    runs-on: macos-15
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+        working-directory: source
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_${{ inputs.xcode_version }}.app/Contents/Developer
+      CARGO_TARGET_DIR: ${{ github.workspace }}/source/src-tauri/target
+      CARGO_INCREMENTAL: '0'
+      TAURI_ENV_PLATFORM: ios
+      SNAPSHOT_SHA: ${{ inputs.source_sha }}
+    steps:
+      - name: Validate dispatch
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          [[ "$SNAPSHOT_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test -d "$DEVELOPER_DIR"
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+      - name: Verify snapshot
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SNAPSHOT_SHA"
+          node ../control/scripts/verify-snapshot.mjs . ios
+      - uses: pnpm/action-setup@v5
+        with:
+          version: 10.34.1
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: source/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-ios
+      - name: Record environment
+        id: apple-cache
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          { xcodebuild -version; xcrun --sdk iphoneos --show-sdk-version; } > artifacts/apple-cache-inputs.txt
+          printf 'key=%s\n' "$(shasum -a 256 artifacts/apple-cache-inputs.txt | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+          { sw_vers; uname -m; rustc -Vv; node --version; pnpm --version; } > artifacts/environment.txt
+          cat artifacts/apple-cache-inputs.txt >> artifacts/environment.txt
+          cp .build-lab/source.json artifacts/source.json
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: ios-iphoneos-testlab-v1
+          key: macos-15-${{ steps.apple-cache.outputs.key }}
+          workspaces: source/src-tauri -> target
+          cache-bin: false
+          cache-on-failure: true
+      - name: Prepare Apple tools
+        run: |
+          set -euo pipefail
+          if ! command -v xcodegen >/dev/null; then brew install xcodegen; fi
+          if ! command -v idevice_id >/dev/null; then brew install libimobiledevice; fi
+      - run: pnpm install --frozen-lockfile
+      - name: Build and verify physical-device packages
+        run: |
+          set -euo pipefail
+          python3 benchmarks/ios/buildTestLab.py 2>&1 | tee artifacts/testlab-build.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ios-testlab-${{ inputs.source_sha }}-xcode-${{ inputs.xcode_version }}-${{ github.run_attempt }}
+          path: |
+            source/artifacts/*.zip
+            source/artifacts/*.ipa
+            source/artifacts/*.json
+            source/artifacts/*.txt
+            source/artifacts/*.log
+          retention-days: 7
+          if-no-files-found: warn
