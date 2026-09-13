@@ -158,6 +158,8 @@ jobs:
           grep -Eq 'platform[[:space:]]+IOSSIMULATOR' artifacts/macho-platform.txt
           ditto -c -k --sequesterRsrc --keepParent "$app" artifacts/RisuNest-ios-simulator-agent.app.zip
           shasum -a 256 artifacts/RisuNest-ios-simulator-agent.app.zip > artifacts/app.sha256
+      - name: Run isolated iOS simulator contracts
+        run: python3 ../control/scripts/ios-runtime.py 2>&1 | tee artifacts/ios-runtime.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
