@@ -9,8 +9,8 @@ on:
       xcode_version:
         description: Match this version to the Test Lab device catalog before upload
         type: choice
-        options: ['26.3', '16.4']
-        default: '26.3'
+        options: ['26.2', '16.4']
+        default: '26.2'
 permissions:
   contents: read
 concurrency:

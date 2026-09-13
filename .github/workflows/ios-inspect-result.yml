@@ -1,0 +1,47 @@
+name: Inspect iOS test result
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Completed synthetic iOS run to inspect
+        required: true
+        type: string
+permissions:
+  actions: read
+  contents: read
+jobs:
+  inspect:
+    runs-on: macos-15
+    timeout-minutes: 10
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+      INSPECT_RUN: ${{ inputs.run_id }}
+    steps:
+      - name: Validate request
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          [[ "$INSPECT_RUN" =~ ^[0-9]+$ ]]
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.run_id }}
+          pattern: ios-simulator-*
+          path: input
+      - name: Export XCTest evidence
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import pathlib, subprocess
+          matches=list(pathlib.Path('input').rglob('ios-ui.xcresult'))
+          assert len(matches)==1, matches
+          output=pathlib.Path('evidence');output.mkdir()
+          subprocess.run(['xcrun','xcresulttool','export','attachments','--path',str(matches[0]),'--output-path',str(output/'attachments')],check=True)
+          with (output/'summary.json').open('w') as file:
+              subprocess.run(['xcrun','xcresulttool','get','object','--legacy','--path',str(matches[0]),'--format','json'],stdout=file,check=True)
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios-evidence-${{ inputs.run_id }}
+          path: evidence/
+          retention-days: 3
