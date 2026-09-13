@@ -1203,8 +1203,8 @@
     {
       "path": "crates/tauri-plugin-ios-native/ios/Sources/IosNativePlugin.swift",
       "mode": "100644",
-      "bytes": 19451,
-      "sha256": "26592fdb1d55d3e141e14bbc907587e7cbb455674090b5b0cb4f3ec00237dedd"
+      "bytes": 19872,
+      "sha256": "0855a85cc9deda38d8960be5fccc9c3b71856510ba600699bb0e2099055266af"
     },
     {
       "path": "crates/tauri-plugin-ios-native/src/lib.rs",
@@ -7017,14 +7017,14 @@
     {
       "path": "src/ts/iosNative.test.ts",
       "mode": "100644",
-      "bytes": 5102,
-      "sha256": "994f48f25652d235b38b5984656950e18a0529c071a734fa43043da56a5ccbc2"
+      "bytes": 5190,
+      "sha256": "0b546701cceb1728c5a0822ef03759506750c5be120095d17ba6caf58b9580c8"
     },
     {
       "path": "src/ts/iosNative.ts",
       "mode": "100644",
-      "bytes": 5126,
-      "sha256": "6e14044dc6bb9733d1339cd68839ebacd3e29587fda998dc353ea839977beceb"
+      "bytes": 5230,
+      "sha256": "9f9ed68430feaa8cb1a8cd7c77d82d3b694f394625b359bd6bc8c5581555c962"
     },
     {
       "path": "src/ts/iris.ts",
