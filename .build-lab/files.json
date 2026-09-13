@@ -93,8 +93,8 @@
     {
       "path": "benchmarks/ios/NativeUITests.swift",
       "mode": "100644",
-      "bytes": 9455,
-      "sha256": "bd82f500882961eb23feb02df05343508bdf119db5f089f354e83fa461cae421"
+      "bytes": 9745,
+      "sha256": "fd4b7af1c75d2a9322ee7ac5448652eb141194f74f87019b924d1e2bc10b1388"
     },
     {
       "path": "benchmarks/ios/buildTestLab.py",
@@ -123,8 +123,8 @@
     {
       "path": "benchmarks/ios/main.ts",
       "mode": "100644",
-      "bytes": 7231,
-      "sha256": "f57fcb8b105f11a86150448fecdbd1db13d852bfccc43850f6f835f8a6b0856c"
+      "bytes": 7891,
+      "sha256": "a00a7882e070559e21ae53bf6368d25216aab0b4e946ee16502c5918ec322273"
     },
     {
       "path": "benchmarks/ios/native/.gitignore",
