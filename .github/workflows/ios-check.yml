@@ -80,6 +80,23 @@ jobs:
           test "$(uname -m)" = arm64
           xcrun simctl list runtimes --json > artifacts/runtimes.json
           node -e 'const fs = require("node:fs"); const r = JSON.parse(fs.readFileSync("artifacts/runtimes.json", "utf8")).runtimes; if (!r.some(x => x.isAvailable && x.identifier.includes(".iOS-"))) throw new Error("No available iOS simulator runtime");'
+      - name: Identify Apple cache inputs
+        id: apple-cache
+        run: |
+          set -euo pipefail
+          { xcodebuild -version; xcrun --sdk iphonesimulator --show-sdk-version; } > artifacts/apple-cache-inputs.txt
+          printf 'key=%s\n' "$(shasum -a 256 artifacts/apple-cache-inputs.txt | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+      - uses: Swatinem/rust-cache@v2
+        id: rust-cache
+        with:
+          prefix-key: ios-aarch64-apple-ios-sim-v1
+          key: macos-15-${{ steps.apple-cache.outputs.key }}
+          workspaces: source/src-tauri -> target
+          cache-bin: false
+      - name: Record Rust cache state
+        env:
+          RUST_CACHE_HIT: ${{ steps.rust-cache.outputs.cache-hit }}
+        run: printf 'rust_cache_hit=%s\n' "$RUST_CACHE_HIT" >> artifacts/environment.txt
       - name: Prepare Apple project tools
         run: |
           set -euo pipefail
