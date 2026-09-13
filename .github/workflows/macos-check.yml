@@ -122,6 +122,30 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent "$app" artifacts/RisuNest-agent.app.zip
           shasum -a 256 artifacts/RisuNest-agent.app.zip > artifacts/app.sha256
           cat artifacts/binary.txt artifacts/app.sha256
+      - name: Verify native product boundary
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          binary = Path(os.environ['CARGO_TARGET_DIR']) / 'release/bundle/macos/RisuNest.app/Contents/MacOS/RisuNest'
+          data = binary.read_bytes()
+          for marker in [b'macos_bench_', b'RISUNEST_MACOS_PHASE', b'RISUNEST_MACOS_REPORT']:
+              assert marker not in data, f'Harness marker in product: {marker!r}'
+          print('Native product contains no Mac harness commands or controller entry')
+          PY
+      - name: Build isolated Mac WKWebView harness
+        run: |
+          set -euo pipefail
+          pnpm benchmark:macos:build:agent 2>&1 | tee artifacts/harness-frontend.log
+          node benchmarks/macos/prepare.mjs
+          shasum -a 256 benchmarks/macos/native/Cargo.lock >> artifacts/environment.txt
+          (cd benchmarks/macos/native && pnpm exec tauri build --ci --bundles app -- --locked) 2>&1 | tee artifacts/harness-native.log
+      - name: Actual WKWebView contracts and desktop lifecycle
+        run: |
+          set -euo pipefail
+          app="$CARGO_TARGET_DIR/release/bundle/macos/RisuNest Mac Bench.app"
+          codesign --verify --deep --strict "$app"
+          python3 benchmarks/macos/run.py --app "$app" --artifacts artifacts/wkwebview 2>&1 | tee artifacts/wkwebview.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
