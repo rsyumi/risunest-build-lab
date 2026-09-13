@@ -2887,6 +2887,204 @@
       "sha256": "99856053f245337d20d308dbeaf9cd7250ad0c186ebbb6866ab46a6e7005ee19"
     },
     {
+      "path": "src-tauri/gen/apple/.gitignore",
+      "mode": "100644",
+      "bytes": 38,
+      "sha256": "ec85aeb06e2efff22f16fb602d48fb456c81abe3a7b22a3df1f163b540222c15"
+    },
+    {
+      "path": "src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/AppIcon-20x20@1x.png",
+      "mode": "100644",
+      "bytes": 1036,
+      "sha256": "6f69e2a2abbb31ef7747c689dea8846c3c7bc3d8376820c82d602130296e7f0d"
+    },
+    {
+      "path": "src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/AppIcon-20x20@2x-1.png",
+      "mode": "100644",
+      "bytes": 2216,
+      "sha256": "b3bd925890f7576fed830544e9f78549bc6008f68bdb42c5c2ee885c5d3590ba"
+    },
+    {
+      "path": "src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/AppIcon-20x20@2x.png",
+      "mode": "100644",
+      "bytes": 2216,
+      "sha256": "b3bd925890f7576fed830544e9f78549bc6008f68bdb42c5c2ee885c5d3590ba"
+    },
+    {
+      "path": "src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/AppIcon-20x20@3x.png",
+      "mode": "100644",
+      "bytes": 3512,
+      "sha256": "da9a76eee16ce88b848bfeb25048831d23d2b301067d16a9d9dc3672a53b4b90"
+    },
+    {
+      "path": "src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/AppIcon-29x29@1x.png",
+      "mode": "100644",
+      "bytes": 1568,
+      "sha256": "0a624f08d05e65fe7af794f87648ab9d5bc29e943859690ce590e51b6aff59e5"
+    },
+    {
+      "path": "src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/AppIcon-29x29@2x-1.png",
+      "mode": "100644",
+      "bytes": 3394,
+      "sha256": "ae99de26704f7e00dc0c99d679d41d3478f911c009f3fe54e95c0fbbe53945f3"
+    },
+    {
+      "path": "src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/AppIcon-29x29@2x.png",
+      "mode": "100644",
+      "bytes": 3394,
+      "sha256": "ae99de26704f7e00dc0c99d679d41d3478f911c009f3fe54e95c0fbbe53945f3"
+    },
+    {
+      "path": "src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/AppIcon-29x29@3x.png",
+      "mode": "100644",
+      "bytes": 5228,
+      "sha256": "5a383a6c895c30a97194793bcb4b56cf5c4b8be3f8c6d0df30ee2e6aa8ad318f"
+    },
+    {
+      "path": "src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/AppIcon-40x40@1x.png",
+      "mode": "100644",
+      "bytes": 2216,
+      "sha256": "b3bd925890f7576fed830544e9f78549bc6008f68bdb42c5c2ee885c5d3590ba"
+    },
+    {
+      "path": "src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/AppIcon-40x40@2x-1.png",
+      "mode": "100644",
+      "bytes": 4794,
+      "sha256": "fb7f2504609276695c0935d3a341e55332d7a41a81865cb43e7644d8645621e3"
+    },
+    {
+      "path": "src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/AppIcon-40x40@2x.png",
+      "mode": "100644",
+      "bytes": 4794,
+      "sha256": "fb7f2504609276695c0935d3a341e55332d7a41a81865cb43e7644d8645621e3"
+    },
+    {
+      "path": "src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/AppIcon-40x40@3x.png",
+      "mode": "100644",
+      "bytes": 7288,
+      "sha256": "74af92c6437a607d4145b3350427e0718bc2990eecf43496fe783b9e4630a969"
+    },
+    {
+      "path": "src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/AppIcon-512@2x.png",
+      "mode": "100644",
+      "bytes": 121323,
+      "sha256": "00badc78c2ecb7460bbe02aeeca1e8848724ee133391bb3025df561007187eaf"
+    },
+    {
+      "path": "src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/AppIcon-60x60@2x.png",
+      "mode": "100644",
+      "bytes": 7288,
+      "sha256": "74af92c6437a607d4145b3350427e0718bc2990eecf43496fe783b9e4630a969"
+    },
+    {
+      "path": "src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/AppIcon-60x60@3x.png",
+      "mode": "100644",
+      "bytes": 11091,
+      "sha256": "41cae5ed106f23641a7c1a0727104579b1d79701155a4500d9d0083bc771064a"
+    },
+    {
+      "path": "src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/AppIcon-76x76@1x.png",
+      "mode": "100644",
+      "bytes": 4515,
+      "sha256": "307bf14ce2591bf666c35d1d5a69a78ca06abf3d4094594c68fd9cbb4f7f52ca"
+    },
+    {
+      "path": "src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/AppIcon-76x76@2x.png",
+      "mode": "100644",
+      "bytes": 9257,
+      "sha256": "f57261cf6b864619b1fb007d93f9fdbb43d31cddd5a452826ff2aa194f823037"
+    },
+    {
+      "path": "src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/AppIcon-83.5x83.5@2x.png",
+      "mode": "100644",
+      "bytes": 10219,
+      "sha256": "c1f76a0113c3196a5a11d1923d6be353d6521b228e82456504de1d3da25c301b"
+    },
+    {
+      "path": "src-tauri/gen/apple/Assets.xcassets/AppIcon.appiconset/Contents.json",
+      "mode": "100644",
+      "bytes": 2297,
+      "sha256": "df475ae9ab6c86d4d6a084de49383397b03bff7a09c7598b7fc80f70e30244b2"
+    },
+    {
+      "path": "src-tauri/gen/apple/Assets.xcassets/Contents.json",
+      "mode": "100644",
+      "bytes": 60,
+      "sha256": "7b225591af0371e8fea9f152cab6dd13013bf49ed2b277380503c4501698cbb7"
+    },
+    {
+      "path": "src-tauri/gen/apple/ExportOptions.plist",
+      "mode": "100644",
+      "bytes": 241,
+      "sha256": "f4b26407cbe7c3659a9e893910fbea2c0b654fb681e0af83fce9a50877ad88ac"
+    },
+    {
+      "path": "src-tauri/gen/apple/LaunchScreen.storyboard",
+      "mode": "100644",
+      "bytes": 1845,
+      "sha256": "e2bbf975eda3a747e21502a0322266117ae7dca72b9a8af483ba49c5f33f5fd9"
+    },
+    {
+      "path": "src-tauri/gen/apple/Podfile",
+      "mode": "100644",
+      "bytes": 585,
+      "sha256": "c1758568f4aae3cd361d20d75c4ae7967e245d38dbb05d587e3b73dc41392551"
+    },
+    {
+      "path": "src-tauri/gen/apple/Sources/risunest/bindings/bindings.h",
+      "mode": "100644",
+      "bytes": 81,
+      "sha256": "84e20ed9c0a0a7a5e2edf5c9705865255512e86e366031ab03ad64c7a98d9195"
+    },
+    {
+      "path": "src-tauri/gen/apple/Sources/risunest/main.mm",
+      "mode": "100644",
+      "bytes": 100,
+      "sha256": "f68a6372ef25f1ed1c1b2dfaa6f969904e235eb81a6d0afddf6501ca18066d19"
+    },
+    {
+      "path": "src-tauri/gen/apple/project.yml",
+      "mode": "100644",
+      "bytes": 3350,
+      "sha256": "fac08fa6bb8d6839c3363cf0857113cded77dbfed3b9c557d80b9a73f64652df"
+    },
+    {
+      "path": "src-tauri/gen/apple/risunest.xcodeproj/project.pbxproj",
+      "mode": "100644",
+      "bytes": 52828,
+      "sha256": "8b7103aaaf1f377ebbde968f67d38f7247a134dc8741845ce41d9c1e3a670aa8"
+    },
+    {
+      "path": "src-tauri/gen/apple/risunest.xcodeproj/project.xcworkspace/contents.xcworkspacedata",
+      "mode": "100644",
+      "bytes": 135,
+      "sha256": "7f3b00b5c3fdb45242d7b87e1e5c4e25d1fa8129a16c94295ecc4e8ea2235c5f"
+    },
+    {
+      "path": "src-tauri/gen/apple/risunest.xcodeproj/project.xcworkspace/xcshareddata/WorkspaceSettings.xcsettings",
+      "mode": "100644",
+      "bytes": 304,
+      "sha256": "041a807cc7b18ebb8e74da4ef61bf2ff3a958bc75b63777e4b83f5b48a34c94c"
+    },
+    {
+      "path": "src-tauri/gen/apple/risunest.xcodeproj/xcshareddata/xcschemes/risunest_iOS.xcscheme",
+      "mode": "100644",
+      "bytes": 4595,
+      "sha256": "dab03b49dcd7a4d5fd62fcb0c42508a9bbdf85477313f60c510db59b8f52313e"
+    },
+    {
+      "path": "src-tauri/gen/apple/risunest_iOS/Info.plist",
+      "mode": "100644",
+      "bytes": 1448,
+      "sha256": "8c0e0e491e680a19374a15440c1fed09fe64e7a347d457f12db13819f173f95a"
+    },
+    {
+      "path": "src-tauri/gen/apple/risunest_iOS/risunest_iOS.entitlements",
+      "mode": "100644",
+      "bytes": 181,
+      "sha256": "97704a8960b4facceef54397a08fb5d0a456247c3627359215aa2a27df22656c"
+    },
+    {
       "path": "src-tauri/gen/schemas/capabilities.json",
       "mode": "100644",
       "bytes": 2684,
