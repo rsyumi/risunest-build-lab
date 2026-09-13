@@ -94,6 +94,7 @@ jobs:
           key: macos-15-${{ steps.apple-cache.outputs.key }}
           workspaces: source/src-tauri -> target
           cache-bin: false
+          cache-on-failure: true
       - name: Record Rust cache state
         env:
           RUST_CACHE_HIT: ${{ steps.rust-cache.outputs.cache-hit }}

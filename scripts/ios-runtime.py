@@ -56,10 +56,17 @@ phone=[x for x in types if x['name'].startswith('iPhone')][-1]
 device=run(['xcrun','simctl','create','RisuNest synthetic iOS',phone['identifier'],runtime['identifier']]).strip()
 (artifacts/'ios-device.json').write_text(json.dumps({'udid':device,'runtime':runtime['version'],'device':phone['name']}))
 
+current_pid=None
+memory={}
 def collect(phase,timeout=600):
     container=pathlib.Path(run(['xcrun','simctl','get_app_container',device,identifier,'data']).strip())
     deadline=time.monotonic()+timeout
     while time.monotonic()<deadline:
+        if current_pid is not None:
+            rss=subprocess.run(['ps','-p',str(current_pid),'-o','rss='],capture_output=True,text=True)
+            if rss.returncode == 0 and rss.stdout.strip().isdigit():
+                memory.setdefault(phase,[]).append(int(rss.stdout.strip()))
+                (artifacts/'ios-native-rss-kib.json').write_text(json.dumps(memory))
         matches=list(container.rglob('verification-'+phase+'.jsonl'))
         if matches:
             text=matches[0].read_text()
@@ -89,9 +96,12 @@ server=ThreadingHTTPServer(('127.0.0.1',0),StreamHandler)
 threading.Thread(target=server.serve_forever,daemon=True).start()
 
 def launch(phase):
+    global current_pid
     child=os.environ.copy();child['SIMCTL_CHILD_RISUNEST_IOS_PHASE']=phase
     child['SIMCTL_CHILD_RISUNEST_IOS_STREAM_URL']='http://127.0.0.1:'+str(server.server_port)
-    print(run(['xcrun','simctl','launch','--terminate-running-process',device,identifier],env=child))
+    output=run(['xcrun','simctl','launch','--terminate-running-process',device,identifier],env=child)
+    print(output)
+    current_pid=int(output.strip().rsplit(':',1)[1])
 
 try:
     print(run(['xcrun','simctl','boot',device]))
