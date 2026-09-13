@@ -105,8 +105,8 @@
     {
       "path": "benchmarks/ios/cloudContracts.ts",
       "mode": "100644",
-      "bytes": 5211,
-      "sha256": "48e704b711203b73f7908715deb093067ce9d7e5d15658f02c636b5d8108c9e3"
+      "bytes": 6321,
+      "sha256": "c32027df59007f7a2021cffb815483d4be36a0ff23bf34d02708d8270aa2c982"
     },
     {
       "path": "benchmarks/ios/contracts.ts",
@@ -1203,8 +1203,8 @@
     {
       "path": "crates/tauri-plugin-ios-native/ios/Sources/IosNativePlugin.swift",
       "mode": "100644",
-      "bytes": 19113,
-      "sha256": "8f1e054578819b732dc3d99110cea7c456fdcfde2571c83a08616911b0e809e0"
+      "bytes": 19451,
+      "sha256": "26592fdb1d55d3e141e14bbc907587e7cbb455674090b5b0cb4f3ec00237dedd"
     },
     {
       "path": "crates/tauri-plugin-ios-native/src/lib.rs",
