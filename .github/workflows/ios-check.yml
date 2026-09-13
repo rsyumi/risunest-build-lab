@@ -102,7 +102,9 @@ jobs:
           set -euo pipefail
           start=$SECONDS
           if ! command -v xcodegen >/dev/null; then brew install xcodegen; fi
+          if ! command -v idevice_id >/dev/null; then brew install libimobiledevice; fi
           xcodegen --version | tee artifacts/xcodegen.txt
+          idevice_id --version >> artifacts/environment.txt
           printf 'tool_setup_seconds=%s\n' "$((SECONDS-start))" >> artifacts/environment.txt
       - run: pnpm install --frozen-lockfile
       - name: Confirm CLI and initialize Apple shell
