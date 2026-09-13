@@ -31,6 +31,22 @@ jobs:
           set -euo pipefail
           test "$GITHUB_REF" = refs/heads/main
           [[ "$SNAPSHOT_SHA" =~ ^[0-9a-f]{40}$ ]]
+      - name: Select matching Apple toolchain
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          echo "Apple toolchain before selection:"
+          xcode-select -p
+          command -v swift
+          swift --version
+          sudo xcode-select --switch "$DEVELOPER_DIR"
+          swift_bin="$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin"
+          test -x "$swift_bin/swift"
+          printf '%s\n' "$swift_bin" >> "$GITHUB_PATH"
+          export PATH="$swift_bin:$PATH"
+          echo "Apple toolchain after selection:"
+          xcrun --find swift
+          swift --version
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.sha }}
@@ -85,7 +101,7 @@ jobs:
         id: apple-cache
         run: |
           set -euo pipefail
-          { xcodebuild -version; xcrun --sdk iphonesimulator --show-sdk-version; } > artifacts/apple-cache-inputs.txt
+          { xcodebuild -version; swift --version; xcrun --sdk iphonesimulator --show-sdk-version; } > artifacts/apple-cache-inputs.txt
           printf 'key=%s\n' "$(shasum -a 256 artifacts/apple-cache-inputs.txt | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
       - uses: Swatinem/rust-cache@v2
         id: rust-cache
