@@ -4,6 +4,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 root = pathlib.Path.cwd()
 artifacts = root / 'artifacts'
 bench = root / 'benchmarks/ios/native'
+product_binary=pathlib.Path((artifacts/'executable-path.txt').read_text()).read_bytes()
+assert all(marker not in product_binary for marker in [b'ios_bench_phase',b'ios_bench_report',b'RISUNEST_IOS_PHASE']), 'Verification commands in product binary'
+del product_binary
 
 def run(args, cwd=root, env=None):
     print('+', ' '.join(map(str,args)), flush=True)
@@ -27,6 +30,8 @@ for path in apple.glob('*_iOS/Info.plist'):
     info=plistlib.loads(path.read_bytes())
     info['BGTaskSchedulerPermittedIdentifiers']=['io.github.rsyumi.risunest.ios.bench.generation']
     info['UIBackgroundModes']=['processing']
+    info['UIFileSharingEnabled']=True
+    info['LSSupportsOpeningDocumentsInPlace']=True
     path.write_bytes(plistlib.dumps(info))
 
 for path in apple.glob('Sources/**/*'):
@@ -104,6 +109,21 @@ try:
     print(run(['xcrun','simctl','launch',device,identifier]))
     collect('background',120)
     print(run(['xcrun','simctl','io',device,'screenshot',str(artifacts/'ios-harness.png')]))
+    uitests=root/'.ios-ui-tests'
+    uitests.mkdir()
+    spec={
+        'name':'RisuNestUITests',
+        'targets':{'RisuNestUITests':{
+            'type':'bundle.ui-testing','platform':'iOS','deploymentTarget':'16.4',
+            'sources':[str(root/'benchmarks/ios/NativeUITests.swift')],
+            'settings':{'base':{'GENERATE_INFOPLIST_FILE':'YES','PRODUCT_BUNDLE_IDENTIFIER':identifier+'.uitests'}}}},
+        'schemes':{'RisuNestUITests':{'build':{'targets':{'RisuNestUITests':['test']}},'test':{'targets':['RisuNestUITests']}}}
+    }
+    (uitests/'project.json').write_text(json.dumps(spec))
+    print(run(['xcodegen','generate','--spec','project.json'],cwd=uitests))
+    print(run(['xcodebuild','test','-project','RisuNestUITests.xcodeproj','-scheme','RisuNestUITests',
+               '-destination','platform=iOS Simulator,id='+device,'-derivedDataPath',str(uitests/'DerivedData'),
+               '-resultBundlePath',str(artifacts/'ios-ui.xcresult'),'CODE_SIGNING_ALLOWED=NO'],cwd=uitests))
     product=pathlib.Path((artifacts/'app-path.txt').read_text())
     print(run(['codesign','--force','--deep','--sign','-',str(product)]))
     print(run(['xcrun','simctl','install',device,str(product)]))
@@ -118,6 +138,10 @@ try:
     print(run(['xcrun','simctl','install',device,str(app)]))
     launch('ipad');collect('ipad',120)
     print(run(['xcrun','simctl','io',device,'screenshot',str(artifacts/'ios-ipad.png')]))
+    print(run(['xcrun','simctl','install',device,str(product)]))
+    print(run(['xcrun','simctl','launch',device,'io.github.rsyumi.risunest']))
+    time.sleep(15)
+    print(run(['xcrun','simctl','io',device,'screenshot',str(artifacts/'ios-product-ipad.png')]))
     (artifacts/'ios-runtime-result.json').write_text(json.dumps({'passed':True,'restartExact':True}))
 finally:
     subprocess.run(['xcrun','simctl','shutdown',device],check=False)
