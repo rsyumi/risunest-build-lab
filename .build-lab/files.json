@@ -93,14 +93,20 @@
     {
       "path": "benchmarks/ios/NativeUITests.swift",
       "mode": "100644",
-      "bytes": 6705,
-      "sha256": "4247acba93895e610ea8e7bc9021f8418fd61960a8a381fcdedea557def41a92"
+      "bytes": 8989,
+      "sha256": "99466259344a6eda148905ad85d84d4e913a3298f510eaa1f909be065b96b962"
     },
     {
       "path": "benchmarks/ios/buildTestLab.py",
       "mode": "100644",
       "bytes": 7319,
       "sha256": "12a5f8d49a82278de77614dec90c8344e028f5fb03f3d78d4cada3951683f7b0"
+    },
+    {
+      "path": "benchmarks/ios/cloudContracts.ts",
+      "mode": "100644",
+      "bytes": 4966,
+      "sha256": "0e60218c5ac5376aca1f4cc829578a55e393b5effa929b13356edd5b647ff1c9"
     },
     {
       "path": "benchmarks/ios/contracts.ts",
@@ -111,14 +117,14 @@
     {
       "path": "benchmarks/ios/index.html",
       "mode": "100644",
-      "bytes": 519,
-      "sha256": "4be640d66405adfe8ce190eb6f14c7d65bb440ad7e2ea90754d8a1f02d63e63e"
+      "bytes": 487,
+      "sha256": "04877fa831e49c0373b6a92736e99964ad875d44ca1ff68daa31dcc11089cc43"
     },
     {
       "path": "benchmarks/ios/main.ts",
       "mode": "100644",
-      "bytes": 5512,
-      "sha256": "ca117267dc1191a5f84ae5cba66ad766a3b1566a8c87b7f23eab8edcd24b7663"
+      "bytes": 6289,
+      "sha256": "88e03b99c6ea96af3c94a9339523b4a993fa6df58b88d0c97913a7120eade865"
     },
     {
       "path": "benchmarks/ios/native/.gitignore",
@@ -153,8 +159,8 @@
     {
       "path": "benchmarks/ios/native/src/lib.rs",
       "mode": "100644",
-      "bytes": 2112,
-      "sha256": "c0b9b160b4629411508be5dc0c517130b61df80a9676544d9f5d53d2f42cf90b"
+      "bytes": 2488,
+      "sha256": "696f4a4f610a37fbe456c213098c35aacf1d051235ddaf7c9707da2c1f3e569f"
     },
     {
       "path": "benchmarks/ios/native/tauri.conf.json",
@@ -11153,8 +11159,8 @@
     {
       "path": "benchmarks/ios/README.md",
       "mode": "100644",
-      "bytes": 2840,
-      "sha256": "4a8ac518df971049fc2f2c5f14c1652f7275fa00d44afa4bc6d62c83e4683d46",
+      "bytes": 3206,
+      "sha256": "ac1b2d9973ed15e29a0ede058ce6168ae8bbfa05cc738f58141d9355aa7f3590",
       "reason": "explanatory-document"
     },
     {
