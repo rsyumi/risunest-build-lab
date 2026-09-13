@@ -177,20 +177,20 @@
     {
       "path": "benchmarks/macos/main.ts",
       "mode": "100644",
-      "bytes": 11514,
-      "sha256": "9fdf74f92c571022d576c0873535aa964bc5f21da8ba59f1c5d01bea79248a2c"
+      "bytes": 12189,
+      "sha256": "acf92def24509c207e5e93fa2ab0e253009062fe14c598c39b88cb7906795a8c"
     },
     {
       "path": "benchmarks/macos/native/Cargo.lock",
       "mode": "100644",
-      "bytes": 186147,
-      "sha256": "e6b9c67e21c9b17c8123c13aaa57986bb5631f5263b2a2977f02b8b4ced74efd"
+      "bytes": 186366,
+      "sha256": "bc5491460d713f20ec11c71a4671e5cbe68bca096550535a97a1a71d805a99c7"
     },
     {
       "path": "benchmarks/macos/native/Cargo.toml",
       "mode": "100644",
-      "bytes": 372,
-      "sha256": "e11dbc7539c9e726a396b2de3816319437daf1cb7045497b06aebb083eb0b979"
+      "bytes": 831,
+      "sha256": "188d324d0cfd6480a8055c309437bcf56c0ad408c54a53361ea5a9cc1d2511b6"
     },
     {
       "path": "benchmarks/macos/native/build.rs",
@@ -201,8 +201,8 @@
     {
       "path": "benchmarks/macos/native/src/main.rs",
       "mode": "100644",
-      "bytes": 2465,
-      "sha256": "924d17348346a6e74ae81b0427af2370234e84c67c4b9afd2790aff16711d0b8"
+      "bytes": 2672,
+      "sha256": "6745df998526a8699912e5ca9e88468c919a9bd1ca153497d6883d4aa8fc68e3"
     },
     {
       "path": "benchmarks/macos/prepare.mjs",
@@ -213,8 +213,8 @@
     {
       "path": "benchmarks/macos/run.py",
       "mode": "100644",
-      "bytes": 5438,
-      "sha256": "229db044f342dca0b76aed29a97643bd022c2dbb54b44e866ca770895e2e6d88"
+      "bytes": 5479,
+      "sha256": "ffd105ff22bfa9e90a4baa680a5e48f4bdd2d2d1bcdf960b9d46189f1f402903"
     },
     {
       "path": "benchmarks/macos/vite.config.ts",
@@ -10884,8 +10884,8 @@
     {
       "path": "benchmarks/macos/README.md",
       "mode": "100644",
-      "bytes": 2988,
-      "sha256": "4cbc161422b73817cd385245b8b8b2b9067e6eda34b65ed55888f1727fd412ca",
+      "bytes": 3141,
+      "sha256": "7dbc5464b29cc480aa02948cdc0003434ed5f1fca26ee560ab5986cf50e7e4b1",
       "reason": "explanatory-document"
     },
     {

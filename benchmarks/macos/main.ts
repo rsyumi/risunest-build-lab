@@ -61,9 +61,15 @@ async function tokenizer() {
       try {
         await invokeNativeTokenizerBatch(route, [text], "ids");
       } catch (error) {
-        const value = error as { code?: string };
+        const value = error as {
+          code?: string;
+          special_token?: string;
+          index?: number;
+        };
         check(
-          value.code === entry.error!.code,
+          value.code === entry.error!.code &&
+            value.special_token === entry.error!.token &&
+            value.index === 0,
           `${entry.name}: special token error category`,
         );
         rejected = true;
@@ -322,6 +328,20 @@ async function main() {
       "product UI edit survives quit and restart",
     );
     await report("app-restart", { passed: true });
+    await invoke("macos_bench_quit");
+  } else if (phase === "streaming") {
+    document.getElementById("benchmark")!.remove();
+    await import("../streaming/main");
+    const api = (
+      window as unknown as {
+        __streamingSmoke: {
+          run(): Promise<{ passed: boolean; assertion?: string }>;
+        };
+      }
+    ).__streamingSmoke;
+    const result = await api.run();
+    check(result.passed, `streaming suite: ${result.assertion ?? "failed"}`);
+    await report("streaming", result);
     await invoke("macos_bench_quit");
   } else {
     throw new Error("Unknown isolated Mac harness phase");
