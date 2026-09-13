@@ -105,8 +105,8 @@
     {
       "path": "benchmarks/ios/main.ts",
       "mode": "100644",
-      "bytes": 3750,
-      "sha256": "432ca9e00106b2872b255e8bb6cbc6eb8393101b053a7ec0f91113a5c97cf872"
+      "bytes": 4384,
+      "sha256": "55bb109bd4f6be5bf43cea40eff58615d1664e0015729d276748b6eef4b9bd04"
     },
     {
       "path": "benchmarks/ios/native/.gitignore",
@@ -135,20 +135,26 @@
     {
       "path": "benchmarks/ios/native/capabilities/ios.json",
       "mode": "100644",
-      "bytes": 1467,
-      "sha256": "2d110680a8b343b7ae5913fb5ec3d4e02ec8c8ac7a6dbafcb55b0105b7c53623"
+      "bytes": 1511,
+      "sha256": "bc77cf48cf49e51420e75546aa698413c39d72c1798210aff56610e396c5151e"
     },
     {
       "path": "benchmarks/ios/native/src/lib.rs",
       "mode": "100644",
-      "bytes": 1823,
-      "sha256": "07257860d0f4962d1d040245d98b1ca8723f081170fb5f365f72eb6550b7c761"
+      "bytes": 2112,
+      "sha256": "c0b9b160b4629411508be5dc0c517130b61df80a9676544d9f5d53d2f42cf90b"
     },
     {
       "path": "benchmarks/ios/native/tauri.conf.json",
       "mode": "100644",
       "bytes": 312,
       "sha256": "7af37dc255b4a0a7f93ce288a77ff4bcad12665bbdd65f1425b469af86406a2f"
+    },
+    {
+      "path": "benchmarks/ios/runtimeContracts.ts",
+      "mode": "100644",
+      "bytes": 3448,
+      "sha256": "0a94a0d70be509498907b80357318da03bd16d4d69ea444145d6475f16498516"
     },
     {
       "path": "benchmarks/ios/vite.config.ts",
@@ -1155,8 +1161,8 @@
     {
       "path": "crates/tauri-plugin-ios-native/build.rs",
       "mode": "100644",
-      "bytes": 306,
-      "sha256": "3e2532374b11148fcb5e8ee0f9b5eafdc0c6d7e0a12742b28d09e7e9dd29dc21"
+      "bytes": 337,
+      "sha256": "10fa7139dd79089f60658624e6994845ae09a5076ae04730b7bc93d148485e37"
     },
     {
       "path": "crates/tauri-plugin-ios-native/ios/Package.swift",
@@ -1167,8 +1173,8 @@
     {
       "path": "crates/tauri-plugin-ios-native/ios/Sources/IosNativePlugin.swift",
       "mode": "100644",
-      "bytes": 14201,
-      "sha256": "b8e48160edad088210e73dcc81e8fab512b3e3ca35779a47becad34f36cca6c6"
+      "bytes": 18061,
+      "sha256": "1f267342b112a99c032269031d401300b7c5c0fd6da4f73ccd953a2a3157d672"
     },
     {
       "path": "crates/tauri-plugin-ios-native/src/lib.rs",
@@ -2541,8 +2547,8 @@
     {
       "path": "src-tauri/capabilities/ios.json",
       "mode": "100644",
-      "bytes": 1467,
-      "sha256": "2d110680a8b343b7ae5913fb5ec3d4e02ec8c8ac7a6dbafcb55b0105b7c53623"
+      "bytes": 1511,
+      "sha256": "bc77cf48cf49e51420e75546aa698413c39d72c1798210aff56610e396c5151e"
     },
     {
       "path": "src-tauri/capabilities/migrated.json",
@@ -3147,8 +3153,8 @@
     {
       "path": "src-tauri/gen/apple/project.yml",
       "mode": "100644",
-      "bytes": 3480,
-      "sha256": "60d952b7f8b3ae22acccfce3df2451050a3fb32ca54fcef64c49b9f2866f9ef1"
+      "bytes": 3604,
+      "sha256": "a9a16af650fd5564fee586c35a1daf5ceac313d6bec28637c5d8ef7b2777644f"
     },
     {
       "path": "src-tauri/gen/apple/risunest.xcodeproj/project.pbxproj",
@@ -3177,8 +3183,8 @@
     {
       "path": "src-tauri/gen/apple/risunest_iOS/Info.plist",
       "mode": "100644",
-      "bytes": 1606,
-      "sha256": "3d9865fd1d16ba67b9da3b395b333de125eb203375abef45a67b0d6a7fa7b073"
+      "bytes": 1808,
+      "sha256": "81890ef84b2c195fd961f74fe1672c9aabd1311bc2de4aedba449f0ee0fe7275"
     },
     {
       "path": "src-tauri/gen/apple/risunest_iOS/risunest_iOS.entitlements",
@@ -6969,14 +6975,14 @@
     {
       "path": "src/ts/iosNative.test.ts",
       "mode": "100644",
-      "bytes": 3260,
-      "sha256": "22e86a7ad3003eece5042ba3bb3998810e7a40b5209d662915d0118fcf9e96a0"
+      "bytes": 3772,
+      "sha256": "55430e7927fa51c574daeffa49599e6fe48a80af406a0d20a0ecd75540d8adc3"
     },
     {
       "path": "src/ts/iosNative.ts",
       "mode": "100644",
-      "bytes": 4509,
-      "sha256": "e7f1b0dabb5a40ec1c147c3a3264c3d1aabc2bb70990bec0118f222fc75fe53e"
+      "bytes": 4871,
+      "sha256": "241550ad052120bd84585fde18ad672d34dbc3741bc7dd1ae636af45be461e4e"
     },
     {
       "path": "src/ts/iris.ts",
@@ -7821,8 +7827,8 @@
     {
       "path": "src/ts/process/index.svelte.ts",
       "mode": "100644",
-      "bytes": 86178,
-      "sha256": "c81a9dc87cde9c23db87c5143181869b23633876c58699d0bd99311776a6bf23"
+      "bytes": 86504,
+      "sha256": "63b81135745d70386c5f05c41c4d849e4d516d434978b01e6da3563a0d5173df"
     },
     {
       "path": "src/ts/process/infunctions.ts",
