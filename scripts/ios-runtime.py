@@ -64,6 +64,7 @@ device=run(['xcrun','simctl','create','RisuNest synthetic iOS',phone['identifier
 (artifacts/'ios-device.json').write_text(json.dumps({'udid':device,'runtime':runtime['version'],'device':phone['name']}))
 
 current_pid=None
+device_prefix=''
 memory={}
 def collect(phase,timeout=600):
     container=pathlib.Path(run(['xcrun','simctl','get_app_container',device,identifier,'data']).strip())
@@ -71,15 +72,17 @@ def collect(phase,timeout=600):
     while time.monotonic()<deadline:
         if current_pid is not None:
             rss=subprocess.run(['ps','-p',str(current_pid),'-o','rss='],capture_output=True,text=True)
+            if rss.returncode != 0:
+                raise RuntimeError('Owned simulator process exited during '+phase)
             if rss.returncode == 0 and rss.stdout.strip().isdigit():
-                memory.setdefault(phase,[]).append(int(rss.stdout.strip()))
+                memory.setdefault(device_prefix+phase,[]).append(int(rss.stdout.strip()))
                 (artifacts/'ios-native-rss-kib.json').write_text(json.dumps(memory))
         matches=list(container.rglob('verification-'+phase+'.jsonl'))
         if matches:
             text=matches[0].read_text()
             complete_text=text[:text.rfind('\n')+1]
             records=[json.loads(line) for line in complete_text.splitlines() if line]
-            (artifacts/('ios-'+phase+'.jsonl')).write_text(text)
+            (artifacts/('ios-'+device_prefix+phase+'.jsonl')).write_text(text)
             if any(x['stage']=='failure' for x in records): raise RuntimeError(records[-1])
             if any(x['stage']=='complete' for x in records): return records
         time.sleep(2)
@@ -107,8 +110,8 @@ def launch(phase):
     child=os.environ.copy();child['SIMCTL_CHILD_RISUNEST_IOS_PHASE']=phase
     child['SIMCTL_CHILD_RISUNEST_IOS_STREAM_URL']='http://127.0.0.1:'+str(server.server_port)
     output=run(['xcrun','simctl','launch','--terminate-running-process',
-                '--stdout='+str(artifacts/('ios-'+phase+'.stdout.log')),
-                '--stderr='+str(artifacts/('ios-'+phase+'.stderr.log')),device,identifier],env=child)
+                '--stdout='+str(artifacts/('ios-'+device_prefix+phase+'.stdout.log')),
+                '--stderr='+str(artifacts/('ios-'+device_prefix+phase+'.stderr.log')),device,identifier],env=child)
     print(output)
     current_pid=int(output.strip().rsplit(':',1)[1])
 
@@ -128,6 +131,9 @@ try:
     print(run(['xcrun','simctl','launch',device,identifier]))
     collect('background',120)
     print(run(['xcrun','simctl','io',device,'screenshot',str(artifacts/'ios-harness.png')]))
+    launch('app');collect('app',180)
+    print(run(['xcrun','simctl','io',device,'screenshot',str(artifacts/'ios-product-chat.png')]))
+    launch('app-restart');collect('app-restart',120)
     uitests=root/'.ios-ui-tests'
     uitests.mkdir()
     spec={
@@ -151,16 +157,27 @@ try:
     print(run(['xcrun','simctl','io',device,'screenshot',str(artifacts/'ios-product-first-launch.png')]))
     print(run(['xcrun','simctl','shutdown',device]))
     tablet=compatible_type('iPad')
+    device_prefix='ipad-'
     device=run(['xcrun','simctl','create','RisuNest synthetic iPad',tablet['identifier'],runtime['identifier']]).strip()
     print(run(['xcrun','simctl','boot',device]))
     print(run(['xcrun','simctl','bootstatus',device,'-b']))
     print(run(['xcrun','simctl','install',device,str(app)]))
     launch('ipad');collect('ipad',120)
     print(run(['xcrun','simctl','io',device,'screenshot',str(artifacts/'ios-ipad.png')]))
+    launch('app');collect('app',180)
+    print(run(['xcrun','simctl','io',device,'screenshot',str(artifacts/'ios-product-chat-ipad.png')]))
+    launch('app-restart');collect('app-restart',120)
     print(run(['xcrun','simctl','install',device,str(product)]))
     print(run(['xcrun','simctl','launch',device,'io.github.rsyumi.risunest']))
     time.sleep(15)
     print(run(['xcrun','simctl','io',device,'screenshot',str(artifacts/'ios-product-ipad.png')]))
-    (artifacts/'ios-runtime-result.json').write_text(json.dumps({'passed':True,'restartExact':True}))
+    (artifacts/'ios-runtime-result.json').write_text(json.dumps({'passed':True,'restartExact':True,'productUIPhoneAndPad':True}))
+except Exception:
+    subprocess.run(['xcrun','simctl','io',device,'screenshot',str(artifacts/'ios-failure.png')],check=False)
+    if current_pid:
+        with (artifacts/'ios-owned-process.log').open('w') as output:
+            subprocess.run(['xcrun','simctl','spawn',device,'log','show','--last','3m','--style','compact',
+                            '--predicate','processIdentifier == '+str(current_pid)],stdout=output,stderr=subprocess.STDOUT,check=False)
+    raise
 finally:
     subprocess.run(['xcrun','simctl','shutdown',device],check=False)
