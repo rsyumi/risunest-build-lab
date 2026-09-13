@@ -93,8 +93,8 @@
     {
       "path": "benchmarks/ios/NativeUITests.swift",
       "mode": "100644",
-      "bytes": 5146,
-      "sha256": "c5832ad04d0d2b58a7b6d53a9726d869847045b20dcb513a5450880bfdb57aaf"
+      "bytes": 6705,
+      "sha256": "4247acba93895e610ea8e7bc9021f8418fd61960a8a381fcdedea557def41a92"
     },
     {
       "path": "benchmarks/ios/buildTestLab.py",
