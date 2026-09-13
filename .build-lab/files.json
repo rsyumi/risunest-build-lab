@@ -93,26 +93,26 @@
     {
       "path": "benchmarks/ios/NativeUITests.swift",
       "mode": "100644",
-      "bytes": 3229,
-      "sha256": "2d985240b255364f2694997689ff917d4ca44e5c3b2f40eb09cca23972d8f4e5"
+      "bytes": 4125,
+      "sha256": "90f65b84e17a35369aeb258275d467074148f3ed35919bb4f13ebb80acd96f69"
     },
     {
       "path": "benchmarks/ios/contracts.ts",
       "mode": "100644",
-      "bytes": 7426,
-      "sha256": "ad2e4341c28ef3d957bf2ff8af33e8b385291e16f7677443d5c8beabec626f55"
+      "bytes": 7438,
+      "sha256": "61080b570ed63f4e25ea4f89bd25076d4dff64fc48c51399d1f2d661459028e8"
     },
     {
       "path": "benchmarks/ios/index.html",
       "mode": "100644",
-      "bytes": 372,
-      "sha256": "2edb5c69d5c66acdfbc9672265da2cfd8789e7a201d202bb606451c042e798c1"
+      "bytes": 519,
+      "sha256": "4be640d66405adfe8ce190eb6f14c7d65bb440ad7e2ea90754d8a1f02d63e63e"
     },
     {
       "path": "benchmarks/ios/main.ts",
       "mode": "100644",
-      "bytes": 4820,
-      "sha256": "f603294ceaa61fad2f00476d998f4cc8a3dbf20c1b85b115c1a8ff1136bca495"
+      "bytes": 5103,
+      "sha256": "4b48dcfce680dab04beda7956e278e7b7881161bb30bbceba45edbce4f30c949"
     },
     {
       "path": "benchmarks/ios/native/.gitignore",
@@ -161,6 +161,12 @@
       "mode": "100644",
       "bytes": 3111,
       "sha256": "287f6b45742f18ca73345ab02b2308caa98d4598c2d217dc42c186bcddb78aa2"
+    },
+    {
+      "path": "benchmarks/ios/productContracts.ts",
+      "mode": "100644",
+      "bytes": 4053,
+      "sha256": "6bd128e3f4a27d4294705b82b1f98f0625ebc58fb8aa88d123d2cef0c3e56db1"
     },
     {
       "path": "benchmarks/ios/runtimeContracts.ts",
