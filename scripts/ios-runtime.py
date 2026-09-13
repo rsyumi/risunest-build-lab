@@ -53,7 +53,13 @@ print(run(['codesign','--force','--deep','--sign','-',str(app)]))
 runtimes=json.loads(run(['xcrun','simctl','list','runtimes','--json']))['runtimes']
 runtime=sorted([x for x in runtimes if x['isAvailable'] and '.iOS-' in x['identifier']],key=lambda x:tuple(map(int,x['version'].split('.'))))[-1]
 types=json.loads(run(['xcrun','simctl','list','devicetypes','--json']))['devicetypes']
-phone=[x for x in types if x['name'].startswith('iPhone')][-1]
+available=json.loads(run(['xcrun','simctl','list','devices','available','--json']))['devices'][runtime['identifier']]
+def compatible_type(prefix):
+    names={item['name'] for item in available if item['isAvailable'] and item['name'].startswith(prefix)}
+    candidates=[item for item in types if item['name'] in names]
+    assert candidates, 'No compatible '+prefix+' device for '+runtime['identifier']
+    return candidates[0]
+phone=compatible_type('iPhone')
 device=run(['xcrun','simctl','create','RisuNest synthetic iOS',phone['identifier'],runtime['identifier']]).strip()
 (artifacts/'ios-device.json').write_text(json.dumps({'udid':device,'runtime':runtime['version'],'device':phone['name']}))
 
@@ -144,7 +150,7 @@ try:
     time.sleep(15)
     print(run(['xcrun','simctl','io',device,'screenshot',str(artifacts/'ios-product-first-launch.png')]))
     print(run(['xcrun','simctl','shutdown',device]))
-    tablet=[x for x in types if x['name'].startswith('iPad')][-1]
+    tablet=compatible_type('iPad')
     device=run(['xcrun','simctl','create','RisuNest synthetic iPad',tablet['identifier'],runtime['identifier']]).strip()
     print(run(['xcrun','simctl','boot',device]))
     print(run(['xcrun','simctl','bootstatus',device,'-b']))
