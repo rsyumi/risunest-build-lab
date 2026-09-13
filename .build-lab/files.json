@@ -4005,8 +4005,8 @@
     {
       "path": "src-tauri/src/server_sync/credentials.rs",
       "mode": "100644",
-      "bytes": 10237,
-      "sha256": "0d3b06048ad94efe01338e8d38f1d56b33a6c0e52fd6291ab913d0132f380711"
+      "bytes": 11957,
+      "sha256": "fe977e0b683ff664355160b23229659b01806872f13a8a4b7672b7ed439d638a"
     },
     {
       "path": "src-tauri/src/server_sync/directory_tests.rs",
@@ -4287,8 +4287,8 @@
     {
       "path": "src/lang/en.ts",
       "mode": "100644",
-      "bytes": 146683,
-      "sha256": "7c122665a1405f9045fd8ee98dfcaf31e22994cbfe62339a9233ad782efc42e9"
+      "bytes": 146817,
+      "sha256": "2c10863306a3f4032e8ec69c60078fcd0556ec67b93cf3cafc8b8b9fe0d4f37d"
     },
     {
       "path": "src/lang/es.ts",
@@ -4305,8 +4305,8 @@
     {
       "path": "src/lang/ko.ts",
       "mode": "100644",
-      "bytes": 160896,
-      "sha256": "f5abc9afb42a92f286a2ada21014c176d3946262254813810c9f75e0228a1acc"
+      "bytes": 161090,
+      "sha256": "e2aad3e3ff444b5b632c00e8969442b73d463f37ba942cbd7bc0f883b268d2d8"
     },
     {
       "path": "src/lang/vi.ts",
@@ -6183,8 +6183,8 @@
     {
       "path": "src/ts/bootstrap.ts",
       "mode": "100644",
-      "bytes": 41281,
-      "sha256": "0d787b9d42f168240f5ca153d6ee2f7e83ef51fb252b6aa9d177c8fc1fef75ab"
+      "bytes": 41184,
+      "sha256": "5e7ba1d0b587ee33c755fbe98260537f47dd9d495aaa886000479ca1337e9cda"
     },
     {
       "path": "src/ts/cbs.operationContext.test.ts",
