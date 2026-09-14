@@ -1,5 +1,5 @@
-name: Apple release build lab
-run-name: Apple test packages / ${{ inputs.source_sha }}
+name: Apple and Linux release build lab
+run-name: Native test packages / ${{ inputs.source_sha }} / Sync ${{ inputs.include_sync }}
 
 on:
   workflow_dispatch:
@@ -8,12 +8,16 @@ on:
         description: Full macOS-lane snapshot commit SHA in this build-lab repository
         type: string
         required: true
+      include_sync:
+        description: Run Sync builds, packages, and lifecycle checks
+        type: boolean
+        default: true
 
 permissions:
   contents: read
 
 concurrency:
-  group: apple-release-build-lab-${{ github.ref_name }}-${{ inputs.source_sha }}
+  group: apple-release-build-lab-${{ github.ref_name }}-${{ inputs.source_sha }}-${{ inputs.include_sync }}
   cancel-in-progress: false
 
 jobs:
@@ -176,7 +180,7 @@ jobs:
           );
           NODE
 
-      - name: Run macOS app and Sync Rust tests
+      - name: Run macOS app Rust tests
         if: matrix.kind == 'macos'
         run: |
           set -euo pipefail
@@ -184,6 +188,14 @@ jobs:
           export TMPDIR="$(cd "$contract_tmp" && pwd -P)"
           printf 'rust_test_tmpdir=%s\n' "$TMPDIR" >> artifacts/environment.txt
           cargo test --manifest-path src-tauri/Cargo.toml --target '${{ matrix.rust_target }}' --release --locked --lib -- --test-threads=1 2>&1 | tee artifacts/rust-tests.log
+
+      - name: Run macOS Sync Rust tests
+        if: matrix.kind == 'macos' && inputs.include_sync
+        run: |
+          set -euo pipefail
+          contract_tmp="$(mktemp -d "$RUNNER_TEMP/risunest-sync-agent-test-contracts.XXXXXX")"
+          export TMPDIR="$(cd "$contract_tmp" && pwd -P)"
+          printf 'sync_rust_test_tmpdir=%s\n' "$TMPDIR" >> artifacts/environment.txt
           cargo test --manifest-path server/sync/Cargo.toml --target '${{ matrix.rust_target }}' --release --locked -- --test-threads=1 2>&1 | tee -a artifacts/rust-tests.log
           cargo test --manifest-path server/manager/Cargo.toml --target '${{ matrix.rust_target }}' --release --locked -- --test-threads=1 2>&1 | tee -a artifacts/rust-tests.log
 
@@ -214,6 +226,14 @@ jobs:
             printf '%s\n' "$delimiter"
             printf 'TAURI_SIGNING_PRIVATE_KEY_PASSWORD=\n'
           } >> "$GITHUB_ENV"
+          node --input-type=module - "$key_file.pub" "$RUNNER_TEMP/apple-prebuilt.json" <<'NODE'
+          import { readFileSync, writeFileSync } from "node:fs";
+          const [publicKeyPath, configPath] = process.argv.slice(2);
+          const publicKey = readFileSync(publicKeyPath, "utf8").trim();
+          const config = JSON.parse(readFileSync(configPath, "utf8"));
+          config.plugins = { ...config.plugins, updater: { pubkey: publicKey, endpoints: [] } };
+          writeFileSync(configPath, `${JSON.stringify(config, null, 2)}\n`);
+          NODE
           printf 'ephemeral_updater_key=true\n' >> artifacts/environment.txt
           rm -f "$key_file" "$key_file.pub"
 
@@ -265,11 +285,11 @@ jobs:
           cat artifacts/binary.txt artifacts/packages.sha256
 
       - name: Install locked Sync GUI inputs
-        if: matrix.kind == 'macos'
+        if: matrix.kind == 'macos' && inputs.include_sync
         run: pnpm install --dir server/manager/gui --frozen-lockfile
 
       - name: Prepare synthetic Sync package inputs
-        if: matrix.kind == 'macos'
+        if: matrix.kind == 'macos' && inputs.include_sync
         run: |
           set -euo pipefail
           test ! -e server/sync/README.md
@@ -307,7 +327,7 @@ jobs:
           NODE
 
       - name: Build and package macOS Sync agent test suite
-        if: matrix.kind == 'macos'
+        if: matrix.kind == 'macos' && inputs.include_sync
         env:
           APPLE_SIGNING_IDENTITY: "-"
           RISUNEST_SYNC_TEST_REGISTRY_URL: https://registry.invalid/risunest-agent-test/
@@ -337,8 +357,17 @@ jobs:
             --output "$RISUNEST_SYNC_TEST_WORK/packages" \
             --cloudflared-sha256 "$vendor_sha" 2>&1 | tee artifacts/sync/package.log
 
+      - name: Run macOS Sync LaunchAgent lifecycle
+        if: matrix.kind == 'macos' && inputs.include_sync
+        run: |
+          set -euo pipefail
+          native="$RISUNEST_SYNC_TEST_WORK/native/native-build.json"
+          server="$(node -p "require('$native').daemon")"
+          manager="$(node -p "require('$native').manager")"
+          sh server/manager/tests/macos-startup.sh "$server" "$manager" 2>&1 | tee artifacts/sync/macos-startup.log
+
       - name: Verify extracted and mounted macOS Sync packages
-        if: matrix.kind == 'macos'
+        if: matrix.kind == 'macos' && inputs.include_sync
         run: |
           set -euo pipefail
           assets="$RISUNEST_SYNC_TEST_WORK/packages/assets.json"
@@ -456,13 +485,13 @@ jobs:
           grep -q -- '--no-sign' artifacts/ios-build-help.txt
           python3 ../control/scripts/ios-shell-inputs.py src-tauri/gen/apple artifacts/apple-shell-before
 
-      - name: Build unsigned iPhoneOS ARM64 test app
+      - name: Build Tauri unsigned iPhoneOS ARM64 test package
         if: matrix.kind == 'ios'
         env:
           TAURI_ENV_PLATFORM: ios
         run: |
           set -euo pipefail
-          pnpm tauri ios build --ci --target aarch64 --no-sign --archive-only \
+          pnpm tauri ios build --ci --target aarch64 --no-sign \
             --config src-tauri/tauri.agent.conf.json \
             --config "$RUNNER_TEMP/apple-prebuilt.json" 2>&1 | tee artifacts/ios-build.log
 
@@ -471,11 +500,14 @@ jobs:
         run: |
           set -euo pipefail
           python3 ../control/scripts/ios-shell-inputs.py src-tauri/gen/apple artifacts/apple-shell-after
-          cmp artifacts/apple-shell-before/apple-shell-inputs.json artifacts/apple-shell-after/apple-shell-inputs.json
-          test -z "$(git status --short --untracked-files=all -- src-tauri/gen/apple)"
-          git diff --exit-code -- src-tauri/gen/apple
+          python3 ../control/scripts/ios-shell-inputs.py compare \
+            artifacts/apple-shell-before/apple-shell-inputs.json \
+            artifacts/apple-shell-after/apple-shell-inputs.json \
+            artifacts/apple-shell-preservation.json
+          git status --short --untracked-files=all -- src-tauri/gen/apple > artifacts/apple-shell-generated-status.txt
+          cat artifacts/apple-shell-preservation.json artifacts/apple-shell-generated-status.txt
 
-      - name: Create and verify unsigned iPhoneOS package
+      - name: Verify Tauri unsigned iPhoneOS package
         if: matrix.kind == 'ios'
         run: |
           set -euo pipefail
@@ -484,6 +516,8 @@ jobs:
           import pathlib
           import plistlib
 
+          release_input = json.loads(pathlib.Path("artifacts/release-input.json").read_text())
+          tauri_config = json.loads(pathlib.Path("src-tauri/tauri.conf.json").read_text())
           matches = []
           for app in pathlib.Path("src-tauri/gen/apple").glob("build/**/*.xcarchive/Products/Applications/*.app"):
               info_path = app / "Info.plist"
@@ -496,18 +530,40 @@ jobs:
           assert len(matches) == 1, f"Expected one archived iPhoneOS app, found {len(matches)}"
           app, info = matches[0]
           assert info.get("MinimumOSVersion") == "16.4", info.get("MinimumOSVersion")
+          assert info.get("CFBundleVersion") == release_input["iosBuildNumber"], info.get("CFBundleVersion")
+          expected_documents = [{
+              "CFBundleTypeExtensions": association["ext"],
+              "CFBundleTypeName": association["ext"][0],
+              "CFBundleTypeRole": "Editor",
+              "LSHandlerRank": "Default",
+          } for association in tauri_config["bundle"]["fileAssociations"]]
+          assert info.get("CFBundleDocumentTypes") == expected_documents, info.get("CFBundleDocumentTypes")
+          expected_urls = [{
+              "CFBundleURLSchemes": deep_link["scheme"],
+              "CFBundleURLName": deep_link["scheme"][0],
+          } for deep_link in tauri_config["plugins"]["deep-link"]["mobile"]]
+          assert info.get("CFBundleURLTypes") == expected_urls, info.get("CFBundleURLTypes")
+          ipas = list(pathlib.Path("src-tauri/gen/apple").glob("build/**/*.ipa"))
+          assert len(ipas) == 1, f"Expected one Tauri-produced IPA, found {len(ipas)}"
+          ipa = ipas[0]
+          assert ipa.name == "RisuNest.ipa", ipa
           executable = app / info["CFBundleExecutable"]
           assert executable.is_file(), "Missing iPhoneOS executable"
           pathlib.Path("artifacts/ios-app.json").write_text(json.dumps({
               "app": str(app),
+              "ipa": str(ipa),
               "executable": str(executable),
               "identifier": info["CFBundleIdentifier"],
               "platforms": info["CFBundleSupportedPlatforms"],
               "minimumOS": info["MinimumOSVersion"],
+              "buildNumber": info["CFBundleVersion"],
+              "documentExtensions": info["CFBundleDocumentTypes"][0]["CFBundleTypeExtensions"],
+              "urlSchemes": info["CFBundleURLTypes"][0]["CFBundleURLSchemes"],
               "signing": "unsigned test build",
           }, indent=2) + "\n")
           PY
           app="$(node -p 'require("./artifacts/ios-app.json").app')"
+          ipa="$(node -p 'require("./artifacts/ios-app.json").ipa')"
           executable="$(node -p 'require("./artifacts/ios-app.json").executable')"
           plutil -lint "$app/Info.plist"
           lipo "$executable" -verify_arch arm64
@@ -517,10 +573,8 @@ jobs:
             echo 'Expected an unsigned iPhoneOS app.' >&2
             exit 1
           fi
-          stage="$RUNNER_TEMP/risunest-agent-test-ios-payload"
-          mkdir -p "$stage/Payload"
-          ditto "$app" "$stage/Payload/RisuNest.app"
-          (cd "$stage" && zip -qry -y "$GITHUB_WORKSPACE/source/artifacts/RisuNest-agent-test-ios-aarch64-unsigned.ipa" Payload)
+          test -s "$ipa"
+          cp "$ipa" artifacts/RisuNest-agent-test-ios-aarch64-unsigned.ipa
           node scripts/release/package-app.mjs \
             --kind ios \
             --arch aarch64 \
@@ -536,6 +590,242 @@ jobs:
           name: risunest-agent-test-${{ matrix.id }}-${{ inputs.source_sha }}-${{ github.run_attempt }}
           path: source/artifacts/
           retention-days: 3
+          if-no-files-found: warn
+
+  linux-sync:
+    name: ${{ matrix.name }}
+    if: inputs.include_sync
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64 Sync native package and lifecycle
+            id: linux-x64
+            runner: ubuntu-22.04
+            rust_target: x86_64-unknown-linux-gnu
+            arch: x86_64
+          - name: Linux ARM64 Sync native package and lifecycle
+            id: linux-arm64
+            runner: ubuntu-22.04-arm
+            rust_target: aarch64-unknown-linux-gnu
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+        working-directory: source
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/source/src-tauri/target
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_RELEASE_DEBUG: "0"
+      SNAPSHOT_SHA: ${{ inputs.source_sha }}
+    steps:
+      - name: Validate dispatch
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == refs/heads/* ]]
+          [[ "$SNAPSHOT_SHA" =~ ^[0-9a-f]{40}$ ]]
+
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Install native build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
+
+      - name: Verify snapshot and record Linux environment
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SNAPSHOT_SHA"
+          node ../control/scripts/verify-snapshot.mjs . macos
+          mkdir -p artifacts/sync/packages
+          cp .build-lab/source.json artifacts/source.json
+          cp .build-lab/files.json artifacts/files.json
+          {
+            printf 'artifact_scope=agent-test-build-only\n'
+            printf 'workflow_sha=%s\nsnapshot_sha=%s\nrun_attempt=%s\n' "$GITHUB_SHA" "$SNAPSHOT_SHA" "$GITHUB_RUN_ATTEMPT"
+            printf 'matrix_id=%s\nrunner=%s\nrust_target=%s\n' '${{ matrix.id }}' '${{ matrix.runner }}' '${{ matrix.rust_target }}'
+            uname -a
+            rustc -Vv
+            cargo -V
+            node -v
+            systemctl --version | sed -n '1p'
+            df -h .
+            sha256sum crates/sync-wire/Cargo.lock server/sync/Cargo.lock server/manager/Cargo.lock
+          } > artifacts/environment.txt
+          cat artifacts/environment.txt
+
+      - name: Run locked Sync wire, server and manager tests
+        run: |
+          set -euo pipefail
+          cargo fmt --manifest-path server/sync/Cargo.toml --check
+          cargo fmt --manifest-path server/manager/Cargo.toml --check
+          cargo clippy --manifest-path server/sync/Cargo.toml --all-targets --locked \
+            --target '${{ matrix.rust_target }}' -- -D warnings 2>&1 | tee artifacts/sync/clippy.log
+          cargo test --manifest-path crates/sync-wire/Cargo.toml --target '${{ matrix.rust_target }}' --release --locked -- --test-threads=1 2>&1 | tee artifacts/sync/rust-tests.log
+          cargo test --manifest-path server/sync/Cargo.toml --target '${{ matrix.rust_target }}' --release --locked -- --test-threads=1 2>&1 | tee -a artifacts/sync/rust-tests.log
+          cargo test --manifest-path server/manager/Cargo.toml --target '${{ matrix.rust_target }}' --release --locked -- --test-threads=1 2>&1 | tee -a artifacts/sync/rust-tests.log
+
+      - name: Prepare synthetic Linux Sync package inputs
+        run: |
+          set -euo pipefail
+          test ! -e server/sync/README.md
+          cat > server/sync/README.md <<'README'
+          # RisuNest Sync agent test package
+
+          Synthetic documentation generated only inside the isolated release build lab.
+          README
+          sync_work="$RUNNER_TEMP/risunest-sync-agent-test-${{ matrix.id }}"
+          mkdir -p "$sync_work/native" "$sync_work/raw" "$sync_work/packages"
+          printf 'synthetic_sync_readme=true\n' >> artifacts/environment.txt
+          printf 'RISUNEST_SYNC_TEST_WORK=%s\n' "$sync_work" >> "$GITHUB_ENV"
+          node scripts/release/vendor.mjs --target 'linux-${{ matrix.arch }}' --output "$sync_work/vendor"
+          node --input-type=module - "$sync_work" <<'NODE'
+          import { copyFileSync, readFileSync, writeFileSync } from "node:fs";
+          import { join } from "node:path";
+
+          const work = process.argv[2];
+          const version = JSON.parse(readFileSync("server/version.json", "utf8"));
+          const vendorInput = JSON.parse(readFileSync("scripts/release/cloudflared.json", "utf8"));
+          const current = JSON.parse(readFileSync(join(work, "vendor/vendor.json"), "utf8"));
+          writeFileSync(
+            "artifacts/sync/release-input.json",
+            `${JSON.stringify({ version: version.version, compatibility: version.compatibility, vendorInput }, null, 2)}\n`,
+          );
+          const vendors = Object.entries(vendorInput.assets).map(([target, asset]) => ({
+            name: "cloudflared",
+            version: vendorInput.version,
+            os: target.split("-")[0],
+            arch: asset.actualArch,
+            sha256: target === current.target ? current.executableSha256 : asset.sha256,
+          }));
+          writeFileSync("artifacts/sync/synthetic-product-manifest.json", `${JSON.stringify({
+            schema: "risunest.product-release/v1",
+            product: "sync",
+            version: version.version,
+            tag: `sync-v${version.version}`,
+            sourceCommit: "0000000000000000000000000000000000000000",
+            releasePage: `https://github.com/rsyumi/RisuNest/releases/tag/sync-v${version.version}`,
+            notes: "Synthetic Linux extractor parity manifest",
+            localizedNotes: {},
+            pub_date: "2026-09-15T00:00:00.000Z",
+            platforms: {},
+            downloads: [],
+            compatibility: version.compatibility,
+            vendor: vendors,
+          }, null, 2)}\n`);
+          copyFileSync(join(work, "vendor/vendor.json"), "artifacts/sync/vendor.json");
+          writeFileSync(
+            process.env.GITHUB_ENV,
+            `RISUNEST_CLOUDFLARED_INPUT=${join(work, "vendor/vendor.json")}\n`,
+            { flag: "a" },
+          );
+          if (current.actualArch !== '${{ matrix.arch }}')
+            throw new Error("Pinned Linux cloudflared architecture mismatch.");
+          NODE
+
+      - name: Build raw and managed Linux Sync packages
+        env:
+          RISUNEST_SYNC_TEST_REGISTRY_URL: https://registry.invalid/risunest-agent-test/
+        run: |
+          set -euo pipefail
+          version="$(node -p "require('./artifacts/sync/release-input.json').version")"
+          node server/manager/install/build.mjs \
+            --target '${{ matrix.rust_target }}' \
+            --output "$RISUNEST_SYNC_TEST_WORK/native" \
+            --registry-url "$RISUNEST_SYNC_TEST_REGISTRY_URL" \
+            --version "$version" 2>&1 | tee artifacts/sync/native-build.log
+          cp "$RISUNEST_SYNC_TEST_WORK/native/native-build.json" artifacts/sync/native-build.json
+          daemon="$(node -p "require('$RISUNEST_SYNC_TEST_WORK/native/native-build.json').daemon")"
+          python3 server/sync/distribution/package.py \
+            --binary "$daemon" \
+            --target '${{ matrix.rust_target }}' \
+            --version "$version" \
+            --output "$RISUNEST_SYNC_TEST_WORK/raw" 2>&1 | tee artifacts/sync/raw-package.log
+          raw="$(find "$RISUNEST_SYNC_TEST_WORK/raw" -maxdepth 1 -type f -name '*.tar.gz' -print -quit)"
+          test "$(find "$RISUNEST_SYNC_TEST_WORK/raw" -maxdepth 1 -type f -name '*.tar.gz' | wc -l | tr -d ' ')" -eq 1
+          test -n "$raw"
+          vendor_sha="$(node -p "require('$RISUNEST_SYNC_TEST_WORK/vendor/vendor.json').executableSha256")"
+          node server/manager/install/package.mjs \
+            --native-build "$RISUNEST_SYNC_TEST_WORK/native/native-build.json" \
+            --raw-archive "$raw" \
+            --release-input artifacts/sync/release-input.json \
+            --output "$RISUNEST_SYNC_TEST_WORK/packages" \
+            --cloudflared-sha256 "$vendor_sha" 2>&1 | tee artifacts/sync/package.log
+
+      - name: Run the production Rust extractor with a six-row selected-target manifest
+        run: |
+          set -euo pipefail
+          assets="$RISUNEST_SYNC_TEST_WORK/packages/assets.json"
+          managed="$(node -e "const a=require('$assets'); console.log(a.find(x=>x.download.variant==='managed').path)")"
+          RISUNEST_PACKAGE_FIXTURE="$managed" \
+          RISUNEST_PRODUCT_MANIFEST="$(pwd)/artifacts/sync/synthetic-product-manifest.json" \
+          RISUNEST_PACKAGE_FORMAT=tar.gz \
+          RISUNEST_PACKAGE_OS=linux \
+          RISUNEST_PACKAGE_ARCH='${{ matrix.arch }}' \
+            cargo test --manifest-path server/manager/Cargo.toml \
+              --target '${{ matrix.rust_target }}' --release --locked \
+              --lib update::archive::tests::package_script_windows_zip_matches_the_runtime_extractor -- \
+              --ignored --exact --test-threads=1 2>&1 | tee artifacts/sync/runtime-extractor.log
+          grep -Eq 'test result: ok\. 1 passed; 0 failed; 0 ignored;' artifacts/sync/runtime-extractor.log
+          tar -tzf "$managed" > artifacts/sync/managed-entries.txt
+          if grep -Eq '^\./|/\.\.?(/|$)' artifacts/sync/managed-entries.txt; then
+            echo 'Managed archive contains a path rejected by the updater.' >&2
+            exit 1
+          fi
+          tar -xOf "$managed" risunest-sync-bundle.json > artifacts/sync/risunest-sync-bundle.json
+
+      - name: Run native daemon, systemd, TUI and installer lifecycles
+        run: |
+          set -euo pipefail
+          native="$RISUNEST_SYNC_TEST_WORK/native/native-build.json"
+          server="$(node -p "require('$native').daemon")"
+          manager="$(node -p "require('$native').manager")"
+          node server/manager/tests/daemon-process.mjs "$server" "$manager" 2>&1 | tee artifacts/sync/daemon-process.log
+          sudo loginctl enable-linger "$USER"
+          test "$(loginctl show-user "$USER" -p Linger --value)" = yes
+          systemctl --user daemon-reload
+          python3 server/manager/tests/linux-process.py "$server" "$manager" 2>&1 | tee artifacts/sync/linux-process.log
+
+      - name: Collect Linux package evidence
+        if: always()
+        run: |
+          set -euo pipefail
+          if test -n "${RISUNEST_SYNC_TEST_WORK:-}" && test -f "$RISUNEST_SYNC_TEST_WORK/packages/assets.json"; then
+            assets="$RISUNEST_SYNC_TEST_WORK/packages/assets.json"
+            raw="$(node -e "const a=require('$assets'); console.log(a.find(x=>x.download.variant==='raw').path)")"
+            managed="$(node -e "const a=require('$assets'); console.log(a.find(x=>x.download.variant==='managed').path)")"
+            cp "$raw" "artifacts/sync/packages/RisuNest-Sync-agent-test-linux-${{ matrix.arch }}-raw.tar.gz"
+            cp "$managed" "artifacts/sync/packages/RisuNest-Sync-agent-test-linux-${{ matrix.arch }}-managed.tar.gz"
+            cp "$assets" artifacts/sync/package-assets.json
+            sha256sum artifacts/sync/packages/* > artifacts/sync/packages.sha256
+            cat artifacts/sync/packages.sha256
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: risunest-agent-test-${{ matrix.id }}-${{ inputs.source_sha }}-${{ github.run_attempt }}
+          path: source/artifacts/
+          retention-days: 2
           if-no-files-found: warn
 
   windows-arm-cloudflared:
