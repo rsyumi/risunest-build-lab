@@ -983,6 +983,10 @@ jobs:
         with:
           node-version: 24
 
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           targets: ${{ matrix.rust_target }}
