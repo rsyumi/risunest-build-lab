@@ -684,6 +684,9 @@ jobs:
           cargo test --manifest-path server/sync/Cargo.toml --target '${{ matrix.rust_target }}' --release --locked -- --test-threads=1 2>&1 | tee -a artifacts/sync/rust-tests.log
           cargo test --manifest-path server/manager/Cargo.toml --target '${{ matrix.rust_target }}' --release --locked -- --test-threads=1 2>&1 | tee -a artifacts/sync/rust-tests.log
 
+      - name: Run synthetic Linux installer rollback tests
+        run: bash server/manager/install/install.test.sh
+
       - name: Prepare synthetic Linux Sync package inputs
         run: |
           set -euo pipefail
