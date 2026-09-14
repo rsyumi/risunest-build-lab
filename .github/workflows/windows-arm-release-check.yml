@@ -318,6 +318,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           targets: aarch64-pc-windows-msvc
+          components: rustfmt,clippy
 
       - uses: actions/cache/restore@v5
         with:
