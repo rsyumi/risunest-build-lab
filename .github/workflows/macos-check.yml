@@ -208,6 +208,7 @@ jobs:
           export TMPDIR="$(cd "$contract_tmp" && pwd -P)"
           printf 'rust_test_tmpdir=%s\n' "$TMPDIR" >> artifacts/environment.txt
           cargo test --manifest-path src-tauri/Cargo.toml --target '${{ matrix.rust_target }}' --release --locked --lib -- --test-threads=1 2>&1 | tee artifacts/rust-tests.log
+          cargo test --manifest-path src-tauri/Cargo.toml --package tauri-plugin-updater --target '${{ matrix.rust_target }}' --release --locked --lib -- --test-threads=1 2>&1 | tee -a artifacts/rust-tests.log
 
       - name: Run macOS Sync Rust tests
         if: matrix.kind == 'macos' && inputs.include_sync
@@ -303,6 +304,14 @@ jobs:
           shasum -a 256 artifacts/packages/* > artifacts/packages.sha256
           file "$binary" > artifacts/binary.txt
           cat artifacts/binary.txt artifacts/packages.sha256
+
+      - name: Replace a disposable macOS app through the production updater
+        if: matrix.kind == 'macos'
+        run: |
+          set -euo pipefail
+          export RISUNEST_MAC_UPDATE_ARCHIVE="$CARGO_TARGET_DIR/${{ matrix.rust_target }}/release/bundle/macos/RisuNest.app.tar.gz"
+          cargo test --manifest-path src-tauri/Cargo.toml --package tauri-plugin-updater --target '${{ matrix.rust_target }}' --release --locked --lib updater::tests::produced_macos_archive_replaces_disposable_app_and_preserves_sibling_data -- --ignored --exact --nocapture 2>&1 | tee artifacts/app-update-install.log
+          grep -F 'test result: ok. 1 passed; 0 failed; 0 ignored;' artifacts/app-update-install.log
 
       - name: Install locked Sync GUI inputs
         if: matrix.kind == 'macos' && inputs.include_sync

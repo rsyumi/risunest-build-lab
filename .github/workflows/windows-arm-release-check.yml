@@ -122,6 +122,14 @@ jobs:
       - name: Install locked frontend inputs
         run: pnpm install --frozen-lockfile
 
+      - name: Run vendored updater tests on Windows ARM64
+        run: |
+          if (!(Test-Path crates/tauri-plugin-updater/Cargo.toml)) { throw 'Vendored updater crate is missing from the snapshot.' }
+          cargo test --manifest-path src-tauri/Cargo.toml --package tauri-plugin-updater `
+            --release --locked --target $env:RUST_TARGET --lib 2>&1 |
+            Tee-Object -FilePath artifacts/app/updater-tests.log
+          if ($LASTEXITCODE -ne 0) { throw 'Vendored updater tests failed on Windows ARM64.' }
+
       - name: Build agent frontend
         run: |
           pnpm build:agent 2>&1 | Tee-Object -FilePath artifacts/app/frontend.log
@@ -132,8 +140,12 @@ jobs:
         run: |
           $keyFile = Join-Path $env:RUNNER_TEMP 'risunest-windows-arm-app-test.key'
           try {
-            pnpm exec -- tauri signer generate --ci --password "" --write-keys $keyFile *> $null
-            if ($LASTEXITCODE -ne 0 -or !(Test-Path $keyFile) -or !(Test-Path "$keyFile.pub")) {
+            $keyOutput = @(node node_modules/@tauri-apps/cli/tauri.js signer generate --ci --write-keys $keyFile 2>&1)
+            $keyStatus = $LASTEXITCODE
+            $keyOutput | ForEach-Object {
+              ([string]$_) -replace '[A-Za-z0-9+/=]{48,}', '[redacted-key-material]'
+            } | Set-Content -Encoding utf8NoBOM artifacts/app/key-generation.log
+            if ($keyStatus -ne 0 -or !(Test-Path $keyFile) -or !(Test-Path "$keyFile.pub")) {
               throw 'Ephemeral updater key generation failed.'
             }
             $privateKey = (Get-Content -Raw $keyFile).Trim()
@@ -445,8 +457,12 @@ jobs:
         run: |
           $keyFile = Join-Path $env:RUNNER_TEMP 'risunest-windows-arm-sync-test.key'
           try {
-            pnpm exec -- tauri signer generate --ci --password "" --write-keys $keyFile *> $null
-            if ($LASTEXITCODE -ne 0 -or !(Test-Path $keyFile) -or !(Test-Path "$keyFile.pub")) {
+            $keyOutput = @(node node_modules/@tauri-apps/cli/tauri.js signer generate --ci --write-keys $keyFile 2>&1)
+            $keyStatus = $LASTEXITCODE
+            $keyOutput | ForEach-Object {
+              ([string]$_) -replace '[A-Za-z0-9+/=]{48,}', '[redacted-key-material]'
+            } | Set-Content -Encoding utf8NoBOM artifacts/sync/key-generation.log
+            if ($keyStatus -ne 0 -or !(Test-Path $keyFile) -or !(Test-Path "$keyFile.pub")) {
               throw 'Ephemeral updater key generation failed.'
             }
             $privateKey = (Get-Content -Raw $keyFile).Trim()
