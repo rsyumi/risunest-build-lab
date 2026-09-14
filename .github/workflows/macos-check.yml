@@ -1200,7 +1200,7 @@ jobs:
           python3 server/manager/tests/linux-process.py "$server" "$manager" 2>&1 | tee artifacts/sync/linux-process.log
           assets="$RISUNEST_SYNC_TEST_WORK/packages/assets.json"
           managed="$(node -e "const a=require('$assets'); console.log(a.find(x=>x.download.variant==='managed').path)")"
-          bash server/manager/install/managed-install.integration.test.sh "$managed" 2>&1 | tee artifacts/sync/managed-install.log
+          env -u XDG_CONFIG_HOME -u XDG_DATA_HOME bash server/manager/install/managed-install.integration.test.sh "$managed" 2>&1 | tee artifacts/sync/managed-install.log
 
       - name: Collect Linux package evidence
         if: always()
