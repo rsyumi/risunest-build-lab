@@ -16,15 +16,30 @@ on:
         description: Run Sync builds, packages, and lifecycle checks
         type: boolean
         default: true
+      include_linux:
+        description: Run Linux app and enabled Sync jobs
+        type: boolean
+        default: true
+      include_windows:
+        description: Run native Windows ARM app and enabled Sync jobs
+        type: boolean
+        default: false
 
 permissions:
   contents: read
 
 concurrency:
-  group: apple-release-build-lab-${{ github.ref_name }}-${{ inputs.source_sha }}-${{ inputs.include_apple }}-${{ inputs.include_sync }}
+  group: apple-release-build-lab-${{ github.ref_name }}-${{ inputs.source_sha }}-${{ inputs.include_apple }}-${{ inputs.include_sync }}-${{ inputs.include_linux }}-${{ inputs.include_windows }}
   cancel-in-progress: false
 
 jobs:
+  windows-arm:
+    if: inputs.include_windows
+    uses: ./.github/workflows/windows-arm-release-check.yml
+    with:
+      source_sha: ${{ inputs.source_sha }}
+      include_sync: ${{ inputs.include_sync }}
+
   apple:
     name: ${{ matrix.name }}
     if: inputs.include_apple
@@ -599,6 +614,7 @@ jobs:
 
   linux-app:
     name: ${{ matrix.name }}
+    if: inputs.include_linux
     strategy:
       fail-fast: false
       matrix:
@@ -835,7 +851,7 @@ jobs:
 
   linux-sync:
     name: ${{ matrix.name }}
-    if: inputs.include_sync
+    if: inputs.include_linux && inputs.include_sync
     strategy:
       fail-fast: false
       matrix:

@@ -2,6 +2,14 @@ name: Windows ARM release build lab
 run-name: Windows ARM native test packages / ${{ inputs.source_sha }} / Sync ${{ inputs.include_sync }}
 
 on:
+  workflow_call:
+    inputs:
+      source_sha:
+        type: string
+        required: true
+      include_sync:
+        type: boolean
+        default: true
   workflow_dispatch:
     inputs:
       source_sha:
