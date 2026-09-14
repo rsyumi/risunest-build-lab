@@ -1102,6 +1102,9 @@ jobs:
     env:
       CARGO_TARGET_DIR: ${{ github.workspace }}/source/src-tauri/target
       SNAPSHOT_SHA: ${{ inputs.source_sha }}
+      GIT_CONFIG_COUNT: "1"
+      GIT_CONFIG_KEY_0: core.autocrlf
+      GIT_CONFIG_VALUE_0: "false"
     steps:
       - name: Validate dispatch
         working-directory: ${{ github.workspace }}
@@ -1129,7 +1132,9 @@ jobs:
         run: |
           if ((git rev-parse HEAD) -ne $env:SNAPSHOT_SHA) { throw 'Snapshot checkout mismatch.' }
           node ../control/scripts/verify-snapshot.mjs . macos
+          if ($LASTEXITCODE -ne 0) { throw 'Snapshot verification failed.' }
           node -e "if (process.arch !== 'arm64') throw new Error('Expected a native Windows ARM64 runner')"
+          if ($LASTEXITCODE -ne 0) { throw 'Native runner verification failed.' }
           New-Item -ItemType Directory -Force artifacts | Out-Null
           Copy-Item .build-lab/source.json artifacts/source.json
           @(

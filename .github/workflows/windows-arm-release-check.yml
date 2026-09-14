@@ -43,6 +43,9 @@ jobs:
       CARGO_PROFILE_RELEASE_DEBUG: "0"
       SNAPSHOT_SHA: ${{ inputs.source_sha }}
       RUST_TARGET: aarch64-pc-windows-msvc
+      GIT_CONFIG_COUNT: "1"
+      GIT_CONFIG_KEY_0: core.autocrlf
+      GIT_CONFIG_VALUE_0: "false"
     steps:
       - name: Validate dispatch
         working-directory: ${{ github.workspace }}
@@ -262,6 +265,9 @@ jobs:
       CARGO_PROFILE_RELEASE_DEBUG: "0"
       SNAPSHOT_SHA: ${{ inputs.source_sha }}
       RUST_TARGET: aarch64-pc-windows-msvc
+      GIT_CONFIG_COUNT: "1"
+      GIT_CONFIG_KEY_0: core.autocrlf
+      GIT_CONFIG_VALUE_0: "false"
     steps:
       - name: Validate dispatch
         working-directory: ${{ github.workspace }}
