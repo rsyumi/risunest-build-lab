@@ -1,25 +1,54 @@
-name: macOS check
-run-name: macOS ${{ inputs.runner }} / ${{ inputs.source_sha }}
+name: Apple release build lab
+run-name: Apple test packages / ${{ inputs.source_sha }}
+
 on:
   workflow_dispatch:
     inputs:
       source_sha:
-        description: Full snapshot commit SHA in this build-lab repository
+        description: Full macOS-lane snapshot commit SHA in this build-lab repository
         type: string
         required: true
-      runner:
-        type: choice
-        default: macos-15
-        options: [macos-15, macos-14, macos-15-intel, macos-26]
+
 permissions:
   contents: read
+
 concurrency:
-  group: macos-check-snapshots-macos-${{ inputs.runner }}
-  cancel-in-progress: true
+  group: apple-release-build-lab-${{ github.ref_name }}-${{ inputs.source_sha }}
+  cancel-in-progress: false
+
 jobs:
-  native:
-    runs-on: ${{ inputs.runner }}
-    timeout-minutes: 90
+  apple:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS ARM64 agent test packages
+            id: macos-arm64
+            kind: macos
+            runner: macos-15
+            rust_target: aarch64-apple-darwin
+            arch: aarch64
+            macho_arch: arm64
+            sdk: macosx
+          - name: macOS x64 agent test packages
+            id: macos-x64
+            kind: macos
+            runner: macos-15-intel
+            rust_target: x86_64-apple-darwin
+            arch: x86_64
+            macho_arch: x86_64
+            sdk: macosx
+          - name: iPhoneOS ARM64 unsigned agent test package
+            id: ios-arm64
+            kind: ios
+            runner: macos-15
+            rust_target: aarch64-apple-ios
+            arch: aarch64
+            macho_arch: arm64
+            sdk: iphoneos
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
     defaults:
       run:
         shell: bash
@@ -28,130 +57,395 @@ jobs:
       CARGO_TARGET_DIR: ${{ github.workspace }}/source/src-tauri/target
       CARGO_INCREMENTAL: "0"
       CARGO_PROFILE_RELEASE_DEBUG: "0"
-      APPLE_SIGNING_IDENTITY: "-"
       SNAPSHOT_SHA: ${{ inputs.source_sha }}
-      RUNNER_LABEL: ${{ inputs.runner }}
     steps:
-      - name: Validate dispatch inputs
+      - name: Validate dispatch
         working-directory: ${{ github.workspace }}
         run: |
           set -euo pipefail
-          test "$GITHUB_REF" = refs/heads/main
+          [[ "$GITHUB_REF" == refs/heads/* ]]
           [[ "$SNAPSHOT_SHA" =~ ^[0-9a-f]{40}$ ]]
-          case "$RUNNER_LABEL" in macos-15|macos-14|macos-15-intel|macos-26) ;; *) exit 1;; esac
+
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.sha }}
           path: control
           persist-credentials: false
+
       - uses: actions/checkout@v6
         with:
           ref: ${{ inputs.source_sha }}
           path: source
           persist-credentials: false
+
+      - uses: pnpm/action-setup@v5
+        with:
+          version: 10.34.1
+
       - uses: actions/setup-node@v6
         with:
           node-version: 24
-      - name: Verify snapshot identity and integrity
+          cache: pnpm
+          cache-dependency-path: source/pnpm-lock.yaml
+
+      - name: Select matching iOS toolchain
+        if: matrix.kind == 'ios'
+        working-directory: ${{ github.workspace }}
+        env:
+          DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+        run: |
+          set -euo pipefail
+          test -d "$DEVELOPER_DIR"
+          sudo xcode-select --switch "$DEVELOPER_DIR"
+          swift_bin="$DEVELOPER_DIR/Toolchains/XcodeDefault.xctoolchain/usr/bin"
+          test -x "$swift_bin/swift"
+          printf '%s\n' "$swift_bin" >> "$GITHUB_PATH"
+          export PATH="$swift_bin:$PATH"
+          xcrun --find swift
+          swift --version
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - name: Verify snapshot and record environment
+        id: environment
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$SNAPSHOT_SHA"
           node ../control/scripts/verify-snapshot.mjs . macos
-      - uses: pnpm/action-setup@v5
-        with:
-          version: 10.34.1
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Record environment and cache identity
-        id: environment
-        run: |
-          set -euo pipefail
           mkdir -p artifacts
+          cp .build-lab/source.json artifacts/source.json
+          cp .build-lab/files.json artifacts/files.json
           {
+            printf 'artifact_scope=agent-test-build-only\n'
             printf 'workflow_sha=%s\nsnapshot_sha=%s\nrun_attempt=%s\n' "$GITHUB_SHA" "$SNAPSHOT_SHA" "$GITHUB_RUN_ATTEMPT"
-            printf 'image_os=%s\nimage_version=%s\n' "$ImageOS" "$ImageVersion"
-            sw_vers; uname -a; rustc -Vv; cargo -V; node -v; pnpm -v
-            xcode-select -p; xcodebuild -version; xcrun --sdk macosx --show-sdk-version
+            printf 'matrix_id=%s\nrunner=%s\nrust_target=%s\n' '${{ matrix.id }}' '${{ matrix.runner }}' '${{ matrix.rust_target }}'
+            sw_vers
+            uname -a
+            rustc -Vv
+            cargo -V
+            node -v
+            pnpm -v
+            xcode-select -p
+            xcodebuild -version
+            xcrun --sdk '${{ matrix.sdk }}' --show-sdk-version
             df -h .
             shasum -a 256 pnpm-lock.yaml src-tauri/Cargo.lock
           } > artifacts/environment.txt
           cat artifacts/environment.txt
-          cp .build-lab/source.json artifacts/source.json
-          cp .build-lab/files.json artifacts/files.json
-          target="$(rustc -Vv | sed -n 's/^host: //p')"
-          sdk="$( { xcodebuild -version; xcrun --sdk macosx --show-sdk-version; } | shasum -a 256 | cut -d' ' -f1)"
-          printf 'target=%s\nsdk=%s\n' "$target" "$sdk" >> "$GITHUB_OUTPUT"
+          sdk_hash="$( { xcodebuild -version; xcrun --sdk '${{ matrix.sdk }}' --show-sdk-version; } | shasum -a 256 | cut -d' ' -f1)"
+          printf 'sdk_hash=%s\n' "$sdk_hash" >> "$GITHUB_OUTPUT"
+
       - uses: Swatinem/rust-cache@v2
         with:
+          prefix-key: apple-agent-test-build-v1
+          key: ${{ matrix.id }}-${{ steps.environment.outputs.sdk_hash }}
           workspaces: source/src-tauri -> target
-          cache-workspace-crates: true
+          cache-bin: false
           cache-on-failure: true
-          key: macos-${{ inputs.runner }}-${{ runner.arch }}-${{ steps.environment.outputs.target }}-${{ steps.environment.outputs.sdk }}
+
+      - name: Prepare iOS project tools
+        if: matrix.kind == 'ios'
+        run: |
+          set -euo pipefail
+          if ! command -v xcodegen >/dev/null; then brew install xcodegen; fi
+          if ! command -v idevice_id >/dev/null; then brew install libimobiledevice; fi
+          xcodegen --version
+          idevice_id --version
+
       - name: Install locked frontend inputs
         run: pnpm install --frozen-lockfile
-      - name: Build agent frontend once
-        run: pnpm build:agent 2>&1 | tee artifacts/frontend.log
-      - name: Verify agent configuration and frontend
-        run: node ../control/scripts/verify-macos-inputs.mjs .
-      - name: Rust contracts
+
+      - name: Build and verify agent frontend
         run: |
           set -euo pipefail
-          # macOS defaults to /var/folders; /var is a symlink rejected by the
-          # storage path contract. Keep that protection and use a physical fixture root.
-          contract_tmp="$(mktemp -d "$RUNNER_TEMP/risunest-contracts.XXXXXX")"
+          pnpm build:agent 2>&1 | tee artifacts/frontend.log
+          node ../control/scripts/verify-macos-inputs.mjs .
+          if [ '${{ matrix.kind }}' = macos ]; then
+            printf '%s\n' '{"build":{"beforeBuildCommand":"test -f dist/index.html"},"bundle":{"createUpdaterArtifacts":true}}' > "$RUNNER_TEMP/apple-prebuilt.json"
+          else
+            printf '%s\n' '{"build":{"beforeBuildCommand":"test -f dist/index.html"},"bundle":{"iOS":{"bundleVersion":"1"}}}' > "$RUNNER_TEMP/apple-prebuilt.json"
+          fi
+          node --input-type=module - <<'NODE'
+          import { readFileSync, writeFileSync } from "node:fs";
+          const config = JSON.parse(readFileSync("src-tauri/tauri.conf.json", "utf8"));
+          writeFileSync(
+            "artifacts/release-input.json",
+            `${JSON.stringify({ version: config.version, mobileBuildNumber: 1, iosBuildNumber: "1" }, null, 2)}\n`,
+          );
+          NODE
+
+      - name: Run macOS Rust tests
+        if: matrix.kind == 'macos'
+        run: |
+          set -euo pipefail
+          contract_tmp="$(mktemp -d "$RUNNER_TEMP/risunest-agent-test-contracts.XXXXXX")"
           export TMPDIR="$(cd "$contract_tmp" && pwd -P)"
           printf 'rust_test_tmpdir=%s\n' "$TMPDIR" >> artifacts/environment.txt
-          cargo test --manifest-path src-tauri/Cargo.toml --release --locked --lib -- --test-threads=1 2>&1 | tee artifacts/rust-contracts.log
-      - name: Build agent app
+          cargo test --manifest-path src-tauri/Cargo.toml --target '${{ matrix.rust_target }}' --release --locked --lib -- --test-threads=1 2>&1 | tee artifacts/rust-tests.log
+
+      - name: Generate ephemeral test-only updater key
+        if: matrix.kind == 'macos'
         run: |
           set -euo pipefail
-          printf '%s\n' '{"build":{"beforeBuildCommand":"test -f dist/index.html"}}' > "$RUNNER_TEMP/macos-prebuilt.json"
-          pnpm tauri build --ci --bundles app \
+          key_file="$RUNNER_TEMP/risunest-agent-test-updater-${{ matrix.id }}.key"
+          python3 - "$key_file" <<'PY'
+          import subprocess
+          import sys
+
+          subprocess.run(
+              ["pnpm", "tauri", "signer", "generate", "--ci", "--password", "", "--write-keys", sys.argv[1]],
+              check=True,
+              stdout=subprocess.DEVNULL,
+              stderr=subprocess.DEVNULL,
+              timeout=30,
+          )
+          PY
+          test -s "$key_file"
+          private_key="$(cat "$key_file")"
+          echo "::add-mask::$private_key"
+          delimiter="RISUNEST_TEST_KEY_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+          {
+            printf 'TAURI_SIGNING_PRIVATE_KEY<<%s\n' "$delimiter"
+            printf '%s\n' "$private_key"
+            printf '%s\n' "$delimiter"
+            printf 'TAURI_SIGNING_PRIVATE_KEY_PASSWORD=\n'
+          } >> "$GITHUB_ENV"
+          printf 'ephemeral_updater_key=true\n' >> artifacts/environment.txt
+          rm -f "$key_file" "$key_file.pub"
+
+      - name: Build ad-hoc signed macOS test packages
+        if: matrix.kind == 'macos'
+        env:
+          APPLE_SIGNING_IDENTITY: "-"
+        run: |
+          set -euo pipefail
+          pnpm tauri build --ci --target '${{ matrix.rust_target }}' --bundles app,dmg \
             --config src-tauri/tauri.agent.conf.json \
-            --config "$RUNNER_TEMP/macos-prebuilt.json" -- --locked 2>&1 | tee artifacts/native-build.log
-      - name: Verify and archive app
+            --config "$RUNNER_TEMP/apple-prebuilt.json" -- --locked 2>&1 | tee artifacts/native-build.log
+
+      - name: Verify and collect macOS test packages
+        if: matrix.kind == 'macos'
         run: |
           set -euo pipefail
-          app="$CARGO_TARGET_DIR/release/bundle/macos/RisuNest.app"
+          release="$CARGO_TARGET_DIR/${{ matrix.rust_target }}/release"
+          app="$release/bundle/macos/RisuNest.app"
+          binary="$app/Contents/MacOS/RisuNest"
           test -d "$app"
+          test -x "$binary"
           plutil -lint "$app/Contents/Info.plist"
           test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")" = io.github.rsyumi.risunest
           test "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$app/Contents/Info.plist")" = 14.0
-          lipo "$app/Contents/MacOS/RisuNest" -verify_arch "$(uname -m)"
-          file "$app/Contents/MacOS/RisuNest" > artifacts/binary.txt
+          lipo "$binary" -verify_arch '${{ matrix.macho_arch }}'
           codesign --verify --deep --strict "$app" 2>&1 | tee artifacts/codesign.txt
           codesign -dv --verbose=4 "$app" 2>> artifacts/codesign.txt
-          cp "$app/Contents/Info.plist" artifacts/Info.plist
-          ditto -c -k --sequesterRsrc --keepParent "$app" artifacts/RisuNest-agent.app.zip
-          shasum -a 256 artifacts/RisuNest-agent.app.zip > artifacts/app.sha256
-          cat artifacts/binary.txt artifacts/app.sha256
-      - name: Verify native product boundary
+          grep -Fx 'Signature=adhoc' artifacts/codesign.txt
+          node scripts/release/package-app.mjs \
+            --kind desktop \
+            --os macos \
+            --arch '${{ matrix.arch }}' \
+            --bundle-dir "$release/bundle" \
+            --binary "$binary" \
+            --output artifacts/package-proof \
+            --release-input artifacts/release-input.json
+          dmg="$(find "$release/bundle/dmg" -maxdepth 1 -type f -name '*.dmg' -print -quit)"
+          updater="$(find "$release/bundle/macos" -maxdepth 1 -type f -name '*.app.tar.gz' -print -quit)"
+          test -n "$dmg"
+          test -n "$updater"
+          test -s "$updater.sig"
+          mkdir -p artifacts/packages
+          cp "$dmg" "artifacts/packages/RisuNest-agent-test-macos-${{ matrix.arch }}.dmg"
+          cp "$updater" "artifacts/packages/RisuNest-agent-test-macos-${{ matrix.arch }}.app.tar.gz"
+          cp "$updater.sig" "artifacts/packages/RisuNest-agent-test-macos-${{ matrix.arch }}.app.tar.gz.sig"
+          shasum -a 256 artifacts/packages/* > artifacts/packages.sha256
+          file "$binary" > artifacts/binary.txt
+          cat artifacts/binary.txt artifacts/packages.sha256
+
+      - name: Capture committed Apple shell inputs
+        if: matrix.kind == 'ios'
         run: |
+          set -euo pipefail
+          test -f src-tauri/gen/apple/project.yml
+          test -f src-tauri/gen/apple/Sources/risunest/main.mm
+          test -f src-tauri/gen/apple/risunest.xcodeproj/project.pbxproj
+          test -z "$(git status --short --untracked-files=all -- src-tauri/gen/apple)"
+          git diff --exit-code -- src-tauri/gen/apple
+          pnpm tauri ios build --help > artifacts/ios-build-help.txt
+          grep -q -- '--no-sign' artifacts/ios-build-help.txt
+          python3 ../control/scripts/ios-shell-inputs.py src-tauri/gen/apple artifacts/apple-shell-before
+
+      - name: Build unsigned iPhoneOS ARM64 test app
+        if: matrix.kind == 'ios'
+        env:
+          TAURI_ENV_PLATFORM: ios
+        run: |
+          set -euo pipefail
+          pnpm tauri ios build --ci --target aarch64 --no-sign --archive-only \
+            --config src-tauri/tauri.agent.conf.json \
+            --config "$RUNNER_TEMP/apple-prebuilt.json" 2>&1 | tee artifacts/ios-build.log
+
+      - name: Verify Apple shell preservation
+        if: matrix.kind == 'ios'
+        run: |
+          set -euo pipefail
+          python3 ../control/scripts/ios-shell-inputs.py src-tauri/gen/apple artifacts/apple-shell-after
+          cmp artifacts/apple-shell-before/apple-shell-inputs.json artifacts/apple-shell-after/apple-shell-inputs.json
+          test -z "$(git status --short --untracked-files=all -- src-tauri/gen/apple)"
+          git diff --exit-code -- src-tauri/gen/apple
+
+      - name: Create and verify unsigned iPhoneOS package
+        if: matrix.kind == 'ios'
+        run: |
+          set -euo pipefail
           python3 - <<'PY'
-          import os
-          from pathlib import Path
-          binary = Path(os.environ['CARGO_TARGET_DIR']) / 'release/bundle/macos/RisuNest.app/Contents/MacOS/RisuNest'
-          data = binary.read_bytes()
-          for marker in [b'macos_bench_', b'RISUNEST_MACOS_PHASE', b'RISUNEST_MACOS_REPORT']:
-              assert marker not in data, f'Harness marker in product: {marker!r}'
-          print('Native product contains no Mac harness commands or controller entry')
+          import json
+          import pathlib
+          import plistlib
+
+          matches = []
+          for app in pathlib.Path("src-tauri/gen/apple").glob("build/**/*.xcarchive/Products/Applications/*.app"):
+              info_path = app / "Info.plist"
+              if not info_path.is_file():
+                  continue
+              with info_path.open("rb") as file:
+                  info = plistlib.load(file)
+              if info.get("CFBundleIdentifier") == "io.github.rsyumi.risunest" and info.get("CFBundleSupportedPlatforms") == ["iPhoneOS"]:
+                  matches.append((app, info))
+          assert len(matches) == 1, f"Expected one archived iPhoneOS app, found {len(matches)}"
+          app, info = matches[0]
+          assert info.get("MinimumOSVersion") == "16.4", info.get("MinimumOSVersion")
+          executable = app / info["CFBundleExecutable"]
+          assert executable.is_file(), "Missing iPhoneOS executable"
+          pathlib.Path("artifacts/ios-app.json").write_text(json.dumps({
+              "app": str(app),
+              "executable": str(executable),
+              "identifier": info["CFBundleIdentifier"],
+              "platforms": info["CFBundleSupportedPlatforms"],
+              "minimumOS": info["MinimumOSVersion"],
+              "signing": "unsigned test build",
+          }, indent=2) + "\n")
           PY
-      - name: Build isolated Mac WKWebView harness
-        run: |
-          set -euo pipefail
-          pnpm benchmark:macos:build:agent 2>&1 | tee artifacts/harness-frontend.log
-          node benchmarks/macos/prepare.mjs
-          shasum -a 256 benchmarks/macos/native/Cargo.lock >> artifacts/environment.txt
-          (cd benchmarks/macos/native && node ../../../node_modules/@tauri-apps/cli/tauri.js build --ci --bundles app -- --locked) 2>&1 | tee artifacts/harness-native.log
-      - name: Actual WKWebView contracts and desktop lifecycle
-        run: |
-          set -euo pipefail
-          app="$CARGO_TARGET_DIR/release/bundle/macos/RisuNest Mac Bench.app"
-          codesign --verify --deep --strict "$app"
-          python3 benchmarks/macos/run.py --app "$app" --artifacts artifacts/wkwebview 2>&1 | tee artifacts/wkwebview.log
+          app="$(node -p 'require("./artifacts/ios-app.json").app')"
+          executable="$(node -p 'require("./artifacts/ios-app.json").executable')"
+          plutil -lint "$app/Info.plist"
+          lipo "$executable" -verify_arch arm64
+          xcrun vtool -show-build "$executable" > artifacts/macho-platform.txt
+          grep -Eq 'platform[[:space:]]+IOS$' artifacts/macho-platform.txt
+          if codesign -dv "$app" > artifacts/codesign.txt 2>&1; then
+            echo 'Expected an unsigned iPhoneOS app.' >&2
+            exit 1
+          fi
+          stage="$RUNNER_TEMP/risunest-agent-test-ios-payload"
+          mkdir -p "$stage/Payload"
+          ditto "$app" "$stage/Payload/RisuNest.app"
+          (cd "$stage" && zip -qry -y "$GITHUB_WORKSPACE/source/artifacts/RisuNest-agent-test-ios-aarch64-unsigned.ipa" Payload)
+          node scripts/release/package-app.mjs \
+            --kind ios \
+            --arch aarch64 \
+            --package artifacts/RisuNest-agent-test-ios-aarch64-unsigned.ipa \
+            --output artifacts/package-proof \
+            --release-input artifacts/release-input.json
+          shasum -a 256 artifacts/RisuNest-agent-test-ios-aarch64-unsigned.ipa > artifacts/package.sha256
+          cat artifacts/macho-platform.txt artifacts/package.sha256
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: macos-${{ inputs.runner }}-${{ inputs.source_sha }}-${{ github.run_attempt }}
+          name: risunest-agent-test-${{ matrix.id }}-${{ inputs.source_sha }}-${{ github.run_attempt }}
           path: source/artifacts/
+          retention-days: 3
+          if-no-files-found: warn
+
+  windows-arm-cloudflared:
+    name: Windows ARM x64 cloudflared lifecycle probe
+    runs-on: windows-11-arm
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: source
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/source/src-tauri/target
+      SNAPSHOT_SHA: ${{ inputs.source_sha }}
+    steps:
+      - name: Validate dispatch
+        working-directory: ${{ github.workspace }}
+        run: |
+          if ($env:GITHUB_REF -notlike 'refs/heads/*') { throw 'A branch ref is required.' }
+          if ($env:SNAPSHOT_SHA -notmatch '^[0-9a-f]{40}$') { throw 'A full lowercase snapshot SHA is required.' }
+
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+
+      - name: Verify snapshot
+        run: |
+          if ((git rev-parse HEAD) -ne $env:SNAPSHOT_SHA) { throw 'Snapshot checkout mismatch.' }
+          node ../control/scripts/verify-snapshot.mjs . macos
+          node -e "if (process.arch !== 'arm64') throw new Error('Expected a native Windows ARM64 runner')"
+          New-Item -ItemType Directory -Force artifacts | Out-Null
+          Copy-Item .build-lab/source.json artifacts/source.json
+          @(
+            "artifact_scope=agent-test-build-only"
+            "workflow_sha=$env:GITHUB_SHA"
+            "snapshot_sha=$env:SNAPSHOT_SHA"
+            "node_arch=$(node -p process.arch)"
+            "runner_arch=$env:RUNNER_ARCH"
+          ) | Set-Content -Encoding utf8NoBOM artifacts/windows-environment.txt
+
+      - name: Fetch and verify pinned x64 cloudflared input
+        run: |
+          node scripts/release/vendor.mjs --target windows-aarch64 --output artifacts/cloudflared
+          $vendor = Get-Content -Raw artifacts/cloudflared/vendor.json | ConvertFrom-Json
+          $pinned = Get-Content -Raw scripts/release/cloudflared.json | ConvertFrom-Json
+          if ($vendor.actualArch -ne 'x86_64') { throw 'Windows ARM cloudflared exception must use the pinned x64 binary.' }
+          if ($vendor.version -ne $pinned.version) { throw 'Downloaded cloudflared version differs from the pin.' }
+          node --input-type=module -e "import { assertBinaryArchitecture } from './scripts/release/platform/native.mjs'; console.log(JSON.stringify(assertBinaryArchitecture(process.argv[1], 'x86_64', 'pe')))" $vendor.executable |
+            Tee-Object -FilePath artifacts/cloudflared-binary.json
+          & $vendor.executable --version 2>&1 | Tee-Object -FilePath artifacts/cloudflared-version.txt
+          if ($LASTEXITCODE -ne 0) { throw 'The pinned x64 cloudflared binary did not execute under Windows ARM emulation.' }
+
+      - name: Probe quick-tunnel readiness, stop, child exit, and restart
+        id: quick-tunnel
+        continue-on-error: true
+        run: |
+          $vendor = Get-Content -Raw artifacts/cloudflared/vendor.json | ConvertFrom-Json
+          node scripts/release/verify-cloudflared.mjs --binary $vendor.executable *>&1 |
+            Tee-Object -FilePath artifacts/cloudflared-lifecycle.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Record optional network probe result
+        if: always()
+        env:
+          QUICK_TUNNEL_OUTCOME: ${{ steps.quick-tunnel.outcome }}
+        run: |
+          @{ quickTunnel = $env:QUICK_TUNNEL_OUTCOME; required = $false } |
+            ConvertTo-Json | Set-Content -Encoding utf8NoBOM artifacts/cloudflared-network-result.json
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: risunest-agent-test-windows-arm-cloudflared-${{ inputs.source_sha }}-${{ github.run_attempt }}
+          path: |
+            source/artifacts/source.json
+            source/artifacts/windows-environment.txt
+            source/artifacts/cloudflared/vendor.json
+            source/artifacts/cloudflared-binary.json
+            source/artifacts/cloudflared-version.txt
+            source/artifacts/cloudflared-lifecycle.txt
+            source/artifacts/cloudflared-network-result.json
           retention-days: 3
           if-no-files-found: warn
