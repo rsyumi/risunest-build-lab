@@ -1,0 +1,5 @@
+<resources>
+    <string name="generation_notification_channel">응답 생성 중</string>
+    <string name="generation_notification_title">응답 생성 중</string>
+    <string name="generation_notification_text">AI 응답을 받고 있습니다.</string>
+</resources>
