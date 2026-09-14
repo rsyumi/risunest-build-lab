@@ -20,6 +20,10 @@ on:
         description: Run Linux app and enabled Sync jobs
         type: boolean
         default: true
+      include_linux_app:
+        description: Include Linux app packages when Linux jobs are enabled
+        type: boolean
+        default: true
       include_windows:
         description: Run native Windows ARM app and enabled Sync jobs
         type: boolean
@@ -29,7 +33,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: apple-release-build-lab-${{ github.ref_name }}-${{ inputs.source_sha }}-${{ inputs.include_apple }}-${{ inputs.include_sync }}-${{ inputs.include_linux }}-${{ inputs.include_windows }}
+  group: apple-release-build-lab-${{ github.ref_name }}-${{ inputs.source_sha }}-${{ inputs.include_apple }}-${{ inputs.include_sync }}-${{ inputs.include_linux }}-${{ inputs.include_linux_app }}-${{ inputs.include_windows }}
   cancel-in-progress: false
 
 jobs:
@@ -623,7 +627,7 @@ jobs:
 
   linux-app:
     name: ${{ matrix.name }}
-    if: inputs.include_linux
+    if: inputs.include_linux && inputs.include_linux_app
     strategy:
       fail-fast: false
       matrix:
@@ -913,6 +917,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           targets: ${{ matrix.rust_target }}
+          components: rustfmt,clippy
 
       - name: Install native build prerequisites
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev
