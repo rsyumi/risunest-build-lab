@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "lane": "macos",
+  "source_commit": "562421999864bb95bf14eff504aaf47b8328a7ad",
+  "source_tree": "9c6697cfc8f5c58f49371a8bcf4e94f1beaae3d6",
+  "file_list_sha256": "437ff1d374904de85432dee4a5020cb1ecd880d45d4d030e1191704a68033b7a",
+  "exclusion_rules_version": "risunest-build-inputs-v1"
+}
