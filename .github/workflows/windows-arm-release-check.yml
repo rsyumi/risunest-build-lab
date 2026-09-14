@@ -1,0 +1,615 @@
+name: Windows ARM release build lab
+run-name: Windows ARM native test packages / ${{ inputs.source_sha }} / Sync ${{ inputs.include_sync }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full macOS-lane snapshot commit SHA in this build-lab repository
+        type: string
+        required: true
+      include_sync:
+        description: Build and exercise the Windows ARM Sync suite
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-arm-release-build-lab-${{ github.ref_name }}-${{ inputs.source_sha }}-${{ inputs.include_sync }}
+  cancel-in-progress: false
+
+jobs:
+  app:
+    name: Windows ARM64 app ZIP and NSIS producer
+    runs-on: windows-11-arm
+    timeout-minutes: 150
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: source
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/source/src-tauri/target
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_RELEASE_DEBUG: "0"
+      SNAPSHOT_SHA: ${{ inputs.source_sha }}
+      RUST_TARGET: aarch64-pc-windows-msvc
+    steps:
+      - name: Validate dispatch
+        working-directory: ${{ github.workspace }}
+        run: |
+          if ($env:GITHUB_REF -notlike 'refs/heads/*') { throw 'A branch ref is required.' }
+          if ($env:SNAPSHOT_SHA -notmatch '^[0-9a-f]{40}$') { throw 'A full lowercase snapshot SHA is required.' }
+
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@v5
+        with:
+          version: 10.34.1
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: source/pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: aarch64-pc-windows-msvc
+
+      - uses: actions/cache/restore@v5
+        with:
+          path: |
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/git/db
+          key: windows-arm-app-agent-test-cargo-1.97.1-${{ hashFiles('source/src-tauri/Cargo.lock') }}
+          restore-keys: windows-arm-app-agent-test-cargo-1.97.1-
+
+      - name: Verify snapshot and record native environment
+        run: |
+          if ((git rev-parse HEAD) -ne $env:SNAPSHOT_SHA) { throw 'Snapshot checkout mismatch.' }
+          node ../control/scripts/verify-snapshot.mjs . macos
+          if ($LASTEXITCODE -ne 0) { throw 'Snapshot verification failed.' }
+          if ((node -p process.arch) -ne 'arm64') { throw 'Expected native ARM64 Node.js.' }
+          if ((rustc -vV | Select-String '^host: ' | ForEach-Object { $_.Line.Substring(6) }) -ne $env:RUST_TARGET) {
+            throw 'Expected a native Windows ARM64 Rust host.'
+          }
+          $sevenZip = Join-Path $env:ProgramFiles '7-Zip'
+          if (!(Test-Path (Join-Path $sevenZip '7z.exe'))) { throw '7-Zip is required for NSIS inspection.' }
+          $sevenZip | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          New-Item -ItemType Directory -Force artifacts, artifacts/app, artifacts/app/packages | Out-Null
+          Copy-Item .build-lab/source.json artifacts/source.json
+          Copy-Item .build-lab/files.json artifacts/files.json
+          @(
+            'artifact_scope=agent-test-build-only'
+            "workflow_sha=$env:GITHUB_SHA"
+            "snapshot_sha=$env:SNAPSHOT_SHA"
+            "run_attempt=$env:GITHUB_RUN_ATTEMPT"
+            "runner_arch=$env:RUNNER_ARCH"
+            "node_arch=$(node -p process.arch)"
+            "rust_target=$env:RUST_TARGET"
+            (rustc -Vv)
+            (cargo -V)
+            (node -v)
+            (pnpm -v)
+          ) | Set-Content -Encoding utf8NoBOM artifacts/app/environment.txt
+          Get-FileHash pnpm-lock.yaml, src-tauri/Cargo.lock -Algorithm SHA256 |
+            Format-Table -AutoSize | Out-String | Add-Content -Encoding utf8NoBOM artifacts/app/environment.txt
+
+      - name: Install locked frontend inputs
+        run: pnpm install --frozen-lockfile
+
+      - name: Build agent frontend
+        run: |
+          pnpm build:agent 2>&1 | Tee-Object -FilePath artifacts/app/frontend.log
+          if ($LASTEXITCODE -ne 0) { throw 'Agent frontend build failed.' }
+          if (!(Test-Path dist/index.html)) { throw 'Agent frontend output is missing.' }
+
+      - name: Build, package, sign and inspect Windows ARM64 app artifacts
+        run: |
+          $keyFile = Join-Path $env:RUNNER_TEMP 'risunest-windows-arm-app-test.key'
+          try {
+            pnpm exec -- tauri signer generate --ci --password "" --write-keys $keyFile *> $null
+            if ($LASTEXITCODE -ne 0 -or !(Test-Path $keyFile) -or !(Test-Path "$keyFile.pub")) {
+              throw 'Ephemeral updater key generation failed.'
+            }
+            $privateKey = (Get-Content -Raw $keyFile).Trim()
+            $publicKey = (Get-Content -Raw "$keyFile.pub").Trim()
+            if (!$privateKey -or !$publicKey) { throw 'Ephemeral updater key is empty.' }
+            Write-Output "::add-mask::$privateKey"
+            $env:TAURI_SIGNING_PRIVATE_KEY = $privateKey
+            $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ''
+            $env:RISUNEST_UPDATE_PUBLIC_KEY = $publicKey
+            $publicKey | Set-Content -Encoding utf8NoBOM artifacts/app/updater-public.key
+
+            @'
+          import { readFileSync, writeFileSync } from "node:fs";
+          import { androidVersionCode, iosBundleVersion } from "./scripts/release/common.mjs";
+          import { releaseDownloads } from "./scripts/release/downloads.mjs";
+
+          const sourceCommit = process.env.SNAPSHOT_SHA;
+          const version = JSON.parse(readFileSync("src-tauri/tauri.conf.json", "utf8")).version;
+          const tag = `app-v${version}`;
+          writeFileSync("artifacts/app/release-input.json", `${JSON.stringify({
+            product: "app",
+            tag,
+            version,
+            sourceCommit,
+            pub_date: "2026-09-15T00:00:00.000Z",
+            releasePage: `https://github.com/rsyumi/RisuNest/releases/tag/${tag}`,
+            notes: "Synthetic Windows ARM agent producer verification only",
+            localizedNotes: {},
+            compatibility: null,
+            vendorInput: null,
+            mobileBuildNumber: androidVersionCode(version),
+            iosBuildNumber: iosBundleVersion(version),
+            expectedDownloads: releaseDownloads("app", version),
+          }, null, 2)}\n`);
+          writeFileSync(process.env.RUNNER_TEMP + "/windows-arm-app-prebuilt.json", `${JSON.stringify({
+            build: { beforeBuildCommand: "node -e \"require('node:fs').accessSync('dist/index.html')\"" },
+          }, null, 2)}\n`);
+          '@ | node --input-type=module -
+            if ($LASTEXITCODE -ne 0) { throw 'App release input generation failed.' }
+
+            node scripts/release/tauri-config.mjs --release-input artifacts/app/release-input.json --output "$env:RUNNER_TEMP/release-tauri.json"
+            if ($LASTEXITCODE -ne 0) { throw 'Release Tauri config generation failed.' }
+            New-Item -ItemType Directory -Force release-work/app, artifacts/app/package-proof, artifacts/app/release-out | Out-Null
+            pnpm exec -- tauri build --target $env:RUST_TARGET --no-bundle `
+              --config src-tauri/tauri.agent.conf.json `
+              --config "$env:RUNNER_TEMP/release-tauri.json" `
+              --config "$env:RUNNER_TEMP/windows-arm-app-prebuilt.json" -- --locked 2>&1 |
+              Tee-Object -FilePath artifacts/app/native-build.log
+            if ($LASTEXITCODE -ne 0) { throw 'Windows ARM64 app build failed.' }
+            Copy-Item "$env:CARGO_TARGET_DIR/$env:RUST_TARGET/release/RisuNest.exe" release-work/app/app-binary.exe
+            pnpm exec -- tauri build --target $env:RUST_TARGET --bundles nsis `
+              --config src-tauri/tauri.agent.conf.json `
+              --config "$env:RUNNER_TEMP/release-tauri.json" `
+              --config "$env:RUNNER_TEMP/windows-arm-app-prebuilt.json" -- --locked 2>&1 |
+              Tee-Object -FilePath artifacts/app/nsis-build.log
+            if ($LASTEXITCODE -ne 0) { throw 'Windows ARM64 NSIS build failed.' }
+            node scripts/release/package-app.mjs `
+              --kind desktop --os windows --arch aarch64 `
+              --bundle-dir "$env:CARGO_TARGET_DIR/$env:RUST_TARGET/release/bundle" `
+              --binary release-work/app/app-binary.exe `
+              --release-input artifacts/app/release-input.json `
+              --output artifacts/app/package-proof 2>&1 |
+              Tee-Object -FilePath artifacts/app/package-inspection.log
+            if ($LASTEXITCODE -ne 0) { throw 'Windows ARM64 package inspection failed.' }
+            node scripts/release/build.mjs `
+              --release-input artifacts/app/release-input.json `
+              --leg desktop_windows_aarch64 `
+              --assets-json artifacts/app/package-proof/assets.json `
+              --output artifacts/app/release-out `
+              --public-key "$publicKey" 2>&1 |
+              Tee-Object -FilePath artifacts/app/release-inventory.log
+            if ($LASTEXITCODE -ne 0) { throw 'Windows ARM64 release inventory generation failed.' }
+
+            @'
+          import { readFileSync } from "node:fs";
+          import { assertBinaryArchitecture } from "./scripts/release/platform/native.mjs";
+
+          const inventory = JSON.parse(readFileSync("artifacts/app/release-out/inventory-desktop_windows_aarch64.json", "utf8"));
+          if (inventory.downloads.length !== 2) throw new Error("Expected ZIP and NSIS app downloads.");
+          const byFormat = new Map(inventory.downloads.map((download) => [download.format, download]));
+          for (const format of ["zip", "nsis"]) {
+            const download = byFormat.get(format);
+            if (!download || download.product !== "app" || download.variant !== "desktop" ||
+                download.os !== "windows" || download.arch !== "aarch64" ||
+                !Number.isSafeInteger(download.size) || download.size <= 0 ||
+                !/^[a-f0-9]{64}$/.test(download.sha256) || !download.signature)
+              throw new Error(`Incomplete ${format} release proof.`);
+            if (download.binaryProof.length !== 1 || download.binaryProof[0].arches.join(",") !== "aarch64")
+              throw new Error(`${format} did not prove exactly one ARM64 executable.`);
+          }
+          if (!byFormat.get("nsis").checks.includes("bundle-marker-nsis"))
+            throw new Error("NSIS bundle selection was not proved.");
+          assertBinaryArchitecture("release-work/app/app-binary.exe", "aarch64", "pe");
+          assertBinaryArchitecture("artifacts/app/package-proof/nsis-app-proof.exe", "aarch64", "pe");
+          console.log(JSON.stringify({ formats: [...byFormat.keys()].sort(), arch: "aarch64" }));
+          '@ | node --input-type=module - 2>&1 | Tee-Object -FilePath artifacts/app/final-proof.log
+            if ($LASTEXITCODE -ne 0) { throw 'Final Windows ARM64 app proof failed.' }
+            Get-FileHash artifacts/app/release-out/* -Algorithm SHA256 |
+              Sort-Object Path | Format-Table -AutoSize | Out-String |
+              Set-Content -Encoding utf8NoBOM artifacts/app/release-out.sha256
+          }
+          finally {
+            Remove-Item -LiteralPath $keyFile, "$keyFile.pub" -Force -ErrorAction SilentlyContinue
+            Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY -ErrorAction SilentlyContinue
+            Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD -ErrorAction SilentlyContinue
+            Remove-Item Env:RISUNEST_UPDATE_PUBLIC_KEY -ErrorAction SilentlyContinue
+          }
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: risunest-agent-test-windows-arm-app-${{ inputs.source_sha }}-${{ github.run_attempt }}
+          path: source/artifacts/
+          retention-days: 3
+          if-no-files-found: warn
+
+  sync:
+    name: Windows ARM64 Sync suite and packages
+    if: inputs.include_sync
+    runs-on: windows-11-arm
+    timeout-minutes: 210
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: source
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/source/src-tauri/target
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_RELEASE_DEBUG: "0"
+      SNAPSHOT_SHA: ${{ inputs.source_sha }}
+      RUST_TARGET: aarch64-pc-windows-msvc
+    steps:
+      - name: Validate dispatch
+        working-directory: ${{ github.workspace }}
+        run: |
+          if ($env:GITHUB_REF -notlike 'refs/heads/*') { throw 'A branch ref is required.' }
+          if ($env:SNAPSHOT_SHA -notmatch '^[0-9a-f]{40}$') { throw 'A full lowercase snapshot SHA is required.' }
+
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@v5
+        with:
+          version: 10.34.1
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: |
+            source/pnpm-lock.yaml
+            source/server/manager/gui/pnpm-lock.yaml
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: aarch64-pc-windows-msvc
+
+      - uses: actions/cache/restore@v5
+        with:
+          path: |
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/git/db
+          key: windows-arm-sync-agent-test-cargo-1.97.1-${{ hashFiles('source/crates/sync-wire/Cargo.lock', 'source/server/sync/Cargo.lock', 'source/server/manager/Cargo.lock', 'source/server/manager/gui/src-tauri/Cargo.lock') }}
+          restore-keys: windows-arm-sync-agent-test-cargo-1.97.1-
+
+      - name: Verify snapshot and record native environment
+        run: |
+          if ((git rev-parse HEAD) -ne $env:SNAPSHOT_SHA) { throw 'Snapshot checkout mismatch.' }
+          node ../control/scripts/verify-snapshot.mjs . macos
+          if ($LASTEXITCODE -ne 0) { throw 'Snapshot verification failed.' }
+          if ((node -p process.arch) -ne 'arm64') { throw 'Expected native ARM64 Node.js.' }
+          if ((rustc -vV | Select-String '^host: ' | ForEach-Object { $_.Line.Substring(6) }) -ne $env:RUST_TARGET) {
+            throw 'Expected a native Windows ARM64 Rust host.'
+          }
+          $sevenZip = Join-Path $env:ProgramFiles '7-Zip'
+          if (!(Test-Path (Join-Path $sevenZip '7z.exe'))) { throw '7-Zip is required for NSIS inspection.' }
+          $sevenZip | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          New-Item -ItemType Directory -Force artifacts, artifacts/sync, artifacts/sync/packages | Out-Null
+          Copy-Item .build-lab/source.json artifacts/source.json
+          Copy-Item .build-lab/files.json artifacts/files.json
+          @(
+            'artifact_scope=agent-test-build-only'
+            "workflow_sha=$env:GITHUB_SHA"
+            "snapshot_sha=$env:SNAPSHOT_SHA"
+            "run_attempt=$env:GITHUB_RUN_ATTEMPT"
+            "runner_arch=$env:RUNNER_ARCH"
+            "node_arch=$(node -p process.arch)"
+            "rust_target=$env:RUST_TARGET"
+            (rustc -Vv)
+            (cargo -V)
+            (node -v)
+            (pnpm -v)
+            (python --version)
+          ) | Set-Content -Encoding utf8NoBOM artifacts/sync/environment.txt
+          Get-FileHash crates/sync-wire/Cargo.lock, server/sync/Cargo.lock, server/manager/Cargo.lock, server/manager/gui/src-tauri/Cargo.lock -Algorithm SHA256 |
+            Format-Table -AutoSize | Out-String | Add-Content -Encoding utf8NoBOM artifacts/sync/environment.txt
+
+      - name: Install locked package inputs
+        run: |
+          pnpm install --frozen-lockfile
+          if ($LASTEXITCODE -ne 0) { throw 'Root dependency installation failed.' }
+          pnpm install --dir server/manager/gui --frozen-lockfile
+          if ($LASTEXITCODE -ne 0) { throw 'Sync GUI dependency installation failed.' }
+
+      - name: Run locked Sync tests
+        run: |
+          cargo fmt --manifest-path server/sync/Cargo.toml --check
+          if ($LASTEXITCODE -ne 0) { throw 'Sync server formatting failed.' }
+          cargo fmt --manifest-path server/manager/Cargo.toml --check
+          if ($LASTEXITCODE -ne 0) { throw 'Sync manager formatting failed.' }
+          cargo test --manifest-path crates/sync-wire/Cargo.toml --target $env:RUST_TARGET --release --locked -- --test-threads=1 2>&1 |
+            Tee-Object -FilePath artifacts/sync/rust-tests.log
+          if ($LASTEXITCODE -ne 0) { throw 'Sync wire tests failed.' }
+          cargo test --manifest-path server/sync/Cargo.toml --target $env:RUST_TARGET --release --locked -- --test-threads=1 2>&1 |
+            Tee-Object -FilePath artifacts/sync/rust-tests-server.log
+          if ($LASTEXITCODE -ne 0) { throw 'Sync server tests failed.' }
+          cargo test --manifest-path server/manager/Cargo.toml --target $env:RUST_TARGET --release --locked -- --test-threads=1 2>&1 |
+            Tee-Object -FilePath artifacts/sync/rust-tests-manager.log
+          if ($LASTEXITCODE -ne 0) { throw 'Sync manager tests failed.' }
+
+      - name: Fetch, verify and exercise pinned Windows ARM vendor input
+        run: |
+          node scripts/release/vendor.mjs --target windows-aarch64 --output artifacts/sync/vendor
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned cloudflared fetch failed.' }
+          $vendor = Get-Content -Raw artifacts/sync/vendor/vendor.json | ConvertFrom-Json
+          $pinned = Get-Content -Raw scripts/release/cloudflared.json | ConvertFrom-Json
+          if ($vendor.target -ne 'windows-aarch64' -or $vendor.actualArch -ne 'x86_64') {
+            throw 'Windows ARM cloudflared must use the explicit pinned x64 exception.'
+          }
+          if ($vendor.version -ne $pinned.version -or $vendor.sourceSha256 -ne $pinned.assets.'windows-aarch64'.sha256) {
+            throw 'Fetched cloudflared input does not match the committed Windows ARM pin.'
+          }
+          node --input-type=module -e "import { assertBinaryArchitecture } from './scripts/release/platform/native.mjs'; console.log(JSON.stringify(assertBinaryArchitecture(process.argv[1], 'x86_64', 'pe')))" $vendor.executable |
+            Tee-Object -FilePath artifacts/sync/cloudflared-binary.json
+          if ($LASTEXITCODE -ne 0) { throw 'Cloudflared PE architecture proof failed.' }
+          & $vendor.executable --version 2>&1 | Tee-Object -FilePath artifacts/sync/cloudflared-version.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned x64 cloudflared did not execute under Windows ARM emulation.' }
+          node scripts/release/verify-cloudflared.mjs --binary $vendor.executable 2>&1 |
+            Tee-Object -FilePath artifacts/sync/cloudflared-lifecycle.json
+          if ($LASTEXITCODE -ne 0) { throw 'Required cloudflared lifecycle probe failed.' }
+          $evidence = Get-Content -Raw artifacts/sync/cloudflared-lifecycle.json | ConvertFrom-Json
+          if ($evidence.schema -ne 'risunest-cloudflared-lifecycle/v1' -or $evidence.output -ne 'json' -or $evidence.runs.Count -ne 2) {
+            throw 'Cloudflared lifecycle evidence is incomplete.'
+          }
+          foreach ($run in $evidence.runs) {
+            if (-not $run.urlPublished -or -not $run.edgeRegistered -or -not $run.originProxied -or -not $run.stopRequested -or -not $run.stopped) {
+              throw 'Cloudflared lifecycle did not prove start, readiness, proxy, and stop.'
+            }
+          }
+
+      - name: Prepare synthetic Windows ARM Sync package inputs
+        run: |
+          if (Test-Path server/sync/README.md) { throw 'The immutable snapshot unexpectedly contains the excluded Sync README.' }
+          @'
+          # RisuNest Sync agent test package
+
+          Synthetic documentation generated only inside the isolated release build lab.
+          '@ | Set-Content -Encoding utf8NoBOM server/sync/README.md
+          $work = Join-Path $env:RUNNER_TEMP 'risunest-sync-windows-arm-agent-test'
+          New-Item -ItemType Directory -Force "$work/native", "$work/raw", "$work/packages" | Out-Null
+          "RISUNEST_SYNC_TEST_WORK=$work" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          @'
+          import { readFileSync, writeFileSync } from "node:fs";
+          import { releaseDownloads } from "./scripts/release/downloads.mjs";
+
+          const sourceCommit = process.env.SNAPSHOT_SHA;
+          const versionFile = JSON.parse(readFileSync("server/version.json", "utf8"));
+          const vendorInput = JSON.parse(readFileSync("scripts/release/cloudflared.json", "utf8"));
+          const tag = `sync-v${versionFile.version}`;
+          const releaseInput = {
+            product: "sync",
+            tag,
+            version: versionFile.version,
+            sourceCommit,
+            pub_date: "2026-09-15T00:00:00.000Z",
+            releasePage: `https://github.com/rsyumi/RisuNest/releases/tag/${tag}`,
+            notes: "Synthetic Windows ARM Sync producer verification only",
+            localizedNotes: {},
+            compatibility: versionFile.compatibility,
+            vendorInput,
+            mobileBuildNumber: null,
+            iosBuildNumber: null,
+            expectedDownloads: releaseDownloads("sync", versionFile.version),
+          };
+          writeFileSync("artifacts/sync/release-input.json", `${JSON.stringify(releaseInput, null, 2)}\n`);
+          '@ | node --input-type=module -
+          if ($LASTEXITCODE -ne 0) { throw 'Sync release input generation failed.' }
+
+      - name: Build, package, sign and inspect Windows ARM64 Sync artifacts
+        env:
+          RISUNEST_DEFAULT_REGISTRY_URL: https://registry.invalid/risunest-agent-test/
+        run: |
+          $keyFile = Join-Path $env:RUNNER_TEMP 'risunest-windows-arm-sync-test.key'
+          try {
+            pnpm exec -- tauri signer generate --ci --password "" --write-keys $keyFile *> $null
+            if ($LASTEXITCODE -ne 0 -or !(Test-Path $keyFile) -or !(Test-Path "$keyFile.pub")) {
+              throw 'Ephemeral updater key generation failed.'
+            }
+            $privateKey = (Get-Content -Raw $keyFile).Trim()
+            $publicKey = (Get-Content -Raw "$keyFile.pub").Trim()
+            if (!$privateKey -or !$publicKey) { throw 'Ephemeral updater key is empty.' }
+            Write-Output "::add-mask::$privateKey"
+            $env:TAURI_SIGNING_PRIVATE_KEY = $privateKey
+            $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ''
+            $env:RISUNEST_UPDATE_PUBLIC_KEY = $publicKey
+            $publicKey | Set-Content -Encoding utf8NoBOM artifacts/sync/updater-public.key
+            $vendorPath = (Resolve-Path artifacts/sync/vendor/vendor.json).Path
+            $env:RISUNEST_CLOUDFLARED_INPUT = $vendorPath
+
+            $version = (Get-Content -Raw artifacts/sync/release-input.json | ConvertFrom-Json).version
+            node server/manager/install/build.mjs `
+              --target $env:RUST_TARGET `
+              --output "$env:RISUNEST_SYNC_TEST_WORK/native" `
+              --registry-url $env:RISUNEST_DEFAULT_REGISTRY_URL `
+              --version $version 2>&1 | Tee-Object -FilePath artifacts/sync/native-build.log
+            if ($LASTEXITCODE -ne 0) { throw 'Windows ARM64 Sync native build failed.' }
+            Copy-Item "$env:RISUNEST_SYNC_TEST_WORK/native/native-build.json" artifacts/sync/native-build.json
+            $native = Get-Content -Raw "$env:RISUNEST_SYNC_TEST_WORK/native/native-build.json" | ConvertFrom-Json
+            python server/sync/distribution/package.py `
+              --binary $native.daemon `
+              --target $env:RUST_TARGET `
+              --version $version `
+              --output "$env:RISUNEST_SYNC_TEST_WORK/raw" 2>&1 |
+              Tee-Object -FilePath artifacts/sync/raw-package.log
+            if ($LASTEXITCODE -ne 0) { throw 'Windows ARM64 raw Sync package failed.' }
+            $raw = @(Get-ChildItem "$env:RISUNEST_SYNC_TEST_WORK/raw" -File -Filter '*.zip')
+            if ($raw.Count -ne 1) { throw "Expected one raw ZIP, found $($raw.Count)." }
+            $vendor = Get-Content -Raw $vendorPath | ConvertFrom-Json
+            node server/manager/install/package.mjs `
+              --native-build "$env:RISUNEST_SYNC_TEST_WORK/native/native-build.json" `
+              --raw-archive $raw[0].FullName `
+              --release-input artifacts/sync/release-input.json `
+              --output "$env:RISUNEST_SYNC_TEST_WORK/packages" `
+              --cloudflared-sha256 $vendor.executableSha256 2>&1 |
+              Tee-Object -FilePath artifacts/sync/managed-package.log
+            if ($LASTEXITCODE -ne 0) { throw 'Windows ARM64 managed Sync package failed.' }
+            node scripts/release/build.mjs `
+              --release-input artifacts/sync/release-input.json `
+              --leg sync_windows_aarch64 `
+              --assets-json "$env:RISUNEST_SYNC_TEST_WORK/packages/assets.json" `
+              --output artifacts/sync/release-out `
+              --public-key "$publicKey" 2>&1 |
+              Tee-Object -FilePath artifacts/sync/release-inventory.log
+            if ($LASTEXITCODE -ne 0) { throw 'Windows ARM64 Sync release inventory generation failed.' }
+            Copy-Item "$env:RISUNEST_SYNC_TEST_WORK/packages/assets.json" artifacts/sync/package-assets.json
+            Copy-Item "$env:RISUNEST_SYNC_TEST_WORK/packages/managed.zip" artifacts/sync/packages/managed.zip
+            Copy-Item $raw[0].FullName artifacts/sync/packages/raw.zip
+
+            @'
+          import { readFileSync, writeFileSync } from "node:fs";
+          import { assertBinaryArchitecture } from "./scripts/release/platform/native.mjs";
+
+          const releaseInput = JSON.parse(readFileSync("artifacts/sync/release-input.json", "utf8"));
+          const current = JSON.parse(readFileSync("artifacts/sync/vendor/vendor.json", "utf8"));
+          const inventory = JSON.parse(readFileSync("artifacts/sync/release-out/inventory-sync_windows_aarch64.json", "utf8"));
+          const formats = new Set(inventory.downloads.map((download) => download.format));
+          if (inventory.downloads.length !== 3 || !formats.has("zip") || !formats.has("nsis"))
+            throw new Error("Expected raw ZIP plus managed ZIP and NSIS Sync downloads.");
+          for (const download of inventory.downloads) {
+            if (download.product !== "sync" || download.os !== "windows" || download.arch !== "aarch64" ||
+                !Number.isSafeInteger(download.size) || download.size <= 0 || !/^[a-f0-9]{64}$/.test(download.sha256) ||
+                !download.signature || download.binaryProof.some((proof) => proof.arches.join(",") !== "aarch64"))
+              throw new Error(`Incomplete ${download.variant}/${download.format} proof.`);
+          }
+          if (inventory.vendor.length !== 1 || inventory.vendor[0].arch !== "x86_64" || inventory.vendor[0].packageArch !== "aarch64")
+            throw new Error("Windows ARM managed package did not preserve the pinned x64 vendor exception.");
+          const vendors = Object.entries(releaseInput.vendorInput.assets).map(([target, asset]) => ({
+            name: "cloudflared",
+            version: releaseInput.vendorInput.version,
+            os: target.split("-")[0],
+            arch: asset.actualArch,
+            sha256: target === current.target ? current.executableSha256 : asset.sha256,
+          }));
+          writeFileSync("artifacts/sync/synthetic-product-manifest.json", `${JSON.stringify({
+            schema: "risunest.product-release/v1",
+            product: "sync",
+            version: releaseInput.version,
+            tag: releaseInput.tag,
+            sourceCommit: releaseInput.sourceCommit,
+            releasePage: releaseInput.releasePage,
+            notes: "Synthetic Windows ARM extractor parity manifest",
+            localizedNotes: {},
+            pub_date: releaseInput.pub_date,
+            platforms: {},
+            downloads: [],
+            compatibility: releaseInput.compatibility,
+            vendor: vendors,
+          }, null, 2)}\n`);
+          const native = JSON.parse(readFileSync("artifacts/sync/native-build.json", "utf8"));
+          for (const [role, path] of [["daemon", native.daemon], ["background", native.packagedDaemon], ["manager", native.manager], ["gui", native.gui]]) {
+            const result = assertBinaryArchitecture(path, "aarch64", "pe");
+            if (result.arches.join(",") !== "aarch64") throw new Error(`${role} is not an exact ARM64 PE.`);
+          }
+          console.log(JSON.stringify({ downloads: inventory.downloads.length, vendorArch: inventory.vendor[0].arch }));
+          '@ | node --input-type=module - 2>&1 | Tee-Object -FilePath artifacts/sync/final-proof.log
+            if ($LASTEXITCODE -ne 0) { throw 'Final Windows ARM64 Sync proof failed.' }
+          }
+          finally {
+            Remove-Item -LiteralPath $keyFile, "$keyFile.pub" -Force -ErrorAction SilentlyContinue
+            Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY -ErrorAction SilentlyContinue
+            Remove-Item Env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD -ErrorAction SilentlyContinue
+            Remove-Item Env:RISUNEST_UPDATE_PUBLIC_KEY -ErrorAction SilentlyContinue
+            Remove-Item Env:RISUNEST_CLOUDFLARED_INPUT -ErrorAction SilentlyContinue
+          }
+
+      - name: Run managed ZIP through the production Rust extractor
+        run: |
+          $env:RISUNEST_PACKAGE_FIXTURE = (Resolve-Path artifacts/sync/packages/managed.zip).Path
+          $env:RISUNEST_PRODUCT_MANIFEST = (Resolve-Path artifacts/sync/synthetic-product-manifest.json).Path
+          $env:RISUNEST_PACKAGE_FORMAT = 'zip'
+          $env:RISUNEST_PACKAGE_OS = 'windows'
+          $env:RISUNEST_PACKAGE_ARCH = 'aarch64'
+          $output = cargo test --manifest-path server/manager/Cargo.toml --release --locked --target $env:RUST_TARGET `
+            --lib update::archive::tests::package_script_windows_zip_matches_the_runtime_extractor -- `
+            --ignored --exact --nocapture 2>&1 | Tee-Object -FilePath artifacts/sync/extractor-parity.log
+          if ($LASTEXITCODE -ne 0) { throw 'Managed ZIP runtime extraction failed.' }
+          if (($output | Out-String) -notmatch 'test result: ok\. 1 passed; 0 failed; 0 ignored;') {
+            throw 'Managed ZIP extractor parity did not execute exactly one passing test.'
+          }
+
+      - name: Run Windows Task Scheduler lifecycle
+        run: |
+          $native = Get-Content -Raw artifacts/sync/native-build.json | ConvertFrom-Json
+          ./server/manager/tests/windows-startup.ps1 -Manager $native.manager -Server $native.daemon 2>&1 |
+            Tee-Object -FilePath artifacts/sync/windows-startup.log
+          if ($LASTEXITCODE -ne 0) { throw 'Windows Task Scheduler lifecycle failed.' }
+
+      - name: Run six isolated Windows update helper lifecycles
+        env:
+          RISUNEST_TEST_SERVER: ${{ format('{0}/source/src-tauri/target/aarch64-pc-windows-msvc/release/risunest-sync-server.exe', github.workspace) }}
+          RISUNEST_TEST_MANAGER: ${{ format('{0}/source/src-tauri/target/aarch64-pc-windows-msvc/release/risunest-sync-manager.exe', github.workspace) }}
+        run: |
+          $tests = @(
+            'helper_replaces_and_restarts_an_isolated_live_server',
+            'helper_verifies_a_stopped_replacement_then_restores_stopped_intent',
+            'interrupted_files_recovery_outlives_the_active_installed_manager',
+            'helper_recovers_the_live_server_when_its_parent_does_not_exit',
+            'helper_rolls_back_a_corrupt_live_replacement_and_restarts_the_old_server',
+            'installer_guard_records_restart_failure_after_accepted_corrupt_server_start'
+          )
+          foreach ($test in $tests) {
+            $output = cargo test --manifest-path server/manager/Cargo.toml --release --locked --target $env:RUST_TARGET `
+              --test update_helper $test -- --ignored --exact --nocapture 2>&1 |
+              Tee-Object -FilePath "artifacts/sync/$test.log"
+            if ($LASTEXITCODE -ne 0) { throw "$test failed." }
+            if (($output | Out-String) -notmatch 'test result: ok\. 1 passed; 0 failed; 0 ignored;') {
+              throw "$test did not execute exactly one passing test."
+            }
+          }
+
+      - name: Run Windows installer guard fixture
+        run: |
+          ./server/manager/install/windows.test.ps1 2>&1 | Tee-Object -FilePath artifacts/sync/windows-installer-guard.log
+          if ($LASTEXITCODE -ne 0) { throw 'Windows installer guard fixture failed.' }
+
+      - name: Record Sync artifact hashes
+        if: always()
+        run: |
+          if (Test-Path artifacts/sync/release-out) {
+            Get-FileHash artifacts/sync/release-out/* -Algorithm SHA256 |
+              Sort-Object Path | Format-Table -AutoSize | Out-String |
+              Set-Content -Encoding utf8NoBOM artifacts/sync/release-out.sha256
+          }
+          if (Test-Path artifacts/sync/packages) {
+            Get-FileHash artifacts/sync/packages/* -Algorithm SHA256 |
+              Sort-Object Path | Format-Table -AutoSize | Out-String |
+              Set-Content -Encoding utf8NoBOM artifacts/sync/packages.sha256
+          }
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: risunest-agent-test-windows-arm-sync-${{ inputs.source_sha }}-${{ github.run_attempt }}
+          path: source/artifacts/
+          retention-days: 3
+          if-no-files-found: warn
