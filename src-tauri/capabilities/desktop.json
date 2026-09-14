@@ -1,0 +1,17 @@
+{
+  "identifier": "desktop-capability",
+  "windows": [
+    "main"
+  ],
+  "platforms": [
+    "macOS",
+    "windows",
+    "linux"
+  ],
+  "permissions": [
+    "process:default",
+    "shell:default",
+    "http:default",
+    "deep-link:default"
+  ]
+}
