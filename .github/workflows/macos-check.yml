@@ -1,5 +1,5 @@
 name: Apple and Linux release build lab
-run-name: Native test packages / ${{ inputs.source_sha }} / Sync ${{ inputs.include_sync }}
+run-name: Native test packages / ${{ inputs.source_sha }} / Apple ${{ inputs.include_apple }} / Sync ${{ inputs.include_sync }}
 
 on:
   workflow_dispatch:
@@ -8,6 +8,10 @@ on:
         description: Full macOS-lane snapshot commit SHA in this build-lab repository
         type: string
         required: true
+      include_apple:
+        description: Run macOS and iOS app jobs (and macOS Sync when enabled)
+        type: boolean
+        default: true
       include_sync:
         description: Run Sync builds, packages, and lifecycle checks
         type: boolean
@@ -17,12 +21,13 @@ permissions:
   contents: read
 
 concurrency:
-  group: apple-release-build-lab-${{ github.ref_name }}-${{ inputs.source_sha }}-${{ inputs.include_sync }}
+  group: apple-release-build-lab-${{ github.ref_name }}-${{ inputs.source_sha }}-${{ inputs.include_apple }}-${{ inputs.include_sync }}
   cancel-in-progress: false
 
 jobs:
   apple:
     name: ${{ matrix.name }}
+    if: inputs.include_apple
     strategy:
       fail-fast: false
       matrix:
@@ -583,6 +588,242 @@ jobs:
             --release-input artifacts/release-input.json
           shasum -a 256 artifacts/RisuNest-agent-test-ios-aarch64-unsigned.ipa > artifacts/package.sha256
           cat artifacts/package-proof/ios-package-inventory.json artifacts/macho-platform.txt artifacts/package.sha256
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: risunest-agent-test-${{ matrix.id }}-${{ inputs.source_sha }}-${{ github.run_attempt }}
+          path: source/artifacts/
+          retention-days: 3
+          if-no-files-found: warn
+
+  linux-app:
+    name: ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64 agent test AppImage and DEB
+            id: linux-app-x64
+            runner: ubuntu-24.04
+            rust_target: x86_64-unknown-linux-gnu
+            arch: x86_64
+          - name: Linux ARM64 agent test AppImage and DEB
+            id: linux-app-arm64
+            runner: ubuntu-24.04-arm
+            rust_target: aarch64-unknown-linux-gnu
+            arch: aarch64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+        working-directory: source
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/source/src-tauri/target
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_RELEASE_DEBUG: "0"
+      SNAPSHOT_SHA: ${{ inputs.source_sha }}
+    steps:
+      - name: Validate dispatch
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REF" == refs/heads/* ]]
+          [[ "$SNAPSHOT_SHA" =~ ^[0-9a-f]{40}$ ]]
+
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@v5
+        with:
+          version: 10.34.1
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: source/pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: ${{ matrix.rust_target }}
+
+      - uses: actions/cache/restore@v5
+        with:
+          path: |
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/git/db
+          key: linux-app-agent-test-cargo-1.97.1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('source/src-tauri/Cargo.lock') }}
+          restore-keys: linux-app-agent-test-cargo-1.97.1-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Install production Linux package dependencies
+        run: >-
+          sudo apt-get update && sudo apt-get install -y
+          build-essential pkg-config libwebkit2gtk-4.1-dev libssl-dev libdbus-1-dev
+          libayatana-appindicator3-dev librsvg2-dev patchelf desktop-file-utils
+          shared-mime-info libfuse2t64 file binutils
+
+      - name: Verify snapshot and record Linux environment
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SNAPSHOT_SHA"
+          node ../control/scripts/verify-snapshot.mjs . macos
+          mkdir -p artifacts/packages artifacts/package-proof
+          cp .build-lab/source.json artifacts/source.json
+          cp .build-lab/files.json artifacts/files.json
+          {
+            printf 'artifact_scope=agent-test-build-only\n'
+            printf 'workflow_sha=%s\nsnapshot_sha=%s\nrun_attempt=%s\n' "$GITHUB_SHA" "$SNAPSHOT_SHA" "$GITHUB_RUN_ATTEMPT"
+            printf 'matrix_id=%s\nrunner=%s\nrust_target=%s\n' '${{ matrix.id }}' '${{ matrix.runner }}' '${{ matrix.rust_target }}'
+            uname -a
+            rustc -Vv
+            cargo -V
+            node -v
+            pnpm -v
+            ldd --version | sed -n '1p'
+            dpkg-deb --version | sed -n '1p'
+            df -h .
+            sha256sum pnpm-lock.yaml src-tauri/Cargo.lock
+          } > artifacts/environment.txt
+          cat artifacts/environment.txt
+
+      - name: Install locked frontend inputs
+        run: pnpm install --frozen-lockfile
+
+      - name: Build agent frontend and prepare test release inputs
+        run: |
+          set -euo pipefail
+          pnpm build:agent 2>&1 | tee artifacts/frontend.log
+          test -s dist/index.html
+          printf '%s\n' '{"build":{"beforeBuildCommand":"test -f dist/index.html"}}' > "$RUNNER_TEMP/linux-prebuilt.json"
+          node --input-type=module - <<'NODE'
+          import { readFileSync, writeFileSync } from "node:fs";
+
+          const config = JSON.parse(readFileSync("src-tauri/tauri.conf.json", "utf8"));
+          writeFileSync(
+            "artifacts/release-input.json",
+            `${JSON.stringify({ product: "app", version: config.version }, null, 2)}\n`,
+          );
+          NODE
+
+      - name: Generate ephemeral test-only updater key
+        run: |
+          set -euo pipefail
+          key_file="$RUNNER_TEMP/risunest-agent-test-updater-${{ matrix.id }}.key"
+          timeout 30s pnpm exec -- tauri signer generate --ci --password "" --write-keys "$key_file" >/dev/null 2>&1
+          test -s "$key_file"
+          test -s "$key_file.pub"
+          private_key="$(cat "$key_file")"
+          public_key="$(cat "$key_file.pub")"
+          echo "::add-mask::$private_key"
+          private_delimiter="RISUNEST_TEST_PRIVATE_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+          public_delimiter="RISUNEST_TEST_PUBLIC_${GITHUB_RUN_ID}_${GITHUB_RUN_ATTEMPT}"
+          {
+            printf 'TAURI_SIGNING_PRIVATE_KEY<<%s\n%s\n%s\n' "$private_delimiter" "$private_key" "$private_delimiter"
+            printf 'TAURI_SIGNING_PRIVATE_KEY_PASSWORD=\n'
+            printf 'RISUNEST_UPDATE_PUBLIC_KEY<<%s\n%s\n%s\n' "$public_delimiter" "$public_key" "$public_delimiter"
+          } >> "$GITHUB_ENV"
+          printf 'ephemeral_updater_key=true\n' >> artifacts/environment.txt
+          rm -f "$key_file" "$key_file.pub"
+
+      - name: Build and inspect Linux test packages through release tooling
+        env:
+          TARGET: ${{ matrix.rust_target }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-work
+          node scripts/release/tauri-config.mjs \
+            --release-input artifacts/release-input.json \
+            --output "$RUNNER_TEMP/release-tauri.json"
+          pnpm exec -- tauri build --target "$TARGET" --no-bundle \
+            --config src-tauri/tauri.agent.conf.json \
+            --config "$RUNNER_TEMP/release-tauri.json" \
+            --config "$RUNNER_TEMP/linux-prebuilt.json" -- --locked 2>&1 | tee artifacts/native-build.log
+          cp "$CARGO_TARGET_DIR/$TARGET/release/RisuNest" release-work/app-binary
+          pnpm exec -- tauri build --target "$TARGET" --bundles deb,appimage \
+            --config src-tauri/tauri.agent.conf.json \
+            --config "$RUNNER_TEMP/release-tauri.json" \
+            --config "$RUNNER_TEMP/linux-prebuilt.json" -- --locked 2>&1 | tee artifacts/package-build.log
+          node scripts/release/package-app.mjs \
+            --kind desktop \
+            --os linux \
+            --arch "$ARCH" \
+            --bundle-dir "$CARGO_TARGET_DIR/$TARGET/release/bundle" \
+            --binary release-work/app-binary \
+            --release-input artifacts/release-input.json \
+            --output artifacts/package-proof 2>&1 | tee artifacts/package-inspection.log
+
+      - name: Record Linux package and executable inventories
+        env:
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          node --input-type=module - "$ARCH" <<'NODE'
+          import { copyFileSync, readFileSync } from "node:fs";
+          import { join } from "node:path";
+          import { assertBinaryArchitecture } from "./scripts/release/platform/native.mjs";
+
+          const arch = process.argv[2];
+          const assets = JSON.parse(readFileSync("artifacts/package-proof/assets.json", "utf8"));
+          const expected = new Map([
+            ["deb", ["package-inspected", "bundle-marker-deb"]],
+            ["appimage", ["package-inspected", "bundle-marker-app"]],
+          ]);
+          if (assets.length !== expected.size) throw new Error(`Expected two Linux packages, found ${assets.length}.`);
+          for (const asset of assets) {
+            const format = asset.download?.format;
+            if (!expected.has(format) || asset.download.product !== "app" || asset.download.variant !== "desktop" ||
+                asset.download.os !== "linux" || asset.download.arch !== arch)
+              throw new Error(`Unexpected Linux package identity: ${JSON.stringify(asset.download)}`);
+            if (JSON.stringify([...asset.checks].sort()) !== JSON.stringify([...expected.get(format)].sort()))
+              throw new Error(`Incomplete ${format} inspection evidence.`);
+            if (asset.binaries?.length !== 1 || asset.binaries[0].arch !== arch || asset.binaries[0].format !== "elf")
+              throw new Error(`Incomplete ${format} ELF proof.`);
+            const extension = format === "deb" ? "deb" : "AppImage";
+            copyFileSync(asset.path, join("artifacts/packages", `RisuNest-agent-test-linux-${arch}.${extension}`));
+            const proofName = format === "deb" ? "deb-installed-app-proof" : "appimage-packaged-app-proof";
+            copyFileSync(asset.binaries[0].path, join("artifacts/package-proof", proofName));
+          }
+          assertBinaryArchitecture("release-work/app-binary", arch, "elf");
+          assertBinaryArchitecture("artifacts/package-proof/deb-installed-app-proof", arch, "elf");
+          assertBinaryArchitecture("artifacts/package-proof/appimage-packaged-app-proof", arch, "elf");
+          assertBinaryArchitecture(`artifacts/packages/RisuNest-agent-test-linux-${arch}.AppImage`, arch, "elf");
+          NODE
+          deb="artifacts/packages/RisuNest-agent-test-linux-$ARCH.deb"
+          appimage="artifacts/packages/RisuNest-agent-test-linux-$ARCH.AppImage"
+          test -s "$deb"
+          test -s "$appimage"
+          chmod +x "$appimage"
+          dpkg-deb --contents "$deb" > artifacts/deb-entries.txt
+          extraction="$RUNNER_TEMP/risunest-appimage-inventory-${{ matrix.id }}"
+          mkdir -p "$extraction"
+          (cd "$extraction" && "$GITHUB_WORKSPACE/source/$appimage" --appimage-extract >/dev/null)
+          find "$extraction/squashfs-root" -printf '%P\n' | LC_ALL=C sort > artifacts/appimage-entries.txt
+          test "$(find "$extraction/squashfs-root" -type f -name RisuNest | wc -l | tr -d ' ')" -eq 1
+          file release-work/app-binary artifacts/package-proof/deb-installed-app-proof artifacts/package-proof/appimage-packaged-app-proof "$deb" "$appimage" > artifacts/binary-and-package-types.txt
+          for binary in release-work/app-binary artifacts/package-proof/deb-installed-app-proof artifacts/package-proof/appimage-packaged-app-proof "$appimage"; do
+            readelf -h "$binary"
+          done > artifacts/elf-headers.txt
+          sha256sum artifacts/packages/* > artifacts/packages.sha256
+          cat artifacts/package-proof/assets.json artifacts/binary-and-package-types.txt artifacts/packages.sha256
+
+      - name: Clear ephemeral test-only updater key environment
+        if: always()
+        run: |
+          printf 'TAURI_SIGNING_PRIVATE_KEY=\n' >> "$GITHUB_ENV"
+          printf 'TAURI_SIGNING_PRIVATE_KEY_PASSWORD=\n' >> "$GITHUB_ENV"
 
       - uses: actions/upload-artifact@v4
         if: always()
