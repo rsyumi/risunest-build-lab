@@ -12,6 +12,10 @@ on:
         description: Run macOS and iOS app jobs (and macOS Sync when enabled)
         type: boolean
         default: true
+      include_ios:
+        description: Include iOS when Apple jobs are enabled
+        type: boolean
+        default: true
       include_sync:
         description: Run Sync builds, packages, and lifecycle checks
         type: boolean
@@ -41,7 +45,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: apple-release-build-lab-${{ github.ref_name }}-${{ inputs.source_sha }}-${{ inputs.include_apple }}-${{ inputs.include_sync }}-${{ inputs.include_linux }}-${{ inputs.include_linux_app }}-${{ inputs.include_windows }}
+  group: apple-release-build-lab-${{ github.ref_name }}-${{ inputs.source_sha }}-${{ inputs.include_apple }}-${{ inputs.include_ios }}-${{ inputs.include_sync }}-${{ inputs.include_linux }}-${{ inputs.include_linux_app }}-${{ inputs.include_windows }}
   cancel-in-progress: false
 
 jobs:
@@ -94,31 +98,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: macOS ARM64 agent test packages
-            id: macos-arm64
-            kind: macos
-            runner: macos-15
-            rust_target: aarch64-apple-darwin
-            arch: aarch64
-            macho_arch: arm64
-            sdk: macosx
-          - name: macOS x64 agent test packages
-            id: macos-x64
-            kind: macos
-            runner: macos-15-intel
-            rust_target: x86_64-apple-darwin
-            arch: x86_64
-            macho_arch: x86_64
-            sdk: macosx
-          - name: iPhoneOS ARM64 unsigned agent test package
-            id: ios-arm64
-            kind: ios
-            runner: macos-15
-            rust_target: aarch64-apple-ios
-            arch: aarch64
-            macho_arch: arm64
-            sdk: iphoneos
+        include: >-
+          ${{ fromJSON(format('[{0}{1}]', '{"name":"macOS ARM64 agent test packages","id":"macos-arm64","kind":"macos","runner":"macos-15","rust_target":"aarch64-apple-darwin","arch":"aarch64","macho_arch":"arm64","sdk":"macosx"},{"name":"macOS x64 agent test packages","id":"macos-x64","kind":"macos","runner":"macos-15-intel","rust_target":"x86_64-apple-darwin","arch":"x86_64","macho_arch":"x86_64","sdk":"macosx"}', inputs.include_ios && ',{"name":"iPhoneOS ARM64 unsigned agent test package","id":"ios-arm64","kind":"ios","runner":"macos-15","rust_target":"aarch64-apple-ios","arch":"aarch64","macho_arch":"arm64","sdk":"iphoneos"}' || '')) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     defaults:
