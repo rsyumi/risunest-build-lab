@@ -1,0 +1,85 @@
+{
+  "build": {
+    "beforeDevCommand": "pnpm dev",
+    "beforeBuildCommand": "pnpm tauribuild",
+    "frontendDist": "../dist",
+    "devUrl": "http://localhost:5174"
+  },
+  "bundle": {
+    "active": true,
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": [],
+    "targets": ["deb", "rpm", "appimage", "nsis", "app", "dmg"],
+    "createUpdaterArtifacts": false,
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico"
+      }
+    },
+    "fileAssociations": [
+      {
+        "ext": ["risum", "risup", "charx", "risunest", "risudat"],
+        "mimeType": "application/x-risunest"
+      }
+    ]
+  },
+  "productName": "RisuNest",
+  "mainBinaryName": "RisuNest",
+  "version": "2026.8.250",
+  "identifier": "io.github.rsyumi.risunest",
+  "plugins": {
+    "updater": {
+      "comment": "The signed product manifest endpoint and public key are supplied by the native verified-update boundary. The public release build injects RISUNEST_UPDATE_PUBLIC_KEY and signs artifacts with TAURI_SIGNING_PRIVATE_KEY. Empty endpoints prevent direct frontend checks against an unverified multi-product catalog.",
+      "pubkey": "",
+      "endpoints": [],
+      "windows": {
+        "installMode": "passive"
+      }
+    },
+    "deep-link": {
+      "desktop": {
+        "schemes": ["risunestlocal"]
+      },
+      "mobile": [
+        {
+          "scheme": ["risunestlocal"],
+          "appLink": false
+        }
+      ]
+    }
+  },
+  "app": {
+    "withGlobalTauri": false,
+    "windows": [
+      {
+        "fullscreen": false,
+        "resizable": true,
+        "title": "RisuNest",
+        "width": 1024,
+        "height": 768,
+        "minWidth": 300,
+        "minHeight": 500,
+        "dragDropEnabled": false
+      }
+    ],
+    "security": {
+      "assetProtocol": {
+        "scope": [
+          "asset",
+          "$APPDATA",
+          "$APPDATA/*",
+          "$APPDATA/**/*",
+          "/data/**/*"
+        ],
+        "enable": true
+      },
+      "csp": null
+    }
+  }
+}

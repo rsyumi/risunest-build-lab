@@ -1,0 +1,15 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "build": {
+    "beforeDevCommand": "pnpm dev:agent",
+    "beforeBuildCommand": "pnpm tauribuild:agent"
+  },
+  "bundle": {
+    "createUpdaterArtifacts": false
+  },
+  "plugins": {
+    "risunest": {
+      "agent": true
+    }
+  }
+}
