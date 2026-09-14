@@ -10,6 +10,9 @@ on:
       include_sync:
         type: boolean
         default: true
+      include_app:
+        type: boolean
+        default: true
   workflow_dispatch:
     inputs:
       source_sha:
@@ -20,16 +23,21 @@ on:
         description: Build and exercise the Windows ARM Sync suite
         type: boolean
         default: true
+      include_app:
+        description: Build and exercise the Windows ARM app
+        type: boolean
+        default: true
 
 permissions:
   contents: read
 
 concurrency:
-  group: windows-arm-release-build-lab-${{ github.ref_name }}-${{ inputs.source_sha }}-${{ inputs.include_sync }}
+  group: windows-arm-release-build-lab-${{ github.ref_name }}-${{ inputs.source_sha }}-${{ inputs.include_sync }}-${{ inputs.include_app }}
   cancel-in-progress: false
 
 jobs:
   app:
+    if: inputs.include_app
     name: Windows ARM64 app ZIP and NSIS producer
     runs-on: windows-11-arm
     timeout-minutes: 150

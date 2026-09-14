@@ -28,6 +28,10 @@ on:
         description: Run native Windows ARM app and enabled Sync jobs
         type: boolean
         default: false
+      include_windows_app:
+        description: Include the app when Windows ARM jobs are enabled
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -43,6 +47,7 @@ jobs:
     with:
       source_sha: ${{ inputs.source_sha }}
       include_sync: ${{ inputs.include_sync }}
+      include_app: ${{ inputs.include_windows_app }}
 
   apple:
     name: ${{ matrix.name }}
