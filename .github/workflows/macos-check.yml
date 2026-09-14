@@ -246,6 +246,7 @@ jobs:
           contract_tmp="$(mktemp -d "$RUNNER_TEMP/risunest-sync-agent-test-contracts.XXXXXX")"
           export TMPDIR="$(cd "$contract_tmp" && pwd -P)"
           printf 'sync_rust_test_tmpdir=%s\n' "$TMPDIR" >> artifacts/environment.txt
+          cargo test --manifest-path crates/release-update/Cargo.toml --target '${{ matrix.rust_target }}' --release --locked 2>&1 | tee -a artifacts/rust-tests.log
           cargo test --manifest-path server/sync/Cargo.toml --target '${{ matrix.rust_target }}' --release --locked -- --test-threads=1 2>&1 | tee -a artifacts/rust-tests.log
           cargo test --manifest-path server/manager/Cargo.toml --target '${{ matrix.rust_target }}' --release --locked -- --test-threads=1 2>&1 | tee -a artifacts/rust-tests.log
 
