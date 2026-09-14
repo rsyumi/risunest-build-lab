@@ -364,7 +364,7 @@ jobs:
 
       - name: Install locked Sync GUI inputs
         if: matrix.kind == 'macos' && inputs.include_sync
-        run: pnpm install --dir server/manager/gui --frozen-lockfile
+        run: pnpm --dir server/manager/gui --ignore-workspace install --frozen-lockfile
 
       - name: Prepare synthetic Sync package inputs
         if: matrix.kind == 'macos' && inputs.include_sync

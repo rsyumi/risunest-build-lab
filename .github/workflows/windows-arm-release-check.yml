@@ -373,7 +373,7 @@ jobs:
         run: |
           pnpm install --frozen-lockfile
           if ($LASTEXITCODE -ne 0) { throw 'Root dependency installation failed.' }
-          pnpm install --dir server/manager/gui --frozen-lockfile
+          pnpm --dir server/manager/gui --ignore-workspace install --frozen-lockfile
           if ($LASTEXITCODE -ne 0) { throw 'Sync GUI dependency installation failed.' }
 
       - name: Run locked Sync tests
