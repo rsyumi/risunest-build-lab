@@ -32,6 +32,10 @@ on:
         description: Include the app when Windows ARM jobs are enabled
         type: boolean
         default: true
+      probe_launchd:
+        description: Inspect current macOS one-shot launchctl semantics
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -41,6 +45,41 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  macos-launchd-probe:
+    if: inputs.probe_launchd
+    runs-on: macos-15
+    timeout-minutes: 5
+    steps:
+      - name: Observe success and failure restart behavior on the current runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          work="$RUNNER_TEMP/risunest-launchd-probe-$GITHUB_RUN_ID"
+          mkdir -p "$work"
+          labels=()
+          cleanup() { for label in "${labels[@]}"; do launchctl remove "$label" >/dev/null 2>&1 || true; done; }
+          trap cleanup EXIT
+          for code in 0 1; do
+            label="io.github.rsyumi.risunest-launchd-probe-$GITHUB_RUN_ID-$code"
+            labels+=("$label")
+            cat > "$work/probe-$code.sh" <<'SH'
+          #!/bin/sh
+          printf 'started\n' >> "$1"
+          exit "$2"
+          SH
+            launchctl submit -l "$label" -- /bin/sh "$work/probe-$code.sh" "$work/starts-$code" "$code"
+          done
+          sleep 16
+          for code in 0 1; do
+            label="io.github.rsyumi.risunest-launchd-probe-$GITHUB_RUN_ID-$code"
+            test -f "$work/starts-$code"
+            count=$(wc -l < "$work/starts-$code" | tr -d ' ')
+            printf 'exit_code=%s starts=%s\n' "$code" "$count"
+            launchctl list "$label" | grep -E 'PID|LastExitStatus|Label' || true
+            launchctl remove "$label"
+            if launchctl list "$label" >/dev/null 2>&1; then exit 1; fi
+          done
+
   windows-arm:
     if: inputs.include_windows
     uses: ./.github/workflows/windows-arm-release-check.yml
