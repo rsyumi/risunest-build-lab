@@ -582,7 +582,7 @@ jobs:
             --output artifacts/package-proof \
             --release-input artifacts/release-input.json
           shasum -a 256 artifacts/RisuNest-agent-test-ios-aarch64-unsigned.ipa > artifacts/package.sha256
-          cat artifacts/macho-platform.txt artifacts/package.sha256
+          cat artifacts/package-proof/ios-package-inventory.json artifacts/macho-platform.txt artifacts/package.sha256
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -807,6 +807,9 @@ jobs:
           test "$(loginctl show-user "$USER" -p Linger --value)" = yes
           systemctl --user daemon-reload
           python3 server/manager/tests/linux-process.py "$server" "$manager" 2>&1 | tee artifacts/sync/linux-process.log
+          assets="$RISUNEST_SYNC_TEST_WORK/packages/assets.json"
+          managed="$(node -e "const a=require('$assets'); console.log(a.find(x=>x.download.variant==='managed').path)")"
+          bash server/manager/install/managed-install.integration.test.sh "$managed" 2>&1 | tee artifacts/sync/managed-install.log
 
       - name: Collect Linux package evidence
         if: always()
@@ -894,19 +897,27 @@ jobs:
 
       - name: Probe quick-tunnel readiness, stop, child exit, and restart
         id: quick-tunnel
-        continue-on-error: true
         run: |
           $vendor = Get-Content -Raw artifacts/cloudflared/vendor.json | ConvertFrom-Json
           node scripts/release/verify-cloudflared.mjs --binary $vendor.executable *>&1 |
             Tee-Object -FilePath artifacts/cloudflared-lifecycle.txt
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $evidence = Get-Content -Raw artifacts/cloudflared-lifecycle.txt | ConvertFrom-Json
+          if ($evidence.schema -ne 'risunest-cloudflared-lifecycle/v1' -or $evidence.output -ne 'json' -or $evidence.runs.Count -ne 2) {
+            throw 'Cloudflared lifecycle evidence is incomplete.'
+          }
+          foreach ($run in $evidence.runs) {
+            if (-not $run.urlPublished -or -not $run.edgeRegistered -or -not $run.originProxied -or -not $run.stopRequested -or -not $run.stopped) {
+              throw 'Cloudflared lifecycle did not prove start, readiness, proxy, and stop.'
+            }
+          }
 
-      - name: Record optional network probe result
+      - name: Record required network probe result
         if: always()
         env:
           QUICK_TUNNEL_OUTCOME: ${{ steps.quick-tunnel.outcome }}
         run: |
-          @{ quickTunnel = $env:QUICK_TUNNEL_OUTCOME; required = $false } |
+          @{ quickTunnel = $env:QUICK_TUNNEL_OUTCOME; required = $true } |
             ConvertTo-Json | Set-Content -Encoding utf8NoBOM artifacts/cloudflared-network-result.json
 
       - uses: actions/upload-artifact@v4
