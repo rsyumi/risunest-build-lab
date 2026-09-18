@@ -4491,8 +4491,8 @@
     {
       "path": "src-tauri/src/external_storage/providers/google_drive/config.rs",
       "mode": "100644",
-      "bytes": 12480,
-      "sha256": "e4a3ab832efdad4ede5daa9f7c7884715f527f0acf48845392e7d7833c92f4c8"
+      "bytes": 12523,
+      "sha256": "797ba53ad6bc4c5ed7ecdd869fb90ec0ee09c61ae8d5f1992053e7db3ec6eb55"
     },
     {
       "path": "src-tauri/src/external_storage/providers/google_drive/mod.rs",
