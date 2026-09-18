@@ -14,9 +14,9 @@ import { get } from "svelte/store";
 import { open } from '@tauri-apps/plugin-shell'
 import { openUrl } from '@tauri-apps/plugin-opener'
 import streamSaver from 'streamsaver';
-import { type Database, defaultSdDataFunc, getDatabase, appVer, getCurrentCharacter, type character, type groupChat, appSubVer } from "./storage/database.svelte";
+import { type Database, defaultSdDataFunc, getDatabase, getCurrentCharacter, type character, type groupChat, appSubVer } from "./storage/database.svelte";
+import versionData from "../../version.json";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { checkRisuUpdate } from "./update";
 import { MobileGUI, botMakerMode, selectedCharID, loadedStore, DBState, LoadingStatusState, selIdState, ReloadGUIPointer, bodyIntercepterStore } from "./stores.svelte";
 import { loadPlugins } from "./plugins/plugins.svelte";
 import { alertConfirm, alertError, alertMd, alertNormal, alertNormalWait, alertSelect, alertTOS, waitAlert } from "./alert";
@@ -39,7 +39,6 @@ import { initMobileGesture } from "./hotkey";
 import { fetch as TauriHTTPFetch } from '@tauri-apps/plugin-http';
 import { fetchTauriHttpStream } from './network/tauriHttpStream';
 import { moduleUpdate } from "./process/modules";
-import { getColdStorageItem, makeColdData } from "./process/coldstorage.svelte";
 import {
     listCharacterResources,
     listDatabaseRootResources,
@@ -833,20 +832,7 @@ export function getBasename(data: string) {
 }
 
 export async function getUncleanables(db: Database, uptype: 'basename' | 'pure' = 'basename') {
-    let chars: (character|groupChat)[] = []
-    if (db.characters) {
-        for(let cha of db.characters){
-            if(cha?.coldstorage){
-                const coldData = await getColdStorageItem(cha.coldstorage!)
-                if(coldData?.character && coldData.character.chaId === cha.chaId){
-                    cha = coldData.character
-                }
-            }
-            chars.push(cha)
-        }
-    }
-
-    return getUncleanablesSync(db, uptype, { chars });
+    return getUncleanablesSync(db, uptype);
 }
 
 /**
@@ -1735,7 +1721,7 @@ export function getLanguageCodes() {
 }
 
 export function getVersionString(): string {
-    let versionString = appVer
+    let versionString = versionData.version
     if(appSubVer) {
         versionString += '-' + appSubVer
     }

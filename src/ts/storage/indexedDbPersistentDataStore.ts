@@ -2,6 +2,7 @@ import isEqual from 'lodash/isEqual'
 import { applyRootMutations } from './rootMutation'
 import type { Chat, Database, Message, botPreset } from './database.svelte'
 import type {
+    ArchivePreview,
     AssetAlias,
     AssetAliasIdentity,
     AssetAliasKind,
@@ -19,9 +20,6 @@ import type {
     ConversationSummary,
     ConversationWindow,
     ConversationWindowQuery,
-    ColdAlias,
-    ColdPayloadAuthorityState,
-    ColdPayloadMigrationInput,
     DataRevision,
     AssetRepositoryAuthorityState,
     AssetRepositoryMigrationInput,
@@ -30,6 +28,7 @@ import type {
     PersistentRevisionLease,
     PersistentRoot,
     PluginStorageCatalog,
+    PluginStorageListItem,
     PluginStorageMutation,
     PresetCatalog,
     PresetSummary,
@@ -39,7 +38,6 @@ import type {
 import {
     RevisionConflictError,
     SnapshotReleasedError,
-    validateColdAlias,
     validateAssetAlias,
     validateAssetAliasKeyBatch,
     validateAssetAliasIdentity,
@@ -47,10 +45,12 @@ import {
     validateConversationWindowQuery,
     validateAssetOwnerHead,
 } from './persistentDataStore'
+import type { PluginStorageMeta } from '../plugins/pluginOwner'
+import { readPluginStorageMetaOwner } from '../plugins/pluginOwner'
 import { parseAssetRepositoryAuthorityState } from './assetRepositoryAuthority'
-import { parseColdPayloadAuthorityState } from './coldPayloadAuthority'
 
-const DATABASE_VERSION = 15
+const DATABASE_VERSION = 1
+const DATABASE_SCHEMA_ID = 'risunest-persistent-data-v1'
 const MESSAGE_PAGE_SIZE = 128
 const SNAPSHOT_LEASE_TTL_MS = 24 * 60 * 60 * 1000
 const MAX_INDEX_VALUE = Number.MAX_SAFE_INTEGER
@@ -67,8 +67,6 @@ const INDEXED_GENERATION_STORE_NAMES = [
     'assetAliases',
     'assetOwnerHeads',
     'assetRepositoryAuthority',
-    'coldAliases',
-    'coldPayloadAuthority',
 ] as const
 const DATA_STORE_NAMES = ['root', ...INDEXED_GENERATION_STORE_NAMES] as const
 const STORE_NAMES = ['meta', ...DATA_STORE_NAMES] as const
@@ -105,7 +103,9 @@ interface StoredPluginStorage extends StoredRecord<unknown> {
 interface StoredPluginStorageMetadata {
     key: string
     generation: string
+    owner: string
     storageKey: string
+    valueType: 'string' | 'json'
     byteSize: number
     ordinal: number
 }
@@ -168,6 +168,47 @@ function replacementOwnerTuplesEqual(
         && right !== null
         && left.present === right.present
         && isEqual(left.entries, right.entries)
+}
+
+function retainedModuleIndex(
+    oldRoot: PersistentRoot,
+    newRoot: PersistentRoot,
+    property: 'modules' | 'personas',
+    index: number,
+    embedded: boolean,
+): number | null {
+    const oldValues = (oldRoot as Record<string, unknown>)[property]
+    const newValues = (newRoot as Record<string, unknown>)[property]
+    if (!Array.isArray(oldValues) || !Array.isArray(newValues)) return null
+    const source = oldValues[index]
+    if (source === undefined) return null
+    const moduleFrom = (value: unknown): unknown => {
+        if (!embedded) return value
+        if (!value || typeof value !== 'object') return undefined
+        return (value as Record<string, unknown>).embeddedModule
+    }
+    const sourceModule = moduleFrom(source)
+    const id = sourceModule && typeof sourceModule === 'object'
+        ? (sourceModule as Record<string, unknown>).id
+        : undefined
+    if (typeof id === 'string' && id.length > 0) {
+        const matchesId = (value: unknown) => {
+            const module = moduleFrom(value)
+            return module && typeof module === 'object'
+                && (module as Record<string, unknown>).id === id
+        }
+        if (oldValues.filter(matchesId).length === 1 && newValues.filter(matchesId).length === 1) {
+            return newValues.findIndex(matchesId)
+        }
+    }
+    if (isEqual(newValues[index], source)) return index
+    const oldMatches = oldValues.filter((value) => isEqual(value, source))
+    const newMatches = newValues
+        .map((value, candidate) => ({ value, candidate }))
+        .filter(({ value }) => isEqual(value, source))
+    return oldMatches.length === 1 && newMatches.length === 1
+        ? newMatches[0].candidate
+        : null
 }
 
 interface StoredMessageOccurrencePage {
@@ -237,12 +278,6 @@ function serializedByteSize(value: unknown): number {
     return textEncoder.encode(JSON.stringify(value) ?? 'null').byteLength
 }
 
-function validateColdAliasKey(key: string): void {
-    if (typeof key !== 'string' || key.length === 0 || key.includes('\0')) {
-        throw new TypeError('Cold alias key must be nonempty and contain no NUL characters')
-    }
-}
-
 function arrayIndexKey(key: string): number | null {
     if (!/^(0|[1-9]\d*)$/.test(key)) return null
     const value = Number(key)
@@ -270,7 +305,7 @@ interface SnapshotLeaseTarget {
 
 interface SnapshotLeaseRecord {
     key: string
-    value: string | SnapshotLeaseTarget
+    value: SnapshotLeaseTarget
     createdAt?: number
 }
 
@@ -329,26 +364,33 @@ function cursorPage<T>(
         const request = index.openCursor(range)
         request.onerror = () => reject(request.error)
         request.onsuccess = () => {
-            const cursor = request.result
-            if (!cursor) {
-                resolve({
-                    items,
-                    nextCursor: hasMore ? String(offset + items.length) : undefined,
-                })
-                return
-            }
-            const value = (cursor.value as StoredRecord<T>).value
-            if (predicate(value)) {
-                if (matched >= offset && items.length < limit) {
-                    items.push(value)
-                } else if (matched >= offset + limit) {
-                    hasMore = true
-                    resolve({ items, nextCursor: String(offset + items.length) })
+            try {
+                const cursor = request.result
+                if (!cursor) {
+                    resolve({
+                        items,
+                        nextCursor: hasMore ? String(offset + items.length) : undefined,
+                    })
                     return
                 }
-                matched++
+                const value = (cursor.value as StoredRecord<T>).value
+                if (predicate(value)) {
+                    if (matched >= offset && items.length < limit) {
+                        items.push(value)
+                    } else if (matched >= offset + limit) {
+                        hasMore = true
+                        resolve({ items, nextCursor: String(offset + items.length) })
+                        return
+                    }
+                    matched++
+                }
+                cursor.continue()
+            } catch (error) {
+                reject(error)
+                try {
+                    index.objectStore.transaction.abort()
+                } catch {}
             }
-            cursor.continue()
         }
     })
 }
@@ -378,7 +420,7 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
         const request = this.indexedDbFactory.open(this.databaseName, DATABASE_VERSION)
         // Another document holding the previous version would otherwise stall boot forever.
         request.onblocked = () => this.onBlockedUpgrade()
-        request.onupgradeneeded = (event) => {
+        request.onupgradeneeded = () => {
             const database = request.result
             for (const storeName of STORE_NAMES) {
                 if (!database.objectStoreNames.contains(storeName)) {
@@ -427,13 +469,6 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
             )
             this.createIndex(transaction.objectStore('messagePages'), 'byGeneration', 'generation')
             const messageOccurrences = transaction.objectStore('messageOccurrences')
-            if (event.oldVersion === 13) {
-                for (const oldIndex of ['byConversationMessageIndex', 'byConversationIndex']) {
-                    if (messageOccurrences.indexNames.contains(oldIndex)) {
-                        messageOccurrences.deleteIndex(oldIndex)
-                    }
-                }
-            }
             this.createIndex(
                 messageOccurrences,
                 'byLookupKey',
@@ -487,64 +522,64 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
                 'byGeneration',
                 'generation',
             )
-            this.createIndex(
-                transaction.objectStore('coldAliases'),
-                'byGeneration',
-                'generation',
-            )
-            this.createIndex(
-                transaction.objectStore('coldPayloadAuthority'),
-                'byGeneration',
-                'generation',
-            )
-            if (event.oldVersion < 7) {
-                this.backfillCharacterSummaries(transaction)
-                this.backfillOrderKeys<StoredConversation>(
-                    transaction.objectStore('conversations'),
-                    (record) => record.value.summary,
-                )
-                this.migrateRootRows(transaction)
-                this.backfillPluginStorageMetadata(transaction)
-            }
-            if (event.oldVersion >= 8 && event.oldVersion < 10) {
-                this.migrateAssetAliasKeys(transaction)
-            }
-            if (event.oldVersion > 0 && event.oldVersion < 11) {
-                this.backfillAssetRepositoryAuthority(transaction)
-            }
-            if (event.oldVersion > 0 && event.oldVersion < 12) {
-                this.backfillColdPayloadAuthority(transaction)
-            }
-            if (event.oldVersion > 0 && event.oldVersion < 14) {
-                this.backfillMessageOccurrences(transaction)
-            }
-            if (event.oldVersion > 0 && event.oldVersion < 15) {
-                this.migrateCompositeKeyEncoding(transaction)
-            }
+            transaction.objectStore('meta').put({
+                key: 'schemaIdentity',
+                value: DATABASE_SCHEMA_ID,
+            })
+            transaction.objectStore('meta').put({
+                key: 'schemaVersion',
+                value: DATABASE_VERSION,
+            })
         }
-        this.database = await requestResult(request)
-        this.database.onversionchange = () => {
+        const database = await requestResult(request)
+        try {
+            await this.validateDatabaseSchema(database)
+        } catch (error) {
+            database.close()
+            throw error
+        }
+        this.database = database
+        database.onversionchange = () => {
             this.database?.close()
             this.database = undefined
         }
 
         const transaction = this.database.transaction(
-            ['meta', 'root', 'assetRepositoryAuthority', 'coldPayloadAuthority'],
+            ['meta', 'root', 'assetRepositoryAuthority'],
             'readwrite',
         )
         const meta = transaction.objectStore('meta')
         const currentRevision = await requestResult(meta.get('currentRevision'))
-        meta.put({ key: 'schemaVersion', value: DATABASE_VERSION })
         if (!currentRevision) {
             const generation = this.generationFor(0)
             meta.put({ key: 'activeGeneration', value: generation })
             meta.put({ key: 'currentRevision', value: 0 })
             transaction.objectStore('root').put({ key: generation, generation, value: {} })
             this.putAssetRepositoryAuthority(transaction, generation, { format: 'legacy' })
-            this.putColdPayloadAuthority(transaction, generation, { format: 'legacy' })
         }
         await transactionDone(transaction)
         await this.sweepTemporaryGenerations()
+    }
+
+    private async validateDatabaseSchema(database: IDBDatabase): Promise<void> {
+        if (STORE_NAMES.some((storeName) => !database.objectStoreNames.contains(storeName))) {
+            throw new Error('Unsupported RisuNest IndexedDB schema')
+        }
+        const transaction = database.transaction('meta', 'readonly')
+        const done = transactionDone(transaction)
+        void done.catch(() => {})
+        const meta = transaction.objectStore('meta')
+        const [identity, version] = await Promise.all([
+            requestResult(meta.get('schemaIdentity')),
+            requestResult(meta.get('schemaVersion')),
+        ]) as Array<{ value?: unknown } | undefined>
+        await done
+        if (
+            identity?.value !== DATABASE_SCHEMA_ID
+            || version?.value !== DATABASE_VERSION
+        ) {
+            throw new Error('Unsupported RisuNest IndexedDB schema')
+        }
     }
 
     async readRoot(): Promise<Versioned<PersistentRoot>> {
@@ -570,6 +605,12 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
         const transaction = this.requireDatabase().transaction(['meta', 'catalog'], 'readonly')
         const { revision, generation } = await this.readActive(transaction)
         return this.queryCharactersFromTransaction(transaction, revision, generation, input)
+    }
+
+    async readCharacterSummary(id: string): Promise<CharacterSummary | null> {
+        const transaction = this.requireDatabase().transaction(['meta', 'catalog'], 'readonly')
+        const { generation } = await this.readActive(transaction)
+        return this.readCharacterSummaryFromTransaction(transaction, generation, id)
     }
 
     async readCharacter(id: string): Promise<Versioned<CharacterDetail> | null> {
@@ -641,10 +682,28 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
         return this.queryPluginStorageFromTransaction(transaction, revision, generation)
     }
 
-    async readPluginStorage(key: string): Promise<Versioned<unknown> | null> {
+    async readPluginStorage(owner: string, key: string): Promise<Versioned<unknown> | null> {
         const transaction = this.requireDatabase().transaction(['meta', 'pluginStorage'], 'readonly')
         const { revision, generation } = await this.readActive(transaction)
-        return this.readPluginStorageFromTransaction(transaction, revision, generation, key)
+        return this.readPluginStorageFromTransaction(transaction, revision, generation, owner, key)
+    }
+
+    async listPluginStorage(): Promise<PluginStorageListItem[]> {
+        const transaction = this.requireDatabase().transaction(
+            ['meta', 'pluginStorageMetadata'],
+            'readonly',
+        )
+        const { generation } = await this.readActive(transaction)
+        const records = (await requestResult(
+            transaction.objectStore('pluginStorageMetadata').index('byGeneration').getAll(generation),
+        )) as StoredPluginStorageMetadata[]
+        await transactionDone(transaction)
+        return records.sort(comparePluginStorageRecords).map((record) => ({
+            owner: record.owner,
+            key: record.storageKey,
+            valueType: record.valueType,
+            byteSize: record.byteSize,
+        }))
     }
 
     async readAssetAlias(identity: AssetAliasIdentity): Promise<Versioned<AssetAlias> | null> {
@@ -698,34 +757,6 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
         )
         const { revision, generation } = await this.readActive(transaction)
         return this.readAssetOwnerHeadFromTransaction(transaction, revision, generation, owner)
-    }
-
-    async readColdPayloadAuthority(): Promise<Versioned<ColdPayloadAuthorityState>> {
-        const transaction = this.requireDatabase().transaction(
-            ['meta', 'coldPayloadAuthority'],
-            'readonly',
-        )
-        const { revision, generation } = await this.readActive(transaction)
-        return this.readColdPayloadAuthorityFromTransaction(transaction, revision, generation)
-    }
-
-    async readColdAlias(key: string): Promise<Versioned<ColdAlias> | null> {
-        validateColdAliasKey(key)
-        const transaction = this.requireDatabase().transaction(
-            ['meta', 'coldAliases'],
-            'readonly',
-        )
-        const { revision, generation } = await this.readActive(transaction)
-        return this.readColdAliasFromTransaction(transaction, revision, generation, key)
-    }
-
-    async listColdAliases(): Promise<Versioned<ColdAlias[]>> {
-        const transaction = this.requireDatabase().transaction(
-            ['meta', 'coldAliases'],
-            'readonly',
-        )
-        const { revision, generation } = await this.readActive(transaction)
-        return this.listColdAliasesFromTransaction(transaction, revision, generation)
     }
 
     async commitAssetAlias(
@@ -801,8 +832,13 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
             compatibilityHash: input.compatibilityHash,
         })
         for (const alias of input.assetAliases) validateAssetAlias(alias)
-        const { characters, botPresets: _botPresets, pluginCustomStorage: _pluginStorage, ...root } =
-            input.database
+        const {
+            characters,
+            botPresets: _botPresets,
+            pluginCustomStorage: _pluginStorage,
+            pluginStorageMeta: _pluginStorageMeta,
+            ...root
+        } = input.database
         const characterDetails = characters.map(({ chats: _chats, ...detail }) => detail)
         validateOwnerHeadsForCommit({
             expectedRevision: input.sourceRevision,
@@ -843,135 +879,22 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
         }
     }
 
-    async commitColdAlias(
-        alias: ColdAlias,
-        expectedRevision: DataRevision,
-    ): Promise<{ revision: DataRevision }> {
-        validateColdAlias(alias)
-        if (alias.objectHash === null) {
-            throw new TypeError('Cold payload v2 alias objectHash cannot be null')
-        }
-        const transaction = this.requireDatabase().transaction([...STORE_NAMES], 'readwrite')
-        try {
-            const active = await this.readActive(transaction)
-            if (active.revision !== expectedRevision) {
-                throw new RevisionConflictError(expectedRevision, active.revision)
-            }
-            await this.requireColdPayloadAuthority(
-                transaction,
-                active.generation,
-                'v2',
-                'Cold alias mutation requires v2 authority',
-            )
-            const revision = active.revision + 1
-            const generation = await this.ensureWritableGeneration(
-                transaction,
-                active.generation,
-                revision,
-            )
-            this.putColdAlias(transaction, generation, alias)
-            this.setActive(transaction, revision, generation)
-            await transactionDone(transaction)
-            return { revision }
-        } catch (error) {
-            try {
-                transaction.abort()
-            } catch {}
-            throw error
-        }
+    archivePreview(_characterId: string): Promise<ArchivePreview> {
+        return Promise.reject(new Error('Archiving characters requires the native store'))
     }
 
-    async deleteColdAlias(
-        key: string,
-        expectedRevision: DataRevision,
+    archiveCharacter(
+        _characterId: string,
+        _expectedRevision: DataRevision,
     ): Promise<{ revision: DataRevision }> {
-        validateColdAliasKey(key)
-        const transaction = this.requireDatabase().transaction([...STORE_NAMES], 'readwrite')
-        try {
-            const active = await this.readActive(transaction)
-            if (active.revision !== expectedRevision) {
-                throw new RevisionConflictError(expectedRevision, active.revision)
-            }
-            await this.requireColdPayloadAuthority(
-                transaction,
-                active.generation,
-                'v2',
-                'Cold alias mutation requires v2 authority',
-            )
-            const revision = active.revision + 1
-            const generation = await this.ensureWritableGeneration(
-                transaction,
-                active.generation,
-                revision,
-            )
-            transaction.objectStore('coldAliases').delete(this.coldAliasKey(generation, key))
-            this.setActive(transaction, revision, generation)
-            await transactionDone(transaction)
-            return { revision }
-        } catch (error) {
-            try {
-                transaction.abort()
-            } catch {}
-            throw error
-        }
+        return Promise.reject(new Error('Archiving characters requires the native store'))
     }
 
-    async activateColdPayloadMigration(
-        input: ColdPayloadMigrationInput,
+    restoreCharacter(
+        _characterId: string,
+        _expectedRevision: DataRevision,
     ): Promise<{ revision: DataRevision }> {
-        const authority = parseColdPayloadAuthorityState({
-            format: 'v2',
-            migrationId: input.migrationId,
-            compatibilityHash: input.compatibilityHash,
-        })
-        const keys = new Set<string>()
-        for (const alias of input.coldAliases) {
-            validateColdAlias(alias)
-            if (alias.objectHash === null) {
-                throw new TypeError('Cold payload migration alias objectHash cannot be null')
-            }
-            if (keys.has(alias.key)) throw new TypeError(`Duplicate cold alias ${alias.key}`)
-            keys.add(alias.key)
-        }
-
-        const transaction = this.requireDatabase().transaction([...STORE_NAMES], 'readwrite')
-        try {
-            const active = await this.readActive(transaction)
-            if (active.revision !== input.sourceRevision) {
-                throw new RevisionConflictError(input.sourceRevision, active.revision)
-            }
-            await this.requireColdPayloadAuthority(
-                transaction,
-                active.generation,
-                'legacy',
-                'Cold payload migration requires legacy authority',
-            )
-            const revision = active.revision + 1
-            const generation = await this.ensureWritableGeneration(
-                transaction,
-                active.generation,
-                revision,
-            )
-            await this.deleteIndexRange(
-                transaction.objectStore('coldAliases').index('byGeneration'),
-                this.keyRangeFactory.only(generation),
-            )
-            this.putColdPayloadAuthority(transaction, generation, {
-                format: 'preparing',
-                migrationId: input.migrationId,
-                sourceRevision: input.sourceRevision,
-            })
-            for (const alias of input.coldAliases) this.putColdAlias(transaction, generation, alias)
-            this.putColdPayloadAuthority(transaction, generation, authority)
-            this.setActive(transaction, revision, generation)
-            await transactionDone(transaction)
-            return { revision }
-        } catch (error) {
-            try {
-                transaction.abort()
-            } catch {}
-            throw error
-        }
+        return Promise.reject(new Error('Archiving characters requires the native store'))
     }
 
     async commit(input: WorkingSetCommit): Promise<{ revision: DataRevision }> {
@@ -1016,6 +939,11 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
                 aliasKeys.add(key)
             }
             validateOwnerHeadsForCommit(input)
+            const retainedOwnerHeads = await this.retainedCommitOwnerHeads(
+                transaction,
+                active.generation,
+                input,
+            )
 
             const revision = active.revision + 1
             const generation = await this.ensureWritableGeneration(
@@ -1051,7 +979,12 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
                     value: structuredClone(alias),
                 } satisfies StoredRecord<AssetAlias>)
             }
-            await this.replaceChangedOwnerHeads(transaction, generation, input)
+            await this.replaceChangedOwnerHeads(
+                transaction,
+                generation,
+                input,
+                retainedOwnerHeads,
+            )
             this.setActive(transaction, revision, generation)
             await transactionDone(transaction)
             return { revision }
@@ -1286,6 +1219,15 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
                     input,
                 )
             },
+            readCharacterSummary: async (id) => {
+                assertActive()
+                const transaction = this.requireDatabase().transaction(
+                    ['meta', 'catalog'],
+                    'readonly',
+                )
+                await this.validateSnapshotLease(transaction, lease, generation, revision)
+                return this.readCharacterSummaryFromTransaction(transaction, generation, id)
+            },
             readCharacter: async (id) => {
                 assertActive()
                 const transaction = this.requireDatabase().transaction(
@@ -1377,7 +1319,7 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
                     generation,
                 )
             },
-            readPluginStorage: async (key) => {
+            readPluginStorage: async (owner, key) => {
                 assertActive()
                 const transaction = this.requireDatabase().transaction(
                     ['meta', 'pluginStorage'],
@@ -1388,6 +1330,7 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
                     transaction,
                     revision,
                     generation,
+                    owner,
                     key,
                 )
             },
@@ -1461,47 +1404,6 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
                     revision,
                     generation,
                     owner,
-                )
-            },
-            readColdPayloadAuthority: async () => {
-                assertActive()
-                const transaction = this.requireDatabase().transaction(
-                    ['meta', 'coldPayloadAuthority'],
-                    'readonly',
-                )
-                await this.validateSnapshotLease(transaction, lease, generation, revision)
-                return this.readColdPayloadAuthorityFromTransaction(
-                    transaction,
-                    revision,
-                    generation,
-                )
-            },
-            readColdAlias: async (key) => {
-                assertActive()
-                validateColdAliasKey(key)
-                const transaction = this.requireDatabase().transaction(
-                    ['meta', 'coldAliases'],
-                    'readonly',
-                )
-                await this.validateSnapshotLease(transaction, lease, generation, revision)
-                return this.readColdAliasFromTransaction(
-                    transaction,
-                    revision,
-                    generation,
-                    key,
-                )
-            },
-            listColdAliases: async () => {
-                assertActive()
-                const transaction = this.requireDatabase().transaction(
-                    ['meta', 'coldAliases'],
-                    'readonly',
-                )
-                await this.validateSnapshotLease(transaction, lease, generation, revision)
-                return this.listColdAliasesFromTransaction(
-                    transaction,
-                    revision,
-                    generation,
                 )
             },
             release: async () => {
@@ -1588,6 +1490,7 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
         const objectStore = transaction.objectStore('assetAliases')
         const requests = keys.map((key) => objectStore.get(this.assetAliasKey(generation, kind, key)))
         const done = transactionDone(transaction)
+        void done.catch(() => {})
         const leaseRecord = leaseRequest === undefined
             ? undefined
             : await requestResult(leaseRequest) as SnapshotLeaseRecord | undefined
@@ -1672,9 +1575,7 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
                     resolve(collected)
                     return
                 }
-                const alias = (cursor.value as StoredRecord<AssetAlias>).value
-                validateAssetAlias(alias)
-                collected.push(structuredClone(alias))
+                collected.push((cursor.value as StoredRecord<AssetAlias>).value)
                 if (collected.length > input.limit) {
                     resolve(collected)
                     return
@@ -1683,8 +1584,10 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
             }
         })
         await transactionDone(transaction)
-        if (items.length <= input.limit) return { revision, items }
-        const pageItems = items.slice(0, input.limit)
+        for (const alias of items) validateAssetAlias(alias)
+        const clonedItems = items.map((alias) => structuredClone(alias))
+        if (clonedItems.length <= input.limit) return { revision, items: clonedItems }
+        const pageItems = clonedItems.slice(0, input.limit)
         const last = pageItems[pageItems.length - 1]
         return {
             revision,
@@ -1736,91 +1639,11 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
         return { revision, value: structuredClone(record.value) }
     }
 
-    private async readColdPayloadAuthorityFromTransaction(
-        transaction: IDBTransaction,
-        revision: DataRevision,
-        generation: string,
-    ): Promise<Versioned<ColdPayloadAuthorityState>> {
-        const authority = await this.readColdPayloadAuthorityRecord(transaction, generation)
-        await transactionDone(transaction)
-        return { revision, value: authority }
-    }
-
-    private async readColdAliasFromTransaction(
-        transaction: IDBTransaction,
-        revision: DataRevision,
-        generation: string,
-        key: string,
-    ): Promise<Versioned<ColdAlias> | null> {
-        const record = (await requestResult(
-            transaction.objectStore('coldAliases').get(this.coldAliasKey(generation, key)),
-        )) as StoredRecord<ColdAlias> | undefined
-        await transactionDone(transaction)
-        if (!record) return null
-        if (record.generation !== generation) {
-            throw new TypeError('Cold alias stored generation does not match its lookup key')
-        }
-        if (record.value.key !== key) {
-            throw new TypeError('Cold alias stored logical key does not match its lookup key')
-        }
-        validateColdAlias(record.value)
-        return { revision, value: structuredClone(record.value) }
-    }
-
-    private async listColdAliasesFromTransaction(
-        transaction: IDBTransaction,
-        revision: DataRevision,
-        generation: string,
-    ): Promise<Versioned<ColdAlias[]>> {
-        const records = (await requestResult(
-            transaction.objectStore('coldAliases').index('byGeneration').getAll(generation),
-        )) as StoredRecord<ColdAlias>[]
-        await transactionDone(transaction)
-        const value = records.map((record) => {
-            if (record.generation !== generation) {
-                throw new TypeError('Cold alias stored generation does not match its index')
-            }
-            validateColdAlias(record.value)
-            if (record.key !== this.coldAliasKey(generation, record.value.key)) {
-                throw new TypeError('Cold alias stored logical key does not match its lookup key')
-            }
-            return structuredClone(record.value)
-        })
-        value.sort((left, right) => (left.key < right.key ? -1 : left.key > right.key ? 1 : 0))
-        return { revision, value }
-    }
-
-    private async readColdPayloadAuthorityRecord(
-        transaction: IDBTransaction,
-        generation: string,
-    ): Promise<ColdPayloadAuthorityState> {
-        const record = (await requestResult(
-            transaction.objectStore('coldPayloadAuthority').get(generation),
-        )) as StoredRecord<ColdPayloadAuthorityState> | undefined
-        if (!record) {
-            throw new TypeError('Persistent cold payload authority marker is missing')
-        }
-        if (record.generation !== generation) {
-            throw new TypeError('Persistent cold payload authority marker generation is invalid')
-        }
-        return parseColdPayloadAuthorityState(record.value)
-    }
-
-    private async requireColdPayloadAuthority(
-        transaction: IDBTransaction,
-        generation: string,
-        format: ColdPayloadAuthorityState['format'],
-        message: string,
-    ): Promise<ColdPayloadAuthorityState> {
-        const authority = await this.readColdPayloadAuthorityRecord(transaction, generation)
-        if (authority.format !== format) throw new Error(message)
-        return authority
-    }
-
     private async replaceChangedOwnerHeads(
         transaction: IDBTransaction,
         generation: string,
         input: WorkingSetCommit,
+        retained: AssetOwnerHead[],
     ): Promise<void> {
         const changedCharacters = new Set(commitCharacterParents(input).keys())
         if (input.deleteCharacterId) changedCharacters.add(input.deleteCharacterId)
@@ -1841,9 +1664,101 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
                 ),
             )
         }
-        for (const head of input.assetOwnerHeads ?? []) {
+        for (const head of [...retained, ...(input.assetOwnerHeads ?? [])]) {
             this.putAssetOwnerHead(transaction, generation, head)
         }
+    }
+
+    private async retainedCommitOwnerHeads(
+        transaction: IDBTransaction,
+        generation: string,
+        input: WorkingSetCommit,
+    ): Promise<AssetOwnerHead[]> {
+        const characterParents = commitCharacterParents(input)
+        if (!input.root && characterParents.size === 0) return []
+        const store = transaction.objectStore('assetOwnerHeads')
+        const records: StoredRecord<AssetOwnerHead>[] = []
+        if (input.root) {
+            for (const kind of [
+                'root-module-assets',
+                'persona-embedded-module-assets',
+            ] as const) {
+                const prefix = `${generation}:asset-owner-head:${kind}:`
+                records.push(...await requestResult(
+                    store.getAll(this.keyRangeFactory.bound(prefix, `${prefix}\uffff`)),
+                ) as StoredRecord<AssetOwnerHead>[])
+            }
+        }
+        for (const characterId of characterParents.keys()) {
+            const ownerKey = `character-additional-assets:${characterId}`
+            const record = await requestResult(
+                store.get(this.assetOwnerHeadKey(generation, ownerKey)),
+            ) as StoredRecord<AssetOwnerHead> | undefined
+            if (record) records.push(record)
+        }
+
+        let oldRoot: PersistentRoot | undefined
+        if (input.root) {
+            const record = await requestResult(
+                transaction.objectStore('root').get(generation),
+            ) as StoredRecord<PersistentRoot> | undefined
+            if (!record) throw new Error('Persistent active generation root is missing')
+            if (record.generation !== generation) {
+                throw new TypeError('Persistent root generation does not match its lookup key')
+            }
+            oldRoot = record.value
+        }
+
+        const retained: AssetOwnerHead[] = []
+        for (const record of records) {
+            if (record.generation !== generation) {
+                throw new TypeError('Asset owner head stored generation does not match its lookup key')
+            }
+            validateAssetOwnerHead(record.value)
+            const originalOwner = record.value.owner
+            if (record.key !== this.assetOwnerHeadKey(
+                generation,
+                assetOwnerLocatorKey(originalOwner),
+            )) {
+                throw new TypeError('Asset owner head stored locator does not match its lookup key')
+            }
+            let owner = originalOwner
+            let replacementTuple: ReplacementOwnerTuple | null
+            if (owner.kind === 'character-additional-assets') {
+                if (input.deleteCharacterId === owner.characterId) continue
+                replacementTuple = replacementOwnerTupleFromParent(
+                    characterParents.get(owner.characterId),
+                    'additionalAssets',
+                )
+            } else {
+                const property = owner.kind === 'root-module-assets' ? 'modules' : 'personas'
+                const index = retainedModuleIndex(
+                    oldRoot!,
+                    input.root!,
+                    property,
+                    owner.index,
+                    owner.kind === 'persona-embedded-module-assets',
+                )
+                if (index === null) continue
+                owner = { ...owner, index }
+                replacementTuple = owner.kind === 'root-module-assets'
+                    ? replacementOwnerTupleFromParent(input.root!.modules?.[index], 'assets')
+                    : replacementOwnerTupleFromParent(
+                        input.root!.personas?.[index]?.embeddedModule,
+                        'assets',
+                    )
+            }
+            const sourceTuple = await this.readReplacementOwnerTuple(
+                transaction,
+                generation,
+                oldRoot ?? ({} as PersistentRoot),
+                originalOwner,
+            )
+            if (replacementOwnerTuplesEqual(sourceTuple, replacementTuple)) {
+                retained.push(structuredClone({ ...record.value, owner }))
+            }
+        }
+        return retained
     }
 
     private putAssetOwnerHead(
@@ -1871,30 +1786,6 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
         } satisfies StoredRecord<AssetRepositoryAuthorityState>)
     }
 
-    private putColdAlias(
-        transaction: IDBTransaction,
-        generation: string,
-        alias: ColdAlias,
-    ): void {
-        transaction.objectStore('coldAliases').put({
-            key: this.coldAliasKey(generation, alias.key),
-            generation,
-            value: structuredClone(alias),
-        } satisfies StoredRecord<ColdAlias>)
-    }
-
-    private putColdPayloadAuthority(
-        transaction: IDBTransaction,
-        generation: string,
-        authority: ColdPayloadAuthorityState,
-    ): void {
-        transaction.objectStore('coldPayloadAuthority').put({
-            key: generation,
-            generation,
-            value: structuredClone(authority),
-        } satisfies StoredRecord<ColdPayloadAuthorityState>)
-    }
-
     private deleteAssetOwnerHeadKind(
         store: IDBObjectStore,
         generation: string,
@@ -1917,7 +1808,7 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
             revision,
             items: records
                 .sort(comparePluginStorageRecords)
-                .map(({ storageKey: key, byteSize }) => ({ key, byteSize })),
+                .map(({ owner, storageKey: key, byteSize }) => ({ owner, key, byteSize })),
         }
     }
 
@@ -1925,10 +1816,13 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
         transaction: IDBTransaction,
         revision: DataRevision,
         generation: string,
+        owner: string,
         key: string,
     ): Promise<Versioned<unknown> | null> {
         const record = (await requestResult(
-            transaction.objectStore('pluginStorage').get(this.pluginStorageKey(generation, key)),
+            transaction
+                .objectStore('pluginStorage')
+                .get(this.pluginStorageKey(generation, owner, key)),
         )) as StoredPluginStorage | undefined
         await transactionDone(transaction)
         return record ? { revision, value: record.value } : null
@@ -1991,6 +1885,18 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
         )
         await transactionDone(transaction)
         return { revision, ...result }
+    }
+
+    private async readCharacterSummaryFromTransaction(
+        transaction: IDBTransaction,
+        generation: string,
+        id: string,
+    ): Promise<CharacterSummary | null> {
+        const record = (await requestResult(
+            transaction.objectStore('catalog').get(this.characterKey(generation, id)),
+        )) as StoredRecord<CharacterSummary> | undefined
+        await transactionDone(transaction)
+        return record ? record.value : null
     }
 
     private async readCharacterFromTransaction(
@@ -2280,20 +2186,6 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
         )
         this.putAssetRepositoryAuthority(transaction, targetGeneration, assetAuthority)
 
-        const coldAuthority = await this.readColdPayloadAuthorityRecord(
-            transaction,
-            sourceGeneration,
-        )
-        if (coldAuthority.format === 'preparing') {
-            throw new Error('Active cold payload generation cannot be preparing')
-        }
-        await this.copyGeneration(
-            transaction.objectStore('coldAliases'),
-            sourceGeneration,
-            targetGeneration,
-        )
-        this.putColdPayloadAuthority(transaction, targetGeneration, coldAuthority)
-
         const ownerHeadRecords = (await requestResult(
             transaction.objectStore('assetOwnerHeads').index('byGeneration').getAll(sourceGeneration),
         )) as StoredRecord<AssetOwnerHead>[]
@@ -2348,7 +2240,7 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
         transaction: IDBTransaction,
         generation: string,
     ): Promise<boolean> {
-        const records = await this.readMetaRecordsByPrefix<string | SnapshotLeaseTarget>(
+        const records = await this.readMetaRecordsByPrefix<SnapshotLeaseTarget>(
             transaction.objectStore('meta'),
             'snapshotLease:',
         )
@@ -2364,12 +2256,22 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
         for (const alias of assetAliases) validateAssetAlias(alias)
         const ids = new Set<string>()
         const conversationIds = new Set<string>()
-        const { characters, botPresets, pluginCustomStorage, ...root } = databaseValue
+        const {
+            characters,
+            botPresets,
+            pluginCustomStorage,
+            pluginStorageMeta,
+            ...root
+        } = databaseValue as Database & { pluginStorageMeta?: PluginStorageMeta }
         this.putRoot(transaction, generation, root)
         this.putAssetRepositoryAuthority(transaction, generation, { format: 'legacy' })
-        this.putColdPayloadAuthority(transaction, generation, { format: 'legacy' })
         this.writePresetRows(transaction, generation, botPresets ?? [])
-        this.writePluginStorageRows(transaction, generation, pluginCustomStorage ?? {})
+        this.writePluginStorageRows(
+            transaction,
+            generation,
+            pluginCustomStorage ?? {},
+            pluginStorageMeta,
+        )
         for (const alias of assetAliases) {
             transaction.objectStore('assetAliases').put({
                 key: this.assetAliasKey(generation, alias.kind, alias.key),
@@ -2451,63 +2353,70 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
         await transactionDone(transaction)
     }
 
-    /** Removes abandoned staging data and generations retained only by expired leases. */
+    /** Removes inactive generations and generations retained only by expired leases. */
     private async sweepTemporaryGenerations(): Promise<void> {
         const database = this.requireDatabase()
         const cutoff = Date.now() - SNAPSHOT_LEASE_TTL_MS
-        const leaseTransaction = database.transaction('meta', 'readwrite')
-        const meta = leaseTransaction.objectStore('meta')
-        const leaseRecords = await this.readMetaRecordsByPrefix<string | SnapshotLeaseTarget>(
-            meta,
-            'snapshotLease:',
-        )
-        const leased = new Set<string>()
-        const reclaimCandidates = new Set<string>()
-        for (const record of leaseRecords) {
-            const target = this.snapshotLeaseTarget(record)
-            const lease = record.key.slice('snapshotLease:'.length)
-            const live =
-                activeSnapshotLeases.has(lease) || (record.createdAt ?? 0) >= cutoff
-            if (live) leased.add(target.generation)
-            else {
-                reclaimCandidates.add(target.generation)
-                meta.delete(record.key)
+        const transaction = database.transaction([...STORE_NAMES], 'readwrite')
+        const done = transactionDone(transaction)
+        void done.catch(() => {})
+        try {
+            const meta = transaction.objectStore('meta')
+            const leaseRecords = await this.readMetaRecordsByPrefix<SnapshotLeaseTarget>(
+                meta,
+                'snapshotLease:',
+            )
+            const leased = new Set<string>()
+            const reclaimCandidates = new Set<string>()
+            for (const record of leaseRecords) {
+                const target = this.snapshotLeaseTarget(record)
+                if (typeof record.createdAt !== 'number' || !Number.isFinite(record.createdAt)) {
+                    throw new TypeError('Snapshot lease createdAt is invalid')
+                }
+                const lease = record.key.slice('snapshotLease:'.length)
+                const live = activeSnapshotLeases.has(lease) || record.createdAt >= cutoff
+                if (live) leased.add(target.generation)
+                else {
+                    reclaimCandidates.add(target.generation)
+                    meta.delete(record.key)
+                }
             }
-        }
-        const active = await this.readActive(leaseTransaction)
-        await transactionDone(leaseTransaction)
-
-        const rootTransaction = database.transaction('root', 'readonly')
-        const rootKeys = await requestResult(rootTransaction.objectStore('root').getAllKeys())
-        await transactionDone(rootTransaction)
-        for (const key of rootKeys) {
-            const generation = String(key)
-            if (generation.startsWith('snapshot-') || generation.startsWith('staging-')) {
-                reclaimCandidates.add(generation)
+            const active = await this.readActive(transaction)
+            const rootKeys = await requestResult(transaction.objectStore('root').getAllKeys())
+            for (const key of rootKeys) {
+                if (typeof key === 'string' && /^revision-(0|[1-9]\d*)$/.test(key)) {
+                    reclaimCandidates.add(key)
+                }
             }
-        }
 
-        const transaction = database.transaction([...DATA_STORE_NAMES], 'readwrite')
-        for (const generation of reclaimCandidates) {
-            if (generation === active.generation || leased.has(generation)) continue
-            await this.deleteGenerationFromTransaction(transaction, generation)
+            for (const generation of reclaimCandidates) {
+                if (generation === active.generation || leased.has(generation)) continue
+                await this.deleteGenerationFromTransaction(transaction, generation)
+            }
+            await done
+        } catch (error) {
+            try {
+                transaction.abort()
+            } catch {}
+            try {
+                await done
+            } catch {}
+            throw error
         }
-        await transactionDone(transaction)
     }
 
     private snapshotLeaseTarget(record: SnapshotLeaseRecord): SnapshotLeaseTarget {
-        if (typeof record.value === 'string') {
-            return {
-                generation: record.value,
-                revision: this.revisionFromLease(record.key.slice('snapshotLease:'.length)),
-            }
+        const target = record.value as unknown
+        if (
+            !target
+            || typeof target !== 'object'
+            || typeof (target as { generation?: unknown }).generation !== 'string'
+            || !Number.isSafeInteger((target as { revision?: unknown }).revision)
+            || ((target as { revision: number }).revision < 0)
+        ) {
+            throw new TypeError('Snapshot lease target is invalid')
         }
-        return record.value
-    }
-
-    private revisionFromLease(lease: string): DataRevision {
-        const revision = Number.parseInt(lease.slice('snapshot-'.length).split('-')[0], 10)
-        return Number.isFinite(revision) ? revision : 0
+        return target as SnapshotLeaseTarget
     }
 
     private readMetaRecordsByPrefix<T>(
@@ -3222,15 +3131,19 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
         transaction: IDBTransaction,
         generation: string,
         values: Record<string, unknown>,
+        meta?: PluginStorageMeta,
     ): void {
         const valueStore = transaction.objectStore('pluginStorage')
         const metadataStore = transaction.objectStore('pluginStorageMetadata')
         for (const [ordinal, storageKey] of Object.keys(values).entries()) {
             const value = values[storageKey]
+            const owner = readPluginStorageMetaOwner(meta, storageKey)
             const metadata = {
-                key: this.pluginStorageKey(generation, storageKey),
+                key: this.pluginStorageKey(generation, owner, storageKey),
                 generation,
+                owner,
                 storageKey,
+                valueType: typeof value === 'string' ? 'string' : 'json',
                 byteSize: serializedByteSize(value),
                 ordinal,
             } satisfies StoredPluginStorageMetadata
@@ -3250,35 +3163,35 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
         const valueStore = transaction.objectStore('pluginStorage')
         const metadataStore = transaction.objectStore('pluginStorageMetadata')
         if (mutation.type === 'clear') {
-            await Promise.all([
-                this.deleteIndexRange(
-                    valueStore.index('byGeneration'),
-                    this.keyRangeFactory.only(generation),
-                ),
-                this.deleteIndexRange(
-                    metadataStore.index('byGeneration'),
-                    this.keyRangeFactory.only(generation),
-                ),
-            ])
+            const owned = (await requestResult(
+                metadataStore.index('byGeneration').getAll(generation),
+            )) as StoredPluginStorageMetadata[]
+            for (const record of owned) {
+                if (record.owner !== mutation.owner) continue
+                valueStore.delete(record.key)
+                metadataStore.delete(record.key)
+            }
             return
         }
         if (mutation.type === 'delete') {
-            const key = this.pluginStorageKey(generation, mutation.key)
+            const key = this.pluginStorageKey(generation, mutation.owner, mutation.key)
             valueStore.delete(key)
             metadataStore.delete(key)
             return
         }
         const existing = (await requestResult(
-            metadataStore.get(this.pluginStorageKey(generation, mutation.key)),
+            metadataStore.get(this.pluginStorageKey(generation, mutation.owner, mutation.key)),
         )) as StoredPluginStorageMetadata | undefined
         const ordinal = existing?.ordinal ?? await this.nextPluginStorageOrdinal(
             metadataStore,
             generation,
         )
         const metadata = {
-            key: this.pluginStorageKey(generation, mutation.key),
+            key: this.pluginStorageKey(generation, mutation.owner, mutation.key),
             generation,
+            owner: mutation.owner,
             storageKey: mutation.key,
+            valueType: typeof mutation.value === 'string' ? 'string' : 'json',
             byteSize: serializedByteSize(mutation.value),
             ordinal,
         } satisfies StoredPluginStorageMetadata
@@ -3362,341 +3275,6 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
         options?: IDBIndexParameters,
     ): void {
         if (!store.indexNames.contains(name)) store.createIndex(name, keyPath, options)
-    }
-
-    private migrateAssetAliasKeys(transaction: IDBTransaction): void {
-        const aliases = transaction.objectStore('assetAliases')
-        const records: StoredRecord<AssetAlias>[] = []
-        const request = aliases.openCursor()
-        request.onsuccess = () => {
-            const cursor = request.result
-            if (!cursor) {
-                for (const record of records) {
-                    aliases.put({
-                        ...record,
-                        key: this.assetAliasKey(
-                            record.generation,
-                            record.value.kind,
-                            record.value.key,
-                        ),
-                    })
-                }
-                return
-            }
-            const record = cursor.value as StoredRecord<AssetAlias>
-            validateAssetAlias(record.value)
-            records.push(record)
-            cursor.delete()
-            cursor.continue()
-        }
-    }
-
-    private backfillMessageOccurrences(transaction: IDBTransaction): void {
-        const pages = transaction.objectStore('messagePages')
-        transaction.objectStore('messageOccurrences').clear()
-        const request = pages.openCursor()
-        request.onsuccess = () => {
-            const cursor = request.result
-            if (!cursor) return
-            const page = cursor.value as StoredMessagePage
-            this.putMessageOccurrencePage(
-                transaction,
-                page.generation,
-                page.characterId,
-                page.conversationId,
-                page.pageIndex,
-                page.value,
-            )
-            cursor.continue()
-        }
-    }
-
-    private backfillAssetRepositoryAuthority(transaction: IDBTransaction): void {
-        const authority = transaction.objectStore('assetRepositoryAuthority')
-        const generations = new Set<string>()
-        const request = transaction.objectStore('meta').openCursor()
-        request.onsuccess = () => {
-            const cursor = request.result
-            if (!cursor) {
-                for (const generation of generations) {
-                    authority.put({
-                        key: generation,
-                        generation,
-                        value: { format: 'legacy' },
-                    } satisfies StoredRecord<AssetRepositoryAuthorityState>)
-                }
-                return
-            }
-            const record = cursor.value as { key: string; value: unknown }
-            if (record.key === 'activeGeneration' && typeof record.value === 'string') {
-                generations.add(record.value)
-            } else if (record.key.startsWith('snapshotLease:')) {
-                if (typeof record.value === 'string') {
-                    generations.add(record.value)
-                } else if (
-                    record.value !== null
-                    && typeof record.value === 'object'
-                    && typeof (record.value as { generation?: unknown }).generation === 'string'
-                ) {
-                    generations.add((record.value as { generation: string }).generation)
-                }
-            }
-            cursor.continue()
-        }
-    }
-
-    private backfillColdPayloadAuthority(transaction: IDBTransaction): void {
-        const authority = transaction.objectStore('coldPayloadAuthority')
-        const generations = new Set<string>()
-        const request = transaction.objectStore('meta').openCursor()
-        request.onsuccess = () => {
-            const cursor = request.result
-            if (!cursor) {
-                for (const generation of generations) {
-                    authority.put({
-                        key: generation,
-                        generation,
-                        value: { format: 'legacy' },
-                    } satisfies StoredRecord<ColdPayloadAuthorityState>)
-                }
-                return
-            }
-            const record = cursor.value as { key: string; value: unknown }
-            if (record.key === 'activeGeneration' && typeof record.value === 'string') {
-                generations.add(record.value)
-            } else if (record.key.startsWith('snapshotLease:')) {
-                if (typeof record.value === 'string') {
-                    generations.add(record.value)
-                } else if (
-                    record.value !== null
-                    && typeof record.value === 'object'
-                    && typeof (record.value as { generation?: unknown }).generation === 'string'
-                ) {
-                    generations.add((record.value as { generation: string }).generation)
-                }
-            }
-            cursor.continue()
-        }
-    }
-
-    private backfillOrderKeys<T>(
-        store: IDBObjectStore,
-        summaryFrom: (record: StoredRecord<T>) => { configuredIndex: number; recentAt: number },
-    ): void {
-        const request = store.openCursor()
-        request.onsuccess = () => {
-            const cursor = request.result
-            if (!cursor) return
-            const record = cursor.value as StoredRecord<T> & {
-                configuredIndex?: number
-                recentSortValue?: number
-            }
-            const summary = summaryFrom(record)
-            record.configuredIndex = summary.configuredIndex
-            record.recentSortValue = -summary.recentAt
-            cursor.update(record)
-            cursor.continue()
-        }
-    }
-
-    private backfillCharacterSummaries(transaction: IDBTransaction): void {
-        const catalog = transaction.objectStore('catalog')
-        const characters = transaction.objectStore('characters')
-        const request = catalog.openCursor()
-        request.onsuccess = () => {
-            const cursor = request.result
-            if (!cursor) return
-            const record = cursor.value as StoredRecord<CharacterSummary> & {
-                configuredIndex?: number
-                recentSortValue?: number
-            }
-            const detailRequest = characters.get(record.key)
-            detailRequest.onsuccess = () => {
-                const detail = (detailRequest.result as StoredRecord<CharacterDetail> | undefined)?.value
-                record.configuredIndex = record.value.configuredIndex
-                record.recentSortValue = -record.value.recentAt
-                record.value.type = detail?.type ?? 'character'
-                record.value.creatorNotes = detail?.creatorNotes
-                record.value.trashTime = detail?.trashTime
-                cursor.update(record)
-                cursor.continue()
-            }
-        }
-    }
-
-    private migrateRootRows(transaction: IDBTransaction): void {
-        const root = transaction.objectStore('root')
-        const presets = transaction.objectStore('presets')
-        const request = root.openCursor()
-        request.onsuccess = () => {
-            const cursor = request.result
-            if (!cursor) return
-            const record = cursor.value as StoredRecord<Record<string, unknown>>
-            const hasLegacyPresets = Object.prototype.hasOwnProperty.call(
-                record.value,
-                'botPresets',
-            )
-            if (hasLegacyPresets && !Array.isArray(record.value.botPresets)) {
-                transaction.abort()
-                return
-            }
-            const legacyPresets = hasLegacyPresets
-                ? record.value.botPresets as botPreset[]
-                : []
-            for (let configuredIndex = 0; configuredIndex < legacyPresets.length; configuredIndex++) {
-                const id = String(configuredIndex)
-                const preset = legacyPresets[configuredIndex]
-                presets.put({
-                    key: this.presetKey(record.generation, id),
-                    generation: record.generation,
-                    configuredIndex,
-                    value: {
-                        summary: { id, name: preset.name ?? '', image: preset.image, configuredIndex },
-                        preset,
-                    },
-                })
-            }
-            const legacy = record.value.pluginCustomStorage
-            if (
-                legacy !== undefined &&
-                (!legacy || typeof legacy !== 'object' || Array.isArray(legacy))
-            ) {
-                transaction.abort()
-                return
-            }
-            this.writePluginStorageRows(
-                transaction,
-                record.generation,
-                (legacy ?? {}) as Record<string, unknown>,
-            )
-            const {
-                characters: _characters,
-                botPresets: _botPresets,
-                pluginCustomStorage: _pluginCustomStorage,
-                ...value
-            } = record.value
-            cursor.update({ ...record, value })
-            cursor.continue()
-        }
-    }
-
-    private backfillPluginStorageMetadata(transaction: IDBTransaction): void {
-        const valueStore = transaction.objectStore('pluginStorage')
-        const metadataStore = transaction.objectStore('pluginStorageMetadata')
-        const request = valueStore.openCursor()
-        request.onsuccess = () => {
-            const cursor = request.result
-            if (!cursor) return
-            const record = cursor.value as StoredPluginStorage
-            metadataStore.put({
-                key: record.key,
-                generation: record.generation,
-                storageKey: record.storageKey,
-                byteSize: record.byteSize ?? serializedByteSize(record.value),
-                ordinal: record.ordinal ?? 0,
-            } satisfies StoredPluginStorageMetadata)
-            cursor.continue()
-        }
-    }
-
-    // Version 15 escapes user-controlled key components; rows written before
-    // that carry raw ids in their joined keys and can collide across distinct
-    // (characterId, conversationId) tuples. The migration scans conversations
-    // once, rewriting each affected conversation from its authoritative
-    // summary fields, and reaches the matching message rows through their
-    // byConversationPage index so clean libraries never scan the page stores.
-    // Rows with an unexpected shape are left untouched rather than dropped.
-    private migrateCompositeKeyEncoding(transaction: IDBTransaction): void {
-        const conversations = transaction.objectStore('conversations')
-        const affected: {
-            record: Record<string, unknown>
-            oldKey: string
-            generation: string
-            characterId: string
-            conversationId: string
-        }[] = []
-        const request = conversations.openCursor()
-        request.onsuccess = () => {
-            const cursor = request.result
-            if (!cursor) {
-                for (const entry of affected) this.applyCompositeKeyRewrite(transaction, entry)
-                return
-            }
-            const record = cursor.value as Record<string, unknown> & {
-                key: string
-                generation: string
-                value?: { summary?: { characterId?: unknown; id?: unknown } }
-            }
-            const characterId = record.value?.summary?.characterId
-            const conversationId = record.value?.summary?.id
-            if (typeof characterId === 'string' && typeof conversationId === 'string') {
-                const rebuilt = this.conversationKey(record.generation, characterId, conversationId)
-                if (rebuilt !== record.key) {
-                    affected.push({
-                        record,
-                        oldKey: record.key,
-                        generation: record.generation,
-                        characterId,
-                        conversationId,
-                    })
-                }
-            }
-            cursor.continue()
-        }
-    }
-
-    private applyCompositeKeyRewrite(
-        transaction: IDBTransaction,
-        entry: {
-            record: Record<string, unknown>
-            oldKey: string
-            generation: string
-            characterId: string
-            conversationId: string
-        },
-    ): void {
-        const conversations = transaction.objectStore('conversations')
-        conversations.delete(entry.oldKey)
-        conversations.put({
-            ...entry.record,
-            key: this.conversationKey(entry.generation, entry.characterId, entry.conversationId),
-        })
-        for (const storeName of ['messagePages', 'messageOccurrences'] as const) {
-            const store = transaction.objectStore(storeName)
-            const range = this.keyRangeFactory.bound(
-                [entry.generation, entry.characterId, entry.conversationId, 0],
-                [entry.generation, entry.characterId, entry.conversationId, MAX_INDEX_VALUE],
-            )
-            const pages = store.index('byConversationPage').openCursor(range)
-            const staleKeys: string[] = []
-            const rewritten: Record<string, unknown>[] = []
-            pages.onsuccess = () => {
-                const cursor = pages.result
-                if (!cursor) {
-                    for (const key of staleKeys) store.delete(key)
-                    for (const record of rewritten) store.put(record)
-                    return
-                }
-                const record = cursor.value as Record<string, unknown> & {
-                    key: string
-                    pageIndex?: unknown
-                }
-                if (typeof record.pageIndex === 'number') {
-                    const page = storeName === 'messagePages'
-                        ? String(record.pageIndex)
-                        : String(record.pageIndex).padStart(16, '0')
-                    const prefix = storeName === 'messagePages'
-                        ? 'message-page'
-                        : 'message-occurrence-page'
-                    const rebuilt = `${entry.generation}:${prefix}:${encodeKeyComponent(entry.characterId)}:${encodeKeyComponent(entry.conversationId)}:${page}`
-                    if (rebuilt !== record.key) {
-                        staleKeys.push(record.key)
-                        rewritten.push({ ...record, key: rebuilt })
-                    }
-                }
-                cursor.continue()
-            }
-        }
     }
 
     private generationFor(revision: DataRevision): string {
@@ -3791,8 +3369,8 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
         })
     }
 
-    private pluginStorageKey(generation: string, key: string): string {
-        return `${generation}:plugin-storage:${key}`
+    private pluginStorageKey(generation: string, owner: string, key: string): string {
+        return `${generation}:plugin-storage:${JSON.stringify([owner, key])}`
     }
 
     private assetAliasKey(generation: string, kind: AssetAlias['kind'], key: string): string {
@@ -3803,7 +3381,4 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
         return `${generation}:asset-owner-head:${ownerKey}`
     }
 
-    private coldAliasKey(generation: string, key: string): string {
-        return `${generation}:cold-alias:${key}`
-    }
 }

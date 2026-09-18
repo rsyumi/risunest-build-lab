@@ -7,6 +7,11 @@ const forbiddenMarkers = [
   "__RISUNEST_LINUX_BENCHMARK__",
   "__RISUNEST_TOKENIZER_BENCHMARK__",
   "__streamingSmoke",
+  "__startupMetrics",
+  "__startupRecord",
+  "__startupObserveCall",
+  "M0-stage:",
+  "risunest-m0-owner",
   "__testResponsesAPI",
   "resetOpenedFileListenersForTest",
   "VITE_TOKENIZER_BENCHMARK",
@@ -38,7 +43,7 @@ export function isVerificationModule(id) {
       normalized,
     );
   }
-  return /(?:^|\/)(?:benchmarks|tests|__tests__|__fixtures__)(?:\/|$)|\.(?:test|spec|bench|testSupport)\.[cm]?[jt]sx?$/.test(
+  return /(?:^|\/)(?:benchmarks|tests|__tests__|__fixtures__)(?:\/|$)|\.(?:test|spec|bench|testSupport)\.(?:[cm]?[jt]sx?|svelte)$/.test(
     normalized,
   );
 }

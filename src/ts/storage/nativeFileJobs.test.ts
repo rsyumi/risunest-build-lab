@@ -6,7 +6,9 @@ import {
     NativeFileJobError,
     runNativeOfficialAccountSnapshotRestore,
     runNativeBlockRisuSaveRestore,
+    runNativeArchiveExport,
     runNativeArchiveRestore,
+    runNativeArchiveReferenceExport,
     runNativeBlockRisuSaveExport,
     runNativeLegacyLocalBackupExport,
     runNativeCompatibleLocalBackupExport,
@@ -19,7 +21,13 @@ import {
     type NativeFileJobStatus,
     type NativeOfficialPublicationAttemptResult,
     type NativeOfficialPublicationRetryRequest,
+    type NativeStagedPluginChoice,
+    type NativeStagedPluginPreview,
 } from './nativeFileJobs'
+import {
+    continueCommittedWorkingSetRefresh,
+    retryCommittedWorkingSetRefreshWithContinuation,
+} from './committedWorkingSetContinuation'
 
 function status(
     state: NativeFileJobStatus['state'],
@@ -42,24 +50,52 @@ function status(
 function restoreRuntime(
     revision: number,
     options: {
-        capture?: () => void | Promise<void>
+        capture?: (reason: string) => void | Promise<void>
         refresh?: (revision: number) => void | Promise<void>
+        markRefreshRequired?: (revision: number, error: unknown) => void
         acquire?: () => void | Promise<void>
         release?: () => void
+        projection?: 'applied' | 'refresh-required'
+        /** Revision captured after explicit restore preparation and user choices. */
+        fencedRevision?: number
     } = {},
 ) {
+    let captures = 0
     return {
-        capturePersistentMutationToken: async () => {
-            await options.capture?.()
-            return { revision, mutationGeneration: 1 }
-        },
-        acquireDestructiveReplacementFence: async () => {
-            await options.acquire?.()
+        getStorageAuthorityEpoch: () => 2,
+        retryCommittedWorkingSetRefresh: async () => {
+            await options.refresh?.(revision + 1)
             return {
+                kind: 'committed' as const,
+                revision: revision + 1,
+                projection: options.projection ?? 'applied' as const,
+            }
+        },
+        capturePersistentMutationToken: async (reason: string) => {
+            await options.capture?.(reason)
+            return {
+                revision: captures++ > 0 ? options.fencedRevision ?? revision : revision,
+                mutationGeneration: 1,
+            }
+        },
+        markCommittedWorkingSetRefreshRequired: (
+            committedRevision: number,
+            error: unknown,
+        ) => options.markRefreshRequired?.(committedRevision, error),
+        acquireDestructiveReplacementFence: async (token: { revision: number; mutationGeneration: number }) => {
+            await options.acquire?.()
+            expect(token.revision).toBe(options.fencedRevision ?? revision)
+            return {
+                revision: token.revision,
                 refreshCommittedWorkingSet: async (
                     committedRevision: number,
                 ) => {
                     await options.refresh?.(committedRevision)
+                    return {
+                        kind: 'committed',
+                        revision: committedRevision,
+                        projection: options.projection ?? 'applied',
+                    } as const
                 },
                 release: () => options.release?.(),
             }
@@ -67,14 +103,380 @@ function restoreRuntime(
     }
 }
 
+function pluginValuePreview(keys: readonly string[]): NativeStagedPluginPreview {
+    return {
+        values: keys.map((key, index) => ({
+            key,
+            byteSize: 12 + index,
+            valueType: 'json',
+        })),
+        pluginNames: ['provider-manager', 'yumi-translator'],
+    }
+}
+
+/** One import that reaches the plugin value pass, answers it, and ends. */
+async function restoreOverPluginValues(options: {
+    jobId: string
+    preview: NativeStagedPluginPreview
+    fenceFails?: boolean
+    answer: NativeStagedPluginChoice | null
+    onOffer(remembered: NativeStagedPluginChoice | null | undefined): void
+}): Promise<void> {
+    const cancels = options.fenceFails === true || options.answer === null
+    const statuses: NativeFileJobStatus[] = [
+        {
+            ...status('waitingForInput'),
+            jobId: options.jobId,
+            phase: 'awaiting-activation',
+            pluginValuePreview: options.preview,
+        },
+        cancels
+            ? {
+                  ...status('cancelled'),
+                  jobId: options.jobId,
+                  phase: 'awaiting-activation',
+              }
+            : {
+                  ...status('succeeded', {
+                      revision: 9,
+                      sourceBytes: 128,
+                      sourceSha256: 'c'.repeat(64),
+                      characterCount: 1,
+                      presetCount: 0,
+                      warningCodes: [],
+                  }),
+                  jobId: options.jobId,
+              },
+    ]
+    const runtime = restoreRuntime(
+        8,
+        options.fenceFails
+            ? {
+                  acquire: () => {
+                      throw new Error('another mutation advanced the revision')
+                  },
+              }
+            : {},
+    )
+    const running = runNativeBlockRisuSaveRestore(
+        runtime,
+        { type: 'desktopPath', path: 'save.risudat' },
+        {
+            assignPluginValues: async (_preview, remembered) => {
+                options.onOffer(remembered)
+                return options.answer
+            },
+        },
+        {
+            isTauri: () => true,
+            invoke: async (command) => {
+                if (command === 'native_file_job_start')
+                    return { jobId: options.jobId }
+                if (command === 'native_file_job_status') return statuses.shift()
+                if (command === 'native_plugin_values_assign') return undefined
+                if (command === 'native_file_job_cancel') return 'requested'
+                if (command === 'native_file_job_finalize') return 'requested'
+                if (command === 'native_file_job_forget') return true
+                throw new Error(`Unexpected command: ${command}`)
+            },
+            wait: async () => undefined,
+        },
+    )
+    if (cancels) await expect(running).rejects.toThrow()
+    else await running
+}
+
 describe('native file jobs', () => {
+    it('flushes a device-section export without acquiring the old renderer replacement fence', async () => {
+        localStorage.removeItem('risuNestPortableExportIntent')
+        const calls: Array<[string, Record<string, unknown> | undefined]> = []
+        let revision = 20
+        const runtime = {
+            ...restoreRuntime(20, {
+                capture: () => {
+                    throw new Error('old mutation token must not be captured')
+                },
+                acquire: () => {
+                    throw new Error('old replacement fence must not be acquired')
+                },
+            }),
+            get revision() {
+                return revision
+            },
+            flushPendingData: async (reason: string) => {
+                calls.push([`flush:${reason}`, undefined])
+                revision = 21
+            },
+        }
+        const result = {
+            revision: 21,
+            sourceBytes: 128,
+            sourceSha256: 'd'.repeat(64),
+            characterCount: 1,
+            presetCount: 0,
+            warningCodes: [],
+        }
+
+        await expect(
+            runNativeArchiveExport(
+                runtime,
+                { type: 'desktopPath', path: 'C:\\chosen\\device.risunest' },
+                { library: true, deviceSections: ['hypa'] },
+                {},
+                {
+                    isTauri: () => true,
+                    invoke: async (command, args) => {
+                        calls.push([command, args])
+                        if (command === 'native_file_job_start')
+                            return { jobId: 'device-export-1' }
+                        if (command === 'native_file_job_status')
+                            return {
+                                ...status('succeeded', result),
+                                jobId: 'device-export-1',
+                                kind: 'export-portable-backup',
+                            }
+                        if (command === 'native_file_job_forget') return true
+                        throw new Error(`Unexpected command: ${command}`)
+                    },
+                    wait: async () => undefined,
+                    copyToAndroidSaf: async () => ({ bytes: 0, warningCodes: [] }),
+                },
+            ),
+        ).resolves.toEqual(result)
+
+        expect(calls.slice(0, 2)).toEqual([
+            ['flush:native-portable-export', undefined],
+            [
+                'native_file_job_start',
+                {
+                    request: {
+                        kind: 'export-portable-backup',
+                        expectedRevision: 21,
+                        selection: { library: true, deviceSections: ['hypa'] },
+                        destination: 'C:\\chosen\\device.risunest',
+                    },
+                },
+            ],
+        ])
+        expect(calls.map(([command]) => command)).not.toContain(
+            'native_device_backup_bootstrap',
+        )
+        expect(localStorage.getItem('risuNestPortableExportIntent')).toBeNull()
+    })
+
+    it('starts a library-only portable export from an opaque conflict source', async () => {
+        const calls: Array<[string, Record<string, unknown> | undefined]> = []
+        const result = {
+            revision: 0,
+            sourceBytes: 128,
+            sourceSha256: 'a'.repeat(64),
+            characterCount: 1,
+            presetCount: 0,
+            warningCodes: [],
+        }
+
+        await expect(runNativeArchiveReferenceExport(
+            { type: 'conflictReference', token: 'external:source-token' },
+            { type: 'desktopPath', path: 'C:\\chosen\\conflict.risunest' },
+            {},
+            {
+                isTauri: () => true,
+                invoke: async (command, args) => {
+                    calls.push([command, args])
+                    if (command === 'native_file_job_start') return { jobId: 'export-1' }
+                    if (command === 'native_file_job_status') return {
+                        ...status('succeeded', result),
+                        jobId: 'export-1',
+                        kind: 'export-portable-backup',
+                    }
+                    if (command === 'native_file_job_forget') return true
+                    throw new Error(`Unexpected command: ${command}`)
+                },
+                wait: async () => undefined,
+                copyToAndroidSaf: async () => ({ bytes: 0, warningCodes: [] }),
+            },
+        )).resolves.toEqual(result)
+
+        expect(calls[0]).toEqual([
+            'native_file_job_start',
+            {
+                request: {
+                    kind: 'export-portable-backup',
+                    source: { type: 'conflictReference', token: 'external:source-token' },
+                    selection: { library: true, deviceSections: [] },
+                    destination: 'C:\\chosen\\conflict.risunest',
+                },
+            },
+        ])
+        expect(JSON.stringify(calls[0])).not.toContain('expectedRevision')
+    })
+
+    it.each(['none', 'ack', 'open'] as const)(
+        'acknowledges and reopens a committed portable device session before refresh (failure: %s)',
+        async (failure) => {
+            const calls: string[] = []
+            const events: string[] = []
+            let staleWritesBlocked = false
+            let storeOpen = false
+            let failAck = failure === 'ack'
+            let failOpen = failure === 'open'
+            const refresh = vi.fn(async () => {
+                if (!storeOpen) throw new Error('persistent store has not been opened')
+                events.push('working-set-refresh')
+            })
+            const markRefreshRequired = vi.fn((revision: number) => {
+                expect(revision).toBe(4)
+                staleWritesBlocked = true
+                events.push('refresh-required')
+            })
+            const committed = {
+                revision: 4,
+                sourceBytes: 128,
+                sourceSha256: 'b'.repeat(64),
+                characterCount: 1,
+                presetCount: 0,
+                warningCodes: [],
+            }
+            const statuses: NativeFileJobStatus[] = [
+                {
+                    ...status('waitingForInput'),
+                    kind: 'restore-portable-backup',
+                    phase: 'awaiting-backup-selection',
+                    restorePreview: {
+                        libraryIncluded: true,
+                        repairRequired: false,
+                        deviceSections: ['hypa'],
+                    },
+                },
+                {
+                    ...status('waitingForInput'),
+                    kind: 'restore-portable-backup',
+                    phase: 'awaiting-activation',
+                },
+                {
+                    ...status('succeeded', committed),
+                    kind: 'restore-portable-backup',
+                    deviceSessionId: 'device-session',
+                },
+            ]
+            const invoke = async (command: string) => {
+                calls.push(command)
+                if (command === 'native_file_job_start') return { jobId: 'job-1' }
+                if (command === 'native_file_job_status') return statuses.shift()
+                if (command === 'native_portable_select_sections') return undefined
+                if (command === 'native_file_job_finalize') return undefined
+                if (command === 'native_device_backup_recovery_complete') {
+                    events.push('device-ack')
+                    if (failAck) throw new Error('synthetic ack failure')
+                    return undefined
+                }
+                if (command === 'pds_open') {
+                    events.push('persistent-store-open')
+                    if (failOpen) throw new Error('synthetic open failure')
+                    storeOpen = true
+                    return { revision: 4 }
+                }
+                if (command === 'native_file_job_forget') return true
+                throw new Error(`Unexpected command: ${command}`)
+            }
+            const runtime = restoreRuntime(3, {
+                refresh,
+                markRefreshRequired,
+                release: () => {
+                    if (failure !== 'none') expect(staleWritesBlocked).toBe(true)
+                    events.push('fence-released')
+                },
+            })
+            const running = runNativeArchiveRestore(
+                runtime,
+                { type: 'desktopPath', path: 'C:\\synthetic\\portable.risunest' },
+                {
+                    choosePortableSections: async () => ({
+                        library: true,
+                        deviceSections: ['hypa'],
+                    }),
+                    onNativeStatus: async (value) => {
+                        if (value.state === 'succeeded') events.push('library-hold')
+                    },
+                },
+                {
+                    isTauri: () => true,
+                    invoke,
+                    wait: async () => undefined,
+                },
+            )
+
+            if (failure !== 'none') {
+                await expect(running).rejects.toBeInstanceOf(
+                    NativeFileJobActivationCommittedError,
+                )
+                expect(refresh).not.toHaveBeenCalled()
+                expect(markRefreshRequired).toHaveBeenCalledOnce()
+                expect(staleWritesBlocked).toBe(true)
+                expect(calls).not.toContain('native_file_job_forget')
+                expect(calls.filter(command => command === 'native_file_job_finalize'))
+                    .toHaveLength(1)
+                failAck = false
+                failOpen = false
+                await expect(
+                    retryCommittedWorkingSetRefreshWithContinuation(runtime),
+                ).resolves.toMatchObject({ revision: 4, projection: 'applied' })
+                expect(calls.filter(command => command === 'native_file_job_finalize'))
+                    .toHaveLength(1)
+                expect(calls.filter(command => command === 'native_file_job_start'))
+                    .toHaveLength(1)
+                expect(refresh).toHaveBeenCalledOnce()
+                expect(calls).toContain('native_file_job_forget')
+                expect(calls.filter(command => command === 'native_device_backup_recovery_complete'))
+                    .toHaveLength(failure === 'ack' ? 2 : 1)
+                expect(calls.filter(command => command === 'pds_open'))
+                    .toHaveLength(failure === 'open' ? 2 : 1)
+            } else {
+                await expect(running).resolves.toEqual(committed)
+                expect(refresh).toHaveBeenCalledOnce()
+                expect(markRefreshRequired).not.toHaveBeenCalled()
+                expect(calls).toContain('native_file_job_forget')
+            }
+            expect(events).toEqual(
+                failure === 'ack'
+                    ? [
+                        'library-hold',
+                        'device-ack',
+                        'refresh-required',
+                        'fence-released',
+                        'device-ack',
+                        'persistent-store-open',
+                        'working-set-refresh',
+                    ]
+                    : failure === 'open'
+                      ? [
+                            'library-hold',
+                            'device-ack',
+                            'persistent-store-open',
+                            'refresh-required',
+                            'fence-released',
+                            'persistent-store-open',
+                            'working-set-refresh',
+                        ]
+                    : [
+                        'library-hold',
+                        'device-ack',
+                        'persistent-store-open',
+                        'working-set-refresh',
+                        'fence-released',
+                    ],
+            )
+        },
+    )
+
     it.each(['chooser', 'fence'])(
-        'cancels portable restore aborted during %s before native section approval',
+        'keeps portable selection outside the replacement fence when aborted during %s',
         async (point) => {
             const abort = new AbortController()
             const commands: string[] = []
+            const events: string[] = []
             const released = vi.fn()
-            let polled = false
+            let polls = 0
             const preview = {
                 ...status('waitingForInput'),
                 kind: 'restore-portable-backup' as const,
@@ -82,7 +484,7 @@ describe('native file jobs', () => {
                 restorePreview: {
                     libraryIncluded: true,
                     repairRequired: false,
-                    deviceSections: ['local-storage'],
+                    deviceSections: ['hypa'],
                 },
             }
             await expect(
@@ -99,11 +501,14 @@ describe('native file jobs', () => {
                     },
                     {
                         signal: abort.signal,
+                        onBlockingChange: (blocking) => {
+                            events.push(`blocking:${blocking}`)
+                        },
                         choosePortableSections: async () => {
                             if (point === 'chooser') abort.abort()
                             return {
                                 library: true,
-                                deviceSections: ['local-storage'],
+                                deviceSections: ['hypa'],
                             }
                         },
                     },
@@ -115,9 +520,16 @@ describe('native file jobs', () => {
                             if (command === 'native_file_job_start')
                                 return { jobId: 'job-1' }
                             if (command === 'native_file_job_status') {
-                                if (!polled) {
-                                    polled = true
+                                polls += 1
+                                if (polls === 1) {
                                     return preview
+                                }
+                                if (point === 'fence' && polls === 2) {
+                                    return {
+                                        ...status('waitingForInput'),
+                                        kind: 'restore-portable-backup',
+                                        phase: 'awaiting-activation',
+                                    }
                                 }
                                 return {
                                     ...status('cancelled'),
@@ -130,7 +542,17 @@ describe('native file jobs', () => {
                 ),
             ).rejects.toMatchObject({ name: 'AbortError' })
             expect(commands).toContain('native_file_job_cancel')
-            expect(commands).not.toContain('native_portable_select_sections')
+            expect(commands.includes('native_portable_select_sections')).toBe(
+                point === 'fence',
+            )
+            if (point === 'fence') {
+                expect(events).toEqual(['blocking:true', 'blocking:false'])
+                expect(commands.indexOf('native_portable_select_sections')).toBeLessThan(
+                    commands.indexOf('native_file_job_cancel'),
+                )
+            } else {
+                expect(events).toEqual([])
+            }
             expect(released).toHaveBeenCalledTimes(point === 'fence' ? 1 : 0)
         },
     )
@@ -412,11 +834,14 @@ describe('native file jobs', () => {
                     wait: async () => undefined,
                     copyToAndroidSaf: async () => ({
                         bytes: 2048,
-                        warningCodes: [],
+                        warningCodes: ['provider-warning'],
                     }),
                 },
             ),
-        ).rejects.toMatchObject({ code: 'length-mismatch' })
+        ).rejects.toMatchObject({
+            code: 'length-mismatch',
+            warningCodes: ['provider-warning', 'partial-destination-may-remain'],
+        })
         expect(commands).toEqual([
             'native_file_job_start',
             'native_file_job_status',
@@ -568,6 +993,205 @@ describe('native file jobs', () => {
         expect(JSON.stringify(calls)).not.toContain('Uint8Array')
     })
 
+    it('assigns the plugin values a save left unowned before the replacement is applied', async () => {
+        const calls: Array<[string, Record<string, unknown> | undefined]> = []
+        const statuses: NativeFileJobStatus[] = [
+            {
+                ...status('waitingForInput'),
+                phase: 'awaiting-activation',
+                pluginValuePreview: {
+                    values: [
+                        { key: 'pm_store', byteSize: 24, valueType: 'json' },
+                        { key: 'yt_glossary', byteSize: 12, valueType: 'string' },
+                    ],
+                    pluginNames: ['provider-manager', 'yumi-translator'],
+                },
+            },
+            {
+                ...status('succeeded', {
+                    revision: 9,
+                    sourceBytes: 128,
+                    sourceSha256: 'c'.repeat(64),
+                    characterCount: 1,
+                    presetCount: 0,
+                    warningCodes: [],
+                }),
+            },
+        ]
+
+        await runNativeBlockRisuSaveRestore(
+            restoreRuntime(8),
+            { type: 'desktopPath', path: 'save.risudat' },
+            {
+                assignPluginValues: async (preview) => {
+                    expect(preview.values.map((value) => value.key)).toEqual([
+                        'pm_store',
+                        'yt_glossary',
+                    ])
+                    expect(preview.pluginNames).toEqual([
+                        'provider-manager',
+                        'yumi-translator',
+                    ])
+                    return {
+                        assignments: [
+                            { owner: 'provider-manager', keys: ['pm_store'] },
+                        ],
+                        automatic: false,
+                    }
+                },
+            },
+            {
+                isTauri: () => true,
+                invoke: async (command, args) => {
+                    calls.push([command, args])
+                    if (command === 'native_file_job_start') return { jobId: 'job-1' }
+                    if (command === 'native_file_job_status') return statuses.shift()
+                    if (command === 'native_plugin_values_assign') return undefined
+                    if (command === 'native_file_job_finalize') return 'requested'
+                    if (command === 'native_file_job_forget') return true
+                    throw new Error(`Unexpected command: ${command}`)
+                },
+                wait: async () => undefined,
+            },
+        )
+
+        const assigned = calls.find(([command]) => command === 'native_plugin_values_assign')
+        expect(assigned?.[1]).toEqual({
+            jobId: 'job-1',
+            assignments: [{ owner: 'provider-manager', keys: ['pm_store'] }],
+            automatic: false,
+        })
+        const order = calls.map(([command]) => command)
+        expect(order.indexOf('native_plugin_values_assign')).toBeLessThan(
+            order.indexOf('native_file_job_finalize'),
+        )
+    })
+
+    it('cancels the import when the plugin value pass is closed without an answer', async () => {
+        const commands: string[] = []
+        const acquire = vi.fn()
+        const statuses: NativeFileJobStatus[] = [
+            {
+                ...status('waitingForInput'),
+                phase: 'awaiting-activation',
+                pluginValuePreview: {
+                    values: [{ key: 'pm_store', byteSize: 24, valueType: 'json' }],
+                    pluginNames: [],
+                },
+            },
+            { ...status('cancelled'), phase: 'awaiting-activation' },
+        ]
+
+        await expect(
+            runNativeBlockRisuSaveRestore(
+                restoreRuntime(8, { acquire }),
+                { type: 'desktopPath', path: 'save.risudat' },
+                { assignPluginValues: async () => null },
+                {
+                    isTauri: () => true,
+                    invoke: async (command) => {
+                        commands.push(command)
+                        if (command === 'native_file_job_start') return { jobId: 'job-1' }
+                        if (command === 'native_file_job_status') return statuses.shift()
+                        if (command === 'native_file_job_cancel') return 'requested'
+                        if (command === 'native_file_job_forget') return true
+                        throw new Error(`Unexpected command: ${command}`)
+                    },
+                    wait: async () => undefined,
+                },
+            ),
+        ).rejects.toThrow()
+
+        expect(commands).toContain('native_file_job_cancel')
+        expect(commands).not.toContain('native_plugin_values_assign')
+        expect(commands).not.toContain('native_file_job_finalize')
+        expect(acquire).not.toHaveBeenCalled()
+    })
+
+    it('keeps the plugin value answers for the attempt after a lost fence', async () => {
+        const preview = pluginValuePreview(['pm_store', 'pm_keys'])
+        const answer: NativeStagedPluginChoice = {
+            assignments: [{ owner: 'provider-manager', keys: ['pm_store'] }],
+            automatic: false,
+        }
+        const offered: (NativeStagedPluginChoice | null | undefined)[] = []
+
+        await restoreOverPluginValues({
+            jobId: 'job-1',
+            preview,
+            fenceFails: true,
+            answer,
+            onOffer: (remembered) => offered.push(remembered),
+        })
+        await restoreOverPluginValues({
+            jobId: 'job-2',
+            preview,
+            answer,
+            onOffer: (remembered) => offered.push(remembered),
+        })
+
+        expect(offered[1]).toEqual(answer)
+        expect(offered[0]).toBeNull()
+    })
+
+    it('drops the plugin value answers once the import carrying them is applied', async () => {
+        const preview = pluginValuePreview(['yt_glossary', 'yt_terms'])
+        const answer: NativeStagedPluginChoice = {
+            assignments: [{ owner: 'yumi-translator', keys: ['yt_glossary'] }],
+            automatic: true,
+        }
+        const offered: (NativeStagedPluginChoice | null | undefined)[] = []
+
+        await restoreOverPluginValues({
+            jobId: 'job-1',
+            preview,
+            fenceFails: true,
+            answer,
+            onOffer: (remembered) => offered.push(remembered),
+        })
+        await restoreOverPluginValues({
+            jobId: 'job-2',
+            preview,
+            answer,
+            onOffer: (remembered) => offered.push(remembered),
+        })
+        await restoreOverPluginValues({
+            jobId: 'job-3',
+            preview,
+            answer,
+            onOffer: (remembered) => offered.push(remembered),
+        })
+
+        expect(offered[1]).toEqual(answer)
+        expect(offered[2]).toBeNull()
+    })
+
+    it('offers nothing to a save that left a different set of values unowned', async () => {
+        const answered = pluginValuePreview(['hp_index', 'hp_chunks'])
+        const other = pluginValuePreview(['hp_index', 'hp_vectors'])
+        const answer: NativeStagedPluginChoice = {
+            assignments: [{ owner: 'provider-manager', keys: ['hp_index'] }],
+            automatic: false,
+        }
+        const offered: (NativeStagedPluginChoice | null | undefined)[] = []
+
+        await restoreOverPluginValues({
+            jobId: 'job-1',
+            preview: answered,
+            fenceFails: true,
+            answer,
+            onOffer: (remembered) => offered.push(remembered),
+        })
+        await restoreOverPluginValues({
+            jobId: 'job-2',
+            preview: other,
+            answer: null,
+            onOffer: (remembered) => offered.push(remembered),
+        })
+
+        expect(offered[1]).toBeNull()
+    })
+
     it('restores an official snapshot without transferring its database bytes through IPC', async () => {
         const calls: Array<[string, Record<string, unknown> | undefined]> = []
         const events: string[] = []
@@ -635,8 +1259,8 @@ describe('native file jobs', () => {
         expect(events).toEqual([
             'fence-acquired',
             'refreshed',
-            'plugins-reloaded',
             'fence-released',
+            'plugins-reloaded',
         ])
         expect(calls[0]).toEqual([
             'native_file_job_start',
@@ -1146,8 +1770,8 @@ describe('native file jobs', () => {
             'fresh-status',
             'fence-acquired',
             'refreshed',
-            'plugins-reloaded',
             'fence-released',
+            'plugins-reloaded',
         ])
         expect(calls).toEqual([
             [
@@ -1164,7 +1788,10 @@ describe('native file jobs', () => {
                 },
             ],
             ['native_file_job_status', { jobId: 'lossless-restore' }],
-            ['native_file_job_finalize', { jobId: 'lossless-restore' }],
+            [
+                'native_file_job_finalize',
+                { jobId: 'lossless-restore', expectedRevision: 17 },
+            ],
             ['native_file_job_status', { jobId: 'lossless-restore' }],
             ['native_file_job_forget', { jobId: 'lossless-restore' }],
         ])
@@ -1417,7 +2044,10 @@ describe('native file jobs', () => {
                     }),
                 },
             ),
-        ).rejects.toMatchObject({ code: 'length-mismatch' })
+        ).rejects.toMatchObject({
+            code: 'length-mismatch',
+            warningCodes: ['partial-destination-may-remain'],
+        })
         expect(commands).toEqual([
             'native_file_job_start',
             'native_file_job_status',
@@ -1519,11 +2149,8 @@ describe('native file jobs', () => {
         ]
         const refreshed: number[] = []
         const runtime = restoreRuntime(3, {
-            capture: () => {
-                calls.push([
-                    'capture:native-block-risu-save-restore',
-                    undefined,
-                ])
+            capture: (reason) => {
+                calls.push([`capture:${reason}`, undefined])
             },
             refresh: (revision) => {
                 refreshed.push(revision)
@@ -1575,12 +2202,67 @@ describe('native file jobs', () => {
             ],
             ['native_file_job_status', { jobId: 'job-1' }],
             ['native_file_job_status', { jobId: 'job-1' }],
-            ['native_file_job_finalize', { jobId: 'job-1' }],
+            ['capture:native-block-risu-save-restore-activation', undefined],
+            [
+                'native_file_job_finalize',
+                { jobId: 'job-1', expectedRevision: 3 },
+            ],
             ['native_file_job_status', { jobId: 'job-1' }],
             ['native_file_job_forget', { jobId: 'job-1' }],
         ])
         expect(calls.some(([command]) => command.includes('read'))).toBe(false)
         expect(JSON.stringify(calls)).not.toContain('Uint8Array')
+    })
+
+    it('activates against an explicitly recaptured token after restore preparation', async () => {
+        const calls: Array<[string, Record<string, unknown> | undefined]> = []
+        const statuses = [
+            {
+                ...status('waitingForInput'),
+                phase: 'awaiting-activation' as const,
+            },
+            status('succeeded', {
+                revision: 6,
+                sourceBytes: 128,
+                sourceSha256: 'a'.repeat(64),
+                characterCount: 2,
+                presetCount: 1,
+                warningCodes: [],
+            }),
+        ]
+
+        const result = await runNativeBlockRisuSaveRestore(
+            // Reading the backup took long enough for the renderer to leave an
+            // edit behind, which the explicit activation token capture flushes to revision 5.
+            restoreRuntime(4, { fencedRevision: 5 }),
+            { type: 'desktopPath', path: 'C:\chosen\backup.risudat' },
+            undefined,
+            {
+                isTauri: () => true,
+                invoke: async (command, args) => {
+                    calls.push([command, args])
+                    if (command === 'native_file_job_start')
+                        return { jobId: 'job-1' }
+                    if (command === 'native_file_job_status')
+                        return statuses.shift()
+                    if (command === 'native_file_job_finalize')
+                        return 'requested'
+                    if (command === 'native_file_job_forget') return true
+                    throw new Error(`Unexpected command: ${command}`)
+                },
+                wait: async () => undefined,
+            },
+        )
+
+        expect(result.revision).toBe(6)
+        expect(
+            calls.find(([command]) => command === 'native_file_job_start')?.[1],
+        ).toMatchObject({ request: { expectedRevision: 4 } })
+        expect(
+            calls.find(
+                ([command]) => command === 'native_file_job_finalize',
+            )?.[1],
+        ).toEqual({ jobId: 'job-1', expectedRevision: 5 })
     })
 
     it('explicit abort requests native cancellation and waits for terminal cleanup', async () => {
@@ -1881,7 +2563,7 @@ describe('native file jobs', () => {
         expect(commands).not.toContain('native_file_job_finalize')
     })
 
-    it('holds the replacement fence through refresh, plugin reload, and acknowledgement', async () => {
+    it('releases the replacement fence before plugin reload and acknowledgement', async () => {
         const events: string[] = []
         const observedPhases: string[] = []
         let statusCount = 0
@@ -1948,12 +2630,106 @@ describe('native file jobs', () => {
             'native-finalized',
             'stage:refreshing-app',
             'working-set-refreshed',
+            'fence-released',
             'stage:reloading-plugins',
             'plugins-reloaded',
             'terminal-acknowledged',
-            'fence-released',
         ])
         expect(observedPhases).toContain('activating-database')
+    })
+
+    it('continues a committed restore once after read-only recovery without reactivation', async () => {
+        const events: string[] = []
+        let statusCount = 0
+        const commands: string[] = []
+        const committed = {
+            revision: 9,
+            sourceBytes: 128,
+            sourceSha256: 'e'.repeat(64),
+            characterCount: 1,
+            presetCount: 0,
+            warningCodes: [],
+        }
+
+        const runtime = restoreRuntime(8, {
+            projection: 'refresh-required',
+            release: () => events.push('fence-released'),
+        })
+        await expect(runNativeBlockRisuSaveRestore(
+            runtime,
+            { type: 'desktopPath', path: 'C:\\chosen\\backup.risudat' },
+            { afterRefresh: () => { events.push('plugins-reloaded') } },
+            {
+                isTauri: () => true,
+                invoke: async (command) => {
+                    commands.push(command)
+                    if (command === 'native_file_job_start') return { jobId: 'job-1' }
+                    if (command === 'native_file_job_status') {
+                        statusCount++
+                        return statusCount === 1
+                            ? { ...status('waitingForInput'), phase: 'awaiting-activation' }
+                            : status('succeeded', committed)
+                    }
+                    if (command === 'native_file_job_finalize') return 'requested'
+                    if (command === 'native_file_job_forget') {
+                        events.push('terminal-acknowledged')
+                        return true
+                    }
+                    throw new Error(`Unexpected command: ${command}`)
+                },
+                wait: async () => undefined,
+            },
+        )).rejects.toBeInstanceOf(NativeFileJobActivationCommittedError)
+
+        expect(events).toEqual(['fence-released'])
+        expect(commands.filter(command => command === 'native_file_job_finalize')).toHaveLength(1)
+        await continueCommittedWorkingSetRefresh(9, runtime, 2)
+        await continueCommittedWorkingSetRefresh(9, runtime, 2)
+        expect(events).toEqual([
+            'fence-released',
+            'plugins-reloaded',
+            'terminal-acknowledged',
+        ])
+        expect(commands.filter(command => command === 'native_file_job_finalize')).toHaveLength(1)
+    })
+
+    it('acknowledges a committed native job when plugin reload fails after fence release', async () => {
+        let statusCount = 0
+        const commands: string[] = []
+        const committed = {
+            revision: 9,
+            sourceBytes: 128,
+            sourceSha256: 'd'.repeat(64),
+            characterCount: 1,
+            presetCount: 0,
+            warningCodes: [],
+        }
+
+        await expect(runNativeBlockRisuSaveRestore(
+            restoreRuntime(8),
+            { type: 'desktopPath', path: 'C:\\chosen\\backup.risudat' },
+            { afterRefresh: async () => { throw new Error('plugin reload failed') } },
+            {
+                isTauri: () => true,
+                invoke: async (command) => {
+                    commands.push(command)
+                    if (command === 'native_file_job_start') return { jobId: 'job-1' }
+                    if (command === 'native_file_job_status') {
+                        statusCount++
+                        return statusCount === 1
+                            ? { ...status('waitingForInput'), phase: 'awaiting-activation' }
+                            : status('succeeded', committed)
+                    }
+                    if (command === 'native_file_job_finalize') return 'requested'
+                    if (command === 'native_file_job_forget') return true
+                    throw new Error(`Unexpected command: ${command}`)
+                },
+                wait: async () => undefined,
+            },
+        )).rejects.toBeInstanceOf(NativeFileJobActivationCommittedError)
+
+        expect(commands.filter(command => command === 'native_file_job_finalize')).toHaveLength(1)
+        expect(commands.filter(command => command === 'native_file_job_forget')).toHaveLength(1)
     })
 
     it.each(['refresh', 'native-status', 'ui-status'])(

@@ -1,3 +1,4 @@
+import { UNOWNED_PLUGIN_OWNER } from '../plugins/pluginOwner'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { get } from 'svelte/store'
 
@@ -252,7 +253,7 @@ describe('production persistent working-set publication', () => {
         expect(getDatabase().characters[1].personality).toBe('Complete personality')
     })
 
-    it('reports selected lifecycle policy, compatibility, operation and viewport budget', () => {
+    it('reports selected lifecycle policy, operation and viewport budget', () => {
         setDatabaseLite({
             botPresets: [],
             characters: [],
@@ -267,7 +268,6 @@ describe('production persistent working-set publication', () => {
         )
 
         expect(adapter.canUseWindowedSelectedConversation?.()).toBe(true)
-        expect(adapter.isMaximumCompatibilityMode?.()).toBe(false)
         expect(adapter.isConversationOperationActive?.()).toBe(false)
         expect(adapter.conversationViewportRowBudget).toBe(
             getRuntimePerformanceBudgets().chatMountedMessageBudget,
@@ -275,14 +275,8 @@ describe('production persistent working-set publication', () => {
 
         workingSetResidency.setEvictionAllowed(false)
         doingChat.set(true)
-        setDatabaseLite({
-            botPresets: [],
-            characters: [],
-            plugins: [{ enabled: true, version: '2.1' }],
-        } as unknown as Database)
 
         expect(adapter.canUseWindowedSelectedConversation?.()).toBe(false)
-        expect(adapter.isMaximumCompatibilityMode?.()).toBe(true)
         expect(adapter.isConversationOperationActive?.()).toBe(true)
         doingChat.set(false)
         expect(operationTransitions).toEqual([false, true, false])
@@ -356,15 +350,24 @@ describe('production persistent working-set publication', () => {
     })
 
     it('preloads nested maximum plugin values from the installed plain database', async () => {
-        const storage = createPluginStorageStore({
-            store: {} as PersistentDataStore,
-            mutate: async () => undefined,
-        })
-        const unregister = registerPluginStorageLifecycle(storage)
         const nestedValue = {
             list: [{ enabled: true }],
             settings: { mode: 'maximum' },
         }
+        const storage = createPluginStorageStore({
+            getStorageAuthorityEpoch: () => 0,
+            assertPersistentMutationAllowed: vi.fn(),
+            store: {
+                open: async () => undefined,
+                queryPluginStorage: async () => ({
+                    revision: 1,
+                    items: [{ owner: UNOWNED_PLUGIN_OWNER, key: 'nested', byteSize: 1 }],
+                }),
+                readPluginStorage: async () => ({ revision: 1, value: nestedValue }),
+            } as unknown as PersistentDataStore,
+            mutate: async () => undefined,
+        })
+        const unregister = registerPluginStorageLifecycle(storage)
         const complete = {
             botPresets: [],
             pluginCustomStorage: { nested: nestedValue },
@@ -373,55 +376,11 @@ describe('production persistent working-set publication', () => {
         try {
             createProductionStateAdapter().installCompleteDatabase!(complete)
 
-            await expect(storage.keys()).resolves.toEqual(['nested'])
-            await expect(storage.getItem('nested')).resolves.toEqual(nestedValue)
-            expect(await storage.getItem('nested')).not.toBe(nestedValue)
+            await expect(storage.forOwner(UNOWNED_PLUGIN_OWNER).keys()).resolves.toEqual(['nested'])
+            await expect(storage.forOwner(UNOWNED_PLUGIN_OWNER).getItem('nested')).resolves.toEqual(nestedValue)
+            expect(await storage.forOwner(UNOWNED_PLUGIN_OWNER).getItem('nested')).not.toBe(nestedValue)
         } finally {
             unregister()
         }
     })
-
-    it.each(['proxy', 'pluginStorage'] as const)(
-        'creates a safe own proto key through the V2 %s writer',
-        (writer) => {
-            setDatabaseLite({
-                botPresets: [],
-                characters: [],
-                plugins: [],
-                pluginCustomStorage: JSON.parse('{"2":0,"zeta":false}'),
-            } as unknown as Database)
-            const expectedPrototype = Object.getPrototypeOf(
-                getDatabase().pluginCustomStorage,
-            )
-            const value = ''
-            const api = getV2PluginAPIs()
-            const initialStorage = getDatabase().pluginCustomStorage
-
-            if (writer === 'proxy') {
-                ;(api.getDatabase() as Record<string, unknown>).ordinary = 0
-            } else api.pluginStorage.setItem('ordinary', '')
-            expect(getDatabase().pluginCustomStorage).toBe(initialStorage)
-
-            if (writer === 'proxy') {
-                ;(api.getDatabase() as Record<string, unknown>).__proto__ = value
-            }
-            else api.pluginStorage.setItem('__proto__', value)
-
-            const storage = getDatabase().pluginCustomStorage
-            expect(Object.keys(storage)).toEqual(['2', 'zeta', 'ordinary', '__proto__'])
-            expect(Object.hasOwn(storage, '__proto__')).toBe(true)
-            expect(storage.__proto__).toEqual(value)
-            expect(Object.getPrototypeOf(storage)).toBe(expectedPrototype)
-            expect(storage['2']).toBe(0)
-            expect(storage.zeta).toBe(false)
-            expect(storage.ordinary).toBe(writer === 'proxy' ? 0 : '')
-
-            if (writer === 'proxy') {
-                ;(api.getDatabase() as Record<string, unknown>).__proto__ = 'updated'
-            } else api.pluginStorage.setItem('__proto__', 'updated')
-            expect(getDatabase().pluginCustomStorage).toBe(storage)
-            expect(Object.keys(storage)).toEqual(['2', 'zeta', 'ordinary', '__proto__'])
-            expect(storage.__proto__).toBe('updated')
-        },
-    )
 })

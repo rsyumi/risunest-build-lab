@@ -1,8 +1,12 @@
+mod account_credential;
 #[cfg(any(test, target_os = "android"))]
 mod android_commit_transport;
 mod app_data_root;
+mod app_update;
 mod asset_repository;
+mod boot_marker;
 mod cold_payload_codec;
+mod data_health;
 pub(crate) mod device_backup;
 mod external_storage;
 pub mod import_export_jobs;
@@ -58,6 +62,89 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Listener, Manager};
+
+const MAX_NATIVE_STARTUP_ERROR_CHARS: usize = 4096;
+
+#[derive(Default)]
+struct NativeStartupFailure {
+    message: Option<String>,
+    _persistent_gate: Option<persistent_store::commands::DeviceMaintenanceGuard>,
+    _native_file_gate: Option<native_file_jobs::admission::Permit>,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct NativeStartupState(Arc<Mutex<NativeStartupFailure>>);
+
+impl NativeStartupState {
+    fn record_failure(
+        &self,
+        error: impl std::fmt::Display,
+        persistent_gate: Option<persistent_store::commands::DeviceMaintenanceGuard>,
+        native_file_gate: Option<native_file_jobs::admission::Permit>,
+    ) {
+        let message = error
+            .to_string()
+            .chars()
+            .take(MAX_NATIVE_STARTUP_ERROR_CHARS)
+            .collect::<String>();
+        let mut failure = self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if failure.message.is_none() {
+            failure.message = Some(message);
+            failure._persistent_gate = persistent_gate;
+            failure._native_file_gate = native_file_gate;
+        }
+    }
+
+    pub(crate) fn ensure_ready(&self) -> Result<(), String> {
+        let failure = self
+            .0
+            .lock()
+            .map_err(|error| format!("native startup status lock failed: {error}"))?;
+        match failure.message.as_ref() {
+            Some(error) => Err(format!("Native setup failed: {error}")),
+            None => Ok(()),
+        }
+    }
+}
+
+#[tauri::command]
+fn native_startup_status(state: tauri::State<'_, NativeStartupState>) -> Result<(), String> {
+    state.ensure_ready()
+}
+
+fn boot_marker_root(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
+    app_data_root::resolve(app).map_err(|error| {
+        format!("failed to resolve application data directory: {error}")
+    })
+}
+
+fn boot_marker_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| i64::try_from(since.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or_default()
+}
+
+/// Records that a start has begun and reports what the last one left. The renderer calls it
+/// before anything it could fail in, so a start that never reaches the app still counts.
+#[tauri::command(async)]
+fn boot_attempt_begin(app: tauri::AppHandle) -> Result<boot_marker::BootDecision, String> {
+    let version = app.package_info().version.to_string();
+    let root = boot_marker_root(&app)?;
+    boot_marker::begin(&root, &version, boot_marker_now())
+        .map_err(|error| format!("failed to record the start attempt: {error}"))
+}
+
+/// Records that the start finished, so the next one begins from zero.
+#[tauri::command(async)]
+fn boot_attempt_complete(app: tauri::AppHandle) -> Result<(), String> {
+    let root = boot_marker_root(&app)?;
+    boot_marker::complete(&root)
+        .map_err(|error| format!("failed to clear the start attempt: {error}"))
+}
 
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -264,7 +351,9 @@ pub fn builder() -> tauri::Builder<tauri::Wry> {
     native_log::install_panic_hook();
     let native_log_state = native_log::global_state();
     let setup_native_log_state = native_log_state.clone();
-    let mut builder = tauri::Builder::default();
+    let native_startup_state = NativeStartupState::default();
+    let setup_native_startup_state = native_startup_state.clone();
+    let mut builder = tauri::Builder::default().manage(native_startup_state);
     #[cfg(target_os = "ios")]
     {
         builder = builder
@@ -300,17 +389,37 @@ pub fn builder() -> tauri::Builder<tauri::Wry> {
             .manage(android_commit_transport::native_state().clone())
             .on_page_load(|webview, payload| {
                 if webview.label() == "main"
-                    && matches!(payload.event(), tauri::webview::PageLoadEvent::Finished)
-                {
-                    if let Some(state) = webview.try_state::<device_backup::DeviceBackupState>() {
-                        state.main_document_finished();
-                    }
-                }
-                if webview.label() == "main"
                     && matches!(payload.event(), tauri::webview::PageLoadEvent::Started)
                 {
-                    if let Some(state) = webview.try_state::<device_backup::DeviceBackupState>() {
-                        state.main_document_started();
+                    if let Some(state) =
+                        webview.try_state::<persistent_store::PersistentStoreState>()
+                    {
+                        if let Err(error) = state.reset_renderer_session() {
+                            crate::nlog!(
+                                "error",
+                                "failed to reset persistent renderer session: {error}"
+                            );
+                        }
+                    }
+                    if let Some(state) =
+                        webview.try_state::<asset_repository::commands::DurableCasJobState>()
+                    {
+                        if let Err(error) = state.reset_renderer_session() {
+                            crate::nlog!(
+                                "error",
+                                "failed to reset durable CAS renderer session: {error}"
+                            );
+                        }
+                    }
+                    if let Some(state) =
+                        webview.try_state::<native_media::ipc::NativeMediaIpcState>()
+                    {
+                        if let Err(error) = state.reset_renderer_session() {
+                            crate::nlog!(
+                                "error",
+                                "failed to reset native media renderer session: {error}"
+                            );
+                        }
                     }
                     webview
                         .state::<android_commit_transport::AndroidCommitState>()
@@ -322,17 +431,33 @@ pub fn builder() -> tauri::Builder<tauri::Wry> {
     {
         builder = builder.on_page_load(|webview, payload| {
             if webview.label() == "main"
-                && matches!(payload.event(), tauri::webview::PageLoadEvent::Finished)
-            {
-                if let Some(state) = webview.try_state::<device_backup::DeviceBackupState>() {
-                    state.main_document_finished();
-                }
-            }
-            if webview.label() == "main"
                 && matches!(payload.event(), tauri::webview::PageLoadEvent::Started)
             {
-                if let Some(state) = webview.try_state::<device_backup::DeviceBackupState>() {
-                    state.main_document_started();
+                if let Some(state) = webview.try_state::<persistent_store::PersistentStoreState>() {
+                    if let Err(error) = state.reset_renderer_session() {
+                        crate::nlog!(
+                            "error",
+                            "failed to reset persistent renderer session: {error}"
+                        );
+                    }
+                }
+                if let Some(state) =
+                    webview.try_state::<asset_repository::commands::DurableCasJobState>()
+                {
+                    if let Err(error) = state.reset_renderer_session() {
+                        crate::nlog!(
+                            "error",
+                            "failed to reset durable CAS renderer session: {error}"
+                        );
+                    }
+                }
+                if let Some(state) = webview.try_state::<native_media::ipc::NativeMediaIpcState>() {
+                    if let Err(error) = state.reset_renderer_session() {
+                        crate::nlog!(
+                            "error",
+                            "failed to reset native media renderer session: {error}"
+                        );
+                    }
                 }
                 let _ = webview.with_webview(|_| persistent_commit_transport::reset());
             }
@@ -349,15 +474,31 @@ pub fn builder() -> tauri::Builder<tauri::Wry> {
                 ios_lifecycle::main_document_started(webview.app_handle());
                 #[cfg(target_os = "macos")]
                 macos_lifecycle::document_started(webview.app_handle());
-                if let Some(state) = webview.try_state::<device_backup::DeviceBackupState>() {
-                    state.main_document_started();
+                if let Some(state) = webview.try_state::<persistent_store::PersistentStoreState>() {
+                    if let Err(error) = state.reset_renderer_session() {
+                        crate::nlog!(
+                            "error",
+                            "failed to reset persistent renderer session: {error}"
+                        );
+                    }
                 }
-            }
-            if webview.label() == "main"
-                && matches!(payload.event(), tauri::webview::PageLoadEvent::Finished)
-            {
-                if let Some(state) = webview.try_state::<device_backup::DeviceBackupState>() {
-                    state.main_document_finished();
+                if let Some(state) =
+                    webview.try_state::<asset_repository::commands::DurableCasJobState>()
+                {
+                    if let Err(error) = state.reset_renderer_session() {
+                        crate::nlog!(
+                            "error",
+                            "failed to reset durable CAS renderer session: {error}"
+                        );
+                    }
+                }
+                if let Some(state) = webview.try_state::<native_media::ipc::NativeMediaIpcState>() {
+                    if let Err(error) = state.reset_renderer_session() {
+                        crate::nlog!(
+                            "error",
+                            "failed to reset native media renderer session: {error}"
+                        );
+                    }
                 }
             }
         });
@@ -383,56 +524,114 @@ pub fn builder() -> tauri::Builder<tauri::Wry> {
 
     builder
         .setup(move |app| {
-            #[cfg(any(target_os = "android", target_os = "ios"))]
-            app.handle().plugin(tauri_plugin_barcode_scanner::init())?;
-            #[cfg(target_os = "ios")]
-            app.handle().plugin(tauri_plugin_ios_native::init())?;
-            let app_data_dir = app_data_root::resolve(app)?;
-            let device_backup =
-                device_backup::DeviceBackupState::initialize(app_data_dir.join("device-backup"));
-            setup_native_log_state.configure_file_path(&app_data_dir);
-            app.manage(setup_native_log_state.clone());
-            let state = native_file_jobs::NativeFileJobState::initialize(
-                app_data_dir.join("native-file-jobs"),
-            );
-            // Recover device state before opening the PDS or permitting other
-            // native writers. Initialization failures also keep these gates shut.
-            let device_recovery_pending = !matches!(device_backup.is_blocking(), Ok(false));
-            if device_recovery_pending {
-                let admission = state.admission.file(true).map_err(std::io::Error::other)?;
-                device_backup.attach_startup_admission(admission)?;
-                let guard = app
+            let setup_result = (|| -> Result<(), String> {
+                #[cfg(any(target_os = "android", target_os = "ios"))]
+                app.handle()
+                    .plugin(tauri_plugin_barcode_scanner::init())
+                    .map_err(|error| format!("barcode scanner initialization failed: {error}"))?;
+                #[cfg(target_os = "ios")]
+                app.handle()
+                    .plugin(tauri_plugin_ios_native::init())
+                    .map_err(|error| format!("iOS native initialization failed: {error}"))?;
+                let app_data_dir = app_data_root::resolve(app)
+                    .map_err(|error| format!("application data root unavailable: {error}"))?;
+                app.state::<external_storage::job_store::JobCommandState>()
+                    .root
+                    .set(app_data_dir.clone())
+                    .map_err(|_| "external storage root is already configured".to_string())?;
+                let agent_build = app
+                    .config()
+                    .plugins
+                    .0
+                    .get("risunest")
+                    .and_then(|value| value.get("agent"))
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false);
+                app.manage(app_update::AppUpdateState::initialize(agent_build));
+                let device_backup = device_backup::DeviceBackupState::initialize(
+                    app_data_dir.join("device-backup"),
+                );
+                setup_native_log_state.configure_file_path(&app_data_dir);
+                app.manage(setup_native_log_state.clone());
+                let state = native_file_jobs::NativeFileJobState::initialize(
+                    app_data_dir.join("native-file-jobs"),
+                );
+                // Manage recovery state before acquiring either fence. If a later
+                // startup step fails, an attached fence remains live while the
+                // renderer shows the failure panel.
+                app.manage(device_backup);
+                app.manage(state);
+                let device_backup = app.state::<device_backup::DeviceBackupState>();
+                let state = app.state::<native_file_jobs::NativeFileJobState>();
+                // Recover device state before opening the PDS or permitting other
+                // native writers. Initialization failures also keep these gates shut.
+                let device_recovery_pending = !matches!(device_backup.is_blocking(), Ok(false));
+                if device_recovery_pending {
+                    let admission = state
+                        .admission
+                        .file(true)
+                        .map_err(|error| format!("native file admission failed: {error}"))?;
+                    device_backup
+                        .attach_startup_admission(admission)
+                        .map_err(|error| format!("device startup admission failed: {error}"))?;
+                    let guard = app
+                        .state::<persistent_store::PersistentStoreState>()
+                        .acquire_device_maintenance()
+                        .map_err(|error| {
+                            format!("persistent device maintenance gate failed: {error}")
+                        })?;
+                    device_backup
+                        .attach_maintenance_guard(guard)
+                        .map_err(|error| format!("device maintenance guard failed: {error}"))?;
+                }
+                app.state::<native_media::ipc::NativeMediaIpcState>()
+                    .configure(app_data_dir.join("native-media-ipc"))?;
+                native_media::recover_inlay_writes(&app_data_dir)
+                    .map_err(|error| format!("Inlay recovery failed: {error}"))?;
+                app.manage(native_media::streaming::MediaServerState::initialize(
+                    app_data_dir.clone(),
+                ));
+                app.manage(
+                    native_file_jobs::screenshot_output::ScreenshotOutputState::initialize(
+                        app_data_dir
+                            .join("native-file-jobs")
+                            .join("screenshot-output"),
+                    ),
+                );
+                #[cfg(any(
+                    target_os = "windows",
+                    target_os = "android",
+                    target_os = "linux",
+                    target_os = "ios",
+                    target_os = "macos"
+                ))]
+                app.manage(regex_shadow::RegexCancellationRegistry::default());
+                Ok(())
+            })();
+            if let Err(error) = setup_result {
+                crate::nlog!("error", "native startup initialization failed: {error}");
+                // Retain both library-wide gates for the rest of the process.
+                // A gate that cannot be acquired is already held or unavailable,
+                // either of which also rejects later operations.
+                let native_file_gate = app
+                    .try_state::<native_file_jobs::NativeFileJobState>()
+                    .and_then(|state| state.admission.file(true).ok());
+                let persistent_gate = app
                     .state::<persistent_store::PersistentStoreState>()
-                    .acquire_device_maintenance()?;
-                device_backup.attach_maintenance_guard(guard)?;
-            } else {
-                native_media::recover_inlay_writes(&app_data_dir).map_err(std::io::Error::other)?;
+                    .acquire_device_maintenance()
+                    .ok();
+                setup_native_startup_state.record_failure(error, persistent_gate, native_file_gate);
             }
-            app.manage(device_backup);
-            app.manage(native_media::streaming::MediaServerState::initialize(
-                app_data_dir.clone(),
-            ));
-            app.manage(state);
-            app.manage(
-                native_file_jobs::screenshot_output::ScreenshotOutputState::initialize(
-                    app_data_dir
-                        .join("native-file-jobs")
-                        .join("screenshot-output"),
-                ),
-            );
-            #[cfg(any(
-                target_os = "windows",
-                target_os = "android",
-                target_os = "linux",
-                target_os = "ios",
-                target_os = "macos"
-            ))]
-            app.manage(regex_shadow::RegexCancellationRegistry::default());
             Ok(())
         })
         .manage(asset_repository::commands::DurableCasJobState::default())
+        .manage(native_media::ipc::NativeMediaIpcState::default())
         .manage(persistent_store::PersistentStoreState::default())
+        .manage(persistent_store::commands::data_health::DataHealthState::default())
         .manage(server_sync::commands::ServerSyncCommandState::default())
+        .manage(server_sync::events::ServerSyncEventsState::default())
+        .manage(external_storage::connection_commands::ConnectionCommandState::default())
+        .manage(external_storage::job_store::JobCommandState::default())
         .plugin(tauri_plugin_http::init())
         .plugin(tauri_plugin_deep_link::init())
         .plugin(tauri_plugin_process::init())
@@ -445,18 +644,54 @@ pub fn builder() -> tauri::Builder<tauri::Wry> {
 /// The product command router, reusable by alternative native entries.
 pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
+        external_storage::connection_commands::external_storage_list_providers,
+        external_storage::connection_commands::external_storage_prepare_connection,
+        external_storage::connection_commands::external_storage_commit_connection,
+        external_storage::connection_commands::external_storage_begin_authorization,
+        external_storage::connection_commands::external_storage_complete_authorization,
+        external_storage::connection_commands::external_storage_cancel_authorization,
+        external_storage::connection_commands::external_storage_set_capture_policy,
+        external_storage::connection_commands::external_storage_set_retention_policy,
+        external_storage::connection_commands::external_storage_remove_connection,
+        external_storage::connection_commands::external_storage_begin_recovery_export,
+        external_storage::connection_commands::external_storage_save_recovery_file,
+        external_storage::connection_commands::external_storage_prepare_recovery_import,
+        external_storage::runtime::external_storage_get_state,
+        external_storage::runtime::external_storage_capture_exit_target,
+        external_storage::runtime::external_storage_set_execution_session,
+        external_storage::runtime::external_storage_set_sync_target,
+        external_storage::runtime::external_storage_start_job,
+        external_storage::runtime::external_storage_get_job,
+        external_storage::runtime::external_storage_cancel_job,
+        external_storage::runtime::external_storage_get_quota,
+        external_storage::history::external_storage_list_history,
+        external_storage::sync_engine::external_storage_list_conflicts,
+        external_storage::sync_engine::external_storage_delete_conflict,
+        external_storage::sync_engine::external_storage_recheck_conflict,
+        native_file_jobs::reference_source::external_storage_open_conflict_source,
+        native_file_jobs::reference_source::external_storage_release_conflict_source,
+        external_storage::sync_engine::external_storage_apply_received,
+        external_storage::snapshot_export_commands::external_storage_export_snapshot,
         #[cfg(target_os = "ios")]
         ios_lifecycle::ios_prepare_restart,
         #[cfg(target_os = "macos")]
         macos_lifecycle::macos_lifecycle_ready,
         #[cfg(target_os = "macos")]
         macos_lifecycle::macos_exit_response,
+        native_startup_status,
+        app_update::commands::app_update_environment,
+        app_update::commands::app_update_check,
+        app_update::commands::app_update_cancel,
+        app_update::commands::app_update_install,
+        app_update::commands::app_update_stage_deb,
         native_media::streaming::native_media_base_url,
         server_sync::commands::server_sync_status,
         server_sync::commands::server_sync_asset_status,
         server_sync::commands::server_sync_asset_policy,
         server_sync::commands::server_sync_asset_evict,
         server_sync::commands::server_sync_verified_bytes,
+        server_sync::commands::server_sync_progress_counts,
+        server_sync::commands::server_sync_retryable_failure,
         server_sync::commands::server_sync_backups,
         server_sync::commands::server_sync_backup_inventory,
         server_sync::commands::server_sync_backup_delete,
@@ -474,6 +709,8 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         server_sync::commands::server_sync_publish,
         server_sync::commands::server_sync_cancel,
         greet,
+        boot_attempt_begin,
+        boot_attempt_complete,
         native_request,
         check_auth,
         #[cfg(desktop)]
@@ -482,6 +719,15 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         persistent_store::commands::pds_snapshot_delete,
         persistent_store::commands::pds_asset_gc_preview,
         persistent_store::commands::pds_asset_gc_execute,
+        persistent_store::commands::data_health::pds_data_health_scan,
+        persistent_store::commands::data_health::pds_data_health_deep_scan,
+        persistent_store::commands::data_health::pds_data_health_result,
+        persistent_store::commands::data_health::pds_data_health_cancel,
+        persistent_store::commands::data_health::pds_data_health_repair_plan,
+        persistent_store::commands::data_health::pds_data_health_repair_preview,
+        persistent_store::commands::data_health::pds_data_health_repair_apply,
+        persistent_store::commands::data_health::pds_data_health_journals,
+        persistent_store::commands::data_health::pds_data_health_undo,
         native_log::native_log_tail,
         native_log::native_log_error,
         native_log::native_log_file_path,
@@ -490,13 +736,23 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         native_tokenizer::tokenize_batch,
         native_media::native_media_write_inlay_image,
         native_media::native_media_encode_inlay_image,
-        asset_repository::commands::asset_cas_read_object,
+        native_media::ipc::native_media_inlay_input_open,
+        native_media::ipc::native_media_inlay_input_chunk,
+        native_media::ipc::native_media_inlay_input_cancel,
+        native_media::ipc::native_media_encode_inlay_finish,
+        native_media::ipc::native_media_write_inlay_finish,
+        native_media::ipc::native_media_inlay_output_read,
+        native_media::ipc::native_media_inlay_output_cancel,
         asset_repository::commands::asset_cas_read_object_range,
         asset_repository::commands::asset_cas_stat_object,
         asset_repository::commands::asset_remote_stat_object,
         asset_repository::commands::asset_remote_read_object,
         asset_repository::commands::asset_cas_job_begin,
         asset_repository::commands::asset_cas_job_prepare,
+        asset_repository::commands::asset_cas_job_upload_open,
+        asset_repository::commands::asset_cas_job_upload_chunk,
+        asset_repository::commands::asset_cas_job_upload_finish,
+        asset_repository::commands::asset_cas_job_upload_cancel,
         asset_repository::commands::asset_cas_job_pin_existing,
         asset_repository::commands::asset_cas_job_seal,
         asset_repository::commands::asset_cas_job_finalize_content,
@@ -504,24 +760,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         asset_repository::commands::asset_cas_job_release,
         native_file_jobs::native_file_job_start,
         device_backup::native_device_backup_bootstrap,
-        device_backup::native_device_backup_section_begin,
-        device_backup::native_device_backup_row_append,
-        device_backup::native_device_backup_row_append_from_blob,
-        device_backup::native_device_backup_section_finish,
-        device_backup::native_device_backup_section_list,
-        device_backup::native_device_backup_row_read,
-        device_backup::native_device_backup_row_read_bytes,
-        device_backup::native_device_backup_blob_begin,
-        device_backup::native_device_backup_blob_append,
-        device_backup::native_device_backup_blob_finish,
-        device_backup::native_device_backup_blob_read,
-        device_backup::native_device_backup_prepared,
-        device_backup::native_device_backup_section_intent,
-        device_backup::native_device_backup_section_complete,
-        device_backup::native_device_backup_finish_device,
         device_backup::native_device_backup_recovery_complete,
-        device_backup::native_device_backup_fail,
-        device_backup::native_device_backup_retry_recovery,
         native_file_jobs::native_content_source_metadata,
         native_file_jobs::native_file_job_status,
         native_file_jobs::native_file_job_list,
@@ -531,6 +770,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         native_file_jobs::native_file_job_forget,
         native_file_jobs::native_portable_handoff_cleanup,
         native_file_jobs::native_portable_select_sections,
+        native_file_jobs::native_plugin_values_assign,
         native_file_jobs::native_backup_source_format,
         native_file_jobs::native_legacy_backup_handoff_cleanup,
         native_file_jobs::native_character_charx_handoff_cleanup,
@@ -553,20 +793,17 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         persistent_store::commands::pds_read_conversation_metadata,
         persistent_store::commands::pds_read_conversation_window,
         persistent_store::commands::pds_query_plugin_storage,
+        persistent_store::commands::pds_list_plugin_storage,
         persistent_store::commands::pds_read_plugin_storage,
+        persistent_store::commands::hypa::pds_read_hypa_embeddings,
+        persistent_store::commands::hypa::pds_write_hypa_embeddings,
         persistent_store::commands::pds_read_asset_alias,
         persistent_store::commands::pds_read_asset_aliases_by_keys,
         persistent_store::commands::pds_list_asset_aliases,
         persistent_store::commands::pds_read_asset_repository_authority,
         persistent_store::commands::pds_read_asset_owner_head,
-        persistent_store::commands::pds_read_cold_payload_authority,
-        persistent_store::commands::pds_read_cold_alias,
-        persistent_store::commands::pds_list_cold_aliases,
         persistent_store::commands::pds_commit_asset_alias,
         persistent_store::commands::pds_delete_asset_alias,
-        persistent_store::commands::pds_commit_cold_alias,
-        persistent_store::commands::pds_delete_cold_alias,
-        persistent_store::commands::pds_activate_cold_payload_migration,
         persistent_store::commands::pds_commit,
         #[cfg(target_os = "android")]
         android_commit_transport::pds_commit_android_open,
@@ -586,6 +823,9 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         persistent_commit_transport::pds_commit_shared_finish,
         #[cfg(windows)]
         persistent_commit_transport::pds_commit_shared_cancel,
+        persistent_store::commands::pds_archive_preview,
+        persistent_store::commands::pds_archive_character,
+        persistent_store::commands::pds_restore_character,
         persistent_store::commands::pds_replace_begin,
         persistent_store::commands::pds_replace_put_root,
         persistent_store::commands::pds_replace_put_presets,
@@ -593,9 +833,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         persistent_store::commands::pds_replace_put_asset_aliases,
         persistent_store::commands::pds_replace_put_asset_owner_heads,
         persistent_store::commands::pds_replace_put_asset_repository_authority,
-        persistent_store::commands::pds_replace_put_cold_payload_authority,
         persistent_store::commands::pds_replace_preserve_repositories,
-        persistent_store::commands::pds_replace_put_cold_aliases,
         persistent_store::commands::pds_replace_commit,
         persistent_store::commands::pds_replace_abort,
         persistent_store::commands::pds_materialize,
@@ -611,9 +849,26 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         persistent_store::commands::pds_snapshot_create,
         persistent_store::commands::pds_snapshot_list,
         persistent_store::commands::pds_snapshot_restore_request,
-        persistent_store::commands::pds_get_app_kv,
-        persistent_store::commands::pds_set_app_kv,
-        persistent_store::commands::pds_remove_app_kv,
+        persistent_store::commands::pds_get_device_setting,
+        persistent_store::commands::pds_set_device_setting,
+        persistent_store::commands::pds_patch_device_setting,
+        persistent_store::commands::pds_read_device_settings,
+        persistent_store::commands::pds_read_plugin_permissions,
+        persistent_store::commands::pds_write_plugin_permission,
+        persistent_store::commands::pds_write_plugin_permission_grant,
+        persistent_store::commands::pds_hydrate_plugin_device_storage,
+        persistent_store::commands::pds_read_plugin_device_value,
+        persistent_store::commands::pds_list_plugin_device_keys,
+        persistent_store::commands::pds_list_plugin_device_storage,
+        persistent_store::commands::pds_write_plugin_device_values,
+        persistent_store::commands::pds_begin_plugin_claim_session,
+        persistent_store::commands::pds_claim_plugin_storage_value,
+        persistent_store::commands::pds_close_plugin_claim_session,
+        persistent_store::commands::pds_colliding_plugin_storage_keys,
+        persistent_store::commands::pds_assign_plugin_storage,
+        account_credential::account_credential_read,
+        account_credential::account_credential_write,
+        account_credential::account_credential_clear,
         #[cfg(any(
             target_os = "windows",
             target_os = "android",
@@ -632,6 +887,14 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         regex_shadow::regex_cancel_batch,
         #[cfg(windows)]
         windows_appearance::windows_set_appearance,
+        persistent_store::commands::pds_read_section_participation,
+        persistent_store::commands::pds_set_section_participating,
+        persistent_store::commands::pds_read_character_summary,
+        persistent_store::commands::pds_working_set_change_window,
+        persistent_store::commands::pds_working_set_change_page,
+        persistent_store::commands::pds_commit_working_set_change_cursor,
+        server_sync::events::server_sync_events_start,
+        server_sync::events::server_sync_events_stop,
     ]
 }
 
@@ -682,5 +945,52 @@ mod header_map_tests {
         );
         // Invalid UTF-8 bytes degrade to replacement characters instead of panicking.
         assert_eq!(json["x-latin1"], "\u{FFFD}t\u{FFFD}");
+    }
+
+    #[test]
+    fn native_startup_state_keeps_the_first_bounded_failure() {
+        let state = NativeStartupState::default();
+        assert_eq!(state.ensure_ready(), Ok(()));
+
+        state.record_failure("synthetic setup failure", None, None);
+        state.record_failure("later failure", None, None);
+
+        assert_eq!(
+            state.ensure_ready(),
+            Err("Native setup failed: synthetic setup failure".to_owned())
+        );
+
+        let bounded = NativeStartupState::default();
+        bounded.record_failure("x".repeat(MAX_NATIVE_STARTUP_ERROR_CHARS + 10), None, None);
+        let error = bounded.ensure_ready().unwrap_err();
+        assert_eq!(
+            error.chars().count(),
+            "Native setup failed: ".chars().count() + MAX_NATIVE_STARTUP_ERROR_CHARS
+        );
+    }
+
+    #[test]
+    fn native_startup_failure_retains_persistent_and_file_admission_gates() {
+        let directory = tempfile::tempdir().unwrap();
+        let persistent = persistent_store::PersistentStoreState::default();
+        let native_files =
+            native_file_jobs::NativeFileJobState::initialize(directory.path().into());
+        let native_file_gate = native_files.admission.file(true).unwrap();
+        let persistent_gate = persistent.acquire_device_maintenance().unwrap();
+        let startup = NativeStartupState::default();
+
+        startup.record_failure(
+            "synthetic gated failure",
+            Some(persistent_gate),
+            Some(native_file_gate),
+        );
+
+        assert!(persistent.admit_renderer_operation().is_err());
+        assert!(native_files.admission.file(false).is_err());
+        assert!(native_files.admission.server().is_err());
+        assert_eq!(
+            startup.ensure_ready(),
+            Err("Native setup failed: synthetic gated failure".to_owned())
+        );
     }
 }

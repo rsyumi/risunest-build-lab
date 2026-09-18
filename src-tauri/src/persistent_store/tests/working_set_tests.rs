@@ -1,4 +1,5 @@
 use super::*;
+use crate::persistent_store::plugin_owner::UNOWNED_OWNER;
 
 #[test]
 fn root_mutations_preserve_unchanged_fields_and_leased_revision() {
@@ -166,14 +167,14 @@ fn plugin_storage_is_revisioned_per_key_and_lease_isolated() {
         json!({
             "revision": 1,
             "items": [
-                { "key": "alpha", "byteSize": 5 },
-                { "key": "beta", "byteSize": 16 }
+                { "owner": UNOWNED_OWNER, "key": "alpha", "byteSize": 5 },
+                { "owner": UNOWNED_OWNER, "key": "beta", "byteSize": 16 }
             ]
         })
     );
     assert_eq!(
         store
-            .read_plugin_storage("beta", None)
+            .read_plugin_storage(UNOWNED_OWNER, "beta", None)
             .expect("read plugin key")
             .expect("plugin key exists")
             .value,
@@ -188,10 +189,12 @@ fn plugin_storage_is_revisioned_per_key_and_lease_isolated() {
             root: Some(json!({ "username": "Plugin commit" })),
             plugin_storage: Some(vec![
                 PluginStorageMutation::Set {
+                    owner: UNOWNED_OWNER.to_owned(),
                     key: "alpha".to_owned(),
                     value: json!("new"),
                 },
                 PluginStorageMutation::Delete {
+                    owner: UNOWNED_OWNER.to_owned(),
                     key: "beta".to_owned(),
                 },
             ]),
@@ -201,7 +204,7 @@ fn plugin_storage_is_revisioned_per_key_and_lease_isolated() {
 
     assert_eq!(
         store
-            .read_plugin_storage("alpha", Some(&lease.lease))
+            .read_plugin_storage(UNOWNED_OWNER, "alpha", Some(&lease.lease))
             .expect("read leased plugin key")
             .expect("leased plugin key exists")
             .value,
@@ -215,7 +218,7 @@ fn plugin_storage_is_revisioned_per_key_and_lease_isolated() {
         .release_revision(&lease.lease)
         .expect("release plugin lease");
     assert!(matches!(
-        store.read_plugin_storage("alpha", Some(&lease.lease)),
+        store.read_plugin_storage(UNOWNED_OWNER, "alpha", Some(&lease.lease)),
         Err(StoreError::SnapshotReleased)
     ));
 }
@@ -263,7 +266,7 @@ fn plugin_storage_preserves_legacy_object_key_order_across_reopen() {
     );
     assert_eq!(
         store
-            .read_plugin_storage("\u{ffff}x", None)
+            .read_plugin_storage(UNOWNED_OWNER, "\u{ffff}x", None)
             .expect("read unicode key")
             .expect("unicode key exists")
             .value,
@@ -274,13 +277,16 @@ fn plugin_storage_preserves_legacy_object_key_order_across_reopen() {
         .commit(&WorkingSetCommit {
             plugin_storage: Some(vec![
                 PluginStorageMutation::Set {
+                    owner: UNOWNED_OWNER.to_owned(),
                     key: "zeta".to_owned(),
                     value: json!("updated"),
                 },
                 PluginStorageMutation::Delete {
+                    owner: UNOWNED_OWNER.to_owned(),
                     key: "zeta".to_owned(),
                 },
                 PluginStorageMutation::Set {
+                    owner: UNOWNED_OWNER.to_owned(),
                     key: "zeta".to_owned(),
                     value: json!("reinserted"),
                 },
@@ -380,7 +386,7 @@ fn opens_new_store_at_revision_zero() {
     let store = PersistentStore::open(directory.path()).expect("open persistent store");
 
     assert_eq!(store.revision().expect("read revision"), 0);
-    assert!(directory.path().join("persistent/persistent.db").is_file());
+    assert!(directory.path().join("persistent/persistent.sqlite").is_file());
 }
 
 #[test]
@@ -1478,6 +1484,7 @@ fn ordinary_commit_during_a_lease_does_not_copy_any_generation_family() {
     store
         .commit(&WorkingSetCommit {
             plugin_storage: Some(vec![PluginStorageMutation::Set {
+                owner: UNOWNED_OWNER.to_owned(),
                 key: "counted-zero".to_owned(),
                 value: json!(0),
             }]),
@@ -1578,7 +1585,7 @@ fn leased_family_canonical(store: &PersistentStore, lease: &str) -> Vec<u8> {
         ).expect("read leased message window"),
         "pluginCatalog": store.query_plugin_storage(Some(lease))
             .expect("query leased plugin storage"),
-        "plugin": store.read_plugin_storage("lease-key", Some(lease))
+        "plugin": store.read_plugin_storage(UNOWNED_OWNER, "lease-key", Some(lease))
             .expect("read leased plugin value"),
         "assetAliases": store.list_asset_aliases(Some(lease))
             .expect("list leased asset aliases"),
@@ -1590,12 +1597,6 @@ fn leased_family_canonical(store: &PersistentStore, lease: &str) -> Vec<u8> {
             .expect("read leased asset owner head"),
         "assetRepositoryAuthority": store.read_asset_repository_authority(Some(lease))
             .expect("read leased asset repository authority"),
-        "coldPayloadAuthority": store.read_cold_payload_authority(Some(lease))
-            .expect("read leased cold payload authority"),
-        "coldAliases": store.list_cold_aliases(Some(lease))
-            .expect("list leased cold aliases"),
-        "coldAlias": store.read_cold_alias("cold/lease", Some(lease))
-            .expect("read leased cold alias"),
         "materialized": store.materialize_lease(lease).expect("materialize leased revision"),
     }))
     .expect("serialize leased record families")
@@ -1607,7 +1608,7 @@ fn sha256(bytes: &[u8]) -> String {
 
 #[test]
 fn wal_lease_keeps_every_final_record_family_and_native_export_canonical() {
-    let (directory, mut store, database) = open_fixture();
+    let (_directory, mut store, database) = open_fixture();
     let alias = AssetAlias {
         key: "assets/lease.bin".to_owned(),
         object_hash: Some("11".repeat(32)),
@@ -1626,16 +1627,6 @@ fn wal_lease_keeps_every_final_record_family_and_native_export_canonical() {
         "22".repeat(32),
         1,
     );
-    let cas = crate::asset_repository::PayloadCas::new(directory.path()).expect("open payload CAS");
-    let prepared_cold = cas
-        .prepare_bytes(b"cold-data")
-        .expect("prepare leased cold payload");
-    let cold = ColdAlias {
-        key: "cold/lease".to_owned(),
-        object_hash: Some(prepared_cold.content_hash),
-        size: prepared_cold.byte_size as i64,
-        metadata: json!({ "codec": "fixture" }),
-    };
     let mut final_root = staged_root(&database);
     final_root["modules"] = json!([{
         "id": "lease-module",
@@ -1665,24 +1656,13 @@ fn wal_lease_keeps_every_final_record_family_and_native_export_canonical() {
     store
         .replace_put_asset_owner_heads(&staging.staging_id, std::slice::from_ref(&owner))
         .expect("stage final-family owner head");
-    store
-        .replace_put_cold_aliases(&staging.staging_id, std::slice::from_ref(&cold))
-        .expect("stage final-family cold alias");
-    store
-        .replace_put_cold_payload_authority(
-            &staging.staging_id,
-            &ColdPayloadAuthorityState::V2 {
-                migration_id: "lease-cold-migration".to_owned(),
-                compatibility_hash: "44".repeat(32),
-            },
-        )
-        .expect("stage final-family cold authority");
     let seeded = store
         .replace_commit(&staging.staging_id, Some(1))
         .expect("activate final-family staging");
     let seeded = store
         .commit(&WorkingSetCommit {
             plugin_storage: Some(vec![PluginStorageMutation::Set {
+                owner: UNOWNED_OWNER.to_owned(),
                 key: "lease-key".to_owned(),
                 value: json!({ "nested": [0, false, ""] }),
             }]),
@@ -1722,6 +1702,7 @@ fn wal_lease_keeps_every_final_record_family_and_native_export_canonical() {
                 AssetOwnerLocator::RootModuleAssets { index: 0 },
             )]),
             plugin_storage: Some(vec![PluginStorageMutation::Set {
+                owner: UNOWNED_OWNER.to_owned(),
                 key: "lease-key".to_owned(),
                 value: json!("writer plugin"),
             }]),
@@ -1847,6 +1828,7 @@ fn revision_lease_survives_append_delete_root_change_and_staged_replace() {
     store
         .commit(&WorkingSetCommit {
             plugin_storage: Some(vec![PluginStorageMutation::Set {
+                owner: UNOWNED_OWNER.to_owned(),
                 key: "pinned-zero".to_owned(),
                 value: json!(0),
             }]),
@@ -1868,6 +1850,7 @@ fn revision_lease_survives_append_delete_root_change_and_staged_replace() {
             }]),
             delete_character_id: Some("char-b".to_owned()),
             plugin_storage: Some(vec![PluginStorageMutation::Set {
+                owner: UNOWNED_OWNER.to_owned(),
                 key: "pinned-zero".to_owned(),
                 value: json!(1),
             }]),
@@ -1926,7 +1909,7 @@ fn revision_lease_survives_append_delete_root_change_and_staged_replace() {
     );
     assert_eq!(
         store
-            .read_plugin_storage("pinned-zero", Some(&lease.lease))
+            .read_plugin_storage(UNOWNED_OWNER, "pinned-zero", Some(&lease.lease))
             .expect("read leased plugin value")
             .expect("leased plugin value exists")
             .value,
@@ -2054,6 +2037,7 @@ fn batch_character_details_delete_atomically_and_preserve_plugin_zero() {
         .commit(&WorkingSetCommit {
             character: Some(group.clone()),
             plugin_storage: Some(vec![PluginStorageMutation::Set {
+                owner: UNOWNED_OWNER.to_owned(),
                 key: "zero".to_owned(),
                 value: json!(0),
             }]),
@@ -2126,7 +2110,7 @@ fn batch_character_details_delete_atomically_and_preserve_plugin_zero() {
     );
     assert_eq!(
         store
-            .read_plugin_storage("zero", None)
+            .read_plugin_storage(UNOWNED_OWNER, "zero", None)
             .expect("read plugin zero")
             .expect("plugin zero exists")
             .value,
@@ -2157,7 +2141,7 @@ fn batch_character_details_delete_atomically_and_preserve_plugin_zero() {
     );
     assert_eq!(
         store
-            .read_plugin_storage("zero", None)
+            .read_plugin_storage(UNOWNED_OWNER, "zero", None)
             .expect("read preserved plugin zero")
             .expect("plugin zero exists")
             .value,
@@ -2208,7 +2192,7 @@ fn batch_character_details_delete_atomically_and_preserve_plugin_zero() {
     );
     assert_eq!(
         store
-            .read_plugin_storage("zero", Some(&lease.lease))
+            .read_plugin_storage(UNOWNED_OWNER, "zero", Some(&lease.lease))
             .expect("read leased plugin zero")
             .expect("leased plugin zero exists")
             .value,
@@ -2660,6 +2644,7 @@ fn reopen_invalidates_runtime_and_legacy_leases_then_reclaims_inactive_generatio
     store
         .commit(&WorkingSetCommit {
             plugin_storage: Some(vec![PluginStorageMutation::Set {
+                owner: UNOWNED_OWNER.to_owned(),
                 key: "ttl-zero".to_owned(),
                 value: json!(0),
             }]),
@@ -2711,7 +2696,7 @@ fn reopen_invalidates_runtime_and_legacy_leases_then_reclaims_inactive_generatio
     assert_eq!(expired_generation_rows, 0);
     assert_eq!(
         store
-            .read_plugin_storage("ttl-zero", None)
+            .read_plugin_storage(UNOWNED_OWNER, "ttl-zero", None)
             .expect("read active plugin value after sweep")
             .expect("active plugin value survives sweep")
             .value,
@@ -2733,13 +2718,14 @@ fn pilot_mutated_database_supports_generation_cow_compatible_reopen_read_and_com
         .commit(&WorkingSetCommit {
             root: Some(json!({ "username": "Pilot-mutated root" })),
             plugin_storage: Some(vec![PluginStorageMutation::Set {
+                owner: UNOWNED_OWNER.to_owned(),
                 key: "rollback-compatible".to_owned(),
                 value: json!({ "pilot": true }),
             }]),
             ..empty_working_set_commit(1)
         })
         .expect("mutate fixture through WAL pilot");
-    let database_path = directory.path().join("persistent/persistent.db");
+    let database_path = directory.path().join("persistent/persistent.sqlite");
     drop(store);
 
     let mut compatibility = Connection::open(&database_path).expect("open database for COW path");
@@ -2748,7 +2734,7 @@ fn pilot_mutated_database_supports_generation_cow_compatible_reopen_read_and_com
         compatibility
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .expect("read schema version"),
-        2
+        i64::from(super::schema::SCHEMA_VERSION)
     );
     assert_eq!(
         super::current_revision(&compatibility).expect("read pilot revision through COW path"),
@@ -2870,7 +2856,7 @@ fn pilot_mutated_database_supports_generation_cow_compatible_reopen_read_and_com
     );
     assert_eq!(
         reopened
-            .read_plugin_storage("rollback-compatible", None)
+            .read_plugin_storage(UNOWNED_OWNER, "rollback-compatible", None)
             .expect("read COW-copied plugin value")
             .expect("COW-copied plugin value exists")
             .value,
@@ -2889,9 +2875,13 @@ fn pilot_mutated_database_supports_generation_cow_compatible_reopen_read_and_com
 fn app_kv_round_trips_json() {
     let (_directory, store, _) = open_fixture();
     let value = json!({ "sourceRevision": 1, "imported": true });
-    store.set_app_kv("migration", &value).expect("write app kv");
+    store
+        .set_app_kv("device-backup-commit:migration", &value)
+        .expect("write app kv");
     assert_eq!(
-        store.get_app_kv("migration").expect("read app kv"),
+        store
+            .get_app_kv("device-backup-commit:migration")
+            .expect("read app kv"),
         Some(value)
     );
 }
@@ -2900,22 +2890,65 @@ fn app_kv_round_trips_json() {
 fn app_kv_remove_deletes_only_the_selected_key() {
     let (_directory, store, _) = open_fixture();
     store
-        .set_app_kv("credential", &json!({ "token": "legacy" }))
-        .expect("write credential");
+        .set_app_kv("device-backup-commit:first", &json!({ "job": "first" }))
+        .expect("write first marker");
     store
-        .set_app_kv("ledger", &json!({ "version": 1 }))
-        .expect("write ledger");
+        .set_app_kv("external-restore-commit:second", &json!({ "job": "second" }))
+        .expect("write second marker");
 
     store
-        .remove_app_kv("credential")
-        .expect("remove credential");
+        .remove_app_kv("device-backup-commit:first")
+        .expect("remove first marker");
 
     assert_eq!(
-        store.get_app_kv("credential").expect("read credential"),
+        store
+            .get_app_kv("device-backup-commit:first")
+            .expect("read removed marker"),
         None
     );
     assert_eq!(
-        store.get_app_kv("ledger").expect("read ledger"),
-        Some(json!({ "version": 1 }))
+        store
+            .get_app_kv("external-restore-commit:second")
+            .expect("read remaining marker"),
+        Some(json!({ "job": "second" }))
+    );
+}
+
+#[test]
+fn app_kv_accepts_only_the_two_job_marker_prefixes() {
+    // Everything a device keeps now lives in device.sqlite or the OS vault.
+    // app_kv holds only the markers that must share a commit with the
+    // replacement they authorize.
+    let (_directory, store, _) = open_fixture();
+    for rejected in [
+        "official-account.credential.v1",
+        "official-account.association.v1",
+        "official-account.asset-ledger.v1",
+        "sync-conflict-backups.index.v1",
+        "device-backup-commit:",
+        "external-restore-commit:",
+        "prefixed-device-backup-commit:job",
+        "",
+    ] {
+        assert!(
+            store.set_app_kv(rejected, &json!(true)).is_err(),
+            "{rejected} must not be writable"
+        );
+        assert!(
+            store.get_app_kv(rejected).is_err(),
+            "{rejected} must not be readable"
+        );
+        assert!(
+            store.remove_app_kv(rejected).is_err(),
+            "{rejected} must not be removable"
+        );
+    }
+    assert_eq!(
+        store
+            .connection
+            .query_row("SELECT count(*) FROM app_kv", [], |row| row
+                .get::<_, i64>(0))
+            .expect("count app kv rows"),
+        0
     );
 }

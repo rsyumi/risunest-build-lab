@@ -1,7 +1,7 @@
 use super::{StoreError, StoreResult};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 
-pub(crate) const SCHEMA_VERSION: u32 = 2;
+pub(crate) const SCHEMA_VERSION: u32 = 5;
 
 const ASSET_GC_MAINTENANCE_STATE_TABLE_SQL: &str = r#"
 CREATE TABLE asset_gc_maintenance_state (
@@ -85,12 +85,17 @@ fn create_schema(connection: &mut Connection) -> StoreResult<()> {
         CREATE TABLE root (generation TEXT PRIMARY KEY, value TEXT NOT NULL);
         CREATE TABLE plugin_storage (
             generation TEXT NOT NULL,
+            owner TEXT NOT NULL,
             storage_key TEXT NOT NULL,
             byte_size INTEGER NOT NULL,
             ordinal INTEGER NOT NULL,
             value TEXT NOT NULL,
-            PRIMARY KEY (generation, storage_key)
+            claimed_from TEXT,
+            import_batch_id TEXT,
+            assigned_at INTEGER,
+            PRIMARY KEY (generation, owner, storage_key)
         );
+        CREATE INDEX plugin_storage_owner ON plugin_storage (generation, owner, ordinal);
         CREATE TABLE bot_presets (
             generation TEXT NOT NULL,
             preset_id TEXT NOT NULL,
@@ -114,6 +119,7 @@ fn create_schema(connection: &mut Connection) -> StoreResult<()> {
             creator_notes TEXT,
             trash_time INTEGER,
             detail TEXT NOT NULL,
+            archived_object TEXT,
             PRIMARY KEY (generation, character_id)
         );
         CREATE INDEX characters_configured ON characters (generation, configured_index);
@@ -195,24 +201,6 @@ fn create_schema(connection: &mut Connection) -> StoreResult<()> {
         );
         CREATE INDEX asset_owner_heads_generation ON asset_owner_heads (generation);
         CREATE TABLE asset_repository_authority (
-            generation TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        );
-        CREATE TABLE cold_aliases (
-            generation TEXT NOT NULL,
-            key TEXT NOT NULL,
-            object_hash TEXT CHECK (
-                object_hash IS NULL OR (
-                    length(object_hash) = 64
-                    AND object_hash NOT GLOB '*[^0-9a-f]*'
-                )
-            ),
-            size INTEGER NOT NULL CHECK (size >= 0),
-            metadata TEXT NOT NULL,
-            PRIMARY KEY (generation, key)
-        );
-        CREATE INDEX cold_aliases_generation ON cold_aliases (generation);
-        CREATE TABLE cold_payload_authority (
             generation TEXT PRIMARY KEY,
             value TEXT NOT NULL
         );

@@ -1,7 +1,7 @@
 use super::owner_projection::OwnerManifestProjector;
 use super::{
     compare_plugin_storage_keys, AssetAlias, AssetOwnerHead, AssetOwnerLocator,
-    AssetRepositoryAuthorityState, ColdAlias, ColdPayloadAuthorityState, ReadTarget, StoreError,
+    AssetRepositoryAuthorityState, ReadTarget, StoreError,
     StoreResult,
 };
 use crate::asset_repository::owner_manifest_codec::OwnerManifestEntry;
@@ -35,9 +35,7 @@ pub(crate) struct PinnedLegacyBackupInventory {
     pub(crate) revision: i64,
     pub(crate) assets: Vec<AssetAlias>,
     pub(crate) owner_heads: Vec<AssetOwnerHead>,
-    pub(crate) cold: Vec<ColdAlias>,
     pub(crate) asset_authority: AssetRepositoryAuthorityState,
-    pub(crate) cold_authority: ColdPayloadAuthorityState,
 }
 
 pub(crate) fn pinned_legacy_backup_inventory(
@@ -48,9 +46,7 @@ pub(crate) fn pinned_legacy_backup_inventory(
         revision: target.revision,
         assets: super::query::list_asset_aliases(connection, target)?.value,
         owner_heads: super::query::list_asset_owner_heads(connection, target)?.value,
-        cold: super::query::list_cold_aliases(connection, target)?.value,
         asset_authority: super::query::read_asset_repository_authority(connection, target)?.value,
-        cold_authority: super::query::read_cold_payload_authority(connection, target)?.value,
     })
 }
 
@@ -133,6 +129,7 @@ const MODULES: u8 = 5;
 const PLUGINS: u8 = 9;
 const LOADOUTS: u8 = 10;
 const PLUGIN_STORAGE: u8 = 11;
+const PLUGIN_STORAGE_META: u8 = 12;
 #[cfg(feature = "native-official-publication")]
 const MAX_EXPORT_OWNERSHIP_BYTES: u64 = 4096;
 
@@ -143,6 +140,8 @@ pub(crate) struct ExportedRisuSave {
     pub(crate) bytes: u64,
     pub(crate) character_count: u64,
     pub(crate) preset_count: u64,
+    pub(crate) excluded_archived_character_count: u64,
+    pub(crate) excluded_colliding_plugin_value_count: u64,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -340,7 +339,10 @@ fn create_controlled_inner(
     let loadouts = take_root_block_value(&mut root, "loadouts");
     let plugins = take_root_block_value(&mut root, "plugins");
     root.shift_remove("pluginCustomStorage");
-    let mut plugin_storage = plugin_storage_value(connection, &target.generation)?;
+    let flattened = flattened_plugin_storage(connection, &target.generation)?;
+    let excluded_colliding_plugin_value_count = flattened.collisions.len() as u64;
+    let plugin_storage_meta = plugin_storage_meta_value(&flattened.owners);
+    let mut plugin_storage = Value::Object(flattened.values);
     if let Some(replacements) = replacements {
         project_plugin_storage_resources(&mut plugin_storage, replacements);
     }
@@ -349,9 +351,11 @@ fn create_controlled_inner(
     }
 
     let character_ids = character_ids(connection, &target.generation)?;
+    let excluded_archived_character_count =
+        super::archive::archived_character_ids(connection, &target.generation)?.len() as u64;
     owner_projector.validate_character_owners(&character_ids.iter().cloned().collect())?;
     let preset_count = preset_count(connection, &target.generation)?;
-    let total_items = character_ids.len() as u64 + 7;
+    let total_items = character_ids.len() as u64 + 8;
     let mut completed_items = 0u64;
     let mut directory = vec![
         Value::String("preset".to_owned()),
@@ -359,6 +363,7 @@ fn create_controlled_inner(
         Value::String("loadouts".to_owned()),
         Value::String("plugins".to_owned()),
         Value::String("pluginStorage".to_owned()),
+        Value::String("pluginStorageMeta".to_owned()),
     ];
     directory.extend(character_ids.iter().cloned().map(Value::String));
     directory.push(Value::String("config".to_owned()));
@@ -443,6 +448,20 @@ fn create_controlled_inner(
         total_items,
         &mut on_progress,
     )?;
+    check_export_cancelled(&is_cancelled)?;
+    write_optional_value_block(
+        &mut file,
+        PLUGIN_STORAGE_META,
+        "pluginStorageMeta",
+        Some(&plugin_storage_meta),
+        &is_cancelled,
+    )?;
+    report_export_progress(
+        &mut file,
+        &mut completed_items,
+        total_items,
+        &mut on_progress,
+    )?;
     for character_id in &character_ids {
         check_export_cancelled(&is_cancelled)?;
         write_block(
@@ -493,6 +512,8 @@ fn create_controlled_inner(
         bytes,
         character_count: character_ids.len() as u64,
         preset_count,
+        excluded_archived_character_count,
+        excluded_colliding_plugin_value_count,
     })
 }
 
@@ -529,9 +550,30 @@ fn preset_count(connection: &Connection, generation: &str) -> StoreResult<u64> {
     })
 }
 
-fn plugin_storage_value(connection: &Connection, generation: &str) -> StoreResult<Value> {
+/// One `plugin_storage` row with the ownership the table records.
+pub(crate) struct PluginStorageRow {
+    pub(crate) owner: String,
+    pub(crate) key: String,
+    pub(crate) value: Value,
+    pub(crate) assigned_at: Option<i64>,
+}
+
+/// Flattened plugin storage plus the keys that could not be flattened.
+pub(crate) struct FlattenedPluginStorage {
+    pub(crate) values: Map<String, Value>,
+    /// Keys held by more than one plugin, with every owner that holds them.
+    pub(crate) collisions: Vec<(String, Vec<String>)>,
+    /// Owner of each exported key, for the ownership sidecar.
+    pub(crate) owners: Vec<(String, String, Option<i64>)>,
+}
+
+/// Legacy key order: numeric keys first, then the recorded position.
+pub(crate) fn plugin_storage_rows(
+    connection: &Connection,
+    generation: &str,
+) -> StoreResult<Vec<PluginStorageRow>> {
     let mut statement = connection.prepare(
-        "SELECT storage_key, value, ordinal FROM plugin_storage
+        "SELECT owner, storage_key, value, ordinal, assigned_at FROM plugin_storage
          WHERE generation = ?1",
     )?;
     let mut values = statement
@@ -539,23 +581,111 @@ fn plugin_storage_value(connection: &Connection, generation: &str) -> StoreResul
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
-                row.get::<_, i64>(2)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, Option<i64>>(4)?,
             ))
         })?
         .map(|row| {
-            let (key, value, ordinal) = row?;
-            Ok((key, serde_json::from_str(&value)?, ordinal))
+            let (owner, key, value, ordinal, assigned_at) = row?;
+            Ok((
+                owner,
+                key,
+                serde_json::from_str(&value)?,
+                ordinal,
+                assigned_at,
+            ))
         })
-        .collect::<StoreResult<Vec<(String, Value, i64)>>>()?;
-    values.sort_by(|(left, _, left_ordinal), (right, _, right_ordinal)| {
-        compare_plugin_storage_keys(left, *left_ordinal, right, *right_ordinal)
-    });
-    Ok(Value::Object(
-        values
-            .into_iter()
-            .map(|(key, value, _)| (key, value))
-            .collect::<Map<String, Value>>(),
-    ))
+        .collect::<StoreResult<Vec<(String, String, Value, i64, Option<i64>)>>>()?;
+    values.sort_by(
+        |(left_owner, left, _, left_ordinal, _), (right_owner, right, _, right_ordinal, _)| {
+            compare_plugin_storage_keys(left, *left_ordinal, right, *right_ordinal)
+                .then_with(|| left_owner.cmp(right_owner))
+        },
+    );
+    Ok(values
+        .into_iter()
+        .map(|(owner, key, value, _, assigned_at)| PluginStorageRow {
+            owner,
+            key,
+            value,
+            assigned_at,
+        })
+        .collect())
+}
+
+/// Upstream saves hold one value per key. A key two plugins both hold cannot be
+/// written without handing one plugin the other plugin's value, so neither side
+/// goes out and the caller reports the key.
+pub(crate) fn flattened_plugin_storage(
+    connection: &Connection,
+    generation: &str,
+) -> StoreResult<FlattenedPluginStorage> {
+    let rows = plugin_storage_rows(connection, generation)?;
+    let mut owners_by_key: HashMap<String, Vec<String>> = HashMap::new();
+    for row in &rows {
+        let entry = owners_by_key.entry(row.key.clone()).or_default();
+        if !entry.iter().any(|owner| owner == &row.owner) {
+            entry.push(row.owner.clone());
+        }
+    }
+    let mut collisions: Vec<(String, Vec<String>)> = owners_by_key
+        .iter()
+        .filter(|(_, owners)| owners.len() > 1)
+        .map(|(key, owners)| {
+            let mut owners = owners.clone();
+            owners.sort();
+            (key.clone(), owners)
+        })
+        .collect();
+    collisions.sort_by(|left, right| left.0.cmp(&right.0));
+    let mut values = Map::new();
+    let mut owners = Vec::new();
+    for row in rows {
+        if owners_by_key
+            .get(&row.key)
+            .is_some_and(|holders| holders.len() > 1)
+        {
+            continue;
+        }
+        owners.push((row.key.clone(), row.owner, row.assigned_at));
+        values.insert(row.key, row.value);
+    }
+    Ok(FlattenedPluginStorage {
+        values,
+        collisions,
+        owners,
+    })
+}
+
+/// The in-app compatibility projection keeps every key. A colliding key keeps
+/// the later position so the object stays deterministic.
+pub(crate) fn materialized_plugin_storage(
+    connection: &Connection,
+    generation: &str,
+) -> StoreResult<Map<String, Value>> {
+    let mut values = Map::new();
+    for row in plugin_storage_rows(connection, generation)? {
+        values.insert(row.key, row.value);
+    }
+    Ok(values)
+}
+
+/// The ownership sidecar upstream RisuAI ignores and RisuNest reads back.
+/// `updatedAt` carries the recorded assignment time so two exports of one
+/// revision stay byte identical.
+pub(crate) fn plugin_storage_meta_value(owners: &[(String, String, Option<i64>)]) -> Value {
+    let mut meta = Map::new();
+    for (key, owner, assigned_at) in owners {
+        if super::plugin_owner::is_unowned(owner) {
+            continue;
+        }
+        let mut entry = Map::new();
+        entry.insert("plugin".to_owned(), Value::String(owner.clone()));
+        entry.insert("updatedAt".to_owned(), Value::from(assigned_at.unwrap_or(0)));
+        meta.insert(key.clone(), Value::Object(entry));
+    }
+    Value::Object(meta)
 }
 
 pub(super) fn cleanup(snapshots_dir: &Path, path: &Path) -> StoreResult<()> {
@@ -861,7 +991,7 @@ impl<F: Fn() -> bool> Write for CancellationAwareWriter<'_, F> {
     fn write(&mut self, buffer: &[u8]) -> std::io::Result<usize> {
         if (self.is_cancelled)() {
             return Err(std::io::Error::new(
-                std::io::ErrorKind::Interrupted,
+                std::io::ErrorKind::Other,
                 EXPORT_CANCELLED_MESSAGE,
             ));
         }
@@ -871,7 +1001,7 @@ impl<F: Fn() -> bool> Write for CancellationAwareWriter<'_, F> {
     fn flush(&mut self) -> std::io::Result<()> {
         if (self.is_cancelled)() {
             return Err(std::io::Error::new(
-                std::io::ErrorKind::Interrupted,
+                std::io::ErrorKind::Other,
                 EXPORT_CANCELLED_MESSAGE,
             ));
         }
@@ -879,10 +1009,13 @@ impl<F: Fn() -> bool> Write for CancellationAwareWriter<'_, F> {
     }
 }
 
+// One enumerator serves the RisuSave export and the official account projection,
+// so an archived character cannot reach either as a marker-only shell.
 fn character_ids(connection: &Connection, generation: &str) -> StoreResult<Vec<String>> {
     let mut statement = connection.prepare(
         "SELECT character_id FROM characters
-         WHERE generation = ?1 ORDER BY configured_index ASC",
+         WHERE generation = ?1 AND archived_object IS NULL
+         ORDER BY configured_index ASC",
     )?;
     let ids = statement
         .query_map([generation], |row| row.get(0))?
@@ -1197,6 +1330,7 @@ fn take_root_block_value(root: &mut Map<String, Value>, key: &str) -> Option<Val
 
 #[cfg(test)]
 mod tests {
+    use super::super::plugin_owner::UNOWNED_OWNER;
     use super::*;
     use crate::asset_repository::{owner_manifest_codec, PayloadCas};
     use crate::persistent_store::{
@@ -1204,12 +1338,39 @@ mod tests {
     };
     use flate2::read::GzDecoder;
     use serde_json::{json, Value};
+    use std::cell::Cell;
     use std::collections::HashMap;
     use std::fs;
     use std::io::Read;
     use tempfile::TempDir;
 
     const HEADER: &[u8] = b"RISUSAVE\0";
+
+    #[test]
+    fn cancellation_writer_stops_write_all_without_retrying_into_output() {
+        let directory = TempDir::new().unwrap();
+        let mut file = File::create(directory.path().join("cancelled.bin")).unwrap();
+        let cancellation_checks = Cell::new(0);
+        let is_cancelled = || {
+            let checks = cancellation_checks.get() + 1;
+            cancellation_checks.set(checks);
+            checks <= 3
+        };
+        let mut writer = CancellationAwareWriter {
+            file: &mut file,
+            is_cancelled: &is_cancelled,
+        };
+
+        let error = writer
+            .write_all(b"synthetic payload")
+            .expect_err("cancelled writer must stop");
+
+        assert_ne!(error.kind(), std::io::ErrorKind::Interrupted);
+        assert_eq!(error.to_string(), EXPORT_CANCELLED_MESSAGE);
+        assert_eq!(cancellation_checks.get(), 1);
+        drop(writer);
+        assert_eq!(file.stream_position().unwrap(), 0);
+    }
 
     #[test]
     fn risusave_export_naming_matches_the_shared_taxonomy_golden_fixture() {
@@ -1942,11 +2103,11 @@ mod tests {
             json!("remote/assets/plugin.bin")
         );
         assert_eq!(blocks[5].value["prose"], json!("prefix assets/plugin.bin"));
-        assert_eq!(blocks[6].value["image"], json!("new"));
-        assert_eq!(blocks[6].value["unrelated"], json!("old"));
-        assert_eq!(blocks[6].value["chats"][0]["name"], json!("old"));
+        assert_eq!(blocks[7].value["image"], json!("new"));
+        assert_eq!(blocks[7].value["unrelated"], json!("old"));
+        assert_eq!(blocks[7].value["chats"][0]["name"], json!("old"));
         assert_eq!(
-            blocks[6].value["chats"][0]["message"][0]["data"],
+            blocks[7].value["chats"][0]["message"][0]["data"],
             json!("old")
         );
 
@@ -1960,6 +2121,121 @@ mod tests {
             source_blocks[5].value["prose"],
             json!("prefix assets/plugin.bin")
         );
+    }
+
+    fn archived_fixture() -> (TempDir, PersistentStore, i64, String) {
+        let directory = TempDir::new().unwrap();
+        let mut store = PersistentStore::open(directory.path()).unwrap();
+        let staging = store.replace_begin().unwrap().staging_id;
+        store
+            .replace_put_root(
+                &staging,
+                &json!({
+                    "username": "Archive Export",
+                    "account": { "id": "account-1", "token": "secret" },
+                    "modules": [],
+                    "loadouts": [],
+                    "plugins": []
+                }),
+            )
+            .unwrap();
+        store.replace_put_presets(&staging, &[]).unwrap();
+        store
+            .replace_add_characters(
+                &staging,
+                &[
+                    json!({
+                        "type": "character",
+                        "chaId": "kept",
+                        "name": "Kept",
+                        "chats": [{ "id": "kept-chat", "name": "Kept Chat", "message": [] }]
+                    }),
+                    json!({
+                        "type": "character",
+                        "chaId": "archived",
+                        "name": "Archived",
+                        "chats": [{
+                            "id": "archived-chat",
+                            "name": "Archived Chat",
+                            "message": [{ "role": "user", "data": "hidden", "chatId": "a1" }]
+                        }]
+                    }),
+                ],
+            )
+            .unwrap();
+        let revision = store.replace_commit(&staging, None).unwrap().revision;
+        store.archive_character("archived", revision, 10).unwrap();
+        let revision = store.revision().unwrap();
+        let lease = store.acquire_revision(revision).unwrap().lease;
+        (directory, store, revision, lease)
+    }
+
+    /// Invariant 10. The export reads `detail` straight from SQL, so the marker
+    /// can only be kept out by leaving the character out of the enumeration.
+    #[test]
+    fn a_risu_save_export_omits_archived_characters_and_their_marker() {
+        let (_directory, store, _revision, lease) = archived_fixture();
+        let exported = store.export_risu_save(&lease, false).unwrap();
+        assert_eq!(exported.character_count, 1);
+        assert_eq!(exported.excluded_archived_character_count, 1);
+
+        let blocks = read_blocks(Path::new(&exported.path));
+        let characters = blocks
+            .iter()
+            .filter(|block| block.block_type == CHARACTER_WITH_CHAT)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            characters
+                .iter()
+                .map(|block| block.name.as_str())
+                .collect::<Vec<_>>(),
+            ["kept"]
+        );
+        for block in &blocks {
+            assert!(
+                !block.value.to_string().contains("risuNestArchived"),
+                "block {} leaks the archive marker",
+                block.name
+            );
+        }
+    }
+
+    /// Invariant 4. The account projection has its own entry point, and the
+    /// shared enumeration is what keeps the archive out of both.
+    #[cfg(feature = "native-official-publication")]
+    #[test]
+    fn the_official_account_projection_omits_archived_characters() {
+        let (_directory, store, _revision, lease) = archived_fixture();
+        let (connection, target) = store.read_view(Some(&lease)).unwrap();
+        let exported = create_projected_controlled_for_account(
+            connection,
+            &store.snapshots_dir,
+            &target,
+            &lease,
+            "account-1",
+            &HashMap::new(),
+            || false,
+            |_, _, _| {},
+        )
+        .unwrap();
+        assert_eq!(exported.character_count, 1);
+        assert_eq!(exported.excluded_archived_character_count, 1);
+
+        let blocks = read_blocks(Path::new(&exported.path));
+        let characters = blocks
+            .iter()
+            .filter(|block| block.block_type == CHARACTER_WITH_CHAT)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            characters
+                .iter()
+                .map(|block| block.name.as_str())
+                .collect::<Vec<_>>(),
+            ["kept"]
+        );
+        assert!(characters
+            .iter()
+            .all(|block| !block.value.to_string().contains("risuNestArchived")));
     }
 
     #[test]
@@ -2058,6 +2334,7 @@ mod tests {
                 (10, "loadouts"),
                 (9, "plugins"),
                 (11, "pluginStorage"),
+                (12, "pluginStorageMeta"),
                 (2, "trash-first"),
                 (2, "live-second"),
                 (0, "config"),
@@ -2072,6 +2349,7 @@ mod tests {
                 "loadouts",
                 "plugins",
                 "pluginStorage",
+                "pluginStorageMeta",
                 "trash-first",
                 "live-second",
                 "config"
@@ -2082,8 +2360,8 @@ mod tests {
             json!([{ "name": "Preset A" }, { "name": "Preset B" }])
         );
         assert_eq!(blocks[5].value, json!({ "plugin": { "enabled": true } }));
-        assert_eq!(blocks[6].value["chats"][0]["message"][0]["data"], "trash");
-        assert_eq!(blocks[7].value["chats"][0]["message"][1]["data"], "world");
+        assert_eq!(blocks[7].value["chats"][0]["message"][0]["data"], "trash");
+        assert_eq!(blocks[8].value["chats"][0]["message"][1]["data"], "world");
         assert_eq!(exported.bytes, fs::metadata(&exported.path).unwrap().len());
     }
 
@@ -2249,32 +2527,39 @@ mod tests {
                 delete_character_id: None,
                 asset_owner_heads: None,
                 plugin_storage: Some(vec![
-                    PluginStorageMutation::Clear,
+                    PluginStorageMutation::Clear { owner: UNOWNED_OWNER.to_owned() },
                     PluginStorageMutation::Set {
+                        owner: UNOWNED_OWNER.to_owned(),
                         key: "zeta".to_owned(),
                         value: json!("first string"),
                     },
                     PluginStorageMutation::Set {
+                        owner: UNOWNED_OWNER.to_owned(),
                         key: "10".to_owned(),
                         value: json!("ten"),
                     },
                     PluginStorageMutation::Set {
+                        owner: UNOWNED_OWNER.to_owned(),
                         key: "2".to_owned(),
                         value: json!(0),
                     },
                     PluginStorageMutation::Set {
+                        owner: UNOWNED_OWNER.to_owned(),
                         key: "01".to_owned(),
                         value: json!("non-index"),
                     },
                     PluginStorageMutation::Set {
+                        owner: UNOWNED_OWNER.to_owned(),
                         key: "4294967294".to_owned(),
                         value: json!(true),
                     },
                     PluginStorageMutation::Set {
+                        owner: UNOWNED_OWNER.to_owned(),
                         key: "4294967295".to_owned(),
                         value: json!(false),
                     },
                     PluginStorageMutation::Set {
+                        owner: UNOWNED_OWNER.to_owned(),
                         key: "\u{ffff}x".to_owned(),
                         value: json!("unicode"),
                     },

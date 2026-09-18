@@ -14,6 +14,7 @@ import type {
     WorkingSetCommit,
 } from './persistentDataStore'
 import type { RisuModule } from '../process/modules'
+import type { CommittedApplyOutcome } from './persistentDataRuntime'
 import { RevisionConflictError } from './persistentDataStore'
 import { appendCharacterIdToOrder, removeCharacterIdFromOrder } from './characterOrderMutation'
 import {
@@ -59,7 +60,6 @@ export { canonicalJson }
 const SAVE_DEBOUNCE_MS = 500
 /** Official publishes upload the full database snapshot, so they are spaced like upstream's save loop. */
 const OFFICIAL_PUBLISH_MIN_INTERVAL_MS = 3_000
-const CONCURRENT_CHARACTER_COMPENSATION_ATTEMPTS = 3
 const CHARACTER_MUTATION_PAGE_SIZE = 100
 
 type CompleteCharacter = character | groupChat
@@ -116,9 +116,13 @@ export interface SaveCoordinatorDependencies {
         event: ActiveConversationMutationEvent,
     ): ConversationMutationPersistenceHandle | null | undefined
     onConversationMutationPersisted?(event: PersistedConversationMutationEvent): void
+    onConversationMutationFallbackPersisted?(event: PersistedConversationMutationEvent): void
     onPersistenceIdle?(): void
     onFlushPromise?(promise: Promise<void> | null): void
     onBackgroundError?(error: unknown): void
+    onWorkingSetRefreshRequired?(revision: DataRevision | null): void
+    onDestructiveReplacementFenceChanged?(active: boolean): void
+    isConversationOperationActive?(): boolean
 }
 
 export interface PersistedConversationMutationEvent {
@@ -206,15 +210,6 @@ interface PendingCharacterAddition {
     token: object
     locallyAdded: boolean
     baseline: string | null
-}
-
-interface PendingResidentCompensation {
-    characterId: string
-}
-
-interface PendingResidentConversationCompensation {
-    characterId: string
-    conversationId: string
 }
 
 interface PendingConversationMutation {
@@ -403,9 +398,12 @@ function conversationMatchesAfterIdNormalization(
     )
 }
 
-interface ReplacementRebaseResult {
-    database: Database
-    compensation: Omit<WorkingSetCommit, 'expectedRevision'> | null
+interface ReplacementAdmission extends PersistentMutationToken {
+    authorityEpoch: number
+    navigationGeneration: number | undefined
+    baseline: CapturedState
+    hadPendingDebounce: boolean
+    supersededAdditionToken: object | null
 }
 
 export interface PersistentReplacementOptions {
@@ -531,6 +529,7 @@ export class SaveCoordinator {
     private readonly clock: SaveCoordinatorClock
     private currentRevision: DataRevision | null = null
     private authorityEpoch = 0
+    private committedRefreshRevision: DataRevision | null = null
     private rootBaseline: string | null = null
     private pluginStorageBaselineEntries: PluginStorageBaseline | null = null
     private readonly pluginStorageCaptureCache = new PluginStorageCaptureCache()
@@ -565,18 +564,25 @@ export class SaveCoordinator {
     private officialPublishRetryHandle: unknown
     private pendingCharacterAddition: PendingCharacterAddition | null = null
     private reservedCharacterAddition: ReservedCharacterAddition | null = null
-    private pendingResidentCompensations: PendingResidentCompensation[] = []
-    private pendingResidentConversationCompensations: PendingResidentConversationCompensation[] = []
     private pendingConversationMutations: PendingConversationMutation[] = []
     private lastBackgroundErrorMessage: string | null = null
-    private destructiveReplacementFence: {
+    private destructiveReplacementFenceState: {
         owner: symbol
         state: 'acquiring' | 'held'
-        acceptsPostPublicationDirty: boolean
-        queuedPostPublicationDirty: boolean
         blockedPrePublicationDirty: boolean
         refreshBaseline?: CapturedState
     } | null = null
+    private get destructiveReplacementFence() {
+        return this.destructiveReplacementFenceState
+    }
+    private set destructiveReplacementFence(value: SaveCoordinator['destructiveReplacementFenceState']) {
+        this.destructiveReplacementFenceState = value
+        try {
+            this.dependencies.onDestructiveReplacementFenceChanged?.(value !== null)
+        } catch (error) {
+            this.reportBackgroundError(error)
+        }
+    }
     private selectedConversationTransitionActive = false
     private persistenceWasBusy = false
 
@@ -591,6 +597,25 @@ export class SaveCoordinator {
 
     get storageAuthorityEpoch(): number {
         return this.authorityEpoch
+    }
+
+    get pendingWorkingSetRefreshRevision(): DataRevision | null {
+        return this.committedRefreshRevision
+    }
+
+    markCommittedWorkingSetRefreshRequired(revision: DataRevision, error: unknown): void {
+        if (revision > this.revision) {
+            this.currentRevision = revision
+            this.authorityEpoch++
+        }
+        this.committedRefreshRevision = Math.max(revision, this.revision)
+        this.cancelDebounce()
+        try {
+            this.dependencies.onWorkingSetRefreshRequired?.(this.committedRefreshRevision)
+        } catch (notificationError) {
+            this.reportBackgroundError(notificationError)
+        }
+        this.reportBackgroundError(error)
     }
 
     get pendingBytes(): number {
@@ -616,8 +641,6 @@ export class SaveCoordinator {
             this.additionPromise !== null ||
             this.pendingCharacterAddition !== null ||
             this.reservedCharacterAddition !== null ||
-            this.pendingResidentCompensations.length > 0 ||
-            this.pendingResidentConversationCompensations.length > 0 ||
             this.pendingConversationMutations.length > 0 ||
             this.pendingWindowedActivationChange !== null
         )
@@ -658,37 +681,61 @@ export class SaveCoordinator {
     }
 
     initialize(revision: DataRevision, database?: Database): void {
+        if (this.committedRefreshRevision !== null && revision < this.committedRefreshRevision) {
+            throw new RevisionConflictError(this.committedRefreshRevision, revision)
+        }
         this.cancelDebounce()
         this.cancelOfficialPublishRetry()
         this.pluginStorageCaptureCache.clear()
         const captured = database ? this.captureDatabase(database) : this.capture()
+        if (captured.pluginStorageCapture) {
+            this.dependencies.canonicalCapture?.seedPluginStorage?.(captured.pluginStorageCapture)
+        }
+        const recoveringSameRevision = this.committedRefreshRevision === revision
+        const retainPublication = recoveringSameRevision && this.pendingPublicationRevision === revision
+        const retainedDeferredRevision = recoveringSameRevision && this.deferredPublicationRevision === revision
+            ? revision
+            : null
         this.authorityEpoch++
         this.currentRevision = revision
         this.rootBaseline = captured.rootCanonical
-        this.pluginStorageBaseline = captured.pluginStorageCanonical
+        this.pluginStorageBaselineEntries = captured.pluginStorageCapture
+            ? new PluginStorageBaseline(captured.pluginStorageCapture)
+            : captured.pluginStorageCanonical === null
+              ? null
+              : new PluginStorageBaseline(captured.pluginStorageCanonical)
         this.presetsBaseline = captured.presetsCanonical
         this.setCharacterBaseline(captured)
         this.dirtyGeneration = 0
         this.pendingByteCount = 0
-        if (this.pendingPublication) {
-            this.pendingPublicationCleanup.add(this.pendingPublication)
+        if (!retainPublication) {
+            if (this.pendingPublication) {
+                this.pendingPublicationCleanup.add(this.pendingPublication)
+            }
+            this.pendingPublication = null
+            this.pendingPublicationRevision = null
         }
-        this.pendingPublication = null
-        this.pendingPublicationRevision = null
-        this.deferredPublicationRevision = null
-        this.lastOfficialPublishAttemptAt = null
+        this.deferredPublicationRevision = retainedDeferredRevision
+        if (!recoveringSameRevision) this.lastOfficialPublishAttemptAt = null
         this.pendingCharacterAddition = null
         this.reservedCharacterAddition = null
-        this.pendingResidentCompensations = []
-        this.pendingResidentConversationCompensations = []
         this.pendingConversationMutations = []
         this.pendingWindowedActivationChange = null
         this.persistenceWasBusy = false
         this.lastBackgroundErrorMessage = null
         if (this.destructiveReplacementFence?.state === 'held') {
-            this.destructiveReplacementFence.acceptsPostPublicationDirty = true
-            this.destructiveReplacementFence.queuedPostPublicationDirty = false
-            this.destructiveReplacementFence.blockedPrePublicationDirty = false
+            this.destructiveReplacementFence.refreshBaseline = captured
+        }
+        if (this.committedRefreshRevision !== null) {
+            this.committedRefreshRevision = null
+            try {
+                this.dependencies.onWorkingSetRefreshRequired?.(null)
+            } catch (error) {
+                this.reportBackgroundError(error)
+            }
+        }
+        if (!this.destructiveReplacementFence && this.hasPendingOfficialPublication) {
+            this.armOfficialPublishRetry(this.officialPublishDelayMs())
         }
         this.armPublicationCleanupRetryIfNeeded()
     }
@@ -750,8 +797,6 @@ export class SaveCoordinator {
             character.chaId !== authority.characterId ||
             this.pendingByteCount > 0 ||
             this.pendingConversationMutations.length > 0 ||
-            this.pendingResidentCompensations.length > 0 ||
-            this.pendingResidentConversationCompensations.length > 0 ||
             this.pendingCharacterAddition !== null
         )
             return false
@@ -854,19 +899,15 @@ export class SaveCoordinator {
     markPersistentDataDirty(estimatedBytes: number): void {
         this.assertInitialized()
         this.assertSelectedConversationTransitionInactive()
+        if (this.committedRefreshRevision !== null) throw new PersistentMutationFencedError()
         const fence = this.destructiveReplacementFence
+        if (fence?.state === 'acquiring') throw new PersistentMutationFencedError()
         if (fence?.state === 'held') {
-            if (!fence.acceptsPostPublicationDirty) {
-                const matchesFenceBaseline = fence.refreshBaseline
-                    ? this.captureMatchesCapturedState(fence.refreshBaseline)
-                    : this.captureMatchesBaseline()
-                if (!matchesFenceBaseline) {
-                    fence.blockedPrePublicationDirty = true
-                }
-                throw new PersistentMutationFencedError()
-            }
-            if (this.captureMatchesBaseline()) return
-            fence.queuedPostPublicationDirty = true
+            const matchesFenceBaseline = fence.refreshBaseline
+                ? this.captureMatchesCapturedState(fence.refreshBaseline)
+                : this.captureMatchesBaseline()
+            if (!matchesFenceBaseline) fence.blockedPrePublicationDirty = true
+            throw new PersistentMutationFencedError()
         }
         this.dirtyGeneration++
         this.persistenceWasBusy = true
@@ -874,7 +915,6 @@ export class SaveCoordinator {
         const previousBytes = this.pendingByteCount
         this.pendingByteCount = Math.max(previousBytes, bytes)
         this.cancelDebounce()
-        if (fence) return
         if (this.pendingByteCount >= PENDING_BYTE_LIMIT && previousBytes < PENDING_BYTE_LIMIT) {
             this.startBackgroundFlush('byte-limit')
             return
@@ -981,10 +1021,12 @@ export class SaveCoordinator {
     }
 
     private async runLocalFlush(reason: string): Promise<void> {
+        const authorityEpoch = this.authorityEpoch
         while (this.queuedOperationCount > 0 && !this.publicationInProgress) {
             await this.waitForOperationStateChange()
+            this.assertQueuedMutationAllowed(authorityEpoch)
         }
-        this.assertPersistentMutationAllowed()
+        this.assertPersistentMutationAllowed(authorityEpoch)
         if (this.publicationInProgress) {
             const promise = this.flushIterations(reason, false)
             this.localFlushDuringPublicationPromise = promise
@@ -998,18 +1040,19 @@ export class SaveCoordinator {
             }
         }
         await this.enqueue(async () => {
-            this.assertPersistentMutationAllowed()
+            this.assertQueuedMutationAllowed(authorityEpoch)
             await this.flushIterations(reason, false)
-        })
+        }, authorityEpoch)
     }
 
     replacePersistentDatabase(
         database: Database,
         reason: string,
         options: PersistentReplacementOptions = {},
-    ): Promise<void> {
+    ): Promise<CommittedApplyOutcome> {
         this.assertInitialized()
         this.assertPersistentMutationAllowed()
+        options = { ...options }
         const expectationError = this.replacementExpectationError(options)
         if (expectationError) return Promise.reject(expectationError)
         if (!options.authoritative && this.dependencies.isIncompleteWorkingSet?.(database)) {
@@ -1020,77 +1063,103 @@ export class SaveCoordinator {
             )
         }
         const candidate = canonicalDatabaseClone(database)
-        const before = this.capture()
-        const capturedGeneration = this.dirtyGeneration
-        const supersededAdditionToken =
-            (this.pendingCharacterAddition ?? this.reservedCharacterAddition)?.token ?? null
-        const hadPendingDebounce = this.debounceHandle !== undefined
-        this.cancelDebounce()
-        const replacement = this.enqueue(() => {
-            const queuedExpectationError = this.replacementExpectationError(options)
-            if (queuedExpectationError) throw queuedExpectationError
-            return this.runReplacement(
-                candidate,
-                before,
-                capturedGeneration,
-                supersededAdditionToken,
-                reason,
-                options,
-            )
-        })
-        return replacement.catch((error) => {
-            this.rearmDebounceAfterReplacementFailure(capturedGeneration, hadPendingDebounce)
-            throw error
-        })
+        return this.enqueueReplacement(candidate, this.captureReplacementAdmission(options), reason, options)
     }
 
     replacePreparedPersistentDatabase(
         prepare: () => Promise<Database>,
         reason: string,
         options: PersistentReplacementOptions = {},
-    ): Promise<void> {
+    ): Promise<CommittedApplyOutcome> {
         this.assertInitialized()
         this.assertPersistentMutationAllowed()
+        options = { ...options }
         const expectationError = this.replacementExpectationError(options)
         if (expectationError) return Promise.reject(expectationError)
-        const before = this.capture()
-        const capturedGeneration = this.dirtyGeneration
-        const supersededAdditionToken =
-            (this.pendingCharacterAddition ?? this.reservedCharacterAddition)?.token ?? null
-        const hadPendingDebounce = this.debounceHandle !== undefined
+        const admission = this.captureReplacementAdmission(options)
+        // Detach immediately, but do not reserve the write queue or pause local autosave.
+        return (async () => {
+            const prepared = await prepare()
+            if (!options.authoritative && this.dependencies.isIncompleteWorkingSet?.(prepared)) {
+                throw new Error(
+                    'Cannot replace persistent data from an incomplete persistent working set',
+                )
+            }
+            const candidate = canonicalDatabaseClone(prepared)
+            return this.enqueueReplacement(candidate, admission, reason, options)
+        })()
+    }
+
+    private captureReplacementAdmission(options: PersistentReplacementOptions): ReplacementAdmission {
+        return {
+            revision: options.expectedRevision ?? this.revision,
+            mutationGeneration: options.expectedMutationGeneration ?? this.dirtyGeneration,
+            authorityEpoch: this.authorityEpoch,
+            navigationGeneration: this.dependencies.getNavigationGeneration?.(),
+            baseline: this.capture(),
+            hadPendingDebounce: this.debounceHandle !== undefined,
+            supersededAdditionToken:
+                (this.pendingCharacterAddition ?? this.reservedCharacterAddition)?.token ?? null,
+        }
+    }
+
+    private enqueueReplacement(
+        candidate: Database,
+        admission: ReplacementAdmission,
+        reason: string,
+        options: PersistentReplacementOptions,
+    ): Promise<CommittedApplyOutcome> {
+        this.assertPersistentMutationAllowed(admission.authorityEpoch)
+        if (this.dependencies.isConversationOperationActive?.() || this.publicationInProgress) {
+            return Promise.reject(new PersistentMutationFencedError())
+        }
+        const owner = Symbol('prepared-database-replacement')
+        this.destructiveReplacementFence = {
+            owner,
+            state: 'acquiring',
+            blockedPrePublicationDirty: false,
+        }
         this.cancelDebounce()
-        const preparation = Promise.resolve().then(prepare)
-        const replacement = this.enqueue(async () => {
-            const queuedExpectationError = this.replacementExpectationError(options)
-            if (queuedExpectationError) throw queuedExpectationError
-            let candidate: Database
+        return this.enqueue(async () => {
             try {
-                const prepared = await preparation
-                const preparedExpectationError = this.replacementExpectationError(options)
-                if (preparedExpectationError) throw preparedExpectationError
+                // Earlier queued writes and pre-existing dirty state remain durable even
+                // when they make this prepared replacement's exact token stale.
+                await this.flushIterations(reason, false)
+                const expectationError = this.replacementExpectationError({
+                    expectedRevision: admission.revision,
+                    expectedMutationGeneration: admission.mutationGeneration,
+                })
+                if (expectationError) throw expectationError
                 if (
-                    !options.authoritative &&
-                    this.dependencies.isIncompleteWorkingSet?.(prepared)
+                    this.authorityEpoch !== admission.authorityEpoch ||
+                    this.dependencies.getNavigationGeneration?.() !== admission.navigationGeneration ||
+                    !this.captureMatchesCapturedState(admission.baseline) ||
+                    this.dependencies.isConversationOperationActive?.()
                 ) {
-                    throw new Error(
-                        'Cannot replace persistent data from an incomplete persistent working set',
+                    throw new PersistentMutationFencedError()
+                }
+                if (admission.baseline.windowedCharacter || this.windowedCharacterBaseline) {
+                    throw new WindowedConversationRequiresCompatibilityError(
+                        'database replacement requires complete ownership',
                     )
                 }
-                candidate = canonicalDatabaseClone(prepared)
-            } catch (error) {
-                throw error
+                if (this.destructiveReplacementFence?.owner !== owner) {
+                    throw new Error('Destructive persistent replacement fence ownership changed')
+                }
+                this.destructiveReplacementFence.state = 'held'
+                return await this.runReplacement(candidate, admission, options)
+            } finally {
+                if (this.destructiveReplacementFence?.owner === owner) {
+                    // A failed admission owns the same input guard as an applied replacement.
+                    this.destructiveReplacementFence.state = 'held'
+                    this.releaseDestructiveReplacementFence(owner)
+                }
             }
-            await this.runReplacement(
-                candidate,
-                before,
-                capturedGeneration,
-                supersededAdditionToken,
-                reason,
-                options,
+        }, null).catch((error) => {
+            this.rearmDebounceAfterReplacementFailure(
+                admission.mutationGeneration,
+                admission.hadPendingDebounce,
             )
-        })
-        return replacement.catch((error) => {
-            this.rearmDebounceAfterReplacementFailure(capturedGeneration, hadPendingDebounce)
             throw error
         })
     }
@@ -1170,9 +1239,9 @@ export class SaveCoordinator {
             const published = this.capture()
             this.presetsBaseline = published.presetsCanonical
             this.dependencies.onLocalRevision?.(committed.revision)
-            await this.finishExplicitCommit(committed.revision)
             this.pendingByteCount = 0
             this.lastBackgroundErrorMessage = null
+            await this.finishExplicitCommit(committed.revision)
         })
     }
 
@@ -1184,6 +1253,7 @@ export class SaveCoordinator {
         try {
             this.assertInitialized()
             this.assertPersistentMutationAllowed()
+            input = canonicalClone(input)
         } catch (error) {
             throw persistentRootModuleAppendRejected(error)
         }
@@ -1277,10 +1347,10 @@ export class SaveCoordinator {
             }
             const modules = Array.isArray(snapshot.root.modules) ? snapshot.root.modules : []
             const moduleIndex = modules.length
-            snapshot.root.modules = [...modules, canonicalClone(input.module)]
+            snapshot.root.modules = [...modules, input.module]
             const ownerHead: AssetOwnerHead = {
                 owner: { kind: 'root-module-assets', index: moduleIndex },
-                ...canonicalClone(input.ownerHead),
+                ...input.ownerHead,
             } as AssetOwnerHead
             const liveBeforeCommit = this.capture()
             signal?.throwIfAborted()
@@ -1329,13 +1399,24 @@ export class SaveCoordinator {
     ): Promise<void> {
         this.assertInitialized()
         this.assertPersistentMutationAllowed()
+        const committedMutations = mutations.map((mutation): PluginStorageMutation => {
+            if (mutation.type === 'clear') return { type: 'clear', owner: mutation.owner }
+            if (mutation.type === 'delete' || mutation.value === undefined) {
+                return { type: 'delete', owner: mutation.owner, key: mutation.key }
+            }
+            return {
+                type: 'set',
+                owner: mutation.owner,
+                key: mutation.key,
+                value: canonicalClone(mutation.value),
+            }
+        })
         this.cancelDebounce()
         return this.enqueue(async () => {
             await this.flushIterations(reason, true)
-            if (mutations.length === 0) return
+            if (committedMutations.length === 0) return
             const revision = this.revision
             const baseline = this.pluginStorageBaselineEntries
-            const committedMutations = canonicalClone(mutations) as PluginStorageMutation[]
             const readLiveStorage = () =>
                 this.dependencies.capturePluginStorage
                     ? this.dependencies.capturePluginStorage()
@@ -1395,10 +1476,15 @@ export class SaveCoordinator {
         characterId: string,
         conversationId: string,
         patch: ConversationBindingPatch,
-        publish: () => void,
+        publish: (committedPatch: ConversationBindingPatch) => void,
     ): Promise<void> {
         this.assertInitialized()
         this.assertPersistentMutationAllowed()
+        const clonePatch = (): ConversationBindingPatch =>
+            Object.fromEntries(Object.entries(patch).map(([key, value]) => [
+                key, value === undefined ? undefined : canonicalClone(value),
+            ]))
+        patch = clonePatch()
         return this.enqueue(async () => {
             await this.flushIterations('chat-binding', true)
             const metadata = await this.dependencies.store.readConversationMetadata(
@@ -1437,7 +1523,8 @@ export class SaveCoordinator {
                 if (conversation) applyConversationBindingPatch(conversation, patch)
                 this.characterBaseline = canonicalJson(baseline)
             }
-            publish()
+            // The UI must not share nested values with the persisted windowed baseline.
+            publish(clonePatch())
             this.dependencies.onStorageOnlyRevision?.(committed.revision)
             this.dependencies.onLocalRevision?.(committed.revision)
             await this.finishExplicitCommit(committed.revision)
@@ -1481,29 +1568,41 @@ export class SaveCoordinator {
                 liveBeforeCommit.root,
             )
             const rootChanged = canonicalJson(committedRoot) !== canonicalJson(rootValue.value)
+            const committedDetail = deleting ? null : canonicalClone(state.character)
             const commit: WorkingSetCommit = { expectedRevision: revision }
             if (rootChanged) commit.root = committedRoot
             if (deleting) commit.deleteCharacterId = characterId
-            else commit.character = canonicalClone(state.character)
+            else commit.character = committedDetail!
 
             const committed = await this.dependencies.store.commit(commit)
             const residentAfterCommit = this.captureResidentCharacter(characterId)
             if (!this.residentCharactersMatch(residentBefore, residentAfterCommit)) {
-                const committedCharacter = deleting
+                const committedCharacter = committedDetail === null
                     ? null
                     : this.mergeCommittedDetailWithResident(
-                          state.character,
+                          committedDetail,
                           residentBefore?.character ?? null,
                       )
-                return this.compensateConcurrentResidentCharacter({
-                    committedRevision: committed.revision,
+                this.finishCharacterMutation(
+                    {
+                        revision: committed.revision,
+                        root: committedRoot,
+                        characterId,
+                        kind: deleting ? 'delete' : 'detail',
+                        character: committedDetail,
+                    },
                     committedRoot,
-                    committedCharacter,
-                    deleting,
-                    characterId,
-                    residentAfterCommit,
-                    reason,
-                })
+                    {
+                        preservePendingWork: true,
+                        publish: false,
+                        committedSelectedCharacter: {
+                            id: characterId,
+                            character: committedCharacter,
+                        },
+                    },
+                )
+                await this.finishExplicitCommit(committed.revision)
+                return true
             }
             const liveAfterCommit = this.capture()
             this.finishCharacterMutation(
@@ -1516,7 +1615,7 @@ export class SaveCoordinator {
                     ),
                     characterId,
                     kind: deleting ? 'delete' : 'detail',
-                    character: deleting ? null : canonicalClone(state.character),
+                    character: committedDetail,
                 },
                 committedRoot,
             )
@@ -1635,6 +1734,12 @@ export class SaveCoordinator {
                 return residentDetail as CharacterDetail
             })
             const liveAfterCommit = this.capture()
+            const selectedRelatedDetail = relatedCharacters.find(
+                (detail) => detail.chaId === liveAfterCommit.character?.chaId,
+            )
+            const selectedRelatedBefore = liveAfterCommit.character
+                ? relatedResidentsBefore.get(liveAfterCommit.character.chaId)
+                : null
             this.finishCharacterMutation(
                 {
                     revision: committed.revision,
@@ -1651,19 +1756,18 @@ export class SaveCoordinator {
                 committedRoot,
                 {
                     preservePendingWork: changedDuringCommit || relatedRaces.size > 0,
+                    committedSelectedCharacter: selectedRelatedDetail
+                        ? {
+                              id: selectedRelatedDetail.chaId,
+                              character: this.mergeCommittedDetailWithResident(
+                                  selectedRelatedDetail,
+                                  selectedRelatedBefore?.character ?? null,
+                              ),
+                          }
+                        : undefined,
                 },
             )
-            for (const relatedId of relatedRaces.keys()) {
-                this.enqueueResidentCompensation(relatedId)
-            }
-            if (changedDuringCommit || relatedRaces.size > 0) {
-                if (this.dependencies.officialPublisher) {
-                    await this.stagePublication(committed.revision)
-                }
-                await this.flushIterations(reason, true)
-            } else {
-                await this.finishExplicitCommit(committed.revision)
-            }
+            await this.finishExplicitCommit(committed.revision)
             return true
         })
     }
@@ -1676,14 +1780,12 @@ export class SaveCoordinator {
     ): Promise<boolean> {
         this.assertInitialized()
         this.assertPersistentMutationAllowed()
+        const { expectedRevision } = options
         this.cancelDebounce()
         return this.enqueue(async () => {
             await this.flushIterations(reason, true)
-            if (
-                options.expectedRevision !== undefined &&
-                options.expectedRevision !== this.revision
-            )
-                throw new RevisionConflictError(options.expectedRevision, this.revision)
+            if (expectedRevision !== undefined && expectedRevision !== this.revision)
+                throw new RevisionConflictError(expectedRevision, this.revision)
             const residentBefore = this.captureResidentCharacter(characterId)
             const revision = this.revision
             const [rootValue, characterValue] = await Promise.all([
@@ -1713,15 +1815,23 @@ export class SaveCoordinator {
             })
             const residentAfterCommit = this.captureResidentCharacter(characterId)
             if (!this.residentCharactersMatch(residentBefore, residentAfterCommit)) {
-                return this.compensateConcurrentResidentCharacter({
-                    committedRevision: committed.revision,
-                    committedRoot: rootValue.value,
-                    committedCharacter: replacement,
-                    deleting: false,
-                    characterId,
-                    residentAfterCommit,
-                    reason,
-                })
+                this.finishCharacterMutation(
+                    {
+                        revision: committed.revision,
+                        root: rootValue.value,
+                        characterId,
+                        kind: 'replace',
+                        character: replacement,
+                    },
+                    rootValue.value,
+                    {
+                        preservePendingWork: true,
+                        publish: false,
+                        committedSelectedCharacter: { id: characterId, character: replacement },
+                    },
+                )
+                await this.finishExplicitCommit(committed.revision)
+                return true
             }
             this.finishCharacterMutation(
                 {
@@ -1747,14 +1857,13 @@ export class SaveCoordinator {
     ): Promise<boolean> {
         this.assertInitialized()
         this.assertPersistentMutationAllowed()
+        const candidate = canonicalClone(replacement)
+        const { expectedRevision } = options
         this.cancelDebounce()
         return this.enqueue(async () => {
             await this.flushIterations(reason, true)
-            if (
-                options.expectedRevision !== undefined &&
-                options.expectedRevision !== this.revision
-            )
-                throw new RevisionConflictError(options.expectedRevision, this.revision)
+            if (expectedRevision !== undefined && expectedRevision !== this.revision)
+                throw new RevisionConflictError(expectedRevision, this.revision)
 
             const authority = this.dependencies.captureSelectedConversationAuthority?.() ?? null
             if (
@@ -1777,7 +1886,6 @@ export class SaveCoordinator {
             )
             if (!current) return false
             this.assertReadRevision(this.revision, current.revision)
-            const candidate = canonicalClone(replacement)
             if (candidate.id !== conversationId) {
                 throw new Error(`Replacement conversation ID must remain ${conversationId}`)
             }
@@ -1804,14 +1912,21 @@ export class SaveCoordinator {
                 conversationId,
             )
             if (!this.residentConversationsMatch(residentBefore, residentAfterCommit)) {
-                return this.compensateConcurrentResidentConversation({
-                    committedRevision: committed.revision,
-                    characterId,
-                    conversationId,
-                    residentAfterCommit,
-                    reason,
-                    replacementMessageCount: candidate.message.length,
-                })
+                await this.finishPersistentConversationReplacement(
+                    {
+                        revision: committed.revision,
+                        characterId,
+                        conversationId,
+                        conversation: candidate,
+                    },
+                    {
+                        preservePendingWork: true,
+                        publish: false,
+                        residentBefore,
+                        summaryBefore,
+                    },
+                )
+                return true
             }
             await this.finishPersistentConversationReplacement(
                 {
@@ -1838,6 +1953,13 @@ export class SaveCoordinator {
     ): Promise<boolean> {
         this.assertInitialized()
         this.assertPersistentMutationAllowed()
+        const { includeInCharacterOrder } = options
+        const assetAliases = options.assetAliases === undefined
+            ? undefined
+            : [...canonicalClone(options.assetAliases)]
+        const assetOwnerHeads = options.assetOwnerHeads === undefined
+            ? undefined
+            : [...canonicalClone(options.assetOwnerHeads)]
         this.cancelDebounce()
         return this.enqueue(async () => {
             await this.flushIterations(reason, true)
@@ -1864,15 +1986,13 @@ export class SaveCoordinator {
             }
 
             const commit: WorkingSetCommit = { expectedRevision: revision }
-            if (options.assetAliases !== undefined) {
-                const assetAliases = [...canonicalClone(options.assetAliases)]
+            if (assetAliases !== undefined) {
                 if (assetAliases.some((alias) => alias.kind !== 'asset')) {
                     throw new TypeError('Prepared character aliases must be ordinary assets')
                 }
                 commit.assetAliases = assetAliases
             }
-            if (options.assetOwnerHeads !== undefined) {
-                const assetOwnerHeads = [...canonicalClone(options.assetOwnerHeads)]
+            if (assetOwnerHeads !== undefined) {
                 if (
                     assetOwnerHeads.some(
                         (head) =>
@@ -1891,7 +2011,7 @@ export class SaveCoordinator {
             if (current) {
                 commit.replaceCharacter = replacement
             } else {
-                if (options.includeInCharacterOrder !== false) {
+                if (includeInCharacterOrder !== false) {
                     appendCharacterIdToOrder(mutatedRoot, characterId)
                     committedRoot = rebaseRootMutation(
                         rootValue.value,
@@ -1905,21 +2025,29 @@ export class SaveCoordinator {
             const committed = await this.dependencies.store.commit(commit)
             const residentAfterCommit = this.captureResidentCharacter(characterId)
             if (!this.residentCharactersMatch(residentBefore, residentAfterCommit)) {
-                return this.compensateConcurrentResidentCharacter({
-                    committedRevision: committed.revision,
+                this.finishCharacterMutation(
+                    {
+                        revision: committed.revision,
+                        root: committedRoot,
+                        characterId,
+                        kind: current ? 'replace' : 'add',
+                        character: replacement,
+                    },
                     committedRoot,
-                    committedCharacter: replacement,
-                    deleting: false,
-                    characterId,
-                    residentAfterCommit,
-                    reason,
-                })
+                    {
+                        preservePendingWork: true,
+                        publish: false,
+                        committedSelectedCharacter: { id: characterId, character: replacement },
+                    },
+                )
+                await this.finishExplicitCommit(committed.revision)
+                return true
             }
             this.finishCharacterMutation(
                 {
                     revision: committed.revision,
                     root:
-                        current || options.includeInCharacterOrder === false
+                        current || includeInCharacterOrder === false
                             ? this.capture().root
                             : rebaseRootMutation(rootValue.value, mutatedRoot, this.capture().root),
                     characterId,
@@ -2054,12 +2182,16 @@ export class SaveCoordinator {
         )
     }
 
-    capturePersistentMutationToken(reason: string): Promise<PersistentMutationToken> {
+    capturePersistentMutationToken(
+        reason: string,
+        options: { publishOfficial?: boolean } = {},
+    ): Promise<PersistentMutationToken> {
+        options = { ...options }
         this.assertInitialized()
         this.assertPersistentMutationAllowed()
         this.cancelDebounce()
         return this.enqueue(async () => {
-            await this.flushIterations(reason, true)
+            await this.flushIterations(reason, options.publishOfficial ?? true)
             return {
                 revision: this.revision,
                 mutationGeneration: this.dirtyGeneration,
@@ -2067,29 +2199,35 @@ export class SaveCoordinator {
         })
     }
 
+    /** Drains local writes without advancing the preparation's expected token. */
     acquireDestructiveReplacementFence(expected: PersistentMutationToken): Promise<symbol> {
-        this.assertInitialized()
-        if (this.destructiveReplacementFence) throw new PersistentMutationFencedError()
+        this.assertPersistentMutationAllowed()
+        if (this.dependencies.isConversationOperationActive?.() || this.publicationInProgress) {
+            throw new PersistentMutationFencedError()
+        }
+        expected = { ...expected }
+        const authorityEpoch = this.authorityEpoch
+        const navigationGeneration = this.dependencies.getNavigationGeneration?.()
         const owner = Symbol('destructive-persistent-replacement')
         this.destructiveReplacementFence = {
             owner,
             state: 'acquiring',
-            acceptsPostPublicationDirty: false,
-            queuedPostPublicationDirty: false,
             blockedPrePublicationDirty: false,
         }
         this.cancelDebounce()
         return this.enqueue(async () => {
             try {
-                await this.flushIterations('destructive-persistent-replacement', true)
+                await this.flushIterations('destructive-persistent-replacement', false)
                 if (this.revision !== expected.revision) {
                     throw new RevisionConflictError(expected.revision, this.revision)
                 }
-                if (this.dirtyGeneration !== expected.mutationGeneration) {
-                    throw new Error(
-                        `Expected mutation generation ${expected.mutationGeneration}, ` +
-                            `but current generation is ${this.dirtyGeneration}`,
-                    )
+                if (
+                    this.dirtyGeneration !== expected.mutationGeneration ||
+                    this.authorityEpoch !== authorityEpoch ||
+                    this.dependencies.getNavigationGeneration?.() !== navigationGeneration ||
+                    this.dependencies.isConversationOperationActive?.()
+                ) {
+                    throw new PersistentMutationFencedError()
                 }
                 if (this.destructiveReplacementFence?.owner !== owner) {
                     throw new Error('Destructive persistent replacement fence ownership changed')
@@ -2102,7 +2240,7 @@ export class SaveCoordinator {
                 }
                 throw error
             }
-        })
+        }, null)
     }
 
     /**
@@ -2117,8 +2255,6 @@ export class SaveCoordinator {
         this.destructiveReplacementFence = {
             owner,
             state: 'acquiring',
-            acceptsPostPublicationDirty: false,
-            queuedPostPublicationDirty: false,
             blockedPrePublicationDirty: false,
         }
         this.cancelDebounce()
@@ -2136,7 +2272,7 @@ export class SaveCoordinator {
                 }
                 throw error
             }
-        })
+        }, null)
     }
 
     assertDestructiveReplacementFence(owner: symbol): void {
@@ -2149,12 +2285,9 @@ export class SaveCoordinator {
         if (this.destructiveReplacementFence.blockedPrePublicationDirty) {
             throw new PersistentMutationFencedError()
         }
-        if (
-            !this.destructiveReplacementFence.acceptsPostPublicationDirty &&
-            !(this.destructiveReplacementFence.refreshBaseline
-                ? this.captureMatchesCapturedState(this.destructiveReplacementFence.refreshBaseline)
-                : this.captureMatchesBaseline())
-        ) {
+        if (!(this.destructiveReplacementFence.refreshBaseline
+            ? this.captureMatchesCapturedState(this.destructiveReplacementFence.refreshBaseline)
+            : this.captureMatchesBaseline())) {
             this.destructiveReplacementFence.blockedPrePublicationDirty = true
             throw new PersistentMutationFencedError()
         }
@@ -2167,11 +2300,9 @@ export class SaveCoordinator {
         ) {
             throw new Error('Destructive persistent replacement fence is not held')
         }
-        const queuedPostPublicationDirty =
-            this.destructiveReplacementFence.queuedPostPublicationDirty
         this.destructiveReplacementFence = null
-        if (queuedPostPublicationDirty && !this.flushPromise && !this.additionPromise) {
-            this.armDebounce()
+        if (this.committedRefreshRevision === null && this.hasPendingOfficialPublication) {
+            this.armOfficialPublishRetry(this.officialPublishDelayMs())
         }
     }
 
@@ -2218,23 +2349,29 @@ export class SaveCoordinator {
     }
 
     commitCharacterAddition(request: CharacterAdditionRequest, reason: string): Promise<void> {
+        request = { ...request }
         this.assertInitialized()
         this.assertPersistentMutationAllowed()
         if (!request.characterId) {
             throw new Error('Character addition requires a nonempty character ID')
         }
+        const authorityEpoch = this.authorityEpoch
         const inFlight = this.additionPromise
         if (inFlight) {
             // Two imports can overlap, so the later one waits instead of failing.
             return inFlight
                 .catch(() => undefined)
-                .then(() => this.commitCharacterAddition(request, reason))
+                .then(() => {
+                    this.assertPersistentMutationAllowed(authorityEpoch)
+                    return this.commitCharacterAddition(request, reason)
+                })
         }
         if (this.pendingCharacterAddition) {
             // A previous addition failed and left its work pending; retry it before this import.
-            return this.flushPendingData(reason).then(() =>
-                this.commitCharacterAddition(request, reason),
-            )
+            return this.flushPendingData(reason).then(() => {
+                this.assertPersistentMutationAllowed(authorityEpoch)
+                return this.commitCharacterAddition(request, reason)
+            })
         }
         if (this.reservedCharacterAddition) {
             throw new Error('A character addition is already pending')
@@ -2250,6 +2387,12 @@ export class SaveCoordinator {
             }
             if (this.pendingCharacterAddition?.token !== reserved.token) return
             await this.flushIterations(reason, true)
+        }).catch((error) => {
+            if (this.reservedCharacterAddition === reserved) {
+                this.reservedCharacterAddition = null
+                this.notifyOperationStateChange()
+            }
+            throw error
         })
         this.trackPromiseSlot(
             promise,
@@ -2261,12 +2404,18 @@ export class SaveCoordinator {
         return promise
     }
 
-    private enqueue<T>(operation: () => Promise<T>): Promise<T> {
+    private enqueue<T>(
+        operation: () => Promise<T>,
+        expectedAuthorityEpoch: number | null = this.authorityEpoch,
+    ): Promise<T> {
         this.queuedOperationCount += 1
         this.persistenceWasBusy = true
         this.notifyOperationStateChange()
         return this.operationMutex.runExclusive(async () => {
             try {
+                if (expectedAuthorityEpoch !== null) {
+                    this.assertQueuedMutationAllowed(expectedAuthorityEpoch)
+                }
                 return await operation()
             } finally {
                 this.queuedOperationCount -= 1
@@ -2287,25 +2436,13 @@ export class SaveCoordinator {
     }
 
     private async flushIterations(_reason: string, publishOfficial: boolean): Promise<void> {
+        if (this.committedRefreshRevision !== null) throw new PersistentMutationFencedError()
+        if (this.destructiveReplacementFence) publishOfficial = false
         if (publishOfficial && this.deferredPublicationRevision !== null) {
             await this.applyDeferredPublication()
         }
         if (publishOfficial && this.pendingPublicationCleanup.size > 0) {
             await this.retryPublicationCleanup()
-        }
-        if (this.pendingResidentCompensations.length > 0) {
-            if (
-                this.windowedCharacterBaseline ||
-                (this.dependencies.captureSelectedConversationAuthority?.() ?? null) !== null
-            ) {
-                throw new WindowedConversationRequiresCompatibilityError(
-                    'resident compensation requires a complete selected character',
-                )
-            }
-            await this.retryPendingResidentCompensations(publishOfficial)
-        }
-        if (this.pendingResidentConversationCompensations.length > 0) {
-            await this.retryPendingResidentConversationCompensations(publishOfficial)
         }
         while (true) {
             const generation = this.dirtyGeneration
@@ -2433,7 +2570,19 @@ export class SaveCoordinator {
                             committedConversationKeys.has(
                                 `${event.characterId}\u0000${event.conversationId}`,
                             ),
-                    ) ?? []
+                        ) ?? []
+                const persistedConversationMutationSet = new Set(
+                    persistedConversationMutations,
+                )
+                const fallbackPersistedConversationMutations =
+                    pendingConversationMutations.filter(
+                        (pending) =>
+                            !persistedConversationMutationSet.has(pending) &&
+                            (pending.event.characterId === replacedCharacterId ||
+                                committedConversationKeys.has(
+                                    `${pending.event.characterId}\u0000${pending.event.conversationId}`,
+                                )),
+                    )
                 const persistenceHandles: ConversationMutationPersistenceHandle[] = []
                 for (const { event } of persistedConversationMutations) {
                     try {
@@ -2481,6 +2630,12 @@ export class SaveCoordinator {
                     if (persistedConversationMutations.length > 0) {
                         this.acknowledgeConversationMutations(
                             persistedConversationMutations,
+                            committed.revision,
+                        )
+                    }
+                    if (fallbackPersistedConversationMutations.length > 0) {
+                        this.acknowledgeFallbackConversationMutations(
+                            fallbackPersistedConversationMutations,
                             committed.revision,
                         )
                     }
@@ -2546,6 +2701,7 @@ export class SaveCoordinator {
                     (currentAddition.pending.locallyAdded &&
                         currentAddition.canonical === currentAddition.pending.baseline))
             ) {
+                this.pendingByteCount = 0
                 if (publishOfficial && this.pendingPublicationRevision !== null) {
                     const delay = this.officialPublishDelayMs()
                     if (delay <= 0) {
@@ -2554,7 +2710,6 @@ export class SaveCoordinator {
                     }
                     this.armOfficialPublishRetry(delay)
                     this.pendingCharacterAddition = null
-                    this.pendingByteCount = 0
                     return
                 }
                 if (
@@ -2565,7 +2720,6 @@ export class SaveCoordinator {
                     this.armOfficialPublishRetry(this.officialPublishDelayMs())
                 }
                 this.pendingCharacterAddition = null
-                this.pendingByteCount = 0
                 this.lastBackgroundErrorMessage = null
                 return
             }
@@ -2600,89 +2754,65 @@ export class SaveCoordinator {
 
     private async runReplacement(
         candidate: Database,
-        before: CapturedState,
-        capturedGeneration: number,
-        supersededAdditionToken: object | null,
-        reason: string,
+        admission: ReplacementAdmission,
         options: PersistentReplacementOptions,
-    ): Promise<void> {
-        await this.retryPendingResidentCompensations(true)
-        const pendingExpectationError = this.replacementExpectationError(options)
-        if (pendingExpectationError) throw pendingExpectationError
-        this.rebaseReplacementPublication(candidate, before, this.capture(), false)
+    ): Promise<CommittedApplyOutcome> {
+        const candidateCapture = this.captureDatabase(candidate)
         const replaced = await this.dependencies.store.replaceFromDatabase(
             candidate,
-            options.expectedRevision ?? this.revision,
+            admission.revision,
         )
+        // This revision is authoritative even when a later projection or notification fails.
         this.authorityEpoch++
-        const live = this.capture()
+        this.currentRevision = replaced.revision
         const stalePublication = options.publishOfficial ? null : this.pendingPublication
         if (!options.publishOfficial) {
             this.pendingPublication = null
             this.pendingPublicationRevision = null
+            this.deferredPublicationRevision = null
             this.cancelOfficialPublishRetry()
         }
-        if (this.pendingCharacterAddition?.token === supersededAdditionToken) {
+        if (this.pendingCharacterAddition?.token === admission.supersededAdditionToken) {
             this.pendingCharacterAddition = null
         }
-        if (this.reservedCharacterAddition?.token === supersededAdditionToken) {
+        if (this.reservedCharacterAddition?.token === admission.supersededAdditionToken) {
             this.reservedCharacterAddition = null
         }
-        this.currentRevision = replaced.revision
-        const candidateCapture = this.captureDatabase(candidate)
         this.rootBaseline = candidateCapture.rootCanonical
         this.pluginStorageBaseline = candidateCapture.pluginStorageCanonical
         this.presetsBaseline = candidateCapture.presetsCanonical
         this.setCharacterBaseline(candidateCapture)
+        this.pendingByteCount = 0
+        this.cancelDebounce()
 
-        const rebased = this.rebaseReplacementPublication(candidate, before, live, true)
-        const published = rebased.database
-        const compensation = rebased.compensation ? canonicalClone(rebased.compensation) : null
-
-        this.dependencies.replaceDatabase(published)
-        if (stalePublication) {
-            await this.disposeOrQueuePublication(stalePublication)
-        }
-        if (compensation) {
-            this.dirtyGeneration++
-            const compensated = await this.dependencies.store.commit({
-                expectedRevision: replaced.revision,
-                ...compensation,
-            })
-            this.currentRevision = compensated.revision
-            if (compensation.root) {
-                this.rootBaseline = canonicalJson(compensation.root)
-            }
-            if (compensation.pluginStorage) {
-                this.pluginStorageBaseline = pluginStorageJson(published.pluginCustomStorage ?? {})
-            }
-            if (compensation.replacePresets) {
-                this.presetsBaseline = canonicalJson(compensation.replacePresets)
-            }
+        try {
             if (
-                compensation.replaceCharacter &&
-                this.capture().character?.chaId === compensation.replaceCharacter.chaId
+                this.destructiveReplacementFence?.blockedPrePublicationDirty ||
+                this.dependencies.getNavigationGeneration?.() !== admission.navigationGeneration ||
+                !this.captureMatchesCapturedState(admission.baseline)
             ) {
-                this.characterBaseline = canonicalJson(compensation.replaceCharacter)
-                this.characterBaselineId = compensation.replaceCharacter.chaId
+                throw new PersistentMutationFencedError()
             }
-            this.dependencies.onLocalRevision?.(compensated.revision)
-            if (!this.flushPromise && !this.additionPromise) this.armDebounce()
-            if (options.publishOfficial && this.dependencies.officialPublisher) {
-                await this.stagePublication(compensated.revision)
-                this.armOfficialPublishRetry(this.officialPublishDelayMs())
-            }
-            throw new Error(`Concurrent live changes conflicted with replacement: ${reason}`)
+            this.dependencies.onLocalRevision?.(replaced.revision)
+            this.dependencies.replaceDatabase(candidate)
+            // Projection may select a different character when the old selection is absent.
+            // Baseline the committed candidate for that selection, never the mutable live view.
+            this.setCharacterBaseline(this.captureDatabase(candidate))
+        } catch (error) {
+            this.markCommittedWorkingSetRefreshRequired(replaced.revision, error)
         }
-
-        this.dependencies.onLocalRevision?.(replaced.revision)
-        if (options.publishOfficial) await this.finishExplicitCommit(replaced.revision)
-
-        if (this.dirtyGeneration === capturedGeneration) {
-            this.cancelDebounce()
-            this.pendingByteCount = 0
-        } else if (!this.flushPromise && !this.additionPromise) {
-            this.armDebounce()
+        // Cleanup and official publication are queued while the input guard is held.
+        // Neither operation can turn a completed local replacement into a retryable write.
+        try {
+            if (stalePublication) await this.disposeOrQueuePublication(stalePublication)
+            if (options.publishOfficial) await this.finishExplicitCommit(replaced.revision)
+        } catch (error) {
+            this.reportBackgroundError(error)
+        }
+        return {
+            kind: 'committed',
+            revision: replaced.revision,
+            projection: this.committedRefreshRevision === null ? 'applied' : 'refresh-required',
         }
     }
 
@@ -2826,13 +2956,14 @@ export class SaveCoordinator {
         result: PersistentConversationReplacementResult,
         options: {
             preservePendingWork?: boolean
+            publish?: boolean
             residentBefore?: { conversation: Chat; canonical: string } | null
             summaryBefore?: boolean
         } = {},
     ): Promise<void> {
         this.currentRevision = result.revision
         this.dirtyGeneration++
-        this.dependencies.publishConversationReplacement?.(result)
+        if (options.publish !== false) this.dependencies.publishConversationReplacement?.(result)
         this.advanceCharacterBaselineForConversation(result, options.residentBefore ?? null)
         if (options.summaryBefore === true) {
             this.advanceCharacterSummaryBaselineForConversation(result)
@@ -2841,79 +2972,6 @@ export class SaveCoordinator {
         this.lastBackgroundErrorMessage = null
         this.dependencies.onLocalRevision?.(result.revision)
         await this.finishExplicitCommit(result.revision)
-    }
-
-    private async compensateConcurrentResidentConversation(options: {
-        committedRevision: DataRevision
-        characterId: string
-        conversationId: string
-        residentAfterCommit: { conversation: Chat; canonical: string } | null
-        reason: string
-        replacementMessageCount: number
-    }): Promise<never> {
-        this.enqueueResidentConversationCompensation(options.characterId, options.conversationId)
-        this.currentRevision = options.committedRevision
-        this.dirtyGeneration++
-        this.dependencies.onLocalRevision?.(options.committedRevision)
-
-        let resident = options.residentAfterCommit
-        let deleteCount = options.replacementMessageCount
-        let targetSettled = resident === null
-        for (
-            let attempt = 0;
-            resident && attempt < CONCURRENT_CHARACTER_COMPENSATION_ATTEMPTS;
-            attempt++
-        ) {
-            const candidate = canonicalClone(resident.conversation)
-            const { message, ...conversation } = candidate
-            const compensated = await this.dependencies.store.commit({
-                expectedRevision: this.revision,
-                conversations: [
-                    {
-                        type: 'replace-range',
-                        characterId: options.characterId,
-                        conversationId: options.conversationId,
-                        start: 0,
-                        deleteCount,
-                        messages: message,
-                        conversation,
-                    },
-                ],
-            })
-            this.currentRevision = compensated.revision
-            this.dependencies.onLocalRevision?.(compensated.revision)
-            const next = this.captureResidentConversation(
-                options.characterId,
-                options.conversationId,
-            )
-            if (this.residentConversationsMatch(resident, next)) {
-                targetSettled = true
-                this.advanceCharacterBaselineForConversation(
-                    {
-                        revision: compensated.revision,
-                        characterId: options.characterId,
-                        conversationId: options.conversationId,
-                        conversation: resident.conversation,
-                    },
-                    resident,
-                )
-                break
-            }
-            deleteCount = candidate.message.length
-            resident = next
-            targetSettled = resident === null
-        }
-
-        if (targetSettled) {
-            this.removeResidentConversationCompensation(options.characterId, options.conversationId)
-        } else {
-            this.armDebounce()
-        }
-        await this.finishExplicitCommit(this.revision)
-        throw new Error(
-            `Resident conversation changed during persistent mutation: ` +
-                `${options.characterId}/${options.conversationId}`,
-        )
     }
 
     private assertResidentCharacterUnchanged(
@@ -2935,274 +2993,44 @@ export class SaveCoordinator {
         } as CompleteCharacter
     }
 
-    private async compensateConcurrentResidentCharacter(options: {
-        committedRevision: DataRevision
-        committedRoot: RootDatabase
-        committedCharacter: CompleteCharacter | null
-        deleting: boolean
-        characterId: string
-        residentAfterCommit: { character: CompleteCharacter; canonical: string } | null
-        reason: string
-    }): Promise<never> {
-        this.currentRevision = options.committedRevision
-        this.dirtyGeneration++
-        this.rootBaseline = canonicalJson(options.committedRoot)
-        const selected = this.capture().character
-        if (selected?.chaId === options.characterId) {
-            this.characterBaseline = options.committedCharacter
-                ? canonicalJson(options.committedCharacter)
-                : null
-            this.characterBaselineId = options.committedCharacter?.chaId ?? null
-        }
-        this.dependencies.onLocalRevision?.(options.committedRevision)
-
-        let resident = options.residentAfterCommit
-        let addCharacter = options.deleting
-        let targetSettled = resident === null
-        for (
-            let attempt = 0;
-            resident && attempt < CONCURRENT_CHARACTER_COMPENSATION_ATTEMPTS;
-            attempt++
-        ) {
-            const root = this.capture().root
-            const compensation: WorkingSetCommit = {
-                expectedRevision: this.revision,
-                ...(addCharacter
-                    ? { addCharacter: resident.character }
-                    : { replaceCharacter: resident.character }),
-            }
-            if (canonicalJson(root) !== this.rootBaseline) compensation.root = root
-            const compensated = await this.dependencies.store.commit(compensation)
-            this.currentRevision = compensated.revision
-            this.rootBaseline = canonicalJson(root)
-            this.dependencies.onLocalRevision?.(compensated.revision)
-            const next = this.captureResidentCharacter(options.characterId)
-            if (this.residentCharactersMatch(resident, next)) {
-                targetSettled = true
-                if (this.capture().character?.chaId === options.characterId) {
-                    this.characterBaseline = resident.canonical
-                    this.characterBaselineId = options.characterId
-                }
-                break
-            }
-            resident = next
-            targetSettled = resident === null
-            addCharacter = false
-        }
-
-        if (!targetSettled && resident) {
-            this.enqueueResidentCompensation(options.characterId)
-        }
-
-        const current = this.capture()
-        const currentAddition = this.capturePendingAddition()
-        const isClean =
-            targetSettled &&
-            current.rootCanonical === this.rootBaseline &&
-            this.pluginStorageMatchesBaseline(current) &&
-            (current.presetsCanonical === null ||
-                current.presetsCanonical === this.presetsBaseline) &&
-            current.characterCanonical === this.characterBaseline &&
-            (!currentAddition ||
-                (currentAddition.pending.locallyAdded &&
-                    currentAddition.canonical === currentAddition.pending.baseline))
-        if (isClean) {
-            this.cancelDebounce()
-            this.pendingByteCount = 0
-        } else if (!this.flushPromise && !this.additionPromise) {
-            this.armDebounce()
-        }
-        await this.finishExplicitCommit(this.revision)
-        throw new Error(
-            `Resident character changed during persistent mutation: ${options.characterId}`,
-        )
-    }
-
-    private async retryPendingResidentCompensations(publishOfficial: boolean): Promise<void> {
-        if (
-            this.windowedCharacterBaseline ||
-            (this.dependencies.captureSelectedConversationAuthority?.() ?? null) !== null
-        ) {
-            throw new WindowedConversationRequiresCompatibilityError(
-                'resident compensation requires complete ownership',
-            )
-        }
-        while (this.pendingResidentCompensations.length > 0) {
-            const pending = this.pendingResidentCompensations[0]
-            const resident = this.captureResidentCharacter(pending.characterId)
-            if (!resident) {
-                if (this.pendingResidentCompensations[0] === pending) {
-                    this.pendingResidentCompensations.shift()
-                }
-                continue
-            }
-
-            let committed: { revision: DataRevision }
-            try {
-                committed = await this.dependencies.store.commit({
-                    expectedRevision: this.revision,
-                    replaceCharacter: await this.reconstructResidentCharacter(resident),
-                })
-            } catch (error) {
-                this.armDebounce()
-                throw error
-            }
-            this.currentRevision = committed.revision
-            this.dependencies.onLocalRevision?.(committed.revision)
-            if (this.dependencies.officialPublisher) {
-                if (publishOfficial) await this.stagePublication(committed.revision)
-                else this.deferPublication(committed.revision)
-            }
-
-            const current = this.captureResidentCharacter(pending.characterId)
-            if (!this.residentCharactersMatch(resident, current)) {
-                this.armDebounce()
-                throw new Error(
-                    `Resident character changed during deferred compensation: ${pending.characterId}`,
-                )
-            }
-            if (this.pendingResidentCompensations[0] === pending) {
-                this.pendingResidentCompensations.shift()
-            }
-            if (this.capture().character?.chaId === pending.characterId) {
-                this.characterBaseline = resident.canonical
-                this.characterBaselineId = pending.characterId
-            }
-        }
-    }
-
-    private async retryPendingResidentConversationCompensations(
-        publishOfficial: boolean,
-    ): Promise<void> {
-        while (this.pendingResidentConversationCompensations.length > 0) {
-            const pending = this.pendingResidentConversationCompensations[0]
-            const resident = this.captureResidentConversation(
-                pending.characterId,
-                pending.conversationId,
-            )
-            if (!resident) {
-                this.pendingResidentConversationCompensations.shift()
-                continue
-            }
-            let committed: { revision: DataRevision }
-            try {
-                const durable = await this.dependencies.store.readConversation(
-                    pending.characterId,
-                    pending.conversationId,
-                )
-                if (!durable) {
-                    this.pendingResidentConversationCompensations.shift()
-                    continue
-                }
-                this.assertReadRevision(this.revision, durable.revision)
-                const candidate = canonicalClone(resident.conversation)
-                const { message, ...conversation } = candidate
-                committed = await this.dependencies.store.commit({
-                    expectedRevision: this.revision,
-                    conversations: [
-                        {
-                            type: 'replace-range',
-                            characterId: pending.characterId,
-                            conversationId: pending.conversationId,
-                            start: 0,
-                            deleteCount: durable.value.message.length,
-                            messages: message,
-                            conversation,
-                        },
-                    ],
-                })
-            } catch (error) {
-                this.armDebounce()
-                throw error
-            }
-            this.currentRevision = committed.revision
-            this.dependencies.onLocalRevision?.(committed.revision)
-            if (this.dependencies.officialPublisher) {
-                if (publishOfficial) await this.stagePublication(committed.revision)
-                else this.deferPublication(committed.revision)
-            }
-            if (
-                !this.residentConversationsMatch(
-                    resident,
-                    this.captureResidentConversation(pending.characterId, pending.conversationId),
-                )
-            ) {
-                this.armDebounce()
-                throw new Error(
-                    `Resident conversation changed during deferred compensation: ` +
-                        `${pending.characterId}/${pending.conversationId}`,
-                )
-            }
-            this.pendingResidentConversationCompensations.shift()
-            this.advanceCharacterBaselineForConversation(
-                {
-                    revision: committed.revision,
-                    characterId: pending.characterId,
-                    conversationId: pending.conversationId,
-                    conversation: resident.conversation,
-                },
-                resident,
-            )
-        }
-    }
-
     private finishCharacterMutation(
         result: PersistentCharacterMutationResult,
         committedRoot: RootDatabase,
-        options: { preservePendingWork?: boolean } = {},
+        options: {
+            preservePendingWork?: boolean
+            publish?: boolean
+            committedSelectedCharacter?: { id: string; character: CompleteCharacter | null }
+        } = {},
     ): void {
         this.currentRevision = result.revision
         this.dirtyGeneration++
         this.rootBaseline = canonicalJson(committedRoot)
-        this.dependencies.publishCharacterMutation?.(result)
-        const published = this.capture()
+        if (options.publish !== false) {
+            this.dependencies.publishCharacterMutation?.(result)
+            const published = this.capture()
+            if (
+                published.character?.chaId === result.characterId ||
+                (result.kind === 'delete' && !published.character) ||
+                (this.dependencies.publishCharacterMutation !== undefined &&
+                    result.relatedCharacters?.some(
+                        (detail) => detail.chaId === published.character?.chaId,
+                    ))
+            ) {
+                this.setCharacterBaseline(published)
+            }
+        }
         if (
-            published.character?.chaId === result.characterId ||
-            (result.kind === 'delete' && !published.character) ||
-            (this.dependencies.publishCharacterMutation !== undefined &&
-                result.relatedCharacters?.some(
-                    (detail) => detail.chaId === published.character?.chaId,
-                ))
+            options.committedSelectedCharacter !== undefined &&
+            this.capture().character?.chaId === options.committedSelectedCharacter.id
         ) {
-            this.setCharacterBaseline(published)
+            this.characterBaseline = options.committedSelectedCharacter.character
+                ? canonicalJson(options.committedSelectedCharacter.character)
+                : null
+            this.characterBaselineId = options.committedSelectedCharacter.character?.chaId ?? null
         }
         this.dependencies.onLocalRevision?.(result.revision)
         if (!options.preservePendingWork) this.pendingByteCount = 0
         this.lastBackgroundErrorMessage = null
-    }
-
-    private enqueueResidentCompensation(characterId: string): void {
-        if (
-            this.pendingResidentCompensations.some((pending) => pending.characterId === characterId)
-        )
-            return
-        this.pendingResidentCompensations.push({ characterId })
-    }
-
-    private enqueueResidentConversationCompensation(
-        characterId: string,
-        conversationId: string,
-    ): void {
-        if (
-            this.pendingResidentConversationCompensations.some(
-                (pending) =>
-                    pending.characterId === characterId &&
-                    pending.conversationId === conversationId,
-            )
-        )
-            return
-        this.pendingResidentConversationCompensations.push({ characterId, conversationId })
-    }
-
-    private removeResidentConversationCompensation(
-        characterId: string,
-        conversationId: string,
-    ): void {
-        const index = this.pendingResidentConversationCompensations.findIndex(
-            (pending) =>
-                pending.characterId === characterId && pending.conversationId === conversationId,
-        )
-        if (index >= 0) this.pendingResidentConversationCompensations.splice(index, 1)
     }
 
     private advanceCharacterBaselineForConversation(
@@ -3280,10 +3108,8 @@ export class SaveCoordinator {
 
     private async finishExplicitCommit(revision: DataRevision): Promise<void> {
         if (!this.dependencies.officialPublisher) return
-        await this.stagePublication(revision)
-        const delay = this.officialPublishDelayMs()
-        if (delay <= 0) await this.publishPendingRevision()
-        else this.armOfficialPublishRetry(delay)
+        this.deferPublication(revision)
+        this.armOfficialPublishRetry(this.officialPublishDelayMs())
     }
 
     private trackPromiseSlot(
@@ -3715,6 +3541,29 @@ export class SaveCoordinator {
         }
     }
 
+    private acknowledgeFallbackConversationMutations(
+        persisted: readonly PendingConversationMutation[],
+        revision: DataRevision,
+    ): void {
+        const persistedSet = new Set(persisted)
+        this.pendingConversationMutations = this.pendingConversationMutations.filter(
+            (pending) => !persistedSet.has(pending),
+        )
+        for (const pending of persisted) {
+            try {
+                this.dependencies.onConversationMutationFallbackPersisted?.({
+                    characterId: pending.event.characterId,
+                    conversationId: pending.event.conversationId,
+                    sessionToken: pending.event.sessionToken,
+                    sessionVersion: pending.event.sessionVersion,
+                    revision,
+                })
+            } catch (error) {
+                this.reportBackgroundError(error)
+            }
+        }
+    }
+
     /**
      * Builds conversation-level mutations when only chat content changed for the tracked
      * selected character. Returns null whenever a full character replacement is required:
@@ -3898,15 +3747,22 @@ export class SaveCoordinator {
     }
 
     private captureDatabase(database: Database): CapturedState {
-        const { characters, botPresets, pluginCustomStorage, ...rootValue } = database
+        const {
+            characters,
+            botPresets,
+            pluginCustomStorage,
+            pluginStorageMeta: _pluginStorageMeta,
+            ...rootValue
+        } = database
         const rootCanonical = canonicalJson(rootValue)
         const presetsCanonical = canonicalJson(botPresets ?? [])
         const pluginStorageUnavailable =
             !Object.prototype.hasOwnProperty.call(database, 'pluginCustomStorage') &&
             this.dependencies.isIncompleteWorkingSet?.(database) === true
-        const pluginStorageCanonical = pluginStorageUnavailable
+        const pluginStorageCapture = pluginStorageUnavailable
             ? null
-            : pluginStorageJson(pluginCustomStorage ?? {})
+            : this.pluginStorageCaptureCache.capture(pluginCustomStorage ?? {})
+        let detachedPluginStorage: Database['pluginCustomStorage'] | null | undefined
         const selectedId = this.dependencies.captureSelectedCharacter()?.chaId
         const character = selectedId
             ? (characters.find((candidate) => candidate.chaId === selectedId) ?? null)
@@ -3915,11 +3771,16 @@ export class SaveCoordinator {
         return {
             root: JSON.parse(rootCanonical) as RootDatabase,
             rootCanonical,
-            pluginStorage:
-                pluginStorageCanonical === null
-                    ? null
-                    : (JSON.parse(pluginStorageCanonical) as Database['pluginCustomStorage']),
-            pluginStorageCanonical,
+            get pluginStorage() {
+                if (detachedPluginStorage === undefined) {
+                    detachedPluginStorage = pluginStorageCapture?.value ?? null
+                }
+                return detachedPluginStorage
+            },
+            get pluginStorageCanonical() {
+                return pluginStorageCapture?.json ?? null
+            },
+            pluginStorageCapture,
             presets: JSON.parse(presetsCanonical) as botPreset[],
             presetsCanonical,
             character: characterCanonical
@@ -4031,7 +3892,7 @@ export class SaveCoordinator {
     }
 
     private armDebounce(): void {
-        if (this.debounceHandle !== undefined) return
+        if (this.debounceHandle !== undefined || this.committedRefreshRevision !== null) return
         this.debounceHandle = this.clock.setTimeout(() => {
             this.debounceHandle = undefined
             this.startBackgroundFlush('debounce')
@@ -4039,14 +3900,25 @@ export class SaveCoordinator {
     }
 
     private startBackgroundFlush(reason: string): void {
-        void this.flushPendingData(reason).catch((error) => this.reportBackgroundError(error))
+        try {
+            void this.flushPendingData(reason).catch((error) => this.reportBackgroundError(error))
+        } catch (error) {
+            this.reportBackgroundError(error)
+            if (this.hasPendingOfficialPublication) {
+                this.armOfficialPublishRetry(OFFICIAL_PUBLISH_MIN_INTERVAL_MS)
+            }
+        }
     }
 
     private reportBackgroundError(error: unknown): void {
         const message = error instanceof Error ? error.message : String(error)
         if (message === this.lastBackgroundErrorMessage) return
         this.lastBackgroundErrorMessage = message
-        this.dependencies.onBackgroundError?.(error)
+        try {
+            this.dependencies.onBackgroundError?.(error)
+        } catch {
+            // Diagnostic observers cannot change the outcome of a durable write.
+        }
     }
 
     private reportActivePromise(): void {
@@ -4064,6 +3936,10 @@ export class SaveCoordinator {
     }
 
     private async publishPendingRevision(): Promise<void> {
+        if (this.destructiveReplacementFence) {
+            this.armOfficialPublishRetry(OFFICIAL_PUBLISH_MIN_INTERVAL_MS)
+            return
+        }
         this.publicationInProgress = true
         this.notifyOperationStateChange()
         const revision = this.pendingPublicationRevision
@@ -4135,6 +4011,11 @@ export class SaveCoordinator {
     }
 
     private async disposeOrQueuePublication(publication: PinnedPublication): Promise<void> {
+        if (this.destructiveReplacementFence) {
+            this.pendingPublicationCleanup.add(publication)
+            this.armPublicationCleanupRetryIfNeeded()
+            return
+        }
         try {
             await publication.dispose()
             this.pendingPublicationCleanup.delete(publication)
@@ -4146,6 +4027,7 @@ export class SaveCoordinator {
     }
 
     private async retryPublicationCleanup(): Promise<void> {
+        if (this.destructiveReplacementFence) return
         for (const publication of [...this.pendingPublicationCleanup]) {
             try {
                 await publication.dispose()
@@ -4184,106 +4066,6 @@ export class SaveCoordinator {
         }
     }
 
-    private rebaseReplacementPublication(
-        candidate: Database,
-        before: CapturedState,
-        live: CapturedState,
-        preserveConflicts: boolean,
-    ): ReplacementRebaseResult {
-        if (before.windowedCharacter || live.windowedCharacter || this.windowedCharacterBaseline) {
-            throw new WindowedConversationRequiresCompatibilityError(
-                'database replacement requires complete ownership',
-            )
-        }
-        const publishedParts = splitDatabase(canonicalDatabaseClone(candidate))
-        const compensation: Omit<WorkingSetCommit, 'expectedRevision'> = {}
-        let publishedRoot: RootDatabase
-        try {
-            publishedRoot = rebaseConcurrentLiveDelta(before.root, live.root, publishedParts.root)
-        } catch (error) {
-            if (!preserveConflicts) throw error
-            publishedRoot = canonicalClone(live.root)
-            compensation.root = publishedRoot
-        }
-
-        let publishedPresets = publishedParts.presets
-        if (
-            live.presets !== null &&
-            before.presets !== null &&
-            live.presetsCanonical !== before.presetsCanonical
-        ) {
-            try {
-                publishedPresets = rebaseConcurrentLiveDelta(
-                    before.presets,
-                    live.presets,
-                    publishedParts.presets,
-                )
-            } catch (error) {
-                if (!preserveConflicts) throw error
-                publishedPresets = canonicalClone(live.presets)
-                compensation.replacePresets = publishedPresets
-            }
-        }
-
-        let publishedPluginStorage = publishedParts.pluginStorage
-        if (
-            live.pluginStorage !== null &&
-            before.pluginStorage !== null &&
-            live.pluginStorageCanonical !== before.pluginStorageCanonical
-        ) {
-            try {
-                publishedPluginStorage = rebaseConcurrentPluginStorage(
-                    before.pluginStorage,
-                    live.pluginStorage,
-                    publishedParts.pluginStorage,
-                )
-            } catch (error) {
-                if (!preserveConflicts) throw error
-                publishedPluginStorage = applyPluginStorageMutations(live.pluginStorage, [])
-                compensation.pluginStorage = diffPluginStorage(
-                    pluginStorageJson(publishedParts.pluginStorage),
-                    publishedPluginStorage,
-                )
-            }
-        }
-        if (
-            before.character &&
-            live.character?.chaId === before.character.chaId &&
-            live.characterCanonical !== before.characterCanonical
-        ) {
-            const index = publishedParts.characters.findIndex(
-                (characterValue) => characterValue.chaId === live.character!.chaId,
-            )
-            // A character absent from the replacement was removed by it; do not resurrect it.
-            if (index >= 0) {
-                try {
-                    publishedParts.characters[index] = rebaseConcurrentLiveDelta(
-                        before.character,
-                        live.character,
-                        publishedParts.characters[index],
-                    )
-                } catch (error) {
-                    if (!preserveConflicts) throw error
-                    publishedParts.characters[index] = canonicalClone(live.character)
-                    compensation.replaceCharacter = publishedParts.characters[index]
-                }
-            }
-        }
-
-        const includesPluginStorage =
-            Object.prototype.hasOwnProperty.call(candidate, 'pluginCustomStorage') ||
-            live.pluginStorage !== null
-        return {
-            database: {
-                ...publishedRoot,
-                ...(includesPluginStorage ? { pluginCustomStorage: publishedPluginStorage } : {}),
-                characters: publishedParts.characters,
-                botPresets: publishedPresets,
-            } as Database,
-            compensation: Object.keys(compensation).length > 0 ? compensation : null,
-        }
-    }
-
     private replacementExpectationError(options: PersistentReplacementOptions): Error | null {
         if (options.expectedRevision !== undefined && options.expectedRevision !== this.revision) {
             return new RevisionConflictError(options.expectedRevision, this.revision)
@@ -4308,9 +4090,25 @@ export class SaveCoordinator {
         if (this.currentRevision === null) throw new Error('Save coordinator is not initialized')
     }
 
-    private assertPersistentMutationAllowed(): void {
+    assertPersistentMutationAllowed(expectedAuthorityEpoch?: number): void {
+        this.assertInitialized()
         this.assertSelectedConversationTransitionInactive()
-        if (this.destructiveReplacementFence) {
+        if (
+            this.destructiveReplacementFence ||
+            this.committedRefreshRevision !== null ||
+            (expectedAuthorityEpoch !== undefined && expectedAuthorityEpoch !== this.authorityEpoch)
+        ) {
+            throw new PersistentMutationFencedError()
+        }
+    }
+
+    private assertQueuedMutationAllowed(expectedAuthorityEpoch: number): void {
+        this.assertSelectedConversationTransitionInactive()
+        if (
+            this.committedRefreshRevision !== null ||
+            this.authorityEpoch !== expectedAuthorityEpoch ||
+            this.destructiveReplacementFence?.state === 'held'
+        ) {
             throw new PersistentMutationFencedError()
         }
     }

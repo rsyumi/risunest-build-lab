@@ -9,7 +9,7 @@ fn fresh_schema_adds_only_the_global_empty_asset_object_catalog() {
             .connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
             .expect("read current version"),
-        2
+        i64::from(super::schema::SCHEMA_VERSION)
     );
     assert_eq!(
         table_columns(&store.connection, "asset_objects")
@@ -29,14 +29,6 @@ fn fresh_schema_adds_only_the_global_empty_asset_object_catalog() {
     assert!(super::GENERATION_TABLES
         .iter()
         .all(|(table, _)| *table != "asset_objects"));
-    assert_eq!(
-        store
-            .connection
-            .query_row("SELECT COUNT(*) FROM cold_payload_authority", [], |row| row
-                .get::<_, i64>(0))
-            .expect("count cold authority rows"),
-        1
-    );
 }
 
 #[test]
@@ -81,7 +73,7 @@ fn fresh_schema_adds_generation_scoped_exact_replacement_alias_provenance() {
             .connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
             .unwrap(),
-        2
+        super::schema::SCHEMA_VERSION
     );
     assert_eq!(
         table_columns(&store.connection, "asset_alias_replacement_candidates")
@@ -111,7 +103,7 @@ fn fresh_schema_adds_one_validated_asset_gc_maintenance_cursor_row() {
             .connection
             .query_row("PRAGMA user_version", [], |row| row.get::<_, u32>(0))
             .unwrap(),
-        2
+        super::schema::SCHEMA_VERSION
     );
     assert_eq!(
         table_columns(&store.connection, "asset_gc_maintenance_state")
@@ -212,6 +204,42 @@ fn asset_object_catalog_is_idempotent_conflict_safe_and_stably_paged() {
     assert!(store
         .query_asset_object_catalog(1, Some("not-an-opaque-cursor"))
         .is_err());
+}
+
+#[test]
+fn direct_asset_object_registration_uses_the_initialized_store_database() {
+    use super::asset_object_catalog::AssetObjectRegistration;
+
+    let directory = tempfile::tempdir().expect("create direct registration directory");
+    let store = PersistentStore::open(directory.path()).expect("initialize persistent store");
+    let registration = AssetObjectRegistration {
+        object_hash: "ab".repeat(32),
+        byte_size: 42,
+    };
+
+    super::super::register_asset_objects_at_root(directory.path(), &[registration.clone()], 17)
+        .expect("register through direct database connection");
+
+    assert_eq!(
+        store
+            .connection
+            .query_row(
+                "SELECT byte_size, created_at_ms FROM asset_objects WHERE object_hash = ?1",
+                [&registration.object_hash],
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .expect("read directly registered object"),
+        (42, 17)
+    );
+}
+
+#[test]
+fn direct_asset_object_registration_does_not_create_a_missing_database() {
+    let directory = tempfile::tempdir().expect("create missing database directory");
+    let database_path = directory.path().join("persistent").join("persistent.sqlite");
+
+    assert!(super::super::register_asset_objects_at_root(directory.path(), &[], 0).is_err());
+    assert!(!database_path.exists());
 }
 
 #[test]
@@ -384,7 +412,7 @@ fn asset_gc_delete_page_recollects_a_late_root_under_writer_exclusion() {
     let cas = crate::asset_repository::PayloadCas::new(directory.path()).expect("open CAS");
     let prepared = cas.prepare_bytes(b"late rooted object").unwrap();
     register_gc_candidate(&mut store, &prepared);
-    let database_path = directory.path().join("persistent/persistent.db");
+    let database_path = directory.path().join("persistent/persistent.sqlite");
     let generation = super::active_generation(&store.connection).unwrap();
     let mut injected = false;
 
@@ -497,8 +525,8 @@ fn asset_gc_delete_page_refuses_unsealed_jobs_and_unready_migrations() {
     store
         .connection
         .execute(
-            "INSERT INTO plugin_storage (generation, storage_key, byte_size, ordinal, value)
-             VALUES (?1, 'gc-blocker-plugin', 2, 0, '{}')",
+            "INSERT INTO plugin_storage (generation, owner, storage_key, byte_size, ordinal, value)
+             VALUES (?1, 'synthetic-plugin', 'gc-blocker-plugin', 2, 0, '{}')",
             [generation],
         )
         .unwrap();
@@ -1227,7 +1255,7 @@ fn asset_gc_recovery_rejects_a_noncanonical_tombstone_path_without_data_loss() {
         cas.stat_object(&prepared.content_hash).unwrap(),
         Some(prepared.byte_size)
     );
-    let connection = Connection::open(directory.path().join("persistent/persistent.db")).unwrap();
+    let connection = Connection::open(directory.path().join("persistent/persistent.sqlite")).unwrap();
     assert_eq!(
         connection
             .query_row(

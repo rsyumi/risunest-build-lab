@@ -1,9 +1,9 @@
+import { UNOWNED_PLUGIN_OWNER } from '../../plugins/pluginOwner'
 import { describe, expect, it } from 'vitest'
 import type { Database, groupChat } from '../database.svelte'
 import type {
     AssetAlias,
     AssetOwnerHead,
-    ColdAlias,
     PersistentDataStore,
 } from '../persistentDataStore'
 import { RevisionConflictError, SnapshotReleasedError } from '../persistentDataStore'
@@ -180,6 +180,12 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
                     }),
                 ).toEqual({ revision: reordered.revision, value: reorderedHeads[0] })
                 expect(
+                    await store.readAssetOwnerHead({
+                        kind: 'persona-embedded-module-assets',
+                        index: 0,
+                    }),
+                ).toEqual({ revision: reordered.revision, value: originalHeads[2] })
+                expect(
                     await lease.readAssetOwnerHead({
                         kind: 'root-module-assets',
                         index: 0,
@@ -245,7 +251,7 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
             })
         })
 
-        it('invalidates a character shadow head when its parent changes without a replacement', async () => {
+        it('preserves a character shadow head when unrelated parent fields change', async () => {
             const { store } = await createHarness()
             const database = structuredClone(fixtureDatabase)
             database.characters[0].additionalAssets = [
@@ -278,10 +284,128 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
                 character: { ...detail, name: 'Changed through the legacy path' },
             })
 
-            expect(await store.readAssetOwnerHead(head.owner)).toBeNull()
+            expect(await store.readAssetOwnerHead(head.owner)).toEqual({
+                revision: changed.revision,
+                value: head,
+            })
             expect((await store.readCharacter(database.characters[0].chaId))!.revision).toBe(
                 changed.revision,
             )
+
+            const invalidated = await store.commit({
+                expectedRevision: changed.revision,
+                character: {
+                    ...detail,
+                    additionalAssets: [['replacement', 'assets/replacement.bin', 'BIN']],
+                },
+            })
+            expect(invalidated.revision).toBe(changed.revision + 1)
+            expect(await store.readAssetOwnerHead(head.owner)).toBeNull()
+        })
+
+        it('preserves root owner heads when unrelated root fields change', async () => {
+            const { store } = await createHarness()
+            const database = structuredClone(fixtureDatabase)
+            database.modules = [{
+                id: 'module',
+                name: 'Module',
+                description: '',
+                assets: [['kept', 'assets/kept.bin', 'BIN']],
+            }]
+            const imported = await store.replaceFromDatabase(database)
+            const root = (await store.readRoot()).value
+            const head: AssetOwnerHead = {
+                owner: { kind: 'root-module-assets', index: 0 },
+                present: true,
+                manifestHash: '56'.repeat(32),
+                entryCount: 1,
+            }
+            const shadowed = await store.commit({
+                expectedRevision: imported.revision,
+                root,
+                assetOwnerHeads: [head],
+            })
+
+            const changed = await store.commit({
+                expectedRevision: shadowed.revision,
+                root: { ...root, username: 'Unrelated root change' },
+            })
+
+            expect(await store.readAssetOwnerHead(head.owner)).toEqual({
+                revision: changed.revision,
+                value: head,
+            })
+
+            const changedModules = structuredClone(root.modules!)
+            changedModules[0].assets = [['replacement', 'assets/replacement.bin', 'BIN']]
+            const invalidated = await store.commit({
+                expectedRevision: changed.revision,
+                root: { ...root, modules: changedModules },
+            })
+            expect(invalidated.revision).toBe(changed.revision + 1)
+            expect(await store.readAssetOwnerHead(head.owner)).toBeNull()
+        })
+
+        it('moves omitted root owner heads with uniquely identified modules', async () => {
+            const { store } = await createHarness()
+            const database = structuredClone(fixtureDatabase)
+            database.modules = [
+                {
+                    id: 'module-a',
+                    name: 'Module A',
+                    description: '',
+                    assets: [['a', 'assets/a.bin', 'BIN']],
+                },
+                {
+                    id: 'module-b',
+                    name: 'Module B',
+                    description: '',
+                    assets: [['b', 'assets/b.bin', 'BIN']],
+                },
+            ]
+            const imported = await store.replaceFromDatabase(database)
+            const root = (await store.readRoot()).value
+            const heads: AssetOwnerHead[] = [
+                {
+                    owner: { kind: 'root-module-assets', index: 0 },
+                    present: true,
+                    manifestHash: '57'.repeat(32),
+                    entryCount: 1,
+                },
+                {
+                    owner: { kind: 'root-module-assets', index: 1 },
+                    present: true,
+                    manifestHash: '58'.repeat(32),
+                    entryCount: 1,
+                },
+            ]
+            const shadowed = await store.commit({
+                expectedRevision: imported.revision,
+                root,
+                assetOwnerHeads: heads,
+            })
+            const reorderedRoot = structuredClone(root)
+            reorderedRoot.modules!.reverse()
+
+            const reordered = await store.commit({
+                expectedRevision: shadowed.revision,
+                root: reorderedRoot,
+            })
+
+            expect(await store.readAssetOwnerHead({
+                kind: 'root-module-assets',
+                index: 0,
+            })).toEqual({
+                revision: reordered.revision,
+                value: { ...heads[1], owner: { kind: 'root-module-assets', index: 0 } },
+            })
+            expect(await store.readAssetOwnerHead({
+                kind: 'root-module-assets',
+                index: 1,
+            })).toEqual({
+                revision: reordered.revision,
+                value: { ...heads[0], owner: { kind: 'root-module-assets', index: 1 } },
+            })
         })
 
         it('validates a character owner head against the final same-ID parent atomically', async () => {
@@ -870,113 +994,6 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
             })
         })
 
-        it('activates cold aliases and v2 authority in one revision', async () => {
-            const { store, reopen } = await createHarness()
-            const initial = await store.replaceFromDatabase(structuredClone(fixtureDatabase))
-            const lease = await store.acquireRevision(initial.revision)
-            const aliases: ColdAlias[] = [
-                {
-                    key: 'conversation/alpha',
-                    objectHash: '31'.repeat(32),
-                    size: 17,
-                    metadata: { codec: 'gzip', nested: { version: 1 } },
-                },
-                {
-                    key: 'conversation/empty',
-                    objectHash: 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
-                    size: 0,
-                    metadata: {},
-                },
-            ]
-
-            expect(await store.readColdPayloadAuthority()).toEqual({
-                revision: initial.revision,
-                value: { format: 'legacy' },
-            })
-            const activated = await store.activateColdPayloadMigration({
-                sourceRevision: initial.revision,
-                migrationId: 'cold-atomic',
-                compatibilityHash: '42'.repeat(32),
-                coldAliases: aliases,
-            })
-
-            expect(await store.readColdPayloadAuthority()).toEqual({
-                revision: activated.revision,
-                value: {
-                    format: 'v2',
-                    migrationId: 'cold-atomic',
-                    compatibilityHash: '42'.repeat(32),
-                },
-            })
-            expect(await store.listColdAliases()).toEqual({
-                revision: activated.revision,
-                value: aliases,
-            })
-            expect(await store.readColdAlias('conversation/alpha')).toEqual({
-                revision: activated.revision,
-                value: aliases[0],
-            })
-            expect(await lease.readColdPayloadAuthority()).toEqual({
-                revision: initial.revision,
-                value: { format: 'legacy' },
-            })
-            expect(await lease.readColdAlias('conversation/alpha')).toBeNull()
-            await lease.release()
-
-            const reopened = await reopen()
-            expect(await reopened.readColdPayloadAuthority()).toEqual({
-                revision: activated.revision,
-                value: {
-                    format: 'v2',
-                    migrationId: 'cold-atomic',
-                    compatibilityHash: '42'.repeat(32),
-                },
-            })
-            expect(await reopened.listColdAliases()).toEqual({
-                revision: activated.revision,
-                value: aliases,
-            })
-        })
-
-        it('preserves v2 cold authority and aliases across a database-only replacement', async () => {
-            const { store, reopen } = await createHarness()
-            const initial = await store.replaceFromDatabase(structuredClone(fixtureDatabase))
-            const alias: ColdAlias = {
-                key: 'conversation/restored',
-                objectHash: '49'.repeat(32),
-                size: 23,
-                metadata: { source: 'restored-before-database' },
-            }
-            const activated = await store.activateColdPayloadMigration({
-                sourceRevision: initial.revision,
-                migrationId: 'cold-restore-preserve',
-                compatibilityHash: '4a'.repeat(32),
-                coldAliases: [alias],
-            })
-            const replacement = structuredClone(fixtureDatabase)
-            replacement.username = 'Restored after cold payloads'
-
-            const replaced = await store.replaceFromDatabase(replacement, activated.revision)
-
-            expect(await store.readColdPayloadAuthority()).toEqual({
-                revision: replaced.revision,
-                value: {
-                    format: 'v2',
-                    migrationId: 'cold-restore-preserve',
-                    compatibilityHash: '4a'.repeat(32),
-                },
-            })
-            expect(await store.listColdAliases()).toEqual({
-                revision: replaced.revision,
-                value: [alias],
-            })
-            const reopened = await reopen()
-            expect(await reopened.readColdAlias(alias.key)).toEqual({
-                revision: replaced.revision,
-                value: alias,
-            })
-        })
-
         it('preserves repository aliases and only unchanged owner heads across a database-only replacement', async () => {
             const { store, reopen } = await createHarness()
             const database = structuredClone(fixtureDatabase)
@@ -1070,29 +1087,12 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
                 assetAliases: aliases,
                 assetOwnerHeads: heads,
             })
-            const coldAlias: ColdAlias = {
-                key: 'cold/database-replacement',
-                objectHash: '66'.repeat(32),
-                size: 6,
-                metadata: { source: 'before-database-replacement' },
-            }
-            const coldAuthority = {
-                format: 'v2' as const,
-                migrationId: 'cold-database-replacement',
-                compatibilityHash: '67'.repeat(32),
-            }
-            const coldActivated = await store.activateColdPayloadMigration({
-                sourceRevision: assetsActivated.revision,
-                migrationId: coldAuthority.migrationId,
-                compatibilityHash: coldAuthority.compatibilityHash,
-                coldAliases: [coldAlias],
-            })
             const replacement = structuredClone(database)
             replacement.username = 'Database-only replacement'
             replacement.modules[1].assets = [['new', 'assets/new.bin', 'BIN']]
             replacement.personas[0].embeddedModule!.assets = []
 
-            const replaced = await store.replaceFromDatabase(replacement, coldActivated.revision)
+            const replaced = await store.replaceFromDatabase(replacement, assetsActivated.revision)
 
             expect(await store.readAssetRepositoryAuthority()).toEqual({
                 revision: replaced.revision,
@@ -1113,14 +1113,6 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
                     ? { revision: replaced.revision, value: head }
                     : null)
             }
-            expect(await store.readColdPayloadAuthority()).toEqual({
-                revision: replaced.revision,
-                value: coldAuthority,
-            })
-            expect(await store.listColdAliases()).toEqual({
-                revision: replaced.revision,
-                value: [coldAlias],
-            })
 
             const reopened = await reopen()
             expect(await reopened.readAssetAlias({ kind: 'asset', key: aliases[0].key })).toEqual({
@@ -1132,10 +1124,6 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
                     ? { revision: replaced.revision, value: head }
                     : null)
             }
-            expect(await reopened.readColdAlias(coldAlias.key)).toEqual({
-                revision: replaced.revision,
-                value: coldAlias,
-            })
         })
 
         it('preserves an owner head when nested object key insertion order changes', async () => {
@@ -1265,115 +1253,6 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
                 revision: replaced.revision,
                 value: authority,
             })
-        })
-
-        it('copy-on-write isolates cold alias commits and deletes from a pinned revision', async () => {
-            const { store } = await createHarness()
-            const initial = await store.replaceFromDatabase(structuredClone(fixtureDatabase))
-            const original: ColdAlias[] = [
-                {
-                    key: 'conversation/alpha',
-                    objectHash: '51'.repeat(32),
-                    size: 10,
-                    metadata: { codec: 'gzip' },
-                },
-                {
-                    key: 'conversation/beta',
-                    objectHash: '52'.repeat(32),
-                    size: 20,
-                    metadata: { codec: 'gzip' },
-                },
-            ]
-            const activated = await store.activateColdPayloadMigration({
-                sourceRevision: initial.revision,
-                migrationId: 'cold-cow',
-                compatibilityHash: '53'.repeat(32),
-                coldAliases: original,
-            })
-            const lease = await store.acquireRevision(activated.revision)
-            const replacement: ColdAlias = {
-                key: original[0].key,
-                objectHash: '54'.repeat(32),
-                size: 30,
-                metadata: { codec: 'gzip', arbitrary: ['kept', 2, true] },
-            }
-
-            const committed = await store.commitColdAlias(replacement, activated.revision)
-            const deleted = await store.deleteColdAlias(original[1].key, committed.revision)
-
-            expect(await store.listColdAliases()).toEqual({
-                revision: deleted.revision,
-                value: [replacement],
-            })
-            expect(await lease.listColdAliases()).toEqual({
-                revision: activated.revision,
-                value: original,
-            })
-            expect(await lease.readColdAlias(original[0].key)).toEqual({
-                revision: activated.revision,
-                value: original[0],
-            })
-            expect(await lease.readColdAlias(original[1].key)).toEqual({
-                revision: activated.revision,
-                value: original[1],
-            })
-            await lease.release()
-        })
-
-        it('rejects legacy cold mutations and invalid migration batches atomically', async () => {
-            const { store } = await createHarness()
-            const initial = await store.replaceFromDatabase(structuredClone(fixtureDatabase))
-            const valid: ColdAlias = {
-                key: 'conversation/valid',
-                objectHash: '61'.repeat(32),
-                size: 1,
-                metadata: {},
-            }
-
-            await expect(store.commitColdAlias(valid, initial.revision)).rejects.toThrow('v2')
-            await expect(store.deleteColdAlias(valid.key, initial.revision)).rejects.toThrow('v2')
-            await expect(store.activateColdPayloadMigration({
-                sourceRevision: initial.revision,
-                migrationId: 'cold-null-payload',
-                compatibilityHash: '62'.repeat(32),
-                coldAliases: [{ ...valid, objectHash: null }],
-            })).rejects.toThrow('objectHash')
-            await expect(store.activateColdPayloadMigration({
-                sourceRevision: initial.revision,
-                migrationId: 'cold-duplicate',
-                compatibilityHash: '63'.repeat(32),
-                coldAliases: [valid, { ...valid, objectHash: '64'.repeat(32) }],
-            })).rejects.toThrow('Duplicate cold alias')
-
-            expect((await store.readRoot()).revision).toBe(initial.revision)
-            expect(await store.readColdPayloadAuthority()).toEqual({
-                revision: initial.revision,
-                value: { format: 'legacy' },
-            })
-            expect(await store.listColdAliases()).toEqual({
-                revision: initial.revision,
-                value: [],
-            })
-        })
-
-        it('rejects a null object hash in a normal v2 cold mutation', async () => {
-            const { store } = await createHarness()
-            const initial = await store.replaceFromDatabase(structuredClone(fixtureDatabase))
-            const activated = await store.activateColdPayloadMigration({
-                sourceRevision: initial.revision,
-                migrationId: 'cold-no-legacy-fallback',
-                compatibilityHash: '69'.repeat(32),
-                coldAliases: [],
-            })
-
-            await expect(store.commitColdAlias({
-                key: 'conversation/null-hash',
-                objectHash: null,
-                size: 0,
-                metadata: {},
-            }, activated.revision)).rejects.toThrow('objectHash')
-            expect((await store.readRoot()).revision).toBe(activated.revision)
-            expect((await store.listColdAliases()).value).toEqual([])
         })
 
         it('activates staged zero-byte and missing-payload aliases across reopen', async () => {
@@ -1511,6 +1390,7 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
                 revision: imported.revision,
                 items: [
                     {
+                        owner: UNOWNED_PLUGIN_OWNER,
                         key: 'fixture',
                         byteSize: new TextEncoder().encode(
                             JSON.stringify(database.pluginCustomStorage.fixture),
@@ -1518,10 +1398,10 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
                     },
                 ],
             })
-            expect((await store.readPluginStorage('fixture'))?.value).toEqual(
+            expect((await store.readPluginStorage(UNOWNED_PLUGIN_OWNER, 'fixture'))?.value).toEqual(
                 database.pluginCustomStorage.fixture,
             )
-            expect(await store.readPluginStorage('missing')).toBeNull()
+            expect(await store.readPluginStorage(UNOWNED_PLUGIN_OWNER, 'missing')).toBeNull()
             expect((await store.materializeDatabase()).pluginCustomStorage).toEqual(
                 database.pluginCustomStorage,
             )
@@ -1538,9 +1418,9 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
                 expectedRevision: imported.revision,
                 root: { ...root, username: 'Plugin commit' },
                 pluginStorage: [
-                    { type: 'set', key: 'alpha', value: 'new' },
-                    { type: 'delete', key: 'beta' },
-                    { type: 'set', key: 'gamma', value: [1, 2, 3] },
+                    { type: 'set', owner: UNOWNED_PLUGIN_OWNER, key: 'alpha', value: 'new' },
+                    { type: 'delete', owner: UNOWNED_PLUGIN_OWNER, key: 'beta' },
+                    { type: 'set', owner: UNOWNED_PLUGIN_OWNER, key: 'gamma', value: [1, 2, 3] },
                 ],
             })
 
@@ -1557,7 +1437,7 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
             await expect(store.commit({
                 expectedRevision: imported.revision,
                 root: { ...root, username: 'Stale plugin commit' },
-                pluginStorage: [{ type: 'clear' }],
+                pluginStorage: [{ type: 'clear', owner: UNOWNED_PLUGIN_OWNER }],
             })).rejects.toBeInstanceOf(RevisionConflictError)
             expect((await store.readRoot()).revision).toBe(committed.revision)
             expect((await store.readRoot()).value.username).toBe('Plugin commit')
@@ -1568,7 +1448,7 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
 
             await store.commit({
                 expectedRevision: committed.revision,
-                pluginStorage: [{ type: 'clear' }],
+                pluginStorage: [{ type: 'clear', owner: UNOWNED_PLUGIN_OWNER }],
             })
             expect((await store.queryPluginStorage()).items).toEqual([])
         })
@@ -1582,16 +1462,16 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
 
             await store.commit({
                 expectedRevision: imported.revision,
-                pluginStorage: [{ type: 'set', key: 'memory', value: { revision: 2 } }],
+                pluginStorage: [{ type: 'set', owner: UNOWNED_PLUGIN_OWNER, key: 'memory', value: { revision: 2 } }],
             })
 
             expect((await lease.queryPluginStorage()).items.map((item) => item.key)).toEqual([
                 'memory',
             ])
-            expect((await lease.readPluginStorage('memory'))?.value).toEqual({ revision: 1 })
-            expect((await store.readPluginStorage('memory'))?.value).toEqual({ revision: 2 })
+            expect((await lease.readPluginStorage(UNOWNED_PLUGIN_OWNER, 'memory'))?.value).toEqual({ revision: 1 })
+            expect((await store.readPluginStorage(UNOWNED_PLUGIN_OWNER, 'memory'))?.value).toEqual({ revision: 2 })
             await lease.release()
-            await expect(lease.readPluginStorage('memory')).rejects.toBeInstanceOf(
+            await expect(lease.readPluginStorage(UNOWNED_PLUGIN_OWNER, 'memory')).rejects.toBeInstanceOf(
                 SnapshotReleasedError,
             )
         })
@@ -1617,14 +1497,14 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
             expect(Object.keys((await store.materializeDatabase()).pluginCustomStorage)).toEqual(
                 originalOrder,
             )
-            expect((await store.readPluginStorage('\uffffx'))?.value).toBe('high unicode')
+            expect((await store.readPluginStorage(UNOWNED_PLUGIN_OWNER, '\uffffx'))?.value).toBe('high unicode')
 
             const updated = await store.commit({
                 expectedRevision: imported.revision,
                 pluginStorage: [
-                    { type: 'set', key: 'zeta', value: 'updated in place' },
-                    { type: 'delete', key: 'zeta' },
-                    { type: 'set', key: 'zeta', value: 'reinserted last' },
+                    { type: 'set', owner: UNOWNED_PLUGIN_OWNER, key: 'zeta', value: 'updated in place' },
+                    { type: 'delete', owner: UNOWNED_PLUGIN_OWNER, key: 'zeta' },
+                    { type: 'set', owner: UNOWNED_PLUGIN_OWNER, key: 'zeta', value: 'reinserted last' },
                 ],
             })
             const expectedAfterReinsert = originalOrder.filter((key) => key !== 'zeta')
@@ -1641,10 +1521,10 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
             const cleared = await reopened.commit({
                 expectedRevision: updated.revision,
                 pluginStorage: [
-                    { type: 'clear' },
-                    { type: 'set', key: 'zeta', value: 'fresh string' },
-                    { type: 'set', key: '2', value: 2 },
-                    { type: 'set', key: '1', value: 1 },
+                    { type: 'clear', owner: UNOWNED_PLUGIN_OWNER },
+                    { type: 'set', owner: UNOWNED_PLUGIN_OWNER, key: 'zeta', value: 'fresh string' },
+                    { type: 'set', owner: UNOWNED_PLUGIN_OWNER, key: '2', value: 2 },
+                    { type: 'set', owner: UNOWNED_PLUGIN_OWNER, key: '1', value: 1 },
                 ],
             })
             expect((await reopened.queryPluginStorage()).items.map((item) => item.key)).toEqual([
@@ -2440,14 +2320,14 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
             expect((await store.readCharacter('group-unreferenced'))?.value).toMatchObject({
                 characters: ['char-b'],
             })
-            expect((await store.readPluginStorage('zero'))?.value).toBe(0)
+            expect((await store.readPluginStorage(UNOWNED_PLUGIN_OWNER, 'zero'))?.value).toBe(0)
             expect((await lease.readCharacter('char-a'))?.value.name).toBe('Alpha')
             expect((await lease.readCharacter('group-active'))?.value).toMatchObject({
                 characters: ['char-b', 'char-a'],
                 characterTalks: [0.25, 1.25],
                 characterActive: [true, false],
             })
-            expect((await lease.readPluginStorage('zero'))?.value).toBe(0)
+            expect((await lease.readPluginStorage(UNOWNED_PLUGIN_OWNER, 'zero'))?.value).toBe(0)
             await lease.release()
 
             await expect(store.commit({
@@ -2455,7 +2335,7 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
                 characterDetails: [active],
             })).rejects.toBeInstanceOf(RevisionConflictError)
             expect((await store.readRoot()).revision).toBe(committed.revision)
-            expect((await store.readPluginStorage('zero'))?.value).toBe(0)
+            expect((await store.readPluginStorage(UNOWNED_PLUGIN_OWNER, 'zero'))?.value).toBe(0)
         })
 
         it.each(['empty', 'duplicate', 'deleted', 'missing'] as const)(
@@ -2847,7 +2727,7 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
             expect(await store.readRoot()).toEqual(rootBefore)
             expect((await store.readCharacter('char-a'))?.value.name).toBe('Alpha')
             expect((await store.readCharacter('group-a'))?.value).toEqual(groupBefore)
-            expect((await store.readPluginStorage('zero'))?.value).toBe(0)
+            expect((await store.readPluginStorage(UNOWNED_PLUGIN_OWNER, 'zero'))?.value).toBe(0)
         })
 
         it('does not activate an invalid staged replacement', async () => {

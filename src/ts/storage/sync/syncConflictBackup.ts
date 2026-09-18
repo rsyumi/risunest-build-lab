@@ -1,6 +1,6 @@
 import localforage from 'localforage'
 import { isTauri } from '../../platform'
-import { createNativeAppKv } from '../nativeAppKv'
+import { createNativeDeviceSettings } from '../nativeDeviceSettings'
 import { getBlobStore } from '../platformBlobStore'
 
 export type SyncConflictBackupSide = 'local' | 'remote'
@@ -81,9 +81,9 @@ export class SyncConflictBackupStore {
     async list(): Promise<SyncConflictBackupEntry[]> {
         const raw = await this.kv.getItem(indexKey)
         if (!Array.isArray(raw)) return []
-        const entries = raw.map(normalizeEntry)
-        if (entries.some((entry) => entry === null)) return []
-        return (entries as SyncConflictBackupEntry[])
+        return raw
+            .map(normalizeEntry)
+            .filter((entry): entry is SyncConflictBackupEntry => entry !== null)
             .sort((left, right) => right.createdAt - left.createdAt)
     }
 
@@ -143,15 +143,15 @@ function nativePayloadKey(id: string): string {
 export function getSyncConflictBackupStore(): SyncConflictBackupStore {
     if (sharedStore) return sharedStore
     if (isTauri) {
-        const appKv = createNativeAppKv()
+        const deviceSettings = createNativeDeviceSettings()
         const blobStore = getBlobStore()
         sharedStore = new SyncConflictBackupStore({
-            getItem: () => appKv.get(nativeIndexKey),
+            getItem: () => deviceSettings.get(nativeIndexKey),
             async setItem(_key, value) {
-                await appKv.set(nativeIndexKey, value)
+                await deviceSettings.set(nativeIndexKey, value)
                 return value
             },
-            removeItem: () => appKv.remove(nativeIndexKey),
+            removeItem: () => deviceSettings.set(nativeIndexKey, null),
         }, Date.now, {
             async write(id, bytes) {
                 await blobStore.put(nativePayloadKey(id), bytes, {

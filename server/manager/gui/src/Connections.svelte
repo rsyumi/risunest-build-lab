@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { untrack, tick } from "svelte";
+  import { onDestroy, untrack, tick } from "svelte";
   import { Copy } from "@lucide/svelte";
   import { phase, type Status, type Environment } from "./api";
   let {
@@ -8,12 +8,17 @@
     busy,
     mutate,
     copy,
+    activity,
   }: {
     status: Status;
     environment: Environment | null;
     busy: boolean;
-    mutate: (path: string, body?: Record<string, unknown>) => Promise<boolean>;
+    mutate: (
+      path: string,
+      body?: Record<string, unknown>,
+    ) => Promise<string | null>;
     copy: (text: string) => void;
+    activity: (active: boolean) => void;
   } = $props();
   // Form drafts retain the revision they were based on while status polls continue.
   let mode = $state(
@@ -43,6 +48,7 @@
   let dirty = $state(false);
   function changed() {
     dirty = true;
+    activity(true);
   }
   function reset() {
     mode = status.connectionState.mode === "managed" ? "managed" : "fixed";
@@ -53,22 +59,28 @@
     enabled = status.connection.registryEnabled;
     revision = status.revision;
     dirty = false;
+    activity(false);
   }
   async function apply() {
-    if (
-      await mutate("connection", {
-        revision,
-        options: {
-          endpoint: mode === "fixed" ? endpoint : null,
-          cloudflared: mode === "managed" ? executable : null,
-          registryUrl: enabled ? registry : null,
-        },
-      })
-    ) {
+    const nextRevision = await mutate("connection", {
+      revision,
+      options: {
+        endpoint: mode === "fixed" ? endpoint : null,
+        cloudflared: mode === "managed" ? executable : null,
+        registryUrl: enabled ? registry : null,
+      },
+    });
+    if (nextRevision) {
+      revision = nextRevision;
       await tick();
       reset();
     }
   }
+  async function act(path: string) {
+    const nextRevision = await mutate(path);
+    if (nextRevision) revision = nextRevision;
+  }
+  onDestroy(() => activity(false));
 </script>
 
 <p class="page-description">
@@ -134,13 +146,13 @@
       {#if status.connectionState.mode === "managed"}<div class="actions">
           <button
             type="button"
-            onclick={() => mutate("tunnel/start")}
+            onclick={() => void act("tunnel/start")}
             disabled={status.tunnel.phase === "connected" || busy}>시작</button
-          ><button type="button" onclick={() => mutate("tunnel/restart")}
+          ><button type="button" onclick={() => void act("tunnel/restart")}
             >다시 시작</button
           ><button
             type="button"
-            onclick={() => mutate("tunnel/stop")}
+            onclick={() => void act("tunnel/stop")}
             disabled={status.tunnel.phase === "stopped" || busy}>중지</button
           >
         </div>{/if}
@@ -173,7 +185,7 @@
         <button
           type="button"
           disabled={!status.connection.registryEnabled || busy}
-          onclick={() => mutate("registry/repost")}>다시 게시</button
+          onclick={() => void act("registry/repost")}>다시 게시</button
         >
       </div>
       <details class="advanced">

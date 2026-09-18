@@ -1,9 +1,10 @@
 use super::{
-    active_generation, asset_object_catalog, current_revision, hash_exact_file, schema, snapshot,
+    active_generation, archive, asset_object_catalog, current_revision, hash_exact_file, schema,
+    snapshot,
     AnchorOccurrence, AssetAlias, AssetAliasListQuery, AssetOwnerHead, AssetOwnerLocator,
-    AssetRepositoryAuthorityState, CharacterQuery, CheckpointMode, ColdAlias,
-    ColdPayloadAuthorityState, ColdPayloadMigrationInput, ConversationMutation, ConversationPage,
-    ConversationQuery, ConversationWindowQuery, PersistentStore, PluginStorageMutation, QueryOrder,
+    AssetRepositoryAuthorityState, CharacterQuery, CheckpointMode, ConversationMutation,
+    ConversationPage, ConversationQuery, ConversationWindowQuery, PersistentStore,
+    PluginStorageMutation, QueryOrder,
     StoreError, Versioned, WorkingSetCommit, ASSET_GC_PRODUCT_MINIMUM_GRACE_MS,
     ASSET_GC_PRODUCT_PAGE_LIMIT, GENERATION_TABLES, JAVASCRIPT_MAX_SAFE_INTEGER,
 };
@@ -120,21 +121,28 @@ fn stage_root(store: &mut PersistentStore, username: &str) -> String {
     staging.staging_id
 }
 
+#[path = "tests/archive_tests.rs"]
+mod archive_tests;
 #[path = "tests/asset_alias_tests.rs"]
 mod asset_alias_tests;
 #[path = "tests/asset_catalog_gc_tests.rs"]
 mod asset_catalog_gc_tests;
-#[path = "tests/cold_payload_tests.rs"]
-mod cold_payload_tests;
+#[path = "tests/content_change_vocabulary_tests.rs"]
+mod content_change_vocabulary_tests;
+#[path = "tests/data_health_tests.rs"]
+mod data_health_tests;
+mod selective_import_tests;
 #[path = "tests/display_name_tests.rs"]
 mod display_name_tests;
+#[path = "tests/external_storage_tests.rs"]
+mod external_storage_tests;
+#[path = "tests/plugin_owner_tests.rs"]
+mod plugin_owner_tests;
 #[path = "tests/replacement_tests.rs"]
 mod replacement_tests;
 #[path = "tests/schema_migration_tests.rs"]
 mod schema_migration_tests;
 mod server_sync_apply_tests;
-#[path = "tests/external_storage_tests.rs"]
-mod external_storage_tests;
 mod server_sync_engine_tests;
 #[path = "tests/server_sync_outbox_tests.rs"]
 mod server_sync_outbox_tests;
@@ -144,6 +152,8 @@ mod server_sync_projection_tests;
 mod snapshot_lease_tests;
 #[path = "tests/storage_stats_tests.rs"]
 mod storage_stats_tests;
+#[path = "tests/vault_boundary_tests.rs"]
+mod vault_boundary_tests;
 #[path = "tests/working_set_tests.rs"]
 mod working_set_tests;
 

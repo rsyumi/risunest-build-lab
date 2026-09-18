@@ -27,7 +27,6 @@
     import { postChatFile } from 'src/ts/process/files/multisend';
     import InlayFilePreview from './InlayFilePreview.svelte';
     import { ConnectionOpenStore } from 'src/ts/sync/multiuser';
-    import { coldStorageHeader, preLoadChat } from 'src/ts/process/coldstorage.svelte';
     import Chats from './Chats.svelte';
     import Button from '../UI/GUI/Button.svelte';
     import PluginDefinedIcon from '../Others/PluginDefinedIcon.svelte';
@@ -93,6 +92,7 @@
     }
     import { readSelectedConversationLatestTail } from '../../ts/selectedConversationTail';
     import { writeConversationSuggestions } from '../../ts/autoSuggestionMetadata';
+    import { moveAlternateGreeting } from './conversationStartMutations';
 
     const loadPlaygroundMenu = () => import('../Playground/PlaygroundMenu.svelte').then(m => m.default);
     
@@ -155,12 +155,6 @@
         return conversationViewportSource
             ? selectedConversationViewport.totalMessages
             : currentChat?.length ?? 0
-    })
-    let firstCurrentMessage = $derived.by(() => {
-        void viewportBindingRevision
-        return conversationViewportSource
-            ? selectedConversationViewport.firstMessage
-            : currentChat?.[0]
     })
     let tailCurrentMessage = $derived.by(() => {
         void viewportBindingRevision
@@ -492,6 +486,41 @@
         return result === true
     }
 
+    async function selectAlternateGreeting(direction: -1 | 1): Promise<void> {
+        try {
+            await runSelectedConversationOperation('select-alternate-greeting', (context) => {
+                const { character, conversation, session } = context.requireCurrent()
+                if (character.type === 'group') return
+                moveAlternateGreeting(
+                    conversation,
+                    session,
+                    character.alternateGreetings.length,
+                    direction,
+                )
+                context.requireCurrent()
+            })
+        } catch (error) {
+            alertError(error)
+        }
+    }
+
+    async function removeCreatorQuote(): Promise<void> {
+        const character = DBState.db.characters[$selectedCharID]
+        if (!character || character.type === 'group') return
+        try {
+            const changed = await persistentRuntime.mutatePersistentCharacterDetail(
+                character.chaId,
+                'remove-creator-quote',
+                ({ character: storedCharacter }) => {
+                    if (storedCharacter.type !== 'group') storedCharacter.removedQuotes = true
+                },
+            )
+            if (!changed) alertError(language.errors.noData)
+        } catch (error) {
+            alertError(error)
+        }
+    }
+
     let abortController:null|AbortController = null
 
     async function sendChatMain(continued:boolean = false) {
@@ -545,17 +574,6 @@
                 autoMode = false
             }
         }
-    }
-
-    async function preLoadSelectedChat() {
-        return runSelectedConversationOperation(
-            'preload-cold-conversation',
-            async (context) => {
-                const authority = context.requireCurrent()
-                await preLoadChat($selectedCharID, authority.character.chatPage)
-                context.requireCurrent()
-            },
-        )
     }
 
     async function appendPlaygroundMessage() {
@@ -857,7 +875,6 @@
                 requestInfoInsideChat: DBState.db.requestInfoInsideChat ?? false,
                 aiLawApplies: aiLawApplies(),
                 translator: DBState.db.translator,
-                swipe: DBState.db.swipe,
                 showFirstMessagePages: DBState.db.showFirstMessagePages,
                 memoryLimitThickness: DBState.db.memoryLimitThickness ?? 1,
                 customQuotes: DBState.db.customQuotes,
@@ -1342,16 +1359,6 @@
                 </div>
             {/if}
 
-            {#if firstCurrentMessage?.data?.startsWith(coldStorageHeader)}
-                {#await preLoadSelectedChat()}
-                    <div class="w-full flex justify-center text-textcolor2 italic mb-12">
-                        {language.loadingChatData}
-                    </div>
-                {:then a}
-                    <div></div>
-                {/await}
-            {:else}
-
             {#if chatFoldedStateMessageIndex.index !== -1}
                 <button class="w-full flex justify-center max-w-full p-4">
                     <Button className="max-w-xl w-full" onclick={() => {
@@ -1376,30 +1383,9 @@
                 onReroll={reroll}
                 onNextReroll={nextReroll}
                 unReroll={unReroll}
-                onFirstMessageReroll={() => {
-                    const character = DBState.db.characters[$selectedCharID]
-                    const chat = character.chats[character.chatPage]
-                    if (character.type !== 'group') {
-                        chat.fmIndex = chat.fmIndex >= character.alternateGreetings.length - 1
-                            ? -1
-                            : chat.fmIndex + 1
-                    }
-                    character.chats[character.chatPage] = chat
-                }}
-                unFirstMessageReroll={() => {
-                    const character = DBState.db.characters[$selectedCharID]
-                    const chat = character.chats[character.chatPage]
-                    if (character.type !== 'group') {
-                        chat.fmIndex = chat.fmIndex === -1
-                            ? character.alternateGreetings.length - 1
-                            : chat.fmIndex - 1
-                    }
-                    character.chats[character.chatPage] = chat
-                }}
-                onRemoveCreatorQuote={() => {
-                    const character = DBState.db.characters[$selectedCharID]
-                    if (character.type !== 'group') character.removedQuotes = true
-                }}
+                onFirstMessageReroll={() => void selectAlternateGreeting(1)}
+                unFirstMessageReroll={() => void selectAlternateGreeting(-1)}
+                onRemoveCreatorQuote={() => void removeCreatorQuote()}
                 showAiWarning={aiLawApplies()}
                 currentCharacter={currentCharacter}
                 currentUsername={currentUsername}
@@ -1407,8 +1393,6 @@
                 userIconPortrait={userIconPortrait}
                 bind:hasNewUnreadMessage={showNewMessageButton}
             />
-
-            {/if}
 
             {#if openMenu}
                 <div class="{DBState.db.fixedChatTextarea ? 'fixed' : 'absolute'} right-2 bottom-16 p-5 bg-darkbg flex flex-col gap-3 text-textcolor rounded-md" onclick={(e) => {

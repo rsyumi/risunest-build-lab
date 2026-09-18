@@ -1,12 +1,13 @@
 import { writable } from "svelte/store"
 import { getDatabase } from "./database.svelte"
 import localforage from "localforage"
-import { alertLogin, alertNormalWait, alertStore } from "../alert"
+import { alertError, alertLogin, alertNormalWait, alertStore } from "../alert"
 import { getUncleanablesSync } from "../globalApi.svelte"
 import { v4 } from "uuid"
 import { language } from "src/lang"
 import { fetchProtectedResource } from "../sionyw"
 import { completeAccountUnmigration } from "./databaseRestore"
+import { getDeviceMarkers } from "./deviceMarkers"
 import {
     materializePersistentDatabaseSnapshotWithRevision,
     replacePersistentDatabase,
@@ -22,6 +23,7 @@ export function resetAccountStorageSession(): void {
 
 let seenWarnings:string[] = []
 const accountDatabaseKey = 'database/database.bin'
+const maxNativeOfficialWriteAttempts = 3
 
 export type AccountReadResult =
     | { kind: 'value'; bytes: Uint8Array }
@@ -78,6 +80,12 @@ export interface AccountRecoveredOfficialWrite {
     session: string | null
     warning?: string | null
     reloadSession?: boolean
+}
+
+/** Nothing caches the account database locally. */
+const uncachedDatabase: AccountStorageCache = {
+    getItem: async () => null,
+    setItem: async () => undefined,
 }
 
 export interface AccountStorageCache {
@@ -176,8 +184,7 @@ export class AccountStorage{
     private readonly credentialRouting?: AccountCredentialRouting
 
     constructor(options: AccountStorageOptions = {}) {
-        this.databaseCache = options.databaseCache
-            ?? localforage.createInstance({ name: 'risuaiAccountCached' })
+        this.databaseCache = options.databaseCache ?? uncachedDatabase
         this.assetCache = options.assetCache ?? localforage
         this.credentialRouting = options.credentialRouting
     }
@@ -276,9 +283,9 @@ export class AccountStorage{
         attempt: AccountNativeOfficialWriteAttempt<T>,
         options: AccountWriteOptions = {},
     ): Promise<AccountNativeOfficialWriteResult<T> | null> {
-        while (true) {
+        for (let attemptNumber = 1; attemptNumber <= maxNativeOfficialWriteAttempts; attemptNumber += 1) {
             this.checkAuth()
-            if (localStorage.getItem('ignoreRisuAuth') === 'true' || !this.auth) return null
+            if (getDeviceMarkers().getItem('ignoreRisuAuth') === 'true' || !this.auth) return null
 
             const result = await attempt({
                 credential: { kind: 'risu-auth', token: this.auth },
@@ -290,6 +297,9 @@ export class AccountStorage{
             if (result.session !== null) risuSession = result.session
             publishAccountWarning(result.warning)
             if (result.kind === 'reauthentication-needed') {
+                if (attemptNumber === maxNativeOfficialWriteAttempts) {
+                    throw new Error('Official account reauthentication was rejected too many times')
+                }
                 await this.reauthenticate(options.signal)
                 continue
             }
@@ -349,7 +359,7 @@ export class AccountStorage{
             }, options.signal))
             if(da.status === 403){
                 await discardResponseBody(da)
-                await this.reauthenticate()
+                await this.reauthenticate(options.signal)
             }
         }
         if(da.status === 303){
@@ -468,18 +478,21 @@ async function performAccountUnmigration(): Promise<void> {
     const { storeActiveAsset } = await import("./accountAssetAccess")
     const {
         getAccountColdStorageItem,
-        getColdStorageItem,
         isColdStorageBackupData,
         listColdDataKeys,
-        setLocalColdStorageItem,
     } = await import("../process/coldstorage.svelte")
+    const { expandColdPayloads } = await import("../process/coldPayloadExpansion")
     const blobStore = await resolveBlobStore()
     const accountStorage = new AccountStorage()
     const coldKeys = await listColdDataKeys(db)
 
     await completeAccountUnmigration(db, {
-        prepareResources: () =>
-            materializeAccountUnmigrationResources({
+        onPostCommitError: (error) => {
+            console.error('Committed account unmigration follow-up failed', error)
+            alertError(language.risuNest.persistentData.followupFailed)
+        },
+        prepareResources: async (candidate) => {
+            const selectedCold = await materializeAccountUnmigrationResources({
                 coldKeys,
                 onProgress: (stage, completed, total) => {
                     alertStore.set({
@@ -516,7 +529,6 @@ async function performAccountUnmigration(): Promise<void> {
                         ext: name.split('.').pop() ?? '',
                     })
                 },
-                readLocalCold: (key) => getColdStorageItem(key, { accountFallback: true }),
                 readRemoteCold: async (key) => {
                     const value = await getAccountColdStorageItem(key)
                     if (value !== null && !isColdStorageBackupData(value)) {
@@ -524,12 +536,9 @@ async function performAccountUnmigration(): Promise<void> {
                     }
                     return value
                 },
-                writeLocalCold: async (key, value) => {
-                    if (!(await setLocalColdStorageItem(key, value))) {
-                        throw new Error(`Failed to write local cold payload: ${key}`)
-                    }
-                },
-            }),
+            })
+            await expandColdPayloads(candidate, async (key) => selectedCold.get(key) ?? null)
+        },
         replaceDatabase: (database, reason) => {
             alertStore.set({ type: 'wait', msg: language.accountUnmigration.finishing })
             // Keep the snapshot guards: concurrent edits must survive a failed transition.
@@ -539,10 +548,12 @@ async function performAccountUnmigration(): Promise<void> {
                 expectedMutationGeneration,
             })
         },
-        finalize: () => {
+        finalize: async () => {
             alertStore.set({ type: "none", msg: "" })
-            localStorage.setItem('dosync', 'avoid')
-            localStorage.removeItem('accountst')
+            const markers = getDeviceMarkers()
+            markers.setItem('dosync', 'avoid')
+            markers.removeItem('accountst')
+            await markers.flush()
             localStorage.removeItem('fallbackRisuToken')
             location.reload()
         },

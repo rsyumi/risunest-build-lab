@@ -32,20 +32,12 @@ impl ResidencyStatus {
     }
 }
 
-fn cold_hashes(db: &rusqlite::Connection) -> Result<Vec<String>> {
-    let mut statement =
-        db.prepare("SELECT DISTINCT object_hash FROM cold_aliases WHERE object_hash IS NOT NULL")?;
-    let hashes = statement
-        .query_map([], |r| r.get(0))?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    Ok(hashes)
-}
 impl PersistentStore {
     pub(crate) fn hydrate_registered_remote_assets(
         &self,
         check: impl Fn() -> Result<()>,
     ) -> Result<()> {
-        if !self.repository_root.join("asset-residency.sqlite").exists() {
+        if !Residency::exists(&self.repository_root) {
             return Ok(());
         }
         let residency = Residency::open(&self.repository_root)?;
@@ -105,14 +97,18 @@ impl PersistentStore {
         }
         check()
     }
-    fn residency_inventory(&self, residency: &Residency, guarded: bool) -> Result<Inventory> {
+    fn residency_inventory(&self, guarded: bool) -> Result<Inventory> {
         let cas = PayloadCas::new(&self.repository_root)?;
-        let roots = self.collect_asset_gc_roots(&cas, guarded, false)?;
+        let roots = self.collect_labelled_asset_gc_roots(guarded, false)?;
         let mut referenced = BTreeSet::new();
         let mut local = BTreeSet::new();
         let mut release_blocked = false;
-        for root in roots {
+        for (label, root) in roots {
             release_blocked |= root.retain_all_objects || !root.blockers.is_empty();
+            if label == "external-conflict" {
+                local.extend(root.object_hashes.iter().cloned());
+                local.extend(root.manifest_hashes.iter().cloned());
+            }
             referenced.extend(root.object_hashes);
             referenced.extend(root.manifest_hashes.iter().cloned());
             local.extend(root.manifest_hashes);
@@ -133,12 +129,7 @@ impl PersistentStore {
                 }
             }
         }
-        local.extend(cold_hashes(&self.connection)?);
-        for reader in self.revision_leases.values() {
-            local.extend(cold_hashes(&reader.connection)?);
-        }
-        // Detached consumers and staged imports still require their physical
-        // inputs. Their roots do not distinguish media from cold record bytes.
+        // Detached consumers and staged imports still require their physical inputs.
         for root in self
             .active_readers
             .detached_asset_roots()?
@@ -154,31 +145,20 @@ impl PersistentStore {
         }
         // External captures require complete local payloads through publication,
         // even when the source alias was removed by a later edit.
-        local.extend(crate::external_storage::capture::registered_roots(
-            &self.connection, &self.repository_root,
-        )?.object_hashes);
-        // Archive SQLite holds only metadata. Cache the role list by immutable
-        // snapshot ID so later cleanups do not reconstruct each historical DB.
-        let archive = snapshot_archive::Archive::open(&self.snapshots_dir)?;
-        for info in archive.list()? {
-            let hashes = match residency.snapshot_roles(&info.id)? {
-                Some(hashes) => hashes,
-                None => {
-                    let scratch = archive.scratch()?;
-                    archive.restore(&info.id, &scratch.path)?;
-                    let db = rusqlite::Connection::open_with_flags(
-                        &scratch.path,
-                        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-                    )?;
-                    let hashes = cold_hashes(&db)?;
-                    drop(db);
-                    residency.save_snapshot_roles(&info.id, &hashes)?;
-                    hashes
-                }
-            };
-            local.extend(hashes);
-        }
-        drop(archive);
+        local.extend(
+            crate::external_storage::capture::registered_roots(
+                &self.connection,
+                &self.repository_root,
+            )?
+            .object_hashes,
+        );
+        crate::server_sync::backups::references::visit_roots(&self.repository_root, |object| {
+            referenced.insert(object.hash.clone());
+            if object.metadata || object.local_required {
+                local.insert(object.hash);
+            }
+            Ok(())
+        })?;
         let jobs = if guarded {
             crate::asset_repository::job_pins::collect_durable_cas_job_roots_already_guarded(
                 &self.repository_root,
@@ -199,10 +179,10 @@ impl PersistentStore {
     }
     pub(crate) fn asset_residency_status(&self) -> Result<ResidencyStatus> {
         let residency = Residency::open(&self.repository_root)?;
-        let inventory = self.residency_inventory(&residency, false)?;
+        let inventory = self.residency_inventory(false)?;
         let cas = PayloadCas::new(&self.repository_root)?;
         let mut status = ResidencyStatus {
-            policy: residency.policy()?,
+            policy: self.device_store()?.asset_residency_policy()?,
             local_bytes: 0,
             remote_bytes: 0,
             remote_objects: 0,
@@ -227,13 +207,12 @@ impl PersistentStore {
         check: impl Fn() -> Result<()>,
     ) -> Result<ResidencyStatus> {
         check()?;
-        let residency = Residency::open(&self.repository_root)?;
         if policy == AssetPolicy::Remote && self.server_stored_config()?.is_none() {
             return Err(SyncError::new("server-not-bound", 409));
         }
-        residency.set_policy(policy)?;
+        self.device_store()?.set_asset_residency_policy(policy)?;
         if policy == AssetPolicy::Full {
-            let inventory = self.residency_inventory(&residency, false)?;
+            let inventory = self.residency_inventory(false)?;
             for hash in inventory.referenced {
                 check()?;
                 if open_or_hydrate_with_check(&self.repository_root, &hash, &check)?.is_none() {
@@ -251,7 +230,7 @@ impl PersistentStore {
     ) -> Result<ResidencyStatus> {
         check()?;
         let mut residency = Residency::open(&self.repository_root)?;
-        if residency.policy()? != AssetPolicy::Remote {
+        if self.device_store()?.asset_residency_policy()? != AssetPolicy::Remote {
             return Err(SyncError::new("remote-asset-policy-required", 409));
         }
         if self.server_status()?.operation_pending {
@@ -260,11 +239,11 @@ impl PersistentStore {
         let mut config = self
             .server_stored_config()?
             .ok_or_else(|| SyncError::new("server-not-bound", 409))?;
-        let mut client = ServerClient::new(config.resolve(&self.repository_root)?)?;
+        let client = ServerClient::new(config.resolve(&self.repository_root)?)?;
         let head = client.resolve_identity(false)?;
         check()?;
         config.endpoint = client.config().endpoint.clone();
-        let inventory = self.residency_inventory(&residency, false)?;
+        let inventory = self.residency_inventory(false)?;
         let candidates = inventory
             .referenced
             .difference(&inventory.local)
@@ -332,7 +311,7 @@ impl PersistentStore {
             )?;
             check()?;
             let _guard = crate::asset_repository::coordinator::lock_repository_mutation()?;
-            let fresh = self.residency_inventory(&residency, true)?;
+            let fresh = self.residency_inventory(true)?;
             let sync_cache_root =
                 self.repository_root
                     .join("server-sync")
@@ -370,7 +349,7 @@ impl PersistentStore {
         &self,
         check: impl Fn() -> Result<()>,
     ) -> Result<()> {
-        let residency = Residency::open(&self.repository_root)?;
+        let mut residency = Residency::open(&self.repository_root)?;
         let cas = PayloadCas::new(&self.repository_root)?;
         let mut after = String::new();
         loop {
@@ -378,51 +357,64 @@ impl PersistentStore {
             if page.is_empty() {
                 break;
             }
-            let mut releases = std::collections::BTreeMap::<
-                String,
-                Vec<crate::server_sync::residency::RemoteObject>,
-            >::new();
-            {
-                let _guard = crate::asset_repository::coordinator::lock_repository_mutation()?;
-                let inventory = self.residency_inventory(&residency, true)?;
-                if inventory.release_blocked {
-                    return Ok(());
-                }
-                for (cursor, hash, _) in page {
-                    check()?;
-                    after = cursor.clone();
-                    let context = cursor
-                        .split_once('/')
-                        .ok_or_else(|| SyncError::new("invalid-custody-cursor", 409))?
-                        .0;
-                    let Some(object) = residency.release_object(&hash, context)? else {
-                        continue;
-                    };
-                    if inventory.referenced.contains(&hash) || inventory.local.contains(&hash) {
-                        continue;
-                    }
-                    if !residency.begin_release(&object)? {
-                        continue;
-                    }
-                    if cas.stat_object(&hash)?.is_none() {
-                        self.connection
-                            .execute("DELETE FROM asset_objects WHERE object_hash=?1", [&hash])?;
-                    }
-                    releases.entry(context.to_owned()).or_default().push(object);
-                }
-            }
-            for objects in releases.values() {
+            let mut candidates = std::collections::BTreeMap::<String, Vec<String>>::new();
+            for (cursor, hash, _) in page {
                 check()?;
-                let mut client =
-                    ServerClient::new(objects[0].config.resolve(&self.repository_root)?)?;
+                after = cursor.clone();
+                let context = cursor
+                    .split_once('/')
+                    .ok_or_else(|| SyncError::new("invalid-custody-cursor", 409))?
+                    .0;
+                candidates.entry(context.to_owned()).or_default().push(hash);
+            }
+            for (context, hashes) in candidates {
+                check()?;
+                let mut proof = None;
+                for hash in &hashes {
+                    if let Some(object) = residency.release_object(hash, &context)? {
+                        proof = Some(object);
+                        break;
+                    }
+                }
+                let Some(proof) = proof else {
+                    continue;
+                };
+                let client = ServerClient::new(proof.config.resolve(&self.repository_root)?)?;
                 let head = client.resolve_identity(false)?;
                 check()?;
+                let objects = {
+                    let _guard = crate::asset_repository::coordinator::lock_repository_mutation()?;
+                    let inventory = self.residency_inventory(true)?;
+                    if inventory.release_blocked {
+                        return Ok(());
+                    }
+                    let mut objects = Vec::new();
+                    for hash in hashes {
+                        if inventory.referenced.contains(&hash) || inventory.local.contains(&hash) {
+                            continue;
+                        }
+                        let Some(object) = residency.begin_latest_release(&hash, &context)? else {
+                            continue;
+                        };
+                        if cas.stat_object(&hash)?.is_none() {
+                            self.connection.execute(
+                                "DELETE FROM asset_objects WHERE object_hash=?1",
+                                [&hash],
+                            )?;
+                        }
+                        objects.push(object);
+                    }
+                    objects
+                };
+                if objects.is_empty() {
+                    continue;
+                }
                 let reply=client.request(reqwest::Method::POST,"objects/retention/release",&[],
                     Some(risunest_sync_wire::canonical::encode(&serde_json::json!({"epoch":head.epoch,"objects":objects.iter().map(|object|serde_json::json!({"deviceId":object.device_id,"hash":object.hash,"retentionId":object.retention_id})).collect::<Vec<_>>()}))?),&[],risunest_sync_wire::MAX_METADATA_BYTES)?;
                 if reply.status != 204 {
                     return Err(crate::server_sync::client::response_error(reply));
                 }
-                for object in objects {
+                for object in &objects {
                     residency.finish_release(object)?;
                 }
             }

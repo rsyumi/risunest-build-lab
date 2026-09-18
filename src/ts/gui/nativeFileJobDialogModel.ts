@@ -76,6 +76,7 @@ const STAGE_ORDER: DialogStageId[] = [
     'decoding-database',
     'staging-characters',
     'finalizing-staging',
+    'assign-plugin-values',
     'activating',
     'refreshing-app',
     'reloading-plugins',
@@ -85,6 +86,13 @@ const STAGE_ORDER: DialogStageId[] = [
 /** Stages shown as pending from the start; optional stages appear only once observed. */
 const EXPECTED_STAGES: Record<NativeFileOperationFormat, DialogStageId[]> = {
     'library-backup': [
+        'reading-database',
+        'finalizing-staging',
+        'activating',
+        'refreshing-app',
+        'reloading-plugins',
+    ],
+    'conflict-reference': [
         'reading-database',
         'finalizing-staging',
         'activating',
@@ -176,11 +184,16 @@ function normalizeStage(stage: NativeFileJobStage): DialogStageId {
     return stage === 'awaiting-activation' ? 'activating' : stage
 }
 
+/**
+ * The job the native side reports names the file that is actually being
+ * read. The operation's own format only says which admission rules applied
+ * (one common picker admits every backup as a library backup), so it is the
+ * fallback until the first status arrives.
+ */
 function formatOf(
     explicit: NativeFileOperationFormat | undefined,
     status: NativeFileJobStatus | undefined,
 ): NativeFileOperationFormat | undefined {
-    if (explicit) return explicit
     switch (status?.kind) {
         case 'restore-block-risu-save':
             return 'risu-save'
@@ -189,7 +202,7 @@ function formatOf(
         case 'restore-legacy-local-backup':
             return 'local-backup'
         default:
-            return undefined
+            return explicit
     }
 }
 
@@ -218,6 +231,7 @@ function stageLabel(stage: NativeFileJobDialogStage): string {
         case 'decoding-database': return copy.stageDecodingDatabase
         case 'staging-characters': return copy.stageStagingCharacters
         case 'finalizing-staging': return copy.stageFinalizingStaging
+        case 'assign-plugin-values': return copy.stageAssignPluginValues
         case 'activating': return copy.stageActivating
         case 'refreshing-app': return copy.stageRefreshingApp
         case 'reloading-plugins': return copy.stageReloadingPlugins
@@ -381,24 +395,17 @@ function buildCounters(
                 label: copy.countColdStorage,
                 value: known(counts?.coldStorage),
             },
+            {
+                key: 'pocketMedia',
+                label: copy.countPocketMedia,
+                value: known(counts?.pocketMedia),
+            },
+            {
+                key: 'skipped',
+                label: copy.countSkipped,
+                value: known(counts?.skipped),
+            },
         )
-        if (
-            counts &&
-            counts.pocketMedia + counts.pocketMetadata + counts.skipped > 0
-        ) {
-            rows.push(
-                {
-                    key: 'pocketMedia',
-                    label: copy.countPocketMedia,
-                    value: formatCount(counts.pocketMedia),
-                },
-                {
-                    key: 'skipped',
-                    label: copy.countSkipped,
-                    value: formatCount(counts.skipped),
-                },
-            )
-        }
     }
     return rows
 }

@@ -17,7 +17,7 @@ use crate::{
         encode_logical_record_key, LogicalRecordEnvelope, LogicalRecordLocator,
     },
 };
-use risunest_sync_wire::{RecordVersion, RemoteHead};
+use risunest_sync_wire::{Domain, RecordVersion, RemoteHead};
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use serde_json::Value;
 use std::collections::BTreeSet;
@@ -37,13 +37,21 @@ pub(crate) struct ValidatedRecord {
     record: RemoteRecord,
     locator: LogicalRecordLocator,
 }
+
+impl ValidatedRecord {
+    pub(crate) fn into_parts(self) -> (RemoteRecord, LogicalRecordLocator) {
+        (self.record, self.locator)
+    }
+}
+
 pub(crate) struct ReplicaAdvance {
     pub scope_clears: Vec<(String, String)>,
     pub publish_keys: Vec<ServerDirtyKey>,
     pub clear_revision: Option<i64>,
-    pub bases: Vec<(String, RecordVersion, Option<String>)>,
+    pub bases: Vec<(Domain, String, RecordVersion, Option<String>)>,
     pub finish_operation: bool,
     pub scanned_revision: Option<i64>,
+    pub applied_sections: Vec<Domain>,
 }
 impl Default for ReplicaAdvance {
     fn default() -> Self {
@@ -54,6 +62,7 @@ impl Default for ReplicaAdvance {
             bases: Vec::new(),
             finish_operation: false,
             scanned_revision: None,
+            applied_sections: Vec::new(),
         }
     }
 }
@@ -181,39 +190,32 @@ pub(crate) fn validate_remote_with_residency(
                     object_hash,
                     size,
                     metadata,
-                }
-                | LogicalRecordEnvelope::Cold {
-                    object_hash,
-                    size,
-                    metadata,
                 } => {
                     if let Some(hash) = object_hash {
-                        if cas.stat_object(hash)? != Some(*size)
-                            && (matches!(locator, LogicalRecordLocator::Cold { .. })
-                                || !remote(hash, Some(*size))?)
-                        {
+                        if cas.stat_object(hash)? != Some(*size) && !remote(hash, Some(*size))? {
                             return invalid("Server payload size differs from alias");
                         }
                     }
-                    if !matches!(locator, LogicalRecordLocator::Cold { .. }) {
-                        let typed = decode_asset_alias_metadata(metadata).map_err(|_| {
-                            StoreError::Validation {
-                                message: "Invalid server alias metadata".into(),
-                            }
+                    let typed =
+                        decode_asset_alias_metadata(metadata).map_err(|_| StoreError::Validation {
+                            message: "Invalid server alias metadata".into(),
                         })?;
-                        if matches!(locator, LogicalRecordLocator::Asset { .. })
-                            && (typed.inlay_type.is_some()
-                                || typed.width.is_some()
-                                || typed.height.is_some())
-                        {
-                            return invalid("Asset contains inlay-only metadata");
-                        }
-                        if matches!(locator, LogicalRecordLocator::Inlay { .. })
-                            && typed.inlay_type.is_none()
-                        {
-                            return invalid("Inlay type is missing");
-                        }
+                    if matches!(locator, LogicalRecordLocator::Asset { .. })
+                        && (typed.inlay_type.is_some()
+                            || typed.width.is_some()
+                            || typed.height.is_some())
+                    {
+                        return invalid("Asset contains inlay-only metadata");
                     }
+                    if matches!(locator, LogicalRecordLocator::Inlay { .. })
+                        && typed.inlay_type.is_none()
+                    {
+                        return invalid("Inlay type is missing");
+                    }
+                }
+                // The store no longer holds cold payloads; the shared record format still carries the variant.
+                LogicalRecordEnvelope::Cold { .. } => {
+                    return invalid("Cold records are unsupported")
                 }
                 _ => (),
             }
@@ -376,7 +378,7 @@ impl PersistentStore {
             } else {
                 rows::apply_delete(&tx, &generation, &item.locator).map_err(semantic)?;
             }
-            tx.execute("INSERT INTO server_sync_base(key,version,local_hash) VALUES(?1,?2,?3) ON CONFLICT(key) DO UPDATE SET version=excluded.version,local_hash=excluded.local_hash",params![item.record.key,serde_json::to_string(&item.record.version)?,item.record.local_hash])?;
+            tx.execute("INSERT INTO server_sync_base(domain,key,version,local_hash) VALUES('library',?1,?2,?3) ON CONFLICT(domain,key) DO UPDATE SET version=excluded.version,local_hash=excluded.local_hash",params![item.record.key,serde_json::to_string(&item.record.version)?,item.record.local_hash])?;
             Ok(())
         })?;
         for id in touched {
@@ -400,8 +402,8 @@ impl PersistentStore {
                 [revision],
             )?;
         }
-        for (key, version, local_hash) in advance.bases {
-            tx.execute("INSERT INTO server_sync_base VALUES(?1,?2,?3) ON CONFLICT(key) DO UPDATE SET version=excluded.version,local_hash=excluded.local_hash",params![key,serde_json::to_string(&version)?,local_hash])?;
+        for (domain, key, version, local_hash) in advance.bases {
+            tx.execute("INSERT INTO server_sync_base VALUES(?1,?2,?3,?4) ON CONFLICT(domain,key) DO UPDATE SET version=excluded.version,local_hash=excluded.local_hash",params![domain.as_str(),key,serde_json::to_string(&version)?,local_hash])?;
         }
         if advance.finish_operation {
             let (phase, operation_revision): (String, i64) = tx.query_row(
@@ -430,7 +432,18 @@ impl PersistentStore {
                 tx.execute(&format!("DELETE FROM {table}"), [])?;
             }
         }
-        tx.execute("DELETE FROM server_sync_remote_dirty", [])?;
+        // Only the sections this activation reconciled release their work set.
+        // A section left unreceived keeps its marks for the next cycle.
+        let reconciled = advance
+            .applied_sections
+            .iter()
+            .map(|domain| format!("'{}'", domain.as_str()))
+            .collect::<Vec<_>>()
+            .join(",");
+        tx.execute(
+            &format!("DELETE FROM server_sync_remote_dirty WHERE domain IN ({reconciled})"),
+            [],
+        )?;
         tx.execute("UPDATE server_sync_state SET reconciling=0", [])?;
         if advance.scanned_revision == Some(actual) {
             tx.execute(
@@ -452,6 +465,15 @@ impl PersistentStore {
             "UPDATE server_sync_state SET head=?1 WHERE singleton=1",
             [serde_json::to_string(next_head)?],
         )?;
+        // Only sections this cycle applied advance. The rest stay unreceived.
+        for domain in advance.applied_sections {
+            let section = next_head
+                .section(domain)
+                .map_err(|_| StoreError::Validation {
+                    message: "Invalid server cursor".into(),
+                })?;
+            tx.execute("INSERT INTO server_sync_remote_sections VALUES(?1,?2,?3) ON CONFLICT(domain) DO UPDATE SET applied_seq=excluded.applied_seq,state_id=excluded.state_id",params![domain.as_str(),next_head.seq.as_str(),section.state_id])?;
+        }
         super::content_change_index::finish_mutation(&tx)?;
         super::commit::set_active(&tx, revision, &generation)?;
         tx.commit()?;

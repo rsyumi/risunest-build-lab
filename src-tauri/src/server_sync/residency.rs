@@ -35,9 +35,20 @@ pub(crate) struct Residency {
 }
 
 impl Residency {
+    pub fn path(root: &Path) -> PathBuf {
+        root.join("server-sync").join("asset-residency.sqlite")
+    }
+    pub fn exists(root: &Path) -> bool {
+        Self::path(root).exists()
+    }
     pub fn open(root: &Path) -> Result<Self> {
-        let root = std::fs::canonicalize(root)?;
-        let path = root.join("asset-residency.sqlite");
+        let directory = root.join("server-sync");
+        std::fs::create_dir_all(&directory)?;
+        let metadata = std::fs::symlink_metadata(&directory)?;
+        if !metadata.is_dir() || crate::trust_boundary::is_link_like(&metadata) {
+            return Err(SyncError::new("unsafe-residency-path", 409));
+        }
+        let path = std::fs::canonicalize(&directory)?.join("asset-residency.sqlite");
         for suffix in ["", "-wal", "-shm"] {
             let target = PathBuf::from(format!("{}{suffix}", path.display()));
             match std::fs::symlink_metadata(target) {
@@ -61,12 +72,9 @@ impl Residency {
             if count != 0 {
                 return Err(SyncError::new("invalid-residency-store", 409));
             }
-            tx.execute_batch("CREATE TABLE settings(singleton INTEGER PRIMARY KEY CHECK(singleton=1),policy TEXT NOT NULL CHECK(policy IN ('full','remote')));
-                INSERT INTO settings VALUES(1,'full');
-                CREATE TABLE contexts(id TEXT PRIMARY KEY,library_id TEXT NOT NULL,device_id TEXT NOT NULL,epoch TEXT NOT NULL,config TEXT NOT NULL);
+            tx.execute_batch("CREATE TABLE contexts(id TEXT PRIMARY KEY,library_id TEXT NOT NULL,device_id TEXT NOT NULL,epoch TEXT NOT NULL,config TEXT NOT NULL);
                 CREATE TABLE objects(context TEXT NOT NULL REFERENCES contexts(id),hash TEXT NOT NULL,size INTEGER NOT NULL CHECK(size>=0),retention_id TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('active','releasing','released')),PRIMARY KEY(context,hash));
                 CREATE INDEX objects_hash ON objects(hash);
-                CREATE TABLE snapshot_roles(id TEXT PRIMARY KEY,hashes TEXT NOT NULL);
                 PRAGMA user_version=1;")?;
             tx.commit()?;
         } else if version != 1 {
@@ -84,28 +92,6 @@ impl Residency {
                     .map_err(|_| SyncError::new("invalid-retention-config", 409))?,
                 config.library_id
             ],
-        )?;
-        Ok(())
-    }
-    pub fn policy(&self) -> Result<AssetPolicy> {
-        let value: String =
-            self.db
-                .query_row("SELECT policy FROM settings WHERE singleton=1", [], |r| {
-                    r.get(0)
-                })?;
-        match value.as_str() {
-            "full" => Ok(AssetPolicy::Full),
-            "remote" => Ok(AssetPolicy::Remote),
-            _ => Err(SyncError::new("invalid-asset-policy", 409)),
-        }
-    }
-    pub fn set_policy(&self, policy: AssetPolicy) -> Result<()> {
-        self.db.execute(
-            "UPDATE settings SET policy=?1 WHERE singleton=1",
-            [match policy {
-                AssetPolicy::Full => "full",
-                AssetPolicy::Remote => "remote",
-            }],
         )?;
         Ok(())
     }
@@ -239,29 +225,46 @@ impl Residency {
     pub fn begin_release(&self, object: &RemoteObject) -> Result<bool> {
         Ok(self.db.execute("UPDATE objects SET state='releasing' WHERE context=?1 AND hash=?2 AND retention_id=?3 AND state IN ('active','releasing')",params![object.context,object.hash,object.retention_id])?==1)
     }
+    pub fn begin_latest_release(
+        &mut self,
+        digest: &str,
+        context: &str,
+    ) -> Result<Option<RemoteObject>> {
+        validate_hash(digest)?;
+        let tx = self
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let value: Option<(i64, String, String, String)> = tx
+            .query_row(
+                "SELECT o.size,o.retention_id,c.device_id,c.config FROM objects o JOIN contexts c ON c.id=o.context WHERE o.hash=?1 AND o.context=?2 AND o.state!='released'",
+                params![digest, context],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .optional()?;
+        let Some((size, retention_id, device_id, config)) = value else {
+            tx.commit()?;
+            return Ok(None);
+        };
+        let updated = tx.execute(
+            "UPDATE objects SET state='releasing' WHERE context=?1 AND hash=?2 AND retention_id=?3 AND state IN ('active','releasing')",
+            params![context, digest, retention_id],
+        )?;
+        tx.commit()?;
+        if updated != 1 {
+            return Ok(None);
+        }
+        Ok(Some(RemoteObject {
+            context: context.to_owned(),
+            hash: digest.to_owned(),
+            size: u64::try_from(size).map_err(|_| SyncError::new("invalid-retention-size", 409))?,
+            retention_id,
+            device_id,
+            config: serde_json::from_str(&config)
+                .map_err(|_| SyncError::new("invalid-retention-config", 409))?,
+        }))
+    }
     pub fn finish_release(&self, object: &RemoteObject) -> Result<()> {
         self.db.execute("UPDATE objects SET state='released' WHERE context=?1 AND hash=?2 AND retention_id=?3 AND state='releasing'",params![object.context,object.hash,object.retention_id])?;
-        Ok(())
-    }
-    pub fn snapshot_roles(&self, id: &str) -> Result<Option<Vec<String>>> {
-        let value: Option<String> = self
-            .db
-            .query_row("SELECT hashes FROM snapshot_roles WHERE id=?1", [id], |r| {
-                r.get(0)
-            })
-            .optional()?;
-        value
-            .map(|value| {
-                serde_json::from_str(&value)
-                    .map_err(|_| SyncError::new("invalid-snapshot-roles", 409))
-            })
-            .transpose()
-    }
-    pub fn save_snapshot_roles(&self, id: &str, hashes: &[String]) -> Result<()> {
-        for hash in hashes {
-            validate_hash(hash)?;
-        }
-        self.db.execute("INSERT INTO snapshot_roles VALUES(?1,?2) ON CONFLICT(id) DO UPDATE SET hashes=excluded.hashes",params![id,serde_json::to_string(hashes).map_err(|_|SyncError::new("invalid-snapshot-roles",409))?])?;
         Ok(())
     }
 }
@@ -317,7 +320,7 @@ pub(crate) fn open_or_hydrate_with_check(
     // parallel chunks; unrelated attachments must not multiply those buffers.
     static TRANSFER_BUDGET: Mutex<()> = Mutex::new(());
     let _budget = lock_with_check(&TRANSFER_BUDGET, check)?;
-    let mut client = super::client::ServerClient::new(proof.config.resolve(&root)?)?;
+    let client = super::client::ServerClient::new(proof.config.resolve(&root)?)?;
     client.resolve_identity(false)?;
     check()?;
     let directory = tempfile::Builder::new()

@@ -1,13 +1,22 @@
+pub(crate) mod data_health;
+pub(crate) mod hypa;
+
+use super::archive::ArchivePreview;
+use super::device_store::plugin_values::{
+    PluginDeviceHydration, PluginDeviceListItem, PluginDeviceMutation,
+};
+use super::device_store::sections::{section_from_id, CHOOSABLE_SECTIONS};
 use super::export::ExportedRisuSave;
 #[cfg(feature = "native-kei-upload-pilot")]
 use super::kei::KeiUploadResult;
+use super::content_change_index::{ContentChangeWindow, ContentKey};
 use super::{
     AssetAlias, AssetAliasListQuery, AssetAliasPage, AssetOwnerHead, AssetOwnerLocator,
-    AssetRepositoryAuthorityState, CharacterPage, CharacterQuery, CheckpointMode, ColdAlias,
-    ColdPayloadAuthorityState, ColdPayloadMigrationInput, ConversationPage, ConversationQuery,
+    AssetRepositoryAuthorityState, AssignedPluginStorage, CharacterPage, CharacterQuery,
+    CharacterSummary, CheckpointMode, ClaimedPluginValue, ConversationPage, ConversationQuery,
     ConversationWindow, ConversationWindowQuery, LeaseResult, PersistentStorageStats,
-    PersistentStore, PluginStorageCatalog, PresetCatalog, RevisionResult, SnapshotCreated,
-    SnapshotInfo, StagingResult, StoreError, StoreResult, Versioned, WorkingSetCommit,
+    PersistentStore, PluginStorageCatalog, PluginStorageListItem, PresetCatalog, RevisionResult,
+    SnapshotCreated, SnapshotInfo, StagingResult, StoreError, StoreResult, Versioned, WorkingSetCommit,
 };
 use serde_json::Value;
 use std::path::Path;
@@ -102,26 +111,9 @@ impl PersistentStoreState {
     }
 
     pub(crate) fn acquire_device_maintenance(&self) -> StoreResult<DeviceMaintenanceGuard> {
-        let mut state = self
-            .renderer_gate
-            .state
-            .lock()
-            .map_err(|error| StoreError::Store {
-                message: format!("persistent renderer admission mutex poisoned: {error}"),
-            })?;
-        if state.maintenance_active {
-            return Err(renderer_gate_error());
-        }
-        state.maintenance_active = true;
-        while state.operations != 0 {
-            state = self
-                .renderer_gate
-                .drained
-                .wait(state)
-                .map_err(|error| StoreError::Store {
-                    message: format!("persistent renderer drain mutex poisoned: {error}"),
-                })?;
-        }
+        let maintenance = self
+            .try_acquire_renderer_maintenance()?
+            .ok_or_else(renderer_gate_error)?;
         // No new operation can enter between draining and closing the store.
         // Reopening after the guard is released refreshes the connection after
         // native restore and discards leases owned by the previous renderer.
@@ -131,9 +123,47 @@ impl PersistentStoreState {
                 message: format!("persistent store mutex poisoned: {error}"),
             })?
             .take();
-        Ok(DeviceMaintenanceGuard {
+        Ok(maintenance)
+    }
+
+    fn try_acquire_renderer_maintenance(&self) -> StoreResult<Option<DeviceMaintenanceGuard>> {
+        let mut state = self
+            .renderer_gate
+            .state
+            .lock()
+            .map_err(|error| StoreError::Store {
+                message: format!("persistent renderer admission mutex poisoned: {error}"),
+            })?;
+        if state.maintenance_active {
+            return Ok(None);
+        }
+        state.maintenance_active = true;
+        let maintenance = DeviceMaintenanceGuard {
             gate: Arc::clone(&self.renderer_gate),
-        })
+        };
+        while state.operations != 0 {
+            state = self
+                .renderer_gate
+                .drained
+                .wait(state)
+                .map_err(|error| StoreError::Store {
+                    message: format!("persistent renderer drain mutex poisoned: {error}"),
+                })?;
+        }
+        Ok(Some(maintenance))
+    }
+
+    pub(crate) fn reset_renderer_session(&self) -> StoreResult<()> {
+        let Some(_maintenance) = self.try_acquire_renderer_maintenance()? else {
+            return Ok(());
+        };
+        let mut store = self.store.lock().map_err(|error| StoreError::Store {
+            message: format!("persistent store mutex poisoned: {error}"),
+        })?;
+        if let Some(store) = store.as_mut() {
+            store.release_all_revision_leases()?;
+        }
+        Ok(())
     }
 }
 
@@ -166,7 +196,7 @@ fn current_time_ms() -> StoreResult<i64> {
     })
 }
 
-fn with_store<T>(
+pub(crate) fn with_store<T>(
     state: State<'_, PersistentStoreState>,
     operation: impl FnOnce(&PersistentStore) -> StoreResult<T>,
 ) -> StoreResult<T> {
@@ -177,7 +207,20 @@ fn with_store_mutex<T>(
     state: &PersistentStoreState,
     operation: impl FnOnce(&PersistentStore) -> StoreResult<T>,
 ) -> StoreResult<T> {
-    let _operation = state.admit_renderer_operation()?;
+    let operation_guard = state.admit_renderer_operation()?;
+    with_store_mutex_admitted(state, &operation_guard, operation)
+}
+
+fn with_store_mutex_admitted<T>(
+    state: &PersistentStoreState,
+    operation_guard: &RendererOperationGuard,
+    operation: impl FnOnce(&PersistentStore) -> StoreResult<T>,
+) -> StoreResult<T> {
+    if !operation_guard.belongs_to(state) {
+        return Err(StoreError::Validation {
+            message: "renderer operation permit belongs to another persistent store".to_owned(),
+        });
+    }
     let store = state.store.lock().map_err(|error| StoreError::Store {
         message: format!("persistent store mutex poisoned: {error}"),
     })?;
@@ -185,6 +228,34 @@ fn with_store_mutex<T>(
         message: "persistent store has not been opened".to_owned(),
     })?;
     operation(store)
+}
+
+impl RendererOperationGuard {
+    fn belongs_to(&self, state: &PersistentStoreState) -> bool {
+        Arc::ptr_eq(&self.gate, &state.renderer_gate)
+    }
+}
+
+#[cfg(any(target_os = "android", test))]
+fn with_snapshot_directory<T>(
+    state: &PersistentStoreState,
+    operation: impl FnOnce(&Path) -> StoreResult<T>,
+) -> StoreResult<T> {
+    let _operation = state.admit_renderer_operation()?;
+    let directory = {
+        let store = state.store.lock().map_err(|error| StoreError::Store {
+            message: format!("persistent store mutex poisoned: {error}"),
+        })?;
+        store
+            .as_ref()
+            .ok_or_else(|| StoreError::Validation {
+                message: "persistent store has not been opened".to_owned(),
+            })?
+            .snapshots_dir
+            .clone()
+    };
+    // Archive owns its cross-process lock; listing does not need the live database.
+    operation(&directory)
 }
 
 fn finish_storage_command<T>(command: &'static str, result: StoreResult<T>) -> StoreResult<T> {
@@ -205,7 +276,28 @@ fn with_store_mutex_mut<T>(
     state: &PersistentStoreState,
     operation: impl FnOnce(&mut PersistentStore) -> StoreResult<T>,
 ) -> StoreResult<T> {
-    let _operation = state.admit_renderer_operation()?;
+    let operation_guard = state.admit_renderer_operation()?;
+    with_store_mutex_mut_admitted(state, &operation_guard, operation)
+}
+
+pub(crate) fn with_store_mut_admitted<T>(
+    state: State<'_, PersistentStoreState>,
+    operation_guard: &RendererOperationGuard,
+    operation: impl FnOnce(&mut PersistentStore) -> StoreResult<T>,
+) -> StoreResult<T> {
+    with_store_mutex_mut_admitted(&state, operation_guard, operation)
+}
+
+fn with_store_mutex_mut_admitted<T>(
+    state: &PersistentStoreState,
+    operation_guard: &RendererOperationGuard,
+    operation: impl FnOnce(&mut PersistentStore) -> StoreResult<T>,
+) -> StoreResult<T> {
+    if !operation_guard.belongs_to(state) {
+        return Err(StoreError::Validation {
+            message: "renderer operation permit belongs to another persistent store".to_owned(),
+        });
+    }
     let mut store = state.store.lock().map_err(|error| StoreError::Store {
         message: format!("persistent store mutex poisoned: {error}"),
     })?;
@@ -220,13 +312,14 @@ pub(crate) fn replace_commit_with_snapshot(
     staging_id: &str,
     expected_revision: Option<i64>,
 ) -> StoreResult<RevisionResult> {
-    let _operation = app
-        .state::<PersistentStoreState>()
-        .admit_renderer_operation()?;
-    let prepared = with_store_mut(app.state(), |store| {
+    let state = app.state::<PersistentStoreState>();
+    let operation_guard = state.admit_renderer_operation()?;
+    let prepared = with_store_mutex_mut_admitted(&state, &operation_guard, |store| {
         store.prepare_replace_commit(staging_id, expected_revision)
     })?;
-    with_store_mut(app.state(), |store| store.finish_prepared_replace(prepared))
+    with_store_mutex_mut_admitted(&state, &operation_guard, |store| {
+        store.finish_prepared_replace(prepared)
+    })
 }
 
 #[tauri::command(async)]
@@ -234,18 +327,32 @@ pub(crate) fn pds_open(
     app: AppHandle,
     state: State<'_, PersistentStoreState>,
 ) -> Result<PersistentStoreOpenResult, StoreError> {
-    let _operation = state.admit_renderer_operation()?;
+    let operation_guard = state.admit_renderer_operation()?;
     let app_data_dir = crate::app_data_root::resolve(&app).map_err(|error| StoreError::Store {
         message: format!("failed to resolve application data directory: {error}"),
     })?;
-    open_renderer_persistent_store(&state, &app_data_dir)
+    open_renderer_persistent_store_admitted(&state, &operation_guard, &app_data_dir)
 }
 
+#[cfg(test)]
 fn open_renderer_persistent_store(
     state: &PersistentStoreState,
     app_data_dir: &Path,
 ) -> StoreResult<PersistentStoreOpenResult> {
-    let _operation = state.admit_renderer_operation()?;
+    let operation_guard = state.admit_renderer_operation()?;
+    open_renderer_persistent_store_admitted(state, &operation_guard, app_data_dir)
+}
+
+fn open_renderer_persistent_store_admitted(
+    state: &PersistentStoreState,
+    operation_guard: &RendererOperationGuard,
+    app_data_dir: &Path,
+) -> StoreResult<PersistentStoreOpenResult> {
+    if !operation_guard.belongs_to(state) {
+        return Err(StoreError::Validation {
+            message: "renderer operation permit belongs to another persistent store".to_owned(),
+        });
+    }
     let mut store = state.store.lock().map_err(|error| StoreError::Store {
         message: format!("persistent store mutex poisoned: {error}"),
     })?;
@@ -333,6 +440,50 @@ pub(crate) fn pds_read_character(
 }
 
 #[tauri::command(async)]
+pub(crate) fn pds_read_character_summary(
+    state: State<'_, PersistentStoreState>,
+    id: String,
+    lease: Option<String>,
+) -> Result<Option<CharacterSummary>, StoreError> {
+    with_store(state, |store| {
+        store.read_character_summary(&id, lease.as_deref())
+    })
+}
+
+/// Reading the window and the records it names through one lease is what keeps
+/// a targeted pass equivalent to a reprojection.
+#[tauri::command(async)]
+pub(crate) fn pds_working_set_change_window(
+    state: State<'_, PersistentStoreState>,
+    lease: String,
+) -> Result<ContentChangeWindow, StoreError> {
+    with_store(state, |store| store.working_set_change_window(&lease))
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_working_set_change_page(
+    state: State<'_, PersistentStoreState>,
+    lease: String,
+    after_revision: i64,
+    after_key: Option<ContentKey>,
+    limit: usize,
+) -> Result<Vec<ContentKey>, StoreError> {
+    with_store(state, |store| {
+        store.working_set_change_page(&lease, after_revision, after_key, limit)
+    })
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_commit_working_set_change_cursor(
+    state: State<'_, PersistentStoreState>,
+    revision: i64,
+) -> Result<(), StoreError> {
+    with_store_mut(state, |store| {
+        store.commit_working_set_change_cursor(revision)
+    })
+}
+
+#[tauri::command(async)]
 pub(crate) fn pds_query_conversations(
     state: State<'_, PersistentStoreState>,
     query: ConversationQuery,
@@ -387,13 +538,22 @@ pub(crate) fn pds_query_plugin_storage(
 }
 
 #[tauri::command(async)]
+pub(crate) fn pds_list_plugin_storage(
+    state: State<'_, PersistentStoreState>,
+    lease: Option<String>,
+) -> Result<Vec<PluginStorageListItem>, StoreError> {
+    with_store(state, |store| store.list_plugin_storage(lease.as_deref()))
+}
+
+#[tauri::command(async)]
 pub(crate) fn pds_read_plugin_storage(
     state: State<'_, PersistentStoreState>,
+    owner: String,
     key: String,
     lease: Option<String>,
 ) -> Result<Option<Versioned<Value>>, StoreError> {
     with_store(state, |store| {
-        store.read_plugin_storage(&key, lease.as_deref())
+        store.read_plugin_storage(&owner, &key, lease.as_deref())
     })
 }
 
@@ -454,33 +614,6 @@ pub(crate) fn pds_read_asset_owner_head(
 }
 
 #[tauri::command(async)]
-pub(crate) fn pds_read_cold_payload_authority(
-    state: State<'_, PersistentStoreState>,
-    lease: Option<String>,
-) -> Result<Versioned<ColdPayloadAuthorityState>, StoreError> {
-    with_store(state, |store| {
-        store.read_cold_payload_authority(lease.as_deref())
-    })
-}
-
-#[tauri::command(async)]
-pub(crate) fn pds_read_cold_alias(
-    state: State<'_, PersistentStoreState>,
-    key: String,
-    lease: Option<String>,
-) -> Result<Option<Versioned<ColdAlias>>, StoreError> {
-    with_store(state, |store| store.read_cold_alias(&key, lease.as_deref()))
-}
-
-#[tauri::command(async)]
-pub(crate) fn pds_list_cold_aliases(
-    state: State<'_, PersistentStoreState>,
-    lease: Option<String>,
-) -> Result<Versioned<Vec<ColdAlias>>, StoreError> {
-    with_store(state, |store| store.list_cold_aliases(lease.as_deref()))
-}
-
-#[tauri::command(async)]
 pub(crate) fn pds_commit_asset_alias(
     state: State<'_, PersistentStoreState>,
     alias: AssetAlias,
@@ -504,36 +637,6 @@ pub(crate) fn pds_delete_asset_alias(
 }
 
 #[tauri::command(async)]
-pub(crate) fn pds_commit_cold_alias(
-    state: State<'_, PersistentStoreState>,
-    alias: ColdAlias,
-    expected_revision: i64,
-) -> Result<RevisionResult, StoreError> {
-    with_store_mut(state, |store| {
-        store.commit_cold_alias(&alias, expected_revision)
-    })
-}
-
-#[tauri::command(async)]
-pub(crate) fn pds_delete_cold_alias(
-    state: State<'_, PersistentStoreState>,
-    key: String,
-    expected_revision: i64,
-) -> Result<RevisionResult, StoreError> {
-    with_store_mut(state, |store| {
-        store.delete_cold_alias(&key, expected_revision)
-    })
-}
-
-#[tauri::command(async)]
-pub(crate) fn pds_activate_cold_payload_migration(
-    state: State<'_, PersistentStoreState>,
-    input: ColdPayloadMigrationInput,
-) -> Result<RevisionResult, StoreError> {
-    with_store_mut(state, |store| store.activate_cold_payload_migration(&input))
-}
-
-#[tauri::command(async)]
 pub(crate) fn pds_commit(
     state: State<'_, PersistentStoreState>,
     commit: WorkingSetCommit,
@@ -541,6 +644,40 @@ pub(crate) fn pds_commit(
 ) -> Result<RevisionResult, StoreError> {
     with_store_mut(state, |store| {
         store.commit_with_asset_aliases(&commit, &asset_aliases)
+    })
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_archive_preview(
+    state: State<'_, PersistentStoreState>,
+    character_id: String,
+    lease: Option<String>,
+) -> Result<ArchivePreview, StoreError> {
+    with_store(state, |store| {
+        store.archive_preview(&character_id, lease.as_deref())
+    })
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_archive_character(
+    state: State<'_, PersistentStoreState>,
+    character_id: String,
+    expected_revision: i64,
+) -> Result<RevisionResult, StoreError> {
+    let now_ms = current_time_ms()?;
+    with_store_mut(state, |store| {
+        store.archive_character(&character_id, expected_revision, now_ms)
+    })
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_restore_character(
+    state: State<'_, PersistentStoreState>,
+    character_id: String,
+    expected_revision: i64,
+) -> Result<RevisionResult, StoreError> {
+    with_store_mut(state, |store| {
+        store.restore_character(&character_id, expected_revision)
     })
 }
 
@@ -616,17 +753,6 @@ pub(crate) fn pds_replace_put_asset_repository_authority(
 }
 
 #[tauri::command(async)]
-pub(crate) fn pds_replace_put_cold_payload_authority(
-    state: State<'_, PersistentStoreState>,
-    staging_id: String,
-    authority: ColdPayloadAuthorityState,
-) -> Result<(), StoreError> {
-    with_store_mut(state, |store| {
-        store.replace_put_cold_payload_authority(&staging_id, &authority)
-    })
-}
-
-#[tauri::command(async)]
 pub(crate) fn pds_replace_preserve_repositories(
     state: State<'_, PersistentStoreState>,
     staging_id: String,
@@ -634,17 +760,6 @@ pub(crate) fn pds_replace_preserve_repositories(
 ) -> Result<RevisionResult, StoreError> {
     with_store_mut(state, |store| {
         store.replace_preserve_repositories(&staging_id, expected_revision)
-    })
-}
-
-#[tauri::command(async)]
-pub(crate) fn pds_replace_put_cold_aliases(
-    state: State<'_, PersistentStoreState>,
-    staging_id: String,
-    aliases: Vec<ColdAlias>,
-) -> Result<(), StoreError> {
-    with_store_mut(state, |store| {
-        store.replace_put_cold_aliases(&staging_id, &aliases)
     })
 }
 
@@ -695,7 +810,24 @@ pub(crate) fn pds_export_risu_save(
     lease: String,
     omit_account: bool,
 ) -> Result<ExportedRisuSave, StoreError> {
-    with_store(state, |store| store.export_risu_save(&lease, omit_account))
+    let operation_guard = state.admit_renderer_operation()?;
+    let prepared = with_store_mutex_mut_admitted(&state, &operation_guard, |store| {
+        store.detach_risu_save_export(&lease)
+    })?;
+    let outcome = prepared.create_attached_export(omit_account);
+    let reattach = with_store_mutex_mut_admitted(&state, &operation_guard, |store| {
+        store.reattach_risu_save_export(prepared)
+    });
+    match (outcome, reattach) {
+        (Ok(exported), Ok(())) => Ok(exported),
+        (Err(error), Ok(())) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(error), Err(reattach_error)) => Err(StoreError::Store {
+            message: format!(
+                "{error}; failed to reattach revision lease after native export: {reattach_error}"
+            ),
+        }),
+    }
 }
 
 #[tauri::command(async)]
@@ -733,7 +865,7 @@ pub(crate) async fn pds_kei_backup_upload(
     token: String,
 ) -> Result<KeiUploadResult, StoreError> {
     let operation = state.admit_renderer_operation()?;
-    let prepared = with_store_mut(state, |store| {
+    let prepared = with_store_mutex_mut_admitted(&state, &operation, |store| {
         store.prepare_kei_upload(&lease, &url, &expected_account_id, &token)
     })?;
     // Keep admission with the native task even if its invoking renderer goes
@@ -784,7 +916,14 @@ pub(crate) fn pds_snapshot_create(
 pub(crate) fn pds_snapshot_list(
     state: State<'_, PersistentStoreState>,
 ) -> Result<Vec<SnapshotInfo>, StoreError> {
-    with_store(state, PersistentStore::snapshot_list)
+    #[cfg(target_os = "android")]
+    {
+        with_snapshot_directory(&state, super::snapshot::list)
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        with_store(state, PersistentStore::snapshot_list)
+    }
 }
 
 #[tauri::command(async)]
@@ -816,7 +955,21 @@ pub(crate) struct AssetGcMaintenanceResult {
     deleted_count: u64,
     deleted_bytes: u64,
     blockers: Vec<String>,
+    /// What the cleanup looked at and decided, so a preview can be argued with rather than
+    /// only believed. Bounded, because a large library holds more objects than a list can show.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    candidates: Vec<super::AssetGcCandidateDetail>,
+    /// Rows past the bound, counted rather than listed.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    omitted: u64,
 }
+
+fn is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
+/// Rows one preview lists before it counts the rest.
+const GC_DETAIL_LIMIT: usize = 500;
 
 fn asset_gc_result(
     report: crate::asset_repository::migration_gc::AssetGcDryRunReport,
@@ -827,6 +980,8 @@ fn asset_gc_result(
         deleted_count: report.deleted_hashes.len() as u64,
         deleted_bytes: report.deleted_bytes,
         blockers: report.blockers,
+        candidates: Vec::new(),
+        omitted: 0,
     }
 }
 
@@ -834,16 +989,22 @@ fn asset_gc_result(
 pub(crate) fn pds_asset_gc_preview(
     state: State<'_, PersistentStoreState>,
 ) -> Result<AssetGcMaintenanceResult, StoreError> {
+    let operation_guard = state.admit_renderer_operation()?;
     finish_storage_command(
         "pds_asset_gc_preview",
-        with_store(state, pds_asset_gc_preview_all),
+        pds_asset_gc_preview_all(&state, &operation_guard),
     )
 }
 
 fn pds_asset_gc_preview_all(
-    store: &PersistentStore,
+    state: &PersistentStoreState,
+    operation_guard: &RendererOperationGuard,
 ) -> Result<AssetGcMaintenanceResult, StoreError> {
     let now = current_time_ms()?;
+    // Preview roots are scoped to this invocation. Deletion always collects fresh roots.
+    let preview = with_store_mutex_admitted(state, operation_guard, |store| {
+        store.prepare_asset_gc_preview()
+    })?;
     let mut cursor = None;
     let mut result = AssetGcMaintenanceResult {
         candidate_count: 0,
@@ -851,13 +1012,30 @@ fn pds_asset_gc_preview_all(
         deleted_count: 0,
         deleted_bytes: 0,
         blockers: Vec::new(),
+        candidates: Vec::new(),
+        omitted: 0,
     };
     loop {
-        let page = store.asset_gc_dry_run(128, cursor.as_deref(), now, 7 * 24 * 60 * 60 * 1_000)?;
+        let (page, details) = with_store_mutex_admitted(state, operation_guard, |store| {
+            store.asset_gc_preview_page_detail(
+                &preview,
+                128,
+                cursor.as_deref(),
+                now,
+                7 * 24 * 60 * 60 * 1_000,
+            )
+        })?;
         let page_result = asset_gc_result(page.report);
         result.candidate_count += page_result.candidate_count;
         result.candidate_bytes += page_result.candidate_bytes;
         result.blockers.extend(page_result.blockers);
+        for detail in details {
+            if result.candidates.len() < GC_DETAIL_LIMIT {
+                result.candidates.push(detail);
+            } else {
+                result.omitted += 1;
+            }
+        }
         match page.next_cursor {
             Some(next) => cursor = Some(next),
             None => break,
@@ -870,14 +1048,16 @@ fn pds_asset_gc_preview_all(
 pub(crate) fn pds_asset_gc_execute(
     state: State<'_, PersistentStoreState>,
 ) -> Result<AssetGcMaintenanceResult, StoreError> {
+    let operation_guard = state.admit_renderer_operation()?;
     finish_storage_command(
         "pds_asset_gc_execute",
-        with_store_mut(state, pds_asset_gc_execute_all),
+        pds_asset_gc_execute_all(&state, &operation_guard),
     )
 }
 
 fn pds_asset_gc_execute_all(
-    store: &mut PersistentStore,
+    state: &PersistentStoreState,
+    operation_guard: &RendererOperationGuard,
 ) -> Result<AssetGcMaintenanceResult, StoreError> {
     let now = current_time_ms()?;
     let mut cursor = None;
@@ -887,15 +1067,11 @@ fn pds_asset_gc_execute_all(
         deleted_count: 0,
         deleted_bytes: 0,
         blockers: Vec::new(),
+        candidates: Vec::new(),
+        omitted: 0,
     };
     loop {
-        let page = store.asset_gc_delete_page_with_hook(
-            128,
-            cursor.as_deref(),
-            now,
-            7 * 24 * 60 * 60 * 1_000,
-            |_| Ok(()),
-        )?;
+        let page = pds_asset_gc_execute_page(state, operation_guard, cursor.as_deref(), now)?;
         let page_result = asset_gc_result(page.report);
         result.candidate_count += page_result.candidate_count;
         result.candidate_bytes += page_result.candidate_bytes;
@@ -910,6 +1086,17 @@ fn pds_asset_gc_execute_all(
     Ok(result)
 }
 
+fn pds_asset_gc_execute_page(
+    state: &PersistentStoreState,
+    operation_guard: &RendererOperationGuard,
+    cursor: Option<&str>,
+    now: i64,
+) -> StoreResult<crate::asset_repository::migration_gc::AssetGcDryRunPage> {
+    with_store_mutex_mut_admitted(state, operation_guard, |store| {
+        store.asset_gc_delete_page_with_hook(128, cursor, now, 7 * 24 * 60 * 60 * 1_000, |_| Ok(()))
+    })
+}
+
 #[tauri::command(async)]
 pub(crate) fn pds_snapshot_restore_request(
     state: State<'_, PersistentStoreState>,
@@ -918,64 +1105,401 @@ pub(crate) fn pds_snapshot_restore_request(
     with_store(state, |store| store.snapshot_restore_request(&id))
 }
 
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct PluginStorageSource {
+    owner: String,
+    key: String,
+}
+
 #[tauri::command(async)]
-pub(crate) fn pds_get_app_kv(
+pub(crate) fn pds_colliding_plugin_storage_keys(
+    state: State<'_, PersistentStoreState>,
+    owner: String,
+    keys: Vec<String>,
+) -> Result<Vec<String>, StoreError> {
+    with_store(state, |store| {
+        store.colliding_plugin_storage_keys(&owner, &keys)
+    })
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_assign_plugin_storage(
+    state: State<'_, PersistentStoreState>,
+    owner: String,
+    sources: Vec<PluginStorageSource>,
+    collision: super::commit::AssignCollision,
+    expected_revision: i64,
+) -> Result<AssignedPluginStorage, StoreError> {
+    let sources: Vec<(String, String)> = sources
+        .into_iter()
+        .map(|source| (source.owner, source.key))
+        .collect();
+    with_store_mut(state, |store| {
+        store.assign_plugin_storage(&sources, &owner, collision, expected_revision)
+    })
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_begin_plugin_claim_session(
+    state: State<'_, PersistentStoreState>,
+    owner: String,
+    code_hash: String,
+    runtime_instance: String,
+) -> Result<Option<String>, StoreError> {
+    with_store(state, |store| {
+        store.begin_plugin_claim_session(&owner, &code_hash, &runtime_instance)
+    })
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_claim_plugin_storage_value(
+    state: State<'_, PersistentStoreState>,
+    session_id: String,
+    owner: String,
+    code_hash: String,
+    runtime_instance: String,
+    key: String,
+    expected_revision: i64,
+) -> Result<ClaimedPluginValue, StoreError> {
+    with_store_mut(state, |store| {
+        store.claim_plugin_storage_value(
+            &session_id,
+            &owner,
+            &code_hash,
+            &runtime_instance,
+            &key,
+            expected_revision,
+        )
+    })
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_close_plugin_claim_session(
+    state: State<'_, PersistentStoreState>,
+    session_id: String,
+) -> Result<(), StoreError> {
+    with_store(state, |store| store.close_plugin_claim_session(&session_id))
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_hydrate_plugin_device_storage(
+    state: State<'_, PersistentStoreState>,
+    owner: String,
+) -> Result<PluginDeviceHydration, StoreError> {
+    with_store(state, |store| {
+        store.device_store()?.hydrate_plugin_device_storage(&owner)
+    })
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_read_plugin_device_value(
+    state: State<'_, PersistentStoreState>,
+    owner: String,
+    space: String,
+    key: String,
+) -> Result<Option<String>, StoreError> {
+    with_store(state, |store| {
+        store
+            .device_store()?
+            .read_plugin_device_value(&owner, &space, &key)
+    })
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_list_plugin_device_keys(
+    state: State<'_, PersistentStoreState>,
+    owner: String,
+    space: String,
+) -> Result<Vec<String>, StoreError> {
+    with_store(state, |store| {
+        store.device_store()?.list_plugin_device_keys(&owner, &space)
+    })
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_list_plugin_device_storage(
+    state: State<'_, PersistentStoreState>,
+) -> Result<Vec<PluginDeviceListItem>, StoreError> {
+    with_store(state, |store| {
+        store.device_store()?.list_plugin_device_storage()
+    })
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_write_plugin_device_values(
+    app: AppHandle,
+    state: State<'_, PersistentStoreState>,
+    owner: String,
+    mutations: Vec<PluginDeviceMutation>,
+) -> Result<(), StoreError> {
+    let changed = with_store_mut(state, |store| {
+        let device = store.device_store_mut()?;
+        let before = device.revision()?;
+        device.write_plugin_device_values(&owner, &mutations)?;
+        Ok(device.revision()? != before)
+    })?;
+    if changed {
+        crate::server_sync::events::notify_device_changed(&app);
+    }
+    Ok(())
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_get_device_setting(
     state: State<'_, PersistentStoreState>,
     key: String,
 ) -> Result<Option<Value>, StoreError> {
-    with_store(state, |store| store.get_app_kv(&key))
+    with_store(state, |store| store.device_store()?.read_setting(&key))
+}
+
+/// A null value removes the setting.
+#[tauri::command(async)]
+pub(crate) fn pds_set_device_setting(
+    state: State<'_, PersistentStoreState>,
+    key: String,
+    value: Option<Value>,
+) -> Result<(), StoreError> {
+    with_store(state, |store| {
+        let device = store.device_store()?;
+        match value {
+            Some(value) => device.write_setting(&key, &value),
+            None => device.remove_setting(&key),
+        }
+    })
 }
 
 #[tauri::command(async)]
-pub(crate) fn pds_set_app_kv(
+pub(crate) fn pds_patch_device_setting(
     state: State<'_, PersistentStoreState>,
     key: String,
-    value: Value,
+    entries: serde_json::Map<String, Value>,
 ) -> Result<(), StoreError> {
-    with_store(state, |store| store.set_app_kv(&key, &value))
+    with_store_mut(state, |store| {
+        store.device_store_mut()?.patch_setting(&key, &entries)
+    })
+}
+
+/// Answers in request order so one call can fill the whole boot cache.
+#[tauri::command(async)]
+pub(crate) fn pds_read_device_settings(
+    state: State<'_, PersistentStoreState>,
+    keys: Vec<String>,
+) -> Result<Vec<Option<Value>>, StoreError> {
+    with_store(state, |store| store.device_store()?.read_settings(&keys))
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PluginPermissionRow {
+    code_hash: String,
+    permission: String,
+    granted: bool,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PluginPermissionGrantRow {
+    plugin_name: String,
+    permission: String,
+    last_grant_at: i64,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PluginPermissionState {
+    permissions: Vec<PluginPermissionRow>,
+    grants: Vec<PluginPermissionGrantRow>,
 }
 
 #[tauri::command(async)]
-pub(crate) fn pds_remove_app_kv(
+pub(crate) fn pds_read_plugin_permissions(
     state: State<'_, PersistentStoreState>,
-    key: String,
+) -> Result<PluginPermissionState, StoreError> {
+    with_store(state, |store| {
+        let device = store.device_store()?;
+        Ok(PluginPermissionState {
+            permissions: device
+                .read_plugin_permissions()?
+                .into_iter()
+                .map(|row| PluginPermissionRow {
+                    code_hash: row.code_hash,
+                    permission: row.permission,
+                    granted: row.granted,
+                })
+                .collect(),
+            grants: device
+                .read_plugin_permission_grants()?
+                .into_iter()
+                .map(|row| PluginPermissionGrantRow {
+                    plugin_name: row.plugin_name,
+                    permission: row.permission,
+                    last_grant_at: row.last_grant_at,
+                })
+                .collect(),
+        })
+    })
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_write_plugin_permission(
+    state: State<'_, PersistentStoreState>,
+    code_hash: String,
+    permission: String,
+    granted: bool,
 ) -> Result<(), StoreError> {
-    with_store(state, |store| store.remove_app_kv(&key))
+    with_store(state, |store| {
+        store
+            .device_store()?
+            .write_plugin_permission(&code_hash, &permission, granted)
+    })
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_write_plugin_permission_grant(
+    state: State<'_, PersistentStoreState>,
+    plugin_name: String,
+    permission: String,
+    last_grant_at: i64,
+) -> Result<(), StoreError> {
+    with_store(state, |store| {
+        store.device_store()?.write_plugin_permission_grant(
+            &plugin_name,
+            &permission,
+            last_grant_at,
+        )
+    })
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SectionParticipationRow {
+    section: String,
+    participating: bool,
+}
+
+fn read_section_participation(
+    state: &PersistentStoreState,
+) -> Result<Vec<SectionParticipationRow>, StoreError> {
+    with_store_mutex(state, |store| {
+        let device = store.device_store()?;
+        CHOOSABLE_SECTIONS
+            .into_iter()
+            .map(|section| {
+                Ok(SectionParticipationRow {
+                    section: section.as_str().to_owned(),
+                    participating: device.section_state(section)?.participating,
+                })
+            })
+            .collect()
+    })
+}
+
+fn set_section_participation(
+    state: &PersistentStoreState,
+    section: &str,
+    participating: bool,
+) -> Result<(), StoreError> {
+    let Some(section) = section_from_id(section) else {
+        return Err(StoreError::Validation {
+            message: "unknown device section".to_owned(),
+        });
+    };
+    with_store_mutex_mut(state, |store| {
+        store
+            .device_store_mut()?
+            .set_section_participating(section, participating)
+    })
+}
+
+/// Which sections this device currently exchanges with a remote.
+#[tauri::command(async)]
+pub(crate) fn pds_read_section_participation(
+    state: State<'_, PersistentStoreState>,
+) -> Result<Vec<SectionParticipationRow>, StoreError> {
+    read_section_participation(&state)
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_set_section_participating(
+    state: State<'_, PersistentStoreState>,
+    section: String,
+    participating: bool,
+) -> Result<(), StoreError> {
+    set_section_participation(&state, &section, participating)
 }
 
 #[cfg(test)]
 mod tests {
+    mod asset_gc_performance;
+
     use super::*;
     use serde_json::json;
     use std::fs;
     use tempfile::tempdir;
 
     #[test]
+    fn snapshot_directory_operation_releases_live_store_but_retains_renderer_admission() {
+        let directory = tempdir().unwrap();
+        let state = PersistentStoreState::default();
+        assert!(with_snapshot_directory(&state, super::super::snapshot::list).is_err());
+        open_renderer_persistent_store(&state, directory.path()).unwrap();
+        with_snapshot_directory(&state, |path| {
+            assert_eq!(path, directory.path().join("persistent/snapshots"));
+            assert!(state.store.try_lock().is_ok());
+            assert_eq!(state.renderer_gate.state.lock().unwrap().operations, 1);
+            let archive = super::super::snapshot_archive::Archive::open(path)?;
+            assert!(archive.list()?.is_empty());
+            with_store_mutex(&state, |store| {
+                store.set_app_kv("device-backup-commit:synthetic", &json!(1))
+            })
+        })
+        .unwrap();
+        assert_eq!(state.renderer_gate.state.lock().unwrap().operations, 0);
+        let maintenance = state.acquire_device_maintenance().unwrap();
+        assert!(with_snapshot_directory(&state, super::super::snapshot::list).is_err());
+        drop(maintenance);
+    }
+
+    #[test]
     fn device_maintenance_blocks_renderer_writers_and_reopens_restored_store() {
         let directory = tempdir().unwrap();
         let state = PersistentStoreState::default();
         open_renderer_persistent_store(&state, directory.path()).unwrap();
-        with_store_mutex(&state, |store| store.set_app_kv("synthetic", &json!(1))).unwrap();
+        with_store_mutex(&state, |store| {
+            store.set_app_kv("device-backup-commit:synthetic", &json!(1))
+        })
+        .unwrap();
 
         let maintenance = state.acquire_device_maintenance().unwrap();
         assert!(state.store.lock().unwrap().is_none());
         assert!(state.admit_renderer_operation().is_err());
         assert!(state.acquire_device_maintenance().is_err());
+        state
+            .reset_renderer_session()
+            .expect("active maintenance already owns renderer cleanup");
         assert!(open_renderer_persistent_store(&state, directory.path()).is_err());
         assert!(
-            with_store_mutex(&state, |store| { store.set_app_kv("synthetic", &json!(2)) }).is_err()
+            with_store_mutex(&state, |store| {
+                store.set_app_kv("device-backup-commit:synthetic", &json!(2))
+            })
+            .is_err()
         );
         assert!(with_store_mutex_mut(&state, |store| store.replace_begin()).is_err());
 
         // Only the maintenance worker's independent store can write while the
         // renderer fence is held. A new renderer observes the completed result.
         let native = PersistentStore::open(directory.path()).unwrap();
-        native.set_app_kv("synthetic", &json!(3)).unwrap();
+        native
+            .set_app_kv("device-backup-commit:synthetic", &json!(3))
+            .unwrap();
         drop(native);
         drop(maintenance);
         open_renderer_persistent_store(&state, directory.path()).unwrap();
         assert_eq!(
-            with_store_mutex(&state, |store| store.get_app_kv("synthetic")).unwrap(),
+            with_store_mutex(&state, |store| store
+                .get_app_kv("device-backup-commit:synthetic"))
+            .unwrap(),
             Some(json!(3))
         );
     }
@@ -1011,7 +1535,7 @@ mod tests {
             with_store_mutex_mut(&writer_state, |store| {
                 entered_tx.send(()).unwrap();
                 release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
-                store.set_app_kv("drained-writer", &json!(true))
+                store.set_app_kv("device-backup-commit:drained-writer", &json!(true))
             })
             .unwrap();
         });
@@ -1043,11 +1567,101 @@ mod tests {
         assert!(state.store.lock().unwrap().is_none());
         let native = PersistentStore::open(directory.path()).unwrap();
         assert_eq!(
-            native.get_app_kv("drained-writer").unwrap(),
+            native.get_app_kv("device-backup-commit:drained-writer").unwrap(),
             Some(json!(true))
         );
         drop(native);
         drop(maintenance);
+    }
+
+    #[test]
+    fn admitted_operation_can_finish_after_maintenance_closes_new_admission() {
+        use std::sync::mpsc;
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        let directory = tempdir().unwrap();
+        let state = Arc::new(PersistentStoreState::default());
+        open_renderer_persistent_store(&state, directory.path()).unwrap();
+        let operation_guard = state.admit_renderer_operation().unwrap();
+        let maintenance_state = Arc::clone(&state);
+        let (maintenance_tx, maintenance_rx) = mpsc::channel();
+        let maintainer = thread::spawn(move || {
+            maintenance_tx
+                .send(maintenance_state.acquire_device_maintenance().unwrap())
+                .unwrap();
+        });
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !state.renderer_gate.state.lock().unwrap().maintenance_active {
+            assert!(
+                Instant::now() < deadline,
+                "maintenance admission did not close"
+            );
+            thread::yield_now();
+        }
+
+        assert!(with_store_mutex_mut(&state, |_| Ok(())).is_err());
+        with_store_mutex_mut_admitted(&state, &operation_guard, |store| {
+            store.set_app_kv("device-backup-commit:admitted-operation", &json!(true))
+        })
+        .expect("existing permit must finish its store work");
+        assert!(matches!(
+            maintenance_rx.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+
+        drop(operation_guard);
+        let maintenance = maintenance_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        maintainer.join().unwrap();
+        let native = PersistentStore::open(directory.path()).unwrap();
+        assert_eq!(
+            native.get_app_kv("device-backup-commit:admitted-operation").unwrap(),
+            Some(json!(true))
+        );
+        drop(native);
+        drop(maintenance);
+    }
+
+    #[test]
+    fn failed_maintenance_acquisition_reopens_renderer_admission() {
+        use std::thread;
+
+        let state = Arc::new(PersistentStoreState::default());
+        let poison_state = Arc::clone(&state);
+        assert!(thread::spawn(move || {
+            let _store = poison_state.store.lock().unwrap();
+            panic!("synthetic store mutex poison");
+        })
+        .join()
+        .is_err());
+
+        assert!(state.acquire_device_maintenance().is_err());
+        assert!(!state.renderer_gate.state.lock().unwrap().maintenance_active);
+        drop(
+            state
+                .admit_renderer_operation()
+                .expect("failed maintenance must reopen admission"),
+        );
+    }
+
+    #[test]
+    fn renderer_session_reset_releases_leases_without_closing_the_store() {
+        let directory = tempdir().unwrap();
+        let state = PersistentStoreState::default();
+        open_renderer_persistent_store(&state, directory.path()).unwrap();
+        let lease = with_store_mutex_mut(&state, |store| store.acquire_revision(0)).unwrap();
+
+        state.reset_renderer_session().unwrap();
+
+        with_store_mutex(&state, |store| {
+            assert_eq!(store.active_readers.active_count(), 0);
+            assert!(matches!(
+                store.read_root(Some(&lease.lease)),
+                Err(StoreError::SnapshotReleased)
+            ));
+            Ok(())
+        })
+        .unwrap();
     }
 
     #[test]
@@ -1234,7 +1848,14 @@ mod tests {
                     .revision,
                 0
             );
-            assert!(pds_asset_gc_preview_all(slot.as_ref().unwrap()).is_err());
+            let state = PersistentStoreState {
+                store: Mutex::new(slot.take()),
+                ..PersistentStoreState::default()
+            };
+            let operation_guard = state.admit_renderer_operation().unwrap();
+            assert!(pds_asset_gc_preview_all(&state, &operation_guard).is_err());
+            drop(operation_guard);
+            slot = state.store.into_inner().unwrap();
         }
     }
 
@@ -1394,7 +2015,15 @@ mod tests {
             .map(|payload| payload.byte_size)
             .sum::<u64>();
 
-        let result = pds_asset_gc_preview_all(&store).expect("preview every command page");
+        let state = PersistentStoreState {
+            store: Mutex::new(Some(store)),
+            ..PersistentStoreState::default()
+        };
+        let operation_guard = state.admit_renderer_operation().unwrap();
+        let result =
+            pds_asset_gc_preview_all(&state, &operation_guard).expect("preview every command page");
+        drop(operation_guard);
+        let store = state.store.into_inner().unwrap().unwrap();
 
         assert_eq!(result.candidate_count, total);
         assert_eq!(result.candidate_bytes, expected_bytes);
@@ -1447,8 +2076,46 @@ mod tests {
             .map(|payload| payload.byte_size)
             .sum::<u64>();
 
-        let result = pds_asset_gc_execute_all(&mut store).expect("execute every command page");
+        let state = PersistentStoreState {
+            store: Mutex::new(Some(store)),
+            ..PersistentStoreState::default()
+        };
+        let operation_guard = state.admit_renderer_operation().unwrap();
+        let observed_pages = std::cell::Cell::new(0);
+        let now = current_time_ms().unwrap();
+        let mut cursor = None;
+        let mut result = AssetGcMaintenanceResult {
+            candidate_count: 0,
+            candidate_bytes: 0,
+            deleted_count: 0,
+            deleted_bytes: 0,
+            blockers: Vec::new(),
+            candidates: Vec::new(),
+            omitted: 0,
+        };
+        loop {
+            let page = pds_asset_gc_execute_page(&state, &operation_guard, cursor.as_deref(), now)
+                .expect("execute command page");
+            assert!(
+                state.store.try_lock().is_ok(),
+                "store lock must be released between GC pages"
+            );
+            observed_pages.set(observed_pages.get() + 1);
+            let page_result = asset_gc_result(page.report);
+            result.candidate_count += page_result.candidate_count;
+            result.candidate_bytes += page_result.candidate_bytes;
+            result.deleted_count += page_result.deleted_count;
+            result.deleted_bytes += page_result.deleted_bytes;
+            result.blockers.extend(page_result.blockers);
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        drop(operation_guard);
+        let store = state.store.into_inner().unwrap().unwrap();
 
+        assert!(observed_pages.get() >= 2);
         assert_eq!(result.candidate_count, total);
         assert_eq!(result.candidate_bytes, expected_bytes);
         assert_eq!(result.deleted_count, total);
@@ -1464,5 +2131,44 @@ mod tests {
                 .expect("stat deleted candidate")
                 .is_none()
         }));
+    }
+    /// The local data screen reads the shipped defaults, then writes the one
+    /// row the user changed.
+    #[test]
+    fn local_data_command_sets_device_sections_participating() {
+        let directory = tempdir().unwrap();
+        let state = PersistentStoreState::default();
+        open_renderer_persistent_store(&state, directory.path()).unwrap();
+
+        let initial = read_section_participation(&state).unwrap();
+        assert_eq!(
+            initial
+                .iter()
+                .map(|row| (row.section.as_str(), row.participating))
+                .collect::<Vec<_>>(),
+            vec![("hypa", true), ("local-plugins", false)]
+        );
+
+        set_section_participation(&state, "local-plugins", true).unwrap();
+        assert!(with_store_mutex(&state, |store| Ok(store
+            .device_store()?
+            .section_state(super::super::device_store::Section::LocalPlugins)?
+            .participating))
+        .unwrap());
+
+        set_section_participation(&state, "hypa", false).unwrap();
+        assert_eq!(
+            read_section_participation(&state)
+                .unwrap()
+                .iter()
+                .map(|row| (row.section.as_str(), row.participating))
+                .collect::<Vec<_>>(),
+            vec![("hypa", false), ("local-plugins", true)]
+        );
+
+        assert!(matches!(
+            set_section_participation(&state, "library", true),
+            Err(StoreError::Validation { .. })
+        ));
     }
 }

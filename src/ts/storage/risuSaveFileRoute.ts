@@ -36,6 +36,8 @@ type FileRouteRuntime = Pick<
     | 'flushPendingData'
     | 'capturePersistentMutationToken'
     | 'acquireDestructiveReplacementFence'
+    | 'markCommittedWorkingSetRefreshRequired'
+    | 'getStorageAuthorityEpoch'
     | 'replacePersistentDatabase'
 >
 
@@ -51,6 +53,8 @@ export interface RisuSaveFileRouteDependencies {
         source: NativeFileJobSource,
         options: NativeFileRestoreJobOptions,
     ): Promise<NativeFileJobResult>
+    /** Present only where a person can answer, so tests stay headless. */
+    assignPluginValues?: NativeFileRestoreJobOptions['assignPluginValues']
     runNativeExport(
         runtime: FileRouteRuntime,
         destination: string,
@@ -427,6 +431,9 @@ export async function importRisuSaveFromPicker(
                         onBlockingChange: options.onBlockingChange,
                         afterRefresh:
                             dependencies.reloadPluginsAfterNativeRestore,
+                        ...(dependencies.assignPluginValues
+                            ? { assignPluginValues: dependencies.assignPluginValues }
+                            : {}),
                     },
                 )
             } catch (error) {

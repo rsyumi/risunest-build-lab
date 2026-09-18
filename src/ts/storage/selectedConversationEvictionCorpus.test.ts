@@ -1,3 +1,4 @@
+const PLUGIN_ACCESS_OWNER = 'test-plugin'
 // @vitest-environment node
 
 import './tests/selectedConversationEvictionNodeDom.setup'
@@ -143,8 +144,11 @@ function screenshotRenderContext(owner: character): ChatScreenshotRenderContext 
     }
 }
 
-async function waitForWindowed(runtime: ReturnType<typeof createPersistentDataRuntime>) {
-    await vi.waitFor(() => expect(runtime.getSelectedConversationMode()).toBe('windowed'))
+async function waitForWindowed(
+    runtime: ReturnType<typeof createPersistentDataRuntime>,
+    stage = 'initial activation',
+) {
+    await vi.waitFor(() => expect(runtime.getSelectedConversationMode(), stage).toBe('windowed'))
     expect(runtime.getActiveConversationSession()).toBeNull()
     const source = runtime.getActiveConversationViewportSource()
     expect(source).not.toBeNull()
@@ -204,13 +208,14 @@ describe('selected conversation eviction correctness corpus', () => {
                 publishPersistentConversationReplacementToWorkingSet(workingCopy, result)
             },
             canUseWindowedSelectedConversation: () => true,
-            isMaximumCompatibilityMode: () => false,
             isConversationOperationActive: () => false,
             conversationViewportRowBudget: VIEWPORT_ROW_BUDGET,
         }
+        const backgroundErrors: unknown[] = []
         const runtime = createPersistentDataRuntime({
             store,
             state,
+            onBackgroundError: (error) => { backgroundErrors.push(error) },
             prepareDatabase: async (candidate) => candidate,
         })
         await runtime.initializeActiveWorkingSet(workingCopy)
@@ -236,7 +241,7 @@ describe('selected conversation eviction correctness corpus', () => {
             conversationId: string,
             expectedConversation: Chat,
         ) => {
-            await waitForWindowed(runtime)
+            await waitForWindowed(runtime, stage)
             expect(() => selectedConversation().message).toThrow('metadata-only')
             expect(Object.keys(selectedConversation()), `${stage}: metadata shell keys`)
                 .not.toContain('message')
@@ -268,14 +273,13 @@ describe('selected conversation eviction correctness corpus', () => {
         const assertWindowed = (stage = 'unnamed stage') =>
             assertSelectedWindowed(stage, 'chat-a', oracle)
 
-        const profile = { profile: 'scalable-v3' as const, allowsEviction: true }
         const materializeDatabaseSnapshot = vi.fn()
         const replacePersistentDatabase = vi.fn()
         const pluginAccess = createPluginDatabaseAccess({
+        owner: PLUGIN_ACCESS_OWNER,
             store,
             flushPendingData: (reason) => runtime.flushPendingData(reason),
             getCompatibilityDatabase: () => workingCopy,
-            getCompatibilityProfile: () => profile.profile,
             getSelectedCharacterId: () => workingCopy.characters[0]?.chaId ?? null,
             captureSelectedConversationTarget: () => runtime.captureSelectedConversationTarget(),
             acquireCompleteConversation: (reason, target) =>
@@ -299,8 +303,9 @@ describe('selected conversation eviction correctness corpus', () => {
             ),
             reportIdentityReplacementRejected: vi.fn(),
             getNavigationGeneration: () => runtime.getNavigationGeneration(),
+            getStorageAuthorityEpoch: () => runtime.getStorageAuthorityEpoch(),
+            assertPersistentMutationAllowed: (epoch) => runtime.assertPersistentMutationAllowed(epoch),
             applyCompatibilityDatabaseLite: vi.fn(),
-            applyCompatibilityDatabase: vi.fn(),
             readPluginStorageSnapshot: vi.fn(async () => ({})),
             mutatePluginStorage: vi.fn(),
             invalidatePluginStorage: vi.fn(),
@@ -337,7 +342,6 @@ describe('selected conversation eviction correctness corpus', () => {
         Object.assign(oracle, persistedPluginReplacement!.value)
         expectedRevision += 1
         await assertWindowed('scalable plugin getter and setter')
-        expect(profile).toEqual({ profile: 'scalable-v3', allowsEviction: true })
         expect(materializeDatabaseSnapshot).not.toHaveBeenCalled()
         expect(replacePersistentDatabase).not.toHaveBeenCalled()
         expect(storeMaterializeDatabase).not.toHaveBeenCalled()
@@ -525,8 +529,11 @@ describe('selected conversation eviction correctness corpus', () => {
         await expect(runtime.flushPendingData('revision-conflict-stale'))
             .rejects.toBeInstanceOf(RevisionConflictError)
         expect(runtime.getSelectedConversationMode()).toBe('complete')
-        await runtime.refreshActiveWorkingSetFromStore(competingCommit.revision)
-        await waitForWindowed(runtime)
+        backgroundErrors.length = 0
+        const refresh = await runtime.refreshActiveWorkingSetFromStore(competingCommit.revision)
+        expect(backgroundErrors, 'refresh after competing commit').toEqual([])
+        expect(refresh.projection).toBe('applied')
+        await waitForWindowed(runtime, 'refresh after competing commit')
         const retryLease = await runtime.acquireCompleteConversation('revision-conflict-retry')
         retryLease.session.append(structuredClone(conflictMessage))
         retryLease.release()
@@ -702,7 +709,10 @@ describe('selected conversation eviction correctness corpus', () => {
         }))
         vi.doMock('./persistentDataRuntime.svelte', () => ({
             acquireDestructiveReplacementFence: vi.fn(),
-            acknowledgeGenerationCompletion: () => runtime.acknowledgeGenerationCompletion(),
+            acknowledgeGenerationCompletion: (epoch?: number) => runtime.acknowledgeGenerationCompletion(epoch),
+            assertPersistentMutationAllowed: (epoch?: number) => runtime.assertPersistentMutationAllowed(epoch),
+            getPersistentStorageAuthorityEpoch: () => runtime.getStorageAuthorityEpoch(),
+            getPersistentNavigationGeneration: () => runtime.getNavigationGeneration(),
             capturePersistentMutationToken: vi.fn(),
             captureSelectedConversationTarget: () => runtime.captureSelectedConversationTarget(),
             acquireCompleteConversation: (reason: string, target: never) =>
@@ -769,7 +779,6 @@ describe('selected conversation eviction correctness corpus', () => {
             ['../process/files/inlays', { getInlayAsset: vi.fn(async () => null) }],
             ['../process/models/modelString', { getGenerationModelString: () => 'test-model' }],
             ['../process/inlayScreen', { runInlayScreen: (_char: unknown, data: string) => ({ text: data }) }],
-            ['../process/prereroll', { addRerolls: vi.fn() }],
             ['../process/transformers', { runImageEmbedding: vi.fn() }],
             ['../process/memory/hanuraiMemory', { hanuraiMemory: vi.fn() }],
             ['../process/memory/hypav2', { hypaMemoryV2: vi.fn() }],
@@ -986,61 +995,6 @@ describe('selected conversation eviction correctness corpus', () => {
         const exportedOwner = exported.database.characters[0].chats.find((chat) => chat.id === 'chat-a')!
         expect(exportedOwner).toEqual(oracle)
         await assertWindowed('authoritative export')
-
-        for (const moduleId of [
-            '../plugins/plugins.svelte',
-            '../globalApi.svelte',
-            '../alert',
-            '../util',
-            '../../lang',
-            '../stores.svelte',
-        ]) vi.doUnmock(moduleId)
-        vi.resetModules()
-        vi.doMock('./persistentDataRuntime.svelte', () => ({
-            acquireDestructiveReplacementFence: vi.fn(),
-            capturePersistentMutationToken: vi.fn(),
-            getPersistentDataRuntime: () => runtime,
-            getPersistentNavigationGeneration: () => runtime.getNavigationGeneration(),
-            materializeMaximumCompatibilityWorkingSet: () =>
-                runtime.materializeMaximumCompatibilityWorkingSet(),
-            mutatePersistentPluginStorage: (
-                reason: string,
-                mutations: never,
-            ) => runtime.mutatePersistentPluginStorage(reason, mutations),
-            releaseInactiveWorkingSet: (
-                canRelease?: () => boolean | Promise<boolean>,
-                isCurrent?: () => boolean,
-            ) => runtime.releaseInactiveWorkingSet(canRelease, isCurrent),
-            replacePersistentDatabase: (
-                database: Database,
-                reason: string,
-                options: never,
-            ) => runtime.replacePersistentDatabase(database, reason, options),
-        }))
-        const pluginStores = await import('../stores.svelte')
-        pluginStores.DBState.db = workingCopy
-        pluginStores.selectedCharID.set(0)
-        const { getV2PluginAPIs, pluginCompatibility } = await import('../plugins/plugins.svelte')
-        await pluginCompatibility.transition('maximum-compatibility')
-        pluginStores.DBState.db = workingCopy
-        const livePluginDatabase = getV2PluginAPIs().getDatabase() as Database
-        expect(livePluginDatabase).not.toBe(workingCopy)
-        const livePluginConversation = livePluginDatabase.characters[0].chats
-            .find((chat: Chat) => chat.id === 'chat-a')!
-        expect(livePluginConversation.message).toEqual(oracle.message)
-        const pluginMessage = {
-            role: 'user',
-            data: 'plugin compatibility append',
-            chatId: 'op-plugin-v2.1',
-            saying: 'live proxy compatibility',
-        } as Message
-        livePluginConversation.message.push(pluginMessage)
-        oracle.message.push(pluginMessage)
-        await pluginCompatibility.transition('scalable-v3')
-        expectedRevision += 1
-        await runtime.initializeActiveWorkingSet(workingCopy)
-        await assertWindowed('Plugin API v2.1 live Proxy')
-        vi.doUnmock('./persistentDataRuntime.svelte')
 
         const finalPersisted = await store.readConversation('char-a', 'chat-a')
         expect(finalPersisted).not.toBeNull()

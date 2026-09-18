@@ -11,6 +11,7 @@ import segmentedSource from '../RisuNest/SegmentedButtons.svelte?raw'
 import toggleSource from '../RisuNest/SettingToggle.svelte?raw'
 import groupSource from '../RisuNest/SettingGroup.svelte?raw'
 import rowSource from '../RisuNest/SettingRow.svelte?raw'
+import buttonSource from '../RisuNest/SettingButton.svelte?raw'
 import { risuNestSettingUnits } from 'src/ts/setting/risuNestSettingsData'
 
 describe('RisuNest settings accessibility and copy', () => {
@@ -23,12 +24,11 @@ describe('RisuNest settings accessibility and copy', () => {
     })
 
     it('uses localized loading and async status regions', () => {
-        expect(storageSource).toContain('{language.loading}')
+        expect(buttonSource).toContain('{language.loading}')
+        expect(buttonSource).toContain('aria-busy=')
         expect(storageSource).not.toContain('Loading...')
         expect(storageSource).toContain('aria-live="polite"')
-        expect(backupSource).toContain('aria-live="polite"')
         expect(backupSource).not.toContain('console.error')
-        expect(serverSyncSource).toContain('aria-labelledby=')
         expect(serverSyncSource).toContain('aria-live=')
     })
 
@@ -43,6 +43,7 @@ describe('RisuNest settings accessibility and copy', () => {
             backupSource,
             androidSource,
             logSource,
+            serverSyncSource,
         ]) {
             expect(source).toContain('<SettingGroup')
             expect(source).not.toMatch(/<h2\b/)
@@ -53,7 +54,7 @@ describe('RisuNest settings accessibility and copy', () => {
 
     it('stacks setting rows below the container breakpoint instead of the viewport', () => {
         expect(rowSource).toContain('grid-cols-1')
-        expect(rowSource).toContain('@xl:grid-cols-[minmax(0,1fr)_auto]')
+        expect(rowSource).toContain('@xl:grid-cols-[minmax(50%,1fr)_auto]')
         expect(rowSource).not.toMatch(/\b(sm|md|lg):/)
     })
 
@@ -70,6 +71,7 @@ describe('RisuNest settings accessibility and copy', () => {
         expect(toggleSource).not.toContain('✓')
         expect(logSource).toContain('<SettingToggle')
         expect(androidSource).toContain('<SettingToggle')
-        expect(logSource).toContain('hover:bg-selected')
+        expect(logSource).toContain('<SettingButton')
+        expect(buttonSource).toContain('hover:bg-selected')
     })
 })

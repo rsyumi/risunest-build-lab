@@ -36,6 +36,7 @@ export interface Status {
 export interface Startup {
   registered: boolean;
   enabled: boolean;
+  actionMatches: boolean;
 }
 export interface Environment {
   platform: string;
@@ -44,6 +45,23 @@ export interface Environment {
   startup: Startup | null;
   startupError: string | null;
   trayStartup: boolean;
+  updateSettings: { schema: string; policy: "automatic" | "notify" | "off" };
+  updateStatus: {
+    schema: string;
+    phase: string;
+    targetVersion: string | null;
+    lastCheckedAt: number | null;
+    lastCompletedAt: number | null;
+    deferredUntil: number | null;
+    reason: string | null;
+    lastFailedVersion: string | null;
+  };
+  updateSchedule: Startup | null;
+  updateScheduleError: string | null;
+}
+export interface UpdateCheckOutcome {
+  result: "skipped" | "current" | "available" | "deferred" | "started" | "completed";
+  value?: string;
 }
 export interface Backend {
   status(): Promise<Status>;
@@ -52,6 +70,8 @@ export interface Backend {
   start(): Promise<void>;
   startup(action: "install" | "remove"): Promise<Startup>;
   trayStartup(enabled: boolean): Promise<void>;
+  updatePolicy(policy: "automatic" | "notify" | "off"): Promise<void>;
+  updateCheck(automatic: boolean): Promise<UpdateCheckOutcome>;
   requestId(): Promise<string>;
   qr(uri: string): Promise<string>;
 }
@@ -62,6 +82,8 @@ export const native: Backend = {
   start: () => invoke("manager_start"),
   startup: (action) => invoke("manager_startup", { action }),
   trayStartup: (enabled) => invoke("manager_tray_startup", { enabled }),
+  updatePolicy: (policy) => invoke("manager_update_policy", { policy }),
+  updateCheck: (automatic) => invoke("manager_update_check", { automatic }),
   requestId: () => invoke("manager_request_id"),
   qr: (uri) => invoke("manager_qr", { uri }),
 };

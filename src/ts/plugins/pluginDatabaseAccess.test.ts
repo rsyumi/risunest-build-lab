@@ -1,3 +1,4 @@
+const PLUGIN_ACCESS_OWNER = 'test-plugin'
 import { describe, expect, it, vi } from 'vitest'
 import type { Database } from '../storage/database.svelte'
 import type {
@@ -85,13 +86,13 @@ function createHarness() {
         username: 'Live user',
         maxContext: 8192,
     } as unknown as Database
-    let compatibilityProfile: 'scalable-v3' | 'maximum-compatibility' = 'scalable-v3'
     let navigationGeneration = 0
     let selectedCharacterId: string | null = 'active'
     const getSelectedCharacterId = vi.fn(() => selectedCharacterId)
     const materializedDatabases: Database[] = []
     const pinnedDatabases: Database[] = []
     const pinnedCharacterQueries: unknown[] = []
+    const archivedCharacterIds = new Set<string>()
     const releasedLeases: Array<ReturnType<typeof vi.fn>> = []
     const authoritativeSnapshots: Array<{
         database: Database
@@ -144,11 +145,23 @@ function createHarness() {
                         trashed: trash,
                         conversationCount: character.chats.length,
                         type: character.type,
+                        ...(archivedCharacterIds.has(character.chaId)
+                            ? {
+                                  archived: {
+                                      archivedAt: 10,
+                                      conversationCount: character.chats.length,
+                                      messageCount: 0,
+                                  },
+                              }
+                            : {}),
                     })),
                     nextCursor: end < values.length ? String(end) : undefined,
                 }
             },
             readCharacter: async (id: string) => {
+                if (archivedCharacterIds.has(id)) {
+                    throw new Error(`Character ${id} is archived`)
+                }
                 const character = characters.find((value) => value.chaId === id)
                 if (!character) return null
                 const { chats, ...detail } = character
@@ -179,12 +192,16 @@ function createHarness() {
             },
             queryPluginStorage: async () => ({
                 revision,
-                items: Object.keys(pluginStorage).map((key) => ({ key, byteSize: 0 })),
+                items: Object.keys(pluginStorage).map((key) => ({
+                    owner: PLUGIN_ACCESS_OWNER,
+                    key,
+                    byteSize: 0,
+                })),
             }),
-            readPluginStorage: async (key: string) => Object.prototype.hasOwnProperty.call(
-                pluginStorage,
-                key,
-            ) ? { revision, value: pluginStorage[key] } : null,
+            readPluginStorage: async (_owner: string, key: string) =>
+                Object.prototype.hasOwnProperty.call(pluginStorage, key)
+                    ? { revision, value: pluginStorage[key] }
+                    : null,
             release,
         } as unknown as PersistentRevisionLease
     })
@@ -204,7 +221,6 @@ function createHarness() {
     const flushPendingData = vi.fn(async () => undefined)
     const snapshot = vi.fn((value: unknown) => structuredClone(value))
     const applyCompatibilityDatabaseLite = vi.fn((_database: Record<string, unknown>) => undefined)
-    const applyCompatibilityDatabase = vi.fn(async (_database: Record<string, unknown>) => undefined)
     const materializeDatabaseSnapshot = vi.fn(async () => {
         const snapshot = authoritativeSnapshots.shift()!
         return {
@@ -215,6 +231,11 @@ function createHarness() {
     const prepareAuthoritativeDatabaseUpdate = vi.fn(async (
         database: Record<string, unknown>,
     ) => database)
+    let authorityEpoch = 0
+    let mutationFenced = false
+    const assertPersistentMutationAllowed = (expected = authorityEpoch) => {
+        if (mutationFenced || expected !== authorityEpoch) throw new Error('Persistent mutation fenced')
+    }
     const replacePersistentDatabase = vi.fn(async (
         _database: Database,
         _reason: string,
@@ -224,7 +245,7 @@ function createHarness() {
             expectedRevision?: number
             expectedMutationGeneration?: number
         },
-    ) => undefined)
+    ) => ({ kind: 'committed' as const, revision: 5, projection: 'applied' as const }))
     const readPluginStorageSnapshot = vi.fn(async () => ({
         '2': 0,
         memory: { retained: true },
@@ -253,10 +274,10 @@ function createHarness() {
     const replacePersistentConversation = vi.fn(async () => true)
     const reportIdentityReplacementRejected = vi.fn()
     const access = createPluginDatabaseAccess({
+        owner: PLUGIN_ACCESS_OWNER,
         store,
         flushPendingData,
         getCompatibilityDatabase: () => compatibilityDatabase,
-        getCompatibilityProfile: () => compatibilityProfile,
         getSelectedCharacterId,
         captureSelectedConversationTarget: () => selectedTarget as any,
         acquireCompleteConversation: acquireCompleteConversation as any,
@@ -267,8 +288,9 @@ function createHarness() {
         replacePersistentConversation,
         reportIdentityReplacementRejected,
         getNavigationGeneration: () => navigationGeneration,
+        getStorageAuthorityEpoch: () => authorityEpoch,
+        assertPersistentMutationAllowed,
         applyCompatibilityDatabaseLite,
-        applyCompatibilityDatabase,
         materializeDatabaseSnapshot,
         replacePersistentDatabase,
         readPluginStorageSnapshot,
@@ -279,8 +301,8 @@ function createHarness() {
     })
     return {
         access,
-        applyCompatibilityDatabase,
         applyCompatibilityDatabaseLite,
+        archivedCharacterIds,
         authoritativeSnapshots,
         compatibilityDatabase,
         flushPendingData,
@@ -309,12 +331,11 @@ function createHarness() {
         setSelectedConversationTarget(target: typeof selectedTarget) {
             selectedTarget = target
         },
-        setCompatibilityProfile(profile: 'scalable-v3' | 'maximum-compatibility') {
-            compatibilityProfile = profile
-        },
         setNavigationGeneration(generation: number) {
             navigationGeneration = generation
         },
+        advanceAuthorityEpoch() { authorityEpoch++ },
+        setMutationFenced(value: boolean) { mutationFenced = value },
         snapshot,
         store,
     }
@@ -348,6 +369,42 @@ function callContext(): PluginFullObjectCallContext {
 }
 
 describe('plugin database access', () => {
+    it('late_plugin_result_cannot_cross_replacement during database preparation', async () => {
+        const harness = createHarness()
+        const prepared = deferred<Record<string, unknown>>()
+        harness.prepareAuthoritativeDatabaseUpdate.mockReturnValueOnce(prepared.promise)
+        const writing = harness.access.setDatabase({ temperature: 0.5 }, ['temperature'])
+        const rejected = expect(writing).rejects.toThrow('Persistent mutation fenced')
+        harness.advanceAuthorityEpoch()
+        prepared.resolve({ temperature: 0.5 })
+        await rejected
+        expect(harness.applyCompatibilityDatabaseLite).not.toHaveBeenCalled()
+        expect(harness.mutatePluginStorage).not.toHaveBeenCalled()
+        expect(harness.replacePersistentDatabase).not.toHaveBeenCalled()
+    })
+
+    it('rejects a late selected-character write even when the new library retains the same IDs', async () => {
+        const harness = createHarness()
+        const flushed = deferred<void>()
+        harness.flushPendingData.mockReturnValueOnce(flushed.promise)
+        const writing = harness.access.setCurrentCharacter(makeCharacter('active'), callContext())
+        const rejected = expect(writing).rejects.toThrow('Persistent mutation fenced')
+        harness.advanceAuthorityEpoch()
+        flushed.resolve()
+        await rejected
+        expect(harness.replacePersistentCompleteCharacter).not.toHaveBeenCalled()
+        expect(harness.replacePersistentConversation).not.toHaveBeenCalled()
+    })
+
+    it('blocks synchronous plugin settings before mutating the working set during refresh', () => {
+        const harness = createHarness()
+        harness.setMutationFenced(true)
+        expect(() => harness.access.setDatabaseLite({ temperature: 0.5 }, ['temperature']))
+            .toThrow('Persistent mutation fenced')
+        expect(harness.applyCompatibilityDatabaseLite).not.toHaveBeenCalled()
+        expect(harness.mutatePluginStorage).not.toHaveBeenCalled()
+    })
+
     it('projector overlays durable, dirty resident, and exact live output without flushing', async () => {
         const harness = createHarness()
         const durable = makeCharacter('active')
@@ -405,6 +462,31 @@ describe('plugin database access', () => {
         expect(harness.materializeDatabaseSnapshot).not.toHaveBeenCalled()
     })
 
+    it('retries opening the projector store after a transient failure', async () => {
+        const harness = createHarness()
+        const durable = makeCharacter('active')
+        const transient = new Error('synthetic projector open failure')
+        vi.mocked(harness.store.open)
+            .mockRejectedValueOnce(transient)
+            .mockResolvedValue(undefined)
+        harness.pinnedDatabases.push(makeFullObjectDatabase([durable]))
+        vi.mocked(getPersistentDataStore).mockReturnValue(harness.store)
+        const projector = createProductionPluginChatOutputProjector(structuredClone)
+        const input = {
+            characterId: 'active',
+            conversationId: 'active-chat-a',
+            liveCharacter: durable,
+            liveConversation: durable.chats[0],
+        }
+
+        await expect(projector(input)).rejects.toBe(transient)
+        await expect(projector(input)).resolves.toMatchObject({
+            chat: { id: 'active-chat-a' },
+        })
+
+        expect(harness.store.open).toHaveBeenCalledTimes(2)
+    })
+
     it('merges active and trash configured order before resolving an index', async () => {
         const harness = createHarness()
         harness.pinnedDatabases.push(makeFullObjectDatabase([
@@ -416,6 +498,64 @@ describe('plugin database access', () => {
         await expect(harness.access.getCharacterFromIndex(1, callContext()))
             .resolves.toMatchObject({ chaId: 'trash-b' })
         expect(harness.releasedLeases[0]).toHaveBeenCalledOnce()
+    })
+
+    // Invariant 9.
+    it('reads the whole database without the archived characters and without failing', async () => {
+        const harness = createHarness()
+        harness.archivedCharacterIds.add('archived-b')
+        harness.pinnedDatabases.push(makeFullObjectDatabase([
+            makeCharacter('active-a'),
+            makeCharacter('archived-b'),
+            makeCharacter('active-c'),
+        ]))
+
+        const result = await harness.access.getDatabaseSnapshot(['characters'], ['characters'])
+
+        const characters = result.characters as PluginCompleteCharacter[]
+        expect(characters.map((character) => character.chaId)).toEqual([
+            'active-a',
+            'active-c',
+        ])
+        expect(JSON.stringify(result)).not.toContain('archived-b')
+    })
+
+    // Invariants 20 and 27.
+    it('resolves every index to the character the whole database read holds there', async () => {
+        const harness = createHarness()
+        harness.archivedCharacterIds.add('archived-a')
+        harness.archivedCharacterIds.add('archived-c')
+        const database = () => makeFullObjectDatabase([
+            makeCharacter('archived-a'),
+            makeCharacter('active-b'),
+            makeCharacter('archived-c'),
+            makeCharacter('active-d'),
+            makeCharacter('trash-e', true),
+        ])
+        harness.pinnedDatabases.push(database(), database(), database(), database())
+
+        const snapshot = await harness.access.getDatabaseSnapshot(['characters'], ['characters'])
+        const characters = snapshot.characters as PluginCompleteCharacter[]
+        expect(characters.map((character) => character.chaId)).toEqual([
+            'active-b',
+            'active-d',
+            'trash-e',
+        ])
+        for (let index = 0; index < characters.length; index += 1) {
+            const indexed = await harness.access.getCharacterFromIndex(index, callContext())
+            expect(indexed?.chaId).toBe(characters[index].chaId)
+        }
+    })
+
+    it('resolves no index past the end of the filtered list', async () => {
+        const harness = createHarness()
+        harness.archivedCharacterIds.add('archived-b')
+        harness.pinnedDatabases.push(makeFullObjectDatabase([
+            makeCharacter('active-a'),
+            makeCharacter('archived-b'),
+        ]))
+
+        await expect(harness.access.getCharacterFromIndex(1, callContext())).resolves.toBeNull()
     })
 
     it('returns exact detached current, indexed character, and indexed chat objects', async () => {
@@ -888,9 +1028,9 @@ describe('plugin database access', () => {
             },
         })
         const access = createProductionPluginDatabaseAccess({
+        owner: PLUGIN_ACCESS_OWNER,
             flushPendingData: harness.flushPendingData,
             getCompatibilityDatabase: () => harness.compatibilityDatabase,
-            getCompatibilityProfile: () => 'scalable-v3',
             getSelectedCharacterId: harness.getSelectedCharacterId,
             captureSelectedConversationTarget: () => null,
             acquireCompleteConversation: vi.fn(),
@@ -899,8 +1039,9 @@ describe('plugin database access', () => {
             replacePersistentConversation: vi.fn(),
             reportIdentityReplacementRejected: vi.fn(),
             getNavigationGeneration: () => 0,
+            getStorageAuthorityEpoch: () => 0,
+            assertPersistentMutationAllowed: vi.fn(),
             applyCompatibilityDatabaseLite: harness.applyCompatibilityDatabaseLite,
-            applyCompatibilityDatabase: harness.applyCompatibilityDatabase,
             readPluginStorageSnapshot: harness.readPluginStorageSnapshot,
             mutatePluginStorage: harness.mutatePluginStorage,
             invalidatePluginStorage: harness.invalidatePluginStorage,
@@ -942,12 +1083,26 @@ describe('plugin database access', () => {
             }),
         ).toEqual({ ...conversationWindow, revision: 4 })
         expect(harness.snapshot).not.toHaveBeenCalled()
-        expect(harness.store.open).toHaveBeenCalledTimes(1)
+        expect(harness.store.open).toHaveBeenCalledTimes(3)
         expect(harness.store.readRoot).not.toHaveBeenCalled()
         expect(harness.store.readCharacter).not.toHaveBeenCalled()
         expect(harness.store.readConversation).not.toHaveBeenCalled()
         expect(harness.store.materializeDatabase).not.toHaveBeenCalled()
         expect(harness.store.acquireRevision).not.toHaveBeenCalled()
+    })
+
+    it('retries opening the store after a transient query failure', async () => {
+        const harness = createHarness()
+        const transient = new Error('synthetic open failure')
+        vi.mocked(harness.store.open)
+            .mockRejectedValueOnce(transient)
+            .mockResolvedValue(undefined)
+
+        await expect(harness.access.queryCharacters()).rejects.toBe(transient)
+        await expect(harness.access.queryCharacters()).resolves.toEqual(characterPage)
+
+        expect(harness.store.open).toHaveBeenCalledTimes(2)
+        expect(harness.store.queryCharacters).toHaveBeenCalledOnce()
     })
 
     it('finishes each flush before the matching persistent query begins', async () => {
@@ -1434,25 +1589,6 @@ describe('plugin database access', () => {
         expect(harness.store.acquireRevision).toHaveBeenCalledTimes(3)
     })
 
-    it('snapshots maximum compatibility root and v2.1 character edits from one live value', async () => {
-        const harness = createHarness()
-        harness.setCompatibilityProfile('maximum-compatibility')
-        harness.compatibilityDatabase.username = 'Live maximum user'
-        harness.compatibilityDatabase.characters = [
-            { chaId: 'inactive', name: 'Edited by v2.1', chats: [] },
-        ] as Database['characters']
-
-        await expect(
-            harness.access.getDatabaseSnapshot('all', ['characters', 'username']),
-        ).resolves.toEqual({
-            characters: harness.compatibilityDatabase.characters,
-            username: 'Live maximum user',
-        })
-        expect(harness.flushPendingData).not.toHaveBeenCalled()
-        expect(harness.store.open).not.toHaveBeenCalled()
-        expect(harness.store.materializeDatabase).not.toHaveBeenCalled()
-    })
-
     it('does not retain pinned character results between calls', async () => {
         const harness = createHarness()
         const first = {
@@ -1602,7 +1738,6 @@ describe('plugin database access', () => {
         expect(candidate).not.toHaveProperty('privateValue')
         expect(candidate).not.toBe(authoritative)
         expect(candidate.characters).not.toBe(pluginCharacters)
-        expect(harness.applyCompatibilityDatabase).not.toHaveBeenCalled()
     })
 
     it('waits for authoritative replacement so scalable live reprojection is observable', async () => {
@@ -1634,7 +1769,7 @@ describe('plugin database access', () => {
         expect(() => harness.access.setDatabaseLite(
             { characters: [{ chaId: 'inactive', chats: [] }] },
             ['characters'],
-        )).toThrow(/async setDatabase.*maximum-compatibility/i)
+        )).toThrow(/async setDatabase/i)
         expect(harness.applyCompatibilityDatabaseLite).not.toHaveBeenCalled()
         expect(harness.materializeDatabaseSnapshot).not.toHaveBeenCalled()
         expect(harness.replacePersistentDatabase).not.toHaveBeenCalled()
@@ -1649,7 +1784,6 @@ describe('plugin database access', () => {
         )).rejects.toThrow(/not fully hydrated/i)
         expect(harness.materializeDatabaseSnapshot).not.toHaveBeenCalled()
         expect(harness.replacePersistentDatabase).not.toHaveBeenCalled()
-        expect(harness.applyCompatibilityDatabase).not.toHaveBeenCalled()
     })
 
     it('rejects live catalog stubs instead of merging them into the full snapshot', async () => {
@@ -1689,18 +1823,16 @@ describe('plugin database access', () => {
         await harness.access.setDatabase(asyncUpdate, ['characters', 'username'])
 
         expect(harness.applyCompatibilityDatabaseLite).toHaveBeenCalledWith(liteUpdate)
-        expect(harness.applyCompatibilityDatabase).not.toHaveBeenCalled()
         expect(harness.applyCompatibilityDatabaseLite).toHaveBeenCalledWith(asyncUpdate)
         expect(harness.materializeDatabaseSnapshot).not.toHaveBeenCalled()
         expect(harness.replacePersistentDatabase).not.toHaveBeenCalled()
         expect(harness.flushPendingData).toHaveBeenCalledWith('plugin-root-update')
     })
 
-    it.each(['scalable-v3', 'maximum-compatibility'] as const)(
-        'persists a %s root-only update without replacing a concurrently edited character',
-        async (profile) => {
+    it(
+        'persists a root-only update without replacing a concurrently edited character',
+        async () => {
             const harness = createHarness()
-            harness.setCompatibilityProfile(profile)
             harness.compatibilityDatabase.characters = [
                 { chaId: 'character', name: 'Before', chats: [] },
             ] as Database['characters']
@@ -1710,9 +1842,13 @@ describe('plugin database access', () => {
             })
             const character = harness.compatibilityDatabase.characters[0]
             harness.applyCompatibilityDatabaseLite.mockImplementation((update) => {
-                applyPluginDatabaseUpdate(harness.compatibilityDatabase as Database, update, [
-                    'username',
-                ])
+                applyPluginDatabaseUpdate(
+                    harness.compatibilityDatabase as Database,
+                    update,
+                    ['username'],
+                    PLUGIN_ACCESS_OWNER,
+                    () => PLUGIN_ACCESS_OWNER,
+                )
             })
             harness.flushPendingData.mockImplementation(async () => {
                 character.name = 'Concurrent edit'
@@ -1759,21 +1895,6 @@ describe('plugin database access', () => {
         expect(harness.replacePersistentDatabase).not.toHaveBeenCalled()
     })
 
-    it('keeps maximum-compatibility character setters on the live full database paths', async () => {
-        const harness = createHarness()
-        harness.setCompatibilityProfile('maximum-compatibility')
-        const liteUpdate = { characters: [{ chaId: 'lite', chats: [] }] }
-        const asyncUpdate = { characters: [{ chaId: 'async', chats: [] }] }
-
-        harness.access.setDatabaseLite(liteUpdate, ['characters'])
-        await harness.access.setDatabase(asyncUpdate, ['characters'])
-
-        expect(harness.applyCompatibilityDatabaseLite).toHaveBeenCalledWith(liteUpdate)
-        expect(harness.applyCompatibilityDatabase).toHaveBeenCalledWith(asyncUpdate)
-        expect(harness.materializeDatabaseSnapshot).not.toHaveBeenCalled()
-        expect(harness.replacePersistentDatabase).not.toHaveBeenCalled()
-    })
-
     it('leaves live and authoritative snapshots unchanged when scalable replacement fails', async () => {
         const harness = createHarness()
         const liveBefore = structuredClone(harness.compatibilityDatabase)
@@ -1793,7 +1914,6 @@ describe('plugin database access', () => {
 
         expect(harness.compatibilityDatabase).toEqual(liveBefore)
         expect(authoritative).toEqual(authoritativeBefore)
-        expect(harness.applyCompatibilityDatabase).not.toHaveBeenCalled()
     })
 
     it('allows only one of two setters materialized from the same revision to commit', async () => {
@@ -1817,6 +1937,7 @@ describe('plugin database access', () => {
                 throw new Error('revision-conflict')
             }
             currentRevision++
+            return { kind: 'committed', revision: currentRevision, projection: 'applied' }
         })
 
         const outcomes = await Promise.allSettled([
@@ -1930,6 +2051,7 @@ describe('plugin database access', () => {
             if (options.expectedMutationGeneration !== currentMutationGeneration) {
                 throw new Error('mutation-generation-conflict')
             }
+            return { kind: 'committed', revision: 61, projection: 'applied' }
         })
 
         await expect(
@@ -1948,7 +2070,6 @@ describe('plugin database access', () => {
             }),
         )
         expect(harness.compatibilityDatabase).toEqual(liveBefore)
-        expect(harness.applyCompatibilityDatabase).not.toHaveBeenCalled()
     })
 
     it('rejects a scalable update when confirmation outlives profile or navigation state', async () => {
@@ -1960,30 +2081,10 @@ describe('plugin database access', () => {
             ['plugins', 'username'],
         )
 
-        harness.setCompatibilityProfile('maximum-compatibility')
         harness.setNavigationGeneration(1)
         confirmation.resolve({ plugins: [], username: 'After' })
 
         await expect(pending).rejects.toThrow(/became stale/i)
-        expect(harness.materializeDatabaseSnapshot).not.toHaveBeenCalled()
-        expect(harness.applyCompatibilityDatabase).not.toHaveBeenCalled()
-    })
-
-    it('does not publish a maximum-compatibility capture after switching profiles', async () => {
-        const harness = createHarness()
-        harness.setCompatibilityProfile('maximum-compatibility')
-        const confirmation = deferred<Record<string, unknown>>()
-        harness.prepareAuthoritativeDatabaseUpdate.mockReturnValueOnce(confirmation.promise)
-        const pending = harness.access.setDatabase(
-            { plugins: [], username: 'After' },
-            ['plugins', 'username'],
-        )
-
-        harness.setCompatibilityProfile('scalable-v3')
-        confirmation.resolve({ plugins: [], username: 'After' })
-
-        await expect(pending).rejects.toThrow(/became stale/i)
-        expect(harness.applyCompatibilityDatabase).not.toHaveBeenCalled()
         expect(harness.materializeDatabaseSnapshot).not.toHaveBeenCalled()
     })
 
@@ -2041,7 +2142,6 @@ describe('plugin database access', () => {
             update as unknown as Record<string, unknown>,
             ['username'],
         )).toThrow(/plain record/i)
-        expect(harness.applyCompatibilityDatabase).not.toHaveBeenCalled()
         expect(harness.applyCompatibilityDatabaseLite).not.toHaveBeenCalled()
     })
 

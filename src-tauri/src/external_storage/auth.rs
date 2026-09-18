@@ -5,6 +5,12 @@ use oauth2::{CsrfToken, PkceCodeChallenge, PkceCodeVerifier};
 pub(crate) trait SecretVault: Send + Sync {
     fn read<'a>(&'a self, reference: &'a SecretRef) -> ProviderFuture<'a, SecretBytes>;
     fn store<'a>(&'a self, bytes: &'a SecretBytes) -> ProviderFuture<'a, SecretRef>;
+    /// Rotated tokens overwrite the same reference so a connection keeps one secret.
+    fn replace<'a>(
+        &'a self,
+        reference: &'a SecretRef,
+        bytes: &'a SecretBytes,
+    ) -> ProviderFuture<'a, ()>;
     fn remove<'a>(&'a self, reference: &'a SecretRef) -> ProviderFuture<'a, ()>;
 }
 // No serializer or debug formatter. The concrete vault owns OS sealing and namespace.
@@ -69,13 +75,23 @@ impl PendingAuthorization {
         let pairs: Vec<_> = callback.query_pairs().collect();
         let states: Vec<_> = pairs.iter().filter(|(name, _)| name == "state").collect();
         let codes: Vec<_> = pairs.iter().filter(|(name, _)| name == "code").collect();
+        let errors: Vec<_> = pairs.iter().filter(|(name, _)| name == "error").collect();
         if states.len() != 1
             || states[0].1 != *self.state.secret()
-            || codes.len() != 1
-            || codes[0].1.is_empty()
-            || codes[0].1.len() > 8192
-            || pairs.iter().any(|(name, _)| name == "error")
         {
+            return Err(ProviderError::new(ErrorKind::ReauthRequired));
+        }
+        if !errors.is_empty() {
+            if errors.len() != 1 || errors[0].1.is_empty() || !codes.is_empty() {
+                return Err(ProviderError::new(ErrorKind::ReauthRequired));
+            }
+            return Err(ProviderError::new(if errors[0].1 == "access_denied" {
+                ErrorKind::Cancelled
+            } else {
+                ErrorKind::ReauthRequired
+            }));
+        }
+        if codes.len() != 1 || codes[0].1.is_empty() || codes[0].1.len() > 8192 {
             return Err(ProviderError::new(ErrorKind::ReauthRequired));
         }
         Ok(AuthorizationCode {
@@ -136,5 +152,22 @@ mod tests {
             .append_pair("state", &state)
             .append_pair("code", "synthetic-code");
         assert!(pending.finish(&wrong).is_err());
+
+        let (pending, url) = PendingAuthorization::start(policy()).unwrap();
+        let state = url
+            .query_pairs()
+            .find(|(name, _)| name == "state")
+            .unwrap()
+            .1
+            .to_string();
+        let mut denied = policy().redirect_url;
+        denied
+            .query_pairs_mut()
+            .append_pair("state", &state)
+            .append_pair("error", "access_denied");
+        assert_eq!(
+            pending.finish(&denied).err().unwrap().kind,
+            ErrorKind::Cancelled
+        );
     }
 }

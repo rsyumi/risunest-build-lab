@@ -261,7 +261,8 @@ describe('getInlayRenderSource', () => {
     test('detaches an existing original asset URL offscreen without changing its markup layout', () => {
         vi.stubGlobal('IntersectionObserver', TestIntersectionObserver)
         const root = document.createElement('div')
-        root.innerHTML = '<figure class="custom-bot-layout"><img class="portrait" src="http://risuasset.localhost/assets/original.png"><figcaption>caption</figcaption></figure>'
+        const nativeUrl = `http://127.0.0.1:43127/${'a'.repeat(32)}/${Buffer.from('assets/original.png').toString('hex')}`
+        root.innerHTML = `<figure class="custom-bot-layout"><img class="portrait" src="${nativeUrl}"><figcaption>caption</figcaption></figure>`
         document.body.append(root)
         const image = root.querySelector('img')!
 
@@ -272,7 +273,7 @@ describe('getInlayRenderSource', () => {
         expect(root.querySelector('figcaption')?.textContent).toBe('caption')
 
         observer.setVisible(image, true)
-        expect(image.getAttribute('src')).toBe('http://risuasset.localhost/assets/original.png')
+        expect(image.getAttribute('src')).toBe(nativeUrl)
         observer.setVisible(image, false)
         expect(image.getAttribute('src')).toBeNull()
         expect(URL.revokeObjectURL).not.toHaveBeenCalled()
@@ -352,7 +353,7 @@ describe('getInlayRenderSource', () => {
         inlayMocks.getInlayAssetMetadata.mockResolvedValue(null)
 
         await expect(getInlayRenderSource('legacy-audio', true)).resolves.toBeNull()
-        expect(inlayMocks.getInlayAssetMetadata).toHaveBeenCalledWith('legacy-audio', { migrateLegacy: false })
+        expect(inlayMocks.getInlayAssetMetadata).toHaveBeenCalledWith('legacy-audio')
         expect(inlayMocks.getInlayAssetBlob).not.toHaveBeenCalled()
         expect(inlayMocks.getInlayAssetRenderUrl).not.toHaveBeenCalled()
     })
@@ -382,8 +383,8 @@ describe('getInlayRenderSource', () => {
 
         expect([...sources.keys()]).toEqual(['shown-a', 'shown-b'])
         expect(inlayMocks.getInlayAssetMetadata).toHaveBeenCalledTimes(2)
-        expect(inlayMocks.getInlayAssetMetadata).toHaveBeenNthCalledWith(1, 'shown-a', { migrateLegacy: false })
-        expect(inlayMocks.getInlayAssetMetadata).toHaveBeenNthCalledWith(2, 'shown-b', { migrateLegacy: false })
+        expect(inlayMocks.getInlayAssetMetadata).toHaveBeenNthCalledWith(1, 'shown-a')
+        expect(inlayMocks.getInlayAssetMetadata).toHaveBeenNthCalledWith(2, 'shown-b')
         expect(inlayMocks.listInlayAssetMetadata).not.toHaveBeenCalled()
         expect(inlayMocks.getInlayAssetBlob).not.toHaveBeenCalled()
     })

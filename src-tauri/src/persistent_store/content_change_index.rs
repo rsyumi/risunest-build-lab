@@ -1,7 +1,12 @@
 //! Coalesced content changes for external consumers. Never acknowledges the server outbox.
 //! Only actual mutations open a context; staging/copy operations stay invisible.
-use super::{active_generation, current_revision, StoreError, StoreResult};
+use super::{active_generation, current_revision, PersistentStore, StoreError, StoreResult};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use serde::{Deserialize, Serialize};
+
+/// The working set inside the WebView. Every other consumer is a connection id,
+/// so the renderer never names its own consumer and cannot move another cursor.
+pub(crate) const WORKING_SET_CONSUMER: &str = "ui-working-set";
 
 const SCHEMA: &str = r#"
 CREATE TABLE content_change_context(singleton INTEGER PRIMARY KEY CHECK(singleton=1),generation TEXT NOT NULL,revision INTEGER NOT NULL CHECK(revision>=0),origin TEXT NOT NULL CHECK(origin IN ('local','server','external')));
@@ -9,15 +14,23 @@ CREATE TABLE content_changes(generation TEXT NOT NULL,kind TEXT NOT NULL,key1 TE
 CREATE INDEX content_changes_revision ON content_changes(generation,revision);
 CREATE TABLE content_change_consumers(id TEXT PRIMARY KEY,generation TEXT NOT NULL,revision INTEGER NOT NULL CHECK(revision>=0),rebuild_required INTEGER NOT NULL CHECK(rebuild_required IN (0,1)));
 CREATE TABLE content_change_floor(singleton INTEGER PRIMARY KEY CHECK(singleton=1),generation TEXT NOT NULL,revision INTEGER NOT NULL CHECK(revision>=0));
-CREATE TABLE content_capture_reservations(id TEXT PRIMARY KEY,generation TEXT NOT NULL,revision INTEGER NOT NULL CHECK(revision>=0));
 INSERT INTO content_change_floor VALUES(1,'revision-0',0);
 "#;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ContentKey {
     pub kind: String,
     pub key1: String,
     pub key2: String,
+}
+
+/// What the renderer needs to decide between a targeted pass and a reprojection.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ContentChangeWindow {
+    pub revision: i64,
+    pub after_revision: Option<i64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -121,7 +134,6 @@ pub(super) fn full_replacement(
     revision: i64,
 ) -> StoreResult<()> {
     tx.execute("DELETE FROM content_changes", [])?;
-    tx.execute("DELETE FROM content_capture_reservations", [])?;
     tx.execute("UPDATE content_change_consumers SET rebuild_required=1", [])?;
     tx.execute(
         "UPDATE content_change_floor SET generation=?1,revision=?2 WHERE singleton=1",
@@ -209,7 +221,7 @@ pub(crate) fn page(
     Ok(keys)
 }
 
-/// Called in the transaction that commits verified local cache/capture references.
+/// Called in the transaction that commits verified local capture references.
 /// Remote publication never owns this cursor.
 pub(crate) fn commit_cursor(
     tx: &Transaction<'_>,
@@ -254,42 +266,97 @@ pub(crate) fn require_rebuild(tx: &Transaction<'_>, consumer: &str) -> StoreResu
     Ok(())
 }
 
-pub(crate) fn reserve(
-    tx: &Transaction<'_>,
-    id: &str,
-    generation: &str,
-    from_revision: i64,
-) -> StoreResult<()> {
-    let floor: i64 = tx.query_row(
-        "SELECT revision FROM content_change_floor WHERE singleton=1",
-        [],
-        |r| r.get(0),
-    )?;
-    if id.is_empty()
-        || generation != active_generation(tx)?
-        || from_revision < floor
-        || from_revision > current_revision(tx)?
-    {
-        return Err(invalid("Invalid capture reservation"));
-    }
-    tx.execute(
-        "INSERT INTO content_capture_reservations VALUES(?1,?2,?3)",
-        params![id, generation, from_revision],
-    )?;
-    Ok(())
-}
-
 pub(crate) fn prune(tx: &Transaction<'_>) -> StoreResult<i64> {
     let generation = active_generation(tx)?;
     let current = current_revision(tx)?;
-    let floor: i64 = tx.query_row("SELECT min(revision) FROM (SELECT ?2 AS revision UNION ALL SELECT revision FROM content_change_consumers WHERE generation=?1 AND rebuild_required=0 UNION ALL SELECT revision FROM content_capture_reservations WHERE generation=?1)",params![generation,current],|r|r.get(0))?;
+    let (floor_generation, old_floor): (String, i64) = tx.query_row(
+        "SELECT generation,revision FROM content_change_floor WHERE singleton=1",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    if floor_generation != generation || old_floor > current {
+        return Err(invalid("Content index floor is inconsistent"));
+    }
+    // These consumers already need a rebuild under the existing window rule.
+    tx.execute(
+        "UPDATE content_change_consumers SET rebuild_required=1 WHERE generation=?1 AND revision<?2",
+        params![generation, old_floor],
+    )?;
+    let cutoff: i64 = tx.query_row(
+        "SELECT min(revision) FROM (SELECT ?2 AS revision UNION ALL SELECT revision FROM content_change_consumers WHERE generation=?1 AND rebuild_required=0)",
+        params![generation, current],
+        |row| row.get(0),
+    )?;
+    if cutoff < old_floor || cutoff > current {
+        return Err(invalid("Content index prune boundary is inconsistent"));
+    }
     tx.execute(
         "DELETE FROM content_changes WHERE generation=?1 AND revision<=?2",
-        params![generation, floor],
+        params![generation, cutoff],
     )?;
     tx.execute(
-        "UPDATE content_change_floor SET revision=max(revision,?1) WHERE singleton=1",
-        [floor],
+        "UPDATE content_change_floor SET revision=?2 WHERE singleton=1 AND generation=?1",
+        params![generation, cutoff],
     )?;
-    Ok(floor)
+    Ok(cutoff)
+}
+
+pub(crate) fn remove_connection_consumer(
+    tx: &Transaction<'_>,
+    connection: &str,
+) -> StoreResult<()> {
+    if connection.is_empty() || connection == WORKING_SET_CONSUMER {
+        return Err(invalid("Invalid content consumer connection"));
+    }
+    tx.execute(
+        "DELETE FROM content_change_consumers WHERE id=?1",
+        [connection],
+    )?;
+    prune(tx)?;
+    Ok(())
+}
+
+impl PersistentStore {
+    /// The window and every record reprojected for it come from one lease, so the
+    /// change list and the content that explains it share a revision.
+    pub(crate) fn working_set_change_window(
+        &self,
+        lease: &str,
+    ) -> StoreResult<ContentChangeWindow> {
+        let reader = self.working_set_reader(lease)?;
+        Ok(ContentChangeWindow {
+            revision: reader.target.revision,
+            after_revision: match window(reader, WORKING_SET_CONSUMER)? {
+                ChangeWindow::Rebuild => None,
+                ChangeWindow::Incremental { after_revision } => Some(after_revision),
+            },
+        })
+    }
+
+    pub(crate) fn working_set_change_page(
+        &self,
+        lease: &str,
+        after_revision: i64,
+        after_key: Option<ContentKey>,
+        limit: usize,
+    ) -> StoreResult<Vec<ContentKey>> {
+        let reader = self.working_set_reader(lease)?;
+        page(reader, after_revision, after_key.as_ref(), limit)
+    }
+
+    /// Called only once the renderer has installed the projection for `revision`.
+    pub(crate) fn commit_working_set_change_cursor(&mut self, revision: i64) -> StoreResult<()> {
+        let transaction = self.connection.transaction()?;
+        let generation = active_generation(&transaction)?;
+        commit_cursor(&transaction, WORKING_SET_CONSUMER, &generation, revision)?;
+        prune(&transaction)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    fn working_set_reader(&self, lease: &str) -> StoreResult<&super::RevisionReadLease> {
+        self.revision_leases
+            .get(lease)
+            .ok_or(StoreError::SnapshotReleased)
+    }
 }

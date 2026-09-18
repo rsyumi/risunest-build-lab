@@ -1,22 +1,31 @@
 <script lang="ts">
     import { language } from 'src/lang'
-    import { risuNestSettingsItems } from 'src/ts/setting/risuNestSettingsData'
+    import { risuNestInlaySettingsItems, risuNestStreamingSettingsItems } from 'src/ts/setting/risuNestSettingsData'
     import { isTauri, isTauriAndroid, isTauriIOS } from 'src/ts/platform'
     import RisuNestSettingRows from '../RisuNest/RisuNestSettingRows.svelte'
     import RisuNestPerformanceSettings from './RisuNestPerformanceSettings.svelte'
+    import RisuNestInlayInventory from './RisuNestInlayInventory.svelte'
+    import RisuNestPluginData from './RisuNestPluginData.svelte'
+    import RisuNestLocalData from './RisuNestLocalData.svelte'
     import RisuNestStorageDashboard from './RisuNestStorageDashboard.svelte'
+    import RisuNestDataHealth from './RisuNestDataHealth.svelte'
     import RisuNestBackupRestore from './RisuNestBackupRestore.svelte'
     import RisuNestIOSPlatform from './RisuNestIOSPlatform.svelte'
     import RisuNestAndroidPlatform from './RisuNestAndroidPlatform.svelte'
     import RisuNestLogViewer from './RisuNestLogViewer.svelte'
     import ServerSyncSettings from './ServerSyncSettings.svelte'
+    import RisuNestUpdateSettings from './RisuNestUpdateSettings.svelte'
 
     const sections: { id: string; label: string }[] = [
         { id: 'risunest-perf', label: language.risuNest.perf.title },
         { id: 'risunest-streaming', label: language.risuNest.streaming.title },
         { id: 'risunest-inlay', label: language.risuNest.inlay.title },
+        { id: 'risunest-plugin-data', label: language.risuNest.pluginData.title },
+        ...(isTauri ? [{ id: 'risunest-local-data', label: language.risuNest.localData.title }] : []),
+        ...(isTauri ? [{ id: 'risunest-update', label: language.risuNest.update.title }] : []),
         ...(isTauri ? [{ id: 'risunest-server-sync', label: language.risuNest.serverSync.title }] : []),
         ...(isTauri ? [{ id: 'risunest-storage', label: language.risuNest.storage.title }] : []),
+        ...(isTauri ? [{ id: 'risunest-data-health', label: language.risuNest.dataHealth.title }] : []),
         { id: 'risunest-backup', label: language.risuNest.backup.title },
         ...(isTauriAndroid || isTauriIOS ? [{ id: 'risunest-platform', label: language.risuNest.platform.title }] : []),
         ...(isTauri ? [{ id: 'risunest-diag', label: language.risuNest.diag.title }] : []),
@@ -35,12 +44,22 @@
         {/each}
     </nav>
     <RisuNestPerformanceSettings />
-    <RisuNestSettingRows items={risuNestSettingsItems} />
+    <RisuNestSettingRows items={risuNestStreamingSettingsItems} />
+    <RisuNestSettingRows items={risuNestInlaySettingsItems} />
+    <RisuNestInlayInventory />
+    <RisuNestPluginData />
+    {#if isTauri}
+        <RisuNestLocalData />
+    {/if}
+    {#if isTauri}
+        <RisuNestUpdateSettings />
+    {/if}
     {#if isTauri}
         <section id="risunest-server-sync" class="scroll-mt-4"><ServerSyncSettings /></section>
     {/if}
     {#if isTauri}
         <RisuNestStorageDashboard />
+        <RisuNestDataHealth onOpenUnusedImages={() => jumpTo('risunest-storage')} />
     {/if}
     <RisuNestBackupRestore />
     {#if isTauriIOS}

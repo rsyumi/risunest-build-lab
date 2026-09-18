@@ -16,11 +16,27 @@ export interface PersistentConversationMetadata {
     totalMessages: number
 }
 
-export type PersistentRoot = Omit<Database, 'characters' | 'botPresets' | 'pluginCustomStorage'>
+export type PersistentRoot = Omit<
+    Database,
+    'characters' | 'botPresets' | 'pluginCustomStorage' | 'pluginStorageMeta'
+>
 
 export interface PluginStorageSummary {
+    owner: string
     key: string
     byteSize: number
+}
+
+/** What the plugin data screen lists. Values are fetched one at a time. */
+export interface PluginStorageListItem {
+    owner: string
+    key: string
+    space?: 'string' | 'json'
+    valueType: 'string' | 'json'
+    byteSize: number
+    claimedFrom?: string
+    importBatchId?: string
+    assignedAt?: number
 }
 
 export interface PluginStorageCatalog {
@@ -35,64 +51,6 @@ export type AssetRepositoryAuthorityState =
     | { format: 'legacy' }
     | { format: 'preparing'; migrationId: string; sourceRevision: DataRevision }
     | { format: 'v2'; migrationId: string; compatibilityHash: string }
-
-export type ColdPayloadAuthorityState =
-    | { format: 'legacy' }
-    | { format: 'preparing'; migrationId: string; sourceRevision: DataRevision }
-    | { format: 'v2'; migrationId: string; compatibilityHash: string }
-
-export interface ColdAlias {
-    key: string
-    objectHash: string | null
-    size: number
-    metadata: Record<string, unknown>
-}
-
-export interface ColdPayloadMigrationInput {
-    sourceRevision: DataRevision
-    migrationId: string
-    compatibilityHash: string
-    coldAliases: ColdAlias[]
-}
-
-function validateJsonValue(value: unknown, ancestors: Set<object>): void {
-    if (value === null || typeof value === 'string' || typeof value === 'boolean') return
-    if (typeof value === 'number') {
-        if (Number.isFinite(value)) return
-        throw new TypeError('Cold alias metadata numbers must be finite')
-    }
-    if (typeof value !== 'object') {
-        throw new TypeError('Cold alias metadata must contain only JSON values')
-    }
-    const prototype = Object.getPrototypeOf(value)
-    if (!Array.isArray(value) && prototype !== Object.prototype && prototype !== null) {
-        throw new TypeError('Cold alias metadata objects must be plain JSON objects')
-    }
-    if (ancestors.has(value)) {
-        throw new TypeError('Cold alias metadata must not contain cycles')
-    }
-    ancestors.add(value)
-    for (const child of Array.isArray(value) ? value : Object.values(value)) {
-        validateJsonValue(child, ancestors)
-    }
-    ancestors.delete(value)
-}
-
-export function validateColdAlias(alias: ColdAlias): void {
-    if (typeof alias.key !== 'string' || alias.key.length === 0 || alias.key.includes('\0')) {
-        throw new TypeError('Cold alias key must be nonempty and contain no NUL characters')
-    }
-    if (alias.objectHash !== null && !/^[0-9a-f]{64}$/.test(alias.objectHash)) {
-        throw new TypeError('Cold alias objectHash must be null or lowercase SHA-256')
-    }
-    if (!Number.isSafeInteger(alias.size) || alias.size < 0) {
-        throw new TypeError('Cold alias size must be a nonnegative safe integer')
-    }
-    if (alias.metadata === null || typeof alias.metadata !== 'object' || Array.isArray(alias.metadata)) {
-        throw new TypeError('Cold alias metadata must be an object')
-    }
-    validateJsonValue(alias.metadata, new Set())
-}
 
 export interface AssetAliasIdentity {
     kind: AssetAliasKind
@@ -285,9 +243,17 @@ export function validateAssetAliasKeyBatch(kind: AssetAliasKind, keys: string[])
 }
 
 export type PluginStorageMutation =
-    | { type: 'set'; key: string; value: unknown }
-    | { type: 'delete'; key: string }
-    | { type: 'clear' }
+    | { type: 'set'; owner: string; key: string; value: unknown }
+    | { type: 'delete'; owner: string; key: string }
+    | { type: 'clear'; owner: string }
+
+/// What the list needs about an archived character. The stored object and the
+/// asset hashes it holds stay inside the store.
+export interface ArchivedCharacterSummary {
+    archivedAt: number
+    conversationCount: number
+    messageCount: number
+}
 
 export interface CharacterSummary {
     id: string
@@ -300,7 +266,39 @@ export interface CharacterSummary {
     type: CharacterDetail['type']
     creatorNotes?: string
     trashTime?: number
+    archived?: ArchivedCharacterSummary
 }
+
+export interface ArchivePreview {
+    characterId: string
+    name: string
+    conversationCount: number
+    messageCount: number
+    archived: boolean
+}
+
+export class ArchivedCharacterError extends Error {
+    constructor(readonly characterId: string) {
+        super(`Character ${characterId} is archived`)
+        this.name = 'ArchivedCharacterError'
+    }
+}
+
+/// One coalesced change locator. `messages` and `conversations` share a
+/// locator, so a message edit arrives as a change to its conversation.
+export interface ContentChangeKey {
+    kind: string
+    key1: string
+    key2: string
+}
+
+export interface ContentChangeWindow {
+    revision: DataRevision
+    /// Null asks for a full reprojection; the cursor is unusable for this window.
+    afterRevision: DataRevision | null
+}
+
+export const CONTENT_CHANGE_PAGE_LIMIT = 1_024
 
 export interface PresetSummary {
     id: string
@@ -472,6 +470,7 @@ export interface PersistentRevisionReader {
     queryPresets(): Promise<PresetCatalog>
     readPreset(id: string): Promise<Versioned<botPreset> | null>
     queryCharacters(input: CharacterQuery): Promise<CharacterPage>
+    readCharacterSummary(id: string): Promise<CharacterSummary | null>
     readCharacter(id: string): Promise<Versioned<CharacterDetail> | null>
     queryConversations(input: ConversationQuery): Promise<ConversationPage>
     readConversation(characterId: string, conversationId: string): Promise<Versioned<Chat> | null>
@@ -483,15 +482,20 @@ export interface PersistentRevisionReader {
         input: ConversationWindowQuery,
     ): Promise<Versioned<ConversationWindow> | null>
     queryPluginStorage(): Promise<PluginStorageCatalog>
-    readPluginStorage(key: string): Promise<Versioned<unknown> | null>
+    readPluginStorage(owner: string, key: string): Promise<Versioned<unknown> | null>
     readAssetAlias(identity: AssetAliasIdentity): Promise<Versioned<AssetAlias> | null>
     readAssetAliasesByKeys(kind: AssetAliasKind, keys: string[]): Promise<Versioned<AssetAlias[]>>
     listAssetAliases(query: AssetAliasListQuery): Promise<AssetAliasPage>
     readAssetRepositoryAuthority(): Promise<Versioned<AssetRepositoryAuthorityState>>
     readAssetOwnerHead(owner: AssetOwnerLocator): Promise<Versioned<AssetOwnerHead> | null>
-    readColdPayloadAuthority(): Promise<Versioned<ColdPayloadAuthorityState>>
-    readColdAlias(key: string): Promise<Versioned<ColdAlias> | null>
-    listColdAliases(): Promise<Versioned<ColdAlias[]>>
+    /// Present only where the store tracks changes. The window and every record
+    /// reprojected for it must be read through this one lease.
+    readWorkingSetChangeWindow?(): Promise<ContentChangeWindow>
+    readWorkingSetChangePage?(
+        afterRevision: DataRevision,
+        afterKey: ContentChangeKey | null,
+        limit: number,
+    ): Promise<ContentChangeKey[]>
 }
 
 export interface PersistentRevisionLease extends PersistentRevisionReader {
@@ -504,6 +508,7 @@ export interface PersistentDataStore {
     queryPresets(): Promise<PresetCatalog>
     readPreset(id: string): Promise<Versioned<botPreset> | null>
     queryCharacters(input: CharacterQuery): Promise<CharacterPage>
+    readCharacterSummary(id: string): Promise<CharacterSummary | null>
     readCharacter(id: string): Promise<Versioned<CharacterDetail> | null>
     queryConversations(input: ConversationQuery): Promise<ConversationPage>
     readConversation(characterId: string, conversationId: string): Promise<Versioned<Chat> | null>
@@ -515,15 +520,16 @@ export interface PersistentDataStore {
         input: ConversationWindowQuery,
     ): Promise<Versioned<ConversationWindow> | null>
     queryPluginStorage(): Promise<PluginStorageCatalog>
-    readPluginStorage(key: string): Promise<Versioned<unknown> | null>
+    readPluginStorage(owner: string, key: string): Promise<Versioned<unknown> | null>
+    /** Sizes and ownership only. Values stay in the store until one is opened. */
+    listPluginStorage(): Promise<PluginStorageListItem[]>
+    /// Advances only once the working set for `revision` has been installed.
+    commitWorkingSetChangeCursor?(revision: DataRevision): Promise<void>
     readAssetAlias(identity: AssetAliasIdentity): Promise<Versioned<AssetAlias> | null>
     readAssetAliasesByKeys(kind: AssetAliasKind, keys: string[]): Promise<Versioned<AssetAlias[]>>
     listAssetAliases(query: AssetAliasListQuery): Promise<AssetAliasPage>
     readAssetRepositoryAuthority(): Promise<Versioned<AssetRepositoryAuthorityState>>
     readAssetOwnerHead(owner: AssetOwnerLocator): Promise<Versioned<AssetOwnerHead> | null>
-    readColdPayloadAuthority(): Promise<Versioned<ColdPayloadAuthorityState>>
-    readColdAlias(key: string): Promise<Versioned<ColdAlias> | null>
-    listColdAliases(): Promise<Versioned<ColdAlias[]>>
     commitAssetAlias(alias: AssetAlias, expectedRevision: DataRevision): Promise<{ revision: DataRevision }>
     deleteAssetAlias(
         identity: AssetAliasIdentity,
@@ -532,12 +538,16 @@ export interface PersistentDataStore {
     activateAssetRepositoryMigration(
         input: AssetRepositoryMigrationInput,
     ): Promise<{ revision: DataRevision }>
-    commitColdAlias(alias: ColdAlias, expectedRevision: DataRevision): Promise<{ revision: DataRevision }>
-    deleteColdAlias(key: string, expectedRevision: DataRevision): Promise<{ revision: DataRevision }>
-    activateColdPayloadMigration(
-        input: ColdPayloadMigrationInput,
-    ): Promise<{ revision: DataRevision }>
     commit(input: WorkingSetCommit): Promise<{ revision: DataRevision }>
+    archivePreview(characterId: string): Promise<ArchivePreview>
+    archiveCharacter(
+        characterId: string,
+        expectedRevision: DataRevision,
+    ): Promise<{ revision: DataRevision }>
+    restoreCharacter(
+        characterId: string,
+        expectedRevision: DataRevision,
+    ): Promise<{ revision: DataRevision }>
     replaceFromDatabase(
         database: Database,
         expectedRevision?: DataRevision,

@@ -8,7 +8,6 @@ import { dispatchChatOutputListeners } from '../pluginChatOutputListeners'
 const fixture = vi.hoisted(() => {
     const requestedPermissions: string[] = []
     const listeners = new Set<any>()
-    const listenerProvenance = new WeakMap<any, 'v2.1-live' | 'v3-legacy'>()
     const releaseRevisionLease = vi.fn()
     const projectScalable = vi.fn()
     const scopedAccess = {
@@ -26,7 +25,6 @@ const fixture = vi.hoisted(() => {
     return {
         requestedPermissions,
         listeners,
-        listenerProvenance,
         releaseRevisionLease,
         projectScalable,
         scopedAccess,
@@ -38,6 +36,12 @@ const fixture = vi.hoisted(() => {
         }),
     }
 })
+
+const ownedStorageStub = {
+    getItem: vi.fn(), setItem: vi.fn(), removeItem: vi.fn(), clear: vi.fn(),
+    key: vi.fn(), keys: vi.fn(), length: vi.fn(), snapshot: vi.fn(async () => ({})),
+    mutate: vi.fn(),
+}
 
 vi.mock('../plugins.svelte', () => {
     const unrelated = vi.fn()
@@ -55,18 +59,17 @@ vi.mock('../plugins.svelte', () => {
     return {
         allowedDbKeys: [],
         applyPreparedPluginDatabaseUpdate: vi.fn(),
-        chatOutputListenerProvenance: fixture.listenerProvenance,
         customProviderStore: {
             subscribe(run: (value: string[]) => void) { run([]); return () => undefined },
             set: vi.fn(),
         },
         getV2PluginAPIs: () => oldApis,
         handlePluginInstallViaPlugin: vi.fn(),
-        pluginCompatibility: {
-            profile: 'scalable-v3',
-            allowsEviction: true,
-        },
         pluginStorageStore: {
+            forOwner: () => ownedStorageStub,
+            ownerOf: () => 'test-plugin',
+            invalidateOwner: vi.fn(),
+            synchronizeCommittedMutation: vi.fn(),
             snapshot: vi.fn(async () => []), mutate: unrelated, invalidate: unrelated,
             getItem: unrelated, setItem: unrelated, removeItem: unrelated,
             clear: unrelated, key: unrelated, keys: unrelated, length: unrelated,
@@ -79,7 +82,7 @@ vi.mock('../plugins.svelte', () => {
     }
 })
 vi.mock('src/ts/storage/database.svelte', () => ({ getDatabase: () => fixture.database }))
-vi.mock('../pluginSafeClass', () => ({ SafeLocalPluginStorage: class {}, tagWhitelist: [] }))
+vi.mock('../pluginSafeClass', () => ({ SafeLocalPluginStorage: class {}, SafeLocalStorage: class {}, tagWhitelist: [] }))
 vi.mock('src/ts/stores.svelte', () => ({
     DBState: { get db() { return fixture.database } },
     selectedCharID: {
@@ -128,7 +131,9 @@ vi.mock('src/ts/process/ttsHooks', () => ({
 vi.mock('src/ts/storage/persistentDataRuntime.svelte', () => ({
     acquireCompleteConversation: vi.fn(),
     captureSelectedConversationTarget: vi.fn(() => null),
-    flushPendingData: vi.fn(),
+    flushPendingDataLocally: vi.fn(),
+    assertPersistentMutationAllowed: vi.fn(),
+    getPersistentStorageAuthorityEpoch: () => 0,
     getActiveConversationSession: vi.fn(() => null),
     getPersistentNavigationGeneration: vi.fn(() => 0),
     invalidateActiveConversationSession: vi.fn(),
@@ -281,14 +286,11 @@ window.acceptance = (async () => {
 
         await dispatchChatOutputListeners({
             listeners: fixture.listeners,
-            provenance: fixture.listenerProvenance,
-            profile: 'scalable-v3',
             char: finalLiveCharacter,
             chat: finalLiveChat,
             characterIndex: 1,
             chatIndex: 0,
             messageIndex: 1,
-            snapshot: structuredClone,
             projectScalable: fixture.projectScalable,
             onError: (error) => { throw error },
         })
@@ -365,14 +367,11 @@ window.ready = (async () => {
         expect(fixture.listeners).toHaveLength(0)
         await dispatchChatOutputListeners({
             listeners: fixture.listeners,
-            provenance: fixture.listenerProvenance,
-            profile: 'scalable-v3',
             char: finalLiveCharacter,
             chat: finalLiveChat,
             characterIndex: 1,
             chatIndex: 0,
             messageIndex: 1,
-            snapshot: structuredClone,
             projectScalable: fixture.projectScalable,
             onError: (error) => { throw error },
         })

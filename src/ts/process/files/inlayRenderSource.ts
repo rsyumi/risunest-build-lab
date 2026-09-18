@@ -94,6 +94,7 @@ function startDeferredInlaySources(
     const originalSources = new Map<Element, Array<{ element: HTMLElement, url: string }>>()
     const isManagedOriginalUrl = (url: string) => {
         if (url.startsWith('data:') || url.startsWith('risuasset:') || url.includes('://risuasset.localhost/')) return true
+        if (/^http:\/\/127\.0\.0\.1:[1-9][0-9]*\/[a-f0-9]{32}\/(?:[a-f0-9]{2})+(?:\?[^#]*)?(?:#.*)?$/.test(url)) return true
         try {
             return new URL(url, document.baseURI).hostname === 'risuasset.localhost'
         }
@@ -386,7 +387,7 @@ export async function getInlayRenderSource(
 ): Promise<InlayRenderSource | null> {
     if (native) {
         const metadata = knownMetadata
-            ?? await getInlayAssetMetadata(id, { migrateLegacy: false })
+            ?? await getInlayAssetMetadata(id)
         if (!metadata) return null
         const url = await getInlayAssetRenderUrl(id)
         return url ? sourceFromMetadata(metadata, url, false) : null

@@ -12,11 +12,9 @@ use risunest_sync_wire::{Receipt, RecordVersion, RemoteHead, Sequence, TerminalS
 
 fn head(seq: u64) -> RemoteHead {
     RemoteHead {
-        library_id: "library".into(),
-        epoch: "epoch".into(),
         seq: Sequence::from(seq),
         head_id: risunest_sync_wire::hash(seq.to_string().as_bytes()),
-        min_retained_seq: Sequence::from(0),
+        ..RemoteHead::genesis("library".into(), "epoch".into()).unwrap()
     }
 }
 fn bind(store: &mut PersistentStore) {
@@ -119,7 +117,7 @@ fn remote_apply_cursor_base_and_outbox_are_atomic_and_preserve_local_tail() {
     assert!(store.server_status().unwrap().head.is_none());
     assert_eq!(store.server_status().unwrap().dirty_records, 1);
     assert_eq!(
-        store.server_base("r1:root").unwrap().0,
+        store.server_base(risunest_sync_wire::Domain::Library, "r1:root").unwrap().0,
         RecordVersion::Absent
     );
     store
@@ -252,6 +250,46 @@ fn operation_identity_survives_reopen_staging_changes_and_terminal_receipts() {
         .server_reserve(&head(1), "b".repeat(64), "stage-d".into(), 1)
         .is_err());
 }
+#[test]
+fn expired_operation_history_drops_only_the_obsolete_attempt_and_keeps_local_work() {
+    let (_dir, mut store, _) = open_fixture();
+    bind(&mut store);
+    store
+        .commit(&WorkingSetCommit {
+            root: Some(json!({"synthetic":"still-dirty"})),
+            ..empty_working_set_commit(1)
+        })
+        .unwrap();
+    let root = store.read_root(None).unwrap().value;
+    let dirty = store.server_status().unwrap().dirty_records;
+    store
+        .server_reserve(
+            &head(0),
+            "b".repeat(64),
+            "expired-stage".into(),
+            store.revision().unwrap(),
+        )
+        .unwrap();
+
+    store.server_abandon_expired_operation().unwrap();
+
+    assert!(store.server_pending().unwrap().is_none());
+    assert_eq!(store.server_status().unwrap().dirty_records, dirty);
+    assert_eq!(store.read_root(None).unwrap().value, root);
+    assert!(!store.server_status().unwrap().registration_required);
+    assert_eq!(
+        store
+            .server_reserve(
+                &head(0),
+                "c".repeat(64),
+                "replacement-stage".into(),
+                store.revision().unwrap(),
+            )
+            .unwrap()
+            .device_operation_seq,
+        Sequence::from(2)
+    );
+}
 
 #[test]
 fn recovery_preserves_local_edits_and_bases_while_invalidating_old_operations() {
@@ -275,7 +313,7 @@ fn recovery_preserves_local_edits_and_bases_while_invalidating_old_operations() 
     store
         .connection
         .execute(
-            "INSERT INTO server_sync_base VALUES('r1:root',?1,?2)",
+            "INSERT INTO server_sync_base VALUES('library','r1:root',?1,?2)",
             params![
                 serde_json::to_string(&RecordVersion::Absent).unwrap(),
                 "c".repeat(64)
@@ -301,7 +339,7 @@ fn recovery_preserves_local_edits_and_bases_while_invalidating_old_operations() 
     assert_eq!(store.read_root(None).unwrap().value, before);
     assert_eq!(store.revision().unwrap(), revision);
     assert_eq!(
-        store.server_base("r1:root").unwrap().1,
+        store.server_base(risunest_sync_wire::Domain::Library, "r1:root").unwrap().1,
         Some("c".repeat(64))
     );
     let mut config = store.server_config().unwrap().unwrap();

@@ -1,3 +1,4 @@
+import { UNOWNED_PLUGIN_OWNER } from '../../plugins/pluginOwner'
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Database } from '../database.svelte'
@@ -56,12 +57,14 @@ function createStore(input?: {
             revision: input?.replacementRevision ?? revision + 1,
         })),
         queryCharacters: vi.fn(),
+        readCharacterSummary: vi.fn(async () => null),
         readCharacter: vi.fn(),
         queryConversations: vi.fn(),
         readConversation: vi.fn(),
         readConversationMetadata: vi.fn(),
         readConversationWindow: vi.fn(),
-        queryPluginStorage: vi.fn(async () => ({ revision, items: [] })),
+        listPluginStorage: vi.fn(async () => []),
+        queryPluginStorage: vi.fn(async () => ({ revision, items: [] as never[] })),
         readPluginStorage: vi.fn(async () => null),
         readAssetAlias: vi.fn(async () => null),
         readAssetAliasesByKeys: vi.fn(async () => ({ revision, value: [] })),
@@ -71,19 +74,13 @@ function createStore(input?: {
             value: { format: 'legacy' as const },
         })),
         readAssetOwnerHead: vi.fn(async () => null),
-        readColdPayloadAuthority: vi.fn(async () => ({
-            revision,
-            value: { format: 'legacy' as const },
-        })),
-        readColdAlias: vi.fn(async () => null),
-        listColdAliases: vi.fn(async () => ({ revision, value: [] })),
         commitAssetAlias: vi.fn(),
         deleteAssetAlias: vi.fn(),
         activateAssetRepositoryMigration: vi.fn(),
-        commitColdAlias: vi.fn(),
-        deleteColdAlias: vi.fn(),
-        activateColdPayloadMigration: vi.fn(),
         commit: vi.fn(),
+        archivePreview: vi.fn(),
+        archiveCharacter: vi.fn(),
+        restoreCharacter: vi.fn(),
         acquireRevision: vi.fn(),
     }
 }
@@ -109,7 +106,7 @@ describe('bootstrapPersistentDatabase', () => {
         })
         expect(store.materializeDatabase).not.toHaveBeenCalled()
         expect(store.replaceFromDatabase).toHaveBeenCalledWith(prepared, 0)
-        expect(result).toEqual({ database: prepared, revision: 1, profile: 'scalable-v3' })
+        expect(result).toEqual({ database: prepared, revision: 1 })
     })
 
     it('reads a nonblank persistent revision without rewriting it', async () => {
@@ -130,7 +127,6 @@ describe('bootstrapPersistentDatabase', () => {
         expect(result).toEqual({
             database: persistent,
             revision: 7,
-            profile: 'maximum-compatibility',
         })
     })
 
@@ -184,7 +180,6 @@ describe('bootstrapPersistentDatabase', () => {
         expect(result).toEqual({
             database: changed,
             revision: 5,
-            profile: 'maximum-compatibility',
         })
     })
 
@@ -238,7 +233,6 @@ describe('bootstrapPersistentDatabase', () => {
             }),
         }))
         expect(result.revision).toBe(1)
-        expect(result.profile).toBe('scalable-v3')
         expect(result.database.botPresets[0]).toEqual({
             name: persistent.botPresets[0].name,
             image: persistent.botPresets[0].image,
@@ -257,9 +251,57 @@ describe('bootstrapPersistentDatabase', () => {
         ])
         expect(result.database.characters.map(getCatalogConversationCount)).toEqual([1, 2, 1])
         expect(result.database.pluginCustomStorage).toEqual({})
-        expect((await store.readPluginStorage('plugin-memory'))?.value).toEqual(
+        expect((await store.readPluginStorage(UNOWNED_PLUGIN_OWNER, 'plugin-memory'))?.value).toEqual(
             persistent.pluginCustomStorage['plugin-memory'],
         )
+    })
+
+    it('fully migrates pre-v3 characters once before projecting a scalable working set', async () => {
+        const indexedDB = new IDBFactory()
+        const store = new IndexedDbPersistentDataStore(
+            `bootstrap-scalable-migration-${crypto.randomUUID()}`,
+            indexedDB,
+            IDBKeyRange,
+        )
+        const persistent = structuredClone(fixtureDatabase)
+        persistent.plugins = [plugin('2.1', false)]
+        delete (persistent as Partial<Database>).formatversion
+        persistent.characters[0].image = 'C:\\synthetic\\assets\\avatar.png'
+        persistent.characters[0].emotionImages = [
+            ['happy', 'C:\\synthetic\\assets\\happy.png'],
+        ]
+        await store.open()
+        await store.replaceFromDatabase(persistent)
+        const materializeDatabase = vi.spyOn(store, 'materializeDatabase')
+
+        const result = await bootstrapPersistentDatabase({
+            store,
+            now: () => 500,
+            prepareDatabase: async (database) => {
+                const migrated = structuredClone(database)
+                migrated.formatversion = 5
+                migrated.characters[0].image = 'assets/avatar.png'
+                migrated.characters[0].emotionImages = [
+                    ['happy', 'assets/happy.png'],
+                ]
+                return preparedResult(database, migrated)
+            },
+            prepareRoot: async (root) => structuredClone(root),
+            projectScalableWorkingSet: (input) => projectCatalogWorkingSet(
+                input.root,
+                input.characters,
+                createCatalogPresetWorkingSet(input.presetCatalog, input.activePreset),
+            ),
+        })
+
+        expect(materializeDatabase).toHaveBeenCalledOnce()
+        expect(result.database.characters.every(isCatalogCharacterStub)).toBe(true)
+        const stored = await store.materializeDatabase(result.revision)
+        expect(stored.formatversion).toBe(5)
+        expect(stored.characters[0].image).toBe('assets/avatar.png')
+        expect(stored.characters[0].emotionImages).toEqual([
+            ['happy', 'assets/happy.png'],
+        ])
     })
 
     it('yields between character catalog pages without delaying every summary', async () => {
@@ -382,7 +424,6 @@ describe('bootstrapPersistentDatabase', () => {
             ),
         })
 
-        expect(result.profile).toBe('scalable-v3')
         expect(await store.materializeDatabase(result.revision)).toEqual(prepared)
         expect(result.database.botPresets[0]).toEqual({
             name: prepared.botPresets[0].name,

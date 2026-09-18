@@ -14,29 +14,34 @@ const state = vi.hoisted(() => ({
     restartNativeApp: vi.fn(async () => undefined),
     alertError: vi.fn(),
     alertInput: vi.fn(async () => 'drive-token'),
+    alertNormal: vi.fn(),
     alertSelect: vi.fn(async () => '0'),
     blobStore: null as BlobStore | null,
     currentDatabase: null as Database | null,
     forageInit: vi.fn(async () => undefined),
-    localCold: new Map<string, unknown>(),
     officialCold: new Map<string, unknown>(),
     publishCurrentOfficialRevision: vi.fn<() => Promise<void>>(),
-    replacePersistentDatabase: vi.fn<(database: Database, reason: string) => Promise<void>>(),
+    replacePersistentDatabase: vi.fn<PersistentDataRuntime['replacePersistentDatabase']>(),
     runtime: null as PersistentDataRuntime | null,
-    snapshotSeenByColdStorage: null as Database | null,
-    coldStoragePayloads: [] as Array<{
-        key: string
-        backupName: string
-        value: unknown
-    }>,
     restoreEvents: [] as string[],
     getUncleanables: vi.fn(async () => ['assets/second-read.png']),
+    externalGetState: vi.fn(async () => ({
+        supported: true,
+        selection: { kind: 'none', selectionEpoch: 'selection', paused: false, decisionRequired: false },
+        connections: [],
+        jobs: [],
+    })),
+    externalListHistory: vi.fn(async () => ({ items: [] })),
+    requestExternalStorageNow: vi.fn(async () => undefined),
+    requestExternalStorageRestore: vi.fn(async () => undefined),
+    settingsOpenSet: vi.fn(),
+    settingsMenuSet: vi.fn(),
 }))
 
 vi.mock('../alert', () => ({
     alertError: state.alertError,
     alertInput: state.alertInput,
-    alertNormal: vi.fn(),
+    alertNormal: state.alertNormal,
     alertSelect: state.alertSelect,
     alertStore: { set: vi.fn() },
 }))
@@ -51,9 +56,9 @@ vi.mock('../globalApi.svelte', () => ({
         Init: state.forageInit,
         isAccount: true,
     },
-    getUncleanablesSync: vi.fn((_database: Database, _mode: string, options: {
+    getUncleanablesSync: vi.fn((database: Database, _mode: string, options?: {
         chars: Array<{ image?: string }>
-    }) => options.chars.flatMap((character) => (
+    }) => (options?.chars ?? database.characters).flatMap((character) => (
         character.image?.split('/').at(-1) ? [character.image.split('/').at(-1)!] : []
     ))),
     getUncleanables: state.getUncleanables,
@@ -75,7 +80,31 @@ vi.mock('../storage/nativePersistentMaintenance', () => ({
 }))
 
 vi.mock('../../lang', () => ({
-    language: { pasteAuthCode: 'Paste code' },
+    language: {
+        pasteAuthCode: 'Paste code',
+        cancel: 'Cancel',
+        risuNest: {
+            storage: { emptyList: 'Nothing saved yet.' },
+            backup: { actionFailed: 'Backup action failed.' },
+        },
+    },
+}))
+
+vi.mock('../storage/sync/external/bridge', () => ({
+    getExternalStorageBridge: () => ({
+        getState: state.externalGetState,
+        listHistory: state.externalListHistory,
+    }),
+}))
+
+vi.mock('../storage/sync/external/production', () => ({
+    requestExternalStorageNow: state.requestExternalStorageNow,
+    requestExternalStorageRestore: state.requestExternalStorageRestore,
+}))
+
+vi.mock('../stores.svelte', () => ({
+    settingsOpen: { set: state.settingsOpenSet },
+    SettingsMenuIndex: { set: state.settingsMenuSet },
 }))
 
 vi.mock('@tauri-apps/plugin-process', () => ({
@@ -91,15 +120,8 @@ vi.mock('../characterCards', () => ({
 }))
 
 vi.mock('../process/coldstorage.svelte', () => ({
-    collectColdStorageBackupPayloads: vi.fn(async (database: Database) => {
-        state.snapshotSeenByColdStorage = database
-        return { payloads: state.coldStoragePayloads, missingKeys: [], invalidKeys: [] }
-    }),
-    confirmIncompleteColdStorageOperation: vi.fn(async () => true),
+    confirmIncompleteColdStorageRestore: vi.fn(async () => true),
     getColdStorageBackupName: (key: string) => `coldstorage_${key}.json`,
-    getColdStorageItem: async (key: string, options?: { accountFallback?: boolean }) => (
-        options?.accountFallback ? structuredClone(state.localCold.get(key) ?? null) : null
-    ),
     isColdStorageBackupData: (value: unknown) => Boolean(
         value
         && typeof value === 'object'
@@ -108,18 +130,13 @@ vi.mock('../process/coldstorage.svelte', () => ({
     listColdDataKeys: async (database: Database) => database.characters
         .map((character) => character.coldstorage)
         .filter((key): key is string => Boolean(key)),
-    setLocalColdStorageItem: vi.fn(async (key: string, value: unknown) => {
-        state.restoreEvents.push(`cold:${key}`)
-        state.localCold.set(key, structuredClone(value))
-        return true
-    }),
 }))
 
 vi.mock('../storage/persistentDataRuntime.svelte', () => ({
     getPersistentDataRuntime: () => state.runtime,
     publishCurrentOfficialRevision: () => state.publishCurrentOfficialRevision(),
-    replacePersistentDatabase: (database: Database, reason: string) => (
-        state.replacePersistentDatabase(database, reason)
+    replacePersistentDatabase: (...args: Parameters<PersistentDataRuntime['replacePersistentDatabase']>) => (
+        state.replacePersistentDatabase(...args)
     ),
 }))
 
@@ -165,17 +182,97 @@ function driveDatabase(coldKey: string): Database {
     return database
 }
 
+describe('native Drive settings routing', () => {
+    const googleConnection = {
+        id: 'google-primary',
+        providerId: 'google_drive',
+        displayName: 'Google backup',
+        status: 'ready',
+        scope: {
+            library: true,
+            referencedAssets: true,
+            deviceSettings: true,
+            devicePlugins: false,
+        },
+    }
+
+    beforeEach(() => {
+        vi.clearAllMocks()
+        state.externalGetState.mockResolvedValue({
+            supported: true,
+            selection: { kind: 'none', selectionEpoch: 'selection', paused: false, decisionRequired: false },
+            connections: [googleConnection],
+            jobs: [],
+        })
+        state.externalListHistory.mockResolvedValue({ items: [] })
+        state.alertSelect.mockResolvedValue('0')
+    })
+
+    it('uses the common external backup orchestration for the native save button', async () => {
+        const { checkDriver } = await import('./drive')
+        await checkDriver('savetauri')
+
+        expect(state.requestExternalStorageNow).toHaveBeenCalledWith('google-primary', 'backup')
+        expect(state.alertInput).not.toHaveBeenCalled()
+    })
+
+    it('restores a verified external snapshot with what the bundle covers', async () => {
+        state.externalListHistory.mockResolvedValue({
+            items: [{
+                id: 'snapshot-7',
+                kind: 'backup-point',
+                createdAtMs: '1000',
+                logicalRevision: '7',
+                pinned: false,
+                complete: true,
+                verified: true,
+                includedSections: ['hypa', 'local-plugins', 'local-settings'],
+                sameDevice: false,
+            }],
+        })
+        const { checkDriver } = await import('./drive')
+        await checkDriver('loadtauri')
+
+        expect(state.requestExternalStorageRestore).toHaveBeenCalledWith(
+            'google-primary',
+            'snapshot-7',
+            ['library', 'referencedAssets', 'hypa', 'local-plugins'],
+        )
+    })
+
+    it('opens the existing external storage setup when Google is not connected', async () => {
+        state.externalGetState.mockResolvedValue({
+            supported: true,
+            selection: { kind: 'none', selectionEpoch: 'selection', paused: false, decisionRequired: false },
+            connections: [],
+            jobs: [],
+        })
+        const { checkDriver } = await import('./drive')
+        await checkDriver('savetauri')
+
+        expect(state.settingsOpenSet).toHaveBeenCalledWith(true)
+        expect(state.settingsMenuSet).toHaveBeenCalledWith(17)
+        expect(state.requestExternalStorageNow).not.toHaveBeenCalled()
+    })
+
+    it('preserves the official-account refresh-token authorization URL', async () => {
+        const { checkDriver } = await import('./drive')
+        const url = await checkDriver('reftoken')
+
+        expect(url).toContain('redirect_uri=https%3A%2F%2Fsv.risuai.xyz%2Fdrive')
+        expect(url).toContain('state=accesstauri')
+        expect(url).toContain('access_type=offline')
+    })
+})
+
 describe('Drive restore cold snapshot assets', () => {
     beforeEach(() => {
         vi.clearAllMocks()
         state.ios = false
-        state.localCold.clear()
         state.officialCold.clear()
         state.blobStore = null
         state.currentDatabase = driveDatabase('current-cold')
         state.runtime = null
-        state.snapshotSeenByColdStorage = null
-        state.coldStoragePayloads = []
         state.restoreEvents = []
     })
 
@@ -235,18 +332,18 @@ describe('Drive restore cold snapshot assets', () => {
                 },
             },
             cold: {
-                readLocal: async (key) => structuredClone(state.localCold.get(key) ?? null),
                 readRemote: async (key) => structuredClone(state.officialCold.get(key) ?? null),
-                writeRemote: async () => undefined,
             },
             prepareCandidate: async (candidate) => structuredClone(candidate),
             markPublished: vi.fn(),
             ledger: createUnrecordedOfficialAssetLedger(),
         })
-        state.replacePersistentDatabase.mockImplementation(async (candidate, reason) => {
+        state.replacePersistentDatabase.mockImplementation(async (candidate, reason, options) => {
             expect(reason).toBe('drive-restore')
+            expect(options?.publishOfficial).toBe(true)
             state.restoreEvents.push('database')
             revision = (await store.replaceFromDatabase(structuredClone(candidate))).revision
+            return { kind: 'committed', revision, projection: 'applied' }
         })
         state.publishCurrentOfficialRevision.mockImplementation(async () => {
             const publication = await adapter.pin(revision)
@@ -283,8 +380,8 @@ describe('Drive restore cold snapshot assets', () => {
                 : new Response(null, { status: 404 })
         }))
 
-        const { checkDriver } = await import('./drive')
-        await checkDriver('loadtauri')
+        const { loadDrive } = await import('./drive')
+        await loadDrive('drive-token', 'backup')
 
         expect(state.restartNativeApp).toHaveBeenCalledTimes(ios ? 1 : 0)
         const { relaunch } = await import('@tauri-apps/plugin-process')
@@ -298,7 +395,6 @@ describe('Drive restore cold snapshot assets', () => {
         expect(accountWrites).not.toContain('assets/account-only.png')
         expect(accountWrites.at(-1)).toBe('database/database.bin')
         expect(state.restoreEvents).toEqual([
-            `cold:${coldKey}`,
             'asset:assets/drive-only.png',
             `asset:${pluginAssetKey}`,
             'database',
@@ -307,7 +403,7 @@ describe('Drive restore cold snapshot assets', () => {
         expect(state.alertError).not.toHaveBeenCalled()
     })
 
-    it('uploads database and pinned cold assets without rereading mutable cold storage', async () => {
+    it('uploads the pinned database and its referenced assets', async () => {
         const persisted = structuredClone(risuSaveFixtureDatabase) as Database
         const pluginAssetKey = 'assets/plugin-drive-upload.bin'
         const pluginAssetBytes = Uint8Array.of(8, 9)
@@ -319,6 +415,7 @@ describe('Drive restore cold snapshot assets', () => {
             ],
             prose: 'prefix assets/not-a-reference.bin',
         }
+        persisted.characters[0].image = 'assets/cold-pinned.png'
         const store = new IndexedDbPersistentDataStore(
             `drive-backup-${crypto.randomUUID()}`,
             new IDBFactory(),
@@ -339,20 +436,6 @@ describe('Drive restore cold snapshot assets', () => {
             ['assets/first/shared.bin', Uint8Array.of(1)],
             ['assets/second/shared.bin', Uint8Array.of(2)],
         ]))
-        state.coldStoragePayloads = [{
-            key: 'cold-char',
-            backupName: 'coldstorage_cold-char.json',
-            value: {
-                character: {
-                    ...persisted.characters[0],
-                    image: 'assets/cold-pinned.png',
-                },
-            },
-        }, {
-            key: 'cold-message',
-            backupName: 'coldstorage_cold-message.json',
-            value: { message: [{ role: 'user', data: 'second payload' }] },
-        }]
         state.runtime = {
             store,
             revision: imported.revision,
@@ -381,8 +464,8 @@ describe('Drive restore cold snapshot assets', () => {
             })
         }))
 
-        const { checkDriver } = await import('./drive')
-        await checkDriver('savetauri')
+        const { backupDrive } = await import('./drive')
+        await backupDrive('drive-token')
 
         const databaseEntry = [...uploads.entries()].find(([name]) =>
             name.endsWith('-database.risudat'),
@@ -393,19 +476,13 @@ describe('Drive restore cold snapshot assets', () => {
             persisted.characters[0].chats[0].message,
         )
         expect(backedUp.pluginCustomStorage).toEqual(persisted.pluginCustomStorage)
-        expect(state.snapshotSeenByColdStorage).toEqual({ characters: [] })
         expect(materializeDatabase).not.toHaveBeenCalled()
         expect(uploads.has('cold-pinned.png.bin')).toBe(true)
         expect(uploads.has('second-read.png.bin')).toBe(false)
         expect(uploads.get('plugin-drive-upload.bin.bin')).toEqual(pluginAssetBytes)
         expect(uploads.has('shared.bin.bin')).toBe(false)
         expect(uploads.has('not-a-reference.bin.bin')).toBe(false)
-        expect([...uploads.entries()].filter(([name]) => name.startsWith('coldstorage_'))).toEqual(
-            state.coldStoragePayloads.map((payload) => [
-                payload.backupName,
-                new TextEncoder().encode(JSON.stringify(payload.value)),
-            ]),
-        )
+        expect([...uploads.keys()].some((name) => name.startsWith('coldstorage_'))).toBe(false)
         expect(state.getUncleanables).not.toHaveBeenCalled()
         expect(state.runtime.capturePersistentMutationToken).toHaveBeenCalledWith('drive-backup')
     })

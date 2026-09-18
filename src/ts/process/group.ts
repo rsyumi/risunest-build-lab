@@ -13,12 +13,13 @@ import {
     getPersistentNavigationGeneration,
     hydrateCurrentGroupMemberDetail,
     markPersistentDataDirty,
+    readPersistentCharacterDetail,
     reconcilePersistentActiveCharacterIds,
 } from "../storage/persistentDataRuntime.svelte";
-import { restoreColdPersistentCharacter } from './coldCharacterRestore'
 import { doingChat } from './generationState'
 import { appendCurrentConversationMessage } from '../conversationMutations'
 import type { groupChat } from '../storage/database.svelte'
+import { isArchivedCharacter } from '../storage/workingSetCatalog'
 import type { CompleteConversationLease } from '../storage/activeWorkingSet.svelte'
 import { v4 } from 'uuid'
 
@@ -75,6 +76,11 @@ export async function addGroupChar(): Promise<boolean> {
                 alertError(language.errors.alreadyCharInGroup)
                 return false
             }
+            const candidate = DBState.db.characters.find((value) => value.chaId === res)
+            if(candidate && isArchivedCharacter(candidate)){
+                alertError(language.risuNest.archive.groupMemberBlocked.replace('{0}', '1'))
+                return false
+            }
             else{
                 const loadFirstMessage = await alertConfirm(language.askLoadFirstMsg)
                 const groupId = group.chaId
@@ -103,13 +109,10 @@ export async function addGroupChar(): Promise<boolean> {
                         !activeSession.matchesConversation(groupId, selectedChat)
                     ) return false
                     const restoreGeneration = getPersistentNavigationGeneration()
-                    const member = await restoreColdPersistentCharacter(res, {
-                        errorMessage: language.errors.coldStorageRestoreFailed,
-                        isCurrent: () => (
-                            getPersistentNavigationGeneration() === restoreGeneration &&
-                            isSelectedGroup(groupId)
-                        ),
-                    })
+                    const member = await readPersistentCharacterDetail(
+                        res,
+                        'group-member-inspection',
+                    )
                     if (
                         !member ||
                         getPersistentNavigationGeneration() !== restoreGeneration ||

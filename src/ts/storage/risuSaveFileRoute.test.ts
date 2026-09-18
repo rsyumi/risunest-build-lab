@@ -16,12 +16,15 @@ function dependencies(platform: 'native-desktop' | 'web'): RisuSaveFileRouteDepe
         runtime: () => ({
             store: {} as never,
             revision: 4,
+            getStorageAuthorityEpoch: () => 1,
             flushPendingData: vi.fn(async () => undefined),
             capturePersistentMutationToken: vi.fn(async () => ({
                 revision: 4,
                 mutationGeneration: 1,
             })),
+            markCommittedWorkingSetRefreshRequired: vi.fn(),
             acquireDestructiveReplacementFence: vi.fn(async () => ({
+                revision: 4,
                 refreshCommittedWorkingSet: vi.fn(async () => undefined),
                 release: vi.fn(),
             })),

@@ -22,7 +22,7 @@ export async function connectSyntheticAndroid(port, adb, serial) {
     return connectVerifiedIdentity(port, 'io.github.rsyumi.risunest', 120_000)
 }
 
-async function connectVerifiedIdentity(port, identifier, timeoutMs) {
+export async function connectVerifiedIdentity(port, identifier, timeoutMs = 120_000) {
     const deadline = Date.now() + timeoutMs
     while (Date.now() < deadline) {
         let targets
@@ -34,10 +34,15 @@ async function connectVerifiedIdentity(port, identifier, timeoutMs) {
         }
         for (const target of targets.filter((item) => item.type === 'page')) {
             const ws = new WebSocket(target.webSocketDebuggerUrl)
-            await new Promise((resolve, reject) => {
-                ws.onopen = resolve
-                ws.onerror = () => reject(new Error('CDP connection failed'))
-            })
+            try {
+                await new Promise((resolve, reject) => {
+                    ws.onopen = resolve
+                    ws.onerror = () => reject(new Error('CDP connection failed'))
+                })
+            } catch {
+                ws.close()
+                continue
+            }
             let sequence = 0
             const pending = new Map()
             ws.onmessage = ({ data }) => {
@@ -182,6 +187,7 @@ export const instrumentation = `(() => {
                 const before = scroll.scrollTop, scrollStart = performance.now();
                 const maximum = scroll.scrollHeight - scroll.clientHeight;
                 const reversed = getComputedStyle(scroll).flexDirection === 'column-reverse';
+                scroll.dispatchEvent(new WheelEvent('wheel', {deltaY: reversed ? -100 : 100, bubbles: true}));
                 scroll.scrollTop = reversed
                     ? before > -maximum + 1 ? Math.max(-maximum, before - 100) : Math.min(0, before + 100)
                     : before < maximum - 1 ? Math.min(maximum, before + 100) : Math.max(0, before - 100);

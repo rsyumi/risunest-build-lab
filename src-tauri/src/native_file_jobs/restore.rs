@@ -7,7 +7,7 @@ use super::{
 use crate::persistent_store::{RevisionResult, StagingResult, StoreError, StoreResult};
 use flate2::bufread::GzDecoder;
 use rmpv::Value as MessagePackValue;
-use serde_json::Value;
+use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashSet};
 use std::io::{self, BufReader, Read};
@@ -45,6 +45,14 @@ pub(crate) trait ReplacementSink: Send + Sync {
         _expected_revision: i64,
     ) -> StoreResult<()> {
         Ok(())
+    }
+    /// Values the staged save left without an owner. A file RisuNest wrote
+    /// carries ownership, so this is empty for it.
+    fn staged_plugin_preview(
+        &self,
+        _staging_id: &str,
+    ) -> StoreResult<crate::persistent_store::commit::StagedPluginPreview> {
+        Ok(crate::persistent_store::commit::StagedPluginPreview::default())
     }
     fn commit(&self, staging_id: &str, expected_revision: i64) -> StoreResult<RevisionResult>;
     fn abort(&self, staging_id: &str) -> StoreResult<()>;
@@ -283,15 +291,35 @@ fn restore_risu_save_reader_controlled<R: Read>(
         if job.is_cancel_requested() {
             return Err(cancelled("restore cancelled before activation"));
         }
-        sink.preserve_active_repositories(&staging_id, expected_revision)
-            .map_err(store_error)?;
+        // The renderer keeps serving the app while this job reads and stages,
+        // so it may commit in that window. Copying the active repositories here
+        // is the fast path for the common case; activation repeats it whenever
+        // the renderer reports a different revision to replace.
+        let preserved = match sink.preserve_active_repositories(&staging_id, expected_revision) {
+            Ok(()) => true,
+            Err(StoreError::RevisionConflict { .. }) => false,
+            Err(error) => return Err(store_error(error)),
+        };
         if job.is_cancel_requested() {
             return Err(cancelled("restore cancelled before activation"));
         }
-        job.wait_for_restore_finalization()
+        // A save that says nothing about ownership gets one pass over its
+        // plugin values before the replacement is applied.
+        let preview = sink
+            .staged_plugin_preview(&staging_id)
+            .map_err(store_error)?;
+        job.set_plugin_value_preview(&staging_id, preview)
             .map_err(|error| job_error(job, error))?;
+        let activation_revision = job
+            .wait_for_restore_finalization()
+            .map_err(|error| job_error(job, error))?
+            .unwrap_or(expected_revision);
+        if !preserved || activation_revision != expected_revision {
+            sink.preserve_active_repositories(&staging_id, activation_revision)
+                .map_err(store_error)?;
+        }
         let revision = sink
-            .commit(&staging_id, expected_revision)
+            .commit(&staging_id, activation_revision)
             .map_err(store_error)?
             .revision;
         Ok(JobResultSummary {
@@ -485,6 +513,17 @@ fn stage_legacy_database<R: Read>(
             ));
         }
     }
+    for key in ["modules", "loadouts", "plugins"] {
+        if root.get(key).is_some_and(|value| !value.is_array()) {
+            return Err(invalid(format!(
+                "legacy MessagePack {key} must be an array"
+            )));
+        }
+        root.entry(key.to_owned())
+            .or_insert_with(|| Value::Array(Vec::new()));
+    }
+    root.entry("pluginCustomStorage".to_owned())
+        .or_insert_with(|| Value::Object(Map::new()));
 
     let character_total = characters.len() as u64;
     reader.counts.characters_total = Some(character_total);
@@ -610,7 +649,7 @@ fn messagepack_to_json(value: MessagePackValue) -> Result<JsonSlot, NativeJobErr
         MessagePackValue::Ext(-1, bytes) => {
             Ok(JsonSlot::Value(Value::String(timestamp_to_iso(&bytes)?)))
         }
-        MessagePackValue::Ext(kind, _) => Err(compatibility_fallback(format!(
+        MessagePackValue::Ext(kind, _) => Err(unsupported(format!(
             "unsupported legacy MessagePack extension {kind}"
         ))),
     }
@@ -718,7 +757,7 @@ fn timestamp_to_iso(bytes: &[u8]) -> Result<String, NativeJobError> {
     const JS_DATE_LIMIT_MILLISECONDS: f64 = 8_640_000_000_000_000.0;
     let milliseconds = seconds as f64 * 1000.0 + nanoseconds as f64 / 1_000_000.0;
     if !milliseconds.is_finite() || milliseconds.abs() > JS_DATE_LIMIT_MILLISECONDS {
-        return Err(compatibility_fallback(
+        return Err(unsupported(
             "MessagePack timestamp is outside the JavaScript Date range",
         ));
     }
@@ -727,9 +766,7 @@ fn timestamp_to_iso(bytes: &[u8]) -> Result<String, NativeJobError> {
     let clipped_nanoseconds = milliseconds.rem_euclid(1000) as u32 * 1_000_000;
     let datetime = time::OffsetDateTime::from_unix_timestamp(clipped_seconds)
         .and_then(|value| value.replace_nanosecond(clipped_nanoseconds))
-        .map_err(|_| {
-            compatibility_fallback("MessagePack timestamp cannot be represented natively")
-        })?;
+        .map_err(|_| unsupported("MessagePack timestamp cannot be represented natively"))?;
     let year = datetime.year();
     let year = if (0..=9999).contains(&year) {
         format!("{year:04}")
@@ -788,6 +825,7 @@ fn parse_and_stage<R: Read>(
     let mut loadouts = None;
     let mut plugins = None;
     let mut plugin_storage = None;
+    let mut plugin_storage_meta = None;
     let mut character_batch = Vec::new();
     let mut character_batch_bytes = 0usize;
     let mut character_count = 0u64;
@@ -903,6 +941,12 @@ fn parse_and_stage<R: Read>(
                 }
                 plugin_storage = Some(value);
             }
+            12 if name == "pluginStorageMeta" => {
+                if !value.is_object() {
+                    return Err(invalid("pluginStorageMeta block must be a JSON object"));
+                }
+                plugin_storage_meta = Some(value);
+            }
             3 | 6 | 8 => {
                 return Err(unsupported(format!(
                     "block type {block_type} for {name} requires the compatibility parser"
@@ -970,6 +1014,9 @@ fn parse_and_stage<R: Read>(
         "pluginCustomStorage".to_owned(),
         plugin_storage.ok_or_else(|| invalid("missing required block pluginStorage"))?,
     );
+    if let Some(meta) = plugin_storage_meta {
+        root.insert("pluginStorageMeta".to_owned(), meta);
+    }
     let presets = presets.ok_or_else(|| invalid("missing required block preset"))?;
     pocket_features::root(&root).map_err(invalid)?;
     sink.put_root(staging_id, &Value::Object(root))
@@ -1297,7 +1344,7 @@ fn messagepack_error(error: rmpv::decode::Error, job: &JobControl) -> NativeJobE
 }
 
 fn messagepack_io_error(error: io::Error, job: &JobControl) -> NativeJobError {
-    if job.is_cancel_requested() || error.kind() == io::ErrorKind::Interrupted {
+    if job.is_cancel_requested() {
         return cancelled("restore cancelled while decoding legacy MessagePack");
     }
     let message = error.to_string();
@@ -1341,7 +1388,7 @@ fn json_error(
 }
 
 fn gzip_io_error(name: &str, error: io::Error, job: &dyn RestoreControl) -> NativeJobError {
-    if job.is_cancel_requested() || error.kind() == io::ErrorKind::Interrupted {
+    if job.is_cancel_requested() {
         return cancelled(format!("restore cancelled while decoding block {name}"));
     }
     if error.to_string().contains("decoded block limit exceeded") {
@@ -1352,10 +1399,6 @@ fn gzip_io_error(name: &str, error: io::Error, job: &dyn RestoreControl) -> Nati
 
 fn invalid(message: impl AsRef<str>) -> NativeJobError {
     NativeJobError::new("invalid-input", message)
-}
-
-fn compatibility_fallback(message: impl AsRef<str>) -> NativeJobError {
-    NativeJobError::new("compatibility-fallback", message)
 }
 
 fn unsupported(message: impl AsRef<str>) -> NativeJobError {
@@ -1885,6 +1928,78 @@ mod tests {
     }
 
     #[test]
+    fn legacy_restore_supplies_required_optional_root_sections_for_block_round_trip() {
+        let (directory, sink) = fixture();
+        let database = json!({
+            "characters": [],
+            "botPresets": [],
+            "username": "Synthetic"
+        });
+        let job = JobRegistry::default()
+            .create(JobKind::RestoreBlockRisuSave)
+            .unwrap();
+        job.start(JobPhase::ReadingSource).unwrap();
+        let staging_id = sink.begin().unwrap().staging_id;
+        let mut reader = TrackedReader::new(io::empty(), 0, &*job);
+        stage_legacy_database(database, &staging_id, &job, &mut reader, &sink).unwrap();
+        sink.commit(&staging_id, 1).unwrap();
+
+        let exported_path = {
+            let mut store = sink.store.lock().unwrap();
+            let restored = store.materialize(Some(2)).unwrap();
+            assert_eq!(restored["modules"], json!([]));
+            assert_eq!(restored["loadouts"], json!([]));
+            assert_eq!(restored["plugins"], json!([]));
+            assert_eq!(restored["pluginCustomStorage"], json!({}));
+            let lease = store.acquire_revision(2).unwrap().lease;
+            let exported = store.export_risu_save(&lease, false).unwrap();
+            store.release_revision(&lease).unwrap();
+            PathBuf::from(exported.path)
+        };
+        let second_job = JobRegistry::default()
+            .create(JobKind::RestoreBlockRisuSave)
+            .unwrap();
+        restore_risu_save(&exported_path, 2, &second_job, &sink).unwrap();
+        assert_eq!(sink.store.lock().unwrap().revision().unwrap(), 3);
+        sink.store
+            .lock()
+            .unwrap()
+            .cleanup_risu_save_export(&exported_path)
+            .unwrap();
+        drop(directory);
+    }
+
+    #[test]
+    fn legacy_restore_rejects_present_nonarray_optional_root_sections() {
+        for (key, invalid_value) in [
+            ("modules", Value::Null),
+            ("loadouts", json!({})),
+            ("plugins", json!("invalid")),
+        ] {
+            let (_directory, sink) = fixture();
+            let mut database = json!({
+                "characters": [],
+                "botPresets": [],
+                "pluginCustomStorage": {}
+            });
+            database[key] = invalid_value;
+            let job = JobRegistry::default()
+                .create(JobKind::RestoreBlockRisuSave)
+                .unwrap();
+            job.start(JobPhase::ReadingSource).unwrap();
+            let staging_id = sink.begin().unwrap().staging_id;
+            let mut reader = TrackedReader::new(io::empty(), 0, &*job);
+            let error = match stage_legacy_database(database, &staging_id, &job, &mut reader, &sink)
+            {
+                Ok(_) => panic!("{key} must reject a present non-array value"),
+                Err(error) => error,
+            };
+            assert_eq!(error.code, "invalid-input");
+            assert!(error.message.contains(key));
+        }
+    }
+
+    #[test]
     fn strict_raw_msgpackr_restore_rejects_unknown_extensions_without_activation() {
         use base64::Engine;
 
@@ -1895,7 +2010,7 @@ mod tests {
         let bytes = legacy_wire(7, &payload);
 
         let error = assert_failed_general_restore_preserves_active(&bytes, "extension 42");
-        assert_eq!(error.code, "compatibility-fallback");
+        assert_eq!(error.code, "unsupported-format");
     }
 
     #[test]
@@ -2413,6 +2528,68 @@ mod tests {
     }
 
     #[test]
+    fn activation_replaces_against_the_revision_the_renderer_confirms() {
+        let (directory, sink) = fixture();
+        let source = directory.path().join("selected.risudat");
+        valid_save(&source);
+        let opened = open_job_source(
+            directory.path(),
+            &JobSource::DesktopPath {
+                path: source.to_string_lossy().into_owned(),
+            },
+        )
+        .unwrap();
+        let sink = Arc::new(sink);
+        let registry = JobRegistry::default();
+        let job = registry
+            .create_with_context(JobKind::RestoreBlockRisuSave, Some(1), Vec::new())
+            .unwrap();
+
+        let restoring = {
+            let job = Arc::clone(&job);
+            let sink = Arc::clone(&sink);
+            thread::spawn(move || restore_block_risu_save(opened, 1, &job, sink.as_ref()))
+        };
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while job.status().phase != JobPhase::AwaitingActivation {
+            assert!(
+                Instant::now() < deadline,
+                "restore did not reach activation wait"
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+
+        // The renderer keeps serving the app while the job reads, so it can
+        // commit before it fences the replacement.
+        let confirmed = {
+            let mut store = sink.store.lock().unwrap();
+            let staging = store.replace_begin().unwrap().staging_id;
+            store
+                .replace_put_root(&staging, &json!({ "username": "Edited while importing" }))
+                .unwrap();
+            store.replace_put_presets(&staging, &[]).unwrap();
+            store.replace_add_characters(&staging, &[]).unwrap();
+            store.replace_commit(&staging, Some(1)).unwrap().revision
+        };
+        assert_eq!(confirmed, 2);
+
+        assert_eq!(
+            job.request_finalize(Some(confirmed)).unwrap(),
+            FinalizeOutcome::Requested
+        );
+
+        let result = restoring.join().unwrap().unwrap();
+
+        assert_eq!(result.revision, 3);
+        assert_eq!(result.character_count, 1);
+        assert_eq!(sink.store.lock().unwrap().revision().unwrap(), 3);
+        // The pre-activation copy was made against the stale revision, so
+        // activation had to repeat it.
+        assert_eq!(sink.preserve_calls.load(Ordering::Acquire), 2);
+    }
+
+    #[test]
     fn opened_source_identity_survives_path_replacement_without_reopening() {
         let (directory, sink) = fixture();
         let source = directory.path().join("selected.risudat");
@@ -2787,7 +2964,7 @@ mod tests {
             .any(|status| status.job_id == started.job_id));
 
         assert_eq!(
-            state.finalize(&started.job_id).unwrap(),
+            state.finalize(&started.job_id, None).unwrap(),
             FinalizeOutcome::Requested
         );
         let deadline = Instant::now() + Duration::from_secs(2);

@@ -1,7 +1,3 @@
-import {
-    selectPluginCompatibilityProfile,
-    type PluginCompatibilityProfile,
-} from '../plugins/pluginCompatibility'
 import type { Database, botPreset } from './database.svelte'
 import type { PreparedBootstrapDatabase } from './databasePreparation'
 import {
@@ -48,7 +44,6 @@ export interface ScalableBootstrapProjection {
 export interface PersistentBootstrapResult {
     database: Database
     revision: DataRevision
-    profile: PluginCompatibilityProfile
 }
 
 /**
@@ -66,8 +61,7 @@ export async function bootstrapPersistentDatabase(
     if (active.revision === 0) {
         const { database } = await dependencies.prepareDatabase({ ...NEW_DATABASE_SEED } as Database)
         const { revision } = await dependencies.store.replaceFromDatabase(database, 0)
-        const profile = selectPluginCompatibilityProfile(database.plugins ?? [])
-        if (profile === 'scalable-v3' && dependencies.projectScalableWorkingSet) {
+        if (dependencies.projectScalableWorkingSet) {
             const {
                 characters: _characters,
                 botPresets: _botPresets,
@@ -90,28 +84,56 @@ export async function bootstrapPersistentDatabase(
                 root,
                 projectedRevision,
             )
-            return { ...projected, profile }
+            return projected
         }
-        return { database, revision, profile }
+        return { database, revision }
     }
 
-    const profile = selectPluginCompatibilityProfile(active.value.plugins ?? [])
+    const needsCharacterMigration = !active.value.formatversion
+        || active.value.formatversion < 3
+    const prepareScalableMigration = needsCharacterMigration
+        && dependencies.prepareRoot !== undefined
+        && dependencies.projectScalableWorkingSet !== undefined
     if (
-        profile === 'maximum-compatibility' ||
         !dependencies.prepareRoot ||
-        !dependencies.projectScalableWorkingSet
+        !dependencies.projectScalableWorkingSet ||
+        prepareScalableMigration
     ) {
         await dependencies.onPhase?.('compatibility', active.value.language)
         const persistent = await dependencies.store.materializeDatabase(active.revision)
         const { database, changed } = await dependencies.prepareDatabase(persistent)
-        if (!changed) {
-            return { database, revision: active.revision, profile }
+        const revision = changed
+            ? (await dependencies.store.replaceFromDatabase(
+                  database,
+                  active.revision,
+              )).revision
+            : active.revision
+        if (prepareScalableMigration) {
+            const {
+                characters: _characters,
+                botPresets: _botPresets,
+                pluginCustomStorage: _pluginCustomStorage,
+                ...storedRoot
+            } = database
+            const root = await canonicalizePresetSelection(
+                dependencies.store,
+                revision,
+                storedRoot,
+            )
+            const projectedRevision = canonicalJson(root) === canonicalJson(storedRoot)
+                ? revision
+                : (await dependencies.store.commit({
+                    expectedRevision: revision,
+                    root,
+                })).revision
+            const projected = await projectScalableRevision(
+                dependencies,
+                root,
+                projectedRevision,
+            )
+            return projected
         }
-        const { revision } = await dependencies.store.replaceFromDatabase(
-            database,
-            active.revision,
-        )
-        return { database, revision, profile }
+        return { database, revision }
     }
 
     const preparedRoot = await dependencies.prepareRoot(active.value)
@@ -128,8 +150,7 @@ export async function bootstrapPersistentDatabase(
         })).revision
     }
 
-    const projected = await projectScalableRevision(dependencies, root, revision)
-    return { ...projected, profile }
+    return await projectScalableRevision(dependencies, root, revision)
 }
 
 async function canonicalizePresetSelection(

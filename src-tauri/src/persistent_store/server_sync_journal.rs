@@ -1,11 +1,12 @@
 use super::{server_sync_outbox::ServerDirtyKey, PersistentStore};
 use crate::server_sync::{client::ServerConfig, credentials::StoredConfig, Result, SyncError};
 use risunest_sync_wire::{
-    canonical, operation_id, CommitIntent, Receipt, RecordVersion, RemoteHead, Sequence,
+    canonical, operation_id, CommitIntent, Domain, Receipt, RecordVersion, RemoteHead, Sequence,
     TerminalStatus,
 };
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use serde::Serialize;
+use std::collections::BTreeMap;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -113,7 +114,7 @@ impl PersistentStore {
         {
             return Err(SyncError::new("server-config-changed", 409));
         }
-        if self.repository_root.join("asset-residency.sqlite").exists() {
+        if crate::server_sync::residency::Residency::exists(&self.repository_root) {
             crate::server_sync::residency::Residency::open(&self.repository_root)?
                 .replace_access_config(&stored)?;
         }
@@ -153,7 +154,9 @@ impl PersistentStore {
         })();
         if outcome.is_err() {
             let _ = stored.remove(&root);
+            return outcome;
         }
+        super::server_sync_sections::forget_publications(self.device_store_mut()?)?;
         outcome
     }
     /// Disconnect keeps PDS and cached immutable bytes. An unresolved operation
@@ -174,7 +177,10 @@ impl PersistentStore {
             return Err(SyncError::new("resolve-pending-operation-first", 409));
         }
         let selected = super::sync_selection::read(&tx)?;
-        if matches!(selected.target, super::sync_selection::SyncTarget::Server(_)) {
+        if matches!(
+            selected.target,
+            super::sync_selection::SyncTarget::Server(_)
+        ) {
             super::sync_selection::select(
                 &tx,
                 &selected.epoch,
@@ -191,14 +197,17 @@ impl PersistentStore {
             "server_sync_remote",
             "server_sync_remote_dirty",
             "server_sync_remote_cursor",
+            "server_sync_remote_sections",
             "server_sync_operation_records",
             "server_sync_operation_pages",
             "server_sync_operation_scopes",
+            "server_sync_operation_sections",
             "server_sync_state",
         ] {
             tx.execute(&format!("DELETE FROM {table}"), [])?;
         }
         tx.commit()?;
+        super::server_sync_sections::forget_publications(self.device_store_mut()?)?;
         if let Some(stored) = stored {
             let _ = stored.remove(self.repository_root());
         }
@@ -299,10 +308,12 @@ impl PersistentStore {
             "server_sync_remote",
             "server_sync_remote_dirty",
             "server_sync_remote_cursor",
+            "server_sync_remote_sections",
             "server_sync_operation",
             "server_sync_operation_records",
             "server_sync_operation_pages",
             "server_sync_operation_scopes",
+            "server_sync_operation_sections",
         ] {
             tx.execute(&format!("DELETE FROM {table}"), [])?;
         }
@@ -333,7 +344,65 @@ impl PersistentStore {
         } else if let Some(replacement) = replacement {
             let _ = replacement.remove(&root);
         }
+        if outcome.is_ok() {
+            super::server_sync_sections::forget_publications(self.device_store_mut()?)?;
+        }
         outcome
+    }
+    /// Sections whose received changes this device has applied locally. A section
+    /// missing here is unreceived, which is neither a deletion nor an application.
+    pub(crate) fn server_applied_sections(&self, epoch: &str) -> Result<BTreeMap<String, String>> {
+        let stored: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT head FROM server_sync_state WHERE singleton=1",
+                [],
+                |r| r.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
+        let stored: Option<RemoteHead> = stored
+            .map(|value| serde_json::from_str(&value))
+            .transpose()
+            .map_err(|_| SyncError::new("invalid-local-server-head", 409))?;
+        if stored.is_none_or(|head| head.epoch != epoch) {
+            return Ok(BTreeMap::new());
+        }
+        let mut sections = BTreeMap::new();
+        let mut statement = self
+            .connection
+            .prepare("SELECT domain,applied_seq FROM server_sync_remote_sections")?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let domain = Domain::try_from(row.get::<_, String>(0)?.as_str())
+                .map_err(|_| SyncError::new("invalid-local-section", 409))?;
+            let applied = Sequence::try_from(row.get::<_, String>(1)?)
+                .map_err(|_| SyncError::new("invalid-local-section-cursor", 409))?;
+            sections.insert(domain.as_str().to_owned(), applied.as_str().to_owned());
+        }
+        Ok(sections)
+    }
+    /// The per-section remote baseline this operation was planned against. It is
+    /// durable so a restart resumes against the same points, not the latest head.
+    pub(crate) fn server_record_operation_sections(
+        tx: &rusqlite::Transaction<'_>,
+        head: &RemoteHead,
+    ) -> Result<()> {
+        tx.execute("DELETE FROM server_sync_operation_sections", [])?;
+        for domain in Domain::ALL {
+            let section = head
+                .section(domain)
+                .map_err(|_| SyncError::new("invalid-remote-head", 502))?;
+            tx.execute(
+                "INSERT INTO server_sync_operation_sections VALUES(?1,?2,?3)",
+                params![
+                    domain.as_str(),
+                    section.changed_seq.as_str(),
+                    section.state_id
+                ],
+            )?;
+        }
+        Ok(())
     }
     pub(crate) fn server_pending(&self) -> Result<Option<PendingOperation>> {
         let row = self
@@ -390,6 +459,7 @@ impl PersistentStore {
             staged_changes_id: stage_id,
         };
         intent.validate()?;
+        Self::server_record_operation_sections(&tx, head)?;
         tx.execute("INSERT INTO server_sync_operation(singleton,sequence,intent,phase,local_revision) VALUES(1,?1,?2,'prepared',?3)",params![sequence.as_str(),String::from_utf8(canonical::encode(&intent)?).map_err(|_|SyncError::new("invalid-intent",400))?,local_revision])?;
         tx.execute(
             "UPDATE server_sync_state SET next_sequence=?1 WHERE singleton=1",
@@ -411,6 +481,26 @@ impl PersistentStore {
         )?;
         Ok(pending.intent)
     }
+
+    pub(crate) fn server_abandon_expired_operation(&mut self) -> Result<()> {
+        if self.server_pending()?.is_none() {
+            return Err(SyncError::new("missing-operation", 409));
+        }
+        let tx = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        for table in [
+            "server_sync_operation",
+            "server_sync_operation_records",
+            "server_sync_operation_pages",
+            "server_sync_operation_scopes",
+        ] {
+            tx.execute(&format!("DELETE FROM {table}"), [])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Receipt evidence is checked before updating any local durable identity.
     /// A committed receipt is retained until the corresponding remote revision
     /// has been semantically applied, including changes from concurrent devices.
@@ -463,12 +553,16 @@ impl PersistentStore {
         tx.commit()?;
         Ok(committed)
     }
-    pub(crate) fn server_base(&self, key: &str) -> Result<(RecordVersion, Option<String>)> {
+    pub(crate) fn server_base(
+        &self,
+        domain: Domain,
+        key: &str,
+    ) -> Result<(RecordVersion, Option<String>)> {
         let row = self
             .connection
             .query_row(
-                "SELECT version,local_hash FROM server_sync_base WHERE key=?1",
-                [key],
+                "SELECT version,local_hash FROM server_sync_base WHERE domain=?1 AND key=?2",
+                params![domain.as_str(), key],
                 |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
             )
             .optional()?;
@@ -482,12 +576,13 @@ impl PersistentStore {
     }
     pub(crate) fn server_record_prepared(
         &self,
+        domain: Domain,
         key: &str,
         version: &RecordVersion,
         local_hash: Option<&str>,
         dirty: &ServerDirtyKey,
     ) -> Result<()> {
-        self.connection.execute("INSERT INTO server_sync_operation_records VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(key) DO UPDATE SET version=excluded.version,local_hash=excluded.local_hash,revision=excluded.revision",params![key,String::from_utf8(canonical::encode(version)?).map_err(|_|SyncError::new("invalid-version",400))?,local_hash,dirty.kind,dirty.key1,dirty.key2,dirty.revision])?;
+        self.connection.execute("INSERT INTO server_sync_operation_records VALUES(?1,?2,?3,?4,?5,?6,?7,?8) ON CONFLICT(domain,key) DO UPDATE SET version=excluded.version,local_hash=excluded.local_hash,revision=excluded.revision",params![domain.as_str(),key,String::from_utf8(canonical::encode(version)?).map_err(|_|SyncError::new("invalid-version",400))?,local_hash,dirty.kind,dirty.key1,dirty.key2,dirty.revision])?;
         Ok(())
     }
 }

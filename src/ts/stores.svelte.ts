@@ -5,7 +5,6 @@ import type { alertData } from "./alert";
 import { moduleUpdate } from "./process/modules";
 import { resetScriptCache } from "./process/scripts";
 import type { hubType } from "./characterCards";
-import type { PluginSafetyErrors } from "./plugins/pluginSafety";
 import type { CapturedChatMessageTarget } from "./chatMessageUi";
 
 function updateSize(){
@@ -34,6 +33,11 @@ export type BootFailure = {
     stage?: string
 }
 export const bootFailure = writable<BootFailure | null>(null)
+/**
+ * Set while the recovery shell stands in for the app. Holding the ordinary start here is what
+ * keeps `loadData()` from running behind the shell.
+ */
+export const recoveryStart = writable<(() => void) | null>(null)
 export const DynamicGUI = writable(false)
 export const sideBarClosing = writable(false)
 export const sideBarStore = writable(window.innerWidth > 1024)
@@ -127,11 +131,6 @@ export const LoadingStatusState = $state({
 export const QuickSettings = $state({
     open: false,
     index: 0
-})
-
-export const pluginAlertModalStore = $state({
-    open: false,
-    errors: [] as PluginSafetyErrors[]
 })
 
 export const disableHighlight = writable(true)

@@ -10,19 +10,16 @@ import {
 import { changeFullscreen, sleep } from "./util"
 import { get } from "svelte/store";
 import { setDatabase, getDatabase, type Database } from "./storage/database.svelte";
-import { getDeviceSettings } from "./storage/deviceSettings";
+import { getDeviceSettings, loadDeviceSettings } from "./storage/deviceSettings";
 import { setNativeLogFileEnabled } from "./nativeLog";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { checkRisuUpdate } from "./update";
-import { MobileGUI, botMakerMode, selectedCharID, loadedStore, DBState, LoadingStatusState, bootFailure, type BootFailure } from "./stores.svelte";
-import { loadPlugins, loadPluginsAfterAuthoritativeRestore, pluginCompatibility } from "./plugins/plugins.svelte";
-import { shouldProjectScalableWorkingSet } from "./plugins/pluginCompatibility";
+import { MobileGUI, botMakerMode, selectedCharID, loadedStore, LoadingStatusState, bootFailure, type BootFailure } from "./stores.svelte";
+import { loadPlugins, loadPluginsAfterAuthoritativeRestore } from "./plugins/plugins.svelte";
 import { alertConfirm, alertError, alertInput, alertLogin, alertMd, alertNormal, alertSelect, alertTOS, waitAlert } from "./alert";
 import { checkDriverInit } from "./drive/drive";
-import { characterURLImport, downloadRisuHub, hubURL } from "./characterCards";
+import { applyHubSelection, characterURLImport, downloadRisuHub, hubURL } from "./characterCards";
 import { initializeNativeLocalUrls } from "./nativeLocalUrls";
 import { loadRisuAccountData } from "./drive/accounter";
-import { decodeRisuSave } from "./storage/risuSave";
 import { updateAnimationSpeed } from "./gui/animation";
 import { updateColorScheme, updateTextThemeAndCSS } from "./gui/colorscheme";
 import { changeLanguage, language } from "src/lang";
@@ -35,12 +32,7 @@ import {
     resetAccountStorageSession,
     type AccountStorageCache,
 } from "./storage/accountStorage";
-import {
-    getAccountColdStorageItem,
-    getColdStorageItem,
-    makeColdData,
-    setAccountColdStorageItem,
-} from "./process/coldstorage.svelte";
+import { getAccountColdStorageItem } from "./process/coldstorage.svelte";
 import { getRemoteSaveCleanupAction, getRemoteSavePayloadName } from "./storage/remoteSaveCleanup";
 import {
     forageStorage,
@@ -52,10 +44,7 @@ import {
 } from "./globalApi.svelte";
 import { isTauri, isTauriAndroid, isTauriDesktop } from "./platform";
 import { registerModelDynamic } from "./model/modellist";
-import { convertFileSrc } from "@tauri-apps/api/core";
-import { appDataDir, join } from "@tauri-apps/api/path";
 import {
-    checkNewFormat as migrateDatabaseFormat,
     prepareDatabaseForPersistence,
     prepareDatabaseForBootstrap,
     preparePersistentRootForWorkingSet,
@@ -64,7 +53,7 @@ import { bootstrapPersistentDatabase } from "./storage/persistentBootstrap";
 import {
     createCatalogPresetWorkingSet,
     hasIncompletePersistentWorkingSet,
-    isCatalogCharacterStub,
+    isWorkingSetCharacterStub,
     isCatalogPresetWorkingSet,
     projectCatalogWorkingSet,
     projectCompleteScalableWorkingSet,
@@ -105,19 +94,26 @@ import {
 import { initializeIOSNative, installIOSPersistenceLifecycle } from "./iosNative";
 import { restartNativeApp, schedulePeriodicNativeSnapshot } from "./storage/nativePersistentMaintenance";
 import { yieldToUi } from './ui/yieldToUi'
+import { markBootStage, markBootSuspect } from './storage/bootAttempt'
+import {
+    finishBoot,
+    isStartupExcluded,
+    type RecoveryExclusion,
+} from './storage/recoveryMode.svelte'
 import {
     initializeOfficialAccountBootstrap,
-    publishOfficialRevisionIfChanged,
 } from "./storage/sync/officialAccountBootstrap";
 import { createAccountScopedOfficialAssetLedger } from "./storage/sync/officialAssetLedger";
 import {
     configureOfficialAccountAssetReader,
     createStructuredAccountAssetReader,
 } from "./storage/accountAssetAccess";
+import { createNativeAccountCredentialVault } from "./storage/nativeAccountCredential";
 import {
-    createNativeAppKv,
-    createNativeAppKvStringStorage,
-} from "./storage/nativeAppKv";
+    createNativeDeviceSettings,
+    createNativeDeviceSettingsBag,
+} from "./storage/nativeDeviceSettings";
+import { getDeviceMarkers, initializeDeviceMarkers } from "./storage/deviceMarkers";
 import {
     configureNativeOfficialAccountFlow,
     createNativeOfficialAccountFlowService,
@@ -135,11 +131,22 @@ import {
     createNativeOfficialPublicationRecovery,
     type NativeOfficialPublicationRecovery,
 } from "./storage/sync/nativeOfficialPublicationRecovery";
-export { assignIds } from "./storage/databasePreparation";
+import { checkNativeStartupStatus } from './nativeStartup'
+import {
+    createSyncExitCoordinator,
+    type SyncExitDrainAdapter,
+} from './storage/syncExitCoordinator'
+import {
+    configureSyncExitCoordinator,
+    registerWindowCloseDrain,
+} from './storage/syncExitProduction'
+import { getExternalStorageBridge } from './storage/sync/external/bridge'
+import { createServerSyncExitDrainAdapter } from './storage/sync/serverSyncProduction'
 
 const appWindow = isTauri ? getCurrentWebviewWindow() : null
 let disposeLifecycleCommitListeners: (() => void) | undefined
 let disposeMacosLifecycle: (() => void) | undefined
+let disposeWindowCloseDrain: (() => void) | undefined
 let disposeAndroidScreenshotRecovery: (() => void) | undefined
 
 function registerAndroidScreenshotPublicationRecovery() {
@@ -177,7 +184,11 @@ function registerAndroidScreenshotPublicationRecovery() {
  * Boot stages whose failures mean the local persistent store could not be
  * opened or bootstrapped. Both of them go through `store.open()`.
  */
-const persistentStoreOpenStages = new Set(['persistent-storage', 'persistent-database'])
+const persistentStoreOpenStages = new Set([
+    'persistent-storage',
+    'device-settings',
+    'persistent-database',
+])
 
 function describeBootFailureError(error: unknown): string {
     if (error instanceof Error) return error.message
@@ -214,19 +225,17 @@ export async function loadData() {
     bootFailure.set(null)
     const transition = async (nextStage: string, text: string) => {
         stage = nextStage
+        markBootStage(nextStage)
         LoadingStatusState.text = text
         await yieldToUi()
     }
+    const excluded = (name: RecoveryExclusion): boolean =>
+        isStartupExcluded(name, getDeviceSettings().startupExclusions)
     LoadingStatusState.text = language.risuNest.startup.storage
     try {
-        const deviceSettings = getDeviceSettings()
         if (isTauri) {
-            stage = 'native-log'
-            try {
-                await setNativeLogFileEnabled(deviceSettings.nativeFileLogEnabled)
-            } catch (error) {
-                console.error('Native file logging reconciliation failed', error)
-            }
+            stage = 'native-setup'
+            await checkNativeStartupStatus()
         }
         if (isTauri) {
             await transition('app-data-directories', language.risuNest.startup.storage)
@@ -244,6 +253,21 @@ export async function loadData() {
 
         await transition('persistent-storage', language.risuNest.startup.storage)
         await initializePersistentStorage()
+        if (isTauri) {
+            stage = 'device-settings'
+            await initializeDeviceMarkers()
+        }
+        const markers = getDeviceMarkers()
+        applyHubSelection(markers)
+        const deviceSettings = loadDeviceSettings(markers)
+        if (isTauri) {
+            stage = 'native-log'
+            try {
+                await setNativeLogFileEnabled(deviceSettings.nativeFileLogEnabled)
+            } catch (error) {
+                console.error('Native file logging reconciliation failed', error)
+            }
+        }
         stage = 'native-file-jobs'
         const recoveredNativeFileJobs = isTauri
             ? await reconcileNativeFileJobsBeforeBootstrap(undefined, {
@@ -283,24 +307,27 @@ export async function loadData() {
         await transition('asset-repository', language.risuNest.startup.data)
         const assetRepositoryRevision = await activateNativeAssetRepository()
         if (assetRepositoryRevision !== null) local.revision = assetRepositoryRevision
-        const nativeAppKv = isTauri ? createNativeAppKv() : null
-        if (nativeAppKv) localStorage.removeItem('fallbackRisuToken')
-        const nativeCredential = nativeAppKv
-            ? normalizeNativeOfficialAccountCredential(
-                await nativeAppKv.get(nativeOfficialAccountKeys.credential),
-            )
+        // The web build has no OS vault, so it keeps the account token in
+        // localStorage. A native install holds it in the vault alone.
+        const nativeCredentialVault = isTauri ? createNativeAccountCredentialVault() : null
+        const nativeDeviceSettings = isTauri ? createNativeDeviceSettings() : null
+        if (nativeCredentialVault) {
+            localStorage.removeItem('fallbackRisuToken')
+            localStorage.removeItem('risuauth')
+        }
+        const nativeCredential = nativeCredentialVault
+            ? normalizeNativeOfficialAccountCredential(await nativeCredentialVault.read())
             : null
         if (isTauri) local.database.account = nativeCredential ?? undefined
         const installPersistentWorkingSet = (database: Database) => {
             workingSetResidency.clear()
             for (const character of database.characters) {
-                if (isCatalogCharacterStub(character)) {
+                if (isWorkingSetCharacterStub(character)) {
                     workingSetResidency.markCharacterReleased(character.chaId)
                 }
             }
             setDatabase(database)
         }
-        pluginCompatibility.initialize(local.profile)
         configurePersistentDataRuntime({
             projectWorkingSet(
                 database,
@@ -309,10 +336,7 @@ export async function loadData() {
                 activeCharacterIds,
                 forceScalableProjection,
             ) {
-                if (!shouldProjectScalableWorkingSet(
-                    pluginCompatibility,
-                    forceScalableProjection,
-                )) return database
+                if (forceScalableProjection === false) return database
                 const projected = isCatalogPresetWorkingSet(database.botPresets)
                     ? database
                     : projectCompleteScalableWorkingSet(
@@ -323,7 +347,7 @@ export async function loadData() {
                         selectedConversationId,
                     )
                 for (const character of projected.characters) {
-                    if (isCatalogCharacterStub(character)) {
+                    if (isWorkingSetCharacterStub(character)) {
                         workingSetResidency.markCharacterReleased(character.chaId)
                     } else {
                         workingSetResidency.reconcileConversationResidency(character)
@@ -371,15 +395,15 @@ export async function loadData() {
                 },
             })
             : accountStorage
-        const nativeAssociation = nativeAppKv
-            ? await createNativeAppKvStringStorage(
-                nativeAppKv,
+        const nativeAssociation = nativeDeviceSettings
+            ? await createNativeDeviceSettingsBag(
+                nativeDeviceSettings,
                 nativeOfficialAccountKeys.association,
             )
             : null
-        const nativeAssetLedger = nativeAppKv
-            ? await createNativeAppKvStringStorage(
-                nativeAppKv,
+        const nativeAssetLedger = nativeDeviceSettings
+            ? await createNativeDeviceSettingsBag(
+                nativeDeviceSettings,
                 nativeOfficialAccountKeys.assetLedger,
             )
             : null
@@ -392,6 +416,11 @@ export async function loadData() {
         const flushNativeOfficialMetadata = async () => {
             await nativeAssociation?.flush()
             await nativeAssetLedger?.flush()
+        }
+        const clearNativeOfficialMetadata = async () => {
+            await nativeAssociation?.clear()
+            await nativeAssetLedger?.clear()
+            officialAssetLedger.reset()
         }
         let nativePublicationRecovery: NativeOfficialPublicationRecovery | null = null
         const nativeDatabasePublisher = isTauri
@@ -414,15 +443,7 @@ export async function loadData() {
             store: runtime.store,
             resolveBlobs: resolveBlobStore,
             account: accountStorage,
-            cold: {
-                readRemote: getAccountColdStorageItem,
-                async writeRemote(key, value, signal) {
-                    if (!await setAccountColdStorageItem(key, value, signal)) {
-                        throw new Error(`Failed to write official cold payload: ${key}`)
-                    }
-                },
-                readLocal: (key) => getColdStorageItem(key, { accountFallback: true }),
-            },
+            cold: { readRemote: getAccountColdStorageItem },
             prepareCandidate: prepareDatabaseForPersistence,
             markPublished: () => undefined,
             ledger: officialAssetLedger,
@@ -500,7 +521,6 @@ export async function loadData() {
             ]) === '0' ? 'pull' : 'push',
             confirmInitialPush: async () =>
                 await alertInput('to overwrite your data, type "RISUNEST"') === 'RISUNEST',
-            initializeProfile: (profile) => pluginCompatibility.initialize(profile),
             installDatabase: installPersistentWorkingSet,
             initializeWorkingSet: (database) => initializeActiveWorkingSet(database),
             onRemoteError: (error) => {
@@ -514,11 +534,11 @@ export async function loadData() {
                     : 'Official account pull skipped: local revisions were never published. Republishing local data.')
             },
         })
-        if (nativeAppKv) {
+        if (nativeCredentialVault) {
             const assetReader = createStructuredAccountAssetReader(liveAccountStorage)
             configureOfficialAccountAssetReader(nativeCredential ? assetReader : null)
             const service = createNativeOfficialAccountFlowService({
-                appKv: nativeAppKv,
+                credentialVault: nativeCredentialVault,
                 adapter: officialAdapter,
                 initialCredential: nativeCredential,
                 flushPendingData: (reason) => runtime.flushPendingData(reason),
@@ -532,11 +552,7 @@ export async function loadData() {
                     configureOfficialAccountAssetReader(credential ? assetReader : null)
                 },
                 flushMetadata: flushNativeOfficialMetadata,
-                resetMetadata: () => {
-                    nativeAssociation?.reset()
-                    nativeAssetLedger?.reset()
-                    officialAssetLedger.reset()
-                },
+                clearMetadata: clearNativeOfficialMetadata,
                 resetAccountSession: resetAccountStorageSession,
                 nativeRestore: async (initialCredential) => {
                     let credential = initialCredential
@@ -599,11 +615,114 @@ export async function loadData() {
                 console.error('Official reconcile publish failed', error)
             })
         }
-        disposeLifecycleCommitListeners ??= registerLifecycleCommitListeners(undefined, {
-            isSyncActive: () => forageStorage.isAccount,
-            hasPendingSync: () => hasPendingOfficialPublication(),
-            confirmExit: () => alertConfirm(language.exitSyncPendingWarning),
+        if (isTauri) {
+            try {
+                const { installExternalStorageProduction } = await import(
+                    './storage/sync/external/production'
+                )
+                await installExternalStorageProduction()
+            } catch (error) {
+                console.error('External storage scheduler failed to start', error)
+            }
+        }
+        let heldExitRevision: number | undefined
+        let selectedExitDrain: SyncExitDrainAdapter | null = null
+        const syncExitCoordinator = createSyncExitCoordinator({
+            async acquireEditFence() {
+                const token = await runtime.capturePersistentMutationToken(
+                    'normal-exit-fence',
+                    { publishOfficial: false },
+                )
+                const fence = await runtime.acquireDestructiveReplacementFence(token)
+                heldExitRevision = fence.revision
+                return fence
+            },
+            flushLocal: () => runtime.flushPendingDataLocally('normal-exit'),
+            checkpointLocal: async () => {
+                if (!isTauri) return
+                const { checkpointNativePersistentStore } = await import(
+                    './storage/nativePersistentMaintenance'
+                )
+                await checkpointNativePersistentStore('truncate')
+            },
+            async captureTarget() {
+                if (heldExitRevision === undefined) {
+                    throw new Error('Normal exit revision was not fenced')
+                }
+                const capture = await getExternalStorageBridge().captureExitTarget()
+                const revision = Number(capture.revision)
+                if (!Number.isSafeInteger(revision) || revision !== heldExitRevision) {
+                    throw new Error('Normal exit revision changed after the edit fence')
+                }
+                const selection = capture.selection
+                if (selection.kind !== 'none' && selection.decisionRequired) {
+                    throw { code: 'sync-selection-decision-required' }
+                }
+                if (selection.kind !== 'none' && !selection.connectionId) {
+                    throw { code: 'sync-selection-invalid' }
+                }
+                selectedExitDrain = null
+                let selectionId = `none:${selection.selectionEpoch}`
+                if (
+                    !selection.decisionRequired
+                    && selection.kind === 'server'
+                    && selection.connectionId
+                ) {
+                    selectionId = `server:${selection.connectionId}:${selection.selectionEpoch}`
+                    selectedExitDrain = createServerSyncExitDrainAdapter(selectionId)
+                } else if (
+                    !selection.decisionRequired
+                    && selection.kind === 'external'
+                    && selection.connectionId
+                ) {
+                    selectionId = `external:${selection.connectionId}:${selection.selectionEpoch}`
+                    const {
+                        getExternalStorageSyncExitDrainAdapter,
+                        installExternalStorageProduction,
+                    } = await import(
+                        './storage/sync/external/production'
+                    )
+                    await installExternalStorageProduction()
+                    selectedExitDrain = getExternalStorageSyncExitDrainAdapter(capture)
+                    if (!selectedExitDrain || selectedExitDrain.id !== selectionId) {
+                        throw new Error('Selected external synchronization target is unavailable')
+                    }
+                } else if (
+                    selection.kind === 'none'
+                    && forageStorage.isAccount
+                    && hasPendingOfficialPublication()
+                ) {
+                    selectionId = 'official-account'
+                    selectedExitDrain = {
+                        id: selectionId,
+                        async drain() {
+                            await runtime.publishCurrentOfficialRevision()
+                            return hasPendingOfficialPublication()
+                                ? {
+                                    kind: 'blocked',
+                                    reason: 'official-account-sync-pending',
+                                }
+                                : { kind: 'complete' }
+                        },
+                        cancel: async () => {},
+                    }
+                }
+                return {
+                    revision,
+                    libraryEpoch: capture.libraryEpoch,
+                    selectionEpoch: selection.selectionEpoch,
+                    selectionId,
+                }
+            },
+            selectedDrain: () => selectedExitDrain,
+            reportError: (error) =>
+                console.error('Normal exit drain failed', error),
         })
+        configureSyncExitCoordinator(syncExitCoordinator)
+        disposeLifecycleCommitListeners ??= registerLifecycleCommitListeners(
+            undefined,
+            syncExitCoordinator,
+        )
 
         if (
             isTauriDesktop &&
@@ -613,33 +732,26 @@ export async function loadData() {
             const { registerMacosLifecycle } = await import(
                 './storage/macosLifecycle'
             )
-            const { flushPendingDataLocally } = await import(
-                './storage/persistentDataRuntime.svelte'
-            )
-            const { checkpointNativePersistentStore } = await import(
-                './storage/nativePersistentMaintenance'
-            )
             disposeMacosLifecycle = await registerMacosLifecycle({
-                flush: () => flushPendingDataLocally('exit'),
-                checkpoint: () => checkpointNativePersistentStore('truncate'),
-                confirmExitWithoutSaving: () =>
-                    alertConfirm(language.risuNest.exitSaveFailedWarning),
-                sync: {
-                    isSyncActive: () => forageStorage.isAccount,
-                    hasPendingSync: () => hasPendingOfficialPublication(),
-                    confirmExit: () =>
-                        alertConfirm(language.exitSyncPendingWarning),
-                },
+                coordinator: syncExitCoordinator,
             })
         }
 
-        if (isTauriDesktop) {
-            await transition('update-check', language.risuNest.startup.update)
-            await checkRisuUpdate()
-            await changeFullscreen()
+        if (
+            isTauriDesktop
+            && nativePlatform() !== 'macos'
+            && appWindow
+            && !disposeWindowCloseDrain
+        ) {
+            disposeWindowCloseDrain = await registerWindowCloseDrain(
+                appWindow,
+                syncExitCoordinator,
+            )
         }
 
-        if (!isTauri) {
+        if (isTauriDesktop) await changeFullscreen()
+
+        if (!isTauri && !excluded('sync')) {
             await transition('drive-sync', language.risuNest.startup.account)
             if (await checkDriverInit()) return
             await transition('service-worker', language.risuNest.startup.serviceWorker)
@@ -657,19 +769,11 @@ export async function loadData() {
         if (getDatabase().didFirstSetup) void characterURLImport()
 
         await transition('format-update', language.risuNest.startup.data)
-        const fullDatabaseResident = pluginCompatibility.profile === 'maximum-compatibility'
-        const coldStorageChanged = fullDatabaseResident ? await makeColdData() : false
-        await publishOfficialRevisionIfChanged(
-            coldStorageChanged && accountBootstrap.officialEnabled,
-            officialAdapter,
-            runtime.revision,
-        )
-
         performance.mark('boot:cold-storage-ready')
         await transition('plugins', language.risuNest.startup.plugins)
-        let pluginsLoaded = false
+        let pluginsLoaded = excluded('plugins')
         try {
-            await loadPlugins()
+            if (!pluginsLoaded) await loadPlugins()
             pluginsLoaded = true
         } catch (error) {
             console.error(error)
@@ -701,15 +805,16 @@ export async function loadData() {
         const database = getDatabase()
         await transition('ui-state', language.risuNest.startup.ui)
         updateColorScheme()
-        updateTextThemeAndCSS()
+        if (!excluded('theme')) updateTextThemeAndCSS()
         updateAnimationSpeed()
         updateHeightMode()
         updateErrorHandling()
         updateGuisize()
-        if (!localStorage.getItem('nightlyWarned') && import.meta.env.VITE_RISU_NIGHTLY_BUILD === 'TRUE') {
+        if (!markers.getItem('nightlyWarned') && import.meta.env.VITE_RISU_NIGHTLY_BUILD === 'TRUE') {
             alertMd(language.nightlyWarning)
             await waitAlert()
-            localStorage.setItem('nightlyWarned', 'true')
+            markers.setItem('nightlyWarned', 'true')
+            await markers.flush()
         }
         if (database.botSettingAtStart) botMakerMode.set(true)
         if (
@@ -723,6 +828,7 @@ export async function loadData() {
         await initializeIOSNative()
         LoadingStatusState.startedAt = null
         loadedStore.set(true)
+        void finishBoot()
         performance.mark('boot:interactive')
         selectedCharID.set(-1)
         await yieldToUi()
@@ -736,8 +842,7 @@ export async function loadData() {
             runtime.flushPendingDataLocally(reason),
           );
         }
-        moduleUpdate()
-        if (fullDatabaseResident) cleanChunks()
+        if (!excluded('modules')) moduleUpdate()
         void alertTOS().then((accepted) => {
             if (accepted === false) location.reload()
         })
@@ -749,7 +854,7 @@ export async function loadData() {
         // an extra error modal on top of it would only get in the way. Anything
         // else can still fail after the app turned interactive, where no panel
         // is shown, so those keep the modal.
-        if (failure.kind === 'unknown') alertError(error)
+        if (failure.kind === 'unknown' && failure.stage !== 'native-setup') alertError(error)
     } finally {
         LoadingStatusState.startedAt = null
     }
@@ -817,28 +922,12 @@ function updateHeightMode() {
 }
 
 /**
- * Checks and updates the database format to the latest version.
- */
-export async function checkNewFormat(
-    db: Database,
-    options: { now?: number } = {},
-): Promise<Database> {
-    return migrateDatabaseFormat(db, options)
-}
-
-/**
  * Purges chunks of data that are not needed.
  */
-async function cleanChunks(options:{
-    cleanColdStorage?: boolean
-} = {}) {
-    const cleanColdStorage = options.cleanColdStorage ?? false
+async function cleanChunks() {
     const db = getDatabase()
     if (hasIncompletePersistentWorkingSet(db, workingSetResidency)) return
     if (db.account?.useSync) {
-        return
-    }
-    if(db.coldstorage && !cleanColdStorage){
         return
     }
 

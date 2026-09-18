@@ -1,4 +1,4 @@
-use super::{capabilities::*, contract::*, publication::*, quota::*, registry::Registry};
+use super::{capabilities::*, contract::*, publication::*, registry::Registry};
 use std::sync::Arc;
 
 use super::fake::{capabilities, locator, repository, FakeProvider};
@@ -89,8 +89,8 @@ fn sequential_competitors_can_both_confirm_and_recovery_snapshots_survive() {
         observation("b").authenticated_body_hash,
     )
     .unwrap();
-    a.before_write(None, ExecutionSession::Foreground).unwrap();
-    b.before_write(None, ExecutionSession::Foreground).unwrap();
+    a.before_write(None, PublicationMode::Foreground).unwrap();
+    b.before_write(None, PublicationMode::Foreground).unwrap();
     p.write(&locator(), None, b"a").unwrap();
     assert_eq!(
         a.observe_result(Some(&observation("a"))),
@@ -121,11 +121,11 @@ fn response_loss_is_reconciled_by_observation_and_never_repeated_as_old_write() 
         observation("a").authenticated_body_hash,
     )
     .unwrap();
-    a.before_write(None, ExecutionSession::ExitDrain).unwrap();
+    a.before_write(None, PublicationMode::ExitDrain).unwrap();
     p.state.lock().unwrap().lose_response = true;
     let error = p.write(&locator(), None, b"a").unwrap_err();
     assert_eq!(a.write_failed(&error), Outcome::PublicationUnknown);
-    assert!(a.before_write(None, ExecutionSession::Foreground).is_err());
+    assert!(a.before_write(None, PublicationMode::Foreground).is_err());
     assert_eq!(
         a.observe_result(Some(&observation("b"))),
         Outcome::PublicationUnknown
@@ -138,7 +138,7 @@ fn response_loss_is_reconciled_by_observation_and_never_repeated_as_old_write() 
 }
 
 #[test]
-fn sequential_hidden_and_changed_or_missing_head_cannot_publish() {
+fn sequential_changed_or_missing_head_cannot_publish() {
     let expected = observation("base");
     let mut a = Attempt::new(
         &capabilities(false),
@@ -148,15 +148,9 @@ fn sequential_hidden_and_changed_or_missing_head_cannot_publish() {
         observation("a").authenticated_body_hash,
     )
     .unwrap();
-    assert_eq!(
-        a.before_write(Some(&expected), ExecutionSession::Hidden)
-            .unwrap_err()
-            .kind,
-        ErrorKind::Cancelled
-    );
-    assert!(a.before_write(None, ExecutionSession::Foreground).is_err());
+    assert!(a.before_write(None, PublicationMode::Foreground).is_err());
     assert!(a
-        .before_write(Some(&expected), ExecutionSession::Foreground)
+        .before_write(Some(&expected), PublicationMode::Foreground)
         .is_err());
     assert!(Attempt::new(
         &capabilities(false),
@@ -169,48 +163,38 @@ fn sequential_hidden_and_changed_or_missing_head_cannot_publish() {
 }
 
 #[test]
-fn quota_is_shared_persistent_atomic_and_does_not_reset_on_restore_or_retry() {
-    let mut ledger = QuotaLedger::default();
-    ledger.configure(
-        "account",
-        "download",
-        Bucket {
-            limit: 500,
-            used: 499,
-            reset: QuotaReset::At { unix_ms: 1000 },
-            blocked_until_ms: None,
-            last_reset_ms: None,
-        },
-    );
-    let cost = RequestCost {
-        bucket: "download".into(),
-        shared_account: "account".into(),
-        units: 1,
-        reset: QuotaReset::At { unix_ms: 1000 },
-    };
-    assert!(ledger.reserve(&[cost.clone(), cost.clone()], 500).is_err());
-    assert_eq!(ledger.used("account", "download"), Some(499));
-    ledger.reserve(&[cost.clone()], 500).unwrap();
-    let mut reopened: QuotaLedger =
-        serde_json::from_str(&serde_json::to_string(&ledger).unwrap()).unwrap();
+fn publication_classification_requires_the_exact_commit_and_state() {
     assert_eq!(
-        reopened.reserve(&[cost.clone()], 999).unwrap_err().kind,
-        ErrorKind::DailyQuotaExhausted
+        classify_publication("commit", "snapshot-state", Some(("commit", "snapshot-state")), false),
+        PublicationObservation::Confirmed
     );
-    reopened.reserve(&[cost.clone()], 1000).unwrap();
-    reopened.configure(
-        "account",
-        "download",
-        Bucket {
-            limit: 500,
-            used: 0,
-            reset: QuotaReset::At { unix_ms: 1000 },
-            blocked_until_ms: None,
-            last_reset_ms: None,
-        },
+    for observed in [None, Some(("other", "snapshot-state")), Some(("commit", "other"))] {
+        assert_eq!(
+            classify_publication("commit", "snapshot-state", observed, false),
+            PublicationObservation::Unknown
+        );
+    }
+    assert_eq!(
+        classify_publication("commit", "snapshot-state", Some(("other", "other")), true),
+        PublicationObservation::Rejected
     );
-    reopened.reserve(&[cost], 1001).unwrap();
-    assert_eq!(reopened.used("account", "download"), Some(2));
+}
+
+#[test]
+fn every_listed_provider_has_a_factory_and_only_registration_exposes_it() {
+    use super::{fake::MemoryVault, providers, registry::PROVIDER_IDS};
+    let test = super::fake::loopback_dependencies(MemoryVault::default(), 0);
+    let mut registry = Registry::default();
+    assert!(providers::create("proton", test.dependencies.clone()).is_err());
+    for id in PROVIDER_IDS {
+        let provider = providers::create(id, test.dependencies.clone()).unwrap();
+        // A handle from another provider never yields a head.
+        assert!(provider.head_locator(&repository()).is_err());
+        assert!(registry.get(id).is_err());
+        registry.register(id, provider).unwrap();
+        assert!(registry.get(id).is_ok());
+    }
+    assert_eq!(registry.available().len(), PROVIDER_IDS.len());
 }
 
 #[test]
@@ -232,7 +216,7 @@ fn unavailable_services_stay_hidden_and_head_size_and_sdk_overhead_are_bounded()
 fn bounded_spool_round_trip_is_idempotent_and_rejects_corruption_and_overrun() {
     use super::transfer::{SpoolSink, SpoolSource};
     tokio::runtime::Runtime::new().unwrap().block_on(async {
-        use tokio::io::AsyncWriteExt;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let dir = tempfile::tempdir().unwrap();
         let source_path = dir.path().join("source");
         let bytes = vec![42; 100_005];
@@ -274,7 +258,36 @@ fn bounded_spool_round_trip_is_idempotent_and_rejects_corruption_and_overrun() {
         drop(writer);
         assert!(!limited.is_verified());
         assert!(limited.finish(4, &digest).await.is_err());
+        let mut cancelled_reader = source.open(0, 1, &cancel).await.unwrap();
+        let cancelled_output = dir.path().join("cancelled-output");
+        let mut cancelled_sink = SpoolSink::create(&cancelled_output, 1).unwrap();
+        let mut cancelled_writer = cancelled_sink.open(0, 1, &cancel).await.unwrap();
         cancel.cancel();
+        let mut byte = [0];
+        assert_eq!(
+            cancelled_reader
+                .read_exact(&mut byte)
+                .await
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::Other
+        );
+        assert_eq!(
+            cancelled_reader
+                .read_exact(&mut byte)
+                .await
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::Other
+        );
+        assert_eq!(
+            cancelled_writer.write_all(&byte).await.unwrap_err().kind(),
+            std::io::ErrorKind::Other
+        );
+        assert_eq!(
+            cancelled_writer.write_all(&byte).await.unwrap_err().kind(),
+            std::io::ErrorKind::Other
+        );
         assert!(source.open(0, 1, &cancel).await.is_err());
     });
 }
@@ -295,7 +308,7 @@ fn fake_snapshot_discovery_and_lost_upload_reconcile_use_complete_immutable_obje
             repository_id: repository.repository_id.clone(),
             job_id: "synthetic-job".into(),
             object_id: "snapshot-a".into(),
-            role: ObjectRole::Snapshot,
+            role: ObjectRole::SyncState,
             byte_length: 18,
             sha256: digest,
         };
@@ -315,7 +328,7 @@ fn fake_snapshot_discovery_and_lost_upload_reconcile_use_complete_immutable_obje
         };
         assert!(matches!(
             provider
-                .reconcile_upload(&repository, &intent, &resume, &cancel)
+                .reconcile_upload(&repository, &intent, Some(&resume), &cancel)
                 .await
                 .unwrap(),
             UploadResolution::Complete(_)

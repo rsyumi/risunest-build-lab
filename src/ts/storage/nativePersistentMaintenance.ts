@@ -1,6 +1,14 @@
 import { invoke } from '@tauri-apps/api/core'
 import { relaunch } from '@tauri-apps/plugin-process'
 import { isTauriIOS, isTauriMobile } from '../platform'
+import type {
+    DataHealthResult,
+    RepairApplied,
+    RepairCandidate,
+    RepairJournalSummary,
+    RepairPreview,
+    RepairUndone,
+} from './dataHealth'
 
 const PERIODIC_SNAPSHOT_INTERVAL_MS = 24 * 60 * 60 * 1000
 const PERIODIC_SNAPSHOT_CHECK_INTERVAL_MS = 60 * 60 * 1000
@@ -32,7 +40,6 @@ export interface NativePersistentStorageStats {
     databaseBytes: number
     assetObjects: NativeStorageBytes
     assetAliases: NativeStorageAliasStats[]
-    coldAliases: NativeStorageBytes
     pluginStorage: NativeStorageBytes
     characters: { active: NativeStorageBytes; trashedCount: number }
     conversations: { count: number; messageCount: number }
@@ -48,12 +55,24 @@ export interface NativeStorageDeletionStats extends NativeStorageBytes {
     state: string
 }
 
+/** One stored file the cleanup looked at, and what it decided about it. */
+export interface NativeAssetGcCandidate {
+    objectHash: string
+    bytes: number
+    createdAtMs: number
+    state: 'deletable' | 'recent' | 'held'
+    /** What is holding a kept file. Empty with `held` means the library still uses it. */
+    holders: string[]
+}
+
 export interface NativeAssetGcResult {
     candidateCount: number
     candidateBytes: number
     deletedCount: number
     deletedBytes: number
     blockers: string[]
+    candidates?: NativeAssetGcCandidate[]
+    omitted?: number
 }
 
 export interface NativeSnapshotRestoreActions {
@@ -103,6 +122,45 @@ export function executeNativePersistentAssetGc(): Promise<NativeAssetGcResult> {
     return invoke('pds_asset_gc_execute')
 }
 
+export function scanNativeDataHealth(): Promise<DataHealthResult> {
+    return invoke('pds_data_health_scan')
+}
+
+export function deepScanNativeDataHealth(resume: boolean): Promise<DataHealthResult> {
+    return invoke('pds_data_health_deep_scan', { resume })
+}
+
+export function getNativeDataHealthResult(): Promise<DataHealthResult | null> {
+    return invoke('pds_data_health_result')
+}
+
+export async function cancelNativeDataHealthScan(): Promise<void> {
+    await invoke('pds_data_health_cancel')
+}
+
+export function planNativeDataHealthRepair(): Promise<RepairCandidate[]> {
+    return invoke('pds_data_health_repair_plan')
+}
+
+export function previewNativeDataHealthRepair(selection: string[]): Promise<RepairPreview> {
+    return invoke('pds_data_health_repair_preview', { selection })
+}
+
+export function applyNativeDataHealthRepair(
+    selection: string[],
+    snapshot: boolean,
+): Promise<RepairApplied> {
+    return invoke('pds_data_health_repair_apply', { selection, snapshot })
+}
+
+export function listNativeDataHealthJournals(): Promise<RepairJournalSummary[]> {
+    return invoke('pds_data_health_journals')
+}
+
+export function undoNativeDataHealthRepair(journalId: string): Promise<RepairUndone> {
+    return invoke('pds_data_health_undo', { journalId })
+}
+
 export async function requestNativePersistentSnapshotRestore(id: string): Promise<void> {
     await invoke('pds_snapshot_restore_request', { id })
 }
@@ -133,7 +191,10 @@ export async function createPeriodicNativeSnapshotIfDue(
         (newest, snapshot) => Math.max(newest, snapshot.modifiedAt),
         Number.NEGATIVE_INFINITY,
     )
-    if (now - newestModifiedAt < PERIODIC_SNAPSHOT_INTERVAL_MS) return null
+    if (
+        newestModifiedAt <= now
+        && now - newestModifiedAt < PERIODIC_SNAPSHOT_INTERVAL_MS
+    ) return null
     return createNativePersistentSnapshot('periodic')
 }
 

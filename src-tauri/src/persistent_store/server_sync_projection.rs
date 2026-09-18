@@ -29,7 +29,8 @@ pub(crate) fn locator(key: &ServerDirtyKey) -> StoreResult<LogicalRecordLocator>
             preset_id: key.key1.clone(),
         },
         "plugin" => LogicalRecordLocator::Plugin {
-            storage_key: key.key1.clone(),
+            owner: key.key1.clone(),
+            storage_key: key.key2.clone(),
         },
         "character" => LogicalRecordLocator::Character {
             character_id: key.key1.clone(),
@@ -42,9 +43,6 @@ pub(crate) fn locator(key: &ServerDirtyKey) -> StoreResult<LogicalRecordLocator>
             logical_key: key.key1.clone(),
         },
         "inlay" => LogicalRecordLocator::Inlay {
-            logical_key: key.key1.clone(),
-        },
-        "cold" => LogicalRecordLocator::Cold {
             logical_key: key.key1.clone(),
         },
         "owner" if key.key1 == "character-additional-assets" => LogicalRecordLocator::Character {
@@ -77,12 +75,12 @@ pub(crate) fn project(
         LogicalRecordLocator::Preset { preset_id } => {
             ("bot_presets", "preset_id", None, preset_id.as_str(), "")
         }
-        LogicalRecordLocator::Plugin { storage_key } => (
+        LogicalRecordLocator::Plugin { owner, storage_key } => (
             "plugin_storage",
-            "storage_key",
-            None,
+            "owner",
+            Some("storage_key"),
+            owner.as_str(),
             storage_key.as_str(),
-            "",
         ),
         LogicalRecordLocator::Character { character_id } => (
             "characters",
@@ -115,9 +113,8 @@ pub(crate) fn project(
             logical_key.as_str(),
             "inlay",
         ),
-        LogicalRecordLocator::Cold { logical_key } => {
-            ("cold_aliases", "key", None, logical_key.as_str(), "")
-        }
+        // The store no longer holds cold payloads; the shared record format still carries the variant.
+        LogicalRecordLocator::Cold { .. } => return invalid("Cold records are unsupported"),
     };
     let suffix = column2
         .map(|c| format!(" AND {c}=?3"))
@@ -256,8 +253,7 @@ pub(crate) fn dependencies(payload: &ServerPayload, cas: &PayloadCas) -> StoreRe
             }
         }
         LogicalRecordEnvelope::Asset { object_hash, .. }
-        | LogicalRecordEnvelope::Inlay { object_hash, .. }
-        | LogicalRecordEnvelope::Cold { object_hash, .. } => {
+        | LogicalRecordEnvelope::Inlay { object_hash, .. } => {
             if let Some(hash) = object_hash {
                 hashes.insert(hash.clone());
             }
@@ -323,7 +319,6 @@ pub(crate) fn all_keys_page(
             "AND kind='asset'",
         ),
         ("character", "characters", "character_id", "''", ""),
-        ("cold", "cold_aliases", "key", "''", ""),
         (
             "conversation",
             "conversations",
@@ -338,7 +333,7 @@ pub(crate) fn all_keys_page(
             "''",
             "AND kind='inlay'",
         ),
-        ("plugin", "plugin_storage", "storage_key", "''", ""),
+        ("plugin", "plugin_storage", "owner", "storage_key", ""),
         ("preset", "bot_presets", "preset_id", "''", ""),
         ("root", "root", "''", "''", ""),
     ] {

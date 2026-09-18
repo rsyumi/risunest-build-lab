@@ -6,9 +6,15 @@ import type {
 } from './nativePersistentMaintenance'
 import type { SyncConflictBackupEntry } from './sync/syncConflictBackup'
 import type {
+    ServerSyncBackupCursor,
     ServerSyncBackupInventory,
     ServerSyncCacheUsage,
 } from './sync/serverSyncProduction'
+
+export interface ServerSyncBackupDeleteResult {
+    localDeleted: true
+    cleanup: 'complete' | 'pending'
+}
 
 export type RisuNestStorageCardId =
     | 'total'
@@ -35,14 +41,17 @@ export interface RisuNestStorageDashboardDependencies {
     getStats(): Promise<NativePersistentStorageStats>
     listSnapshots(): Promise<NativeSnapshotInfo[]>
     listConflictBackups(): Promise<SyncConflictBackupEntry[]>
-    getServerBackups(): Promise<ServerSyncBackupInventory>
+    /** The newest page, or the page before `before` when a cursor is given. */
+    getServerBackups(before?: ServerSyncBackupCursor): Promise<ServerSyncBackupInventory>
     getTemp(): Promise<ServerSyncCacheUsage>
     cleanupTemp(): Promise<ServerSyncCacheUsage>
     previewGc(): Promise<NativeAssetGcResult>
     executeGc(): Promise<NativeAssetGcResult>
     deleteSnapshot(id: string): Promise<void>
     deleteConflictBackup(id: string): Promise<void>
-    deleteServerBackup(id: string): Promise<void>
+    deleteServerBackup(id: string): Promise<ServerSyncBackupDeleteResult>
+    exportServerBackup(id: string, side: 'local' | 'remote'): Promise<void>
+    restoreServerBackup(id: string, side: 'local' | 'remote'): Promise<void>
     createSnapshot(reason: string): Promise<NativeSnapshotCreated>
 }
 
@@ -274,9 +283,37 @@ export function createRisuNestStorageDashboard(
         },
         async deleteServerBackup(id: string) {
             return run(`delete-server-backup:${id}`, async () => {
-                await deps.deleteServerBackup(id)
+                const result = await deps.deleteServerBackup(id)
                 invalidatePendingReloads()
                 await reload()
+                return result
+            })
+        },
+        async restoreServerBackup(id: string, side: 'local' | 'remote') {
+            return run(`restore-server-backup:${id}:${side}`, async () => {
+                await deps.restoreServerBackup(id, side)
+                invalidatePendingReloads()
+                await reload()
+            })
+        },
+        async exportServerBackup(id: string, side: 'local' | 'remote') {
+            return run(`export-server-backup:${id}:${side}`, () =>
+                deps.exportServerBackup(id, side),
+            )
+        },
+        /** Appends the page before the last loaded one to the server backup list. */
+        async loadMoreServerBackups() {
+            return run('more-server-backups', async () => {
+                const current = state.serverBackups
+                if (!current?.next) return
+                const older = await deps.getServerBackups(current.next)
+                if (state.serverBackups !== current) return
+                update({
+                    serverBackups: {
+                        ...older,
+                        items: [...current.items, ...older.items],
+                    },
+                })
             })
         },
         async createSnapshot() {

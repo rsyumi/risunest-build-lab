@@ -6,7 +6,6 @@ import { IndexedDbPersistentDataStore } from '../indexedDbPersistentDataStore'
 import {
     capturePersistentRoot,
     createPersistentDataRuntime,
-    installMaximumCompatibilityWorkingSet,
 } from '../persistentDataRuntime'
 import { isCatalogCharacterStub } from '../workingSetCatalog'
 import { WorkingSetResidencyRegistry } from '../workingSetResidency'
@@ -61,6 +60,7 @@ function makeLease(input: {
         readPreset: vi.fn(async () => null),
         readRoot: vi.fn(),
         queryCharacters: vi.fn(),
+        readCharacterSummary: vi.fn(async () => null),
         readCharacter:
             input.readCharacter ??
             vi.fn(async () => ({
@@ -103,12 +103,6 @@ function makeLease(input: {
             value: { format: 'legacy' as const },
         })),
         readAssetOwnerHead: vi.fn(async () => null),
-        readColdPayloadAuthority: vi.fn(async () => ({
-            revision,
-            value: { format: 'legacy' as const },
-        })),
-        readColdAlias: vi.fn(async () => null),
-        listColdAliases: vi.fn(async () => ({ revision, value: [] })),
         release: vi.fn(async () => undefined),
     }
 }
@@ -127,7 +121,9 @@ function makeHarness(
         mutationGeneration: 0,
         initialize: vi.fn(),
         flushPendingData: vi.fn(() => Promise.resolve()),
-        replacePersistentDatabase: vi.fn(async () => undefined),
+        replacePersistentDatabase: vi.fn(async () => ({
+            kind: 'committed', revision: 1, projection: 'applied',
+        } as const)),
         adoptHydratedCharacter: vi.fn(() => true),
         markPersistentDataDirty: vi.fn(),
         recordActiveConversationMutation: vi.fn(),
@@ -407,7 +403,6 @@ function makeWindowedHarness(input: {
         captureActivationRollback,
         canActivateWorkingSet: () => true,
         canUseWindowedSelectedConversation: () => windowedAllowed,
-        isMaximumCompatibilityMode: () => false,
         isConversationOperationActive: () => false,
         shouldHydrateFullCharacter: () => false,
         canReleaseConversation: () => true,
@@ -912,6 +907,54 @@ describe('ActiveWorkingSet', () => {
         expect([...harness.workingSet.activeCharacterIds]).toEqual([])
     })
 
+    it('keeps the selected conversation target current when leave becomes blocked during flush', async () => {
+        const harness = makeHarness(makeLease({
+            characterId: 'char-a',
+            chats: [makeChat('chat-a')],
+        }), { hydrateFullCharacter: true })
+        await harness.workingSet.activateCharacter('char-a')
+        const flushing = deferred<void>()
+        harness.coordinator.flushPendingData.mockReturnValueOnce(flushing.promise)
+
+        const leaving = harness.workingSet.deactivate()
+        harness.setWorkingSetReleaseAllowed(false)
+        flushing.resolve()
+
+        await expect(leaving).resolves.toBe(false)
+        harness.setWorkingSetReleaseAllowed(true)
+        const target = harness.workingSet.captureSelectedConversationTarget()
+        expect(target).not.toBeNull()
+        const lease = await harness.workingSet.acquireCompleteConversation(
+            'after-blocked-leave',
+            target!,
+        )
+        lease.release()
+    })
+
+    it('keeps the selected conversation target current when activation becomes blocked during flush', async () => {
+        const harness = makeHarness(makeLease({
+            characterId: 'char-a',
+            chats: [makeChat('chat-a'), makeChat('chat-b')],
+        }), { hydrateFullCharacter: true })
+        await harness.workingSet.activateCharacter('char-a')
+        const flushing = deferred<void>()
+        harness.coordinator.flushPendingData.mockReturnValueOnce(flushing.promise)
+
+        const activating = harness.workingSet.activateConversation('chat-b')
+        harness.setWorkingSetActivationAllowed(false)
+        flushing.resolve()
+
+        await expect(activating).resolves.toBe(false)
+        harness.setWorkingSetActivationAllowed(true)
+        const target = harness.workingSet.captureSelectedConversationTarget()
+        expect(target).not.toBeNull()
+        const lease = await harness.workingSet.acquireCompleteConversation(
+            'after-blocked-activation',
+            target!,
+        )
+        lease.release()
+    })
+
     it('keeps the active character resident while generation is busy before streaming starts', async () => {
         const harness = makeHarness(makeLease({ characterId: 'char-a' }))
         await harness.workingSet.activateCharacter('char-a')
@@ -1366,7 +1409,7 @@ describe('ActiveWorkingSet', () => {
         await vi.waitFor(() => expect(prepare).toHaveBeenCalledOnce())
         const second = harness.workingSet.activateCharacter('char-b')
         expect(await second).toBe(true)
-        preparation.resolve({ database: harness.database, reason: 'cold-character-restore' })
+        preparation.resolve({ database: harness.database, reason: 'character-detail-replace' })
 
         expect(await first).toBe(false)
         expect(harness.coordinator.replacePersistentDatabase).not.toHaveBeenCalled()
@@ -1410,6 +1453,7 @@ describe('ActiveWorkingSet', () => {
         harness.coordinator.replacePersistentDatabase.mockImplementation(async () => {
             replacementStarted = true
             await replacement.promise
+            return { kind: 'committed', revision: 1, projection: 'applied' }
         })
         harness.coordinator.flushPendingData.mockImplementation(() =>
             replacementStarted ? replacement.promise : Promise.resolve(),
@@ -1418,7 +1462,7 @@ describe('ActiveWorkingSet', () => {
         const first = harness.workingSet.activateCharacter('char-a', {
             prepare: async () => ({
                 database: harness.database,
-                reason: 'cold-character-restore',
+                reason: 'character-detail-replace',
             }),
         })
         await vi.waitFor(() =>
@@ -1748,6 +1792,13 @@ describe('ActiveWorkingSet', () => {
             { role: 'user', data: 'unsaved' },
             { role: 'char', data: 'pending command' },
         ])
+        const currentTarget = workingSet.captureSelectedConversationTarget()
+        expect(currentTarget).not.toBeNull()
+        const currentLease = await workingSet.acquireCompleteConversation(
+            'after-failed-activation',
+            currentTarget!,
+        )
+        currentLease.release()
     })
 
     it('keeps a streaming previous body pinned while selecting the hydrated target', async () => {
@@ -2329,271 +2380,5 @@ describe('ActiveWorkingSet', () => {
         expect(publishCharacter).not.toHaveBeenCalled()
         expect(vi.mocked(reader.queryConversations)).toHaveBeenCalledTimes(2)
         expect((await originalQuery({ characterId: 'char-b', order: 'configured', limit: 100, cursor: '1' })).items).toEqual([])
-    })
-})
-
-describe('maximum compatibility working set installation', () => {
-    function makeCompleteDatabaseLease(
-        database: Database,
-        revision: number,
-    ): PersistentRevisionLease {
-        const {
-            characters,
-            botPresets = [],
-            pluginCustomStorage = {},
-            ...root
-        } = database
-        return {
-            revision,
-            readRoot: vi.fn(async () => ({ revision, value: structuredClone(root) })),
-            queryPresets: vi.fn(async () => ({
-                revision,
-                items: botPresets.map((preset, configuredIndex) => ({
-                    id: String(configuredIndex),
-                    configuredIndex,
-                    name: preset.name ?? '',
-                    image: preset.image,
-                })),
-            })),
-            readPreset: vi.fn(async (id) => {
-                const preset = botPresets[Number(id)]
-                return preset ? { revision, value: structuredClone(preset) } : null
-            }),
-            queryCharacters: vi.fn(async ({ trash }) => ({
-                revision,
-                items: characters.flatMap((character, configuredIndex) =>
-                    (character.trashTime !== undefined) === trash ? [{
-                        id: character.chaId,
-                        name: character.name,
-                        image: character.image,
-                        configuredIndex,
-                        recentAt: character.lastInteraction ?? 0,
-                        trashed: trash,
-                        conversationCount: character.chats.length,
-                        type: character.type,
-                        creatorNotes: character.creatorNotes,
-                        trashTime: character.trashTime,
-                    }] : []),
-            })),
-            readCharacter: vi.fn(async (id) => {
-                const character = characters.find((candidate) => candidate.chaId === id)
-                if (!character) return null
-                const { chats: _chats, ...detail } = character
-                return { revision, value: structuredClone(detail) }
-            }),
-            queryConversations: vi.fn(async ({ characterId }) => {
-                const character = characters.find((candidate) =>
-                    candidate.chaId === characterId)
-                return {
-                    revision,
-                    items: (character?.chats ?? []).map((chat, configuredIndex) => ({
-                        id: chat.id!,
-                        characterId,
-                        name: chat.name ?? '',
-                        folderId: chat.folderId,
-                        bindedPersona: chat.bindedPersona,
-                        configuredIndex,
-                        recentAt: chat.lastDate ?? 0,
-                        messageCount: chat.message.length,
-                    })),
-                }
-            }),
-            readConversation: vi.fn(async (characterId, conversationId) => {
-                const conversation = characters.find((candidate) =>
-                    candidate.chaId === characterId)?.chats.find((candidate) =>
-                    candidate.id === conversationId)
-                return conversation
-                    ? { revision, value: structuredClone(conversation) }
-                    : null
-            }),
-            readConversationMetadata: vi.fn(async () => null),
-            readConversationWindow: vi.fn(async () => null),
-            queryPluginStorage: vi.fn(async () => ({
-                revision,
-                items: Object.keys(pluginCustomStorage).map((key) => ({ key, byteSize: 0 })),
-            })),
-            readPluginStorage: vi.fn(async (key) => Object.hasOwn(pluginCustomStorage, key)
-                ? { revision, value: structuredClone(pluginCustomStorage[key]) }
-                : null),
-            readAssetAlias: vi.fn(async () => null),
-            readAssetAliasesByKeys: vi.fn(async () => ({ revision, value: [] })),
-            listAssetAliases: vi.fn(async () => ({ revision, items: [] })),
-            readAssetRepositoryAuthority: vi.fn(async () => ({
-                revision,
-                value: { format: 'legacy' as const },
-            })),
-            readAssetOwnerHead: vi.fn(async () => null),
-            readColdPayloadAuthority: vi.fn(async () => ({
-                revision,
-                value: { format: 'legacy' as const },
-            })),
-            readColdAlias: vi.fn(async () => null),
-            listColdAliases: vi.fn(async () => ({ revision, value: [] })),
-            release: vi.fn(async () => undefined),
-        }
-    }
-
-    it('captures stable selection IDs after flushing before materialization', async () => {
-        const database = {
-            username: 'Complete',
-            characters: [makeCharacter('char-a', [makeChat('chat-a')])],
-        } as unknown as Database
-        const events: string[] = []
-        let selectedCharacterId = 'char-a'
-        let selectedConversationId = 'chat-a'
-
-        await installMaximumCompatibilityWorkingSet({
-            getSelectedCharacterId: () => selectedCharacterId,
-            getSelectedConversationId: () => selectedConversationId,
-            flushPendingData: async () => {
-                events.push('flush')
-                selectedCharacterId = 'changed-character'
-                selectedConversationId = 'changed-conversation'
-            },
-            getRevision: () => 7,
-            getMutationGeneration: () => 0,
-            getNavigationGeneration: () => 0,
-            acquireRevision: async (revision) => {
-                events.push(`materialize:${revision}`)
-                return makeCompleteDatabaseLease(database, revision)
-            },
-            installCompleteDatabase: (candidate) => {
-                expect(candidate).toMatchObject(database)
-                events.push('install')
-            },
-            restoreSelection: (characterId, conversationId) => {
-                events.push(`restore:${characterId}:${conversationId}`)
-            },
-            adoptMaterializedDatabase: (revision, _mutationGeneration, candidate) => {
-                expect(candidate).toMatchObject(database)
-                events.push(`baseline:${revision}`)
-                return true
-            },
-        })
-
-        expect(events).toEqual([
-            'flush',
-            'materialize:7',
-            'baseline:7',
-            'install',
-            'restore:changed-character:changed-conversation',
-        ])
-    })
-
-    it('keeps the existing working set when pinned materialization fails', async () => {
-        const error = new Error('materialization failed')
-        const installCompleteDatabase = vi.fn()
-        const restoreSelection = vi.fn()
-
-        await expect(installMaximumCompatibilityWorkingSet({
-            getSelectedCharacterId: () => 'char-a',
-            getSelectedConversationId: () => 'chat-a',
-            flushPendingData: vi.fn(async () => undefined),
-            getRevision: () => 3,
-            acquireRevision: vi.fn(async () => {
-                const lease = makeCompleteDatabaseLease({
-                    characters: [],
-                } as unknown as Database, 3)
-                lease.readRoot = vi.fn(async () => { throw error })
-                return lease
-            }),
-            installCompleteDatabase,
-            restoreSelection,
-            getMutationGeneration: () => 0,
-            getNavigationGeneration: () => 0,
-            adoptMaterializedDatabase: vi.fn(() => true),
-        })).rejects.toBe(error)
-
-        expect(installCompleteDatabase).not.toHaveBeenCalled()
-        expect(restoreSelection).not.toHaveBeenCalled()
-    })
-
-    it('retries when edits and navigation change while materialization is pending', async () => {
-        const stale = {
-            username: 'Stale',
-            characters: [makeCharacter('char-a', [makeChat('chat-a')])],
-        } as unknown as Database
-        const fresh = {
-            username: 'Fresh',
-            characters: [makeCharacter('char-b', [makeChat('chat-b')])],
-        } as unknown as Database
-        const firstMaterialization = deferred<PersistentRevisionLease>()
-        let revision = 7
-        let mutationGeneration = 0
-        let navigationGeneration = 0
-        let selectedCharacterId = 'char-a'
-        let selectedConversationId = 'chat-a'
-        let flushCount = 0
-        const installCompleteDatabase = vi.fn()
-        const restoreSelection = vi.fn()
-        const acquireRevision = vi.fn((candidateRevision: number) =>
-            candidateRevision === 7
-                ? firstMaterialization.promise
-                : Promise.resolve(makeCompleteDatabaseLease(fresh, candidateRevision)),
-        )
-
-        const installation = installMaximumCompatibilityWorkingSet({
-            getSelectedCharacterId: () => selectedCharacterId,
-            getSelectedConversationId: () => selectedConversationId,
-            flushPendingData: async () => {
-                flushCount++
-                if (flushCount === 2) revision = 8
-            },
-            getRevision: () => revision,
-            getMutationGeneration: () => mutationGeneration,
-            getNavigationGeneration: () => navigationGeneration,
-            acquireRevision,
-            installCompleteDatabase,
-            restoreSelection,
-            adoptMaterializedDatabase: (candidateRevision, candidateGeneration) =>
-                candidateRevision === revision && candidateGeneration === mutationGeneration,
-        })
-        await vi.waitFor(() => expect(acquireRevision).toHaveBeenCalledWith(7))
-
-        mutationGeneration++
-        navigationGeneration++
-        selectedCharacterId = 'char-b'
-        selectedConversationId = 'chat-b'
-        firstMaterialization.resolve(makeCompleteDatabaseLease(stale, 7))
-        await installation
-
-        expect(acquireRevision.mock.calls.map(([candidateRevision]) => candidateRevision)).toEqual([
-            7,
-            8,
-        ])
-        expect(installCompleteDatabase).toHaveBeenCalledOnce()
-        expect(installCompleteDatabase.mock.calls[0][0]).toMatchObject(fresh)
-        expect(restoreSelection).toHaveBeenCalledWith('char-b', 'chat-b')
-    })
-
-    it('leaves the current working set installed when bounded materialization retries stay stale', async () => {
-        const database = {
-            username: 'Candidate',
-            characters: [makeCharacter('char-a', [makeChat('chat-a')])],
-        } as unknown as Database
-        let navigationGeneration = 0
-        const installCompleteDatabase = vi.fn()
-        const restoreSelection = vi.fn()
-        const acquireRevision = vi.fn(async () => {
-            navigationGeneration++
-            return makeCompleteDatabaseLease(database, 7)
-        })
-
-        await expect(installMaximumCompatibilityWorkingSet({
-            getSelectedCharacterId: () => 'char-a',
-            getSelectedConversationId: () => 'chat-a',
-            flushPendingData: vi.fn(async () => undefined),
-            getRevision: () => 7,
-            getMutationGeneration: () => 0,
-            getNavigationGeneration: () => navigationGeneration,
-            acquireRevision,
-            installCompleteDatabase,
-            restoreSelection,
-            adoptMaterializedDatabase: vi.fn(() => true),
-        })).rejects.toThrow('Working set changed during maximum compatibility materialization')
-
-        expect(acquireRevision).toHaveBeenCalledTimes(3)
-        expect(installCompleteDatabase).not.toHaveBeenCalled()
-        expect(restoreSelection).not.toHaveBeenCalled()
     })
 })

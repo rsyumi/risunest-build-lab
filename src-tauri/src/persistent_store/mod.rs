@@ -1,16 +1,22 @@
+pub(crate) mod archive;
 pub(crate) mod asset_object_catalog;
 pub(crate) mod asset_residency;
 pub(crate) mod commands;
-mod commit;
-pub(crate) mod content_change_index;
+pub(crate) mod commit;
 pub(crate) mod content_capture;
+pub(crate) mod content_change_index;
 mod content_locators;
-pub(crate) mod external_storage_state;
-pub(crate) mod sync_selection;
+pub(crate) mod device_store;
 pub(crate) mod export;
+pub(crate) mod external_apply;
+pub(crate) mod external_capture;
+pub(crate) mod external_conflicts;
+pub(crate) mod external_runtime;
+pub(crate) mod external_storage_state;
 #[cfg(feature = "native-kei-upload-pilot")]
 pub(crate) mod kei;
 pub(crate) mod owner_projection;
+pub(crate) mod plugin_owner;
 pub(crate) mod portable;
 pub(crate) mod portable_validation;
 mod preservation;
@@ -26,14 +32,17 @@ pub(crate) mod server_sync_engine;
 pub(crate) mod server_sync_journal;
 pub(crate) mod server_sync_outbox;
 pub(crate) mod server_sync_projection;
+pub(crate) mod server_sync_sections;
+mod repair;
 mod snapshot;
 mod snapshot_archive;
+pub(crate) mod sync_selection;
 
 pub(crate) use asset_object_catalog::{AssetObjectCatalog, AssetObjectCatalogPage};
 pub(crate) use commands::PersistentStoreState;
 pub(crate) use snapshot::RevisionReadLease;
 
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 #[cfg(feature = "native-official-publication")]
@@ -47,6 +56,8 @@ use std::time::Duration;
 use std::time::Instant;
 
 pub(super) type StoreResult<T> = Result<T, StoreError>;
+
+pub(crate) const DATABASE_FILE: &str = "persistent.sqlite";
 
 pub(super) const CONVERSATION_RANGE_MAX_LIMIT: i64 = 4_096;
 pub(super) const JAVASCRIPT_MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
@@ -74,7 +85,7 @@ pub(super) const GENERATION_TABLES: &[(&str, &str)] = &[
     ),
     (
         "plugin_storage",
-        "storage_key, byte_size, ordinal, value",
+        "owner, storage_key, byte_size, ordinal, value, claimed_from, import_batch_id, assigned_at",
     ),
     (
         "asset_aliases",
@@ -89,8 +100,6 @@ pub(super) const GENERATION_TABLES: &[(&str, &str)] = &[
         "owner_kind, owner_locator, present, manifest_hash, entry_count",
     ),
     ("asset_repository_authority", "value"),
-    ("cold_payload_authority", "value"),
-    ("cold_aliases", "key, object_hash, size, metadata"),
 ];
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -201,6 +210,18 @@ pub(crate) struct CharacterSummary {
     pub(crate) creator_notes: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) trash_time: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) archived: Option<ArchivedCharacterSummary>,
+}
+
+/// What the list needs about an archived character. The stored object hash and
+/// the asset hash list stay inside the store.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ArchivedCharacterSummary {
+    pub(crate) archived_at: i64,
+    pub(crate) conversation_count: i64,
+    pub(crate) message_count: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -223,8 +244,45 @@ pub(crate) struct PresetCatalog {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PluginStorageSummary {
+    pub(crate) owner: String,
     pub(crate) key: String,
     pub(crate) byte_size: i64,
+}
+
+/// What the plugin data screen lists. Values stay in the store; the screen asks
+/// for one when the reader opens it.
+/// A claim answers with the value it handed over and the revision it left the
+/// library at, so the renderer's write coordinator stays in step.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ClaimedPluginValue {
+    pub(crate) value: Option<Value>,
+    pub(crate) revision: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AssignedPluginStorage {
+    #[serde(flatten)]
+    pub(crate) outcome: commit::AssignOutcome,
+    pub(crate) revision: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PluginStorageListItem {
+    pub(crate) owner: String,
+    pub(crate) key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) space: Option<String>,
+    pub(crate) value_type: String,
+    pub(crate) byte_size: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) claimed_from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) import_batch_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) assigned_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -291,52 +349,6 @@ impl AssetRepositoryAuthorityState {
                 compatibility_hash,
             } => validate_authority_fields(
                 "Asset repository",
-                migration_id,
-                None,
-                Some(compatibility_hash),
-            ),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "format",
-    rename_all = "lowercase",
-    rename_all_fields = "camelCase",
-    deny_unknown_fields
-)]
-pub(crate) enum ColdPayloadAuthorityState {
-    Legacy,
-    Preparing {
-        migration_id: String,
-        source_revision: i64,
-    },
-    #[serde(rename = "v2")]
-    V2 {
-        migration_id: String,
-        compatibility_hash: String,
-    },
-}
-
-impl ColdPayloadAuthorityState {
-    pub(crate) fn validate(&self) -> StoreResult<()> {
-        match self {
-            Self::Legacy => Ok(()),
-            Self::Preparing {
-                migration_id,
-                source_revision,
-            } => validate_authority_fields(
-                "Cold payload",
-                migration_id,
-                Some(*source_revision),
-                None,
-            ),
-            Self::V2 {
-                migration_id,
-                compatibility_hash,
-            } => validate_authority_fields(
-                "Cold payload",
                 migration_id,
                 None,
                 Some(compatibility_hash),
@@ -569,55 +581,6 @@ impl AssetOwnerHead {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ColdAlias {
-    pub(crate) key: String,
-    pub(crate) object_hash: Option<String>,
-    pub(crate) size: i64,
-    pub(crate) metadata: Value,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct ColdPayloadMigrationInput {
-    pub(crate) source_revision: i64,
-    pub(crate) migration_id: String,
-    pub(crate) compatibility_hash: String,
-    pub(crate) cold_aliases: Vec<ColdAlias>,
-}
-
-impl ColdPayloadMigrationInput {
-    fn authority(&self) -> ColdPayloadAuthorityState {
-        ColdPayloadAuthorityState::V2 {
-            migration_id: self.migration_id.clone(),
-            compatibility_hash: self.compatibility_hash.clone(),
-        }
-    }
-}
-
-impl ColdAlias {
-    pub(super) fn validate(&self) -> StoreResult<()> {
-        if self.key.is_empty() || self.key.contains('\0') {
-            return Err(StoreError::Validation {
-                message: "Cold alias key must be nonempty and contain no NUL characters".to_owned(),
-            });
-        }
-        validate_object_hash(&self.object_hash, "Cold alias")?;
-        if self.size < 0 {
-            return Err(StoreError::Validation {
-                message: "Cold alias size must be nonnegative".to_owned(),
-            });
-        }
-        if !self.metadata.is_object() {
-            return Err(StoreError::Validation {
-                message: "Cold alias metadata must be a JSON object".to_owned(),
-            });
-        }
-        Ok(())
-    }
-}
-
 pub(crate) use crate::trust_boundary::is_lower_hex_256 as is_lowercase_sha256_hex;
 
 fn validate_object_hash(hash: &Option<String>, subject: &str) -> StoreResult<()> {
@@ -638,33 +601,6 @@ fn validate_hash(hash: &str, subject: &str) -> StoreResult<()> {
     if !is_lowercase_sha256_hex(hash) {
         return Err(StoreError::Validation {
             message: format!("{subject} must be 64 lowercase hexadecimal characters"),
-        });
-    }
-    Ok(())
-}
-
-fn verify_cold_alias_object(
-    cas: &crate::asset_repository::PayloadCas,
-    alias: &ColdAlias,
-) -> StoreResult<()> {
-    alias.validate()?;
-    let hash = alias
-        .object_hash
-        .as_deref()
-        .ok_or_else(|| StoreError::Validation {
-            message: "Cold payload v2 alias requires an objectHash".to_owned(),
-        })?;
-    let actual_size = cas
-        .stat_object(hash)?
-        .ok_or_else(|| StoreError::Validation {
-            message: format!("Cold payload CAS object {hash} is missing"),
-        })?;
-    if actual_size != alias.size as u64 {
-        return Err(StoreError::Validation {
-            message: format!(
-                "Cold payload alias size {} does not match CAS size {actual_size}",
-                alias.size
-            ),
         });
     }
     Ok(())
@@ -818,9 +754,18 @@ pub(crate) enum ConversationMutation {
     rename_all_fields = "camelCase"
 )]
 pub(crate) enum PluginStorageMutation {
-    Set { key: String, value: Value },
-    Delete { key: String },
-    Clear,
+    Set {
+        owner: String,
+        key: String,
+        value: Value,
+    },
+    Delete {
+        owner: String,
+        key: String,
+    },
+    Clear {
+        owner: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -910,6 +855,127 @@ pub(crate) struct PersistentStore {
     database_path: PathBuf,
     snapshots_dir: PathBuf,
     pending_restore_failure: Option<String>,
+    // A device store that cannot be opened must not block the library, so the
+    // failure is carried until something actually needs per-device state.
+    device_store: Result<device_store::DeviceStore, String>,
+}
+
+/// One generation, held open for a diagnosis. It outlives the store mutex on purpose: a deep
+/// scan reads every stored object, and the library stays writable while it does.
+pub(crate) struct DataHealthReader {
+    connection: Connection,
+    cas: crate::asset_repository::PayloadCas,
+    revision: i64,
+}
+
+impl DataHealthReader {
+    pub(crate) fn revision(&self) -> i64 {
+        self.revision
+    }
+
+    pub(crate) fn scan(
+        &self,
+        limit: usize,
+        probe: &dyn crate::local_backup::CancellationProbe,
+    ) -> StoreResult<crate::data_health::Findings> {
+        let mut findings = crate::data_health::Findings::new(limit);
+        crate::portable_backup::scan_live_library(&self.connection, &self.cas, &mut findings, probe)
+        .map_err(scan_failure)?;
+        self.note_unreferenced_objects(&mut findings, probe)?;
+        Ok(findings)
+    }
+
+    /// Reports the stored objects no alias in this generation names. They cost space and nothing
+    /// else, so the diagnosis only counts them and sends the reader to the cleanup, which is the
+    /// only place a file is actually deleted.
+    fn note_unreferenced_objects(
+        &self,
+        findings: &mut crate::data_health::Findings,
+        probe: &dyn crate::local_backup::CancellationProbe,
+    ) -> StoreResult<()> {
+        use crate::data_health::{codes, FindingSink, Finding};
+        let mut statement = self.connection.prepare(
+            "SELECT object_hash,byte_size FROM asset_objects WHERE object_hash NOT IN (
+                 SELECT object_hash FROM asset_aliases WHERE object_hash IS NOT NULL
+             ) ORDER BY object_hash",
+        )?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            if probe.is_cancelled() {
+                return Err(StoreError::Validation {
+                    message: crate::data_health::CANCELLED.to_owned(),
+                });
+            }
+            let hash: String = row.get(0)?;
+            let bytes: i64 = row.get(1)?;
+            findings.note(
+                Finding::new(
+                    codes::OBJECT_UNREFERENCED,
+                    "asset",
+                    hash,
+                    format!("{bytes} bytes no record uses"),
+                )
+                .targeting("bytes", bytes.to_string()),
+            );
+        }
+        Ok(())
+    }
+
+    pub(crate) fn object_totals(&self) -> StoreResult<crate::portable_backup::ObjectTotals> {
+        crate::portable_backup::registered_object_totals(&self.connection).map_err(scan_failure)
+    }
+
+    pub(crate) fn scan_objects(
+        &self,
+        after: Option<&str>,
+        budget: u64,
+        limit: usize,
+        probe: &dyn crate::local_backup::CancellationProbe,
+    ) -> StoreResult<(crate::portable_backup::ObjectPage, crate::data_health::Findings)> {
+        let mut findings = crate::data_health::Findings::new(limit);
+        let page = crate::portable_backup::scan_registered_objects(
+            &self.connection,
+            &self.cas,
+            after,
+            budget,
+            &mut findings,
+            probe,
+        )
+        .map_err(scan_failure)?;
+        Ok((page, findings))
+    }
+}
+
+fn scan_failure(error: crate::portable_backup::Error) -> StoreError {
+    match error {
+        crate::portable_backup::Error::Cancelled => StoreError::Validation {
+            message: crate::data_health::CANCELLED.to_owned(),
+        },
+        error => StoreError::Store {
+            message: error.to_string(),
+        },
+    }
+}
+
+pub(crate) struct AssetGcPreview {
+    cas: crate::asset_repository::PayloadCas,
+    residency: crate::server_sync::residency::Residency,
+    marks: crate::asset_repository::migration_gc::AssetGcMarks,
+    /// What holds an object besides the library, so a retained candidate can say why.
+    holders: Vec<(&'static str, std::collections::BTreeSet<String>)>,
+}
+
+/// One stored object the cleanup looked at, and what it decided.
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AssetGcCandidateDetail {
+    pub(crate) object_hash: String,
+    pub(crate) bytes: u64,
+    pub(crate) created_at_ms: i64,
+    /// `deletable`, `recent` or `held`.
+    pub(crate) state: &'static str,
+    /// Named holders for a retained object. Empty with `held` means the library still uses it.
+    pub(crate) holders: Vec<&'static str>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
@@ -957,7 +1023,6 @@ pub(crate) struct PersistentStorageStats {
     pub(crate) database_bytes: u64,
     pub(crate) asset_objects: StorageCountBytes,
     pub(crate) asset_aliases: Vec<StorageAliasStats>,
-    pub(crate) cold_aliases: StorageCountBytes,
     pub(crate) plugin_storage: StorageCountBytes,
     pub(crate) characters: StorageCharacterStats,
     pub(crate) conversations: StorageConversationStats,
@@ -1030,6 +1095,20 @@ impl PreparedRisuSaveExport {
         let active_readers = reader.active_readers();
         snapshot::close_revision(reader)?;
         checkpoint_after_detached_release(&self.database_path, &active_readers)
+    }
+
+    pub(crate) fn create_attached_export(
+        &self,
+        omit_account: bool,
+    ) -> StoreResult<export::ExportedRisuSave> {
+        let reader = self.reader()?;
+        export::create(
+            &reader.connection,
+            &self.snapshots_dir,
+            &reader.target,
+            &self.lease,
+            omit_account,
+        )
     }
 
     pub(crate) fn cleanup_file(&self, path: &Path) -> StoreResult<()> {
@@ -1172,6 +1251,43 @@ fn combine_publication_cleanup_error(
     }
 }
 
+/// `app_kv` carries only the job markers that must land in the same commit as
+/// the replacement they authorize. Everything else a device keeps belongs to
+/// `device.sqlite` or to the OS vault, neither of which a restore replaces.
+const APP_KV_KEY_PREFIXES: [&str; 2] = ["device-backup-commit:", "external-restore-commit:"];
+
+pub(super) fn validate_app_kv_key(key: &str) -> StoreResult<()> {
+    if APP_KV_KEY_PREFIXES
+        .iter()
+        .any(|prefix| key.len() > prefix.len() && key.starts_with(prefix))
+    {
+        return Ok(());
+    }
+    Err(StoreError::Validation {
+        message: "app_kv key is outside the allowed job marker key space".to_owned(),
+    })
+}
+
+fn open_device_store(persistent_dir: &Path) -> Result<device_store::DeviceStore, String> {
+    device_store::DeviceStore::open(persistent_dir).map_err(|error| {
+        let message = format!("device store is unavailable: {error}");
+        crate::nlog!("warn", "{message}");
+        message
+    })
+}
+
+pub(crate) fn register_asset_objects_at_root(
+    repository_root: &Path,
+    objects: &[asset_object_catalog::AssetObjectRegistration],
+    created_at_ms: i64,
+) -> StoreResult<()> {
+    let database_path = repository_root.join("persistent").join(DATABASE_FILE);
+    let mut connection =
+        Connection::open_with_flags(database_path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    connection.busy_timeout(Duration::from_secs(5))?;
+    AssetObjectCatalog::new(&mut connection).register(objects, created_at_ms)
+}
+
 impl PersistentStore {
     pub(crate) fn asset_object_catalog(&mut self) -> AssetObjectCatalog<'_> {
         AssetObjectCatalog::new(&mut self.connection)
@@ -1190,13 +1306,17 @@ impl PersistentStore {
     }
 
     pub(crate) fn open(app_data_dir: &Path) -> StoreResult<Self> {
+        let retained_stage = crate::device_backup::active_native_portable_stage(app_data_dir)
+            .map_err(|failure| StoreError::Validation {
+                message: failure.to_string(),
+            })?;
         let persistent_dir = app_data_dir.join("persistent");
         let snapshots_dir = persistent_dir.join("snapshots");
         std::fs::create_dir_all(&snapshots_dir)?;
         let pending_restore_failure =
             snapshot::apply_pending_restore(&persistent_dir, &snapshots_dir)?;
 
-        let database_path = persistent_dir.join("persistent.db");
+        let database_path = persistent_dir.join(DATABASE_FILE);
         let mut connection = Connection::open(&database_path)?;
         schema::initialize(&mut connection)?;
         recover_asset_object_deletions(&mut connection, app_data_dir)?;
@@ -1218,18 +1338,15 @@ impl PersistentStore {
             "INSERT OR IGNORE INTO asset_repository_authority (generation, value) VALUES (?1, ?2)",
             params!["revision-0", r#"{"format":"legacy"}"#],
         )?;
-        transaction.execute(
-            "INSERT OR IGNORE INTO cold_payload_authority (generation, value) VALUES (?1, ?2)",
-            params!["revision-0", r#"{"format":"legacy"}"#],
-        )?;
         transaction.commit()?;
         export::sweep_abandoned(&snapshots_dir)?;
         #[cfg(feature = "native-kei-upload-pilot")]
         kei::sweep_abandoned(&snapshots_dir);
-        snapshot::sweep_temporary_generations(&mut connection)?;
+        snapshot::sweep_temporary_generations(&mut connection, retained_stage.as_deref())?;
         snapshot::checkpoint(&connection, CheckpointMode::Truncate)?;
 
         let active_readers = Arc::new(snapshot::ActiveReaderRegistry::default());
+        let device_store = open_device_store(&persistent_dir);
         Ok(Self {
             revision_leases: HashMap::new(),
             active_readers,
@@ -1238,6 +1355,7 @@ impl PersistentStore {
             database_path,
             snapshots_dir,
             pending_restore_failure,
+            device_store,
         })
     }
 
@@ -1251,6 +1369,7 @@ impl PersistentStore {
     pub(crate) fn open_native_job_store(&self) -> StoreResult<Self> {
         let mut connection = Connection::open(&self.database_path)?;
         schema::initialize(&mut connection)?;
+        let device_store = open_device_store(&self.repository_root.join("persistent"));
         Ok(Self {
             revision_leases: HashMap::new(),
             active_readers: Arc::clone(&self.active_readers),
@@ -1259,7 +1378,24 @@ impl PersistentStore {
             database_path: self.database_path.clone(),
             snapshots_dir: self.snapshots_dir.clone(),
             pending_restore_failure: None,
+            device_store,
         })
+    }
+
+    pub(crate) fn device_store(&self) -> StoreResult<&device_store::DeviceStore> {
+        self.device_store
+            .as_ref()
+            .map_err(|message| StoreError::Store {
+                message: message.clone(),
+            })
+    }
+
+    pub(crate) fn device_store_mut(&mut self) -> StoreResult<&mut device_store::DeviceStore> {
+        self.device_store
+            .as_mut()
+            .map_err(|message| StoreError::Store {
+                message: message.clone(),
+            })
     }
 
     pub(crate) fn revision(&self) -> StoreResult<i64> {
@@ -1301,6 +1437,15 @@ impl PersistentStore {
     ) -> StoreResult<Option<Versioned<Value>>> {
         let (connection, target) = self.read_view(lease)?;
         query::read_character(connection, id, &target)
+    }
+
+    pub(crate) fn read_character_summary(
+        &self,
+        id: &str,
+        lease: Option<&str>,
+    ) -> StoreResult<Option<CharacterSummary>> {
+        let (connection, target) = self.read_view(lease)?;
+        query::read_character_summary(connection, id, &target)
     }
 
     pub(crate) fn query_conversations(
@@ -1349,13 +1494,108 @@ impl PersistentStore {
         query::query_plugin_storage(connection, &target)
     }
 
+    pub(crate) fn list_plugin_storage(
+        &self,
+        lease: Option<&str>,
+    ) -> StoreResult<Vec<PluginStorageListItem>> {
+        let (connection, target) = self.read_view(lease)?;
+        query::list_plugin_storage(connection, &target)
+    }
+
+    /// Opens this plugin's one chance to take values an upstream save left
+    /// without an owner. Answers with nothing when no import is waiting or when
+    /// this plugin already had its window for that import.
+    pub(crate) fn begin_plugin_claim_session(
+        &self,
+        owner: &str,
+        code_hash: &str,
+        runtime_instance: &str,
+    ) -> StoreResult<Option<String>> {
+        let Some(batch) = commit::pending_plugin_import_batch(&self.connection)? else {
+            return Ok(None);
+        };
+        self.device_store()?.open_plugin_claim_session(
+            &batch,
+            owner,
+            code_hash,
+            runtime_instance,
+            device_store::now_ms()?,
+        )
+    }
+
+    pub(crate) fn claim_plugin_storage_value(
+        &mut self,
+        session_id: &str,
+        owner: &str,
+        code_hash: &str,
+        runtime_instance: &str,
+        key: &str,
+        expected_revision: i64,
+    ) -> StoreResult<ClaimedPluginValue> {
+        let now = device_store::now_ms()?;
+        let batch = self.device_store()?.plugin_claim_session_batch(
+            session_id,
+            owner,
+            code_hash,
+            runtime_instance,
+            now,
+        )?;
+        let Some(batch) = batch else {
+            return Ok(ClaimedPluginValue {
+                value: None,
+                revision: expected_revision,
+            });
+        };
+        let (value, revision) = commit::claim_unowned_plugin_value(
+            &mut self.connection,
+            owner,
+            key,
+            &batch,
+            now,
+            expected_revision,
+        )?;
+        Ok(ClaimedPluginValue { value, revision })
+    }
+
+    pub(crate) fn close_plugin_claim_session(&self, session_id: &str) -> StoreResult<()> {
+        self.device_store()?.close_plugin_claim_session(session_id)
+    }
+
+    pub(crate) fn colliding_plugin_storage_keys(
+        &self,
+        owner: &str,
+        keys: &[String],
+    ) -> StoreResult<Vec<String>> {
+        commit::colliding_plugin_storage_keys(&self.connection, owner, keys)
+    }
+
+    pub(crate) fn assign_plugin_storage(
+        &mut self,
+        sources: &[(String, String)],
+        owner: &str,
+        collision: commit::AssignCollision,
+        expected_revision: i64,
+    ) -> StoreResult<AssignedPluginStorage> {
+        let assigned_at = device_store::now_ms()?;
+        let (outcome, revision) = commit::assign_plugin_storage(
+            &mut self.connection,
+            sources,
+            owner,
+            collision,
+            assigned_at,
+            expected_revision,
+        )?;
+        Ok(AssignedPluginStorage { outcome, revision })
+    }
+
     pub(crate) fn read_plugin_storage(
         &self,
+        owner: &str,
         key: &str,
         lease: Option<&str>,
     ) -> StoreResult<Option<Versioned<Value>>> {
         let (connection, target) = self.read_view(lease)?;
-        query::read_plugin_storage(connection, key, &target)
+        query::read_plugin_storage(connection, owner, key, &target)
     }
 
     pub(crate) fn read_asset_alias(
@@ -1395,14 +1635,6 @@ impl PersistentStore {
         query::read_asset_repository_authority(connection, &target)
     }
 
-    pub(crate) fn read_cold_payload_authority(
-        &self,
-        lease: Option<&str>,
-    ) -> StoreResult<Versioned<ColdPayloadAuthorityState>> {
-        let (connection, target) = self.read_view(lease)?;
-        query::read_cold_payload_authority(connection, &target)
-    }
-
     pub(crate) fn read_asset_owner_head(
         &self,
         owner: &AssetOwnerLocator,
@@ -1410,15 +1642,6 @@ impl PersistentStore {
     ) -> StoreResult<Option<Versioned<AssetOwnerHead>>> {
         let (connection, target) = self.read_view(lease)?;
         query::read_asset_owner_head(connection, owner, &target)
-    }
-
-    pub(crate) fn read_cold_alias(
-        &self,
-        key: &str,
-        lease: Option<&str>,
-    ) -> StoreResult<Option<Versioned<ColdAlias>>> {
-        let (connection, target) = self.read_view(lease)?;
-        query::read_cold_alias(connection, key, &target)
     }
 
     pub(crate) fn list_asset_aliases(
@@ -1435,14 +1658,6 @@ impl PersistentStore {
     ) -> StoreResult<Versioned<Vec<AssetOwnerHead>>> {
         let (connection, target) = self.read_view(lease)?;
         query::list_asset_owner_heads(connection, &target)
-    }
-
-    pub(crate) fn list_cold_aliases(
-        &self,
-        lease: Option<&str>,
-    ) -> StoreResult<Versioned<Vec<ColdAlias>>> {
-        let (connection, target) = self.read_view(lease)?;
-        query::list_cold_aliases(connection, &target)
     }
 
     pub(crate) fn materialize(&self, revision: Option<i64>) -> StoreResult<Value> {
@@ -1524,33 +1739,38 @@ impl PersistentStore {
         commit::delete_asset_alias(&mut self.connection, kind, key, expected_revision)
     }
 
-    pub(crate) fn commit_cold_alias(
+    pub(crate) fn archive_preview(
+        &self,
+        character_id: &str,
+        lease: Option<&str>,
+    ) -> StoreResult<archive::ArchivePreview> {
+        let (connection, target) = self.read_view(lease)?;
+        archive::preview(connection, &target.generation, character_id)
+    }
+
+    pub(crate) fn archive_character(
         &mut self,
-        alias: &ColdAlias,
+        character_id: &str,
+        expected_revision: i64,
+        now_ms: i64,
+    ) -> StoreResult<RevisionResult> {
+        let cas = crate::asset_repository::PayloadCas::new(&self.repository_root)?;
+        archive::archive_character(
+            &mut self.connection,
+            &cas,
+            character_id,
+            expected_revision,
+            now_ms,
+        )
+    }
+
+    pub(crate) fn restore_character(
+        &mut self,
+        character_id: &str,
         expected_revision: i64,
     ) -> StoreResult<RevisionResult> {
         let cas = crate::asset_repository::PayloadCas::new(&self.repository_root)?;
-        verify_cold_alias_object(&cas, alias)?;
-        commit::commit_cold_alias(&mut self.connection, alias, expected_revision)
-    }
-
-    pub(crate) fn delete_cold_alias(
-        &mut self,
-        key: &str,
-        expected_revision: i64,
-    ) -> StoreResult<RevisionResult> {
-        commit::delete_cold_alias(&mut self.connection, key, expected_revision)
-    }
-
-    pub(crate) fn activate_cold_payload_migration(
-        &mut self,
-        input: &ColdPayloadMigrationInput,
-    ) -> StoreResult<RevisionResult> {
-        let cas = crate::asset_repository::PayloadCas::new(&self.repository_root)?;
-        for alias in &input.cold_aliases {
-            verify_cold_alias_object(&cas, alias)?;
-        }
-        commit::activate_cold_payload_migration(&mut self.connection, input)
+        archive::restore_character(&mut self.connection, &cas, character_id, expected_revision)
     }
 
     pub(crate) fn replace_begin(&mut self) -> StoreResult<StagingResult> {
@@ -1559,6 +1779,39 @@ impl PersistentStore {
 
     pub(crate) fn replace_put_root(&mut self, staging_id: &str, root: &Value) -> StoreResult<()> {
         commit::replace_put_root(&mut self.connection, staging_id, root)
+    }
+
+    pub(crate) fn staged_plugin_preview(
+        &self,
+        staging_id: &str,
+    ) -> StoreResult<commit::StagedPluginPreview> {
+        commit::staged_plugin_preview(&self.connection, staging_id)
+    }
+
+    pub(crate) fn staged_library_counts(&self, staging_id: &str) -> StoreResult<(u64, u64)> {
+        commit::require_staging(&self.connection, staging_id)?;
+        let (characters, presets): (i64, i64) = self.connection.query_row(
+            "SELECT
+                (SELECT count(*) FROM characters WHERE generation=?1),
+                (SELECT count(*) FROM bot_presets WHERE generation=?1)",
+            [staging_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        Ok((characters as u64, presets as u64))
+    }
+
+    pub(crate) fn assign_staged_plugin_values(
+        &mut self,
+        staging_id: &str,
+        assignments: &[commit::StagedPluginAssignment],
+        automatic: bool,
+    ) -> StoreResult<()> {
+        commit::assign_staged_plugin_values(
+            &mut self.connection,
+            staging_id,
+            assignments,
+            automatic,
+        )
     }
 
     pub(crate) fn replace_put_presets(
@@ -1593,14 +1846,6 @@ impl PersistentStore {
         commit::replace_put_asset_repository_authority(&mut self.connection, staging_id, authority)
     }
 
-    pub(crate) fn replace_put_cold_payload_authority(
-        &mut self,
-        staging_id: &str,
-        authority: &ColdPayloadAuthorityState,
-    ) -> StoreResult<()> {
-        commit::replace_put_cold_payload_authority(&mut self.connection, staging_id, authority)
-    }
-
     pub(crate) fn replace_preserve_repositories(
         &mut self,
         staging_id: &str,
@@ -1612,14 +1857,6 @@ impl PersistentStore {
             expected_revision,
         )?;
         Ok(RevisionResult { revision })
-    }
-
-    pub(crate) fn replace_put_cold_aliases(
-        &mut self,
-        staging_id: &str,
-        aliases: &[ColdAlias],
-    ) -> StoreResult<()> {
-        commit::replace_put_cold_aliases(&mut self.connection, staging_id, aliases)
     }
 
     pub(crate) fn replace_add_characters(
@@ -1640,30 +1877,6 @@ impl PersistentStore {
         self.finish_prepared_replace(prepared)
     }
 
-    fn verify_staged_cold_payload_objects(&self, staging_id: &str) -> StoreResult<()> {
-        let authority = commit::read_cold_payload_authority(&self.connection, staging_id)?;
-        if !matches!(authority, ColdPayloadAuthorityState::V2 { .. }) {
-            return Ok(());
-        }
-        let cas = crate::asset_repository::PayloadCas::new(&self.repository_root)?;
-        let mut statement = self.connection.prepare(
-            "SELECT key, object_hash, size, metadata
-             FROM cold_aliases WHERE generation = ?1 ORDER BY key ASC",
-        )?;
-        let mut rows = statement.query([staging_id])?;
-        while let Some(row) = rows.next()? {
-            let metadata: String = row.get(3)?;
-            let alias = ColdAlias {
-                key: row.get(0)?,
-                object_hash: row.get(1)?,
-                size: row.get(2)?,
-                metadata: serde_json::from_str(&metadata)?,
-            };
-            verify_cold_alias_object(&cas, &alias)?;
-        }
-        Ok(())
-    }
-
     pub(crate) fn prepare_replace_commit(
         &self,
         staging_id: &str,
@@ -1671,7 +1884,6 @@ impl PersistentStore {
     ) -> StoreResult<PreparedReplaceCommit> {
         let revision =
             commit::validate_replace_commit(&self.connection, staging_id, expected_revision)?;
-        self.verify_staged_cold_payload_objects(staging_id)?;
         Ok(PreparedReplaceCommit {
             staging_id: staging_id.to_owned(),
             revision,
@@ -1682,7 +1894,6 @@ impl PersistentStore {
         &mut self,
         prepared: PreparedReplaceCommit,
     ) -> StoreResult<RevisionResult> {
-        self.verify_staged_cold_payload_objects(&prepared.staging_id)?;
         commit::replace_commit(
             &mut self.connection,
             &prepared.staging_id,
@@ -1696,7 +1907,6 @@ impl PersistentStore {
         key: &str,
         value: &Value,
     ) -> StoreResult<RevisionResult> {
-        self.verify_staged_cold_payload_objects(&prepared.staging_id)?;
         commit::replace_commit_with_app_kv(
             &mut self.connection,
             &prepared.staging_id,
@@ -1713,7 +1923,6 @@ impl PersistentStore {
         prepared: PreparedReplaceCommit,
         job: &str,
     ) -> StoreResult<RevisionResult> {
-        self.verify_staged_cold_payload_objects(&prepared.staging_id)?;
         commit::replace_commit_from_external(
             &mut self.connection,
             &prepared.staging_id,
@@ -1748,6 +1957,28 @@ impl PersistentStore {
         self.checkpoint_after_release()
     }
 
+    pub(crate) fn release_all_revision_leases(&mut self) -> StoreResult<()> {
+        let mut first_error = None;
+        for (_, reader) in self.revision_leases.drain() {
+            if let Err(error) = snapshot::close_revision(reader) {
+                if first_error.is_none() {
+                    first_error = Some(error);
+                }
+            }
+        }
+        let checkpoint = self.checkpoint_after_release();
+        match (first_error, checkpoint) {
+            (None, result) => result,
+            (Some(error), Ok(())) => Err(error),
+            (Some(error), Err(checkpoint_error)) => Err(StoreError::Store {
+                message: format!(
+                    "{error}; checkpoint after renderer lease cleanup failed: {checkpoint_error}"
+                ),
+            }),
+        }
+    }
+
+    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn export_risu_save(
         &self,
         lease: &str,
@@ -1780,6 +2011,48 @@ impl PersistentStore {
             database_path: self.database_path.clone(),
             reader: Some(reader),
         })
+    }
+
+    pub(crate) fn detach_risu_save_export(
+        &mut self,
+        lease: &str,
+    ) -> StoreResult<PreparedRisuSaveExport> {
+        if !lease.starts_with("snapshot-") {
+            return Err(StoreError::Validation {
+                message: "revision lease must be a snapshot lease".to_owned(),
+            });
+        }
+        let reader = self
+            .revision_leases
+            .get(lease)
+            .ok_or(StoreError::SnapshotReleased)?;
+        reader.publish_detached_asset_roots()?;
+        let reader = self
+            .revision_leases
+            .remove(lease)
+            .ok_or(StoreError::SnapshotReleased)?;
+        Ok(PreparedRisuSaveExport {
+            revision: reader.target.revision,
+            lease: lease.to_owned(),
+            snapshots_dir: self.snapshots_dir.clone(),
+            database_path: self.database_path.clone(),
+            reader: Some(reader),
+        })
+    }
+
+    pub(crate) fn reattach_risu_save_export(
+        &mut self,
+        mut prepared: PreparedRisuSaveExport,
+    ) -> StoreResult<()> {
+        if self.revision_leases.contains_key(&prepared.lease) {
+            return Err(StoreError::Validation {
+                message: "revision lease was replaced while its export was detached".to_owned(),
+            });
+        }
+        let lease = prepared.lease.clone();
+        let reader = prepared.take_reader()?;
+        self.revision_leases.insert(lease, reader);
+        Ok(())
     }
 
     #[cfg(feature = "native-official-publication")]
@@ -2014,11 +2287,6 @@ impl PersistentStore {
             "SELECT COUNT(*), COALESCE(SUM(byte_size), 0) FROM asset_objects",
             [],
         )?;
-        let cold_aliases = query_count_bytes(
-            &transaction,
-            "SELECT COUNT(*), COALESCE(SUM(size), 0) FROM cold_aliases WHERE generation = ?1",
-            [&active],
-        )?;
         let plugin_storage = query_count_bytes(
             &transaction,
             "SELECT COUNT(*), COALESCE(SUM(byte_size), 0) FROM plugin_storage WHERE generation = ?1",
@@ -2087,7 +2355,6 @@ impl PersistentStore {
             database_bytes,
             asset_objects,
             asset_aliases: aliases,
-            cold_aliases,
             plugin_storage,
             characters: StorageCharacterStats {
                 active: active_characters,
@@ -2113,31 +2380,134 @@ impl PersistentStore {
         now_ms: i64,
         minimum_grace_ms: i64,
     ) -> StoreResult<crate::asset_repository::migration_gc::AssetGcDryRunPage> {
-        use crate::asset_repository::migration_gc::{
-            dry_run_mark_and_sweep_with_remote, AssetGcDryRunPage,
-        };
+        let preview = self.prepare_asset_gc_preview()?;
+        self.asset_gc_preview_page(&preview, limit, cursor, now_ms, minimum_grace_ms)
+    }
 
-        let persistent_dir = self
-            .snapshots_dir
-            .parent()
-            .ok_or_else(|| StoreError::Store {
-                message: "persistent snapshots directory has no parent".to_owned(),
-            })?;
-        let repository_root = persistent_dir.parent().ok_or_else(|| StoreError::Store {
-            message: "persistent directory has no repository root".to_owned(),
-        })?;
-        let cas = crate::asset_repository::PayloadCas::new(repository_root)?;
-        let roots = self.collect_asset_gc_roots(&cas, false, true)?;
-        let candidates = self.query_asset_object_catalog(limit, cursor)?;
-        let residency = crate::server_sync::residency::Residency::open(repository_root)
+    pub(crate) fn prepare_asset_gc_preview(&self) -> StoreResult<AssetGcPreview> {
+        let cas = crate::asset_repository::PayloadCas::new(&self.repository_root)?;
+        let labelled = self.collect_labelled_asset_gc_roots(false, true)?;
+        // Only the holders that are small and explainable are kept for attribution; the library
+        // itself is the default answer and copying its root set would cost as much as it holds.
+        let holders = labelled
+            .iter()
+            .filter(|(label, _)| *label != "library")
+            .map(|(label, roots)| (*label, roots.object_hashes.clone()))
+            .collect();
+        let residency = crate::server_sync::residency::Residency::open(&self.repository_root)
             .map_err(|error| std::io::Error::other(error.code))?;
-        let report = dry_run_mark_and_sweep_with_remote(
+        let marks = crate::asset_repository::migration_gc::mark_asset_roots_with_remote(
             &cas,
+            labelled.into_iter().map(|(_, roots)| roots),
+            |hash| residency.gc_size(hash),
+        )?;
+        Ok(AssetGcPreview {
+            cas,
+            residency,
+            marks,
+            holders,
+        })
+    }
+
+    /// The same page the preview reports, with a row per object saying what the cleanup decided
+    /// and, when it kept one, what is holding it.
+    pub(crate) fn asset_gc_preview_page_detail(
+        &self,
+        preview: &AssetGcPreview,
+        limit: i64,
+        cursor: Option<&str>,
+        now_ms: i64,
+        minimum_grace_ms: i64,
+    ) -> StoreResult<(
+        crate::asset_repository::migration_gc::AssetGcDryRunPage,
+        Vec<AssetGcCandidateDetail>,
+    )> {
+        let candidates = self.query_asset_object_catalog(limit, cursor)?;
+        let looked_at: Vec<(String, u64, i64)> = candidates
+            .items
+            .iter()
+            .map(|candidate| {
+                (
+                    candidate.object_hash.clone(),
+                    candidate.byte_size,
+                    candidate.created_at_ms,
+                )
+            })
+            .collect();
+        let report = crate::asset_repository::migration_gc::sweep_asset_candidates_with_remote(
+            &preview.cas,
             candidates.items,
-            roots,
+            &preview.marks,
             now_ms,
             minimum_grace_ms,
-            |hash| residency.gc_size(hash),
+            |hash| preview.residency.gc_size(hash),
+        )
+        .map_err(StoreError::from)?;
+        let deletable: std::collections::BTreeSet<&str> = report
+            .potential_delete_hashes
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let recent: std::collections::BTreeSet<&str> = report
+            .grace_retained_hashes
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let details = looked_at
+            .into_iter()
+            .map(|(object_hash, bytes, created_at_ms)| {
+                let state = match object_hash.as_str() {
+                    hash if deletable.contains(hash) => "deletable",
+                    hash if recent.contains(hash) => "recent",
+                    _ => "held",
+                };
+                let holders = match state {
+                    "held" => preview
+                        .holders
+                        .iter()
+                        .filter(|(_, hashes)| hashes.contains(&object_hash))
+                        .map(|(label, _)| *label)
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                AssetGcCandidateDetail {
+                    object_hash,
+                    bytes,
+                    created_at_ms,
+                    state,
+                    holders,
+                }
+            })
+            .collect();
+        Ok((
+            crate::asset_repository::migration_gc::AssetGcDryRunPage {
+                report,
+                next_cursor: candidates.next_cursor,
+            },
+            details,
+        ))
+    }
+
+    pub(crate) fn asset_gc_preview_page(
+        &self,
+        preview: &AssetGcPreview,
+        limit: i64,
+        cursor: Option<&str>,
+        now_ms: i64,
+        minimum_grace_ms: i64,
+    ) -> StoreResult<crate::asset_repository::migration_gc::AssetGcDryRunPage> {
+        use crate::asset_repository::migration_gc::{
+            sweep_asset_candidates_with_remote, AssetGcDryRunPage,
+        };
+
+        let candidates = self.query_asset_object_catalog(limit, cursor)?;
+        let report = sweep_asset_candidates_with_remote(
+            &preview.cas,
+            candidates.items,
+            &preview.marks,
+            now_ms,
+            minimum_grace_ms,
+            |hash| preview.residency.gc_size(hash),
         )
         .map_err(StoreError::from)?;
         Ok(AssetGcDryRunPage {
@@ -2263,7 +2633,7 @@ impl PersistentStore {
         let initial_report = dry_run_mark_and_sweep_with_remote(
             &cas,
             initial_candidates.items.clone(),
-            self.collect_asset_gc_roots(&cas, false, false)?,
+            self.collect_asset_gc_roots(false, false)?,
             now_ms,
             minimum_grace_ms,
             |hash| residency.gc_size(hash),
@@ -2294,7 +2664,7 @@ impl PersistentStore {
         let mut report = dry_run_mark_and_sweep_with_remote(
             &cas,
             final_candidates.items.clone(),
-            self.collect_asset_gc_roots(&cas, true, false)?,
+            self.collect_asset_gc_roots(true, false)?,
             now_ms,
             minimum_grace_ms,
             |hash| residency.gc_size(hash),
@@ -2395,37 +2765,102 @@ impl PersistentStore {
 
     fn collect_asset_gc_roots(
         &self,
-        cas: &crate::asset_repository::PayloadCas,
         repository_guard_held: bool,
         read_only: bool,
     ) -> StoreResult<Vec<crate::asset_repository::migration_gc::AssetRootSet>> {
+        Ok(self
+            .collect_labelled_asset_gc_roots(repository_guard_held, read_only)?
+            .into_iter()
+            .map(|(_, roots)| roots)
+            .collect())
+    }
+
+    /// The same roots, each labelled by what holds it, so a preview can explain a retention.
+    fn collect_labelled_asset_gc_roots(
+        &self,
+        repository_guard_held: bool,
+        read_only: bool,
+    ) -> StoreResult<Vec<(&'static str, crate::asset_repository::migration_gc::AssetRootSet)>> {
         use crate::asset_repository::job_pins::{
             collect_durable_cas_job_roots, collect_durable_cas_job_roots_already_guarded,
             collect_durable_cas_job_roots_read_only,
         };
         use crate::asset_repository::migration_gc::collect_staged_migration_roots;
 
-        let mut roots = vec![snapshot::collect_asset_roots(&self.connection, cas)?];
+        let mut roots = vec![("library", snapshot::collect_asset_roots(&self.connection)?)];
         for reader in self.revision_leases.values() {
-            roots.push(snapshot::collect_asset_roots(&reader.connection, cas)?);
+            roots.push((
+                "library",
+                snapshot::collect_asset_roots(&reader.connection)?,
+            ));
         }
-        roots.extend(self.active_readers.detached_asset_roots()?);
-        roots.push(crate::external_storage::capture::registered_roots(
-            &self.connection, &self.repository_root,
-        )?);
-        roots.extend(snapshot_archive::Archive::open(&self.snapshots_dir)?.roots()?);
-        roots.extend(collect_staged_migration_roots(&self.repository_root)?);
-        roots.push(if read_only {
-            collect_durable_cas_job_roots_read_only(&self.repository_root)
-        } else if repository_guard_held {
-            collect_durable_cas_job_roots_already_guarded(&self.repository_root)
-        } else {
-            collect_durable_cas_job_roots(&self.repository_root)
-        });
+        roots.extend(
+            self.active_readers
+                .detached_asset_roots()?
+                .into_iter()
+                .map(|set| ("library", set)),
+        );
+        roots.push((
+            "remote",
+            crate::external_storage::capture::registered_roots(
+                &self.connection,
+                &self.repository_root,
+            )?,
+        ));
+        roots.push((
+            "external-conflict",
+            external_conflicts::registered_conflict_roots(
+                self.device_store()?.connection(),
+                &self.repository_root,
+            )?
+            .assets,
+        ));
+        let mut server_conflicts =
+            crate::asset_repository::migration_gc::AssetRootSet::default();
+        crate::server_sync::backups::references::visit_roots(
+            &self.repository_root,
+            |object| {
+                if object.metadata || object.local_required {
+                    server_conflicts.object_hashes.insert(object.hash);
+                }
+                Ok(())
+            },
+        )
+        .map_err(|error| StoreError::Store {
+            message: format!("server conflict roots are unavailable: {}", error.code),
+        })?;
+        roots.push(("server-conflict", server_conflicts));
+        roots.extend(
+            snapshot_archive::Archive::open(&self.snapshots_dir)?
+                .roots()?
+                .into_iter()
+                .map(|set| ("snapshot", set)),
+        );
+        roots.extend(
+            collect_staged_migration_roots(&self.repository_root)?
+                .into_iter()
+                .map(|set| ("migration", set)),
+        );
+        // A repair journal holds what a repair stopped referencing, so an undo still has it.
+        roots.push((
+            "repair",
+            crate::data_health::journal::roots(&self.repository_root)?,
+        ));
+        roots.push((
+            "job",
+            if read_only {
+                collect_durable_cas_job_roots_read_only(&self.repository_root)
+            } else if repository_guard_held {
+                collect_durable_cas_job_roots_already_guarded(&self.repository_root)
+            } else {
+                collect_durable_cas_job_roots(&self.repository_root)
+            },
+        ));
         Ok(roots)
     }
 
     pub(crate) fn get_app_kv(&self, key: &str) -> StoreResult<Option<Value>> {
+        validate_app_kv_key(key)?;
         let value: Option<String> = self
             .connection
             .query_row("SELECT value FROM app_kv WHERE key = ?1", [key], |row| {
@@ -2438,6 +2873,7 @@ impl PersistentStore {
     }
 
     pub(crate) fn set_app_kv(&self, key: &str, value: &Value) -> StoreResult<()> {
+        validate_app_kv_key(key)?;
         self.connection.execute(
             "INSERT INTO app_kv (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             params![key, serde_json::to_string(value)?],
@@ -2446,9 +2882,23 @@ impl PersistentStore {
     }
 
     pub(crate) fn remove_app_kv(&self, key: &str) -> StoreResult<()> {
+        validate_app_kv_key(key)?;
         self.connection
             .execute("DELETE FROM app_kv WHERE key = ?1", [key])?;
         Ok(())
+    }
+
+    /// Opens the leased generation for diagnosis. The reader owns its connection, so the scan it
+    /// serves runs without the store mutex and never blocks a writer. The lease pins the
+    /// generation against collection, and the caller compares its revision again before applying
+    /// any repair.
+    pub(crate) fn data_health_reader(&self, lease: &str) -> StoreResult<DataHealthReader> {
+        let (_, target) = self.read_view(Some(lease))?;
+        Ok(DataHealthReader {
+            connection: snapshot::open_generation_reader(&self.database_path, &target.generation)?,
+            cas: crate::asset_repository::PayloadCas::new(self.repository_root())?,
+            revision: target.revision,
+        })
     }
 
     fn read_view(&self, lease: Option<&str>) -> StoreResult<(&Connection, ReadTarget)> {

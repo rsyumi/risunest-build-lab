@@ -57,7 +57,7 @@ impl std::error::Error for ProviderError {}
 /// No Debug/Serialize implementation: provider contexts stay outside UI DTOs.
 #[derive(Clone)]
 pub(crate) struct SecretRef(pub String);
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct ConnectionConfig {
     pub provider: String,
@@ -67,7 +67,7 @@ pub(crate) struct ConnectionConfig {
     pub location: BTreeMap<String, String>,
     pub oauth_profile: Option<OAuthProfile>,
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct OAuthProfile {
     pub project_id: String,
@@ -76,13 +76,21 @@ pub(crate) struct OAuthProfile {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum OpenMode {
     Create,
+    /// Resume the same durable create intent after an earlier attempt may
+    /// have initialized part or all of the provider-owned remote layout.
+    ResumeCreate,
     Existing,
 }
 
 pub(crate) struct RepositoryHandle {
+    /// Provider-defined identity of the remote root, computed identically on
+    /// every device from the same connection. It is not the descriptor's own
+    /// repository id; `ObjectIntent.repository_id` carries this value back.
     pub repository_id: String,
     /// Provider/account/endpoint/root identity, checked before reusing a locator.
     pub connection_identity: String,
+    /// Stable authenticated account scope for waits and API clock observations.
+    pub account: super::quota::AccountKey,
     pub context: Box<dyn std::any::Any + Send + Sync>,
 }
 
@@ -119,9 +127,66 @@ pub(crate) enum ObjectRole {
     Descriptor,
     Pack,
     Catalog,
-    Snapshot,
+    SyncState,
+    BackupBundle,
     BackupPoint,
+    Lease,
 }
+
+/// What a lease in `Collection::Leases` announces. The word is plain so a
+/// publisher can tell a delete marker from ordinary work by enumeration alone.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum LeaseKind {
+    Work,
+    Cleanup,
+    Deleting,
+}
+impl LeaseKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Work => "work",
+            Self::Cleanup => "cleanup",
+            Self::Deleting => "deleting",
+        }
+    }
+    fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "work" => Self::Work,
+            "cleanup" => Self::Cleanup,
+            "deleting" => Self::Deleting,
+            _ => return None,
+        })
+    }
+}
+
+/// 128 random bits, chosen before the object is written so a retry after an
+/// unclear answer names the same object again.
+pub(crate) const LEASE_TAG_HEX: usize = 32;
+
+/// `{kind}-{tag}`. No writer or job identity appears, so an observer who can
+/// only enumerate the repository cannot count the devices using it.
+pub(crate) fn lease_object_id(kind: LeaseKind, tag: &str) -> Result<String> {
+    if tag.len() != LEASE_TAG_HEX
+        || !tag
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(ProviderError::new(ErrorKind::Corrupt));
+    }
+    Ok(format!("{}-{tag}", kind.as_str()))
+}
+
+pub(crate) fn parse_lease_object_id(object_id: &str) -> Result<(LeaseKind, String)> {
+    let corrupt = || ProviderError::new(ErrorKind::Corrupt);
+    let (kind, tag) = object_id.split_once('-').ok_or_else(corrupt)?;
+    let kind = LeaseKind::parse(kind).ok_or_else(corrupt)?;
+    if lease_object_id(kind, tag)? != object_id {
+        return Err(corrupt());
+    }
+    Ok((kind, tag.to_owned()))
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct ObjectIntent {
@@ -248,6 +313,7 @@ pub(crate) enum Collection {
     Snapshots,
     BackupPoints,
     Descriptors,
+    Leases,
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -264,26 +330,11 @@ pub(crate) enum ProviderOperation {
     ReconcileUpload,
     CompareExchangeHead,
     ReplaceHead,
+    Delete,
     Authenticate,
 }
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub(crate) enum QuotaReset {
-    At { unix_ms: u64 },
-    Rolling { window_ms: u64 },
-    Unknown,
-}
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct RequestCost {
-    pub bucket: String,
-    pub shared_account: String,
-    pub units: u64,
-    pub reset: QuotaReset,
-}
-
-/// One call represents one provider operation. SDK subrequests, session control
-/// and retries must individually pass the injected quota/HTTP boundary.
+/// One call represents one provider operation. Each SDK subrequest, session
+/// control call and explicit owner retry passes the one-dispatch HTTP boundary.
 pub(crate) trait Provider: Send + Sync {
     fn open_repository<'a>(
         &'a self,
@@ -300,6 +351,19 @@ pub(crate) trait Provider: Send + Sync {
         sink: &'a mut dyn TransferSink,
         cancel: &'a Cancellation,
     ) -> ProviderFuture<'a, ReadReceipt>;
+    /// Opens a resumable session (multipart, upload session, issued upload URL)
+    /// when the service has one, so the owner journals the sealed state before
+    /// any payload byte moves. `None` means the object is sent in one request
+    /// and retried whole after a failure.
+    fn begin_upload<'a>(
+        &'a self,
+        repository: &'a RepositoryHandle,
+        intent: &'a ObjectIntent,
+        cancel: &'a Cancellation,
+    ) -> ProviderFuture<'a, Option<ResumeState>>;
+    /// With `resume`, continues from its remotely confirmed offset. Without it,
+    /// a single-request upload; a retry with the same identity and bytes must
+    /// converge on the same complete receipt, never overwrite different bytes.
     fn create_object<'a>(
         &'a self,
         repository: &'a RepositoryHandle,
@@ -332,14 +396,27 @@ pub(crate) trait Provider: Send + Sync {
         limit: u16,
         cancel: &'a Cancellation,
     ) -> ProviderFuture<'a, ObjectPage>;
+    /// Removes one object this repository owns. Idempotent: a target that is
+    /// already gone answers `Ok`. The head locator and descriptor objects are
+    /// refused with `Unsupported`. A success answer means the remote deletion
+    /// finished; an accepted but still pending deletion is not a success.
+    fn delete_object<'a>(
+        &'a self,
+        repository: &'a RepositoryHandle,
+        locator: &'a RemoteLocator,
+        cancel: &'a Cancellation,
+    ) -> ProviderFuture<'a, ()>;
     fn reconcile_upload<'a>(
         &'a self,
         repository: &'a RepositoryHandle,
         intent: &'a ObjectIntent,
-        resume: &'a ResumeState,
+        resume: Option<&'a ResumeState>,
         cancel: &'a Cancellation,
     ) -> ProviderFuture<'a, UploadResolution>;
-    fn request_cost(&self, operation: ProviderOperation) -> Vec<RequestCost>;
+    /// The one mutable head of a repository. Head writes accept only this
+    /// locator, so an ordinary object can never be replaced by a head write;
+    /// a backup-only service answers `Unsupported`.
+    fn head_locator(&self, repository: &RepositoryHandle) -> Result<RemoteLocator>;
 }
 
 #[derive(Clone)]
@@ -355,5 +432,47 @@ impl HeadBytes {
     }
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_lease_name_carries_its_kind_and_tag_and_nothing_else() {
+        let tag = "0123456789abcdef0123456789abcdef";
+        for (kind, expected) in [
+            (LeaseKind::Work, "work"),
+            (LeaseKind::Cleanup, "cleanup"),
+            (LeaseKind::Deleting, "deleting"),
+        ] {
+            let object_id = lease_object_id(kind, tag).unwrap();
+            assert_eq!(object_id, format!("{expected}-{tag}"));
+            assert_eq!(parse_lease_object_id(&object_id).unwrap(), (kind, tag.into()));
+        }
+        // One kind's name can never be read as another's.
+        assert_ne!(
+            lease_object_id(LeaseKind::Work, tag).unwrap(),
+            lease_object_id(LeaseKind::Cleanup, tag).unwrap()
+        );
+
+        for bad in ["", "0123456789ABCDEF0123456789abcdef", &tag[1..], &format!("{tag}0")] {
+            assert_eq!(
+                lease_object_id(LeaseKind::Work, bad).unwrap_err().kind,
+                ErrorKind::Corrupt
+            );
+        }
+        for bad in [
+            "work",
+            &format!("working-{tag}"),
+            &format!("work-{}", &tag[1..]),
+            &format!("work-{tag}-1"),
+        ] {
+            assert_eq!(
+                parse_lease_object_id(bad).unwrap_err().kind,
+                ErrorKind::Corrupt
+            );
+        }
     }
 }

@@ -10,6 +10,7 @@ import {
     RevisionConflictError,
     SnapshotReleasedError,
     validateConversationWindowQuery,
+    type ArchivePreview,
     type AssetAlias,
     type AssetAliasIdentity,
     type AssetAliasKind,
@@ -20,6 +21,9 @@ import {
     type CharacterDetail,
     type CharacterPage,
     type CharacterQuery,
+    type CharacterSummary,
+    type ContentChangeKey,
+    type ContentChangeWindow,
     type ConversationPage,
     type ConversationQuery,
     type ConversationWindow,
@@ -27,14 +31,12 @@ import {
     type DataRevision,
     type AssetRepositoryAuthorityState,
     type AssetRepositoryMigrationInput,
-    type ColdAlias,
-    type ColdPayloadAuthorityState,
-    type ColdPayloadMigrationInput,
     type PersistentDataStore,
     type PersistentConversationMetadata,
     type PersistentRevisionLease,
     type PersistentRoot,
     type PluginStorageCatalog,
+    type PluginStorageListItem,
     type PresetCatalog,
     type Versioned,
     type WorkingSetCommit,
@@ -158,6 +160,10 @@ export class SqlitePersistentDataStore implements PersistentDataStore {
         return invokeStore('pds_query_characters', { query: input })
     }
 
+    readCharacterSummary(id: string): Promise<CharacterSummary | null> {
+        return invokeStore('pds_read_character_summary', { id })
+    }
+
     readCharacter(id: string): Promise<Versioned<CharacterDetail> | null> {
         return invokeStore('pds_read_character', { id })
     }
@@ -194,8 +200,16 @@ export class SqlitePersistentDataStore implements PersistentDataStore {
         return invokeStore('pds_query_plugin_storage', {})
     }
 
-    readPluginStorage(key: string): Promise<Versioned<unknown> | null> {
-        return invokeStore('pds_read_plugin_storage', { key })
+    readPluginStorage(owner: string, key: string): Promise<Versioned<unknown> | null> {
+        return invokeStore('pds_read_plugin_storage', { owner, key })
+    }
+
+    listPluginStorage(): Promise<PluginStorageListItem[]> {
+        return invokeStore('pds_list_plugin_storage', {})
+    }
+
+    commitWorkingSetChangeCursor(revision: DataRevision): Promise<void> {
+        return invokeStore('pds_commit_working_set_change_cursor', { revision })
     }
 
     readAssetAlias(identity: AssetAliasIdentity): Promise<Versioned<AssetAlias> | null> {
@@ -221,18 +235,6 @@ export class SqlitePersistentDataStore implements PersistentDataStore {
         owner: AssetOwnerLocator,
     ): Promise<Versioned<AssetOwnerHead> | null> {
         return invokeStore('pds_read_asset_owner_head', { owner })
-    }
-
-    readColdPayloadAuthority(): Promise<Versioned<ColdPayloadAuthorityState>> {
-        return invokeStore('pds_read_cold_payload_authority', {})
-    }
-
-    readColdAlias(key: string): Promise<Versioned<ColdAlias> | null> {
-        return invokeStore('pds_read_cold_alias', { key })
-    }
-
-    listColdAliases(): Promise<Versioned<ColdAlias[]>> {
-        return invokeStore('pds_list_cold_aliases', {})
     }
 
     commitAssetAlias(
@@ -306,31 +308,29 @@ export class SqlitePersistentDataStore implements PersistentDataStore {
         }
     }
 
-    commitColdAlias(
-        alias: ColdAlias,
-        expectedRevision: DataRevision,
-    ): Promise<{ revision: DataRevision }> {
-        return invokeStore('pds_commit_cold_alias', { alias, expectedRevision })
-    }
-
-    deleteColdAlias(
-        key: string,
-        expectedRevision: DataRevision,
-    ): Promise<{ revision: DataRevision }> {
-        return invokeStore('pds_delete_cold_alias', { key, expectedRevision })
-    }
-
-    activateColdPayloadMigration(
-        input: ColdPayloadMigrationInput,
-    ): Promise<{ revision: DataRevision }> {
-        return invokeStore('pds_activate_cold_payload_migration', { input })
-    }
-
     commit(input: WorkingSetCommit): Promise<{ revision: DataRevision }> {
         const { assetAliases = [], ...commit } = input
         return nativeCommitTransport.commit({ commit, assetAliases }).catch((error) => {
             throw restoreStoreError(error)
         })
+    }
+
+    archivePreview(characterId: string): Promise<ArchivePreview> {
+        return invokeStore('pds_archive_preview', { characterId })
+    }
+
+    archiveCharacter(
+        characterId: string,
+        expectedRevision: DataRevision,
+    ): Promise<{ revision: DataRevision }> {
+        return invokeStore('pds_archive_character', { characterId, expectedRevision })
+    }
+
+    restoreCharacter(
+        characterId: string,
+        expectedRevision: DataRevision,
+    ): Promise<{ revision: DataRevision }> {
+        return invokeStore('pds_restore_character', { characterId, expectedRevision })
     }
 
     async replaceFromDatabase(
@@ -412,9 +412,28 @@ export class SqlitePersistentDataStore implements PersistentDataStore {
                 assertActive()
                 return invokeStore('pds_query_characters', { query: input, lease })
             },
+            readCharacterSummary: async (id) => {
+                assertActive()
+                return invokeStore('pds_read_character_summary', { id, lease })
+            },
             readCharacter: async (id) => {
                 assertActive()
                 return invokeStore('pds_read_character', { id, lease })
+            },
+            readWorkingSetChangeWindow: async () => {
+                assertActive()
+                return invokeStore<ContentChangeWindow>('pds_working_set_change_window', {
+                    lease,
+                })
+            },
+            readWorkingSetChangePage: async (afterRevision, afterKey, limit) => {
+                assertActive()
+                return invokeStore<ContentChangeKey[]>('pds_working_set_change_page', {
+                    lease,
+                    afterRevision,
+                    afterKey,
+                    limit,
+                })
             },
             queryConversations: async (input) => {
                 assertActive()
@@ -445,9 +464,9 @@ export class SqlitePersistentDataStore implements PersistentDataStore {
                 assertActive()
                 return invokeStore('pds_query_plugin_storage', { lease })
             },
-            readPluginStorage: async (key) => {
+            readPluginStorage: async (owner, key) => {
                 assertActive()
-                return invokeStore('pds_read_plugin_storage', { key, lease })
+                return invokeStore('pds_read_plugin_storage', { owner, key, lease })
             },
             readAssetAlias: async (identity) => {
                 assertActive()
@@ -468,18 +487,6 @@ export class SqlitePersistentDataStore implements PersistentDataStore {
             readAssetOwnerHead: async (owner) => {
                 assertActive()
                 return invokeStore('pds_read_asset_owner_head', { owner, lease })
-            },
-            readColdPayloadAuthority: async () => {
-                assertActive()
-                return invokeStore('pds_read_cold_payload_authority', { lease })
-            },
-            readColdAlias: async (key) => {
-                assertActive()
-                return invokeStore('pds_read_cold_alias', { key, lease })
-            },
-            listColdAliases: async () => {
-                assertActive()
-                return invokeStore('pds_list_cold_aliases', { lease })
             },
             release: () => {
                 if (releasePromise) return releasePromise

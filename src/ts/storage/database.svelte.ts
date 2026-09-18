@@ -26,6 +26,8 @@ import {
 import { normalizeInlayEncodeOptions } from './blobStore';
 
 //APP_VERSION_POINT is to locate the app version in the database file for version bumping
+//appVer is the last RisuAI version this build stays compatible with, and it is what CBS
+//and remote RisuAI services are told. The RisuNest release version lives in version.json.
 export let appVer = "2026.8.250" //<APP_VERSION_POINT>
 export let appSubVer = ''
 
@@ -101,9 +103,6 @@ export function normalizeDatabaseDefaults(data:Database): Database {
     }
     if(checkNullish(data.language)){
         data.language = 'en'
-    }
-    if(checkNullish(data.swipe)){
-        data.swipe = true
     }
     if(checkNullish(data.translator)){
         data.translator = ''
@@ -702,10 +701,13 @@ export function normalizeDatabaseDefaults(data:Database): Database {
         quality: data.risunestInlayWebpQuality,
         maxDimension: data.risunestInlayMaxDimension,
         skipReencode: data.risunestInlaySkipReencode,
+        animationMaxFps: data.risunestInlayAnimationMaxFps,
     })
     data.risunestInlayWebpQuality = normalizedInlayOptions.quality
     data.risunestInlayMaxDimension = normalizedInlayOptions.maxDimension
     data.risunestInlaySkipReencode = normalizedInlayOptions.skipReencode
+    data.risunestInlayAnimationMaxFps = normalizedInlayOptions.animationMaxFps
+    data.risunestInlayAnimationStillFrame ??= true
     data.streamingDisplayOptimizationMode ??= 'off'
     data.streamingThoughtMode ??= 'recent'
     data.streamingDeferDisplayProcessing ??= false
@@ -728,7 +730,6 @@ export function normalizeDatabaseDefaults(data:Database): Database {
     data.customSidebarItems ??= []
     data.moveInsteadOfCopyOnCMPConvert ??= false
     data.skipSavingAssetsOnWebSync ??= true
-    data.coldstorage ??= data?.plugins?.length === 0
     for(const char of data.characters){
         for(const chat of char.chats ?? []){
             chat.isStreaming = false
@@ -888,7 +889,6 @@ export interface Database{
     ttsAutoSpeech?:boolean
     promptPreprocess:boolean
     bias: [string, number][]
-    swipe:boolean
     instantRemove:boolean
     textTheme: string
     customTextTheme: {
@@ -1172,6 +1172,11 @@ export interface Database{
     risunestInlayWebpQuality?: number
     risunestInlayMaxDimension?: number
     risunestInlaySkipReencode?: boolean
+    risunestInlayAnimationMaxFps?: number
+    risunestInlayAnimationStillFrame?: boolean
+    risunestGoogleSearchApiKey?: string
+    risunestGoogleSearchEngineId?: string
+    risunestIrisDialogue?: IrisDialogueLine[]
     reasoningEffort:number
     bulkEnabling:boolean
     showTranslationLoading: boolean
@@ -1195,7 +1200,6 @@ export interface Database{
     localActivationInGlobalLorebook: boolean
     showFolderName: boolean
     automaticCachePoint: boolean
-    coldstorage: boolean
     claudeRetrivalCaching: boolean
     outputImageModal: boolean
     playMessageOnTranslateEnd:boolean
@@ -1254,6 +1258,8 @@ export interface Database{
     dynamicOutput?:DynamicOutput
     hubServerType?:string
     pluginCustomStorage:{[key:string]:any}
+    /** Ownership beside the flattened values, shared with PocketRisu. */
+    pluginStorageMeta?:{[key:string]:{plugin:string,updatedAt:number}}
     ImagenModel:string
     ImagenImageSize:string
     ImagenAspectRatio:string
@@ -1872,6 +1878,13 @@ export interface Chat{
     bookmarkNames?: { [chatId: string]: string };
     useLocallySetGlobalVariables?: boolean
     GLGlobalVariables?: { [key: string]: string }
+    toolCalls?: { [callId: string]: import('../process/mcp/mcp').toolCallData }
+}
+
+export interface IrisDialogueLine{
+    speaker: string
+    text: string
+    tip?: string
 }
 
 export interface ChatFolder{

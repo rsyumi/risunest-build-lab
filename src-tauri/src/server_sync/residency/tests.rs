@@ -30,11 +30,8 @@ fn config(device: &str) -> StoredConfig {
 }
 fn head() -> RemoteHead {
     RemoteHead {
-        library_id: "library".into(),
-        epoch: "epoch".into(),
-        seq: 0.into(),
         head_id: hash(b"head"),
-        min_retained_seq: 0.into(),
+        ..RemoteHead::genesis("library".into(), "epoch".into()).unwrap()
     }
 }
 fn object(seed: &[u8]) -> RetainedObject {
@@ -46,18 +43,20 @@ fn object(seed: &[u8]) -> RetainedObject {
 }
 
 #[test]
-fn policy_and_custody_survive_reopen_but_are_device_local() {
+fn custody_survives_reopen_but_stays_device_local() {
     let root = tempfile::tempdir().unwrap();
     let other = tempfile::tempdir().unwrap();
     let mut store = Residency::open(root.path()).unwrap();
-    assert_eq!(store.policy().unwrap(), AssetPolicy::Full);
-    store.set_policy(AssetPolicy::Remote).unwrap();
     store
         .confirm(&config("device"), &head(), &[object(b"first")])
         .unwrap();
     drop(store);
+    assert!(root
+        .path()
+        .join("server-sync/asset-residency.sqlite")
+        .is_file());
+    assert!(!root.path().join("asset-residency.sqlite").exists());
     let store = Residency::open(root.path()).unwrap();
-    assert_eq!(store.policy().unwrap(), AssetPolicy::Remote);
     let context = Residency::context_id(&config("device"), "epoch");
     assert!(store
         .confirms(&hash(b"payload"), Some(7), &context)
@@ -67,7 +66,6 @@ fn policy_and_custody_survive_reopen_but_are_device_local() {
         .unwrap());
     assert!(!store.confirms(&hash(b"payload"), Some(7), "other").unwrap());
     let other = Residency::open(other.path()).unwrap();
-    assert_eq!(other.policy().unwrap(), AssetPolicy::Full);
     assert!(other.object(&hash(b"payload"), None).unwrap().is_none());
 }
 
@@ -90,6 +88,38 @@ fn stale_release_cannot_remove_renewed_custody() {
         hash(b"second")
     );
     assert!(!store.begin_release(&old).unwrap());
+}
+
+#[test]
+fn latest_release_claim_uses_the_newest_id_and_stale_completion_preserves_a_new_retain() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = Residency::open(root.path()).unwrap();
+    store
+        .confirm(&config("device"), &head(), &[object(b"first")])
+        .unwrap();
+    store
+        .confirm(&config("device"), &head(), &[object(b"second")])
+        .unwrap();
+    let context = Residency::context_id(&config("device"), "epoch");
+    let releasing = store
+        .begin_latest_release(&hash(b"payload"), &context)
+        .unwrap()
+        .unwrap();
+    assert_eq!(releasing.retention_id, hash(b"second"));
+
+    let mut concurrent = Residency::open(root.path()).unwrap();
+    concurrent
+        .confirm(&config("device"), &head(), &[object(b"third")])
+        .unwrap();
+    store.finish_release(&releasing).unwrap();
+    assert_eq!(
+        store
+            .object(&hash(b"payload"), Some(&context))
+            .unwrap()
+            .unwrap()
+            .retention_id,
+        hash(b"third")
+    );
 }
 
 #[test]

@@ -6,17 +6,20 @@ const native = vi.hoisted(() => ({
   getServerSyncCacheUsage: vi.fn(),
   cleanupServerSyncCache: vi.fn(),
   deleteServerSyncBackup: vi.fn(),
+  exportServerSyncBackup: vi.fn(),
   restoreServerSyncBackup: vi.fn(),
 }));
 const confirm = vi.hoisted(() => vi.fn());
+const normal = vi.hoisted(() => vi.fn());
 vi.mock("src/ts/storage/sync/serverSyncProduction", () => native);
-vi.mock("src/ts/alert", () => ({ alertConfirm: confirm }));
+vi.mock("src/ts/alert", () => ({ alertConfirm: confirm, alertNormal: normal }));
 vi.mock("src/lang", async () => ({
   language: (await import("src/lang/en")).languageEnglish,
 }));
 import ServerSyncStorage from "./ServerSyncStorage.svelte";
 import { languageEnglish } from "src/lang/en";
 const labels = languageEnglish.risuNest.serverSync.management;
+const text = languageEnglish.risuNest.serverSync;
 const inventory = (): ServerSyncBackupInventory => ({
   items: [
     {
@@ -29,11 +32,23 @@ const inventory = (): ServerSyncBackupInventory => ({
         seq: "1",
         headId: "head",
         minRetainedSeq: "0",
+        sections: {
+          hypa: { stateId: "hypa-state", changedSeq: "0", gcFloor: "0" },
+          library: { stateId: "library-state", changedSeq: "0", gcFloor: "0" },
+          "local-plugins": { stateId: "plugins-state", changedSeq: "0", gcFloor: "0" },
+        },
       },
-      localBytes: 1024,
-      remoteBytes: 2048,
+      local: {
+        localRequiredBytes: 1024,
+        remoteDependentBytes: 0,
+        availability: "local-complete",
+      },
+      remote: {
+        localRequiredBytes: 256,
+        remoteDependentBytes: 2048,
+        availability: "connection-required",
+      },
       preservationScope: "library",
-      recoveryReady: true,
       diskBytes: 3200,
       deletable: true,
       blockedReason: null,
@@ -63,6 +78,10 @@ beforeEach(() => {
     blockedReason: null,
   });
   confirm.mockResolvedValue(true);
+  native.deleteServerSyncBackup.mockResolvedValue({
+    localDeleted: true,
+    cleanup: "complete",
+  });
   changed = vi.fn();
   target = document.createElement("div");
   document.body.append(target);
@@ -104,6 +123,19 @@ describe("shared local server storage management", () => {
       "synthetic-id",
     );
   });
+  it("reports cleanup pending after the local backup has already been deleted", async () => {
+    native.deleteServerSyncBackup.mockResolvedValueOnce({
+      localDeleted: true,
+      cleanup: "pending",
+    });
+    await vi.waitFor(() => expect(button(languageEnglish.remove)).toBeDefined());
+
+    button(languageEnglish.remove).click();
+
+    await vi.waitFor(() =>
+      expect(normal).toHaveBeenCalledWith(labels.deleteCleanupPending),
+    );
+  });
   it("restores the chosen side through the existing guarded file route", async () => {
     await vi.waitFor(() =>
       expect(
@@ -118,6 +150,18 @@ describe("shared local server storage management", () => {
       ),
     );
     expect(confirm).toHaveBeenCalledWith(labels.restoreConfirm);
+  });
+  it("exports an available side through the reference portable route", async () => {
+    await vi.waitFor(() => expect(button(text.exportLocalBackup)).toBeDefined());
+
+    button(text.exportLocalBackup).click();
+
+    await vi.waitFor(() =>
+      expect(native.exportServerSyncBackup).toHaveBeenCalledExactlyOnceWith(
+        "synthetic-id",
+        "local",
+      ),
+    );
   });
   it("rechecks listing after refresh and disables deletion, restoration and cache cleanup when native reports protection", async () => {
     await vi.waitFor(() => expect(button(labels.clean)).toBeDefined());

@@ -8,19 +8,21 @@ const SCHEMA: &str = r#"
 CREATE TABLE server_sync_state(singleton INTEGER PRIMARY KEY CHECK(singleton=1),config TEXT NOT NULL,head TEXT,next_sequence TEXT NOT NULL DEFAULT '1',full_scan INTEGER NOT NULL DEFAULT 1,registration_required INTEGER NOT NULL DEFAULT 0,reconciling INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE server_sync_context(singleton INTEGER PRIMARY KEY CHECK(singleton=1),generation TEXT NOT NULL,revision INTEGER NOT NULL);
 CREATE TABLE server_sync_dirty(kind TEXT NOT NULL,key1 TEXT NOT NULL,key2 TEXT NOT NULL,revision INTEGER NOT NULL,PRIMARY KEY(kind,key1,key2));
-CREATE TABLE server_sync_base(key TEXT PRIMARY KEY,version TEXT NOT NULL,local_hash TEXT);
+CREATE TABLE server_sync_base(domain TEXT NOT NULL,key TEXT NOT NULL,version TEXT NOT NULL,local_hash TEXT,PRIMARY KEY(domain,key));
 CREATE TABLE server_sync_scope_base(scope TEXT PRIMARY KEY,version TEXT NOT NULL);
 CREATE TABLE server_sync_scope_clear_base(scope TEXT PRIMARY KEY,version TEXT NOT NULL);
 CREATE TABLE server_sync_clears(id TEXT PRIMARY KEY,revision INTEGER NOT NULL,expected_version TEXT);
-CREATE TABLE server_sync_clear_members(clear_id TEXT NOT NULL REFERENCES server_sync_clears(id) ON DELETE CASCADE,key TEXT NOT NULL,PRIMARY KEY(clear_id,key));
+CREATE TABLE server_sync_clear_members(clear_id TEXT NOT NULL REFERENCES server_sync_clears(id) ON DELETE CASCADE,owner TEXT NOT NULL,key TEXT NOT NULL,PRIMARY KEY(clear_id,owner,key));
 CREATE TABLE server_sync_operation(singleton INTEGER PRIMARY KEY CHECK(singleton=1),sequence TEXT NOT NULL,intent TEXT NOT NULL,phase TEXT NOT NULL,local_revision INTEGER NOT NULL);
 CREATE TABLE server_sync_objects(hash TEXT PRIMARY KEY,size INTEGER NOT NULL,path TEXT NOT NULL);
-CREATE TABLE server_sync_operation_records(key TEXT PRIMARY KEY,version TEXT NOT NULL,local_hash TEXT,kind TEXT NOT NULL,key1 TEXT NOT NULL,key2 TEXT NOT NULL,revision INTEGER NOT NULL);
+CREATE TABLE server_sync_operation_records(domain TEXT NOT NULL,key TEXT NOT NULL,version TEXT NOT NULL,local_hash TEXT,kind TEXT NOT NULL,key1 TEXT NOT NULL,key2 TEXT NOT NULL,revision INTEGER NOT NULL,PRIMARY KEY(domain,key));
 CREATE TABLE server_sync_operation_pages(page INTEGER PRIMARY KEY,body BLOB NOT NULL);
 CREATE TABLE server_sync_operation_scopes(scope TEXT PRIMARY KEY,version TEXT NOT NULL);
-CREATE TABLE server_sync_remote(key TEXT PRIMARY KEY,version TEXT NOT NULL);
-CREATE TABLE server_sync_remote_dirty(key TEXT PRIMARY KEY);
-CREATE TABLE server_sync_remote_cursor(singleton INTEGER PRIMARY KEY CHECK(singleton=1),head TEXT NOT NULL,cursor TEXT,complete INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE server_sync_operation_sections(domain TEXT PRIMARY KEY,base_seq TEXT NOT NULL,base_state_id TEXT NOT NULL);
+CREATE TABLE server_sync_remote(domain TEXT NOT NULL,key TEXT NOT NULL,version TEXT NOT NULL,PRIMARY KEY(domain,key));
+CREATE TABLE server_sync_remote_dirty(domain TEXT NOT NULL,key TEXT NOT NULL,PRIMARY KEY(domain,key));
+CREATE TABLE server_sync_remote_cursor(singleton INTEGER PRIMARY KEY CHECK(singleton=1),head TEXT NOT NULL,domains TEXT NOT NULL,cursor TEXT,complete INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE server_sync_remote_sections(domain TEXT PRIMARY KEY,applied_seq TEXT NOT NULL,state_id TEXT NOT NULL);
 "#;
 
 use super::content_locators::tracked_tables;
@@ -49,7 +51,9 @@ pub(super) fn create_schema(db: &Connection) -> StoreResult<()> {
 }
 pub(super) fn validate_schema(db: &Connection) -> StoreResult<()> {
     let reconciliation: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('server_sync_state') WHERE name='reconciling' AND type='INTEGER' AND \"notnull\"=1)", [], |r|r.get(0))?;
-    if !reconciliation {
+    let sections: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('server_sync_remote_cursor') WHERE name='domains' AND type='TEXT' AND \"notnull\"=1)", [], |r|r.get(0))?;
+    let addressed: bool = db.query_row("SELECT (SELECT count(*) FROM pragma_table_info('server_sync_remote') WHERE name='domain')+(SELECT count(*) FROM pragma_table_info('server_sync_remote_dirty') WHERE name='domain')+(SELECT count(*) FROM pragma_table_info('server_sync_base') WHERE name='domain')+(SELECT count(*) FROM pragma_table_info('server_sync_operation_records') WHERE name='domain')=4", [], |r|r.get(0))?;
+    if !reconciliation || !sections || !addressed {
         return Err(StoreError::Validation {
             message: "Server sync replica schema is incompatible".into(),
         });
@@ -68,9 +72,11 @@ pub(super) fn validate_schema(db: &Connection) -> StoreResult<()> {
         "server_sync_operation_records",
         "server_sync_operation_pages",
         "server_sync_operation_scopes",
+        "server_sync_operation_sections",
         "server_sync_remote",
         "server_sync_remote_dirty",
         "server_sync_remote_cursor",
+        "server_sync_remote_sections",
     ] {
         let present: bool = db.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
@@ -119,11 +125,15 @@ pub(super) fn full_replacement(tx: &Transaction<'_>) -> StoreResult<()> {
     tx.execute("UPDATE server_sync_state SET full_scan=1", [])?;
     Ok(())
 }
-pub(super) fn capture_clear(tx: &Transaction<'_>, generation: &str) -> StoreResult<()> {
+pub(super) fn capture_clear(
+    tx: &Transaction<'_>,
+    generation: &str,
+    owner: &str,
+) -> StoreResult<()> {
     let id = uuid::Uuid::new_v4().to_string();
     let inserted=tx.execute("INSERT INTO server_sync_clears SELECT ?1,revision,(SELECT version FROM server_sync_scope_base WHERE scope='plugin-storage') FROM server_sync_context WHERE singleton=1",[&id])?;
     if inserted > 0 {
-        tx.execute("INSERT INTO server_sync_clear_members SELECT ?1,storage_key FROM plugin_storage WHERE generation=?2",params![id,generation])?;
+        tx.execute("INSERT INTO server_sync_clear_members SELECT ?1,owner,storage_key FROM plugin_storage WHERE generation=?2 AND owner=?3",params![id,generation,owner])?;
     }
     Ok(())
 }

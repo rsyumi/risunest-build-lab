@@ -1,5 +1,9 @@
 use super::{JobControl, JobPhase, JobResultSummary, NativeJobError, OpenedJobSource};
-use crate::device_backup::{DeviceBackupState, Operation, Spool};
+use crate::device_backup::{
+    capture_native_sections, capture_prepared_native_sections, journal_prepared_native_sections,
+    prepare_native_sections, resume_journaled_native_restore, DeviceBackupError, DeviceBackupState,
+    Spool,
+};
 use crate::{
     asset_repository::{
         job_pins::{CasJobKind, CasObjectRole, CasReleaseOutcome, DurableCasJob},
@@ -21,12 +25,17 @@ use tauri::Manager;
 pub(crate) struct PortableSelection {
     pub(crate) library: bool,
     pub(crate) device_sections: Vec<String>,
+    /// Absent brings the whole library; present brings only the records it names, closed over
+    /// what those records refer to.
+    #[serde(default)]
+    pub(crate) items: Option<portable_backup::ArchiveSelection>,
 }
 impl Default for PortableSelection {
     fn default() -> Self {
         Self {
             library: true,
             device_sections: vec![],
+            items: None,
         }
     }
 }
@@ -36,8 +45,18 @@ pub(crate) struct RestorePreview {
     pub(crate) library_included: bool,
     pub(crate) repair_required: bool,
     pub(crate) device_sections: Vec<String>,
+    /// What is wrong with the archive's library. An archive the gate refuses still reports this,
+    /// which is the only way a reader learns what to leave out.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) diagnosis: Option<crate::data_health::ScanResult>,
+    /// The records the reader can choose between.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) items: Option<portable_backup::ArchiveInventory>,
 }
-fn restore_preview(archive: &VerifiedArchive) -> Result<RestorePreview, NativeJobError> {
+fn restore_preview(
+    archive: &VerifiedArchive,
+    probe: &dyn CancellationProbe,
+) -> Result<RestorePreview, NativeJobError> {
     let mut sections = Vec::new();
     let mut statement = archive
         .db
@@ -50,103 +69,58 @@ fn restore_preview(archive: &VerifiedArchive) -> Result<RestorePreview, NativeJo
         if sections.len() == 1024 {
             return Err(error("Archive contains too many device sections"));
         }
-        sections.push(row.get(0).map_err(error)?);
+        let section: String = row.get(0).map_err(error)?;
+        risunest_external_storage_format::section::SectionKind::parse(&section).map_err(|_| {
+            NativeJobError::new(
+                "invalid-source",
+                "Portable backup contains an unsupported device section",
+            )
+        })?;
+        sections.push(section);
     }
+    let (diagnosis, items) = match archive.manifest.library_included {
+        true => {
+            let mut findings = crate::data_health::Findings::new(2000);
+            archive.scan_library(&mut findings, probe).map_err(error)?;
+            let items =
+                portable_backup::archive_inventory(&archive.db, &findings.items).map_err(error)?;
+            (
+                Some(crate::data_health::ScanResult::new(
+                    0,
+                    archive_scanned_at(),
+                    crate::data_health::ScanDepth::Deep,
+                    findings,
+                )),
+                Some(items),
+            )
+        }
+        false => (None, None),
+    };
     Ok(RestorePreview {
         library_included: archive.manifest.library_included,
         repair_required: archive.manifest.repair_required,
         device_sections: sections,
+        diagnosis,
+        items,
     })
 }
 
-fn begin_device(
-    app: &tauri::AppHandle,
-    selection: &PortableSelection,
-    store: &mut PersistentStore,
-    revision: i64,
-    stage: Option<&str>,
-    job: &JobControl,
-    operation: Operation,
-) -> Result<Option<String>, NativeJobError> {
-    if selection.device_sections.is_empty() {
-        return Ok(None);
-    }
-    if app.webview_windows().len() != 1 {
-        return Err(NativeJobError::new(
-            "device-writers-active",
-            "Close other application windows before device maintenance",
-        ));
-    }
-    let guard = app
-        .state::<crate::persistent_store::PersistentStoreState>()
-        .acquire_device_maintenance()
-        .map_err(error)?;
-    if store.revision().map_err(error)? != revision {
-        return Err(NativeJobError::new(
-            "revision-conflict",
-            "Library changed before device maintenance",
-        ));
-    }
-    let coordinator = app.state::<DeviceBackupState>();
-    let generation = if selection.library {
-        let lease = store.acquire_revision(revision).map_err(error)?.lease;
-        let generation = store.portable_source_generation(&lease).map_err(error);
-        store.release_revision(&lease).map_err(error)?;
-        Some(generation?)
-    } else {
-        None
-    };
-    coordinator.attach_maintenance_guard(guard).map_err(error)?;
-    let id = match coordinator.create_session(
-        &job.id(),
-        operation,
-        selection.library,
-        &selection.device_sections,
-        generation,
-        stage.map(str::to_owned),
-    ) {
-        Ok(id) => id,
-        Err(failure) => {
-            let _ = coordinator.release_unused_maintenance();
-            return Err(error(failure));
-        }
-    };
-    job.set_device_session(&id).map_err(error)?;
-    Ok(Some(id))
+fn archive_scanned_at() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| i64::try_from(since.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or_default()
 }
-fn wait_device(
-    coordinator: &DeviceBackupState,
-    id: &str,
-    job: &JobControl,
-    predicate: impl Fn(&crate::device_backup::Session) -> bool,
-) -> Result<(), NativeJobError> {
-    loop {
-        let session = coordinator.session(id).map_err(error)?;
-        if predicate(&session) {
-            return Ok(());
-        }
-        if job.is_cancel_requested() {
-            if session.phase == "committing-library" {
-                coordinator.library_commit_failed(id).map_err(error)?;
-            } else {
-                coordinator.fail(id, "job-cancelled").map_err(error)?;
-            }
-            return Err(NativeJobError::new(
-                "cancelled",
-                "Device backup job was cancelled",
-            ));
-        }
-        if matches!(
-            session.phase.as_str(),
-            "rolled-back" | "rolling-back" | "recovery-required"
-        ) {
-            return Err(NativeJobError::new(
-                "device-recovery-required",
-                "Device maintenance requires recovery",
-            ));
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
+
+fn append_cleanup_failure(
+    primary: &mut NativeJobError,
+    operation: &str,
+    cleanup: impl std::fmt::Display,
+) {
+    *primary = NativeJobError::new(
+        &primary.code,
+        format!("{}; {operation} failed: {cleanup}", primary.message),
+    );
 }
 
 struct Probe<'a>(&'a JobControl);
@@ -157,6 +131,13 @@ impl CancellationProbe for Probe<'_> {
 }
 fn error(error: impl std::fmt::Display) -> NativeJobError {
     NativeJobError::new("portable-backup-failed", error.to_string())
+}
+fn device_error(failure: DeviceBackupError) -> NativeJobError {
+    if failure.code == "device-cancelled" {
+        NativeJobError::new("cancelled", failure.message)
+    } else {
+        error(failure)
+    }
 }
 fn portable_error(failure: portable_backup::Error) -> NativeJobError {
     match failure {
@@ -184,6 +165,14 @@ fn new_pins(store: &PersistentStore, kind: CasJobKind) -> Result<DurableCasJob, 
         now(),
     )
     .map_err(error)
+}
+
+fn new_pins_for_job(
+    store: &PersistentStore,
+    kind: CasJobKind,
+    job_id: &str,
+) -> Result<DurableCasJob, NativeJobError> {
+    DurableCasJob::begin(store.repository_root(), job_id, kind, now()).map_err(error)
 }
 pub(super) fn finish_durable_job(
     outcome: Result<JobResultSummary, NativeJobError>,
@@ -281,7 +270,18 @@ fn publish(
         destination,
         || job.is_cancel_requested(),
         |_| {},
-        || Ok(()),
+        || {
+            job.commit_export_publication().map_err(|message| {
+                if job.is_cancel_requested() {
+                    crate::persistent_store::export::destination::DestinationWriteError::Cancelled
+                } else {
+                    crate::persistent_store::export::destination::DestinationWriteError::Io {
+                        operation: "commit portable export publication",
+                        source: std::io::Error::other(message),
+                    }
+                }
+            })
+        },
     )
     .map_err(|failure| {
         super::error::destination_error_with(
@@ -298,37 +298,45 @@ pub(crate) fn export_portable(
     revision: i64,
     owned: &Path,
     handoffs: &Path,
-    mut store: PersistentStore,
+    store: PersistentStore,
     job: &JobControl,
     device: Option<(&tauri::AppHandle, &PortableSelection)>,
 ) -> Result<JobResultSummary, NativeJobError> {
-    job.start(JobPhase::WritingExport).map_err(error)?;
+    super::job_transition(job, job.start(JobPhase::WritingExport))?;
     let fallback = PortableSelection::default();
     let selection = device.map(|(_, selection)| selection).unwrap_or(&fallback);
+    export_portable_running(
+        destination,
+        revision,
+        owned,
+        handoffs,
+        store,
+        job,
+        selection,
+    )
+}
+
+fn export_portable_running(
+    destination: Option<&Path>,
+    revision: i64,
+    owned: &Path,
+    handoffs: &Path,
+    mut store: PersistentStore,
+    job: &JobControl,
+    selection: &PortableSelection,
+) -> Result<JobResultSummary, NativeJobError> {
     if !selection.library && selection.device_sections.is_empty() {
         return Err(error("Select at least one backup section"));
     }
-    let session = match device {
-        Some((app, _)) => begin_device(
-            app,
-            selection,
-            &mut store,
-            revision,
-            None,
-            job,
-            Operation::Capture,
-        )?,
-        None => None,
-    };
+    if store.revision().map_err(error)? != revision {
+        return Err(NativeJobError::new(
+            "revision-conflict",
+            "Library changed before portable backup capture",
+        ));
+    }
     let probe = Probe(job);
     let mut pins = new_pins(&store, CasJobKind::OfficialPublicationOrExportPreparation)?;
     let outcome = (|| {
-        if let (Some((app, _)), Some(id)) = (device, session.as_deref()) {
-            let coordinator = app.state::<DeviceBackupState>();
-            wait_device(&coordinator, id, job, |_| {
-                coordinator.maintenance_entered(id).unwrap_or(false)
-            })?;
-        }
         let captured = if selection.library {
             capture(&mut store, revision, owned, &mut pins, &probe)?
         } else {
@@ -346,16 +354,14 @@ pub(crate) fn export_portable(
                 repair_required: false,
             }
         };
-        if let (Some((app, _)), Some(id)) = (device, session.as_deref()) {
-            let coordinator = app.state::<DeviceBackupState>();
-            wait_device(&coordinator, id, job, |session| {
-                session.phase == "device-captured"
-            })?;
-            coordinator
-                .export_to_catalog(id, Spool::Source, &captured.catalog, &probe)
-                .map_err(error)?;
-            coordinator.confirm_capture(id).map_err(error)?;
-            job.leave_device_wait(false).map_err(error)?;
+        if !selection.device_sections.is_empty() {
+            capture_native_sections(
+                &mut store,
+                &selection.device_sections,
+                &captured.catalog,
+                &probe,
+            )
+            .map_err(device_error)?;
         }
         let path = owned.join("archive.risunest.part");
         let archive = write_verified(
@@ -377,10 +383,8 @@ pub(crate) fn export_portable(
                 (path.clone(), Some(path.to_string_lossy().into_owned()))
             }
         };
-        job.set_phase(JobPhase::PublishingDestination)
-            .map_err(error)?;
+        super::job_transition(job, job.set_phase(JobPhase::PublishingDestination))?;
         let published = publish(&path, &destination, owned, job)?;
-        job.set_phase(JobPhase::FinalizingExport).map_err(error)?;
         Ok(JobResultSummary {
             revision,
             source_bytes: published.bytes,
@@ -396,20 +400,68 @@ pub(crate) fn export_portable(
             publication: None,
         })
     })();
-    if outcome.is_err() {
-        if let (Some((app, _)), Some(id)) = (device, session.as_deref()) {
-            let _ = app
-                .state::<DeviceBackupState>()
-                .fail(id, "archive-export-failed");
-        }
-    }
     finish_pins(outcome, &mut pins)
+}
+
+fn begin_native_restore(
+    app: &tauri::AppHandle,
+    selection: &PortableSelection,
+    store: &mut PersistentStore,
+    revision: i64,
+    stage: Option<&str>,
+    job: &JobControl,
+    source: &[crate::device_backup::PreparedDeviceSection],
+    probe: &dyn CancellationProbe,
+    durable_session_started: &mut bool,
+) -> Result<String, NativeJobError> {
+    let guard = app
+        .state::<crate::persistent_store::commands::PersistentStoreState>()
+        .acquire_device_maintenance()
+        .map_err(error)?;
+    let coordinator = app.state::<DeviceBackupState>();
+    coordinator.attach_maintenance_guard(guard).map_err(error)?;
+    let id = match coordinator.create_native_portable_session(
+        &job.id(),
+        selection.library,
+        &selection.device_sections,
+        revision,
+        stage.map(str::to_owned),
+    ) {
+        Ok(id) => id,
+        Err(failure) => {
+            let _ = coordinator.release_unused_maintenance();
+            return Err(error(failure));
+        }
+    };
+    if let Err(failure) = job.set_device_session(&id) {
+        let failure = error(failure);
+        let _ = coordinator.fail(&id, "archive-restore-setup-failed");
+        let _ = coordinator.recovery_complete(&id);
+        let _ = coordinator.cleanup(&id);
+        return Err(failure);
+    }
+    *durable_session_started = true;
+    let prepared = (|| {
+        journal_prepared_native_sections(&coordinator, &id, Spool::Source, source)
+            .map_err(error)?;
+        coordinator.source_ready(&id).map_err(error)?;
+        let rollback = capture_prepared_native_sections(store, &selection.device_sections, probe)
+            .map_err(error)?;
+        journal_prepared_native_sections(&coordinator, &id, Spool::Rollback, &rollback)
+            .map_err(error)?;
+        coordinator.prepared(&id).map_err(error)?;
+        Ok(())
+    })();
+    if let Err(failure) = prepared {
+        return Err(failure);
+    }
+    Ok(id)
 }
 
 pub(crate) fn restore_portable(
     mut source: OpenedJobSource,
     already_owned: bool,
-    revision: i64,
+    mut revision: i64,
     owned: &Path,
     mut store: PersistentStore,
     job: &JobControl,
@@ -455,63 +507,48 @@ pub(crate) fn restore_portable(
     let archive = VerifiedArchive::open(input, owned, &probe).map_err(error)?;
     let fallback = match device {
         Some((_, None)) => job
-            .wait_for_portable_selection(restore_preview(&archive)?)
+            .wait_for_portable_selection(restore_preview(&archive, &probe)?)
             .map_err(error)?,
         _ => PortableSelection::default(),
     };
     let selection = device
         .and_then(|(_, selection)| selection)
         .unwrap_or(&fallback);
-    let device = device.map(|(app, _)| (app, selection));
+    let app = device.map(|(app, _)| app);
     if !selection.library && selection.device_sections.is_empty() {
         return Err(error("Select at least one backup section"));
     }
-    if selection.library {
+    if selection.library && selection.items.is_none() {
         archive.validate_library(&probe).map_err(error)?;
     }
-    let mut pins = new_pins(&store, CasJobKind::LocalBackupRestore)?;
+    let mut pins = new_pins_for_job(&store, CasJobKind::LocalBackupRestore, &job.id())?;
+    let mut journal_owned = false;
     let outcome = (|| {
         job.set_phase(JobPhase::StagingDatabase).map_err(error)?;
-        let stage = if selection.library {
-            Some(
+        let stage = match (selection.library, selection.items.as_ref()) {
+            (false, _) => None,
+            (true, None) => Some(
                 store
                     .stage_portable_records(&archive.db, &probe)
                     .map_err(error)?,
-            )
-        } else {
-            None
-        };
-        let mut committed = false;
-        let session = match device {
-            Some((app, _)) => match begin_device(
-                app,
-                selection,
-                &mut store,
-                revision,
-                stage.as_ref().map(|s| s.staging_id.as_str()),
-                job,
-                Operation::Restore,
-            ) {
-                Ok(session) => session,
-                Err(failure) => {
-                    if let Some(stage) = &stage {
-                        store.replace_abort(&stage.staging_id).map_err(error)?;
-                    }
-                    return Err(failure);
-                }
-            },
-            None => None,
-        };
-        let activated = (|| {
-            if let (Some((app, _)), Some(id)) = (device, session.as_deref()) {
-                let coordinator = app.state::<DeviceBackupState>();
-                coordinator
-                    .import_from_archive(id, &archive, &probe)
-                    .map_err(error)?;
-                wait_device(&coordinator, id, job, |session| {
-                    session.phase == "awaiting-native-preparation"
-                })?;
+            ),
+            (true, Some(items)) => {
+                let closed = portable_backup::close_selection(&archive.db, items).map_err(error)?;
+                Some(
+                    crate::persistent_store::portable::stage_portable_records_selected(
+                        &mut store,
+                        &archive.db,
+                        &closed,
+                        &probe,
+                    )
+                    .map_err(error)?,
+                )
             }
+        };
+        let prepared_device =
+            prepare_native_sections(&archive, &selection.device_sections, &probe).map_err(error)?;
+        let mut committed = false;
+        let activated = (|| {
             if selection.library {
                 let inventory = portable_backup::RestoreInventory::build(&archive, owned, &probe)
                     .map_err(error)?;
@@ -524,19 +561,14 @@ pub(crate) fn restore_portable(
                 }
             }
             let counts = counts(&archive)?;
-            if let (Some((app, _)), Some(id)) = (device, session.as_deref()) {
-                // Start the non-cancellable replacement interval before the first device write.
-                job.leave_device_wait(true).map_err(error)?;
-                let coordinator = app.state::<DeviceBackupState>();
-                coordinator.allow_device_apply(id).map_err(error)?;
-                wait_device(&coordinator, id, job, |session| {
-                    matches!(session.phase.as_str(), "committing-library" | "committed")
-                })?;
-                if !selection.library {
-                    committed = true;
-                }
-            } else {
-                job.wait_for_restore_finalization().map_err(error)?;
+            if let Some(finalized) = job.wait_for_restore_finalization().map_err(error)? {
+                revision = finalized;
+            }
+            if store.revision().map_err(error)? != revision {
+                return Err(NativeJobError::new(
+                    "revision-conflict",
+                    "Library changed before portable restore activation",
+                ));
             }
             if selection.library {
                 if probe.is_cancelled() {
@@ -558,36 +590,53 @@ pub(crate) fn restore_portable(
                     ));
                 }
             }
-            let mut warning_codes = vec![];
-            let final_revision = if let Some(stage) = stage.as_ref() {
+            let warning_codes = vec![];
+            let final_revision = if !prepared_device.is_empty() {
+                let app = app.ok_or_else(|| {
+                    NativeJobError::new(
+                        "device-maintenance-unavailable",
+                        "Native device restore requires the application maintenance state",
+                    )
+                })?;
+                let mut durable_session_started = false;
+                let session = match begin_native_restore(
+                    app,
+                    selection,
+                    &mut store,
+                    revision,
+                    stage.as_ref().map(|stage| stage.staging_id.as_str()),
+                    job,
+                    &prepared_device,
+                    &probe,
+                    &mut durable_session_started,
+                ) {
+                    Ok(session) => session,
+                    Err(failure) => {
+                        if durable_session_started {
+                            committed = true;
+                            journal_owned = selection.library;
+                        }
+                        return Err(failure);
+                    }
+                };
+                // From this point the existing durable device journal and the PDS
+                // stage own recovery. A failed attempt resumes this accepted restore.
+                committed = true;
+                journal_owned = selection.library;
+                let result = resume_journaled_native_restore(
+                    &app.state::<DeviceBackupState>(),
+                    &session,
+                    &mut store,
+                )
+                .map_err(error)?;
+                result
+            } else if let Some(stage) = stage.as_ref() {
                 let prepared = store
                     .prepare_replace_commit(&stage.staging_id, Some(revision))
                     .map_err(super::error::store_error)?;
-                if let (Some((app, _)), Some(id)) = (device, session.as_deref()) {
-                    let coordinator = app.state::<DeviceBackupState>();
-                    let (key, marker) = coordinator.commit_marker(id).map_err(error)?;
-                    match store.finish_prepared_replace_with_app_kv(
-                        prepared,
-                        &key,
-                        &serde_json::to_value(marker).map_err(error)?,
-                    ) {
-                        Ok(result) => {
-                            committed = true;
-                            if coordinator.mark_library_committed(id).is_err() {
-                                warning_codes.push("device-recovery-required".into());
-                            }
-                            result.revision
-                        }
-                        Err(failure) => {
-                            coordinator.library_commit_failed(id).map_err(error)?;
-                            return Err(error(failure));
-                        }
-                    }
-                } else {
-                    let result = store.finish_prepared_replace(prepared).map_err(error)?;
-                    committed = true;
-                    result.revision
-                }
+                let result = store.finish_prepared_replace(prepared).map_err(error)?;
+                committed = true;
+                result.revision
             } else {
                 committed = true;
                 revision
@@ -603,24 +652,23 @@ pub(crate) fn restore_portable(
                 publication: None,
             })
         })();
-        if activated.is_err() && !committed {
-            if let Some(stage) = stage.as_ref() {
-                store.replace_abort(&stage.staging_id).map_err(error)?;
-            }
-            if let (Some((app, _)), Some(id)) = (device, session.as_deref()) {
-                let coordinator = app.state::<DeviceBackupState>();
-                if coordinator.session(id).map_err(error)?.phase == "committing-library" {
-                    coordinator.library_commit_failed(id).map_err(error)?;
-                } else {
-                    coordinator
-                        .fail(id, "archive-restore-failed")
-                        .map_err(error)?;
+        match activated {
+            Err(mut failure) if !committed => {
+                if let Some(stage) = stage.as_ref() {
+                    if let Err(cleanup) = store.replace_abort(&stage.staging_id) {
+                        append_cleanup_failure(&mut failure, "staging abort", cleanup);
+                    }
                 }
+                Err(failure)
             }
+            outcome => outcome,
         }
-        activated
     })();
-    finish_pins(outcome, &mut pins)
+    if journal_owned && outcome.is_err() {
+        outcome
+    } else {
+        finish_pins(outcome, &mut pins)
+    }
 }
 
 fn install(
@@ -689,9 +737,7 @@ fn counts(archive: &VerifiedArchive) -> Result<(u64, u64), NativeJobError> {
 mod tests {
     use super::*;
     use crate::local_backup::NeverCancelled;
-    use crate::persistent_store::{
-        portable::digest_raw_tables, AssetRepositoryAuthorityState, ColdPayloadAuthorityState,
-    };
+    use crate::persistent_store::{portable::digest_raw_tables, AssetRepositoryAuthorityState};
     pub(super) fn library(root: &Path) -> PersistentStore {
         let mut store = PersistentStore::open(root).unwrap();
         let database: serde_json::Value =
@@ -722,21 +768,81 @@ mod tests {
                 },
             )
             .unwrap();
-        store
-            .replace_put_cold_payload_authority(
-                &stage.staging_id,
-                &ColdPayloadAuthorityState::V2 {
-                    migration_id: "synthetic".into(),
-                    compatibility_hash: "cd".repeat(32),
-                },
-            )
-            .unwrap();
         store.replace_commit(&stage.staging_id, Some(0)).unwrap();
         store
     }
 
+    #[test]
+    fn cancelled_device_capture_returns_the_canonical_worker_cancellation() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source");
+        let owned = directory.path().join("job");
+        fs::create_dir(&owned).unwrap();
+        let store = library(&source);
+        let revision = store.revision().unwrap();
+        let registry = super::super::JobRegistry::default();
+        let job = registry
+            .create_internal(
+                super::super::JobKind::ExportPortableBackup,
+                Some(revision),
+                vec![],
+                false,
+            )
+            .unwrap();
+        job.start(JobPhase::WritingExport).unwrap();
+        assert_eq!(
+            job.request_cancel().unwrap(),
+            super::super::CancelOutcome::Requested
+        );
+
+        let failure = export_portable_running(
+            None,
+            revision,
+            &owned,
+            &directory.path().join("handoffs"),
+            store,
+            &job,
+            &PortableSelection {
+                library: false,
+                device_sections: vec!["hypa".into()],
+                items: None,
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(failure.code, "cancelled");
+        assert_eq!(failure.message, "Device catalog verification was cancelled");
+        assert_eq!(job.status().state, super::super::JobState::Cancelling);
+        super::super::finish_worker_outcome(
+            &job,
+            super::super::JobKind::ExportPortableBackup,
+            Err(failure),
+            vec![],
+        );
+        let status = job.status();
+        assert_eq!(status.state, super::super::JobState::Cancelled);
+        assert!(status.error.is_none());
+        assert!(status.result.is_none());
+        assert!(!owned.join("archive.risunest.part").exists());
+        assert!(!directory.path().join("handoffs").exists());
+    }
+
+    #[test]
+    fn non_cancellation_device_errors_keep_the_portable_failure_contract() {
+        let failure = device_error(DeviceBackupError {
+            code: "device-storage-failed".into(),
+            message: "synthetic storage failure".into(),
+        });
+
+        assert_eq!(failure.code, "portable-backup-failed");
+        assert_eq!(
+            failure.message,
+            "device-storage-failed: synthetic storage failure"
+        );
+    }
+
     fn add_test_aliases(root: &Path, hash: &str, size: usize, count: usize) {
-        let mut db = rusqlite::Connection::open(root.join("persistent/persistent.db")).unwrap();
+        let mut db = rusqlite::Connection::open(root.join("persistent/persistent.sqlite")).unwrap();
         let generation: String = serde_json::from_str(
             &db.query_row::<String, _, _>(
                 "SELECT value FROM meta WHERE key='activeGeneration'",
@@ -836,7 +942,7 @@ mod tests {
         assert!(!target.join("persistent/recovery").exists());
         let store = PersistentStore::open(&target).unwrap();
         assert!(store.snapshot_list().unwrap().is_empty());
-        let db = rusqlite::Connection::open(target.join("persistent/persistent.db")).unwrap();
+        let db = rusqlite::Connection::open(target.join("persistent/persistent.sqlite")).unwrap();
         assert_eq!(
             db.query_row::<i64, _, _>("SELECT count(*) FROM asset_aliases", [], |r| r.get(0))
                 .unwrap(),
@@ -866,8 +972,8 @@ mod tests {
             fs::write(&object, payload).unwrap();
             add_test_aliases(&target, &hash, payload.len(), 1);
             if !corrupt_existing {
-                let db =
-                    rusqlite::Connection::open(target.join("persistent/persistent.db")).unwrap();
+                let db = rusqlite::Connection::open(target.join("persistent/persistent.sqlite"))
+                    .unwrap();
                 db.execute_batch("CREATE TRIGGER reject_replacement BEFORE DELETE ON root WHEN OLD.generation='revision-1' BEGIN SELECT RAISE(ABORT,'synthetic commit failure'); END;").unwrap();
             }
             let jobs = directory.path().join("restore-job");
@@ -934,7 +1040,7 @@ mod tests {
         let target_store = library(&target);
         let revision = target_store.revision().unwrap();
         let before = target_store.read_root(None).unwrap().value;
-        let before_roots = rusqlite::Connection::open(target.join("persistent/persistent.db"))
+        let before_roots = rusqlite::Connection::open(target.join("persistent/persistent.sqlite"))
             .unwrap()
             .query_row::<i64, _, _>("SELECT count(*) FROM root", [], |r| r.get(0))
             .unwrap();
@@ -960,7 +1066,7 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(failure.code, "revision-conflict");
-        let db = rusqlite::Connection::open(target.join("persistent/persistent.db")).unwrap();
+        let db = rusqlite::Connection::open(target.join("persistent/persistent.sqlite")).unwrap();
         assert_eq!(
             db.query_row::<i64, _, _>("SELECT count(*) FROM root", [], |r| r.get(0))
                 .unwrap(),
@@ -983,7 +1089,8 @@ mod tests {
             let store = library(&source);
             let revision = store.revision().unwrap();
             drop(store);
-            let db = rusqlite::Connection::open(source.join("persistent/persistent.db")).unwrap();
+            let db =
+                rusqlite::Connection::open(source.join("persistent/persistent.sqlite")).unwrap();
             if unknown {
                 db.execute_batch("CREATE TABLE future_records(generation TEXT,value TEXT); INSERT INTO future_records VALUES('synthetic','unclassified raw value')").unwrap();
             } else {
@@ -1022,6 +1129,17 @@ mod tests {
             .unwrap();
             assert!(archive.manifest.repair_required);
             assert!(archive.validate_library(&NeverCancelled).is_err());
+            if archive.manifest.library_included {
+                // The gate refuses this archive, so only the collecting scan can say what is wrong.
+                let mut findings = crate::data_health::Findings::new(64);
+                archive
+                    .scan_library(&mut findings, &NeverCancelled)
+                    .unwrap();
+                assert!(findings
+                    .items
+                    .iter()
+                    .any(|finding| finding.code == crate::data_health::codes::RECORD_INVALID));
+            }
             if unknown {
                 assert_eq!(
                     archive.manifest.profile,

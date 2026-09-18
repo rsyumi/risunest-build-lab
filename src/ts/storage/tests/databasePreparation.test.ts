@@ -70,8 +70,26 @@ function deterministicIds(...ids: string[]): () => string {
 }
 
 describe('prepareDatabaseForPersistence', () => {
+    it('detaches nested replacement input synchronously with one existing canonical capture', async () => {
+        const options = { now: 1_700_000_000_000 }
+        const input = await prepareDatabaseForPersistence(fixtureDatabase, options)
+        const expected = structuredClone(input)
+        vi.mocked(canonicalJson).mockClear()
+        const preparing = prepareDatabaseForPersistence(input, options)
+        input.username = 'Changed after preparation started'
+        input.characters[0].name = 'Changed nested input'
+        const prepared = await preparing
+
+        expect(prepared).toEqual(expected)
+        expect(canonicalJson).toHaveBeenCalledOnce()
+        expect(prepared).not.toBe(input)
+        expect(prepared.characters[0]).not.toBe(input.characters[0])
+    })
+
     it('reports real normalization changes and becomes unchanged after preparation', async () => {
-        const input = await prepareDatabaseForPersistence(fixtureDatabase, { now: 1_700_000_000_000 })
+        const input = await prepareDatabaseForPersistence(fixtureDatabase, {
+            now: 1_700_000_000_000,
+        })
         input.formatversion = 4
         input.loreBookToken = 400
         input.characters[0].chaId = ''
@@ -84,16 +102,13 @@ describe('prepareDatabaseForPersistence', () => {
         const expected = await prepareDatabaseForPersistence(input, options)
         vi.mocked(canonicalJson).mockClear()
         const prepared = await prepareDatabaseForBootstrap(input, options)
-        expect(canonicalJson).toHaveBeenCalledTimes(2)
+        expect(canonicalJson).not.toHaveBeenCalled()
         expect(prepared.database).toEqual(expected)
         expect(prepared.changed).toBe(true)
         expect(input).toEqual(original)
         expect(prepared.database).not.toBe(input)
 
-        const stable = await prepareDatabaseForBootstrap(
-            prepared.database,
-            options,
-        )
+        const stable = await prepareDatabaseForBootstrap(prepared.database, options)
         expect(stable.changed).toBe(false)
         expect(stable.database).toEqual(prepared.database)
         expect(stable.database).not.toBe(prepared.database)
@@ -147,6 +162,32 @@ describe('prepareDatabaseForPersistence', () => {
         expect(prepared.characterOrder).toEqual(original.characterOrder)
     })
 
+    it('does not mark character migrations complete while preparing only the root', async () => {
+        const database = structuredClone(fixtureDatabase)
+        const { characters: _characters, botPresets: _botPresets, ...root } = database
+        delete (root as Partial<PersistentRoot>).formatversion
+        root.loreBookToken = 400
+
+        const prepared = await preparePersistentRootForWorkingSet(root, {
+            now: 1_700_000_000_000,
+        })
+
+        expect(prepared.formatversion).toBeUndefined()
+        expect(prepared.loreBookToken).toBe(8000)
+    })
+
+    it('keeps format version 2 pending until character migration can run', async () => {
+        const database = structuredClone(fixtureDatabase)
+        const { characters: _characters, botPresets: _botPresets, ...root } = database
+        root.formatversion = 2
+
+        const prepared = await preparePersistentRootForWorkingSet(root, {
+            now: 1_700_000_000_000,
+        })
+
+        expect(prepared.formatversion).toBe(2)
+    })
+
     it('normalizes a detached database without changing the input', async () => {
         const input = structuredClone(fixtureDatabase)
         input.formatversion = 4
@@ -172,7 +213,12 @@ describe('prepareDatabaseForPersistence', () => {
         input.characters[1].chats[1].id = ''
 
         const prepared = await prepareDatabaseForPersistence(input, {
-            createId: deterministicIds('new-character', 'new-character-2', 'new-chat', 'new-chat-2'),
+            createId: deterministicIds(
+                'new-character',
+                'new-character-2',
+                'new-chat',
+                'new-chat-2',
+            ),
             now: 0,
         })
 

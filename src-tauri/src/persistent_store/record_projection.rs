@@ -511,17 +511,18 @@ pub(super) fn reconstruct_record_with_owner_objects(
                 value: serde_json::from_str(&raw)?,
             }
         }
-        LogicalRecordLocator::Plugin { storage_key } => {
+        LogicalRecordLocator::Plugin { owner, storage_key } => {
             let (ordinal, raw): (i64, String) = connection
                 .query_row(
                     "SELECT ordinal, value FROM plugin_storage
-                     WHERE generation = ?1 AND storage_key = ?2",
-                    params![pds_generation, storage_key],
+                     WHERE generation = ?1 AND owner = ?2 AND storage_key = ?3",
+                    params![pds_generation, owner, storage_key],
                     |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()?
                 .ok_or_else(|| missing_source("plugin"))?;
             LogicalRecordEnvelope::Plugin {
+                owner: owner.clone(),
                 ordinal: nonnegative_u64(ordinal, "plugin storage ordinal")?,
                 value: serde_json::from_str(&raw)?,
             }
@@ -586,22 +587,8 @@ pub(super) fn reconstruct_record_with_owner_objects(
         LogicalRecordLocator::Inlay { logical_key } => {
             reconstruct_asset_alias(connection, pds_generation, "inlay", &logical_key)?
         }
-        LogicalRecordLocator::Cold { logical_key } => {
-            let (object_hash, size, metadata): (Option<String>, i64, String) = connection
-                .query_row(
-                    "SELECT object_hash, size, metadata FROM cold_aliases
-                     WHERE generation = ?1 AND key = ?2",
-                    params![pds_generation, logical_key],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )
-                .optional()?
-                .ok_or_else(|| missing_source("cold"))?;
-            LogicalRecordEnvelope::Cold {
-                object_hash,
-                size: nonnegative_u64(size, "cold alias size")?,
-                metadata: serde_json::from_str(&metadata)?,
-            }
-        }
+        // The store no longer holds cold payloads; the shared record format still carries the variant.
+        LogicalRecordLocator::Cold { .. } => return Err(missing_source("cold")),
     };
     Ok(encode_logical_record(&envelope).map_err(codec_error)?.bytes)
 }

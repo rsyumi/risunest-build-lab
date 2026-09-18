@@ -1,4 +1,5 @@
 import type { Chat, Database, character, groupChat } from './database.svelte'
+import type { CommittedApplyOutcome } from './persistentDataRuntime'
 import { safeStructuredClone } from '../polyfill'
 import {
     ActiveConversationSession,
@@ -48,7 +49,7 @@ export interface WorkingSetCoordinator {
     readonly mutationGeneration: number
     initialize(revision: DataRevision, database: Database): void
     flushPendingData(reason: string): Promise<void>
-    replacePersistentDatabase(database: Database, reason: string): Promise<void>
+    replacePersistentDatabase(database: Database, reason: string): Promise<CommittedApplyOutcome>
     adoptHydratedCharacter(
         revision: DataRevision,
         mutationGeneration: number,
@@ -106,7 +107,6 @@ export interface ActiveWorkingSetDependencies {
         nextConversationId: string,
     ): boolean
     canUseWindowedSelectedConversation?(): boolean
-    isMaximumCompatibilityMode?(): boolean
     isConversationOperationActive?(): boolean
     subscribeConversationOperationActive?(listener: (active: boolean) => void): () => void
     conversationViewportRowBudget?: number
@@ -379,7 +379,6 @@ export class ActiveWorkingSet {
             !this.matchesTarget(state, target) ||
             this.promotionFlight !== null ||
             this.dependencies.canUseWindowedSelectedConversation?.() !== true ||
-            this.dependencies.isMaximumCompatibilityMode?.() === true ||
             this.dependencies.isConversationOperationActive?.() === true ||
             this.dependencies.coordinator.hasPendingPersistenceWork !== false ||
             !transition ||
@@ -610,6 +609,25 @@ export class ActiveWorkingSet {
         return acknowledged
     }
 
+    acknowledgeConversationMutationFallbackPersisted(
+        event: PersistedConversationMutationEvent,
+    ): boolean {
+        const session = this.activeSession
+        if (
+            !session ||
+            session.characterId !== event.characterId ||
+            session.conversationId !== event.conversationId ||
+            !session.ownsSessionToken(event.sessionToken)
+        ) return false
+        const acknowledged = session.acknowledgeFallbackPersisted(
+            event.sessionToken,
+            event.sessionVersion,
+            event.revision,
+        )
+        if (acknowledged) this.notifyActiveConversationViewportSource()
+        return acknowledged
+    }
+
     reconcileActiveCharacterIds(
         database: Database,
         selectedCharacterId: string | null,
@@ -638,13 +656,18 @@ export class ActiveWorkingSet {
 
     fenceNavigation(): number {
         this.navigationGeneration++
+        this.refreshSelectedConversationNavigation(this.navigationGeneration)
+        return this.navigationGeneration
+    }
+
+    private refreshSelectedConversationNavigation(generation: number): void {
+        if (generation !== this.navigationGeneration) return
         const state = this.selectedConversationState
         if (state) {
-            state.navigationGeneration = this.navigationGeneration
+            state.navigationGeneration = generation
             state.stateToken = Symbol('fenced selected conversation')
         }
         this.promotionFlight = null
-        return this.navigationGeneration
     }
 
     invalidateActiveConversationSession(): void {
@@ -700,7 +723,7 @@ export class ActiveWorkingSet {
 
     async deactivate(): Promise<boolean> {
         if (this.dependencies.canDeactivateWorkingSet?.() === false) return false
-        const generation = ++this.navigationGeneration
+        const generation = this.fenceNavigation()
         const activeIds = this.activeIds.size > 0
             ? new Set(this.activeIds)
             : new Set(
@@ -788,11 +811,12 @@ export class ActiveWorkingSet {
                 this.dependencies.canActivateWorkingSet?.() === false
             ) return false
             if (!prepared) return false
-            await this.dependencies.coordinator.replacePersistentDatabase(
+            const outcome = await this.dependencies.coordinator.replacePersistentDatabase(
                 prepared.database,
                 prepared.reason,
             )
             if (
+                outcome.projection === 'refresh-required' ||
                 generation !== this.navigationGeneration ||
                 this.dependencies.canActivateWorkingSet?.() === false
             ) return false
@@ -1085,11 +1109,24 @@ export class ActiveWorkingSet {
         const existing = this.conversationFlights.get(key)
         if (existing?.generation === this.navigationGeneration) return existing.promise
         const generation = ++this.navigationGeneration
-        const pending = this.activateConversationOnce(characterId, id, generation).finally(() => {
-            if (this.conversationFlights.get(key)?.promise === pending) {
-                this.conversationFlights.delete(key)
-            }
-        })
+        const pending = this.activateConversationOnce(characterId, id, generation)
+            .then(
+                (activated) => {
+                    if (!activated) {
+                        this.refreshSelectedConversationNavigation(generation)
+                    }
+                    return activated
+                },
+                (error) => {
+                    this.refreshSelectedConversationNavigation(generation)
+                    throw error
+                },
+            )
+            .finally(() => {
+                if (this.conversationFlights.get(key)?.promise === pending) {
+                    this.conversationFlights.delete(key)
+                }
+            })
         this.conversationFlights.set(key, { generation, promise: pending })
         return pending
     }
@@ -1341,7 +1378,6 @@ export class ActiveWorkingSet {
             options.prepare === undefined &&
             this.dependencies.canActivateWorkingSet?.() !== false &&
             this.dependencies.canUseWindowedSelectedConversation?.() === true &&
-            this.dependencies.isMaximumCompatibilityMode?.() !== true &&
             this.dependencies.isConversationOperationActive?.() !== true &&
             this.dependencies.coordinator.runSelectedConversationTransition !==
                 undefined &&

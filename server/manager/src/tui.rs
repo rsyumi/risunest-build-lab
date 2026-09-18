@@ -55,8 +55,29 @@ fn input(label: &str, default: &str) -> Result<String> {
         value.trim().to_owned()
     })
 }
+fn fixed_endpoint_default(status: &Value) -> &str {
+    if status["connectionState"]["mode"] == "managed" {
+        ""
+    } else {
+        status["connection"]["endpoint"].as_str().unwrap_or("")
+    }
+}
+fn fixed_endpoint(value: String) -> Result<String> {
+    if value.trim().is_empty() {
+        Err("fixed-endpoint-required".into())
+    } else {
+        Ok(value)
+    }
+}
 fn pause() -> Result<()> {
     input("Enter를 누르면 돌아갑니다", "").map(|_| ())
+}
+fn begin_management_activity(root: &Path) -> Result<crate::update::ActivityGuard> {
+    let _lock = crate::update::try_lock(root)?;
+    if root.join("manager-update/transaction.json").exists() {
+        return Err("update-recovery-required".into());
+    }
+    crate::update::ActivityGuard::start(root)
 }
 struct Raw;
 struct Screen;
@@ -160,6 +181,7 @@ pub fn error_message(code: &str) -> &str {
         "registration-already-issued" => "이미 발급한 요청입니다. 기기 목록을 확인하세요. 등록 링크를 잃었다면 해당 기기를 해제한 뒤 다시 등록하세요.",
         "management-response-incomplete" => "응답을 끝까지 받지 못했습니다. 다시 등록하기 전에 기기 목록을 확인하세요.",
         "public-endpoint-not-ready" => "서버 주소가 준비되지 않았습니다. 연결 설정을 확인하세요.",
+        "fixed-endpoint-required" => "고정 주소를 입력하세요.",
         "invalid-device-name" => "기기 이름을 확인하세요. 1~80자이며 제어 문자는 사용할 수 없습니다.",
         "management-unauthorized" => "관리 인증 정보를 확인할 수 없습니다. 서버에 다시 연결하세요.",
         _ => "작업을 완료하지 못했습니다. 서버 상태와 설정을 확인하세요.",
@@ -236,10 +258,14 @@ async fn register(client: &Client, status: &Value) -> Result<()> {
     Ok(())
 }
 
-async fn devices(client: &Client, status: &Value) -> Result<()> {
+async fn devices(root: &Path, client: &Client, status: &Value) -> Result<()> {
     match menu("기기", &["새 기기 등록", "기기 해제"])? {
-        Some(0) => register(client, status).await?,
+        Some(0) => {
+            let _activity = begin_management_activity(root)?;
+            register(client, status).await?;
+        }
         Some(1) => {
+            let _activity = begin_management_activity(root)?;
             let devices: Vec<_> = status["devices"]
                 .as_array()
                 .ok_or("invalid-management-response")?
@@ -278,7 +304,7 @@ async fn devices(client: &Client, status: &Value) -> Result<()> {
     Ok(())
 }
 
-async fn connection(client: &Client, status: &Value, executable: &Path) -> Result<()> {
+async fn connection(root: &Path, client: &Client, status: &Value, executable: &Path) -> Result<()> {
     let action = menu(
         "연결",
         &[
@@ -307,6 +333,7 @@ async fn connection(client: &Client, status: &Value, executable: &Path) -> Resul
             pause()?;
         }
         Some(1) => {
+            let _activity = begin_management_activity(root)?;
             let Some(mode) = menu("연결 방식", &["고정 주소", "임시 주소 (Cloudflare Tunnel)"])?
             else {
                 return Ok(());
@@ -314,7 +341,10 @@ async fn connection(client: &Client, status: &Value, executable: &Path) -> Resul
             clear();
             let c = &status["connection"];
             let endpoint = if mode == 0 {
-                Some(input("고정 주소", c["endpoint"].as_str().unwrap_or(""))?)
+                Some(fixed_endpoint(input(
+                    "고정 주소",
+                    fixed_endpoint_default(status),
+                )?)?)
             } else {
                 None
             };
@@ -366,6 +396,7 @@ async fn connection(client: &Client, status: &Value, executable: &Path) -> Resul
             client.mutate("connection",json!({"revision":status["revision"],"options":{"endpoint":endpoint,"cloudflared":cloudflared,"registryUrl":registry}})).await?;
         }
         Some(index @ 2..=5) => {
+            let _activity = begin_management_activity(root)?;
             let path = [
                 "tunnel/start",
                 "tunnel/stop",
@@ -412,31 +443,48 @@ pub async fn run(root: &Path, executable: &Path) -> Result<()> {
                     "로그인 시 서버 자동 실행 등록",
                     "자동 실행 해제",
                     "자동 실행 상태 조회",
+                    "업데이트 설정",
                 ],
             )? {
                 Some(0) => {
+                    let _activity = begin_management_activity(root)?;
                     if status.is_ok() {
                         Ok(())
                     } else {
                         platform::start(root, executable)
                     }
                 }
-                Some(1) => match &status {
-                    Ok(s) => {
-                        println!("서버를 중지하면 기기 동기화가 멈춥니다.");
-                        if input("중지하려면 '중지' 입력", "")? == "중지" {
-                            client
-                                .mutate("shutdown", json!({"revision":s["revision"]}))
-                                .await
-                                .map(|_| ())
-                        } else {
-                            Ok(())
+                Some(1) => {
+                    let _activity = begin_management_activity(root)?;
+                    match &status {
+                        Ok(s) => {
+                            println!("서버를 중지하면 기기 동기화가 멈춥니다.");
+                            if input("중지하려면 '중지' 입력", "")? == "중지" {
+                                client
+                                    .mutate("shutdown", json!({"revision":s["revision"]}))
+                                    .await
+                                    .map(|_| ())
+                            } else {
+                                Ok(())
+                            }
                         }
+                        Err(e) => Err(e.clone()),
                     }
-                    Err(e) => Err(e.clone()),
-                },
-                Some(2) => platform::startup(root, executable, "install").map(|_| ()),
-                Some(3) => platform::startup(root, executable, "remove").map(|_| ()),
+                }
+                Some(2) => crate::update::set_autostart(
+                    root,
+                    &platform::manager_executable()?,
+                    executable,
+                    true,
+                )
+                .map(|_| ()),
+                Some(3) => crate::update::set_autostart(
+                    root,
+                    &platform::manager_executable()?,
+                    executable,
+                    false,
+                )
+                .map(|_| ()),
                 Some(4) => {
                     let state = platform::startup(root, executable, "status")?;
                     println!(
@@ -449,6 +497,48 @@ pub async fn run(root: &Path, executable: &Path) -> Result<()> {
                     );
                     pause()
                 }
+                Some(5) => {
+                    let current = crate::update::load_settings(root)?;
+                    let update_status = crate::update::load_status(root)?;
+                    clear();
+                    println!(
+                        "현재 업데이트 정책: {}\n업데이트 상태: {:?}\n대상 버전: {}\n마지막 결과: {}\n",
+                        match current.policy {
+                            crate::update::UpdatePolicy::Automatic => "자동 적용",
+                            crate::update::UpdatePolicy::Notify => "알림",
+                            crate::update::UpdatePolicy::Off => "사용 안 함",
+                        },
+                        update_status.phase,
+                        update_status.target_version.as_deref().map(safe_text).unwrap_or_else(|| "없음".into()),
+                        update_status.reason.as_deref().map(safe_text).unwrap_or_else(|| "없음".into()),
+                    );
+                    let Some(policy) = menu(
+                        "업데이트 정책",
+                        &["안전할 때 자동 적용", "새 버전만 알림", "예약 확인 끄기"],
+                    )?
+                    else {
+                        continue;
+                    };
+                    let policy = [
+                        crate::update::UpdatePolicy::Automatic,
+                        crate::update::UpdatePolicy::Notify,
+                        crate::update::UpdatePolicy::Off,
+                    ][policy];
+                    let manager = platform::manager_executable()?;
+                    crate::update::set_policy(root, &manager, executable, policy)?;
+                    println!(
+                        "업데이트 정책: {}",
+                        match policy {
+                            crate::update::UpdatePolicy::Automatic => "자동 적용",
+                            crate::update::UpdatePolicy::Notify => "알림",
+                            crate::update::UpdatePolicy::Off => "사용 안 함",
+                        }
+                    );
+                    if current.policy != policy {
+                        println!("예약 실행 설정을 함께 변경했습니다.");
+                    }
+                    pause()
+                }
                 _ => Ok(()),
             }
         } else {
@@ -459,8 +549,8 @@ pub async fn run(root: &Path, executable: &Path) -> Result<()> {
                         overview(&status);
                         pause()
                     }
-                    1 => devices(&client, &status).await,
-                    2 => connection(&client, &status, executable).await,
+                    1 => devices(root, &client, &status).await,
+                    2 => connection(root, &client, &status, executable).await,
                     _ => Ok(()),
                 },
                 Err(e) => Err(e),
@@ -473,4 +563,56 @@ pub async fn run(root: &Path, executable: &Path) -> Result<()> {
     }
     clear();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn management_input_blocks_updates_only_until_the_action_finishes() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(!crate::update::has_active_activity(root.path()).unwrap());
+        let activity = begin_management_activity(root.path()).unwrap();
+        assert!(crate::update::has_active_activity(root.path()).unwrap());
+        drop(activity);
+        assert!(!crate::update::has_active_activity(root.path()).unwrap());
+    }
+
+    #[test]
+    fn management_input_cannot_start_during_update_or_interrupted_recovery() {
+        let root = tempfile::tempdir().unwrap();
+        let lock = crate::update::try_lock(root.path()).unwrap();
+        assert!(
+            matches!(begin_management_activity(root.path()), Err(error) if error == "update-already-running")
+        );
+        drop(lock);
+        std::fs::write(root.path().join("manager-update/transaction.json"), "{}").unwrap();
+        assert!(
+            matches!(begin_management_activity(root.path()), Err(error) if error == "update-recovery-required")
+        );
+        assert!(!crate::update::has_active_activity(root.path()).unwrap());
+    }
+
+    #[test]
+    fn managed_tunnel_address_is_not_a_fixed_address_default() {
+        let status = json!({
+            "connectionState": {"mode": "managed"},
+            "connection": {"endpoint": "https://synthetic.trycloudflare.com"}
+        });
+        assert_eq!(fixed_endpoint_default(&status), "");
+        assert_eq!(
+            fixed_endpoint(String::new()).unwrap_err(),
+            "fixed-endpoint-required"
+        );
+    }
+
+    #[test]
+    fn fixed_address_remains_the_fixed_address_default() {
+        let status = json!({
+            "connectionState": {"mode": "fixed"},
+            "connection": {"endpoint": "https://sync.example.com"}
+        });
+        assert_eq!(fixed_endpoint_default(&status), "https://sync.example.com");
+    }
 }
