@@ -138,7 +138,7 @@ jobs:
       - name: Build isolated Mac WKWebView harness
         run: |
           set -euo pipefail
-          pnpm benchmark:macos:build:agent 2>&1 | tee artifacts/harness-frontend.log
+          pnpm exec vite build --mode agent --config benchmarks/macos/vite.config.ts 2>&1 | tee artifacts/harness-frontend.log
           node benchmarks/macos/prepare.mjs
           shasum -a 256 benchmarks/macos/native/Cargo.lock >> artifacts/environment.txt
           (cd benchmarks/macos/native && node ../../../node_modules/@tauri-apps/cli/tauri.js build --ci --bundles app -- --locked) 2>&1 | tee artifacts/harness-native.log
