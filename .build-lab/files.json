@@ -579,8 +579,8 @@
     {
       "path": "benchmarks/streaming/fixture.ts",
       "mode": "100644",
-      "bytes": 3160,
-      "sha256": "8ee396a8709d193fabfd118a4880819973aad504e2b492ad851dab17263e8300"
+      "bytes": 3688,
+      "sha256": "a20129cddfc829d4c7fefa56c47ac6b0803960437dfddbfd8d15552bc513502e"
     },
     {
       "path": "benchmarks/streaming/index.html",
@@ -603,8 +603,8 @@
     {
       "path": "benchmarks/streaming/suite.ts",
       "mode": "100644",
-      "bytes": 8510,
-      "sha256": "2bb50c9962a73c29b4028ff7cb1d3c8aad734c7c0a0937b8d63f3ae255d26df1"
+      "bytes": 8691,
+      "sha256": "b66612b0b4ddb055677fd9c01d4ad258bc5171f40f7cad0d626a3e7166af50fb"
     },
     {
       "path": "benchmarks/streaming/tauri.conf.json",

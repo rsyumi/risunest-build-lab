@@ -4,6 +4,7 @@ interface FixtureApi {
   publish(source: string, active?: boolean): Promise<void>;
   sourceMatches(source: string): boolean;
   debugState(): Record<string, unknown>;
+  debugFinal(source: string): Promise<Record<string, unknown>>;
   setRemoval(enabled: boolean): Promise<void>;
 }
 
@@ -38,6 +39,7 @@ const percentile = (values: number[], ratio: number) => {
 export async function runStreamingSuite(api: FixtureApi, profile = "smoke") {
   const cases: Record<string, unknown>[] = [];
   let phase = "start";
+  let lastSource = "";
   try {
     for (const mode of ["recent", "collapsed", "off"] as const) {
       for (const defer of [true, false]) {
@@ -56,6 +58,7 @@ export async function runStreamingSuite(api: FixtureApi, profile = "smoke") {
         );
         const source =
           "<Thoughts>" + thought + "\nLATEST-SYNTHETIC</Thoughts>\n**Answer**";
+        lastSource = source;
         const started = performance.now();
         await api.publish(source);
         await until(
@@ -223,6 +226,7 @@ export async function runStreamingSuite(api: FixtureApi, profile = "smoke") {
       assertion: error instanceof Error ? error.message : "unknown",
       diagnostics: {
         ...api.debugState(),
+        ...(lastSource ? await api.debugFinal(lastSource) : {}),
         completedCases: cases.length,
         strongText: body.querySelector("strong")?.textContent ?? null,
         hasDetails: !!body.querySelector("details"),
