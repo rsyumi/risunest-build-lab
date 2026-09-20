@@ -1485,8 +1485,8 @@
     {
       "path": "crates/tauri-plugin-ios-native/ios/Sources/IosNativePlugin.swift",
       "mode": "100644",
-      "bytes": 27509,
-      "sha256": "bebd6ebd918ef7c7ff2fb2df724b7db6f7e7be3819fb6d85185bd1500a1b2e7a"
+      "bytes": 27484,
+      "sha256": "58a20063e706642651f32bf2dec37fa55a8170092e34487f085399b61e73cdf5"
     },
     {
       "path": "crates/tauri-plugin-ios-native/src/lib.rs",
@@ -2223,8 +2223,8 @@
     {
       "path": "scripts/release/signing-preflight.mjs",
       "mode": "100644",
-      "bytes": 4788,
-      "sha256": "30d66aa1b82465a11ed56080e36442e9149066a0f27482aa3f5e758f54e3e732"
+      "bytes": 4712,
+      "sha256": "ed97e314d5febadf7ebd4d71d91f6e82e0b84f3e1f8ec3d44589042a06274241"
     },
     {
       "path": "scripts/release/source-check.mjs",
@@ -13719,8 +13719,8 @@
     {
       "path": "tests/release/build-workflow.node-test.mjs",
       "mode": "100644",
-      "bytes": 15789,
-      "sha256": "cf6a54f085deec318da4ceec5298081285e04030eb704b7b7ceaf15738406d8b"
+      "bytes": 19701,
+      "sha256": "725f59aeb5d34ced492984aec4b2549c48f5a7d5fcb9890070800ef573aa96ca"
     },
     {
       "path": "tests/release/catalog.node-test.mjs",
@@ -13773,8 +13773,8 @@
     {
       "path": "tests/release/signing-preflight.node-test.mjs",
       "mode": "100644",
-      "bytes": 8175,
-      "sha256": "36e48b31dc5e54fe23258bac468214df0a31193b43441e8dbd22be912415c591"
+      "bytes": 8872,
+      "sha256": "d0520a409d66753c373d91dd5faf20f09666f92073fa597ed974ca1def8b75a1"
     },
     {
       "path": "tests/release/signing.mjs",
@@ -13884,8 +13884,8 @@
     {
       "path": ".github/actions/test-references/action.yml",
       "mode": "100644",
-      "bytes": 607,
-      "sha256": "801be984a3ae63e9e8c47d6dae90e02ee34f910ae0284c9098d6c2e51fa3d7fa",
+      "bytes": 693,
+      "sha256": "ed4e55844715191da227c31f49ff455964f262e2058eb4d39bc8024953317129",
       "reason": "private-control-or-generated"
     },
     {
@@ -13947,15 +13947,15 @@
     {
       "path": ".github/workflows/release.yml",
       "mode": "100644",
-      "bytes": 51585,
-      "sha256": "c594652756b89f9a9ff086b315624240b9d052fb6d7c0f74f36462eb65996ea4",
+      "bytes": 56906,
+      "sha256": "f11ae40cd615d9b43bbb6b1c64ecb239bac53d47251c39067722e42b712f93a2",
       "reason": "private-control-or-generated"
     },
     {
       "path": ".github/workflows/stable-release.yml",
       "mode": "100644",
-      "bytes": 436,
-      "sha256": "fbc0d9868e6ee3a7233a0d6148a2bba9dd238b5be7267bfd46aa224e62d9aa4d",
+      "bytes": 970,
+      "sha256": "31989194c33d6ee1bc4e5c30c9995ed61c51897460babbf88c12982d47e1341c",
       "reason": "private-control-or-generated"
     },
     {
