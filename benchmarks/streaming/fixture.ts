@@ -95,6 +95,9 @@ export function startStreamingSmoke() {
     sourceMatches: fixture.sourceMatches,
     setRemoval: (enabled: boolean) => {
       DBState.db.characters[0].customscript = enabled ? removalScripts : [];
+      // Chats remounts a row when its parser-character stamp changes. Mirror
+      // that production transition in this isolated Chat fixture.
+      fixture.refreshCharacter();
     },
   };
   Object.assign(window, {

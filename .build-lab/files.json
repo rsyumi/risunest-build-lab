@@ -567,8 +567,8 @@
     {
       "path": "benchmarks/streaming/Fixture.svelte",
       "mode": "100644",
-      "bytes": 1657,
-      "sha256": "d4c463b41120942462635226b71dd1d0653646b0cacc576fbc7a343f7b140b70"
+      "bytes": 1717,
+      "sha256": "2fbd051d8a78d4b80375df8f4c97a6cd8f62c00b1c21a7be221ce2f1c364a19f"
     },
     {
       "path": "benchmarks/streaming/android-smoke.mjs",
@@ -579,8 +579,8 @@
     {
       "path": "benchmarks/streaming/fixture.ts",
       "mode": "100644",
-      "bytes": 2933,
-      "sha256": "28b30df0bfce120717522fb36f0451b2ebdc317ffdde81eb7e4a349fe8279a9e"
+      "bytes": 3112,
+      "sha256": "3949a47274e9e9c840c0b12687e3795141ecd5a7f8c043180506bda0865886d6"
     },
     {
       "path": "benchmarks/streaming/index.html",
