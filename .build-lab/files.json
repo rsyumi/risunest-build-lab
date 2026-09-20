@@ -207,8 +207,8 @@
     {
       "path": "benchmarks/ios/productContracts.ts",
       "mode": "100644",
-      "bytes": 5857,
-      "sha256": "aae0543f2e6b6bb1e2c401b03b02de79eac8e5b00bc1674a45fb1086be40e432"
+      "bytes": 5984,
+      "sha256": "f1e93964ec6bed74257f4214064d04adda7622acd465b7f7e8ff6a7e129c0e22"
     },
     {
       "path": "benchmarks/ios/runtimeContracts.ts",
@@ -1671,8 +1671,8 @@
     {
       "path": "package.json",
       "mode": "100644",
-      "bytes": 9298,
-      "sha256": "323410fc4c2a452aa3c1184a0640b6e9974cdf57c51c3e71299cc54b8a3da0ce"
+      "bytes": 9286,
+      "sha256": "0232a557db75e3a5ffaef049e3bd5474c5d0ded74a2521f61ac3cf9d583346cb"
     },
     {
       "path": "pnpm-lock.yaml",
@@ -13882,6 +13882,13 @@
       "reason": "outside-build-inputs"
     },
     {
+      "path": ".github/RELEASING.md",
+      "mode": "100644",
+      "bytes": 2251,
+      "sha256": "120a1bc01bcfe15373c38021f4fbfc8f203dd7f61066249aca8e1095c509f73c",
+      "reason": "private-control-or-generated"
+    },
+    {
       "path": ".github/actions/test-references/action.yml",
       "mode": "100644",
       "bytes": 693,
@@ -13987,10 +13994,17 @@
       "reason": "explanatory-document"
     },
     {
+      "path": "README.ko.md",
+      "mode": "100644",
+      "bytes": 6979,
+      "sha256": "6d15bdc92f369203a3a6154f50a8f844accc95e6523dd384f67d57d5db9f8bb5",
+      "reason": "explanatory-document"
+    },
+    {
       "path": "README.md",
       "mode": "100644",
-      "bytes": 3253,
-      "sha256": "e960b3221ed199f6597aae80a02e04d9d20bc0c8695793859e0766f9b5d9519a",
+      "bytes": 6737,
+      "sha256": "32800330741437a718fe26b5a57f2041119e5199c5c0fedb9d2ec05bcdc099ae",
       "reason": "explanatory-document"
     },
     {
@@ -14150,8 +14164,8 @@
     {
       "path": "legal/PRIVACY.md",
       "mode": "100644",
-      "bytes": 3571,
-      "sha256": "523561482aa71bbeb477c6f86e7fe603ee0ea8b779d8809c68826fb15bb7443b",
+      "bytes": 3641,
+      "sha256": "d8d87b157cb6fd5be005c31a2fac207258da35e39a67bbdb95473c3541d8c9c2",
       "reason": "explanatory-document"
     },
     {

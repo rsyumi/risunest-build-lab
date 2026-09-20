@@ -2,6 +2,13 @@ import { invoke } from "@tauri-apps/api/core";
 import { check, initialize, pause } from "./contracts";
 
 const expectedKey = "ios-synthetic-product-edit";
+async function acceptTerms() {
+  const { createNativeDeviceSettings } = await import(
+    "../../src/ts/storage/nativeDeviceSettings"
+  );
+  await createNativeDeviceSettings().set("risunest_tos_v1", "true");
+}
+
 async function until(predicate: () => boolean, message: string) {
   const deadline = performance.now() + 60_000;
   while (!predicate()) {
@@ -35,7 +42,7 @@ export async function productApp(restart: boolean) {
     },
     assetAliases: [],
   });
-  localStorage.setItem("risunest_tos_v1", "true");
+  await acceptTerms();
   document.getElementById("benchmark")!.remove();
   const app = await import("../../src/main");
   await app.default;
@@ -127,7 +134,7 @@ export async function productOnboarding() {
     },
     assetAliases: [],
   });
-  localStorage.setItem("risunest_tos_v1", "true");
+  await acceptTerms();
   document.getElementById("benchmark")!.remove();
   const app = await import("../../src/main");
   await app.default;
@@ -152,7 +159,7 @@ export async function productSettings() {
     },
     assetAliases: [],
   });
-  localStorage.setItem("risunest_tos_v1", "true");
+  await acceptTerms();
   document.getElementById("benchmark")!.remove();
   const app = await import("../../src/main");
   await app.default;
