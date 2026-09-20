@@ -1761,7 +1761,10 @@ fn redeeming_an_authorization_code_stores_the_first_token_document() {
             .as_mut()
             .unwrap()
             .platform_client_ids
-            .insert("windows".to_owned(), "windows-client".to_owned());
+            .insert(
+                config::platform_key().to_owned(),
+                "platform-client".to_owned(),
+            );
         config.location.insert(
             "redirectUri".to_owned(),
             "risunest://oauth/callback".to_owned(),
@@ -1773,7 +1776,7 @@ fn redeeming_an_authorization_code_stores_the_first_token_document() {
             verifier: crate::external_storage::auth::SecretBytes(zeroize::Zeroizing::new(
                 b"synthetic-verifier".to_vec(),
             )),
-            client_id: "windows-client".to_owned(),
+            client_id: "platform-client".to_owned(),
             redirect_url: url::Url::parse("risunest://oauth/callback").unwrap(),
         };
         let stored = connector
@@ -1793,7 +1796,7 @@ fn redeeming_an_authorization_code_stores_the_first_token_document() {
         );
         let body = String::from_utf8(records[0].body.clone()).unwrap();
         assert!(body.contains("grant_type=authorization_code"));
-        assert!(body.contains("client_id=windows-client"));
+        assert!(body.contains("client_id=platform-client"));
         assert!(body.contains("code=synthetic-code"));
         assert!(body.contains("code_verifier=synthetic-verifier"));
         assert!(body.contains("redirect_uri=risunest%3A%2F%2Foauth%2Fcallback"));

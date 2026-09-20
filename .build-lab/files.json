@@ -4665,8 +4665,8 @@
     {
       "path": "src-tauri/src/external_storage/providers/google_drive/tests.rs",
       "mode": "100644",
-      "bytes": 80615,
-      "sha256": "6ffde695b367774a13ca1de37d1badd3abf01a2231956de9d6be0ca49aa249b1"
+      "bytes": 80693,
+      "sha256": "740e9ab23c7dc4d1f76cfbe841d78e487c868ad24062bd744f0644d18e0109c6"
     },
     {
       "path": "src-tauri/src/external_storage/providers/google_drive/wire.rs",
@@ -4725,8 +4725,8 @@
     {
       "path": "src-tauri/src/external_storage/providers/onedrive/tests.rs",
       "mode": "100644",
-      "bytes": 68025,
-      "sha256": "75bc47634b5a1966e6c64e5c1efa93f344ca90957aa2b887732a4efa6861c86d"
+      "bytes": 68088,
+      "sha256": "ac8173d5597485343ccc28ccdc70ddf5c42c7687f11de04190a8c0b4d4875436"
     },
     {
       "path": "src-tauri/src/external_storage/providers/onedrive/tokens.rs",

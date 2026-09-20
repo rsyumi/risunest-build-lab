@@ -5,7 +5,7 @@ use super::{
         android_web_authorization_policy, authorization_policy, exchange_authorization_code,
         ios_authorization_policy, verify_google_grant,
     },
-    config::AuthorizationSettings,
+    config::{self, AuthorizationSettings},
     create,
 };
 use crate::external_storage::{
@@ -2167,6 +2167,7 @@ fn android_grant_binding_fails_before_account_lookup() {
 #[test]
 fn a_code_exchange_returns_a_storable_refresh_payload() {
     runtime().block_on(async {
+        let platform_client_id = client_id(config::platform_key());
         let server = WireServer::start(vec![
             json_reply(
                 200,
@@ -2184,7 +2185,7 @@ fn a_code_exchange_returns_a_storable_refresh_payload() {
         let grant = || AuthorizationCode {
             code: SecretBytes(zeroize::Zeroizing::new(b"synthetic-code".to_vec())),
             verifier: SecretBytes(zeroize::Zeroizing::new(b"synthetic-verifier".to_vec())),
-            client_id: client_id("windows"),
+            client_id: platform_client_id.clone(),
             redirect_url: url::Url::parse("http://127.0.0.1:52001/oauth").unwrap(),
         };
         let config = connection(server.url.as_str());
@@ -2211,7 +2212,7 @@ fn a_code_exchange_returns_a_storable_refresh_payload() {
         assert!(body.contains("grant_type=authorization_code"));
         assert!(body.contains("code_verifier=synthetic-verifier"));
         assert!(body.contains("client_secret=synthetic-client-secret"));
-        assert!(body.contains(&format!("client_id={}", client_id("windows"))));
+        assert!(body.contains(&format!("client_id={platform_client_id}")));
         assert!(records[1]
             .headers
             .starts_with("GET /synthetic/drive/v3/about?fields=user"));
