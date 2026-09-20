@@ -3,7 +3,7 @@ interface FixtureApi {
   configure(mode: Mode, defer: boolean): Promise<void>;
   publish(source: string, active?: boolean): Promise<void>;
   sourceMatches(source: string): boolean;
-  setRemoval(enabled: boolean): void;
+  setRemoval(enabled: boolean): Promise<void>;
 }
 
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -42,7 +42,7 @@ export async function runStreamingSuite(api: FixtureApi, profile = "smoke") {
       for (const defer of [true, false]) {
         phase = `${mode}-${defer ? "deferred" : "effects"}`;
         progress(phase);
-        api.setRemoval(false);
+        await api.setRemoval(false);
         await api.configure(mode, defer);
         await until(
           () => !!root().textContent?.includes("Synthetic initial answer"),
@@ -109,7 +109,7 @@ export async function runStreamingSuite(api: FixtureApi, profile = "smoke") {
           );
         }
         // Completion must execute the real editdisplay regex against the whole input.
-        api.setRemoval(true);
+        await api.setRemoval(true);
         const finalStarted = performance.now();
         progress(phase + "-final");
         await api.publish(source, false);
@@ -137,7 +137,7 @@ export async function runStreamingSuite(api: FixtureApi, profile = "smoke") {
 
     phase = "split-nested-replacement";
     progress(phase);
-    api.setRemoval(false);
+    await api.setRemoval(false);
     await api.configure("recent", true);
     for (const source of [
       "<Thou",

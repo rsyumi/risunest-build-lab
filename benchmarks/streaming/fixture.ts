@@ -93,8 +93,9 @@ export function startStreamingSmoke() {
       await tick();
     },
     sourceMatches: fixture.sourceMatches,
-    setRemoval: (enabled: boolean) => {
+    setRemoval: async (enabled: boolean) => {
       DBState.db.characters[0].customscript = enabled ? removalScripts : [];
+      await tick();
     },
   };
   Object.assign(window, {
