@@ -5031,8 +5031,8 @@
     {
       "path": "src-tauri/src/lib.rs",
       "mode": "100644",
-      "bytes": 45654,
-      "sha256": "b8ed8baa57505015dda5de5704815e43afdc6c426d7acceb80837f76b6f88289"
+      "bytes": 45676,
+      "sha256": "9cafa24f29306468c7017049b752763efe0d7230a2e9f716ef62129c59334f1e"
     },
     {
       "path": "src-tauri/src/local_backup.rs",
