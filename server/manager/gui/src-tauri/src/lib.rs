@@ -9,6 +9,21 @@ use std::{
 };
 use tauri::{Manager, State};
 
+#[cfg(windows)]
+mod snap;
+
+/// Opens the native window menu for the title bar drawn by the webview.
+#[tauri::command]
+fn window_system_menu(window: tauri::WebviewWindow, x: f64, y: f64) {
+    #[cfg(windows)]
+    {
+        let target = window.as_ref().window();
+        let _ = window.run_on_main_thread(move || snap::show_system_menu(&target, Some((x, y))));
+    }
+    #[cfg(not(windows))]
+    let _ = (window, x, y);
+}
+
 struct Context {
     root: PathBuf,
     executable: PathBuf,
@@ -155,7 +170,8 @@ async fn manager_start(ctx: State<'_, Context>) -> Result<()> {
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    Err("server-not-ready".into())
+    Err(std::fs::read_to_string(ctx.root.join("startup-error.txt"))
+        .unwrap_or_else(|_| "server-not-ready".into()))
 }
 #[tauri::command]
 async fn manager_environment(ctx: State<'_, Context>) -> Result<Value> {
@@ -175,9 +191,25 @@ async fn manager_environment(ctx: State<'_, Context>) -> Result<Value> {
             ),
             Err(error)=>(None,Some(error)),
         };
-        Ok(json!({"platform":std::env::consts::OS,"dataDir":path_text(&root),"cloudflared":path_text(&cloudflared),"startup":startup,"startupError":error,"trayStartup":gui_startup::setting(&root,None)?,"updateSettings":update_settings,"updateStatus":update_status,"updateSchedule":update_schedule,"updateScheduleError":update_schedule_error}))
+        Ok(json!({"network":risunest_sync_server::config::NetworkSettings::load(&root).map_err(|e| e.code.to_owned())?,"platform":std::env::consts::OS,"dataDir":path_text(&root),"cloudflared":path_text(&cloudflared),"startup":startup,"startupError":error,"trayStartup":gui_startup::setting(&root,None)?,"updateSettings":update_settings,"updateStatus":update_status,"updateSchedule":update_schedule,"updateScheduleError":update_schedule_error}))
     }).await.map_err(|_|"environment-unavailable")?
 }
+#[tauri::command]
+async fn manager_network(ctx: State<'_, Context>, settings: Value) -> Result<()> {
+    let settings: risunest_sync_server::config::NetworkSettings =
+        serde_json::from_value(settings).map_err(|_| "invalid-network-settings")?;
+    let root = ctx.root.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _lock = update::try_lock(&root)?;
+        if root.join("manager-update/transaction.json").exists() {
+            return Err("update-recovery-required".into());
+        }
+        settings.save(&root).map_err(|e| e.code.to_owned())
+    })
+    .await
+    .map_err(|_| "network-settings-save-failed")?
+}
+
 #[tauri::command]
 async fn manager_startup(
     ctx: State<'_, Context>,
@@ -313,6 +345,21 @@ pub fn run() {
     let executable = platform::server_executable().expect("server path unavailable");
     let client = Client::new(root.clone()).expect("management client unavailable");
     let updates = UpdateCoordination::new(&root).expect("update activity unavailable");
+    let mut tauri_context = tauri::generate_context!();
+    let main_window = if let Some(data_directory) =
+        platform::webview_data_dir().expect("WebView data directory unavailable")
+    {
+        let index = tauri_context
+            .config_mut()
+            .app
+            .windows
+            .iter()
+            .position(|window| window.label == "main")
+            .expect("main window missing");
+        Some((tauri_context.config_mut().app.windows.remove(index), data_directory))
+    } else {
+        None
+    };
     tauri::Builder::default()
         .manage(Context {
             root,
@@ -325,14 +372,21 @@ pub fn run() {
             manager_mutate,
             manager_start,
             manager_environment,
+            manager_network,
             manager_startup,
             manager_update_policy,
             manager_update_check,
             manager_tray_startup,
             manager_request_id,
-            manager_qr
+            manager_qr,
+            window_system_menu
         ])
         .setup(move |app| {
+            if let Some((config, data_directory)) = &main_window {
+                tauri::WebviewWindowBuilder::from_config(app, config)?
+                    .data_directory(data_directory.clone())
+                    .build()?;
+            }
             use tauri::{
                 menu::{Menu, MenuItem},
                 tray::TrayIconBuilder,
@@ -355,15 +409,21 @@ pub fn run() {
                     _ => (),
                 })
                 .build(app)?;
-            if !tray {
-                if let Some(window) = app.get_webview_window("main") {
+            if let Some(window) = app.get_webview_window("main") {
+                // The frontend draws the title bar over the acrylic backdrop on Windows.
+                #[cfg(windows)]
+                {
+                    window.set_decorations(false)?;
+                    snap::attach(&window.as_ref().window());
+                }
+                if !tray {
                     window.show()?;
                 }
             }
             Ok(())
         })
-        .on_window_event(move |window, event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+        .on_window_event(move |window, event| match event {
+            tauri::WindowEvent::CloseRequested { api, .. } => {
                 if tray {
                     api.prevent_close();
                     let _ = window.hide();
@@ -371,8 +431,13 @@ pub fn run() {
                     window.app_handle().exit(0);
                 }
             }
+            #[cfg(windows)]
+            tauri::WindowEvent::Resized(_) | tauri::WindowEvent::ScaleFactorChanged { .. } => {
+                snap::layout(window)
+            }
+            _ => (),
         })
-        .run(tauri::generate_context!())
+        .run(tauri_context)
         .expect("sync manager runtime failed");
 }
 

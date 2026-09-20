@@ -28,6 +28,7 @@ vi.mock('src/lang', async () => ({
 }))
 
 import RisuNestDataHealth from './RisuNestDataHealth.svelte'
+import { dataHealthOwnerKey } from 'src/ts/storage/dataHealthPresentation'
 import { languageKorean } from 'src/lang/ko'
 import { languageEnglish } from 'src/lang/en'
 import type { DataHealthResult } from 'src/ts/storage/dataHealth'
@@ -134,7 +135,13 @@ describe('RisuNestDataHealth', () => {
         })
         const target = document.createElement('div')
         document.body.append(target)
-        mounted = mount(RisuNestDataHealth, { target, props })
+        mounted = mount(RisuNestDataHealth, {
+            target,
+            props: {
+                resolveNames: async () => new Map(),
+                ...props,
+            },
+        })
         await settle()
         return target
     }
@@ -149,6 +156,67 @@ describe('RisuNestDataHealth', () => {
         )
         expect(target.querySelectorAll('[data-data-health-group]')).toHaveLength(2)
         expect(target.querySelectorAll('[data-data-health-item]')).toHaveLength(2)
+        const groups = [...target.querySelectorAll('[data-data-health-group]')].map(
+            (group) => group.textContent ?? '',
+        )
+        expect(groups[0]).toContain(strings.severityBlockingHelp)
+        expect(groups[1]).toContain(strings.severityDegradedHelp)
+    })
+
+    it('shows module, chat and message names instead of storage locators', async () => {
+        const named: DataHealthResult = {
+            ...damaged,
+            counts: { blocking: 0, degraded: 3, informational: 0 },
+            omitted: 0,
+            items: [
+                {
+                    code: 'reference-invalid',
+                    severity: 'degraded',
+                    owner: { kind: 'module', id: 'module-1' },
+                    locator: { sourcePath: '$.assets[0][1]', occurrence: 0 },
+                    target: { kind: 'asset', key: '' },
+                    detail: 'reference value cannot be resolved',
+                },
+                {
+                    code: 'reference-missing',
+                    severity: 'degraded',
+                    owner: { kind: 'conversation', id: 'character-1/chat-1' },
+                    locator: { sourcePath: '$.modules[0]', occurrence: 0 },
+                    target: { kind: 'module', key: 'missing-module' },
+                    detail: 'reference has no target in this library',
+                },
+                {
+                    code: 'reference-missing',
+                    severity: 'degraded',
+                    owner: { kind: 'conversation', id: 'character-1/chat-1' },
+                    locator: { sourcePath: '$.message[7].data', occurrence: 1 },
+                    target: { kind: 'inlay', key: 'missing-inlay' },
+                    detail: 'reference has no target in this library',
+                },
+            ],
+        }
+        const target = await setup(named, {
+            resolveNames: async () => new Map([
+                [dataHealthOwnerKey('module', 'module-1'), { ownerName: 'Weather' }],
+                [dataHealthOwnerKey('conversation', 'character-1/chat-1'), {
+                    ownerName: 'Mari / First chat',
+                    characterName: 'Mari',
+                    conversationName: 'First chat',
+                }],
+            ]),
+        })
+        await settle()
+        const text = [...target.querySelectorAll('[data-data-health-item]')]
+            .map((item) => item.textContent ?? '')
+            .join('\n')
+        expect(text).toContain('Module “Weather” has no link for asset 1.')
+        expect(text).toContain(
+            'The module assigned to character “Mari”, chat “First chat”, does not exist.',
+        )
+        expect(text).toContain(
+            'Character “Mari”, chat “First chat”, has broken inlay data in message 8.',
+        )
+        expect(text).not.toContain('character-1/chat-1')
     })
 
     it('says nothing has been checked before the first scan', async () => {
@@ -169,6 +237,28 @@ describe('RisuNestDataHealth', () => {
         await settle()
         expect(maintenance.scanNativeDataHealth).toHaveBeenCalledOnce()
         expect(target.querySelectorAll('[data-data-health-group]')).toHaveLength(2)
+        // The repair choices follow the new diagnosis without leaving the screen.
+        expect(maintenance.planNativeDataHealthRepair).toHaveBeenCalled()
+        expect(target.querySelectorAll('[data-data-health-choice]')).toHaveLength(1)
+    })
+
+    it('shows the running check beside the summary instead of only on the button', async () => {
+        let release: (result: DataHealthResult) => void = () => {}
+        maintenance.scanNativeDataHealth.mockImplementation(
+            () => new Promise<DataHealthResult>((resolve) => { release = resolve }),
+        )
+        const target = await setup(null)
+        const button = [...target.querySelectorAll('button')].find(
+            (candidate) => candidate.textContent?.trim() === strings.quickScan,
+        )
+        button?.click()
+        await settle()
+        const progress = target.querySelector('[data-data-health-progress]')
+        expect(progress?.textContent).toContain(strings.quickScanRunning)
+        expect(progress?.querySelector('[role="progressbar"]')).not.toBeNull()
+        release(damaged)
+        await settle()
+        expect(target.querySelector('[data-data-health-progress]')).toBeNull()
     })
 
     it('offers to continue a full check that stopped before it finished', async () => {
@@ -237,19 +327,41 @@ describe('RisuNestDataHealth', () => {
     })
 
 
-    it('offers one answer per problem and previews what it will do', async () => {
+    it('offers one answer per problem and counts what is selected', async () => {
         const target = await setup(damaged)
         const choices = target.querySelectorAll('[data-data-health-choice]')
         expect(choices).toHaveLength(1)
         expect(choices[0].textContent).toContain(strings.actionDropReference)
-        const preview = target.querySelector('[data-data-health-preview]')
-        expect(preview?.textContent).toContain(strings.previewTitle)
-        expect(preview?.textContent).toContain(
-            strings.previewAnswered.replace('{0}', '1').replace('{1}', '2'),
+        expect(target.querySelector('[data-data-health-preview]')).toBeNull()
+        expect(
+            target.querySelector('[data-data-health-apply]')?.textContent,
+        ).toContain(strings.repairSelected.replace('{0}', '1'))
+        expect(
+            target.querySelector('[data-data-health-apply]')?.textContent,
+        ).toContain(strings.repairSnapshotHelp.replace('{0}', '1'))
+    })
+
+    it('clears and restores every answer from the select-all box', async () => {
+        const target = await setup(damaged)
+        const selectAll = target.querySelector<HTMLInputElement>(
+            '[data-data-health-select-all] input[type="checkbox"]',
         )
-        expect(preview?.textContent).toContain(
-            strings.previewDiscards.replace('{0}', '1'),
+        expect(selectAll?.checked).toBe(true)
+        selectAll?.click()
+        await settle()
+        expect(
+            target.querySelector('[data-data-health-select-all]')?.textContent,
+        ).toContain(strings.repairSelected.replace('{0}', '0'))
+        const apply = [...target.querySelectorAll<HTMLButtonElement>('button')].find(
+            (button) => button.textContent?.trim() === strings.repairApply,
         )
+        expect(apply?.disabled).toBe(true)
+        selectAll?.click()
+        await settle()
+        expect(
+            target.querySelector('[data-data-health-select-all]')?.textContent,
+        ).toContain(strings.repairSelected.replace('{0}', '1'))
+        expect(apply?.disabled).toBe(false)
     })
 
     it('applies the selection and shows the diagnosis of the repaired library', async () => {

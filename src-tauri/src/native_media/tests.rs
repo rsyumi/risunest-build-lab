@@ -1,4 +1,5 @@
 use super::{
+    default_animation_decode_bytes,
     decode_physical_key, encode_inlay_image, recover_inlay_writes, respond, sha256_hex,
     write_inlay_image, write_inlay_image_with_suffix, InlayEncodeFormat, InlayEncodeOptions,
     InlayImageMetadata,
@@ -7,7 +8,7 @@ use image::{
     codecs::gif::{GifEncoder, Repeat},
     codecs::webp::WebPDecoder,
     imageops::FilterType,
-    AnimationDecoder, Delay, DynamicImage, Frame, ImageFormat, Rgba, RgbaImage,
+    AnimationDecoder, Delay, DynamicImage, Frame, ImageDecoder, ImageFormat, ImageReader, Rgba, RgbaImage,
 };
 use serde_json::json;
 use std::{fs, io::Cursor, path::Path};
@@ -658,6 +659,7 @@ fn animation_options(max_dimension: u32, animation_max_fps: u32) -> InlayEncodeO
         max_dimension,
         skip_reencode: true,
         animation_max_fps,
+        animation_decode_bytes: default_animation_decode_bytes(),
     }
 }
 
@@ -775,6 +777,7 @@ fn preserves_an_animation_the_settings_ask_to_keep_as_it_is() {
             max_dimension: 0,
             skip_reencode: true,
             animation_max_fps: 0,
+            animation_decode_bytes: default_animation_decode_bytes(),
         }),
     )
     .unwrap();
@@ -932,6 +935,7 @@ fn configurable_inlay_encoding_preserves_original_and_skipped_webp_bytes() {
                 max_dimension: 0,
                 skip_reencode: skip,
                 animation_max_fps: 0,
+                animation_decode_bytes: default_animation_decode_bytes(),
             }),
         )
         .unwrap();
@@ -949,6 +953,7 @@ fn configurable_inlay_encoding_preserves_original_and_skipped_webp_bytes() {
             max_dimension: 0,
             skip_reencode: false,
             animation_max_fps: 0,
+            animation_decode_bytes: default_animation_decode_bytes(),
         }),
     )
     .unwrap();
@@ -969,6 +974,7 @@ fn configurable_inlay_encoding_resizes_before_webp_encoding() {
             max_dimension: 5,
             skip_reencode: false,
             animation_max_fps: 0,
+            animation_decode_bytes: default_animation_decode_bytes(),
         }),
     )
     .unwrap();
@@ -995,6 +1001,7 @@ fn configured_webp_quality_is_forwarded_instead_of_using_the_default() {
             max_dimension: 0,
             skip_reencode: false,
             animation_max_fps: 0,
+            animation_decode_bytes: default_animation_decode_bytes(),
         }),
     )
     .unwrap();
@@ -1023,6 +1030,7 @@ fn configured_png_resizes_losslessly_with_truthful_dimensions() {
             max_dimension: 5,
             skip_reencode: true,
             animation_max_fps: 0,
+            animation_decode_bytes: default_animation_decode_bytes(),
         }),
     )
     .unwrap();
@@ -1115,6 +1123,7 @@ fn configured_png_converts_jpeg_and_webp_sources() {
                 max_dimension: 0,
                 skip_reencode: false,
                 animation_max_fps: 0,
+                animation_decode_bytes: default_animation_decode_bytes(),
             }),
         )
         .unwrap();
@@ -1137,6 +1146,7 @@ fn skipped_webp_reencodes_when_max_dimension_requires_resize() {
             max_dimension: 5,
             skip_reencode: true,
             animation_max_fps: 0,
+            animation_decode_bytes: default_animation_decode_bytes(),
         }),
     )
     .unwrap();
@@ -1146,6 +1156,37 @@ fn skipped_webp_reencodes_when_max_dimension_requires_resize() {
         (Some(5), Some(3))
     );
     assert_eq!(result.metadata.mime, "image/webp");
+}
+
+#[test]
+fn original_mode_keeps_header_dimensions_without_decoding_png_pixels() {
+    let valid = encoded_fixture(ImageFormat::Png, 8, 3);
+    let mut source = valid[..8].to_vec();
+    for (kind, payload) in png_chunks(&valid) {
+        let kind: &[u8; 4] = kind.as_bytes().try_into().unwrap();
+        source.extend(png_chunk(kind, if kind == b"IDAT" { b"invalid pixels" } else { &payload }));
+    }
+    let decoder = ImageReader::new(Cursor::new(&source)).with_guessed_format().unwrap().into_decoder().unwrap();
+    assert_eq!(decoder.dimensions(), (8, 3));
+    assert!(DynamicImage::from_decoder(decoder).is_err());
+    let result = encode_inlay_image("original", &source, "image.png", Some(InlayEncodeOptions {
+        format: InlayEncodeFormat::Original, ..InlayEncodeOptions::default()
+    })).unwrap();
+    assert_eq!(result.data, source);
+    assert_eq!((result.metadata.width, result.metadata.height), (Some(8), Some(3)));
+}
+
+#[test]
+fn metadata_only_original_dimensions_follow_every_exif_orientation() {
+    for orientation in 1..=8 {
+        let source = with_exif_orientation(encoded_fixture(ImageFormat::Jpeg, 8, 3), orientation);
+        let result = encode_inlay_image("original", &source, "image.jpg", Some(InlayEncodeOptions {
+            format: InlayEncodeFormat::Original, ..InlayEncodeOptions::default()
+        })).unwrap();
+        let expected = if orientation >= 5 { (Some(3), Some(8)) } else { (Some(8), Some(3)) };
+        assert_eq!((result.metadata.width, result.metadata.height), expected);
+        assert_eq!(result.data, source);
+    }
 }
 
 #[test]
@@ -1161,6 +1202,7 @@ fn original_inlay_ignores_max_dimension_and_preserves_oriented_jpeg_bytes() {
             max_dimension: 1,
             skip_reencode: false,
             animation_max_fps: 0,
+            animation_decode_bytes: default_animation_decode_bytes(),
         }),
     )
     .unwrap();
@@ -1287,6 +1329,7 @@ fn commits_png_and_original_inlay_formats_without_rolling_back_the_new_pair() {
                 max_dimension: 0,
                 skip_reencode: false,
                 animation_max_fps: 0,
+                animation_decode_bytes: default_animation_decode_bytes(),
             },
             "image/png",
             "png",
@@ -1300,6 +1343,7 @@ fn commits_png_and_original_inlay_formats_without_rolling_back_the_new_pair() {
                 max_dimension: 0,
                 skip_reencode: false,
                 animation_max_fps: 0,
+                animation_decode_bytes: default_animation_decode_bytes(),
             },
             "image/jpeg",
             "jpg",
@@ -1762,4 +1806,32 @@ fn committed_journal_left_by_cleanup_failure_never_rolls_back_a_later_opaque_wri
     fs::remove_dir(blocked_cleanup).unwrap();
     recover_inlay_writes(temp.path()).unwrap();
     assert_eq!(fs::read_dir(transaction_dir).unwrap().count(), 0);
+}
+
+#[test]
+fn animation_preflight_preserves_exact_source_under_small_budget() {
+    for (source, name) in [
+        (animated_gif_fixture(&[30, 40], 64, 64), "loop.gif"),
+        (animated_apng_fixture(&[30, 40], 64, 64), "loop.png"),
+        (animated_webp_fixture(&[30, 40], 64, 64), "loop.webp"),
+    ] {
+        let mut options = animation_options(1, 1);
+        options.animation_decode_bytes = 64 * 64 * 4 * 4 - 1;
+        let result = encode_inlay_image("budget", &source, name, Some(options)).unwrap();
+        assert_eq!(result.data, source);
+        assert_eq!(result.metadata.preservation_reason.as_deref(), Some("animation-cost"));
+        let format = image::guess_format(&source).unwrap();
+        let kind = super::inlay_animation(format, &source).unwrap();
+        assert!(super::animation_policy::permits_decode(&source, kind, 64 * 64 * 4 * 4));
+        assert!(!super::animation_policy::permits_decode(&source[..source.len() - 1], kind, u64::MAX));
+    }
+}
+
+#[test]
+fn huge_gif_canvas_is_preserved_without_decoding_pixels() {
+    let mut source = animated_gif_fixture(&[30, 40], 2, 2);
+    source[6..10].copy_from_slice(&[255, 255, 255, 255]);
+    let result = encode_inlay_image("huge", &source, "huge.gif", None).unwrap();
+    assert_eq!(result.data, source);
+    assert_eq!(result.metadata.preservation_reason.as_deref(), Some("animation-cost"));
 }

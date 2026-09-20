@@ -13,6 +13,7 @@
   import {
     native,
     message,
+    updatePhase,
     type Backend,
     type Status,
     type Environment,
@@ -20,6 +21,9 @@
   } from "./api";
   import Overview from "./Overview.svelte";
   import Connections from "./Connections.svelte";
+  import Network from "./Network.svelte";
+  import Titlebar from "./Titlebar.svelte";
+  import type { NetworkSettings } from "./api";
   import logo from "./logo.svg";
   let { backend = native }: { backend?: Backend } = $props();
   let page = $state("overview");
@@ -28,20 +32,44 @@
   let connected = $state(false);
   let busy = $state(false);
   let notice = $state("");
-  let dialog = $state<"register" | "issued" | "revoke" | "stop" | null>(null);
+  let dialog = $state<"register" | "issued" | "revoke" | "stop" | "leave" | null>(null);
   let name = $state("");
   let selected = $state<Device | null>(null);
   let uri = $state("");
   let svg = $state("");
-  let connectionDirty = $state(false);
+  let connectionDraftDirty = $state(false);
+  let networkDirty = $state(false);
+  let connectionDirty = $derived(connectionDraftDirty || networkDirty);
+  let pendingPage = "";
   let updating = $state(false);
   let dialogElement: HTMLDialogElement;
+  // The webview draws the title bar where the OS frame is hidden (Windows) or overlaid (macOS).
+  const titlebar: "windows" | "macos" | null = /Windows/.test(navigator.userAgent)
+    ? "windows"
+    : /Mac/.test(navigator.userAgent)
+      ? "macos"
+      : null;
   let automaticUpdateRetryAfter = 0;
   const navigation = [
-    { id: "overview", label: "개요", icon: LayoutDashboard },
-    { id: "devices", label: "기기", icon: MonitorSmartphone },
-    { id: "connection", label: "연결", icon: Link },
-    { id: "settings", label: "실행 설정", icon: SlidersHorizontal },
+    { id: "overview", label: "개요", icon: LayoutDashboard, description: "" },
+    {
+      id: "devices",
+      label: "기기",
+      icon: MonitorSmartphone,
+      description: "이 라이브러리에 등록된 기기를 관리합니다.",
+    },
+    {
+      id: "connection",
+      label: "연결",
+      icon: Link,
+      description: "고정 주소와 임시 주소, 주소 레지스트리를 설정합니다.",
+    },
+    {
+      id: "settings",
+      label: "실행 설정",
+      icon: SlidersHorizontal,
+      description: "서버 실행 상태와 로그인 시 자동 실행 여부를 관리합니다.",
+    },
   ];
   const current = $derived(navigation.find((n) => n.id === page)!);
   let refreshSequence = 0;
@@ -83,11 +111,32 @@
   }
   function navigate(id: string) {
     if (id !== page && connectionDirty) {
-      notice = "적용하지 않은 연결 설정을 적용하거나 다시 불러온 뒤 이동하세요.";
+      pendingPage = id;
+      open("leave");
       return;
     }
     page = id;
     if (id === "settings") void loadEnvironment();
+  }
+  function leavePage() {
+    const next = pendingPage;
+    close();
+    connectionDraftDirty = false;
+    networkDirty = false;
+    navigate(next);
+  }
+  async function saveNetwork(settings: NetworkSettings): Promise<boolean> {
+    busy = true;
+    notice = "";
+    try {
+      await backend.network(settings);
+      await loadEnvironment();
+      notice = "네트워크 설정을 저장했습니다. 다음 서버 시작부터 적용됩니다.";
+      return true;
+    } catch (error) {
+      notice = message(error);
+      return false;
+    } finally { busy = false; }
   }
   async function refreshAll() {
     await Promise.all([refresh(), loadEnvironment()]);
@@ -295,7 +344,9 @@
   }
 </script>
 
-<div class="app-shell" class:mac={environment?.platform === "macos"}>
+<div class="app-shell" class:mac={titlebar === "macos"}>
+  {#if titlebar}<Titlebar platform={titlebar} />{/if}
+  <div class="body">
   <aside>
     <div class="identity">
       <img src={logo} alt="RisuNest" />
@@ -307,18 +358,21 @@
           class:active={page === item.id}
           aria-current={page === item.id ? "page" : undefined}
           onclick={() => navigate(item.id)}
-          ><item.icon size={19} />{item.label}</button
+          ><item.icon size={17} />{item.label}</button
         >{/each}
     </nav>
     <div class="sidebar-bottom">
       <span class:offline={!connected}
-        >● {connected ? "로컬 서버 연결됨" : "서버 연결 안 됨"}</span
+        >{connected ? "로컬 서버 연결됨" : "서버 연결 안 됨"}</span
       ><small>RisuNest Sync · 0.1</small>
     </div>
   </aside>
   <main>
     <header class="page-heading">
-      <h1>{current.label}</h1>
+      <div>
+        <h1>{current.label}</h1>
+        {#if current.description}<p>{current.description}</p>{/if}
+      </div>
       <div class="actions">
         <button
           class="icon-button"
@@ -345,6 +399,9 @@
           >서버 시작</button
         >
       </section>{/if}
+    {#if page === "connection" && environment}
+      <Network settings={environment.network} listener={connected ? status?.listener ?? null : null} {busy} save={saveNetwork} activity={(dirty) => (networkDirty = dirty)} />
+    {/if}
     {#if status}
       {#if page === "overview"}<Overview
           {status}
@@ -353,12 +410,9 @@
           showDevices={() => (page = "devices")}
         />
       {:else if page === "devices"}
-        <p class="page-description">
-          이 라이브러리에 등록된 기기를 관리합니다.
-        </p>
         <div class="card device-list">
           {#each status.devices as device}<div class="device-row">
-              <MonitorSmartphone size={21} />
+              <span class="device-icon"><MonitorSmartphone size={18} /></span>
               <div>
                 <strong>{device.name || device.id.slice(0, 12)}</strong><small
                   >{device.id}</small
@@ -383,18 +437,15 @@
           busy={busy || !connected}
           {mutate}
           {copy}
-          activity={(active) => (connectionDirty = active)}
+          activity={(active) => (connectionDraftDirty = active)}
         />{/if}
     {/if}
     {#if page === "settings"}
-      <p class="page-description">
-        서버 실행 상태와 로그인 시 자동 실행 여부를 관리합니다.
-      </p>
       <section class="card settings-group">
         <div class="setting">
           <div class="setting-heading">
             <h2>Sync 업데이트</h2>
-            <span class="pill">{environment?.updateStatus.phase ?? "idle"}</span>
+            <span class="pill">{updatePhase(environment?.updateStatus.phase ?? "idle")}</span>
           </div>
           <label
             >업데이트 정책<select
@@ -491,6 +542,7 @@
       </p>
     {/if}
   </main>
+  </div>
 </div>
 <dialog
   bind:this={dialogElement}
@@ -505,7 +557,10 @@
     onclick={close}
     disabled={busy}><X size={20} /></button
   >
-  {#if dialog === "register"}<h2>새 기기 등록</h2>
+  {#if dialog === "leave"}
+    <p>저장하지 않은 변경사항이 있습니다. 정말로 이동하시겠습니까? 변경한 내용이 초기화됩니다.</p>
+    <div class="actions"><button onclick={leavePage}>네</button><button onclick={close}>아니오</button></div>
+  {:else if dialog === "register"}<h2>새 기기 등록</h2>
     <p>등록할 기기의 이름을 입력하세요.</p>
     <form
       onsubmit={(e) => {

@@ -3,8 +3,8 @@ use super::{
     ArchivedCharacterSummary, AssetAlias, AssetAliasListQuery, AssetAliasPage, AssetOwnerHead,
     AssetOwnerLocator, AssetRepositoryAuthorityState, CharacterPage, CharacterQuery,
     CharacterSummary, ConversationPage, ConversationQuery, ConversationSummary,
-    ConversationWindow, ConversationWindowQuery, PluginStorageCatalog, PluginStorageListItem,
-    PluginStorageSummary,
+    ConversationMessageMetadata, ConversationMessageMetadataWindow, ConversationWindow,
+    ConversationWindowQuery, PluginStorageCatalog, PluginStorageListItem, PluginStorageSummary,
     PresetCatalog, PresetSummary, QueryOrder, ReadTarget, StoreError, StoreResult, Versioned,
     CONVERSATION_RANGE_MAX_LIMIT, JAVASCRIPT_MAX_SAFE_INTEGER,
 };
@@ -537,14 +537,17 @@ pub(super) fn query_characters(
     query: &CharacterQuery,
     target: &ReadTarget,
 ) -> StoreResult<CharacterPage> {
-    let (limit, offset) = page_input(query.limit, query.cursor.as_deref())?;
-    let order = order_sql(query.order);
     let search = query
         .search
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_lowercase);
+    if search.is_none() && matches!(query.order, QueryOrder::Configured) {
+        return query_configured_characters(connection, query, target);
+    }
+    let (limit, offset) = page_input(query.limit, query.cursor.as_deref())?;
+    let order = order_sql(query.order);
     let mut statement = connection.prepare(&format!(
         "SELECT {CHARACTER_SUMMARY_COLUMNS}
          FROM characters
@@ -579,6 +582,44 @@ pub(super) fn query_characters(
         next_cursor: has_more.then(|| (offset + items.len() as i64).to_string()),
         items,
     })
+}
+
+fn query_configured_characters(
+    connection: &Connection,
+    query: &CharacterQuery,
+    target: &ReadTarget,
+) -> StoreResult<CharacterPage> {
+    let (limit, _) = page_input(query.limit, None)?;
+    let after: (i64, String) = match query.cursor.as_deref() {
+        Some(cursor) => serde_json::from_str(cursor).map_err(|_| StoreError::Validation {
+            message: "Invalid configured character cursor".to_owned(),
+        })?,
+        None => (i64::MIN, String::new()),
+    };
+    let mut statement = connection.prepare(&format!(
+        "SELECT {CHARACTER_SUMMARY_COLUMNS} FROM characters
+         WHERE generation = ?1 AND trashed = ?2
+           AND (configured_index, character_id) > (?3, ?4)
+         ORDER BY configured_index ASC, character_id ASC LIMIT ?5"
+    ))?;
+    let mut rows = statement.query(params![target.generation, query.trash as i64,
+        after.0, after.1, limit.saturating_add(1)])?;
+    let mut items = Vec::new();
+    let mut has_more = false;
+    while let Some(row) = rows.next()? {
+        if items.len() as i64 == limit {
+            has_more = true;
+            break;
+        }
+        items.push(character_summary_from_row(row)?);
+    }
+    let next_cursor = if has_more {
+        let last = items.last().expect("positive page limit");
+        Some(serde_json::to_string(&(last.configured_index, &last.id))?)
+    } else {
+        None
+    };
+    Ok(CharacterPage { revision: target.revision, next_cursor, items })
 }
 
 /// One summary by identity. Targeted invalidation reprojects a single changed
@@ -634,7 +675,14 @@ pub(super) fn query_conversations(
     let (limit, offset) = page_input(query.limit, query.cursor.as_deref())?;
     let order = order_sql(query.order);
     let mut statement = connection.prepare(&format!(
-        "SELECT conversation_id, character_id, name, configured_index, recent_at, message_count, detail
+        "SELECT conversation_id, character_id, name, configured_index, recent_at, message_count,
+             CASE WHEN json_type(detail, '$.folderId') = 'text'
+                 THEN json_extract(detail, '$.folderId') END,
+             CASE WHEN json_type(detail, '$.bindedPersona') = 'text'
+                 THEN json_extract(detail, '$.bindedPersona') END,
+             CASE WHEN json_type(detail, '$.fmIndex') = 'integer'
+                       AND typeof(json_extract(detail, '$.fmIndex')) = 'integer'
+                 THEN json_extract(detail, '$.fmIndex') END
          FROM conversations WHERE generation = ?1 AND character_id = ?2
          ORDER BY {order} LIMIT ?3 OFFSET ?4"
     ))?;
@@ -646,23 +694,16 @@ pub(super) fn query_conversations(
     ])?;
     let mut items = Vec::new();
     while let Some(row) = rows.next()? {
-        let detail: Value = serde_json::from_str(&row.get::<_, String>(6)?)?;
         items.push(ConversationSummary {
             id: row.get(0)?,
             character_id: row.get(1)?,
             name: row.get(2)?,
-            folder_id: detail
-                .get("folderId")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-            binded_persona: detail
-                .get("bindedPersona")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
+            folder_id: row.get(6)?,
+            binded_persona: row.get(7)?,
             configured_index: row.get(3)?,
             recent_at: row.get(4)?,
             message_count: row.get(5)?,
-            fm_index: detail.get("fmIndex").and_then(Value::as_i64),
+            fm_index: row.get(8)?,
         });
     }
     let has_more = items.len() as i64 > limit;
@@ -849,6 +890,113 @@ pub(super) fn read_conversation_window(
     Ok(Some(Versioned {
         revision: target.revision,
         value: ConversationWindow {
+            character_id: query.character_id.clone(),
+            conversation_id: query.conversation_id.clone(),
+            messages,
+            start_index,
+            end_index,
+            total_messages,
+            has_more_before: start_index > 0,
+            has_more_after: end_index < total_messages,
+        },
+    }))
+}
+
+pub(super) fn read_conversation_message_metadata_window(
+    connection: &Connection,
+    query: &ConversationWindowQuery,
+    target: &ReadTarget,
+) -> StoreResult<Option<Versioned<ConversationMessageMetadataWindow>>> {
+    let Some(start_index) = query.start_index else {
+        return Err(StoreError::Validation {
+            message: "conversation metadata range requires startIndex".to_owned(),
+        });
+    };
+    if !(0..=JAVASCRIPT_MAX_SAFE_INTEGER).contains(&start_index) {
+        return Err(StoreError::Validation {
+            message: "conversation metadata range startIndex must be a nonnegative safe integer"
+                .to_owned(),
+        });
+    }
+    let Some(limit) = query.limit else {
+        return Err(StoreError::Validation {
+            message: "conversation metadata range requires limit".to_owned(),
+        });
+    };
+    if !(1..=CONVERSATION_RANGE_MAX_LIMIT).contains(&limit)
+        || query.anchor_message_id.is_some()
+        || query.anchor_occurrence.is_some()
+        || query.before.is_some()
+        || query.after.is_some()
+    {
+        return Err(StoreError::Validation {
+            message: "conversation metadata range is invalid".to_owned(),
+        });
+    }
+    let total_messages: Option<i64> = connection
+        .query_row(
+            "SELECT message_count FROM conversations WHERE generation = ?1 AND character_id = ?2 AND conversation_id = ?3",
+            params![target.generation, query.character_id, query.conversation_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(total_messages) = total_messages else {
+        return Ok(None);
+    };
+    let start_index = start_index.min(total_messages);
+    let end_index = (start_index + limit).min(total_messages);
+    let mut statement = connection.prepare(
+        "SELECT message_id, json_extract(value, '$.role'), value -> '$.disabled',
+                COALESCE(json_type(value, '$.data') = 'text'
+                AND instr(json_extract(value, '$.data'), '{{') = 0
+                AND instr(json_extract(value, '$.data'), '}}') = 0
+                AND instr(json_extract(value, '$.data'), '<Thoughts>') = 0
+                AND instr(json_extract(value, '$.data'), '</Thoughts>') = 0, 0)
+         FROM messages
+         WHERE generation = ?1 AND character_id = ?2 AND conversation_id = ?3
+           AND message_index >= ?4 AND message_index < ?5
+         ORDER BY message_index ASC",
+    )?;
+    let rows = statement.query_map(
+        params![
+            target.generation,
+            query.character_id,
+            query.conversation_id,
+            start_index,
+            end_index
+        ],
+        |row| {
+            let disabled_json: Option<String> = row.get(2)?;
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                disabled_json,
+                row.get::<_, bool>(3)?,
+            ))
+        },
+    )?;
+    let mut messages = Vec::with_capacity((end_index - start_index) as usize);
+    for row in rows {
+        let (chat_id, role, disabled_json, parser_inert) = row?;
+        let disabled = disabled_json
+            .filter(|value| value != "null")
+            .map(|value| serde_json::from_str(&value))
+            .transpose()?;
+        messages.push(ConversationMessageMetadata {
+            chat_id,
+            role,
+            disabled,
+            parser_inert,
+        });
+    }
+    if messages.len() != (end_index - start_index) as usize {
+        return Err(StoreError::Store {
+            message: "Conversation metadata range is incomplete".to_owned(),
+        });
+    }
+    Ok(Some(Versioned {
+        revision: target.revision,
+        value: ConversationMessageMetadataWindow {
             character_id: query.character_id.clone(),
             conversation_id: query.conversation_id.clone(),
             messages,

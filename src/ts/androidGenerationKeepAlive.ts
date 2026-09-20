@@ -1,12 +1,14 @@
+import './androidNativeControl'
 import { getDeviceSettings } from './storage/deviceSettings'
 import { isTauriAndroid } from './platform'
 
 export interface AndroidGenerationKeepAliveBridge {
-    begin(): boolean
-    end(): boolean | void
-    notificationsEnabled(): boolean
-    openNotificationSettings(): boolean | void
-    webViewVersion(): string
+    begin(): boolean | Promise<boolean>
+    end(): boolean | void | Promise<boolean | void>
+    notificationsEnabled(): boolean | Promise<boolean>
+    requestNotifications(): void | Promise<void>
+    openNotificationSettings(): boolean | void | Promise<boolean | void>
+    webViewVersion(): string | Promise<string>
 }
 
 declare global {
@@ -19,28 +21,37 @@ function bridge(): AndroidGenerationKeepAliveBridge | undefined {
     return typeof window === 'undefined' ? undefined : window.RisuGenerationKeepAlive
 }
 
-export function beginAndroidGenerationKeepAlive(enabled = getDeviceSettings().androidKeepAliveDuringGeneration): boolean {
+export async function beginAndroidGenerationKeepAlive(enabled = getDeviceSettings().androidKeepAliveDuringGeneration): Promise<boolean> {
     if (!isTauriAndroid || !enabled) return false
     try {
-        return bridge()?.begin() === true
+        return await bridge()?.begin() === true
     } catch {
         return false
     }
 }
 
-export function endAndroidGenerationKeepAlive(acquired: boolean): void {
+export async function endAndroidGenerationKeepAlive(acquired: boolean): Promise<void> {
     if (!isTauriAndroid || !acquired) return
     try {
-        bridge()?.end()
+        await bridge()?.end()
     } catch {
         // Ending is best effort. The Android service timeout is the final cleanup path.
     }
 }
 
-export function androidGenerationNotificationsEnabled(): boolean | null {
+export async function requestAndroidGenerationNotifications(): Promise<void> {
+    if (!isTauriAndroid) return
+    try {
+        await bridge()?.requestNotifications()
+    } catch {
+        // Permission readiness is read separately; a failed request never implies a grant.
+    }
+}
+
+export async function androidGenerationNotificationsEnabled(): Promise<boolean | null> {
     if (!isTauriAndroid) return null
     try {
-        const value = bridge()?.notificationsEnabled()
+        const value = await bridge()?.notificationsEnabled()
         return typeof value === 'boolean' ? value : null
     } catch {
         return null

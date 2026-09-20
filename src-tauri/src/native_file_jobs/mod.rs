@@ -17,6 +17,8 @@ pub(crate) use backup_source::*;
 mod official_snapshot;
 mod risum_export;
 mod verified_read;
+#[cfg(windows)]
+mod windows_cloud_source;
 
 #[cfg(test)]
 mod screenshot_output_test;
@@ -46,6 +48,9 @@ const ANDROID_SPOOL_STALE_MILLIS: u64 = 24 * 60 * 60 * 1_000;
 const HANDOFF_STALE_AFTER: Duration = Duration::from_secs(24 * 60 * 60);
 const ANDROID_SPOOL_STAGING_PREFIX: &str = ".spooling-";
 const ANDROID_SPOOL_CLEANUP_PREFIX: &str = ".cleanup-";
+// Keep Rust ownership changes exclusive, then retain the opened file so cleanup
+// initiated outside Rust cannot invalidate an already successful claim on POSIX.
+static ANDROID_SPOOL_OWNERSHIP_GATE: Mutex<()> = Mutex::new(());
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -420,7 +425,18 @@ pub(crate) struct OpenedJobSource {
     pub(crate) total_bytes: u64,
 }
 
+#[derive(Debug)]
+struct ClaimedSpoolSource {
+    #[cfg(test)]
+    path: PathBuf,
+    opened: OpenedJobSource,
+}
+
 fn open_regular_file_no_follow(path: &Path) -> Result<OpenedJobSource, NativeJobError> {
+    open_source_file(path, false)
+}
+
+fn open_source_file(path: &Path, _allow_cloud_source: bool) -> Result<OpenedJobSource, NativeJobError> {
     let mut options = OpenOptions::new();
     options.read(true);
     #[cfg(unix)]
@@ -450,6 +466,15 @@ fn open_regular_file_no_follow(path: &Path) -> Result<OpenedJobSource, NativeJob
     };
     #[cfg(not(windows))]
     let is_reparse_point = false;
+    #[cfg(windows)]
+    if is_reparse_point && _allow_cloud_source && metadata.is_file() && !metadata.file_type().is_symlink() {
+        let file = windows_cloud_source::reopen_cloud_source(file)?;
+        let metadata = file.metadata().map_err(|error| invalid_source_error(error.to_string()))?;
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            return Err(invalid_source_error("source must be a regular file"));
+        }
+        return Ok(OpenedJobSource { file, total_bytes: metadata.len() });
+    }
     if metadata.file_type().is_symlink() || is_reparse_point || !metadata.is_file() {
         return Err(invalid_source_error("source must be a regular file"));
     }
@@ -471,7 +496,7 @@ pub(crate) fn open_job_source(
                     "desktop source must be an absolute file path",
                 ));
             }
-            open_regular_file_no_follow(path)
+            open_source_file(path, true)
         }
         JobSource::AndroidSpool { token } => {
             let path = resolve_spool_source(job_root, token)?;
@@ -571,7 +596,7 @@ fn claim_spool_source(
     job_root: &Path,
     token: &str,
     owned_directory: &Path,
-) -> Result<PathBuf, NativeJobError> {
+) -> Result<ClaimedSpoolSource, NativeJobError> {
     claim_spool_source_with_display_name(job_root, token, owned_directory, None)
 }
 
@@ -580,7 +605,7 @@ fn claim_spool_content_source(
     token: &str,
     owned_directory: &Path,
     display_name: &str,
-) -> Result<PathBuf, NativeJobError> {
+) -> Result<ClaimedSpoolSource, NativeJobError> {
     claim_spool_source_with_display_name(job_root, token, owned_directory, Some(display_name))
 }
 
@@ -589,7 +614,10 @@ fn claim_spool_source_with_display_name(
     token: &str,
     owned_directory: &Path,
     expected_display_name: Option<&str>,
-) -> Result<PathBuf, NativeJobError> {
+) -> Result<ClaimedSpoolSource, NativeJobError> {
+    let _ownership = ANDROID_SPOOL_OWNERSHIP_GATE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     parse_android_spool_token(token)?;
     let sources_root = job_root.join("sources").canonicalize().map_err(|error| {
         invalid_source_error(format!("Android source root is unavailable: {error}"))
@@ -620,7 +648,13 @@ fn claim_spool_source_with_display_name(
             "claimed Android spool escapes its native job directory",
         ));
     }
-    validate_spool_source(&canonical_claimed, token, expected_display_name)
+    let path = validate_spool_source(&canonical_claimed, token, expected_display_name)?;
+    let opened = open_regular_file_no_follow(&path)?;
+    Ok(ClaimedSpoolSource {
+        #[cfg(test)]
+        path,
+        opened,
+    })
 }
 
 fn validate_spool_source(
@@ -986,6 +1020,9 @@ fn cleanup_spool_directories_at(
     now_millis: u64,
     stale_after_millis: u64,
 ) -> Result<(), String> {
+    let _ownership = ANDROID_SPOOL_OWNERSHIP_GATE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     if !sources_root.is_dir() {
         return Ok(());
     }
@@ -1765,7 +1802,7 @@ impl NativeFileJobState {
             JobSource::DesktopPath { .. } => open_job_source(&self.root, &source),
             JobSource::AndroidSpool { token } => {
                 claim_spool_content_source(&self.root, token, &owned_directory, &display_name)
-                    .and_then(|path| open_regular_file_no_follow(&path))
+                    .map(|source| source.opened)
             }
             JobSource::ConflictReference { .. } => Err(invalid_source_error(
                 "conflict references cannot import content",
@@ -1991,13 +2028,13 @@ impl NativeFileJobState {
             match source {
                 JobSource::DesktopPath { .. } if opened_source.is_some() => Ok(()),
                 JobSource::AndroidSpool { token } if opened_source.is_none() => {
-                    let path = claim_spool_source_with_display_name(
+                    let source = claim_spool_source_with_display_name(
                         &self.root,
                         token,
                         &owned_directory,
                         expected_display_name,
                     )?;
-                    *opened_source = Some(open_regular_file_no_follow(&path)?);
+                    *opened_source = Some(source.opened);
                     Ok(())
                 }
                 JobSource::ConflictReference { .. } => Err(NativeJobError::new(
@@ -2957,6 +2994,61 @@ impl restore::ReplacementSink for PersistentReplacementSink {
         })
     }
 
+    fn supports_incremental_characters(&self) -> bool {
+        true
+    }
+
+    fn put_character_detail(
+        &self,
+        staging_id: &str,
+        detail: &serde_json::Value,
+        conversation_count: i64,
+    ) -> crate::persistent_store::StoreResult<()> {
+        crate::persistent_store::commands::with_store_mut(self.app.state(), |store| {
+            store.replace_put_character_detail(staging_id, detail, conversation_count)
+        })
+    }
+
+    fn put_conversation_row(
+        &self,
+        staging_id: &str,
+        character_id: &str,
+        configured_index: i64,
+        detail: &serde_json::Value,
+        recent_at: i64,
+        message_count: i64,
+    ) -> crate::persistent_store::StoreResult<()> {
+        crate::persistent_store::commands::with_store_mut(self.app.state(), |store| {
+            store.replace_put_conversation_row(
+                staging_id,
+                character_id,
+                configured_index,
+                detail,
+                recent_at,
+                message_count,
+            )
+        })
+    }
+
+    fn add_conversation_messages(
+        &self,
+        staging_id: &str,
+        character_id: &str,
+        conversation_id: &str,
+        start: i64,
+        messages: &[serde_json::Value],
+    ) -> crate::persistent_store::StoreResult<()> {
+        crate::persistent_store::commands::with_store_mut(self.app.state(), |store| {
+            store.replace_add_conversation_messages(
+                staging_id,
+                character_id,
+                conversation_id,
+                start,
+                messages,
+            )
+        })
+    }
+
     fn preserve_active_repositories(
         &self,
         staging_id: &str,
@@ -3446,7 +3538,16 @@ pub(crate) struct JobStatus {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct ExportExclusions {
+    pub(crate) archived_characters: u64,
+    pub(crate) colliding_plugin_values: u64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct JobResultSummary {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) export_exclusions: Option<ExportExclusions>,
     pub(crate) revision: i64,
     pub(crate) source_bytes: u64,
     pub(crate) source_sha256: String,
@@ -4703,7 +4804,7 @@ mod tests {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     use serde_json::json;
     use std::fs;
-    use std::io::{Cursor, Write};
+    use std::io::{Cursor, Read, Write};
     use std::sync::Barrier;
     use std::thread;
     use std::time::Duration;
@@ -4713,6 +4814,7 @@ mod tests {
 
     fn result(revision: i64) -> JobResultSummary {
         JobResultSummary {
+            export_exclusions: None,
             revision,
             source_bytes: 1,
             source_sha256: "a".repeat(64),
@@ -5339,8 +5441,9 @@ mod tests {
 
         let source = claim_spool_source(directory.path(), &token, &owned).unwrap();
 
-        assert_eq!(source.file_name().unwrap(), "source.risudat");
-        assert!(source.starts_with(owned.canonicalize().unwrap()));
+        assert_eq!(source.path.file_name().unwrap(), "source.risudat");
+        assert!(source.path.starts_with(owned.canonicalize().unwrap()));
+        assert_eq!(source.opened.total_bytes, 9);
         assert!(!directory.path().join("sources").join(&token).exists());
         assert!(claim_spool_source(directory.path(), &token, &owned).is_err());
     }
@@ -5447,7 +5550,11 @@ mod tests {
             cleanup.join().unwrap().unwrap();
 
             match claimed {
-                Ok(source) => assert_eq!(fs::read(source).unwrap(), b"RISUSAVE\0"),
+                Ok(mut source) => {
+                    let mut bytes = Vec::new();
+                    source.opened.file.read_to_end(&mut bytes).unwrap();
+                    assert_eq!(bytes, b"RISUSAVE\0");
+                }
                 Err(_) => assert!(!owned.join("android-source").exists()),
             }
             assert!(!directory.path().join("sources").join(&token).exists());
@@ -7233,6 +7340,7 @@ mod tests {
         success.start(JobPhase::ReadingSource).unwrap();
         assert!(success
             .finish_success(JobResultSummary {
+                export_exclusions: None,
                 revision: 2,
                 source_bytes: 128,
                 source_sha256: "a".repeat(64),
@@ -7889,6 +7997,15 @@ mod tests {
         type Cleanup = fn(&Path, &Path) -> Result<bool, NativeJobError>;
         let cleanup_for = |kind: &str| -> Cleanup {
             match kind {
+                "raw-recovery" => |root, path| {
+                    cleanup_handoff_path(
+                        root,
+                        path,
+                        "risunest-rescue-",
+                        ".risunest-rescue.zip",
+                        "raw recovery",
+                    )
+                },
                 "portable-backup" => |root, path| {
                     cleanup_handoff_path(
                         root,
@@ -7906,7 +8023,7 @@ mod tests {
             }
         };
         let grammars = fixture["managedHandoffs"].as_array().unwrap();
-        assert_eq!(grammars.len(), 5, "grammar count drifted from the fixture");
+        assert_eq!(grammars.len(), 6, "grammar count drifted from the fixture");
 
         for grammar in grammars {
             let kind = grammar["kind"].as_str().unwrap();

@@ -19,7 +19,9 @@ use super::{
     SnapshotCreated, SnapshotInfo, StagingResult, StoreError, StoreResult, Versioned, WorkingSetCommit,
 };
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager, State};
@@ -34,6 +36,29 @@ pub(crate) struct PersistentStoreState {
     store: Mutex<Option<PersistentStore>>,
     snapshot_operations: Mutex<()>,
     renderer_gate: Arc<RendererGate>,
+    archive_operations: Mutex<HashMap<String, Arc<AtomicBool>>>,
+}
+
+struct ArchiveOperationGuard<'a> {
+    state: &'a PersistentStoreState,
+    operation_id: String,
+    cancelled: Arc<AtomicBool>,
+}
+
+impl ArchiveOperationGuard<'_> {
+    fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+}
+
+impl Drop for ArchiveOperationGuard<'_> {
+    fn drop(&mut self) {
+        self.state
+            .archive_operations
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .remove(&self.operation_id);
+    }
 }
 
 #[derive(Default)]
@@ -93,6 +118,43 @@ fn renderer_gate_error() -> StoreError {
 }
 
 impl PersistentStoreState {
+    fn begin_archive_operation(
+        &self,
+        operation_id: String,
+    ) -> StoreResult<ArchiveOperationGuard<'_>> {
+        if operation_id.is_empty() || operation_id.len() > 128 {
+            return Err(StoreError::Validation {
+                message: "character archive operation id is invalid".to_owned(),
+            });
+        }
+        let mut operations = self.archive_operations.lock().map_err(|error| StoreError::Store {
+            message: format!("character archive operation mutex poisoned: {error}"),
+        })?;
+        if operations.contains_key(&operation_id) {
+            return Err(StoreError::Validation {
+                message: "character archive operation id is already active".to_owned(),
+            });
+        }
+        let cancelled = Arc::new(AtomicBool::new(false));
+        operations.insert(operation_id.clone(), Arc::clone(&cancelled));
+        Ok(ArchiveOperationGuard {
+            state: self,
+            operation_id,
+            cancelled,
+        })
+    }
+
+    fn cancel_archive_operation(&self, operation_id: &str) -> StoreResult<bool> {
+        let operations = self.archive_operations.lock().map_err(|error| StoreError::Store {
+            message: format!("character archive operation mutex poisoned: {error}"),
+        })?;
+        let Some(cancelled) = operations.get(operation_id) else {
+            return Ok(false);
+        };
+        cancelled.store(true, Ordering::Release);
+        Ok(true)
+    }
+
     pub(crate) fn admit_renderer_operation(&self) -> StoreResult<RendererOperationGuard> {
         let mut state = self
             .renderer_gate
@@ -180,6 +242,7 @@ impl Default for PersistentStoreState {
             store: Mutex::new(None),
             snapshot_operations: Mutex::new(()),
             renderer_gate: Arc::new(RendererGate::default()),
+            archive_operations: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -537,6 +600,17 @@ pub(crate) fn pds_read_conversation_window(
 }
 
 #[tauri::command(async)]
+pub(crate) fn pds_read_conversation_message_metadata_window(
+    state: State<'_, PersistentStoreState>,
+    query: ConversationWindowQuery,
+    lease: Option<String>,
+) -> Result<Option<Versioned<super::ConversationMessageMetadataWindow>>, StoreError> {
+    with_store(state, |store| {
+        store.read_conversation_message_metadata_window(&query, lease.as_deref())
+    })
+}
+
+#[tauri::command(async)]
 pub(crate) fn pds_query_plugin_storage(
     state: State<'_, PersistentStoreState>,
     lease: Option<String>,
@@ -670,10 +744,17 @@ pub(crate) fn pds_archive_character(
     state: State<'_, PersistentStoreState>,
     character_id: String,
     expected_revision: i64,
+    operation_id: String,
 ) -> Result<RevisionResult, StoreError> {
     let now_ms = current_time_ms()?;
-    with_store_mut(state, |store| {
-        store.archive_character(&character_id, expected_revision, now_ms)
+    let operation = state.begin_archive_operation(operation_id)?;
+    with_store_mutex_mut(&state, |store| {
+        store.archive_character_with_cancellation(
+            &character_id,
+            expected_revision,
+            now_ms,
+            &|| operation.is_cancelled(),
+        )
     })
 }
 
@@ -682,10 +763,24 @@ pub(crate) fn pds_restore_character(
     state: State<'_, PersistentStoreState>,
     character_id: String,
     expected_revision: i64,
+    operation_id: String,
 ) -> Result<RevisionResult, StoreError> {
-    with_store_mut(state, |store| {
-        store.restore_character(&character_id, expected_revision)
+    let operation = state.begin_archive_operation(operation_id)?;
+    with_store_mutex_mut(&state, |store| {
+        store.restore_character_with_cancellation(
+            &character_id,
+            expected_revision,
+            &|| operation.is_cancelled(),
+        )
     })
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_cancel_character_archive_operation(
+    state: State<'_, PersistentStoreState>,
+    operation_id: String,
+) -> Result<bool, StoreError> {
+    state.cancel_archive_operation(&operation_id)
 }
 
 #[tauri::command(async)]
@@ -1074,6 +1169,10 @@ fn pds_asset_gc_execute_all(
     operation_guard: &RendererOperationGuard,
 ) -> Result<AssetGcMaintenanceResult, StoreError> {
     let now = current_time_ms()?;
+    // This fresh command-local mark only filters candidates; deletion rechecks current roots.
+    let marks = with_store_mutex_admitted(state, operation_guard, |store| {
+        store.prepare_asset_gc_delete_marks()
+    })?;
     let mut cursor = None;
     let mut result = AssetGcMaintenanceResult {
         candidate_count: 0,
@@ -1085,7 +1184,7 @@ fn pds_asset_gc_execute_all(
         omitted: 0,
     };
     loop {
-        let page = pds_asset_gc_execute_page(state, operation_guard, cursor.as_deref(), now)?;
+        let page = pds_asset_gc_execute_page(state, operation_guard, &marks, cursor.as_deref(), now)?;
         let page_result = asset_gc_result(page.report);
         result.candidate_count += page_result.candidate_count;
         result.candidate_bytes += page_result.candidate_bytes;
@@ -1103,11 +1202,12 @@ fn pds_asset_gc_execute_all(
 fn pds_asset_gc_execute_page(
     state: &PersistentStoreState,
     operation_guard: &RendererOperationGuard,
+    marks: &crate::asset_repository::migration_gc::AssetGcMarks,
     cursor: Option<&str>,
     now: i64,
 ) -> StoreResult<crate::asset_repository::migration_gc::AssetGcDryRunPage> {
     with_store_mutex_mut_admitted(state, operation_guard, |store| {
-        store.asset_gc_delete_page_with_hook(128, cursor, now, 7 * 24 * 60 * 60 * 1_000, |_| Ok(()))
+        store.asset_gc_delete_marked_page_with_hook(marks, 128, cursor, now, 7 * 24 * 60 * 60 * 1_000, |_| Ok(()))
     })
 }
 
@@ -1385,6 +1485,15 @@ pub(crate) fn pds_write_plugin_permission_grant(
     })
 }
 
+#[tauri::command(async)]
+pub(crate) fn pds_clear_plugin_permissions(
+    state: State<'_, PersistentStoreState>,
+) -> Result<(), StoreError> {
+    with_store_mut(state, |store| {
+        store.device_store_mut()?.clear_plugin_permissions()
+    })
+}
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SectionParticipationRow {
@@ -1451,6 +1560,24 @@ mod tests {
     use serde_json::json;
     use std::fs;
     use tempfile::tempdir;
+
+    #[test]
+    fn archive_operation_cancellation_reaches_the_active_operation_and_is_released() {
+        let state = PersistentStoreState::default();
+        let operation = state
+            .begin_archive_operation("archive-operation".to_owned())
+            .expect("register archive operation");
+
+        assert!(!operation.is_cancelled());
+        assert!(state
+            .cancel_archive_operation("archive-operation")
+            .expect("cancel archive operation"));
+        assert!(operation.is_cancelled());
+        drop(operation);
+        assert!(!state
+            .cancel_archive_operation("archive-operation")
+            .expect("completed operation was released"));
+    }
 
     #[test]
     fn snapshot_directory_operation_releases_live_store_but_retains_renderer_admission() {
@@ -1961,6 +2088,7 @@ mod tests {
             )),
             snapshot_operations: Mutex::new(()),
             renderer_gate: Arc::new(RendererGate::default()),
+            archive_operations: Mutex::new(HashMap::new()),
         });
         let barrier = Arc::new(Barrier::new(3));
         let active = Arc::new(AtomicUsize::new(0));
@@ -2120,41 +2248,14 @@ mod tests {
             ..PersistentStoreState::default()
         };
         let operation_guard = state.admit_renderer_operation().unwrap();
-        let observed_pages = std::cell::Cell::new(0);
-        let now = current_time_ms().unwrap();
-        let mut cursor = None;
-        let mut result = AssetGcMaintenanceResult {
-            candidate_count: 0,
-            candidate_bytes: 0,
-            deleted_count: 0,
-            deleted_bytes: 0,
-            blockers: Vec::new(),
-            candidates: Vec::new(),
-            omitted: 0,
-        };
-        loop {
-            let page = pds_asset_gc_execute_page(&state, &operation_guard, cursor.as_deref(), now)
-                .expect("execute command page");
-            assert!(
-                state.store.try_lock().is_ok(),
-                "store lock must be released between GC pages"
-            );
-            observed_pages.set(observed_pages.get() + 1);
-            let page_result = asset_gc_result(page.report);
-            result.candidate_count += page_result.candidate_count;
-            result.candidate_bytes += page_result.candidate_bytes;
-            result.deleted_count += page_result.deleted_count;
-            result.deleted_bytes += page_result.deleted_bytes;
-            result.blockers.extend(page_result.blockers);
-            match page.next_cursor {
-                Some(next) => cursor = Some(next),
-                None => break,
-            }
-        }
+        super::super::ASSET_GC_ROOT_COLLECTIONS.with(|count| count.set((0, 0)));
+        let result = pds_asset_gc_execute_all(&state, &operation_guard).expect("execute complete cleanup");
+        super::super::ASSET_GC_ROOT_COLLECTIONS.with(|count| {
+            assert_eq!(count.get(), (1, 2), "one preliminary scan and one final check per deleting page");
+        });
+        assert!(state.store.try_lock().is_ok());
         drop(operation_guard);
         let store = state.store.into_inner().unwrap().unwrap();
-
-        assert!(observed_pages.get() >= 2);
         assert_eq!(result.candidate_count, total);
         assert_eq!(result.candidate_bytes, expected_bytes);
         assert_eq!(result.deleted_count, total);

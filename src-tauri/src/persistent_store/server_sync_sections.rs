@@ -42,6 +42,15 @@ pub(crate) fn participation(device: &DeviceStore) -> StoreResult<Vec<(Domain, St
     Ok(chosen)
 }
 
+pub(crate) fn has_pending(device: &DeviceStore) -> StoreResult<bool> {
+    for (domain, _) in participation(device)? {
+        if device.has_pending_section_entries(require_section(domain)?)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 pub(crate) fn stamp_unpublished_removal(
     device: &DeviceStore,
     domain: Domain,
@@ -99,8 +108,8 @@ pub(crate) enum SectionWrite {
     },
 }
 
-pub(crate) fn write_sections(device: &mut DeviceStore, writes: &[SectionWrite]) -> StoreResult<()> {
-    let writes = writes.iter().map(|write| Ok(match write {
+fn write_section(tx: &rusqlite::Transaction<'_>, write: &SectionWrite) -> StoreResult<()> {
+    let input = match write {
         SectionWrite::Apply { domain, entry, object } => SectionWriteInput::Apply {
             section: require_section(*domain)?, entry, object: object.as_deref(),
         },
@@ -108,6 +117,39 @@ pub(crate) fn write_sections(device: &mut DeviceStore, writes: &[SectionWrite]) 
         SectionWrite::MarkVersion { domain, key, version } => SectionWriteInput::MarkVersion {
             section: require_section(*domain)?, key, version,
         },
-    })).collect::<StoreResult<Vec<_>>>()?;
-    device.write_section_entries(&writes)
+    };
+    DeviceStore::write_section_entry(tx, &input)
+}
+
+#[cfg(test)]
+pub(crate) fn write_sections(device: &mut DeviceStore, writes: &[SectionWrite]) -> StoreResult<()> {
+    let tx = device.transaction()?;
+    for write in writes { write_section(&tx, write)?; }
+    tx.commit()?;
+    Ok(())
+}
+
+impl super::PersistentStore {
+    pub(crate) fn write_prepared_server_sections(
+        &mut self,
+        mut load: impl FnMut(&str, &str, &str, &str, &str) -> crate::server_sync::Result<Option<SectionWrite>>,
+    ) -> crate::server_sync::Result<()> {
+        let device = self.device_store.as_mut().map_err(|message| StoreError::Store {
+            message: message.clone(),
+        })?;
+        let tx = device.transaction()?;
+        let mut statement = self.connection.prepare(
+            "SELECT domain,key,action,remote,version FROM server_section_records ORDER BY domain,key",
+        )?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let (domain, key, action, remote, version): (String, String, String, String, String) =
+                (row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?);
+            if let Some(write) = load(&domain, &key, &action, &remote, &version)? {
+                write_section(&tx, &write)?;
+            }
+        }
+        tx.commit()?;
+        Ok(())
+    }
 }

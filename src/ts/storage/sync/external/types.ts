@@ -81,6 +81,7 @@ export interface PrepareExternalConnectionRequest {
     mode: ExternalOpenMode
     purpose: ExternalConnectionPurpose
     capturePolicy?: ExternalCapturePolicy
+    recoveryKey?: string
     acknowledgements: string[]
 }
 
@@ -162,6 +163,8 @@ export type ExternalJobKind =
     | 'sync'
     | 'restore'
     | 'pin-history'
+    | 'delete-history'
+    | 'cleanup'
     | 'resolve-conflict'
 
 /** The areas beside the library that a backup can carry. */
@@ -176,6 +179,10 @@ export interface StartExternalJobRequest {
     connectionId: string
     kind: ExternalJobKind
     snapshotId?: string
+    pointId?: string
+    pointObservation?: string
+    confirmOtherDevice?: boolean
+    confirmLastRetained?: boolean
     conflictId?: string
     choice?: 'local' | 'remote'
     restoreAreas?: ExternalRestoreArea[]
@@ -187,6 +194,12 @@ export interface StartExternalJobRequest {
 
 export interface ExternalJobSummary {
     id: string
+    applicationStarted?: boolean
+    restoreRequest?: {
+        snapshotId: string
+        targetRevision: DecimalString
+        restoreAreas: ExternalRestoreArea[]
+    }
     connectionId: string
     kind: ExternalJobKind
     state:
@@ -214,6 +227,9 @@ export interface ExternalJobSummary {
         receivedRevision?: DecimalString
         receiveReady?: boolean
         expectedRevision?: DecimalString
+        deletedObjects?: DecimalString
+        deletedBytes?: DecimalString
+        stopReason?: string
     }
 }
 
@@ -231,6 +247,10 @@ export interface ExternalStorageState {
 
 export interface ExternalHistoryItem {
     id: string
+    snapshotId?: string
+    pointId?: string
+    pointObservation?: string
+    deletable?: boolean
     kind: 'snapshot' | 'backup-point' | 'conflict' | 'recovery-candidate'
     createdAtMs: DecimalString
     logicalRevision: DecimalString
@@ -243,7 +263,11 @@ export interface ExternalHistoryItem {
     /** Whether these values are the ones this device wrote. */
     sameDevice: boolean
     deviceName?: string
-    warning?: string
+}
+
+export interface ExternalHistoryDeletePreparation {
+    sameDevice: boolean
+    lastRetained: boolean
 }
 
 export interface ExternalHistoryPage {
@@ -318,10 +342,13 @@ export interface PendingExternalAuthorization {
     state: 'browser-required' | 'native-pending' | 'complete'
 }
 
-export interface ExternalRecoveryMaterial {
-    recoveryId: string
+export interface ExternalRecoveryKeyMaterial {
+    key: string
+}
+
+export interface ExternalConnectionSettingsMaterial {
+    transferId: string
     expiresAtMs: DecimalString
-    code: string
     qrPayload?: string
 }
 
@@ -333,7 +360,7 @@ export interface ExternalSnapshotExportResult {
 
 export interface ExternalConnectionResult {
     connection: ExternalConnectionSummary
-    recovery?: ExternalRecoveryMaterial
+    recovery?: ExternalRecoveryKeyMaterial
 }
 
 export interface ExternalAuthorizationPending {

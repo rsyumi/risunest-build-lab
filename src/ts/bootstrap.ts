@@ -16,7 +16,6 @@ import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { MobileGUI, botMakerMode, selectedCharID, loadedStore, LoadingStatusState, bootFailure, type BootFailure } from "./stores.svelte";
 import { loadPlugins, loadPluginsAfterAuthoritativeRestore } from "./plugins/plugins.svelte";
 import { alertConfirm, alertError, alertInput, alertLogin, alertMd, alertNormal, alertSelect, alertTOS, waitAlert } from "./alert";
-import { checkDriverInit } from "./drive/drive";
 import { applyHubSelection, characterURLImport, downloadRisuHub, hubURL } from "./characterCards";
 import { initializeNativeLocalUrls } from "./nativeLocalUrls";
 import { loadRisuAccountData } from "./drive/accounter";
@@ -67,6 +66,8 @@ import {
     publishCurrentOfficialRevision,
 } from "./storage/persistentDataRuntime.svelte";
 import { registerLifecycleCommitListeners } from "./storage/lifecycleCommit";
+import { releaseIdleTransformerModels } from "./process/transformers";
+import { forgetInlayProviderImages } from "./process/files/inlayProviderImage";
 import { platform as nativePlatform } from '@tauri-apps/plugin-os'
 import { resolveBlobStore } from "./storage/platformBlobStore";
 import {
@@ -284,6 +285,13 @@ export async function loadData() {
         const recoveredNativeRestoreJobs =
             recoveredNativeFileJobs.pendingRestoreAcknowledgements
         const runtime = getPersistentDataRuntime()
+        const flushLifecycle = (reason: string, locally = false): Promise<void> => {
+            forgetInlayProviderImages()
+            void releaseIdleTransformerModels().catch(() => {
+                console.warn('Optional model memory cleanup failed')
+            })
+            return locally ? runtime.flushPendingDataLocally(reason) : runtime.flushPendingData(reason)
+        }
         const resolvePersistentWorkingSet = () => bootstrapPersistentDatabase({
             store: runtime.store,
             onPhase: async (phase, locale) => {
@@ -720,7 +728,7 @@ export async function loadData() {
         })
         configureSyncExitCoordinator(syncExitCoordinator)
         disposeLifecycleCommitListeners ??= registerLifecycleCommitListeners(
-            undefined,
+            flushLifecycle,
             syncExitCoordinator,
         )
 
@@ -752,8 +760,6 @@ export async function loadData() {
         if (isTauriDesktop) await changeFullscreen()
 
         if (!isTauri && !excluded('sync')) {
-            await transition('drive-sync', language.risuNest.startup.account)
-            if (await checkDriverInit()) return
             await transition('service-worker', language.risuNest.startup.serviceWorker)
             if (navigator.serviceWorker) {
                 setUsingSw(true)
@@ -838,9 +844,7 @@ export async function loadData() {
         registerAndroidRisuSaveRoute()
         if (isTauri) {
           schedulePeriodicNativeSnapshot();
-          installIOSPersistenceLifecycle((reason) =>
-            runtime.flushPendingDataLocally(reason),
-          );
+          installIOSPersistenceLifecycle((reason) => flushLifecycle(reason, true));
         }
         if (!excluded('modules')) moduleUpdate()
         void alertTOS().then((accepted) => {

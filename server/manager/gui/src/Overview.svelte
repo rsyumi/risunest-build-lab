@@ -1,6 +1,12 @@
 <script lang="ts">
-  import { Check, Copy, ChevronRight, AlertCircle } from "@lucide/svelte";
-  import { formatBytes, phase, type Status } from "./api";
+  import {
+    Check,
+    Copy,
+    ChevronRight,
+    AlertCircle,
+    MonitorSmartphone,
+  } from "@lucide/svelte";
+  import { message, formatBytes, phase, type Status } from "./api";
   let {
     status,
     connected,
@@ -52,12 +58,16 @@
       >
     </div>{/if}
   <div class="services">
-    <span>● 동기화 서버</span><span
+    <span class:on={connected}>동기화 서버</span><span
+      class:on={status.tunnel.phase === "connected"}
       >임시 주소 · {phase(status.tunnel.phase)}</span
-    ><span>레지스트리 · {phase(status.publication.phase)}</span>
+    ><span class:on={status.publication.phase === "published"}
+      >레지스트리 · {phase(status.publication.phase)}</span
+    >
   </div>
   {#if status.tunnel.error || status.publication.error}<p class="warning">
-      <AlertCircle size={15} /> 연결 상태를 확인하세요. 서버에 저장된 데이터는 유지됩니다.
+      <AlertCircle size={15} /> {status.tunnel.error ? message(status.tunnel.error) : "주소 레지스트리에 게시하지 못했습니다."}
+      <code>{status.tunnel.error ?? status.publication.error}</code>
     </p>{/if}
 </section>
 <section class="card storage-summary" aria-label="저장 공간">
@@ -116,6 +126,7 @@
 </div>
 <div class="card device-list">
   {#each active.slice(0, 3) as device}<div class="device-row">
+      <span class="device-icon"><MonitorSmartphone size={18} /></span>
       <div>
         <strong>{device.name || device.id.slice(0, 12)}</strong><small
           >{device.id}</small

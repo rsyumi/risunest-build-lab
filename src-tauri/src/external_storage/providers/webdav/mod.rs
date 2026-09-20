@@ -21,7 +21,7 @@
 //! credentials from `account_id` and those bytes.
 //!
 //! Below the root, each object role owns a collection (`descriptors`, `packs`,
-//! `catalogs`, `snapshots`, `points`, `leases`) and the head is the root member
+//! `catalogs`, `snapshots`, `points`, `inventory`, `leases`) and the head is the root member
 //! `head`.
 //! A `RemoteLocator.object` is the slash-joined raw path of an object relative
 //! to the root, which any device can resolve on its own.
@@ -41,7 +41,7 @@ use base64::{engine::general_purpose::STANDARD, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 use url::Url;
 use zeroize::Zeroizing;
@@ -58,9 +58,10 @@ const KOOFR_HOST: &str = "app.koofr.net";
 const KOOFR_DAV_PREFIX: &str = "/dav/";
 const ROOT_KEY: &str = "root";
 const DESCRIPTOR_FOLDER: &str = "descriptors";
-const ROLE_FOLDERS: [&str; 6] = [
+const ROLE_FOLDERS: [&str; 7] = [
     "catalogs",
     DESCRIPTOR_FOLDER,
+    "inventory",
     "leases",
     "packs",
     "points",
@@ -73,7 +74,7 @@ const PROPFIND_BODY: &[u8] = br#"<?xml version="1.0" encoding="utf-8"?>
 <propfind xmlns="DAV:"><prop><getetag/><getcontentlength/><resourcetype/></prop></propfind>"#;
 
 pub(crate) fn create(dependencies: Dependencies) -> Result<Arc<dyn Provider>> {
-    Ok(Arc::new(WebdavProvider { dependencies }))
+    Ok(Arc::new(WebdavProvider { dependencies, listings: Mutex::new(BTreeMap::new()) }))
 }
 
 fn role_folder(role: ObjectRole) -> &'static str {
@@ -85,6 +86,7 @@ fn role_folder(role: ObjectRole) -> &'static str {
         // authenticated envelope header, not the path, tells them apart.
         ObjectRole::SyncState | ObjectRole::BackupBundle => "snapshots",
         ObjectRole::BackupPoint => "points",
+        ObjectRole::InventoryPage => "inventory",
         ObjectRole::Lease => "leases",
     }
 }
@@ -92,6 +94,7 @@ fn collection_folder(collection: Collection) -> &'static str {
     match collection {
         Collection::Snapshots => role_folder(ObjectRole::SyncState),
         Collection::BackupPoints => role_folder(ObjectRole::BackupPoint),
+        Collection::InventoryPages => role_folder(ObjectRole::InventoryPage),
         Collection::Descriptors => role_folder(ObjectRole::Descriptor),
         Collection::Leases => role_folder(ObjectRole::Lease),
     }
@@ -407,7 +410,15 @@ pub(crate) struct ConditionalWriteProbe {
     pub probed_at_ms: u64,
 }
 
+struct Listing {
+    identity: String,
+    folder: String,
+    expires: u64,
+    objects: std::collections::VecDeque<ObjectReceipt>,
+}
+
 pub(crate) struct WebdavProvider {
+    listings: Mutex<BTreeMap<String, Listing>>,
     dependencies: Dependencies,
 }
 impl WebdavProvider {
@@ -491,8 +502,8 @@ impl WebdavProvider {
         }
         self.require(&response, &[207])?;
         let body =
-            common::read_bounded(&mut response.body, common::MAX_CONTROL_BODY, cancel).await?;
-        Ok(Some(multistatus::parse(&body)?))
+            common::read_bounded(&mut response.body, if depth == "1" { 16 * 1024 * 1024 } else { common::MAX_CONTROL_BODY }, cancel).await?;
+        Ok(Some(if depth == "1" { multistatus::parse_complete(&body)? } else { multistatus::parse(&body)? }))
     }
 
     /// The resource itself, through a `Depth: 0` request.
@@ -619,10 +630,10 @@ impl WebdavProvider {
                 }
                 continue;
             }
-            if contents.len() > 1 {
+            if contents.len() > 2 {
                 return Err(ProviderError::new(ErrorKind::PreconditionFailed));
             }
-            if let Some(descriptor) = contents.into_iter().next() {
+            for descriptor in contents {
                 if descriptor.collection
                     || descriptor.content_length.is_none_or(|length| length == 0)
                     || !paths::valid_segment(&descriptor.name)
@@ -818,6 +829,7 @@ pub(crate) async fn probe_conditional_writes(
     let context = RepositoryContext::new(&settings, &password)?;
     let provider = WebdavProvider {
         dependencies: dependencies.clone(),
+        listings: Mutex::new(BTreeMap::new()),
     };
     let object = vec![format!("probe-{}", uuid::Uuid::new_v4())];
     let url = paths::object_url(&context.base, &object);
@@ -1105,39 +1117,49 @@ impl Provider for WebdavProvider {
                 return Err(unsupported());
             }
             let folder = collection_folder(collection).to_owned();
-            let url = paths::collection_url(&context.base, std::slice::from_ref(&folder));
-            let entries = self
-                .propfind(context, url.clone(), "1", cancel)
-                .await?
-                .ok_or_else(|| ProviderError::new(ErrorKind::NotFound))?;
-            // DAV has no server-side paging, so the page is cut locally from
-            // the sorted member names and the cursor is the last name served.
-            let all = members(&url, &entries)?;
-            let mut remaining = all
-                .iter()
-                .filter(|member| !member.collection)
-                .filter(|member| cursor.is_none_or(|cursor| member.name.as_str() > cursor));
-            let mut objects = Vec::new();
-            let mut last = None;
-            for member in remaining.by_ref().take(limit as usize) {
-                objects.push(ObjectReceipt {
-                    locator: RemoteLocator {
-                        connection_identity: repository.connection_identity.clone(),
-                        collection: Some(folder.clone()),
-                        object: format!("{folder}/{}", member.name),
-                    },
-                    byte_length: member.content_length.ok_or_else(paths::corrupt)?,
-                    version: member.version.clone(),
-                    checksum: None,
-                    complete: true,
-                });
-                last = Some(member.name.clone());
-            }
-            let next_cursor = remaining.next().is_some().then_some(last).flatten();
-            Ok(ObjectPage {
-                objects,
-                next_cursor,
-            })
+            let mut listing = if let Some(cursor) = cursor {
+                let mut listings = self.listings.lock().map_err(|_| paths::corrupt())?;
+                listings.retain(|_, listing| listing.expires > self.now_ms());
+                let listing = listings.remove(cursor).ok_or_else(paths::corrupt)?;
+                if listing.identity != repository.connection_identity || listing.folder != folder {
+                    return Err(paths::corrupt());
+                }
+                listing
+            } else {
+                let url = paths::collection_url(&context.base, std::slice::from_ref(&folder));
+                let entries = self.propfind(context, url.clone(), "1", cancel).await?
+                    .ok_or_else(|| ProviderError::new(ErrorKind::NotFound))?;
+                require_exact_collection(&url, &entries)?;
+                let all = strict_members(&url, &entries)?;
+                if all.windows(2).any(|pair| pair[0].name == pair[1].name) { return Err(paths::corrupt()); }
+                let mut objects = std::collections::VecDeque::new();
+                for member in all.into_iter().filter(|member| !member.collection) {
+                    objects.push_back(ObjectReceipt {
+                        locator: RemoteLocator {
+                            connection_identity: repository.connection_identity.clone(),
+                            collection: Some(folder.clone()),
+                            object: format!("{folder}/{}", member.name),
+                        },
+                        byte_length: member.content_length.ok_or_else(paths::corrupt)?,
+                        version: member.version,
+                        checksum: None,
+                        complete: true,
+                    });
+                }
+                Listing { identity: repository.connection_identity.clone(), folder,
+                    expires: self.now_ms().saturating_add(5 * 60 * 1000), objects }
+            };
+            let count = usize::from(limit).min(listing.objects.len());
+            let objects = listing.objects.drain(..count).collect();
+            let next_cursor = if listing.objects.is_empty() { None } else {
+                let cursor = uuid::Uuid::new_v4().to_string();
+                let mut listings = self.listings.lock().map_err(|_| paths::corrupt())?;
+                listings.retain(|_, listing| listing.expires > self.now_ms());
+                if listings.len() >= 4 { return Err(ProviderError::new(ErrorKind::Transient)); }
+                listings.insert(cursor.clone(), listing);
+                Some(cursor)
+            };
+            Ok(ObjectPage { objects, next_cursor })
         })
     }
 

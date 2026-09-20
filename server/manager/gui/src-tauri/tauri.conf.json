@@ -20,6 +20,8 @@
         "minWidth": 720,
         "minHeight": 560,
         "transparent": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
         "visible": false,
         "windowEffects": {
           "effects": ["acrylic", "sidebar"],
@@ -33,6 +35,7 @@
   },
   "bundle": {
     "active": false,
+    "publisher": "Yumi",
     "icon": ["icons/icon.png", "icons/icon.ico", "icons/icon.icns"],
     "windows": { "nsis": { "installMode": "currentUser" } },
     "macOS": { "minimumSystemVersion": "13.0" }

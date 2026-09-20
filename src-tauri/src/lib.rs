@@ -3,6 +3,8 @@ mod account_credential;
 mod android_commit_transport;
 mod app_data_root;
 mod app_update;
+#[cfg(desktop)]
+mod appimage_integration;
 mod asset_repository;
 mod boot_marker;
 mod cold_payload_codec;
@@ -44,6 +46,8 @@ mod publication_upload;
 mod regex_shadow;
 mod server_sync;
 mod trust_boundary;
+#[cfg(test)]
+mod test_memory;
 #[cfg(windows)]
 mod windows_appearance;
 
@@ -348,12 +352,32 @@ fn check_auth(fpath: String, auth: String) -> bool {
 
 /// Product initialization shared by native entry points.
 pub fn builder() -> tauri::Builder<tauri::Wry> {
+    builder_with_main_window(None)
+}
+
+fn builder_with_main_window(
+    main_window: Option<(tauri::utils::config::WindowConfig, std::path::PathBuf)>,
+) -> tauri::Builder<tauri::Wry> {
     native_log::install_panic_hook();
     let native_log_state = native_log::global_state();
     let setup_native_log_state = native_log_state.clone();
     let native_startup_state = NativeStartupState::default();
     let setup_native_startup_state = native_startup_state.clone();
     let mut builder = tauri::Builder::default().manage(native_startup_state);
+    #[cfg(desktop)]
+    {
+        // Reject a second process before plugins with startup side effects run.
+        builder = builder
+            .manage(opened_files::OpenedFilesState::from_launch_arguments())
+            .plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.unminimize();
+                    let _ = window.set_focus();
+                }
+                opened_files::deliver_single_instance_arguments(app, &args, &cwd);
+            }));
+    }
     #[cfg(target_os = "ios")]
     {
         builder = builder
@@ -506,25 +530,19 @@ pub fn builder() -> tauri::Builder<tauri::Wry> {
 
     #[cfg(desktop)]
     {
-        builder = builder
-            .manage(opened_files::OpenedFilesState::from_launch_arguments())
-            .plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
-                let _ = app.get_webview_window("main").map(|window| {
-                    #[cfg(target_os = "macos")]
-                    {
-                        let _ = window.show();
-                        let _ = window.unminimize();
-                    }
-                    let _ = window.set_focus();
-                });
-                opened_files::deliver_single_instance_arguments(app, &args, &cwd);
-            }))
-            .plugin(tauri_plugin_updater::Builder::new().build());
+        builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
     }
 
     builder
         .setup(move |app| {
+            if let Some((config, data_directory)) = &main_window {
+                tauri::WebviewWindowBuilder::from_config(app, config)?
+                    .data_directory(data_directory.clone())
+                    .build()?;
+            }
             let setup_result = (|| -> Result<(), String> {
+                #[cfg(target_os = "macos")]
+                macos_lifecycle::install_native_quit(app.handle())?;
                 #[cfg(any(target_os = "android", target_os = "ios"))]
                 app.handle()
                     .plugin(tauri_plugin_barcode_scanner::init())
@@ -653,9 +671,9 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         external_storage::connection_commands::external_storage_set_capture_policy,
         external_storage::connection_commands::external_storage_set_retention_policy,
         external_storage::connection_commands::external_storage_remove_connection,
-        external_storage::connection_commands::external_storage_begin_recovery_export,
-        external_storage::connection_commands::external_storage_save_recovery_file,
-        external_storage::connection_commands::external_storage_prepare_recovery_import,
+        external_storage::connection_commands::external_storage_begin_connection_settings_export,
+        external_storage::connection_commands::external_storage_save_connection_settings_file,
+        external_storage::connection_commands::external_storage_prepare_connection_settings_import,
         external_storage::runtime::external_storage_get_state,
         external_storage::runtime::external_storage_capture_exit_target,
         external_storage::runtime::external_storage_set_execution_session,
@@ -665,6 +683,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         external_storage::runtime::external_storage_cancel_job,
         external_storage::runtime::external_storage_get_quota,
         external_storage::history::external_storage_list_history,
+        external_storage::history_deletion::external_storage_prepare_history_delete,
         external_storage::sync_engine::external_storage_list_conflicts,
         external_storage::sync_engine::external_storage_delete_conflict,
         external_storage::sync_engine::external_storage_recheck_conflict,
@@ -715,6 +734,10 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         check_auth,
         #[cfg(desktop)]
         opened_files::opened_files_take,
+        #[cfg(desktop)]
+        appimage_integration::appimage_integration_state,
+        #[cfg(desktop)]
+        appimage_integration::appimage_integration_register,
         persistent_store::commands::pds_storage_stats,
         persistent_store::commands::pds_snapshot_delete,
         persistent_store::commands::pds_asset_gc_preview,
@@ -793,6 +816,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         persistent_store::commands::pds_read_conversation,
         persistent_store::commands::pds_read_conversation_metadata,
         persistent_store::commands::pds_read_conversation_window,
+        persistent_store::commands::pds_read_conversation_message_metadata_window,
         persistent_store::commands::pds_query_plugin_storage,
         persistent_store::commands::pds_list_plugin_storage,
         persistent_store::commands::pds_read_plugin_storage,
@@ -827,6 +851,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         persistent_store::commands::pds_archive_preview,
         persistent_store::commands::pds_archive_character,
         persistent_store::commands::pds_restore_character,
+        persistent_store::commands::pds_cancel_character_archive_operation,
         persistent_store::commands::pds_replace_begin,
         persistent_store::commands::pds_replace_put_root,
         persistent_store::commands::pds_replace_put_presets,
@@ -857,6 +882,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         persistent_store::commands::pds_read_plugin_permissions,
         persistent_store::commands::pds_write_plugin_permission,
         persistent_store::commands::pds_write_plugin_permission_grant,
+        persistent_store::commands::pds_clear_plugin_permissions,
         persistent_store::commands::pds_hydrate_plugin_device_storage,
         persistent_store::commands::pds_read_plugin_device_value,
         persistent_store::commands::pds_list_plugin_device_keys,
@@ -900,14 +926,30 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
 }
 
 pub fn handle_run_event(_app: &tauri::AppHandle, _event: tauri::RunEvent) {
+    #[cfg(target_os = "ios")]
+    if let tauri::RunEvent::Opened { urls } = &_event {
+        use tauri_plugin_ios_native::IosNativeExt;
+        let plugin = _app.ios_native().clone();
+        let files = urls.iter().filter(|url| url.scheme() == "file")
+            .map(ToString::to_string).collect::<Vec<_>>();
+        if !files.is_empty() {
+            tauri::async_runtime::spawn(async move { plugin.receive_opened_files(files).await; });
+        }
+    }
     #[cfg(target_os = "macos")]
     macos_lifecycle::handle_run_event(_app, _event);
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    builder()
-        .build(tauri::generate_context!())
+    let mut context = tauri::generate_context!();
+    #[cfg(desktop)]
+    let main_window = app_data_root::take_main_window_with_webview_root(&mut context)
+        .expect("desktop WebView data directory unavailable");
+    #[cfg(not(desktop))]
+    let main_window = None;
+    builder_with_main_window(main_window)
+        .build(context)
         .expect("error while building tauri application")
         .run(handle_run_event);
 }

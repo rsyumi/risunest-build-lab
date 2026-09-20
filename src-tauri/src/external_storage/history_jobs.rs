@@ -292,6 +292,10 @@ mod tests {
                 connection_id: "connection".into(),
                 kind: JobKind::PinHistory,
                 snapshot_id: Some("snapshot".into()),
+                point_id: None,
+                point_observation: None,
+                confirm_other_device: None,
+                confirm_last_retained: None,
                 conflict_id: None,
                 choice: None,
                 restore_areas: None,
@@ -346,6 +350,7 @@ mod tests {
                 provider_repository_id: fake::repository().repository_id,
                 credential_ref: "credential".into(),
                 root_key_ref: "key".into(),
+                recovery_key_ref: "recovery-key".into(),
                 capture_policy: None,
                 retention_policy: None,
                 capabilities: fake::capabilities(true),
@@ -481,7 +486,9 @@ mod tests {
                 "snapshot"
             );
             let objects = &provider.state.lock().unwrap().objects;
-            assert_eq!(objects.len(), 1);
+            assert_eq!(objects.len(), 2);
+            assert_eq!(objects.keys()
+                .filter(|id| id.starts_with("inventory-page-")).count(), 1);
             assert!(objects.contains_key(&format!("backup-point-{}", job.id)));
         });
     }

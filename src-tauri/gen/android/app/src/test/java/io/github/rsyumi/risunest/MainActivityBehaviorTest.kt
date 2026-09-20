@@ -2,16 +2,19 @@ package io.github.rsyumi.risunest
 
 import android.content.ComponentCallbacks2
 import androidx.core.view.WindowInsetsCompat
-import java.nio.file.Files
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
 
 class MainActivityBehaviorTest {
+  @get:Rule val temporaryFolder = TemporaryFolder.builder().assureDeletion().build()
+
   @Test
   fun `content picker recognizes binary cards and upstream metadata formats only`() {
     for (name in listOf("card.CHARX", "card.png", "module.risum", "book.lorebook", "module.json", "card.JPEG")) {
@@ -93,27 +96,7 @@ class MainActivityBehaviorTest {
   }
 
   @Test
-  fun `disabled SAF jobs retain the legacy tauri opened files contract`() {
-    assertEquals(
-      "window.tauriOpenedFiles=[\"C:\\\\opened\\u000afile.risudat\"];",
-      openedFilesScript(listOf("C:\\opened\nfile.risudat")),
-    )
-  }
-
-  @Test
-  fun `legacy opened files are injected on a cold start and dispatched on a warm start`() {
-    assertEquals(
-      LegacyOpenedFileDelivery.DOCUMENT_START_INJECTION,
-      legacyOpenedFileDelivery(coldStart = true),
-    )
-    assertEquals(
-      LegacyOpenedFileDelivery.RUNTIME_EVENT,
-      legacyOpenedFileDelivery(coldStart = false),
-    )
-  }
-
-  @Test
-  fun `warm start delivery dispatches the opened files and falls back to the startup queue`() {
+  fun `ready document delivery dispatches opened files and falls back to its startup queue`() {
     val script = openedFilesEventScript(listOf("/data/cache/opened_files/1-0-preset.risup"))
 
     assertEquals(true, script.contains("new CustomEvent('risu-opened-files'"))
@@ -121,12 +104,12 @@ class MainActivityBehaviorTest {
     assertEquals(true, script.contains("\"/data/cache/opened_files/1-0-preset.risup\""))
     assertEquals(true, script.contains("if(window.dispatchEvent(event)){"))
     assertEquals(true, script.contains("window.tauriOpenedFiles="))
-    // The cold start contract stays a plain assignment, the warm start one never replaces it.
+    // Delivery never replaces an earlier undrained startup batch.
     assertEquals(false, script.startsWith("window.tauriOpenedFiles="))
   }
 
   @Test
-  fun `warm start delivery escapes opened file paths the same way the cold start does`() {
+  fun `ready document delivery escapes opened file paths`() {
     assertEquals(
       true,
       openedFilesEventScript(listOf("C:\\opened\nfile.risup"))
@@ -656,7 +639,7 @@ class MainActivityBehaviorTest {
 
   @Test
   fun `legacy opened file cleanup removes only stale regular files`() {
-    val directory = Files.createTempDirectory("risu-opened-files").toFile()
+    val directory = temporaryFolder.newFolder()
     val stale = directory.resolve("stale.risup").apply {
       writeBytes(byteArrayOf(1))
       setLastModified(1_000)
@@ -831,17 +814,26 @@ class MainActivityBehaviorTest {
   }
 
   @Test
-  fun `generation keep alive requests notification permission before checking availability`() {
+  fun `generation keep alive does not start while notification permission is unavailable`() {
     val events = mutableListOf<String>()
 
     val started = beginGenerationKeepAlive(
-      requestNotifications = { events.add("request") },
       notificationsEnabled = { events.add("enabled"); false },
       startService = { events.add("start"); true },
     )
 
     assertEquals(false, started)
-    assertEquals(listOf("request", "enabled"), events)
+    assertEquals(listOf("enabled"), events)
+  }
+
+  @Test
+  fun `generation keep alive starts immediately after permission is ready`() {
+    var starts = 0
+    assertEquals(true, beginGenerationKeepAlive(
+      notificationsEnabled = { true },
+      startService = { starts++; true },
+    ))
+    assertEquals(1, starts)
   }
 
   @Test

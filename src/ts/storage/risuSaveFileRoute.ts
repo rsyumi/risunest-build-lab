@@ -1,3 +1,4 @@
+import type { ExportExclusions } from './exportExcludedReport'
 import type { Database } from './database.svelte'
 import {
     AndroidSafDestinationError,
@@ -61,7 +62,7 @@ export interface RisuSaveFileRouteDependencies {
         options: NativeFileExportJobOptions,
     ): Promise<NativeFileJobResult>
     decodeRisuSave(bytes: Uint8Array): Promise<unknown>
-    collectWebExport(omitAccount: boolean): Promise<Uint8Array>
+    collectWebExport(omitAccount: boolean): Promise<{ bytes: Uint8Array; exclusions: ExportExclusions }>
     downloadWebExport(name: string, bytes: Uint8Array): Promise<void>
     withFlushedExport<T>(
         runtime: RisuSaveExportRuntime,
@@ -71,8 +72,8 @@ export interface RisuSaveFileRouteDependencies {
     copyAndroidExport(
         request: AndroidSafDestinationRequest,
     ): Promise<AndroidSafDestinationResult>
-    markAndroidExportReady(requestId: string): boolean
-    acknowledgeAndroidExport(requestId: string): boolean
+    markAndroidExportReady(requestId: string): boolean | Promise<boolean>
+    acknowledgeAndroidExport(requestId: string): boolean | Promise<boolean>
     reloadPlugins(): void | Promise<void>
     reloadPluginsAfterNativeRestore(): void | Promise<void>
     /** Name and size of a picked desktop file for the progress dialog; defaults to the basename. */
@@ -192,6 +193,7 @@ async function exportThroughAndroidSaf(
                                 mode: 'native' as const,
                                 warningCodes,
                                 bytes: file.bytes,
+                                exclusions: { archivedCharacters: file.excludedArchivedCharacterCount, collidingPluginValues: file.excludedCollidingPluginValueCount },
                             },
                         }
                     }
@@ -208,7 +210,7 @@ async function exportThroughAndroidSaf(
             )
         },
     )
-    if (!dependencies.markAndroidExportReady(terminal.requestId)) {
+    if (!await dependencies.markAndroidExportReady(terminal.requestId)) {
         throw new AndroidSafDestinationError(
             terminal.requestId,
             'prerequisite-proof-failed',
@@ -216,7 +218,7 @@ async function exportThroughAndroidSaf(
             'Android SAF publication prerequisites could not be persisted',
         )
     }
-    if (!dependencies.acknowledgeAndroidExport(terminal.requestId)) {
+    if (!await dependencies.acknowledgeAndroidExport(terminal.requestId)) {
         throw new AndroidSafDestinationError(
             terminal.requestId,
             'acknowledgement-failed',
@@ -257,13 +259,13 @@ function recoveredAndroidRisuSaveTerminal(
     return event as AndroidSafDestinationEvent
 }
 
-export function recoverAndroidRisuSavePublication(
+export async function recoverAndroidRisuSavePublication(
     encoded: string | null,
-    acknowledge: (requestId: string) => boolean,
-): AndroidSafDestinationEvent | null {
+    acknowledge: (requestId: string) => boolean | Promise<boolean>,
+): Promise<AndroidSafDestinationEvent | null> {
     const terminal = recoveredAndroidRisuSaveTerminal(encoded)
     if (!terminal) return null
-    if (!acknowledge(terminal.requestId)) {
+    if (!await acknowledge(terminal.requestId)) {
         throw new AndroidSafDestinationError(
             terminal.requestId,
             'acknowledgement-failed',
@@ -275,8 +277,8 @@ export function recoverAndroidRisuSavePublication(
 }
 
 export interface AndroidRisuSaveRecoveryDependencies {
-    getStatus(): string | null
-    acknowledge(requestId: string): boolean
+    getStatus(): string | null | Promise<string | null>
+    acknowledge(requestId: string): boolean | Promise<boolean>
     listen(listener: (event: AndroidSafDestinationEvent) => void): () => void
     isActive(requestId: string): boolean
 }
@@ -286,8 +288,6 @@ export function listenRecoveredAndroidRisuSavePublications(
     onError: (error: unknown) => void,
     dependencies: AndroidRisuSaveRecoveryDependencies,
 ): () => void {
-    const encoded = dependencies.getStatus()
-    const initialTerminal = recoveredAndroidRisuSaveTerminal(encoded)
     return listenRecoveredPublications({
         sourceKind: 'risuSave',
         onTerminal,
@@ -298,15 +298,14 @@ export function listenRecoveredAndroidRisuSavePublications(
             JSON.stringify(event),
             dependencies.acknowledge,
         ),
-        initial: encoded && initialTerminal && !dependencies.isActive(initialTerminal.requestId)
-            ? {
-                requestId: initialTerminal.requestId,
-                recover: () => recoverAndroidRisuSavePublication(
-                    encoded,
-                    dependencies.acknowledge,
-                ),
-            }
-            : null,
+        initial: {
+            recover: async () => {
+                const encoded = await dependencies.getStatus()
+                const terminal = recoveredAndroidRisuSaveTerminal(encoded)
+                if (!terminal || dependencies.isActive(terminal.requestId)) return null
+                return recoverAndroidRisuSavePublication(encoded, dependencies.acknowledge)
+            },
+        },
     })
 }
 
@@ -317,6 +316,7 @@ export interface RisuSaveFileRouteOptions extends NativeFileRestoreJobOptions {
 }
 
 export interface RisuSaveFileRouteResult {
+    exclusions?: ExportExclusions
     mode: 'native' | 'web'
     warningCodes: string[]
     bytes?: number
@@ -398,9 +398,9 @@ async function exportWithWebCodec(
     omitAccount: boolean,
     dependencies: RisuSaveFileRouteDependencies,
 ): Promise<RisuSaveFileRouteResult> {
-    const bytes = await dependencies.collectWebExport(omitAccount)
+    const { bytes, exclusions } = await dependencies.collectWebExport(omitAccount)
     await dependencies.downloadWebExport(name, bytes)
-    return { mode: 'web', warningCodes: [], bytes: bytes.byteLength }
+    return { mode: 'web', warningCodes: [], bytes: bytes.byteLength, exclusions }
 }
 
 export async function importRisuSaveFromPicker(
@@ -494,6 +494,7 @@ export async function exportRisuSaveFromPicker(
             mode: 'native',
             warningCodes: result.warningCodes,
             bytes: result.sourceBytes,
+            exclusions: result.exportExclusions,
         }
     }
 

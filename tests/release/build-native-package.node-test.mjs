@@ -10,9 +10,12 @@ import { assertBinaryArchitecture } from "../../scripts/release/platform/native.
 import { assertPackageFormat } from "../../scripts/release/platform/package.mjs";
 import {
   assertIosBundleMetadata,
+  assertMacBundleMetadata,
+  assertMacAdHocSignature,
   inspectMacAppRoot,
   validateIosArchiveEntries,
 } from "../../scripts/release/package-app.mjs";
+import { assertAppIdentifier, assertSyncIdentifier, mergeTauriConfig, releaseTauriConfig } from "../../scripts/release/tauri-config.mjs";
 import { validateOwnedInventory } from "../../server/manager/install/package.mjs";
 
 function pe(machine) {
@@ -250,4 +253,99 @@ test("committed iOS shell carries the configured custom URL scheme", () => {
   assert.deepEqual(JSON.parse(parsed.stdout), expected);
   const project = readFileSync(join(repository, "src-tauri/gen/apple/project.yml"), "utf8");
   assert.match(project, /CFBundleURLSchemes: \[risunestlocal\]\s+CFBundleURLName: risunestlocal/);
+});
+
+
+test("iOS package proof requires imported and exported custom document types", () => {
+  const imported = "io.github.rsyumi.risunest.risum";
+  const exported = "io.github.rsyumi.risunest.risunest";
+  const associations = [
+    { ext: ["risum"], contentTypes: [imported] },
+    { ext: ["risunest"], mimeType: "application/x-risunest", exportedType: { identifier: exported, conformsTo: ["public.data"] } },
+  ];
+  const config = { ...tauriConfig, bundle: { fileAssociations: associations } };
+  const info = { ...iosInfo(), CFBundleDocumentTypes: associations.map(a => ({
+    CFBundleTypeExtensions: a.ext, CFBundleTypeName: a.ext[0], CFBundleTypeRole: "Editor", LSHandlerRank: "Default",
+    LSItemContentTypes: a.contentTypes ?? [a.exportedType.identifier],
+  })),
+    UTImportedTypeDeclarations: [{ UTTypeIdentifier: imported, UTTypeConformsTo: ["public.data"], UTTypeTagSpecification: { "public.filename-extension": ["risum"] } }],
+    UTExportedTypeDeclarations: [{ UTTypeIdentifier: exported, UTTypeConformsTo: ["public.data"], UTTypeTagSpecification: { "public.filename-extension": ["risunest"], "public.mime-type": "application/x-risunest" } }],
+  };
+  assert.equal(assertIosBundleMetadata(info, releaseInput, config, iosConfig).executable, "RisuNest");
+  for (const key of ["UTImportedTypeDeclarations", "UTExportedTypeDeclarations"]) {
+    const invalid = structuredClone(info);
+    delete invalid[key];
+    assert.throws(() => assertIosBundleMetadata(invalid, releaseInput, config, iosConfig), /custom document type/);
+  }
+  const invalid = structuredClone(info);
+  delete invalid.CFBundleDocumentTypes[0].LSItemContentTypes;
+  assert.throws(() => assertIosBundleMetadata(invalid, releaseInput, config, iosConfig), /bundle metadata/);
+});
+
+
+test("effective configuration preserves the approved desktop and mobile identities", () => {
+  const base = JSON.parse(readFileSync("src-tauri/tauri.conf.json", "utf8"));
+  const expected = {
+    windows: "RisuNest",
+    linux: "risunest",
+    macos: "io.github.rsyumi.risunest",
+    android: "io.github.rsyumi.risunest",
+    ios: "io.github.rsyumi.risunest",
+  };
+  for (const os of ["windows", "linux", "macos", "android", "ios"]) {
+    const overlay = JSON.parse(readFileSync(`src-tauri/tauri.${os}.conf.json`, "utf8"));
+    const config = mergeTauriConfig(base, overlay, releaseTauriConfig({ product: "app", version: "1.2.3" }, "synthetic"));
+    assert.equal(assertAppIdentifier(config, os), expected[os]);
+    assert.equal(config.bundle.publisher, "Yumi");
+    assert.equal(config.version, "1.2.3");
+    if (os === "macos") assert.equal(config.bundle.macOS.signingIdentity, "-");
+    assert.throws(() => assertAppIdentifier({ ...config, identifier: "wrong" }, os), /effective/);
+  }
+});
+
+test("Sync GUI configuration follows each desktop platform identity", () => {
+  const root = "server/manager/gui/src-tauri";
+  const base = JSON.parse(readFileSync(`${root}/tauri.conf.json`, "utf8"));
+  const expected = {
+    windows: "RisuNestSync",
+    linux: "risunest-sync",
+    macos: "io.github.rsyumi.risunest.sync-manager",
+  };
+  for (const os of ["windows", "linux", "macos"]) {
+    const overlay = JSON.parse(readFileSync(`${root}/tauri.${os}.conf.json`, "utf8"));
+    const config = mergeTauriConfig(base, overlay);
+    assert.equal(assertSyncIdentifier(config, os), expected[os]);
+    assert.throws(() => assertSyncIdentifier({ ...config, identifier: "wrong" }, os), /effective/);
+  }
+});
+
+test("application bundles identify Yumi as the publisher", () => {
+  const app = JSON.parse(readFileSync("src-tauri/tauri.conf.json", "utf8"));
+  const sync = JSON.parse(readFileSync("server/manager/gui/src-tauri/tauri.conf.json", "utf8"));
+  assert.equal(app.productName, "RisuNest");
+  assert.equal(app.bundle.publisher, "Yumi");
+  assert.equal(sync.productName, "RisuNest Sync");
+  assert.equal(sync.bundle.publisher, "Yumi");
+});
+
+test("Sync NSIS hook separates the default install and durable data directories", () => {
+  const hook = readFileSync("server/manager/install/windows.nsh", "utf8");
+  assert.match(hook, /StrCmp \$INSTDIR "\$LOCALAPPDATA\\RisuNest Sync"/);
+  assert.match(hook, /StrCpy \$INSTDIR "\$LOCALAPPDATA\\RisuNestSync"/);
+  assert.match(hook, /\$LOCALAPPDATA\\RisuNestSyncData\\manager-update/);
+  assert.doesNotMatch(hook, /\$LOCALAPPDATA\\RisuNestSync\\manager-update/);
+});
+
+test("macOS package metadata and intentional ad-hoc signatures are checked", () => {
+  const config = { ...tauriConfig, identifier: "io.github.rsyumi.risunest", productName: "RisuNest", mainBinaryName: "RisuNest",
+    bundle: { ...tauriConfig.bundle, macOS: { minimumSystemVersion: "14.0" } },
+    plugins: { "deep-link": { desktop: { schemes: ["risunestlocal"] } } },
+  };
+  const info = { ...iosInfo(), CFBundleIdentifier: "io.github.rsyumi.risunest", CFBundleName: "RisuNest", LSMinimumSystemVersion: "14.0" };
+  assert.equal(assertMacBundleMetadata(info, releaseInput, config).identifier, "io.github.rsyumi.risunest");
+  for (const key of ["CFBundleIdentifier", "CFBundleExecutable", "CFBundleName", "CFBundleShortVersionString", "CFBundleVersion", "LSMinimumSystemVersion", "CFBundleDocumentTypes", "CFBundleURLTypes"]) {
+    assert.throws(() => assertMacBundleMetadata({ ...info, [key]: undefined }, releaseInput, config), /metadata/);
+  }
+  assert.doesNotThrow(() => assertMacAdHocSignature("Executable=RisuNest\nSignature=adhoc\nTeamIdentifier=not set\n"));
+  assert.throws(() => assertMacAdHocSignature("Signature size=123\nAuthority=Unexpected\n"), /ad-hoc/);
 });

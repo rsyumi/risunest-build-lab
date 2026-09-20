@@ -732,6 +732,31 @@ pub(crate) struct ConversationWindow {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ConversationMessageMetadata {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) chat_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) disabled: Option<Value>,
+    pub(crate) parser_inert: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ConversationMessageMetadataWindow {
+    pub(crate) character_id: String,
+    pub(crate) conversation_id: String,
+    pub(crate) messages: Vec<ConversationMessageMetadata>,
+    pub(crate) start_index: i64,
+    pub(crate) end_index: i64,
+    pub(crate) total_messages: i64,
+    pub(crate) has_more_before: bool,
+    pub(crate) has_more_after: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(
     tag = "type",
     rename_all = "kebab-case",
@@ -965,8 +990,13 @@ fn scan_failure(error: crate::portable_backup::Error) -> StoreError {
     }
 }
 
+#[cfg(test)]
+std::thread_local! {
+    static ASSET_GC_ROOT_COLLECTIONS: std::cell::Cell<(usize, usize)> = const { std::cell::Cell::new((0, 0)) };
+}
+
 pub(crate) struct AssetGcPreview {
-    cas: crate::asset_repository::PayloadCas,
+    scan: crate::asset_repository::PayloadCasReadScan,
     residency: crate::server_sync::residency::Residency,
     marks: crate::asset_repository::migration_gc::AssetGcMarks,
     /// What holds an object besides the library, so a retained candidate can say why.
@@ -1494,6 +1524,15 @@ impl PersistentStore {
         query::read_conversation_window(connection, query, &target)
     }
 
+    pub(crate) fn read_conversation_message_metadata_window(
+        &self,
+        query: &ConversationWindowQuery,
+        lease: Option<&str>,
+    ) -> StoreResult<Option<Versioned<ConversationMessageMetadataWindow>>> {
+        let (connection, target) = self.read_view(lease)?;
+        query::read_conversation_message_metadata_window(connection, query, &target)
+    }
+
     pub(crate) fn query_plugin_storage(
         &self,
         lease: Option<&str>,
@@ -1772,6 +1811,24 @@ impl PersistentStore {
         )
     }
 
+    pub(crate) fn archive_character_with_cancellation(
+        &mut self,
+        character_id: &str,
+        expected_revision: i64,
+        now_ms: i64,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> StoreResult<RevisionResult> {
+        let cas = crate::asset_repository::PayloadCas::new(&self.repository_root)?;
+        archive::archive_character_with_cancellation(
+            &mut self.connection,
+            &cas,
+            character_id,
+            expected_revision,
+            now_ms,
+            is_cancelled,
+        )
+    }
+
     pub(crate) fn restore_character(
         &mut self,
         character_id: &str,
@@ -1779,6 +1836,22 @@ impl PersistentStore {
     ) -> StoreResult<RevisionResult> {
         let cas = crate::asset_repository::PayloadCas::new(&self.repository_root)?;
         archive::restore_character(&mut self.connection, &cas, character_id, expected_revision)
+    }
+
+    pub(crate) fn restore_character_with_cancellation(
+        &mut self,
+        character_id: &str,
+        expected_revision: i64,
+        is_cancelled: &dyn Fn() -> bool,
+    ) -> StoreResult<RevisionResult> {
+        let cas = crate::asset_repository::PayloadCas::new(&self.repository_root)?;
+        archive::restore_character_with_cancellation(
+            &mut self.connection,
+            &cas,
+            character_id,
+            expected_revision,
+            is_cancelled,
+        )
     }
 
     pub(crate) fn replace_begin(&mut self) -> StoreResult<StagingResult> {
@@ -1887,6 +1960,58 @@ impl PersistentStore {
         characters: &[Value],
     ) -> StoreResult<()> {
         commit::replace_add_characters(&mut self.connection, staging_id, characters)
+    }
+
+    pub(crate) fn replace_put_character_detail(
+        &mut self,
+        staging_id: &str,
+        detail: &Value,
+        conversation_count: i64,
+    ) -> StoreResult<()> {
+        commit::replace_put_character_detail(
+            &mut self.connection,
+            staging_id,
+            detail,
+            conversation_count,
+        )
+    }
+
+    pub(crate) fn replace_put_conversation_row(
+        &mut self,
+        staging_id: &str,
+        character_id: &str,
+        configured_index: i64,
+        detail: &Value,
+        recent_at: i64,
+        message_count: i64,
+    ) -> StoreResult<()> {
+        commit::replace_put_conversation_row(
+            &mut self.connection,
+            staging_id,
+            character_id,
+            configured_index,
+            detail,
+            recent_at,
+            message_count,
+        )
+    }
+
+    pub(crate) fn replace_add_conversation_messages(
+        &mut self,
+        staging_id: &str,
+        character_id: &str,
+        conversation_id: &str,
+        start: i64,
+        messages: &[Value],
+    ) -> StoreResult<()> {
+        commit::replace_add_conversation_messages(
+            &mut self.connection,
+            staging_id,
+            character_id,
+            conversation_id,
+            start,
+            messages,
+        )
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
@@ -2408,6 +2533,7 @@ impl PersistentStore {
 
     pub(crate) fn prepare_asset_gc_preview(&self) -> StoreResult<AssetGcPreview> {
         let cas = crate::asset_repository::PayloadCas::new(&self.repository_root)?;
+        let scan = cas.into_read_scan();
         let labelled = self.collect_labelled_asset_gc_roots(false, true)?;
         // Only the holders that are small and explainable are kept for attribution; the library
         // itself is the default answer and copying its root set would cost as much as it holds.
@@ -2418,13 +2544,13 @@ impl PersistentStore {
             .collect();
         let residency = crate::server_sync::residency::Residency::open(&self.repository_root)
             .map_err(|error| std::io::Error::other(error.code))?;
-        let marks = crate::asset_repository::migration_gc::mark_asset_roots_with_remote(
-            &cas,
+        let marks = crate::asset_repository::migration_gc::mark_asset_roots_with_remote_scan(
+            &scan,
             labelled.into_iter().map(|(_, roots)| roots),
             |hash| residency.gc_size(hash),
         )?;
         Ok(AssetGcPreview {
-            cas,
+            scan,
             residency,
             marks,
             holders,
@@ -2456,8 +2582,8 @@ impl PersistentStore {
                 )
             })
             .collect();
-        let report = crate::asset_repository::migration_gc::sweep_asset_candidates_with_remote(
-            &preview.cas,
+        let report = crate::asset_repository::migration_gc::sweep_asset_candidates_with_remote_scan(
+            &preview.scan,
             candidates.items,
             &preview.marks,
             now_ms,
@@ -2519,12 +2645,12 @@ impl PersistentStore {
         minimum_grace_ms: i64,
     ) -> StoreResult<crate::asset_repository::migration_gc::AssetGcDryRunPage> {
         use crate::asset_repository::migration_gc::{
-            sweep_asset_candidates_with_remote, AssetGcDryRunPage,
+            sweep_asset_candidates_with_remote_scan, AssetGcDryRunPage,
         };
 
         let candidates = self.query_asset_object_catalog(limit, cursor)?;
-        let report = sweep_asset_candidates_with_remote(
-            &preview.cas,
+        let report = sweep_asset_candidates_with_remote_scan(
+            &preview.scan,
             candidates.items,
             &preview.marks,
             now_ms,
@@ -2634,8 +2760,34 @@ impl PersistentStore {
         Ok(())
     }
 
+    pub(crate) fn prepare_asset_gc_delete_marks(
+        &self,
+    ) -> StoreResult<crate::asset_repository::migration_gc::AssetGcMarks> {
+        let cas = crate::asset_repository::PayloadCas::new(&self.repository_root)?;
+        let residency = crate::server_sync::residency::Residency::open(&self.repository_root)
+            .map_err(|error| std::io::Error::other(error.code))?;
+        Ok(crate::asset_repository::migration_gc::mark_asset_roots_with_remote(
+            &cas, self.collect_asset_gc_roots(false, false)?, |hash| residency.gc_size(hash),
+        )?)
+    }
+
     pub(crate) fn asset_gc_delete_page_with_hook(
         &mut self,
+        limit: i64,
+        cursor: Option<&str>,
+        now_ms: i64,
+        minimum_grace_ms: i64,
+        hook: impl FnMut(
+            crate::asset_repository::migration_gc::AssetGcDeleteHookPoint,
+        ) -> StoreResult<()>,
+    ) -> StoreResult<crate::asset_repository::migration_gc::AssetGcDryRunPage> {
+        let marks = self.prepare_asset_gc_delete_marks()?;
+        self.asset_gc_delete_marked_page_with_hook(&marks, limit, cursor, now_ms, minimum_grace_ms, hook)
+    }
+
+    pub(crate) fn asset_gc_delete_marked_page_with_hook(
+        &mut self,
+        initial_marks: &crate::asset_repository::migration_gc::AssetGcMarks,
         limit: i64,
         cursor: Option<&str>,
         now_ms: i64,
@@ -2645,17 +2797,18 @@ impl PersistentStore {
         ) -> StoreResult<()>,
     ) -> StoreResult<crate::asset_repository::migration_gc::AssetGcDryRunPage> {
         use crate::asset_repository::migration_gc::{
-            dry_run_mark_and_sweep_with_remote, AssetGcDeleteHookPoint, AssetGcDryRunPage,
+            dry_run_mark_and_sweep_with_remote, sweep_asset_candidates_with_remote,
+            AssetGcDeleteHookPoint, AssetGcDryRunPage,
         };
 
         let cas = crate::asset_repository::PayloadCas::new(&self.repository_root)?;
         let initial_candidates = self.query_asset_object_catalog(limit, cursor)?;
         let residency = crate::server_sync::residency::Residency::open(&self.repository_root)
             .map_err(|error| std::io::Error::other(error.code))?;
-        let initial_report = dry_run_mark_and_sweep_with_remote(
+        let initial_report = sweep_asset_candidates_with_remote(
             &cas,
             initial_candidates.items.clone(),
-            self.collect_asset_gc_roots(false, false)?,
+            initial_marks,
             now_ms,
             minimum_grace_ms,
             |hash| residency.gc_size(hash),
@@ -2809,6 +2962,12 @@ impl PersistentStore {
         };
         use crate::asset_repository::migration_gc::collect_staged_migration_roots;
 
+        #[cfg(test)]
+        ASSET_GC_ROOT_COLLECTIONS.with(|count| {
+            let (preliminary, final_checks) = count.get();
+            count.set((preliminary + usize::from(!repository_guard_held),
+                final_checks + usize::from(repository_guard_held)));
+        });
         let mut roots = vec![("library", snapshot::collect_asset_roots(&self.connection)?)];
         for reader in self.revision_leases.values() {
             roots.push((

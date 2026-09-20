@@ -14,6 +14,7 @@
         requestExternalConflictRestore,
         requestExternalStorageResolveConflict,
         requestExternalStorageRestore,
+        requestExternalStorageDeleteHistory,
     } from 'src/ts/storage/sync/external/production'
     import type {
         ExternalConflictSummary,
@@ -24,7 +25,7 @@
         ExternalHistoryItem,
         ExternalJobSummary,
         ExternalQuotaSummary,
-        ExternalRecoveryMaterial,
+        ExternalConnectionSettingsMaterial,
         ExternalRetentionPolicy,
         ExternalRestoreArea,
         ExternalRestoreSection,
@@ -51,8 +52,9 @@
     let conflicts = $state<Record<string, ExternalConflictSummary[]>>({})
     let conflictCursor = $state<Record<string, ExternalConflictCursor | undefined>>({})
     let quota = $state<Record<string, ExternalQuotaSummary>>({})
-    let recovery = $state<ExternalRecoveryMaterial | null>(null)
-    let recoveryQr = $state('')
+    let recoveryKey = $state('')
+    let connectionSettings = $state<ExternalConnectionSettingsMaterial | null>(null)
+    let connectionSettingsQr = $state('')
     /** The history entry whose restore scope is open, and what is ticked in it. */
     let restoreScope = $state<{ id: string; sections: ExternalRestoreSection[] } | null>(null)
     let pollTimer: ReturnType<typeof setTimeout> | undefined
@@ -80,7 +82,7 @@
         const sections = externalRestorableSections(item)
         if (sections.length === 0) {
             void runJob(connection, 'restore', {
-                snapshotId: item.id,
+                snapshotId: item.snapshotId ?? item.id,
                 restoreAreas: externalRestoreAreas(item, []),
             })
             return
@@ -134,7 +136,7 @@
     async function onConnected(result: ExternalConnectionResult): Promise<void> {
         busy = false
         adding = false
-        if (result.recovery) await displayRecovery(result.recovery)
+        if (result.recovery) recoveryKey = result.recovery.key
         await refreshExternalStorageProductionState()
         await refresh()
         schedulePoll()
@@ -148,7 +150,7 @@
 
     async function runJob(
         connection: ExternalConnectionSummary,
-        job: 'backup' | 'sync' | 'restore' | 'pin-history' | 'resolve-conflict',
+        job: 'backup' | 'sync' | 'restore' | 'pin-history' | 'resolve-conflict' | 'cleanup',
         details: {
             snapshotId?: string
             conflictId?: string
@@ -159,7 +161,7 @@
         if (job === 'restore' && !(await alertConfirm(strings.restore))) return
         busy = true
         try {
-            if (job === 'backup' || job === 'sync') {
+            if (job === 'backup' || job === 'sync' || job === 'cleanup') {
                 const operation = requestExternalStorageNow(connection.id, job)
                 schedulePoll(true)
                 await operation
@@ -193,6 +195,42 @@
                     ...details,
                 })
             }
+            await refresh(true)
+            schedulePoll()
+        } catch (reason) {
+            error = externalErrorMessage(strings, reason)
+        } finally {
+            busy = false
+        }
+    }
+
+    async function deleteHistory(
+        connection: ExternalConnectionSummary,
+        item: ExternalHistoryItem,
+    ): Promise<void> {
+        if (!item.pointId || !item.pointObservation || !item.deletable) return
+        busy = true
+        try {
+            const preparation = await bridge.prepareHistoryDelete(
+                connection.id,
+                item.pointId,
+                item.pointObservation,
+            )
+            if (!preparation.sameDevice
+                && !(await alertConfirm(strings.deleteOtherDeviceConfirm))) return
+            if (preparation.lastRetained
+                && !(await alertConfirm(strings.deleteLastRetainedConfirm))) return
+            if (preparation.sameDevice && !preparation.lastRetained
+                && !(await alertConfirm(strings.deleteHistoryConfirm))) return
+            const operation = requestExternalStorageDeleteHistory(
+                connection.id,
+                item,
+                !preparation.sameDevice,
+                preparation.lastRetained,
+            )
+            schedulePoll(true)
+            await operation
+            await loadHistory(connection, false)
             await refresh(true)
             schedulePoll()
         } catch (reason) {
@@ -398,23 +436,23 @@
         }
     }
 
-    async function displayRecovery(material: ExternalRecoveryMaterial): Promise<void> {
-        recovery = material
+    async function displayConnectionSettings(material: ExternalConnectionSettingsMaterial): Promise<void> {
+        connectionSettings = material
         if (!material.qrPayload) {
-            recoveryQr = ''
+            connectionSettingsQr = ''
             return
         }
         try {
-            recoveryQr = await QRCode.toDataURL(material.qrPayload, { margin: 2, width: 240 })
+            connectionSettingsQr = await QRCode.toDataURL(material.qrPayload, { margin: 2, width: 240 })
         } catch {
-            recoveryQr = ''
+            connectionSettingsQr = ''
         }
     }
 
-    async function createRecovery(connection: ExternalConnectionSummary): Promise<void> {
+    async function createConnectionSettings(connection: ExternalConnectionSummary): Promise<void> {
         busy = true
         try {
-            await displayRecovery(await bridge.beginRecoveryExport(connection.id))
+            await displayConnectionSettings(await bridge.beginConnectionSettingsExport(connection.id))
         } catch (reason) {
             error = externalErrorMessage(strings, reason)
         } finally {
@@ -422,18 +460,22 @@
         }
     }
 
-    async function saveRecoveryFile(): Promise<void> {
-        if (!recovery) return
+    async function saveConnectionSettingsFile(): Promise<void> {
+        if (!connectionSettings) return
         try {
-            await bridge.saveRecoveryFile(recovery.recoveryId)
+            await bridge.saveConnectionSettingsFile(connectionSettings.transferId)
         } catch (reason) {
             error = externalErrorMessage(strings, reason)
         }
     }
 
-    function closeRecovery(): void {
-        recovery = null
-        recoveryQr = ''
+    function closeRecoveryKey(): void {
+        recoveryKey = ''
+    }
+
+    function closeConnectionSettings(): void {
+        connectionSettings = null
+        connectionSettingsQr = ''
     }
 
     async function exportSnapshot(connectionId: string, snapshotId: string): Promise<void> {
@@ -504,6 +546,10 @@
     }
 
     function jobSummary(job: ExternalJobSummary): string {
+        if (job.kind === 'cleanup' && job.state === 'succeeded' && job.result?.deletedObjects !== undefined && job.result.deletedBytes !== undefined) {
+            const summary = strings.cleanupSummary.replace('{0}', job.result.deletedObjects).replace('{1}', bytes(job.result.deletedBytes))
+            return job.result.stopReason === 'complete' ? summary : `${summary} ${strings.cleanupPartial}`
+        }
         const progress = externalJobProgress(job)
         const size = `${bytes(job.completedBytes)}${job.totalBytes ? ` / ${bytes(job.totalBytes)}` : ''}`
         const state = externalJobIsActive(job) ? strings.jobActive[job.kind] : `${strings.jobKinds[job.kind]} · ${jobLabel(job)}`
@@ -539,7 +585,7 @@
 </script>
 
 
-<svelte:window onkeydown={event => { if (event.key === 'Escape' && recovery) closeRecovery() }} />
+<svelte:window onkeydown={event => { if (event.key === 'Escape') { closeRecoveryKey(); closeConnectionSettings() } }} />
 
 <SettingGroup id="risunest-external-storage" title={strings.title} description={strings.help}>
     {#snippet actions()}
@@ -598,7 +644,7 @@
 
                 <div class="actions">
                     {#if job && job.state === 'waiting' && job.error?.action === 'retry' && (job.kind === 'backup' || job.kind === 'sync')}
-                        <SettingButton disabled={busy} onclick={() => runJob(connection, job.kind)}>{strings.retryAction}</SettingButton>
+                        <SettingButton disabled={busy} onclick={() => runJob(connection, job.kind === 'backup' ? 'backup' : 'sync')}>{strings.retryAction}</SettingButton>
                     {/if}
                     <SettingButton disabled={busy || (job && externalJobIsActive(job))} onclick={() => runJob(connection, 'backup')}>{strings.runBackup}</SettingButton>
                     {#if connection.purpose === 'sync'}<SettingButton disabled={busy || (job && externalJobIsActive(job))} onclick={() => runJob(connection, 'sync')}>{strings.runSync}</SettingButton>{/if}
@@ -620,9 +666,10 @@
                                     <span>{historyLine(item)}</span>
                                     <span class="item-actions">
                                         <SettingButton variant="secondary" disabled={!item.complete || !item.verified} onclick={() => beginRestore(connection, item)}>{strings.restore}</SettingButton>
-                                        <SettingButton variant="secondary" disabled={!item.complete || !item.verified} onclick={() => exportSnapshot(connection.id, item.id)}>{strings.download}</SettingButton>
+                                        <SettingButton variant="secondary" disabled={!item.complete || !item.verified} onclick={() => exportSnapshot(connection.id, item.snapshotId ?? item.id)}>{strings.download}</SettingButton>
                                         {#if item.pinned}<SettingButton variant="secondary" disabled>{strings.pinned}</SettingButton>
-                                        {:else}<SettingButton variant="secondary" onclick={() => runJob(connection, 'pin-history', { snapshotId: item.id })}>{strings.pin}</SettingButton>{/if}
+                                        {:else}<SettingButton variant="secondary" onclick={() => runJob(connection, 'pin-history', { snapshotId: item.snapshotId ?? item.id })}>{strings.pin}</SettingButton>{/if}
+                                        {#if item.deletable}<SettingButton variant="secondary" disabled={busy} onclick={() => deleteHistory(connection, item)}>{strings.deleteHistory}</SettingButton>{/if}
                                     </span>
                                 </div>
                                 {#if restoreScope && restoreScope.id === item.id}
@@ -635,12 +682,11 @@
                                             <p class="policy-note">{strings[sectionHelp[section]]}</p>
                                         {/each}
                                         <div class="actions">
-                                            <SettingButton disabled={busy} onclick={() => runJob(connection, 'restore', { snapshotId: item.id, restoreAreas: externalRestoreAreas(item, chosen) })}>{strings.restore}</SettingButton>
+                                            <SettingButton disabled={busy} onclick={() => runJob(connection, 'restore', { snapshotId: item.snapshotId ?? item.id, restoreAreas: externalRestoreAreas(item, chosen) })}>{strings.restore}</SettingButton>
                                             <SettingButton variant="secondary" disabled={busy} onclick={() => { restoreScope = null }}>{strings.cancel}</SettingButton>
                                         </div>
                                     </div>
                                 {/if}
-                                {#if item.warning}<p class="text-xs text-danger-400">{item.warning}</p>{/if}
                             </div>
                         {/each}
                         {#if historyCursor[connection.id]}<div><SettingButton variant="secondary" busy={historyLoading[connection.id]} onclick={() => loadHistory(connection, true)}>{strings.loadMore}</SettingButton></div>{/if}
@@ -703,6 +749,11 @@
                                 </dl>
                             {/if}
                         {/if}
+                        {#if connection.capabilities.snapshotDiscovery && connection.capabilities.leaseOperations && connection.capabilities.deleteObjects}
+                            <SettingButton disabled={busy || connection.status !== 'ready' || storageState.jobs.some(job => job.connectionId === connection.id && externalJobIsActive(job))} onclick={() => runJob(connection, 'cleanup')}>{strings.cleanup}</SettingButton>
+                        {/if}
+                        <p class="text-textcolor2">{strings.retentionHelp} {strings.retentionOtherDevices}</p>
+                        <p class="text-textcolor2">{strings.cleanupTrashNotice} {strings.providerCapacityHelp}</p>
                         <label class="policy-row fixed">
                             <span>{strings.retentionCount}</span>
                             <span class="amount">
@@ -720,7 +771,7 @@
                 {/if}
 
                 <div class="foot">
-                    <SettingButton variant="secondary" onclick={() => createRecovery(connection)}>{strings.recovery}</SettingButton>
+                    <SettingButton variant="secondary" onclick={() => createConnectionSettings(connection)}>{strings.connectionSettings}</SettingButton>
                     <SettingButton variant="danger" disabled={busy} onclick={() => removeConnection(connection)}>{strings.remove}</SettingButton>
                 </div>
             </article>
@@ -729,19 +780,29 @@
     {#if error}<p class="px-4 pb-4 text-sm text-danger-400" role="alert">{error}</p>{/if}
 </SettingGroup>
 
-{#if recovery}
+{#if recoveryKey}
     <div class="fixed inset-0 z-60 flex items-center justify-center bg-black/65 p-4" role="dialog" aria-modal="true" aria-label={strings.recovery}>
         <div class="dialog">
             <h3 class="text-lg font-bold">{strings.recovery}</h3>
             <p class="text-sm text-textcolor2">{strings.recoveryNotice}</p>
-            {#if recoveryQr}<img class="mx-auto rounded bg-white p-2" src={recoveryQr} alt={strings.showRecovery} />
-            {:else}<p class="rounded-md border border-darkborderc bg-darkbg p-3 text-sm">{strings.recoveryFileOnly}</p>{/if}
             <label class="block text-sm">
                 <span class="font-medium">{strings.recoveryCode}</span>
-                <input readonly class="mt-1 w-full select-all rounded border border-darkborderc bg-darkbg p-2 font-mono" value={recovery.code} />
+                <input readonly class="mt-1 w-full select-all rounded border border-darkborderc bg-darkbg p-2 font-mono" value={recoveryKey} />
                 <span class="mt-1 block text-[13px] text-textcolor2">{strings.recoveryCodeHelp}</span>
             </label>
-            <div class="actions"><SettingButton onclick={saveRecoveryFile}>{strings.saveRecovery}</SettingButton><SettingButton variant="secondary" onclick={closeRecovery}>{strings.closeRecovery}</SettingButton></div>
+            <div class="actions"><SettingButton onclick={closeRecoveryKey}>{strings.closeRecovery}</SettingButton></div>
+        </div>
+    </div>
+{/if}
+
+{#if connectionSettings}
+    <div class="fixed inset-0 z-60 flex items-center justify-center bg-black/65 p-4" role="dialog" aria-modal="true" aria-label={strings.connectionSettings}>
+        <div class="dialog">
+            <h3 class="text-lg font-bold">{strings.connectionSettings}</h3>
+            <p class="text-sm text-textcolor2">{strings.connectionSettingsNotice}</p>
+            {#if connectionSettingsQr}<img class="mx-auto rounded bg-white p-2" src={connectionSettingsQr} alt={strings.connectionSettingsQr} />
+            {:else}<p class="rounded-md border border-darkborderc bg-darkbg p-3 text-sm">{strings.connectionSettingsFileOnly}</p>{/if}
+            <div class="actions"><SettingButton onclick={saveConnectionSettingsFile}>{strings.saveConnectionSettings}</SettingButton><SettingButton variant="secondary" onclick={closeConnectionSettings}>{strings.closeRecovery}</SettingButton></div>
         </div>
     </div>
 {/if}

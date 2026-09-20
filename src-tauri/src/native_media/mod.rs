@@ -28,6 +28,7 @@ use tauri::http::{
 use tauri::{AppHandle, Manager};
 
 pub(crate) mod ipc;
+mod animation_policy;
 
 const MAX_BODY_BYTES: u64 = 1024 * 1024;
 const EXPOSED_HEADERS: &str = "Accept-Ranges, Content-Length, Content-Range, Content-Type, ETag";
@@ -65,6 +66,8 @@ pub(crate) struct InlayImageMetadata {
     width: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     height: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    preservation_reason: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -86,7 +89,11 @@ pub(crate) struct InlayEncodeOptions {
     /// Frames per second an animation is thinned down to, or 0 to keep the original rate.
     #[serde(deserialize_with = "deserialize_inlay_animation_fps")]
     animation_max_fps: u32,
+    #[serde(default = "default_animation_decode_bytes")]
+    animation_decode_bytes: u64,
 }
+
+fn default_animation_decode_bytes() -> u64 { 256 * 1024 * 1024 }
 
 fn deserialize_inlay_animation_fps<'de, D>(deserializer: D) -> Result<u32, D::Error>
 where
@@ -159,6 +166,7 @@ impl Default for InlayEncodeOptions {
             max_dimension: 0,
             skip_reencode: false,
             animation_max_fps: 0,
+            animation_decode_bytes: default_animation_decode_bytes(),
         }
     }
 }
@@ -1099,6 +1107,7 @@ fn preserved_inlay_image(
             inlay_type: "image".to_owned(),
             width: size.map(|(width, _)| width),
             height: size.map(|(_, height)| height),
+            preservation_reason: None,
         },
     }
 }
@@ -1355,6 +1364,7 @@ fn encode_animated_inlay_image(
             inlay_type: "image".to_owned(),
             width: Some(width),
             height: Some(height),
+            preservation_reason: None,
         },
         data: encoded,
     })
@@ -1375,6 +1385,11 @@ fn encode_inlay_image(
     };
     if let Some(source) = inlay_animation(format, data) {
         if options.format != InlayEncodeFormat::Original {
+            if !animation_policy::permits_decode(data, source, options.animation_decode_bytes) {
+                let mut preserved = preserved_inlay_image(id, data, name, None);
+                preserved.metadata.preservation_reason = Some("animation-cost".to_owned());
+                return Ok(preserved);
+            }
             if let Ok(encoded) = encode_animated_inlay_image(id, data, name, &options, source) {
                 return Ok(encoded);
             }
@@ -1395,16 +1410,23 @@ fn encode_inlay_image(
         return Ok(preserved_inlay_image(id, data, name, None));
     };
     let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
+    let (mut width, mut height) = decoder.dimensions();
+    if matches!(orientation, Orientation::Rotate90 | Orientation::Rotate270
+        | Orientation::Rotate90FlipH | Orientation::Rotate270FlipH)
+    {
+        std::mem::swap(&mut width, &mut height);
+    }
+    let needs_resize = options.max_dimension > 0 && width.max(height) > options.max_dimension;
+    if options.format == InlayEncodeFormat::Original
+        || (options.format == InlayEncodeFormat::Webp && options.skip_reencode
+            && format == ImageFormat::WebP && !needs_resize)
+    {
+        return Ok(preserved_inlay_image(id, data, name, Some((width, height))));
+    }
     let Ok(mut decoded) = DynamicImage::from_decoder(decoder) else {
         return Ok(preserved_inlay_image(id, data, name, None));
     };
     decoded.apply_orientation(orientation);
-    let width = decoded.width();
-    let height = decoded.height();
-    if options.format == InlayEncodeFormat::Original {
-        return Ok(preserved_inlay_image(id, data, name, Some((width, height))));
-    }
-    let needs_resize = options.max_dimension > 0 && width.max(height) > options.max_dimension;
     if needs_resize {
         let scale = options.max_dimension as f64 / width.max(height) as f64;
         decoded = decoded.resize(
@@ -1413,20 +1435,16 @@ fn encode_inlay_image(
             FilterType::Lanczos3,
         );
     }
-    let rgba = decoded.to_rgba8();
+    let rgba = decoded.into_rgba8();
+    let (output_width, output_height) = rgba.dimensions();
     let (encoded, mime, ext) = match options.format {
         InlayEncodeFormat::Original => unreachable!(),
         InlayEncodeFormat::Png => {
             let mut value = Vec::new();
-            DynamicImage::ImageRgba8(rgba.clone())
+            DynamicImage::ImageRgba8(rgba)
                 .write_to(&mut Cursor::new(&mut value), ImageFormat::Png)
                 .map_err(|error| format!("failed to encode PNG Inlay image: {error}"))?;
             (value, "image/png", "png")
-        }
-        InlayEncodeFormat::Webp
-            if options.skip_reencode && format == ImageFormat::WebP && !needs_resize =>
-        {
-            (data.to_vec(), "image/webp", "webp")
         }
         InlayEncodeFormat::Webp => (
             webp::Encoder::from_rgba(rgba.as_raw(), rgba.width(), rgba.height())
@@ -1444,8 +1462,9 @@ fn encode_inlay_image(
         name: name.to_owned(),
         ext: ext.to_owned(),
         inlay_type: "image".to_owned(),
-        width: Some(rgba.width()),
-        height: Some(rgba.height()),
+        width: Some(output_width),
+        height: Some(output_height),
+        preservation_reason: None,
     };
     Ok(EncodedInlayImage {
         data: encoded,

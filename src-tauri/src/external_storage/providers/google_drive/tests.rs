@@ -550,7 +550,7 @@ fn create_mode_reserves_a_head_identifier_in_an_empty_location() {
 }
 
 #[test]
-fn resume_create_accepts_only_an_empty_or_single_descriptor_control_layout() {
+fn resume_create_accepts_only_an_empty_or_bootstrap_descriptor_control_layout() {
     runtime().block_on(async {
         let test = deps_with(Some(stored_secret(NOW_MS + 3_600_000)));
         let provider = provider_of(&test.dependencies);
@@ -628,15 +628,19 @@ fn resume_create_accepts_only_an_empty_or_single_descriptor_control_layout() {
             ErrorKind::PreconditionFailed
         );
 
-        let duplicate = WireServer::start(vec![
+        let too_many = WireServer::start(vec![
             about_reply(),
             folder_reply(),
-            control_reply(vec![descriptor_file("desc-1"), descriptor_file("desc-2")]),
+            control_reply(vec![
+                descriptor_file("desc-1"),
+                descriptor_file("desc-2"),
+                descriptor_file("desc-3"),
+            ]),
         ]);
         assert_eq!(
             provider
                 .open_repository(
-                    &connection(duplicate.url.as_str()),
+                    &connection(too_many.url.as_str()),
                     &secret_ref(),
                     OpenMode::ResumeCreate,
                     &cancel,
@@ -2070,7 +2074,7 @@ fn authorization_uses_the_platform_client_and_the_per_file_scope() {
     assert_eq!(android.client_id, client_id("android"));
     assert_eq!(
         android.redirect_url.as_str(),
-        "https://update.rsyumi.workers.dev/oauth/google-drive-callback.html"
+        "https://update.rsyumi.workers.dev/oauth/google-drive-callback"
     );
     let mut custom = config.clone();
     custom.location.insert(
@@ -2248,6 +2252,8 @@ fn deleting_checks_the_parent_and_role_of_the_file_before_removing_it() {
         replies.push(error_reply(404, "notFound"));
         replies.push(json_reply(200, member("descriptor", FOLDER)));
         replies.push(json_reply(200, member("pack", "another-folder")));
+        replies.push(json_reply(200, member("inventoryPage", FOLDER)));
+        replies.push(Reply::Http { status: 204, headers: vec![], body: Vec::new() });
         let server = WireServer::start(replies);
         let test = deps_with(Some(stored_secret(NOW_MS + 3_600_000)));
         let cancel = Cancellation::default();
@@ -2292,8 +2298,10 @@ fn deleting_checks_the_parent_and_role_of_the_file_before_removing_it() {
             );
         }
 
+        provider.delete_object(&repository, &locator("inventory-file"), &cancel).await.unwrap();
         let lines = request_lines(&server);
-        assert_eq!(lines.len(), 8);
+        assert_eq!(lines.len(), 10);
+        assert_eq!(lines[9], "DELETE /synthetic/drive/v3/files/inventory-file HTTP/1.1");
         assert!(lines[3].contains("fields=id%2Cparents%2CappProperties"));
         assert_eq!(
             lines[4],

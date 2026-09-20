@@ -424,15 +424,15 @@ fn create_refuses_an_occupied_root_and_existing_requires_the_descriptor_collecti
 fn create_builds_the_root_and_every_role_collection_without_touching_ancestors() {
     runtime().block_on(async {
         let mut replies = vec![reply(404, &[], b"")];
-        replies.extend((0..7).map(|_| reply(201, &[], b"")));
+        replies.extend((0..8).map(|_| reply(201, &[], b"")));
         let harness = Harness::start(replies);
         harness.open(OpenMode::Create).await.unwrap();
-        assert_eq!(harness.count(), 8);
+        assert_eq!(harness.count(), 9);
         assert_eq!(
             harness.line(1),
             format!("MKCOL {}/ HTTP/1.1", encoded_root())
         );
-        let created: Vec<String> = (2..8).map(|index| harness.line(index)).collect();
+        let created: Vec<String> = (2..9).map(|index| harness.line(index)).collect();
         for folder in ROLE_FOLDERS {
             assert!(
                 created.contains(&format!("MKCOL {}/{folder}/ HTTP/1.1", encoded_root())),
@@ -442,10 +442,10 @@ fn create_builds_the_root_and_every_role_collection_without_touching_ancestors()
 
         // An empty root that already exists is reused; only its contents decide.
         let mut existing = vec![root_listing(Vec::new())];
-        existing.extend((0..6).map(|_| reply(405, &[], b"")));
+        existing.extend((0..7).map(|_| reply(405, &[], b"")));
         let reuse = Harness::start(existing);
         reuse.open(OpenMode::Create).await.unwrap();
-        assert_eq!(reuse.count(), 7);
+        assert_eq!(reuse.count(), 8);
         assert!(reuse.line(1).starts_with("MKCOL "));
     });
 }
@@ -949,6 +949,11 @@ fn resume_create_rejects_foreign_role_contents_duplicate_descriptors_and_incompl
                         64,
                         None,
                     ),
+                    object_response(
+                        &format!("{}/{DESCRIPTOR_FOLDER}/descriptor-c", encoded_root()),
+                        64,
+                        None,
+                    ),
                 ],
             ),
         ]);
@@ -1059,15 +1064,10 @@ fn listings_page_by_name_with_a_cursor_and_reject_limits_outside_the_range() {
                     Some("\"snap\""),
                 )
             }));
-            // A member that is gone and a nested collection are both skipped.
-            responses.push(format!(
-                "<D:response><D:href>{folder}/ghost</D:href>\
-                 <D:status>HTTP/1.1 404 Not Found</D:status></D:response>"
-            ));
             responses.push(collection_response(&format!("{folder}/nested/")));
             multistatus_reply(&responses)
         };
-        let harness = Harness::start(vec![established_root(), page(), page()]);
+        let harness = Harness::start(vec![established_root(), page()]);
         let repository = harness.opened().await;
 
         let first = harness
@@ -1090,7 +1090,7 @@ fn listings_page_by_name_with_a_cursor_and_reject_limits_outside_the_range() {
         assert_eq!(first.objects[0].byte_length, 10);
         assert_eq!(first.objects[1].byte_length, 20);
         assert!(first.objects.iter().all(|object| object.complete));
-        assert_eq!(first.next_cursor.as_deref(), Some("snap-b"));
+        assert!(first.next_cursor.is_some());
         assert_eq!(harness.line(1), format!("PROPFIND {folder}/ HTTP/1.1"));
         assert_eq!(harness.header(1, "depth").as_deref(), Some("1"));
 
@@ -1126,7 +1126,7 @@ fn listings_page_by_name_with_a_cursor_and_reject_limits_outside_the_range() {
                 ErrorKind::Unsupported
             );
         }
-        assert_eq!(harness.count(), 3);
+        assert_eq!(harness.count(), 2);
     });
 }
 
@@ -1518,5 +1518,49 @@ fn the_lease_collection_is_its_own_member_of_the_root() {
             harness.line(2),
             format!("DELETE {}/leases/{name} HTTP/1.1", encoded_root())
         );
+    });
+}
+
+#[test]
+fn incomplete_or_oversized_listing_never_produces_a_page() {
+    runtime().block_on(async {
+        let folder = format!("{}/snapshots", encoded_root());
+        let failed = format!("<D:response><D:href>{folder}/hidden</D:href><D:status>HTTP/1.1 403 Forbidden</D:status></D:response>");
+        let oversized = vec![b' '; 16 * 1024 * 1024 + 1];
+        for listing in [
+            multistatus_reply(&[collection_response(&format!("{folder}/")), failed]),
+            multistatus_reply(&[collection_response(&format!("{folder}/")), object_response("/foreign/object", 4, None)]),
+            reply(207, &[], b"<D:multistatus xmlns:D=\"DAV:\"><D:response>"),
+            multistatus_reply(&[collection_response(&format!("{folder}/")),
+                format!("<D:response><D:response><D:href>{folder}/hidden</D:href></D:response></D:response>")]),
+            reply(207, &[], &oversized),
+        ] {
+            let harness = Harness::start(vec![established_root(), listing]);
+            let repository = harness.opened().await;
+            assert!(harness.provider.list_objects(&repository, Collection::Snapshots, None, 2,
+                &Cancellation::default()).await.is_err());
+        }
+    });
+}
+
+#[test]
+fn a_new_enumeration_is_fresh_and_expired_cursors_cannot_authorize_empty_results() {
+    runtime().block_on(async {
+        let folder = format!("{}/snapshots", encoded_root());
+        let listing = || folder_listing("snapshots", vec![
+            object_response(&format!("{folder}/a"), 1, None),
+            object_response(&format!("{folder}/b"), 1, None),
+        ]);
+        let harness = Harness::start(vec![established_root(), listing(), folder_listing("snapshots", vec![])]);
+        let repository = harness.opened().await;
+        let first = harness.provider.list_objects(&repository, Collection::Snapshots, None, 1,
+            &Cancellation::default()).await.unwrap();
+        harness.test.clock.set(NOW_MS + 5 * 60 * 1000);
+        assert!(harness.provider.list_objects(&repository, Collection::Snapshots, first.next_cursor.as_deref(), 1,
+            &Cancellation::default()).await.is_err());
+        let fresh = harness.provider.list_objects(&repository, Collection::Snapshots, None, 1,
+            &Cancellation::default()).await.unwrap();
+        assert!(fresh.objects.is_empty());
+        assert_eq!(harness.count(), 3);
     });
 }

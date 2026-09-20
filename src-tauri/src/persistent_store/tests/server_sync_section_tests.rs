@@ -576,6 +576,51 @@ fn a_prepared_section_ack_does_not_ack_a_later_value_or_removal() {
     fleet.task.abort();
 }
 
+#[test]
+fn section_only_plugin_refresh_is_retained_across_activation_confirmation() {
+    for (participating, local_edit) in [(true, false), (false, false), (true, true)] {
+        let fleet = fleet();
+        let (_author_dir, mut author) = prepared();
+        let (_reader_dir, mut reader) = prepared();
+        for store in [&mut author, &mut reader] {
+            store.device_store_mut().unwrap()
+                .set_section_participating(Section::LocalPlugins, true).unwrap();
+            fleet.bind(store);
+            assert_eq!(settle(store).phase, "idle");
+        }
+        author.device_store_mut().unwrap().write_plugin_device_values("synthetic-plugin", &[
+            PluginDeviceMutation::Set { space: "string".into(), key: "received".into(), value: "new".into() },
+        ]).unwrap();
+        assert_eq!(settle(&mut author).phase, "idle");
+        assert_eq!(settle(&mut author).phase, "idle");
+        let crate::persistent_store::server_sync_engine::Preparation::Ready(mut ready) = reader
+            .server_prepare_cycle(&CycleOptions::default()).unwrap()
+        else { panic!("expected preparation") };
+        assert_eq!(ready.applied, 0);
+        if local_edit {
+            let mut root = reader.read_root(None).unwrap().value;
+            root["username"] = json!("local edit after preparation");
+            reader.commit(&WorkingSetCommit {
+                root: Some(root), ..empty_working_set_commit(ready.revision)
+            }).unwrap();
+            assert_eq!(reader.server_activate_cycle(&mut ready).unwrap_err().code, "local-revision-changed");
+            assert_eq!(reader.device_store().unwrap()
+                .read_plugin_device_value("synthetic-plugin", "string", "received").unwrap(), None);
+            fleet.task.abort();
+            continue;
+        }
+        if !participating {
+            reader.device_store_mut().unwrap()
+                .set_section_participating(Section::LocalPlugins, false).unwrap();
+        }
+        let revision = reader.server_activate_cycle(&mut ready).unwrap();
+        assert_eq!(ready.plugin_changes(), (participating, participating));
+        assert_eq!(reader.server_activate_cycle(&mut ready).unwrap(), revision);
+        assert_eq!(ready.plugin_changes(), (participating, participating));
+        fleet.task.abort();
+    }
+}
+
 /// Invariant 18. A choice made after a cycle was planned cancels that cycle's
 /// section work instead of carrying out the previous choice.
 #[test]
@@ -1030,4 +1075,48 @@ fn leaving_a_section_keeps_the_mirror_and_taking_one_on_rebuilds_it() {
     assert!(rebuilt_the_mirror(&fleet, mark));
     assert_eq!(read_vector(&reader, 21), read_vector(&author, 21));
     fleet.task.abort();
+}
+
+#[test]
+fn prepared_section_values_apply_before_loading_the_next_and_roll_back_on_late_failure() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = PersistentStore::open(directory.path()).unwrap();
+    store.connection.execute_batch("CREATE TEMP TABLE server_section_records(domain TEXT,key TEXT,action TEXT,remote TEXT,version TEXT,PRIMARY KEY(domain,key));").unwrap();
+    for index in 0..514 {
+        store.connection.execute("INSERT INTO server_section_records VALUES(?1,?2,'apply','remote','version')", params![Domain::LocalPlugins.as_str(), format!("key-{index:04}")]).unwrap();
+    }
+    let before = store.device_store().unwrap().section_state(Section::LocalPlugins).unwrap();
+    let payload = "v".repeat(8192);
+    let mut loaded = 0;
+    let result = store.write_prepared_server_sections(|_, key, _, _, _| {
+        loaded += 1;
+        if loaded == 514 { return Err(crate::server_sync::SyncError::new("synthetic-read-failure", 500)); }
+        Ok(Some(sections::SectionWrite::Apply {
+            domain: Domain::LocalPlugins, entry: plugin_entry(key, 10, "remote", Some(&payload)), object: None,
+        }))
+    });
+    assert!(result.is_err());
+    assert_eq!(loaded, 514);
+    assert!(plugin_rows(&store).is_empty());
+    assert_eq!(store.device_store().unwrap().section_state(Section::LocalPlugins).unwrap(), before);
+
+    let first = plugin_entry("key-0000", 10, "remote", Some("original"));
+    apply_over_the_ledger(&mut store, &first).unwrap();
+    loaded = 0;
+    let result = store.write_prepared_server_sections(|_, key, _, _, _| {
+        loaded += 1;
+        Ok(Some(sections::SectionWrite::Apply {
+            domain: Domain::LocalPlugins, entry: plugin_entry(key, 10, "remote", Some(&payload)), object: None,
+        }))
+    });
+    assert!(result.is_err());
+    assert_eq!(loaded, 1, "a conflicting value must stop before loading later bodies");
+    assert_eq!(plugin_rows(&store)[0].value.as_deref(), Some("original"));
+
+    store.write_prepared_server_sections(|_, key, _, _, _| Ok(Some(sections::SectionWrite::Apply {
+        domain: Domain::LocalPlugins, entry: plugin_entry(key, 11, "remote", Some(&payload)), object: None,
+    }))).unwrap();
+    let rows = plugin_rows(&store);
+    assert_eq!(rows.len(), 514);
+    assert!(rows.iter().all(|row| row.value.as_deref() == Some(payload.as_str())));
 }

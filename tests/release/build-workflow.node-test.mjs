@@ -1,24 +1,95 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { runInNewContext } from "node:vm";
 
 const workflow = readFileSync(new URL("../../.github/workflows/release.yml", import.meta.url), "utf8").replace(/\r\n/g, "\n");
+const stableWorkflow = readFileSync(new URL("../../.github/workflows/stable-release.yml", import.meta.url), "utf8").replace(/\r\n/g, "\n");
 const cacheWorkflow = readFileSync(new URL("../../.github/workflows/release-cache.yml", import.meta.url), "utf8").replace(/\r\n/g, "\n");
 const checkWorkflow = readFileSync(new URL("../../.github/workflows/release-check.yml", import.meta.url), "utf8").replace(/\r\n/g, "\n");
 
 test("both products and pull requests run shared native signature and catalog tests", () => {
   const commonTests = workflow.slice(workflow.indexOf("\n  release-tooling-tests:\n"), workflow.indexOf("\n  app-web-tests:\n"));
-  assert.doesNotMatch(commonTests, /if: inputs\.product/);
+  assert.doesNotMatch(commonTests, /\n    if: inputs\.product/);
   for (const contents of [commonTests, checkWorkflow]) {
     assert.match(contents, /uses: dtolnay\/rust-toolchain@1\.97\.1/);
-    assert.match(contents, /cargo test --manifest-path crates\/release-update\/Cargo\.toml --release --locked/);
   }
+  assert.match(commonTests, /pnpm test:protocol/);
+  assert.match(commonTests, /pnpm test:node/);
+  assert.match(commonTests, /pnpm test --project harness/);
+  assert.doesNotMatch(commonTests, /pnpm test:release/);
+  assert.match(checkWorkflow, /cargo test --manifest-path crates\/release-update\/Cargo\.toml --release --locked/);
   assert.match(workflow, /needs: \[source, release-tooling-tests,/);
+});
+
+function assertRequiredVerificationGates(contents) {
+  const preparation = contents.slice(contents.indexOf("\n  prepare-draft:\n"));
+  const expression = /if: >-\n([\s\S]*?)\n    needs:/.exec(preparation)?.[1];
+  const dependencies = /needs: \[([^\]]+)\]/.exec(preparation)?.[1].split(",").map(value => value.trim());
+  assert(expression && dependencies, "Missing preparation gate");
+  const shared = ["source", "release-tooling-tests", "endpoint-registry-tests", "shared-wasm-tests"];
+  const products = {
+    app: ["app-web-tests", "app-native-tests", "app-android-tests", "app-ios-tests"],
+    sync: ["sync-tests", "sync-gui-tests"],
+  };
+  const all = [...shared, ...products.app, ...products.sync];
+  for (const job of all) assert(dependencies.includes(job), `Missing dependency: ${job}`);
+  const permits = (product, results) => runInNewContext(expression
+    .replace(/always\(\)/g, "true")
+    .replace(/inputs\.product/g, JSON.stringify(product))
+    .replace(/needs\.([\w-]+)\.result/g, (_, job) => JSON.stringify(results[job])),
+  Object.create(null), { timeout: 100, contextCodeGeneration: { strings: false, wasm: false } });
+  for (const product of Object.keys(products)) {
+    const baseline = Object.fromEntries(all.map(job => [job, "skipped"]));
+    for (const job of [...shared, ...products[product]]) baseline[job] = "success";
+    assert.equal(permits(product, baseline), true, `${product} successful verification`);
+    for (const job of [...shared, ...products[product]]) {
+      for (const result of ["failure", "cancelled", "skipped"]) {
+        assert.equal(permits(product, { ...baseline, [job]: result }), false, `${product}: ${job} ${result}`);
+      }
+    }
+  }
+}
+
+test("failed or cancelled mandatory checks cannot prepare either release", () => {
+  assertRequiredVerificationGates(workflow);
+  for (const job of ["endpoint-registry-tests", "shared-wasm-tests"]) {
+    assert.throws(() => assertRequiredVerificationGates(workflow.replace(`${job}, `, "")), /Missing dependency/);
+    assert.throws(() => assertRequiredVerificationGates(workflow.replace(new RegExp(`needs\\.${job}\\.result == 'success' &&\\s*`), "")));
+    const block = new RegExp(`\\n  ${job}:\\n([\\s\\S]*?)(?=\\n  [a-z][\\w-]*:|$)`).exec(workflow)?.[1];
+    assert(block);
+    assert.match(block, /needs: source/);
+    assert.match(block, /ref: "\$\{\{ needs\.source\.outputs\.source_commit \}\}"/);
+    assert.doesNotMatch(block, /if: inputs\.product|secrets\./);
+  }
+});
+
+test("WASM jobs verify native artifacts afterward and Android includes barcode tests", () => {
+  assert.match(workflow, /pnpm test:wasm[\s\S]*dbus-run-session -- bash scripts\/linux-native-tests\.sh --lib external_storage/);
+  assert.match(workflow, /:app:testLowMemorySafCopy :tauri-plugin-barcode-scanner:testDebugUnitTest/);
+  assert.match(workflow, /pnpm test --project app --project app-extended/);
 });
 
 test("release source input uses one run timestamp instead of the commit timestamp", () => {
   assert.match(workflow, /published_at=\$\(date -u/);
   assert.doesNotMatch(workflow, /git show[^\n]*--format=%cI/);
+});
+
+test("stable tags publish automatically only from commits contained in main", () => {
+  assert.match(stableWorkflow, /tags:\n\s+- "app-v\*"\n\s+- "sync-v\*"/);
+  assert.match(stableWorkflow, /source_ref: \$\{\{ github\.sha \}\}/);
+  assert.match(stableWorkflow, /publish: true/);
+  assert.match(workflow, /fetch-depth: 0/);
+  assert.match(workflow, /if \[\[ "\$GITHUB_EVENT_NAME" == "push" \]\]/);
+  assert.match(workflow, /test "\$GITHUB_REF_TYPE" = "tag"/);
+  assert.match(workflow, /git merge-base --is-ancestor "\$source_commit" refs\/remotes\/origin\/main/);
+  assert.match(workflow, /git rev-parse "\$TAG\^\{commit\}"/);
+});
+
+test("manual release runs default to a non-publishing main rehearsal", () => {
+  const dispatch = workflow.slice(workflow.indexOf("  workflow_dispatch:"), workflow.indexOf("\npermissions:"));
+  assert.match(dispatch, /source_ref:\n\s+description:[^\n]+\n\s+type: string\n\s+default: main/);
+  assert.match(dispatch, /publish:\n\s+description:[^\n]+\n\s+type: boolean\n\s+default: false/);
 });
 
 test("stable release runs serialize per tag while different tags can build together", () => {
@@ -31,9 +102,34 @@ test("stable release runs serialize per tag while different tags can build toget
 test("private signing material is scoped to signing steps", () => {
   const globalEnvironment = workflow.slice(workflow.indexOf("\nenv:\n"), workflow.indexOf("\njobs:\n"));
   assert.doesNotMatch(globalEnvironment, /TAURI_SIGNING_PRIVATE_KEY|ANDROID_KEYSTORE/);
-  const sourceAndTests = workflow.slice(workflow.indexOf("\n  source:\n"), workflow.indexOf("\n  prepare-draft:\n"));
-  assert.doesNotMatch(sourceAndTests, /TAURI_PRIVATE_KEY|ANDROID_KEYSTORE_BASE64/);
-  assert.equal((workflow.match(/^\s+ANDROID_KEYSTORE_BASE64:/gm) ?? []).length, 1);
+  const source = workflow.slice(workflow.indexOf("\n  source:\n"), workflow.indexOf("\n  release-tooling-tests:\n"));
+  assert.doesNotMatch(source, /TAURI_PRIVATE_KEY|ANDROID_KEYSTORE_BASE64/);
+  const tooling = workflow.slice(workflow.indexOf("\n  release-tooling-tests:\n"), workflow.indexOf("\n  app-web-tests:\n"));
+  const appPreflight = tooling.slice(tooling.indexOf("      - name: Preflight app signing inputs\n"),
+    tooling.indexOf("      - name: Preflight Sync signing inputs\n"));
+  const syncPreflight = tooling.slice(tooling.indexOf("      - name: Preflight Sync signing inputs\n"),
+    tooling.indexOf("      - name: Clean signing preflight files\n"));
+  for (const secret of [
+    "TAURI_PRIVATE_KEY",
+    "TAURI_KEY_PASSWORD",
+    "RISUNEST_UPDATE_PUBLIC_KEY",
+  ]) {
+    assert.match(appPreflight, new RegExp(`secrets\\.${secret}`));
+    assert.match(syncPreflight, new RegExp(`secrets\\.${secret}`));
+  }
+  for (const secret of [
+    "ANDROID_KEYSTORE_BASE64",
+    "ANDROID_KEYSTORE_PASSWORD",
+    "ANDROID_KEY_ALIAS",
+    "ANDROID_KEY_PASSWORD",
+  ]) {
+    assert.match(appPreflight, new RegExp(`secrets\\.${secret}`));
+    assert.doesNotMatch(syncPreflight, new RegExp(`secrets\\.${secret}`));
+  }
+  assert.doesNotMatch(appPreflight, /secrets\.RISUNEST_DEFAULT_REGISTRY_URL/);
+  assert.match(syncPreflight, /secrets\.RISUNEST_DEFAULT_REGISTRY_URL/);
+  assert.match(tooling, /uses: actions\/setup-java@v5\n\s+if: inputs\.product == 'app'/);
+  assert.match(tooling, /name: Clean signing preflight files\n\s+if: always\(\)/);
 });
 
 test("release caches retain downloads without unpacked dependency trees", () => {

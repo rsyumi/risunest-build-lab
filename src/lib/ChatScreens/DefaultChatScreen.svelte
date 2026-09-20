@@ -7,6 +7,7 @@
     import { CameraIcon, DatabaseIcon, DicesIcon, GlobeIcon, ImagePlusIcon, LanguagesIcon, Laugh, MenuIcon, MicOffIcon, PackageIcon, Plus, RefreshCcwIcon, ReplyIcon, Send, StepForwardIcon, XIcon, BrainIcon, ArrowDown, SparkleIcon } from "@lucide/svelte";
     import { selectedCharID, PlaygroundStore, createSimpleCharacter, hypaV3ModalOpen, ScrollToMessageStore, additionalChatMenu, additionalFloatingActionButtons, easyPanelStore, chatPanelStore } from "../../ts/stores.svelte";
     import { onDestroy } from 'svelte';
+    import { isCompositionKey } from 'src/ts/hotkeyModifier';
     import { type Chat as ChatRecord, type Database, type character, type groupChat, type Message } from "../../ts/storage/database.svelte";
     import { DBState } from 'src/ts/stores.svelte';
     import { chatProcessStage, doingChat, sendChat, notifyGenerationCompletion } from "../../ts/process/index.svelte";
@@ -60,8 +61,8 @@
     } from 'src/ts/chatScreenshotSourceLease';
     import { canExportLongScreenshotArchive, captureChatScreenshot, createDomScreenshotEncoder, type ChatScreenshotSurface } from 'src/ts/chatScreenshotCapture';
     import { createStreamingScreenshotArchive } from 'src/ts/chatScreenshotArchive';
-    import { createAndroidScreenshotArchiveWriter, createNativeScreenshotArchiveWriter, describeScreenshotPublicationError } from 'src/ts/nativeScreenshotArchiveWriter';
-    import { isTauri, isTauriAndroid, isTauriDesktop } from 'src/ts/platform';
+    import { createAndroidScreenshotArchiveWriter, createIOSScreenshotArchiveWriter, createNativeScreenshotArchiveWriter, describeScreenshotPublicationError } from 'src/ts/nativeScreenshotArchiveWriter';
+    import { isTauri, isTauriAndroid, isTauriDesktop, isTauriIOS } from 'src/ts/platform';
     import { isAndroidSafFileJobsEnabled } from 'src/ts/storage/androidSafBridge';
     import { getModuleAssets, getModuleLorebooks, getModuleRegexScripts, getModules, getModuleTriggers } from 'src/ts/process/modules';
     import { ColorSchemeTypeStore } from 'src/ts/gui/colorscheme';
@@ -994,12 +995,16 @@
                         if (!canExportLongScreenshotArchive(
                             isTauri,
                             isTauriDesktop,
-                            androidSafReady,
+                            androidSafReady || isTauriIOS,
                         )) {
                             throw new Error(language.screenshotLongNativeUnavailable)
                         }
                         if (isTauriDesktop) {
                             const writer = await createNativeScreenshotArchiveWriter(`${fileBase}.zip`)
+                            return createStreamingScreenshotArchive(writer)
+                        }
+                        if (isTauriIOS) {
+                            const writer = await createIOSScreenshotArchiveWriter(`${fileBase}.zip`)
                             return createStreamingScreenshotArchive(writer)
                         }
                         if (androidSafReady) {
@@ -1171,7 +1176,8 @@
                           bind:value={messageInput}
                           bind:this={inputEle}
                           onkeydown={(e) => {
-                        if(e.key.toLocaleLowerCase() === "enter" && !e.isComposing){
+                        if (isCompositionKey(e)) return;
+                        if(e.key.toLocaleLowerCase() === "enter"){
                             if(DBState.db.sendWithEnter && (!e.shiftKey)){
                                 send()
                                 e.preventDefault()
@@ -1275,7 +1281,8 @@
                               bind:value={messageInputTranslate}
                               bind:this={inputTranslateEle}
                               onkeydown={(e) => {
-                            if(e.key.toLocaleLowerCase() === "enter" && (!e.shiftKey) && !e.isComposing){
+                            if (isCompositionKey(e)) return;
+                            if(e.key.toLocaleLowerCase() === "enter" && (!e.shiftKey)){
                                 if(DBState.db.sendWithEnter){
                                     send()
                                     e.preventDefault()

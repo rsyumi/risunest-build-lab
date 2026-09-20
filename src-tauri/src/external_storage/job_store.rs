@@ -13,6 +13,7 @@ pub(crate) enum JobKind {
     Sync,
     Restore,
     PinHistory,
+    DeleteHistory,
     ResolveConflict,
     Cleanup,
 }
@@ -22,6 +23,10 @@ pub(crate) struct StartJobRequest {
     pub connection_id: String,
     pub kind: JobKind,
     pub snapshot_id: Option<String>,
+    pub point_id: Option<String>,
+    pub point_observation: Option<String>,
+    pub confirm_other_device: Option<bool>,
+    pub confirm_last_retained: Option<bool>,
     pub conflict_id: Option<String>,
     pub choice: Option<String>,
     pub restore_areas: Option<Vec<String>>,
@@ -43,6 +48,10 @@ impl StartJobRequest {
         // A removal is described entirely by the connection it runs on.
         if self.kind == JobKind::Cleanup
             && (self.snapshot_id.is_some()
+                || self.point_id.is_some()
+                || self.point_observation.is_some()
+                || self.confirm_other_device.is_some()
+                || self.confirm_last_retained.is_some()
                 || self.conflict_id.is_some()
                 || self.choice.is_some()
                 || self.restore_areas.is_some()
@@ -50,11 +59,29 @@ impl StartJobRequest {
         {
             return Err(ProviderError::new(ErrorKind::Corrupt));
         }
-        if !valid(&self.connection_id)
-            || [&self.snapshot_id, &self.conflict_id, &self.session_id]
+        let delete_history = self.kind == JobKind::DeleteHistory;
+        if delete_history
+            != (self.point_id.is_some()
+                && self.point_observation.is_some()
+                && self.confirm_other_device.is_some()
+                && self.confirm_last_retained.is_some())
+            || (!delete_history
+                && (self.point_id.is_some()
+                    || self.point_observation.is_some()
+                    || self.confirm_other_device.is_some()
+                    || self.confirm_last_retained.is_some()))
+            || (delete_history
+                && (self.snapshot_id.is_some()
+                    || self.conflict_id.is_some()
+                    || self.choice.is_some()
+                    || self.restore_areas.is_some()
+                    || self.target_revision.is_some()))
+            || !valid(&self.connection_id)
+            || [&self.snapshot_id, &self.point_id, &self.conflict_id, &self.session_id]
                 .into_iter()
                 .flatten()
                 .any(|s| !valid(s))
+            || self.point_observation.as_ref().is_some_and(|s| s.is_empty() || s.len() > 256 * 1024 || s.contains('\0'))
             || self
                 .target_revision
                 .as_ref()
@@ -122,6 +149,16 @@ impl DurableJob {
             receive_staging_id: None,
         }
     }
+    pub fn with_restore_id(mut self, id: String) -> Result<Self> {
+        if self.request.kind != JobKind::Restore
+            || uuid::Uuid::parse_str(&id).ok().is_none_or(|parsed| parsed.to_string() != id)
+        {
+            return Err(ProviderError::new(ErrorKind::PreconditionFailed));
+        }
+        self.summary["id"] = json!(id);
+        self.id = id;
+        Ok(self)
+    }
     pub fn terminal(&self) -> bool {
         matches!(
             self.summary["state"].as_str(),
@@ -173,6 +210,17 @@ impl JobStore {
             return Err(ProviderError::new(ErrorKind::PreconditionFailed));
         }
         Ok(())
+    }
+    /// Unlike put, a retried start must never replace a worker's durable state.
+    pub fn insert_new(&self, job: &DurableJob) -> Result<bool> {
+        let encoded = serde_json::to_string(job).map_err(failure)?;
+        Ok(self.0.execute(
+            "INSERT OR IGNORE INTO external_requests
+             SELECT ?1,?2,?3 WHERE NOT EXISTS(
+                 SELECT 1 FROM external_requests WHERE connection_id=?2
+                 AND COALESCE(json_extract(value,'$.summary.state'),'') NOT IN ('succeeded','failed','cancelled'))",
+            rusqlite::params![job.id, job.request.connection_id, encoded],
+        ).map_err(failure)? == 1)
     }
     pub fn read(&self, id: &str) -> Result<DurableJob> {
         let bytes: Option<String> = self
@@ -389,6 +437,39 @@ mod tests {
         }
     }
     #[test]
+    fn a_retried_restore_start_never_overwrites_its_original_job() {
+        let root = tempfile::tempdir().unwrap();
+        let jobs = JobStore::open(root.path()).unwrap();
+        let input = serde_json::from_value(json!({
+            "connectionId":"synthetic", "kind":"restore",
+            "snapshotId":"snapshot", "targetRevision":"1"
+        })).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        let queued = DurableJob::new(input, false, 1, identity())
+            .with_restore_id(id.clone()).unwrap();
+        assert_eq!(queued.summary["id"], id);
+        assert!(jobs.insert_new(&queued).unwrap());
+        let mut running = queued.clone();
+        running.summary["state"] = json!("running");
+        running.summary["applicationStarted"] = json!(true);
+        jobs.put(&running).unwrap();
+        assert!(!jobs.insert_new(&queued).unwrap());
+        assert_eq!(jobs.read(&id).unwrap().summary, running.summary);
+        let other = queued.clone().with_restore_id(uuid::Uuid::new_v4().to_string()).unwrap();
+        assert!(!jobs.insert_new(&other).unwrap());
+        assert!(jobs.read(&other.id).is_err());
+        running.summary["state"] = json!("succeeded");
+        running.summary["result"] = json!({"receivedRevision":"2"});
+        jobs.put(&running).unwrap();
+        drop(jobs);
+        let reopened = JobStore::open(root.path()).unwrap();
+        assert!(!reopened.insert_new(&queued).unwrap());
+        assert_eq!(reopened.read(&id).unwrap().summary, running.summary);
+        assert!(queued.clone().with_restore_id("../job".into()).is_err());
+        assert!(DurableJob::new(request(), false, 1, identity()).with_restore_id(id).is_err());
+    }
+
+    #[test]
     fn revisions_and_session_inputs_are_validated() {
         let mut input = request();
         input.target_revision = Some("-1".into());
@@ -426,6 +507,41 @@ mod tests {
         input.session_id = Some("session".into());
         input.reason = Some("automatic".into());
         assert!(input.validate().is_ok());
+    }
+
+    #[test]
+    fn selected_history_deletion_requires_one_exact_durable_observation_and_confirmations() {
+        let observation = serde_json::to_string(&risunest_external_storage_format::snapshot::StoredObject {
+            header: risunest_external_storage_format::snapshot::PublicObjectHeader::new(
+                "repository".into(),
+                "backup-point-point".into(),
+                risunest_external_storage_format::snapshot::ObjectRole::BackupPoint,
+                1,
+            ).unwrap(),
+            locator: risunest_external_storage_format::snapshot::WireLocator {
+                connection_identity: "account/root".into(),
+                collection: Some("points".into()),
+                object: "opaque".into(),
+            },
+            ciphertext_length: 0,
+            ciphertext_sha256: [1; 32],
+            plaintext_length: 1,
+            plaintext_sha256: [2; 32],
+        }).unwrap();
+        let mut input: StartJobRequest = serde_json::from_value(json!({
+            "connectionId":"synthetic",
+            "kind":"delete-history",
+            "pointId":"point",
+            "pointObservation":observation,
+            "confirmOtherDevice":false,
+            "confirmLastRetained":true
+        })).unwrap();
+        assert!(input.validate().is_ok());
+        input.point_observation = None;
+        assert!(input.validate().is_err());
+        input.point_observation = Some("{}".into());
+        input.snapshot_id = Some("snapshot".into());
+        assert!(input.validate().is_err());
     }
 
     #[test]

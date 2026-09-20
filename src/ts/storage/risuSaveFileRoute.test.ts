@@ -65,12 +65,13 @@ function dependencies(platform: 'native-desktop' | 'web'): RisuSaveFileRouteDepe
             revision: 4,
             sourceBytes: 8192,
             sourceSha256: 'b'.repeat(64),
+            exportExclusions: { archivedCharacters: 1, collidingPluginValues: 2 },
             characterCount: 2,
             presetCount: 1,
             warningCodes: [],
         })),
         decodeRisuSave: vi.fn(async () => ({ username: 'Web import', characters: [] })),
-        collectWebExport: vi.fn(async () => Uint8Array.from([4, 5, 6])),
+        collectWebExport: vi.fn(async () => ({ bytes: Uint8Array.from([4, 5, 6]), exclusions: { archivedCharacters: 1, collidingPluginValues: 2 } })),
         downloadWebExport: vi.fn(async () => undefined),
         withFlushedExport: vi.fn(async () => {
             throw new Error('Unexpected managed Android export')
@@ -107,7 +108,7 @@ describe('RisuSave picker route', () => {
             withFlushedExport: (...args: any[]) => Promise<unknown>
             copyAndroidExport: (...args: any[]) => Promise<unknown>
             markAndroidExportReady?: (requestId: string) => boolean
-            acknowledgeAndroidExport?: (requestId: string) => boolean
+            acknowledgeAndroidExport?: (requestId: string) => boolean | Promise<boolean>
         },
     ): void {
         deps.platform = () => 'native-android' as never
@@ -150,13 +151,13 @@ describe('RisuSave picker route', () => {
                     revision: 4,
                     withNativeFile: async (
                         options: unknown,
-                        nativeCallback: (file: { path: string; bytes: number }) => Promise<unknown>,
+                        nativeCallback: (file: import('./nativePersistentExport').NativePersistentExportFile) => Promise<unknown>,
                     ) => {
                         events.push(`native-file:${JSON.stringify(options)}`)
                         try {
                             return await nativeCallback({
                                 path: '/app/persistent/exports/risusave-a.risudat',
-                                bytes: 8_192,
+                                bytes: 8_192, excludedArchivedCharacterCount: 1, excludedCollidingPluginValueCount: 2,
                             })
                         }
                         finally {
@@ -198,6 +199,7 @@ describe('RisuSave picker route', () => {
         await expect(pending).resolves.toEqual({
             mode: 'native',
             bytes: 8_192,
+            exclusions: { archivedCharacters: 1, collidingPluginValues: 2 },
             warningCodes: ['android-saf-provider-not-atomic'],
         })
         expect(events).toEqual([
@@ -249,7 +251,7 @@ describe('RisuSave picker route', () => {
         expect(acknowledgeAndroidExport).not.toHaveBeenCalled()
 
         const replayAck = vi.fn(() => true)
-        expect(risuSaveFileRoute.recoverAndroidRisuSavePublication(JSON.stringify({
+        expect(await risuSaveFileRoute.recoverAndroidRisuSavePublication(JSON.stringify({
             requestId: '77777777-7777-4777-8777-777777777777',
             exportId: '88888888-8888-4888-8888-888888888888',
             sourceKind: 'risuSave',
@@ -263,7 +265,7 @@ describe('RisuSave picker route', () => {
     it('propagates acknowledgement failure while retaining a renderer recovery retry', async () => {
         const deps = dependencies('native-desktop')
         const markAndroidExportReady = vi.fn(() => true)
-        const acknowledgeAndroidExport = vi.fn(() => false)
+        const acknowledgeAndroidExport = vi.fn(async () => false)
         installAndroidExport(deps, {
             withFlushedExport: async (_runtime, _reason, callback) => await callback({
                 withNativeFile: async (_options: unknown, nativeCallback: Function) =>
@@ -289,15 +291,9 @@ describe('RisuSave picker route', () => {
             '11111111-1111-4111-8111-111111111111',
         )
 
-        const recover = (risuSaveFileRoute as unknown as {
-            recoverAndroidRisuSavePublication(
-                encoded: string | null,
-                acknowledge: (requestId: string) => boolean,
-            ): unknown
-        }).recoverAndroidRisuSavePublication
-        expect(recover).toBeTypeOf('function')
-        const retry = vi.fn(() => true)
-        expect(recover(JSON.stringify({
+        const recover = risuSaveFileRoute.recoverAndroidRisuSavePublication
+        const retry = vi.fn(async () => true)
+        expect(await recover(JSON.stringify({
             requestId: '11111111-1111-4111-8111-111111111111',
             exportId: '22222222-2222-4222-8222-222222222222',
             sourceKind: 'risuSave',
@@ -423,7 +419,7 @@ describe('RisuSave picker route', () => {
         installAndroidExport(deps, {
             withFlushedExport: async (_runtime, _reason, callback) => await callback({
                 withNativeFile: async (_options: unknown, nativeCallback: Function) =>
-                    await nativeCallback({ path: '/app/persistent/exports/source.risudat', bytes: 10 }),
+                    await nativeCallback({ path: '/app/persistent/exports/source.risudat', bytes: 10, excludedArchivedCharacterCount: 1, excludedCollidingPluginValueCount: 2 }),
             }),
             copyAndroidExport: async () => ({
                 requestId: 'saf-request-2',
@@ -470,7 +466,7 @@ describe('RisuSave picker route', () => {
         installAndroidExport(deps, {
             withFlushedExport: async (_runtime, _reason, callback) => await callback({
                 withNativeFile: async (_options: unknown, nativeCallback: Function) =>
-                    await nativeCallback({ path: '/app/persistent/exports/source.risudat', bytes: 10 }),
+                    await nativeCallback({ path: '/app/persistent/exports/source.risudat', bytes: 10, excludedArchivedCharacterCount: 1, excludedCollidingPluginValueCount: 2 }),
             }),
             copyAndroidExport: async () => ({
                 requestId: 'saf-request-3',
@@ -486,6 +482,7 @@ describe('RisuSave picker route', () => {
         await expect(exportRisuSaveFromPicker({}, deps)).resolves.toEqual({
             mode: 'native',
             bytes: 10,
+            exclusions: { archivedCharacters: 1, collidingPluginValues: 2 },
             warningCodes: [
                 'android-saf-provider-not-atomic',
                 'partial-destination-may-remain',

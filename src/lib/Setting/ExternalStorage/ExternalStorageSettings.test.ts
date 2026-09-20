@@ -6,9 +6,12 @@ const state = vi.hoisted(() => ({
     getState: vi.fn(),
     getQuota: vi.fn(),
     setRetentionPolicy: vi.fn(),
+    listHistory: vi.fn(),
     listConflicts: vi.fn(),
     recheckConflict: vi.fn(),
     deleteConflict: vi.fn(),
+    beginConnectionSettingsExport: vi.fn(),
+    saveConnectionSettingsFile: vi.fn(),
 }))
 
 vi.mock('src/ts/platform', () => ({ isTauri: true, isTauriAndroid: false, isTauriIOS: false }))
@@ -30,14 +33,17 @@ vi.mock('src/ts/storage/sync/external/bridge', () => ({
         getState: state.getState,
         getQuota: state.getQuota,
         setRetentionPolicy: state.setRetentionPolicy,
-        listHistory: vi.fn(),
+        listHistory: state.listHistory,
         listConflicts: state.listConflicts,
         recheckConflict: state.recheckConflict,
         deleteConflict: state.deleteConflict,
+        beginConnectionSettingsExport: state.beginConnectionSettingsExport,
+        saveConnectionSettingsFile: state.saveConnectionSettingsFile,
     }),
 }))
 
 import ExternalStorageSettings from './ExternalStorageSettings.svelte'
+import { requestExternalStorageNow } from 'src/ts/storage/sync/external/production'
 import { externalStorageStrings } from './strings'
 
 const strings = externalStorageStrings('en')
@@ -105,6 +111,13 @@ describe('the storage usage tab', () => {
         // The rows have to stand on their own: usage is a separate request.
         state.getQuota.mockRejectedValue({ kind: 'transient', httpStatus: null, retryAtMs: null })
         state.setRetentionPolicy.mockResolvedValue(undefined)
+        state.listHistory.mockResolvedValue({ items: [] })
+        state.beginConnectionSettingsExport.mockResolvedValue({
+            transferId: 'settings-transfer',
+            expiresAtMs: '1000',
+            qrPayload: null,
+        })
+        state.saveConnectionSettingsFile.mockResolvedValue(undefined)
         target = document.createElement('div')
         document.body.append(target)
         component = mount(ExternalStorageSettings, { target })
@@ -118,10 +131,68 @@ describe('the storage usage tab', () => {
         vi.clearAllMocks()
     })
 
+    it('runs manual cleanup through the production queue only for a capable connection', async () => {
+        await openStorageUsage()
+        expect([...target.querySelectorAll('button')].some(button => button.textContent?.trim() === strings.cleanup)).toBe(false)
+        if (component) unmount(component)
+        const capable = connection(10, 30)
+        capable.capabilities.leaseOperations = true
+        capable.capabilities.deleteObjects = true
+        state.getState.mockResolvedValue({ supported: true, selection: { kind: 'none', selectionEpoch: '0', paused: false, decisionRequired: false }, connections: [capable], jobs: [] })
+        component = mount(ExternalStorageSettings, { target })
+        await settle()
+        await openStorageUsage()
+        const button = [...target.querySelectorAll('button')].find(button => button.textContent?.trim() === strings.cleanup)
+        expect(button).toBeDefined()
+        button!.click()
+        await settle()
+        expect(requestExternalStorageNow).toHaveBeenCalledWith('connection-1', 'cleanup')
+    })
+
     it('shows the stored limits even when the usage request fails', async () => {
         await openStorageUsage()
         expect(labelled(strings.retentionCount).value).toBe('10')
         expect(labelled(strings.retentionDays).value).toBe('30')
+    })
+
+    it('exports connection settings without offering recovery-key replacement', async () => {
+        const button = [...target.querySelectorAll('button')].find(
+            item => item.textContent?.trim() === strings.connectionSettings,
+        )
+        expect(button).toBeDefined()
+        button?.click()
+        await settle()
+
+        expect(state.beginConnectionSettingsExport).toHaveBeenCalledWith('connection-1')
+        expect(target.getAttribute('role')).not.toBe('dialog')
+        expect(target.textContent).toContain(strings.connectionSettingsNotice)
+        expect(target.textContent).not.toMatch(/reissue|rotate/i)
+
+        const save = [...target.querySelectorAll('button')].find(
+            item => item.textContent?.trim() === strings.saveConnectionSettings,
+        )
+        save?.click()
+        await settle()
+        expect(state.saveConnectionSettingsFile).toHaveBeenCalledWith('settings-transfer')
+    })
+
+    it('does not render provider-supplied prose from ordinary history rows', async () => {
+        state.listHistory.mockResolvedValue({
+            items: [{
+                id: 'snapshot', snapshotId: 'snapshot', kind: 'backup-point',
+                createdAtMs: '1', logicalRevision: 1, storedBytes: '1', pinned: false,
+                complete: true, verified: true, includedSections: [], sameDevice: true,
+                warning: 'UNTRUSTED REMOTE WARNING',
+            }],
+        })
+        const tab = [...target.querySelectorAll('button')].find(
+            item => item.textContent?.trim() === strings.history,
+        )
+        tab?.click()
+        await settle()
+
+        expect(target.textContent).not.toContain('UNTRUSTED REMOTE WARNING')
+        expect(target.textContent).toContain(strings.historyKinds['backup-point'])
     })
 
     it('rechecks an unconfirmed remote point before offering destructive conflict choices', async () => {

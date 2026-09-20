@@ -1,3 +1,4 @@
+import type { ExportExclusions } from './exportExcludedReport'
 import { exportIOSFile } from './iosFiles'
 import { MAX_CONTENT_METADATA_BYTES } from './contentImportLimits'
 import { invoke } from '@tauri-apps/api/core'
@@ -57,6 +58,7 @@ export interface NativeCompatibilityReport {
 }
 
 export interface NativeFileJobResult {
+    exportExclusions?: ExportExclusions
     revision: number
     sourceBytes: number
     sourceSha256: string
@@ -212,6 +214,10 @@ export type NativeFileJobStage =
     | 'reloading-plugins'
     | 'restarting-app'
     | 'awaiting-reselect'
+    | 'preparing-export'
+    | 'writing-export'
+    | 'publishing-destination'
+    | 'finalizing-export'
 
 export interface NativeImportCounts {
     entriesRead: number
@@ -262,6 +268,23 @@ export function resolveNativeFileJobStage(
         return 'assign-plugin-values'
     }
     if (status.detail) return status.detail.stage
+    // Exports report phases only. The rescue archive keeps the archive wording it always had.
+    if (status.kind.startsWith('export-') && status.kind !== 'export-raw-recovery') {
+        switch (status.phase) {
+            case 'queued':
+            case 'reading-source':
+                return 'preparing-export'
+            case 'writing-export':
+                return 'writing-export'
+            case 'publishing-destination':
+                return 'publishing-destination'
+            case 'finalizing-export':
+            case 'complete':
+                return 'finalizing-export'
+            default:
+                return null
+        }
+    }
     switch (status.phase) {
         case 'reading-source':
             // The common picker admits every backup as a library backup, so the
@@ -554,7 +577,7 @@ export interface NativeFileJobDependencies {
     isTauri(): boolean
     invoke(command: string, args?: Record<string, unknown>): Promise<unknown>
     wait(milliseconds: number): Promise<void>
-    discardAndroidSource?(token: string): boolean
+    discardAndroidSource?(token: string): boolean | Promise<boolean>
 }
 
 export interface NativeBackupExportDependencies extends NativeFileJobDependencies {
@@ -1140,16 +1163,16 @@ async function pollNativeFileJobUntilTerminal(
     }
 }
 
-function abortBeforeNativeRestoreStart(
+async function abortBeforeNativeRestoreStart(
     source: NativeFileJobSource | NativeOfficialAccountSnapshotRestoreRequest,
     dependencies: NativeFileJobDependencies,
-): never {
+): Promise<never> {
     if (!('type' in source)) throw abortError()
     let discarded = source.type !== 'androidSpool'
     if (source.type === 'androidSpool') {
         try {
             discarded =
-                dependencies.discardAndroidSource?.(source.token) === true
+                await dependencies.discardAndroidSource?.(source.token) === true
         } catch {}
     }
     if (!discarded) {
@@ -1187,14 +1210,14 @@ async function runNativeReplacementRestore(
         throw new Error(`${operation} requires Tauri`)
     }
     if (options.signal?.aborted) {
-        abortBeforeNativeRestoreStart(source, dependencies)
+        await abortBeforeNativeRestoreStart(source, dependencies)
     }
 
     const mutationToken = await runtime.capturePersistentMutationToken(
         mutationReason, { publishOfficial: false },
     )
     if (options.signal?.aborted) {
-        abortBeforeNativeRestoreStart(source, dependencies)
+        await abortBeforeNativeRestoreStart(source, dependencies)
     }
     const request =
         kind === 'restore-official-account-snapshot'

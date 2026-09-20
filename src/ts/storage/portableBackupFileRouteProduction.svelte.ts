@@ -131,7 +131,7 @@ export async function exportPortableBackupFromSystemPicker(
                 joined.dispose()
             }
         },
-        { format: 'library-backup' },
+        { presentation: 'dialog', format: 'library-backup' },
     ).finally(resumeServerSyncAfterBackup)
 }
 
@@ -183,7 +183,7 @@ export async function exportPortableBackupFromReferenceSource(
                 joined.dispose()
             }
         },
-        { format: 'library-backup' },
+        { presentation: 'dialog', format: 'library-backup' },
     ).finally(resumeServerSyncAfterBackup)
 }
 
@@ -393,7 +393,7 @@ export async function restoreBackupFromNativeSource(
                 // A claimed token has already moved to native ownership, so this only removes an
                 // unclaimed picker result when confirmation, format probing, or admission failed.
                 if (input?.type === 'androidSpool')
-                    discardAndroidSafSource(input.token)
+                    await discardAndroidSafSource(input.token)
             }
         },
         { presentation: 'dialog', format: 'library-backup' },

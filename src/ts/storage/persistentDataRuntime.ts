@@ -8,6 +8,7 @@ import {
     type ConversationPublicationOptions,
     type CompleteConversationLease,
     type SelectedConversationTarget,
+    type WindowedConversationMutationController,
 } from './activeWorkingSet.svelte'
 import type { ActiveConversationSession } from './activeConversationSession'
 import type { ConversationViewportSource } from '../conversationViewportSource'
@@ -94,6 +95,7 @@ export function capturePersistentRoot(database: Database): RootDatabase {
         characters: _characters,
         botPresets: _botPresets,
         pluginCustomStorage: _pluginCustomStorage,
+        pluginStorageMeta: _pluginStorageMeta,
         ...root
     } = database
     return root
@@ -373,6 +375,11 @@ export interface PersistentDataRuntime {
         reason: string,
         target?: SelectedConversationTarget | null,
     ): Promise<CompleteConversationLease>
+    captureWindowedConversationMutationController(
+        target: SelectedConversationTarget,
+        chat: Chat,
+        absoluteStartIndex: number,
+    ): WindowedConversationMutationController | null
     tryDemoteSelectedConversation(
         target?: SelectedConversationTarget | null,
     ): boolean
@@ -955,6 +962,12 @@ export function createPersistentDataRuntime(
             workingSet.captureSelectedConversationAuthority(),
         acquireCompleteConversation: (reason, target) =>
             workingSet.acquireCompleteConversation(reason, target ?? undefined),
+        captureWindowedConversationMutationController: (target, chat, absoluteStartIndex) =>
+            workingSet.captureWindowedConversationMutationController(
+                target,
+                chat,
+                absoluteStartIndex,
+            ),
         tryDemoteSelectedConversation: (target) =>
             workingSet.tryDemoteSelectedConversation(target ?? undefined),
         refreshSelectedConversationAfterReplacement: (

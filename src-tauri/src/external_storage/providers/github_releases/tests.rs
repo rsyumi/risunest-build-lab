@@ -151,6 +151,188 @@ fn has_header(record: &crate::external_storage::wire_fixture::WireRequest, name:
         .any(|(header, _)| header.eq_ignore_ascii_case(name))
 }
 
+fn existing_repository_replies() -> Vec<Reply> {
+    vec![
+        repository_reply(true),
+        reply(200, json!([release(7, &format!("{PREFIX}-d-0"))])),
+        reply(200, json!([asset(1, "descriptor-root", 4, None)])),
+    ]
+}
+
+#[test]
+fn inventory_lookup_finds_later_releases_after_gaps_and_rejects_duplicates() {
+    runtime().block_on(async {
+        for duplicate in [false, true] {
+            let bytes = b"inventory-payload";
+            let mut replies = existing_repository_replies();
+            replies.push(reply(200, json!([
+                release(40, &job_tag("job-1", 9)),
+                release(41, &job_tag("job-1", 12)),
+                release(42, &job_tag("other-job", 0)),
+            ])));
+            replies.push(reply(200, json!([asset(90, "pack-object", bytes.len() as u64, Some(digest_of(bytes)))])));
+            replies.push(reply(200, if duplicate {
+                json!([asset(91, "pack-object", bytes.len() as u64, Some(digest_of(bytes)))])
+            } else { json!([]) }));
+            let server = github_server(replies);
+            let provider = adapter(dependencies().dependencies);
+            let handle = open(provider.as_ref(), &server, OpenMode::Existing).await.unwrap();
+            let intent = object_intent(&handle, ObjectRole::Pack, "object", bytes);
+            let result = provider.lookup_object(&handle, &intent, &Cancellation::default()).await;
+            if duplicate {
+                assert_eq!(result.unwrap_err().kind, ErrorKind::PreconditionFailed);
+            } else {
+                assert_eq!(result.unwrap().unwrap().locator.object, "40/90");
+            }
+            let requests = server.requests.lock().unwrap();
+            assert_eq!(requests.len(), 6);
+            assert!(requests.iter().all(|request| method_of(request) == "GET"));
+        }
+    });
+}
+
+#[test]
+fn inventory_collection_lists_only_inventory_assets() {
+    runtime().block_on(async {
+        let mut replies = existing_repository_replies();
+        replies.push(reply(200, json!([release(40, &job_tag("job-1", 9))])));
+        replies.push(reply(200, json!([
+            asset(90, "inventory-inventory-page-one", 100, None),
+            asset(91, "pack-object", 100, None),
+        ])));
+        let server = github_server(replies);
+        let provider = adapter(dependencies().dependencies);
+        let handle = open(provider.as_ref(), &server, OpenMode::Existing).await.unwrap();
+        let page = provider.list_objects(&handle, Collection::InventoryPages, None, 10, &Cancellation::default()).await.unwrap();
+        assert_eq!(page.objects.len(), 1);
+        assert_eq!(page.objects[0].locator.object, "40/90");
+        assert!(page.next_cursor.is_none());
+    });
+}
+
+#[test]
+fn bounded_lookups_do_not_report_unscanned_objects_as_absent() {
+    runtime().block_on(async {
+        for kind in ["release", "asset-name", "asset-id"] {
+            let pages = if kind == "release" { api::MAX_RELEASE_SCAN_PAGES } else { api::MAX_ASSET_SCAN_PAGES };
+            let replies = (0..pages).map(|page| {
+                let entries: Vec<_> = if kind == "release" {
+                    (0..api::RELEASE_PAGE_SIZE).map(|index| {
+                        release(1 + u64::from(page) * 1000 + index as u64, &format!("unrelated-{page}-{index}"))
+                    }).collect()
+                } else {
+                    (0..api::ASSET_PAGE_SIZE).map(|index| {
+                        asset(1 + u64::from(page) * 1000 + index as u64, &format!("pack-unrelated-{page}-{index}"), 4, None)
+                    }).collect()
+                };
+                reply(200, json!(entries))
+            }).collect();
+            let server = github_server(replies);
+            let test = dependencies();
+            let provider = super::GithubReleases { dependencies: test.dependencies };
+            let context = api::Context::new(&config(&server), zeroize::Zeroizing::new("synthetic-token".into())).unwrap();
+            let cancel = Cancellation::default();
+            let result = match kind {
+                "release" => provider.find_release(&context, "unseen-release", &cancel).await.map(|value| value.is_some()),
+                "asset-name" => provider.find_asset(&context, 7, "unseen-asset", &cancel).await.map(|value| value.is_some()),
+                _ => provider.find_asset_by_id(&context, 7, u64::MAX, &cancel).await.map(|value| value.is_some()),
+            };
+            assert_eq!(result.unwrap_err().kind, ErrorKind::Transient, "{kind}");
+            assert_eq!(server.requests.lock().unwrap().len(), pages as usize);
+        }
+    });
+}
+
+#[test]
+fn discovery_returns_a_cursor_when_its_budget_ends_on_a_skipped_release_or_page() {
+    runtime().block_on(async {
+        for start in [0usize, 29] {
+            let tag = job_tag("retained-job", 0);
+            let first: Vec<_> = (0..30).map(|id| release(id + 100, "unrelated")).collect();
+            let second: Vec<_> = (0..30).map(|id| release(id + 200, "unrelated")).collect();
+            let mut third: Vec<_> = (0..30).map(|id| release(id + 300, "unrelated")).collect();
+            if start == 0 { third[2] = release(777, &tag); }
+            let resumed = if start == 0 { third.clone() } else { vec![release(777, &tag)] };
+            let mut replies = existing_repository_replies();
+            for page in [first, second, third, resumed] { replies.push(reply(200, json!(page))); }
+            replies.push(reply(200, json!([asset(999, &api::asset_name(ObjectRole::BackupBundle, "snapshot-retained"), 4, None)])));
+            if start == 0 { replies.push(reply(200, json!([]))); }
+            let server = github_server(replies);
+            let test = dependencies();
+            let provider = adapter(test.dependencies);
+            let handle = open(provider.as_ref(), &server, OpenMode::Existing).await.unwrap();
+            let cancel = Cancellation::default();
+            let cursor = format!("1:{start}:1:0");
+            let first = provider.list_objects(&handle, Collection::Snapshots, Some(&cursor), 100, &cancel).await.unwrap();
+            assert!(first.objects.is_empty());
+            let next = first.next_cursor.expect("A bounded scan has not exhausted the repository");
+            assert_ne!(next, cursor);
+            let resumed = provider.list_objects(&handle, Collection::Snapshots, Some(&next), 100, &cancel).await.unwrap();
+            assert_eq!(resumed.objects.len(), 1);
+            assert!(resumed.objects[0].complete);
+            assert!(resumed.next_cursor.is_none());
+        }
+    });
+}
+
+#[test]
+fn an_exhausted_asset_search_does_not_claim_a_successful_deletion() {
+    runtime().block_on(async {
+        let tag = job_tag("retained-job", 0);
+        let mut replies = existing_repository_replies();
+        replies.push(reply(200, release(777, &tag)));
+        for page in 0..api::MAX_ASSET_SCAN_PAGES {
+            replies.push(reply(200, json!((0..api::ASSET_PAGE_SIZE).map(|index| {
+                asset(1 + u64::from(page) * 1000 + index as u64, "pack-unrelated", 4, None)
+            }).collect::<Vec<_>>())));
+        }
+        let server = github_server(replies);
+        let test = dependencies();
+        let provider = super::GithubReleases { dependencies: test.dependencies };
+        let handle = open(&provider, &server, OpenMode::Existing).await.unwrap();
+        let locator = provider.context(&handle).unwrap().locator(&tag, 777, u64::MAX);
+        assert_eq!(provider.delete_object(&handle, &locator, &Cancellation::default()).await.unwrap_err().kind,
+            ErrorKind::Transient);
+        assert!(server.requests.lock().unwrap().iter().all(|request| method_of(request) == "GET"));
+    });
+}
+
+#[test]
+fn backup_only_cleanup_reads_points_without_requesting_an_unsupported_head() {
+    runtime().block_on(async {
+        use crate::external_storage::{cleanup, connection::RetentionPolicy, connection_commands::ConnectedRepository, connection_store::StoredConnection};
+        let mut replies = existing_repository_replies();
+        replies.push(reply(200, json!([])));
+        let server = github_server(replies);
+        let test = dependencies();
+        let provider = std::sync::Arc::new(super::GithubReleases { dependencies: test.dependencies.clone() });
+        let handle = open(provider.as_ref(), &server, OpenMode::Existing).await.unwrap();
+        let locator = provider.context(&handle).unwrap().locator(&format!("{PREFIX}-d-0"), 7, 1);
+        let connected = ConnectedRepository {
+            stored: StoredConnection {
+                id: "connection".into(), config: config(&server),
+                descriptor: risunest_external_storage_format::format::Descriptor::new("repository".into(), None).unwrap(),
+                descriptor_locator: locator, provider_repository_id: handle.repository_id.clone(),
+                credential_ref: SECRET.into(), root_key_ref: "synthetic-root-key".into(),
+                recovery_key_ref: "synthetic-recovery-key".into(),
+                capabilities: super::capabilities(), created_at_ms: NOW_MS,
+                last_sync_at_ms: None, last_backup_at_ms: None, capture_policy: None, retention_policy: None,
+            },
+            provider, handle, dependencies: test.dependencies,
+            root_key: zeroize::Zeroizing::new([7; 32]),
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let view = cleanup::ConnectedRepositoryView {
+            connected: &connected, writer_id: "writer", policy: RetentionPolicy::DEFAULT,
+            now_ms: NOW_MS, unfinished: vec![], cache_root: directory.path(),
+        };
+        let roots = cleanup::RepositoryView::roots(&view, &Cancellation::default()).await.unwrap();
+        assert!(roots.head.is_none());
+        assert!(roots.points.is_empty());
+        assert_eq!(server.requests.lock().unwrap().len(), 4);
+    });
+}
+
 #[test]
 fn configuration_and_missing_secrets_are_refused_before_any_request() {
     runtime().block_on(async {
@@ -481,7 +663,7 @@ fn resume_create_rejects_head_duplicate_malformed_and_foreign_owned_layouts() {
                 ],
             ),
             (
-                "duplicate descriptor assets",
+                "too many descriptor assets",
                 vec![
                     repository_reply(true),
                     reply(200, json!([release(7, &descriptor_tag)])),
@@ -489,7 +671,8 @@ fn resume_create_rejects_head_duplicate_malformed_and_foreign_owned_layouts() {
                         200,
                         json!([
                             asset(1, "descriptor-one", 4, None),
-                            asset(2, "descriptor-two", 4, None)
+                            asset(2, "descriptor-two", 4, None),
+                            asset(3, "descriptor-three", 4, None)
                         ]),
                     ),
                 ],
@@ -1585,5 +1768,162 @@ fn the_lease_collection_uses_its_own_tag_and_asset_prefix() {
         );
         assert_eq!(page.objects[0].locator.collection.as_deref(), Some(lease_tag.as_str()));
         assert_eq!(server.requests.lock().unwrap().len(), 4);
+    });
+}
+
+#[test]
+fn a_zero_length_owned_starter_recovers_after_a_failed_upload() {
+    runtime().block_on(async {
+        for reconcile in [false, true] {
+            let bytes = vec![7u8; 64];
+            let starter = json!({ "id": 88, "name": "pack-object-1", "size": 0, "state": "starter" });
+            let mut replies = vec![repository_reply(true), reply(200, json!([])),
+                reply(201, release(20, &job_tag("job-1", 0)))];
+            if reconcile {
+                replies.push(reply(502, json!({})));
+                replies.push(reply(200, json!([release(20, &job_tag("job-1", 0))])));
+            } else {
+                replies.push(reply(422, json!({})));
+            }
+            replies.extend([
+                reply(200, json!([starter.clone()])),
+                reply(200, release(20, &job_tag("job-1", 0))),
+                reply(200, starter), reply(204, json!(null)),
+                reply(201, asset(99, "pack-object-1", 64, Some(digest_of(&bytes)))),
+            ]);
+            let server = github_server(replies);
+            let test = dependencies();
+            let provider = adapter(test.dependencies.clone());
+            let handle = open(provider.as_ref(), &server, OpenMode::Create).await.unwrap();
+            let directory = tempfile::tempdir().unwrap();
+            let source = source(directory.path(), "pack", &bytes);
+            let intent = object_intent(&handle, ObjectRole::Pack, "object-1", &bytes);
+            let cancel = Cancellation::default();
+            if reconcile {
+                assert_eq!(provider.create_object(&handle, &intent, &source, None, &cancel).await.unwrap_err().kind, ErrorKind::Transient);
+                assert!(matches!(provider.reconcile_upload(&handle, &intent, None, &cancel).await.unwrap(), UploadResolution::RestartRequired));
+            }
+            let receipt = provider.create_object(&handle, &intent, &source, None, &cancel).await.unwrap();
+            assert_eq!(receipt.locator.object, "20/99");
+            let requests = server.requests.lock().unwrap();
+            let deleted: Vec<_> = requests.iter().filter(|r| method_of(r) == "DELETE").collect();
+            assert_eq!(deleted.len(), 1);
+            assert!(head_line(deleted[0]).contains("/releases/assets/88"));
+            assert_eq!(requests.last().unwrap().body, bytes);
+        }
+    });
+}
+
+#[test]
+fn starter_cleanup_refuses_changed_incomplete_and_foreign_metadata() {
+    runtime().block_on(async {
+        let bytes = vec![7u8; 64];
+        let starter = json!({ "id": 88, "name": "pack-object-1", "size": 0, "state": "starter" });
+        for case in 0..8 {
+            let mut listed = starter.clone();
+            let mut current = starter.clone();
+            let mut owner = release(20, &job_tag("job-1", 0));
+            match case {
+                0 => { listed["size"] = json!(1); }
+                1 => { listed["state"] = json!("uploaded"); }
+                2 => { owner["tag_name"] = json!(job_tag("other-job", 0)); }
+                3 => { owner["draft"] = json!(false); }
+                4 => { current["state"] = json!("uploaded"); }
+                5 => { current["name"] = json!("pack-other"); }
+                6 => { current["size"] = json!(1); }
+                _ => { current.as_object_mut().unwrap().remove("size"); }
+            }
+            let mut replies = vec![repository_reply(true), reply(200, json!([])),
+                reply(201, release(20, &job_tag("job-1", 0))), reply(422, json!({})), reply(200, json!([listed]))];
+            if case >= 2 { replies.push(reply(200, owner)); }
+            if case >= 4 { replies.push(reply(200, current)); }
+            let server = github_server(replies);
+            let test = dependencies();
+            let provider = adapter(test.dependencies.clone());
+            let handle = open(provider.as_ref(), &server, OpenMode::Create).await.unwrap();
+            let directory = tempfile::tempdir().unwrap();
+            let source = source(directory.path(), "pack", &bytes);
+            let intent = object_intent(&handle, ObjectRole::Pack, "object-1", &bytes);
+            assert!(provider.create_object(&handle, &intent, &source, None, &Cancellation::default()).await.is_err(), "case {case}");
+            assert!(server.requests.lock().unwrap().iter().all(|r| method_of(r) != "DELETE"), "case {case}");
+        }
+    });
+}
+
+#[test]
+fn starter_recovery_stops_after_one_immediate_retry() {
+    runtime().block_on(async {
+        let bytes = vec![7u8; 64];
+        let starter = json!({ "id": 88, "name": "pack-object-1", "size": 0, "state": "starter" });
+        let mut replies = vec![repository_reply(true), reply(200, json!([])),
+            reply(201, release(20, &job_tag("job-1", 0)))];
+        for _ in 0..2 {
+            replies.extend([reply(422, json!({})), reply(200, json!([starter.clone()])),
+                reply(200, release(20, &job_tag("job-1", 0))), reply(200, starter.clone()), reply(204, json!(null))]);
+        }
+        let server = github_server(replies);
+        let test = dependencies();
+        let provider = adapter(test.dependencies.clone());
+        let handle = open(provider.as_ref(), &server, OpenMode::Create).await.unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let source = source(directory.path(), "pack", &bytes);
+        let intent = object_intent(&handle, ObjectRole::Pack, "object-1", &bytes);
+        let error = provider.create_object(&handle, &intent, &source, None, &Cancellation::default()).await.unwrap_err();
+        assert_eq!(error.kind, ErrorKind::Transient);
+        assert_eq!(server.requests.lock().unwrap().iter().filter(|r| method_of(r) == "POST").count(), 3);
+    });
+}
+
+#[test]
+fn shared_descriptor_and_lease_starters_are_never_removed() {
+    runtime().block_on(async {
+        let bytes = vec![7u8; 64];
+        for role in [ObjectRole::Descriptor, ObjectRole::Lease] {
+            let name = api::asset_name(role, "object-1");
+            let tag = format!("{PREFIX}-{}-0", api::batch_key(role, "job-1"));
+            let server = github_server(vec![repository_reply(true), reply(200, json!([])),
+                reply(201, release(20, &tag)), reply(422, json!({})),
+                reply(200, json!([{ "id": 88, "name": name, "size": 0, "state": "starter" }]))]);
+            let test = dependencies();
+            let provider = adapter(test.dependencies.clone());
+            let handle = open(provider.as_ref(), &server, OpenMode::Create).await.unwrap();
+            let directory = tempfile::tempdir().unwrap();
+            let source = source(directory.path(), "object", &bytes);
+            let intent = object_intent(&handle, role, "object-1", &bytes);
+            assert!(provider.create_object(&handle, &intent, &source, None, &Cancellation::default()).await.is_err());
+            assert!(server.requests.lock().unwrap().iter().all(|r| method_of(r) != "DELETE"));
+        }
+    });
+}
+
+#[test]
+fn empty_job_release_cleanup_requires_complete_empty_inventory_and_no_active_owner() {
+    runtime().block_on(async {
+        for case in 0..8 {
+            let tag = match case {
+                3 => format!("{PREFIX}-l-0"),
+                4 => format!("{PREFIX}-d-0"),
+                _ => job_tag("job-1", 0),
+            };
+            let actual = if case == 5 { job_tag("other", 0) } else { tag.clone() };
+            let mut replies = vec![repository_reply(true), reply(200, json!([])), reply(200, release(20, &actual))];
+            if matches!(case, 0 | 2 | 6 | 7) {
+                replies.push(reply(200, if case == 2 { json!([asset(88, "pack-kept", 64, None)]) }
+                    else if case == 6 { json!({"incomplete": true}) } else { json!([]) }));
+            }
+            if case == 0 || case == 7 { replies.push(reply(if case == 7 { 202 } else { 204 }, json!(null))); }
+            let server = github_server(replies);
+            let test = dependencies();
+            let provider = adapter(test.dependencies.clone());
+            let handle = open(provider.as_ref(), &server, OpenMode::Create).await.unwrap();
+            let locator = RemoteLocator { connection_identity: handle.connection_identity.clone(), collection: Some(tag), object: "20/88".into() };
+            let protected = if case == 1 { vec!["job-1".to_owned()] } else { Vec::new() };
+            let result = provider.delete_empty_container(&handle, &locator, &protected, &Cancellation::default()).await;
+            assert_eq!(result.is_err(), case == 6 || case == 7, "case {case}");
+            let records = server.requests.lock().unwrap();
+            let deletes: Vec<_> = records.iter().filter(|r| method_of(r) == "DELETE").collect();
+            assert_eq!(deletes.len(), usize::from(case == 0 || case == 7), "case {case}");
+            if let Some(request) = deletes.first() { assert!(head_line(request).contains("/releases/20 ")); }
+        }
     });
 }

@@ -72,7 +72,7 @@ describe('external storage connection request', () => {
             values: {
                 folderId: 'folder', space: 'drive', projectId: 'project',
                 clientId: 'web-client.apps.googleusercontent.com',
-                oauthRedirectUri: 'https://update.rsyumi.workers.dev/oauth/google-drive-callback.html',
+                oauthRedirectUri: 'https://update.rsyumi.workers.dev/oauth/google-drive-callback',
                 clientSecret: 'must-stay-transient',
             },
             platform: 'android', mode: 'create', purpose: 'backup',
@@ -81,7 +81,7 @@ describe('external storage connection request', () => {
         })
 
         expect(request.config.location.oauthRedirectUri).toBe(
-            'https://update.rsyumi.workers.dev/oauth/google-drive-callback.html',
+            'https://update.rsyumi.workers.dev/oauth/google-drive-callback',
         )
         expect(request.config.oauthProfile?.platformClientIds).toEqual({
             android: 'web-client.apps.googleusercontent.com',
@@ -133,6 +133,19 @@ describe('external storage connection request', () => {
                 { ...base, id: 'mmm', createdAtMs: '2000' as const },
             ],
         ).map(item => item.id)).toEqual(['zzz', 'mmm', 'aaa'])
+    })
+
+    it('keeps separate point rows and hides their weaker raw recovery candidate', () => {
+        const base = {
+            createdAtMs: '1' as const, logicalRevision: '1' as const,
+            pinned: false, complete: true, verified: true,
+            includedSections: [], sameDevice: false,
+        }
+        const first = { ...base, id: 'point-a', snapshotId: 'snapshot', kind: 'backup-point' as const }
+        const second = { ...base, id: 'point-b', snapshotId: 'snapshot', kind: 'backup-point' as const }
+        const recovery = { ...base, id: 'snapshot', snapshotId: 'snapshot', kind: 'recovery-candidate' as const }
+        expect(mergeExternalHistoryItems([first], [second, recovery]).map(item => item.id))
+            .toEqual(['point-a', 'point-b'])
     })
 
     it('keeps only the entries a restore can read back', () => {
