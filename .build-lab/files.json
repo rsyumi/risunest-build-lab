@@ -3286,7 +3286,7 @@
       "path": "src-tauri/Cargo.lock",
       "mode": "100644",
       "bytes": 197045,
-      "sha256": "81ee0f0cc8ec388ec8681797abaeb6416f86cfe8e18a8b0302833fba2547f037"
+      "sha256": "cacc481a37ed2a8b74ecdcd5f2705822528876af8757c4b39468a8415cc76772"
     },
     {
       "path": "src-tauri/Cargo.toml",
