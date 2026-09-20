@@ -3,6 +3,10 @@ import { IDBFactory, IDBKeyRange } from "fake-indexeddb";
 import { describe, expect, it, vi } from "vitest";
 import type { RisuNestDeviceSettings } from "../deviceSettings";
 import {
+  getAppUpdateSettings,
+  updateAppUpdateSettings,
+} from "../../update/settings";
+import {
   captureDeviceSection,
   databaseSectionId,
   discoverDeviceSections,
@@ -16,14 +20,10 @@ import {
 } from "./scopes";
 import { encodeCloneGraph, encodeUtf16 } from "./cloneGraph";
 import {
-  runDeviceMaintenance,
-  type DeviceMaintenanceBootstrap,
-  type DeviceMaintenanceSession,
-} from "./maintenance";
-import type { DeviceNativeInvoke } from "./nativeSpool";
-import {
   defaultDeviceExportChoices,
   defaultDeviceRestoreChoices,
+  defaultNativePortableExportChoices,
+  defaultNativePortableRestoreChoices,
   selectedDeviceSections,
 } from "./selection";
 
@@ -102,8 +102,9 @@ export function fixtureSpool(): DeviceSpool {
     async sections() {
       return [...sections.values()].map((section) => section.info!);
     },
-    async *rows(sectionId) {
-      yield* sections.get(sectionId)!.rows;
+    async *rows(sectionId, range) {
+      const rows = sections.get(sectionId)!.rows;
+      yield* rows.slice(range?.startOrdinal ?? 0, range?.endOrdinalExclusive);
     },
     async putBinary(body) {
       const bytes = new Uint8Array(
@@ -232,14 +233,15 @@ describe("device plugin storage scopes", () => {
     );
   });
 
-  it("preserves the current four-field settings exactly and normal startup accepts them", async () => {
+  it("preserves the current settings exactly and normal startup accepts them", async () => {
     const environment = fixtureEnvironment();
     const spool = fixtureSpool();
     const settings = {
-      schema: "risunest.device-settings/v1",
+      schema: "risunest.device-settings/v2",
       performanceProfile: "low-spec",
       androidKeepAliveDuringGeneration: true,
       nativeFileLogEnabled: false,
+      startupExclusions: ["plugins"],
     } satisfies RisuNestDeviceSettings;
     const raw = JSON.stringify(settings, null, 2);
     environment.localStorage.setItem("risuNestDeviceSettings", raw);
@@ -264,6 +266,41 @@ describe("device plugin storage scopes", () => {
     }
   });
 
+  it("backs up and restores the separate app update settings record", async () => {
+    const environment = fixtureEnvironment();
+    const spool = fixtureSpool();
+    const raw = JSON.stringify({
+      schema: "risunest.app-update-settings/v1",
+      autoUpdateCheck: false,
+      skippedVersion: "2.3.4",
+      lastCheckedAt: 123456,
+    });
+    environment.localStorage.setItem("risuNestUpdateSettings", raw);
+    vi.stubGlobal("localStorage", environment.localStorage);
+    expect(getAppUpdateSettings().autoUpdateCheck).toBe(false);
+    const info = await captureDeviceSection(
+      "device-settings",
+      spool,
+      environment,
+    );
+    updateAppUpdateSettings({
+      autoUpdateCheck: true,
+      skippedVersion: "",
+      lastCheckedAt: 999999,
+    });
+    expect(getAppUpdateSettings().autoUpdateCheck).toBe(true);
+    await (await stageDeviceSection(info, spool, environment)).apply();
+    expect(environment.localStorage.getItem("risuNestUpdateSettings")).toBe(
+      raw,
+    );
+    expect(getAppUpdateSettings()).toMatchObject({
+      autoUpdateCheck: false,
+      skippedVersion: "2.3.4",
+      lastCheckedAt: 123456,
+    });
+    vi.unstubAllGlobals();
+  });
+
   it.each([
     ["syncAutoListen", true],
     ["syncListenMethod", "lan"],
@@ -274,10 +311,11 @@ describe("device plugin storage scopes", () => {
     async (key, value) => {
       const environment = fixtureEnvironment();
       const raw = JSON.stringify({
-        schema: "risunest.device-settings/v1",
+        schema: "risunest.device-settings/v2",
         performanceProfile: "low-spec",
         androidKeepAliveDuringGeneration: true,
         nativeFileLogEnabled: false,
+        startupExclusions: [],
         [key]: value,
       });
       environment.localStorage.setItem("risuNestDeviceSettings", raw);
@@ -363,6 +401,40 @@ describe("device plugin storage scopes", () => {
     ]);
   });
 
+  it("keeps native portable sections separate from browser clone scopes", () => {
+    expect(defaultNativePortableExportChoices()).toEqual([
+      {
+        sectionId: "hypa",
+        label: "",
+        included: true,
+        selected: true,
+      },
+      {
+        sectionId: "local-plugins",
+        label: "",
+        included: true,
+        selected: true,
+      },
+      {
+        sectionId: "local-settings",
+        label: "",
+        included: true,
+        selected: false,
+      },
+    ]);
+    expect(defaultNativePortableRestoreChoices(["local-settings"])).toEqual([
+      {
+        sectionId: "local-settings",
+        label: "",
+        included: true,
+        selected: true,
+      },
+    ]);
+    expect(() =>
+      defaultNativePortableRestoreChoices(["local-storage"]),
+    ).toThrow("Invalid native portable device section");
+  });
+
   it("restores original database absence without requiring space for a new database", async () => {
     const environment = fixtureEnvironment();
     const spool = fixtureSpool();
@@ -386,271 +458,47 @@ describe("device plugin storage scopes", () => {
       ),
     ).toBe(false);
   });
-});
 
-function maintenanceFixture(
-  environment: DeviceStorageEnvironment,
-  source: DeviceSpool,
-  rollback: DeviceSpool,
-) {
-  const session: DeviceMaintenanceSession = {
-    sessionId: "synthetic-session",
-    jobId: "synthetic-job",
-    operation: "restore",
-    phase: "preparing",
-    includesLibrary: false,
-    selectedSections: ["local-storage", "localforage"],
-    action: "prepare",
-  };
-  let active = true;
-  const events: string[] = [];
-  const initial = (): DeviceMaintenanceBootstrap => ({
-    mode: active ? "maintenance" : "normal",
-    session: active ? { ...session } : null,
-  });
-  const invoke = (async (command: string, args?: Record<string, unknown>) => {
-    events.push(command);
-    if (command === "native_device_backup_bootstrap") return initial();
-    if (command === "native_device_backup_prepared") {
-      expect((await rollback.sections()).length).toBe(2);
-      session.phase = "prepared";
-    } else if (
-      command === "native_device_backup_section_intent" &&
-      !args.rollback
-    )
-      session.phase = "applying-device";
-    else if (command === "native_device_backup_finish_device") {
-      session.phase = "committed";
-      session.action = "reapply-source";
-    } else if (command === "native_device_backup_fail") {
-      session.phase = "rolling-back";
-      session.action = "rollback";
-    } else if (command === "native_device_backup_recovery_complete")
-      active = false;
-    return undefined;
-  }) as DeviceNativeInvoke;
-  return {
-    initial,
-    session,
-    events,
-    run: () =>
-      runDeviceMaintenance(initial(), {
-        invoke,
-        environment,
-        spool: (_sessionId, kind) => (kind === "source" ? source : rollback),
-        view: {
-          progress() {},
-          failed() {},
-          async reviewReplacement() {
-            events.push("user-reviewed-replacement");
-            return true;
-          },
-          async completed() {
-            events.push("user-reviewed-result");
-          },
-        },
-        wait: async () => {},
-      }),
-  };
-}
-
-describe("device maintenance transaction", () => {
-  it.each([
-    {
-      includesLibrary: true,
-      action: "reapply-source",
-      phase: "committed",
-      expected: "true",
-    },
-    {
-      includesLibrary: true,
-      action: "complete",
-      phase: "committed",
-      expected: "true",
-    },
-    {
-      includesLibrary: false,
-      action: "reapply-source",
-      phase: "committed",
-      expected: "false",
-    },
-    {
-      includesLibrary: true,
-      action: "rollback",
-      phase: "rolling-back",
-      expected: "false",
-    },
-    {
-      includesLibrary: true,
-      action: "complete",
-      phase: "rolled-back",
-      expected: "false",
-    },
-  ] as const)(
-    "holds automatic sync only after a committed library restore ($includesLibrary, $phase, $action)",
-    async ({ includesLibrary, action, phase, expected }) => {
-      const environment = fixtureEnvironment();
-      const source = fixtureSpool();
-      const rollback = fixtureSpool();
-      environment.localStorage.setItem(
-        "risuNestServerSyncRestoreHold",
-        "false",
-      );
-      for (const section of ["local-storage", "localforage"] as const) {
-        await captureDeviceSection(section, source, environment);
-        await captureDeviceSection(section, rollback, environment);
-      }
-      const fixture = maintenanceFixture(environment, source, rollback);
-      Object.assign(fixture.session, { includesLibrary, action, phase });
-      const setItem = environment.localStorage.setItem.bind(
-        environment.localStorage,
-      );
-      environment.localStorage.setItem = (key, value) => {
-        if (key === "risuNestServerSyncRestoreHold")
-          fixture.events.push("automatic-sync-held");
-        setItem(key, value);
+  it("replays each plugin store from its bounded ordinal range", async () => {
+    const environment = fixtureEnvironment();
+    const spool = fixtureSpool();
+    const name = "safe_plugin_bounded_ranges";
+    await new Promise<void>((resolve, reject) => {
+      const request = environment.indexedDB.open(name, 1);
+      request.onupgradeneeded = () => {
+        request.result.createObjectStore("a");
+        request.result.createObjectStore("empty");
+        request.result.createObjectStore("z");
       };
-      await fixture.run();
-      expect(
-        environment.localStorage.getItem("risuNestServerSyncRestoreHold"),
-      ).toBe(expected);
-      if (expected === "true") {
-        expect(fixture.events.indexOf("automatic-sync-held")).toBeLessThan(
-          fixture.events.indexOf("user-reviewed-result"),
-        );
-        expect(fixture.events.indexOf("automatic-sync-held")).toBeLessThan(
-          fixture.events.indexOf("native_device_backup_recovery_complete"),
-        );
-      } else expect(fixture.events).not.toContain("automatic-sync-held");
-      expect(fixture.initial().mode).toBe("normal");
-    },
-  );
+      request.onerror = () => reject(request.error);
+      request.onsuccess = () => {
+        const db = request.result;
+        const tx = db.transaction(["a", "z"], "readwrite");
+        tx.objectStore("a").put({ value: 1 }, "a-1");
+        tx.objectStore("z").put({ value: 2 }, "z-1");
+        tx.oncomplete = () => {
+          db.close();
+          resolve();
+        };
+        tx.onerror = () => reject(tx.error);
+      };
+    });
+    const sectionId = databaseSectionId(name);
+    const info = await captureDeviceSection(sectionId, spool, environment);
+    const originalRows = spool.rows.bind(spool);
+    const rows = vi.spyOn(spool, "rows").mockImplementation(
+      (id, range) => originalRows(id, range),
+    );
 
-  it("preserves rollback before any write intent and waits for result acknowledgement", async () => {
-    const environment = fixtureEnvironment();
-    const source = fixtureSpool();
-    const rollback = fixtureSpool();
-    environment.localStorage.setItem("safe_plugin_key", "new-local");
-    await environment.localforage.setItem("safe_plugin_key", "new-forage");
-    await captureDeviceSection("local-storage", source, environment);
-    await captureDeviceSection("localforage", source, environment);
-    environment.localStorage.setItem("safe_plugin_key", "old-local");
-    await environment.localforage.setItem("safe_plugin_key", "old-forage");
-    const fixture = maintenanceFixture(environment, source, rollback);
-    await fixture.run();
-    expect(environment.localStorage.getItem("safe_plugin_key")).toBe(
-      "new-local",
-    );
-    expect(await environment.localforage.getItem("safe_plugin_key")).toBe(
-      "new-forage",
-    );
-    expect(
-      fixture.events.indexOf("native_device_backup_prepared"),
-    ).toBeLessThan(
-      fixture.events.indexOf("native_device_backup_section_intent"),
-    );
-    expect(fixture.events.indexOf("user-reviewed-result")).toBeLessThan(
-      fixture.events.indexOf("native_device_backup_recovery_complete"),
-    );
-    expect(fixture.initial().mode).toBe("normal");
-    expect(
-      fixture.events.filter(
-        (event) => event === "native_device_backup_section_intent",
-      ),
-    ).toHaveLength(2);
-  });
+    const staged = await stageDeviceSection(info, spool, environment);
+    await staged.apply();
+    await staged.cleanup();
 
-  it("reapplies the committed source after a fresh maintenance bootstrap", async () => {
-    const environment = fixtureEnvironment();
-    const source = fixtureSpool();
-    environment.localStorage.setItem("safe_plugin_key", "committed-local");
-    await environment.localforage.setItem(
-      "safe_plugin_key",
-      "committed-forage",
-    );
-    await captureDeviceSection("local-storage", source, environment);
-    await captureDeviceSection("localforage", source, environment);
-    environment.localStorage.setItem("safe_plugin_key", "interrupted-local");
-    await environment.localforage.setItem(
-      "safe_plugin_key",
-      "interrupted-forage",
-    );
-    const fixture = maintenanceFixture(environment, source, fixtureSpool());
-    fixture.session.phase = "committed";
-    fixture.session.action = "reapply-source";
-    await fixture.run();
-    expect(environment.localStorage.getItem("safe_plugin_key")).toBe(
-      "committed-local",
-    );
-    expect(await environment.localforage.getItem("safe_plugin_key")).toBe(
-      "committed-forage",
-    );
-    expect(
-      fixture.events.filter(
-        (event) => event === "native_device_backup_section_intent",
-      ),
-    ).toHaveLength(2);
-    expect(fixture.events).not.toContain("native_device_backup_finish_device");
-  });
-
-  it("verifies already committed sections without rewriting them after a restart", async () => {
-    const environment = fixtureEnvironment();
-    const source = fixtureSpool();
-    environment.localStorage.setItem("safe_plugin_key", "committed-local");
-    await environment.localforage.setItem(
-      "safe_plugin_key",
-      "committed-forage",
-    );
-    await captureDeviceSection("local-storage", source, environment);
-    await captureDeviceSection("localforage", source, environment);
-    environment.localStorage.removeItem = () => {
-      throw new Error("unexpected storage rewrite");
-    };
-    environment.localforage.removeItem = async () => {
-      throw new Error("unexpected storage rewrite");
-    };
-    const fixture = maintenanceFixture(environment, source, fixtureSpool());
-    fixture.session.phase = "committed";
-    fixture.session.action = "reapply-source";
-    await fixture.run();
-    expect(
-      fixture.events.filter(
-        (event) => event === "native_device_backup_section_complete",
-      ),
-    ).toHaveLength(2);
-    expect(fixture.events).not.toContain("native_device_backup_fail");
-    expect(fixture.initial().mode).toBe("normal");
-  });
-
-  it("rolls all selected regions back after a later region fails", async () => {
-    const environment = fixtureEnvironment();
-    const source = fixtureSpool();
-    const rollback = fixtureSpool();
-    environment.localStorage.setItem("safe_plugin_key", "new-local");
-    await environment.localforage.setItem("safe_plugin_key", "new-forage");
-    await captureDeviceSection("local-storage", source, environment);
-    await captureDeviceSection("localforage", source, environment);
-    environment.localStorage.setItem("safe_plugin_key", "old-local");
-    await environment.localforage.setItem("safe_plugin_key", "old-forage");
-    const setItem = environment.localforage.setItem;
-    let failOnce = true;
-    environment.localforage.setItem = (async (key: string, value: unknown) => {
-      if (failOnce) {
-        failOnce = false;
-        throw new Error("synthetic quota failure");
-      }
-      return setItem(key, value);
-    }) as typeof setItem;
-    const fixture = maintenanceFixture(environment, source, rollback);
-    await fixture.run();
-    expect(environment.localStorage.getItem("safe_plugin_key")).toBe(
-      "old-local",
-    );
-    expect(await environment.localforage.getItem("safe_plugin_key")).toBe(
-      "old-forage",
-    );
-    expect(fixture.events).toContain("native_device_backup_fail");
-    expect(fixture.events).not.toContain("native_device_backup_finish_device");
-    expect(fixture.initial().mode).toBe("normal");
+    expect(rows.mock.calls[0]).toEqual([sectionId]);
+    expect(rows.mock.calls.slice(1).every(([, range]) => range !== undefined))
+      .toBe(true);
+    expect(rows.mock.calls.some(([, range]) =>
+      range?.startOrdinal === 1 && range.endOrdinalExclusive === 1,
+    )).toBe(true);
   });
 });

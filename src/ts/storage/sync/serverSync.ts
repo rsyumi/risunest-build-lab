@@ -2,12 +2,20 @@ import type { SyncMutationRuntime } from "./syncMutationRuntime";
 import { invoke } from "@tauri-apps/api/core";
 import type { PersistentDestructiveReplacementFence } from "../persistentDataRuntime";
 
+/** Ledger sections. Device-fixed data is never addressable on the server. */
+export type ServerSection = "library" | "hypa" | "local-plugins";
+export interface ServerSectionHead {
+  stateId: string;
+  changedSeq: string;
+  gcFloor: string;
+}
 export interface ServerHead {
   libraryId: string;
   epoch: string;
   seq: string;
   headId: string;
   minRetainedSeq: string;
+  sections: Record<ServerSection, ServerSectionHead>;
 }
 export interface ServerDirectory {
   baseUrl: string;
@@ -30,6 +38,7 @@ export interface ServerStatus {
   deviceId: string | null;
   head: ServerHead | null;
   dirtyRecords: number;
+  pendingDeviceSections: boolean;
   fullScan: boolean;
   registrationRequired: boolean;
   operationPending: boolean;
@@ -51,6 +60,11 @@ export interface ServerCycleOptions {
 }
 export type ServerSyncProgress =
   "saving" | "preparing" | "applying" | "refreshing" | "publishing";
+/** Records the running cycle applies or uploads, and how many are done. */
+export interface ServerCycleItems {
+  done: number;
+  total: number;
+}
 type Prepared =
   | { kind: "report"; result: ServerCycle }
   | {
@@ -60,6 +74,11 @@ type Prepared =
       head: ServerHead;
       appliedRecords: number;
     };
+interface Activated {
+  revision: number;
+  pluginsChanged: boolean;
+  devicePluginsChanged: boolean;
+}
 type NativeInvoke = <T>(
   command: string,
   args?: Record<string, unknown>,
@@ -69,6 +88,18 @@ export class ServerSyncError extends Error {
     super(code);
     this.name = "ServerSyncError";
   }
+}
+function isCycleItems(value: unknown): value is ServerCycleItems {
+  if (typeof value !== "object" || value === null) return false;
+  const { done, total } = value as Record<string, unknown>;
+  return (
+    typeof done === "number" &&
+    typeof total === "number" &&
+    Number.isSafeInteger(done) &&
+    Number.isSafeInteger(total) &&
+    done >= 0 &&
+    total >= done
+  );
 }
 export function serverSyncError(cause: unknown): ServerSyncError {
   if (cause instanceof ServerSyncError) return cause;
@@ -87,8 +118,11 @@ export function createServerSyncFacade(options: {
   runtime: SyncMutationRuntime;
   invoke?: NativeInvoke;
   restorePlugins?: () => Promise<void>;
+  invalidateDevicePlugins?: () => void;
   onProgress?: (phase: ServerSyncProgress) => void;
   onVerifiedBytes?: (bytes: string) => void;
+  onRetryableFailure?: (code: string | undefined) => void;
+  onCycleItems?: (items: ServerCycleItems) => void;
 }) {
   const native = options.invoke ?? invoke;
   const transfer = async <T>(
@@ -97,24 +131,53 @@ export function createServerSyncFacade(options: {
   ): Promise<T> => {
     let closed = false;
     let sampling = false;
+    const observed = Boolean(
+      options.onVerifiedBytes ||
+        options.onRetryableFailure ||
+        options.onCycleItems,
+    );
     const sample = async () => {
-      if (sampling || !options.onVerifiedBytes) return;
+      if (sampling || !observed) return;
       sampling = true;
       try {
-        const bytes = await native<string>("server_sync_verified_bytes");
+        const [verified, failure, items] = await Promise.allSettled([
+          options.onVerifiedBytes
+            ? native<string>("server_sync_verified_bytes")
+            : Promise.resolve(undefined),
+          options.onRetryableFailure
+            ? native<string | null>("server_sync_retryable_failure")
+            : Promise.resolve(undefined),
+          options.onCycleItems
+            ? native<ServerCycleItems>("server_sync_progress_counts")
+            : Promise.resolve(undefined),
+        ]);
+        if (closed) return;
         if (
-          !closed &&
-          typeof bytes === "string" &&
-          /^(0|[1-9][0-9]{0,19})$/.test(bytes)
+          verified.status === "fulfilled" &&
+          typeof verified.value === "string" &&
+          /^(0|[1-9][0-9]{0,19})$/.test(verified.value)
         )
-          options.onVerifiedBytes(bytes);
+          options.onVerifiedBytes?.(verified.value);
+        if (failure.status === "fulfilled") {
+          const code = failure.value;
+          if (
+            code === null ||
+            (typeof code === "string" && /^[a-z-]{1,64}$/.test(code))
+          )
+            options.onRetryableFailure?.(code ?? undefined);
+        }
+        if (items.status === "fulfilled" && isCycleItems(items.value))
+          options.onCycleItems?.({
+            done: items.value.done,
+            total: items.value.total,
+          });
       } catch {
         /* Progress must never change the synchronization outcome. */
       } finally {
         sampling = false;
       }
     };
-    const timer = options.onVerifiedBytes
+    const timer = observed
       ? setInterval(() => void sample(), 1000)
       : undefined;
     try {
@@ -128,7 +191,10 @@ export function createServerSyncFacade(options: {
     | {
         revision: number;
         preparationId: string;
-        fence: PersistentDestructiveReplacementFence;
+        projected: boolean;
+        pluginsChanged: boolean;
+        devicePluginsChanged: boolean;
+        fence?: PersistentDestructiveReplacementFence;
       }
     | undefined;
   let pendingActivation:
@@ -144,22 +210,45 @@ export function createServerSyncFacade(options: {
     if (!pending) throw new ServerSyncError("refresh-not-pending");
     options.onProgress?.("refreshing");
     try {
-      await pending.fence.refreshCommittedWorkingSet(pending.revision);
-      await options.restorePlugins?.();
+      if (pending.devicePluginsChanged) {
+        options.invalidateDevicePlugins?.();
+        pending.devicePluginsChanged = false;
+      }
+      if (!pending.projected) {
+        let outcome;
+        if (pending.fence) {
+          const fence = pending.fence;
+          try {
+            outcome = await fence.refreshCommittedWorkingSet(pending.revision);
+          } finally {
+            pending.fence = undefined;
+            fence.release();
+          }
+        } else {
+          outcome = await options.runtime.refreshActiveWorkingSetFromStore(pending.revision);
+        }
+        if (outcome.projection === 'refresh-required') {
+          throw new ServerSyncError('committed-refresh-pending');
+        }
+        pending.projected = true;
+      } else if (pending.fence) {
+        pending.fence.release();
+        pending.fence = undefined;
+      }
+      if (pending.pluginsChanged) await options.restorePlugins?.();
     } catch {
       throw new ServerSyncError("committed-refresh-pending");
     }
     pendingRefresh = undefined;
-    pending.fence.release();
     return pending.preparationId;
   };
   const activate = async (): Promise<string> => {
     const pending = pendingActivation;
     if (!pending) throw new ServerSyncError("activation-not-pending");
     options.onProgress?.("applying");
-    let revision: number;
+    let activated: Activated;
     try {
-      revision = await native<number>("server_sync_activate", {
+      activated = await native<Activated>("server_sync_activate", {
         preparationId: pending.prepared.preparationId,
       });
     } catch (cause) {
@@ -179,10 +268,13 @@ export function createServerSyncFacade(options: {
       throw new ServerSyncError("activation-confirmation-pending");
     }
     pendingActivation = undefined;
-    if (pending.prepared.appliedRecords > 0) {
+    if (pending.prepared.appliedRecords > 0 || activated.pluginsChanged || activated.devicePluginsChanged) {
       pendingRefresh = {
-        revision,
+        revision: activated.revision,
         preparationId: pending.prepared.preparationId,
+        projected: pending.prepared.appliedRecords === 0,
+        pluginsChanged: activated.pluginsChanged,
+        devicePluginsChanged: activated.devicePluginsChanged,
         fence: pending.fence,
       };
       return refresh();
@@ -212,6 +304,7 @@ export function createServerSyncFacade(options: {
     });
     if (prepared.kind === "report") return prepared.result;
     let fence: PersistentDestructiveReplacementFence | undefined;
+    let ownsPreparation = true;
     try {
       if (cancelled) throw new ServerSyncError("cancelled");
       await options.runtime.flushPendingData("server-sync-activate");
@@ -221,11 +314,12 @@ export function createServerSyncFacade(options: {
       fence = await options.runtime.acquireDestructiveReplacementFence(token);
       if (cancelled) throw new ServerSyncError("cancelled");
       pendingActivation = { prepared, fence };
+      ownsPreparation = false;
       fence = undefined;
       await activate();
     } catch (cause) {
-      if (fence) {
-        fence.release();
+      if (ownsPreparation) {
+        fence?.release();
         await native("server_sync_cancel").catch(() => undefined);
       }
       throw serverSyncError(cause);

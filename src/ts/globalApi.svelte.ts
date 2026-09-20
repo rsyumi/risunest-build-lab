@@ -12,14 +12,14 @@ import { v4 as uuidv4, v4 } from 'uuid';
 import { appDataDir, join } from "@tauri-apps/api/path";
 import { get } from "svelte/store";
 import { open } from '@tauri-apps/plugin-shell'
+import { openUrl } from '@tauri-apps/plugin-opener'
 import streamSaver from 'streamsaver';
-import { type Database, defaultSdDataFunc, getDatabase, appVer, getCurrentCharacter, type character, type groupChat, appSubVer } from "./storage/database.svelte";
+import { type Database, defaultSdDataFunc, getDatabase, getCurrentCharacter, type character, type groupChat, appSubVer } from "./storage/database.svelte";
+import versionData from "../../version.json";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { checkRisuUpdate } from "./update";
 import { MobileGUI, botMakerMode, selectedCharID, loadedStore, DBState, LoadingStatusState, selIdState, ReloadGUIPointer, bodyIntercepterStore } from "./stores.svelte";
 import { loadPlugins } from "./plugins/plugins.svelte";
 import { alertConfirm, alertError, alertMd, alertNormal, alertNormalWait, alertSelect, alertTOS, waitAlert } from "./alert";
-import { checkDriverInit } from "./drive/drive";
 import { hasher } from "./parser/parser.svelte";
 import { characterURLImport, hubURL, realmHubURL } from "./characterCards";
 import { defaultJailbreak, defaultMainPrompt, oldJailbreak, oldMainPrompt } from "./storage/defaultPrompts";
@@ -38,7 +38,6 @@ import { initMobileGesture } from "./hotkey";
 import { fetch as TauriHTTPFetch } from '@tauri-apps/plugin-http';
 import { fetchTauriHttpStream } from './network/tauriHttpStream';
 import { moduleUpdate } from "./process/modules";
-import { getColdStorageItem, makeColdData } from "./process/coldstorage.svelte";
 import {
     listCharacterResources,
     listDatabaseRootResources,
@@ -46,7 +45,8 @@ import {
     replaceDatabaseRootResources,
 } from "./process/coldstorageData";
 import { collectExactPluginStorageAssetReferences } from "./drive/backupAssets";
-import { isTauri, isTauriMobile, isNodeServer } from "./platform";
+import { downloadIOSFile } from "./storage/iosFiles";
+import { isTauriIOS, isTauri, isTauriMobile, isNodeServer } from "./platform";
 import { isLocalNetworkUrl } from "./network/localNetwork";
 import { decodeProxyJobWsChunk, formatProxyStreamErrorMessage, parseProxyJobWsEvent } from "./network/proxyJobWs";
 import { getNodeServerProxyAuth } from "./storage/nodeStorage";
@@ -119,6 +119,7 @@ export async function downloadFile(name: string, dat: Uint8Array | ArrayBuffer |
         a.remove()
     }
 
+    if (isTauriIOS) return downloadIOSFile(name, data);
     if (isTauriMobile) {
         // Android resolves the download directory to app private storage the user cannot browse,
         // so exports go through the system picker instead.
@@ -830,20 +831,7 @@ export function getBasename(data: string) {
 }
 
 export async function getUncleanables(db: Database, uptype: 'basename' | 'pure' = 'basename') {
-    let chars: (character|groupChat)[] = []
-    if (db.characters) {
-        for(let cha of db.characters){
-            if(cha?.coldstorage){
-                const coldData = await getColdStorageItem(cha.coldstorage!)
-                if(coldData?.character && coldData.character.chaId === cha.chaId){
-                    cha = coldData.character
-                }
-            }
-            chars.push(cha)
-        }
-    }
-
-    return getUncleanablesSync(db, uptype, { chars });
+    return getUncleanablesSync(db, uptype);
 }
 
 /**
@@ -949,7 +937,10 @@ export function getFetchLogs() {
  * @param {string} url - The URL to open.
  */
 export function openURL(url: string) {
-    if (isTauri) {
+    if (isTauriIOS) {
+        void openUrl(url).catch((error) => alertError(String(error)))
+    }
+    else if (isTauri) {
         open(url)
     }
     else {
@@ -1729,7 +1720,7 @@ export function getLanguageCodes() {
 }
 
 export function getVersionString(): string {
-    let versionString = appVer
+    let versionString = versionData.version
     if(appSubVer) {
         versionString += '-' + appSubVer
     }

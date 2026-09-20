@@ -1,7 +1,7 @@
 mod common;
 use common::*;
 use risunest_sync_server::{config::Config, store::Store};
-use risunest_sync_wire::{hash, ReadFence, RecordVersion, TerminalStatus};
+use risunest_sync_wire::{hash, Domain, ReadFence, RecordVersion, TerminalStatus};
 use std::sync::Arc;
 
 #[test]
@@ -18,16 +18,16 @@ fn owner_lock_and_reinitialization_protect_the_store() {
     assert_eq!(Store::open(dir.path()).unwrap().head().unwrap(), head);
 }
 #[test]
-fn only_loopback_listener_and_absolute_storage_are_allowed() {
+fn explicit_interface_listeners_and_absolute_storage_are_allowed() {
     let dir = tempfile::tempdir().unwrap();
-    for listen in ["0.0.0.0:4319", "192.168.1.2:4319", "[::]:4319"] {
+    for listen in ["0.0.0.0:14319", "192.168.1.2:14319", "[::]:14319"] {
         assert!(Config {
             data_dir: dir.path().into(),
             listen: listen.parse().unwrap(),
             https_proxy: true
         }
         .validate()
-        .is_err());
+        .is_ok());
     }
     assert!(Config {
         data_dir: "relative".into(),
@@ -119,6 +119,7 @@ fn missing_dependencies_and_wrong_before_or_fence_never_advance_head() {
     );
     let mut c = changes("a", b"missing");
     c.read_fences.push(ReadFence {
+        domain: Domain::Library,
         key: "owner".into(),
         version: RecordVersion::Tombstone {
             deletion_id: "deleted".into(),
@@ -151,11 +152,19 @@ fn device_scoping_isolates_staging_receipts_ack_and_revocation() {
     assert_eq!(failed.error.as_deref(), Some("staging-not-found"));
     let receipt = store.commit(&a, &intent, &head.etag()).unwrap();
     assert!(store.receipt(&b, &receipt.operation_id).is_err());
-    assert!(store.acknowledge(&a, "wrong", &1.into()).is_err());
-    assert!(store.acknowledge(&a, &head.epoch, &2.into()).is_err());
-    store.acknowledge(&a, &head.epoch, &1.into()).unwrap();
-    assert!(store.acknowledge(&a, &head.epoch, &0.into()).is_err());
-    store.acknowledge(&b, &head.epoch, &0.into()).unwrap();
+    assert!(store.acknowledge(&a, "wrong", &acks(&1.into())).is_err());
+    assert!(store
+        .acknowledge(&a, &head.epoch, &acks(&2.into()))
+        .is_err());
+    store
+        .acknowledge(&a, &head.epoch, &acks(&1.into()))
+        .unwrap();
+    assert!(store
+        .acknowledge(&a, &head.epoch, &acks(&0.into()))
+        .is_err());
+    store
+        .acknowledge(&b, &head.epoch, &acks(&0.into()))
+        .unwrap();
     store.revoke_device(&a.id).unwrap();
     store
         .put_object(&b, &hash(b"still-allowed"), b"still-allowed")
@@ -204,11 +213,11 @@ fn simultaneous_devices_get_one_commit_one_stale_then_both_independent_changes()
         TerminalStatus::Committed
     );
     assert!(matches!(
-        store.record("a").unwrap(),
+        store.record(Domain::Library, "a").unwrap(),
         RecordVersion::Live { .. }
     ));
     assert!(matches!(
-        store.record("b").unwrap(),
+        store.record(Domain::Library, "b").unwrap(),
         RecordVersion::Live { .. }
     ));
 }

@@ -1,13 +1,14 @@
 import { createPersistenceCanonicalCapture } from './reactivePersistenceCapture.svelte'
-import { get } from 'svelte/store'
+import { derived, get, readonly, writable } from 'svelte/store'
 import { doingChat } from '../process/generationState'
-import { ReloadGUIPointer, selectedCharID } from '../stores.svelte'
+import { ReloadGUIPointer, selectedCharID, selIdState } from '../stores.svelte'
 import type { ActiveConversationSession } from './activeConversationSession'
 import type {
     ActiveConversationViewportSourceListener,
     CompleteConversationLease,
     ConversationPublicationOptions,
     SelectedConversationTarget,
+    WindowedConversationMutationController,
 } from './activeWorkingSet.svelte'
 import type { ConversationViewportSource } from '../conversationViewportSource'
 import type { Chat, Database, character, groupChat } from './database.svelte'
@@ -25,6 +26,7 @@ import type {
     PersistentCompleteCharacterMutation,
     PersistentCompleteCharacterUpsert,
     PersistentCompleteCharacterUpsertOptions,
+    PersistentDatabaseMaterializationOptions,
     PersistentScopedReplacementOptions,
     PersistentDatabaseSnapshot,
     PersistentMutationToken,
@@ -32,6 +34,7 @@ import type {
 } from './saveCoordinator'
 import type { CharacterActivationOptions } from './activeWorkingSet.svelte'
 import { notifyLocalPersistentRevision } from './persistentRevisionEvents'
+import { retryCommittedWorkingSetRefreshWithContinuation } from './committedWorkingSetContinuation'
 import {
     capturePersistentRoot,
     capturePersistentPluginStorage,
@@ -42,6 +45,7 @@ import {
     publishPersistentCharacterMutationToWorkingSet,
     publishPersistentConversationReplacementToWorkingSet,
     restoreStableWorkingSetSelection,
+    type CommittedApplyOutcome,
     type PersistentDestructiveReplacementFence,
     type PersistentDataRuntime,
     type PersistentDataRuntimeStateAdapter,
@@ -53,19 +57,20 @@ import { workingSetResidency } from './workingSetResidency'
 import {
     createPresetCatalogWorkingSetFromValues,
     hydrateWorkingSetCharacterDetail,
+    isArchivedCharacter,
     isCatalogCharacterStub,
     isCatalogPresetWorkingSet,
 } from './workingSetCatalog'
 import {
     notifyPluginStorageAuthorityReplacement,
     notifyPluginStorageCompatibilityMutation,
-    notifyPluginStorageCompatibilityOrder,
+    notifyPluginStorageOwnerChanged,
+    resolveLifecyclePluginStorageOwner,
 } from '../plugins/pluginStorageStore'
 import {
     applyPluginStorageMutationsInPlace,
     orderPluginStorageKeys,
 } from './saveCoordinatorHelpers'
-import { selectPluginCompatibilityProfile } from '../plugins/pluginCompatibility'
 import { getRuntimePerformanceBudgets } from '../runtimePerformanceProfile'
 import type { WindowedConversationPersistenceAuthority } from './saveCoordinator'
 import {
@@ -74,6 +79,8 @@ import {
 } from './persistentConversationRead'
 
 export type {
+    CommittedApplyOutcome,
+    ReplacementChangeSet,
     PersistentDestructiveReplacementFence,
     PersistentDataRuntime,
     PersistentDataRuntimeStateAdapter,
@@ -85,7 +92,7 @@ type CompleteCharacter = character | groupChat
 export function createProductionStateAdapter(): PersistentDataRuntimeStateAdapter {
     const readSelectedCharacter = () => {
         const database = getDatabase()
-        const selected = captureSelectedPersistentCharacter(database, get(selectedCharID))
+        const selected = captureSelectedPersistentCharacter(database, selIdState.selId)
         return selected ? captureResidentPersistentCharacter(database, selected.chaId) : null
     }
     const canonicalCapture = createPersistenceCanonicalCapture({
@@ -104,17 +111,20 @@ export function createProductionStateAdapter(): PersistentDataRuntimeStateAdapte
         },
         publishPluginStorageWorkingSet(storage) {
             getDatabase().pluginCustomStorage = storage
-            notifyPluginStorageAuthorityReplacement(storage)
+            notifyPluginStorageAuthorityReplacement()
         },
         publishPluginStorageMutations(mutations, keys) {
             const storage = (getDatabase().pluginCustomStorage ??= {})
-            applyPluginStorageMutationsInPlace(storage, mutations)
+            applyPluginStorageMutationsInPlace(
+                storage,
+                mutations,
+                resolveLifecyclePluginStorageOwner,
+            )
             const ordered = orderPluginStorageKeys(storage, keys)
             if (ordered !== storage) getDatabase().pluginCustomStorage = ordered
             for (const mutation of mutations) {
                 notifyPluginStorageCompatibilityMutation(mutation)
             }
-            notifyPluginStorageCompatibilityOrder(keys)
         },
         capturePresets() {
             return capturePersistentPresets(getDatabase())
@@ -147,11 +157,7 @@ export function createProductionStateAdapter(): PersistentDataRuntimeStateAdapte
                 forceScalableProjection,
             ) ?? database
             setDatabase(replacement)
-            notifyPluginStorageAuthorityReplacement(
-                forceScalableProjection || isCatalogPresetWorkingSet(replacement.botPresets)
-                    ? null
-                    : replacement.pluginCustomStorage ?? {},
-            )
+            notifyPluginStorageAuthorityReplacement()
             restoreStableWorkingSetSelection(
                 replacement,
                 selectedCharacterId,
@@ -202,7 +208,7 @@ export function createProductionStateAdapter(): PersistentDataRuntimeStateAdapte
         installCompleteDatabase(database) {
             workingSetResidency.clear()
             setDatabase(database)
-            notifyPluginStorageAuthorityReplacement(database.pluginCustomStorage ?? {})
+            notifyPluginStorageAuthorityReplacement()
         },
         restoreSelection(characterId, conversationId) {
             restoreStableWorkingSetSelection(
@@ -345,12 +351,22 @@ export function createProductionStateAdapter(): PersistentDataRuntimeStateAdapte
         canUseWindowedSelectedConversation() {
             return workingSetResidency.allowsEviction
         },
-        isMaximumCompatibilityMode() {
-            return selectPluginCompatibilityProfile(getDatabase().plugins ?? []) ===
-                'maximum-compatibility'
-        },
         isConversationOperationActive() {
             return get(doingChat)
+        },
+        captureWorkingSetDatabase() {
+            return getDatabase()
+        },
+        onPluginStorageChanged(owner) {
+            notifyPluginStorageOwnerChanged(owner)
+        },
+        getGeneratingConversation() {
+            const database = getDatabase()
+            const character = database.characters[get(selectedCharID)]
+            if (!character) return null
+            const conversation = character.chats[character.chatPage ?? 0]
+            if (!conversation) return null
+            return { characterId: character.chaId, conversationId: conversation.id }
         },
         subscribeConversationOperationActive(listener) {
             return doingChat.subscribe(listener)
@@ -368,14 +384,6 @@ export function createProductionStateAdapter(): PersistentDataRuntimeStateAdapte
         },
         releaseInactiveCharacter(id) {
             workingSetResidency.releaseCharacterToCatalog(getDatabase(), id)
-        },
-        releaseInactiveCharacters(selectedId, activeIds) {
-            const database = getDatabase()
-            for (const character of [...database.characters]) {
-                if (character.chaId !== selectedId && !activeIds?.has(character.chaId)) {
-                    workingSetResidency.releaseCharacterToCatalog(database, character.chaId)
-                }
-            }
         },
     }
 }
@@ -398,6 +406,13 @@ const productionConfiguration: ProductionRuntimeConfiguration = {
     officialPublisher: null,
 }
 let productionRuntime: PersistentDataRuntime | null = null
+const workingSetRefreshRevision = writable<DataRevision | null>(null)
+const destructiveReplacementActive = writable(false)
+export const persistentWorkingSetRefreshRevision = readonly(workingSetRefreshRevision)
+export const persistentWorkingSetInputBlocked = derived(
+    [destructiveReplacementActive, workingSetRefreshRevision],
+    ([active, revision]) => active || revision !== null,
+)
 
 export function configurePersistentDataRuntime(
     configuration: Partial<ProductionRuntimeConfiguration>,
@@ -417,6 +432,8 @@ export function getPersistentDataRuntime(): PersistentDataRuntime {
             },
             onFlushPromise: (promise) => productionConfiguration.onFlushPromise?.(promise),
             onBackgroundError: (error) => productionConfiguration.onBackgroundError?.(error),
+            onWorkingSetRefreshRequired: (revision) => workingSetRefreshRevision.set(revision),
+            onDestructiveReplacementFenceChanged: (active) => destructiveReplacementActive.set(active),
             prepareDatabase: prepareDatabaseForPersistence,
         })
     }
@@ -425,16 +442,32 @@ export function getPersistentDataRuntime(): PersistentDataRuntime {
 
 export const initializeActiveWorkingSet = (database: Database): Promise<void> =>
     getPersistentDataRuntime().initializeActiveWorkingSet(database)
-export const refreshActiveWorkingSetFromStore = (revision: DataRevision): Promise<void> =>
+export const refreshActiveWorkingSetFromStore = (revision: DataRevision): Promise<CommittedApplyOutcome> =>
     getPersistentDataRuntime().refreshActiveWorkingSetFromStore(revision)
+export const retryCommittedWorkingSetRefresh = async (): Promise<CommittedApplyOutcome | null> => {
+    const runtime = getPersistentDataRuntime()
+    return retryCommittedWorkingSetRefreshWithContinuation(
+        runtime,
+        productionConfiguration.onBackgroundError,
+    )
+}
+export const assertPersistentMutationAllowed = (expectedAuthorityEpoch?: number): void =>
+    getPersistentDataRuntime().assertPersistentMutationAllowed(expectedAuthorityEpoch)
+export const getPersistentStorageAuthorityEpoch = (): number =>
+    getPersistentDataRuntime().getStorageAuthorityEpoch()
 export const markPersistentDataDirty = (estimatedBytes: number): void =>
     getPersistentDataRuntime().markPersistentDataDirty(estimatedBytes)
 export const flushPendingData = (reason: string): Promise<void> =>
     getPersistentDataRuntime().flushPendingData(reason)
 export const flushPendingDataLocally = (reason: string): Promise<void> =>
     getPersistentDataRuntime().flushPendingDataLocally(reason)
-export const acknowledgeGenerationCompletion = (): Promise<void> =>
-    getPersistentDataRuntime().acknowledgeGenerationCompletion()
+export const acknowledgeGenerationCompletion = async (expectedAuthorityEpoch?: number): Promise<void> => {
+    const runtime = getPersistentDataRuntime()
+    const authorityEpoch = expectedAuthorityEpoch ?? runtime.getStorageAuthorityEpoch()
+    await runtime.acknowledgeGenerationCompletion(authorityEpoch)
+    runtime.assertPersistentMutationAllowed(authorityEpoch)
+    notifyLocalPersistentRevision(runtime.revision, 'generation-complete')
+}
 export const commitCharacterAddition = (
     request: CharacterAdditionRequest,
     reason: string,
@@ -442,7 +475,13 @@ export const commitCharacterAddition = (
 export const activateCharacter = (
     id: string,
     options?: CharacterActivationOptions,
-): Promise<boolean> => getPersistentDataRuntime().activateCharacter(id, options)
+): Promise<boolean> => {
+    // An archived character has no detail to hydrate, so selection stops here
+    // instead of failing inside the read.
+    const member = getDatabase().characters.find((candidate) => candidate.chaId === id)
+    if (member && isArchivedCharacter(member)) return Promise.resolve(false)
+    return getPersistentDataRuntime().activateCharacter(id, options)
+}
 export function hydrateCurrentGroupMemberDetail(
     groupId: string,
     detail: CharacterDetail,
@@ -456,6 +495,9 @@ export function hydrateCurrentGroupMemberDetail(
     )
     if (memberIndex < 0 || detail.chaId === groupId) return false
     const member = database.characters[memberIndex]
+    // An archived member has no detail to hydrate, so it is unusable rather
+    // than loadable. This must come before the stub check.
+    if (isArchivedCharacter(member)) return false
     if (!isCatalogCharacterStub(member)) return true
     const hydrated = hydrateWorkingSetCharacterDetail(database, memberIndex, detail)
     workingSetResidency.markCharacterHydrated(hydrated.chaId)
@@ -482,6 +524,16 @@ export const acquireCompleteConversation = (
     target?: SelectedConversationTarget | null,
 ): Promise<CompleteConversationLease> =>
     getPersistentDataRuntime().acquireCompleteConversation(reason, target)
+export const captureWindowedConversationMutationController = (
+    target: SelectedConversationTarget,
+    chat: Chat,
+    absoluteStartIndex: number,
+): WindowedConversationMutationController | null =>
+    getPersistentDataRuntime().captureWindowedConversationMutationController(
+        target,
+        chat,
+        absoluteStartIndex,
+    )
 export const tryDemoteSelectedConversation = (
     target?: SelectedConversationTarget | null,
 ): boolean => getPersistentDataRuntime().tryDemoteSelectedConversation(target)
@@ -515,7 +567,7 @@ export const replacePersistentDatabase = (
     database: Database,
     reason: string,
     options?: PersistentReplacementOptions,
-): Promise<void> => getPersistentDataRuntime().replacePersistentDatabase(database, reason, options)
+): Promise<CommittedApplyOutcome> => getPersistentDataRuntime().replacePersistentDatabase(database, reason, options)
 export const mutatePersistentPluginStorage = (
     reason: string,
     mutations: readonly PluginStorageMutation[],
@@ -642,8 +694,9 @@ export const readPersistentSelectedConversationWindow = (
 }
 export const capturePersistentMutationToken = (
     reason: string,
+    options?: { publishOfficial?: boolean },
 ): Promise<PersistentMutationToken> =>
-    getPersistentDataRuntime().capturePersistentMutationToken(reason)
+    getPersistentDataRuntime().capturePersistentMutationToken(reason, options)
 export const acquireDestructiveReplacementFence = (
     expected: PersistentMutationToken,
 ): Promise<PersistentDestructiveReplacementFence> =>
@@ -655,11 +708,9 @@ export const materializePersistentDatabaseSnapshot = (reason: string): Promise<D
     getPersistentDataRuntime().materializePersistentDatabaseSnapshot(reason)
 export const materializePersistentDatabaseSnapshotWithRevision = (
     reason: string,
+    options?: PersistentDatabaseMaterializationOptions,
 ): Promise<PersistentDatabaseSnapshot> =>
-    getPersistentDataRuntime().materializePersistentDatabaseSnapshotWithRevision(reason)
-
-export const materializeMaximumCompatibilityWorkingSet = (): Promise<void> =>
-    getPersistentDataRuntime().materializeMaximumCompatibilityWorkingSet()
+    getPersistentDataRuntime().materializePersistentDatabaseSnapshotWithRevision(reason, options)
 
 export const releaseInactiveWorkingSet = (
     canRelease?: () => boolean | Promise<boolean>,

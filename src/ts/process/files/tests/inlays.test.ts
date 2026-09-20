@@ -1,4 +1,7 @@
+import { setRuntimePerformanceProfile } from 'src/ts/runtimePerformanceProfile'
+vi.mock('src/ts/alert', () => ({ alertToast: vi.fn() }))
 import fc from 'fast-check'
+import localforage from 'localforage'
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 import type { InlayAsset } from '../inlays'
 import {
@@ -8,17 +11,19 @@ import {
     getInlayAssetRenderUrl,
     listInlayAssets,
     listInlayAssetMetadata,
-    migrateLegacyInlayAsset,
-    readLegacyInlayPayload,
     postInlayAsset,
     reencodeImage,
     removeInlayAsset,
     saveInlayedSignature,
     setInlayAsset,
     writeInlayImage,
-    UnsupportedAnimatedInlayError,
+    InlayInputTooLargeError,
+    maxNewInlayInputBytes,
 } from '../inlays'
-import { createBackedBlobStore } from 'src/ts/storage/platformBlobStore'
+import {
+    configureBlobStoreStorageProvider,
+    createBackedBlobStore,
+} from 'src/ts/storage/platformBlobStore'
 import { getDatabase } from 'src/ts/storage/database.svelte'
 
 //#region module mocks
@@ -169,6 +174,7 @@ beforeEach(() => {
     canvasEncodeArgs = undefined
     loadedImageWidth = 100
     loadedImageHeight = 100
+    configureBlobStoreStorageProvider(async () => localforage.createInstance({ name: 'risunest' }))
     vi.stubGlobal('fetch', vi.fn(async () => new Response(
         Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
         { headers: { 'Content-Type': 'image/png' } },
@@ -188,14 +194,14 @@ beforeEach(() => {
 describe('setInlayAsset', () => {
     test('normalizes absent and malformed configured options at the encoding boundary', () => {
         expect(getInlayEncodeOptions()).toEqual({
-            format: 'webp', quality: 85, maxDimension: 0, skipReencode: true,
+            format: 'webp', quality: 85, maxDimension: 0, skipReencode: true, animationDecodeBytes: 256 * 1024 * 1024, animationMaxFps: 0,
         })
         vi.mocked(getDatabase).mockReturnValue({
             risunestInlayFormat: 'invalid', risunestInlayWebpQuality: 140.6,
             risunestInlayMaxDimension: -4.4, risunestInlaySkipReencode: 'yes',
         } as any)
         expect(getInlayEncodeOptions()).toEqual({
-            format: 'webp', quality: 100, maxDimension: 0, skipReencode: true,
+            format: 'webp', quality: 100, maxDimension: 0, skipReencode: true, animationDecodeBytes: 256 * 1024 * 1024, animationMaxFps: 0,
         })
     })
 
@@ -328,18 +334,30 @@ describe('setInlayAsset', () => {
 
     test.each([
         ['GIF', Uint8Array.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61]), 'gif', 'image/gif'],
-        ['AVIF', new TextEncoder().encode('\0\0\0\x18ftypavif'), 'avif', 'image/avif'],
+        ['AVIF', ftypBytes('avif'), 'avif', 'image/avif'],
         ['animated WebP', new TextEncoder().encode('RIFF\x0c\0\0\0WEBPANIM\0\0\0\0'), 'webp', 'image/webp'],
         ['APNG', apngBytes(), 'png', 'image/png'],
-    ])('rejects new %s input rather than flattening it', async (_label, bytes, ext, mime) => {
-        const rejection = setInlayAsset('unsupported-image', {
+    ])('stores new %s input as it arrived instead of flattening it', async (_label, bytes, ext, mime) => {
+        await setInlayAsset('unsupported-image', {
             data: new Blob([bytes.slice().buffer as ArrayBuffer], { type: mime }),
             ext, name: `unsupported.${ext}`, type: 'image',
         })
 
-        await expect(rejection).rejects.toBeInstanceOf(UnsupportedAnimatedInlayError)
+        const stored = await getInlayAssetBlob('unsupported-image')
+        expect(stored).toMatchObject({ ext, type: 'image' })
+        expect(new Uint8Array(await stored!.data.arrayBuffer())).toEqual(bytes)
+        expect(fakeCtx.drawImage).not.toHaveBeenCalled()
+    })
 
-        expect(await getInlayAssetBlob('unsupported-image')).toBeNull()
+    test('refuses only an attachment past the input size limit', async () => {
+        const oversized = new Uint8Array(maxNewInlayInputBytes + 1)
+
+        await expect(setInlayAsset('too-large', {
+            data: new Blob([oversized.buffer as ArrayBuffer], { type: 'image/png' }),
+            ext: 'png', name: 'huge.png', type: 'image',
+        })).rejects.toBeInstanceOf(InlayInputTooLargeError)
+
+        expect(await getInlayAssetBlob('too-large')).toBeNull()
     })
 
     test('stores an asset in the storage', async () => {
@@ -399,38 +417,22 @@ describe('getInlayAsset', () => {
         expect(result).toBeNull()
     })
 
-    test('returns asset with base64 data URI when stored as Blob', async () => {
-        const blob = new Blob(['test-data'], { type: 'text/plain' })
-        const asset: InlayAsset = {
-            data: blob,
+    test('returns asset with base64 data URI', async () => {
+        loadedImageWidth = 50
+        loadedImageHeight = 50
+        await setInlayAsset('blob-id', {
+            data: new Blob([new Uint8Array([1, 2])], { type: 'image/png' }),
             ext: 'png',
             height: 50,
             width: 50,
             name: 'blob-asset.png',
             type: 'image',
-        }
-        store.set('blob-id', asset)
+        })
 
         const result = await getInlayAsset('blob-id')
 
         expect(result!.data).toMatch(/^data:/)
         expect(result!.name).toBe('blob-asset.png')
-    })
-
-    test('returns asset with string data as-is when stored as string', async () => {
-        const b64 = 'data:image/png;base64,aGVsbG8='
-        const asset: InlayAsset = {
-            data: b64,
-            ext: 'png',
-            height: 50,
-            width: 50,
-            name: 'string-asset.png',
-            type: 'image',
-        }
-        store.set('str-id', asset)
-
-        const result = await getInlayAsset('str-id')
-        expect(result!.data).toBe(b64)
     })
 })
 
@@ -440,39 +442,20 @@ describe('getInlayAssetBlob', () => {
         expect(result).toBeNull()
     })
 
-    test('returns Blob data when stored as Blob', async () => {
-        const blob = new Blob(['binary-data'], { type: 'image/png' })
-        const asset: InlayAsset = {
-            data: blob,
+    test('returns Blob data', async () => {
+        loadedImageWidth = 64
+        loadedImageHeight = 64
+        await setInlayAsset('blob-id', {
+            data: new Blob([new Uint8Array([1, 2])], { type: 'image/png' }),
             ext: 'png',
             height: 64,
             width: 64,
             name: 'blob.png',
             type: 'image',
-        }
-        store.set('blob-id', asset)
+        })
 
         const result = await getInlayAssetBlob('blob-id')
         expect(result!.data).toBeInstanceOf(Blob)
-    })
-
-    test('migrates string data to Blob and updates storage', async () => {
-        const b64 = 'data:image/png;base64,aGVsbG8='
-        const asset: InlayAsset = {
-            data: b64,
-            ext: 'png',
-            height: 32,
-            width: 32,
-            name: 'legacy.png',
-            type: 'image',
-        }
-        store.set('legacy-id', asset)
-
-        const result = await getInlayAssetBlob('legacy-id')
-        expect(result!.data).toBeInstanceOf(Blob)
-
-        const retained = store.get('legacy-id') as InlayAsset
-        expect(retained.data).toBe(b64)
     })
 })
 
@@ -499,8 +482,10 @@ describe('listInlayAssets', () => {
             name: 'b.mp3',
             type: 'audio',
         }
-        store.set('id-a', asset1)
-        store.set('id-b', asset2)
+        loadedImageWidth = 10
+        loadedImageHeight = 10
+        await setInlayAsset('id-a', asset1)
+        await setInlayAsset('id-b', asset2)
 
         const result = await listInlayAssets()
         expect(result).toMatchObject([
@@ -524,32 +509,12 @@ describe('native inlay rendering', () => {
             inlayType: 'image',
         })))
 
-        await expect(listInlayAssetMetadata({ migrateLegacy: false })).resolves.toMatchObject([{ key: 'new-id' }])
+        await expect(listInlayAssetMetadata()).resolves.toMatchObject([{ key: 'new-id' }])
         expect(legacyReads).toBe(0)
         expect(legacyKeyLists).toBe(0)
         expect(payloadReads).toBe(0)
     })
 
-    test('migrates legacy entries once before returning metadata-only listings', async () => {
-        store.set('legacy-id', {
-            data: new Blob(['legacy'], { type: 'image/webp' }),
-            ext: 'webp',
-            height: 2,
-            width: 3,
-            name: 'legacy.webp',
-            type: 'image',
-        } satisfies InlayAsset)
-
-        await expect(listInlayAssetMetadata()).resolves.toEqual([{
-            key: 'legacy-id', kind: 'inlay', size: 6, mime: 'image/webp', name: 'legacy.webp', ext: 'webp',
-            inlayType: 'image', width: 3, height: 2,
-        }])
-        expect(payloadReads).toBeGreaterThan(0)
-
-        payloadReads = 0
-        await expect(listInlayAssetMetadata()).resolves.toHaveLength(1)
-        expect(payloadReads).toBe(0)
-    })
 
     test('lists metadata without reading payload bytes', async () => {
         store.set('blobstore/inlays/69642d61.bin', new Uint8Array([1, 2, 3]))
@@ -594,7 +559,7 @@ describe('removeInlayAsset', () => {
 })
 
 describe('postInlayAsset', () => {
-    test('revokes an image URL when the source setter throws', async () => {
+    test('keeps the original bytes and the URL contract when the source setter throws', async () => {
         vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:source-throw')
         const revokeObjectURL = vi.spyOn(URL, 'revokeObjectURL')
         vi.stubGlobal('Image', class {
@@ -603,16 +568,17 @@ describe('postInlayAsset', () => {
             set src(_value: string) { throw new Error('source assignment failed') }
         })
 
-        await expect(postInlayAsset({
-            name: 'broken.png',
-            data: new Uint8Array([1]),
-        })).rejects.toThrow('source assignment failed')
+        await postInlayAsset({ name: 'broken.png', data: new Uint8Array([1]) })
 
+        // The bytes survive a decoder that never got started.
+        const stored = await getInlayAssetBlob('test-uuid-1234')
+        expect(new Uint8Array(await stored!.data.arrayBuffer())).toEqual(new Uint8Array([1]))
+        expect(stored).toMatchObject({ ext: 'png' })
         expect(revokeObjectURL).toHaveBeenCalledTimes(1)
         expect(revokeObjectURL).toHaveBeenCalledWith('blob:source-throw')
     })
 
-    test('revokes an image URL when image loading fails', async () => {
+    test('keeps the original bytes and the URL contract when image loading fails', async () => {
         vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:load-error')
         const revokeObjectURL = vi.spyOn(URL, 'revokeObjectURL')
         vi.stubGlobal('Image', class {
@@ -621,11 +587,10 @@ describe('postInlayAsset', () => {
             set src(_value: string) { queueMicrotask(() => this.onerror?.()) }
         })
 
-        await expect(postInlayAsset({
-            name: 'broken.png',
-            data: new Uint8Array([1]),
-        })).rejects.toThrow('Failed to load image')
+        await postInlayAsset({ name: 'broken.png', data: new Uint8Array([1]) })
 
+        const stored = await getInlayAssetBlob('test-uuid-1234')
+        expect(new Uint8Array(await stored!.data.arrayBuffer())).toEqual(new Uint8Array([1]))
         expect(revokeObjectURL).toHaveBeenCalledTimes(1)
         expect(revokeObjectURL).toHaveBeenCalledWith('blob:load-error')
     })
@@ -750,10 +715,10 @@ describe('reencodeImage temporary object URLs', () => {
 describe('writeInlayImage', () => {
     test.each([
         ['GIF', Uint8Array.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61]), 'image/gif'],
-        ['AVIF', new TextEncoder().encode('\0\0\0\x18ftypavif'), 'image/avif'],
+        ['AVIF', ftypBytes('avif'), 'image/avif'],
         ['animated WebP', new TextEncoder().encode('RIFF\x0c\0\0\0WEBPANIM\0\0\0\0'), 'image/webp'],
         ['APNG', apngBytes(), 'image/png'],
-    ])('validates direct %s sources before drawing them to canvas', async (_label, bytes, mime) => {
+    ])('stores a direct %s source without drawing it to canvas', async (_label, bytes, mime) => {
         const source = `data:${mime};base64,fixture`
         vi.stubGlobal('fetch', vi.fn(async () => new Response(bytes.slice().buffer as ArrayBuffer, {
             headers: { 'Content-Type': mime },
@@ -761,28 +726,29 @@ describe('writeInlayImage', () => {
         const image = makeImage(20, 10)
         Object.defineProperty(image, 'currentSrc', { get: () => source })
 
-        await expect(writeInlayImage(image, { id: 'direct-unsupported' }))
-            .rejects.toThrow(/unsupported/i)
+        await writeInlayImage(image, { id: 'direct-unsupported' })
 
+        const stored = await getInlayAssetBlob('direct-unsupported')
+        expect(new Uint8Array(await stored!.data.arrayBuffer())).toEqual(bytes)
+        expect(stored!.data.type).toBe(mime)
         expect(fakeCtx.drawImage).not.toHaveBeenCalled()
-        expect(await getInlayAssetBlob('direct-unsupported')).toBeNull()
     })
 
     test.each([
-        ['AVIS major brand', ftypBytes('avis'), 'application/octet-stream'],
-        ['AVIF compatible brand', ftypBytes('mif1', ['miaf', 'avif']), 'application/octet-stream'],
-        ['AVIS compatible brand', ftypBytes('mif1', ['avis']), 'application/octet-stream'],
-        ['parameterized mixed-case MIME', Uint8Array.of(1, 2, 3), ' Image/AVIF; codecs="av01" '],
-    ])('rejects direct %s before canvas without relying on extension', async (_label, bytes, mime) => {
+        ['AVIS major brand', ftypBytes('avis')],
+        ['AVIF compatible brand', ftypBytes('mif1', ['miaf', 'avif'])],
+        ['AVIS compatible brand', ftypBytes('mif1', ['avis'])],
+    ])('stores a direct %s source from its bytes, not its extension', async (_label, bytes) => {
         vi.stubGlobal('fetch', vi.fn(async () => new Response(bytes.slice().buffer as ArrayBuffer, {
-            headers: { 'Content-Type': mime },
+            headers: { 'Content-Type': 'application/octet-stream' },
         })))
 
-        await expect(writeInlayImage(makeImage(20, 10), { id: 'direct-avif-brand' }))
-            .rejects.toThrow(/AVIF|unsupported/i)
+        await writeInlayImage(makeImage(20, 10), { id: 'direct-avif-brand' })
 
+        const stored = await getInlayAssetBlob('direct-avif-brand')
+        expect(stored).toMatchObject({ ext: 'avif' })
+        expect(new Uint8Array(await stored!.data.arrayBuffer())).toEqual(bytes)
         expect(fakeCtx.drawImage).not.toHaveBeenCalled()
-        expect(await getInlayAssetBlob('direct-avif-brand')).toBeNull()
     })
 
     test('captures a production-style load event that fires during source validation', async () => {
@@ -838,6 +804,30 @@ describe('writeInlayImage', () => {
         expect(stored!.data.type).toBe('image/webp')
     })
 
+    test('maps an asset namespace id to a stable Inlay id without overwriting the source asset', async () => {
+        const sourceAssetKey = 'assets/character-image.png'
+        store.set(sourceAssetKey, new Uint8Array([9, 8, 7]))
+
+        const first = await writeInlayImage(makeImage(200, 100), {
+            name: sourceAssetKey,
+            ext: 'png',
+            id: sourceAssetKey,
+        })
+        const second = await writeInlayImage(makeImage(200, 100), {
+            name: sourceAssetKey,
+            ext: 'png',
+            id: sourceAssetKey,
+        })
+
+        expect(first).toBe('character-image.png')
+        expect(second).toBe(first)
+        expect(store.get(sourceAssetKey)).toEqual(new Uint8Array([9, 8, 7]))
+        expect(await getInlayAssetBlob(first)).toMatchObject({
+            name: sourceAssetKey,
+            type: 'image',
+        })
+    })
+
     test('generates uuid when no id is provided', async () => {
         const imgObj = makeImage(50, 50)
 
@@ -869,6 +859,18 @@ describe('writeInlayImage', () => {
 })
 
 describe('set -> get round-trip', () => {
+    test('returns the mapped identity when setInlayAsset receives an asset namespace id', async () => {
+        const id = await setInlayAsset('assets/persona.png', {
+            data: new Blob(['data'], { type: 'audio/mpeg' }),
+            ext: 'mp3',
+            name: 'persona.mp3',
+            type: 'audio',
+        })
+
+        expect(id).toBe('persona.png')
+        expect(await getInlayAssetBlob(id)).toMatchObject({ name: 'persona.mp3', type: 'audio' })
+    })
+
     test('preserves metadata through setInlayAsset -> getInlayAsset', async () => {
         await fc.assert(
             fc.asyncProperty(
@@ -935,30 +937,6 @@ describe('set -> remove -> get', () => {
 })
 
 describe('BlobStore inlay compatibility', () => {
-    test('reads all historical inlay kinds as exact bytes and metadata without mutation', async () => {
-        const fixtures: Array<[string, InlayAsset, Uint8Array, string]> = [
-            ['image', { data: new Blob([new Uint8Array([1, 2])], { type: 'image/png' }), ext: 'png', name: 'a.png', type: 'image', width: 2, height: 1 }, new Uint8Array([1, 2]), 'image/png'],
-            ['audio', { data: 'data:audio/mpeg;base64,AwQ=', ext: 'mp3', name: 'a.mp3', type: 'audio' }, new Uint8Array([3, 4]), 'audio/mpeg'],
-            ['video', { data: new Blob([new Uint8Array()], { type: 'video/webm' }), ext: 'webm', name: 'a.webm', type: 'video' }, new Uint8Array(), 'video/webm'],
-            ['signature', { data: '{"source":"synthetic"}', ext: 'json', name: 'sig', type: 'signature' }, new TextEncoder().encode('{"source":"synthetic"}'), 'application/json'],
-        ]
-        for (const [id, asset, bytes, mime] of fixtures) store.set(id, asset)
-        const before = new Map(store)
-
-        for (const [id, asset, bytes, mime] of fixtures) {
-            expect(await readLegacyInlayPayload(id)).toEqual({
-                data: bytes,
-                metadata: {
-                    kind: 'inlay', inlayType: asset.type, mime, name: asset.name, ext: asset.ext,
-                    ...(asset.width === undefined ? {} : { width: asset.width }),
-                    ...(asset.height === undefined ? {} : { height: asset.height }),
-                },
-            })
-        }
-        expect(store).toEqual(before)
-        expect(await readLegacyInlayPayload('missing')).toBeNull()
-    })
-
     test('optimizes new images and round trips audio, video, and signature bytes', async () => {
         const fixtures: [string, InlayAsset, Uint8Array][] = [
             ['image', { data: new Blob([new Uint8Array([1, 2])], { type: 'image/png' }), ext: 'png', name: 'a.png', type: 'image', width: 2, height: 1 }, new Uint8Array([1, 2])],
@@ -984,32 +962,15 @@ describe('BlobStore inlay compatibility', () => {
         await saveInlayedSignature('signature', signature)
         expect((await getInlayAsset('signature'))?.data).toBe(JSON.stringify(signature))
     })
+})
 
-    test('removes a failed verification destination before retrying migration', async () => {
-        store.set('retry-id', {
-            data: new Blob([new Uint8Array([7, 8])], { type: 'image/png' }),
-            ext: 'png', name: 'retry.png', type: 'image', width: 2, height: 1,
-        } satisfies InlayAsset)
-        corruptReadKey = `blobstore/inlays/${Buffer.from('retry-id').toString('hex')}.bin`
-
-        expect(await migrateLegacyInlayAsset('retry-id')).toBeNull()
-        expect([...store.keys()].some((key) => key.includes(Buffer.from('retry-id').toString('hex')))).toBe(false)
-        expect(store.get('retry-id')).toBeDefined()
-
-        expect(await migrateLegacyInlayAsset('retry-id')).toMatchObject({ kind: 'inlay', size: 2 })
-    })
-
-    test('removes a destination when verification throws before retrying migration', async () => {
-        store.set('throw-id', {
-            data: new Blob([new Uint8Array([4, 5])], { type: 'image/png' }),
-            ext: 'png', name: 'throw.png', type: 'image', width: 2, height: 1,
-        } satisfies InlayAsset)
-        throwReadKey = `blobstore/inlays/${Buffer.from('throw-id').toString('hex')}.bin`
-
-        await expect(migrateLegacyInlayAsset('throw-id')).rejects.toThrow('verification read failed')
-        expect([...store.keys()].some((key) => key.includes(Buffer.from('throw-id').toString('hex')))).toBe(false)
-        expect(store.get('throw-id')).toBeDefined()
-
-        expect(await migrateLegacyInlayAsset('throw-id')).toMatchObject({ kind: 'inlay', size: 2 })
-    })
+test('uses the currently selected performance profile for animation admission', () => {
+    try {
+        setRuntimePerformanceProfile('low-spec')
+        expect(getInlayEncodeOptions().animationDecodeBytes).toBe(64 * 1024 * 1024)
+        setRuntimePerformanceProfile('normal')
+        expect(getInlayEncodeOptions().animationDecodeBytes).toBe(256 * 1024 * 1024)
+    } finally {
+        setRuntimePerformanceProfile('normal')
+    }
 })

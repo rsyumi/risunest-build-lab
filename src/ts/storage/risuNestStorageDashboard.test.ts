@@ -14,7 +14,6 @@ const stats = {
         { kind: 'inlay', inlayType: null, count: 1, bytes: 1024 * 1024 },
         { kind: 'image', inlayType: 'image', count: 1, bytes: 2 * 1024 * 1024 },
     ],
-    coldAliases: { count: 0, bytes: 0 },
     pluginStorage: { count: 2, bytes: 512 * 1024 },
     characters: { active: { count: 3, bytes: 0 }, trashedCount: 1 },
     conversations: { count: 4, messageCount: 5 },
@@ -113,6 +112,8 @@ describe('RisuNest storage dashboard view model', () => {
             deleteSnapshot: vi.fn(),
             deleteConflictBackup: vi.fn(),
             deleteServerBackup: vi.fn(),
+            exportServerBackup: vi.fn(),
+            restoreServerBackup: vi.fn(),
             createSnapshot: vi.fn(),
         })
 
@@ -151,6 +152,8 @@ describe('RisuNest storage dashboard view model', () => {
             deleteSnapshot: vi.fn(),
             deleteConflictBackup: vi.fn(),
             deleteServerBackup: vi.fn(),
+            exportServerBackup: vi.fn(),
+            restoreServerBackup: vi.fn(),
             createSnapshot: vi.fn(),
         })
 
@@ -206,6 +209,8 @@ describe('RisuNest storage dashboard view model', () => {
             deleteSnapshot: vi.fn(),
             deleteConflictBackup: vi.fn(),
             deleteServerBackup: vi.fn(),
+            exportServerBackup: vi.fn(),
+            restoreServerBackup: vi.fn(),
             createSnapshot: vi.fn(),
         })
         await dashboard.load()
@@ -250,6 +255,8 @@ describe('RisuNest storage dashboard view model', () => {
             deleteSnapshot: vi.fn(),
             deleteConflictBackup: vi.fn(),
             deleteServerBackup: vi.fn(),
+            exportServerBackup: vi.fn(),
+            restoreServerBackup: vi.fn(),
             createSnapshot: vi.fn(),
         })
 
@@ -282,6 +289,8 @@ describe('RisuNest storage dashboard view model', () => {
             deleteSnapshot: vi.fn(),
             deleteConflictBackup: vi.fn(),
             deleteServerBackup: vi.fn(),
+            exportServerBackup: vi.fn(),
+            restoreServerBackup: vi.fn(),
             createSnapshot: vi.fn(),
         })
 
@@ -310,6 +319,8 @@ describe('RisuNest storage dashboard view model', () => {
             deleteSnapshot: vi.fn(),
             deleteConflictBackup: vi.fn(),
             deleteServerBackup: vi.fn(),
+            exportServerBackup: vi.fn(),
+            restoreServerBackup: vi.fn(),
             createSnapshot: vi.fn(),
         })
 
@@ -352,6 +363,8 @@ describe('RisuNest storage dashboard view model', () => {
             deleteSnapshot: vi.fn(),
             deleteConflictBackup: vi.fn(),
             deleteServerBackup: vi.fn(),
+            exportServerBackup: vi.fn(),
+            restoreServerBackup: vi.fn(),
             createSnapshot: vi.fn(),
         })
 
@@ -385,6 +398,8 @@ describe('RisuNest storage dashboard view model', () => {
             deleteSnapshot: vi.fn(),
             deleteConflictBackup: vi.fn(),
             deleteServerBackup: vi.fn(),
+            exportServerBackup: vi.fn(),
+            restoreServerBackup: vi.fn(),
             createSnapshot: vi.fn().mockResolvedValue({}),
         })
         await dashboard.load()
@@ -415,6 +430,8 @@ describe('RisuNest storage dashboard view model', () => {
             deleteSnapshot: vi.fn(),
             deleteConflictBackup: vi.fn(),
             deleteServerBackup: vi.fn(),
+            exportServerBackup: vi.fn(),
+            restoreServerBackup: vi.fn(),
             createSnapshot: vi.fn().mockResolvedValue({}),
         })
         await dashboard.load()
@@ -450,6 +467,8 @@ describe('RisuNest storage dashboard view model', () => {
             deleteSnapshot: vi.fn(),
             deleteConflictBackup: vi.fn(),
             deleteServerBackup: vi.fn(),
+            exportServerBackup: vi.fn(),
+            restoreServerBackup: vi.fn(),
             createSnapshot: vi.fn().mockResolvedValue({}),
         })
         await dashboard.load()
@@ -494,6 +513,8 @@ describe('RisuNest storage dashboard view model', () => {
             deleteSnapshot,
             deleteConflictBackup: vi.fn(),
             deleteServerBackup: vi.fn(),
+            exportServerBackup: vi.fn(),
+            restoreServerBackup: vi.fn(),
             createSnapshot: vi.fn(),
         })
         await dashboard.load()

@@ -9,7 +9,7 @@
     "linux"
   ],
   "permissions": [
-    "updater:default",
+    "core:window:allow-destroy",
     "process:default",
     "shell:default",
     "http:default",

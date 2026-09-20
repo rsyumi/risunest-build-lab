@@ -15,10 +15,12 @@ const mocks = vi.hoisted(() => ({
     alertError: vi.fn(),
     readImage: vi.fn(async (_key: string) => new Uint8Array([1, 2, 3, 4])),
     saveAsset: vi.fn(),
-    compressImage: vi.fn(async (_data: Uint8Array) => new Uint8Array([99])),
     charxWrites: [] as Array<{ key: string; data: Uint8Array }>,
     pngWrites: [] as Array<{ key: string; data: Uint8Array }>,
     downloads: [] as Array<{ name: string; data: Uint8Array }>,
+    platform: 'desktop' as 'desktop' | 'android' | 'ios',
+    importAndroid: vi.fn(),
+    importIOS: vi.fn(),
     nativeDesktopResult: { kind: 'cancelled' } as unknown,
     importDesktopNativeCharacterFromPicker: vi.fn(),
     importDesktopNativeCharacterPath: vi.fn(),
@@ -47,7 +49,7 @@ vi.mock('./alert', () => ({
     alertMd: vi.fn(),
     alertNormal: vi.fn(),
     alertStore: { set: vi.fn() },
-    alertTOS: vi.fn(),
+    alertTOS: vi.fn(), alertRisuServiceTOS: vi.fn(),
     alertWait: vi.fn(),
 }))
 vi.mock('./util', () => ({
@@ -78,10 +80,14 @@ vi.mock('./globalApi.svelte', () => ({
     VirtualWriter: class {},
 }))
 vi.mock('src/ts/platform', () => ({
-    isTauri: false,
-    isTauriDesktop: true,
+    get isTauri() { return mocks.platform !== 'desktop' },
+    get isTauriDesktop() { return mocks.platform === 'desktop' },
+    get isTauriAndroid() { return mocks.platform === 'android' },
+    get isTauriIOS() { return mocks.platform === 'ios' },
     isNodeServer: false,
 }))
+vi.mock('./storage/androidContentPicker', () => ({ importAndroidContentFromPicker: mocks.importAndroid }))
+vi.mock('./storage/iosContentPicker', () => ({ importIOSContentFromPicker: mocks.importIOS }))
 vi.mock('./storage/nativeCharacterFileRoute', () => ({
     importDesktopNativeCharacterFromPicker: mocks.importDesktopNativeCharacterFromPicker,
     importDesktopNativeCharacterPath: mocks.importDesktopNativeCharacterPath,
@@ -141,7 +147,6 @@ vi.mock('@tauri-apps/plugin-fs', () => ({ readFile: vi.fn() }))
 vi.mock('@tauri-apps/plugin-deep-link', () => ({ getCurrent: vi.fn(), onOpenUrl: vi.fn() }))
 vi.mock('./storage/accountStorage', () => ({ AccountStorage: class {} }))
 vi.mock('./media', () => ({
-    compressImage: mocks.compressImage,
     getImageType: vi.fn(() => 'Unknown'),
 }))
 
@@ -158,6 +163,7 @@ import {
 
 describe('character card additions', () => {
     beforeEach(() => {
+        mocks.platform = 'desktop'
         mocks.database.characters = []
         mocks.database.statics.imports = 0
         mocks.nextId = 0
@@ -175,6 +181,16 @@ describe('character card additions', () => {
             mocks.database.characters.push(character)
             return character.chaId
         })
+    })
+
+    it.each(['ios', 'android'] as const)('routes the public character picker only to %s', async platform => {
+        mocks.platform = platform
+        mocks.importIOS.mockResolvedValue('ios-character')
+        mocks.importAndroid.mockResolvedValue('android-character')
+        await expect(importCharacter()).resolves.toBe(`${platform}-character`)
+        expect(platform === 'ios' ? mocks.importIOS : mocks.importAndroid).toHaveBeenCalledWith('character')
+        expect(platform === 'ios' ? mocks.importAndroid : mocks.importIOS).not.toHaveBeenCalled()
+        expect(mocks.openDesktopPicker).not.toHaveBeenCalled()
     })
 
     it('enables the verified native character content route', () => {
@@ -245,6 +261,29 @@ describe('character card additions', () => {
             'C:\\chosen\\card.charx',
             expect.any(Object),
         )
+    })
+
+    it('continues a desktop batch after one selected file fails', async () => {
+        const error = new Error('synthetic invalid source')
+        mocks.desktopPickerPaths = [
+            'C:\\chosen\\first.charx',
+            'C:\\chosen\\broken.charx',
+            'C:\\chosen\\last.charx',
+        ]
+        mocks.importDesktopNativeCharacterPath
+            .mockResolvedValueOnce({ kind: 'imported', mode: 'native', value: 'first-card' })
+            .mockRejectedValueOnce(error)
+            .mockResolvedValueOnce({ kind: 'imported', mode: 'native', value: 'last-card' })
+
+        await expect(importCharacter()).resolves.toBe('last-card')
+
+        expect(mocks.importDesktopNativeCharacterPath).toHaveBeenCalledTimes(3)
+        expect(mocks.importDesktopNativeCharacterPath).toHaveBeenNthCalledWith(
+            3,
+            'C:\\chosen\\last.charx',
+            expect.any(Object),
+        )
+        expect(mocks.alertError).toHaveBeenCalledWith(error)
     })
 
     it('keeps the JavaScript card fallback for mixed-case JSON filenames', async () => {
@@ -542,7 +581,6 @@ describe('character card additions', () => {
 
         const payload = mocks.charxWrites.find((entry) => entry.key.endsWith('/exact.bin'))
         expect(Array.from(payload?.data ?? [])).toEqual([1, 2, 3, 4])
-        expect(mocks.compressImage).not.toHaveBeenCalled()
     })
 
     it('routes the selected desktop CCv3 CharX through the native leased exporter', async () => {
@@ -794,7 +832,6 @@ describe('character card additions', () => {
         const exported = JSON.parse(new TextDecoder().decode(mocks.downloads[0].data))
         const encoded = exported.data.assets[0].uri.split(',')[1]
         expect(Array.from(Buffer.from(encoded, 'base64'))).toEqual([1, 2, 3, 4])
-        expect(mocks.compressImage).not.toHaveBeenCalled()
     })
 
     it('keeps ordinary asset bytes exact in the JavaScript PNG export fallback', async () => {
@@ -834,6 +871,5 @@ describe('character card additions', () => {
         const payload = mocks.pngWrites.find((entry) => entry.key === 'chara-ext-asset_:1')
         expect(Array.from(Buffer.from(new TextDecoder().decode(payload?.data), 'base64')))
             .toEqual([1, 2, 3, 4])
-        expect(mocks.compressImage).not.toHaveBeenCalled()
     })
 })

@@ -12,8 +12,13 @@ const state = vi.hoisted(() => ({
 }))
 
 vi.mock('./platform', () => ({
-    get isTauri() { return state.isTauri },
-    get isTauriMobile() { return state.isTauriMobile },
+    isTauriIOS: false,
+    get isTauri() {
+        return state.isTauri
+    },
+    get isTauriMobile() {
+        return state.isTauriMobile
+    },
     isNodeServer: false,
 }))
 vi.mock('./storage/platformBlobStore', () => ({
@@ -68,7 +73,7 @@ vi.mock('./alert', () => ({
     alertNormal: vi.fn(),
     alertNormalWait: vi.fn(),
     alertSelect: vi.fn(),
-    alertTOS: vi.fn(),
+    alertTOS: vi.fn(), alertRisuServiceTOS: vi.fn(),
     waitAlert: vi.fn(),
 }))
 vi.mock('./storage/persistentDataRuntime.svelte', () => ({
@@ -102,7 +107,6 @@ vi.mock('./process/coldstorageData', () => ({
 }))
 vi.mock('./plugins/plugins.svelte', () => ({ loadPlugins: vi.fn() }))
 vi.mock('./parser/parser.svelte', () => ({ hasher: vi.fn(async () => 'hashed') }))
-vi.mock('./drive/drive', () => ({ checkDriverInit: vi.fn() }))
 vi.mock('./drive/accounter', () => ({ loadRisuAccountData: vi.fn() }))
 vi.mock('./update', () => ({ checkRisuUpdate: vi.fn() }))
 vi.mock('./observer.svelte', () => ({ startObserveDom: vi.fn() }))

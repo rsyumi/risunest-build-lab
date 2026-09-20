@@ -1,3 +1,6 @@
+import { alertToast } from 'src/ts/alert'
+import { language } from 'src/lang'
+vi.mock('src/ts/alert', () => ({ alertToast: vi.fn() }))
 import { beforeEach, describe, expect, test, vi } from 'vitest'
 import type { BlobMetadata, BlobStore, InlayBlobMetadata } from 'src/ts/storage/blobStore'
 
@@ -12,6 +15,7 @@ const native = vi.hoisted(() => ({
     metadata: new Map<string, BlobMetadata>(),
     payloads: new Map<string, Uint8Array>(),
     optimizedWrites: [] as Array<{ key: string, data: Uint8Array, name: string }>,
+    preservationReason: undefined as InlayBlobMetadata['preservationReason'],
     opaqueWrites: [] as string[],
     removes: [] as string[],
 }))
@@ -29,8 +33,18 @@ const nativeStore = {
         const jpeg = data.length >= 3 && data[0] === 0xff && data[1] === 0xd8 && data[2] === 0xff
         const webp = data.length >= 12 && new TextDecoder().decode(data.subarray(0, 4)) === 'RIFF'
             && new TextDecoder().decode(data.subarray(8, 12)) === 'WEBP'
-        if (!png && !jpeg && !webp) throw new Error('unsupported new Inlay image format: Bmp')
         native.optimizedWrites.push({ key, data: data.slice(), name: input.name })
+        if (!png && !jpeg && !webp) {
+            // The native encoder keeps what it cannot improve, instead of refusing it.
+            const bmp = data.length >= 2 && data[0] === 0x42 && data[1] === 0x4d
+            const preserved: InlayBlobMetadata = {
+                key, kind: 'inlay', size: data.byteLength, mime: bmp ? 'image/bmp' : 'application/octet-stream',
+                name: input.name, ext: bmp ? 'bmp' : '', inlayType: 'image', preservationReason: native.preservationReason,
+            }
+            native.metadata.set(key, preserved)
+            native.payloads.set(key, data.slice())
+            return preserved
+        }
         const metadata: InlayBlobMetadata = {
             key, kind: 'inlay', size: 3, mime: 'image/webp', name: input.name,
             ext: 'webp', inlayType: 'image', width: 6, height: 4,
@@ -93,7 +107,6 @@ import {
     getInlayAssetMetadata,
     listInlayAssets,
     listInlayAssetMetadata,
-    migrateLegacyInlayAsset,
     postInlayAsset,
     removeInlayAsset,
     setInlayAsset,
@@ -122,6 +135,8 @@ function expectNoLegacyAccess(): void {
 
 describe('native inlay fresh-install boundary', () => {
     beforeEach(() => {
+        native.preservationReason = undefined
+        vi.mocked(alertToast).mockClear()
         native.metadata.clear()
         native.payloads.clear()
         native.optimizedWrites = []
@@ -133,10 +148,9 @@ describe('native inlay fresh-install boundary', () => {
         legacy.removes = 0
     })
 
-    test('migration and ID-scoped metadata lookup never inspect legacy storage', async () => {
+    test('ID-scoped metadata lookup never inspects legacy storage', async () => {
         seedLegacyInlay('legacy-id')
 
-        await expect(migrateLegacyInlayAsset('legacy-id')).resolves.toBeNull()
         await expect(getInlayAssetMetadata('legacy-id')).resolves.toBeNull()
 
         expectNoLegacyAccess()
@@ -250,7 +264,28 @@ describe('native inlay fresh-install boundary', () => {
         }])
     })
 
-    test('browser-decodable BMP images fall back to a WebP BlobStore write', async () => {
+    test('native generated images map asset namespace ids before invoking the optimizer', async () => {
+        const source = Uint8Array.of(0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a)
+        vi.stubGlobal('fetch', vi.fn(async () => new Response(source, {
+            headers: { 'Content-Type': 'image/png' },
+        })))
+        const image = {
+            src: 'blob:source-asset',
+            currentSrc: '',
+        } as HTMLImageElement
+
+        await expect(writeInlayImage(image, {
+            id: 'assets/persona-image.png',
+            name: 'assets/persona-image.png',
+        })).resolves.toBe('persona-image.png')
+
+        expect(native.optimizedWrites).toEqual([{
+            key: 'persona-image.png', data: source, name: 'assets/persona-image.png',
+        }])
+        expect(native.optimizedWrites.some(({ key }) => key.startsWith('assets/'))).toBe(false)
+    })
+
+    test('hands a format the browser could draw to the native encoder, which keeps it', async () => {
         const bmp = Uint8Array.of(0x42, 0x4d, 0, 0)
         const fetchSource = vi.fn(async () => new Response(bmp, {
             headers: { 'Content-Type': 'image/bmp' },
@@ -284,12 +319,23 @@ describe('native inlay fresh-install boundary', () => {
             ext: 'bmp', name: 'source.bmp', type: 'image',
         })
 
-        expect(native.optimizedWrites).toEqual([])
-        expect(native.opaqueWrites).toEqual(['bmp-image'])
-        expect(drawImage).toHaveBeenCalledWith(expect.anything(), 0, 0, 6, 4)
-        expect(toBlob).toHaveBeenCalledWith(expect.any(Function), 'image/webp', 0.85)
+        expect(native.optimizedWrites).toEqual([{ key: 'bmp-image', data: bmp, name: 'source.bmp' }])
+        expect(native.opaqueWrites).toEqual([])
+        expect(drawImage).not.toHaveBeenCalled()
+        expect(toBlob).not.toHaveBeenCalled()
         await expect(getInlayAssetMetadata('bmp-image')).resolves.toMatchObject({
-            mime: 'image/webp', ext: 'webp', width: 6, height: 4,
+            mime: 'image/bmp', ext: 'bmp',
         })
     })
+})
+
+test('reports original preservation after both native image entry points finish storing', async () => {
+    native.preservationReason = 'animation-cost'
+    const bytes = new Uint8Array([71, 73, 70])
+    await setInlayAsset('preserve-set', { data: new Blob([bytes]), name: 'loop.gif', ext: 'gif', type: 'image' })
+    await writeInlayImage({ src: 'synthetic:image' } as HTMLImageElement, { id: 'preserve-write', data: bytes })
+    expect(native.payloads.get('preserve-set')).toEqual(bytes)
+    expect(native.payloads.get('preserve-write')).toEqual(bytes)
+    expect(alertToast).toHaveBeenCalledTimes(2)
+    expect(alertToast).toHaveBeenCalledWith(language.risuNest.inlay.animationPreserved)
 })

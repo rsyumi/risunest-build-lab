@@ -1,12 +1,13 @@
 import { v4 as uuidv4 } from 'uuid'
 import { defaultJailbreak, defaultMainPrompt, oldJailbreak, oldMainPrompt } from './defaultPrompts'
-import {
-    defaultSdDataFunc,
-    normalizeDatabaseDefaults,
-    type Database,
-} from './database.svelte'
+import { defaultSdDataFunc, normalizeDatabaseDefaults, type Database } from './database.svelte'
 import { canonicalJson } from './saveCoordinator'
 import type { PersistentRoot } from './persistentDataStore'
+import {
+    bootstrapJsonSnapshot,
+    cloneBootstrapSnapshot,
+    equalBootstrapSnapshots,
+} from './bootstrapJsonSnapshot'
 
 export interface DatabasePreparationOptions {
     createId?: () => string
@@ -144,10 +145,7 @@ export async function checkNewFormat(
     return database
 }
 
-export function assignIds(
-    database: Database,
-    createId: () => string = uuidv4,
-): Database {
+export function assignIds(database: Database, createId: () => string = uuidv4): Database {
     const assignedIds = new Set<string>()
     const nextUniqueId = () => {
         let id = createId()
@@ -231,15 +229,15 @@ export interface PreparedBootstrapDatabase {
     changed: boolean
 }
 
-/** Reuse the detached clone's canonical input, within this preparation only. */
+/** Keep a detached comparison snapshot without allocating whole-database JSON strings. */
 export async function prepareDatabaseForBootstrap(
     input: Database,
     options: DatabasePreparationOptions = {},
 ): Promise<PreparedBootstrapDatabase> {
-    const before = canonicalJson(input)
-    const database = JSON.parse(before) as Database
+    const before = bootstrapJsonSnapshot(input)
+    const database = cloneBootstrapSnapshot<Database>(before)
     await prepareDetachedDatabase(database, options)
-    return { database, changed: canonicalJson(database) !== before }
+    return { database, changed: !equalBootstrapSnapshots(before, bootstrapJsonSnapshot(database)) }
 }
 
 async function prepareDetachedDatabase(
@@ -257,6 +255,8 @@ export async function preparePersistentRootForWorkingSet(
     options: Pick<DatabasePreparationOptions, 'now'> = {},
 ): Promise<PersistentRoot> {
     const detachedRoot = JSON.parse(canonicalJson(input)) as PersistentRoot
+    const initialFormatVersion = detachedRoot.formatversion
+    const hasPendingCharacterMigration = !initialFormatVersion || initialFormatVersion < 3
     const characterOrder = detachedRoot.characterOrder ?? []
     const candidate = {
         ...detachedRoot,
@@ -266,12 +266,20 @@ export async function preparePersistentRootForWorkingSet(
 
     normalizeDatabaseDefaults(candidate)
     await checkNewFormat(candidate, { now: options.now })
+    if (hasPendingCharacterMigration) {
+        if (initialFormatVersion === undefined) {
+            delete (candidate as Partial<Database>).formatversion
+        } else {
+            candidate.formatversion = initialFormatVersion
+        }
+    }
     candidate.characterOrder = characterOrder
 
     const {
         characters: _characters,
         botPresets: _botPresets,
         pluginCustomStorage: _pluginCustomStorage,
+        pluginStorageMeta: _pluginStorageMeta,
         ...root
     } = candidate
     return root

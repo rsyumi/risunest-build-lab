@@ -1,3 +1,4 @@
+import { UNOWNED_PLUGIN_OWNER } from '../plugins/pluginOwner'
 import { describe, expect, it, vi } from 'vitest'
 import type { Database } from './database.svelte'
 import {
@@ -59,7 +60,9 @@ function makeConversationDatabase(username: string): Database {
     return database
 }
 
-async function createActiveSessionRuntimeHarness() {
+async function createActiveSessionRuntimeHarness(
+    prepareDatabase: (value: Database) => Promise<Database> = async (value) => value,
+) {
     let database = makeConversationDatabase('Initial')
     let revision = 1
     const store = {
@@ -104,7 +107,7 @@ async function createActiveSessionRuntimeHarness() {
                 publishPersistentConversationReplacementToWorkingSet(database, result)
             },
         },
-        prepareDatabase: async (value) => value,
+        prepareDatabase,
     })
     await runtime.initializeActiveWorkingSet(database)
     return {
@@ -155,6 +158,25 @@ function makeDatabaseLease(database: Database, revision: number): PersistentRevi
                     trashTime: character.trashTime,
                 }] : []),
         })),
+        readCharacterSummary: vi.fn(async (id) => {
+            const configuredIndex = characters.findIndex(
+                (candidate) => candidate.chaId === id,
+            )
+            if (configuredIndex < 0) return null
+            const character = characters[configuredIndex]
+            return {
+                id: character.chaId,
+                name: character.name,
+                image: character.image,
+                configuredIndex,
+                recentAt: character.lastInteraction ?? 0,
+                trashed: character.trashTime !== undefined,
+                conversationCount: character.chats.length,
+                type: character.type,
+                creatorNotes: character.creatorNotes,
+                trashTime: character.trashTime,
+            }
+        }),
         readCharacter: vi.fn(async (id) => {
             const character = characters.find((candidate) => candidate.chaId === id)
             if (!character) return null
@@ -189,9 +211,13 @@ function makeDatabaseLease(database: Database, revision: number): PersistentRevi
         readConversationWindow: vi.fn(async () => null),
         queryPluginStorage: vi.fn(async () => ({
             revision,
-            items: Object.keys(pluginCustomStorage).map((key) => ({ key, byteSize: 0 })),
+            items: Object.keys(pluginCustomStorage).map((key) => ({
+                owner: UNOWNED_PLUGIN_OWNER,
+                key,
+                byteSize: 0,
+            })),
         })),
-        readPluginStorage: vi.fn(async (key) => Object.hasOwn(pluginCustomStorage, key)
+        readPluginStorage: vi.fn(async (_owner, key) => Object.hasOwn(pluginCustomStorage, key)
             ? { revision, value: structuredClone(pluginCustomStorage[key]) }
             : null),
         readAssetAlias: vi.fn(async () => null),
@@ -202,12 +228,6 @@ function makeDatabaseLease(database: Database, revision: number): PersistentRevi
             value: { format: 'legacy' as const },
         })),
         readAssetOwnerHead: vi.fn(async () => null),
-        readColdPayloadAuthority: vi.fn(async () => ({
-            revision,
-            value: { format: 'legacy' as const },
-        })),
-        readColdAlias: vi.fn(async () => null),
-        listColdAliases: vi.fn(async () => ({ revision, value: [] })),
         release: vi.fn(async () => undefined),
     }
 }
@@ -773,6 +793,28 @@ describe('stable working-set selection', () => {
 })
 
 describe('prepared persistent replacement', () => {
+    it('starts detached preparation before the caller can change the replacement input', async () => {
+        const ready = deferred<void>()
+        const prepareDatabase = vi.fn(async (value: Database) => {
+            const captured = structuredClone(value)
+            await ready.promise
+            return captured
+        })
+        const harness = await createActiveSessionRuntimeHarness(prepareDatabase)
+        const input = makeConversationDatabase('Requested replacement')
+        const captured = structuredClone(input)
+        const replacing = harness.runtime.replacePersistentDatabase(input, 'capture-before-prepare')
+        input.username = 'Changed after request'
+        input.characters[0].chats[0].message[0].data = 'Changed nested input'
+        ready.resolve()
+        await replacing
+
+        expect(prepareDatabase).toHaveBeenCalledOnce()
+        expect(harness.store.replaceFromDatabase).toHaveBeenCalledWith(captured, 1)
+        expect(harness.database).toEqual(captured)
+        expect(harness.store.commit).not.toHaveBeenCalled()
+    })
+
     it('invalidates a resident session before publishing a cloned conversation', async () => {
         const harness = await createActiveSessionRuntimeHarness()
         const session = harness.runtime.getActiveConversationSession()!
@@ -798,19 +840,6 @@ describe('prepared persistent replacement', () => {
         expect(session.isActive).toBe(false)
         expect(harness.runtime.getActiveConversationSession()).toBeNull()
         expect(() => session.append({ role: 'char', data: 'detached replacement write' })).toThrow(
-            /inactive/,
-        )
-    })
-
-    it('invalidates the resident session after maximum compatibility materialization', async () => {
-        const harness = await createActiveSessionRuntimeHarness()
-        const session = harness.runtime.getActiveConversationSession()!
-
-        await harness.runtime.materializeMaximumCompatibilityWorkingSet()
-
-        expect(session.isActive).toBe(false)
-        expect(harness.runtime.getActiveConversationSession()).toBeNull()
-        expect(() => session.append({ role: 'char', data: 'detached materialization write' })).toThrow(
             /inactive/,
         )
     })
@@ -872,7 +901,7 @@ describe('prepared persistent replacement', () => {
         expect(store.replaceFromDatabase).not.toHaveBeenCalled()
     })
 
-    it('rebases live edits made while database preparation is pending', async () => {
+    it('preserves newer local edits and rejects a stale prepared replacement', async () => {
         let database = makeDatabase('Initial')
         const preparation = deferred<Database>()
         const prepareDatabase = vi.fn(() => preparation.promise)
@@ -912,13 +941,12 @@ describe('prepared persistent replacement', () => {
         database.username = 'Edited during preparation'
         runtime.markPersistentDataDirty(1)
         preparation.resolve(makeDatabase('Prepared replacement'))
-        await replacement
+        await expect(replacement).rejects.toBeInstanceOf(RevisionConflictError)
 
         expect(database.username).toBe('Edited during preparation')
-        expect(store.replaceFromDatabase).toHaveBeenCalledWith(
-            expect.objectContaining({ username: 'Prepared replacement' }),
-            1,
-        )
+        expect(store.replaceFromDatabase).not.toHaveBeenCalled()
+        expect(store.commit).toHaveBeenCalledOnce()
+        expect(runtime.revision).toBe(2)
     })
 
     it('returns a detached materialized snapshot without installing it', async () => {
@@ -1200,7 +1228,12 @@ describe('prepared persistent replacement', () => {
                     )
                 },
                 publishCharacter: vi.fn(),
-                publishCharacterSet: vi.fn(),
+                publishCharacterSet: (primary, related) => {
+                    for (const value of [primary, ...related]) {
+                        const resident = database.characters.find((item) => item.chaId === value.chaId)
+                        if (resident) Object.assign(resident, structuredClone(value))
+                    }
+                },
                 publishConversation: vi.fn(),
             },
             prepareDatabase: async (value) => value,
@@ -1230,7 +1263,7 @@ describe('prepared persistent replacement', () => {
         expect(isCatalogCharacterStub(database.characters[4])).toBe(true)
     })
 
-    it('rebases a dirty UI edit before synchronous bounded replacement publication', async () => {
+    it('blocks a stale UI edit and persists fresh edits after bounded replacement publication', async () => {
         const complete = {
             username: 'Initial',
             customBackground: '',
@@ -1313,20 +1346,25 @@ describe('prepared persistent replacement', () => {
 
         const replacing = runtime.replacePersistentDatabase(replacement, 'delayed-replacement')
         await vi.waitFor(() => expect(store.replaceFromDatabase).toHaveBeenCalledOnce())
-        database.customBackground = 'live edit during replacement'
-        runtime.markPersistentDataDirty(1)
+        expect(() => {
+            runtime.assertPersistentMutationAllowed()
+            database.customBackground = 'blocked edit during replacement'
+        }).toThrow(/replacement is active/i)
         replacementWrite.resolve({ revision: 8 })
         await replacing
 
         expect(database.username).toBe('Replacement')
-        expect(database.customBackground).toBe('live edit during replacement')
+        expect(database.customBackground).toBe('')
         expect(database.pluginCustomStorage).toEqual({})
         expect(database.characters[0].personality).toBe('member detail')
         expect(isCatalogCharacterStub(database.characters[2])).toBe(true)
         expect(acquireRevision).not.toHaveBeenCalled()
         expect(materializeDatabase).not.toHaveBeenCalled()
 
-        await runtime.flushPendingData('persist-rebased-live-edit')
+        expect(commit).not.toHaveBeenCalled()
+        database.customBackground = 'live edit during replacement'
+        runtime.markPersistentDataDirty(1)
+        await runtime.flushPendingData('persist-new-live-edit')
         expect(commit).toHaveBeenCalledWith(
             expect.objectContaining({
                 expectedRevision: 8,
@@ -1452,7 +1490,7 @@ describe('native replacement working-set refresh', () => {
             store,
             state: {
                 captureRoot: () => capturePersistentRoot(database),
-                capturePluginStorage: () => database.pluginCustomStorage,
+                capturePluginStorage: () => database.pluginCustomStorage ?? null,
                 capturePresets: () => database.botPresets,
                 captureSelectedCharacter: () => database.characters[0] ?? null,
                 captureCharacter: (id) => database.characters.find(
@@ -1469,8 +1507,11 @@ describe('native replacement working-set refresh', () => {
             prepareDatabase: async (value) => value,
         })
         await runtime.initializeActiveWorkingSet(database)
+        vi.mocked(store.readRoot).mockResolvedValue({ revision: 2, value: capturePersistentRoot(restored) })
 
-        await runtime.refreshActiveWorkingSetFromStore(2)
+        await expect(runtime.refreshActiveWorkingSetFromStore(2)).resolves.toEqual({
+            kind: 'committed', revision: 2, projection: 'applied',
+        })
 
         expect(runtime.revision).toBe(2)
         expect(database.username).toBe('After native restore')
@@ -1481,6 +1522,86 @@ describe('native replacement working-set refresh', () => {
         expect(database.characters[1]).not.toHaveProperty('personality')
         expect(materializeDatabase).not.toHaveBeenCalled()
         expect(lease.release).toHaveBeenCalledOnce()
+    })
+
+    it('edit_during_prepare_invalidates_auto_apply without discarding the local edit', async () => {
+        const harness = createFenceRuntimeHarness(
+            makeConversationDatabase('Before native restore'),
+        )
+        const { runtime } = harness
+        await runtime.initializeActiveWorkingSet(harness.database)
+        const token = await runtime.capturePersistentMutationToken('native-restore-start')
+
+        harness.username = 'Live edit during native parse'
+        runtime.markPersistentDataDirty(1)
+
+        const apply = vi.fn()
+        await expect(runtime.acquireDestructiveReplacementFence(token).then(apply))
+            .rejects.toThrow(/revision/i)
+        expect(apply).not.toHaveBeenCalled()
+        expect(runtime.revision).toBe(token.revision + 1)
+        expect(harness.database.username).toBe('Live edit during native parse')
+        expect(harness.store.commit).toHaveBeenCalledWith(
+            expect.objectContaining({
+                rootMutations: [
+                    { type: 'set', key: 'username', value: 'Live edit during native parse' },
+                ],
+            }),
+        )
+        expect(() => runtime.assertPersistentMutationAllowed()).not.toThrow()
+    })
+
+    it('requires a fresh explicit-choice token after even a no-op dirty notice', async () => {
+        const harness = createFenceRuntimeHarness(
+            makeConversationDatabase('Before native restore'),
+        )
+        const { runtime } = harness
+        await runtime.initializeActiveWorkingSet(harness.database)
+        const token = await runtime.capturePersistentMutationToken('native-restore-start')
+
+        runtime.markPersistentDataDirty(0)
+
+        await expect(runtime.acquireDestructiveReplacementFence(token)).rejects.toThrow(/replacement is active/i)
+        expect(runtime.revision).toBe(token.revision)
+        expect(harness.store.commit).not.toHaveBeenCalled()
+        const chosenAgain = await runtime.capturePersistentMutationToken('user-selected-restore-again', {
+            publishOfficial: false,
+        })
+        const fence = await runtime.acquireDestructiveReplacementFence(chosenAgain)
+        expect(fence.revision).toBe(token.revision)
+        fence.release()
+    })
+
+    it('persists outstanding edits but never promotes a stale token during local drain', async () => {
+        const harness = createFenceRuntimeHarness(
+            makeConversationDatabase('Before native restore'),
+        )
+        const { runtime } = harness
+        await runtime.initializeActiveWorkingSet(harness.database)
+        const token = await runtime.capturePersistentMutationToken('native-restore-start')
+
+        harness.username = 'Live edit during native parse'
+        runtime.markPersistentDataDirty(1)
+        vi.mocked(harness.store.commit).mockImplementationOnce(async (commit) => {
+            harness.username = 'Edit landed while the fence was flushing'
+            return { revision: commit.expectedRevision + 1 }
+        })
+
+        await expect(runtime.acquireDestructiveReplacementFence(token)).rejects.toThrow(/revision/i)
+        expect(runtime.revision).toBeGreaterThan(token.revision)
+        expect(() => runtime.assertPersistentMutationAllowed()).not.toThrow()
+        expect(harness.store.commit).toHaveBeenLastCalledWith(
+            expect.objectContaining({
+                rootMutations: [
+                    {
+                        type: 'set',
+                       
+                        key: 'username',
+                        value: 'Edit landed while the fence was flushing',
+                    },
+                ],
+            }),
+        )
     })
 
     it('rejects a destructive fence when a live edit happened after the captured token', async () => {
@@ -1516,12 +1637,13 @@ describe('native replacement working-set refresh', () => {
         await fence.refreshCommittedWorkingSet(2)
         expect(harness.database.username).toBe('After native restore')
         expect(runtime.revision).toBe(2)
-        expect(() => runtime.markPersistentDataDirty(1)).not.toThrow()
+        expect(() => runtime.markPersistentDataDirty(1)).toThrow(/replacement is active/i)
 
         harness.username = 'Edit after native commit'
-        expect(() => runtime.markPersistentDataDirty(1)).not.toThrow()
+        expect(() => runtime.markPersistentDataDirty(1)).toThrow(/replacement is active/i)
 
         fence.release()
+        runtime.markPersistentDataDirty(1)
         await runtime.flushPendingData('post-native-commit-edit')
         expect(harness.database.username).toBe('Edit after native commit')
         expect(harness.store.commit).toHaveBeenCalledWith(
@@ -1531,6 +1653,30 @@ describe('native replacement working-set refresh', () => {
                 ],
             }),
         )
+    })
+
+    it('keeps a stale working set read-only when native acknowledgement fails after commit', async () => {
+        const harness = createFenceRuntimeHarness(
+            makeConversationDatabase('Before native restore'),
+            makeConversationDatabase('After native restore'),
+        )
+        const { runtime } = harness
+        await runtime.initializeActiveWorkingSet(harness.database)
+        const token = await runtime.capturePersistentMutationToken('native-restore-start')
+        const fence = await runtime.acquireDestructiveReplacementFence(token)
+
+        runtime.markCommittedWorkingSetRefreshRequired(
+            2,
+            new Error('synthetic native acknowledgement failure'),
+        )
+        fence.release()
+
+        expect(runtime.revision).toBe(2)
+        expect(runtime.pendingWorkingSetRefreshRevision).toBe(2)
+        expect(harness.database.username).toBe('Before native restore')
+        expect(() => runtime.assertPersistentMutationAllowed()).toThrow(/replacement is active/i)
+        expect(() => runtime.markPersistentDataDirty(1)).toThrow(/replacement is active/i)
+        expect(harness.store.commit).not.toHaveBeenCalled()
     })
 
     it('does not overwrite an already-applied edit during committed working-set projection', async () => {
@@ -1556,13 +1702,18 @@ describe('native replacement working-set refresh', () => {
         harness.username = 'Edit resumed after native commit'
         allowProjection.resolve()
 
-        await expect(refreshing).rejects.toThrow(/replacement is active/i)
+        await expect(refreshing).resolves.toEqual({
+            kind: 'committed', revision: 2, projection: 'refresh-required',
+        })
         expect(harness.database.username).toBe('Edit resumed after native commit')
         expect(() => runtime.markPersistentDataDirty(1)).toThrow(/replacement is active/i)
         fence.release()
+        expect(runtime.pendingWorkingSetRefreshRevision).toBe(2)
+        expect(() => runtime.assertPersistentMutationAllowed()).toThrow(/replacement is active/i)
+        expect(harness.store.commit).not.toHaveBeenCalled()
     })
 
-    it('queues a large post-publication edit without starting a fenced background flush', async () => {
+    it('keeps a large post-publication edit blocked until fence release', async () => {
         const restored = makeConversationDatabase('After native restore')
         const harness = createFenceRuntimeHarness(
             makeConversationDatabase('Before native restore'),
@@ -1575,8 +1726,11 @@ describe('native replacement working-set refresh', () => {
         await fence.refreshCommittedWorkingSet(2)
 
         harness.username = 'Large post-publication edit'
-        expect(() => runtime.markPersistentDataDirty(2 * 1024 * 1024)).not.toThrow()
+        expect(() => runtime.markPersistentDataDirty(2 * 1024 * 1024)).toThrow(
+            /replacement is active/i,
+        )
         fence.release()
+        runtime.markPersistentDataDirty(2 * 1024 * 1024)
         await runtime.flushPendingData('large-post-publication-edit')
 
         expect(harness.store.commit).toHaveBeenCalledWith(
@@ -1586,37 +1740,5 @@ describe('native replacement working-set refresh', () => {
                 ],
             }),
         )
-    })
-
-    it('materializes the complete restored working set for enabled v2.1 plugins', async () => {
-        const restored = makeConversationDatabase('After native restore')
-        restored.plugins = [{
-            name: 'Compatibility plugin',
-            version: '2.1',
-            enabled: true,
-        }] as Database['plugins']
-        restored.pluginCustomStorage = { plugin: { retained: true } }
-        restored.characters.push({
-            ...structuredClone(restored.characters[0]),
-            chaId: 'char-b',
-            name: 'Inactive full character',
-            personality: 'retained full detail',
-            chats: [],
-        })
-        const harness = createFenceRuntimeHarness(
-            makeConversationDatabase('Before native restore'),
-            restored,
-        )
-        const { runtime } = harness
-        await runtime.initializeActiveWorkingSet(harness.database)
-        const token = await runtime.capturePersistentMutationToken('native-restore-start')
-        const fence = await runtime.acquireDestructiveReplacementFence(token)
-
-        await fence.refreshCommittedWorkingSet(2)
-
-        expect(harness.store.materializeDatabase).toHaveBeenCalledWith(2)
-        expect(harness.database.pluginCustomStorage).toEqual({ plugin: { retained: true } })
-        expect(harness.database.characters[1]).toHaveProperty('personality')
-        fence.release()
     })
 })

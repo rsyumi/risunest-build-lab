@@ -1,3 +1,4 @@
+import type { ExportExclusions } from './exportExcludedReport'
 import type { Database } from './database.svelte'
 import {
     hasNativePersistentRevisionLease,
@@ -12,31 +13,25 @@ import type {
 } from './persistentDataStore'
 import {
     assertPinnedRevision,
-    collectPinnedCharacterIds,
+    iteratePinnedCharacterSummaries,
     countPinnedCharacters,
     iteratePinnedCharacters,
     iteratePinnedConversations,
     releasePersistentRevisionLease,
 } from './persistentRecordIterator'
 import { defineOwnEnumerableProperty } from './ownEnumerableProperty'
+import type { PluginStorageMeta } from '../plugins/pluginOwner'
+import { isUnownedPluginOwner } from '../plugins/pluginOwner'
 import {
     replaceCharacterResources,
     replaceDatabaseRootResources,
 } from '../process/coldstorageData'
 import { replaceExactPluginStorageAssetReferences } from '../drive/backupAssets'
 import {
-    decodeRisuSave,
     encodeRisuSaveBlock,
     magicRisuSaveHeader,
     RisuSaveType,
 } from './risuSave'
-
-export async function importRisuSaveToStore(
-    bytes: Uint8Array,
-    store: PersistentDataStore,
-): Promise<{ revision: DataRevision }> {
-    return store.replaceFromDatabase((await decodeRisuSave(bytes)) as Database)
-}
 
 async function* characterValues(reader: PersistentRevisionReader): AsyncGenerator<Database['characters'][number]> {
     for await (const record of iteratePinnedCharacters(reader)) {
@@ -70,6 +65,7 @@ export async function* streamRisuSaveFromStore(
 }
 
 export interface RisuSaveStreamOptions {
+    onExclusions?: (report: ExportExclusions) => void
     replaceResources?: Readonly<Record<string, string>>
     omitAccount?: boolean
 }
@@ -87,14 +83,27 @@ async function presetValues(reader: PersistentRevisionReader): Promise<Database[
     return presets
 }
 
+/**
+ * Upstream saves hold one value per key. A key two plugins both hold cannot be
+ * written without handing one plugin the other's value, so neither side goes
+ * out. The sidecar carries ownership back when RisuNest reads the file again.
+ */
 async function pluginStorageValues(
     reader: PersistentRevisionReader,
-): Promise<Database['pluginCustomStorage']> {
+): Promise<{ storage: Database['pluginCustomStorage']; meta: PluginStorageMeta; excluded: number }> {
     const storage: Database['pluginCustomStorage'] = {}
+    const meta: PluginStorageMeta = {}
     const catalog = await reader.queryPluginStorage()
     assertPinnedRevision(reader.revision, catalog.revision, 'Plugin storage catalog')
+    const owners = new Map<string, Set<string>>()
     for (const summary of catalog.items) {
-        const value = await reader.readPluginStorage(summary.key)
+        const holders = owners.get(summary.key) ?? new Set<string>()
+        holders.add(summary.owner)
+        owners.set(summary.key, holders)
+    }
+    for (const summary of catalog.items) {
+        if ((owners.get(summary.key)?.size ?? 0) > 1) continue
+        const value = await reader.readPluginStorage(summary.owner, summary.key)
         if (!value) throw new Error(`Missing plugin storage value for ${summary.key}`)
         assertPinnedRevision(
             reader.revision,
@@ -102,8 +111,11 @@ async function pluginStorageValues(
             `Plugin storage value ${summary.key}`,
         )
         defineOwnEnumerableProperty(storage, summary.key, value.value)
+        if (!isUnownedPluginOwner(summary.owner)) {
+            meta[summary.key] = { plugin: summary.owner, updatedAt: 0 }
+        }
     }
-    return storage
+    return { storage, meta, excluded: [...owners.values()].filter(holders => holders.size > 1).length }
 }
 
 export async function* streamRisuSaveFromLease(
@@ -118,7 +130,10 @@ export async function* streamRisuSaveFromLease(
     const rootWithPresets = {
         ...storedRoot,
         botPresets: storedPresets,
-        pluginCustomStorage: storedPluginStorage,
+        pluginCustomStorage: storedPluginStorage.storage,
+        ...(Object.keys(storedPluginStorage.meta).length > 0
+            ? { pluginStorageMeta: storedPluginStorage.meta }
+            : {}),
     } as Database
     const root = options?.replaceResources
         ? replaceDatabaseRootResources(rootWithPresets, options.replaceResources)
@@ -135,8 +150,15 @@ export async function* streamRisuSaveFromLease(
         'loadouts',
         'plugins',
         'pluginStorage',
+        'pluginStorageMeta',
     ]
-    const characterIds = await collectPinnedCharacterIds(reader)
+    const characterIds: string[] = []
+    let archivedCharacters = 0
+    for await (const summary of iteratePinnedCharacterSummaries(reader)) {
+        if (summary.archived) archivedCharacters += 1
+        else characterIds.push(summary.id)
+    }
+    options?.onExclusions?.({ archivedCharacters, collidingPluginValues: storedPluginStorage.excluded })
     directory.push(...characterIds, 'config')
 
     const {
@@ -145,8 +167,9 @@ export async function* streamRisuSaveFromLease(
         loadouts,
         plugins,
         pluginCustomStorage,
+        pluginStorageMeta,
         ...rootData
-    } = root
+    } = root as Database & { pluginStorageMeta?: PluginStorageMeta }
     const exportedRoot = options?.omitAccount
         ? Object.fromEntries(Object.entries(rootData).filter(([key]) => key !== 'account'))
         : rootData
@@ -163,6 +186,7 @@ export async function* streamRisuSaveFromLease(
         [RisuSaveType.LOADOUTS, 'loadouts', loadouts],
         [RisuSaveType.PLUGINS, 'plugins', plugins],
         [RisuSaveType.PLUGIN_STORAGE, 'pluginStorage', pluginCustomStorage],
+        [RisuSaveType.PLUGIN_STORAGE_META, 'pluginStorageMeta', pluginStorageMeta ?? {}],
     ] as const) {
         yield await encodeRisuSaveBlock({
             compression: true,
@@ -219,7 +243,7 @@ async function materializeDatabaseFromLease(
     assertPinnedRevision(reader.revision, rootRecord.revision, 'Root')
     const root = rootRecord.value
     const botPresets = await presetValues(reader)
-    const pluginCustomStorage = await pluginStorageValues(reader)
+    const { storage: pluginCustomStorage } = await pluginStorageValues(reader)
     const characters: Database['characters'] = []
     for await (const character of characterValues(reader)) {
         characters.push(character)

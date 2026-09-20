@@ -1,16 +1,14 @@
 use super::snapshot_archive::Archive;
 use super::{
     active_generation, current_revision, CheckpointMode, ReadTarget, SnapshotCreated, SnapshotInfo,
-    StoreError, StoreResult, GENERATION_TABLES,
+    StoreError, StoreResult, DATABASE_FILE, GENERATION_TABLES,
 };
 use crate::asset_repository::migration_gc::AssetRootSet;
 use crate::asset_repository::PayloadCas;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
-use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeSet, HashMap},
     fs,
-    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     sync::{
         atomic::{AtomicUsize, Ordering},
@@ -20,19 +18,32 @@ use std::{
 };
 use uuid::Uuid;
 
-const DATABASE_FILE: &str = "persistent.db";
 const MIN_SNAPSHOT_BYTES: u64 = 512 * 1024 * 1024;
-const MAX_COLD_DECODED_BYTES: u64 = 64 * 1024 * 1024;
+const UNSCANNABLE_BLOCKER: &str = "record-unscannable";
 const CAS_PHYSICAL_PREFIX: &[u8] = b"assets-v2/objects/";
 const COLD_STORAGE_HEADER: &str = "\u{ef01}COLDSTORAGE\u{ef01}";
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static ASSET_ROOT_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 
 #[derive(Default)]
 pub(crate) struct ActiveReaderRegistry {
     count: AtomicUsize,
+    deferred_asset_inventories: AtomicUsize,
     detached_asset_roots: Mutex<HashMap<String, AssetRootSet>>,
 }
 
 impl ActiveReaderRegistry {
+    /// Short local captures pin their referenced objects incrementally. During
+    /// that interval GC/eviction must defer instead of rescanning the full asset
+    /// library on every small edit. Register under the repository mutation lock.
+    pub(crate) fn defer_asset_inventory(self: &Arc<Self>) -> DeferredAssetInventory {
+        self.deferred_asset_inventories
+            .fetch_add(1, Ordering::SeqCst);
+        DeferredAssetInventory(Arc::clone(self))
+    }
     fn register(&self) {
         self.count.fetch_add(1, Ordering::SeqCst);
     }
@@ -63,6 +74,11 @@ impl ActiveReaderRegistry {
     }
 
     pub(crate) fn detached_asset_roots(&self) -> StoreResult<Vec<AssetRootSet>> {
+        if self.deferred_asset_inventories.load(Ordering::SeqCst) > 0 {
+            return Err(StoreError::Validation {
+                message: "Asset inventory is being pinned by a local capture".into(),
+            });
+        }
         Ok(self
             .detached_asset_roots
             .lock()
@@ -72,6 +88,17 @@ impl ActiveReaderRegistry {
             .values()
             .cloned()
             .collect())
+    }
+}
+
+pub(crate) struct DeferredAssetInventory(Arc<ActiveReaderRegistry>);
+impl Drop for DeferredAssetInventory {
+    fn drop(&mut self) {
+        let previous = self
+            .0
+            .deferred_asset_inventories
+            .fetch_sub(1, Ordering::SeqCst);
+        debug_assert!(previous > 0);
     }
 }
 
@@ -92,16 +119,14 @@ impl RevisionReadLease {
     }
 
     pub(crate) fn publish_detached_asset_roots(&self) -> StoreResult<()> {
-        let cas = PayloadCas::new(&self.repository_root)?;
-        let roots = collect_asset_roots(&self.connection, &cas)?;
+        let roots = collect_asset_roots(&self.connection)?;
         self.active_readers
             .publish_detached_asset_roots(&self.lease, roots)
     }
 
     #[cfg(feature = "native-official-publication")]
     pub(crate) fn asset_roots(&self) -> StoreResult<AssetRootSet> {
-        let cas = PayloadCas::new(&self.repository_root)?;
-        collect_asset_roots_for_generation(&self.connection, &cas, &self.target.generation)
+        collect_asset_roots_for_generation(&self.connection, &self.target.generation)
     }
 }
 
@@ -146,7 +171,7 @@ pub(super) fn apply_pending_restore(
         let replacement = (|| -> StoreResult<()> {
             if database_path.is_file() {
                 let connection = Connection::open(&database_path)?;
-                create_in_archive(&connection, &mut archive, snapshots_dir, "pre-restore")?;
+                create_in_archive(&connection, &mut archive, "pre-restore")?;
             }
             replace_database(&database_path, &candidate)
         })();
@@ -172,7 +197,7 @@ pub(super) fn apply_pending_restore(
 
 fn prepare_restore_candidate(persistent_dir: &Path, target: &Path) -> StoreResult<PathBuf> {
     let candidate = persistent_dir.join(format!(
-        "persistent.db.restore-candidate-{}",
+        "{DATABASE_FILE}.restore-candidate-{}",
         Uuid::new_v4()
     ));
     fs::copy(target, &candidate)
@@ -181,7 +206,10 @@ fn prepare_restore_candidate(persistent_dir: &Path, target: &Path) -> StoreResul
     let result = (|| -> StoreResult<()> {
         let mut connection = Connection::open(&candidate)?;
         super::schema::initialize(&mut connection)?;
-        super::server_sync_outbox::restored_copy(&connection)?;
+        let transaction = connection.transaction()?;
+        super::server_sync_outbox::restored_copy(&transaction)?;
+        super::sync_selection::restored_copy(&transaction)?;
+        transaction.commit()?;
         let _ = super::query::materialize(&connection, None)?;
         let integrity: String =
             connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
@@ -210,8 +238,23 @@ fn prepare_restore_candidate(persistent_dir: &Path, target: &Path) -> StoreResul
     Ok(candidate)
 }
 
-pub(super) fn sweep_temporary_generations(connection: &mut Connection) -> StoreResult<()> {
+pub(super) fn sweep_temporary_generations(
+    connection: &mut Connection,
+    retained_stage: Option<&str>,
+) -> StoreResult<()> {
     let transaction = connection.transaction()?;
+    if let Some(retained_stage) = retained_stage {
+        let exists: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM root WHERE generation=?1)",
+            [retained_stage],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            return Err(StoreError::Validation {
+                message: "Native portable restore stage is missing".into(),
+            });
+        }
+    }
     let legacy_generations = {
         let mut statement = transaction.prepare("SELECT generation FROM snapshot_leases")?;
         let generations = statement
@@ -234,7 +277,7 @@ pub(super) fn sweep_temporary_generations(connection: &mut Connection) -> StoreR
     stale.sort();
     stale.dedup();
     for generation in stale {
-        if generation != active {
+        if generation != active && retained_stage != Some(generation.as_str()) {
             delete_generation(&transaction, &generation)?;
         }
     }
@@ -303,16 +346,35 @@ pub(super) fn acquire_revision(
     ))
 }
 
-fn open_revision_reader(database_path: &Path) -> StoreResult<Connection> {
+pub(super) fn open_revision_reader(database_path: &Path) -> StoreResult<Connection> {
+    open_reader(database_path, &|_| Ok(()))
+}
+
+/// A reader that presents one generation under the raw table names. The views are temp objects,
+/// so they have to exist before the connection becomes read-only.
+pub(super) fn open_generation_reader(
+    database_path: &Path,
+    generation: &str,
+) -> StoreResult<Connection> {
+    open_reader(database_path, &|connection| {
+        super::portable::install_generation_views(connection, generation)
+    })
+}
+
+fn open_reader(
+    database_path: &Path,
+    prepare: &dyn Fn(&Connection) -> StoreResult<()>,
+) -> StoreResult<Connection> {
     let preferred = revision_reader_open_flags_for_target(cfg!(target_os = "android"));
     if cfg!(target_os = "android") {
-        return configure_revision_reader(database_path, preferred);
+        return configure_revision_reader(database_path, preferred, prepare);
     }
-    match configure_revision_reader(database_path, preferred) {
+    match configure_revision_reader(database_path, preferred, prepare) {
         Ok(connection) => Ok(connection),
         Err(_) => configure_revision_reader(
             database_path,
             OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            prepare,
         ),
     }
 }
@@ -326,13 +388,18 @@ pub(super) fn revision_reader_open_flags_for_target(is_android: bool) -> OpenFla
     access | OpenFlags::SQLITE_OPEN_NO_MUTEX
 }
 
-fn configure_revision_reader(database_path: &Path, flags: OpenFlags) -> StoreResult<Connection> {
+fn configure_revision_reader(
+    database_path: &Path,
+    flags: OpenFlags,
+    prepare: &dyn Fn(&Connection) -> StoreResult<()>,
+) -> StoreResult<Connection> {
     let connection = Connection::open_with_flags(database_path, flags)?;
     connection.busy_timeout(Duration::ZERO)?;
+    connection.execute_batch("PRAGMA cache_size = -2048;")?;
+    prepare(&connection)?;
     connection.execute_batch(
         "
         PRAGMA query_only = ON;
-        PRAGMA cache_size = -2048;
         BEGIN DEFERRED;
         ",
     )?;
@@ -374,13 +441,12 @@ pub(super) fn create(
     reason: &str,
 ) -> StoreResult<SnapshotCreated> {
     let mut archive = Archive::open(snapshots_dir)?;
-    create_in_archive(connection, &mut archive, snapshots_dir, reason)
+    create_in_archive(connection, &mut archive, reason)
 }
 
 fn create_in_archive(
     connection: &Connection,
     archive: &mut Archive,
-    snapshots_dir: &Path,
     reason: &str,
 ) -> StoreResult<SnapshotCreated> {
     let started = Instant::now();
@@ -389,8 +455,7 @@ fn create_in_archive(
     connection.execute("VACUUM INTO ?1", [scratch.path.to_string_lossy().as_ref()])?;
     let captured = Connection::open(&scratch.path)?;
     let revision = current_revision(&captured)?;
-    let cas = PayloadCas::new(repository_root_from_snapshots_dir(snapshots_dir)?)?;
-    let roots = collect_asset_roots(&captured, &cas)?;
+    let roots = collect_asset_roots(&captured)?;
     drop(captured);
     let metadata = archive.insert(&scratch.path, revision, reason, roots)?;
     archive.rotate(byte_budget(current_bytes), &metadata.id)?;
@@ -446,27 +511,26 @@ fn logical_database_bytes(connection: &Connection) -> StoreResult<u64> {
 
 pub(super) fn collect_asset_roots(
     connection: &Connection,
-    cas: &PayloadCas,
 ) -> StoreResult<AssetRootSet> {
-    collect_asset_roots_scoped(connection, cas, None)
+    #[cfg(test)]
+    ASSET_ROOT_SCANS.with(|count| count.set(count.get() + 1));
+    collect_asset_roots_scoped(connection, None)
 }
 
 #[cfg(feature = "native-official-publication")]
 fn collect_asset_roots_for_generation(
     connection: &Connection,
-    cas: &PayloadCas,
     generation: &str,
 ) -> StoreResult<AssetRootSet> {
-    collect_asset_roots_scoped(connection, cas, Some(generation))
+    collect_asset_roots_scoped(connection, Some(generation))
 }
 
 // One scanner serves both the global GC-root collection and the per-generation
 // publication pinning so the two table lists can never drift apart. The global
-// scope additionally covers the logical-sync manifests and the cross-generation
-// cold-alias blocker, which are meaningless for a single generation.
+// scope additionally covers the logical-sync manifests, which are meaningless
+// for a single generation.
 fn collect_asset_roots_scoped(
     connection: &Connection,
-    cas: &PayloadCas,
     generation: Option<&str>,
 ) -> StoreResult<AssetRootSet> {
     let mut roots = AssetRootSet::default();
@@ -486,7 +550,8 @@ fn collect_asset_roots_scoped(
             "SELECT manifest_hash FROM asset_owner_heads WHERE present = 1"
         },
         scope_params,
-        &mut roots.manifest_hashes,
+        HashTarget::Manifest,
+        &mut roots,
     )?;
     scan_asset_alias_roots(
         connection,
@@ -498,31 +563,29 @@ fn collect_asset_roots_scoped(
         scope_params,
         &mut roots,
     )?;
-    let cold_aliases = scan_cold_alias_roots(
+    // An archived character keeps no scannable detail, so its payload object and
+    // the asset hashes it recorded are the only roots that hold those bytes.
+    scan_archived_object_roots(
         connection,
         if scoped {
-            "SELECT key, object_hash, size FROM cold_aliases
-         WHERE generation = ?1 ORDER BY key ASC"
+            "SELECT archived_object FROM characters
+         WHERE generation = ?1 AND archived_object IS NOT NULL"
         } else {
-            "SELECT key, object_hash, size FROM cold_aliases
-         ORDER BY generation ASC, key ASC"
+            "SELECT archived_object FROM characters WHERE archived_object IS NOT NULL"
         },
         scope_params,
         &mut roots,
     )?;
-    let mut has_cross_generation_cold_aliases = false;
     if !scoped {
         if table_exists(connection, "server_sync_objects")? {
             scan_optional_hash_column(
                 connection,
                 "SELECT hash FROM server_sync_objects",
                 [],
-                &mut roots.object_hashes,
+                HashTarget::Object,
+                &mut roots,
             )?;
         }
-        let retained_generations: i64 =
-            connection.query_row("SELECT COUNT(*) FROM root", [], |row| row.get(0))?;
-        has_cross_generation_cold_aliases = retained_generations > 1 && !cold_aliases.is_empty();
     }
 
     for (table, column) in [
@@ -561,13 +624,8 @@ fn collect_asset_roots_scoped(
         roots.blockers.insert("plugin-storage-opaque".to_owned());
         roots.retain_all_objects = true;
     }
-    let cross_generation_cold_aliases =
-        has_cross_generation_cold_aliases && !roots.cold_keys.is_empty();
-    resolve_nested_cold_roots(cas, cold_aliases, &mut roots)?;
-    if cross_generation_cold_aliases {
-        roots.blockers.insert("cold-payload-unscanned".to_owned());
-        roots.retain_all_objects = true;
-    }
+    // Nothing stores a cold payload any more, so a record that still references
+    // one hides an unknowable set of attachments. Keep every object instead.
     if !roots.cold_keys.is_empty() {
         roots.blockers.insert("cold-payload-unscanned".to_owned());
         roots.retain_all_objects = true;
@@ -575,11 +633,120 @@ fn collect_asset_roots_scoped(
     Ok(roots)
 }
 
-fn repository_root_from_snapshots_dir(snapshots_dir: &Path) -> StoreResult<&Path> {
-    snapshots_dir
-        .parent()
-        .and_then(Path::parent)
-        .ok_or_else(|| validation("snapshot directory has no repository root"))
+/// Every CAS object one character's records reach, so archiving can record them
+/// and keep them out of the sweep while the character has no scannable detail.
+pub(super) fn collect_character_asset_hashes(
+    connection: &Connection,
+    cas: &PayloadCas,
+    generation: &str,
+    character_id: &str,
+) -> StoreResult<Vec<String>> {
+    let mut roots = AssetRootSet::default();
+    let scope: [&dyn rusqlite::ToSql; 2] = [&generation, &character_id];
+    for query in [
+        "SELECT detail FROM characters WHERE generation = ?1 AND character_id = ?2",
+        "SELECT detail FROM conversations WHERE generation = ?1 AND character_id = ?2",
+        "SELECT value FROM messages WHERE generation = ?1 AND character_id = ?2",
+    ] {
+        scan_json_column(connection, query, scope.as_slice(), &mut roots)?;
+    }
+    scan_text_column(
+        connection,
+        "SELECT image FROM characters
+         WHERE generation = ?1 AND character_id = ?2 AND image IS NOT NULL",
+        scope.as_slice(),
+        &mut roots,
+    )?;
+
+    let mut hashes: BTreeSet<String> = std::mem::take(&mut roots.object_hashes);
+    let manifest_hash: Option<String> = connection
+        .query_row(
+            "SELECT manifest_hash FROM asset_owner_heads
+             WHERE generation = ?1 AND owner_kind = 'character-additional-assets'
+               AND owner_locator = ?2 AND present = 1",
+            rusqlite::params![generation, character_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    if let Some(manifest_hash) = manifest_hash {
+        if let Some(canonical) = cas.read_object(&manifest_hash)? {
+            if let Ok(entries) =
+                crate::asset_repository::owner_manifest_codec::decode_owner_manifest(&canonical)
+            {
+                for entry in entries {
+                    if let Some(payload) = entry.payload_hash {
+                        hashes.insert(hex::encode(payload));
+                    }
+                }
+            }
+        }
+        hashes.insert(manifest_hash);
+    }
+
+    let mut candidates: BTreeSet<String> = roots
+        .legacy_asset_keys
+        .iter()
+        .chain(&roots.inlay_ids)
+        .cloned()
+        .collect();
+    collect_alias_key_candidates(connection, generation, character_id, &mut candidates)?;
+    for candidate in candidates {
+        let mut statement = connection.prepare_cached(
+            "SELECT object_hash FROM asset_aliases
+             WHERE generation = ?1 AND logical_key = ?2 AND object_hash IS NOT NULL",
+        )?;
+        let found = statement
+            .query_map(rusqlite::params![generation, candidate], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        hashes.extend(found);
+    }
+    Ok(hashes.into_iter().collect())
+}
+
+/// String leaves of the character detail are the only place an alias logical key
+/// can appear without a recognizable prefix, so they are looked up directly.
+fn collect_alias_key_candidates(
+    connection: &Connection,
+    generation: &str,
+    character_id: &str,
+    candidates: &mut BTreeSet<String>,
+) -> StoreResult<()> {
+    const MAX_CANDIDATE_BYTES: usize = 512;
+    let detail: Option<String> = connection
+        .query_row(
+            "SELECT detail FROM characters WHERE generation = ?1 AND character_id = ?2",
+            rusqlite::params![generation, character_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(detail) = detail else {
+        return Ok(());
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&detail) else {
+        return Ok(());
+    };
+    let mut pending = vec![value];
+    while let Some(value) = pending.pop() {
+        match value {
+            serde_json::Value::String(value) => {
+                if !value.is_empty()
+                    && value.len() <= MAX_CANDIDATE_BYTES
+                    && !value.contains(char::is_whitespace)
+                {
+                    candidates.insert(value);
+                }
+            }
+            serde_json::Value::Array(values) => pending.extend(values),
+            serde_json::Value::Object(values) => {
+                pending.extend(values.into_iter().map(|(_, value)| value))
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 fn repository_root_from_database_path(database_path: &Path) -> StoreResult<PathBuf> {
@@ -588,102 +755,6 @@ fn repository_root_from_database_path(database_path: &Path) -> StoreResult<PathB
         .and_then(Path::parent)
         .map(Path::to_path_buf)
         .ok_or_else(|| validation("persistent database has no repository root"))
-}
-
-fn scan_cold_alias_roots<P: rusqlite::Params>(
-    connection: &Connection,
-    query: &str,
-    params: P,
-    roots: &mut AssetRootSet,
-) -> StoreResult<Vec<(String, String, u64)>> {
-    let mut statement = connection.prepare(query)?;
-    let mut rows = statement.query(params)?;
-    let mut aliases = Vec::new();
-    while let Some(row) = rows.next()? {
-        let key: String = row.get(0)?;
-        let object_hash: Option<String> = row.get(1)?;
-        let size: i64 = row.get(2)?;
-        let Ok(size) = u64::try_from(size) else {
-            roots.cold_keys.insert(key);
-            roots.retain_all_objects = true;
-            continue;
-        };
-        if let Some(object_hash) = object_hash {
-            roots.object_hashes.insert(object_hash.clone());
-            aliases.push((key, object_hash, size));
-        } else {
-            roots.cold_keys.insert(key);
-        }
-    }
-    Ok(aliases)
-}
-
-fn resolve_nested_cold_roots(
-    cas: &PayloadCas,
-    aliases: Vec<(String, String, u64)>,
-    roots: &mut AssetRootSet,
-) -> StoreResult<()> {
-    let mut resolved_keys = BTreeSet::new();
-    let mut opaque_keys = BTreeSet::new();
-    for (key, object_hash, expected_size) in aliases {
-        match decode_cold_payload(cas, &object_hash, expected_size) {
-            Ok(value) => {
-                observe_json_value(&value, None, roots);
-                resolved_keys.insert(key);
-            }
-            Err(_) => {
-                opaque_keys.insert(key);
-                roots.retain_all_objects = true;
-            }
-        }
-    }
-    roots
-        .cold_keys
-        .retain(|key| !resolved_keys.contains(key) || opaque_keys.contains(key));
-    roots.cold_keys.extend(opaque_keys);
-    Ok(())
-}
-
-fn decode_cold_payload(
-    cas: &PayloadCas,
-    object_hash: &str,
-    expected_size: u64,
-) -> StoreResult<serde_json::Value> {
-    decode_cold_payload_with_limit(cas, object_hash, expected_size, MAX_COLD_DECODED_BYTES)
-}
-
-pub(super) fn decode_cold_payload_with_limit(
-    cas: &PayloadCas,
-    object_hash: &str,
-    expected_size: u64,
-    decoded_limit: u64,
-) -> StoreResult<serde_json::Value> {
-    let mut object = cas
-        .open_object(object_hash)?
-        .ok_or_else(|| validation("cold payload CAS object is missing"))?;
-    if object.metadata()?.len() != expected_size {
-        return Err(validation("cold payload CAS object is corrupt"));
-    }
-    let mut hasher = Sha256::new();
-    let mut copied = 0_u64;
-    let mut buffer = [0_u8; 64 * 1024];
-    loop {
-        let read = object.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-        copied = copied
-            .checked_add(read as u64)
-            .ok_or_else(|| validation("cold payload size overflow"))?;
-    }
-    if copied != expected_size || hex::encode(hasher.finalize()) != object_hash {
-        return Err(validation("cold payload CAS object is corrupt"));
-    }
-    object.seek(SeekFrom::Start(0))?;
-    let decoded_limit = usize::try_from(decoded_limit)
-        .map_err(|_| validation("cold payload decoded limit is unsupported"))?;
-    crate::cold_payload_codec::decode_cold_json(object, decoded_limit).map_err(StoreError::from)
 }
 
 fn table_exists(connection: &Connection, table: &str) -> StoreResult<bool> {
@@ -698,18 +769,54 @@ fn table_exists(connection: &Connection, table: &str) -> StoreResult<bool> {
         .map_err(StoreError::from)
 }
 
+// A snapshot exists to preserve the rows it captures, so a value whose storage
+// class or encoding is damaged widens retention instead of failing the capture.
+enum ScannedText {
+    Text(String),
+    Null,
+    Damaged,
+}
+
+fn scanned_text(row: &rusqlite::Row<'_>, index: usize) -> StoreResult<ScannedText> {
+    Ok(match row.get_ref(index)? {
+        rusqlite::types::ValueRef::Null => ScannedText::Null,
+        rusqlite::types::ValueRef::Text(bytes) => match std::str::from_utf8(bytes) {
+            Ok(value) => ScannedText::Text(value.to_owned()),
+            Err(_) => ScannedText::Damaged,
+        },
+        _ => ScannedText::Damaged,
+    })
+}
+
+fn retain_unscannable_record(roots: &mut AssetRootSet) {
+    roots.blockers.insert(UNSCANNABLE_BLOCKER.to_owned());
+    roots.retain_all_objects = true;
+}
+
+enum HashTarget {
+    Manifest,
+    Object,
+}
+
 fn scan_optional_hash_column<P: rusqlite::Params>(
     connection: &Connection,
     query: &str,
     params: P,
-    target: &mut std::collections::BTreeSet<String>,
+    target: HashTarget,
+    roots: &mut AssetRootSet,
 ) -> StoreResult<()> {
     let mut statement = connection.prepare(query)?;
     let mut rows = statement.query(params)?;
     while let Some(row) = rows.next()? {
-        let value: Option<String> = row.get(0)?;
-        if let Some(value) = value {
-            target.insert(value);
+        match scanned_text(row, 0)? {
+            ScannedText::Text(value) => {
+                match target {
+                    HashTarget::Manifest => roots.manifest_hashes.insert(value),
+                    HashTarget::Object => roots.object_hashes.insert(value),
+                };
+            }
+            ScannedText::Null => {}
+            ScannedText::Damaged => retain_unscannable_record(roots),
         }
     }
     Ok(())
@@ -724,12 +831,41 @@ fn scan_asset_alias_roots<P: rusqlite::Params>(
     let mut statement = connection.prepare(query)?;
     let mut rows = statement.query(params)?;
     while let Some(row) = rows.next()? {
-        let logical_key: String = row.get(0)?;
-        let object_hash: Option<String> = row.get(1)?;
-        if let Some(object_hash) = object_hash {
-            roots.object_hashes.insert(object_hash);
-        } else {
-            roots.legacy_asset_keys.insert(logical_key);
+        match scanned_text(row, 1)? {
+            ScannedText::Text(object_hash) => {
+                roots.object_hashes.insert(object_hash);
+            }
+            ScannedText::Null => match scanned_text(row, 0)? {
+                ScannedText::Text(logical_key) => {
+                    roots.legacy_asset_keys.insert(logical_key);
+                }
+                _ => retain_unscannable_record(roots),
+            },
+            ScannedText::Damaged => retain_unscannable_record(roots),
+        }
+    }
+    Ok(())
+}
+
+fn scan_archived_object_roots<P: rusqlite::Params>(
+    connection: &Connection,
+    query: &str,
+    params: P,
+    roots: &mut AssetRootSet,
+) -> StoreResult<()> {
+    let mut statement = connection.prepare(query)?;
+    let mut rows = statement.query(params)?;
+    while let Some(row) = rows.next()? {
+        let ScannedText::Text(encoded) = scanned_text(row, 0)? else {
+            retain_unscannable_record(roots);
+            continue;
+        };
+        match serde_json::from_str::<super::archive::ArchivedObject>(&encoded) {
+            Ok(archived) => {
+                roots.object_hashes.insert(archived.object_hash);
+                roots.object_hashes.extend(archived.asset_hashes);
+            }
+            Err(_) => retain_unscannable_record(roots),
         }
     }
     Ok(())
@@ -744,12 +880,14 @@ fn scan_json_column<P: rusqlite::Params>(
     let mut statement = connection.prepare(query)?;
     let mut rows = statement.query(params)?;
     while let Some(row) = rows.next()? {
-        let encoded: String = row.get(0)?;
-        match serde_json::from_str(&encoded) {
-            Ok(value) => observe_json_value(&value, None, roots),
-            // The snapshot contains this exact record. If its references cannot
-            // be decoded, retain objects instead of discarding the raw backup.
-            Err(_) => roots.retain_all_objects = true,
+        // The snapshot contains this exact record. If its references cannot
+        // be decoded, retain objects instead of discarding the raw backup.
+        match scanned_text(row, 0)? {
+            ScannedText::Text(encoded) => match serde_json::from_str(&encoded) {
+                Ok(value) => observe_json_value(&value, None, roots),
+                Err(_) => retain_unscannable_record(roots),
+            },
+            _ => retain_unscannable_record(roots),
         }
     }
     Ok(())
@@ -764,8 +902,10 @@ fn scan_text_column<P: rusqlite::Params>(
     let mut statement = connection.prepare(query)?;
     let mut rows = statement.query(params)?;
     while let Some(row) = rows.next()? {
-        let value: String = row.get(0)?;
-        observe_text(&value, roots);
+        match scanned_text(row, 0)? {
+            ScannedText::Text(value) => observe_text(&value, roots),
+            _ => retain_unscannable_record(roots),
+        }
     }
     Ok(())
 }
@@ -909,7 +1049,7 @@ fn validate_restore_database(path: &Path) -> StoreResult<()> {
         return Err(validation("snapshot integrity check failed"));
     }
     let version: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
-    if !(1..=i64::from(super::schema::SCHEMA_VERSION)).contains(&version) {
+    if version != i64::from(super::schema::SCHEMA_VERSION) {
         return Err(validation("snapshot schema version is not supported"));
     }
     Ok(())
@@ -927,7 +1067,7 @@ fn remove_database_files(database_path: &Path) -> StoreResult<()> {
 }
 
 fn replace_database(database_path: &Path, target: &Path) -> StoreResult<()> {
-    let next = database_path.with_extension(format!("db.restore-next-{}", Uuid::new_v4()));
+    let next = database_path.with_extension(format!("sqlite.restore-next-{}", Uuid::new_v4()));
     fs::copy(target, &next).map_err(|error| path_error("copy restore candidate", &next, error))?;
     fs::OpenOptions::new()
         .read(true)
@@ -941,7 +1081,7 @@ fn replace_database(database_path: &Path, target: &Path) -> StoreResult<()> {
         return Ok(());
     }
 
-    let previous = database_path.with_extension("db.restore-previous");
+    let previous = database_path.with_extension("sqlite.restore-previous");
     if previous.exists() {
         fs::remove_file(&previous)?;
     }

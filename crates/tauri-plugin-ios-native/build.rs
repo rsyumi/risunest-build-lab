@@ -1,0 +1,22 @@
+fn main() {
+    tauri_plugin::Builder::new(&[
+        "state",
+        "begin",
+        "end",
+        "request_notifications",
+        "notify",
+        "open_settings",
+        "pick_file",
+        "export_file",
+        "discard_file",
+        "publication",
+        "acknowledge_publication",
+        "take_opened_files",
+        "generation_progress",
+        "reset_generation",
+        "authenticate",
+        "cancel_authentication",
+    ])
+    .ios_path("ios")
+    .build();
+}

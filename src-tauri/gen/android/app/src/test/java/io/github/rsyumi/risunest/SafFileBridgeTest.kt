@@ -13,10 +13,14 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
 
 class SafFileBridgeTest {
-  private fun temporaryDirectory(): File = Files.createTempDirectory("risu-saf-test").toFile()
+  @get:Rule val temporaryFolder = TemporaryFolder.builder().assureDeletion().build()
+
+  private fun temporaryDirectory(): File = temporaryFolder.newFolder()
 
   private fun terminalDestinationRecord(
     requestId: String,
@@ -118,6 +122,28 @@ class SafFileBridgeTest {
       root.resolve("11111111-1111-4111-8111-111111111111/ownership.json").readText(),
     )
     assertFalse(root.resolve("11111111-1111-4111-8111-111111111111/source.json.tmp").exists())
+  }
+
+  @Test
+  fun `content spool persists its import destination for replay`() = runBlocking {
+    val root = temporaryDirectory()
+    val token = "31313131-3131-4131-8131-313131313131"
+    val store = SafSpoolStore(
+      root = root,
+      atomicPublisher = testAtomicPublisher,
+      tokenFactory = { UUID.fromString(token) },
+    )
+
+    val batch = spoolOpenedFilesOnIo(
+      store,
+      listOf(TestSafSource("book.lorebook", 2) { ByteArrayInputStream(byteArrayOf(1, 2)) }),
+      importDestination = SafContentImportDestination.MODULE,
+    )
+
+    assertEquals(SafContentImportDestination.MODULE, batch.ready.single().importDestination)
+    assertEquals(SafContentImportDestination.MODULE, store.listReady().single().importDestination)
+    assertTrue(root.resolve("$token/source.json").readText().contains("\"importDestination\":\"module\""))
+    assertTrue(androidSpoolBatchScript("request", batch).contains("\"importDestination\":\"module\""))
   }
 
   @Test
@@ -564,6 +590,26 @@ class SafFileBridgeTest {
   }
 
   @Test
+  fun `destination state rejects pre-release schemas instead of inferring missing fields`() {
+    val root = temporaryDirectory()
+    val stateFile = root.resolve("android-saf-destination.json")
+    val store = SafDestinationStateStore(stateFile, testAtomicPublisher)
+    val current = terminalDestinationRecord(
+      requestId = "51515151-5151-4151-8151-515151515151",
+      exportId = "61616161-6161-4161-8161-616161616161",
+      sourceKind = SafDestinationSourceKind.RISU_SAVE,
+      publicationPrerequisitesComplete = true,
+    )
+    store.save(current)
+    val currentJson = stateFile.readText()
+
+    stateFile.writeText(currentJson.replace("\"version\":3", "\"version\":1"))
+    assertNull(store.load())
+    stateFile.writeText(currentJson.replace("\"version\":3", "\"version\":2"))
+    assertNull(store.load())
+  }
+
+  @Test
   fun `interrupted destination cleanup preserves provider limited warnings`() {
     assertEquals(
       listOf("android-saf-provider-not-atomic"),
@@ -825,6 +871,28 @@ class SafFileBridgeTest {
     outside.parentFile!!.mkdirs()
     outside.writeBytes(byteArrayOf(9))
     val unrelated = handoffs.resolve("manual.risunest").apply { writeBytes(byteArrayOf(8)) }
+
+    assertEquals(source.canonicalFile, resolveManagedExportSource(appData, source.path))
+    assertEquals(id, managedExportId(source))
+    assertEquals(source.canonicalFile, resolveManagedExportById(appData, id))
+    assertNull(resolveManagedExportSource(appData, outside.path))
+    assertNull(resolveManagedExportSource(appData, unrelated.path))
+  }
+
+  @Test
+  fun `destination source accepts only exact app-owned raw recovery handoffs`() {
+    val appData = temporaryDirectory()
+    val handoffs = appData.resolve("native-file-jobs/handoffs")
+    handoffs.mkdirs()
+    val id = "99999999-9999-4999-8999-999999999999"
+    val source = handoffs.resolve("risunest-rescue-$id.risunest-rescue.zip")
+    source.writeBytes(byteArrayOf(1, 2, 3))
+    val outside = appData.resolve("outside/risunest-rescue-$id.risunest-rescue.zip")
+    outside.parentFile!!.mkdirs()
+    outside.writeBytes(byteArrayOf(9))
+    val unrelated = handoffs.resolve("manual.risunest-rescue.zip").apply {
+      writeBytes(byteArrayOf(8))
+    }
 
     assertEquals(source.canonicalFile, resolveManagedExportSource(appData, source.path))
     assertEquals(id, managedExportId(source))

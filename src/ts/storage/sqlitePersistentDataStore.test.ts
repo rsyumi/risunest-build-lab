@@ -57,12 +57,6 @@ describe('SqlitePersistentDataStore', () => {
             assetAliases: [alias],
         }
         const owner = { kind: 'root-module-assets' as const, index: 0 }
-        const coldAlias = {
-            key: 'cold/native',
-            objectHash: '88'.repeat(32),
-            size: 4,
-            metadata: { source: 'native' },
-        }
 
         await store.open()
         await store.readRoot()
@@ -75,18 +69,13 @@ describe('SqlitePersistentDataStore', () => {
         await store.readConversationMetadata('char-a', 'conv-long')
         await store.readConversationWindow(windowQuery)
         await store.queryPluginStorage()
-        await store.readPluginStorage('memory')
+        await store.readPluginStorage('test-plugin', 'memory')
         await store.readAssetAlias({ kind: alias.kind, key: alias.key })
         await store.listAssetAliases({ kind: 'asset', limit: 2, cursor: 'alias-cursor' })
         await store.readAssetRepositoryAuthority()
         await store.readAssetOwnerHead(owner)
-        await store.readColdPayloadAuthority()
-        await store.readColdAlias(coldAlias.key)
-        await store.listColdAliases()
         await store.commitAssetAlias(alias, 8)
         await store.deleteAssetAlias({ kind: alias.kind, key: alias.key }, 9)
-        await store.commitColdAlias(coldAlias, 10)
-        await store.deleteColdAlias(coldAlias.key, 11)
         await store.commit(commit)
         await store.materializeDatabase(9)
 
@@ -108,7 +97,7 @@ describe('SqlitePersistentDataStore', () => {
             ],
             ['pds_read_conversation_window', { query: windowQuery }],
             ['pds_query_plugin_storage', {}],
-            ['pds_read_plugin_storage', { key: 'memory' }],
+            ['pds_read_plugin_storage', { owner: 'test-plugin', key: 'memory' }],
             ['pds_read_asset_alias', { kind: 'asset', key: alias.key }],
             [
                 'pds_list_asset_aliases',
@@ -116,16 +105,11 @@ describe('SqlitePersistentDataStore', () => {
             ],
             ['pds_read_asset_repository_authority', {}],
             ['pds_read_asset_owner_head', { owner }],
-            ['pds_read_cold_payload_authority', {}],
-            ['pds_read_cold_alias', { key: coldAlias.key }],
-            ['pds_list_cold_aliases', {}],
             ['pds_commit_asset_alias', { alias, expectedRevision: 8 }],
             [
                 'pds_delete_asset_alias',
                 { kind: 'asset', key: alias.key, expectedRevision: 9 },
             ],
-            ['pds_commit_cold_alias', { alias: coldAlias, expectedRevision: 10 }],
-            ['pds_delete_cold_alias', { key: coldAlias.key, expectedRevision: 11 }],
             [
                 'pds_commit',
                 {
@@ -215,6 +199,55 @@ describe('SqlitePersistentDataStore', () => {
         await expect(store.readRoot()).rejects.toEqual(new Error('disk I/O error'))
     })
 
+    it('cancels an in-flight native character archive operation with the same operation id', async () => {
+        let rejectArchive!: (error: unknown) => void
+        mocks.invoke.mockImplementation((command: string, args?: Record<string, unknown>) => {
+            if (command === 'pds_archive_character') {
+                return new Promise((_resolve, reject) => { rejectArchive = reject })
+            }
+            if (command === 'pds_cancel_character_archive_operation') {
+                rejectArchive({
+                    code: 'validation',
+                    message: 'character archive operation cancelled',
+                })
+                return Promise.resolve(true)
+            }
+            throw new Error(`unexpected command ${command}`)
+        })
+        const store = new SqlitePersistentDataStore()
+        const controller = new AbortController()
+
+        const archive = store.archiveCharacter('char-a', 12, controller.signal)
+        controller.abort()
+
+        await expect(archive).rejects.toMatchObject({ name: 'AbortError' })
+        const archiveArgs = mocks.invoke.mock.calls[0][1] as Record<string, unknown>
+        expect(mocks.invoke.mock.calls).toEqual([
+            [
+                'pds_archive_character',
+                {
+                    characterId: 'char-a',
+                    expectedRevision: 12,
+                    operationId: archiveArgs.operationId,
+                },
+            ],
+            [
+                'pds_cancel_character_archive_operation',
+                { operationId: archiveArgs.operationId },
+            ],
+        ])
+    })
+
+    it('does not start a character restore whose signal is already cancelled', async () => {
+        const store = new SqlitePersistentDataStore()
+        const controller = new AbortController()
+        controller.abort()
+
+        await expect(store.restoreCharacter('char-a', 12, controller.signal))
+            .rejects.toMatchObject({ name: 'AbortError' })
+        expect(mocks.invoke).not.toHaveBeenCalled()
+    })
+
     it('forwards valid absolute ranges and rejects invalid ranges before native IPC', async () => {
         mocks.invoke.mockResolvedValue({ revision: 9, value: null })
         const store = new SqlitePersistentDataStore()
@@ -295,6 +328,27 @@ describe('SqlitePersistentDataStore', () => {
             ['pds_replace_put_asset_aliases', { stagingId: 'staging-1', aliases }],
             ['pds_replace_commit', { stagingId: 'staging-1', expectedRevision: 3 }],
         ])
+    })
+
+    it('passes owner-scoped plugin values through a staged replacement', async () => {
+        mocks.invoke.mockImplementation(async (command: string) => {
+            if (command === 'pds_replace_begin') return { stagingId: 'staging-plugin-values' }
+            if (command === 'pds_replace_preserve_repositories') return { revision: 4 }
+            if (command === 'pds_replace_commit') return { revision: 5 }
+            return undefined
+        })
+        const pluginStorageValues = [
+            { owner: 'plugin-a', key: 'shared', value: 'a' },
+            { owner: 'plugin-b', key: 'shared', value: 'b' },
+        ]
+        const store = new SqlitePersistentDataStore()
+
+        await store.replaceFromDatabase(fixtureDatabase, 4, [], pluginStorageValues)
+
+        expect(mocks.invoke).toHaveBeenCalledWith('pds_replace_put_root', expect.objectContaining({
+            stagingId: 'staging-plugin-values',
+            pluginStorageValues,
+        }))
     })
 
     it('preserves active repositories after staging a database replacement', async () => {
@@ -431,26 +485,6 @@ describe('SqlitePersistentDataStore', () => {
         ])
     })
 
-    it('activates a complete cold payload migration through one atomic command', async () => {
-        mocks.invoke.mockResolvedValue({ revision: 8 })
-        const alias = {
-            key: 'cold/migrated',
-            objectHash: '88'.repeat(32),
-            size: 3,
-            metadata: {},
-        }
-        const input = {
-            sourceRevision: 7,
-            migrationId: 'cold-migration',
-            compatibilityHash: '99'.repeat(32),
-            coldAliases: [alias],
-        }
-        const store = new SqlitePersistentDataStore()
-
-        await expect(store.activateColdPayloadMigration(input)).resolves.toEqual({ revision: 8 })
-        expect(mocks.invoke).toHaveBeenCalledWith('pds_activate_cold_payload_migration', { input })
-    })
-
     it('splits staged character batches at approximately four MiB', async () => {
         mocks.invoke.mockImplementation(async (command: string) => {
             if (command === 'pds_replace_begin') return { stagingId: 'staging-large' }
@@ -499,14 +533,11 @@ describe('SqlitePersistentDataStore', () => {
             limit: 10,
         })
         await lease.queryPluginStorage()
-        await lease.readPluginStorage('memory')
+        await lease.readPluginStorage('test-plugin', 'memory')
         await lease.readAssetAlias({ kind: 'asset', key: 'assets/pinned.bin' })
         await lease.listAssetAliases({ kind: 'asset', limit: 2 })
         await lease.readAssetRepositoryAuthority()
         await lease.readAssetOwnerHead({ kind: 'root-module-assets', index: 0 })
-        await lease.readColdPayloadAuthority()
-        await lease.readColdAlias('cold/pinned')
-        await lease.listColdAliases()
         await lease.release()
         await lease.release()
 
@@ -543,7 +574,7 @@ describe('SqlitePersistentDataStore', () => {
                 },
             ],
             ['pds_query_plugin_storage', { lease: 'lease-7' }],
-            ['pds_read_plugin_storage', { key: 'memory', lease: 'lease-7' }],
+            ['pds_read_plugin_storage', { owner: 'test-plugin', key: 'memory', lease: 'lease-7' }],
             [
                 'pds_read_asset_alias',
                 { kind: 'asset', key: 'assets/pinned.bin', lease: 'lease-7' },
@@ -557,16 +588,13 @@ describe('SqlitePersistentDataStore', () => {
                 'pds_read_asset_owner_head',
                 { owner: { kind: 'root-module-assets', index: 0 }, lease: 'lease-7' },
             ],
-            ['pds_read_cold_payload_authority', { lease: 'lease-7' }],
-            ['pds_read_cold_alias', { key: 'cold/pinned', lease: 'lease-7' }],
-            ['pds_list_cold_aliases', { lease: 'lease-7' }],
             ['pds_release_revision', { lease: 'lease-7' }],
         ])
         await expect(lease.readRoot()).rejects.toBeInstanceOf(SnapshotReleasedError)
         await expect(lease.readConversationMetadata('char-a', 'conv-long')).rejects.toBeInstanceOf(
             SnapshotReleasedError,
         )
-        expect(mocks.invoke).toHaveBeenCalledTimes(20)
+        expect(mocks.invoke).toHaveBeenCalledTimes(17)
     })
 
     it('retains the native open report and warns when a snapshot restore was skipped', async () => {

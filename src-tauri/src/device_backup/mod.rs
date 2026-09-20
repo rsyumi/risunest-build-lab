@@ -1,21 +1,23 @@
-//! Durable, job-owned maintenance journal for WebView device data.
+//! Durable, job-owned maintenance journal for native portable device data.
 //!
 //! Admission and the native PDS fence belong to the file job. Its owner creates
 //! a session only after acquiring both, and keeps them until `is_blocking` is
-//! false. IPC can operate on an existing session, never create a job or choose
-//! a filesystem path. The maintenance entry must run before normal app imports.
+//! false. Startup resumes the journal before normal app imports.
 
 mod archive;
 mod commands;
 mod spool;
-pub(crate) use archive::validate_archive_catalog;
+pub(crate) use archive::{
+    apply_prepared_native_sections, capture_native_sections, capture_prepared_native_sections,
+    journal_prepared_native_sections, prepare_native_sections,
+    resume_journaled_native_restore, validate_archive_catalog, PreparedDeviceSection,
+};
 pub(crate) use commands::*;
 pub(crate) use spool::{BlobManifest, RowPage, SectionManifest};
 
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use uuid::Uuid;
 
@@ -73,13 +75,6 @@ fn require(condition: bool, message: &str) -> Result<()> {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) enum Operation {
-    Capture,
-    Restore,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "kebab-case")]
 pub(crate) enum Spool {
     Source,
     Rollback,
@@ -107,23 +102,14 @@ pub(crate) struct CommitMarker {
 pub(crate) struct Session {
     pub(crate) session_id: String,
     pub(crate) job_id: String,
-    pub(crate) operation: Operation,
     pub(crate) phase: String,
     pub(crate) includes_library: bool,
     pub(crate) selected_sections: Vec<String>,
-    pub(crate) old_generation: Option<String>,
-    pub(crate) new_generation: Option<String>,
+    pub(crate) profile: String,
+    pub(crate) expected_revision: Option<i64>,
+    pub(crate) stage_id: Option<String>,
     pub(crate) action: String,
     pub(crate) failure_code: Option<String>,
-    pub(crate) failure_detail: Option<FailureDetail>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct FailureDetail {
-    pub(crate) section_id: String,
-    pub(crate) value_type: String,
-    pub(crate) location: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -138,18 +124,12 @@ pub(crate) struct DeviceBackupState {
     inner: Mutex<Inner>,
     maintenance_guard: Mutex<Option<crate::persistent_store::commands::DeviceMaintenanceGuard>>,
     startup_admission: Mutex<Option<crate::native_file_jobs::admission::Permit>>,
-    completed_documents: AtomicU64,
-    started_documents: AtomicU64,
 }
 
 struct Inner {
     connection: Option<Connection>,
     initialization_error: Option<DeviceBackupError>,
     reconciled: bool,
-    maintenance_entry: Option<String>,
-    entry_requested: bool,
-    entry_document: u64,
-    required_document: u64,
     // Only an active session loaded during process startup has no native worker.
     cold_session: Option<String>,
 }
@@ -176,17 +156,15 @@ impl DeviceBackupState {
                 connection,
                 initialization_error,
                 reconciled: false,
-                maintenance_entry: None,
-                entry_requested: false,
-                entry_document: 0,
-                required_document: 0,
                 cold_session,
             }),
             maintenance_guard: Mutex::new(None),
             startup_admission: Mutex::new(None),
-            completed_documents: AtomicU64::new(0),
-            started_documents: AtomicU64::new(0),
         }
+    }
+
+    pub(crate) fn repository_root(&self) -> &Path {
+        &self.repository_root
     }
 
     pub(crate) fn attach_maintenance_guard(
@@ -220,18 +198,6 @@ impl DeviceBackupState {
         Ok(())
     }
 
-    /// Invoked by Tauri's main-document completion callback, not renderer IPC.
-    pub(crate) fn main_document_finished(&self) {
-        self.completed_documents.store(
-            self.started_documents.load(Ordering::SeqCst),
-            Ordering::SeqCst,
-        );
-    }
-
-    pub(crate) fn main_document_started(&self) {
-        self.started_documents.fetch_add(1, Ordering::SeqCst);
-    }
-
     fn lock(&self) -> Result<MutexGuard<'_, Inner>> {
         let inner = self
             .inner
@@ -257,15 +223,26 @@ impl DeviceBackupState {
     }
 
     /// Native-only. The caller owns admission and every writer fence first.
-    pub(crate) fn create_session(
+    pub(crate) fn create_native_portable_session(
         &self,
         job_id: &str,
-        operation: Operation,
         includes_library: bool,
         selected_sections: &[String],
-        old_generation: Option<String>,
-        new_generation: Option<String>,
+        expected_revision: i64,
+        stage_id: Option<String>,
     ) -> Result<String> {
+        require(expected_revision >= 0, "Invalid native restore revision")?;
+        require(
+            includes_library == stage_id.is_some(),
+            "Native portable library selection and stage do not match",
+        )?;
+        for section in selected_sections {
+            risunest_external_storage_format::section::SectionKind::parse(section)
+                .map_err(|_| error("device-invalid-state", "Invalid native portable section"))?;
+        }
+        if let Some(stage_id) = stage_id.as_deref() {
+            validate_native_stage_id(stage_id)?;
+        }
         self.require_maintenance_guard()?;
         validate_id(job_id)?;
         require(
@@ -281,12 +258,6 @@ impl DeviceBackupState {
             validate_section(section)?;
             require(unique.insert(section), "Duplicate selected section")?;
         }
-        for generation in [&old_generation, &new_generation].into_iter().flatten() {
-            require(
-                generation.len() <= 256,
-                "Generation identifier is too large",
-            )?;
-        }
         let mut inner = self.lock()?;
         self.require_maintenance_guard()?;
         let connection = inner.connection.as_mut().unwrap();
@@ -296,7 +267,7 @@ impl DeviceBackupState {
         )?;
         let id = Uuid::new_v4().to_string();
         let transaction = connection.transaction()?;
-        transaction.execute("INSERT INTO sessions(id,job_id,operation,phase,includes_library,old_generation,new_generation) VALUES(?1,?2,?3,?4,?5,?6,?7)", params![id,job_id,if operation == Operation::Capture {"capture"} else {"restore"},if operation == Operation::Capture {"capturing"} else {"loading-source"},includes_library,old_generation,new_generation])?;
+        transaction.execute("INSERT INTO sessions(id,job_id,phase,includes_library,profile,expected_revision,stage_id) VALUES(?1,?2,'loading-source',?3,'native-portable',?4,?5)", params![id,job_id,includes_library,expected_revision,stage_id])?;
         for (position, section) in selected_sections.iter().enumerate() {
             transaction.execute(
                 "INSERT INTO selection(session,section,position) VALUES(?1,?2,?3)",
@@ -304,15 +275,8 @@ impl DeviceBackupState {
             )?;
         }
         transaction.commit()?;
-        // This process created the request, so first bootstrap continues it.
         inner.reconciled = true;
-        inner.maintenance_entry = None;
-        inner.entry_requested = false;
         inner.cold_session = None;
-        inner.required_document = self
-            .started_documents
-            .load(Ordering::SeqCst)
-            .saturating_add(1);
         Ok(id)
     }
 
@@ -344,70 +308,29 @@ impl DeviceBackupState {
         Ok(active_session(self.lock()?.connection.as_ref().unwrap())?.is_some())
     }
 
-    pub(crate) fn bootstrap(&self) -> Result<BootstrapDecision> {
-        self.bootstrap_for_entry(false)
-    }
-
-    pub(crate) fn bootstrap_for_entry(&self, fresh_bootstrap: bool) -> Result<BootstrapDecision> {
+    pub(crate) fn bootstrap_for_entry(&self) -> Result<BootstrapDecision> {
         let mut inner = self.lock()?;
         let restart = !inner.reconciled;
-        let completed = self.completed_documents.load(Ordering::SeqCst);
-        if fresh_bootstrap {
-            if inner.maintenance_entry.is_some() {
-                inner.required_document = inner.entry_document.saturating_add(1);
-            }
-            inner.maintenance_entry = None;
-            inner.entry_requested = true;
-        }
-        let entry_ready = inner.entry_requested && completed >= inner.required_document;
-        let entry_pending = inner.entry_requested && !entry_ready;
-        let live_maintenance_document = inner.maintenance_entry.is_some()
-            && inner.entry_document >= self.started_documents.load(Ordering::SeqCst);
         let connection = inner.connection.as_mut().unwrap();
-        if let Some(session) = active_session(connection)? {
-            self.require_maintenance_guard()?;
-            // A live native commit may outlast its renderer. Absence of a
-            // marker is decisive only after its worker stopped or process loss.
-            let live_commit = !restart
-                && session.phase == "committing-library"
-                && !commit_exists(connection, &self.repository_root, &session)?;
-            if (restart || entry_ready) && !live_commit {
-                if restart
-                    && ((session.operation == Operation::Capture
-                        && matches!(session.phase.as_str(), "capturing" | "device-captured"))
-                        || session.phase == "loading-source")
-                {
-                    connection.execute("UPDATE sessions SET phase='rolled-back',failure_code='interrupted-maintenance' WHERE id=?1",[&session.session_id])?;
-                } else {
+        if restart {
+            if let Some(session) = active_session(connection)? {
+                require(
+                    session.profile == "native-portable",
+                    "Device recovery requires a native portable session",
+                )?;
+                if matches!(
+                    session.phase.as_str(),
+                    "prepared" | "applying-device" | "committing-library" | "committed"
+                ) {
                     reconcile(connection, &self.repository_root, &session)?;
                 }
-            } else if !fresh_bootstrap
-                && !entry_pending
-                && live_maintenance_document
-                && session.phase == "committing-library"
-                && !live_commit
-            {
-                // The atomic PDS marker may survive a failed journal update.
-                // This document already verified its writes, so retain that
-                // proof. A new document takes the full reconciliation above.
-                connection.execute(
-                    "UPDATE sessions SET phase='committed' WHERE id=?1",
-                    [&session.session_id],
-                )?;
             }
         }
-        let mut session = active_session(connection)?;
+        if active_session(connection)?.is_some() {
+            self.require_maintenance_guard()?;
+        }
+        let session = active_session(connection)?;
         inner.reconciled = true;
-        if entry_ready {
-            inner.maintenance_entry = session.as_ref().map(|s| s.session_id.clone());
-            inner.entry_requested = false;
-            inner.entry_document = completed;
-        }
-        if entry_pending || (!restart && session.is_some() && inner.maintenance_entry.is_none()) {
-            if let Some(session) = &mut session {
-                session.action = "await-navigation".into();
-            }
-        }
         Ok(BootstrapDecision {
             mode: if session.is_some() {
                 "maintenance"
@@ -422,22 +345,12 @@ impl DeviceBackupState {
         session_for(self.lock()?.connection.as_ref().unwrap(), id)
     }
 
-    pub(crate) fn maintenance_entered(&self, id: &str) -> Result<bool> {
-        let inner = self.lock()?;
-        active_session_for(inner.connection.as_ref().unwrap(), id)?;
-        Ok(inner.maintenance_entry.as_deref() == Some(id)
-            && inner.entry_document >= self.started_documents.load(Ordering::SeqCst))
-    }
-
     /// Native-only: source section and binary import has fully completed.
     pub(crate) fn source_ready(&self, id: &str) -> Result<()> {
         let mut inner = self.lock()?;
         let connection = inner.connection.as_mut().unwrap();
         let session = active_session_for(connection, id)?;
-        require(
-            session.operation == Operation::Restore && session.phase == "loading-source",
-            "Restore source is not loading",
-        )?;
+        require(session.phase == "loading-source", "Restore source is not loading")?;
         for section in &session.selected_sections {
             spool::verify_section(connection, id, Spool::Source, section)?;
         }
@@ -457,43 +370,11 @@ impl DeviceBackupState {
         }
         spool::verify_blobs(connection, id, Spool::Source)?;
         spool::verify_blobs(connection, id, Spool::Rollback)?;
-        connection.execute(
-            "UPDATE sessions SET phase='awaiting-native-preparation' WHERE id=?1",
-            [id],
-        )?;
-        Ok(())
-    }
-
-    /// Native-only: the incoming library is validated and its objects are staged.
-    pub(crate) fn allow_device_apply(&self, id: &str) -> Result<()> {
-        let mut inner = self.lock()?;
-        let connection = inner.connection.as_mut().unwrap();
-        let session = active_session_for(connection, id)?;
-        require(
-            session.phase == "awaiting-native-preparation",
-            "Restore is not awaiting native preparation",
-        )?;
         connection.execute("UPDATE sessions SET phase='prepared' WHERE id=?1", [id])?;
         Ok(())
     }
 
-    /// Native-only: immutable native inventory and device spool export finished.
-    pub(crate) fn confirm_capture(&self, id: &str) -> Result<()> {
-        let mut inner = self.lock()?;
-        let connection = inner.connection.as_mut().unwrap();
-        let session = active_session_for(connection, id)?;
-        require(
-            session.operation == Operation::Capture && session.phase == "device-captured",
-            "Device capture is not awaiting native inventory",
-        )?;
-        connection.execute(
-            "UPDATE sessions SET phase='capture-complete' WHERE id=?1",
-            [id],
-        )?;
-        Ok(())
-    }
-
-    pub(crate) fn section_intent(&self, id: &str, section: &str, rollback: bool) -> Result<()> {
+    pub(crate) fn section_intent(&self, id: &str, section: &str) -> Result<()> {
         let mut inner = self.lock()?;
         let connection = inner.connection.as_mut().unwrap();
         let session = active_session_for(connection, id)?;
@@ -501,30 +382,18 @@ impl DeviceBackupState {
             session.selected_sections.iter().any(|s| s == section),
             "Section is not selected",
         )?;
-        if rollback {
-            require(
-                session.phase == "rolling-back",
-                "Rollback has not been selected",
-            )?;
-        } else {
-            require(
-                matches!(
-                    session.phase.as_str(),
-                    "prepared" | "applying-device" | "committed"
-                ),
-                "Device apply cannot begin in this phase",
-            )?;
-        }
-        let spool = if rollback {
-            Spool::Rollback
-        } else {
-            Spool::Source
-        };
-        spool::verify_section(connection, id, spool, section)?;
+        require(
+            matches!(
+                session.phase.as_str(),
+                "prepared" | "applying-device" | "committed"
+            ),
+            "Device apply cannot begin in this phase",
+        )?;
+        spool::verify_section(connection, id, Spool::Source, section)?;
         let transaction = connection.transaction()?;
         transaction.execute(
             "UPDATE selection SET intent=?3,verified_digest=NULL WHERE session=?1 AND section=?2",
-            params![id, section, spool.key()],
+            params![id, section, Spool::Source.key()],
         )?;
         if session.phase == "prepared" {
             transaction.execute(
@@ -540,34 +409,24 @@ impl DeviceBackupState {
         &self,
         id: &str,
         section: &str,
-        rollback: bool,
         digest: &str,
     ) -> Result<()> {
         validate_digest(digest)?;
         let mut inner = self.lock()?;
         let connection = inner.connection.as_mut().unwrap();
         let session = active_session_for(connection, id)?;
-        let target = if rollback {
-            Spool::Rollback
-        } else {
-            Spool::Source
-        };
         require(
-            if rollback {
-                session.phase == "rolling-back"
-            } else {
-                matches!(session.phase.as_str(), "applying-device" | "committed")
-            },
+            matches!(session.phase.as_str(), "applying-device" | "committed"),
             "Section completion has wrong phase",
         )?;
-        let expected = spool::verify_section(connection, id, target, section)?;
+        let expected = spool::verify_section(connection, id, Spool::Source, section)?;
         require(
             expected.sha256 == digest,
             "Applied section digest does not match sealed spool",
         )?;
         let count = connection.execute(
             "UPDATE selection SET verified_digest=?4 WHERE session=?1 AND section=?2 AND intent=?3",
-            params![id, section, target.key(), digest],
+            params![id, section, Spool::Source.key(), digest],
         )?;
         require(count == 1, "Section has no durable write intent")
     }
@@ -576,36 +435,24 @@ impl DeviceBackupState {
         let mut inner = self.lock()?;
         let connection = inner.connection.as_mut().unwrap();
         let session = active_session_for(connection, id)?;
-        if session.operation == Operation::Capture {
-            require(session.phase == "capturing", "Capture has wrong phase")?;
-            for section in &session.selected_sections {
-                spool::verify_section(connection, id, Spool::Source, section)?;
-            }
-            spool::verify_blobs(connection, id, Spool::Source)?;
-            connection.execute(
-                "UPDATE sessions SET phase='device-captured' WHERE id=?1",
-                [id],
-            )?;
-        } else {
-            require(
-                session.phase == "applying-device",
-                "Device apply is not running",
-            )?;
-            verify_completions(connection, id, Spool::Source)?;
-            // Device-only success and its marker are one durable transaction.
-            connection.execute(
-                "UPDATE sessions SET phase=?2,device_committed=?3 WHERE id=?1",
-                params![
-                    id,
-                    if session.includes_library {
-                        "committing-library"
-                    } else {
-                        "committed"
-                    },
-                    !session.includes_library
-                ],
-            )?;
-        }
+        require(
+            session.phase == "applying-device",
+            "Device apply is not running",
+        )?;
+        verify_completions(connection, id, Spool::Source)?;
+        // Device-only success and its marker are one durable transaction.
+        connection.execute(
+            "UPDATE sessions SET phase=?2,device_committed=?3 WHERE id=?1",
+            params![
+                id,
+                if session.includes_library {
+                    "committing-library"
+                } else {
+                    "committed"
+                },
+                !session.includes_library
+            ],
+        )?;
         session_for(connection, id)
     }
 
@@ -626,24 +473,6 @@ impl DeviceBackupState {
         Ok(())
     }
 
-    /// Native-only: call after activation returned a transaction failure, never
-    /// merely because cancellation was requested or the renderer disappeared.
-    pub(crate) fn library_commit_failed(&self, id: &str) -> Result<()> {
-        let mut inner = self.lock()?;
-        let connection = inner.connection.as_mut().unwrap();
-        let session = active_session_for(connection, id)?;
-        require(
-            session.includes_library && session.phase == "committing-library",
-            "Library failure has wrong phase",
-        )?;
-        require(
-            !commit_exists(connection, &self.repository_root, &session)?,
-            "Library commit already succeeded",
-        )?;
-        connection.execute("UPDATE sessions SET phase='rolling-back' WHERE id=?1", [id])?;
-        Ok(())
-    }
-
     pub(crate) fn commit_marker(&self, id: &str) -> Result<(String, CommitMarker)> {
         let session = self.session(id)?;
         Ok((
@@ -651,21 +480,39 @@ impl DeviceBackupState {
             CommitMarker {
                 job_id: session.job_id,
                 session_id: session.session_id,
-                new_generation: session.new_generation,
+                new_generation: session.stage_id,
             },
         ))
     }
 
-    pub(crate) fn fail(&self, id: &str, code: &str) -> Result<Session> {
-        self.fail_with_detail(id, code, None)
+    pub(crate) fn library_commit_marker_exists(&self, id: &str) -> Result<bool> {
+        let inner = self.lock()?;
+        let connection = inner.connection.as_ref().unwrap();
+        let session = active_session_for(connection, id)?;
+        require(session.includes_library, "Library marker requires a library restore session")?;
+        commit_exists(connection, &self.repository_root, &session)
     }
 
-    pub(crate) fn fail_with_detail(
-        &self,
-        id: &str,
-        code: &str,
-        detail: Option<FailureDetail>,
-    ) -> Result<Session> {
+    pub(crate) fn pending_source_sections(&self, id: &str) -> Result<Vec<String>> {
+        let inner = self.lock()?;
+        let connection = inner.connection.as_ref().unwrap();
+        let session = active_session_for(connection, id)?;
+        require(
+            native_section_session(&session),
+            "Native source progress requires a native restore session",
+        )?;
+        let mut statement = connection.prepare(
+            "SELECT section FROM selection
+                WHERE session=?1 AND (intent<>'source' OR intent IS NULL OR verified_digest IS NULL)
+                ORDER BY position",
+        )?;
+        let pending = statement
+            .query_map([id], |row| row.get(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(pending)
+    }
+
+    pub(crate) fn fail(&self, id: &str, code: &str) -> Result<Session> {
         require(
             !code.is_empty()
                 && code.len() <= 80
@@ -675,62 +522,17 @@ impl DeviceBackupState {
         let mut inner = self.lock()?;
         let connection = inner.connection.as_mut().unwrap();
         let session = active_session_for(connection, id)?;
-        if let Some(detail) = &detail {
-            require(
-                session.selected_sections.contains(&detail.section_id),
-                "Failure section is not selected",
-            )?;
-            require(
-                detail.value_type.len() <= 128
-                    && detail.value_type.is_ascii()
-                    && detail.location.len() <= 512
-                    && detail.location.is_ascii(),
-                "Failure diagnostic exceeds structural bounds",
-            )?;
-        }
-        let detail = detail
-            .map(|detail| serde_json::to_string(&detail))
-            .transpose()
-            .map_err(|_| error("device-metadata-invalid", "Failure diagnostic is invalid"))?;
         require(
-            session.phase != "committing-library",
-            "Library activation has begun; cancellation is too late",
-        )?;
-        let committed = commit_exists(connection, &self.repository_root, &session)?;
-        let phase = if committed || session.phase == "rolling-back" {
-            "recovery-required"
-        } else if session.operation == Operation::Capture
-            || matches!(
+            matches!(
                 session.phase.as_str(),
-                "preparing"
-                    | "loading-source"
-                    | "capturing"
-                    | "device-captured"
-                    | "capture-complete"
-                    | "awaiting-native-preparation"
-            )
-        {
-            "rolled-back"
-        } else {
-            "rolling-back"
-        };
+                "loading-source" | "preparing"
+            ),
+            "Accepted native restore must resume instead of failing",
+        )?;
         connection.execute(
-            "UPDATE sessions SET phase=?2,failure_code=?3,failure_detail=?4 WHERE id=?1",
-            params![id, phase, code, detail],
+            "UPDATE sessions SET phase='rolled-back',failure_code=?2 WHERE id=?1",
+            params![id, code],
         )?;
-        session_for(connection, id)
-    }
-
-    /// Explicit retry keeps the bootstrap closed and uses the marker as authority.
-    pub(crate) fn retry_recovery(&self, id: &str) -> Result<Session> {
-        let mut inner = self.lock()?;
-        let connection = inner.connection.as_mut().unwrap();
-        let session = active_session_for(connection, id)?;
-        require(
-            session.phase == "recovery-required",
-            "Recovery is not awaiting retry",
-        )?;
-        reconcile(connection, &self.repository_root, &session)?;
         session_for(connection, id)
     }
 
@@ -742,20 +544,12 @@ impl DeviceBackupState {
         let connection = inner.connection.as_mut().unwrap();
         let session = active_session_for(connection, id)?;
         match session.phase.as_str() {
-            "capture-complete" => {
-                for section in &session.selected_sections {
-                    spool::verify_section(connection, id, Spool::Source, section)?;
-                }
-            }
             "committed" => {
                 require(
                     commit_exists(connection, &self.repository_root, &session)?,
                     "Commit marker is absent",
                 )?;
                 verify_completions(connection, id, Spool::Source)?;
-            }
-            "rolling-back" => {
-                verify_completions(connection, id, Spool::Rollback)?;
             }
             "rolled-back" => {}
             _ => {
@@ -774,7 +568,7 @@ impl DeviceBackupState {
             transaction.commit()?;
             inner.cold_session = None;
         } else {
-            connection.execute("UPDATE sessions SET active=0,phase=CASE WHEN phase='rolling-back' THEN 'rolled-back' ELSE phase END WHERE id=?1",[id])?;
+            connection.execute("UPDATE sessions SET active=0 WHERE id=?1", [id])?;
         }
         self.maintenance_guard
             .lock()
@@ -842,7 +636,7 @@ fn open(root: &Path) -> Result<Connection> {
     let connection = Connection::open(path)?;
     connection.busy_timeout(std::time::Duration::from_secs(5))?;
     connection.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA foreign_keys=ON; PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA auto_vacuum=INCREMENTAL;
-        CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,job_id TEXT NOT NULL,operation TEXT NOT NULL,phase TEXT NOT NULL,includes_library INTEGER NOT NULL,old_generation TEXT,new_generation TEXT,device_committed INTEGER NOT NULL DEFAULT 0,active INTEGER NOT NULL DEFAULT 1,failure_code TEXT,failure_detail TEXT);
+        CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,job_id TEXT NOT NULL,phase TEXT NOT NULL,includes_library INTEGER NOT NULL,profile TEXT NOT NULL CHECK(profile='native-portable'),expected_revision INTEGER NOT NULL,stage_id TEXT,device_committed INTEGER NOT NULL DEFAULT 0,active INTEGER NOT NULL DEFAULT 1,failure_code TEXT);
         CREATE UNIQUE INDEX IF NOT EXISTS one_active_session ON sessions(active) WHERE active=1;
         CREATE TABLE IF NOT EXISTS selection(session TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,section TEXT NOT NULL,position INTEGER NOT NULL,intent TEXT,verified_digest TEXT,PRIMARY KEY(session,section));
         CREATE TABLE IF NOT EXISTS sections(session TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,spool TEXT NOT NULL,section TEXT NOT NULL,metadata TEXT NOT NULL,sealed INTEGER NOT NULL DEFAULT 0,records INTEGER NOT NULL DEFAULT 0,sha256 TEXT,PRIMARY KEY(session,spool,section));
@@ -851,6 +645,57 @@ fn open(root: &Path) -> Result<Connection> {
         CREATE TABLE IF NOT EXISTS chunks(session TEXT NOT NULL,spool TEXT NOT NULL,object_id TEXT NOT NULL,offset INTEGER NOT NULL,bytes BLOB NOT NULL,PRIMARY KEY(session,spool,object_id,offset),FOREIGN KEY(session,spool,object_id) REFERENCES blobs(session,spool,object_id) ON DELETE CASCADE);")?;
     crate::trust_boundary::sync_directory(root)?;
     Ok(connection)
+}
+
+pub(crate) fn active_native_portable_stage(root: &Path) -> Result<Option<String>> {
+    let path = root.join("device-backup").join("coordinator.sqlite");
+    match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => require(
+            metadata.is_file() && !crate::trust_boundary::is_link_like(&metadata),
+            "Device coordinator path is not a regular file",
+        )?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    }
+    let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    connection.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA query_only=ON;")?;
+    let row: Option<(String, bool, Option<String>)> = connection
+        .query_row(
+            "SELECT phase,includes_library,stage_id FROM sessions
+                WHERE active=1 AND profile='native-portable'",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((phase, includes_library, stage_id)) = row else {
+        return Ok(None);
+    };
+    if !matches!(
+        phase.as_str(),
+        "loading-source"
+            | "preparing"
+            | "prepared"
+            | "applying-device"
+            | "committing-library"
+    ) {
+        return Ok(None);
+    }
+    if includes_library {
+        let stage_id = stage_id.ok_or_else(|| {
+            error(
+                "device-invalid-state",
+                "Active native portable restore has no library stage",
+            )
+        })?;
+        validate_native_stage_id(&stage_id)?;
+        Ok(Some(stage_id))
+    } else {
+        require(
+            stage_id.is_none(),
+            "Device-only native portable restore has a library stage",
+        )?;
+        Ok(None)
+    }
 }
 
 fn validate_id(id: &str) -> Result<()> {
@@ -863,6 +708,23 @@ fn validate_id(id: &str) -> Result<()> {
         "Invalid opaque identifier",
     )
 }
+fn validate_native_stage_id(stage_id: &str) -> Result<()> {
+    validate_id(stage_id)?;
+    let uuid = stage_id.strip_prefix("staging-").ok_or_else(|| {
+        error(
+            "device-invalid-state",
+            "Invalid native portable stage identifier",
+        )
+    })?;
+    Uuid::parse_str(uuid)
+        .map(|_| ())
+        .map_err(|_| {
+            error(
+                "device-invalid-state",
+                "Invalid native portable stage identifier",
+            )
+        })
+}
 fn validate_digest(digest: &str) -> Result<()> {
     require(
         crate::trust_boundary::is_lower_hex_256(digest),
@@ -870,14 +732,9 @@ fn validate_digest(digest: &str) -> Result<()> {
     )
 }
 fn validate_section(section: &str) -> Result<()> {
-    let valid = matches!(section, "local-storage" | "localforage" | "device-settings")
-        || section.strip_prefix("indexed-db:").is_some_and(|name| {
-            name.starts_with("0073006100660065005f0070006c007500670069006e005f")
-                && name.len() % 4 == 0
-                && name.len() <= 65536
-                && name.bytes().all(crate::trust_boundary::is_lower_hex_byte)
-        });
-    require(valid, "Invalid device section identifier")
+    risunest_external_storage_format::section::SectionKind::parse(section)
+        .map(|_| ())
+        .map_err(|_| error("device-invalid-state", "Invalid native portable section"))
 }
 fn active_session(connection: &Connection) -> Result<Option<Session>> {
     let id: Option<String> = connection
@@ -887,41 +744,32 @@ fn active_session(connection: &Connection) -> Result<Option<Session>> {
 }
 fn session_for(connection: &Connection, id: &str) -> Result<Session> {
     validate_id(id)?;
-    let mut session=connection.query_row("SELECT id,job_id,operation,phase,includes_library,old_generation,new_generation,failure_code,failure_detail FROM sessions WHERE id=?1",[id],|r|Ok(Session {session_id:r.get(0)?,job_id:r.get(1)?,operation:if r.get::<_,String>(2)?=="capture"{Operation::Capture}else{Operation::Restore},phase:r.get(3)?,includes_library:r.get(4)?,old_generation:r.get(5)?,new_generation:r.get(6)?,selected_sections:Vec::new(),action:String::new(),failure_code:r.get(7)?,failure_detail:None})).optional()?.ok_or_else(||error("device-session-missing","Device maintenance session is absent"))?;
-    let detail: Option<String> = connection.query_row(
-        "SELECT failure_detail FROM sessions WHERE id=?1",
-        [id],
-        |r| r.get(0),
-    )?;
-    session.failure_detail = detail
-        .map(|detail| serde_json::from_str(&detail))
-        .transpose()
-        .map_err(|_| {
-            error(
-                "device-metadata-invalid",
-                "Device failure diagnostic is malformed",
-            )
-        })?;
+    let mut session=connection.query_row("SELECT id,job_id,phase,includes_library,profile,expected_revision,stage_id,failure_code FROM sessions WHERE id=?1",[id],|r|Ok(Session {session_id:r.get(0)?,job_id:r.get(1)?,phase:r.get(2)?,includes_library:r.get(3)?,selected_sections:Vec::new(),profile:r.get(4)?,expected_revision:r.get(5)?,stage_id:r.get(6)?,action:String::new(),failure_code:r.get(7)?})).optional()?.ok_or_else(||error("device-session-missing","Device maintenance session is absent"))?;
     let mut statement =
         connection.prepare("SELECT section FROM selection WHERE session=?1 ORDER BY position")?;
     session.selected_sections = statement
         .query_map([id], |r| r.get(0))?
         .collect::<std::result::Result<Vec<_>, _>>()?;
-    session.action = match session.phase.as_str() {
-        "capturing" => "capture",
-        "preparing" => "prepare",
-        "loading-source" => "await-source",
-        "rolling-back" => "rollback",
-        "committed" => "reapply-source",
-        "recovery-required" => "recovery-required",
-        "committing-library" => "await-library",
-        "device-captured" => "await-capture",
-        "awaiting-native-preparation" => "await-native-preparation",
-        "capture-complete" | "rolled-back" => "complete",
-        _ => "continue",
+    session.action = if session.phase == "committed" {
+        "native-complete"
+    } else {
+        match session.phase.as_str() {
+            "loading-source" => "await-source",
+            "committing-library" => "await-library",
+            "rolled-back" => "complete",
+            _ => "continue",
+        }
     }
     .into();
     Ok(session)
+}
+
+fn native_section_session(session: &Session) -> bool {
+    session.profile == "native-portable"
+        && !session.selected_sections.is_empty()
+        && session.selected_sections.iter().all(|section| {
+            risunest_external_storage_format::section::SectionKind::parse(section).is_ok()
+        })
 }
 fn verify_completions(connection: &Connection, id: &str, target: Spool) -> Result<()> {
     let missing:i64=connection.query_row("SELECT COUNT(*) FROM selection s LEFT JOIN sections p ON p.session=s.session AND p.section=s.section AND p.spool=?2 WHERE s.session=?1 AND (s.intent IS NULL OR s.intent<>?2 OR s.verified_digest IS NULL OR p.sha256 IS NULL OR s.verified_digest<>p.sha256)",params![id,target.key()],|r|r.get(0))?;
@@ -936,7 +784,9 @@ fn marker_key(job_id: &str) -> String {
 
 /// Reads the sole commit authority without opening or migrating the PDS.
 fn read_commit_marker(root: &Path, session: &Session) -> Result<Option<CommitMarker>> {
-    let path = root.join("persistent").join("persistent.db");
+    let path = root
+        .join("persistent")
+        .join(crate::persistent_store::DATABASE_FILE);
     match std::fs::symlink_metadata(&path) {
         Ok(metadata) => require(
             metadata.is_file() && !crate::trust_boundary::is_link_like(&metadata),
@@ -965,15 +815,13 @@ fn read_commit_marker(root: &Path, session: &Session) -> Result<Option<CommitMar
     require(
         marker.job_id == session.job_id
             && marker.session_id == session.session_id
-            && marker.new_generation == session.new_generation,
+            && marker.new_generation == session.stage_id,
         "Library commit marker identity mismatch",
     )?;
     Ok(Some(marker))
 }
 fn commit_exists(connection: &Connection, root: &Path, session: &Session) -> Result<bool> {
-    if session.operation == Operation::Capture {
-        Ok(false)
-    } else if session.includes_library {
+    if session.includes_library {
         Ok(read_commit_marker(root, session)?.is_some())
     } else {
         Ok(connection.query_row(
@@ -987,14 +835,9 @@ fn reconcile(connection: &mut Connection, root: &Path, session: &Session) -> Res
     let committed = commit_exists(connection, root, session)?;
     if committed {
         spool::verify_blobs(connection, &session.session_id, Spool::Source)?;
-    } else if !matches!(
+    } else if matches!(
         session.phase.as_str(),
-        "capturing"
-            | "preparing"
-            | "loading-source"
-            | "device-captured"
-            | "capture-complete"
-            | "rolled-back"
+        "prepared" | "applying-device" | "committing-library"
     ) {
         spool::verify_blobs(connection, &session.session_id, Spool::Rollback)?;
     }
@@ -1003,14 +846,6 @@ fn reconcile(connection: &mut Connection, root: &Path, session: &Session) -> Res
         "committed"
     } else {
         match session.phase.as_str() {
-            "capturing" => {
-                transaction.execute(
-                    "DELETE FROM sections WHERE session=?1",
-                    [&session.session_id],
-                )?;
-                transaction.execute("DELETE FROM blobs WHERE session=?1", [&session.session_id])?;
-                "capturing"
-            }
             "loading-source" => "loading-source",
             "preparing" => {
                 transaction.execute(
@@ -1023,22 +858,14 @@ fn reconcile(connection: &mut Connection, root: &Path, session: &Session) -> Res
                 )?;
                 "preparing"
             }
-            "capture-complete" => "capture-complete",
-            "device-captured" => "device-captured",
             "rolled-back" => "rolled-back",
-            _ => "rolling-back",
+            _ => "applying-device",
         }
     };
     transaction.execute(
         "UPDATE sessions SET phase=?2 WHERE id=?1",
         params![session.session_id, phase],
     )?;
-    if matches!(phase, "committed" | "rolling-back") {
-        transaction.execute(
-            "UPDATE selection SET intent=NULL,verified_digest=NULL WHERE session=?1",
-            [&session.session_id],
-        )?;
-    }
     transaction.commit()?;
     Ok(())
 }

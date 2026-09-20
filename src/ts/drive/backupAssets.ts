@@ -16,6 +16,10 @@ import { listCharacterResources, listDatabaseRootResources } from '../process/co
 const INLAY_ENTRY_NAME = /^inlay_((?:[0-9a-f]{2})+)\.risuinlay$/
 const INLAY_TYPES = new Set(['image', 'video', 'audio', 'signature'])
 
+export function isBackupInlayEntryName(name: string): boolean {
+    return INLAY_ENTRY_NAME.test(name)
+}
+
 export function isLegacyBackupAssetKey(key: string): boolean {
     const normalized = key.replace(/\\/g, '/')
     return normalized.startsWith('assets/') && normalized.length > 'assets/'.length
@@ -108,32 +112,14 @@ export async function collectBackupAssetKeys(
     return Array.from(keys).sort()
 }
 
-export function collectPinnedBackupAssetReferences(
-    database: Database,
-    coldPayloadValues: readonly unknown[],
-): string[] {
-    const coldCharacters = new Map<string, Database['characters'][number]>()
-    for (const value of coldPayloadValues) {
-        if (!value || typeof value !== 'object' || Array.isArray(value) || !('character' in value)) {
-            continue
-        }
-        const character = value.character
-        if (!character || typeof character !== 'object' || !('chaId' in character)
-            || typeof character.chaId !== 'string') {
-            continue
-        }
-        coldCharacters.set(character.chaId, character as Database['characters'][number])
-    }
-
+export function collectPinnedBackupAssetReferences(database: Database): string[] {
     const references = new Set<string>()
     const add = (key: string) => {
         if (isLegacyBackupAssetKey(key)) references.add(key.replace(/\\/g, '/'))
     }
     for (const key of listDatabaseRootResources(database)) add(key)
     for (const character of database.characters) {
-        for (const key of listCharacterResources(
-            coldCharacters.get(character.chaId) ?? character,
-        )) add(key)
+        for (const key of listCharacterResources(character)) add(key)
     }
     return Array.from(references).sort()
 }
@@ -165,18 +151,10 @@ export async function collectReferencedBackupInlays(
 
 export type PinnedBackupReferenceMode = 'full' | 'partial'
 
-export interface ColdCharacterReference {
-    characterId: string
-    characterName: string
-    keys: string[]
-}
-
 export interface PinnedBackupReferences {
     assetKeys: string[]
     inlayKeys: string[]
-    coldKeys: string[]
     assetLabels: ReadonlyMap<string, { charName: string; assetName: string }>
-    coldCharacterReferences: ColdCharacterReference[]
 }
 
 export interface PinnedBackupReferenceAccumulator {
@@ -185,19 +163,11 @@ export interface PinnedBackupReferenceAccumulator {
     visitCharacter(record: PinnedCharacterRecord): void
     visitConversation(record: PinnedConversationRecord): void
     visitPluginStorage(value: unknown): void
-    visitColdPayload(value: unknown): void
     finish(): PinnedBackupReferences
 }
 
 function addInlayReferences(value: unknown, references: Set<string>): void {
     collectInlayReferences(value, references, new WeakSet())
-}
-
-function coldPointer(messageData: unknown): string | null {
-    const header = '\uEF01COLDSTORAGE\uEF01'
-    return typeof messageData === 'string' && messageData.startsWith(header)
-        ? messageData.slice(header.length)
-        : null
 }
 
 export function createPinnedBackupReferenceAccumulator(
@@ -218,10 +188,6 @@ export function createPinnedBackupReferenceAccumulator(
     const folderLabels = new Map<string, AssetLabel>()
     const presetLabels = new Map<string, AssetLabel>()
     const inlayKeys = new Set<string>()
-    const coldKeys = new Set<string>()
-    const coldCharacters = new Map<string, ColdCharacterReference>()
-    let currentCharacterId: string | undefined
-    let currentCharacterName: string | undefined
 
     const addAsset = (
         target: Set<string>,
@@ -233,24 +199,6 @@ export function createPinnedBackupReferenceAccumulator(
         const normalized = key.replace(/\\/g, '/')
         target.add(mode === 'full' ? normalized : key)
         if (label) labels?.set(key, label)
-    }
-    const addColdKey = (
-        characterId: string,
-        characterName: string,
-        key: string | undefined,
-    ) => {
-        if (key === undefined) return
-        coldKeys.add(key)
-        let character = coldCharacters.get(characterId)
-        if (!character) {
-            character = {
-                characterId,
-                characterName,
-                keys: [],
-            }
-            coldCharacters.set(characterId, character)
-        }
-        if (!character.keys.includes(key)) character.keys.push(key)
     }
     const addCharacterAssets = (
         id: string,
@@ -346,27 +294,14 @@ export function createPinnedBackupReferenceAccumulator(
             }, presetLabels)
         },
         visitCharacter(record) {
-            currentCharacterId = record.summary.id
-            currentCharacterName = record.summary.name
             const character = {
                 ...record.detail,
                 chats: [],
             } as Database['characters'][number]
             addCharacterAssets(record.summary.id, character, mode === 'partial', true)
-            if (character.coldstorage) {
-                addColdKey(record.summary.id, record.summary.name, character.coldstorage)
-            }
-            for (const key of character.coldStoragedChats ?? []) {
-                addColdKey(record.summary.id, record.summary.name, key)
-            }
             if (mode === 'full') addInlayReferences(record.detail, inlayKeys)
         },
         visitConversation(record) {
-            const key = coldPointer(record.value.message?.[0]?.data)
-            const characterName = currentCharacterId === record.summary.characterId
-                ? currentCharacterName ?? record.summary.characterId
-                : record.summary.characterId
-            addColdKey(record.summary.characterId, characterName, key ?? undefined)
             if (mode === 'full') {
                 addInlayReferences(record.value, inlayKeys)
                 for (const key of collectExactPluginStorageAssetReferences(record.value)) rootAssets.add(key)
@@ -378,28 +313,6 @@ export function createPinnedBackupReferenceAccumulator(
                 rootAssets.add(key)
             }
             addInlayReferences(value, inlayKeys)
-        },
-        visitColdPayload(value) {
-            if (mode !== 'full') return
-            addInlayReferences(value, inlayKeys)
-            for (const key of collectExactPluginStorageAssetReferences(value)) rootAssets.add(key)
-            if (
-                value
-                && typeof value === 'object'
-                && !Array.isArray(value)
-                && 'character' in value
-                && value.character
-                && typeof value.character === 'object'
-                && 'chaId' in value.character
-                && typeof value.character.chaId === 'string'
-            ) {
-                addCharacterAssets(
-                    value.character.chaId,
-                    value.character as Database['characters'][number],
-                    false,
-                    false,
-                )
-            }
         },
         finish() {
             const assets = new Set(rootAssets)
@@ -438,9 +351,7 @@ export function createPinnedBackupReferenceAccumulator(
             return {
                 assetKeys: mode === 'full' ? Array.from(assets).sort() : Array.from(assets),
                 inlayKeys: Array.from(inlayKeys).sort(),
-                coldKeys: Array.from(coldKeys),
                 assetLabels,
-                coldCharacterReferences: Array.from(coldCharacters.values()),
             }
         },
     }
@@ -471,7 +382,7 @@ export async function scanPinnedBackupRecords(
         const pluginStorage = await reader.queryPluginStorage()
         assertPinnedRevision(reader.revision, pluginStorage.revision, 'Plugin storage catalog')
         for (const summary of pluginStorage.items) {
-            const value = await reader.readPluginStorage(summary.key)
+            const value = await reader.readPluginStorage(summary.owner, summary.key)
             if (!value) throw new Error(`Missing plugin storage value for ${summary.key}`)
             assertPinnedRevision(
                 reader.revision,
@@ -494,26 +405,22 @@ export async function scanPinnedBackupRecords(
     return { root: root.value, accumulator }
 }
 
-export function createColdStorageReferenceDatabase(
-    references: readonly ColdCharacterReference[],
-): Pick<Database, 'characters'> {
-    return {
-        characters: references.map((reference) => ({
-            chaId: reference.characterId,
-            name: reference.characterName,
-            type: 'character',
-            coldStoragedChats: reference.keys,
-            chats: [],
-        })) as Database['characters'],
-    }
-}
-
 export function readBackupAsset(
     store: BlobStore,
     key: string,
     officialAccount: boolean,
 ): Promise<Uint8Array | null> {
     return readActiveAsset(store, key, { officialAccount, tauri: false })
+}
+
+export async function readLocalBackupAsset(
+    store: BlobStore,
+    key: string,
+): Promise<Uint8Array | null> {
+    const exact = await store.read(key)
+    if (exact !== null) return exact
+    const normalized = key.replace(/\\/g, '/')
+    return normalized === key ? null : store.read(normalized)
 }
 
 export async function writeBackupAsset(
@@ -551,7 +458,7 @@ export function encodeBackupInlayEntry(metadata: InlayBlobMetadata, data: Uint8A
 }
 
 export function decodeBackupInlayEntry(name: string, entry: Uint8Array): BackupInlayEntry | null {
-    if (!INLAY_ENTRY_NAME.test(name) || entry.byteLength < 4) return null
+    if (!isBackupInlayEntryName(name) || entry.byteLength < 4) return null
     const headerLength = new DataView(entry.buffer, entry.byteOffset, entry.byteLength).getUint32(0, true)
     if (headerLength === 0 || 4 + headerLength > entry.byteLength) return null
     let header: unknown

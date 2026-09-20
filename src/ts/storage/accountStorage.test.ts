@@ -213,7 +213,7 @@ describe('AccountStorage structured wire contract', () => {
         mocks.replacePersistentDatabase.mockImplementation((candidate, reason, options) =>
             coordinator.replacePersistentDatabase(candidate, reason, options),
         )
-        mocks.getColdStorageItem.mockResolvedValue({ character: database.characters[0] })
+        mocks.getAccountColdStorageItem.mockResolvedValue({ character: database.characters[0] })
         mocks.getUncleanablesSync.mockReturnValue(['assets/remote.png'])
         let finishDownload!: (value: Response) => void
         mocks.fetchProtectedResource.mockImplementation(
@@ -245,7 +245,7 @@ describe('AccountStorage structured wire contract', () => {
         const actual =
             await vi.importActual<typeof import('./databaseRestore')>('./databaseRestore')
         mocks.completeAccountUnmigration.mockImplementation(actual.completeAccountUnmigration)
-        mocks.getColdStorageItem.mockResolvedValue({ character: {} })
+        mocks.getAccountColdStorageItem.mockResolvedValue({ character: {} })
         mocks.getUncleanablesSync.mockReturnValue(['assets/retry.png'])
         mocks.fetchProtectedResource
             .mockRejectedValueOnce(new Error('offline'))
@@ -289,7 +289,9 @@ describe('AccountStorage structured wire contract', () => {
             const { AccountStorage, AccountWarning } = await loadStorage()
             const warnings: string[] = []
             const unsubscribe = AccountWarning.subscribe((value) => warnings.push(value))
-            const result = await new AccountStorage().writeItem(
+            const result = await new AccountStorage({
+                databaseCache: mocks.cachedForage,
+            }).writeItem(
                 'database/database.bin',
                 Uint8Array.of(1),
             )
@@ -523,6 +525,28 @@ describe('AccountStorage structured wire contract', () => {
                 signal: undefined,
             }],
         ])
+    })
+
+    it('stops native publication after three rejected reauthentication attempts', async () => {
+        const credentialRouting = {
+            getToken: vi.fn(() => 'native-token'),
+            reauthenticate: vi.fn(async () => undefined),
+        }
+        const attempt = vi.fn(async () => ({
+            kind: 'reauthentication-needed' as const,
+            session: 'session-42',
+        }))
+        const { AccountStorage, resetAccountStorageSession } = await loadStorage()
+        resetAccountStorageSession()
+        const storage = new AccountStorage({ credentialRouting })
+
+        await expect(storage.writeOfficialDatabaseFromNative(attempt)).rejects.toThrow(
+            'Official account reauthentication was rejected too many times',
+        )
+
+        expect(attempt).toHaveBeenCalledTimes(3)
+        expect(mocks.alertLogin).toHaveBeenCalledTimes(2)
+        expect(credentialRouting.reauthenticate).toHaveBeenCalledTimes(2)
     })
 
     it('aborts while waiting for native reauthentication without retrying after login resolves', async () => {
@@ -779,7 +803,7 @@ describe('AccountStorage structured wire contract', () => {
             .mockResolvedValueOnce(response(new Uint8Array([4, 5])))
             .mockResolvedValueOnce(response(new Uint8Array([6])))
         const { AccountStorage } = await loadStorage()
-        const storage = new AccountStorage()
+        const storage = new AccountStorage({ databaseCache: mocks.cachedForage })
 
         await storage.readItem('database/database.bin')
         await storage.readItem('assets/database-icon.png')
@@ -810,7 +834,7 @@ describe('AccountStorage structured wire contract', () => {
                 'content-type': 'application/json',
             }))
         const { AccountStorage } = await loadStorage()
-        const storage = new AccountStorage()
+        const storage = new AccountStorage({ databaseCache: mocks.cachedForage })
 
         await expect(storage.readItem('missing')).resolves.toEqual({ kind: 'missing' })
         await expect(storage.readItem('database/database.bin')).resolves.toEqual({
@@ -923,6 +947,33 @@ describe('AccountStorage structured wire contract', () => {
         expect(mocks.fetchProtectedResource).toHaveBeenCalledTimes(2)
     })
 
+    it('aborts an account read while its 403 reauthentication is waiting', async () => {
+        let resolveLogin!: (value: string) => void
+        mocks.alertLogin.mockReturnValueOnce(new Promise<string>((resolve) => {
+            resolveLogin = resolve
+        }))
+        mocks.fetchProtectedResource.mockResolvedValueOnce(response('retry', 403))
+        const credentialRouting = {
+            getToken: vi.fn(() => 'old-token'),
+            reauthenticate: vi.fn(async () => undefined),
+        }
+        const { AccountStorage } = await loadStorage()
+        const storage = new AccountStorage({ credentialRouting })
+        const controller = new AbortController()
+
+        const read = storage.readItem('database/database.bin', { signal: controller.signal })
+        await vi.waitFor(() => expect(mocks.alertLogin).toHaveBeenCalledOnce())
+        controller.abort(new DOMException('Read cancelled', 'AbortError'))
+
+        await expect(read).rejects.toMatchObject({ name: 'AbortError' })
+        resolveLogin('new-token')
+        await Promise.resolve()
+        await Promise.resolve()
+
+        expect(credentialRouting.reauthenticate).not.toHaveBeenCalled()
+        expect(mocks.fetchProtectedResource).toHaveBeenCalledOnce()
+    })
+
     it('routes native reauthentication without reading or writing the legacy fallback token', async () => {
         localStorage.setItem('fallbackRisuToken', JSON.stringify({ token: 'legacy-token' }))
         const getItem = vi.spyOn(Storage.prototype, 'getItem')
@@ -965,7 +1016,12 @@ describe('AccountStorage structured wire contract', () => {
     })
 
     it('completes restore after AccountStorage reauthenticates a 403 inside the flow queue', async () => {
-        const values = new Map<string, unknown>()
+        const vault = {
+            stored: null as unknown,
+            read: vi.fn(async () => vault.stored ?? null),
+            write: vi.fn(async (credential: unknown) => void (vault.stored = credential)),
+            clear: vi.fn(async () => void (vault.stored = null)),
+        }
         const setRouting = vi.fn()
         let flow!: NativeOfficialAccountFlow
         let reauthenticateSnapshotRequest!: (loginResult: string) => Promise<void>
@@ -986,14 +1042,10 @@ describe('AccountStorage structured wire contract', () => {
                 reauthenticate: (loginResult) => reauthenticateSnapshotRequest(loginResult),
             },
         })
-        const { createNativeOfficialAccountFlowService, nativeOfficialAccountKeys } =
+        const { createNativeOfficialAccountFlowService } =
             await import('./sync/nativeOfficialAccountFlow')
         const service = createNativeOfficialAccountFlowService({
-            appKv: {
-                get: vi.fn(async (key) => values.get(key) ?? null),
-                set: vi.fn(async (key, value) => void values.set(key, value)),
-                remove: vi.fn(async (key) => void values.delete(key)),
-            },
+            credentialVault: vault,
             adapter: {
                 pull: vi.fn(async () => {
                     await storage.readItem('database/database.bin')
@@ -1009,7 +1061,7 @@ describe('AccountStorage structured wire contract', () => {
             setRouting,
             clearLegacyFallback: vi.fn(),
             flushMetadata: vi.fn(async () => undefined),
-            resetMetadata: vi.fn(),
+            clearMetadata: vi.fn(async () => undefined),
             resetAccountSession: vi.fn(),
         })
         flow = service.flow
@@ -1020,7 +1072,7 @@ describe('AccountStorage structured wire contract', () => {
 
         expect(mocks.fetchProtectedResource).toHaveBeenCalledTimes(2)
         expect(flow.getToken()).toBe('refreshed-token')
-        expect(values.get(nativeOfficialAccountKeys.credential)).toEqual({
+        expect(vault.stored).toEqual({
             id: 'account-1',
             token: 'refreshed-token',
             data: {},
@@ -1048,14 +1100,14 @@ describe('AccountStorage structured wire contract', () => {
         })
         const { createNativeOfficialAccountFlowService } =
             await import('./sync/nativeOfficialAccountFlow')
-        const appKv = {
-            get: vi.fn(async () => null),
-            set: vi.fn(async () => undefined),
-            remove: vi.fn(async () => undefined),
+        const vault = {
+            read: vi.fn(async () => null),
+            write: vi.fn(async () => undefined),
+            clear: vi.fn(async () => undefined),
         }
         const setRouting = vi.fn()
         const service = createNativeOfficialAccountFlowService({
-            appKv,
+            credentialVault: vault,
             adapter: {
                 pull: vi.fn(async () => {
                     await storage.readItem('database/database.bin')
@@ -1071,7 +1123,7 @@ describe('AccountStorage structured wire contract', () => {
             setRouting,
             clearLegacyFallback: vi.fn(),
             flushMetadata: vi.fn(async () => undefined),
-            resetMetadata: vi.fn(),
+            clearMetadata: vi.fn(async () => undefined),
             resetAccountSession: vi.fn(),
         })
         flow = service.flow
@@ -1084,7 +1136,7 @@ describe('AccountStorage structured wire contract', () => {
 
         expect(mocks.fetchProtectedResource).toHaveBeenCalledOnce()
         expect(flow.getToken()).toBe('legacy-token')
-        expect(appKv.set).not.toHaveBeenCalled()
+        expect(vault.write).not.toHaveBeenCalled()
         expect(setRouting).not.toHaveBeenCalled()
     })
 
@@ -1112,10 +1164,10 @@ describe('AccountStorage structured wire contract', () => {
         })
         const { createNativeOfficialAccountFlowService } =
             await import('./sync/nativeOfficialAccountFlow')
-        const appKv = {
-            get: vi.fn(async () => null),
-            set: vi.fn(async () => undefined),
-            remove: vi.fn(async () => undefined),
+        const vault = {
+            read: vi.fn(async () => null),
+            write: vi.fn(async () => undefined),
+            clear: vi.fn(async () => undefined),
         }
         const setRouting = vi.fn()
         const publication = {
@@ -1125,7 +1177,7 @@ describe('AccountStorage structured wire contract', () => {
             dispose: vi.fn(async () => undefined),
         }
         const service = createNativeOfficialAccountFlowService({
-            appKv,
+            credentialVault: vault,
             adapter: {
                 pull: vi.fn(),
                 pin: vi.fn(async () => publication),
@@ -1138,7 +1190,7 @@ describe('AccountStorage structured wire contract', () => {
             setRouting,
             clearLegacyFallback: vi.fn(),
             flushMetadata: vi.fn(async () => undefined),
-            resetMetadata: vi.fn(),
+            clearMetadata: vi.fn(async () => undefined),
             resetAccountSession: vi.fn(),
         })
         flow = service.flow
@@ -1153,7 +1205,7 @@ describe('AccountStorage structured wire contract', () => {
         expect(publication.dispose).toHaveBeenCalledOnce()
         expect(mocks.fetchProtectedResource).toHaveBeenCalledTimes(2)
         expect(flow.getToken()).toBe('legacy-token')
-        expect(appKv.set).not.toHaveBeenCalled()
+        expect(vault.write).not.toHaveBeenCalled()
         expect(setRouting).not.toHaveBeenCalled()
     })
 
@@ -1175,23 +1227,21 @@ describe('AccountStorage structured wire contract', () => {
                     flow.reauthenticate(loginResult).then(() => undefined),
             },
         })
-        const { createNativeOfficialAccountFlowService, nativeOfficialAccountKeys } =
+        const { createNativeOfficialAccountFlowService } =
             await import('./sync/nativeOfficialAccountFlow')
-        const values = new Map<string, unknown>([[
-            nativeOfficialAccountKeys.credential,
-            { id: 'account-1', token: 'legacy-token', data: {} },
-        ]])
+        const vault = {
+            stored: { id: 'account-1', token: 'legacy-token', data: {} } as unknown,
+            read: vi.fn(async () => vault.stored ?? null),
+            write: vi.fn(async (credential: unknown) => void (vault.stored = credential)),
+            clear: vi.fn(async () => void (vault.stored = null)),
+        }
         let resolvePull: (result: { kind: 'missing' }) => void = () => undefined
         const pull = vi.fn(async () => new Promise<{ kind: 'missing' }>((resolve) => {
             resolvePull = resolve
         }))
         const setRouting = vi.fn()
         const service = createNativeOfficialAccountFlowService({
-            appKv: {
-                get: vi.fn(async (key) => values.get(key) ?? null),
-                set: vi.fn(async (key, value) => void values.set(key, value)),
-                remove: vi.fn(async (key) => void values.delete(key)),
-            },
+            credentialVault: vault,
             adapter: {
                 pull,
                 pin: vi.fn(),
@@ -1204,7 +1254,7 @@ describe('AccountStorage structured wire contract', () => {
             setRouting,
             clearLegacyFallback: vi.fn(),
             flushMetadata: vi.fn(async () => undefined),
-            resetMetadata: vi.fn(),
+            clearMetadata: vi.fn(async () => undefined),
             resetAccountSession: vi.fn(),
         })
         flow = service.flow
@@ -1222,7 +1272,7 @@ describe('AccountStorage structured wire contract', () => {
             'Native official account session changed during reauthentication',
         )
         expect(flow.getToken()).toBeNull()
-        expect(values.has(nativeOfficialAccountKeys.credential)).toBe(false)
+        expect(vault.stored).toBeNull()
         expect(setRouting).toHaveBeenCalledTimes(1)
         expect(setRouting).toHaveBeenCalledWith(null)
     }, 1_000)
@@ -1241,10 +1291,10 @@ describe('AccountStorage structured wire contract', () => {
         resetAccountStorageSession()
         const { createNativeOfficialAccountFlow } = await import('./sync/nativeOfficialAccountFlow')
         const flow = createNativeOfficialAccountFlow({
-            appKv: {
-                get: vi.fn(async () => null),
-                set: vi.fn(async () => undefined),
-                remove: vi.fn(async () => undefined),
+            credentialVault: {
+                read: vi.fn(async () => null),
+                write: vi.fn(async () => undefined),
+                clear: vi.fn(async () => undefined),
             },
             adapter: {
                 pull: vi.fn(),
@@ -1258,7 +1308,7 @@ describe('AccountStorage structured wire contract', () => {
             setRouting: vi.fn(),
             clearLegacyFallback: vi.fn(),
             flushMetadata: vi.fn(async () => undefined),
-            resetMetadata: vi.fn(),
+            clearMetadata: vi.fn(async () => undefined),
             resetAccountSession: resetAccountStorageSession,
         })
         const storage = new AccountStorage({
@@ -1318,7 +1368,7 @@ describe('AccountStorage structured wire contract', () => {
             .mockResolvedValueOnce(response('retry', 403))
             .mockResolvedValueOnce(response('database/database.bin'))
         const { AccountStorage } = await loadStorage()
-        const storage = new AccountStorage()
+        const storage = new AccountStorage({ databaseCache: mocks.cachedForage })
         const bytes = new Uint8Array([8, 1])
         let settled = false
 
@@ -1487,19 +1537,12 @@ describe('AccountStorage structured wire contract', () => {
         expect(forbidden.cancel).toHaveBeenCalledOnce()
     })
 
-    it('unmigrates assets referenced by the retained local cold character before disabling account', async () => {
-        const localCold = {
-            character: {
-                type: 'character',
-                chaId: 'cold-character',
-                additionalAssets: [['local', 'assets/local-cold-only.png']],
-            },
-        }
+    it('unmigrates assets referenced by the account cold character before disabling account', async () => {
         const officialCold = {
             character: {
                 type: 'character',
                 chaId: 'cold-character',
-                additionalAssets: [['official', 'assets/official-only.png']],
+                additionalAssets: [['official', 'assets/account-cold-only.png']],
             },
         }
         mocks.database.characters = [{
@@ -1521,7 +1564,6 @@ describe('AccountStorage structured wire contract', () => {
             revision: 11,
             mutationGeneration: 17,
         })
-        mocks.getColdStorageItem.mockResolvedValue(localCold)
         mocks.getAccountColdStorageItem.mockResolvedValue(officialCold)
         mocks.getUncleanablesSync.mockImplementation((_database, _mode, options) => (
             options.chars.flatMap((character: any) => (
@@ -1531,11 +1573,9 @@ describe('AccountStorage structured wire contract', () => {
         mocks.fetchProtectedResource.mockResolvedValue(response(new Uint8Array([7, 6, 5])))
         const events: string[] = []
         mocks.completeAccountUnmigration.mockImplementation(async (_database, dependencies) => {
-            await dependencies.prepareResources()
-            await dependencies.replaceDatabase(
-                { ..._database, account: null },
-                'account-unmigration',
-            )
+            const candidate = structuredClone({ ..._database, account: null })
+            await dependencies.prepareResources(candidate)
+            await dependencies.replaceDatabase(candidate, 'account-unmigration')
             events.push('disable-account')
         })
         const { unMigrationAccount } = await loadStorage()
@@ -1544,6 +1584,7 @@ describe('AccountStorage structured wire contract', () => {
 
         expect(mocks.materializePersistentDatabaseSnapshotWithRevision).toHaveBeenCalledWith(
             'account-unmigration',
+            { includePluginStorageValues: true },
         )
         expect(mocks.completeAccountUnmigration).toHaveBeenCalledWith(
             authoritativeDatabase,
@@ -1558,11 +1599,15 @@ describe('AccountStorage structured wire contract', () => {
                 expectedMutationGeneration: 17,
             },
         )
-        expect(mocks.getAccountColdStorageItem).not.toHaveBeenCalled()
-        expect(mocks.blobAssets.get('assets/local-cold-only.png')).toEqual(
+        expect(mocks.getAccountColdStorageItem).toHaveBeenCalledWith('cold-character-key')
+        expect(mocks.blobAssets.get('assets/account-cold-only.png')).toEqual(
             new Uint8Array([7, 6, 5]),
         )
-        expect(mocks.blobAssets.has('assets/official-only.png')).toBe(false)
+        const replaced = mocks.replacePersistentDatabase.mock.calls[0][0]
+        expect(replaced.characters[0].coldstorage).toBeUndefined()
+        expect(replaced.characters[0].additionalAssets).toEqual(
+            officialCold.character.additionalAssets,
+        )
         expect(events).toEqual(['disable-account'])
     })
 

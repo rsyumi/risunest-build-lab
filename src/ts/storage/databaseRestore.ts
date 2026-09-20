@@ -1,18 +1,42 @@
 import { safeStructuredClone } from '../polyfill'
 import type { Database } from './database.svelte'
+import type { CommittedApplyOutcome, PersistentDataRuntime } from './persistentDataRuntime'
 
-type PluginRestoreDependencies = {
-    replaceDatabase: (database: Database, reason: string) => Promise<void>
+type RestoreFollowupDependencies = {
+    onPostCommitError?(error: unknown): void | Promise<void>
+}
+
+type PluginRestoreDependencies = RestoreFollowupDependencies & {
+    replaceDatabase: PersistentDataRuntime['replacePersistentDatabase']
     loadPlugins: () => void | Promise<void>
+}
+
+async function finishCommittedRestore(
+    outcome: CommittedApplyOutcome,
+    followup: () => void | Promise<void>,
+    dependencies: RestoreFollowupDependencies,
+): Promise<CommittedApplyOutcome> {
+    try {
+        await followup()
+    } catch (error) {
+        try {
+            if (dependencies.onPostCommitError) await dependencies.onPostCommitError(error)
+            else console.error('Post-commit restore action failed', error)
+        } catch (reportError) {
+            console.error('Post-commit restore error reporting failed', reportError)
+        }
+    }
+    return outcome
 }
 
 async function installPluginRestore(
     database: Database,
     reason: string,
     dependencies: PluginRestoreDependencies,
-): Promise<void> {
-    await dependencies.replaceDatabase(database, reason)
-    await dependencies.loadPlugins()
+): Promise<CommittedApplyOutcome> {
+    const outcome = await dependencies.replaceDatabase(database, reason)
+    if (outcome.projection === 'refresh-required') return outcome
+    return finishCommittedRestore(outcome, dependencies.loadPlugins, dependencies)
 }
 
 export const installAccountBackup = (database: Database, dependencies: PluginRestoreDependencies) =>
@@ -28,9 +52,7 @@ interface AccountUnmigrationResourceDependencies {
     readLocalAsset(key: string): Promise<Uint8Array | null>
     readRemoteAsset(key: string): Promise<Uint8Array | null>
     writeLocalAsset(key: string, bytes: Uint8Array): Promise<void>
-    readLocalCold(key: string): Promise<unknown | null>
     readRemoteCold(key: string): Promise<unknown | null>
-    writeLocalCold(key: string, value: unknown): Promise<void>
     onProgress?(stage: 'cold' | 'assets', completed: number, total: number): void
 }
 
@@ -41,32 +63,18 @@ function equalBytes(left: Uint8Array | null, right: Uint8Array): boolean {
 
 export async function materializeAccountUnmigrationResources(
     dependencies: AccountUnmigrationResourceDependencies,
-): Promise<void> {
+): Promise<ReadonlyMap<string, unknown>> {
     const selectedCold = new Map<string, unknown>()
     const coldKeys = [...new Set(dependencies.coldKeys)]
     let completed = 0
     dependencies.onProgress?.('cold', completed, coldKeys.length)
     for (const key of coldKeys) {
-        const local = await dependencies.readLocalCold(key)
-        if (local !== null) {
-            if (!dependencies.isValidCold(local)) {
-                throw new Error(`Invalid local cold payload: ${key}`)
-            }
-            selectedCold.set(key, local)
-            dependencies.onProgress?.('cold', ++completed, coldKeys.length)
-            continue
-        }
         const remote = await dependencies.readRemoteCold(key)
         if (remote === null) throw new Error(`Missing account cold payload: ${key}`)
         if (!dependencies.isValidCold(remote)) {
             throw new Error(`Invalid account cold payload: ${key}`)
         }
-        await dependencies.writeLocalCold(key, remote)
-        const verified = await dependencies.readLocalCold(key)
-        if (verified === null || JSON.stringify(verified) !== JSON.stringify(remote)) {
-            throw new Error(`Failed to verify local cold payload: ${key}`)
-        }
-        selectedCold.set(key, verified)
+        selectedCold.set(key, remote)
         dependencies.onProgress?.('cold', ++completed, coldKeys.length)
     }
 
@@ -86,46 +94,39 @@ export async function materializeAccountUnmigrationResources(
         }
         dependencies.onProgress?.('assets', ++completed, assetKeys.length)
     }
+
+    return selectedCold
 }
 
 export async function installLocalBackup(
     database: Database,
-    dependencies: {
-        replaceDatabase: (database: Database, reason: string) => Promise<void>
+    dependencies: RestoreFollowupDependencies & {
+        replaceDatabase: PersistentDataRuntime['replacePersistentDatabase']
         publishAcceptedRevision: () => Promise<void>
         relaunch: () => void | Promise<void>
     },
-): Promise<void> {
-    await dependencies.replaceDatabase(database, 'local-backup')
-    await dependencies.publishAcceptedRevision()
-    await dependencies.relaunch()
-}
-
-export async function installDriveRestore(
-    database: Database,
-    dependencies: {
-        replaceDatabase: (database: Database, reason: string) => Promise<void>
-        publishAcceptedRevision: () => Promise<void>
-        relaunch: () => void | Promise<void>
-    },
-): Promise<void> {
-    await dependencies.replaceDatabase(database, 'drive-restore')
-    await dependencies.publishAcceptedRevision()
-    await dependencies.relaunch()
+): Promise<CommittedApplyOutcome> {
+    const outcome = await dependencies.replaceDatabase(database, 'local-backup', { publishOfficial: true })
+    if (outcome.projection === 'refresh-required') return outcome
+    return finishCommittedRestore(outcome, async () => {
+        await dependencies.publishAcceptedRevision()
+        await dependencies.relaunch()
+    }, dependencies)
 }
 
 export async function completeAccountUnmigration(
     database: Database,
-    dependencies: {
-        prepareResources: () => Promise<void>
-        replaceDatabase: (database: Database, reason: string) => Promise<void>
-        finalize: () => void
+    dependencies: RestoreFollowupDependencies & {
+        prepareResources: (candidate: Database) => Promise<void>
+        replaceDatabase: PersistentDataRuntime['replacePersistentDatabase']
+        finalize: () => void | Promise<void>
     },
-): Promise<void> {
+): Promise<CommittedApplyOutcome> {
     const candidate = safeStructuredClone(database)
     candidate.account = null
 
-    await dependencies.prepareResources()
-    await dependencies.replaceDatabase(candidate, 'account-unmigration')
-    dependencies.finalize()
+    await dependencies.prepareResources(candidate)
+    const outcome = await dependencies.replaceDatabase(candidate, 'account-unmigration')
+    // Device account markers must follow the committed authority even if projection failed.
+    return finishCommittedRestore(outcome, dependencies.finalize, dependencies)
 }

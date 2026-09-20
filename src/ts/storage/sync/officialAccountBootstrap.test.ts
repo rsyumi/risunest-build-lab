@@ -42,13 +42,12 @@ function makeHarness(input: {
     }
     const dependencies: OfficialAccountBootstrapDependencies = {
         isTauri: false,
-        local: { database: local, revision: 1, profile: 'scalable-v3' },
+        local: { database: local, revision: 1 },
         resolveWorkingSet: vi.fn(async (revision) => {
             events.push('resolve')
             return {
                 database: structuredClone(input.materialized ?? local),
                 revision,
-                profile: 'scalable-v3' as const,
             }
         }),
         adapter,
@@ -71,7 +70,6 @@ function makeHarness(input: {
         }),
         chooseExistingRemote: vi.fn(async (): Promise<'pull' | 'push'> => 'pull'),
         confirmInitialPush: vi.fn(async () => true),
-        initializeProfile: vi.fn(() => { events.push('profile') }),
         installDatabase: vi.fn(() => { events.push('install') }),
         initializeWorkingSet: vi.fn(async () => { events.push('initialize') }),
         onRemoteError: vi.fn((error) => { events.push(`error:${(error as Error).message}`) }),
@@ -139,8 +137,7 @@ describe('official account production bootstrap', () => {
         expect(harness.events).toEqual([
             'publisher:off',
             'asset:off',
-            'profile',
-            'install',
+                        'install',
             'initialize',
         ])
     })
@@ -163,8 +160,7 @@ describe('official account production bootstrap', () => {
         expect(harness.events).toEqual([
             'publisher:off',
             'asset:off',
-            'profile',
-            'install',
+                        'install',
             'initialize',
         ])
     })
@@ -190,8 +186,7 @@ describe('official account production bootstrap', () => {
             'publisher:on',
             'asset:on',
             'resolve',
-            'profile',
-            'install',
+                        'install',
             'initialize',
         ])
     })
@@ -217,8 +212,7 @@ describe('official account production bootstrap', () => {
             'skip:true',
             'publisher:on',
             'asset:on',
-            'profile',
-            'install',
+                        'install',
             'initialize',
         ])
     })
@@ -247,6 +241,25 @@ describe('official account production bootstrap', () => {
         expect(harness.adapter.pull).toHaveBeenCalledOnce()
         expect(harness.adapter.pin).toHaveBeenCalledWith(1)
         expect(harness.publication.publish).toHaveBeenCalledOnce()
+        expect(harness.dependencies.confirmInitialPush).toHaveBeenCalledOnce()
+    })
+
+    it('remembers a rejected recovery upload and does not prompt again on restart', async () => {
+        const harness = makeHarness({ accountEnabled: true })
+        harness.dependencies.confirmInitialPush = vi.fn(async () => false)
+
+        await expect(initializeOfficialAccountBootstrap(harness.dependencies)).resolves.toMatchObject({
+            revision: 1,
+            officialEnabled: false,
+        })
+        expect(harness.markers.get('accountst')).toBe('able')
+        expect(harness.markers.get('dosync')).toBe('avoid')
+
+        await expect(initializeOfficialAccountBootstrap(harness.dependencies)).resolves.toMatchObject({
+            revision: 1,
+            officialEnabled: false,
+        })
+        expect(harness.adapter.pull).toHaveBeenCalledOnce()
         expect(harness.dependencies.confirmInitialPush).toHaveBeenCalledOnce()
     })
 
@@ -302,8 +315,7 @@ describe('official account production bootstrap', () => {
             'publisher:off',
             'asset:off',
             'error:account offline',
-            'profile',
-            'install',
+                        'install',
             'initialize',
         ])
     })

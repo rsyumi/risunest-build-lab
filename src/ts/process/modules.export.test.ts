@@ -2,10 +2,23 @@ import { readFileSync } from 'node:fs'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
-    compressImage: vi.fn(async (_data: Uint8Array) => new Uint8Array([0xde, 0xad, 0xbe, 0xef])),
+    platform: 'web' as 'web' | 'desktop' | 'ios' | 'android',
+    importIOS: vi.fn(), importAndroid: vi.fn(), importDesktop: vi.fn(),
+    open: vi.fn(),
     readImage: vi.fn(),
     saveAsset: vi.fn(async (_data: Uint8Array) => ''),
 }))
+
+vi.mock('../platform', () => ({
+    get isTauri() { return mocks.platform !== 'web' },
+    get isTauriDesktop() { return mocks.platform === 'desktop' },
+    get isTauriIOS() { return mocks.platform === 'ios' },
+    get isTauriAndroid() { return mocks.platform === 'android' },
+}))
+vi.mock('../storage/iosContentPicker', () => ({ importIOSContentFromPicker: mocks.importIOS }))
+vi.mock('../storage/androidContentPicker', () => ({ importAndroidContentFromPicker: mocks.importAndroid }))
+vi.mock('../storage/nativeModuleFileRoute', () => ({ importDesktopNativeModulePath: mocks.importDesktop }))
+vi.mock('@tauri-apps/plugin-dialog', () => ({ open: mocks.open }))
 
 vi.mock('src/lang', () => ({
     language: {
@@ -48,7 +61,6 @@ vi.mock('../util', () => ({
 }))
 vi.mock('uuid', () => ({ v4: () => 'roundtrip-module-id' }))
 vi.mock('./lorebook.svelte', () => ({ convertExternalLorebook: vi.fn() }))
-vi.mock('../media', () => ({ compressImage: mocks.compressImage }))
 vi.mock('../stores.svelte', () => ({
     DBState: { db: { modules: [] } },
     HideIconStore: { set: vi.fn() },
@@ -64,11 +76,12 @@ vi.mock('../characterCards', () => ({
     importCharacterProcess: vi.fn(),
 }))
 
-import { exportModuleLegacy, readModule, type RisuModule } from './modules'
+import { exportModuleLegacy, importModule, readModule, type RisuModule } from './modules'
 
 describe('legacy module export', () => {
     beforeEach(() => {
         vi.clearAllMocks()
+        mocks.platform = 'web'
         const rpackMap = readFileSync('src/ts/rpack/rpack_map.bin')
         vi.stubGlobal('fetch', vi.fn(async () => ({
             arrayBuffer: async () => rpackMap.buffer.slice(
@@ -78,7 +91,20 @@ describe('legacy module export', () => {
         })))
     })
 
-    it('roundtrips ordinary asset bytes and preserves asset metadata without image compression', async () => {
+    it.each(['ios', 'android', 'desktop'] as const)('routes the public module picker only to %s', async platform => {
+        mocks.platform = platform
+        mocks.open.mockResolvedValue('C:/synthetic/module.risum')
+        mocks.importIOS.mockResolvedValue('ios-module')
+        mocks.importAndroid.mockResolvedValue('android-module')
+        await importModule()
+        expect(mocks.importIOS).toHaveBeenCalledTimes(platform === 'ios' ? 1 : 0)
+        expect(mocks.importAndroid).toHaveBeenCalledTimes(platform === 'android' ? 1 : 0)
+        expect(mocks.importDesktop).toHaveBeenCalledTimes(platform === 'desktop' ? 1 : 0)
+        if (platform === 'ios') expect(mocks.importIOS).toHaveBeenCalledWith('module')
+        if (platform === 'android') expect(mocks.importAndroid).toHaveBeenCalledWith('module')
+    })
+
+    it('roundtrips ordinary asset bytes and preserves asset metadata exactly', async () => {
         const firstBytes = new Uint8Array([0x00, 0xff, 0x13, 0x7a, 0x80, 0x42])
         const secondBytes = new Uint8Array([0x91, 0x04, 0xcc, 0x2d, 0x7f])
         mocks.readImage.mockImplementation(async (source: string) => {
@@ -102,7 +128,6 @@ describe('legacy module export', () => {
         const exported = await exportModuleLegacy(module, { alertEnd: false, saveData: false })
         const imported = await readModule(Buffer.from(exported))
 
-        expect(mocks.compressImage).not.toHaveBeenCalled()
         expect(mocks.readImage.mock.calls.map(([source]) => source)).toEqual([
             'asset://source-a',
             'asset://source-b',

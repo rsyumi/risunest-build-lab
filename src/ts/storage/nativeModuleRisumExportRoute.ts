@@ -1,6 +1,6 @@
 import { save } from '@tauri-apps/plugin-dialog'
 
-import { isTauriAndroid, isTauriDesktop } from '../platform'
+import { isTauriIOS, isTauriAndroid, isTauriDesktop } from '../platform'
 import type { RisuModule } from '../process/modules'
 import { getDatabase } from './database.svelte'
 import {
@@ -20,6 +20,7 @@ interface NativeRisumExportRuntime {
 interface NativeModuleRisumExportRouteDependencies {
     isDesktop(): boolean
     isAndroid(): boolean
+    isIOS?(): boolean
     chooseDestination(suggestedName: string): Promise<string | null>
     runtime(): NativeRisumExportRuntime
     modules(): RisuModule[]
@@ -32,10 +33,12 @@ interface NativeModuleRisumExportRouteDependencies {
 const productionDependencies: NativeModuleRisumExportRouteDependencies = {
     isDesktop: () => isTauriDesktop,
     isAndroid: () => isTauriAndroid,
-    chooseDestination: (suggestedName) => save({
-        defaultPath: suggestedName,
-        filters: [{ name: 'Risu module', extensions: ['risum'] }],
-    }),
+    isIOS: () => isTauriIOS,
+    chooseDestination: (suggestedName) =>
+        save({
+            defaultPath: suggestedName,
+            filters: [{ name: 'Risu module', extensions: ['risum'] }],
+        }),
     runtime: getPersistentDataRuntime,
     modules: () => getDatabase().modules,
     runExport: runNativeRisuModuleExport,
@@ -56,9 +59,17 @@ export async function exportNativeModuleRisumFromPicker(
     if (flow.kind === 'cancelled') return null
     const moduleIndex = dependencies.modules().findIndex((candidate) => candidate === module)
     if (moduleIndex < 0) throw new Error('Native RISUM export requires the exact root module object')
+    const runtime = dependencies.runtime()
+    await runtime.flushPendingData('native-risum-export')
+    if (options.signal?.aborted) {
+        throw new DOMException('Native file job was cancelled', 'AbortError')
+    }
+    if (dependencies.modules()[moduleIndex] !== module) {
+        throw new Error('Native RISUM export module identity changed while pinning its revision')
+    }
     return dependencies.runExport({
         moduleIndex,
-        expectedRevision: flow.expectedRevision,
+        expectedRevision: runtime.revision,
         destination: flow.destination,
     }, options)
 }

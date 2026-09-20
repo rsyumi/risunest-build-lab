@@ -1,13 +1,13 @@
 <script lang="ts">
     import { onDestroy, onMount } from 'svelte'
     import { language } from 'src/lang'
-    import Button from 'src/lib/UI/GUI/Button.svelte'
     import SettingGroup from '../RisuNest/SettingGroup.svelte'
     import SettingRow from '../RisuNest/SettingRow.svelte'
     import SettingToggle from '../RisuNest/SettingToggle.svelte'
+    import SettingButton from '../RisuNest/SettingButton.svelte'
     import { getDetailedOSLabel } from 'src/ts/platform'
     import { getDeviceSettings, subscribeDeviceSettings, updateDeviceSettings } from 'src/ts/storage/deviceSettings'
-    import { androidGenerationNotificationsEnabled } from 'src/ts/androidGenerationKeepAlive'
+    import { androidGenerationNotificationsEnabled, requestAndroidGenerationNotifications } from 'src/ts/androidGenerationKeepAlive'
 
     let notificationStatus = $state<boolean | null>(null)
     let keepAlive = $state(getDeviceSettings().androidKeepAliveDuringGeneration)
@@ -17,20 +17,25 @@
         keepAlive = settings.androidKeepAliveDuringGeneration
     })
 
-    function refresh(): void {
-        notificationStatus = androidGenerationNotificationsEnabled()
+    let refreshVersion = 0
+    async function refresh(): Promise<void> {
+        const version = ++refreshVersion
+        const status = await androidGenerationNotificationsEnabled()
+        if (version !== refreshVersion) return
+        notificationStatus = status
         const bridge = window.RisuGenerationKeepAlive
         if (!bridge) return
         try {
-            webView = bridge.webViewVersion()
+            const value = await bridge.webViewVersion()
+            if (version === refreshVersion) webView = value
         } catch {
-            notificationStatus = null
+            if (version === refreshVersion) webView = ''
         }
     }
 
-    function openNotificationSettings(): void {
+    async function openNotificationSettings(): Promise<void> {
         try {
-            window.RisuGenerationKeepAlive?.openNotificationSettings()
+            await window.RisuGenerationKeepAlive?.openNotificationSettings()
         } catch {
             // The visible state stays unchanged until Android resumes this WebView.
         }
@@ -50,6 +55,7 @@
         // Android resume does not always produce browser focus/visibility events.
         window.addEventListener('risunest-android-notifications-changed', refresh)
         return () => {
+            refreshVersion++
             window.removeEventListener('focus', refresh)
             document.removeEventListener('visibilitychange', refreshOnVisible)
             window.removeEventListener('risunest-android-notifications-changed', refresh)
@@ -57,9 +63,16 @@
     })
     onDestroy(unsubscribe)
 
-    $effect(() => {
-        updateDeviceSettings({ androidKeepAliveDuringGeneration: keepAlive })
-    })
+    async function setKeepAlive(next: boolean): Promise<void> {
+        if (next === keepAlive) return
+        keepAlive = next
+        updateDeviceSettings({ androidKeepAliveDuringGeneration: next })
+        if (next) {
+            const version = refreshVersion
+            await requestAndroidGenerationNotifications()
+            if (version === refreshVersion) await refresh()
+        }
+    }
 
 </script>
 
@@ -74,7 +87,7 @@
                     : 'border-draculared bg-draculared/10'}`}
             ><span class="h-2 w-2 rounded-full {notificationStatus ? 'bg-success-500' : 'bg-draculared'}" aria-hidden="true"></span>{notificationStatus ? language.risuNest.platform.notificationsOn : language.risuNest.platform.notificationsOff}</span>
         {/if}
-        <Button size="sm" styled="outlined" onclick={openNotificationSettings}>{language.risuNest.platform.openSettings}</Button>
+        <SettingButton variant="secondary" onclick={openNotificationSettings}>{language.risuNest.platform.openSettings}</SettingButton>
     </SettingRow>
     <SettingRow inline label={language.risuNest.platform.keepAlive} help={language.risuNest.platform.keepAliveHelp}>
         {#snippet below()}
@@ -82,7 +95,7 @@
                 <p class="mt-1 text-sm text-draculared" role="alert">{language.risuNest.platform.keepAliveNeedsNotifications}</p>
             {/if}
         {/snippet}
-        <SettingToggle bind:checked={keepAlive} label={language.risuNest.platform.keepAlive} />
+        <SettingToggle checked={keepAlive} onchange={setKeepAlive} label={language.risuNest.platform.keepAlive} />
     </SettingRow>
     {#if operatingSystem || webView}
         <dl data-platform-info class="grid grid-cols-[auto_1fr] gap-x-5 gap-y-1 px-4 py-3 text-sm">

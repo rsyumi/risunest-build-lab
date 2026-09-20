@@ -172,10 +172,6 @@ export function inlayScreenModule(overrides: ModuleOverrides = {}) {
     }
 }
 
-export function prerollModule(overrides: ModuleOverrides = {}) {
-    return { addRerolls: vi.fn(), ...overrides }
-}
-
 export function transformersModule(overrides: ModuleOverrides = {}) {
     return { runImageEmbedding: vi.fn(), ...overrides }
 }
@@ -198,6 +194,9 @@ export function modellistModule(overrides: ModuleOverrides = {}) {
 export function modulesModule(overrides: ModuleOverrides = {}) {
     return {
         getModuleAssets: vi.fn(() => []),
+        getModuleLorebooks: vi.fn(() => []),
+        getModuleRegexScripts: vi.fn(() => []),
+        getModuleTriggers: vi.fn(() => []),
         getModuleToggles: vi.fn(() => ''),
         moduleUpdate: vi.fn(),
         ...overrides,
@@ -211,8 +210,20 @@ export function globalApiModule(overrides: ModuleOverrides = {}) {
 export function pluginsModule(chatOutput: Set<unknown> = new Set()) {
     return {
         pluginV2: { chatOutput },
-        chatOutputListenerProvenance: new WeakMap(),
-        pluginCompatibility: { profile: 'maximum-compatibility' },
+    }
+}
+
+export async function pluginDatabaseAccessModule(
+    importOriginal: () => Promise<Record<string, unknown>>,
+) {
+    return {
+        ...(await importOriginal()),
+        createProductionPluginChatOutputProjector: (
+            snapshot: <T>(value: T) => T,
+        ) => async (input: { liveCharacter: unknown; liveConversation: unknown }) => ({
+            char: snapshot(input.liveCharacter),
+            chat: snapshot(input.liveConversation),
+        }),
     }
 }
 

@@ -10,6 +10,7 @@ import {
     RevisionConflictError,
     SnapshotReleasedError,
     validateConversationWindowQuery,
+    type ArchivePreview,
     type AssetAlias,
     type AssetAliasIdentity,
     type AssetAliasKind,
@@ -20,21 +21,24 @@ import {
     type CharacterDetail,
     type CharacterPage,
     type CharacterQuery,
+    type CharacterSummary,
+    type ContentChangeKey,
+    type ContentChangeWindow,
     type ConversationPage,
     type ConversationQuery,
+    type ConversationMessageMetadataWindow,
     type ConversationWindow,
     type ConversationWindowQuery,
     type DataRevision,
     type AssetRepositoryAuthorityState,
     type AssetRepositoryMigrationInput,
-    type ColdAlias,
-    type ColdPayloadAuthorityState,
-    type ColdPayloadMigrationInput,
     type PersistentDataStore,
     type PersistentConversationMetadata,
     type PersistentRevisionLease,
     type PersistentRoot,
     type PluginStorageCatalog,
+    type PluginStorageListItem,
+    type PluginStorageValue,
     type PresetCatalog,
     type Versioned,
     type WorkingSetCommit,
@@ -88,6 +92,31 @@ async function invokeStore<T>(command: string, args?: Record<string, unknown>): 
         return args === undefined ? await invoke<T>(command) : await invoke<T>(command, args)
     } catch (error) {
         throw restoreStoreError(error)
+    }
+}
+
+async function invokeArchiveOperation<T>(
+    command: 'pds_archive_character' | 'pds_restore_character',
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+): Promise<T> {
+    if (signal?.aborted) {
+        throw new DOMException('Character archive operation was cancelled', 'AbortError')
+    }
+    const operationId = `character-archive-${globalThis.crypto.randomUUID()}`
+    const cancel = () => {
+        void invokeStore('pds_cancel_character_archive_operation', { operationId }).catch(() => {})
+    }
+    signal?.addEventListener('abort', cancel, { once: true })
+    try {
+        return await invokeStore<T>(command, { ...args, operationId })
+    } catch (error) {
+        if (signal?.aborted) {
+            throw new DOMException('Character archive operation was cancelled', 'AbortError')
+        }
+        throw error
+    } finally {
+        signal?.removeEventListener('abort', cancel)
     }
 }
 
@@ -158,6 +187,10 @@ export class SqlitePersistentDataStore implements PersistentDataStore {
         return invokeStore('pds_query_characters', { query: input })
     }
 
+    readCharacterSummary(id: string): Promise<CharacterSummary | null> {
+        return invokeStore('pds_read_character_summary', { id })
+    }
+
     readCharacter(id: string): Promise<Versioned<CharacterDetail> | null> {
         return invokeStore('pds_read_character', { id })
     }
@@ -190,12 +223,29 @@ export class SqlitePersistentDataStore implements PersistentDataStore {
         return await invokeStore('pds_read_conversation_window', { query: input })
     }
 
+    async readConversationMessageMetadataWindow(
+        input: ConversationWindowQuery,
+    ): Promise<Versioned<ConversationMessageMetadataWindow> | null> {
+        validateConversationWindowQuery(input)
+        return await invokeStore('pds_read_conversation_message_metadata_window', {
+            query: input,
+        })
+    }
+
     queryPluginStorage(): Promise<PluginStorageCatalog> {
         return invokeStore('pds_query_plugin_storage', {})
     }
 
-    readPluginStorage(key: string): Promise<Versioned<unknown> | null> {
-        return invokeStore('pds_read_plugin_storage', { key })
+    readPluginStorage(owner: string, key: string): Promise<Versioned<unknown> | null> {
+        return invokeStore('pds_read_plugin_storage', { owner, key })
+    }
+
+    listPluginStorage(): Promise<PluginStorageListItem[]> {
+        return invokeStore('pds_list_plugin_storage', {})
+    }
+
+    commitWorkingSetChangeCursor(revision: DataRevision): Promise<void> {
+        return invokeStore('pds_commit_working_set_change_cursor', { revision })
     }
 
     readAssetAlias(identity: AssetAliasIdentity): Promise<Versioned<AssetAlias> | null> {
@@ -221,18 +271,6 @@ export class SqlitePersistentDataStore implements PersistentDataStore {
         owner: AssetOwnerLocator,
     ): Promise<Versioned<AssetOwnerHead> | null> {
         return invokeStore('pds_read_asset_owner_head', { owner })
-    }
-
-    readColdPayloadAuthority(): Promise<Versioned<ColdPayloadAuthorityState>> {
-        return invokeStore('pds_read_cold_payload_authority', {})
-    }
-
-    readColdAlias(key: string): Promise<Versioned<ColdAlias> | null> {
-        return invokeStore('pds_read_cold_alias', { key })
-    }
-
-    listColdAliases(): Promise<Versioned<ColdAlias[]>> {
-        return invokeStore('pds_list_cold_aliases', {})
     }
 
     commitAssetAlias(
@@ -306,26 +344,6 @@ export class SqlitePersistentDataStore implements PersistentDataStore {
         }
     }
 
-    commitColdAlias(
-        alias: ColdAlias,
-        expectedRevision: DataRevision,
-    ): Promise<{ revision: DataRevision }> {
-        return invokeStore('pds_commit_cold_alias', { alias, expectedRevision })
-    }
-
-    deleteColdAlias(
-        key: string,
-        expectedRevision: DataRevision,
-    ): Promise<{ revision: DataRevision }> {
-        return invokeStore('pds_delete_cold_alias', { key, expectedRevision })
-    }
-
-    activateColdPayloadMigration(
-        input: ColdPayloadMigrationInput,
-    ): Promise<{ revision: DataRevision }> {
-        return invokeStore('pds_activate_cold_payload_migration', { input })
-    }
-
     commit(input: WorkingSetCommit): Promise<{ revision: DataRevision }> {
         const { assetAliases = [], ...commit } = input
         return nativeCommitTransport.commit({ commit, assetAliases }).catch((error) => {
@@ -333,15 +351,48 @@ export class SqlitePersistentDataStore implements PersistentDataStore {
         })
     }
 
+    archivePreview(characterId: string): Promise<ArchivePreview> {
+        return invokeStore('pds_archive_preview', { characterId })
+    }
+
+    archiveCharacter(
+        characterId: string,
+        expectedRevision: DataRevision,
+        signal?: AbortSignal,
+    ): Promise<{ revision: DataRevision }> {
+        return invokeArchiveOperation(
+            'pds_archive_character',
+            { characterId, expectedRevision },
+            signal,
+        )
+    }
+
+    restoreCharacter(
+        characterId: string,
+        expectedRevision: DataRevision,
+        signal?: AbortSignal,
+    ): Promise<{ revision: DataRevision }> {
+        return invokeArchiveOperation(
+            'pds_restore_character',
+            { characterId, expectedRevision },
+            signal,
+        )
+    }
+
     async replaceFromDatabase(
         database: Database,
         expectedRevision?: DataRevision,
         assetAliases: AssetAlias[] = [],
+        pluginStorageValues?: PluginStorageValue[],
     ): Promise<{ revision: DataRevision }> {
         const { stagingId } = await invokeStore<{ stagingId: string }>('pds_replace_begin')
         try {
             const { characters, botPresets, ...root } = database
-            await invokeStore<void>('pds_replace_put_root', { stagingId, root })
+            await invokeStore<void>('pds_replace_put_root', {
+                stagingId,
+                root,
+                ...(pluginStorageValues ? { pluginStorageValues } : {}),
+            })
             await invokeStore<void>('pds_replace_put_presets', {
                 stagingId,
                 presets: botPresets ?? [],
@@ -412,9 +463,28 @@ export class SqlitePersistentDataStore implements PersistentDataStore {
                 assertActive()
                 return invokeStore('pds_query_characters', { query: input, lease })
             },
+            readCharacterSummary: async (id) => {
+                assertActive()
+                return invokeStore('pds_read_character_summary', { id, lease })
+            },
             readCharacter: async (id) => {
                 assertActive()
                 return invokeStore('pds_read_character', { id, lease })
+            },
+            readWorkingSetChangeWindow: async () => {
+                assertActive()
+                return invokeStore<ContentChangeWindow>('pds_working_set_change_window', {
+                    lease,
+                })
+            },
+            readWorkingSetChangePage: async (afterRevision, afterKey, limit) => {
+                assertActive()
+                return invokeStore<ContentChangeKey[]>('pds_working_set_change_page', {
+                    lease,
+                    afterRevision,
+                    afterKey,
+                    limit,
+                })
             },
             queryConversations: async (input) => {
                 assertActive()
@@ -441,13 +511,21 @@ export class SqlitePersistentDataStore implements PersistentDataStore {
                 validateConversationWindowQuery(input)
                 return invokeStore('pds_read_conversation_window', { query: input, lease })
             },
+            readConversationMessageMetadataWindow: async (input) => {
+                assertActive()
+                validateConversationWindowQuery(input)
+                return invokeStore('pds_read_conversation_message_metadata_window', {
+                    query: input,
+                    lease,
+                })
+            },
             queryPluginStorage: async () => {
                 assertActive()
                 return invokeStore('pds_query_plugin_storage', { lease })
             },
-            readPluginStorage: async (key) => {
+            readPluginStorage: async (owner, key) => {
                 assertActive()
-                return invokeStore('pds_read_plugin_storage', { key, lease })
+                return invokeStore('pds_read_plugin_storage', { owner, key, lease })
             },
             readAssetAlias: async (identity) => {
                 assertActive()
@@ -468,18 +546,6 @@ export class SqlitePersistentDataStore implements PersistentDataStore {
             readAssetOwnerHead: async (owner) => {
                 assertActive()
                 return invokeStore('pds_read_asset_owner_head', { owner, lease })
-            },
-            readColdPayloadAuthority: async () => {
-                assertActive()
-                return invokeStore('pds_read_cold_payload_authority', { lease })
-            },
-            readColdAlias: async (key) => {
-                assertActive()
-                return invokeStore('pds_read_cold_alias', { key, lease })
-            },
-            listColdAliases: async () => {
-                assertActive()
-                return invokeStore('pds_list_cold_aliases', { lease })
             },
             release: () => {
                 if (releasePromise) return releasePromise

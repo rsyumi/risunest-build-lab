@@ -1,13 +1,13 @@
 import { runContentImport } from './storage/contentImportOperation'
 import { writable, type Writable } from 'svelte/store'
-import { alertCardExport, alertConfirm, alertError, alertInput, alertMd, alertNormal, alertStore, alertTOS, alertWait } from "./alert"
+import { alertCardExport, alertConfirm, alertError, alertInput, alertMd, alertNormal, alertRisuServiceTOS, alertStore, alertWait } from "./alert"
 import { defaultSdDataFunc, type character, setDatabase, type customscript, type loreSettings, type loreBook, type triggerscript, importPreset, type groupChat, setCurrentCharacter, getCurrentCharacter, getDatabase, setDatabaseLite, appVer } from "./storage/database.svelte"
 import { checkNullish, decryptBuffer, isKnownUri, selectFileByDom, sleep } from "./util"
 import { language } from "src/lang"
 import { v4 as uuidv4, v4 } from 'uuid';
 import { changeChar, characterFormatUpdate, commitDetachedCharacter } from "./characters"
 import { AppendableBuffer, BlankWriter, checkCharOrder, downloadFile, loadAsset, LocalWriter, openURL, readImage, saveAsset, VirtualWriter } from "./globalApi.svelte"
-import { isTauri, isNodeServer, isTauriDesktop } from "src/ts/platform"
+import { isTauri, isNodeServer, isTauriDesktop, isTauriAndroid, isTauriIOS } from "src/ts/platform"
 import { getImageType } from "./media"
 import { DBState, SettingsMenuIndex, ShowRealmFrameStore, selectedCharID, settingsOpen } from "./stores.svelte"
 import { hasher } from "./parser/parser.svelte"
@@ -21,6 +21,7 @@ import { readFile } from "@tauri-apps/plugin-fs"
 import { open } from "@tauri-apps/plugin-dialog"
 import { REALM_HUB_URL, REALM_NIGHTLY_HUB_URL, REALM_NODE_PROXY_BASE, REALM_SITE_URL } from "./realmEndpoints"
 import { registerOpenedFileListeners } from "./openedFiles"
+import { type DeviceMarkerStorage } from './storage/deviceMarkers'
 import { importDesktopNativeCharacterPath } from './storage/nativeCharacterFileRoute'
 import type { NativeFileJobOptions, NativeFileJobSource } from './storage/nativeFileJobs'
 import {
@@ -33,22 +34,31 @@ import { exportNativeCharacterCardFromPicker } from './storage/nativeCharacterCa
 
 const EXTERNAL_HUB_URL = 'https://sv.risuai.xyz';
 const NIGHTLY_HUB_URL = 'https://nightly.sv.risuai.xyz'
-const useNightlyHub = import.meta.env.VITE_RISU_NIGHTLY_BUILD === 'TRUE' || localStorage.getItem('hub') === 'nightly'
-export const hubURL = isNodeServer
+const nightlyBuild = import.meta.env.VITE_RISU_NIGHTLY_BUILD === 'TRUE'
+// The hub choice belongs to the device file, which only opens once the start
+// reaches it, so the start applies the choice before anything requests a hub.
+export let hubURL = isNodeServer
     ? '/hub-proxy'
-    : useNightlyHub
+    : nightlyBuild
     ? NIGHTLY_HUB_URL
     : EXTERNAL_HUB_URL;
 
-// 같은 호스트지만 RisuRealm 경로만 `realmEndpoints`를 거친다. 계정 로그인과 Drive
-// 콜백은 위의 `hubURL`을 그대로 쓰므로 agent 모드에서도 영향을 받지 않는다.
-// `/rs/`는 계정 자산과 Realm 공유 자산이 같이 사는 이중 용도 경로라 Realm 쪽으로
-// 분류한다(scripts/realmBlocklist.mjs). 그래서 `/rs/` URL을 만드는 곳도 이 값을 쓴다.
-export const realmHubURL = isNodeServer
+// Only RisuRealm paths on this host go through `realmEndpoints`. Account login and
+// Drive callbacks keep using `hubURL`, so agent mode does not affect them.
+// `/rs/` serves both account and Realm-shared assets, so it is classified as Realm
+// by scripts/realmBlocklist.mjs. Build every `/rs/` URL from this value.
+export let realmHubURL = isNodeServer
     ? REALM_NODE_PROXY_BASE
-    : useNightlyHub
+    : nightlyBuild
     ? REALM_NIGHTLY_HUB_URL
     : REALM_HUB_URL;
+
+export function applyHubSelection(markers: DeviceMarkerStorage): void {
+    if (isNodeServer) return
+    const nightly = nightlyBuild || markers.getItem('hub') === 'nightly'
+    hubURL = nightly ? NIGHTLY_HUB_URL : EXTERNAL_HUB_URL
+    realmHubURL = nightly ? REALM_NIGHTLY_HUB_URL : REALM_HUB_URL
+}
 
 const nativeCharacterContentImportEnabled = true
 
@@ -98,7 +108,11 @@ export async function importPreparedNativeCharacterContent(
 export async function importCharacter() {
     let lastImportedCharacterId: string | null = null
     try {
-        if (isTauri && !isTauriDesktop) {
+        if (isTauriIOS) {
+            const { importIOSContentFromPicker } = await import('./storage/iosContentPicker')
+            return await importIOSContentFromPicker('character')
+        }
+        if (isTauriAndroid) {
             const { importAndroidContentFromPicker } = await import(
                 './storage/androidContentPicker'
             )
@@ -108,31 +122,44 @@ export async function importCharacter() {
             const selected = await open({ multiple: true, directory: false })
             const paths =
                 typeof selected === 'string' ? [selected] : (selected ?? [])
+            const importErrors: Array<string | Error> = []
             for (const path of paths) {
-                const result = await importDesktopNativeCharacterPath(path, {
-                    readDesktopPath: readFile,
-                    nativeEnabled: () => nativeCharacterContentImportEnabled,
-                    nativeImport: importPreparedNativeCharacterContent,
-                    legacyImport: async ({ name, data }) => {
-                        const importedIndex = await importCharacterProcess({
-                            name,
-                            data,
-                        })
-                        return typeof importedIndex === 'number'
-                            ? (getDatabase().characters[importedIndex]?.chaId ??
-                                  null)
-                            : null
-                    },
-                })
-                if (result.kind === 'imported') {
-                    checkCharOrder()
-                    lastImportedCharacterId = result.value
+                try {
+                    const result = await importDesktopNativeCharacterPath(path, {
+                        readDesktopPath: readFile,
+                        nativeEnabled: () => nativeCharacterContentImportEnabled,
+                        nativeImport: importPreparedNativeCharacterContent,
+                        legacyImport: async ({ name, data }) => {
+                            const importedIndex = await importCharacterProcess({
+                                name,
+                                data,
+                            })
+                            return typeof importedIndex === 'number'
+                                ? (getDatabase().characters[importedIndex]?.chaId ??
+                                      null)
+                                : null
+                        },
+                    })
+                    if (result.kind === 'imported') {
+                        checkCharOrder()
+                        lastImportedCharacterId = result.value
+                    }
+                    if (result.kind === 'destination-required') {
+                        alertError(
+                            'This JPEG is not a character card. Choose an asset destination to import it.',
+                        )
+                    }
+                } catch (error) {
+                    importErrors.push(error instanceof Error ? error : String(error))
                 }
-                if (result.kind === 'destination-required') {
-                    alertError(
-                        'This JPEG is not a character card. Choose an asset destination to import it.',
-                    )
-                }
+            }
+            const firstImportError = importErrors[0]
+            if (firstImportError && importErrors.length === 1) alertError(firstImportError)
+            if (importErrors.length > 1) {
+                alertError(new AggregateError(
+                    importErrors,
+                    `Failed to import ${importErrors.length} of ${paths.length} selected character files`,
+                ))
             }
             return lastImportedCharacterId
         }
@@ -362,7 +389,7 @@ export async function importCharacterProcess<T extends boolean = false>(f: {
                 const xid = 'assets/' + id + '.png'
                 queueFetchKey.push(assetIndex)
                 queueFetchData.push(assetData)
-                queueFetch.push(fetch(`${REALM_HUB_URL}/rs/` + xid))
+                queueFetch.push(fetch(`${realmHubURL}/rs/` + xid))
                 assets[assetIndex] = 'xid:' + xid
                 if (queueFetch.length > 10) {
                     const res = await Promise.all(queueFetch)
@@ -688,12 +715,12 @@ export async function characterURLImport() {
     }
 
     registerOpenedFileListeners(importFile, async (path) => {
-        if (isTauriDesktop && /\.(risunest|risudat|bin)$/i.test(path)) {
+        if ((isTauriDesktop || isTauriIOS) && /\.(risunest|risudat|bin)$/i.test(path)) {
             const { restoreBackupFromNativeSource } = await import('./storage/portableBackupFileRouteProduction.svelte')
             await restoreBackupFromNativeSource({type:'desktopPath',path})
             return true
         }
-        if (!isTauriDesktop || !/\.(json|png|charx|jpe?g|risum)$/i.test(path))
+        if (!(isTauriDesktop || isTauriIOS) || !/\.(json|png|charx|jpe?g|risum)$/i.test(path))
             return false
         if (/\.risum$/i.test(path)) {
             const { importPreparedNativeModuleContent } = await import(
@@ -2249,7 +2276,7 @@ export async function downloadRisuHub(id:string, arg:{
 } = {}) {
     try {
         if(!arg.forceRedirect){
-            if(!(await alertTOS())){
+            if(!(await alertRisuServiceTOS())){
                 return
             }
             alertStore.set({

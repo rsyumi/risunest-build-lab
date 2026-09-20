@@ -39,6 +39,7 @@ fn separate_conversations_keep_local_views_and_alias_conflicts_preserve_both_sid
             plugin_storage: Some(
                 (0..2)
                     .map(|view| PluginStorageMutation::Set {
+                        owner: "synthetic-plugin".to_owned(),
                         key: format!("independent-{view}"),
                         value: json!("base"),
                     })
@@ -80,6 +81,7 @@ fn separate_conversations_keep_local_views_and_alias_conflicts_preserve_both_sid
                     configured_index: None,
                 }]),
                 plugin_storage: Some(vec![PluginStorageMutation::Set {
+                    owner: "synthetic-plugin".to_owned(),
                     key: format!("independent-{view}"),
                     value: json!(view),
                 }]),
@@ -231,8 +233,9 @@ fn separate_conversations_keep_local_views_and_alias_conflicts_preserve_both_sid
         "first"
     );
     assert_eq!(
-        crate::server_sync::backups::list(second.repository_root())
+        crate::server_sync::backups::list(second.repository_root(), None)
             .unwrap()
+            .items
             .len(),
         1
     );
@@ -240,6 +243,7 @@ fn separate_conversations_keep_local_views_and_alias_conflicts_preserve_both_sid
         store
             .commit(&WorkingSetCommit {
                 plugin_storage: Some(vec![PluginStorageMutation::Set {
+                    owner: "synthetic-plugin".to_owned(),
                     key: key.into(),
                     value: json!(true),
                 }]),

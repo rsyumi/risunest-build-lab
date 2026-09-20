@@ -8,9 +8,13 @@ import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.concurrent.thread
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertThrows
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
 
 class MainActivityBehaviorTest {
+  @get:Rule val temporaryFolder = TemporaryFolder.builder().assureDeletion().build()
+
   @Test
   fun `content picker recognizes binary cards and upstream metadata formats only`() {
     for (name in listOf("card.CHARX", "card.png", "module.risum", "book.lorebook", "module.json", "card.JPEG")) {
@@ -34,6 +38,7 @@ class MainActivityBehaviorTest {
     assertEquals(true, shouldUseNativeFileJobSpool("BACKUP.BIN"))
     assertEquals(true, shouldUseNativeFileJobSpool("card.PnG"))
     assertEquals(true, shouldUseNativeFileJobSpool("module.RiSuM"))
+    assertEquals(true, shouldUseNativeFileJobSpool("book.LoReBoOk"))
     assertEquals(true, shouldUseNativeFileJobSpool("BACKUP.RISUNEST"))
     assertEquals(false, shouldUseNativeFileJobSpool("backup.risulossless"))
     assertEquals(true, shouldUseNativeFileJobSpool("character.charx"))
@@ -91,27 +96,7 @@ class MainActivityBehaviorTest {
   }
 
   @Test
-  fun `disabled SAF jobs retain the legacy tauri opened files contract`() {
-    assertEquals(
-      "window.tauriOpenedFiles=[\"C:\\\\opened\\u000afile.risudat\"];",
-      openedFilesScript(listOf("C:\\opened\nfile.risudat")),
-    )
-  }
-
-  @Test
-  fun `legacy opened files are injected on a cold start and dispatched on a warm start`() {
-    assertEquals(
-      LegacyOpenedFileDelivery.DOCUMENT_START_INJECTION,
-      legacyOpenedFileDelivery(coldStart = true),
-    )
-    assertEquals(
-      LegacyOpenedFileDelivery.RUNTIME_EVENT,
-      legacyOpenedFileDelivery(coldStart = false),
-    )
-  }
-
-  @Test
-  fun `warm start delivery dispatches the opened files and falls back to the startup queue`() {
+  fun `ready document delivery dispatches opened files and falls back to its startup queue`() {
     val script = openedFilesEventScript(listOf("/data/cache/opened_files/1-0-preset.risup"))
 
     assertEquals(true, script.contains("new CustomEvent('risu-opened-files'"))
@@ -119,12 +104,12 @@ class MainActivityBehaviorTest {
     assertEquals(true, script.contains("\"/data/cache/opened_files/1-0-preset.risup\""))
     assertEquals(true, script.contains("if(window.dispatchEvent(event)){"))
     assertEquals(true, script.contains("window.tauriOpenedFiles="))
-    // The cold start contract stays a plain assignment, the warm start one never replaces it.
+    // Delivery never replaces an earlier undrained startup batch.
     assertEquals(false, script.startsWith("window.tauriOpenedFiles="))
   }
 
   @Test
-  fun `warm start delivery escapes opened file paths the same way the cold start does`() {
+  fun `ready document delivery escapes opened file paths`() {
     assertEquals(
       true,
       openedFilesEventScript(listOf("C:\\opened\nfile.risup"))
@@ -596,6 +581,88 @@ class MainActivityBehaviorTest {
   }
 
   @Test
+  fun `destination record replay preserves publication readiness proof`() {
+    val script = androidSafDestinationScriptForRecord(
+      SafDestinationRecord(
+        requestId = "11111111-1111-4111-8111-111111111111",
+        exportId = "22222222-2222-4222-8222-222222222222",
+        phase = SafDestinationPhase.SUCCEEDED,
+        destinationUri = "content://provider/document/42",
+        bytes = 42,
+        code = null,
+        warningCodes = emptyList(),
+        updatedAtMillis = 2_000,
+        publicationPrerequisitesComplete = true,
+      ),
+      message = null,
+    )
+
+    assertEquals(true, script.contains("\"publicationPrerequisitesComplete\":true"))
+  }
+
+  @Test
+  fun `SAF progress throttle measures from the last dispatched event`() {
+    val throttle = SafProgressThrottle(intervalMillis = 100)
+
+    assertEquals(true, throttle.shouldDispatch("request:token", 1_000))
+    assertEquals(false, throttle.shouldDispatch("request:token", 1_050))
+    assertEquals(true, throttle.shouldDispatch("request:token", 1_100))
+    assertEquals(false, throttle.shouldDispatch("request:token", 1_150))
+    assertEquals(true, throttle.shouldDispatch("request:token", 1_200))
+  }
+
+  @Test
+  fun `clearing SAF progress throttle releases every token for one request`() {
+    val throttle = SafProgressThrottle(intervalMillis = 100)
+    assertEquals(true, throttle.shouldDispatch("first:a", 1_000))
+    assertEquals(true, throttle.shouldDispatch("first:b", 1_000))
+    assertEquals(true, throttle.shouldDispatch("second:a", 1_000))
+
+    throttle.clear("first")
+
+    assertEquals(true, throttle.shouldDispatch("first:a", 1_001))
+    assertEquals(true, throttle.shouldDispatch("first:b", 1_001))
+    assertEquals(false, throttle.shouldDispatch("second:a", 1_001))
+  }
+
+  @Test
+  fun `SAF picker launch failure runs cleanup instead of escaping`() {
+    val events = mutableListOf<String>()
+
+    launchSafSourcePicker(
+      launch = { throw IllegalStateException("no picker") },
+      onFailure = { events.add("failed") },
+    )
+
+    assertEquals(listOf("failed"), events)
+  }
+
+  @Test
+  fun `legacy opened file cleanup removes only stale regular files`() {
+    val directory = temporaryFolder.newFolder()
+    val stale = directory.resolve("stale.risup").apply {
+      writeBytes(byteArrayOf(1))
+      setLastModified(1_000)
+    }
+    val recent = directory.resolve("recent.risup").apply {
+      writeBytes(byteArrayOf(2))
+      setLastModified(1_950)
+    }
+    val nested = directory.resolve("nested").apply {
+      mkdirs()
+      setLastModified(1_000)
+    }
+
+    assertEquals(
+      listOf("stale.risup"),
+      cleanupLegacyOpenedFiles(directory, nowMillis = 2_000, staleAfterMillis = 100),
+    )
+    assertEquals(false, stale.exists())
+    assertEquals(true, recent.exists())
+    assertEquals(true, nested.exists())
+  }
+
+  @Test
   fun `legacy backup picker result uses a dedicated token-only event`() {
     val script = androidLegacyBackupSourcePickedScript(
       requestId = "11111111-1111-4111-8111-111111111111",
@@ -747,17 +814,26 @@ class MainActivityBehaviorTest {
   }
 
   @Test
-  fun `generation keep alive requests notification permission before checking availability`() {
+  fun `generation keep alive does not start while notification permission is unavailable`() {
     val events = mutableListOf<String>()
 
     val started = beginGenerationKeepAlive(
-      requestNotifications = { events.add("request") },
       notificationsEnabled = { events.add("enabled"); false },
       startService = { events.add("start"); true },
     )
 
     assertEquals(false, started)
-    assertEquals(listOf("request", "enabled"), events)
+    assertEquals(listOf("enabled"), events)
+  }
+
+  @Test
+  fun `generation keep alive starts immediately after permission is ready`() {
+    var starts = 0
+    assertEquals(true, beginGenerationKeepAlive(
+      notificationsEnabled = { true },
+      startService = { starts++; true },
+    ))
+    assertEquals(1, starts)
   }
 
   @Test

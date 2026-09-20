@@ -1,6 +1,7 @@
 <script lang="ts">
     import { CheckIcon, XIcon } from '@lucide/svelte';
     import { createEventDispatcher, onDestroy } from 'svelte';
+    import { isCompositionKey } from 'src/ts/hotkeyModifier';
     import { DBState } from 'src/ts/stores.svelte';
     import { language } from 'src/lang';
     import { 
@@ -36,6 +37,7 @@
 
     const dispatch = createEventDispatcher<{
         start: void;
+        cancel: void;
         save: {
             newData: string;
             target: PartialEditTarget;
@@ -49,6 +51,15 @@
     let isEditing = $state(false);
     let editText = $state('');
     let textareaRef: HTMLTextAreaElement | null = $state(null);
+    let focusTimer: ReturnType<typeof setTimeout> | undefined;
+    let scrollTimer: ReturnType<typeof setTimeout> | undefined;
+
+    function clearEditTimers() {
+        clearTimeout(focusTimer);
+        clearTimeout(scrollTimer);
+        focusTimer = undefined;
+        scrollTimer = undefined;
+    }
 
     let isConfirmingDelete = $state(false);
 
@@ -346,12 +357,15 @@
         isEditing = true;
 
         // Focus textarea on next tick
-        setTimeout(() => {
+        clearEditTimers();
+        focusTimer = setTimeout(() => {
+            focusTimer = undefined;
             if (textareaRef) {
                 textareaRef.focus();
                 adjustHeight();
-                setTimeout(() => {
-                    const buttonsEl = textareaRef.closest('.partial-edit-modal')?.querySelector('.partial-edit-buttons');
+                scrollTimer = setTimeout(() => {
+                    scrollTimer = undefined;
+                    const buttonsEl = textareaRef?.closest('.partial-edit-modal')?.querySelector('.partial-edit-buttons');
                     if (buttonsEl) {
                         (buttonsEl as HTMLElement).scrollIntoView({ behavior: 'instant', block: 'nearest' });
                     }
@@ -401,10 +415,12 @@
             matchingState.targetElement.innerHTML = matchingState.originalHTML;
         }
         closeEdit();
+        dispatch('cancel');
     }
 
     // Close edit mode
     function closeEdit() {
+        clearEditTimers();
         isEditing = false;
         editText = '';
         resetMatchingState();
@@ -436,6 +452,7 @@
     // Cancel deletion
     function handleCancelDelete() {
         closeDeleteConfirm();
+        dispatch('cancel');
     }
 
     // Close delete confirmation
@@ -447,7 +464,7 @@
     function handleKeydown(e: KeyboardEvent) {
         // While an IME is composing, Escape and Enter belong to the composition,
         // not to this editor; acting on them discards the pending edit.
-        if (e.isComposing) return;
+        if (isCompositionKey(e)) return;
         if (e.key === 'Escape') {
             handleCancel();
         } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
@@ -668,6 +685,7 @@
 
     // Cleanup on component unmount
     onDestroy(() => {
+        clearEditTimers();
         matchingRequestId += 1;
         if (blockButtonWrapper) {
             blockButtonWrapper.remove();

@@ -3,7 +3,6 @@ import type { Database } from '../database.svelte'
 import {
     completeAccountUnmigration,
     installAccountBackup,
-    installDriveRestore,
     installLocalBackup,
     installRisuKeiBackup,
     materializeAccountUnmigrationResources,
@@ -13,6 +12,8 @@ const database = {
     account: { token: 'account-token', useSync: true },
     characters: [],
 } as Database
+const committed = { kind: 'committed', revision: 8, projection: 'applied' } as const
+const refreshRequired = { ...committed, projection: 'refresh-required' } as const
 
 describe.each([
     ['account backup', installAccountBackup, 'account-backup'],
@@ -24,6 +25,7 @@ describe.each([
         await install(database, {
             replaceDatabase: async (_candidate, reason) => {
                 events.push(`replace:${reason}`)
+                return committed
             },
             loadPlugins: async () => {
                 events.push('plugins')
@@ -52,7 +54,7 @@ describe('local backup restore', () => {
         const events: string[] = []
 
         await installLocalBackup(database, {
-            replaceDatabase: async () => { events.push('replace') },
+            replaceDatabase: async () => { events.push('replace'); return committed },
             publishAcceptedRevision: async () => { events.push('publish') },
             relaunch: async () => { events.push('relaunch') },
         })
@@ -75,50 +77,15 @@ describe('local backup restore', () => {
     it('retains publication retry ownership and does not relaunch on publish failure', async () => {
         const relaunch = vi.fn()
 
+        const onPostCommitError = vi.fn()
         await expect(installLocalBackup(database, {
-            replaceDatabase: async () => undefined,
+            replaceDatabase: async () => committed,
             publishAcceptedRevision: async () => { throw new Error('official offline') },
             relaunch,
-        })).rejects.toThrow('official offline')
+            onPostCommitError,
+        })).resolves.toEqual(committed)
 
-        expect(relaunch).not.toHaveBeenCalled()
-    })
-})
-
-describe('Drive restore', () => {
-    it('relaunches only after replacement succeeds', async () => {
-        const events: string[] = []
-
-        await installDriveRestore(database, {
-            replaceDatabase: async () => { events.push('replace') },
-            publishAcceptedRevision: async () => { events.push('publish') },
-            relaunch: async () => { events.push('relaunch') },
-        })
-
-        expect(events).toEqual(['replace', 'publish', 'relaunch'])
-    })
-
-    it('does not relaunch when replacement fails', async () => {
-        const relaunch = vi.fn()
-
-        await expect(installDriveRestore(database, {
-            replaceDatabase: async () => { throw new Error('replacement failed') },
-            publishAcceptedRevision: vi.fn(),
-            relaunch,
-        })).rejects.toThrow('replacement failed')
-
-        expect(relaunch).not.toHaveBeenCalled()
-    })
-
-    it('does not relaunch when accepted-revision publication fails', async () => {
-        const relaunch = vi.fn()
-
-        await expect(installDriveRestore(database, {
-            replaceDatabase: async () => undefined,
-            publishAcceptedRevision: async () => { throw new Error('official offline') },
-            relaunch,
-        })).rejects.toThrow('official offline')
-
+        expect(onPostCommitError).toHaveBeenCalledWith(new Error('official offline'))
         expect(relaunch).not.toHaveBeenCalled()
     })
 })
@@ -136,6 +103,7 @@ describe('completeAccountUnmigration', () => {
                 expect(reason).toBe('account-unmigration')
                 expect(candidate.account).toBeNull()
                 expect(candidate).not.toBe(live)
+                return committed
             },
             finalize: () => { events.push('finalize') },
         })
@@ -171,17 +139,69 @@ describe('completeAccountUnmigration', () => {
     })
 })
 
+describe.each([
+    ['account', installAccountBackup],
+    ['Risu-Kei', installRisuKeiBackup],
+] as const)('%s committed restore follow-ups', (_name, install) => {
+    it('does not load plugins from a stale projection or repeat the replacement', async () => {
+        const replaceDatabase = vi.fn(async () => refreshRequired)
+        const loadPlugins = vi.fn()
+        await expect(install(database, { replaceDatabase, loadPlugins })).resolves.toEqual(refreshRequired)
+        expect(replaceDatabase).toHaveBeenCalledOnce()
+        expect(loadPlugins).not.toHaveBeenCalled()
+    })
+
+    it('reports plugin failure without rejecting a completed local replacement', async () => {
+        const failure = new Error('plugin startup unavailable')
+        const replaceDatabase = vi.fn(async () => committed)
+        const onPostCommitError = vi.fn()
+        await expect(install(database, {
+            replaceDatabase,
+            loadPlugins: async () => { throw failure },
+            onPostCommitError,
+        })).resolves.toEqual(committed)
+        expect(replaceDatabase).toHaveBeenCalledOnce()
+        expect(onPostCommitError).toHaveBeenCalledExactlyOnceWith(failure)
+    })
+})
+
+describe.each([
+    ['local', installLocalBackup, 'local-backup'],
+] as const)('%s committed restore follow-ups', (_name, install, reason) => {
+    it('queues publication without immediately publishing or restarting a stale projection', async () => {
+        const replaceDatabase = vi.fn(async () => refreshRequired)
+        const publishAcceptedRevision = vi.fn()
+        const relaunch = vi.fn()
+        await expect(install(database, {
+            replaceDatabase, publishAcceptedRevision, relaunch,
+        })).resolves.toEqual(refreshRequired)
+        expect(replaceDatabase).toHaveBeenCalledExactlyOnceWith(database, reason, { publishOfficial: true })
+        expect(publishAcceptedRevision).not.toHaveBeenCalled()
+        expect(relaunch).not.toHaveBeenCalled()
+    })
+})
+
+it('awaits account marker finalization even when committed projection needs refresh', async () => {
+    let finished = false
+    const finalize = vi.fn(async () => { await Promise.resolve(); finished = true })
+    await expect(completeAccountUnmigration(database, {
+        prepareResources: async () => undefined,
+        replaceDatabase: async () => refreshRequired,
+        finalize,
+    })).resolves.toEqual(refreshRequired)
+    expect(finished).toBe(true)
+    expect(finalize).toHaveBeenCalledOnce()
+})
+
 describe('account unmigration resource materialization', () => {
-    it('retains local payloads and copies verified remote-only assets and cold data', async () => {
+    it('returns the account cold payloads and copies verified remote-only assets', async () => {
         const localAssets = new Map([['assets/local.png', new Uint8Array([1])]])
-        const localCold = new Map<string, unknown>([['cold-local', { message: ['local'] }]])
         const assetWrites: string[] = []
-        const coldWrites: string[] = []
         const onProgress = vi.fn()
 
-        await materializeAccountUnmigrationResources({
+        const selectedCold = await materializeAccountUnmigrationResources({
             onProgress,
-            coldKeys: ['cold-local', 'cold-remote'],
+            coldKeys: ['cold-a', 'cold-b'],
             collectAssetKeys: () => ['assets/local.png', 'assets/remote.png'],
             isValidCold: (value) => typeof value === 'object' && value !== null,
             readLocalAsset: async (key) => localAssets.get(key) ?? null,
@@ -192,20 +212,15 @@ describe('account unmigration resource materialization', () => {
                 assetWrites.push(key)
                 localAssets.set(key, bytes.slice())
             },
-            readLocalCold: async (key) => localCold.get(key) ?? null,
-            readRemoteCold: async (key) => key === 'cold-remote'
-                ? { message: ['remote'] }
-                : null,
-            writeLocalCold: async (key, value) => {
-                coldWrites.push(key)
-                localCold.set(key, structuredClone(value))
-            },
+            readRemoteCold: async (key) => ({ message: [key] }),
         })
 
         expect(assetWrites).toEqual(['assets/remote.png'])
-        expect(coldWrites).toEqual(['cold-remote'])
         expect(localAssets.get('assets/remote.png')).toEqual(new Uint8Array([9, 8]))
-        expect(localCold.get('cold-remote')).toEqual({ message: ['remote'] })
+        expect([...selectedCold]).toEqual([
+            ['cold-a', { message: ['cold-a'] }],
+            ['cold-b', { message: ['cold-b'] }],
+        ])
         expect(onProgress.mock.calls).toEqual([
             ['cold', 0, 2],
             ['cold', 1, 2],
@@ -224,44 +239,47 @@ describe('account unmigration resource materialization', () => {
             readLocalAsset: async () => null,
             readRemoteAsset: async () => new Uint8Array([9]),
             writeLocalAsset: async () => undefined,
-            readLocalCold: async () => null,
             readRemoteCold: async () => null,
-            writeLocalCold: async () => undefined,
         })).rejects.toThrow('Failed to verify local asset: assets/remote.png')
     })
 
-    it('enumerates assets from the retained local cold character instead of official cold', async () => {
-        const localCold = {
-            character: { chaId: 'cold-character', additionalAssets: [['local', 'assets/local-only.png']] },
-        }
+    it('fails before transition when the account has no payload for a reference', async () => {
+        await expect(materializeAccountUnmigrationResources({
+            coldKeys: ['cold-missing'],
+            collectAssetKeys: () => [],
+            isValidCold: () => true,
+            readLocalAsset: async () => null,
+            readRemoteAsset: async () => null,
+            writeLocalAsset: async () => undefined,
+            readRemoteCold: async () => null,
+        })).rejects.toThrow('Missing account cold payload: cold-missing')
+    })
+
+    it('enumerates assets from the account cold character', async () => {
         const remoteCold = {
             character: { chaId: 'cold-character', additionalAssets: [['remote', 'assets/remote-only.png']] },
         }
         const copiedAssets: string[] = []
         const localAssets = new Map<string, Uint8Array>()
-        const readRemoteCold = vi.fn(async () => remoteCold)
 
         await materializeAccountUnmigrationResources({
             coldKeys: ['cold-character-key'],
             collectAssetKeys: (selectedCold) => {
-                const selected = selectedCold.get('cold-character-key') as typeof localCold
+                const selected = selectedCold.get('cold-character-key') as typeof remoteCold
                 return selected.character.additionalAssets.map((asset) => asset[1])
             },
             isValidCold: () => true,
             readLocalAsset: async (key) => localAssets.get(key) ?? null,
-            readRemoteAsset: async (key) => key === 'assets/local-only.png'
+            readRemoteAsset: async (key) => key === 'assets/remote-only.png'
                 ? new Uint8Array([7])
                 : null,
             writeLocalAsset: async (key, bytes) => {
                 copiedAssets.push(key)
                 localAssets.set(key, bytes.slice())
             },
-            readLocalCold: async () => localCold,
-            readRemoteCold,
-            writeLocalCold: async () => undefined,
+            readRemoteCold: async () => remoteCold,
         })
 
-        expect(readRemoteCold).not.toHaveBeenCalled()
-        expect(copiedAssets).toEqual(['assets/local-only.png'])
+        expect(copiedAssets).toEqual(['assets/remote-only.png'])
     })
 })

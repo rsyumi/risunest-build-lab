@@ -121,8 +121,9 @@ async function absent(candidate) {
 async function sourceHashes() {
   const files = [
     "benchmarks/device-backup/main.ts",
-    "src/ts/storage/deviceBackup/maintenance.ts",
-    "src-tauri/src/device_backup/commands.rs",
+    "src/ts/storage/nativeFileJobs.ts",
+    "src/ts/storage/deviceBackup/entry.ts",
+    "src-tauri/src/native_file_jobs/portable.rs",
     "src-tauri/src/device_backup/mod.rs",
   ];
   return Object.fromEntries(
@@ -197,7 +198,7 @@ async function reuseRun() {
     !values["--reuse"] ||
     (!values["--peer"] &&
       !values["--verify-fault"] &&
-      !["before-commit", "after-device-marker"].includes(values["--fault"]))
+      values["--fault"] !== "activating-database")
   )
     throw new Error("synthetic-runner-invalid-argument");
   const reportPath = path.resolve(values["--reuse"]);
@@ -238,7 +239,7 @@ async function reuseRun() {
         "synthetic-fault-restore:synthetic-process-kill-point-reached" ||
       recoveryReport.killPoint?.state?.fault?.reached !== true ||
       !recoveryReport.state.checks.includes(
-        "result-acknowledged-before-normal-bootstrap",
+        "native-startup-recovery-completed",
       )
     )
       throw new Error("synthetic-fault-report-not-control-only-failure");
@@ -255,7 +256,7 @@ async function reuseRun() {
     !within(peer.archivePath, path.join(root, ".tmp")) ||
     !peer.archivePath.endsWith(".risunest") ||
     !Array.isArray(peer.expected) ||
-    peer.expected.length !== 4 ||
+    peer.expected.length !== 3 ||
     peer.expected.some((fingerprint) => !/^[0-9a-f]{64}$/.test(fingerprint))
   )
     throw new Error("synthetic-peer-descriptor-invalid");
@@ -285,7 +286,7 @@ async function run() {
     reuse?.previous.directory ??
     path.join(root, ".tmp", `device-windows-smoke-${runId}`);
   const identifier = `io.github.rsyumi.risunest.devicebackupsynthetic.s${runId.replaceAll("-", "")}`;
-  if (!reuse) await mkdir(directory, { recursive: false });
+  if (!reuse) await mkdir(directory, { recursive: true });
   const reservation = net.createServer();
   reservation.listen(reuse?.previous.port ?? 0, "127.0.0.1");
   await once(reservation, "listening");
@@ -513,10 +514,62 @@ async function run() {
         if (
           reuse?.faultPoint &&
           killed &&
+          !report.verificationControlRehydrated &&
+          state.stage === "ready" &&
+          state.failure === undefined &&
+          state.revision === 0 &&
+          state.restartCount === 0 &&
+          Array.isArray(state.checks) &&
+          state.checks.length === 0 &&
+          Array.isArray(state.statusTransitions) &&
+          state.statusTransitions.length === 0 &&
+          state.fault === undefined &&
+          state.jobId === undefined &&
+          state.backupPath === undefined &&
+          state.expected === undefined
+        ) {
+          const witness = report.killPoint;
+          const killedTransition =
+            "restore-portable-backup:running:activating-database";
+          if (
+            witness?.point !== reuse.faultPoint ||
+            witness.state?.stage !== "fault-restore" ||
+            typeof witness.state?.jobId !== "string" ||
+            witness.state.jobId.length === 0 ||
+            witness.state?.fault?.point !== reuse.faultPoint ||
+            witness.state?.fault?.reached !== true ||
+            witness.state?.statusTransitions?.at(-1) !== killedTransition ||
+            !Number.isInteger(witness.pid) ||
+            !Number.isInteger(witness.restartedPid) ||
+            !Number.isFinite(witness.killedAt) ||
+            !Number.isFinite(witness.restartedAt) ||
+            witness.killedAt > witness.restartedAt ||
+            witness.pid === witness.restartedPid
+          )
+            throw new Error("synthetic-missing-control-kill-witness-invalid");
+          const completion = await evaluate(
+            page,
+            `(async()=>{try{await globalThis.__deviceBackupSmoke.restoreControl(${JSON.stringify(witness.state)});return 'unexpected-success'}catch(error){return error instanceof Error?error.message:String(error)}})()`,
+          );
+          if (completion !== "Synthetic fixture cannot be rehydrated while active")
+            throw new Error("synthetic-missing-control-startup-not-complete");
+          report.startupEntryCompletedWithMissingControl = true;
+          report.verificationStartState = state;
+          report.verificationControlRehydrated = true;
+          controlRehydrationPending = true;
+          await evaluate(
+            page,
+            `localStorage.setItem('risunest-synthetic-device-smoke-fault',${JSON.stringify(JSON.stringify(witness.state))});sessionStorage.setItem('risunest-synthetic-device-smoke',${JSON.stringify(JSON.stringify(witness.state))});setTimeout(()=>location.reload(),0);true`,
+          );
+          continue;
+        }
+        if (
+          reuse?.faultPoint &&
+          killed &&
           state.failure === "synthetic-process-kill-point-reached" &&
           !report.verificationControlRehydrated
         ) {
-          const acknowledgement = "result-acknowledged-before-normal-bootstrap";
+          const acknowledgement = "native-startup-recovery-completed";
           const coldRecoveryEvidence = reuse.recoveryReport?.state ?? state;
           const previousAcknowledgements = report.killPoint.state.checks.filter(
             (check) => check === acknowledgement,
@@ -526,12 +579,6 @@ async function run() {
           ).length;
           if (coldAcknowledgements <= previousAcknowledgements)
             throw new Error("synthetic-cold-recovery-not-acknowledged");
-          const bootstrap = await evaluate(
-            page,
-            "globalThis.__TAURI_INTERNALS__.invoke('native_device_backup_bootstrap')",
-          );
-          if (bootstrap.mode !== "normal")
-            throw new Error("synthetic-cold-recovery-not-normal");
           const control = {
             ...report.killPoint.state,
             stage: "fault-restore",
@@ -542,7 +589,7 @@ async function run() {
           report.coldRecoveryState = coldRecoveryEvidence;
           report.verificationStartState = state;
           report.verificationControlRehydrated = true;
-          report.nativeRecoveryCompletedBeforeControlRehydration = true;
+          report.productStartupRecoveryCompletedBeforeControlRehydration = true;
           controlRehydrationPending = true;
           await evaluate(
             page,
@@ -673,6 +720,14 @@ async function run() {
           if (report.killPoint && !reuse?.recoveryReport)
             report.killPoint.postKillVerificationMs =
               Date.now() - report.killPoint.killedAt;
+          if (reuse?.faultPoint) {
+            if (
+              state.fault?.outcome !== "old" &&
+              state.fault?.outcome !== "committed"
+            )
+              throw new Error("synthetic-fault-recovery-outcome-missing");
+            report.faultRecoveryOutcome = state.fault.outcome;
+          }
           report.passed = true;
           break;
         }

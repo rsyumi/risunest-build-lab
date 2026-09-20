@@ -130,7 +130,6 @@ interface HarnessOptions {
     accountId?: string
     blobs?: Map<string, Uint8Array>
     remoteAssets?: Map<string, Uint8Array>
-    localCold?: Map<string, unknown>
     remoteCold?: Map<string, unknown>
     databaseRead?: AccountReadResult
     prepareCandidate?: (database: Database) => Promise<Database>
@@ -169,10 +168,6 @@ async function makeHarness(options: HarnessOptions = {}) {
     )
     const blobStore = makeBlobStore(localBlobs)
     const remoteAssets = options.remoteAssets ?? new Map<string, Uint8Array>()
-    const localCold = options.localCold ?? new Map<string, unknown>([
-        ['cold-chat', { message: [{ data: 'local chat' }] }],
-        ['cold-message', { message: [{ data: 'local message' }] }],
-    ])
     const remoteCold = options.remoteCold ?? new Map<string, unknown>()
     const events = options.events ?? []
     const writes: Array<{ key: string; bytes?: Uint8Array; value?: unknown }> = []
@@ -194,11 +189,6 @@ async function makeHarness(options: HarnessOptions = {}) {
     })
     const cold = {
         readRemote: vi.fn(async (key: string) => structuredClone(remoteCold.get(key) ?? null)),
-        writeRemote: vi.fn(async (key: string, value: unknown) => {
-            events.push(`cold:${key}`)
-            writes.push({ key, value: structuredClone(value) })
-        }),
-        readLocal: vi.fn(async (key: string) => structuredClone(localCold.get(key) ?? null)),
     }
     const markPublished = vi.fn()
     const prepareCandidate = options.prepareCandidate ?? vi.fn(async (value: Database) => structuredClone(value))
@@ -224,7 +214,6 @@ async function makeHarness(options: HarnessOptions = {}) {
         restartAdapter: () => new OfficialAccountSnapshotAdapter(dependencies),
         blobStore,
         cold,
-        localColdValues: localCold,
         database,
         events,
         imported,
@@ -591,7 +580,7 @@ describe('OfficialAccountSnapshotAdapter publication', () => {
         await expect(publication.publish()).rejects.toThrow('disposed')
     })
 
-    it('publishes sorted assets, then sorted cold payloads, then the projected database', async () => {
+    it('publishes sorted assets, then the projected database', async () => {
         const harness = await makeHarness()
         const publication = await harness.adapter.pin(harness.imported.revision)
 
@@ -600,10 +589,6 @@ describe('OfficialAccountSnapshotAdapter publication', () => {
         const assetEvents = harness.events.filter((event) => event.startsWith('asset:assets/'))
         expect(assetEvents).toEqual([...assetEvents].sort())
         expect(harness.events.slice(0, assetEvents.length)).toEqual(assetEvents)
-        expect(harness.events.slice(assetEvents.length, -1)).toEqual([
-            'cold:cold-chat',
-            'cold:cold-message',
-        ])
         expect(harness.events.at(-1)).toBe(`asset:${databaseKey}`)
 
         const databaseCalls = harness.writeItem.mock.calls.filter(([key]) => key === databaseKey)
@@ -614,61 +599,6 @@ describe('OfficialAccountSnapshotAdapter publication', () => {
         for (const key of resources(projected)) {
             expect(key).toMatch(/^remote\/assets\//)
         }
-        for (const coldWrite of harness.writes.filter((write) => write.value)) {
-            expect(coldWrite.value).not.toBe(harness.cold.readLocal)
-        }
-    })
-
-    it('projects every character resource in a cloned pinned cold payload', async () => {
-        const database = makeDatabase()
-        const coldCharacter = structuredClone(database.characters[0])
-        const coldPayload = { character: coldCharacter }
-        const localCold = new Map<string, unknown>([
-            ['cold-chat', coldPayload],
-            ['cold-message', { message: [{ data: 'unchanged' }] }],
-        ])
-        const harness = await makeHarness({ database, localCold })
-        const publication = await harness.adapter.pin(harness.imported.revision)
-        coldCharacter.image = 'assets/mutated-after-pin.png'
-
-        await publication.publish()
-
-        const written = harness.writes.find((write) => write.key === 'cold-chat')!.value as {
-            character: Database['characters'][number]
-        }
-        for (const key of listCharacterResources(written.character)) {
-            expect(key).toMatch(/^remote\/assets\//)
-        }
-        expect(written.character.image).toBe('remote/assets/character.png')
-        expect((localCold.get('cold-chat') as any).character.image).toBe('assets/mutated-after-pin.png')
-    })
-
-    it('pins and uploads an asset referenced only by a full cold character', async () => {
-        const database = makeDatabase()
-        const coldOnlyKey = 'assets/cold-only.ogg'
-        delete (database.characters[0] as any).additionalAssets
-        const coldCharacter = structuredClone(database.characters[0]) as any
-        coldCharacter.additionalAssets = [['cold audio', coldOnlyKey, 'ogg']]
-        const localBlobs = new Map(
-            resources(database).map((key, index) => [key, Uint8Array.of(index + 1)]),
-        )
-        localBlobs.set(coldOnlyKey, Uint8Array.of(99))
-        const harness = await makeHarness({
-            database,
-            blobs: localBlobs,
-            localCold: new Map([
-                ['cold-chat', { character: coldCharacter }],
-                ['cold-message', { message: [] }],
-            ]),
-        })
-
-        const publication = await harness.adapter.pin(harness.imported.revision)
-        await publication.publish()
-
-        expect(harness.blobStore.stat).toHaveBeenCalledWith(coldOnlyKey)
-        expect(harness.writeItem.mock.calls.some(([key]) => key === coldOnlyKey)).toBe(true)
-        const writtenCold = harness.cold.writeRemote.mock.calls.find(([key]) => key === 'cold-chat')![1] as any
-        expect(writtenCold.character.additionalAssets[0][1]).toBe(`remote/${coldOnlyKey}`)
     })
 
     it('pins a legacy backslash asset key and uploads its normalized local payload', async () => {
@@ -749,7 +679,7 @@ describe('OfficialAccountSnapshotAdapter publication', () => {
             expectedRevision: harness.imported.revision,
             root: { ...root, username: 'Later local user' },
             pluginStorage: [
-                { type: 'set', key: 'fixture', value: { value: 'later' } },
+                { type: 'set', owner: 'test-plugin', key: 'fixture', value: { value: 'later' } },
             ],
         })
         const commit = vi.spyOn(harness.store, 'commit')
@@ -762,7 +692,7 @@ describe('OfficialAccountSnapshotAdapter publication', () => {
         expect(published.username).toBe('Snapshot User')
         expect(published.pluginCustomStorage).toEqual({ fixture: { value: 'stored' } })
         expect((await harness.store.readRoot()).value.username).toBe('Later local user')
-        expect((await harness.store.readPluginStorage('fixture'))?.value).toEqual({
+        expect((await harness.store.readPluginStorage('test-plugin', 'fixture'))?.value).toEqual({
             value: 'later',
         })
         expect(harness.markPublished).toHaveBeenCalledWith(harness.imported.revision)
@@ -801,6 +731,7 @@ describe('OfficialAccountSnapshotAdapter publication', () => {
             root: { ...root, username: 'Later local user' },
             pluginStorage: [{
                 type: 'set',
+                owner: 'test-plugin',
                 key: 'plugin',
                 value: { nested: [{ asset: laterAssetKey }] },
             }],
@@ -821,7 +752,7 @@ describe('OfficialAccountSnapshotAdapter publication', () => {
             rejectedNested: rejectedNestedKey,
             prose: 'prefix assets/not-a-reference.bin',
         })
-        expect((await harness.store.readPluginStorage('plugin'))?.value).toEqual({
+        expect((await harness.store.readPluginStorage('test-plugin', 'plugin'))?.value).toEqual({
             nested: [{ asset: laterAssetKey }],
         })
     })
@@ -832,30 +763,11 @@ describe('OfficialAccountSnapshotAdapter publication', () => {
 
         await (await harness.adapter.pin(harness.imported.revision)).publish()
         const afterFirst = harness.events.filter((event) => event.startsWith('asset:assets/')).length
-        const coldAfterFirst = harness.cold.writeRemote.mock.calls.length
         await (await harness.adapter.pin(harness.imported.revision)).publish()
 
         expect(afterFirst).toBe(assetCount)
         expect(harness.events.filter((event) => event.startsWith('asset:assets/'))).toHaveLength(assetCount)
-        expect(harness.cold.writeRemote).toHaveBeenCalledTimes(coldAfterFirst)
         expect(harness.writes.filter((write) => write.key === databaseKey)).toHaveLength(2)
-    })
-
-    it('uploads a cold payload again once its projected content changes', async () => {
-        const harness = await makeHarness()
-        await (await harness.adapter.pin(harness.imported.revision)).publish()
-        const coldAfterFirst = harness.cold.writeRemote.mock.calls.length
-        const changed = harness.cold.readLocal.mock.results.length > 0
-        expect(changed).toBe(true)
-        harness.cold.readLocal.mockImplementation(async (key: string) => {
-            const value = structuredClone(harness.localColdValues.get(key) ?? null) as Record<string, unknown> | null
-            if (value) value.changedMarker = 'edited'
-            return value
-        })
-
-        await (await harness.adapter.pin(harness.imported.revision)).publish()
-
-        expect(harness.cold.writeRemote.mock.calls.length).toBeGreaterThan(coldAfterFirst)
     })
 
     it('retries the same handle with completed state and exact cached database bytes', async () => {
@@ -880,11 +792,10 @@ describe('OfficialAccountSnapshotAdapter publication', () => {
             harness.writeItem.mock.calls.filter(([key]) => key === databaseKey)[0][1],
         )
         expect(harness.events.filter((event) => event.startsWith('asset:assets/'))).toHaveLength(resources(harness.database).length)
-        expect(harness.cold.writeRemote).toHaveBeenCalledTimes(2)
         expect(harness.markPublished).toHaveBeenCalledTimes(1)
     })
 
-    it('validates remote-only resources and rewrites only changed remote cold projections', async () => {
+    it('validates remote-only resources before publishing', async () => {
         const database = makeDatabase()
         const allResources = resources(database)
         const localKey = allResources[0]
@@ -893,7 +804,6 @@ describe('OfficialAccountSnapshotAdapter publication', () => {
             database,
             blobs: new Map([[localKey, Uint8Array.of(9)]]),
             remoteAssets: new Map(remoteOnly.map((key) => [key, Uint8Array.of(7)])),
-            localCold: new Map(),
             remoteCold: new Map([
                 ['cold-chat', { character: { ...database.characters[0], image: localKey } }],
                 ['cold-message', { message: [{ data: 'unchanged' }] }],
@@ -906,8 +816,6 @@ describe('OfficialAccountSnapshotAdapter publication', () => {
         expect(harness.readItem).toHaveBeenCalledTimes(remoteOnly.length)
         expect(harness.writeItem.mock.calls.filter(([key]) => key.startsWith('assets/'))).toHaveLength(1)
         expect(harness.writeItem.mock.calls[0][0]).toBe(localKey)
-        expect(harness.cold.writeRemote).toHaveBeenCalledTimes(1)
-        expect(harness.cold.writeRemote.mock.calls[0][0]).toBe('cold-chat')
     })
 
     it('publishes without assets that are unavailable everywhere and probes each missing key once', async () => {
@@ -931,38 +839,20 @@ describe('OfficialAccountSnapshotAdapter publication', () => {
         }
     })
 
-    it('publishes without a cold payload that is unavailable everywhere', async () => {
-        const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
-        try {
-            const harness = await makeHarness({
-                localCold: new Map<string, unknown>([
-                    ['cold-chat', { message: [{ data: 'local chat' }] }],
-                ]),
-            })
-
-            await (await harness.adapter.pin(harness.imported.revision)).publish()
-
-            expect(harness.cold.writeRemote.mock.calls.map(([key]) => key)).toEqual(['cold-chat'])
-            expect(harness.writes.some((write) => write.key === databaseKey)).toBe(true)
-        } finally {
-            consoleWarn.mockRestore()
-        }
-    })
-
-    it('releases the lease when reading a cold payload fails during pin', async () => {
-        const harness = await makeHarness({ localCold: new Map() })
-        harness.cold.readRemote.mockRejectedValue(new Error('cold offline'))
+    it('releases the lease when resolving blobs fails during pin', async () => {
+        const harness = await makeHarness()
+        harness.resolveBlobs.mockRejectedValue(new Error('blobs offline'))
         const acquireRevision = vi.spyOn(harness.store, 'acquireRevision')
 
-        await expect(harness.adapter.pin(harness.imported.revision)).rejects.toThrow('cold offline')
+        await expect(harness.adapter.pin(harness.imported.revision)).rejects.toThrow('blobs offline')
         const lease = await acquireRevision.mock.results[0].value
         await expect(lease.readRoot()).rejects.toThrow('released')
         expect(harness.writeItem).not.toHaveBeenCalled()
     })
 
     it('preserves the pin error when lease cleanup also fails', async () => {
-        const harness = await makeHarness({ localCold: new Map() })
-        harness.cold.readRemote.mockRejectedValue(new Error('cold offline'))
+        const harness = await makeHarness()
+        harness.resolveBlobs.mockRejectedValue(new Error('blobs offline'))
         const acquireLease = harness.store.acquireRevision.bind(harness.store)
         const release = vi.fn(async () => {
             throw new Error('release unavailable')
@@ -974,7 +864,7 @@ describe('OfficialAccountSnapshotAdapter publication', () => {
         })
 
         await expect(harness.adapter.pin(harness.imported.revision)).rejects.toThrow(
-            'cold offline',
+            'blobs offline',
         )
 
         expect(release).toHaveBeenCalledTimes(2)
@@ -1056,7 +946,11 @@ describe('OfficialAccountSnapshotAdapter pull', () => {
         expect(result.kind).toBe('activated')
         expect(harness.prepareCandidate).toHaveBeenCalledTimes(1)
         expect(replace).toHaveBeenCalledTimes(1)
-        expect(replace).toHaveBeenCalledWith(prepared, harness.imported.revision)
+        const activated = replace.mock.calls[0][0] as any
+        expect(replace.mock.calls[0][1]).toBe(harness.imported.revision)
+        expect(activated.username).toBe('Prepared remote')
+        expect(activated.characters[0].coldStoragedChats).toBeUndefined()
+        expect(activated.characters[0].chats.at(-1).message).toEqual([{ data: 'remote message' }])
         expect((await harness.store.readRoot()).value.username).toBe('Prepared remote')
     })
 
@@ -1153,7 +1047,7 @@ describe('OfficialAccountSnapshotAdapter pull', () => {
         }
     })
 
-    it('activates without probing account assets or cold payloads', async () => {
+    it('activates without probing account assets and keeps a degraded cold record', async () => {
         const remote = makeDatabase() as any
         remote.characters[0].additionalAssets = [['legacy', 'assets\\windows.gif', 'gif']]
         const bytes = encodeRisuSaveLegacy(remote, 'compression')
@@ -1169,7 +1063,11 @@ describe('OfficialAccountSnapshotAdapter pull', () => {
         expect(result.kind).toBe('activated')
         expect(replace).toHaveBeenCalledTimes(1)
         expect(harness.readItem.mock.calls.map(([key]) => key)).toEqual([databaseKey])
-        expect(harness.cold.readRemote).not.toHaveBeenCalled()
+        expect(harness.cold.readRemote.mock.calls.map(([key]) => key)).toEqual(['cold-message'])
+        const activated = replace.mock.calls[0][0] as any
+        expect(activated.characters[0].coldStoragedChats).toBeUndefined()
+        expect(activated.characters[0].chats.at(-1).message[0].data)
+            .toBe(`${coldStorageHeader}cold-message`)
     })
 
     it('checks abort immediately before the single replacement', async () => {
@@ -1213,11 +1111,7 @@ describe('OfficialAccountSnapshotAdapter pull', () => {
                     : { kind: 'value', bytes: Uint8Array.of(1) }),
                 writeItem: vi.fn(),
             },
-            cold: {
-                readLocal: vi.fn(async () => null),
-                readRemote: vi.fn(async () => null),
-                writeRemote: vi.fn(),
-            },
+            cold: { readRemote: vi.fn(async () => null) },
             prepareCandidate: async (value) => {
                 if (!raced) {
                     raced = true

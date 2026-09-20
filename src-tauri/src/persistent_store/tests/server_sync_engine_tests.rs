@@ -2,7 +2,7 @@ use super::super::server_sync_engine::{CycleOptions, CycleResult};
 use super::*;
 use crate::server_sync::client::ServerConfig;
 use risunest_sync_server::{http, store::Store};
-use std::fs::OpenOptions;
+use risunest_sync_wire::{ChangeSet, Domain, ScopeFence};
 #[path = "server_sync_initial_tests.rs"]
 mod initial;
 #[path = "server_sync_matrix_tests.rs"]
@@ -10,6 +10,8 @@ mod matrix;
 mod residency;
 #[path = "server_sync_retained_fixture_tests.rs"]
 mod retained_fixture;
+#[path = "server_sync_section_tests.rs"]
+mod section;
 #[path = "server_sync_semantic_tests.rs"]
 mod semantic;
 
@@ -50,11 +52,6 @@ fn prepared() -> (tempfile::TempDir, PersistentStore) {
         compatibility_hash: "a".repeat(64),
     })
     .unwrap();
-    let cold = serde_json::to_string(&ColdPayloadAuthorityState::V2 {
-        migration_id: "synthetic".into(),
-        compatibility_hash: "b".repeat(64),
-    })
-    .unwrap();
     store
         .connection
         .execute(
@@ -62,7 +59,6 @@ fn prepared() -> (tempfile::TempDir, PersistentStore) {
             params![generation, assets],
         )
         .unwrap();
-    store.connection.execute("INSERT INTO cold_payload_authority(generation,value) VALUES(?1,?2) ON CONFLICT(generation) DO UPDATE SET value=excluded.value",params![generation,cold]).unwrap();
     (directory, store)
 }
 fn settle(store: &mut PersistentStore) -> CycleResult {
@@ -75,6 +71,94 @@ fn settle(store: &mut PersistentStore) -> CycleResult {
     }
     panic!("Server operation did not settle")
 }
+
+#[test]
+fn expired_server_operation_history_reproposes_without_losing_dirty_records() {
+    let server_dir = tempfile::tempdir().unwrap();
+    let server = Arc::new(Store::init(server_dir.path()).unwrap());
+    let credential = server.add_device().unwrap();
+    let server_device = server
+        .authenticate(&credential.library_id, &credential.token)
+        .unwrap();
+    let staged = server
+        .stage_changes(
+            &server_device,
+            &ChangeSet {
+                changes: vec![],
+                read_fences: vec![],
+                scope_fences: vec![ScopeFence {
+                    scope: "synthetic-expired-history".into(),
+                    expected_version: server.scope_version("synthetic-expired-history").unwrap(),
+                    clear: true,
+                }],
+            },
+        )
+        .unwrap();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let listener = runtime
+        .block_on(tokio::net::TcpListener::bind("127.0.0.1:0"))
+        .unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let server_clone = server.clone();
+    let task = runtime.spawn(async move {
+        axum::serve(listener, http::router(server_clone))
+            .await
+            .unwrap();
+    });
+    let (_local_dir, mut local) = prepared();
+    local
+        .server_bind(&ServerConfig {
+            directory: None,
+            endpoint,
+            library_id: credential.library_id.clone(),
+            device_id: credential.device_id.clone(),
+            token: credential.token,
+        })
+        .unwrap();
+    local
+        .server_reserve(
+            &server.head().unwrap(),
+            staged.changes_digest,
+            staged.staged_changes_id,
+            local.revision().unwrap(),
+        )
+        .unwrap();
+    let dirty = local.server_status().unwrap().dirty_records;
+    let db = rusqlite::Connection::open(server_dir.path().join("metadata.sqlite")).unwrap();
+    db.execute(
+        "UPDATE devices SET watermark='1' WHERE id=?1",
+        [&credential.device_id],
+    )
+    .unwrap();
+
+    local
+        .server_prepare_cycle(&CycleOptions::default())
+        .unwrap();
+
+    assert!(local.server_pending().unwrap().is_none());
+    assert_eq!(local.server_status().unwrap().dirty_records, dirty);
+    assert!(!local.server_status().unwrap().registration_required);
+    let replacement = local
+        .server_reserve(
+            &server.head().unwrap(),
+            "b".repeat(64),
+            "replacement-stage".into(),
+            local.revision().unwrap(),
+        )
+        .unwrap();
+    assert_eq!(
+        replacement.device_operation_seq,
+        risunest_sync_wire::Sequence::from(2)
+    );
+    local.server_abandon_expired_operation().unwrap();
+    task.abort();
+    runtime.shutdown_timeout(Duration::from_secs(2));
+}
+
 #[test]
 fn two_native_replicas_seed_publish_pull_and_preserve_same_key_conflicts() {
     let directory = tempfile::tempdir().unwrap();
@@ -120,12 +204,34 @@ fn two_native_replicas_seed_publish_pull_and_preserve_same_key_conflicts() {
         "second replica: {:?}",
         second_result.conflicts
     );
+    // This profile holds no device section values, so only the library has
+    // published anything. Hypa still travels with the replica and reports what
+    // it applied; local plugin values stay out until the user opts in.
+    let published = server.head().unwrap();
+    assert_eq!(
+        published.section(Domain::Library).unwrap().changed_seq,
+        published.seq
+    );
+    for domain in [Domain::Hypa, Domain::LocalPlugins] {
+        assert_eq!(published.section(domain).unwrap().changed_seq.as_str(), "0");
+    }
+    assert_eq!(
+        server
+            .section_ack_floor(Domain::LocalPlugins)
+            .unwrap()
+            .as_str(),
+        "0"
+    );
+    for domain in [Domain::Library, Domain::Hypa] {
+        assert_ne!(server.section_ack_floor(domain).unwrap().as_str(), "0");
+    }
     assert_eq!(first.server_status().unwrap().dirty_records, 0);
     assert!(!first.server_status().unwrap().full_scan);
     let revision = first.revision().unwrap();
     first
         .commit(&WorkingSetCommit {
             plugin_storage: Some(vec![PluginStorageMutation::Set {
+                owner: "synthetic-plugin".to_owned(),
                 key: "synthetic-shared".into(),
                 value: json!({"text":"payload","unicode":"가🦀"}),
             }]),
@@ -133,12 +239,19 @@ fn two_native_replicas_seed_publish_pull_and_preserve_same_key_conflicts() {
         })
         .unwrap();
     assert_eq!(settle(&mut first).phase, "idle");
+    let items = Arc::new(super::super::server_sync_engine::CycleItemCounter::default());
     let super::super::server_sync_engine::Preparation::Ready(mut ready) = second
-        .server_prepare_cycle(&CycleOptions::default())
+        .server_prepare_cycle(&CycleOptions {
+            cycle_items: Some(items.clone()),
+            ..Default::default()
+        })
         .unwrap()
     else {
         panic!("expected prepared remote update")
     };
+    // The pulled record is counted while it is applied, so the UI can show n/N.
+    assert_eq!(items.total.load(std::sync::atomic::Ordering::Relaxed), 1);
+    assert_eq!(items.done.load(std::sync::atomic::Ordering::Relaxed), 1);
     let previous_revision = second.revision().unwrap();
     second.connection.execute_batch("CREATE TRIGGER synthetic_server_activation_failure BEFORE UPDATE ON server_sync_state BEGIN SELECT RAISE(ABORT,'synthetic'); END;").unwrap();
     assert!(second.server_activate_cycle(&mut ready).is_err());
@@ -162,6 +275,7 @@ fn two_native_replicas_seed_publish_pull_and_preserve_same_key_conflicts() {
         store
             .commit(&WorkingSetCommit {
                 plugin_storage: Some(vec![PluginStorageMutation::Set {
+                    owner: "synthetic-plugin".to_owned(),
                     key: "synthetic-shared".into(),
                     value: json!(value),
                 }]),
@@ -187,7 +301,9 @@ fn two_native_replicas_seed_publish_pull_and_preserve_same_key_conflicts() {
     let client = crate::server_sync::client::ServerClient::new(config).unwrap();
     let observed = server.head().unwrap();
     for collected in [false, true] {
-        let checkpoint = server.create_checkpoint(&device).unwrap();
+        let checkpoint = server
+            .create_checkpoint(&device, &[risunest_sync_wire::Domain::Library])
+            .unwrap();
         let db = Connection::open(directory.path().join("metadata.sqlite")).unwrap();
         if collected {
             db.execute(
@@ -217,7 +333,12 @@ fn two_native_replicas_seed_publish_pull_and_preserve_same_key_conflicts() {
             .unwrap();
         let dirty = second.server_status().unwrap().dirty_records;
         assert_eq!(
-            crate::server_sync::remote::refresh(&mut second.connection, &client, &observed)
+            crate::server_sync::remote::refresh(
+                &mut second.connection,
+                &client,
+                &observed,
+                &[Domain::Library],
+            )
                 .unwrap(),
             observed
         );
@@ -256,49 +377,41 @@ fn two_native_replicas_seed_publish_pull_and_preserve_same_key_conflicts() {
         .collect::<std::io::Result<Vec<_>>>()
         .unwrap();
     assert_eq!(backups.len(), 1);
-    for name in ["local.risunest", "remote.risunest", "complete.json"] {
-        assert!(backups[0].path().join(name).is_file());
-    }
-    for name in ["local.risunest", "remote.risunest"] {
-        let archive = crate::portable_backup::VerifiedArchive::open(
-            std::fs::File::open(backups[0].path().join(name)).unwrap(),
-            &backups[0].path(),
-            &crate::local_backup::NeverCancelled,
-        )
-        .unwrap();
-        assert!(archive.manifest.library_included);
-        assert!(!archive.manifest.device_included);
-        assert!(!archive.manifest.repair_required);
-        archive
-            .validate_library(&crate::local_backup::NeverCancelled)
-            .unwrap();
-        let scratch = tempfile::tempdir().unwrap();
-        let mut restored = PersistentStore::open(scratch.path()).unwrap();
-        let stage = restored
-            .stage_portable_records(&archive.db, &crate::local_backup::NeverCancelled)
-            .unwrap();
-        let prepared = restored
-            .prepare_replace_commit(&stage.staging_id, Some(0))
-            .unwrap();
-        let snapshot = prepared;
-        restored.finish_prepared_replace(snapshot).unwrap();
-        assert_eq!(restored.revision().unwrap(), 1);
-    }
-    let listed = crate::server_sync::backups::list(&second.repository_root).unwrap();
+    let reference = &backups[0];
+    assert!(reference.path().join("index.sqlite").is_file());
+    assert!(reference.path().join("complete.json").is_file());
+    assert!(!reference.path().join("local.risunest").exists());
+    assert!(!reference.path().join("remote.risunest").exists());
+    let reference_id = reference.file_name().into_string().unwrap();
+    let reference_index = crate::server_sync::backups::references::open(
+        &second.repository_root, &reference_id, &|| Ok(())).unwrap();
+    let reference_sides: i64 = reference_index.query_row(
+        "SELECT count(DISTINCT side) FROM records", [], |r| r.get(0)).unwrap();
+    assert_eq!(reference_sides, 2);
+    let listed = crate::server_sync::backups::list(&second.repository_root, None)
+        .unwrap()
+        .items;
     assert_eq!(listed.len(), 1);
     let source = crate::server_sync::backups::source(
         &second.repository_root,
         &listed[0].id,
         crate::server_sync::backups::Side::Remote,
-        || false,
+        &|| Ok(()),
     )
     .unwrap();
-    assert!(Path::new(&source).is_file());
+    assert_eq!(source.id(), listed[0].id);
+    assert_eq!(source.side(), crate::server_sync::backups::Side::Remote);
+    crate::server_sync::backups::validate_reference_source(
+        &second.repository_root,
+        &source,
+        &|| Ok(()),
+    )
+    .unwrap();
     assert!(crate::server_sync::backups::source(
         &second.repository_root,
         "../outside",
         crate::server_sync::backups::Side::Local,
-        || false
+        &|| Ok(())
     )
     .is_err());
     assert_eq!(
@@ -306,31 +419,11 @@ fn two_native_replicas_seed_publish_pull_and_preserve_same_key_conflicts() {
             &second.repository_root,
             &listed[0].id,
             crate::server_sync::backups::Side::Local,
-            || true
+            &|| Err(crate::server_sync::SyncError::new("cancelled", 409))
         )
         .unwrap_err()
         .code,
         "cancelled"
-    );
-    {
-        use std::io::Write;
-        OpenOptions::new()
-            .append(true)
-            .open(&source)
-            .unwrap()
-            .write_all(b"synthetic corruption")
-            .unwrap();
-    }
-    assert_eq!(
-        crate::server_sync::backups::source(
-            &second.repository_root,
-            &listed[0].id,
-            crate::server_sync::backups::Side::Remote,
-            || false
-        )
-        .unwrap_err()
-        .code,
-        "backup-hash-mismatch"
     );
     use super::super::server_sync_engine::Resolution;
     for (index, resolution) in [Resolution::KeepLocal, Resolution::KeepRemote]
@@ -342,8 +435,9 @@ fn two_native_replicas_seed_publish_pull_and_preserve_same_key_conflicts() {
         first
             .commit(&WorkingSetCommit {
                 plugin_storage: Some(vec![
-                    PluginStorageMutation::Clear,
+                    PluginStorageMutation::Clear { owner: "synthetic-plugin".to_owned() },
                     PluginStorageMutation::Set {
+                        owner: "synthetic-plugin".to_owned(),
                         key: local_key.clone(),
                         value: json!("local new"),
                     },
@@ -354,6 +448,7 @@ fn two_native_replicas_seed_publish_pull_and_preserve_same_key_conflicts() {
         second
             .commit(&WorkingSetCommit {
                 plugin_storage: Some(vec![PluginStorageMutation::Set {
+                    owner: "synthetic-plugin".to_owned(),
                     key: remote_key.clone(),
                     value: json!("remote new"),
                 }]),
@@ -397,6 +492,7 @@ fn two_native_replicas_seed_publish_pull_and_preserve_same_key_conflicts() {
     first
         .commit(&WorkingSetCommit {
             plugin_storage: Some(vec![PluginStorageMutation::Set {
+                owner: "synthetic-plugin".to_owned(),
                 key: "offline-after-remote-clear".into(),
                 value: json!("pending"),
             }]),
@@ -405,7 +501,7 @@ fn two_native_replicas_seed_publish_pull_and_preserve_same_key_conflicts() {
         .unwrap();
     second
         .commit(&WorkingSetCommit {
-            plugin_storage: Some(vec![PluginStorageMutation::Clear]),
+            plugin_storage: Some(vec![PluginStorageMutation::Clear { owner: "synthetic-plugin".to_owned() }]),
             ..empty_working_set_commit(second.revision().unwrap())
         })
         .unwrap();
@@ -427,7 +523,7 @@ fn two_native_replicas_seed_publish_pull_and_preserve_same_key_conflicts() {
     let before = server.scope_state("plugin-storage").unwrap();
     first
         .commit(&WorkingSetCommit {
-            plugin_storage: Some(vec![PluginStorageMutation::Clear]),
+            plugin_storage: Some(vec![PluginStorageMutation::Clear { owner: "synthetic-plugin".to_owned() }]),
             ..empty_working_set_commit(first.revision().unwrap())
         })
         .unwrap();

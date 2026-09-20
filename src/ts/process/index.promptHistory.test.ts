@@ -48,6 +48,9 @@ vi.mock('../parser/parser.svelte', () => ({
 }))
 
 vi.mock('../storage/persistentDataRuntime.svelte', () => ({
+    assertPersistentMutationAllowed: vi.fn(),
+    getPersistentStorageAuthorityEpoch: () => 0,
+    getPersistentNavigationGeneration: () => 0,
     acknowledgeGenerationCompletion: vi.fn(async () => undefined),
     acquireCompleteConversation: testState.unexpectedNativeRuntimeAccess,
     acquireDestructiveReplacementFence: testState.unexpectedNativeRuntimeAccess,
@@ -102,7 +105,6 @@ vi.mock('./files/inlays', async () => (await import('./tests/sendChatTestHarness
 vi.mock('./models/modelString', async () => (await import('./tests/sendChatTestHarness')).modelStringModule())
 vi.mock('../sync/multiuser', async () => (await import('./tests/sendChatTestHarness')).multiuserModule())
 vi.mock('./inlayScreen', () => ({ runInlayScreen: vi.fn() }))
-vi.mock('./prereroll', async () => (await import('./tests/sendChatTestHarness')).prerollModule())
 vi.mock('./transformers', async () => (await import('./tests/sendChatTestHarness')).transformersModule({
     runImageEmbedding: vi.fn(async () => []),
 }))

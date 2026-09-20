@@ -2,36 +2,46 @@ import { mount, unmount } from "svelte";
 import { language } from "../../../lang";
 import PortableBackupSelection from "../../../lib/Setting/PortableBackupSelection.svelte";
 import type {
+  NativeArchiveInventory,
   NativePortableRestorePreview,
   NativePortableSelection,
 } from "../nativeFileJobs";
-import { sectionDatabaseName, validateDeviceSectionId } from "./scopes";
+import type { DataHealthResult } from "../dataHealth";
 import {
-  defaultDeviceExportChoices,
+  defaultNativePortableExportChoices,
+  defaultNativePortableRestoreChoices,
   type DeviceSectionChoice,
+  type NativePortableDeviceSection,
 } from "./selection";
 
-function localize(choice: DeviceSectionChoice): DeviceSectionChoice {
+function localize(
+  choice: DeviceSectionChoice<NativePortableDeviceSection>,
+): DeviceSectionChoice<NativePortableDeviceSection> {
   const text = language.portableBackup;
   return {
     ...choice,
     label:
-      choice.sectionId === "local-storage"
-        ? text.localStorage
-        : choice.sectionId === "localforage"
-          ? text.localData
-          : choice.sectionId === "device-settings"
-            ? text.settings
-            : `${text.database}: ${sectionDatabaseName(choice.sectionId).slice("safe_plugin_".length)}`,
+      choice.sectionId === "hypa"
+        ? language.risuNest.localData.hypaTitle
+        : choice.sectionId === "local-plugins"
+          ? language.risuNest.localData.pluginTitle
+          : text.settings,
   };
 }
 
 let selectionOpen = false;
+interface ArchiveDetail {
+  diagnosis?: DataHealthResult;
+  items?: NativeArchiveInventory;
+}
+
 function showSelection(
   mode: "export" | "restore",
-  choices: DeviceSectionChoice[],
+  choices: DeviceSectionChoice<NativePortableDeviceSection>[],
   libraryIncluded: boolean,
   repairRequired = false,
+  firstRun = false,
+  detail: ArchiveDetail = {},
 ): Promise<NativePortableSelection | null> {
   if (selectionOpen)
     return Promise.reject(new Error("A backup selection is already open"));
@@ -66,6 +76,9 @@ function showSelection(
           choices: choices.map(localize),
           libraryIncluded,
           repairRequired,
+          diagnosis: detail.diagnosis,
+          items: detail.items,
+          firstRun,
           onDone: (selection) => finish(selection),
           onError: (error) => finish(null, error),
         },
@@ -77,33 +90,21 @@ function showSelection(
 }
 
 export async function selectPortableBackupExport(): Promise<NativePortableSelection | null> {
-  const choices = await defaultDeviceExportChoices();
-  choices.push({
-    sectionId: "device-settings",
-    label: language.portableBackup.settings,
-    included: true,
-    selected: false,
-  });
+  const choices = defaultNativePortableExportChoices();
   return showSelection("export", choices, true);
 }
 
 export function selectPortableBackupRestore(
   preview: NativePortableRestorePreview,
+  options: { firstRun?: boolean } = {},
 ): Promise<NativePortableSelection | null> {
-  const unique = new Set<string>();
-  const choices = preview.deviceSections.map(
-    (sectionId): DeviceSectionChoice => {
-      validateDeviceSectionId(sectionId);
-      if (unique.has(sectionId))
-        throw new Error("Duplicate backup device section");
-      unique.add(sectionId);
-      return { sectionId, label: "", selected: true, included: true };
-    },
-  );
+  const choices = defaultNativePortableRestoreChoices(preview.deviceSections);
   return showSelection(
     "restore",
     choices,
     preview.libraryIncluded,
     preview.repairRequired,
+    options.firstRun ?? false,
+    { diagnosis: preview.diagnosis, items: preview.items },
   );
 }

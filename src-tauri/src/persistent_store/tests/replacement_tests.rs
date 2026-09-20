@@ -11,7 +11,7 @@ fn bounded_generation_replacement_rolls_back_deleted_and_partly_moved_batches() 
         let transaction = store.connection.transaction().unwrap();
         for index in 0..513 {
             transaction.execute(
-                "INSERT INTO plugin_storage(generation,storage_key,byte_size,ordinal,value) VALUES(?1,?2,1,?3,?4)",
+                "INSERT INTO plugin_storage(generation,owner,storage_key,byte_size,ordinal,value) VALUES(?1,'synthetic-plugin',?2,1,?3,?4)",
                 params![generation, format!("synthetic-{index:04}"), index, value],
             ).unwrap();
         }
@@ -142,7 +142,7 @@ fn prepared_replacement_commits_activation_marker_with_new_revision() {
     let committed = store
         .finish_prepared_replace_with_app_kv(
             authorized,
-            "syntheticRestoreMarker",
+            "external-restore-commit:synthetic",
             &json!({ "manifestId": "manifest-1", "revision": 2 }),
         )
         .expect("activate replacement and marker");
@@ -150,7 +150,7 @@ fn prepared_replacement_commits_activation_marker_with_new_revision() {
     assert_eq!(committed.revision, 2);
     assert_eq!(
         store
-            .get_app_kv("syntheticRestoreMarker")
+            .get_app_kv("external-restore-commit:synthetic")
             .expect("read activation marker"),
         Some(json!({ "manifestId": "manifest-1", "revision": 2 }))
     );
@@ -178,7 +178,7 @@ fn prepared_replacement_rolls_back_when_activation_marker_write_fails() {
         .execute_batch(
             "CREATE TRIGGER reject_restore_marker
              BEFORE INSERT ON app_kv
-             WHEN NEW.key = 'syntheticRestoreMarker'
+             WHEN NEW.key = 'external-restore-commit:synthetic'
              BEGIN
                  SELECT RAISE(ABORT, 'marker rejected');
              END;",
@@ -188,7 +188,7 @@ fn prepared_replacement_rolls_back_when_activation_marker_write_fails() {
     store
         .finish_prepared_replace_with_app_kv(
             authorized,
-            "syntheticRestoreMarker",
+            "external-restore-commit:synthetic",
             &json!({ "manifestId": "manifest-1", "revision": 2 }),
         )
         .expect_err("marker failure must abort the replacement transaction");
@@ -200,7 +200,7 @@ fn prepared_replacement_rolls_back_when_activation_marker_write_fails() {
     );
     assert_eq!(
         store
-            .get_app_kv("syntheticRestoreMarker")
+            .get_app_kv("external-restore-commit:synthetic")
             .expect("read absent activation marker"),
         None
     );
@@ -217,7 +217,7 @@ fn checkpoint_truncate_reports_busy_and_truncates_when_unblocked() {
         .connection
         .execute_batch("PRAGMA wal_autocheckpoint = 0; INSERT INTO app_kv VALUES ('first', '1');")
         .expect("create initial WAL frames");
-    let database_path = directory.path().join("persistent/persistent.db");
+    let database_path = directory.path().join("persistent/persistent.sqlite");
     let wal_path = PathBuf::from(format!("{}-wal", database_path.display()));
     store
         .checkpoint(CheckpointMode::Passive)

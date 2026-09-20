@@ -8,8 +8,9 @@
     import { PlusIcon, SmileIcon, TrashIcon, UserIcon, ActivityIcon, BookIcon, User, Braces, Volume2Icon, DownloadIcon, HardDriveUploadIcon, Share2Icon, ImageIcon, ImageOffIcon, ArrowUp, ArrowDown } from '@lucide/svelte'
     import Check from "../UI/GUI/CheckInput.svelte";
     import { addCharEmotion, addingEmotion, getCharImage, rmCharEmotion, selectCharImg, makeGroupImage, removeChar, changeCharImage } from "../../ts/characters";
+    import { archiveCharacterWithConfirmation, archiveIsAvailable } from "../../ts/storage/characterArchive";
     import LoreBook from "./LoreBook/LoreBookSetting.svelte";
-    import { alertNormal, alertTOS, showHypaV2Alert } from "../../ts/alert";
+    import { alertNormal, alertRisuServiceTOS, showHypaV2Alert } from "../../ts/alert";
     import BarIcon from "./BarIcon.svelte";
     import { findCharacterbyId, getAuthorNoteDefaultText, selectMultipleFile, selectSingleFile } from "../../ts/util";
     import Help from "../Others/Help.svelte";
@@ -726,7 +727,7 @@
     && DBState.db.characters[$selectedCharID].license !== 'CC BY-SA 4.0'
     }
         <Button size="lg" onclick={async () => {
-            if(await alertTOS()){
+            if(await alertRisuServiceTOS()){
                 $ShowRealmFrameStore = 'character'
             }
         }} className="mt-2">
@@ -746,6 +747,12 @@
         <Button size="sm" onclick={async () => {
             const res = await exportChar($selectedCharID)
         }} className="mt-2">{language.exportCharacter}</Button>
+    {/if}
+
+    {#if archiveIsAvailable() && DBState.db.characters[$selectedCharID].type !== 'group'}
+        <Button onclick={async () => {
+            await archiveCharacterWithConfirmation(DBState.db.characters[$selectedCharID].chaId)
+        }} className="mt-2" size="sm">{language.risuNest.archive.action}</Button>
     {/if}
 
     <Button onclick={async () => {

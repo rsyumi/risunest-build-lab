@@ -1,3 +1,4 @@
+import '../androidNativeControl'
 import type { NativeFileJobSource } from './nativeFileJobs'
 
 const SPOOL_EVENT = 'risu-android-spool-ready'
@@ -12,6 +13,7 @@ export interface AndroidSpoolReady {
     displayName: string
     bytes: number
     totalBytes?: number | null
+    importDestination?: 'character' | 'module' | null
 }
 
 export interface AndroidSpoolFailure {
@@ -82,6 +84,7 @@ export function isAndroidNativeContentSpool(source: AndroidSpoolReady): boolean 
         || displayName.endsWith('.jpeg')
         || displayName.endsWith('.png')
         || displayName.endsWith('.risum')
+        || displayName.endsWith('.lorebook')
 }
 
 export async function consumeAndroidSpoolBatch(
@@ -136,23 +139,28 @@ export interface AndroidSafDestinationEvent {
     publicationPrerequisitesComplete?: boolean
 }
 
+type NativeReply<T> = T | Promise<T>
+
 export interface AndroidSafJavascriptBridge {
     copyExport(
         requestId: string,
         sourcePath: string,
         suggestedName: string,
-    ): void
-    cancelExport?(requestId: string): boolean | void
-    cancelSource?(requestId: string): void
-    pickBackupSource?(requestId: string): void
-    pickContentSource?(requestId: string): void
-    pickLegacyBackupSource?(requestId: string): void
-    discardSource?(token: string): boolean
-    getActiveSourceRequestIds?(): string
-    getExportStatus?(): string | null
-    getExportSourceId?(): string | null
-    markExportPublicationReady?(requestId: string): boolean
-    acknowledgeExport?(requestId: string): boolean
+    ): NativeReply<void>
+    cancelExport?(requestId: string): NativeReply<boolean | void>
+    cancelSource?(requestId: string): NativeReply<void>
+    pickBackupSource?(requestId: string): NativeReply<void>
+    pickContentSource?(
+        requestId: string,
+        destination: 'character' | 'module',
+    ): NativeReply<void>
+    pickLegacyBackupSource?(requestId: string): NativeReply<void>
+    discardSource?(token: string): NativeReply<boolean>
+    getActiveSourceRequestIds?(): NativeReply<string>
+    getExportStatus?(): NativeReply<string | null>
+    getExportSourceId?(): NativeReply<string | null>
+    markExportPublicationReady?(requestId: string): NativeReply<boolean>
+    acknowledgeExport?(requestId: string): NativeReply<boolean>
 }
 
 export interface AndroidSafSourcePickerOptions {
@@ -160,6 +168,11 @@ export interface AndroidSafSourcePickerOptions {
     onProgress?(progress: AndroidSafProgress): void
     /** Reports the picked file's name and size before the spool token is returned. */
     onSource?(source: { displayName: string; bytes: number }): void
+}
+
+export interface AndroidSafContentSourcePickerOptions
+    extends AndroidSafSourcePickerOptions {
+    destination: 'character' | 'module'
 }
 
 export interface AndroidSafSourcePickerDependencies {
@@ -229,6 +242,7 @@ interface AndroidSafSourcePickerConfig {
     pickerUnavailableMessage: string
     acceptExtension: string | string[]
     cancelMessage: string
+    importDestination?: 'character' | 'module'
 }
 
 function pickAndroidSpoolSource(
@@ -244,6 +258,7 @@ function pickAndroidSpoolSource(
     const requestId = dependencies.createRequestId()
     return new Promise((resolve, reject) => {
         let settled = false
+        let receiving = false
         let aborted = false
         const cleanup = () => {
             options.signal?.removeEventListener('abort', onAbort)
@@ -265,16 +280,20 @@ function pickAndroidSpoolSource(
             if (options.onProgress) {
                 dependencies.removeEventListener(PROGRESS_EVENT, onProgress)
             }
-            dependencies.bridge.cancelSource?.(requestId)
+            try {
+                void Promise.resolve(dependencies.bridge.cancelSource?.(requestId)).catch(() => {})
+            } catch {}
+            // Cancellation is not a terminal receipt; retain the original source listener.
         }
-        const onEvent = (event: Event) => {
+        const onEvent = async (event: Event) => {
             const batch = (event as CustomEvent<AndroidSpoolBatch>).detail
-            if (!batch || batch.requestId !== requestId) return
+            if (!batch || batch.requestId !== requestId || settled || receiving) return
+            receiving = true
             if (aborted) {
                 let cleanupFailed = false
                 for (const source of batch.ready) {
                     if (
-                        dependencies.bridge.discardSource?.(source.token) !==
+                        await Promise.resolve().then(() => dependencies.bridge.discardSource?.(source.token)).catch(() => false) !==
                         true
                     ) {
                         cleanupFailed = true
@@ -323,7 +342,7 @@ function pickAndroidSpoolSource(
                     source.displayName.toLocaleLowerCase('en-US').endsWith(ext),
                 )
             ) {
-                dependencies.bridge.discardSource?.(source.token)
+                await Promise.resolve().then(() => dependencies.bridge.discardSource?.(source.token)).catch(() => false)
                 finish(() =>
                     reject(
                         new AndroidSafSourceError(
@@ -357,7 +376,10 @@ function pickAndroidSpoolSource(
         try {
             const pick = dependencies.bridge[config.pickMethod]
             if (!pick) throw new Error(config.pickerUnavailableMessage)
-            pick.call(dependencies.bridge, requestId)
+            const started = config.pickMethod === 'pickContentSource'
+                ? dependencies.bridge.pickContentSource?.(requestId, config.importDestination!)
+                : (pick as (requestId: string) => NativeReply<void>).call(dependencies.bridge, requestId)
+            void Promise.resolve(started).catch((error) => finish(() => reject(error)))
         } catch (error) {
             finish(() => reject(error))
         }
@@ -433,44 +455,44 @@ export function listenAndroidSafDestinationEvents(
     return () => dependencies.removeEventListener(DESTINATION_EVENT, onDestination)
 }
 
-export function acknowledgeAndroidSafExport(
+export async function acknowledgeAndroidSafExport(
     requestId: string,
     bridge: AndroidSafJavascriptBridge = productionBridge(),
-): boolean {
-    return bridge.acknowledgeExport?.(requestId) === true
+): Promise<boolean> {
+    return await bridge.acknowledgeExport?.(requestId) === true
 }
 
-export function markAndroidSafExportPublicationReady(
+export async function markAndroidSafExportPublicationReady(
     requestId: string,
     bridge: AndroidSafJavascriptBridge = productionBridge(),
-): boolean {
-    return bridge.markExportPublicationReady?.(requestId) === true
+): Promise<boolean> {
+    return await bridge.markExportPublicationReady?.(requestId) === true
 }
 
-export function getAndroidSafExportStatus(
+export async function getAndroidSafExportStatus(
     bridge: AndroidSafJavascriptBridge = productionBridge(),
-): string | null {
-    return bridge.getExportStatus?.() ?? null
+): Promise<string | null> {
+    return await bridge.getExportStatus?.() ?? null
 }
 
-export function getAndroidSafExportSourceId(
+export async function getAndroidSafExportSourceId(
     bridge: AndroidSafJavascriptBridge | undefined = (window as Window & {
         RisuSafBridge?: AndroidSafJavascriptBridge
     }).RisuSafBridge,
-): string | null {
-    if (bridge?.getExportStatus?.() != null) return null
-    const exportId = bridge?.getExportSourceId?.()
+): Promise<string | null> {
+    if (await bridge?.getExportStatus?.() != null) return null
+    const exportId = await bridge?.getExportSourceId?.()
     return typeof exportId === 'string'
         && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(exportId)
         ? exportId
         : null
 }
 
-export function discardAndroidSafSource(
+export async function discardAndroidSafSource(
     token: string,
     bridge: AndroidSafJavascriptBridge = productionBridge(),
-): boolean {
-    return bridge.discardSource?.(token) === true
+): Promise<boolean> {
+    return await bridge.discardSource?.(token) === true
 }
 
 export function copyNativeExportToAndroidSaf(
@@ -484,6 +506,7 @@ export function copyNativeExportToAndroidSaf(
     activeDestinationRequestIds.add(requestId)
     return new Promise((resolve, reject) => {
         let settled = false
+        let receiving = false
         const cleanup = () => {
             request.signal?.removeEventListener('abort', onAbort)
             dependencies.removeEventListener(DESTINATION_EVENT, onEvent)
@@ -499,13 +522,26 @@ export function copyNativeExportToAndroidSaf(
             callback()
         }
         const onAbort = () => {
-            dependencies.bridge.cancelExport?.(requestId)
+            try {
+                void Promise.resolve(dependencies.bridge.cancelExport?.(requestId)).catch(() => {})
+            } catch {}
+            // Keep the source owned until this copy reports its terminal outcome.
         }
-        const onEvent = (event: Event) => {
+        const onEvent = async (event: Event) => {
             const detail = (event as CustomEvent<AndroidSafDestinationEvent>).detail
-            if (!detail || detail.requestId !== requestId) return
-            if (!request.deferAcknowledgement) {
-                dependencies.bridge.acknowledgeExport?.(requestId)
+            if (!detail || detail.requestId !== requestId || settled || receiving) return
+            receiving = true
+            if (!request.deferAcknowledgement && dependencies.bridge.acknowledgeExport) {
+                const acknowledged = await Promise.resolve()
+                    .then(() => dependencies.bridge.acknowledgeExport!(requestId))
+                    .catch(() => false)
+                if (!acknowledged && detail.state === 'succeeded') {
+                    finish(() => reject(new AndroidSafDestinationError(
+                        requestId, 'acknowledgement-failed', detail.warningCodes,
+                        'Android SAF publication completed but its receipt could not be acknowledged',
+                    )))
+                    return
+                }
             }
             if (detail.state === 'succeeded' && typeof detail.bytes === 'number') {
                 finish(() => resolve({
@@ -541,11 +577,12 @@ export function copyNativeExportToAndroidSaf(
         }
         request.signal?.addEventListener('abort', onAbort, { once: true })
         try {
-            dependencies.bridge.copyExport(
+            const started = dependencies.bridge.copyExport(
                 requestId,
                 request.sourcePath,
                 request.suggestedName,
             )
+            void Promise.resolve(started).catch((error) => finish(() => reject(error)))
         }
         catch (error) {
             finish(() => reject(error))
@@ -554,7 +591,7 @@ export function copyNativeExportToAndroidSaf(
 }
 
 export function pickAndroidContentSource(
-    options: AndroidSafSourcePickerOptions = {},
+    options: AndroidSafContentSourcePickerOptions,
     dependencies: AndroidSafSourcePickerDependencies = productionDependencies,
 ): Promise<NativeFileJobSource | null> {
     return pickAndroidSpoolSource(
@@ -572,6 +609,7 @@ export function pickAndroidContentSource(
                 '.lorebook',
             ],
             cancelMessage: 'Android content selection was cancelled',
+            importDestination: options.destination,
         },
         options,
         dependencies,

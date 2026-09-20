@@ -5,7 +5,8 @@ type MsgType =
     | 'CALLBACK_RETURN'
     | 'RESPONSE'
     | 'RELEASE_INSTANCE'
-    | 'ABORT_SIGNAL';
+    | 'ABORT_SIGNAL'
+    | 'SCRIPT_SETTLED';
 
 interface RpcMessage {
     type: MsgType;
@@ -115,7 +116,66 @@ await (async function() {
             }
             return val.value;
         }
+        if (val && typeof val === 'object' && val.__type === 'IFRAME_OBJECT_STREAM') {
+            return assembleIframeObjectStream(val.value, val.select);
+        }
         return val;
+    }
+
+    async function assembleIframeObjectStream(stream, select) {
+        const result = {};
+        const reader = stream.getReader();
+        try {
+            while (true) {
+                const next = await reader.read();
+                if (next.done) {
+                    if (select === 'character') return result.characters[0];
+                    if (select === 'conversation') return result.characters[0].chats[0];
+                    return result;
+                }
+                const chunk = next.value;
+                if (!chunk || typeof chunk.key !== 'string') {
+                    throw new Error('Invalid iframe object stream chunk');
+                }
+                if (chunk.type === 'set') {
+                    Object.defineProperty(result, chunk.key, {
+                        value: chunk.value, enumerable: true, configurable: true, writable: true
+                    });
+                } else if (chunk.type === 'arrayStart') {
+                    Object.defineProperty(result, chunk.key, {
+                        value: [], enumerable: true, configurable: true, writable: true
+                    });
+                } else if (chunk.type === 'arrayPush') {
+                    if (!Array.isArray(result[chunk.key])) throw new Error('Invalid iframe array chunk');
+                    result[chunk.key].push(chunk.value);
+                } else if (chunk.type === 'characterStart') {
+                    result.characters.push({ ...chunk.value, chats: [] });
+                } else if (chunk.type === 'conversationStart') {
+                    result.characters.at(-1).chats.push({ ...chunk.value, message: [] });
+                } else if (chunk.type === 'message') {
+                    result.characters.at(-1).chats.at(-1).message.push(chunk.value);
+                } else if (chunk.type === 'recordStart') {
+                    Object.defineProperty(result, chunk.key, {
+                        value: {}, enumerable: true, configurable: true, writable: true
+                    });
+                } else if (chunk.type === 'recordSet') {
+                    const record = result[chunk.key];
+                    if (!record || Object.getPrototypeOf(record) !== Object.prototype || typeof chunk.entryKey !== 'string') {
+                        throw new Error('Invalid iframe record chunk');
+                    }
+                    Object.defineProperty(record, chunk.entryKey, {
+                        value: chunk.value, enumerable: true, configurable: true, writable: true
+                    });
+                } else {
+                    throw new Error('Unknown iframe object stream chunk');
+                }
+            }
+        } catch (error) {
+            await reader.cancel().catch(() => {});
+            throw error;
+        } finally {
+            reader.releaseLock();
+        }
     }
 
     function collectTransferables(obj, transferables = []) {
@@ -243,7 +303,7 @@ await (async function() {
         }
 
         if (obj.__type === 'STREAM_PORT') return reconstruct(obj);
-        if (obj.constructor === Object) {
+        if (Object.prototype.toString.call(obj) === '[object Object]') {
             const out = {};
             for (const k of Object.keys(obj)) out[k] = reconstruct(obj[k]);
             return out;
@@ -493,6 +553,13 @@ export class SandboxHost {
 
     private pendingCallbacks = new Map<string, { resolve: Function, reject: Function }>();
 
+    // The guest reports when its top level script has settled. Until the calls
+    // it made before that have answered, the script is not finished.
+    private scriptSettledListener: (() => void) | null = null;
+    private scriptSettledReported = false;
+    private guestReportedSettled = false;
+    private pendingHostCalls = 0;
+
     // Teardown hooks for streams bridged over MessagePort. MessagePort has no
     // 'close' event in stable browsers, so without these the other side of an
     // active stream would wait forever once the iframe is gone.
@@ -500,6 +567,20 @@ export class SandboxHost {
 
     constructor(apiFactory: any) {
         this.apiFactory = apiFactory;
+    }
+
+    /** Called once, after the guest script settles and its calls have answered. */
+    public onScriptSettled(listener: () => void) {
+        this.scriptSettledListener = listener;
+    }
+
+    private reportScriptSettled() {
+        if (this.scriptSettledReported) return;
+        if (!this.guestReportedSettled || this.pendingHostCalls > 0) return;
+        this.scriptSettledReported = true;
+        const listener = this.scriptSettledListener;
+        this.scriptSettledListener = null;
+        listener?.();
     }
 
     public executeInIframe(code: string): Promise<any> {
@@ -881,6 +962,12 @@ export class SandboxHost {
                 return;
             }
 
+            if (data.type === 'SCRIPT_SETTLED') {
+                this.guestReportedSettled = true;
+                this.reportScriptSettled();
+                return;
+            }
+
 
             if (data.type === 'CALL_ROOT' || data.type === 'CALL_INSTANCE') {
                 const response: RpcMessage = { type: 'RESPONSE', reqId: data.reqId };
@@ -895,6 +982,7 @@ export class SandboxHost {
                     streamCleanups = [];
                 };
 
+                this.pendingHostCalls += 1;
                 try {
 
                     const args = this.deserializeArgs(data.args || [], usedAbortIds);
@@ -927,6 +1015,8 @@ export class SandboxHost {
                     response.error = `[Plugin API: ${method}] ` + (err?.message || String(err || "Host execution error"));
                 } finally {
                     for (const id of usedAbortIds) this.abortControllers.delete(id);
+                    this.pendingHostCalls -= 1;
+                    this.reportScriptSettled();
                 }
 
                 if (import.meta.env.DEV) {
@@ -971,9 +1061,12 @@ export class SandboxHost {
             (async () => {
                 ${GUEST_BRIDGE_SCRIPT}
                     
+                const settled = () => {
+                    try { parent.postMessage({ type: 'SCRIPT_SETTLED' }, '*'); } catch (_) {}
+                };
                 (async () => {
                     ${userCode}
-                })()
+                })().then(settled, settled)
             })();
             //# sourceURL=risu-plugin-v3/${encodeURIComponent(sourceLabel)}.js
         </script>

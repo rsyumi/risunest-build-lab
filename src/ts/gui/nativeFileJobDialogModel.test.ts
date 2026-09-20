@@ -124,6 +124,8 @@ describe('nativeFileJobDialogModel', () => {
             'assets=–',
             'inlays=–',
             'coldStorage=–',
+            'pocketMedia=–',
+            'skipped=–',
         ])
         expect(model.cancelVisible).toBe(true)
         expect(model.cancelEnabled).toBe(true)
@@ -342,6 +344,56 @@ describe('nativeFileJobDialogModel', () => {
         expect(complete.subtitle).toBe(copy.formatRisuAi)
     })
 
+    it('names the format after the reported job when the picker admitted it as a library backup', () => {
+        const counts = { entriesRead: 3, pocketMedia: 1, pocketMetadata: 1 }
+        const archive = buildNativeFileJobDialogModel(
+            running({
+                format: 'library-backup',
+                status: status({
+                    kind: 'restore-legacy-local-backup',
+                    detail: detail('reading-archive', {}, counts),
+                }),
+                observedStages: ['reading-archive'],
+            }),
+            null,
+            1_000,
+        )
+        expect(archive.title).toBe(copy.titleLocalBackup)
+        expect(archive.subtitle).toBe(copy.formatPocketRisu)
+        expect(archive.counters.map((counter) => counter.key)).toEqual([
+            'characters',
+            'presets',
+            'assets',
+            'inlays',
+            'coldStorage',
+            'pocketMedia',
+            'skipped',
+        ])
+        expect(stageIds(archive)).toContain('preparing-attachments:pending')
+
+        const portable = buildNativeFileJobDialogModel(
+            running({
+                format: 'library-backup',
+                status: status({ kind: 'restore-portable-backup' }),
+                observedStages: ['reading-database'],
+            }),
+            null,
+            1_000,
+        )
+        expect(portable.title).toBe(copy.titleBackup)
+        expect(portable.counters.map((counter) => counter.key)).toEqual([
+            'characters',
+            'presets',
+        ])
+
+        const unknown = buildNativeFileJobDialogModel(
+            running({ format: 'library-backup' }),
+            null,
+            1_000,
+        )
+        expect(unknown.title).toBe(copy.titleBackup)
+    })
+
     it('uses the RisuSave template and inserts optional stages only when observed', () => {
         const base = running({
             format: 'risu-save',
@@ -539,6 +591,8 @@ describe('nativeFileJobDialogModel', () => {
             'assets=4',
             'inlays=3',
             'coldStorage=2',
+            'pocketMedia=0',
+            'skipped=0',
         ])
         expect(model.warnings).toEqual([
             copy.warningCleanupFailed,
@@ -694,6 +748,137 @@ describe('nativeFileJobDialogModel', () => {
             expect(row.label).not.toContain(row.stage)
             expect(row.label.length).toBeGreaterThan(0)
         }
+    })
+
+    it('shows an export as its reported phases with export wording', () => {
+        const model = buildNativeFileJobDialogModel(
+            running({
+                kind: 'export',
+                format: 'library-backup',
+                status: status({
+                    kind: 'export-portable-backup',
+                    phase: 'writing-export',
+                    progress: { completedBytes: 512, totalBytes: 2048, completedItems: 0 },
+                }),
+                observedStages: ['preparing-export', 'writing-export'],
+            }),
+            null,
+            5_000,
+        )
+        expect(model.open).toBe(true)
+        expect(model.title).toBe(copy.titleExportBackup)
+        expect(model.subtitle).toBe('')
+        expect(stageIds(model)).toEqual([
+            'preparing-export:done',
+            'writing-export:active',
+            'finalizing-export:pending',
+        ])
+        expect(model.overallPercent).toBe(25)
+        expect(model.counters).toEqual([])
+        expect(model.cancelVisible).toBe(true)
+        expect(model.cancelEnabled).toBe(true)
+        expect(model.cancelLabel).toBe(copy.cancelExport)
+    })
+
+    it('names the export after the file it writes before the first status arrives', () => {
+        const risuSave = buildNativeFileJobDialogModel(
+            running({ kind: 'export', format: 'risu-save' }),
+            null,
+            0,
+        )
+        expect(risuSave.title).toBe(copy.titleExportRisuSave)
+        expect(stageIds(risuSave)).toEqual([
+            'preparing-export:pending',
+            'writing-export:pending',
+            'finalizing-export:pending',
+        ])
+        const compatible = buildNativeFileJobDialogModel(
+            running({
+                kind: 'export',
+                format: 'library-backup',
+                status: status({ kind: 'export-compatible-local-backup', phase: 'reading-source' }),
+                observedStages: ['preparing-export'],
+            }),
+            null,
+            0,
+        )
+        expect(compatible.title).toBe(copy.titleExportCompatible)
+    })
+
+    it('adds the save-to-location step only when a mobile export reports it', () => {
+        const model = buildNativeFileJobDialogModel(
+            running({
+                kind: 'export',
+                format: 'library-backup',
+                status: status({ kind: 'export-portable-backup', phase: 'publishing-destination' }),
+                observedStages: ['preparing-export', 'writing-export', 'finalizing-export', 'publishing-destination'],
+            }),
+            null,
+            0,
+        )
+        expect(model.stages.map((row) => row.stage)).toEqual([
+            'preparing-export',
+            'writing-export',
+            'publishing-destination',
+            'finalizing-export',
+        ])
+        expect(model.stages.find((row) => row.stage === 'publishing-destination')?.state).toBe('active')
+    })
+
+    it('summarizes how an export ended with export wording', () => {
+        const succeeded = buildNativeFileJobDialogModel(
+            null,
+            outcome({
+                kind: 'export',
+                format: 'library-backup',
+                status: status({ kind: 'export-portable-backup', phase: 'complete', state: 'succeeded' }),
+                observedStages: ['preparing-export', 'writing-export', 'finalizing-export'],
+            }),
+            0,
+        )
+        expect(succeeded.title).toBe(copy.titleExportBackup)
+        expect(succeeded.terminal?.summary).toBe(copy.resultExportSucceeded)
+        expect(succeeded.terminal?.restarting).toBe(false)
+        expect(stageIds(succeeded)).toEqual([
+            'preparing-export:done',
+            'writing-export:done',
+            'finalizing-export:done',
+            'complete:done',
+        ])
+        expect(succeeded.closeVisible).toBe(true)
+        expect(succeeded.counters).toEqual([])
+
+        const cancelled = buildNativeFileJobDialogModel(
+            null,
+            outcome({ kind: 'export', format: 'risu-save', state: 'cancelled', observedStages: ['preparing-export'] }),
+            0,
+        )
+        expect(cancelled.terminal?.summary).toBe(copy.resultExportCancelled)
+
+        const failed = buildNativeFileJobDialogModel(
+            null,
+            outcome({
+                kind: 'export',
+                format: 'risu-save',
+                state: 'failed',
+                observedStages: ['preparing-export', 'writing-export'],
+                error: { code: 'store-error', message: 'disk full', recoveryRequired: false },
+            }),
+            0,
+        )
+        expect(failed.terminal?.summary).toBe(copy.resultExportFailed)
+        expect(failed.terminal?.reason).toBe(copy.reasonStoreError)
+        expect(failed.terminal?.summary).not.toContain('import')
+    })
+
+    it('keeps the rescue archive on its archive presentation', () => {
+        const model = buildNativeFileJobDialogModel(
+            running({ kind: 'export', format: 'raw-recovery', observedStages: ['reading-archive'] }),
+            null,
+            0,
+        )
+        expect(model.title).toBe(languageEnglish.risuNest.recovery.exportTitle)
+        expect(model.stages.map((row) => row.stage)).toEqual(['reading-archive'])
     })
 
     it('formats bytes and elapsed time', () => {

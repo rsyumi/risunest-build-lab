@@ -1,5 +1,9 @@
 import { pluginDevicePrefix } from "../../plugins/pluginDeviceStorage";
 import {
+  reloadAppUpdateSettings,
+  validateAppUpdateSettings,
+} from "../../update/settings";
+import {
   decodeCloneGraph,
   decodeUtf16,
   encodeCloneGraph,
@@ -34,6 +38,10 @@ export interface DeviceSectionInfo {
   recordCount: number;
   digest: string;
 }
+export interface DeviceRowRange {
+  startOrdinal: number;
+  endOrdinalExclusive: number;
+}
 export interface DeviceSpool {
   beginSection(
     sectionId: DeviceSectionId,
@@ -42,7 +50,7 @@ export interface DeviceSpool {
   appendRow(sectionId: DeviceSectionId, row: DeviceRow): Promise<void>;
   finishSection(sectionId: DeviceSectionId): Promise<DeviceSectionInfo>;
   sections(): Promise<DeviceSectionInfo[]>;
-  rows(sectionId: DeviceSectionId): AsyncIterable<DeviceRow>;
+  rows(sectionId: DeviceSectionId, range?: DeviceRowRange): AsyncIterable<DeviceRow>;
   putBinary(body: Blob | ArrayBuffer): Promise<string>;
   getBinary(reference: string, bytes: number): Promise<Uint8Array>;
 }
@@ -119,6 +127,8 @@ function requirePluginKey(encoded: string): string {
 }
 
 const settingsKey = "risuNestDeviceSettings";
+const updateSettingsKey = "risuNestUpdateSettings";
+const settingsKeys = [settingsKey, updateSettingsKey] as const;
 export function validateSettings(raw: unknown): Record<string, unknown> {
   if (typeof raw !== "string")
     throw new Error("Device settings must be a JSON string");
@@ -127,10 +137,12 @@ export function validateSettings(raw: unknown): Record<string, unknown> {
     throw new Error("Invalid device settings");
   const settings = value as Record<string, unknown>;
   if (
-    settings.schema !== "risunest.device-settings/v1" ||
+    settings.schema !== "risunest.device-settings/v2" ||
     !["normal", "low-spec"].includes(settings.performanceProfile as string) ||
     typeof settings.androidKeepAliveDuringGeneration !== "boolean" ||
-    typeof settings.nativeFileLogEnabled !== "boolean"
+    typeof settings.nativeFileLogEnabled !== "boolean" ||
+    !Array.isArray(settings.startupExclusions) ||
+    settings.startupExclusions.some((item) => typeof item !== "string")
   )
     throw new Error("Device settings schema or values are invalid");
   if (
@@ -141,11 +153,18 @@ export function validateSettings(raw: unknown): Record<string, unknown> {
           "performanceProfile",
           "androidKeepAliveDuringGeneration",
           "nativeFileLogEnabled",
+          "startupExclusions",
         ].includes(key),
     )
   )
     throw new Error("Unknown device setting");
   return settings;
+}
+
+function validateUpdateSettings(raw: unknown) {
+  if (typeof raw !== "string")
+    throw new Error("App update settings must be a JSON string");
+  return validateAppUpdateSettings(JSON.parse(raw));
 }
 
 export async function captureDeviceSection(
@@ -195,15 +214,18 @@ export async function captureDeviceSection(
       },
     });
   } else {
-    const setting =
-      sectionId === "device-settings"
-        ? environment.localStorage.getItem(settingsKey)
-        : null;
-    if (setting !== null) validateSettings(setting);
+    const settings = sectionId === "device-settings"
+      ? settingsKeys.map((key) => [key, environment.localStorage.getItem(key)] as const)
+      : [];
+    for (const [key, value] of settings) {
+      if (value === null) continue;
+      if (key === settingsKey) validateSettings(value);
+      else validateUpdateSettings(value);
+    }
     await spool.beginSection(sectionId, {
       profile: "risunest.device-section/v1",
       sectionId,
-      present: sectionId !== "device-settings" || setting !== null,
+      present: sectionId !== "device-settings" || settings.some(([, value]) => value !== null),
     });
     if (sectionId === "local-storage") {
       const keys = localKeys(environment.localStorage);
@@ -237,12 +259,11 @@ export async function captureDeviceSection(
         )
       )
         throw new Error("Device plugin storage changed during capture");
-    } else if (setting !== null) {
-      await append({
-        kind: "value",
-        key: encodeUtf16(settingsKey),
-        value: await encode(setting),
-      });
+    } else {
+      for (const [key, value] of settings) {
+        if (value === null) continue;
+        await append({ kind: "value", key: encodeUtf16(key), value: await encode(value) });
+      }
     }
   }
   checkpoint(environment);
@@ -304,15 +325,44 @@ export async function stageDeviceSection(
     const storeNames = new Set(
       database.present ? database.stores.map((store) => store.name) : [],
     );
+    const storeRanges = new Map<string, DeviceRowRange>();
+    let nextOrdinal = 0;
+    if (database.present) {
+      for (const store of database.stores) {
+        const endOrdinalExclusive = nextOrdinal + store.count;
+        if (!Number.isSafeInteger(endOrdinalExclusive))
+          throw new Error("Device database record count exceeds the supported range");
+        storeRanges.set(store.name, {
+          startOrdinal: nextOrdinal,
+          endOrdinalExclusive,
+        });
+        nextOrdinal = endOrdinalExclusive;
+      }
+    }
     let recordCount = 0;
+    let validationStoreIndex = 0;
     let estimatedBytes = 0;
     for await (const row of spool.rows(sectionId)) {
       checkpoint(environment);
-      if (row.kind !== "record" || !storeNames.has(decodeUtf16(row.storeName)))
+      const storeName = row.kind === "record" ? decodeUtf16(row.storeName) : "";
+      while (
+        database.present
+        && validationStoreIndex < database.stores.length
+        && recordCount >= storeRanges.get(
+          database.stores[validationStoreIndex].name,
+        )!.endOrdinalExclusive
+      ) validationStoreIndex++;
+      const expectedStore = database.present
+        ? database.stores[validationStoreIndex]
+        : undefined;
+      if (
+        row.kind !== "record"
+        || !storeNames.has(storeName)
+        || expectedStore?.name !== storeName
+      )
         throw new Error("Device record references an unknown store");
       validateCloneGraph(row.key);
       validateCloneGraph(row.value);
-      const storeName = decodeUtf16(row.storeName);
       storeCounts.set(storeName, (storeCounts.get(storeName) ?? 0) + 1);
       recordCount++;
       estimatedBytes += JSON.stringify(row).length * 2 + 1024;
@@ -350,7 +400,9 @@ export async function stageDeviceSection(
     const source = {
       metadata: database,
       async *records(storeName: string): AsyncIterable<PluginDatabaseRecord> {
-        for await (const row of spool.rows(sectionId)) {
+        const range = storeRanges.get(storeName);
+        if (!range) throw new Error("Database source requested an unknown store");
+        for await (const row of spool.rows(sectionId, range)) {
           if (row.kind !== "record")
             throw new Error("Invalid database record row");
           if (decodeUtf16(row.storeName) !== storeName) continue;
@@ -404,15 +456,17 @@ export async function stageDeviceSection(
     if (sectionId === "local-storage" && typeof value !== "string")
       throw new Error("Local storage values must be strings");
     if (sectionId === "device-settings") {
-      if (key !== settingsKey) throw new Error("Invalid device settings key");
-      validateSettings(value);
+      if (!settingsKeys.includes(key as typeof settingsKeys[number]))
+        throw new Error("Invalid device settings key");
+      if (key === settingsKey) validateSettings(value);
+      else validateUpdateSettings(value);
     }
     rowCount++;
   }
   if (
     rowCount !== info.recordCount ||
     (!metadata.present && rowCount !== 0) ||
-    (sectionId === "device-settings" && rowCount !== (metadata.present ? 1 : 0))
+    (sectionId === "device-settings" && (rowCount > settingsKeys.length || (metadata.present ? rowCount === 0 : rowCount !== 0)))
   )
     throw new Error("Device section row count disagrees with metadata");
   const currentKeys =
@@ -422,9 +476,7 @@ export async function stageDeviceSection(
         )
       : sectionId === "local-storage"
         ? localKeys(environment.localStorage)
-        : environment.localStorage.getItem(settingsKey) === null
-          ? []
-          : [settingsKey];
+        : settingsKeys.filter((key) => environment.localStorage.getItem(key) !== null);
   return {
     sectionId,
     deletionCount: currentKeys.filter((key) => !sourceKeys.has(key)).length,
@@ -437,7 +489,7 @@ export async function stageDeviceSection(
             )
           : sectionId === "local-storage"
             ? localKeys(environment.localStorage)
-            : [settingsKey];
+            : [...settingsKeys];
       for (const key of keys) {
         checkpoint(environment);
         if (sectionId === "localforage")
@@ -465,14 +517,18 @@ export async function stageDeviceSection(
             )
           : sectionId === "local-storage"
             ? localKeys(environment.localStorage)
-            : environment.localStorage.getItem(settingsKey) === null
-              ? []
-              : [settingsKey];
+            : settingsKeys.filter((key) => environment.localStorage.getItem(key) !== null);
       if (
         appliedKeys.length !== sourceKeys.size ||
         appliedKeys.some((key) => !sourceKeys.has(key))
       )
         throw new Error("Restored device key set differs from its source");
+      if (
+        sectionId === "device-settings" &&
+        sourceKeys.size > 0 &&
+        typeof localStorage !== "undefined" &&
+        environment.localStorage === localStorage
+      ) reloadAppUpdateSettings();
     },
     async cleanup() {},
   };

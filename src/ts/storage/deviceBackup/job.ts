@@ -1,3 +1,4 @@
+import { exportIOSFile, getIOSPublication, acknowledgeIOSPublication } from "../iosFiles";
 import {
   AndroidSafDestinationError,
   acknowledgeAndroidSafExport,
@@ -9,11 +10,11 @@ import {
   type AndroidSafJavascriptBridge,
 } from "../androidSafBridge";
 import type { NativeFileJobResult } from "../nativeFileJobs";
-import {
-  requestDeviceMaintenanceRestart,
-  type DeviceMaintenanceBootstrap,
-} from "./maintenance";
-import type { DeviceNativeInvoke } from "./nativeSpool";
+
+type DeviceNativeInvoke = <T = unknown>(
+  command: string,
+  args?: Record<string, unknown>,
+) => Promise<T>;
 
 export interface PortableJobStatus {
   jobId: string;
@@ -27,62 +28,15 @@ export interface PortableJobStatus {
     | "failed"
     | "cancelled";
   phase: string;
-  expectedRevision?: number;
-  deviceSessionId?: string;
   result?: NativeFileJobResult;
   error?: { code: string; message: string };
-}
-
-export interface PortableMaintenanceOwnership {
-  /** Revision flushed under the caller's operation ownership, before starting the native job. */
-  flushedRevision: number;
-  /** Throw if the initiating operation no longer owns the current runtime. */
-  assertHeld(): void;
-}
-
-/** Call from the portable job poll loop. A return of false means keep polling. */
-export async function handlePortableDeviceMaintenanceStatus(
-  status: PortableJobStatus,
-  ownership: PortableMaintenanceOwnership,
-  dependencies: { invoke: DeviceNativeInvoke; reload?: () => void },
-): Promise<false> {
-  if (
-    status.state !== "waitingForInput" ||
-    status.phase !== "awaiting-device-maintenance"
-  )
-    return false;
-  ownership.assertHeld();
-  if (
-    !status.deviceSessionId ||
-    (status.expectedRevision !== undefined &&
-      status.expectedRevision !== ownership.flushedRevision)
-  )
-    throw new Error(
-      "Portable backup maintenance ownership does not match the flushed runtime",
-    );
-  const bootstrap = await dependencies.invoke<DeviceMaintenanceBootstrap>(
-    "native_device_backup_bootstrap",
-  );
-  ownership.assertHeld();
-  if (
-    bootstrap.mode !== "maintenance" ||
-    bootstrap.session?.sessionId !== status.deviceSessionId ||
-    bootstrap.session.jobId !== status.jobId
-  )
-    throw new Error(
-      "Portable backup device session does not belong to this file job",
-    );
-  return requestDeviceMaintenanceRestart(
-    dependencies.invoke,
-    dependencies.reload,
-  );
 }
 
 const pendingKey = "risuNestPortableExportIntent";
 export interface PendingPortableExport {
   schema: "risunest.portable-export-intent/v1";
   jobId: string;
-  publication: "desktop" | "android-saf";
+  publication: "desktop" | "android-saf" | "ios-files";
   suggestedName?: string;
   phase: "waiting-native" | "publishing" | "published";
   requestId?: string;
@@ -104,9 +58,9 @@ function validateIntent(
     intent.schema !== "risunest.portable-export-intent/v1" ||
     typeof intent.jobId !== "string" ||
     !/^[A-Za-z0-9_-]{1,128}$/.test(intent.jobId) ||
-    !["desktop", "android-saf"].includes(intent.publication) ||
+    !["desktop", "android-saf", "ios-files"].includes(intent.publication) ||
     !["waiting-native", "publishing", "published"].includes(intent.phase) ||
-    (intent.publication === "android-saf" &&
+    (["android-saf", "ios-files"].includes(intent.publication) &&
       (typeof intent.suggestedName !== "string" ||
         !intent.suggestedName.endsWith(".risunest") ||
         intent.suggestedName.length > 255 ||
@@ -161,14 +115,20 @@ export function createPortableExportIntentStore(
 export function rememberPortableExport(
   jobId: string,
   destination:
-    { type: "desktopPath" } | { type: "androidSaf"; suggestedName: string },
+    | { type: "desktopPath" }
+    | { type: "androidSaf" | "iosFiles"; suggestedName: string },
   store: PortableExportIntentStore = createPortableExportIntentStore(),
 ): void {
   store.write({
     schema: "risunest.portable-export-intent/v1",
     jobId,
-    publication: destination.type === "androidSaf" ? "android-saf" : "desktop",
-    ...(destination.type === "androidSaf"
+    publication:
+      destination.type === "iosFiles"
+        ? "ios-files"
+        : destination.type === "androidSaf"
+          ? "android-saf"
+          : "desktop",
+    ...(destination.type !== "desktopPath"
       ? { suggestedName: destination.suggestedName }
       : {}),
     phase: "waiting-native",
@@ -199,8 +159,8 @@ export interface PortableExportResumeDependencies {
     intent: PendingPortableExport,
     result: NativeFileJobResult,
   ): Promise<AndroidSafDestinationEvent>;
-  acknowledgeAndroid(requestId: string): boolean;
-  androidAcknowledgementPending?(requestId: string): boolean;
+  acknowledgeAndroid(requestId: string): boolean | Promise<boolean>;
+  androidAcknowledgementPending?(requestId: string): boolean | Promise<boolean>;
   cleanupHandoff(path: string): Promise<void>;
   onStatus?(status: PortableJobStatus): void;
   onResult?(result: NativeFileJobResult): void | Promise<void>;
@@ -248,6 +208,36 @@ export async function resumePendingPortableExport(
         ...new Set([...result.warningCodes, ...intent.publicationWarningCodes]),
       ],
     };
+  if (intent.publication === "ios-files" && intent.phase !== "published") {
+    if (!result.handoffPath)
+      throw new PortableExportNeedsAttention(
+        "missing-ios-handoff",
+        intent.jobId,
+      );
+    const continuing = intent.phase === "publishing";
+    if (!continuing) {
+      intent = {
+        ...intent,
+        phase: "publishing",
+        requestId: crypto.randomUUID(),
+      };
+      dependencies.store.write(intent);
+    }
+    const publication = continuing
+      ? await getIOSPublication(intent.requestId!)
+      : await exportIOSFile({
+          sourcePath: result.handoffPath,
+          suggestedName: intent.suggestedName!,
+          requestId: intent.requestId,
+        });
+    if (!publication || publication.bytes !== result.sourceBytes)
+      throw new PortableExportNeedsAttention(
+        "ios-publication-unconfirmed",
+        intent.jobId,
+      );
+    intent = { ...intent, phase: "published", publicationWarningCodes: [] };
+    dependencies.store.write(intent);
+  }
   if (intent.publication === "android-saf" && intent.phase !== "published") {
     if (!result.handoffPath)
       throw new PortableExportNeedsAttention(
@@ -304,8 +294,8 @@ export async function resumePendingPortableExport(
     };
     dependencies.store.write(intent);
     if (
-      !dependencies.acknowledgeAndroid(intent.requestId) &&
-      dependencies.androidAcknowledgementPending?.(intent.requestId) !== false
+      !await dependencies.acknowledgeAndroid(intent.requestId) &&
+      await dependencies.androidAcknowledgementPending?.(intent.requestId) !== false
     )
       throw new PortableExportNeedsAttention(
         "destination-acknowledgement-pending",
@@ -316,8 +306,8 @@ export async function resumePendingPortableExport(
     // A previous acknowledgement can have succeeded before the WebView disappeared.
     // The native job keeps the verified handoff until its final forget operation.
     if (
-      !dependencies.acknowledgeAndroid(intent.requestId) &&
-      dependencies.androidAcknowledgementPending?.(intent.requestId) !== false
+      !await dependencies.acknowledgeAndroid(intent.requestId) &&
+      await dependencies.androidAcknowledgementPending?.(intent.requestId) !== false
     )
       throw new PortableExportNeedsAttention(
         "destination-acknowledgement-pending",
@@ -326,6 +316,8 @@ export async function resumePendingPortableExport(
       );
   }
   try {
+    if (intent.publication === "ios-files" && intent.requestId)
+      await acknowledgeIOSPublication(intent.requestId);
     if (result.handoffPath)
       await dependencies.cleanupHandoff(result.handoffPath);
     await dependencies.invoke("native_file_job_forget", {
@@ -357,8 +349,8 @@ async function resumeAndroidPortablePublication(
   result: NativeFileJobResult,
 ): Promise<AndroidSafDestinationEvent> {
   const bridge = productionAndroidBridge();
-  const read = () => {
-    const text = getAndroidSafExportStatus(bridge);
+  const read = async () => {
+    const text = await getAndroidSafExportStatus(bridge);
     if (!text) return null;
     const event: AndroidSafDestinationEvent = JSON.parse(text);
     if (event.requestId !== intent.requestId)
@@ -368,31 +360,39 @@ async function resumeAndroidPortablePublication(
       );
     return event;
   };
-  const terminal = read();
-  if (terminal) return terminal;
-  const active = getAndroidSafExportSourceId(bridge);
-  if (!active || !result.handoffPath?.includes(active))
-    throw new PortableExportNeedsAttention(
-      "android-publication-retry-required",
-      intent.jobId,
-    );
   return new Promise((resolve, reject) => {
-    const dispose = listenAndroidSafDestinationEvents((event) => {
-      if (event.requestId === intent.requestId) {
-        dispose();
-        resolve(event);
-      }
-    });
-    try {
-      const completed = read();
-      if (completed) {
-        dispose();
-        resolve(completed);
-      }
-    } catch (error) {
+    let settled = false;
+    let dispose = () => {};
+    const finish = (event: AndroidSafDestinationEvent) => {
+      if (settled || event.requestId !== intent.requestId) return;
+      settled = true;
+      dispose();
+      resolve(event);
+    };
+    const fail = (error: unknown) => {
+      if (settled) return;
+      settled = true;
       dispose();
       reject(error);
-    }
+    };
+    // Subscribe before asynchronous receipt reads so completion cannot fall between them.
+    dispose = listenAndroidSafDestinationEvents(finish);
+    void (async () => {
+      const terminal = await read();
+      if (settled) return;
+      if (terminal) return finish(terminal);
+      const active = await getAndroidSafExportSourceId(bridge);
+      if (settled) return;
+      if (!active || !result.handoffPath?.includes(active)) {
+        const completed = await read();
+        if (settled) return;
+        if (completed) return finish(completed);
+        throw new PortableExportNeedsAttention(
+          "android-publication-retry-required",
+          intent.jobId,
+        );
+      }
+    })().catch(fail);
   });
 }
 
@@ -429,11 +429,11 @@ export function portableAndroidPublicationDependencies(): Pick<
     },
     resumeAndroid: resumeAndroidPortablePublication,
     acknowledgeAndroid: acknowledgeAndroidSafExport,
-    androidAcknowledgementPending() {
+    async androidAcknowledgementPending() {
       const bridge = productionAndroidBridge();
       return (
-        getAndroidSafExportStatus(bridge) !== null ||
-        getAndroidSafExportSourceId(bridge) !== null
+        await getAndroidSafExportStatus(bridge) !== null ||
+        await getAndroidSafExportSourceId(bridge) !== null
       );
     },
   };

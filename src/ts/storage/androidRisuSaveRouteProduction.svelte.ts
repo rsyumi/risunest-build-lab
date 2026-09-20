@@ -133,6 +133,20 @@ export async function importAndroidOpenedPreparedContent(
 async function importAndroidCharacterSpool(
     source: AndroidSpoolReady,
 ): Promise<NativeAndroidCharacterSpoolResult<string>> {
+    const replayDestination = source.importDestination
+        ?? (/\.lorebook$/i.test(source.displayName) ? 'module' : null)
+    if (replayDestination) {
+        const { importReplayedAndroidContentSpool } = await import(
+            './androidContentPicker'
+        )
+        const value = await importReplayedAndroidContentSpool(
+            source,
+            replayDestination,
+        )
+        return value === null
+            ? { kind: 'declined' }
+            : { kind: 'imported', value }
+    }
     const [
         { importAndroidNativeCharacterSpool },
         { isNativeCharacterContentImportEnabled },
@@ -259,8 +273,8 @@ export function registerAndroidRisuSaveRoute(): void {
 
     const route = createAndroidRisuSaveSpoolRoute({
         confirmRestore: async () => true,
-        discard: (source) => {
-            if (!discardAndroidSafSource(source.token)) {
+        discard: async (source) => {
+            if (!await discardAndroidSafSource(source.token)) {
                 alertError(`${source.displayName}: discard-failed`)
             }
         },

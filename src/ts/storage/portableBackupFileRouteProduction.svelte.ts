@@ -2,7 +2,8 @@ import { invoke } from '@tauri-apps/api/core'
 import { open, save } from '@tauri-apps/plugin-dialog'
 import { language } from 'src/lang'
 import { alertConfirm, alertNormal } from '../alert'
-import { isTauri, isTauriAndroid } from '../platform'
+import { pickIOSFile, discardIOSFile } from './iosFiles'
+import { isTauriIOS, isTauri, isTauriAndroid } from '../platform'
 import { loadPluginsAfterAuthoritativeRestore } from '../plugins/plugins.svelte'
 import {
     discardAndroidSafSource,
@@ -12,10 +13,12 @@ import {
     selectPortableBackupExport,
     selectPortableBackupRestore,
 } from './deviceBackup/selectionDialog'
+import { selectPluginValueAssignment } from './pluginValueAssignDialog'
 import { runSharedNativeFileOperation } from './nativeFileJobManager'
 import {
     NativeFileJobError,
     runNativeArchiveExport,
+    runNativeArchiveReferenceExport,
     runNativeArchiveRestore,
     runNativeBlockRisuSaveRestore,
     runNativeLegacyLocalBackupRestore,
@@ -43,8 +46,15 @@ export interface BackupPickerContext {
 export type BackupSourceFactory = (
     context: BackupPickerContext,
 ) => Promise<NativeFileJobSource | null>
+export type BackupReferenceSourceFactory = () => Promise<NativeFileJobSource>
 export interface BackupRestoreOptions extends NativeFileRestoreJobOptions {
     onSource?(source: SourceInfo): void
+    /**
+     * The device holds nothing worth keeping yet, as on the first-run
+     * screen: skip the replacement confirmation and describe the section
+     * choice as a first import rather than an overwrite.
+     */
+    firstRun?: boolean
 }
 
 function combineSignals(...signals: (AbortSignal | undefined)[]) {
@@ -86,24 +96,27 @@ export async function exportPortableBackupFromSystemPicker(
                 if (!selection) return null
                 checkSignal(joined.signal)
                 const suggestedName = `risunest-${new Date().toISOString().replace(/[:.]/g, '-')}.risunest`
-                const path = isTauriAndroid
-                    ? null
-                    : await save({
-                          defaultPath: suggestedName,
-                          filters: [
-                              {
-                                  name: 'RisuNest Backup',
-                                  extensions: ['risunest'],
-                              },
-                          ],
-                      })
-                if (!isTauriAndroid && !path) return null
+                const path =
+                    isTauriAndroid || isTauriIOS
+                        ? null
+                        : await save({
+                              defaultPath: suggestedName,
+                              filters: [
+                                  {
+                                      name: 'RisuNest Backup',
+                                      extensions: ['risunest'],
+                                  },
+                              ],
+                          })
+                if (!isTauriAndroid && !isTauriIOS && !path) return null
                 checkSignal(joined.signal)
                 return await runNativeArchiveExport(
                     getPersistentDataRuntime(),
-                    isTauriAndroid
-                        ? { type: 'androidSaf', suggestedName }
-                        : { type: 'desktopPath', path: path! },
+                    isTauriIOS
+                        ? { type: 'iosFiles', suggestedName }
+                        : isTauriAndroid
+                          ? { type: 'androidSaf', suggestedName }
+                          : { type: 'desktopPath', path: path! },
                     selection,
                     {
                         ...options,
@@ -118,14 +131,74 @@ export async function exportPortableBackupFromSystemPicker(
                 joined.dispose()
             }
         },
-        { format: 'library-backup' },
+        { presentation: 'dialog', format: 'library-backup' },
+    ).finally(resumeServerSyncAfterBackup)
+}
+
+export async function exportPortableBackupFromReferenceSource(
+    source: BackupReferenceSourceFactory,
+    options: NativeFileJobOptions = {},
+): Promise<NativeFileJobResult | null> {
+    if (!isTauri)
+        throw new NativeFileJobError(
+            'native-required',
+            'RisuNest backup requires the native app',
+        )
+    getServerSyncController().assertFileOperationAvailable()
+    return runSharedNativeFileOperation(
+        'export',
+        'portable-reference-export',
+        async ({ signal, onStatus }) => {
+            const joined = combineSignals(signal, options.signal)
+            try {
+                const suggestedName = `risunest-${new Date().toISOString().replace(/[:.]/g, '-')}.risunest`
+                const path =
+                    isTauriAndroid || isTauriIOS
+                        ? null
+                        : await save({
+                              defaultPath: suggestedName,
+                              filters: [{ name: 'RisuNest Backup', extensions: ['risunest'] }],
+                          })
+                if (!isTauriAndroid && !isTauriIOS && !path) return null
+                checkSignal(joined.signal)
+                const input = await source()
+                checkSignal(joined.signal)
+                return runNativeArchiveReferenceExport(
+                    input,
+                    isTauriIOS
+                        ? { type: 'iosFiles', suggestedName }
+                        : isTauriAndroid
+                          ? { type: 'androidSaf', suggestedName }
+                          : { type: 'desktopPath', path: path! },
+                    {
+                        ...options,
+                        signal: joined.signal,
+                        onStatus(status) {
+                            onStatus(status)
+                            options.onStatus?.(status)
+                        },
+                    },
+                )
+            } finally {
+                joined.dispose()
+            }
+        },
+        { presentation: 'dialog', format: 'library-backup' },
     ).finally(resumeServerSyncAfterBackup)
 }
 
 export function restoreBackupFromSystemPicker(
     options: BackupRestoreOptions = {},
 ) {
+    let pickedIOSPath: string | undefined
     return restoreBackupFromNativeSource(async (context) => {
+        if (isTauriIOS) {
+            const picked = await pickIOSFile(context.signal)
+            if (!picked) return null
+            pickedIOSPath = picked.path
+            context.onSource({ name: picked.name, bytes: picked.bytes })
+            return { type: 'desktopPath', path: picked.path }
+        }
         if (isTauriAndroid)
             return pickAndroidBackupSource({
                 signal: context.signal,
@@ -162,7 +235,12 @@ export function restoreBackupFromSystemPicker(
         if (typeof path !== 'string') return null
         context.onSource(await describeDesktopSource(path))
         return { type: 'desktopPath', path }
-    }, options)
+    }, options).finally(async () => {
+        if (pickedIOSPath)
+            await discardIOSFile(pickedIOSPath).catch((error) =>
+                console.error('iOS import cleanup failed', error),
+            )
+    })
 }
 
 export async function restoreBackupFromNativeSource(
@@ -207,10 +285,14 @@ export async function restoreBackupFromNativeSource(
                     onSource(await describeDesktopSource(input.path))
                 checkSignal(joined.signal)
                 const format = await invoke<
-                    'portable' | 'block-risu-save' | 'local-backup'
+                    | 'portable'
+                    | 'block-risu-save'
+                    | 'local-backup'
+                    | 'conflict-reference'
                 >('native_backup_source_format', { source: input })
                 if (
                     format !== 'portable' &&
+                    !options.firstRun &&
                     (!(await alertConfirm(language.backupLoadConfirm)) ||
                         !(await alertConfirm(language.backupLoadConfirm2)))
                 )
@@ -218,16 +300,22 @@ export async function restoreBackupFromNativeSource(
                 checkSignal(joined.signal)
                 const runtime = getPersistentDataRuntime()
                 let replacesLibrary = format !== 'portable'
+                let releaseServerReplacement: (() => Promise<void>) | undefined
                 const restoreOptions: NativeFileRestoreJobOptions = {
                     ...options,
                     signal: joined.signal,
                     onStatus,
+                    assignPluginValues: selectPluginValueAssignment,
                     onBlockingChange(blocking) {
                         context.setBlocking(blocking)
                         options.onBlockingChange?.(blocking)
                     },
                     beforeActivation: async () => {
                         await options.beforeActivation?.()
+                        if (!releaseServerReplacement) {
+                            releaseServerReplacement =
+                                await getServerSyncController().beginReplacement()
+                        }
                         try {
                             await getServerSyncController().confirmReplacement()
                         } catch {
@@ -248,9 +336,12 @@ export async function restoreBackupFromNativeSource(
                     },
                 }
                 const selectedInput = input
-                const result = await getServerSyncController().withReplacement(
-                    async () => {
-                        if (format === 'portable')
+                try {
+                    const result = await (async () => {
+                        if (
+                            format === 'portable' ||
+                            format === 'conflict-reference'
+                        )
                             return runNativeArchiveRestore(
                                 runtime,
                                 selectedInput,
@@ -260,6 +351,11 @@ export async function restoreBackupFromNativeSource(
                                         const selection =
                                             await selectPortableBackupRestore(
                                                 preview,
+                                                {
+                                                    firstRun:
+                                                        options.firstRun ??
+                                                        false,
+                                                },
                                             )
                                         replacesLibrary =
                                             selection?.library ?? false
@@ -283,19 +379,21 @@ export async function restoreBackupFromNativeSource(
                             'unsupported-format',
                             'Unsupported backup format',
                         )
-                    },
-                )
-                if (report)
-                    alertNormal(
-                        `${language.portableBackup.preserved}: ${report.files} ${language.files}, ${report.bytes} bytes. ${language.portableBackup.preservedSourceHelp}\n${report.path}`,
-                    )
-                return result
+                    })()
+                    if (report)
+                        alertNormal(
+                            `${language.portableBackup.preserved}: ${report.files} ${language.files}, ${report.bytes} bytes. ${language.portableBackup.preservedSourceHelp}\n${report.path}`,
+                        )
+                    return result
+                } finally {
+                    await releaseServerReplacement?.()
+                }
             } finally {
                 joined.dispose()
                 // A claimed token has already moved to native ownership, so this only removes an
                 // unclaimed picker result when confirmation, format probing, or admission failed.
                 if (input?.type === 'androidSpool')
-                    discardAndroidSafSource(input.token)
+                    await discardAndroidSafSource(input.token)
             }
         },
         { presentation: 'dialog', format: 'library-backup' },

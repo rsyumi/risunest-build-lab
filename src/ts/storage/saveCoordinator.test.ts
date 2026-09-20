@@ -1,7 +1,9 @@
+import { UNOWNED_PLUGIN_OWNER } from '../plugins/pluginOwner'
 import { describe, expect, it, vi } from 'vitest'
 import type { Chat, Database, character } from './database.svelte'
 import type { PersistentDataStore } from './persistentDataStore'
 import { RevisionConflictError } from './persistentDataStore'
+import { canonicalJson } from './saveCoordinator'
 import {
     ActiveConversationSession,
     cloneConversationMetadata,
@@ -15,6 +17,87 @@ import {
 } from './saveCoordinator.testSupport'
 
 describe('SaveCoordinator', () => {
+    it('rejects an uncovered owned append without acknowledging it and allows a later retry', async () => {
+        const database = makeChattyDatabase()
+        let available = false
+        const commit = vi.fn(async ({ expectedRevision }) => ({ revision: expectedRevision + 1 }))
+        const onPersisted = vi.fn()
+        const coordinator = new SaveCoordinator({
+            store: makeStore(commit),
+            captureRoot: () => captureRoot(database),
+            captureSelectedCharacter: () => available ? database.characters[0] : null,
+            replaceDatabase: () => undefined,
+            onConversationMutationPersisted: onPersisted,
+        })
+        coordinator.initialize(2)
+        const session = new ActiveConversationSession({
+            characterId: 'char-a', conversationId: 'two',
+            conversation: database.characters[0].chats[1], storeRevision: 2,
+            onMutation: (event) => coordinator.recordActiveConversationMutation(event),
+        })
+        session.transaction((transaction) => transaction.append({ role: 'user', data: 'Unsaved synthetic turn' }))
+        await expect(coordinator.flushPendingData('missing-capture')).rejects.toThrow(
+            'Pending conversation mutations could not be persisted',
+        )
+        expect(commit).not.toHaveBeenCalled()
+        expect(onPersisted).not.toHaveBeenCalled()
+        expect(coordinator.hasPendingPersistenceWork).toBe(true)
+        available = true
+        await coordinator.flushPendingData('restored-capture')
+        expect(commit).toHaveBeenCalledWith(expect.objectContaining({
+            replaceCharacter: expect.objectContaining({
+                chats: expect.arrayContaining([expect.objectContaining({
+                    id: 'two', message: expect.arrayContaining([{ role: 'user', data: 'Unsaved synthetic turn' }]),
+                })]),
+            }),
+        }))
+        expect(coordinator.hasPendingPersistenceWork).toBe(false)
+    })
+
+    it('rejects top-level values that JSON cannot serialize', () => {
+        expect(() => canonicalJson(undefined)).toThrow(TypeError)
+    })
+
+    it('initializes large plugin baselines once and retains exact later mutation detection', async () => {
+        const database = makeDatabase()
+        const payload = 'synthetic-large-plugin:'.repeat(50000)
+        database.pluginCustomStorage = { payload, nested: { count: 1 } }
+        const store = makeStore(vi.fn(async () => ({ revision: 2 })))
+        const coordinator = new SaveCoordinator({
+            store,
+            captureRoot: () => captureRoot(database),
+            capturePluginStorage: () => database.pluginCustomStorage,
+            captureSelectedCharacter: () => database.characters[0],
+            replaceDatabase: () => undefined,
+        })
+        const parse = vi.spyOn(JSON, 'parse')
+        const stringify = vi.spyOn(JSON, 'stringify')
+        let parses: number, encodes: number
+        try {
+            coordinator.initialize(1, database)
+            parses = parse.mock.calls.filter(([value]) =>
+                value.includes('synthetic-large-plugin:'),
+            ).length
+            encodes = stringify.mock.calls.filter(([value]) => value === payload).length
+        } finally {
+            parse.mockRestore()
+            stringify.mockRestore()
+        }
+        expect(parses).toBe(0)
+        expect(encodes).toBe(1)
+        await coordinator.flushPendingData('clean')
+        expect(store.commit).not.toHaveBeenCalled()
+        database.pluginCustomStorage.nested.count = 2
+        coordinator.markPersistentDataDirty(1)
+        await coordinator.flushPendingData('changed')
+        expect(store.commit).toHaveBeenCalledWith(
+            expect.objectContaining({
+                pluginStorage: [{ type: 'set', owner: UNOWNED_PLUGIN_OWNER, key: 'nested', value: { count: 2 } }],
+            }),
+        )
+        expect(database.pluginCustomStorage.payload).toBe(payload)
+    })
+
     function makeAdditionDatabase() {
         const database = makeDatabase()
         const added = structuredClone(database.characters[0])
@@ -843,7 +926,9 @@ describe('SaveCoordinator', () => {
         detachedSession.append({ role: 'user', data: 'not in selected capture' })
         database.characters[0].name = 'Committed selected character'
         coordinator.markPersistentDataDirty(1)
-        await coordinator.flushPendingData('other-character')
+        await expect(coordinator.flushPendingData('other-character')).rejects.toThrow(
+            'Pending conversation mutations could not be persisted',
+        )
 
         expect(commit.mock.calls[0][0].replaceCharacter).toMatchObject({
             chaId: 'char-a',
@@ -851,6 +936,7 @@ describe('SaveCoordinator', () => {
         })
         expect(onPersisted).not.toHaveBeenCalled()
         expect(detachedSession.persistedVersion).toBe(0)
+        expect(coordinator.hasPendingPersistenceWork).toBe(true)
     })
 
     it('does not acknowledge same-character evidence omitted from a fallback conversation commit', async () => {
@@ -879,7 +965,9 @@ describe('SaveCoordinator', () => {
         detachedSession.append({ role: 'user', data: 'not in captured conversation' })
         database.characters[0].chats[0].message[0].data = 'captured fallback edit'
         coordinator.markPersistentDataDirty(1)
-        await coordinator.flushPendingData('same-character-fallback')
+        await expect(coordinator.flushPendingData('same-character-fallback')).rejects.toThrow(
+            'Pending conversation mutations could not be persisted',
+        )
 
         expect(commit.mock.calls[0][0].conversations).toEqual([
             expect.objectContaining({
@@ -889,6 +977,52 @@ describe('SaveCoordinator', () => {
         ])
         expect(onPersistenceStarted).not.toHaveBeenCalled()
         expect(onPersisted).not.toHaveBeenCalled()
+        expect(coordinator.hasPendingPersistenceWork).toBe(true)
+    })
+
+    it('retires unprojectable evidence after persisting that conversation through fallback', async () => {
+        const database = makeChattyDatabase()
+        const commit = vi.fn(async ({ expectedRevision }) => ({ revision: expectedRevision + 1 }))
+        let session!: ActiveConversationSession
+        const onFallbackPersisted = vi.fn((event) => {
+            session.acknowledgeFallbackPersisted(
+                event.sessionToken,
+                event.sessionVersion,
+                event.revision,
+            )
+        })
+        const coordinator = new SaveCoordinator({
+            store: makeStore(commit),
+            captureRoot: () => captureRoot(database),
+            captureSelectedCharacter: () => database.characters[0],
+            replaceDatabase: () => undefined,
+            onConversationMutationFallbackPersisted: onFallbackPersisted,
+        })
+        coordinator.initialize(2)
+        const conversation = database.characters[0].chats[1]
+        session = new ActiveConversationSession({
+            characterId: 'char-a',
+            conversationId: 'two',
+            conversation,
+            storeRevision: 2,
+            onMutation: (event) => coordinator.recordActiveConversationMutation(event),
+        })
+
+        session.append({ role: 'user', data: 'session append' })
+        conversation.message[0].data = 'untracked live edit'
+        coordinator.markPersistentDataDirty(1)
+        await coordinator.flushPendingData('same-conversation-fallback')
+
+        expect(commit.mock.calls[0][0].conversations).toEqual([
+            expect.objectContaining({
+                characterId: 'char-a',
+                conversationId: 'two',
+            }),
+        ])
+        expect(onFallbackPersisted).toHaveBeenCalledOnce()
+        expect(session.residencyFallbackActive).toBe(true)
+        expect(session.persistedVersion).toBe(1)
+        expect(coordinator.hasPendingPersistenceWork).toBe(false)
     })
 
     it('acknowledges only the covered session prefix from a mixed fallback commit', async () => {
@@ -1675,7 +1809,7 @@ describe('SaveCoordinator', () => {
         expect(database.characters.map((item) => item.chaId)).toContain('char-other')
     })
 
-    it('runs an earlier replacement before installing an addition', async () => {
+    it('rejects an old-authority queued addition and accepts a fresh request after replacement', async () => {
         let database = makeDatabase()
         const replacement = makeDatabase()
         replacement.username = 'Replacement'
@@ -1701,16 +1835,20 @@ describe('SaveCoordinator', () => {
             added.chaId = 'char-added'
             database.characters.push(added)
         })
-        const adding = coordinator.commitCharacterAddition({
+        expect(() => coordinator.commitCharacterAddition({
             characterId: 'char-added',
             estimatedBytes: 1,
             install,
-        }, 'new-character')
+        }, 'new-character')).toThrow(/replacement is active/i)
         expect(install).not.toHaveBeenCalled()
         replacementGate.resolve({ revision: 2 })
         await replacing
-        await adding
+        expect(install).not.toHaveBeenCalled()
+        expect(commit).not.toHaveBeenCalled()
 
+        await coordinator.commitCharacterAddition({
+            characterId: 'char-added', estimatedBytes: 1, install,
+        }, 'fresh-addition-after-replacement')
         expect(install).toHaveBeenCalledOnce()
         expect(database.username).toBe('Replacement')
         expect(commit.mock.calls[0][0]).toMatchObject({
@@ -1719,12 +1857,12 @@ describe('SaveCoordinator', () => {
         })
     })
 
-    it('successful replacement clears a failed addition and failed replacement preserves it', async () => {
+    it('drains a failed addition before replacement and preserves it when the drain fails', async () => {
         const { database, added } = makeAdditionDatabase()
         const commit = vi.fn().mockRejectedValue(new Error('addition failed'))
         const replaceFromDatabase = vi.fn()
             .mockRejectedValueOnce(new Error('replacement failed'))
-            .mockResolvedValueOnce({ revision: 2 })
+            .mockResolvedValueOnce({ revision: 3 })
         const store = { commit, replaceFromDatabase } as unknown as PersistentDataStore
         const coordinator = new SaveCoordinator({
             store,
@@ -1739,13 +1877,20 @@ describe('SaveCoordinator', () => {
             estimatedBytes: 1,
             install: () => database.characters.push(added),
         }, 'new-character')).rejects.toThrow('addition failed')
-        await expect(coordinator.replacePersistentDatabase(makeDatabase(), 'failed-replace')).rejects.toThrow('replacement failed')
+        await expect(coordinator.replacePersistentDatabase(makeDatabase(), 'failed-drain')).rejects.toThrow('addition failed')
         await expect(coordinator.flushPendingData('still-pending')).rejects.toThrow('addition failed')
-        expect(commit).toHaveBeenCalledTimes(2)
+        expect(commit).toHaveBeenCalledTimes(3)
+        expect(replaceFromDatabase).not.toHaveBeenCalled()
 
+        commit.mockResolvedValue({ revision: 2 })
+        await coordinator.flushPendingDataLocally('retry-addition')
+        await expect(coordinator.replacePersistentDatabase(makeDatabase(), 'failed-replace')).rejects.toThrow('replacement failed')
+        expect(database.characters.map((value) => value.chaId)).toContain(added.chaId)
         await coordinator.replacePersistentDatabase(makeDatabase(), 'successful-replace')
         await coordinator.flushPendingData('clean')
-        expect(commit).toHaveBeenCalledTimes(2)
+        expect(coordinator.revision).toBe(3)
+        expect(commit).toHaveBeenCalledTimes(4)
+        expect(replaceFromDatabase).toHaveBeenCalledTimes(2)
     })
 
     it('authoritative replacement supersedes a locally added character after remote failure', async () => {
@@ -1806,8 +1951,11 @@ describe('SaveCoordinator', () => {
             const candidate = makeDatabase()
             candidate.characters = []
             const replacing = coordinator.replacePersistentDatabase(candidate, 'remove-character')
-            db.characters[0].name = 'Edited after enqueue'
-            coordinator.markPersistentDataDirty(1)
+            expect(() => {
+                coordinator.assertPersistentMutationAllowed()
+                db.characters[0].name = 'Edited after enqueue'
+                coordinator.markPersistentDataDirty(1)
+            }).toThrow(/replacement is active/i)
             replacementGate.resolve({ revision: 2 })
             await replacing
 
@@ -1843,6 +1991,87 @@ describe('SaveCoordinator', () => {
         ).rejects.toThrow('replace failed')
 
         expect(revisions).toEqual([8])
+    })
+
+    it('ordinary_flush_keeps_later_edits_dirty across a failed trailing batch', async () => {
+        const database = makeDatabase()
+        database.botPresets = [{ name: 'Initial preset' }] as Database['botPresets']
+        database.pluginCustomStorage = { payload: { value: 'initial' } }
+        database.characters[0].chats = [{
+            id: 'chat-a', name: 'Chat', message: [{ role: 'user', data: 'initial' }],
+        }] as Chat[]
+        const firstStarted = deferred<void>()
+        const firstFinished = deferred<{ revision: number }>()
+        const failure = new Error('trailing batch failed')
+        const commit = vi.fn()
+            .mockImplementationOnce(() => {
+                firstStarted.resolve()
+                return firstFinished.promise
+            })
+            .mockRejectedValueOnce(failure)
+            .mockResolvedValueOnce({ revision: 3 })
+        const store = makeStore(commit)
+        store.readCharacter = vi.fn()
+        store.readConversation = vi.fn()
+        const captureCharacter = vi.fn(() => null)
+        const coordinator = new SaveCoordinator({
+            store,
+            captureRoot: () => captureRoot(database),
+            capturePluginStorage: () => database.pluginCustomStorage,
+            capturePresets: () => database.botPresets,
+            captureSelectedCharacter: () => database.characters[0],
+            captureCharacter,
+            replaceDatabase: () => undefined,
+        })
+        coordinator.initialize(1)
+        const edit = (value: string) => {
+            database.username = value
+            database.botPresets[0].name = value
+            database.pluginCustomStorage.payload = { value }
+            database.characters[0].chats[0].message[0].data = value
+            coordinator.markPersistentDataDirty(25)
+        }
+        edit('first')
+        const flushing = coordinator.flushPendingDataLocally('frozen-batches')
+        const rejected = expect(flushing).rejects.toBe(failure)
+        await firstStarted.promise
+        const firstBatch = structuredClone(commit.mock.calls[0][0])
+        edit('second')
+        expect(commit.mock.calls[0][0]).toEqual(firstBatch)
+        firstFinished.resolve({ revision: 2 })
+        await rejected
+
+        expect(coordinator.revision).toBe(2)
+        expect(coordinator.pendingBytes).toBe(25)
+        expect(commit).toHaveBeenCalledTimes(2)
+        expect(commit.mock.calls[0][0]).toEqual(firstBatch)
+        expect(firstBatch.rootMutations).toEqual([
+            { type: 'set', key: 'username', value: 'first' },
+        ])
+        const secondBatch = structuredClone(commit.mock.calls[1][0])
+        expect(secondBatch).toMatchObject({
+            expectedRevision: 2,
+            rootMutations: [{ type: 'set', key: 'username', value: 'second' }],
+            replacePresets: [{ name: 'second' }],
+            pluginStorage: [{
+                type: 'set', owner: UNOWNED_PLUGIN_OWNER, key: 'payload', value: { value: 'second' },
+            }],
+            conversations: [expect.objectContaining({
+                characterId: 'char-a', conversationId: 'chat-a',
+                messages: [{ role: 'user', data: 'second' }],
+            })],
+        })
+
+        await coordinator.flushPendingDataLocally('retry-trailing-batch')
+        expect(commit).toHaveBeenNthCalledWith(3, secondBatch)
+        expect(coordinator.revision).toBe(3)
+        expect(coordinator.pendingBytes).toBe(0)
+        await coordinator.flushPendingDataLocally('clean-frozen-batches')
+        expect(commit).toHaveBeenCalledTimes(3)
+        expect(store.replaceFromDatabase).not.toHaveBeenCalled()
+        expect(store.readCharacter).not.toHaveBeenCalled()
+        expect(store.readConversation).not.toHaveBeenCalled()
+        expect(captureCharacter).not.toHaveBeenCalled()
     })
 
     it('runs trailing commits for mutations made during every deferred commit', async () => {
@@ -2179,6 +2408,7 @@ describe('SaveCoordinator', () => {
             expect(publish).toHaveBeenCalledOnce()
             expect(handle.dispose).not.toHaveBeenCalled()
             expect(coordinator.hasPendingOfficialPublication).toBe(true)
+            expect(coordinator.pendingBytes).toBe(0)
 
             await vi.advanceTimersByTimeAsync(2_999)
             expect(publish).toHaveBeenCalledOnce()
@@ -2187,6 +2417,48 @@ describe('SaveCoordinator', () => {
             expect(pin).toHaveBeenCalledOnce()
             expect(publish).toHaveBeenCalledTimes(2)
             expect(handle.dispose).toHaveBeenCalledOnce()
+            expect(coordinator.hasPendingOfficialPublication).toBe(false)
+        } finally {
+            vi.useRealTimers()
+        }
+    })
+
+    it('rearms an official publication retry when its timer fires during a replacement fence', async () => {
+        vi.useFakeTimers()
+        try {
+            const database = makeDatabase()
+            const publish = vi.fn()
+                .mockRejectedValueOnce(new Error('offline'))
+                .mockResolvedValueOnce(undefined)
+            const onBackgroundError = vi.fn()
+            const coordinator = new SaveCoordinator({
+                store: makeStore(vi.fn(async ({ expectedRevision }) => ({
+                    revision: expectedRevision + 1,
+                }))),
+                captureRoot: () => captureRoot(database),
+                captureSelectedCharacter: () => database.characters[0],
+                replaceDatabase: () => undefined,
+                officialPublisher: {
+                    pin: vi.fn(async () => ({
+                        publish,
+                        dispose: vi.fn(async () => undefined),
+                    })),
+                },
+                onBackgroundError,
+            })
+            coordinator.initialize(1)
+            database.username = 'Pending publication'
+            coordinator.markPersistentDataDirty(1)
+            await expect(coordinator.flushPendingData('initial')).rejects.toThrow('offline')
+            const fence = await coordinator.acquireCommittedWorkingSetRefreshFence()
+
+            await vi.advanceTimersByTimeAsync(3_000)
+
+            expect(publish).toHaveBeenCalledOnce()
+            expect(onBackgroundError).toHaveBeenCalledOnce()
+            coordinator.releaseDestructiveReplacementFence(fence)
+            await vi.advanceTimersByTimeAsync(3_000)
+            expect(publish).toHaveBeenCalledTimes(2)
             expect(coordinator.hasPendingOfficialPublication).toBe(false)
         } finally {
             vi.useRealTimers()
@@ -2450,7 +2722,7 @@ describe('SaveCoordinator', () => {
         expect(commit).toHaveBeenCalledWith({
             expectedRevision: 7,
             rootMutations: [{ type: 'set', key: 'username', value: 'Edited root' }],
-            pluginStorage: [{ type: 'set', key: '__proto__', value: 0 }],
+            pluginStorage: [{ type: 'set', owner: UNOWNED_PLUGIN_OWNER, key: '__proto__', value: 0 }],
             replacePresets: [{ name: 'Adopted preset', mainPrompt: 'After preset edit' }],
             conversations: [
                 {
@@ -2770,6 +3042,8 @@ describe('SaveCoordinator', () => {
 
             await coordinator.replacePersistentDatabase(makeDatabase(), 'authoritative')
 
+            expect(staleHandle.dispose).not.toHaveBeenCalled()
+            await vi.advanceTimersByTimeAsync(3_000)
             expect(staleHandle.dispose).toHaveBeenCalledOnce()
             await vi.advanceTimersByTimeAsync(3_000)
             expect(staleHandle.dispose).toHaveBeenCalledTimes(2)
@@ -2780,7 +3054,7 @@ describe('SaveCoordinator', () => {
         }
     })
 
-    it('serializes replacement and leaves post-capture mutations for the next ordinary flush', async () => {
+    it('rejects an earlier queued revision and saves new edits only after a fresh replacement', async () => {
         const database = makeDatabase()
         const firstCommit = deferred<{ revision: number }>()
         const replacementWrite = deferred<{ revision: number }>()
@@ -2808,31 +3082,31 @@ describe('SaveCoordinator', () => {
         const flushing = coordinator.flushPendingData('active')
         const candidate = makeDatabase()
         candidate.username = 'Replacement'
-        const replacing = coordinator.replacePersistentDatabase(candidate, 'replace')
-
+        const rejected = expect(coordinator.replacePersistentDatabase(candidate, 'stale-replace'))
+            .rejects.toBeInstanceOf(RevisionConflictError)
         expect(replaceFromDatabase).not.toHaveBeenCalled()
         firstCommit.resolve({ revision: 2 })
-        await flushing
-        await vi.waitFor(() => expect(replaceFromDatabase).toHaveBeenCalledTimes(1))
-        expect(replaceFromDatabase).toHaveBeenCalledWith(
-            expect.objectContaining({ username: 'Replacement' }),
-            2,
-        )
-        expect(replaceDatabase).not.toHaveBeenCalled()
-        database.characters[0].name = 'Mutation after capture'
-        coordinator.markPersistentDataDirty(12)
-        replacementWrite.resolve({ revision: 3 })
+        await Promise.all([flushing, rejected])
+        expect(replaceFromDatabase).not.toHaveBeenCalled()
+        expect(database.username).toBe('Commit before replacement')
 
-        await replacing
+        const replacing = coordinator.replacePersistentDatabase(candidate, 'fresh-replace')
+        await vi.waitFor(() => expect(replaceFromDatabase).toHaveBeenCalledTimes(1))
+        expect(replaceFromDatabase).toHaveBeenCalledWith(candidate, 2)
+        expect(replaceDatabase).not.toHaveBeenCalled()
+        expect(() => {
+            coordinator.assertPersistentMutationAllowed()
+            database.characters[0].name = 'Blocked mutation'
+        }).toThrow(/replacement is active/i)
+        replacementWrite.resolve({ revision: 3 })
+        await expect(replacing).resolves.toEqual({ kind: 'committed', revision: 3, projection: 'applied' })
 
         expect(commit).toHaveBeenCalledTimes(1)
-        expect(replaceDatabase).toHaveBeenCalledTimes(1)
-        expect(replaceDatabase.mock.calls[0][0].characters[0].name).toBe(
-            'Mutation after capture',
-        )
+        expect(replaceDatabase).toHaveBeenCalledExactlyOnceWith(candidate)
         expect(coordinator.revision).toBe(3)
-        expect(coordinator.pendingBytes).toBe(12)
-
+        expect(coordinator.pendingBytes).toBe(0)
+        database.characters[0].name = 'Mutation after capture'
+        coordinator.markPersistentDataDirty(12)
         await coordinator.flushPendingData('post-replacement')
 
         expect(commit).toHaveBeenCalledTimes(2)
@@ -2843,7 +3117,7 @@ describe('SaveCoordinator', () => {
         expect(coordinator.revision).toBe(4)
     })
 
-    it('three-way rebases only concurrent live deltas onto an authoritative replacement', async () => {
+    it('blocks concurrent root, preset and conversation edits during authoritative replacement', async () => {
         const database = makeDatabase()
         database.mainPrompt = 'Before prompt'
         database.botPresets = [
@@ -2883,33 +3157,28 @@ describe('SaveCoordinator', () => {
             authoritative: true,
         })
         await vi.waitFor(() => expect(store.replaceFromDatabase).toHaveBeenCalledOnce())
-        database.mainPrompt = 'Later live prompt'
-        database.botPresets[0].name = 'Later live first'
-        ;(database.characters[0] as character).desc = 'Later live description'
-        database.characters[0].chats[0].note = 'Later live first-chat note'
-        coordinator.markPersistentDataDirty(1)
+        expect(() => {
+            coordinator.assertPersistentMutationAllowed()
+            database.mainPrompt = 'Later live prompt'
+            database.botPresets[0].name = 'Later live first'
+            ;(database.characters[0] as character).desc = 'Later live description'
+            database.characters[0].chats[0].note = 'Later live first-chat note'
+            coordinator.markPersistentDataDirty(1)
+        }).toThrow(/replacement is active/i)
         replacementWrite.resolve({ revision: 6 })
         await replacing
 
-        expect(database).toMatchObject({
-            username: 'Authoritative username',
-            mainPrompt: 'Later live prompt',
-        })
-        expect(database.botPresets).toMatchObject([
-            { name: 'Later live first', mainPrompt: 'first' },
-            { name: 'Before second', mainPrompt: 'Authoritative second prompt' },
-        ])
-        expect(database.characters[0]).toMatchObject({
-            name: 'Authoritative character name',
-            desc: 'Later live description',
-        })
+        expect(database).toEqual(candidate)
+        expect(database.mainPrompt).toBe('Before prompt')
+        expect(database.botPresets[0].name).toBe('Before first')
         expect(database.characters[0].chats).toMatchObject([
             { id: 'chat-b', name: 'Authoritative second chat' },
-            { id: 'chat-a', note: 'Later live first-chat note' },
+            { id: 'chat-a', note: '' },
         ])
+        expect(store.replaceFromDatabase).toHaveBeenCalledOnce()
     })
 
-    it('rebases a concurrent compatibility plugin edit and persists it after replacement', async () => {
+    it('blocks a compatibility plugin edit during replacement and saves a fresh edit afterward', async () => {
         const database = makeDatabase()
         database.pluginCustomStorage = JSON.parse(
             '{"retained":"before","__proto__":"before"}',
@@ -2938,8 +3207,10 @@ describe('SaveCoordinator', () => {
             authoritative: true,
         })
         await vi.waitFor(() => expect(store.replaceFromDatabase).toHaveBeenCalledOnce())
-        database.pluginCustomStorage.__proto__ = 'later'
-        coordinator.markPersistentDataDirty(1)
+        expect(() => {
+            coordinator.assertPersistentMutationAllowed()
+            database.pluginCustomStorage.__proto__ = 'blocked'
+        }).toThrow(/replacement is active/i)
         replacementWrite.resolve({ revision: 6 })
 
         await replacing
@@ -2947,19 +3218,21 @@ describe('SaveCoordinator', () => {
         expect(Object.keys(database.pluginCustomStorage)).toEqual(['retained', '__proto__'])
         expect(database.pluginCustomStorage.retained).toBe('replacement')
         expect(Object.hasOwn(database.pluginCustomStorage, '__proto__')).toBe(true)
-        expect(database.pluginCustomStorage.__proto__).toBe('later')
+        expect(database.pluginCustomStorage.__proto__).toBe('before')
         expect(Object.getPrototypeOf(database.pluginCustomStorage)).toBe(storagePrototype)
         expect(commit).not.toHaveBeenCalled()
 
-        await coordinator.flushPendingData('plugin-rebase-save')
+        database.pluginCustomStorage.__proto__ = 'later'
+        coordinator.markPersistentDataDirty(1)
+        await coordinator.flushPendingData('plugin-after-replacement-save')
 
         expect(commit).toHaveBeenCalledWith({
             expectedRevision: 6,
-            pluginStorage: [{ type: 'set', key: '__proto__', value: 'later' }],
+            pluginStorage: [{ type: 'set', owner: UNOWNED_PLUGIN_OWNER, key: '__proto__', value: 'later' }],
         })
     })
 
-    it('keeps preset entities intact across an authoritative reorder and concurrent rename', async () => {
+    it('keeps preset entities intact by blocking a rename during authoritative reorder', async () => {
         const database = makeDatabase()
         database.botPresets = [
             { name: 'Preset A', mainPrompt: 'A' },
@@ -2985,18 +3258,20 @@ describe('SaveCoordinator', () => {
             authoritative: true,
         })
         await vi.waitFor(() => expect(store.replaceFromDatabase).toHaveBeenCalledOnce())
-        database.botPresets[0].name = 'Preset A2'
-        coordinator.markPersistentDataDirty(1)
+        expect(() => {
+            coordinator.assertPersistentMutationAllowed()
+            database.botPresets[0].name = 'Preset A2'
+        }).toThrow(/replacement is active/i)
         replacementWrite.resolve({ revision: 7 })
         await replacing
 
         expect(database.botPresets).toMatchObject([
             { name: 'Preset B', mainPrompt: 'Candidate B' },
-            { name: 'Preset A2', mainPrompt: 'A' },
+            { name: 'Preset A', mainPrompt: 'A' },
         ])
     })
 
-    it('rejects an ambiguous preset reorder and rename before replacing the store', async () => {
+    it('prevents a live edit from attaching to a renamed preset during replacement', async () => {
         const database = makeDatabase()
         database.botPresets = [
             { name: 'Preset A', mainPrompt: 'A' },
@@ -3021,18 +3296,16 @@ describe('SaveCoordinator', () => {
         const replacing = coordinator.replacePersistentDatabase(candidate, 'ambiguous-rename', {
             authoritative: true,
         })
-        database.botPresets[0].mainPrompt = 'Later A'
-        coordinator.markPersistentDataDirty(1)
-
-        await expect(replacing).rejects.toThrow('renamed candidate array entries')
-        expect(store.replaceFromDatabase).not.toHaveBeenCalled()
-        expect(database.botPresets).toMatchObject([
-            { name: 'Preset A', mainPrompt: 'Later A' },
-            { name: 'Preset B', mainPrompt: 'B' },
-        ])
+        expect(() => {
+            coordinator.assertPersistentMutationAllowed()
+            database.botPresets[0].mainPrompt = 'Later A'
+        }).toThrow(/replacement is active/i)
+        await expect(replacing).resolves.toMatchObject({ projection: 'applied', revision: 8 })
+        expect(store.replaceFromDatabase).toHaveBeenCalledExactlyOnceWith(candidate, 7)
+        expect(database.botPresets[0].mainPrompt).toBe('A')
     })
 
-    it('rejects an all-renamed preset reorder before live edits can attach to another entity', async () => {
+    it('blocks stale preset edits before an all-renamed reorder can attach them to another entity', async () => {
         const database = makeDatabase()
         database.botPresets = [
             { name: 'Preset A', mainPrompt: 'A' },
@@ -3058,19 +3331,17 @@ describe('SaveCoordinator', () => {
         const replacing = coordinator.replacePersistentDatabase(candidate, 'all-renamed-reorder', {
             authoritative: true,
         })
-        database.botPresets[0].temperature = 1.3
-        coordinator.markPersistentDataDirty(1)
-
-        await expect(replacing).rejects.toThrow('renamed candidate array entries')
-        expect(store.replaceFromDatabase).not.toHaveBeenCalled()
-        expect(database.botPresets).toMatchObject([
-            { name: 'Preset A', mainPrompt: 'A', temperature: 1.3 },
-            { name: 'Preset B', mainPrompt: 'B' },
-        ])
+        expect(() => {
+            coordinator.assertPersistentMutationAllowed()
+            database.botPresets[0].temperature = 1.3
+        }).toThrow(/replacement is active/i)
+        await expect(replacing).resolves.toMatchObject({ projection: 'applied', revision: 8 })
+        expect(store.replaceFromDatabase).toHaveBeenCalledExactlyOnceWith(candidate, 7)
+        expect(database.botPresets[0]).not.toHaveProperty('temperature')
     })
 
     it.each(['add', 'delete'] as const)(
-        'preserves an authoritative preset %s and a concurrent live edit',
+        'preserves an authoritative preset %s while a stale edit is blocked',
         async (operation) => {
             const database = makeDatabase()
             database.botPresets = [
@@ -3105,8 +3376,10 @@ describe('SaveCoordinator', () => {
                 { authoritative: true },
             )
             await vi.waitFor(() => expect(store.replaceFromDatabase).toHaveBeenCalledOnce())
-            database.botPresets[1].mainPrompt = 'Later B'
-            coordinator.markPersistentDataDirty(1)
+            expect(() => {
+                coordinator.assertPersistentMutationAllowed()
+                database.botPresets[1].mainPrompt = 'Later B'
+            }).toThrow(/replacement is active/i)
             replacementWrite.resolve({ revision: 8 })
             await replacing
 
@@ -3114,13 +3387,13 @@ describe('SaveCoordinator', () => {
                 ? [
                     { name: 'Preset A', mainPrompt: 'A' },
                     { name: 'Imported preset', mainPrompt: 'Imported' },
-                    { name: 'Preset B', mainPrompt: 'Later B' },
+                    { name: 'Preset B', mainPrompt: 'B' },
                 ]
-                : [{ name: 'Preset B', mainPrompt: 'Later B' }])
+                : [{ name: 'Preset B', mainPrompt: 'B' }])
         },
     )
 
-    it('rejects an ambiguous id-less preset reorder instead of publishing a hybrid', async () => {
+    it('requires a read-only refresh instead of compensating an unguarded id-less preset edit', async () => {
         const database = makeDatabase()
         database.botPresets = [
             { name: 'Duplicate', mainPrompt: 'A' },
@@ -3152,27 +3425,27 @@ describe('SaveCoordinator', () => {
             authoritative: true,
         })
         await vi.waitFor(() => expect(store.replaceFromDatabase).toHaveBeenCalledOnce())
+        // Simulate a legacy writer that bypasses the admission guard before mutating.
         database.botPresets[0].mainPrompt = 'Later A'
-        coordinator.markPersistentDataDirty(1)
+        expect(() => coordinator.markPersistentDataDirty(1)).toThrow(/replacement is active/i)
         replacementWrite.resolve({ revision: 9 })
 
-        await expect(replacing).rejects.toThrow('Concurrent live changes conflicted')
-        expect(replaceDatabase).toHaveBeenCalledOnce()
+        await expect(replacing).resolves.toEqual({
+            kind: 'committed', revision: 9, projection: 'refresh-required',
+        })
+        expect(replaceDatabase).not.toHaveBeenCalled()
         expect(database.botPresets).toMatchObject([
             { name: 'Duplicate', mainPrompt: 'Later A' },
             { name: 'Duplicate', mainPrompt: 'B' },
         ])
-        expect(store.commit).toHaveBeenCalledWith({
-            expectedRevision: 9,
-            replacePresets: database.botPresets,
-        })
-        expect(coordinator.revision).toBe(10)
-
-        await coordinator.flushPendingData('after-conflict')
-        expect(store.commit).toHaveBeenCalledOnce()
+        expect(store.replaceFromDatabase).toHaveBeenCalledExactlyOnceWith(candidate, 8)
+        expect(store.commit).not.toHaveBeenCalled()
+        expect(coordinator.pendingWorkingSetRefreshRevision).toBe(9)
+        await expect(coordinator.flushPendingDataLocally('after-conflict')).rejects.toThrow(/replacement is active/i)
+        expect(store.commit).not.toHaveBeenCalled()
     })
 
-    it('does not baseline a live edit made while replacement compensation is pending', async () => {
+    it('does not save later stale edits after a committed replacement requires refresh', async () => {
         let database = makeDatabase()
         database.botPresets = [
             { name: 'Duplicate', mainPrompt: 'A' },
@@ -3182,10 +3455,7 @@ describe('SaveCoordinator', () => {
         candidate.botPresets.reverse()
         candidate.botPresets[0].mainPrompt = 'Candidate B'
         const replacementWrite = deferred<{ revision: number }>()
-        const compensationWrite = deferred<{ revision: number }>()
         const commit = vi.fn()
-            .mockImplementationOnce(() => compensationWrite.promise)
-            .mockResolvedValueOnce({ revision: 11 })
         const store = {
             replaceFromDatabase: vi.fn(() => replacementWrite.promise),
             commit,
@@ -3206,28 +3476,23 @@ describe('SaveCoordinator', () => {
         })
         await vi.waitFor(() => expect(store.replaceFromDatabase).toHaveBeenCalledOnce())
         database.botPresets[0].mainPrompt = 'Later A'
-        coordinator.markPersistentDataDirty(1)
+        expect(() => coordinator.markPersistentDataDirty(1)).toThrow(/replacement is active/i)
         replacementWrite.resolve({ revision: 9 })
-        await vi.waitFor(() => expect(commit).toHaveBeenCalledOnce())
-        database.botPresets[0].mainPrompt = 'Newest A'
-        coordinator.markPersistentDataDirty(1)
-        compensationWrite.resolve({ revision: 10 })
-
-        await expect(replacing).rejects.toThrow('Concurrent live changes conflicted')
-        expect(commit.mock.calls[0][0].replacePresets[0].mainPrompt).toBe('Later A')
-
-        await coordinator.flushPendingData('after-pending-compensation')
-        expect(commit).toHaveBeenCalledTimes(2)
-        expect(commit.mock.calls[1][0]).toMatchObject({
-            expectedRevision: 10,
-            replacePresets: [
-                { name: 'Duplicate', mainPrompt: 'Newest A' },
-                { name: 'Duplicate', mainPrompt: 'B' },
-            ],
+        await expect(replacing).resolves.toEqual({
+            kind: 'committed', revision: 9, projection: 'refresh-required',
         })
+        expect(coordinator.hasDestructiveReplacementFence).toBe(false)
+        expect(() => {
+            coordinator.assertPersistentMutationAllowed()
+            database.botPresets[0].mainPrompt = 'Newest A'
+        }).toThrow(/replacement is active/i)
+        await expect(coordinator.flushPendingDataLocally('no-compensation')).rejects.toThrow(/replacement is active/i)
+        expect(coordinator.revision).toBe(9)
+        expect(store.replaceFromDatabase).toHaveBeenCalledOnce()
+        expect(commit).not.toHaveBeenCalled()
     })
 
-    it('re-arms the flush debounce when a replacement leaves dirty state behind', async () => {
+    it('re-arms ordinary autosave for edits made after a completed replacement', async () => {
         vi.useFakeTimers()
         try {
             let db = makeDatabase()
@@ -3256,13 +3521,11 @@ describe('SaveCoordinator', () => {
             await vi.advanceTimersByTimeAsync(0)
             const candidate = makeDatabase()
             candidate.username = 'Replacement'
-            const replacing = coordinator.replacePersistentDatabase(candidate, 'replace')
             gate.resolve({ revision: 2 })
-            await Promise.resolve()
+            await flushing
+            await coordinator.replacePersistentDatabase(candidate, 'replace')
             db.username = 'Edit two'
             coordinator.markPersistentDataDirty(1)
-            await flushing
-            await replacing
 
             expect(commit).toHaveBeenCalledTimes(1)
             expect(db.username).toBe('Edit two')
@@ -3420,15 +3683,15 @@ describe('SaveCoordinator', () => {
             replaceDatabase,
         })
         coordinator.initialize(7)
-        database.username = 'Still dirty'
-        coordinator.markPersistentDataDirty(9)
-
         await expect(
             coordinator.replacePersistentDatabase(makeDatabase(), 'replace'),
         ).rejects.toThrow('replacement failed')
 
         expect(replaceDatabase).not.toHaveBeenCalled()
         expect(coordinator.revision).toBe(7)
+        expect(coordinator.hasDestructiveReplacementFence).toBe(false)
+        database.username = 'Still dirty'
+        coordinator.markPersistentDataDirty(9)
         expect(coordinator.pendingBytes).toBe(9)
         await coordinator.flushPendingData('after-failure')
         expect(commit).toHaveBeenCalledWith(

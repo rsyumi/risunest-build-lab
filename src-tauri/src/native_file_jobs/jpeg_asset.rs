@@ -43,8 +43,7 @@ struct CancellableProgressReader<'a> {
 impl Read for CancellableProgressReader<'_> {
     fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
         if self.job.is_cancel_requested() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Interrupted,
+            return Err(std::io::Error::other(
                 "native JPEG asset import was cancelled",
             ));
         }
@@ -352,6 +351,7 @@ fn import_jpeg_asset_with_before_commit(
             )
             .map_err(super::native_store_error)?;
         Ok(JobResultSummary {
+            export_exclusions: None,
             revision: committed.revision,
             source_bytes: prepared.byte_size,
             source_sha256: prepared.content_hash,
@@ -382,7 +382,7 @@ fn import_jpeg_asset_with_before_commit(
 
 #[cfg(test)]
 mod tests {
-    use super::super::JobKind;
+    use super::super::{JobKind, JobRegistry};
     use super::*;
     use crate::asset_repository::job_pins::collect_durable_cas_job_roots;
     use crate::asset_repository::owner_manifest_codec::{
@@ -392,13 +392,33 @@ mod tests {
     use serde_json::Value;
     use sha2::{Digest, Sha256};
     use std::fs;
-    use std::io::{Cursor, Write};
+    use std::io::{Cursor, Read, Write};
     use zip::write::FileOptions;
     use zip::{CompressionMethod, ZipWriter};
 
     fn fixture() -> Value {
         serde_json::from_str(include_str!("../../fixtures/persistent-fixture.json"))
             .expect("parse persistent fixture")
+    }
+
+    #[test]
+    fn cancellation_reader_uses_a_non_retryable_error_for_exact_reads() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("synthetic.jpg");
+        fs::write(&path, [1_u8]).unwrap();
+        let mut source = fs::File::open(path).unwrap();
+        let job = JobRegistry::default()
+            .create(JobKind::ImportJpegAsset)
+            .unwrap();
+        job.request_cancel().unwrap();
+        let mut reader = CancellableProgressReader {
+            source: &mut source,
+            job: &job,
+            completed_bytes: 0,
+            total_bytes: 1,
+        };
+        let error = reader.read_exact(&mut [0_u8; 1]).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
     }
 
     fn open_fixture() -> (tempfile::TempDir, PersistentStore, String, AssetOwnerHead) {

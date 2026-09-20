@@ -3,6 +3,7 @@ use crate::asset_repository::PayloadCas;
 use crate::server_sync::residency::{open_or_hydrate, AssetPolicy, Residency};
 
 mod regressions;
+mod references;
 
 struct Fixture {
     _server_root: tempfile::TempDir,
@@ -257,9 +258,10 @@ fn remote_replica_skips_body_displays_directly_hydrates_bytes_and_exports_comple
         .unwrap()
         .has_remote_or_missing());
     assert_eq!(
-        Residency::open(first.repository_root())
+        first
+            .device_store()
             .unwrap()
-            .policy()
+            .asset_residency_policy()
             .unwrap(),
         AssetPolicy::Full
     );
@@ -490,7 +492,7 @@ fn simultaneous_remote_media_grants_do_not_exhaust_device_request_slots() {
 }
 
 #[test]
-fn owner_metadata_and_cold_payload_stay_local_while_owner_binary_stays_remote() {
+fn owner_manifests_stay_local_while_the_owner_binary_stays_remote() {
     use crate::asset_repository::owner_manifest_codec::OwnerManifestEntry;
     let fixture = Fixture::new();
     let (_first, mut first) = prepared();
@@ -520,38 +522,10 @@ fn owner_metadata_and_cold_payload_stay_local_while_owner_binary_stays_remote() 
         ),
     }];
     let manifest = commit_owner(&mut first, &entries);
-    let cold = PayloadCas::new(first.repository_root())
-        .unwrap()
-        .prepare_bytes(br#"{"synthetic":"cold metadata"}"#)
-        .unwrap();
-    first
-        .asset_object_catalog()
-        .register(
-            &[
-                crate::persistent_store::asset_object_catalog::AssetObjectRegistration {
-                    object_hash: cold.content_hash.clone(),
-                    byte_size: cold.byte_size,
-                },
-            ],
-            1,
-        )
-        .unwrap();
-    first
-        .commit_cold_alias(
-            &ColdAlias {
-                key: "synthetic-cold".into(),
-                object_hash: Some(cold.content_hash.clone()),
-                size: cold.byte_size as i64,
-                metadata: json!({}),
-            },
-            first.revision().unwrap(),
-        )
-        .unwrap();
     assert_eq!(settle(&mut first).phase, "idle");
     assert_eq!(settle(&mut second).phase, "idle");
     let cas = PayloadCas::new(second.repository_root()).unwrap();
     assert!(cas.stat_object(&manifest).unwrap().is_some());
-    assert!(cas.stat_object(&cold.content_hash).unwrap().is_some());
     assert_eq!(cas.stat_object(&binary.content_hash).unwrap(), None);
     // Editing the owning record must not pull all of its media back to disk.
     entries[0].tuple[0] = "edited synthetic".into();
@@ -560,5 +534,4 @@ fn owner_metadata_and_cold_payload_stay_local_while_owner_binary_stays_remote() 
     assert_eq!(cas.stat_object(&binary.content_hash).unwrap(), None);
     second.asset_residency_evict(|| Ok(())).unwrap();
     assert!(cas.stat_object(&edited).unwrap().is_some());
-    assert!(cas.stat_object(&cold.content_hash).unwrap().is_some());
 }

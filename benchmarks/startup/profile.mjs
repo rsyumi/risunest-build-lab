@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url'
 import { buildBenchmarkConfig } from '../phase3/tauri-cdp.mjs'
 import { connect, delay, instrumentation, waitForInteractive } from './cdp.mjs'
 import { sanitizeMetrics } from './metrics.mjs'
+import { observeWal, readWindowsMemory } from './host-metrics.mjs'
 import { runOnPrivateDesktop } from './background.mjs'
 import { addSyntheticAssets, assertSyntheticProfile, seedExpression } from './fixture.mjs'
 
@@ -58,10 +59,14 @@ async function stop(child, client) {
     client?.close()
     if (child.exitCode === null)
         await run('taskkill.exe', ['/PID', String(child.pid), '/T', '/F'], process.env)
+    if (child.exitCode === null && child.signalCode === null)
+        await once(child, 'exit', { signal: AbortSignal.timeout(15_000) })
     stopped.add(child)
 }
 
 async function main() {
+    if (options.kind && !['reload', 'restart'].includes(options.kind))
+        throw new Error('Invalid measurement kind')
     const server = net.createServer()
     server.listen(0, '127.0.0.1')
     await once(server, 'listening')
@@ -95,10 +100,12 @@ async function main() {
         ...config.build,
         ...agent.build,
         beforeBuildCommand: 'node benchmarks/startup/before-build.mjs',
+        frontendDist: '../.tmp/startup-benchmark-dist',
     }
     // An absolute WebView directory prevents cwd-dependent reuse.
     config.app.windows[0].dataDirectory = path.join(temporary, 'webview')
-    if (!options.config) await writeFile(configPath, JSON.stringify(config))
+    if (!options.config || options.rebuild === 'true')
+        await writeFile(configPath, JSON.stringify(config))
     const env = {
         ...process.env,
         APPDATA: path.join(temporary, 'roaming'),
@@ -258,34 +265,37 @@ async function main() {
         recentSnapshotReady = scenario.recentSnapshot
     }
     const measure = async (kind, warmup = false) => {
-        let launchToReadyMs = null
-        if (kind === 'restart') launchToReadyMs = await launch()
-        else {
-            const origin = await client.evaluate('performance.timeOrigin')
-            await client.call('Page.reload')
-            const navigationDeadline = Date.now() + 120_000
-            while ((await client.evaluate('performance.timeOrigin')) === origin) {
-                if (Date.now() > navigationDeadline) throw new Error('Reload did not navigate')
-                await delay(50)
+        const finishWal =
+            options.hostMetrics === 'true' ? await observeWal(profileRoot, config.identifier) : null
+        try {
+            let launchToReadyMs = null
+            if (kind === 'restart') launchToReadyMs = await launch()
+            else {
+                const origin = await client.evaluate('performance.timeOrigin')
+                await client.call('Page.reload')
+                const navigationDeadline = Date.now() + 120_000
+                while ((await client.evaluate('performance.timeOrigin')) === origin) {
+                    if (Date.now() > navigationDeadline) throw new Error('Reload did not navigate')
+                    await delay(50)
+                }
+                await waitForInteractive(client)
             }
-            await waitForInteractive(client)
-        }
-        await delay(10_000)
-        const deadline = Date.now() + 20_000
-        let settled = false
-        do {
-            settled = await client.evaluate(`(() => {
+            await delay(10_000)
+            const deadline = Date.now() + 20_000
+            let settled = false
+            do {
+                settled = await client.evaluate(`(() => {
                 const s = window.__startupMetrics;
                 if (!s) return true;
                 return s.operations.some(o => o.stage === 'flush')
                     && !Object.values(s.active).some(n => n > 0)
                     && !s.calls.some(c => c.ms === null);
             })()`)
-            if (settled) break
-            await delay(250)
-        } while (Date.now() < deadline)
-        const sample = sanitizeMetrics(
-            await client.evaluate(`(async () => ({
+                if (settled) break
+                await delay(250)
+            } while (Date.now() < deadline)
+            const sample = sanitizeMetrics(
+                await client.evaluate(`(async () => ({
             interactiveMs: performance.getEntriesByName('boot:interactive')[0]?.startTime ?? null,
             firstPaintMs: performance.getEntriesByName('first-contentful-paint')[0]?.startTime ?? null,
             marks: performance.getEntriesByType('mark').filter(e => /^boot:[a-z-]+$/.test(e.name)).map(e => ({stage: e.name, ms: e.startTime})),
@@ -307,46 +317,57 @@ async function main() {
             imageResources: performance.getEntriesByType('resource').filter(e => e.initiatorType === 'img').map(e => ({start: e.startTime, ms: e.duration})),
             stabilizationTimeout: ${!settled},
         }))()`),
-        )
-        const legacyAssetsAfter = (await readdir(path.join(profileRoot, 'assets'))).length
-        const paintEpoch =
-            kind === 'restart'
-                ? await client.evaluate(`(() => {
+            )
+            const legacyAssetsAfter = (await readdir(path.join(profileRoot, 'assets'))).length
+            const paintEpoch =
+                kind === 'restart'
+                    ? await client.evaluate(`(() => {
                 const paint = performance.getEntriesByName('first-contentful-paint')[0];
                 return paint ? performance.timeOrigin + paint.startTime : null;
             })()`)
-                : null
-        const launchToFirstPaintMs =
-            Number.isFinite(paintEpoch) && Number.isFinite(launchEpoch)
-                ? paintEpoch - launchEpoch
-                : null
-        samples.push({
-            ...scenario,
-            kind,
-            warmup,
-            launchToReadyMs,
-            launchToFirstPaintMs,
-            legacyAssetsAfter,
-            ...sample,
-        })
-        await persist()
-        if (
-            warmup &&
-            scenario.interaction &&
-            (!sample.interaction?.success || sample.interaction.failure !== null)
-        )
-            throw new Error('Visible interaction warmup failed')
-        console.log(
-            JSON.stringify({
+                    : null
+            const launchToFirstPaintMs =
+                Number.isFinite(paintEpoch) && Number.isFinite(launchEpoch)
+                    ? paintEpoch - launchEpoch
+                    : null
+            samples.push({
+                ...scenario,
                 kind,
                 warmup,
-                interactiveMs: sample.interactiveMs,
-                mode: scenario.mode,
-                objects: scenario.assets,
-                selectionMs: sample.interaction?.selectionMs,
-                settled: !sample.stabilizationTimeout,
-            }),
-        )
+                launchToReadyMs,
+                launchToFirstPaintMs,
+                legacyAssetsAfter,
+                ...sample,
+                ...(finishWal
+                    ? {
+                          host: {
+                              wal: await finishWal(),
+                              memory: await readWindowsMemory(child.pid),
+                          },
+                      }
+                    : {}),
+            })
+            await persist()
+            if (
+                warmup &&
+                scenario.interaction &&
+                (!sample.interaction?.success || sample.interaction.failure !== null)
+            )
+                throw new Error('Visible interaction warmup failed')
+            console.log(
+                JSON.stringify({
+                    kind,
+                    warmup,
+                    interactiveMs: sample.interactiveMs,
+                    mode: scenario.mode,
+                    objects: scenario.assets,
+                    selectionMs: sample.interaction?.selectionMs,
+                    settled: !sample.stabilizationTimeout,
+                }),
+            )
+        } finally {
+            if (finishWal) await finishWal()
+        }
     }
     try {
         console.log(JSON.stringify({ phase: 'initial-launch' }))
@@ -463,13 +484,13 @@ async function main() {
                     source: instrumentation,
                 })
             }
-            for (let i = 0; i < runs; i++) {
+            for (let i = 0; i < (options.kind === 'restart' ? 0 : runs); i++) {
                 await prepareNext()
                 await measure('reload')
             }
             await prepareNext()
             await stop(child, client)
-            for (let i = 0; i < runs; i++) {
+            for (let i = 0; i < (options.kind === 'reload' ? 0 : runs); i++) {
                 await measure('restart')
                 await prepareNext()
                 await stop(child, client)

@@ -1,9 +1,10 @@
 use super::{
-    active_generation, compare_plugin_storage_keys, current_revision, AnchorOccurrence, AssetAlias,
-    AssetAliasListQuery, AssetAliasPage, AssetOwnerHead, AssetOwnerLocator,
-    AssetRepositoryAuthorityState, CharacterPage, CharacterQuery, CharacterSummary, ColdAlias,
-    ColdPayloadAuthorityState, ConversationPage, ConversationQuery, ConversationSummary,
-    ConversationWindow, ConversationWindowQuery, PluginStorageCatalog, PluginStorageSummary,
+    active_generation, compare_plugin_storage_keys, current_revision, AnchorOccurrence,
+    ArchivedCharacterSummary, AssetAlias, AssetAliasListQuery, AssetAliasPage, AssetOwnerHead,
+    AssetOwnerLocator, AssetRepositoryAuthorityState, CharacterPage, CharacterQuery,
+    CharacterSummary, ConversationPage, ConversationQuery, ConversationSummary,
+    ConversationMessageMetadata, ConversationMessageMetadataWindow, ConversationWindow,
+    ConversationWindowQuery, PluginStorageCatalog, PluginStorageListItem, PluginStorageSummary,
     PresetCatalog, PresetSummary, QueryOrder, ReadTarget, StoreError, StoreResult, Versioned,
     CONVERSATION_RANGE_MAX_LIMIT, JAVASCRIPT_MAX_SAFE_INTEGER,
 };
@@ -81,22 +82,24 @@ pub(super) fn query_plugin_storage(
     target: &ReadTarget,
 ) -> StoreResult<PluginStorageCatalog> {
     let mut statement = connection.prepare(
-        "SELECT storage_key, byte_size, ordinal FROM plugin_storage
+        "SELECT owner, storage_key, byte_size, ordinal FROM plugin_storage
          WHERE generation = ?1",
     )?;
     let mut items = statement
         .query_map([&target.generation], |row| {
             Ok((
                 PluginStorageSummary {
-                    key: row.get(0)?,
-                    byte_size: row.get(1)?,
+                    owner: row.get(0)?,
+                    key: row.get(1)?,
+                    byte_size: row.get(2)?,
                 },
-                row.get::<_, i64>(2)?,
+                row.get::<_, i64>(3)?,
             ))
         })?
         .collect::<Result<Vec<_>, _>>()?;
     items.sort_by(|(left, left_ordinal), (right, right_ordinal)| {
         compare_plugin_storage_keys(&left.key, *left_ordinal, &right.key, *right_ordinal)
+            .then_with(|| left.owner.cmp(&right.owner))
     });
     Ok(PluginStorageCatalog {
         revision: target.revision,
@@ -104,15 +107,53 @@ pub(super) fn query_plugin_storage(
     })
 }
 
+/// Ordered by owner then legacy key order. No value body crosses the boundary.
+pub(super) fn list_plugin_storage(
+    connection: &Connection,
+    target: &ReadTarget,
+) -> StoreResult<Vec<PluginStorageListItem>> {
+    let mut statement = connection.prepare(
+        "SELECT owner, storage_key, byte_size, ordinal,
+                CASE WHEN substr(value, 1, 1) = '\"' THEN 'string' ELSE 'json' END,
+                claimed_from, import_batch_id, assigned_at
+         FROM plugin_storage WHERE generation = ?1",
+    )?;
+    let mut items = statement
+        .query_map([&target.generation], |row| {
+            Ok((
+                PluginStorageListItem {
+                    owner: row.get(0)?,
+                    key: row.get(1)?,
+                    space: None,
+                    value_type: row.get(4)?,
+                    byte_size: row.get(2)?,
+                    claimed_from: row.get(5)?,
+                    import_batch_id: row.get(6)?,
+                    assigned_at: row.get(7)?,
+                },
+                row.get::<_, i64>(3)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    items.sort_by(|(left, left_ordinal), (right, right_ordinal)| {
+        left.owner.cmp(&right.owner).then_with(|| {
+            compare_plugin_storage_keys(&left.key, *left_ordinal, &right.key, *right_ordinal)
+        })
+    });
+    Ok(items.into_iter().map(|(item, _)| item).collect())
+}
+
 pub(super) fn read_plugin_storage(
     connection: &Connection,
+    owner: &str,
     key: &str,
     target: &ReadTarget,
 ) -> StoreResult<Option<Versioned<Value>>> {
     let value: Option<String> = connection
         .query_row(
-            "SELECT value FROM plugin_storage WHERE generation = ?1 AND storage_key = ?2",
-            params![target.generation, key],
+            "SELECT value FROM plugin_storage
+             WHERE generation = ?1 AND owner = ?2 AND storage_key = ?3",
+            params![target.generation, owner, key],
             |row| row.get(0),
         )
         .optional()?;
@@ -299,31 +340,6 @@ pub(super) fn read_asset_repository_authority(
     })
 }
 
-pub(super) fn read_cold_payload_authority(
-    connection: &Connection,
-    target: &ReadTarget,
-) -> StoreResult<Versioned<ColdPayloadAuthorityState>> {
-    let stored: Option<String> = connection
-        .query_row(
-            "SELECT value FROM cold_payload_authority WHERE generation = ?1",
-            [&target.generation],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let stored = stored.ok_or_else(|| StoreError::Validation {
-        message: "Cold payload authority state is missing".to_owned(),
-    })?;
-    let value: ColdPayloadAuthorityState =
-        serde_json::from_str(&stored).map_err(|_| StoreError::Validation {
-            message: "Cold payload authority state is invalid".to_owned(),
-        })?;
-    value.validate()?;
-    Ok(Versioned {
-        revision: target.revision,
-        value,
-    })
-}
-
 pub(super) fn read_asset_owner_head(
     connection: &Connection,
     owner: &AssetOwnerLocator,
@@ -349,43 +365,6 @@ pub(super) fn read_asset_owner_head(
         .optional()?;
     value
         .map(|value| {
-            value.validate()?;
-            Ok(Versioned {
-                revision: target.revision,
-                value,
-            })
-        })
-        .transpose()
-}
-
-pub(super) fn read_cold_alias(
-    connection: &Connection,
-    key: &str,
-    target: &ReadTarget,
-) -> StoreResult<Option<Versioned<ColdAlias>>> {
-    let value = connection
-        .query_row(
-            "SELECT key, object_hash, size, metadata FROM cold_aliases
-             WHERE generation = ?1 AND key = ?2",
-            params![target.generation, key],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, String>(3)?,
-                ))
-            },
-        )
-        .optional()?;
-    value
-        .map(|(key, object_hash, size, metadata)| {
-            let value = ColdAlias {
-                key,
-                object_hash,
-                size,
-                metadata: serde_json::from_str(&metadata)?,
-            };
             value.validate()?;
             Ok(Versioned {
                 revision: target.revision,
@@ -489,46 +468,6 @@ fn stored_asset_owner_index(value: &str, subject: &str) -> StoreResult<i64> {
     Ok(index)
 }
 
-pub(super) fn list_cold_aliases(
-    connection: &Connection,
-    target: &ReadTarget,
-) -> StoreResult<Versioned<Vec<ColdAlias>>> {
-    let rows = {
-        let mut statement = connection.prepare(
-            "SELECT key, object_hash, size, metadata FROM cold_aliases
-             WHERE generation = ?1 ORDER BY key ASC",
-        )?;
-        let rows = statement
-            .query_map([&target.generation], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, String>(3)?,
-                ))
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        rows
-    };
-    let values = rows
-        .into_iter()
-        .map(|(key, object_hash, size, metadata)| {
-            let value = ColdAlias {
-                key,
-                object_hash,
-                size,
-                metadata: serde_json::from_str(&metadata)?,
-            };
-            value.validate()?;
-            Ok(value)
-        })
-        .collect::<StoreResult<Vec<_>>>()?;
-    Ok(Versioned {
-        revision: target.revision,
-        value: values,
-    })
-}
-
 fn asset_alias_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AssetAlias> {
     Ok(AssetAlias {
         key: row.get(0)?,
@@ -561,22 +500,56 @@ pub(super) fn validate_asset_kind(kind: &str) -> StoreResult<()> {
     }
 }
 
+const CHARACTER_SUMMARY_COLUMNS: &str =
+    "character_id, name, image, configured_index, recent_at, trashed, conversation_count,
+     type, creator_notes, trash_time, archived_object";
+
+fn character_summary_from_row(row: &rusqlite::Row<'_>) -> StoreResult<CharacterSummary> {
+    let archived = row
+        .get::<_, Option<String>>(10)?
+        .map(|stored| {
+            serde_json::from_str::<super::archive::ArchivedObject>(&stored).map(|archived| {
+                ArchivedCharacterSummary {
+                    archived_at: archived.archived_at,
+                    conversation_count: archived.conversation_count,
+                    message_count: archived.message_count,
+                }
+            })
+        })
+        .transpose()?;
+    Ok(CharacterSummary {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        image: row.get(2)?,
+        configured_index: row.get(3)?,
+        recent_at: row.get(4)?,
+        trashed: row.get::<_, i64>(5)? != 0,
+        conversation_count: row.get(6)?,
+        r#type: row.get(7)?,
+        creator_notes: row.get(8)?,
+        trash_time: row.get(9)?,
+        archived,
+    })
+}
+
 pub(super) fn query_characters(
     connection: &Connection,
     query: &CharacterQuery,
     target: &ReadTarget,
 ) -> StoreResult<CharacterPage> {
-    let (limit, offset) = page_input(query.limit, query.cursor.as_deref())?;
-    let order = order_sql(query.order);
     let search = query
         .search
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(str::to_lowercase);
+    if search.is_none() && matches!(query.order, QueryOrder::Configured) {
+        return query_configured_characters(connection, query, target);
+    }
+    let (limit, offset) = page_input(query.limit, query.cursor.as_deref())?;
+    let order = order_sql(query.order);
     let mut statement = connection.prepare(&format!(
-        "SELECT character_id, name, image, configured_index, recent_at, trashed, conversation_count,
-                type, creator_notes, trash_time
+        "SELECT {CHARACTER_SUMMARY_COLUMNS}
          FROM characters
          WHERE generation = ?1 AND trashed = ?2
          ORDER BY {order}"
@@ -586,18 +559,7 @@ pub(super) fn query_characters(
     let mut matched = 0;
     let mut has_more = false;
     while let Some(row) = rows.next()? {
-        let summary = CharacterSummary {
-            id: row.get(0)?,
-            name: row.get(1)?,
-            image: row.get(2)?,
-            configured_index: row.get(3)?,
-            recent_at: row.get(4)?,
-            trashed: row.get::<_, i64>(5)? != 0,
-            conversation_count: row.get(6)?,
-            r#type: row.get(7)?,
-            creator_notes: row.get(8)?,
-            trash_time: row.get(9)?,
-        };
+        let summary = character_summary_from_row(row)?;
         if search
             .as_ref()
             .is_some_and(|search| !summary.name.to_lowercase().contains(search))
@@ -622,26 +584,87 @@ pub(super) fn query_characters(
     })
 }
 
+fn query_configured_characters(
+    connection: &Connection,
+    query: &CharacterQuery,
+    target: &ReadTarget,
+) -> StoreResult<CharacterPage> {
+    let (limit, _) = page_input(query.limit, None)?;
+    let after: (i64, String) = match query.cursor.as_deref() {
+        Some(cursor) => serde_json::from_str(cursor).map_err(|_| StoreError::Validation {
+            message: "Invalid configured character cursor".to_owned(),
+        })?,
+        None => (i64::MIN, String::new()),
+    };
+    let mut statement = connection.prepare(&format!(
+        "SELECT {CHARACTER_SUMMARY_COLUMNS} FROM characters
+         WHERE generation = ?1 AND trashed = ?2
+           AND (configured_index, character_id) > (?3, ?4)
+         ORDER BY configured_index ASC, character_id ASC LIMIT ?5"
+    ))?;
+    let mut rows = statement.query(params![target.generation, query.trash as i64,
+        after.0, after.1, limit.saturating_add(1)])?;
+    let mut items = Vec::new();
+    let mut has_more = false;
+    while let Some(row) = rows.next()? {
+        if items.len() as i64 == limit {
+            has_more = true;
+            break;
+        }
+        items.push(character_summary_from_row(row)?);
+    }
+    let next_cursor = if has_more {
+        let last = items.last().expect("positive page limit");
+        Some(serde_json::to_string(&(last.configured_index, &last.id))?)
+    } else {
+        None
+    };
+    Ok(CharacterPage { revision: target.revision, next_cursor, items })
+}
+
+/// One summary by identity. Targeted invalidation reprojects a single changed
+/// character without walking the catalog.
+pub(super) fn read_character_summary(
+    connection: &Connection,
+    id: &str,
+    target: &ReadTarget,
+) -> StoreResult<Option<CharacterSummary>> {
+    let mut statement = connection.prepare(&format!(
+        "SELECT {CHARACTER_SUMMARY_COLUMNS} FROM characters
+         WHERE generation = ?1 AND character_id = ?2"
+    ))?;
+    let mut rows = statement.query(params![target.generation, id])?;
+    match rows.next()? {
+        Some(row) => Ok(Some(character_summary_from_row(row)?)),
+        None => Ok(None),
+    }
+}
+
 pub(super) fn read_character(
     connection: &Connection,
     id: &str,
     target: &ReadTarget,
 ) -> StoreResult<Option<Versioned<Value>>> {
-    let detail: Option<String> = connection
+    let row: Option<(String, Option<String>)> = connection
         .query_row(
-            "SELECT detail FROM characters WHERE generation = ?1 AND character_id = ?2",
+            "SELECT detail, archived_object FROM characters
+             WHERE generation = ?1 AND character_id = ?2",
             params![target.generation, id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
-    detail
-        .map(|detail| {
-            Ok(Versioned {
-                revision: target.revision,
-                value: serde_json::from_str(&detail)?,
-            })
-        })
-        .transpose()
+    let Some((detail, archived_object)) = row else {
+        return Ok(None);
+    };
+    // Failing is safer than handing back the marker that stands in for the
+    // archived detail.
+    if archived_object.is_some() {
+        return Err(super::archive::archived_error(id));
+    }
+    Ok(Some(Versioned {
+        revision: target.revision,
+        value: serde_json::from_str(&detail)?,
+    }))
 }
 
 pub(super) fn query_conversations(
@@ -652,7 +675,14 @@ pub(super) fn query_conversations(
     let (limit, offset) = page_input(query.limit, query.cursor.as_deref())?;
     let order = order_sql(query.order);
     let mut statement = connection.prepare(&format!(
-        "SELECT conversation_id, character_id, name, configured_index, recent_at, message_count, detail
+        "SELECT conversation_id, character_id, name, configured_index, recent_at, message_count,
+             CASE WHEN json_type(detail, '$.folderId') = 'text'
+                 THEN json_extract(detail, '$.folderId') END,
+             CASE WHEN json_type(detail, '$.bindedPersona') = 'text'
+                 THEN json_extract(detail, '$.bindedPersona') END,
+             CASE WHEN json_type(detail, '$.fmIndex') = 'integer'
+                       AND typeof(json_extract(detail, '$.fmIndex')) = 'integer'
+                 THEN json_extract(detail, '$.fmIndex') END
          FROM conversations WHERE generation = ?1 AND character_id = ?2
          ORDER BY {order} LIMIT ?3 OFFSET ?4"
     ))?;
@@ -664,23 +694,16 @@ pub(super) fn query_conversations(
     ])?;
     let mut items = Vec::new();
     while let Some(row) = rows.next()? {
-        let detail: Value = serde_json::from_str(&row.get::<_, String>(6)?)?;
         items.push(ConversationSummary {
             id: row.get(0)?,
             character_id: row.get(1)?,
             name: row.get(2)?,
-            folder_id: detail
-                .get("folderId")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
-            binded_persona: detail
-                .get("bindedPersona")
-                .and_then(Value::as_str)
-                .map(str::to_owned),
+            folder_id: row.get(6)?,
+            binded_persona: row.get(7)?,
             configured_index: row.get(3)?,
             recent_at: row.get(4)?,
             message_count: row.get(5)?,
-            fm_index: detail.get("fmIndex").and_then(Value::as_i64),
+            fm_index: row.get(8)?,
         });
     }
     let has_more = items.len() as i64 > limit;
@@ -879,6 +902,113 @@ pub(super) fn read_conversation_window(
     }))
 }
 
+pub(super) fn read_conversation_message_metadata_window(
+    connection: &Connection,
+    query: &ConversationWindowQuery,
+    target: &ReadTarget,
+) -> StoreResult<Option<Versioned<ConversationMessageMetadataWindow>>> {
+    let Some(start_index) = query.start_index else {
+        return Err(StoreError::Validation {
+            message: "conversation metadata range requires startIndex".to_owned(),
+        });
+    };
+    if !(0..=JAVASCRIPT_MAX_SAFE_INTEGER).contains(&start_index) {
+        return Err(StoreError::Validation {
+            message: "conversation metadata range startIndex must be a nonnegative safe integer"
+                .to_owned(),
+        });
+    }
+    let Some(limit) = query.limit else {
+        return Err(StoreError::Validation {
+            message: "conversation metadata range requires limit".to_owned(),
+        });
+    };
+    if !(1..=CONVERSATION_RANGE_MAX_LIMIT).contains(&limit)
+        || query.anchor_message_id.is_some()
+        || query.anchor_occurrence.is_some()
+        || query.before.is_some()
+        || query.after.is_some()
+    {
+        return Err(StoreError::Validation {
+            message: "conversation metadata range is invalid".to_owned(),
+        });
+    }
+    let total_messages: Option<i64> = connection
+        .query_row(
+            "SELECT message_count FROM conversations WHERE generation = ?1 AND character_id = ?2 AND conversation_id = ?3",
+            params![target.generation, query.character_id, query.conversation_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(total_messages) = total_messages else {
+        return Ok(None);
+    };
+    let start_index = start_index.min(total_messages);
+    let end_index = (start_index + limit).min(total_messages);
+    let mut statement = connection.prepare(
+        "SELECT message_id, json_extract(value, '$.role'), value -> '$.disabled',
+                COALESCE(json_type(value, '$.data') = 'text'
+                AND instr(json_extract(value, '$.data'), '{{') = 0
+                AND instr(json_extract(value, '$.data'), '}}') = 0
+                AND instr(json_extract(value, '$.data'), '<Thoughts>') = 0
+                AND instr(json_extract(value, '$.data'), '</Thoughts>') = 0, 0)
+         FROM messages
+         WHERE generation = ?1 AND character_id = ?2 AND conversation_id = ?3
+           AND message_index >= ?4 AND message_index < ?5
+         ORDER BY message_index ASC",
+    )?;
+    let rows = statement.query_map(
+        params![
+            target.generation,
+            query.character_id,
+            query.conversation_id,
+            start_index,
+            end_index
+        ],
+        |row| {
+            let disabled_json: Option<String> = row.get(2)?;
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                disabled_json,
+                row.get::<_, bool>(3)?,
+            ))
+        },
+    )?;
+    let mut messages = Vec::with_capacity((end_index - start_index) as usize);
+    for row in rows {
+        let (chat_id, role, disabled_json, parser_inert) = row?;
+        let disabled = disabled_json
+            .filter(|value| value != "null")
+            .map(|value| serde_json::from_str(&value))
+            .transpose()?;
+        messages.push(ConversationMessageMetadata {
+            chat_id,
+            role,
+            disabled,
+            parser_inert,
+        });
+    }
+    if messages.len() != (end_index - start_index) as usize {
+        return Err(StoreError::Store {
+            message: "Conversation metadata range is incomplete".to_owned(),
+        });
+    }
+    Ok(Some(Versioned {
+        revision: target.revision,
+        value: ConversationMessageMetadataWindow {
+            character_id: query.character_id.clone(),
+            conversation_id: query.conversation_id.clone(),
+            messages,
+            start_index,
+            end_index,
+            total_messages,
+            has_more_before: start_index > 0,
+            has_more_after: end_index < total_messages,
+        },
+    }))
+}
+
 // The anchor and anchorless window paths accept untrusted JSON, so their
 // spans get the same safe-integer bound as the absolute-range path to keep
 // the index arithmetic overflow-free.
@@ -961,7 +1091,8 @@ fn materialize_generation(connection: &Connection, generation: &str) -> StoreRes
     let character_records = {
         let mut statement = connection.prepare(
             "SELECT character_id, detail FROM characters
-             WHERE generation = ?1 ORDER BY configured_index ASC",
+             WHERE generation = ?1 AND archived_object IS NULL
+             ORDER BY configured_index ASC",
         )?;
         let rows = statement.query_map([&generation], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
@@ -1009,32 +1140,7 @@ fn materialize_generation(connection: &Connection, generation: &str) -> StoreRes
         presets
     };
     database.insert("botPresets".to_owned(), Value::Array(presets));
-    let plugin_storage = {
-        let mut statement = connection.prepare(
-            "SELECT storage_key, value, ordinal FROM plugin_storage
-             WHERE generation = ?1",
-        )?;
-        let mut values = statement
-            .query_map([&generation], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, i64>(2)?,
-                ))
-            })?
-            .map(|row| {
-                let (key, value, ordinal) = row?;
-                Ok((key, serde_json::from_str(&value)?, ordinal))
-            })
-            .collect::<StoreResult<Vec<(String, Value, i64)>>>()?;
-        values.sort_by(|(left, _, left_ordinal), (right, _, right_ordinal)| {
-            compare_plugin_storage_keys(left, *left_ordinal, right, *right_ordinal)
-        });
-        values
-            .into_iter()
-            .map(|(key, value, _)| (key, value))
-            .collect::<Map<String, Value>>()
-    };
+    let plugin_storage = super::export::materialized_plugin_storage(connection, &generation)?;
     database.insert(
         "pluginCustomStorage".to_owned(),
         Value::Object(plugin_storage),

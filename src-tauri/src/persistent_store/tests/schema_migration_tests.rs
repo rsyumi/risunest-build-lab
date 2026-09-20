@@ -1,7 +1,7 @@
 use super::*;
 
 fn database_path(directory: &Path) -> PathBuf {
-    directory.join("persistent").join("persistent.db")
+    directory.join("persistent").join("persistent.sqlite")
 }
 
 fn assert_payload_alias_schema(connection: &rusqlite::Connection) {
@@ -49,16 +49,6 @@ fn assert_payload_alias_schema(connection: &rusqlite::Connection) {
                 None,
                 0
             ),
-        ]
-    );
-    assert_eq!(
-        table_columns(connection, "cold_aliases"),
-        vec![
-            ("generation".to_owned(), "TEXT".to_owned(), true, None, 1),
-            ("key".to_owned(), "TEXT".to_owned(), true, None, 2),
-            ("object_hash".to_owned(), "TEXT".to_owned(), false, None, 0),
-            ("size".to_owned(), "INTEGER".to_owned(), true, None, 0),
-            ("metadata".to_owned(), "TEXT".to_owned(), true, None, 0),
         ]
     );
     assert_eq!(
@@ -150,24 +140,6 @@ fn assert_asset_repository_authority_schema(connection: &rusqlite::Connection, e
     );
 }
 
-fn assert_cold_payload_authority_schema(connection: &rusqlite::Connection, expected_rows: i64) {
-    assert_eq!(
-        table_columns(connection, "cold_payload_authority"),
-        vec![
-            ("generation".to_owned(), "TEXT".to_owned(), false, None, 1),
-            ("value".to_owned(), "TEXT".to_owned(), true, None, 0),
-        ]
-    );
-    assert_eq!(
-        connection
-            .query_row("SELECT COUNT(*) FROM cold_payload_authority", [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .expect("count cold authority rows"),
-        expected_rows
-    );
-}
-
 fn assert_no_peer_schema(connection: &rusqlite::Connection) {
     let count: i64 = connection
         .query_row(
@@ -197,7 +169,6 @@ fn empty_database_creates_the_whole_current_schema() {
     assert_payload_alias_schema(&store.connection);
     assert_asset_object_schema(&store.connection);
     assert_asset_repository_authority_schema(&store.connection, 1);
-    assert_cold_payload_authority_schema(&store.connection, 1);
     assert_eq!(
         store
             .connection
@@ -207,17 +178,6 @@ fn empty_database_creates_the_whole_current_schema() {
                 |row| row.get::<_, String>(0),
             )
             .expect("read fresh legacy authority"),
-        r#"{"format":"legacy"}"#
-    );
-    assert_eq!(
-        store
-            .connection
-            .query_row(
-                "SELECT value FROM cold_payload_authority WHERE generation = 'revision-0'",
-                [],
-                |row| row.get::<_, String>(0),
-            )
-            .expect("read fresh legacy cold authority"),
         r#"{"format":"legacy"}"#
     );
     assert_no_peer_schema(&store.connection);
@@ -261,8 +221,44 @@ fn existing_current_database_revalidates_on_reopen() {
 }
 
 #[test]
+fn a_broken_device_store_is_reported_without_blocking_the_library() {
+    let directory = tempfile::tempdir().expect("create device failure directory");
+    let store = PersistentStore::open(directory.path()).expect("create current store");
+    assert!(store.device_store().is_ok());
+    assert!(store
+        .open_native_job_store()
+        .expect("open native job store")
+        .device_store()
+        .is_ok());
+    drop(store);
+
+    let device_path = directory
+        .path()
+        .join("persistent")
+        .join(super::super::device_store::DEVICE_DATABASE_FILE);
+    let connection = rusqlite::Connection::open(&device_path).expect("open device database");
+    connection
+        .execute_batch("PRAGMA user_version = 17;")
+        .expect("stamp unknown device schema version");
+    drop(connection);
+
+    let store =
+        PersistentStore::open(directory.path()).expect("library opens without the device store");
+    assert_eq!(store.revision().expect("read library revision"), 0);
+    let Err(error) = store.device_store() else {
+        panic!("a damaged device store must be reported");
+    };
+    assert_eq!(
+        error,
+        StoreError::Store {
+            message: "device store is unavailable: unsupported device schema version 17".to_owned(),
+        }
+    );
+}
+
+#[test]
 fn unknown_schema_version_is_rejected() {
-    for version in [1_i64, 17] {
+    for version in [1_i64, 2, 3, 17] {
         let directory = tempfile::tempdir().expect("create unknown version directory");
         let store = PersistentStore::open(directory.path()).expect("create current store");
         drop(store);

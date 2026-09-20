@@ -1,6 +1,7 @@
 import { language } from 'src/lang'
 
 import type {
+    NativeFileOperationKind,
     NativeFileOperationOutcome,
     NativeFileOperationState,
 } from '../storage/nativeFileJobManager'
@@ -13,9 +14,11 @@ import type {
 } from '../storage/nativeFileJobs'
 
 /**
- * Pure view model for the shared import progress dialog. Everything the
+ * Pure view model for the shared file job progress dialog. Everything the
  * component renders comes from here so the stage list, number formatting,
  * cancel availability, and terminal copy can be tested without a DOM.
+ * Imports show their staged pipeline; exports show the phases the native
+ * job reports while it writes and saves the file.
  */
 
 export type NativeFileJobDialogStage = Exclude<NativeFileJobStage, 'awaiting-activation'> | 'complete'
@@ -76,15 +79,38 @@ const STAGE_ORDER: DialogStageId[] = [
     'decoding-database',
     'staging-characters',
     'finalizing-staging',
+    'assign-plugin-values',
     'activating',
     'refreshing-app',
     'reloading-plugins',
     'restarting-app',
 ]
 
+const EXPORT_STAGE_ORDER: DialogStageId[] = [
+    'preparing-export',
+    'writing-export',
+    'publishing-destination',
+    'finalizing-export',
+]
+
+/** Saving to the chosen location only happens on Android and iOS, so it appears once observed. */
+const EXPECTED_EXPORT_STAGES: DialogStageId[] = [
+    'preparing-export',
+    'writing-export',
+    'finalizing-export',
+]
+
 /** Stages shown as pending from the start; optional stages appear only once observed. */
 const EXPECTED_STAGES: Record<NativeFileOperationFormat, DialogStageId[]> = {
+    'raw-recovery': ['reading-archive'],
     'library-backup': [
+        'reading-database',
+        'finalizing-staging',
+        'activating',
+        'refreshing-app',
+        'reloading-plugins',
+    ],
+    'conflict-reference': [
         'reading-database',
         'finalizing-staging',
         'activating',
@@ -176,11 +202,16 @@ function normalizeStage(stage: NativeFileJobStage): DialogStageId {
     return stage === 'awaiting-activation' ? 'activating' : stage
 }
 
+/**
+ * The job the native side reports names the file that is actually being
+ * read. The operation's own format only says which admission rules applied
+ * (one common picker admits every backup as a library backup), so it is the
+ * fallback until the first status arrives.
+ */
 function formatOf(
     explicit: NativeFileOperationFormat | undefined,
     status: NativeFileJobStatus | undefined,
 ): NativeFileOperationFormat | undefined {
-    if (explicit) return explicit
     switch (status?.kind) {
         case 'restore-block-risu-save':
             return 'risu-save'
@@ -189,7 +220,34 @@ function formatOf(
         case 'restore-legacy-local-backup':
             return 'local-backup'
         default:
-            return undefined
+            return explicit
+    }
+}
+
+/** The rescue archive is an export too, but keeps the archive presentation it always had. */
+function isExport(
+    kind: NativeFileOperationKind,
+    format: NativeFileOperationFormat | undefined,
+): boolean {
+    return kind === 'export' && format !== 'raw-recovery'
+}
+
+function exportTitleOf(
+    format: NativeFileOperationFormat | undefined,
+    status: NativeFileJobStatus | undefined,
+): string {
+    const copy = language.risuNest.importDialog
+    switch (status?.kind) {
+        case 'export-block-risu-save':
+            return copy.titleExportRisuSave
+        case 'export-portable-backup':
+            return copy.titleExportBackup
+        case 'export-compatible-local-backup':
+            return copy.titleExportCompatible
+        case 'export-legacy-local-backup':
+            return copy.titleExportLocalBackup
+        default:
+            return format === 'risu-save' ? copy.titleExportRisuSave : copy.titleExport
     }
 }
 
@@ -202,6 +260,8 @@ function titleOf(format: NativeFileOperationFormat | undefined): string {
             return copy.titleBackup
         case 'local-backup':
             return copy.titleLocalBackup
+        case 'raw-recovery':
+            return language.risuNest.recovery.exportTitle
         default:
             return copy.titleImport
     }
@@ -218,10 +278,15 @@ function stageLabel(stage: NativeFileJobDialogStage): string {
         case 'decoding-database': return copy.stageDecodingDatabase
         case 'staging-characters': return copy.stageStagingCharacters
         case 'finalizing-staging': return copy.stageFinalizingStaging
+        case 'assign-plugin-values': return copy.stageAssignPluginValues
         case 'activating': return copy.stageActivating
         case 'refreshing-app': return copy.stageRefreshingApp
         case 'reloading-plugins': return copy.stageReloadingPlugins
         case 'restarting-app': return copy.stageRestartingApp
+        case 'preparing-export': return copy.stagePreparingExport
+        case 'writing-export': return copy.stageWritingExport
+        case 'publishing-destination': return copy.stagePublishingDestination
+        case 'finalizing-export': return copy.stageFinalizingExport
         case 'complete': return copy.stageComplete
     }
 }
@@ -282,18 +347,25 @@ function buildStages(
     observed: NativeFileJobStage[],
     status: NativeFileJobStatus | undefined,
     terminalState: NativeFileOperationOutcome['state'] | null,
+    exporting = false,
 ): NativeFileJobDialogStageRow[] {
+    const order = exporting ? EXPORT_STAGE_ORDER : STAGE_ORDER
+    const expected = exporting
+        ? EXPECTED_EXPORT_STAGES
+        : format
+            ? EXPECTED_STAGES[format]
+            : null
     const history = stageHistory(observed)
     const observedSet = new Set(history)
     const current = history.at(-1) ?? null
-    const currentIndex = current ? STAGE_ORDER.indexOf(current) : -1
+    const currentIndex = current ? order.indexOf(current) : -1
     const counts = status?.detail?.counts
 
     const rows: NativeFileJobDialogStageRow[] = []
-    for (const stage of STAGE_ORDER) {
-        const index = STAGE_ORDER.indexOf(stage)
+    for (const stage of order) {
+        const index = order.indexOf(stage)
         if (!observedSet.has(stage)) {
-            if (!format || !EXPECTED_STAGES[format].includes(stage)) continue
+            if (!expected || !expected.includes(stage)) continue
             // An expected stage the job skipped past never happened; drop it instead of faking it.
             if (index <= currentIndex) continue
             if (terminalState) continue
@@ -381,24 +453,17 @@ function buildCounters(
                 label: copy.countColdStorage,
                 value: known(counts?.coldStorage),
             },
+            {
+                key: 'pocketMedia',
+                label: copy.countPocketMedia,
+                value: known(counts?.pocketMedia),
+            },
+            {
+                key: 'skipped',
+                label: copy.countSkipped,
+                value: known(counts?.skipped),
+            },
         )
-        if (
-            counts &&
-            counts.pocketMedia + counts.pocketMetadata + counts.skipped > 0
-        ) {
-            rows.push(
-                {
-                    key: 'pocketMedia',
-                    label: copy.countPocketMedia,
-                    value: formatCount(counts.pocketMedia),
-                },
-                {
-                    key: 'skipped',
-                    label: copy.countSkipped,
-                    value: formatCount(counts.skipped),
-                },
-            )
-        }
     }
     return rows
 }
@@ -515,6 +580,7 @@ export function buildNativeFileJobDialogModel(
     const copy = language.risuNest.importDialog
     if (state?.presentation === 'dialog') {
         const format = formatOf(state.format, state.status)
+        const exporting = isExport(state.kind, format)
         const history = stageHistory(state.observedStages)
         const current = history.at(-1) ?? null
         const counts = state.status?.detail?.counts
@@ -531,8 +597,8 @@ export function buildNativeFileJobDialogModel(
         return {
             compact: format === 'content',
             open: true,
-            title: titleOf(format),
-            subtitle: subtitleOf(format, counts, false),
+            title: exporting ? exportTitleOf(format, state.status) : titleOf(format),
+            subtitle: exporting ? '' : subtitleOf(format, counts, false),
             sourceName: state.source?.name ?? '',
             sourceSize:
                 state.source?.bytes !== undefined
@@ -549,24 +615,32 @@ export function buildNativeFileJobDialogModel(
                 state.observedStages,
                 state.status,
                 null,
+                exporting,
             ),
             currentItem:
                 currentItem &&
+                !exporting &&
                 (current === 'reading-archive' ||
                     current === 'preparing-attachments')
                     ? fillTemplate(copy.currentItem, currentItem)
                     : '',
-            counters: buildCounters(
-                format,
-                counts,
-                state.status?.result,
-                false,
-            ),
+            counters: exporting
+                ? []
+                : buildCounters(
+                      format,
+                      counts,
+                      state.status?.result,
+                      false,
+                  ),
             warnings: (state.status?.warningCodes ?? []).map(warningText),
             terminal: null,
             cancelVisible: true,
             cancelEnabled,
-            cancelLabel: state.cancelRequested ? copy.cancelling : copy.cancel,
+            cancelLabel: state.cancelRequested
+                ? copy.cancelling
+                : exporting
+                    ? copy.cancelExport
+                    : copy.cancel,
             cancelNote:
                 !cancelEnabled && !state.cancelRequested
                     ? copy.cancelUnavailable
@@ -576,13 +650,25 @@ export function buildNativeFileJobDialogModel(
     }
     if (outcome) {
         const format = formatOf(outcome.format, outcome.status)
+        const exporting = isExport(outcome.kind, format)
         const history = stageHistory(outcome.observedStages)
         const restarting =
             outcome.state === 'succeeded' && history.at(-1) === 'restarting-app'
         const counts = outcome.status?.detail?.counts
         let summary: string
         let reason = ''
-        if (outcome.state === 'succeeded') {
+        if (exporting) {
+            if (outcome.state === 'succeeded') {
+                summary = copy.resultExportSucceeded
+            } else if (outcome.state === 'cancelled') {
+                summary = outcome.partialWritesPossible
+                    ? copy.resultExportCancelledPartial
+                    : copy.resultExportCancelled
+            } else {
+                summary = copy.resultExportFailed
+                reason = failureReason(outcome.error?.code ?? '')
+            }
+        } else if (outcome.state === 'succeeded') {
             summary = restarting ? copy.resultRestarting : copy.resultSucceeded
         } else if (outcome.state === 'cancelled') {
             summary = outcome.partialWritesPossible
@@ -597,8 +683,8 @@ export function buildNativeFileJobDialogModel(
         return {
             compact: format === 'content',
             open: true,
-            title: titleOf(format),
-            subtitle: subtitleOf(format, counts, true),
+            title: exporting ? exportTitleOf(format, outcome.status) : titleOf(format),
+            subtitle: exporting ? '' : subtitleOf(format, counts, true),
             sourceName: outcome.source?.name ?? '',
             sourceSize:
                 outcome.source?.bytes !== undefined
@@ -614,14 +700,17 @@ export function buildNativeFileJobDialogModel(
                 outcome.observedStages,
                 outcome.status,
                 outcome.state,
+                exporting,
             ),
             currentItem: '',
-            counters: buildCounters(
-                format,
-                counts,
-                outcome.result,
-                outcome.state === 'succeeded',
-            ),
+            counters: exporting
+                ? []
+                : buildCounters(
+                      format,
+                      counts,
+                      outcome.result,
+                      outcome.state === 'succeeded',
+                  ),
             warnings: outcome.warningCodes.map(warningText),
             terminal: {
                 state: outcome.state,

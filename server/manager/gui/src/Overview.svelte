@@ -1,12 +1,23 @@
 <script lang="ts">
-  import { Check, Copy, ChevronRight, AlertCircle } from "@lucide/svelte";
-  import { formatBytes, phase, type Status } from "./api";
+  import {
+    Check,
+    Copy,
+    ChevronRight,
+    AlertCircle,
+    MonitorSmartphone,
+  } from "@lucide/svelte";
+  import { message, formatBytes, phase, type Status } from "./api";
   let {
     status,
+    connected,
     copy,
     showDevices,
-  }: { status: Status; copy: (text: string) => void; showDevices: () => void } =
-    $props();
+  }: {
+    status: Status;
+    connected: boolean;
+    copy: (text: string) => void;
+    showDevices: () => void;
+  } = $props();
   const active = $derived(status.devices.filter((d) => !d.revoked));
   const unmeasured = $derived(
     status.storage.error ? "측정할 수 없음" : "측정 중",
@@ -20,11 +31,15 @@
 
 <section class="card health">
   <div class="health-heading">
-    <span class="health-icon"><Check size={20} /></span>
+    <span class="health-icon" class:offline={!connected}
+      >{#if connected}<Check size={20} />{:else}<AlertCircle size={20} />{/if}</span
+    >
     <div>
-      <h2>서버 실행 중</h2>
+      <h2>{connected ? "서버 실행 중" : "마지막으로 확인한 서버 정보"}</h2>
       <p>
-        {address
+        {!connected
+          ? "연결이 끊기기 전 상태입니다."
+          : address
           ? "등록된 기기와 동기화할 수 있습니다."
           : "연결 설정에서 서버 주소를 준비하세요."}
       </p>
@@ -43,12 +58,16 @@
       >
     </div>{/if}
   <div class="services">
-    <span>● 동기화 서버</span><span
+    <span class:on={connected}>동기화 서버</span><span
+      class:on={status.tunnel.phase === "connected"}
       >임시 주소 · {phase(status.tunnel.phase)}</span
-    ><span>레지스트리 · {phase(status.publication.phase)}</span>
+    ><span class:on={status.publication.phase === "published"}
+      >레지스트리 · {phase(status.publication.phase)}</span
+    >
   </div>
   {#if status.tunnel.error || status.publication.error}<p class="warning">
-      <AlertCircle size={15} /> 연결 상태를 확인하세요. 서버에 저장된 데이터는 유지됩니다.
+      <AlertCircle size={15} /> {status.tunnel.error ? message(status.tunnel.error) : "주소 레지스트리에 게시하지 못했습니다."}
+      <code>{status.tunnel.error ?? status.publication.error}</code>
     </p>{/if}
 </section>
 <section class="card storage-summary" aria-label="저장 공간">
@@ -107,6 +126,7 @@
 </div>
 <div class="card device-list">
   {#each active.slice(0, 3) as device}<div class="device-row">
+      <span class="device-icon"><MonitorSmartphone size={18} /></span>
       <div>
         <strong>{device.name || device.id.slice(0, 12)}</strong><small
           >{device.id}</small

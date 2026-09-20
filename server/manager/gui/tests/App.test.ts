@@ -1,11 +1,12 @@
 import { mount, tick, unmount } from "svelte";
 import { beforeEach, afterEach, expect, it, vi } from "vitest";
 import App from "../src/App.svelte";
-import type { Backend, Status } from "../src/api";
+import type { Backend, Environment, Status } from "../src/api";
 
 let component: ReturnType<typeof mount> | undefined;
 let target: HTMLDivElement;
 let snapshot: Status;
+let environmentSnapshot: Environment;
 let backend: Backend;
 beforeEach(() => {
   vi.useFakeTimers();
@@ -18,6 +19,7 @@ beforeEach(() => {
   target = document.createElement("div");
   document.body.append(target);
   snapshot = {
+    listener: "127.0.0.1:14319",
     revision: "synthetic:0",
     uptimeSeconds: 5,
     connection: {
@@ -28,7 +30,7 @@ beforeEach(() => {
       uuid: "synthetic-uuid",
     },
     connectionState: { mode: "fixed", publication: "published" },
-    tunnel: { phase: "external", endpoint: null, error: null },
+    tunnel: { phase: "external", endpoint: null, error: null, logs: [] },
     publication: { phase: "published", error: null },
     storage: {
       measuredAt: 1,
@@ -43,20 +45,38 @@ beforeEach(() => {
     devices: [],
     defaultRegistryUrl: "https://registry.example.com",
   };
+  environmentSnapshot = {
+    network: { schema: 1, address: "127.0.0.1", port: 14319 },
+    platform: "windows",
+    dataDir: "synthetic",
+    cloudflared: "C:\\synthetic\\cloudflared.exe",
+    startup: { registered: false, enabled: false, actionMatches: true },
+    startupError: null,
+    trayStartup: false,
+    updateSettings: { schema: "risunest-sync-update-settings/v1", policy: "automatic" },
+    updateStatus: {
+      schema: "risunest-sync-update-status/v1",
+      phase: "idle",
+      targetVersion: null,
+      lastCheckedAt: null,
+      lastCompletedAt: null,
+      deferredUntil: null,
+      reason: null,
+      lastFailedVersion: null,
+    },
+    updateSchedule: { registered: true, enabled: true, actionMatches: true },
+    updateScheduleError: null,
+  };
   backend = {
     status: vi.fn(async () => structuredClone(snapshot)),
-    environment: vi.fn(async () => ({
-      platform: "windows",
-      dataDir: "synthetic",
-      cloudflared: "C:\\synthetic\\cloudflared.exe",
-      startup: { registered: false, enabled: false },
-      startupError: null,
-      trayStartup: false,
-    })),
+    environment: vi.fn(async () => structuredClone(environmentSnapshot)),
     mutate: vi.fn(async () => ({})),
     start: vi.fn(async () => {}),
-    startup: vi.fn(async () => ({ registered: true, enabled: true })),
+    network: vi.fn(async (settings) => { environmentSnapshot.network = settings; }),
+    startup: vi.fn(async () => ({ registered: true, enabled: true, actionMatches: true })),
     trayStartup: vi.fn(async () => {}),
+    updatePolicy: vi.fn(async () => {}),
+    updateCheck: vi.fn(async () => ({ result: "current" })),
     requestId: vi.fn(async () => "a".repeat(64)),
     qr: vi.fn(async () => '<svg aria-label="synthetic-qr"></svg>'),
   };
@@ -104,7 +124,7 @@ it("keeps a dirty form tied to its original revision during status refresh", asy
   await settle();
   expect(input.value).toBe("https://changed.example.com");
   target
-    .querySelector("form")!
+    .querySelector('form[aria-label="연결 설정"]')!
     .dispatchEvent(new Event("submit", { cancelable: true, bubbles: true }));
   await settle();
   expect(backend.mutate).toHaveBeenCalledWith(
@@ -116,6 +136,48 @@ it("keeps a dirty form tied to its original revision during status refresh", asy
       }),
     }),
   );
+});
+
+it("rebases a dirty connection draft after an action from the same form", async () => {
+  vi.mocked(backend.mutate).mockImplementation(async (path) => {
+    if (path === "tunnel/restart") {
+      snapshot.revision = "synthetic:1";
+      return structuredClone(snapshot);
+    }
+    return {};
+  });
+  snapshot.connectionState.mode = "managed";
+  snapshot.connection.cloudflared = "C:\\synthetic\\cloudflared.exe";
+  await open();
+  button("연결").click();
+  await settle();
+  const registry = target.querySelector<HTMLInputElement>(
+    'input[aria-label="레지스트리 사용"]',
+  )!;
+  registry.click();
+  button("다시 시작").click();
+  await vi.waitFor(() =>
+    expect(target.textContent).toContain("변경 사항을 적용했습니다."),
+  );
+  await settle();
+  target
+    .querySelector('form[aria-label="연결 설정"]')!
+    .dispatchEvent(new Event("submit", { cancelable: true, bubbles: true }));
+  await settle();
+  expect(backend.mutate).toHaveBeenLastCalledWith(
+    "connection",
+    expect.objectContaining({ revision: "synthetic:1" }),
+  );
+});
+
+it("labels retained overview data as last-known after losing the daemon", async () => {
+  await open();
+  expect(target.textContent).toContain("서버 실행 중");
+  vi.mocked(backend.status).mockRejectedValue("daemon-unavailable");
+  await vi.advanceTimersByTimeAsync(3000);
+  await settle();
+  expect(target.textContent).toContain("마지막으로 확인한 서버 정보");
+  expect(target.textContent).not.toContain("서버 실행 중");
 });
 
 it("shows a registration URI once and clears it on modal close", async () => {
@@ -166,4 +228,167 @@ it("distinguishes an initial measurement failure from a zero or pending measurem
   await open();
   expect(target.textContent).toContain("측정할 수 없음");
   expect(target.textContent).not.toContain("마지막 측정값");
+});
+
+it("changes the shared update policy from run settings", async () => {
+  await open();
+  button("실행 설정").click();
+  await settle();
+  const select = target.querySelector<HTMLSelectElement>(
+    'select[aria-label="업데이트 정책"]',
+  )!;
+  expect(select.value).toBe("automatic");
+  select.value = "notify";
+  select.dispatchEvent(new Event("change", { bubbles: true }));
+  await settle();
+  expect(backend.updatePolicy).toHaveBeenCalledWith("notify");
+});
+
+it("shows a schedule repair failure and enables retry after the next environment refresh", async () => {
+  environmentSnapshot.updateSchedule = null;
+  environmentSnapshot.updateScheduleError = "update-already-running";
+  await open();
+  button("실행 설정").click();
+  await settle();
+  const select = target.querySelector<HTMLSelectElement>(
+    'select[aria-label="업데이트 정책"]',
+  )!;
+  expect(target.textContent).toContain("예약 업데이트 상태를 확인하지 못했습니다.");
+  expect(select.disabled).toBe(true);
+
+  environmentSnapshot.updateSchedule = {
+    registered: true,
+    enabled: true,
+    actionMatches: true,
+  };
+  environmentSnapshot.updateScheduleError = null;
+  await vi.advanceTimersByTimeAsync(15_000);
+  await settle();
+  expect(target.textContent).not.toContain("예약 업데이트 상태를 확인하지 못했습니다.");
+  expect(select.disabled).toBe(false);
+  expect(backend.environment).toHaveBeenCalledTimes(3);
+});
+
+it("keeps a dirty connection draft on its page and away from update actions", async () => {
+  await open();
+  button("연결").click();
+  await settle();
+  const input = target.querySelector<HTMLInputElement>("input[type=url]")!;
+  input.value = "https://unsaved.example.com";
+  input.dispatchEvent(new Event("input", { bubbles: true }));
+  button("실행 설정").click();
+  await settle();
+  expect(target.querySelector<HTMLInputElement>("input[type=url]")?.value).toBe(
+    "https://unsaved.example.com",
+  );
+  expect(target.querySelector("dialog[open]")?.textContent).toContain("저장하지 않은 변경사항이 있습니다. 정말로 이동하시겠습니까? 변경한 내용이 초기화됩니다.");
+  button("아니오").click();
+  await settle();
+  expect(input.value).toBe("https://unsaved.example.com");
+  button("실행 설정").click();
+  await settle();
+  button("네").click();
+  await settle();
+  expect(target.querySelector('form[aria-label="연결 설정"]')).toBeNull();
+  button("연결").click();
+  await settle();
+  expect(target.querySelector<HTMLInputElement>("input[type=url]")?.value).toBe("https://sync.example.com");
+  expect(backend.updateCheck).not.toHaveBeenCalled();
+});
+
+it("disables manual update checks while a dialog is open", async () => {
+  await open();
+  button("기기 등록").click();
+  button("실행 설정").click();
+  await settle();
+  const check = button("업데이트 확인 및 적용");
+  expect(check.disabled).toBe(true);
+  check.click();
+  expect(backend.updateCheck).not.toHaveBeenCalled();
+});
+
+it("reports a deferred manual update without claiming the app is current", async () => {
+  vi.mocked(backend.updateCheck).mockResolvedValue({
+    result: "deferred",
+    value: "management-active",
+  });
+  await open();
+  button("실행 설정").click();
+  await settle();
+  button("업데이트 확인 및 적용").click();
+  await vi.waitFor(() =>
+    expect(target.textContent).toContain("관리 작업이 끝난 뒤 다시 확인"),
+  );
+  expect(backend.updateCheck).toHaveBeenCalledWith(false);
+  expect(target.textContent).not.toContain("현재 최신 버전입니다.");
+});
+
+it("coordinates an automatic update after the scheduled checker found the open GUI", async () => {
+  environmentSnapshot.updateStatus.phase = "deferred";
+  environmentSnapshot.updateStatus.reason =
+    "management-app-open-or-install-locked";
+  environmentSnapshot.updateStatus.targetVersion = "2.0.0";
+  vi.mocked(backend.updateCheck).mockResolvedValue({
+    result: "started",
+    value: "2.0.0",
+  });
+  await open();
+  await settle();
+  expect(backend.updateCheck).toHaveBeenCalledTimes(1);
+  expect(backend.updateCheck).toHaveBeenCalledWith(true);
+  expect(target.textContent).toContain("관리 앱을 종료하고 적용");
+});
+
+it("does not hot-loop automatic handoff while another manager keeps replacement deferred", async () => {
+  environmentSnapshot.updateStatus.phase = "deferred";
+  environmentSnapshot.updateStatus.reason =
+    "management-app-open-or-install-locked";
+  environmentSnapshot.updateStatus.targetVersion = "2.0.0";
+  vi.mocked(backend.updateCheck).mockResolvedValue({
+    result: "deferred",
+    value: "management-app-open-or-install-locked",
+  });
+  await open();
+  await vi.waitFor(() => expect(backend.updateCheck).toHaveBeenCalledTimes(1));
+  await vi.advanceTimersByTimeAsync(45_000);
+  await settle();
+  expect(backend.updateCheck).toHaveBeenCalledTimes(1);
+});
+
+
+it("saves network settings while the server is stopped and discards only confirmed drafts", async () => {
+  vi.mocked(backend.status).mockRejectedValue("daemon-unavailable");
+  await open();
+  button("연결").click();
+  await settle();
+  const address = target.querySelector<HTMLInputElement>('input[aria-label="바인딩 주소"]')!;
+  const port = target.querySelector<HTMLInputElement>('input[aria-label="포트"]')!;
+  address.value = "0.0.0.0";
+  address.dispatchEvent(new Event("input", { bubbles: true }));
+  port.value = "24319";
+  port.dispatchEvent(new Event("input", { bubbles: true }));
+  await settle();
+  button("개요").click();
+  await settle();
+  target.querySelector("dialog")!.dispatchEvent(new Event("cancel", { cancelable: true }));
+  await settle();
+  expect(address.value).toBe("0.0.0.0");
+  address.closest("form")!.dispatchEvent(new Event("submit", { cancelable: true }));
+  await vi.waitFor(() => expect(backend.network).toHaveBeenCalledWith({ schema: 1, address: "0.0.0.0", port: 24319 }));
+  await settle();
+  expect(target.textContent).toContain("다음 서버 시작부터 적용됩니다.");
+  button("개요").click();
+  await settle();
+  expect(target.querySelector("dialog[open]")).toBeNull();
+});
+
+it("shows the last tunnel failure and output while retrying, as text", async () => {
+  snapshot.tunnel = { phase: "starting", endpoint: null, error: "tunnel-exited", logs: ['<script>synthetic</script>', 'DNS lookup failed'] };
+  await open();
+  expect(target.textContent).toContain("cloudflared가 종료되었습니다.");
+  button("연결").click();
+  await settle();
+  expect(target.textContent).toContain("tunnel-exited");
+  expect(target.querySelector("pre")?.textContent).toContain("DNS lookup failed");
+  expect(target.querySelector("pre script")).toBeNull();
 });

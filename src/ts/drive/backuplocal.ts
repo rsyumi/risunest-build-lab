@@ -7,23 +7,26 @@ import type { BlobStore } from "../storage/blobStore";
 import {
     collectBackupAssetKeys,
     collectReferencedBackupInlays,
-    createColdStorageReferenceDatabase,
     decodeBackupInlayEntry,
     encodeBackupInlayEntry,
     getBackupInlayName,
+    isBackupInlayEntryName,
     isLegacyBackupAssetKey,
     readBackupAsset,
+    readLocalBackupAsset,
     scanPinnedBackupRecords,
     writeBackupAsset,
 } from "./backupAssets";
 import { classifyPocketRisuEntry, PocketRisuInlayImporter } from "./pocketRisuBackup";
+import { createLegacyBackupAttachments } from './legacyBackupAttachments';
 import { isTauri, isTauriDesktop } from "src/ts/platform"
 import { decodeRisuSave } from "../storage/risuSave";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { decryptBuffer, encryptBuffer, sleep } from "../util";
 import { hubURL } from "../characterCards";
 import { language } from "src/lang";
-import { collectColdStorageBackupPayloads, confirmIncompleteColdStorageOperation, getColdStorageBackupKey, getColdStorageItem, isColdStorageBackupData, listColdDataKeys, setLocalColdStorageItem } from "../process/coldstorage.svelte";
+import { confirmIncompleteColdStorageRestore, getColdStorageBackupKey, isColdStorageBackupData, listColdDataKeys } from "../process/coldstorage.svelte";
+import { expandColdPayloads } from "../process/coldPayloadExpansion";
 import { getPersistentDataRuntime, publishCurrentOfficialRevision, replacePersistentDatabase } from "../storage/persistentDataRuntime.svelte";
 import { installLocalBackup } from "../storage/databaseRestore";
 import { type PinnedRisuSaveExport, withFlushedRisuSaveExport } from "../storage/risuSaveStoreAdapter";
@@ -132,19 +135,6 @@ async function saveLocalBackupWithWebView(){
 
 async function saveLocalBackupSnapshot(blobStore: BlobStore, pinned: PinnedRisuSaveExport) {
     const { root, accumulator } = await scanPinnedBackupRecords(pinned.reader, 'full')
-    const coldReferenceDatabase = createColdStorageReferenceDatabase(
-        accumulator.finish().coldCharacterReferences,
-    )
-    const coldStoragePayloads = await collectColdStorageBackupPayloads(coldReferenceDatabase)
-    const unavailableColdStorageKeys = [...coldStoragePayloads.missingKeys, ...coldStoragePayloads.invalidKeys]
-    if(!await confirmIncompleteColdStorageOperation(
-        coldReferenceDatabase,
-        unavailableColdStorageKeys,
-        'backup',
-    )){
-        return
-    }
-    for (const payload of coldStoragePayloads.payloads) accumulator.visitColdPayload(payload.value)
     const references = accumulator.finish()
 
     const writer = new LocalWriter()
@@ -217,14 +207,6 @@ async function saveLocalBackupSnapshot(blobStore: BlobStore, pinned: PinnedRisuS
         )
     }
 
-    for(let i=0;i<coldStoragePayloads.payloads.length;i++){
-        const payload = coldStoragePayloads.payloads[i]
-        let message = `Saving local Backup Cold data... (${i + 1} / ${coldStoragePayloads.payloads.length})`
-        alertWait(message)
-        const encoded = new TextEncoder().encode(JSON.stringify(payload.value))
-        await writer.writeBackup(payload.backupName, encoded)
-    }
-
     alertWait(`Saving local Backup... (Saving database)`)
 
     if(forageStorage.isAccount && location.origin.endsWith('risuai.xyz')){
@@ -271,18 +253,18 @@ export async function SavePartialLocalBackup(){
     const blobStore = await resolveBlobStore()
     // First confirmation: Explain the difference from regular backup
     const firstConfirm = await alertConfirm(language.partialBackupFirstConfirm)
-    
+
     if (!firstConfirm) {
         return
     }
-    
+
     // Second confirmation: Final warning about not saving assets
     const secondConfirm = await alertConfirm(language.partialBackupSecondConfirm)
-    
+
     if (!secondConfirm) {
         return
     }
-    
+
     alertWait("Saving partial local backup...")
     return withFlushedRisuSaveExport(
         getPersistentDataRuntime(),
@@ -294,18 +276,6 @@ export async function SavePartialLocalBackup(){
 async function savePartialLocalBackupSnapshot(blobStore: BlobStore, pinned: PinnedRisuSaveExport) {
     const { accumulator } = await scanPinnedBackupRecords(pinned.reader, 'partial')
     const references = accumulator.finish()
-    const coldReferenceDatabase = createColdStorageReferenceDatabase(
-        references.coldCharacterReferences,
-    )
-    const coldStoragePayloads = await collectColdStorageBackupPayloads(coldReferenceDatabase)
-    const unavailableColdStorageKeys = [...coldStoragePayloads.missingKeys, ...coldStoragePayloads.invalidKeys]
-    if(!await confirmIncompleteColdStorageOperation(
-        coldReferenceDatabase,
-        unavailableColdStorageKeys,
-        'backup',
-    )){
-        return
-    }
 
     const writer = new LocalWriter()
     const r = await writer.init('RisuNest Backup', ['bin'], 'risu-partial-backup.bin')
@@ -330,7 +300,7 @@ async function savePartialLocalBackupSnapshot(blobStore: BlobStore, pinned: Pinn
         }
         alertWait(message)
 
-        let data = await blobStore.read(key)
+        let data = await readLocalBackupAsset(blobStore, key)
         let readRemotely = false
         if (data === null && forageStorage.isAccount) {
             data = await readBackupAsset(blobStore, key, true)
@@ -344,14 +314,6 @@ async function savePartialLocalBackupSnapshot(blobStore: BlobStore, pinned: Pinn
         if (readRemotely) {
             await sleep(100)
         }
-    }
-
-    for(let i=0;i<coldStoragePayloads.payloads.length;i++){
-        const payload = coldStoragePayloads.payloads[i]
-        let message = `Saving partial local Backup Cold data... (${i + 1} / ${coldStoragePayloads.payloads.length})`
-        alertWait(message)
-        const encoded = new TextEncoder().encode(JSON.stringify(payload.value))
-        await writer.writeBackup(payload.backupName, encoded)
     }
 
     alertWait(`Saving partial local backup... (Saving database)`) 
@@ -475,15 +437,8 @@ export async function importLegacyBackupWithWebView(
     const warningCodes: string[] = []
     let bytesRead = 0
     let currentItem: string | undefined
-    let wroteAnything = false
-
-    const markPartialWrite = () => {
-        if (wroteAnything) return
-        wroteAnything = true
-        context.setPartialWritesPossible(true)
-    }
+    const attachments = createLegacyBackupAttachments(blobStore)
     const markAttachmentWritten = () => {
-        markPartialWrite()
         counts.attachmentsPrepared += 1
     }
     const report = (stage: NativeFileJobStage) => {
@@ -504,8 +459,14 @@ export async function importLegacyBackupWithWebView(
     const checkCancelled = () => {
         if (context.signal.aborted) throw cancelledError()
     }
+    let attachmentStagingError: unknown
     const pocketRisuInlays = new PocketRisuInlayImporter(async (id, bytes, metadata) => {
-        await blobStore.put(id, bytes, metadata)
+        try {
+            await attachments.put(id, bytes, metadata)
+        } catch (error) {
+            attachmentStagingError = error
+            throw error
+        }
         markAttachmentWritten()
     })
 
@@ -513,194 +474,221 @@ export async function importLegacyBackupWithWebView(
     const reader = file.stream().getReader()
     let remainingBuffer = new Uint8Array()
     let pendingDatabase: Uint8Array | null = null
-    const restoredColdStorageKeys = new Set<string>()
+    let sawEncryption = false
+    const restoredColdStoragePayloads = new Map<string, unknown>()
 
-    while (true) {
-        checkCancelled()
-        const { done, value } = await reader.read()
-        if (done) break
-        checkCancelled()
-
-        bytesRead += value.length
-        const newBuffer = new Uint8Array(remainingBuffer.length + value.length)
-        newBuffer.set(remainingBuffer)
-        newBuffer.set(value, remainingBuffer.length)
-        remainingBuffer = newBuffer
-
-        let offset = 0
-        while (offset + 4 <= remainingBuffer.length) {
-            const nameLength = new Uint32Array(remainingBuffer.slice(offset, offset + 4).buffer)[0]
-            if (offset + 4 + nameLength > remainingBuffer.length) break
-            const nameBuffer = remainingBuffer.slice(offset + 4, offset + 4 + nameLength)
-            const name = new TextDecoder().decode(nameBuffer)
-            if (offset + 4 + nameLength + 4 > remainingBuffer.length) break
-            const dataLength = new Uint32Array(
-                remainingBuffer.slice(offset + 4 + nameLength, offset + 4 + nameLength + 4).buffer,
-            )[0]
-            if (offset + 4 + nameLength + 4 + dataLength > remainingBuffer.length) break
-            const data = remainingBuffer.slice(
-                offset + 4 + nameLength + 4,
-                offset + 4 + nameLength + 4 + dataLength,
-            )
-            const entryLength = 4 + nameLength + 4 + dataLength
-
+    try {
+        while (true) {
             checkCancelled()
-            counts.entriesRead += 1
-            currentItem = name
-            report('reading-archive')
+            const { done, value } = await reader.read()
+            if (done) break
+            checkCancelled()
 
-            if (name === 'encryption.risudat') {
-                try {
-                    const meta = JSON.parse(new TextDecoder().decode(data)) as typeof encryptionMeta
-                    if (meta.type === 'account' && meta.time) {
-                        encryptionMeta.type = 'account'
-                        encryptionMeta.time = meta.time
-                    } else {
-                        alertError('Invalid encryption metadata, will attempt to load database backup without decryption.')
-                    }
-                } catch (e) {
-                    console.error('Failed to parse encryption metadata:', e)
-                    alertError('Failed to parse encryption metadata, will attempt to load database backup without decryption.')
-                }
-            } else if (name === 'database.risudat') {
-                pendingDatabase = new Uint8Array(data)
-            } else {
-                const inlayEntry = decodeBackupInlayEntry(name, data)
-                if (inlayEntry) {
-                    counts.inlays += 1
+            bytesRead += value.length
+            const newBuffer = new Uint8Array(remainingBuffer.length + value.length)
+            newBuffer.set(remainingBuffer)
+            newBuffer.set(value, remainingBuffer.length)
+            remainingBuffer = newBuffer
+
+            let offset = 0
+            while (offset + 4 <= remainingBuffer.length) {
+                const nameLength = new Uint32Array(remainingBuffer.slice(offset, offset + 4).buffer)[0]
+                if (offset + 4 + nameLength > remainingBuffer.length) break
+                const nameBuffer = remainingBuffer.slice(offset + 4, offset + 4 + nameLength)
+                const name = new TextDecoder().decode(nameBuffer)
+                if (offset + 4 + nameLength + 4 > remainingBuffer.length) break
+                const dataLength = new Uint32Array(
+                    remainingBuffer.slice(offset + 4 + nameLength, offset + 4 + nameLength + 4).buffer,
+                )[0]
+                if (offset + 4 + nameLength + 4 + dataLength > remainingBuffer.length) break
+                const data = remainingBuffer.slice(
+                    offset + 4 + nameLength + 4,
+                    offset + 4 + nameLength + 4 + dataLength,
+                )
+                const entryLength = 4 + nameLength + 4 + dataLength
+
+                checkCancelled()
+                counts.entriesRead += 1
+                currentItem = name
+                report('reading-archive')
+
+                if (name === 'encryption.risudat') {
+                    if (sawEncryption) throw new NativeFileJobError('invalid-source', 'Duplicate encryption entry')
+                    sawEncryption = true
                     try {
-                        await blobStore.put(inlayEntry.key, inlayEntry.data, inlayEntry.metadata)
-                        markAttachmentWritten()
-                    } catch (e) {
-                        console.error(`Failed to restore inlay ${inlayEntry.key}:`, e)
-                        counts.skipped += 1
-                    }
-                    offset += entryLength
-                    await sleep(10)
-                    continue
-                }
-                const pocketRisuEntry = classifyPocketRisuEntry(name)
-                if (pocketRisuEntry) {
-                    if (pocketRisuEntry.kind === 'skip') {
-                        counts.skipped += 1
-                    } else {
-                        if (pocketRisuEntry.kind === 'inlay-data' || pocketRisuEntry.kind === 'inlay-legacy') {
-                            counts.pocketMedia += 1
+                        const meta = JSON.parse(new TextDecoder().decode(data)) as typeof encryptionMeta
+                        if (meta.type === 'account' && meta.time) {
+                            encryptionMeta.type = 'account'
+                            encryptionMeta.time = meta.time
                         } else {
-                            counts.pocketMetadata += 1
+                            alertError('Invalid encryption metadata, will attempt to load database backup without decryption.')
                         }
-                        await pocketRisuInlays.add(pocketRisuEntry, new Uint8Array(data))
+                    } catch (e) {
+                        console.error('Failed to parse encryption metadata:', e)
+                        alertError('Failed to parse encryption metadata, will attempt to load database backup without decryption.')
                     }
-                    offset += entryLength
-                    await sleep(10)
-                    continue
-                }
-                const coldStorageKey = getColdStorageBackupKey(name)
-                let handledAsColdStorage = false
-
-                if (coldStorageKey) {
-                    handledAsColdStorage = true
-                    counts.coldStorage += 1
-                    try {
-                        const text = new TextDecoder().decode(data)
-                        const jsonData = JSON.parse(text)
-
-                        if (isColdStorageBackupData(jsonData)) {
-                            if (await setLocalColdStorageItem(coldStorageKey, jsonData)) {
-                                restoredColdStorageKeys.add(coldStorageKey)
-                                markPartialWrite()
+                } else if (name === 'database.risudat') {
+                    if (pendingDatabase) throw new NativeFileJobError('invalid-source', 'Duplicate database entry')
+                    pendingDatabase = new Uint8Array(data)
+                } else {
+                    const inlayEntry = decodeBackupInlayEntry(name, data)
+                    if (inlayEntry) {
+                        counts.inlays += 1
+                        await attachments.put(inlayEntry.key, inlayEntry.data, inlayEntry.metadata)
+                        markAttachmentWritten()
+                        offset += entryLength
+                        await sleep(10)
+                        continue
+                    }
+                    if (isBackupInlayEntryName(name)) {
+                        counts.skipped += 1
+                        if (!warningCodes.includes('invalid-inlay-entry')) {
+                            warningCodes.push('invalid-inlay-entry')
+                        }
+                        offset += entryLength
+                        await sleep(10)
+                        continue
+                    }
+                    const pocketRisuEntry = classifyPocketRisuEntry(name)
+                    if (pocketRisuEntry) {
+                        if (pocketRisuEntry.kind === 'skip') {
+                            counts.skipped += 1
+                        } else {
+                            if (pocketRisuEntry.kind === 'inlay-data' || pocketRisuEntry.kind === 'inlay-legacy') {
+                                counts.pocketMedia += 1
                             } else {
-                                console.error(`Failed to restore cold storage item ${coldStorageKey}`)
+                                counts.pocketMetadata += 1
+                            }
+                            await pocketRisuInlays.add(pocketRisuEntry, new Uint8Array(data))
+                            if (attachmentStagingError) throw attachmentStagingError
+                        }
+                        offset += entryLength
+                        await sleep(10)
+                        continue
+                    }
+                    const coldStorageKey = getColdStorageBackupKey(name)
+                    let handledAsColdStorage = false
+
+                    if (coldStorageKey) {
+                        handledAsColdStorage = true
+                        counts.coldStorage += 1
+                        try {
+                            const text = new TextDecoder().decode(data)
+                            const jsonData = JSON.parse(text)
+
+                            if (isColdStorageBackupData(jsonData)) {
+                                restoredColdStoragePayloads.set(coldStorageKey, jsonData)
+                            } else {
+                                console.warn(`Skipping invalid cold storage backup item ${name}`)
                                 counts.skipped += 1
                             }
-                        } else {
-                            console.warn(`Skipping invalid cold storage backup item ${name}`)
+                        } catch (e) {
+                            console.error(`Failed to parse cold storage item ${coldStorageKey}:`, e)
                             counts.skipped += 1
                         }
-                    } catch (e) {
-                        console.error(`Failed to parse cold storage item ${coldStorageKey}:`, e)
-                        counts.skipped += 1
+                    }
+
+                    if (!handledAsColdStorage) {
+                        const key = `assets/${name}`
+                        if (isLegacyBackupAssetKey(key)) {
+                            counts.assets += 1
+                            await writeBackupAsset({ ...blobStore, put: attachments.put }, key, data)
+                            markAttachmentWritten()
+                        } else {
+                            counts.skipped += 1
+                        }
                     }
                 }
+                await sleep(10)
 
-                if (!handledAsColdStorage) {
-                    const key = `assets/${name}`
-                    if (isLegacyBackupAssetKey(key)) {
-                        counts.assets += 1
-                        await writeBackupAsset(blobStore, key, data)
-                        markAttachmentWritten()
-                    } else {
-                        counts.skipped += 1
+                offset += entryLength
+            }
+            remainingBuffer = remainingBuffer.slice(offset)
+        }
+
+        if (remainingBuffer.length !== 0) {
+            throw new NativeFileJobError('invalid-source', 'The backup file has a truncated entry')
+        }
+        await pocketRisuInlays.finish()
+        if (attachmentStagingError) throw attachmentStagingError
+        if (pocketRisuInlays.failedIds.length > 0) {
+            console.error('Failed to import PocketRisu inlays:', pocketRisuInlays.failedIds)
+            counts.skipped += pocketRisuInlays.failedIds.length
+            warningCodes.push('pocket-inlay-failed')
+        }
+        counts.entriesTotal = counts.entriesRead
+        currentItem = undefined
+
+        if (!pendingDatabase) {
+            throw new NativeFileJobError('invalid-source', 'The backup file has no database entry')
+        }
+        checkCancelled()
+        report('decoding-database')
+
+        let db = pendingDatabase
+        if (encryptionMeta.type === 'account' && encryptionMeta.time) {
+            try {
+                const key = (await (await fetch(`https://sv.risuai.xyz/cryptokey?key=${encryptionMeta.time}`)).json()).key
+                const decrypted = await decryptBuffer(db, key)
+                db = new Uint8Array(decrypted)
+            }
+            catch (e) {
+                console.error('Failed to decrypt database backup:', e)
+                alertError('Failed to decrypt database backup, will attempt to load it without decryption.')
+            }
+        }
+        const dbData = await decodeRisuSave(db)
+        counts.characters = dbData.characters?.length ?? 0
+        counts.charactersTotal = counts.characters
+        counts.presets = dbData.botPresets?.length ?? 0
+        report('decoding-database')
+
+        const missingColdStorageKeys = (await listColdDataKeys(dbData))
+            .filter((key) => !restoredColdStoragePayloads.has(key))
+        if (!await confirmIncompleteColdStorageRestore(dbData, missingColdStorageKeys)) {
+            throw cancelledError()
+        }
+        await expandColdPayloads(dbData, async (key) => restoredColdStoragePayloads.get(key) ?? null)
+        checkCancelled()
+
+        report('activating')
+        await installLocalBackup(dbData, {
+            replaceDatabase: async (...args) => {
+                try {
+                    await attachments.activate(checkCancelled)
+                    return await replacePersistentDatabase(...args)
+                } catch (error) {
+                    try {
+                        await attachments.rollback()
+                    } catch (rollbackError) {
+                        context.setPartialWritesPossible(true)
+                        throw new AggregateError([error, rollbackError], 'Restore and attachment rollback failed')
                     }
+                    throw error
                 }
-            }
-            await sleep(10)
+            },
+            onPostCommitError: (error) => {
+                console.error('Committed local restore follow-up failed', error)
+                alertError(language.risuNest.persistentData.followupFailed)
+            },
+            publishAcceptedRevision: publishCurrentOfficialRevision,
+            relaunch: async () => {
+                report('restarting-app')
+                // Android has no process relauncher, so the WebView reloads instead.
+                if (isTauriDesktop) {
+                    await relaunch()
+                } else {
+                    location.search = ''
+                }
+            },
+        })
 
-            offset += entryLength
-        }
-        remainingBuffer = remainingBuffer.slice(offset)
+        return { warningCodes }
+    } finally {
+        await reader.cancel().catch(() => undefined)
+        reader.releaseLock()
+        await attachments.dispose().catch((error) => {
+            console.error('Backup attachment staging cleanup failed', error)
+        })
     }
-
-    await pocketRisuInlays.finish()
-    if (pocketRisuInlays.failedIds.length > 0) {
-        console.error('Failed to import PocketRisu inlays:', pocketRisuInlays.failedIds)
-        counts.skipped += pocketRisuInlays.failedIds.length
-        warningCodes.push('pocket-inlay-failed')
-    }
-    counts.entriesTotal = counts.entriesRead
-    currentItem = undefined
-
-    if (!pendingDatabase) {
-        throw new NativeFileJobError('invalid-source', 'The backup file has no database entry')
-    }
-    checkCancelled()
-    report('decoding-database')
-
-    let db = pendingDatabase
-    if (encryptionMeta.type === 'account' && encryptionMeta.time) {
-        try {
-            const key = (await (await fetch(`https://sv.risuai.xyz/cryptokey?key=${encryptionMeta.time}`)).json()).key
-            const decrypted = await decryptBuffer(db, key)
-            db = new Uint8Array(decrypted)
-        }
-        catch (e) {
-            console.error('Failed to decrypt database backup:', e)
-            alertError('Failed to decrypt database backup, will attempt to load it without decryption.')
-        }
-    }
-    const dbData = await decodeRisuSave(db)
-    counts.characters = dbData.characters?.length ?? 0
-    counts.charactersTotal = counts.characters
-    counts.presets = dbData.botPresets?.length ?? 0
-    report('decoding-database')
-
-    const missingColdStorageKeys: string[] = []
-    for (const key of await listColdDataKeys(dbData)) {
-        if (restoredColdStorageKeys.has(key)) continue
-        const existingColdStorage = await getColdStorageItem(key, { accountFallback: true })
-        if (!isColdStorageBackupData(existingColdStorage)) {
-            missingColdStorageKeys.push(key)
-        }
-    }
-    if (!await confirmIncompleteColdStorageOperation(dbData, missingColdStorageKeys, 'restore')) {
-        throw cancelledError()
-    }
-    checkCancelled()
-
-    report('activating')
-    await installLocalBackup(dbData, {
-        replaceDatabase: replacePersistentDatabase,
-        publishAcceptedRevision: publishCurrentOfficialRevision,
-        relaunch: async () => {
-            report('restarting-app')
-            // Android has no process relauncher, so the WebView reloads instead.
-            if (isTauriDesktop) {
-                await relaunch()
-            } else {
-                location.search = ''
-            }
-        },
-    })
-
-    return { warningCodes }
 }

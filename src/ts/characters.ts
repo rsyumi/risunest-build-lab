@@ -1,8 +1,11 @@
+import { offerHtmlClipboardExport } from './htmlClipboardExport'
 import { defaultChatToggleBinding } from './toggleBindings'
 import { get, writable } from "svelte/store";
 import { saveImage, type character, type Chat, defaultSdDataFunc, type loreBook, getDatabase, getCharacterByIndex, setCharacterByIndex } from "./storage/database.svelte";
 import { alertAddCharacter, alertConfirm, alertError, alertNormal, alertSelect, alertStore, alertToast, alertWait } from "./alert";
 import { language } from "../lang";
+import { isArchivedCharacter } from "./storage/workingSetCatalog";
+import { restoreArchivedCharacterWithConfirmation } from "./storage/characterArchive";
 import { checkNullish, findCharacterbyId, getUserName, selectMultipleFile, selectSingleFile } from "./util";
 import { v4 as uuidv4, v4 } from 'uuid';
 import { getImageType } from "./media";
@@ -28,7 +31,6 @@ import {
 } from "./storage/persistentDataRuntime.svelte";
 import type { groupChat } from "./storage/database.svelte";
 import { removeCharacterIdFromOrder } from './storage/characterOrderMutation'
-import { restoreColdPersistentCharacter } from './process/coldCharacterRestore'
 import { safeStructuredClone } from './polyfill'
 import { isConversationSummaryStub } from './storage/conversationResidency'
 import { isMetadataOnlySelectedConversation } from './storage/selectedConversationLifecycle'
@@ -383,15 +385,13 @@ export async function exportChat(page:number){
                 <p>Chat from RisuNest</p>
             `
 
-            //copy to clipboard
-
-            const item = new ClipboardItem({
-                'text/html': new Blob([template], { type: 'text/html' }),
-                'text/plain': new Blob([template], { type: 'text/plain' })
+            offerHtmlClipboardExport(template, `${char.name}_${date}_chat`.replace(/[<>:"/\\|?*\.\,]/g, "") + '.html', {
+                present: value => alertStore.set(value),
+                download: downloadFile,
+                success: copied => alertNormal(copied ? language.clipboardSuccess : language.successExport),
+                error: error => alertError(String(error)),
+                labels: { copy: language.copy, download: language.download, cancel: language.cancel },
             })
-            await navigator.clipboard.write([item])
-
-            alertNormal(language.clipboardSuccess)
             return
 
         }
@@ -1041,8 +1041,13 @@ export async function changeChar(index: number, arg:{
       alertToast(language.navigationBlockedWhileGenerating)
       return false
     }
-    const chaId = DBState.db.characters?.[index]?.chaId
+    const target = DBState.db.characters?.[index]
+    const chaId = target?.chaId
     if(!chaId) return false
+    if(isArchivedCharacter(target)){
+        await restoreArchivedCharacterWithConfirmation(chaId)
+        return false
+    }
     const restoreNavigationGeneration = fencePersistentNavigation()
     const activity = beginNavigationActivity('character')
     const isRestoreCurrent = () =>
@@ -1052,23 +1057,6 @@ export async function changeChar(index: number, arg:{
         reseter()
         await yieldToUi()
         if (!isRestoreCurrent()) return false
-        const restoreColdCharacter = async (characterId: string) => {
-            return restoreColdPersistentCharacter(
-                characterId,
-                {
-                    errorMessage: language.errors.coldStorageRestoreFailed,
-                    isCurrent: isRestoreCurrent,
-                },
-            )
-        }
-        const detail = await restoreColdCharacter(chaId)
-        if (!isRestoreCurrent()) return false
-        if (detail?.type === 'group') {
-            for (const memberId of new Set(detail.characters as string[])) {
-                if (memberId !== chaId) await restoreColdCharacter(memberId)
-                if (!isRestoreCurrent()) return false
-            }
-        }
         if (!isRestoreCurrent()) return false
         const expectedNavigationGeneration = restoreNavigationGeneration + 1
         const activationOptions = {

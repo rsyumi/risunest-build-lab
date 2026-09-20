@@ -23,17 +23,18 @@ pub use stream_transfers::DeltaProgress;
 mod transfers;
 mod upload_jobs;
 mod uploads;
-pub use checkpoints::{Checkpoint, CheckpointPage, ReadPin};
+pub use checkpoints::{Checkpoint, CheckpointCursor, CheckpointPage, ReadPin};
 pub use journal::{ChangeCursor, ChangePage, JournalChange};
 pub use staged::StagedChanges;
 pub use transfers::TransferRequest;
 pub use uploads::{UploadManifest, UploadProgress, UPLOAD_CHUNK_BYTES};
 
 use crate::{Error, Result};
-use risunest_sync_wire::{canonical, hash, validate_id, RemoteHead, Sequence};
+use risunest_sync_wire::{canonical, hash, validate_id, Domain, RemoteHead, Sequence};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::{
+    collections::{BTreeMap, BTreeSet},
     fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
     sync::{Mutex, MutexGuard},
@@ -48,6 +49,7 @@ pub struct Store {
     download_job_gate: Mutex<()>,
     connection_gate: Mutex<()>,
     media_signer: risunest_sync_connect::media::MediaSigner,
+    heads: tokio::sync::watch::Sender<u64>,
     _owner: File,
 }
 
@@ -74,6 +76,16 @@ pub struct DeviceSession {
     pub operation_pending: bool,
 }
 
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DurableWork {
+    pub commit_jobs: u64,
+    pub upload_jobs: u64,
+    pub download_jobs: u64,
+    pub staged_changes: u64,
+    pub uploads: u64,
+}
+
 pub(super) fn random_id() -> Result<String> {
     let mut bytes = [0u8; 32];
     getrandom::getrandom(&mut bytes).map_err(|_| Error::new("entropy-unavailable", 503))?;
@@ -87,8 +99,45 @@ pub(super) fn parse<T: for<'de> Deserialize<'de>>(value: &str) -> Result<T> {
     canonical::decode(value.as_bytes(), risunest_sync_wire::MAX_METADATA_BYTES)
         .map_err(|_| Error::new("corrupt-metadata", 503))
 }
+/// Requested sections, deduplicated. An empty request is never an implicit all.
+pub(super) fn requested_domains(domains: &[Domain]) -> Result<Vec<Domain>> {
+    if domains.is_empty() {
+        return Err(Error::new("invalid-domains", 400));
+    }
+    Ok(domains
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect())
+}
+/// Literal list for an IN clause. Values come from a closed enum, never input text.
+pub(super) fn domain_filter(domains: &[Domain]) -> String {
+    domains
+        .iter()
+        .map(|domain| format!("'{}'", domain.as_str()))
+        .collect::<Vec<_>>()
+        .join(",")
+}
 
 impl Store {
+    pub fn durable_work(&self) -> Result<DurableWork> {
+        let db = self.reader()?;
+        let count = |table: &str| -> Result<u64> {
+            let value: i64 = db.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })?;
+            u64::try_from(value).map_err(|_| Error::new("corrupt-metadata", 503))
+        };
+        Ok(DurableWork {
+            commit_jobs: count("commit_jobs")?,
+            upload_jobs: count("upload_jobs")?,
+            download_jobs: count("download_deltas")?,
+            staged_changes: count("staged_changes")?,
+            uploads: count("uploads")?,
+        })
+    }
+
     pub fn init(root: &Path) -> Result<Self> {
         Self::open_inner(root, true)
     }
@@ -138,20 +187,7 @@ impl Store {
             }
             let tx = db.transaction()?;
             tx.execute_batch(schema::SCHEMA)?;
-            let library_id = random_id()?;
-            let epoch = random_id()?;
-            let head_id = hash(&canonical::encode(&[
-                "risunest-sync-genesis-v1",
-                &library_id,
-                &epoch,
-            ])?);
-            let head = RemoteHead {
-                library_id,
-                epoch,
-                seq: 0.into(),
-                head_id,
-                min_retained_seq: 0.into(),
-            };
+            let head = RemoteHead::genesis(random_id()?, random_id()?)?;
             tx.execute("INSERT INTO library VALUES(1,?1)", [json(&head)?])?;
             tx.execute(
                 "INSERT INTO media_secret VALUES(1,?1)",
@@ -161,7 +197,7 @@ impl Store {
             objects::sync_directory(&root)?;
         } else {
             let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-            if version != 8 {
+            if version != schema::VERSION {
                 return Err(Error::new("incompatible-store", 409));
             }
         }
@@ -192,6 +228,7 @@ impl Store {
             download_job_gate: Mutex::new(()),
             connection_gate: Mutex::new(()),
             media_signer,
+            heads: tokio::sync::watch::Sender::new(0),
             _owner: owner,
         };
         store
@@ -212,6 +249,14 @@ impl Store {
     }
     pub fn head(&self) -> Result<RemoteHead> {
         Self::read_head(&*self.reader()?)
+    }
+    /// Observes announcements that the head may have moved. A reader still
+    /// confirms the head itself: an announcement is never the state.
+    pub fn head_announcements(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.heads.subscribe()
+    }
+    pub(super) fn announce_head(&self) {
+        self.heads.send_modify(|value| *value = value.wrapping_add(1));
     }
     pub fn device_session(&self, device: &Device) -> Result<DeviceSession> {
         let mut connection = self.reader()?;
@@ -323,22 +368,89 @@ impl Store {
         }
         Ok(())
     }
-    pub fn acknowledge(&self, device: &Device, epoch: &str, seq: &Sequence) -> Result<()> {
-        let db = self.db()?;
+    /// Per-section application points. Sections absent from the request are not
+    /// received, which is neither a deletion nor a completed application.
+    pub fn acknowledge(
+        &self,
+        device: &Device,
+        epoch: &str,
+        sections: &BTreeMap<Domain, Sequence>,
+    ) -> Result<()> {
+        if sections.is_empty() {
+            return Err(Error::new("invalid-ack", 400));
+        }
+        let mut db = self.db()?;
         Self::require_device(&db, device)?;
-        let head = Self::read_head(&db)?;
-        let old: String =
-            db.query_row("SELECT ack FROM devices WHERE id=?1", [&device.id], |r| {
-                r.get(0)
-            })?;
-        let old: Sequence = old.try_into()?;
-        if head.epoch != epoch || seq > &head.seq || seq < &old {
+        let tx = db.transaction()?;
+        let head = Self::read_head(&tx)?;
+        if head.epoch != epoch {
             return Err(Error::new("invalid-ack", 409));
         }
-        db.execute(
-            "UPDATE devices SET ack=?1 WHERE id=?2",
-            params![seq.as_str(), device.id],
-        )?;
+        for (domain, seq) in sections {
+            let old = Self::read_section_ack(&tx, &device.id, *domain)?;
+            if seq > &head.seq || seq < &old {
+                return Err(Error::new("invalid-ack", 409));
+            }
+            tx.execute("INSERT INTO device_section_acks VALUES(?1,?2,?3) ON CONFLICT(device,domain) DO UPDATE SET ack=excluded.ack",params![device.id,domain.as_str(),seq.as_str()])?;
+        }
+        tx.commit()?;
         Ok(())
+    }
+    pub(super) fn read_section_ack(
+        db: &Connection,
+        device: &str,
+        domain: Domain,
+    ) -> Result<Sequence> {
+        let value: Option<String> = db
+            .query_row(
+                "SELECT ack FROM device_section_acks WHERE device=?1 AND domain=?2",
+                params![device, domain.as_str()],
+                |r| r.get(0),
+            )
+            .optional()?;
+        Ok(match value {
+            Some(value) => value.try_into()?,
+            None => 0.into(),
+        })
+    }
+    /// The oldest point every active device has applied for one section.
+    pub fn section_ack_floor(&self, domain: Domain) -> Result<Sequence> {
+        let db = self.reader()?;
+        Self::read_section_ack_floor(&db, domain, &Self::read_head(&db)?.seq)
+    }
+    pub(super) fn read_section_ack_floor(
+        db: &Connection,
+        domain: Domain,
+        ceiling: &Sequence,
+    ) -> Result<Sequence> {
+        let mut floor = ceiling.clone();
+        let mut statement = db.prepare(
+            "SELECT COALESCE((SELECT ack FROM device_section_acks WHERE device=devices.id AND domain=?1),'0') FROM devices WHERE revoked=0",
+        )?;
+        for value in statement.query_map([domain.as_str()], |r| r.get::<_, String>(0))? {
+            floor = floor.min(Sequence::try_from(value?)?);
+        }
+        Ok(floor)
+    }
+}
+
+#[cfg(test)]
+mod format_tests {
+    use super::*;
+
+    #[test]
+    fn exported_store_format_matches_the_initialized_schema() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::init(&root.path().join("sync")).unwrap();
+        let version: i64 = store
+            .reader()
+            .unwrap()
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, schema::VERSION);
+        assert_eq!(
+            crate::STORE_FORMAT_ID,
+            format!("risunest-sync-store/v{version}")
+        );
     }
 }

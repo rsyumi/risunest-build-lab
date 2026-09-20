@@ -2,13 +2,12 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   createPortableExportIntentStore,
-  handlePortableDeviceMaintenanceStatus,
   rememberPortableExport,
   resumePendingPortableExport,
   type PortableExportResumeDependencies,
-  type PortableJobStatus,
 } from "./job";
-import type { DeviceNativeInvoke } from "./nativeSpool";
+const ios = vi.hoisted(() => ({ publish: vi.fn(), resume: vi.fn(), acknowledge: vi.fn() }));
+vi.mock("../iosFiles", () => ({ exportIOSFile: ios.publish, getIOSPublication: ios.resume, acknowledgeIOSPublication: ios.acknowledge }));
 import { AndroidSafDestinationError } from "../androidSafBridge";
 
 function intentStore() {
@@ -65,7 +64,7 @@ function resumeFixture() {
   }));
   const dependencies: PortableExportResumeDependencies = {
     store,
-    invoke: invoke as DeviceNativeInvoke,
+    invoke: invoke as PortableExportResumeDependencies["invoke"],
     wait: async () => {},
     publishAndroid,
     resumeAndroid,
@@ -77,35 +76,20 @@ function resumeFixture() {
 }
 
 describe("portable file-job restart handoff", () => {
-  it("requires current flushed ownership and the matching native session before reload", async () => {
-    const status: PortableJobStatus = {
-      jobId: "synthetic-job",
-      kind: "export-portable-backup",
-      state: "waitingForInput",
-      phase: "awaiting-device-maintenance",
-      deviceSessionId: "synthetic-session",
-      expectedRevision: 9,
-    };
-    const invoke = vi.fn(async () => ({
-      mode: "maintenance",
-      session: { sessionId: "synthetic-session", jobId: "synthetic-job" },
-    }));
-    const reload = vi.fn();
-    await expect(
-      handlePortableDeviceMaintenanceStatus(
-        status,
-        { flushedRevision: 8, assertHeld() {} },
-        { invoke: invoke as DeviceNativeInvoke, reload },
-      ),
-    ).rejects.toThrow("flushed runtime");
-    expect(reload).not.toHaveBeenCalled();
-    void handlePortableDeviceMaintenanceStatus(
-      status,
-      { flushedRevision: 9, assertHeld() {} },
-      { invoke: invoke as DeviceNativeInvoke, reload },
-    );
-    await vi.waitFor(() => expect(reload).toHaveBeenCalledTimes(1));
-    expect(invoke).toHaveBeenCalledTimes(2);
+  it("persists iOS publication before acknowledgement and retries cleanup without republishing", async () => {
+    const fixture = resumeFixture();
+    rememberPortableExport("synthetic-job", { type: "iosFiles", suggestedName: "synthetic.risunest" }, fixture.store);
+    ios.publish.mockResolvedValue({ bytes: 1234 });
+    ios.acknowledge.mockImplementationOnce(async () => {
+      expect(fixture.store.read()?.phase).toBe("published");
+      throw new Error("synthetic acknowledgement failure");
+    }).mockResolvedValue(undefined);
+    await expect(resumePendingPortableExport(fixture.dependencies)).rejects.toMatchObject({ code: "cleanup-failed" });
+    expect(fixture.dependencies.cleanupHandoff).not.toHaveBeenCalled();
+    await expect(resumePendingPortableExport(fixture.dependencies)).resolves.toEqual(result);
+    expect(ios.publish).toHaveBeenCalledOnce();
+    expect(ios.acknowledge).toHaveBeenCalledTimes(2);
+    expect(fixture.store.read()).toBeNull();
   });
 
   it("keeps export intent outside every plugin storage prefix", () => {

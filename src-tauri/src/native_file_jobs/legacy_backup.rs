@@ -14,8 +14,8 @@ use crate::local_backup::{
 };
 use crate::persistent_store::export::{self, destination};
 use crate::persistent_store::{
-    AssetAlias, AssetOwnerHead, AssetOwnerLocator, AssetRepositoryAuthorityState, ColdAlias,
-    ColdPayloadAuthorityState, PersistentStore, RevisionResult, StagingResult, StoreResult,
+    AssetAlias, AssetOwnerHead, AssetOwnerLocator, AssetRepositoryAuthorityState, PersistentStore,
+    RevisionResult, StagingResult, StoreResult,
 };
 use crate::server_sync::residency::RemotePayloadAccess;
 use flate2::{read::GzDecoder, write::GzEncoder, Compression};
@@ -25,11 +25,12 @@ use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs::File;
-use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{self, BufReader, Read, Write};
 use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
 use uuid::Uuid;
 
+mod cold_expansion;
 mod compatible_assets;
 mod compatible_export;
 mod compatible_projection;
@@ -364,13 +365,10 @@ pub(crate) fn export_legacy_local_backup(
         if !matches!(
             inventory.asset_authority,
             AssetRepositoryAuthorityState::V2 { .. }
-        ) || !matches!(
-            inventory.cold_authority,
-            ColdPayloadAuthorityState::V2 { .. }
         ) {
             return Err(NativeJobError::new(
                 "capability-unavailable",
-                "native legacy backup export requires migrated asset and cold repositories",
+                "native legacy backup export requires a migrated asset repository",
             ));
         }
         if inventory.revision != expected_revision {
@@ -401,12 +399,6 @@ pub(crate) fn export_legacy_local_backup(
             .assets
             .iter()
             .map(|alias| (&alias.object_hash, alias.size))
-            .chain(
-                inventory
-                    .cold
-                    .iter()
-                    .map(|alias| (&alias.object_hash, alias.size)),
-            )
         {
             let hash = hash.as_deref().ok_or_else(|| {
                 NativeJobError::new(
@@ -451,13 +443,8 @@ pub(crate) fn export_legacy_local_backup(
         )
         .map_err(store_job_error)?;
         database_path = Some(std::path::PathBuf::from(&database.path));
-        let mut entries = materialize_export_entries(
-            owned_directory,
-            &cas,
-            &inventory.assets,
-            &inventory.cold,
-            &cancellation,
-        )?;
+        let mut entries =
+            materialize_export_entries(owned_directory, &cas, &inventory.assets, &cancellation)?;
         entries.extend(materialize_owner_export_entries(
             &cas,
             &owner_projection.payloads,
@@ -525,6 +512,7 @@ pub(crate) fn export_legacy_local_backup(
         )
         .map_err(|error| destination_job_error(error, phase_error.into_inner()))?;
         Ok(JobResultSummary {
+            export_exclusions: None,
             revision: expected_revision,
             source_bytes: published.bytes,
             source_sha256: published.sha256,
@@ -570,10 +558,9 @@ fn materialize_export_entries(
     owned_directory: &std::path::Path,
     cas: &PayloadCas,
     assets: &[AssetAlias],
-    cold: &[ColdAlias],
     cancellation: &dyn CancellationProbe,
 ) -> Result<Vec<LegacyBackupWriteEntry>, NativeJobError> {
-    let mut entries = Vec::with_capacity(assets.len() + cold.len() + 1);
+    let mut entries = Vec::with_capacity(assets.len() + 1);
     let mut names = HashSet::new();
     for (index, alias) in assets.iter().enumerate() {
         check_cancelled(cancellation).map_err(local_backup_error)?;
@@ -603,43 +590,6 @@ fn materialize_export_entries(
         entries.push(LegacyBackupWriteEntry {
             logical_name: name,
             source: LegacyBackupWriteSource::File(source),
-        });
-    }
-    for (index, alias) in cold.iter().enumerate() {
-        check_cancelled(cancellation).map_err(local_backup_error)?;
-        let hash = alias.object_hash.as_deref().ok_or_else(|| {
-            NativeJobError::new(
-                "invalid-source",
-                "legacy backup cold payload has no object hash",
-            )
-        })?;
-        let object_path = cas
-            .object_path(hash)
-            .map_err(io_job_error)?
-            .ok_or_else(|| {
-                NativeJobError::new("invalid-source", "legacy backup cold object is missing")
-            })?;
-        let name = format!("coldstorage_{}.json", alias.key);
-        if !names.insert(name.clone()) {
-            return Err(NativeJobError::new(
-                "invalid-source",
-                "duplicate cold backup entry",
-            ));
-        }
-        let path = owned_directory.join(format!("cold-{index}.json"));
-        let source = File::open(object_path).map_err(io_job_error)?;
-        let mut decoder = GzDecoder::new(CancellationReader::new(source, cancellation));
-        let mut output = std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&path)
-            .map_err(io_job_error)?;
-        io::copy(&mut decoder, &mut output)
-            .map_err(|error| local_backup_error(cancellation_io(error, cancellation)))?;
-        output.sync_all().map_err(io_job_error)?;
-        entries.push(LegacyBackupWriteEntry {
-            logical_name: name,
-            source: LegacyBackupWriteSource::File(path),
         });
     }
     Ok(entries)
@@ -862,6 +812,12 @@ fn write_inlay_entry(
     }
     let header = serde_json::to_vec(&metadata)
         .map_err(|error| NativeJobError::new("store-error", error.to_string()))?;
+    if header.len() > MAX_METADATA_BYTES as usize {
+        return Err(NativeJobError::new(
+            "invalid-input",
+            "legacy backup Inlay metadata exceeds the importer limit",
+        ));
+    }
     let header_length = u32::try_from(header.len()).map_err(|_| {
         NativeJobError::new("store-error", "legacy backup Inlay metadata is too large")
     })?;
@@ -985,28 +941,32 @@ impl restore::ReplacementSink for LegacyReplacementSink {
     }
 
     fn add_characters(&self, staging_id: &str, characters: &[Value]) -> StoreResult<()> {
+        let expanded =
+            cold_expansion::expand_cold_payloads(characters, &self.payloads.cold_payloads)
+                .map_err(|message| crate::persistent_store::StoreError::Store { message })?;
+        let characters = expanded.as_deref().unwrap_or(characters);
         crate::persistent_store::commands::with_store_mut(self.app.state(), |store| {
             store.replace_add_characters(staging_id, characters)
+        })
+    }
+
+    fn staged_plugin_preview(
+        &self,
+        staging_id: &str,
+    ) -> StoreResult<crate::persistent_store::commit::StagedPluginPreview> {
+        crate::persistent_store::commands::with_store(self.app.state(), |store| {
+            store.staged_plugin_preview(staging_id)
         })
     }
 
     fn commit(&self, staging_id: &str, expected_revision: i64) -> StoreResult<RevisionResult> {
         crate::persistent_store::commands::with_store_mut(self.app.state(), |store| {
             store.replace_put_asset_aliases(staging_id, &self.payloads.asset_aliases)?;
-            store.replace_put_cold_aliases(staging_id, &self.payloads.cold_aliases)?;
-            let compatibility_hash = payload_compatibility_hash(&self.payloads);
             store.replace_put_asset_repository_authority(
                 staging_id,
                 &AssetRepositoryAuthorityState::V2 {
                     migration_id: self.migration_id.clone(),
-                    compatibility_hash: compatibility_hash.clone(),
-                },
-            )?;
-            store.replace_put_cold_payload_authority(
-                staging_id,
-                &ColdPayloadAuthorityState::V2 {
-                    migration_id: self.migration_id.clone(),
-                    compatibility_hash,
+                    compatibility_hash: payload_compatibility_hash(&self.payloads),
                 },
             )?;
             self.durable
@@ -1059,7 +1019,7 @@ impl Drop for LegacyReplacementSink {
 
 fn payload_compatibility_hash(payloads: &PreparedLegacyRestorePayloads) -> String {
     use sha2::{Digest, Sha256};
-    let bytes = serde_json::to_vec(&(&payloads.asset_aliases, &payloads.cold_aliases))
+    let bytes = serde_json::to_vec(&payloads.asset_aliases)
         .expect("legacy payload aliases are serializable");
     hex::encode(Sha256::digest(bytes))
 }
@@ -1126,7 +1086,8 @@ fn now_millis() -> i64 {
 
 pub(crate) struct PreparedLegacyRestorePayloads {
     pub(crate) asset_aliases: Vec<AssetAlias>,
-    pub(crate) cold_aliases: Vec<ColdAlias>,
+    /// Upstream cold payload key to the staged file that holds its body.
+    pub(crate) cold_payloads: HashMap<String, std::path::PathBuf>,
 }
 
 #[cfg(test)]
@@ -1167,9 +1128,8 @@ pub(crate) fn prepare_legacy_restore_payloads_observed(
     preflight_legacy_restore_entries(entries)?;
     let pocket_metadata = pocket_risu::index_metadata(entries, cancellation)?;
     let mut asset_aliases = Vec::new();
-    let mut cold_aliases = Vec::new();
+    let mut cold_payloads = HashMap::new();
     let mut asset_keys = HashSet::new();
-    let mut cold_keys = HashSet::new();
     observer.begin(
         entries
             .iter()
@@ -1207,19 +1167,12 @@ pub(crate) fn prepare_legacy_restore_payloads_observed(
         }
         observer.item_started(&entry.logical_name);
         if let Some(key) = cold_key(&entry.logical_name) {
-            if !cold_keys.insert(key.clone()) {
+            let staged = prepare_cold(entry, cancellation, observer)?;
+            if cold_payloads.insert(key, staged).is_some() {
                 return Err(invalid(
                     "legacy backup contains a duplicate cold payload key",
                 ));
             }
-            cold_aliases.push(prepare_cold(
-                entry,
-                key,
-                cas,
-                durable,
-                cancellation,
-                observer,
-            )?);
         } else if let Some(encoded_key) = inlay_key_hex(&entry.logical_name) {
             let alias = prepare_inlay(entry, encoded_key, cas, durable, cancellation, observer)?;
             if !asset_keys.insert((alias.kind.clone(), alias.key.clone())) {
@@ -1238,7 +1191,7 @@ pub(crate) fn prepare_legacy_restore_payloads_observed(
     check_cancelled(cancellation)?;
     Ok(PreparedLegacyRestorePayloads {
         asset_aliases,
-        cold_aliases,
+        cold_payloads,
     })
 }
 
@@ -1371,6 +1324,20 @@ fn prepare_inlay(
                 .ok_or_else(|| invalid(format!("legacy backup Inlay {field} is invalid"))),
         }
     };
+    let mut retained_metadata = object.clone();
+    for key in [
+        "key",
+        "kind",
+        "size",
+        "mime",
+        "name",
+        "ext",
+        "inlayType",
+        "width",
+        "height",
+    ] {
+        retained_metadata.remove(key);
+    }
     Ok(AssetAlias {
         key,
         object_hash: Some(payload.content_hash),
@@ -1382,18 +1349,17 @@ fn prepare_inlay(
         inlay_type: Some(inlay_type),
         width: dimension("width")?,
         height: dimension("height")?,
-        metadata: Value::Object(Map::new()),
+        metadata: Value::Object(retained_metadata),
     })
 }
 
+/// Validates a staged upstream cold payload without materializing it. The body is
+/// spliced into the record that references it when characters are staged.
 fn prepare_cold(
     entry: &StagedLocalBackupEntry,
-    key: String,
-    cas: &PayloadCas,
-    durable: &mut DurableCasJob,
     cancellation: &dyn CancellationProbe,
     observer: &dyn LegacyPrepareObserver,
-) -> Result<ColdAlias, LocalBackupError> {
+) -> Result<std::path::PathBuf, LocalBackupError> {
     let file = open_staged(entry)?;
     let source = CancellationReader::observed(file, cancellation, observer);
     let mut deserializer = serde_json::Deserializer::from_reader(BufReader::new(source));
@@ -1418,41 +1384,10 @@ fn prepare_cold(
         .map_err(|_| invalid("legacy backup cold payload has trailing data"))?;
 
     check_cancelled(cancellation)?;
-    let source = open_staged(entry)?;
-    let mut source = CancellationReader::new(source, cancellation);
-    let compressed_path = entry
+    entry
         .staged_path
-        .as_deref()
-        .and_then(std::path::Path::parent)
-        .ok_or_else(|| invalid("legacy backup cold payload is not staged"))?
-        .join(format!("cold-compressed-{}.gz", Uuid::new_v4()));
-    let mut compressed = std::fs::OpenOptions::new()
-        .create_new(true)
-        .read(true)
-        .write(true)
-        .open(&compressed_path)
-        .map_err(LocalBackupError::io)?;
-    {
-        let mut encoder = GzEncoder::new(&mut compressed, Compression::default());
-        io::copy(&mut source, &mut encoder)
-            .map_err(|error| cancellation_io(error, cancellation))?;
-        encoder.finish().map_err(LocalBackupError::io)?;
-    }
-    compressed.flush().map_err(LocalBackupError::io)?;
-    compressed
-        .seek(SeekFrom::Start(0))
-        .map_err(LocalBackupError::io)?;
-    let mut source = CancellationReader::new(compressed, cancellation);
-    let payload = durable
-        .prepare_reader(cas, &mut source, CasObjectRole::DirectObject)
-        .map_err(|error| cancellation_io(error, cancellation))?;
-    let _ = std::fs::remove_file(compressed_path);
-    Ok(ColdAlias {
-        key,
-        object_hash: Some(payload.content_hash),
-        size: to_alias_size(payload.byte_size)?,
-        metadata: Value::Object(Map::new()),
-    })
+        .clone()
+        .ok_or_else(|| invalid("legacy backup cold payload is not staged"))
 }
 
 struct ColdRootVisitor;
@@ -1586,10 +1521,7 @@ impl<'a, R> CancellationReader<'a, R> {
 impl<R: Read> Read for CancellationReader<'_, R> {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         if self.cancellation.is_cancelled() {
-            return Err(io::Error::new(
-                io::ErrorKind::Interrupted,
-                "legacy backup operation was cancelled",
-            ));
+            return Err(io::Error::other("legacy backup operation was cancelled"));
         }
         let read = self.inner.read(buffer)?;
         if let Some(observer) = self.observer {
@@ -1673,7 +1605,7 @@ mod tests {
         character_json_export::export_character_json, JobKind, JobRegistry, JobState,
     };
     use crate::persistent_store::{
-        AssetOwnerHead, AssetOwnerLocator, AssetRepositoryAuthorityState, ColdPayloadAuthorityState,
+        AssetOwnerHead, AssetOwnerLocator, AssetRepositoryAuthorityState,
     };
     use sha2::{Digest, Sha256};
     use std::fs;
@@ -1708,6 +1640,24 @@ mod tests {
         bytes.extend_from_slice(&(data.len() as u32).to_le_bytes());
         bytes.extend_from_slice(data);
         bytes
+    }
+
+    #[test]
+    fn cancellation_reader_uses_a_non_retryable_error_for_exact_reads() {
+        struct AlwaysCancelled;
+        impl CancellationProbe for AlwaysCancelled {
+            fn is_cancelled(&self) -> bool {
+                true
+            }
+        }
+
+        let mut reader = CancellationReader::new(io::empty(), &AlwaysCancelled);
+        let error = reader.read_exact(&mut [0_u8; 1]).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(
+            cancellation_io(error, &AlwaysCancelled).code,
+            LocalBackupErrorCode::Cancelled
+        );
     }
 
     #[derive(Default)]
@@ -2023,15 +1973,6 @@ mod tests {
                 },
             )
             .unwrap();
-        store
-            .replace_put_cold_payload_authority(
-                &staging,
-                &ColdPayloadAuthorityState::V2 {
-                    migration_id: "legacy-owner-cold".to_owned(),
-                    compatibility_hash: "cd".repeat(32),
-                },
-            )
-            .unwrap();
         let revision = store.replace_commit(&staging, Some(0)).unwrap().revision;
         let owned = directory.path().join("export-owned");
         let handoff = directory.path().join("handoff");
@@ -2163,15 +2104,6 @@ mod tests {
                 },
             )
             .unwrap();
-        store
-            .replace_put_cold_payload_authority(
-                &staging,
-                &ColdPayloadAuthorityState::V2 {
-                    migration_id: "ordinary-cold".to_owned(),
-                    compatibility_hash: "cd".repeat(32),
-                },
-            )
-            .unwrap();
         let revision = store.replace_commit(&staging, Some(0)).unwrap().revision;
         let owned = directory.path().join("ordinary-owned");
         let handoff = directory.path().join("ordinary-handoff");
@@ -2193,6 +2125,7 @@ mod tests {
     #[test]
     fn prepares_asset_inlay_and_cold_payloads_without_mutating_live_aliases() {
         let directory = tempfile::tempdir().unwrap();
+        let _store = PersistentStore::open(directory.path()).unwrap();
         let cas = PayloadCas::new(directory.path()).unwrap();
         let inlay_metadata = serde_json::json!({
             "key": "inlay-id",
@@ -2203,7 +2136,18 @@ mod tests {
             "ext": "webp",
             "size": 4,
             "width": 2,
-            "height": 3
+            "height": 3,
+            "pocketRisu": {
+                "createdAt": 11,
+                "updatedAt": 22,
+                "charId": "synthetic-character",
+                "chatId": "synthetic-chat"
+            },
+            "unknownMetadata": {
+                "nested": {
+                    "retained": true
+                }
+            }
         });
         let header = serde_json::to_vec(&inlay_metadata).unwrap();
         let mut inlay = Vec::new();
@@ -2246,22 +2190,34 @@ mod tests {
         assert_eq!(prepared.asset_aliases.len(), 2);
         assert_eq!(prepared.asset_aliases[0].key, "assets/portrait.png");
         assert_eq!(prepared.asset_aliases[1].key, "inlay-id");
-        assert_eq!(prepared.cold_aliases[0].key, cold_key);
+        assert_eq!(
+            prepared.asset_aliases[1].metadata,
+            serde_json::json!({
+                "pocketRisu": {
+                    "createdAt": 11,
+                    "updatedAt": 22,
+                    "charId": "synthetic-character",
+                    "chatId": "synthetic-chat"
+                },
+                "unknownMetadata": {
+                    "nested": {
+                        "retained": true
+                    }
+                }
+            })
+        );
+        assert!(prepared.cold_payloads[cold_key].is_file());
         for alias in &prepared.asset_aliases {
             assert!(cas
                 .object_path(alias.object_hash.as_deref().unwrap())
                 .unwrap()
                 .is_some());
         }
-        assert!(cas
-            .object_path(prepared.cold_aliases[0].object_hash.as_deref().unwrap())
-            .unwrap()
-            .is_some());
         assert!(!directory
             .path()
             .join("persistent/persistent.sqlite3")
             .exists());
-        assert_eq!(planner.durable.pin_count(), 3);
+        assert_eq!(planner.durable.pin_count(), 2);
         planner.durable.release(CasReleaseOutcome::Aborted).unwrap();
     }
 
@@ -2444,6 +2400,7 @@ mod tests {
     #[test]
     fn imports_pocket_risu_110_inlays_with_sidecars_after_payloads() {
         let directory = tempfile::tempdir().unwrap();
+        let _store = PersistentStore::open(directory.path()).unwrap();
         let cas = PayloadCas::new(directory.path()).unwrap();
         let bytes = [
             entry(b"portrait.png", b"original"),

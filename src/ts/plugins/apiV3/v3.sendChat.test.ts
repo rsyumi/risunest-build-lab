@@ -8,12 +8,19 @@ const mocks = vi.hoisted(() => ({
     api: null as any,
     database: null as any,
     selectedId: 0,
+    authorityEpoch: 0,
     session: null as any,
     selectedTarget: null as any,
     acquireCompleteConversation: vi.fn(),
     processSendChat: vi.fn(),
     doingChat: false,
 }))
+
+const ownedStorageStub = {
+    getItem: vi.fn(), setItem: vi.fn(), removeItem: vi.fn(), clear: vi.fn(),
+    key: vi.fn(), keys: vi.fn(), length: vi.fn(), snapshot: vi.fn(async () => ({})),
+    mutate: vi.fn(),
+}
 
 vi.mock('../plugins.svelte', () => {
     const oldApis = new Proxy({}, { get: () => vi.fn() })
@@ -25,6 +32,10 @@ vi.mock('../plugins.svelte', () => {
         handlePluginInstallViaPlugin: vi.fn(),
         pluginCompatibility: { profile: 'scalable' },
         pluginStorageStore: {
+            forOwner: () => ownedStorageStub,
+            ownerOf: () => 'test-plugin',
+            invalidateOwner: vi.fn(),
+            synchronizeCommittedMutation: vi.fn(),
             snapshot: () => [], mutate: vi.fn(), invalidate: vi.fn(), getItem: vi.fn(),
             setItem: vi.fn(), removeItem: vi.fn(), clear: vi.fn(), key: vi.fn(),
             keys: vi.fn(), length: vi.fn(),
@@ -40,7 +51,7 @@ vi.mock('./factory', () => ({
     },
 }))
 vi.mock('src/ts/storage/database.svelte', () => ({ getDatabase: () => mocks.database }))
-vi.mock('../pluginSafeClass', () => ({ SafeLocalPluginStorage: class {}, tagWhitelist: [] }))
+vi.mock('../pluginSafeClass', () => ({ SafeLocalPluginStorage: class {}, SafeLocalStorage: class {}, tagWhitelist: [] }))
 vi.mock('src/ts/stores.svelte', () => ({
     DBState: { get db() { return mocks.database }, set db(value) { mocks.database = value } },
     selectedCharID: {
@@ -84,7 +95,11 @@ vi.mock('src/ts/process/ttsHooks', () => ({
 vi.mock('src/ts/storage/persistentDataRuntime.svelte', () => ({
     acquireCompleteConversation: mocks.acquireCompleteConversation,
     captureSelectedConversationTarget: () => mocks.selectedTarget,
-    flushPendingData: vi.fn(),
+    flushPendingDataLocally: vi.fn(),
+    assertPersistentMutationAllowed: (epoch = mocks.authorityEpoch) => {
+        if (epoch !== mocks.authorityEpoch) throw new Error('Persistent mutation fenced')
+    },
+    getPersistentStorageAuthorityEpoch: () => mocks.authorityEpoch,
     getActiveConversationSession: () => mocks.session,
     getPersistentNavigationGeneration: () => 0,
     getPersistentDataRuntime: vi.fn(),
@@ -215,7 +230,7 @@ describe('Plugin v3 sendChat complete mutation gateway', () => {
         let releaseCount = 0
 
         const sending = mocks.api.sendChat('hello')
-        for (let index = 0; index < 10; index++) await Promise.resolve()
+        while (mocks.acquireCompleteConversation.mock.calls.length === 0) await Promise.resolve()
 
         expect(mocks.acquireCompleteConversation).toHaveBeenCalledOnce()
         expect(chat.message.map((message: any) => message.data)).toEqual(['before'])

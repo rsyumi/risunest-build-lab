@@ -1,14 +1,14 @@
-import { getDatabase } from "src/ts/storage/database.svelte";
+import { getCurrentChat, getDatabase } from "src/ts/storage/database.svelte";
 import { MCPClient, type JsonRPC, type MCPTool, type RPCToolCallContent } from "./mcplib";
 import { DBState } from "src/ts/stores.svelte";
 import { getModuleMcps } from "../modules";
 import { alertError, alertInput, alertNormal } from "src/ts/alert";
 import { v4 } from "uuid";
 import type { MCPClientLike } from "./internalmcp";
-import localforage from "localforage";
 import { isTauriDesktop } from "src/ts/platform"
 import { sleep } from "src/ts/util";
 import { registeredCustomPluginMCPs } from "./pluginmcp";
+import { spawnMCPProcess, writeMCPMessage } from "./stdio";
 
 export type MCPToolWithURL = MCPTool & {
     mcpURL: string;
@@ -126,13 +126,13 @@ export async function initializeMCPs(additionalMCPs?:string[]) {
                                 console.error('Failed to parse MCP JSON:', error);
                             }
                         }))
-                        const child = await cmd.spawn();
+                        const child = await spawnMCPProcess(command, () => cmd.spawn());
 
                         const client = new MCPClient(mcp);
                         client.customTransport = {
                             send: async (data) => {
                                 console.log('Sending data to MCP:', data);
-                                await child.write(JSON.stringify(data))
+                                await writeMCPMessage(child, data)
                             },
                             addListener: (callback) => {
                                 listeners.add(callback);
@@ -154,11 +154,11 @@ export async function initializeMCPs(additionalMCPs?:string[]) {
                             const pingId = v4();
                             pingIds.push(pingId);
                             console.log('Sending ping to MCP:', pingId);
-                            await child.write(JSON.stringify({
+                            await writeMCPMessage(child, {
                                 jsonrpc: "2.0",
                                 id: pingId,
                                 method: "ping"
-                            }))
+                            })
                             await sleep(1000)
                             if(gotPong){
                                 break;
@@ -178,7 +178,7 @@ export async function initializeMCPs(additionalMCPs?:string[]) {
                     }
                 }                   
                 catch (error) {
-                    throw new Error(`Failed to parse MCP JSON: ${error}`);
+                    throw new Error(`Failed to initialize stdio MCP: ${error}`, { cause: error });
                 }
             }
 
@@ -348,14 +348,15 @@ export type toolCallData = {
     response: RPCToolCallContent[],
 }
 
-const inst = localforage.createInstance({
-    name: 'mcp-tool-calls',
-    storeName: 'mcp-tool-calls'
-});
-
+// A tool call belongs to the conversation whose message references it, so it
+// travels with that conversation instead of living beside it on one device.
 export async function encodeToolCall(call:toolCallData){
     call.call.id = call.call.id || v4();
-    await inst.setItem(call.call.id, call)
+    const chat = getCurrentChat()
+    if(chat){
+        chat.toolCalls ??= {}
+        chat.toolCalls[call.call.id] = call
+    }
     return `<tool_call>${call.call.id}\uf100${call.call.name}</tool_call>\n\n`;
 }
 
@@ -371,9 +372,5 @@ export async function decodeToolCall(text:string):Promise<toolCallData|undefined
     if(!callId) {
         return undefined;
     }
-    const call = await inst.getItem<toolCallData>(callId);
-    if(!call) {
-        return undefined;
-    }
-    return call;
+    return getCurrentChat()?.toolCalls?.[callId];
 }

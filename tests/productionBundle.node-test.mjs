@@ -28,10 +28,15 @@ test("accepts product code and RegExp.test polyfill", () => {
 test("rejects a test module in a dynamic chunk and a test framework", () => {
   for (const id of [
     "/src/foo.test.ts",
+    "/src/lib/ComponentHarness.test.svelte",
+    "/src/lib/state.test.svelte.ts",
+    "/src/ts/database.testUtils.ts",
+    "C:\\project\\src\\lib\\test-fixtures\\state.ts",
     "/benchmarks/streaming/fixture.ts",
     "/benchmarks/linux/main.ts",
     "/tests/support/helper.ts",
     "/node_modules/vitest/dist/index.js",
+    "/node_modules/jsdom/lib/api.js",
   ]) {
     assert.throws(
       () =>

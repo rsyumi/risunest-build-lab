@@ -33,7 +33,9 @@ const catalogPresetMetadata = Symbol('catalogPresetMetadata')
 export interface CatalogCharacterMetadata {
     configuredIndex: number
     conversationCount: number
-    residency: 'catalog' | 'detail'
+    residency: 'catalog' | 'detail' | 'archived'
+    archivedAt?: number
+    archivedMessageCount?: number
 }
 
 type CatalogCharacter = CompleteCharacter & {
@@ -72,8 +74,14 @@ export function createCatalogCharacterStub(summary: CharacterSummary): CompleteC
         enumerable: false,
         value: {
             configuredIndex: summary.configuredIndex,
-            conversationCount: summary.conversationCount,
-            residency: 'catalog',
+            conversationCount: summary.archived?.conversationCount ?? summary.conversationCount,
+            residency: summary.archived ? 'archived' : 'catalog',
+            ...(summary.archived === undefined
+                ? {}
+                : {
+                      archivedAt: summary.archived.archivedAt,
+                      archivedMessageCount: summary.archived.messageCount,
+                  }),
         } satisfies CatalogCharacterMetadata,
         writable: false,
     })
@@ -88,6 +96,17 @@ export function getCatalogCharacterMetadata(
 
 export function isCatalogCharacterStub(value: CompleteCharacter): boolean {
     return getCatalogCharacterMetadata(value)?.residency === 'catalog'
+}
+
+/// An archived character carries a stub that must never be hydrated.
+export function isArchivedCharacter(value: CompleteCharacter): boolean {
+    return getCatalogCharacterMetadata(value)?.residency === 'archived'
+}
+
+/// Both stub kinds, for callers that must not treat a stub as a complete value.
+export function isWorkingSetCharacterStub(value: CompleteCharacter): boolean {
+    const residency = getCatalogCharacterMetadata(value)?.residency
+    return residency === 'catalog' || residency === 'archived'
 }
 
 export function getCatalogConversationCount(value: CompleteCharacter): number {
@@ -210,6 +229,22 @@ export function getCatalogPresetMetadata(
     return (presets as CatalogPresetWorkingSet)[catalogPresetMetadata]
 }
 
+export function advanceCatalogPresetWorkingSetRevision(
+    presets: Database['botPresets'],
+    revision: number,
+): Database['botPresets'] {
+    const metadata = getCatalogPresetMetadata(presets)
+    if (!metadata) throw new Error('Cannot advance a non-catalog preset working set')
+    const advanced = presets.slice()
+    Object.defineProperty(advanced, catalogPresetMetadata, {
+        configurable: false,
+        enumerable: false,
+        value: { ...metadata, catalogRevision: revision } satisfies CatalogPresetMetadata,
+        writable: false,
+    })
+    return advanced
+}
+
 export function isCatalogPresetWorkingSet(presets: Database['botPresets']): boolean {
     if (!presets) return false
     return getCatalogPresetMetadata(presets)?.residency === 'selected-only'
@@ -261,7 +296,7 @@ async function readPinnedPresets(
     return { catalog, values }
 }
 
-async function readPinnedActivePreset(
+export async function readPinnedActivePreset(
     reader: PersistentRevisionReader,
     configuredIndex: number,
 ): Promise<{ catalog: PresetCatalog; active: ActiveCatalogPreset | null }> {
@@ -289,7 +324,7 @@ async function readPinnedPluginStorage(
     assertPinnedRevision(reader.revision, catalog.revision, 'Plugin storage catalog')
     const values: Database['pluginCustomStorage'] = {}
     for (const summary of catalog.items) {
-        const value = await reader.readPluginStorage(summary.key)
+        const value = await reader.readPluginStorage(summary.owner, summary.key)
         if (!value) throw new Error(`Missing plugin storage value for ${summary.key}`)
         assertPinnedRevision(
             reader.revision,
@@ -359,11 +394,12 @@ async function readPinnedConversationSummaries(
     return summaries
 }
 
-async function createPinnedResidentCharacter(
+export async function createPinnedResidentCharacter(
     reader: PersistentRevisionReader,
     summary: CharacterSummary,
     detail: CharacterDetail,
     selectedConversationId?: string | null,
+    keepConversation?: (conversationId: string) => Chat | null,
 ): Promise<CompleteCharacter> {
     const summaries = await readPinnedConversationSummaries(reader, summary.id)
     const chats = summaries.map(createConversationSummaryStub)
@@ -381,13 +417,18 @@ async function createPinnedResidentCharacter(
     }
     if (selectedIndex >= 0) {
         const selected = summaries[selectedIndex]
-        const value = await reader.readConversation(summary.id, selected.id)
-        if (!value) throw new Error(`Missing conversation ${selected.id}`)
-        assertPinnedRevision(reader.revision, value.revision, `Conversation ${selected.id}`)
-        if (value.value.id !== selected.id) {
-            throw new Error(`Conversation ${selected.id} returned mismatched ID`)
+        const kept = keepConversation?.(selected.id) ?? null
+        if (kept) {
+            chats[selectedIndex] = kept
+        } else {
+            const value = await reader.readConversation(summary.id, selected.id)
+            if (!value) throw new Error(`Missing conversation ${selected.id}`)
+            assertPinnedRevision(reader.revision, value.revision, `Conversation ${selected.id}`)
+            if (value.value.id !== selected.id) {
+                throw new Error(`Conversation ${selected.id} returned mismatched ID`)
+            }
+            chats[selectedIndex] = value.value
         }
-        chats[selectedIndex] = value.value
     }
     const character = createPinnedDetailOnlyCharacter(summary, detail)
     character.chats = chats
@@ -395,7 +436,7 @@ async function createPinnedResidentCharacter(
     return character
 }
 
-function createPinnedDetailOnlyCharacter(
+export function createPinnedDetailOnlyCharacter(
     summary: CharacterSummary,
     detail: CharacterDetail,
 ): CompleteCharacter {
@@ -416,23 +457,28 @@ export async function projectPinnedScalableWorkingSet(
     if (options.selectedCharacterId) residentIds.add(options.selectedCharacterId)
     let selectedDetail: CharacterDetail | null = null
     if (options.selectedCharacterId) {
-        const value = await reader.readCharacter(options.selectedCharacterId)
-        if (value) {
-            assertPinnedRevision(
-                reader.revision,
-                value.revision,
-                `Character ${options.selectedCharacterId}`,
-            )
-            selectedDetail = value.value
-            if (value.value.type === 'group') {
-                for (const id of value.value.characters) residentIds.add(id)
+        // An archived character has no detail to read, so the selection keeps its
+        // stub instead of failing the whole projection.
+        const selectedSummary = await reader.readCharacterSummary(options.selectedCharacterId)
+        if (selectedSummary && !selectedSummary.archived) {
+            const value = await reader.readCharacter(options.selectedCharacterId)
+            if (value) {
+                assertPinnedRevision(
+                    reader.revision,
+                    value.revision,
+                    `Character ${options.selectedCharacterId}`,
+                )
+                selectedDetail = value.value
+                if (value.value.type === 'group') {
+                    for (const id of value.value.characters) residentIds.add(id)
+                }
             }
         }
     }
 
     const characters: Database['characters'] = []
     for await (const summary of iteratePinnedCharacterSummaries(reader)) {
-        if (!residentIds.has(summary.id)) {
+        if (summary.archived || !residentIds.has(summary.id)) {
             characters.push(createCatalogCharacterStub(summary))
             continue
         }
@@ -493,7 +539,13 @@ export function projectCompleteScalableWorkingSet(
     activeCharacterIds?: ReadonlySet<string>,
     selectedConversationId?: string | null,
 ): Database {
-    const { characters, botPresets, pluginCustomStorage: _pluginCustomStorage, ...root } = database
+    const {
+        characters,
+        botPresets,
+        pluginCustomStorage: _pluginCustomStorage,
+        pluginStorageMeta: _pluginStorageMeta,
+        ...root
+    } = database
     const summaries: CharacterSummary[] = characters.map((character, configuredIndex) => ({
         id: character.chaId,
         name: character.name,

@@ -1,7 +1,6 @@
 package io.github.rsyumi.risunest
 
 import java.io.File
-import java.nio.file.Files
 import javax.xml.parsers.DocumentBuilderFactory
 import org.w3c.dom.Element
 import org.junit.Assert.assertEquals
@@ -9,7 +8,9 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Rule
 import org.junit.Test
+import org.junit.rules.TemporaryFolder
 
 /**
  * Characterization guard for the native export/import filename taxonomy that
@@ -19,6 +20,8 @@ import org.junit.Test
  * any side fails that side's suite.
  */
 class SafFileTaxonomyGoldenTest {
+  @get:Rule val temporaryFolder = TemporaryFolder.builder().assureDeletion().build()
+
   private data class HandoffGrammar(val kind: String, val prefix: String, val suffixes: List<String>)
 
   private data class Taxonomy(
@@ -60,7 +63,7 @@ class SafFileTaxonomyGoldenTest {
     ).findAll(json).map { match ->
       HandoffGrammar(match.groupValues[1], match.groupValues[2], quotedStrings(match.groupValues[3]))
     }.toList()
-    check(grammars.size == 5) { "expected 5 managed handoff grammars, found ${grammars.size}" }
+    check(grammars.size == 6) { "expected 6 managed handoff grammars, found ${grammars.size}" }
     val exportBlock = Regex("\"risuSaveExport\"\\s*:\\s*\\{([^}]*)\\}").find(json)?.groupValues?.get(1)
       ?: error("fixture risuSaveExport block is missing")
     fun exportString(name: String): String =
@@ -79,7 +82,7 @@ class SafFileTaxonomyGoldenTest {
     )
   }
 
-  private fun temporaryAppDataRoot(): File = Files.createTempDirectory("risu-taxonomy-test").toFile()
+  private fun temporaryAppDataRoot(): File = temporaryFolder.newFolder()
 
   @Test
   fun `spool allowlist equals the fixture database and content union`() {
@@ -116,29 +119,57 @@ class SafFileTaxonomyGoldenTest {
     val document = factory.newDocumentBuilder().parse(manifest)
     val filters = document.getElementsByTagName("intent-filter")
     val androidNamespace = "http://schemas.android.com/apk/res/android"
-    val registered = mutableSetOf<String>()
+    val registered = mutableMapOf<String, MutableSet<String>>()
+    var mimeAssociationFound = false
     for (index in 0 until filters.length) {
       val filter = filters.item(index) as Element
       val actions = filter.getElementsByTagName("action")
       val actionNames = (0 until actions.length).map {
         (actions.item(it) as Element).getAttributeNS(androidNamespace, "name")
       }.toSet()
-      if (!actionNames.containsAll(listOf(
-          "android.intent.action.VIEW", "android.intent.action.SEND", "android.intent.action.SEND_MULTIPLE",
-        ))) continue
+      if (!actionNames.contains("android.intent.action.VIEW")) continue
       val data = filter.getElementsByTagName("data")
+      val dataElements = (0 until data.length).map { data.item(it) as Element }
+      if (dataElements.any {
+          it.getAttributeNS(androidNamespace, "mimeType") == "application/x-risunest"
+        }) {
+        assertTrue(actionNames.contains("android.intent.action.SEND"))
+        assertTrue(actionNames.contains("android.intent.action.SEND_MULTIPLE"))
+        mimeAssociationFound = true
+      }
+      val schemes = dataElements.map {
+        it.getAttributeNS(androidNamespace, "scheme")
+      }.filter { it == "content" || it == "file" }.toSet()
+      if (schemes.isEmpty()) continue
+      assertEquals(setOf("*"), dataElements.map {
+        it.getAttributeNS(androidNamespace, "host")
+      }.filter { it.isNotEmpty() }.toSet())
+      val patterns = mutableSetOf<String>()
       for (dataIndex in 0 until data.length) {
-        registered.add((data.item(dataIndex) as Element).getAttributeNS(androidNamespace, "pathPattern"))
+        patterns.add((data.item(dataIndex) as Element).getAttributeNS(androidNamespace, "pathPattern"))
+      }
+      for (scheme in schemes) {
+        registered.getOrPut(scheme) { mutableSetOf() }.addAll(patterns)
       }
     }
+    assertTrue(mimeAssociationFound)
+    assertEquals(setOf("content", "file"), registered.keys)
     val configuration = repository.resolve("src-tauri/tauri.conf.json").readText(Charsets.UTF_8)
     val configured = Regex("\"ext\"\\s*:\\s*\\[([^\\]]*)\\]")
       .findAll(configuration).flatMap { quotedStrings(it.groupValues[1]) }.toSet()
     for (suffix in taxonomy.databaseSuffixes) {
-      assertTrue(suffix, registered.contains(".*\\\\$suffix"))
-      assertTrue(suffix, configured.contains(suffix.removePrefix(".")))
+      if (suffix == ".bin") {
+        // Generic binary backups remain explicit picker inputs, not an OS-wide association.
+        assertTrue(registered.values.none { it.contains(".*\\\\$suffix") })
+        assertFalse(configured.contains("bin"))
+      } else {
+        for (scheme in listOf("content", "file")) {
+          assertTrue("$scheme:$suffix", registered.getValue(scheme).contains(".*\\\\$suffix"))
+        }
+        assertTrue(suffix, configured.contains(suffix.removePrefix(".")))
+      }
     }
-    assertFalse(registered.contains(".*\\\\.risulossless"))
+    assertTrue(registered.values.none { it.contains(".*\\\\.risulossless") })
     assertFalse(configured.contains("risulossless"))
   }
 
@@ -158,7 +189,7 @@ class SafFileTaxonomyGoldenTest {
     for (grammar in taxonomy.grammars) {
       val expectedSourceKind = when (grammar.kind) {
         "legacy-backup" -> SafDestinationSourceKind.LEGACY_BACKUP
-        "portable-backup", "character-charx", "character-card", "risu-module" ->
+        "raw-recovery", "portable-backup", "character-charx", "character-card", "risu-module" ->
           SafDestinationSourceKind.RISU_SAVE
         else -> error("unexpected managed handoff kind ${grammar.kind}")
       }

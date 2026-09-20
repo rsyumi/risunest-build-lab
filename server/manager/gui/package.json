@@ -1,14 +1,14 @@
 {
   "name": "risunest-sync-manager-gui",
   "private": true,
-  "version": "0.1.0",
+  "version": "1.0.0",
   "type": "module",
   "scripts": {
     "dev:agent": "vite --mode agent --host 127.0.0.1 --port 14320 --strictPort",
     "build:agent": "vite build --mode agent",
     "check": "svelte-check --tsconfig tsconfig.json",
     "tauri": "tauri",
-    "tauri:dev:agent": "tauri dev",
+    "desktop:dev:agent": "tauri dev",
     "test": "vitest run --config vitest.config.ts"
   },
   "dependencies": {

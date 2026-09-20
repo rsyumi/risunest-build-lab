@@ -188,6 +188,7 @@ pub(super) fn run_job(
         })
         .map_err(|error| job_control_error(&job, error))?;
         Ok(JobResultSummary {
+            export_exclusions: None,
             revision,
             source_bytes: payload.bytes,
             source_sha256: payload.sha256.clone(),
@@ -620,8 +621,7 @@ impl AsyncRead for PublicationPayloadReader {
         buffer: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         if self.job.is_cancel_requested() {
-            return Poll::Ready(Err(io::Error::new(
-                io::ErrorKind::Interrupted,
+            return Poll::Ready(Err(io::Error::other(
                 "official publication upload cancelled",
             )));
         }
@@ -801,6 +801,7 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Arc;
     use std::time::{Duration, Instant};
+    use tokio::io::AsyncReadExt;
 
     fn request() -> OfficialPublicationJobRequest {
         OfficialPublicationJobRequest {
@@ -815,6 +816,28 @@ mod tests {
                 token: "secret".to_owned(),
             },
         }
+    }
+
+    #[test]
+    fn cancelled_payload_reader_uses_a_non_retryable_error() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let source = directory.path().join("payload.bin");
+        std::fs::write(&source, b"payload").unwrap();
+        let job = running_job();
+        assert_eq!(job.request_cancel().unwrap(), CancelOutcome::Requested);
+        let mut reader = PublicationPayloadReader {
+            file: tokio::fs::File::from_std(std::fs::File::open(source).unwrap()),
+            job,
+            activity: Arc::new(AtomicU64::new(0)),
+        };
+
+        let error = tauri::async_runtime::block_on(async {
+            let mut byte = [0u8; 1];
+            reader.read(&mut byte).await.unwrap_err()
+        });
+
+        assert_eq!(error.kind(), io::ErrorKind::Other);
+        assert_eq!(error.to_string(), "official publication upload cancelled");
     }
 
     #[derive(Debug, PartialEq, Eq)]

@@ -7,10 +7,15 @@ use super::{
 use crate::persistent_store::{RevisionResult, StagingResult, StoreError, StoreResult};
 use flate2::bufread::GzDecoder;
 use rmpv::Value as MessagePackValue;
-use serde_json::Value;
+use serde::de::{self, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
+use serde::Deserialize;
+use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
+use std::cell::RefCell;
 use std::collections::{BTreeMap, HashSet};
-use std::io::{self, BufReader, Read};
+use std::fmt;
+use std::fs::File;
+use std::io::{self, BufReader, Read, Seek, SeekFrom};
 
 const RISU_SAVE_HEADER: &[u8] = b"RISUSAVE\0";
 const LEGACY_RISU_SAVE_PREFIX: &[u8] = b"\0RISUSAVE\0";
@@ -18,6 +23,8 @@ const HISTORICAL_RISU_PREFIX: &[u8] = b"\0\0RISU";
 const READ_CHUNK_BYTES: usize = 64 * 1024;
 const CHARACTER_BATCH_COUNT: usize = 16;
 const CHARACTER_BATCH_BYTES: usize = 8 * 1024 * 1024;
+const MESSAGE_PAGE_COUNT: usize = 128;
+const MESSAGE_PAGE_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Clone, Copy)]
 pub(crate) struct RestoreLimits {
@@ -39,12 +46,59 @@ pub(crate) trait ReplacementSink: Send + Sync {
     fn put_root(&self, staging_id: &str, root: &Value) -> StoreResult<()>;
     fn put_presets(&self, staging_id: &str, presets: &[Value]) -> StoreResult<()>;
     fn add_characters(&self, staging_id: &str, characters: &[Value]) -> StoreResult<()>;
+    fn supports_incremental_characters(&self) -> bool {
+        false
+    }
+    fn put_character_detail(
+        &self,
+        _staging_id: &str,
+        _detail: &Value,
+        _conversation_count: i64,
+    ) -> StoreResult<()> {
+        Err(StoreError::Store {
+            message: "incremental character staging is unavailable".to_owned(),
+        })
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn put_conversation_row(
+        &self,
+        _staging_id: &str,
+        _character_id: &str,
+        _configured_index: i64,
+        _detail: &Value,
+        _recent_at: i64,
+        _message_count: i64,
+    ) -> StoreResult<()> {
+        Err(StoreError::Store {
+            message: "incremental conversation staging is unavailable".to_owned(),
+        })
+    }
+    fn add_conversation_messages(
+        &self,
+        _staging_id: &str,
+        _character_id: &str,
+        _conversation_id: &str,
+        _start: i64,
+        _messages: &[Value],
+    ) -> StoreResult<()> {
+        Err(StoreError::Store {
+            message: "incremental message staging is unavailable".to_owned(),
+        })
+    }
     fn preserve_active_repositories(
         &self,
         _staging_id: &str,
         _expected_revision: i64,
     ) -> StoreResult<()> {
         Ok(())
+    }
+    /// Values the staged save left without an owner. A file RisuNest wrote
+    /// carries ownership, so this is empty for it.
+    fn staged_plugin_preview(
+        &self,
+        _staging_id: &str,
+    ) -> StoreResult<crate::persistent_store::commit::StagedPluginPreview> {
+        Ok(crate::persistent_store::commit::StagedPluginPreview::default())
     }
     fn commit(&self, staging_id: &str, expected_revision: i64) -> StoreResult<RevisionResult>;
     fn abort(&self, staging_id: &str) -> StoreResult<()>;
@@ -92,11 +146,17 @@ pub(crate) struct RestoreProgressScale {
 }
 
 pub(crate) fn restore_block_risu_save(
-    source: OpenedJobSource,
+    mut source: OpenedJobSource,
     expected_revision: i64,
     job: &JobControl,
     sink: &dyn ReplacementSink,
 ) -> Result<JobResultSummary, NativeJobError> {
+    if super::raw_recovery::is_raw_recovery_archive(&mut source.file)? {
+        return Err(NativeJobError::new(
+            "rescue-format-not-restorable",
+            "RisuNest rescue archives cannot be imported or restored",
+        ));
+    }
     restore_risu_save_reader_controlled(
         source.file,
         source.total_bytes,
@@ -283,18 +343,39 @@ fn restore_risu_save_reader_controlled<R: Read>(
         if job.is_cancel_requested() {
             return Err(cancelled("restore cancelled before activation"));
         }
-        sink.preserve_active_repositories(&staging_id, expected_revision)
-            .map_err(store_error)?;
+        // The renderer keeps serving the app while this job reads and stages,
+        // so it may commit in that window. Copying the active repositories here
+        // is the fast path for the common case; activation repeats it whenever
+        // the renderer reports a different revision to replace.
+        let preserved = match sink.preserve_active_repositories(&staging_id, expected_revision) {
+            Ok(()) => true,
+            Err(StoreError::RevisionConflict { .. }) => false,
+            Err(error) => return Err(store_error(error)),
+        };
         if job.is_cancel_requested() {
             return Err(cancelled("restore cancelled before activation"));
         }
-        job.wait_for_restore_finalization()
+        // A save that says nothing about ownership gets one pass over its
+        // plugin values before the replacement is applied.
+        let preview = sink
+            .staged_plugin_preview(&staging_id)
+            .map_err(store_error)?;
+        job.set_plugin_value_preview(&staging_id, preview)
             .map_err(|error| job_error(job, error))?;
+        let activation_revision = job
+            .wait_for_restore_finalization()
+            .map_err(|error| job_error(job, error))?
+            .unwrap_or(expected_revision);
+        if !preserved || activation_revision != expected_revision {
+            sink.preserve_active_repositories(&staging_id, activation_revision)
+                .map_err(store_error)?;
+        }
         let revision = sink
-            .commit(&staging_id, expected_revision)
+            .commit(&staging_id, activation_revision)
             .map_err(store_error)?
             .revision;
         Ok(JobResultSummary {
+            export_exclusions: None,
             revision,
             source_bytes: reader.completed,
             source_sha256: hex::encode(reader.hasher.finalize()),
@@ -485,6 +566,17 @@ fn stage_legacy_database<R: Read>(
             ));
         }
     }
+    for key in ["modules", "loadouts", "plugins"] {
+        if root.get(key).is_some_and(|value| !value.is_array()) {
+            return Err(invalid(format!(
+                "legacy MessagePack {key} must be an array"
+            )));
+        }
+        root.entry(key.to_owned())
+            .or_insert_with(|| Value::Array(Vec::new()));
+    }
+    root.entry("pluginCustomStorage".to_owned())
+        .or_insert_with(|| Value::Object(Map::new()));
 
     let character_total = characters.len() as u64;
     reader.counts.characters_total = Some(character_total);
@@ -610,7 +702,7 @@ fn messagepack_to_json(value: MessagePackValue) -> Result<JsonSlot, NativeJobErr
         MessagePackValue::Ext(-1, bytes) => {
             Ok(JsonSlot::Value(Value::String(timestamp_to_iso(&bytes)?)))
         }
-        MessagePackValue::Ext(kind, _) => Err(compatibility_fallback(format!(
+        MessagePackValue::Ext(kind, _) => Err(unsupported(format!(
             "unsupported legacy MessagePack extension {kind}"
         ))),
     }
@@ -718,7 +810,7 @@ fn timestamp_to_iso(bytes: &[u8]) -> Result<String, NativeJobError> {
     const JS_DATE_LIMIT_MILLISECONDS: f64 = 8_640_000_000_000_000.0;
     let milliseconds = seconds as f64 * 1000.0 + nanoseconds as f64 / 1_000_000.0;
     if !milliseconds.is_finite() || milliseconds.abs() > JS_DATE_LIMIT_MILLISECONDS {
-        return Err(compatibility_fallback(
+        return Err(unsupported(
             "MessagePack timestamp is outside the JavaScript Date range",
         ));
     }
@@ -727,9 +819,7 @@ fn timestamp_to_iso(bytes: &[u8]) -> Result<String, NativeJobError> {
     let clipped_nanoseconds = milliseconds.rem_euclid(1000) as u32 * 1_000_000;
     let datetime = time::OffsetDateTime::from_unix_timestamp(clipped_seconds)
         .and_then(|value| value.replace_nanosecond(clipped_nanoseconds))
-        .map_err(|_| {
-            compatibility_fallback("MessagePack timestamp cannot be represented natively")
-        })?;
+        .map_err(|_| unsupported("MessagePack timestamp cannot be represented natively"))?;
     let year = datetime.year();
     let year = if (0..=9999).contains(&year) {
         format!("{year:04}")
@@ -788,6 +878,7 @@ fn parse_and_stage<R: Read>(
     let mut loadouts = None;
     let mut plugins = None;
     let mut plugin_storage = None;
+    let mut plugin_storage_meta = None;
     let mut character_batch = Vec::new();
     let mut character_batch_bytes = 0usize;
     let mut character_count = 0u64;
@@ -819,6 +910,38 @@ fn parse_and_stage<R: Read>(
         if encoded_length > reader.total.saturating_sub(reader.completed) {
             return Err(truncated(format!("truncated block body for {name}")));
         }
+        // Compressed framing does not provide a trustworthy decoded size.
+        // Release completed characters before materializing that next block.
+        if !character_batch.is_empty()
+            && (compression != 0
+                || !matches!(block_type, 2 | 7)
+                || (character_batch_bytes as u64).saturating_add(encoded_length)
+                    > CHARACTER_BATCH_BYTES as u64)
+        {
+            sink.add_characters(staging_id, &character_batch)
+                .map_err(store_error)?;
+            character_batch.clear();
+            character_batch_bytes = 0;
+        }
+        if matches!(block_type, 2 | 7) && sink.supports_incremental_characters() {
+            read_character_block(
+                reader,
+                staging_id,
+                &name,
+                compression,
+                encoded_length,
+                character_count,
+                limits,
+                job,
+                sink,
+            )?;
+            character_count += 1;
+            reader.counts.characters = character_count;
+            reader.counts.blocks += 1;
+            reader.complete_item()?;
+            continue;
+        }
+
         let (mut value, decoded_bytes) =
             read_block_value(reader, &name, compression, encoded_length, limits, job)?;
 
@@ -829,10 +952,9 @@ fn parse_and_stage<R: Read>(
                 }
             }
             1 if name == "root" => {
-                let mut object = value
-                    .as_object()
-                    .cloned()
-                    .ok_or_else(|| invalid("root block must be a JSON object"))?;
+                let Value::Object(mut object) = value else {
+                    return Err(invalid("root block must be a JSON object"));
+                };
                 directory = Some(parse_directory(object.shift_remove("__directory"))?);
                 root = Some(object);
             }
@@ -845,16 +967,6 @@ fn parse_and_stage<R: Read>(
                     return Err(invalid(format!(
                         "character block name does not match chaId {name}"
                     )));
-                }
-                if !character_batch.is_empty()
-                    && (character_batch.len() >= CHARACTER_BATCH_COUNT
-                        || character_batch_bytes.saturating_add(decoded_bytes)
-                            > CHARACTER_BATCH_BYTES)
-                {
-                    sink.add_characters(staging_id, &character_batch)
-                        .map_err(store_error)?;
-                    character_batch.clear();
-                    character_batch_bytes = 0;
                 }
                 character_batch_bytes = character_batch_bytes.saturating_add(decoded_bytes);
                 pocket_features::character(&mut value, &format!("character:{character_count}"))
@@ -872,10 +984,9 @@ fn parse_and_stage<R: Read>(
                 }
             }
             4 if name == "preset" => {
-                let list = value
-                    .as_array()
-                    .cloned()
-                    .ok_or_else(|| invalid("preset block must be a JSON array"))?;
+                let Value::Array(list) = value else {
+                    return Err(invalid("preset block must be a JSON array"));
+                };
                 reader.counts.presets = list.len() as u64;
                 presets = Some(list);
             }
@@ -902,6 +1013,12 @@ fn parse_and_stage<R: Read>(
                     return Err(invalid("pluginStorage block must be a JSON object"));
                 }
                 plugin_storage = Some(value);
+            }
+            12 if name == "pluginStorageMeta" => {
+                if !value.is_object() {
+                    return Err(invalid("pluginStorageMeta block must be a JSON object"));
+                }
+                plugin_storage_meta = Some(value);
             }
             3 | 6 | 8 => {
                 return Err(unsupported(format!(
@@ -970,6 +1087,9 @@ fn parse_and_stage<R: Read>(
         "pluginCustomStorage".to_owned(),
         plugin_storage.ok_or_else(|| invalid("missing required block pluginStorage"))?,
     );
+    if let Some(meta) = plugin_storage_meta {
+        root.insert("pluginStorageMeta".to_owned(), meta);
+    }
     let presets = presets.ok_or_else(|| invalid("missing required block preset"))?;
     pocket_features::root(&root).map_err(invalid)?;
     sink.put_root(staging_id, &Value::Object(root))
@@ -983,18 +1103,21 @@ fn parse_and_stage<R: Read>(
 }
 
 fn parse_directory(value: Option<Value>) -> Result<HashSet<String>, NativeJobError> {
-    let values = value
-        .and_then(|value| value.as_array().cloned())
-        .ok_or_else(|| invalid("root block requires __directory string array"))?;
+    let Some(Value::Array(values)) = value else {
+        return Err(invalid("root block requires __directory string array"));
+    };
     let mut directory = HashSet::new();
     for value in values {
-        let name = value
-            .as_str()
-            .filter(|name| !name.is_empty())
-            .ok_or_else(|| invalid("root __directory contains an invalid name"))?;
-        if name == "root" || !directory.insert(name.to_owned()) {
+        let Value::String(name) = value else {
+            return Err(invalid("root __directory contains an invalid name"));
+        };
+        if name.is_empty() {
+            return Err(invalid("root __directory contains an invalid name"));
+        }
+        if name == "root" || directory.contains(&name) {
             return Err(invalid(format!("duplicate block {name} in root directory")));
         }
+        directory.insert(name);
     }
     Ok(directory)
 }
@@ -1048,6 +1171,531 @@ fn read_block_value<R: Read>(
         return Err(corrupt(format!("trailing data in gzip block {name}")));
     }
     Ok((value, decoded_bytes))
+}
+
+fn read_character_block<R: Read>(
+    reader: &mut TrackedReader<'_, R>,
+    staging_id: &str,
+    name: &str,
+    compression: u8,
+    encoded_length: u64,
+    character_index: u64,
+    limits: RestoreLimits,
+    job: &dyn RestoreControl,
+    sink: &dyn ReplacementSink,
+) -> Result<(), NativeJobError> {
+    let block = EncodedBlockReader {
+        reader,
+        remaining: encoded_length,
+    };
+    let staging_error = RefCell::new(None);
+    let seed = CharacterSeed {
+        staging_id,
+        expected_id: name,
+        character_index,
+        job,
+        sink,
+        staging_error: &staging_error,
+    };
+    if compression == 0 {
+        if encoded_length > limits.max_decoded_block_bytes {
+            return Err(invalid(format!("decoded block limit exceeded for {name}")));
+        }
+        let decoded = DecodedLimitReader::new(block, limits.max_decoded_block_bytes, job, name);
+        let mut buffered = BufReader::with_capacity(READ_CHUNK_BYTES, decoded);
+        let mut deserializer = serde_json::Deserializer::from_reader(&mut buffered);
+        if let Err(error) = seed.deserialize(&mut deserializer) {
+            if let Some(error) = staging_error.take() {
+                return Err(store_error(error));
+            }
+            return Err(json_error(name, compression, error, job));
+        }
+        deserializer
+            .end()
+            .map_err(|error| json_error(name, compression, error, job))?;
+        if !buffered.buffer().is_empty() || buffered.get_ref().inner.remaining != 0 {
+            return Err(corrupt(format!("trailing data in block {name}")));
+        }
+        return Ok(());
+    }
+
+    let buffered = BufReader::with_capacity(READ_CHUNK_BYTES, block);
+    let decoder = GzDecoder::new(buffered);
+    let decoded = DecodedLimitReader::new(decoder, limits.max_decoded_block_bytes, job, name);
+    let mut json_reader = BufReader::with_capacity(READ_CHUNK_BYTES, decoded);
+    let mut deserializer = serde_json::Deserializer::from_reader(&mut json_reader);
+    if let Err(error) = seed.deserialize(&mut deserializer) {
+        if let Some(error) = staging_error.take() {
+            return Err(store_error(error));
+        }
+        return Err(json_error(name, compression, error, job));
+    }
+    deserializer
+        .end()
+        .map_err(|error| json_error(name, compression, error, job))?;
+    drop(deserializer);
+    let mut decoded = json_reader.into_inner();
+    let mut buffer = [0u8; READ_CHUNK_BYTES];
+    while decoded
+        .read(&mut buffer)
+        .map_err(|error| gzip_io_error(name, error, job))?
+        != 0
+    {}
+    let decoder = decoded.into_inner();
+    let buffered = decoder.into_inner();
+    if !buffered.buffer().is_empty() || buffered.get_ref().remaining != 0 {
+        return Err(corrupt(format!("trailing data in gzip block {name}")));
+    }
+    Ok(())
+}
+
+trait IgnoredJsonValue: Sized {
+    fn ignored<E: de::Error>() -> Result<Self, E>;
+}
+
+impl IgnoredJsonValue for i64 {
+    fn ignored<E: de::Error>() -> Result<Self, E> {
+        Ok(0)
+    }
+}
+
+macro_rules! ignored_visits {
+    ($value:ty) => {
+        fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            <$value as IgnoredJsonValue>::ignored()
+        }
+
+        fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            <$value as IgnoredJsonValue>::ignored()
+        }
+
+        fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            <$value as IgnoredJsonValue>::ignored()
+        }
+
+        fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            <$value as IgnoredJsonValue>::ignored()
+        }
+
+        fn visit_str<E>(self, _value: &str) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            <$value as IgnoredJsonValue>::ignored()
+        }
+
+        fn visit_string<E>(self, _value: String) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            <$value as IgnoredJsonValue>::ignored()
+        }
+
+        fn visit_none<E>(self) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            <$value as IgnoredJsonValue>::ignored()
+        }
+
+        fn visit_unit<E>(self) -> Result<Self::Value, E>
+        where
+            E: de::Error,
+        {
+            <$value as IgnoredJsonValue>::ignored()
+        }
+
+        fn visit_some<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+        where
+            D: de::Deserializer<'de>,
+        {
+            IgnoredAny::deserialize(deserializer)?;
+            <$value as IgnoredJsonValue>::ignored()
+        }
+
+        fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+        where
+            A: MapAccess<'de>,
+        {
+            while map.next_entry::<IgnoredAny, IgnoredAny>()?.is_some() {}
+            <$value as IgnoredJsonValue>::ignored()
+        }
+    };
+}
+
+struct CharacterSeed<'a> {
+    staging_id: &'a str,
+    expected_id: &'a str,
+    character_index: u64,
+    job: &'a dyn RestoreControl,
+    sink: &'a dyn ReplacementSink,
+    staging_error: &'a RefCell<Option<StoreError>>,
+}
+
+impl<'de> DeserializeSeed<'de> for CharacterSeed<'_> {
+    type Value = ();
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        deserializer.deserialize_map(CharacterVisitor(self))
+    }
+}
+
+struct CharacterVisitor<'a>(CharacterSeed<'a>);
+
+impl<'de> Visitor<'de> for CharacterVisitor<'_> {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a character object")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut detail = Map::new();
+        let mut conversation_count = 0i64;
+        let mut saw_chats = false;
+        while let Some(key) = map.next_key::<String>()? {
+            if self.0.job.is_cancel_requested() {
+                return Err(de::Error::custom("restore cancelled while reading character"));
+            }
+            if key == "chats" {
+                if saw_chats {
+                    return Err(de::Error::custom("duplicate chats field in character"));
+                }
+                saw_chats = true;
+                conversation_count = map.next_value_seed(ChatsSeed {
+                    staging_id: self.0.staging_id,
+                    character_id: self.0.expected_id,
+                    character_index: self.0.character_index,
+                    job: self.0.job,
+                    sink: self.0.sink,
+                    staging_error: self.0.staging_error,
+                })?;
+            } else {
+                detail.insert(key, map.next_value()?);
+            }
+        }
+        let character_id = detail
+            .get("chaId")
+            .and_then(Value::as_str)
+            .ok_or_else(|| de::Error::custom("character block requires chaId"))?;
+        if character_id != self.0.expected_id {
+            return Err(de::Error::custom(
+                "character block name does not match chaId",
+            ));
+        }
+        self.0.sink.put_character_detail(
+            self.0.staging_id,
+            &Value::Object(detail),
+            conversation_count,
+        )
+            .map_err(|error| {
+                *self.0.staging_error.borrow_mut() = Some(error);
+                de::Error::custom("incremental character staging failed")
+            })
+    }
+}
+
+struct ChatsSeed<'a> {
+    staging_id: &'a str,
+    character_id: &'a str,
+    character_index: u64,
+    job: &'a dyn RestoreControl,
+    sink: &'a dyn ReplacementSink,
+    staging_error: &'a RefCell<Option<StoreError>>,
+}
+
+impl<'de> DeserializeSeed<'de> for ChatsSeed<'_> {
+    type Value = i64;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        deserializer.deserialize_any(ChatsVisitor(self))
+    }
+}
+
+struct ChatsVisitor<'a>(ChatsSeed<'a>);
+
+impl<'de> Visitor<'de> for ChatsVisitor<'_> {
+    type Value = i64;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a chats array or ignored non-array value")
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let mut count = 0i64;
+        while sequence
+            .next_element_seed(ConversationSeed {
+                staging_id: self.0.staging_id,
+                character_id: self.0.character_id,
+                configured_index: count,
+                fallback: format!(
+                    "character:{}:chat:{count}",
+                    self.0.character_index
+                ),
+                job: self.0.job,
+                sink: self.0.sink,
+                staging_error: self.0.staging_error,
+            })?
+            .is_some()
+        {
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    ignored_visits!(i64);
+}
+
+struct ConversationSeed<'a> {
+    staging_id: &'a str,
+    character_id: &'a str,
+    configured_index: i64,
+    fallback: String,
+    job: &'a dyn RestoreControl,
+    sink: &'a dyn ReplacementSink,
+    staging_error: &'a RefCell<Option<StoreError>>,
+}
+
+impl<'de> DeserializeSeed<'de> for ConversationSeed<'_> {
+    type Value = ();
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        deserializer.deserialize_map(ConversationVisitor(self))
+    }
+}
+
+struct ConversationVisitor<'a>(ConversationSeed<'a>);
+
+impl<'de> Visitor<'de> for ConversationVisitor<'_> {
+    type Value = ();
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a conversation object")
+    }
+
+    fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut detail = Map::new();
+        let mut messages = MessageSpool::new().map_err(de::Error::custom)?;
+        let mut saw_messages = false;
+        while let Some(key) = map.next_key::<String>()? {
+            if self.0.job.is_cancel_requested() {
+                return Err(de::Error::custom("restore cancelled while reading conversation"));
+            }
+            if key == "message" {
+                if saw_messages {
+                    return Err(de::Error::custom("duplicate message field in conversation"));
+                }
+                saw_messages = true;
+                messages = map.next_value_seed(MessagesSeed {
+                    job: self.0.job,
+                })?;
+            } else {
+                detail.insert(key, map.next_value()?);
+            }
+        }
+        let conversation_id = detail
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())
+            .ok_or_else(|| de::Error::custom("conversation requires a nonempty id"))?
+            .to_owned();
+        let mut normalized_detail = Value::Object(detail);
+        pocket_features::chat(&mut normalized_detail, &self.0.fallback)
+            .map_err(de::Error::custom)?;
+        let recent_at = normalized_detail
+            .get("lastDate")
+            .and_then(Value::as_i64)
+            .or(messages.last_time)
+            .unwrap_or_default();
+        self.0.sink.put_conversation_row(
+            self.0.staging_id,
+            self.0.character_id,
+            self.0.configured_index,
+            &normalized_detail,
+            recent_at,
+            messages.entries.len() as i64,
+        )
+            .map_err(|error| {
+                *self.0.staging_error.borrow_mut() = Some(error);
+                de::Error::custom("incremental conversation staging failed")
+            })?;
+        messages
+            .replay(
+                self.0.staging_id,
+                self.0.character_id,
+                &conversation_id,
+                self.0.job,
+                self.0.sink,
+                self.0.staging_error,
+            )
+            .map_err(de::Error::custom)
+    }
+}
+
+struct MessageSpool {
+    file: File,
+    entries: Vec<(u64, u64)>,
+    last_time: Option<i64>,
+}
+
+impl IgnoredJsonValue for MessageSpool {
+    fn ignored<E: de::Error>() -> Result<Self, E> {
+        Self::new().map_err(E::custom)
+    }
+}
+
+impl MessageSpool {
+    fn new() -> io::Result<Self> {
+        Ok(Self {
+            file: tempfile::tempfile()?,
+            entries: Vec::new(),
+            last_time: None,
+        })
+    }
+
+    fn replay(
+        &mut self,
+        staging_id: &str,
+        character_id: &str,
+        conversation_id: &str,
+        job: &dyn RestoreControl,
+        sink: &dyn ReplacementSink,
+        staging_error: &RefCell<Option<StoreError>>,
+    ) -> Result<(), String> {
+        let mut page = Vec::with_capacity(MESSAGE_PAGE_COUNT);
+        let mut page_bytes = 0u64;
+        let mut start = 0i64;
+        for (index, (offset, length)) in self.entries.iter().copied().enumerate() {
+            if job.is_cancel_requested() {
+                return Err("restore cancelled while staging messages".to_owned());
+            }
+            if !page.is_empty()
+                && (page.len() >= MESSAGE_PAGE_COUNT
+                    || page_bytes.saturating_add(length) > MESSAGE_PAGE_BYTES)
+            {
+                sink.add_conversation_messages(
+                    staging_id,
+                    character_id,
+                    conversation_id,
+                    start,
+                    &page,
+                )
+                .map_err(|error| {
+                    let message = error.to_string();
+                    *staging_error.borrow_mut() = Some(error);
+                    message
+                })?;
+                start += page.len() as i64;
+                page.clear();
+                page_bytes = 0;
+            }
+            self.file
+                .seek(SeekFrom::Start(offset))
+                .map_err(|error| error.to_string())?;
+            let mut bytes = vec![0u8; length as usize];
+            self.file
+                .read_exact(&mut bytes)
+                .map_err(|error| error.to_string())?;
+            let mut message: Value =
+                serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
+            pocket_features::message(
+                &mut message,
+                &format!("{conversation_id}:response:{index}"),
+            )?;
+            page.push(message);
+            page_bytes = page_bytes.saturating_add(length);
+        }
+        if !page.is_empty() {
+            sink.add_conversation_messages(
+                staging_id,
+                character_id,
+                conversation_id,
+                start,
+                &page,
+            )
+            .map_err(|error| {
+                let message = error.to_string();
+                *staging_error.borrow_mut() = Some(error);
+                message
+            })?;
+        }
+        Ok(())
+    }
+}
+
+struct MessagesSeed<'a> {
+    job: &'a dyn RestoreControl,
+}
+
+impl<'de> DeserializeSeed<'de> for MessagesSeed<'_> {
+    type Value = MessageSpool;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: de::Deserializer<'de>,
+    {
+        deserializer.deserialize_any(MessagesVisitor(self))
+    }
+}
+
+struct MessagesVisitor<'a>(MessagesSeed<'a>);
+
+impl<'de> Visitor<'de> for MessagesVisitor<'_> {
+    type Value = MessageSpool;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a message array or ignored non-array value")
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let mut spool = MessageSpool::new().map_err(de::Error::custom)?;
+        while let Some(message) = sequence.next_element::<Value>()? {
+            if self.0.job.is_cancel_requested() {
+                return Err(de::Error::custom("restore cancelled while reading messages"));
+            }
+            let offset = spool.file.stream_position().map_err(de::Error::custom)?;
+            serde_json::to_writer(&mut spool.file, &message).map_err(de::Error::custom)?;
+            let end = spool.file.stream_position().map_err(de::Error::custom)?;
+            spool.entries.push((offset, end - offset));
+            spool.last_time = message.get("time").and_then(Value::as_i64);
+        }
+        Ok(spool)
+    }
+
+    ignored_visits!(MessageSpool);
 }
 
 struct EncodedBlockReader<'a, 'b, R: Read> {
@@ -1297,7 +1945,7 @@ fn messagepack_error(error: rmpv::decode::Error, job: &JobControl) -> NativeJobE
 }
 
 fn messagepack_io_error(error: io::Error, job: &JobControl) -> NativeJobError {
-    if job.is_cancel_requested() || error.kind() == io::ErrorKind::Interrupted {
+    if job.is_cancel_requested() {
         return cancelled("restore cancelled while decoding legacy MessagePack");
     }
     let message = error.to_string();
@@ -1341,7 +1989,7 @@ fn json_error(
 }
 
 fn gzip_io_error(name: &str, error: io::Error, job: &dyn RestoreControl) -> NativeJobError {
-    if job.is_cancel_requested() || error.kind() == io::ErrorKind::Interrupted {
+    if job.is_cancel_requested() {
         return cancelled(format!("restore cancelled while decoding block {name}"));
     }
     if error.to_string().contains("decoded block limit exceeded") {
@@ -1352,10 +2000,6 @@ fn gzip_io_error(name: &str, error: io::Error, job: &dyn RestoreControl) -> Nati
 
 fn invalid(message: impl AsRef<str>) -> NativeJobError {
     NativeJobError::new("invalid-input", message)
-}
-
-fn compatibility_fallback(message: impl AsRef<str>) -> NativeJobError {
-    NativeJobError::new("compatibility-fallback", message)
 }
 
 fn unsupported(message: impl AsRef<str>) -> NativeJobError {
@@ -1450,6 +2094,9 @@ mod tests {
         fail_character_batches: bool,
         abort_calls: AtomicUsize,
         preserve_calls: AtomicUsize,
+        full_character_calls: AtomicUsize,
+        incremental_character_calls: AtomicUsize,
+        max_message_page: AtomicUsize,
     }
 
     impl ReplacementSink for StoreSink {
@@ -1472,6 +2119,7 @@ mod tests {
         }
 
         fn add_characters(&self, staging_id: &str, characters: &[Value]) -> StoreResult<()> {
+            self.full_character_calls.fetch_add(1, Ordering::AcqRel);
             if self.fail_character_batches {
                 return Err(crate::persistent_store::StoreError::Store {
                     message: "simulated disk full".to_owned(),
@@ -1481,6 +2129,76 @@ mod tests {
                 .lock()
                 .unwrap()
                 .replace_add_characters(staging_id, characters)
+        }
+
+        fn supports_incremental_characters(&self) -> bool {
+            true
+        }
+
+        fn put_character_detail(
+            &self,
+            staging_id: &str,
+            detail: &Value,
+            conversation_count: i64,
+        ) -> StoreResult<()> {
+            self.incremental_character_calls.fetch_add(1, Ordering::AcqRel);
+            if self.fail_character_batches {
+                return Err(crate::persistent_store::StoreError::Store {
+                    message: "simulated disk full".to_owned(),
+                });
+            }
+            self.store.lock().unwrap().replace_put_character_detail(
+                staging_id,
+                detail,
+                conversation_count,
+            )
+        }
+
+        fn put_conversation_row(
+            &self,
+            staging_id: &str,
+            character_id: &str,
+            configured_index: i64,
+            detail: &Value,
+            recent_at: i64,
+            message_count: i64,
+        ) -> StoreResult<()> {
+            if self.fail_character_batches {
+                return Err(crate::persistent_store::StoreError::Store {
+                    message: "simulated disk full".to_owned(),
+                });
+            }
+            self.store.lock().unwrap().replace_put_conversation_row(
+                staging_id,
+                character_id,
+                configured_index,
+                detail,
+                recent_at,
+                message_count,
+            )
+        }
+
+        fn add_conversation_messages(
+            &self,
+            staging_id: &str,
+            character_id: &str,
+            conversation_id: &str,
+            start: i64,
+            messages: &[Value],
+        ) -> StoreResult<()> {
+            self.max_message_page.fetch_max(messages.len(), Ordering::AcqRel);
+            if self.fail_character_batches {
+                return Err(crate::persistent_store::StoreError::Store {
+                    message: "simulated disk full".to_owned(),
+                });
+            }
+            self.store.lock().unwrap().replace_add_conversation_messages(
+                staging_id,
+                character_id,
+                conversation_id,
+                start,
+                messages,
+            )
         }
 
         fn preserve_active_repositories(
@@ -1526,6 +2244,9 @@ mod tests {
                 fail_character_batches: false,
                 abort_calls: AtomicUsize::new(0),
                 preserve_calls: AtomicUsize::new(0),
+                full_character_calls: AtomicUsize::new(0),
+                incremental_character_calls: AtomicUsize::new(0),
+                max_message_page: AtomicUsize::new(0),
             },
         )
     }
@@ -1601,6 +2322,38 @@ mod tests {
     fn valid_save(path: &Path) {
         let bytes = save_bytes(valid_blocks());
         fs::write(path, bytes).unwrap();
+    }
+
+    fn raw_recovery_archive(path: &Path) {
+        let file = fs::File::create(path).unwrap();
+        let mut archive = zip::ZipWriter::new(file);
+        archive
+            .start_file(
+                "manifest.json",
+                zip::write::FileOptions::default()
+                    .compression_method(zip::CompressionMethod::Stored),
+            )
+            .unwrap();
+        archive
+            .write_all(br#"{"format":"risunest-raw-recovery","version":1}"#)
+            .unwrap();
+        archive.finish().unwrap();
+    }
+
+    #[test]
+    fn block_restore_rejects_a_renamed_raw_recovery_archive() {
+        let (directory, sink) = fixture();
+        let source = directory.path().join("renamed.risudat");
+        raw_recovery_archive(&source);
+        let registry = JobRegistry::default();
+        let job = registry.create(JobKind::RestoreBlockRisuSave).unwrap();
+
+        let error = restore_block_risu_save_path(&source, 1, &job, &sink).unwrap_err();
+
+        assert_eq!(error.code, "rescue-format-not-restorable");
+        let store = sink.store.lock().unwrap();
+        assert_eq!(store.revision().unwrap(), 1);
+        assert_eq!(store.materialize(Some(1)).unwrap()["username"], "Old");
     }
 
     fn msgpackr_parity_fixture() -> Value {
@@ -1885,6 +2638,78 @@ mod tests {
     }
 
     #[test]
+    fn legacy_restore_supplies_required_optional_root_sections_for_block_round_trip() {
+        let (directory, sink) = fixture();
+        let database = json!({
+            "characters": [],
+            "botPresets": [],
+            "username": "Synthetic"
+        });
+        let job = JobRegistry::default()
+            .create(JobKind::RestoreBlockRisuSave)
+            .unwrap();
+        job.start(JobPhase::ReadingSource).unwrap();
+        let staging_id = sink.begin().unwrap().staging_id;
+        let mut reader = TrackedReader::new(io::empty(), 0, &*job);
+        stage_legacy_database(database, &staging_id, &job, &mut reader, &sink).unwrap();
+        sink.commit(&staging_id, 1).unwrap();
+
+        let exported_path = {
+            let mut store = sink.store.lock().unwrap();
+            let restored = store.materialize(Some(2)).unwrap();
+            assert_eq!(restored["modules"], json!([]));
+            assert_eq!(restored["loadouts"], json!([]));
+            assert_eq!(restored["plugins"], json!([]));
+            assert_eq!(restored["pluginCustomStorage"], json!({}));
+            let lease = store.acquire_revision(2).unwrap().lease;
+            let exported = store.export_risu_save(&lease, false).unwrap();
+            store.release_revision(&lease).unwrap();
+            PathBuf::from(exported.path)
+        };
+        let second_job = JobRegistry::default()
+            .create(JobKind::RestoreBlockRisuSave)
+            .unwrap();
+        restore_risu_save(&exported_path, 2, &second_job, &sink).unwrap();
+        assert_eq!(sink.store.lock().unwrap().revision().unwrap(), 3);
+        sink.store
+            .lock()
+            .unwrap()
+            .cleanup_risu_save_export(&exported_path)
+            .unwrap();
+        drop(directory);
+    }
+
+    #[test]
+    fn legacy_restore_rejects_present_nonarray_optional_root_sections() {
+        for (key, invalid_value) in [
+            ("modules", Value::Null),
+            ("loadouts", json!({})),
+            ("plugins", json!("invalid")),
+        ] {
+            let (_directory, sink) = fixture();
+            let mut database = json!({
+                "characters": [],
+                "botPresets": [],
+                "pluginCustomStorage": {}
+            });
+            database[key] = invalid_value;
+            let job = JobRegistry::default()
+                .create(JobKind::RestoreBlockRisuSave)
+                .unwrap();
+            job.start(JobPhase::ReadingSource).unwrap();
+            let staging_id = sink.begin().unwrap().staging_id;
+            let mut reader = TrackedReader::new(io::empty(), 0, &*job);
+            let error = match stage_legacy_database(database, &staging_id, &job, &mut reader, &sink)
+            {
+                Ok(_) => panic!("{key} must reject a present non-array value"),
+                Err(error) => error,
+            };
+            assert_eq!(error.code, "invalid-input");
+            assert!(error.message.contains(key));
+        }
+    }
+
+    #[test]
     fn strict_raw_msgpackr_restore_rejects_unknown_extensions_without_activation() {
         use base64::Engine;
 
@@ -1895,7 +2720,7 @@ mod tests {
         let bytes = legacy_wire(7, &payload);
 
         let error = assert_failed_general_restore_preserves_active(&bytes, "extension 42");
-        assert_eq!(error.code, "compatibility-fallback");
+        assert_eq!(error.code, "unsupported-format");
     }
 
     #[test]
@@ -2264,7 +3089,7 @@ mod tests {
     }
 
     #[test]
-    fn current_exporter_round_trip_supports_a_character_larger_than_64_mib() {
+    fn current_exporter_round_trip_streams_a_message_history_larger_than_64_mib() {
         let directory = TempDir::new().unwrap();
         let mut store = PersistentStore::open(directory.path()).unwrap();
         let staging = store.replace_begin().unwrap().staging_id;
@@ -2281,6 +3106,11 @@ mod tests {
             )
             .unwrap();
         store.replace_put_presets(&staging, &[]).unwrap();
+        let messages = (0..16_385).map(|index| json!({
+            "role": if index % 2 == 0 { "user" } else { "char" },
+            "data": "x".repeat(4 * 1024),
+            "chatId": format!("large-message-{index}"),
+        })).collect::<Vec<_>>();
         store
             .replace_add_characters(
                 &staging,
@@ -2288,8 +3118,11 @@ mod tests {
                     "type": "character",
                     "chaId": "large-character",
                     "name": "Large character",
-                    "description": "x".repeat(64 * 1024 * 1024 + 1),
-                    "chats": [],
+                    "chats": [{
+                        "id": "large-conversation",
+                        "name": "Large conversation",
+                        "message": messages,
+                    }],
                 })],
             )
             .unwrap();
@@ -2302,15 +3135,31 @@ mod tests {
             fail_character_batches: false,
             abort_calls: AtomicUsize::new(0),
             preserve_calls: AtomicUsize::new(0),
+            full_character_calls: AtomicUsize::new(0),
+            incremental_character_calls: AtomicUsize::new(0),
+            max_message_page: AtomicUsize::new(0),
         };
         let job = JobRegistry::default()
             .create(JobKind::RestoreBlockRisuSave)
             .unwrap();
 
-        let result = restore_block_risu_save_path(&exported_path, 1, &job, &sink).unwrap();
+        let measurement = crate::test_memory::measure_working_set(|| {
+            restore_block_risu_save_path(&exported_path, 1, &job, &sink)
+        });
+        let result = measurement.value.unwrap();
 
         assert_eq!(result.revision, 2);
         assert_eq!(result.character_count, 1);
+        assert_eq!(sink.full_character_calls.load(Ordering::Acquire), 0);
+        assert_eq!(sink.incremental_character_calls.load(Ordering::Acquire), 1);
+        assert!(sink.max_message_page.load(Ordering::Acquire) <= MESSAGE_PAGE_COUNT);
+        println!(
+            "BOUNDED_RISUSAVE_MEMORY {{\"messageCount\":16385,\"messageBytes\":4096,\"baselineWorkingSetBytes\":{:?},\"peakWorkingSetBytes\":{:?},\"retainedWorkingSetBytes\":{:?},\"maxMessagePage\":{}}}",
+            measurement.baseline_working_set_bytes,
+            measurement.peak_working_set_bytes,
+            measurement.retained_working_set_bytes,
+            sink.max_message_page.load(Ordering::Acquire),
+        );
         let mut store = sink.store.lock().unwrap();
         store.release_revision(&lease).unwrap();
         store.cleanup_risu_save_export(&exported_path).unwrap();
@@ -2410,6 +3259,68 @@ mod tests {
         assert_eq!(result.revision, 2);
         assert!(result.character_count > 0);
         assert_eq!(sink.store.lock().unwrap().revision().unwrap(), 2);
+    }
+
+    #[test]
+    fn activation_replaces_against_the_revision_the_renderer_confirms() {
+        let (directory, sink) = fixture();
+        let source = directory.path().join("selected.risudat");
+        valid_save(&source);
+        let opened = open_job_source(
+            directory.path(),
+            &JobSource::DesktopPath {
+                path: source.to_string_lossy().into_owned(),
+            },
+        )
+        .unwrap();
+        let sink = Arc::new(sink);
+        let registry = JobRegistry::default();
+        let job = registry
+            .create_with_context(JobKind::RestoreBlockRisuSave, Some(1), Vec::new())
+            .unwrap();
+
+        let restoring = {
+            let job = Arc::clone(&job);
+            let sink = Arc::clone(&sink);
+            thread::spawn(move || restore_block_risu_save(opened, 1, &job, sink.as_ref()))
+        };
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while job.status().phase != JobPhase::AwaitingActivation {
+            assert!(
+                Instant::now() < deadline,
+                "restore did not reach activation wait"
+            );
+            thread::sleep(Duration::from_millis(2));
+        }
+
+        // The renderer keeps serving the app while the job reads, so it can
+        // commit before it fences the replacement.
+        let confirmed = {
+            let mut store = sink.store.lock().unwrap();
+            let staging = store.replace_begin().unwrap().staging_id;
+            store
+                .replace_put_root(&staging, &json!({ "username": "Edited while importing" }))
+                .unwrap();
+            store.replace_put_presets(&staging, &[]).unwrap();
+            store.replace_add_characters(&staging, &[]).unwrap();
+            store.replace_commit(&staging, Some(1)).unwrap().revision
+        };
+        assert_eq!(confirmed, 2);
+
+        assert_eq!(
+            job.request_finalize(Some(confirmed)).unwrap(),
+            FinalizeOutcome::Requested
+        );
+
+        let result = restoring.join().unwrap().unwrap();
+
+        assert_eq!(result.revision, 3);
+        assert_eq!(result.character_count, 1);
+        assert_eq!(sink.store.lock().unwrap().revision().unwrap(), 3);
+        // The pre-activation copy was made against the stale revision, so
+        // activation had to repeat it.
+        assert_eq!(sink.preserve_calls.load(Ordering::Acquire), 2);
     }
 
     #[test]
@@ -2651,6 +3562,33 @@ mod tests {
     }
 
     #[test]
+    fn stages_completed_characters_before_reading_the_next_compressed_body() {
+        let (_directory, mut sink) = fixture();
+        sink.fail_character_batches = true;
+        let first = block(2, true, "char-1", &json!({ "chaId": "char-1", "chats": [] }));
+        let second = block(2, true, "char-2", &json!({ "chaId": "char-2", "chats": [] }));
+        let first_end = RISU_SAVE_HEADER.len() + first.len();
+        let bytes = save_bytes([first, second]);
+        let mut reader = io::Cursor::new(&bytes);
+        let job = JobRegistry::default().create(JobKind::RestoreBlockRisuSave).unwrap();
+        let error = restore_block_risu_save_reader(
+            &mut reader, bytes.len() as u64, 1, &job, &sink, RestoreLimits::default(),
+        ).unwrap_err();
+        assert_eq!(error.code, "store-error");
+        assert_eq!(reader.position(), first_end as u64);
+        assert_eq!(sink.abort_calls.load(Ordering::Acquire), 1);
+        assert_eq!(sink.store.lock().unwrap().revision().unwrap(), 1);
+    }
+
+    #[test]
+    fn consumed_directory_values_keep_name_and_duplicate_validation() {
+        assert_eq!(parse_directory(Some(json!(["preset", "char-1"]))).unwrap(), HashSet::from(["preset".to_owned(), "char-1".to_owned()]));
+        for value in [None, Some(json!({})), Some(json!([null])), Some(json!([""])), Some(json!(["root"])), Some(json!(["a", "a"]))] {
+            assert!(parse_directory(value).is_err());
+        }
+    }
+
+    #[test]
     fn strict_restore_aborts_staging_when_a_database_batch_write_fails() {
         let (directory, mut sink) = fixture();
         sink.fail_character_batches = true;
@@ -2787,7 +3725,7 @@ mod tests {
             .any(|status| status.job_id == started.job_id));
 
         assert_eq!(
-            state.finalize(&started.job_id).unwrap(),
+            state.finalize(&started.job_id, None).unwrap(),
             FinalizeOutcome::Requested
         );
         let deadline = Instant::now() + Duration::from_secs(2);

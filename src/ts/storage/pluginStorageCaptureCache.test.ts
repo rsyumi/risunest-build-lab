@@ -8,6 +8,47 @@ import {
 afterEach(() => vi.restoreAllMocks())
 
 describe('PluginStorageCaptureCache', () => {
+    it('initializes an owned baseline from encoded entries without decoding or re-encoding', () => {
+        const cache = new PluginStorageCaptureCache()
+        const storage = { payload: 'x'.repeat(1024 * 1024), nested: { count: 1 } }
+        const capture = cache.capture(storage)
+        const parse = vi.spyOn(JSON, 'parse')
+        const stringify = vi.spyOn(JSON, 'stringify')
+        const baseline = new PluginStorageBaseline({
+            entries: capture.entries,
+            get json(): never {
+                throw new Error('Whole JSON must stay lazy')
+            },
+            get value(): never {
+                throw new Error('Decoded value must stay lazy')
+            },
+        })
+        const matches = baseline.matches(capture)
+        const parseCalls = parse.mock.calls.length
+        const stringifyCalls = stringify.mock.calls.length
+        expect(matches).toBe(true)
+        expect(parseCalls).toBe(0)
+        expect(stringifyCalls).toBe(0)
+        storage.nested.count = 2
+        expect(baseline.matches(cache.capture(storage))).toBe(false)
+        expect(baseline.matches(capture)).toBe(true)
+        baseline.apply([{ type: 'set', owner: 'test-plugin', key: 'nested', value: { count: 2 } }])
+        expect(baseline.matches(cache.capture(storage))).toBe(true)
+        expect(baseline.json).toBe(pluginStorageJson(storage))
+    })
+
+    it('accepts serialized callable captures with unchanged whole-object semantics', () => {
+        const capture = new PluginStorageCaptureCache().capture({
+            toJSON() {
+                return { z: 2, a: 1 }
+            },
+        })
+        const baseline = new PluginStorageBaseline(capture)
+        expect(capture.entries).toBeNull()
+        expect(baseline.json).toBe(capture.json)
+        expect(baseline.matches(capture)).toBe(true)
+    })
+
     it('does not re-encode large unchanged primitive entries or parse until requested', () => {
         const storage = { payload: 'x'.repeat(1024 * 1024), count: 1 }
         const cache = new PluginStorageCaptureCache()
@@ -198,7 +239,7 @@ describe('PluginStorageCaptureCache', () => {
         const matches: boolean[] = []
         for (let count = 1; count <= 10; count++) {
             storage.count = count
-            baseline.apply([{ type: 'set', key: 'count', value: count }])
+            baseline.apply([{ type: 'set', owner: 'test-plugin', key: 'count', value: count }])
             const capture = cache.capture(storage)
             matches.push(
                 baseline.matches({
@@ -234,11 +275,11 @@ describe('PluginStorageCaptureCache', () => {
         storage.z = { count: 1 }
         expect(baseline.matches(cache.capture(storage))).toBe(false)
         baseline.apply([
-            { type: 'delete', key: 'z' },
-            { type: 'set', key: 'z', value: { count: 1 } },
+            { type: 'delete', owner: 'test-plugin', key: 'z' },
+            { type: 'set', owner: 'test-plugin', key: 'z', value: { count: 1 } },
         ])
         expect(baseline.matches(cache.capture(storage))).toBe(true)
-        baseline.apply([{ type: 'set', key: '1', value: 'one' }])
+        baseline.apply([{ type: 'set', owner: 'test-plugin', key: '1', value: 'one' }])
         storage['1'] = 'one'
         expect(baseline.matches(cache.capture(storage))).toBe(true)
     })
@@ -249,12 +290,12 @@ describe('PluginStorageCaptureCache', () => {
         const original = cache.capture(storage)
         const baseline = new PluginStorageBaseline(original.json)
         expect(baseline.matches(original)).toBe(true)
-        baseline.apply([{ type: 'set', key: 'count', value: 2 }])
+        baseline.apply([{ type: 'set', owner: 'test-plugin', key: 'count', value: 2 }])
         expect(baseline.matches(original)).toBe(false)
         storage.count = 2
         const changed = cache.capture(storage)
         expect(baseline.matches(changed)).toBe(true)
-        baseline.apply([{ type: 'set', key: 'count', value: 1 }])
+        baseline.apply([{ type: 'set', owner: 'test-plugin', key: 'count', value: 1 }])
         expect(baseline.matches(changed)).toBe(false)
         expect(baseline.matches(original)).toBe(true)
         expect(baseline.json).toBe(original.json)

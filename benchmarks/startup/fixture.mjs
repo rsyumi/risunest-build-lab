@@ -119,7 +119,7 @@ export function seedExpression({
 // The app must be stopped before calling this offline fixture writer.
 export async function addSyntheticAssets(root, identifier, count, images = false) {
     assertSyntheticProfile(root, identifier)
-    const db = new DatabaseSync(path.join(root, 'persistent/persistent.db'))
+    const db = new DatabaseSync(path.join(root, 'persistent/persistent.sqlite'))
     try {
         const active = JSON.parse(
             db.prepare("SELECT value FROM meta WHERE key='activeGeneration'").get().value,
@@ -163,9 +163,15 @@ export async function addSyntheticAssets(root, identifier, count, images = false
             }),
         )
         db.exec('COMMIT')
+        const aliases = db
+            .prepare('SELECT COUNT(*) AS count FROM asset_aliases WHERE generation=?')
+            .get(active).count
+        const objects = db.prepare('SELECT COUNT(*) AS count FROM asset_objects').get().count
+        if (aliases !== count || objects !== count)
+            throw new Error('Synthetic catalog counts do not match the workload')
         return {
-            objects: count,
-            aliases: count,
+            objects,
+            aliases,
             payloadBytes: totalBytes,
             imageObjects: images ? Math.min(16, count) : 0,
         }

@@ -1,3 +1,4 @@
+import type { ExportExclusions } from './exportExcludedReport'
 import type { Database } from './database.svelte'
 import {
     AndroidSafDestinationError,
@@ -36,13 +37,16 @@ type FileRouteRuntime = Pick<
     | 'flushPendingData'
     | 'capturePersistentMutationToken'
     | 'acquireDestructiveReplacementFence'
+    | 'markCommittedWorkingSetRefreshRequired'
+    | 'getStorageAuthorityEpoch'
     | 'replacePersistentDatabase'
 >
 
 export interface RisuSaveFileRouteDependencies {
-    platform(): 'native-desktop' | 'native-android' | 'web'
+    platform(): 'native-desktop' | 'native-ios' | 'native-android' | 'web'
     runtime(): FileRouteRuntime
     chooseNativeImport(): Promise<string | null>
+    cleanupNativeImport?(path: string): Promise<void>
     chooseNativeExport(defaultName: string): Promise<string | null>
     chooseWebImport(): Promise<FileLike[] | null>
     runNativeImport(
@@ -50,13 +54,15 @@ export interface RisuSaveFileRouteDependencies {
         source: NativeFileJobSource,
         options: NativeFileRestoreJobOptions,
     ): Promise<NativeFileJobResult>
+    /** Present only where a person can answer, so tests stay headless. */
+    assignPluginValues?: NativeFileRestoreJobOptions['assignPluginValues']
     runNativeExport(
         runtime: FileRouteRuntime,
         destination: string,
         options: NativeFileExportJobOptions,
     ): Promise<NativeFileJobResult>
     decodeRisuSave(bytes: Uint8Array): Promise<unknown>
-    collectWebExport(omitAccount: boolean): Promise<Uint8Array>
+    collectWebExport(omitAccount: boolean): Promise<{ bytes: Uint8Array; exclusions: ExportExclusions }>
     downloadWebExport(name: string, bytes: Uint8Array): Promise<void>
     withFlushedExport<T>(
         runtime: RisuSaveExportRuntime,
@@ -66,8 +72,8 @@ export interface RisuSaveFileRouteDependencies {
     copyAndroidExport(
         request: AndroidSafDestinationRequest,
     ): Promise<AndroidSafDestinationResult>
-    markAndroidExportReady(requestId: string): boolean
-    acknowledgeAndroidExport(requestId: string): boolean
+    markAndroidExportReady(requestId: string): boolean | Promise<boolean>
+    acknowledgeAndroidExport(requestId: string): boolean | Promise<boolean>
     reloadPlugins(): void | Promise<void>
     reloadPluginsAfterNativeRestore(): void | Promise<void>
     /** Name and size of a picked desktop file for the progress dialog; defaults to the basename. */
@@ -187,6 +193,7 @@ async function exportThroughAndroidSaf(
                                 mode: 'native' as const,
                                 warningCodes,
                                 bytes: file.bytes,
+                                exclusions: { archivedCharacters: file.excludedArchivedCharacterCount, collidingPluginValues: file.excludedCollidingPluginValueCount },
                             },
                         }
                     }
@@ -203,7 +210,7 @@ async function exportThroughAndroidSaf(
             )
         },
     )
-    if (!dependencies.markAndroidExportReady(terminal.requestId)) {
+    if (!await dependencies.markAndroidExportReady(terminal.requestId)) {
         throw new AndroidSafDestinationError(
             terminal.requestId,
             'prerequisite-proof-failed',
@@ -211,7 +218,7 @@ async function exportThroughAndroidSaf(
             'Android SAF publication prerequisites could not be persisted',
         )
     }
-    if (!dependencies.acknowledgeAndroidExport(terminal.requestId)) {
+    if (!await dependencies.acknowledgeAndroidExport(terminal.requestId)) {
         throw new AndroidSafDestinationError(
             terminal.requestId,
             'acknowledgement-failed',
@@ -252,13 +259,13 @@ function recoveredAndroidRisuSaveTerminal(
     return event as AndroidSafDestinationEvent
 }
 
-export function recoverAndroidRisuSavePublication(
+export async function recoverAndroidRisuSavePublication(
     encoded: string | null,
-    acknowledge: (requestId: string) => boolean,
-): AndroidSafDestinationEvent | null {
+    acknowledge: (requestId: string) => boolean | Promise<boolean>,
+): Promise<AndroidSafDestinationEvent | null> {
     const terminal = recoveredAndroidRisuSaveTerminal(encoded)
     if (!terminal) return null
-    if (!acknowledge(terminal.requestId)) {
+    if (!await acknowledge(terminal.requestId)) {
         throw new AndroidSafDestinationError(
             terminal.requestId,
             'acknowledgement-failed',
@@ -270,8 +277,8 @@ export function recoverAndroidRisuSavePublication(
 }
 
 export interface AndroidRisuSaveRecoveryDependencies {
-    getStatus(): string | null
-    acknowledge(requestId: string): boolean
+    getStatus(): string | null | Promise<string | null>
+    acknowledge(requestId: string): boolean | Promise<boolean>
     listen(listener: (event: AndroidSafDestinationEvent) => void): () => void
     isActive(requestId: string): boolean
 }
@@ -281,8 +288,6 @@ export function listenRecoveredAndroidRisuSavePublications(
     onError: (error: unknown) => void,
     dependencies: AndroidRisuSaveRecoveryDependencies,
 ): () => void {
-    const encoded = dependencies.getStatus()
-    const initialTerminal = recoveredAndroidRisuSaveTerminal(encoded)
     return listenRecoveredPublications({
         sourceKind: 'risuSave',
         onTerminal,
@@ -293,15 +298,14 @@ export function listenRecoveredAndroidRisuSavePublications(
             JSON.stringify(event),
             dependencies.acknowledge,
         ),
-        initial: encoded && initialTerminal && !dependencies.isActive(initialTerminal.requestId)
-            ? {
-                requestId: initialTerminal.requestId,
-                recover: () => recoverAndroidRisuSavePublication(
-                    encoded,
-                    dependencies.acknowledge,
-                ),
-            }
-            : null,
+        initial: {
+            recover: async () => {
+                const encoded = await dependencies.getStatus()
+                const terminal = recoveredAndroidRisuSaveTerminal(encoded)
+                if (!terminal || dependencies.isActive(terminal.requestId)) return null
+                return recoverAndroidRisuSavePublication(encoded, dependencies.acknowledge)
+            },
+        },
     })
 }
 
@@ -312,6 +316,7 @@ export interface RisuSaveFileRouteOptions extends NativeFileRestoreJobOptions {
 }
 
 export interface RisuSaveFileRouteResult {
+    exclusions?: ExportExclusions
     mode: 'native' | 'web'
     warningCodes: string[]
     bytes?: number
@@ -393,9 +398,9 @@ async function exportWithWebCodec(
     omitAccount: boolean,
     dependencies: RisuSaveFileRouteDependencies,
 ): Promise<RisuSaveFileRouteResult> {
-    const bytes = await dependencies.collectWebExport(omitAccount)
+    const { bytes, exclusions } = await dependencies.collectWebExport(omitAccount)
     await dependencies.downloadWebExport(name, bytes)
-    return { mode: 'web', warningCodes: [], bytes: bytes.byteLength }
+    return { mode: 'web', warningCodes: [], bytes: bytes.byteLength, exclusions }
 }
 
 export async function importRisuSaveFromPicker(
@@ -403,39 +408,48 @@ export async function importRisuSaveFromPicker(
     dependencies: RisuSaveFileRouteDependencies,
 ): Promise<RisuSaveFileRouteResult | null> {
     const runtime = dependencies.runtime()
-    if (dependencies.platform() === 'native-desktop') {
+    if (['native-desktop', 'native-ios'].includes(dependencies.platform())) {
         const path = await dependencies.chooseNativeImport()
         if (!path) return null
-        if (options.onSource) {
-            options.onSource(dependencies.describeNativeSource
-                ? await dependencies.describeNativeSource(path)
-                : { name: basenameOf(path) })
-        }
-        let result: NativeFileJobResult
         try {
-            result = await dependencies.runNativeImport(
-                runtime,
-                { type: 'desktopPath', path },
-                {
-                    signal: options.signal,
-                    pollIntervalMs: options.pollIntervalMs,
-                    onStatus: options.onStatus,
-                    onBlockingChange: options.onBlockingChange,
-                    afterRefresh: dependencies.reloadPluginsAfterNativeRestore,
-                },
-            )
-        }
-        catch (error) {
-            if (isNativeCompatibilityFallback(error)) {
-                announceWebReselect(options)
-                return importWithWebCodec(runtime, options, dependencies)
+            if (options.onSource) {
+                options.onSource(
+                    dependencies.describeNativeSource
+                        ? await dependencies.describeNativeSource(path)
+                        : { name: basenameOf(path) },
+                )
             }
-            throw error
-        }
-        return {
-            mode: 'native',
-            warningCodes: result.warningCodes,
-            bytes: result.sourceBytes,
+            let result: NativeFileJobResult
+            try {
+                result = await dependencies.runNativeImport(
+                    runtime,
+                    { type: 'desktopPath', path },
+                    {
+                        signal: options.signal,
+                        pollIntervalMs: options.pollIntervalMs,
+                        onStatus: options.onStatus,
+                        onBlockingChange: options.onBlockingChange,
+                        afterRefresh:
+                            dependencies.reloadPluginsAfterNativeRestore,
+                        ...(dependencies.assignPluginValues
+                            ? { assignPluginValues: dependencies.assignPluginValues }
+                            : {}),
+                    },
+                )
+            } catch (error) {
+                if (isNativeCompatibilityFallback(error)) {
+                    announceWebReselect(options)
+                    return importWithWebCodec(runtime, options, dependencies)
+                }
+                throw error
+            }
+            return {
+                mode: 'native',
+                warningCodes: result.warningCodes,
+                bytes: result.sourceBytes,
+            }
+        } finally {
+            await dependencies.cleanupNativeImport?.(path)
         }
     }
 
@@ -451,7 +465,7 @@ export async function exportRisuSaveFromPicker(
     if (platform === 'native-android') {
         return exportThroughAndroidSaf(dependencies.runtime(), name, options, dependencies)
     }
-    if (platform === 'native-desktop') {
+    if (platform === 'native-desktop' || platform === 'native-ios') {
         const destination = await dependencies.chooseNativeExport(name)
         if (!destination) return null
         let result: NativeFileJobResult
@@ -466,10 +480,13 @@ export async function exportRisuSaveFromPicker(
                     omitAccount: options.omitAccount ?? false,
                 },
             )
-        }
-        catch (error) {
+        } catch (error) {
             if (isCapabilityUnavailable(error)) {
-                return exportWithWebCodec(name, options.omitAccount ?? false, dependencies)
+                return exportWithWebCodec(
+                    name,
+                    options.omitAccount ?? false,
+                    dependencies,
+                )
             }
             throw error
         }
@@ -477,6 +494,7 @@ export async function exportRisuSaveFromPicker(
             mode: 'native',
             warningCodes: result.warningCodes,
             bytes: result.sourceBytes,
+            exclusions: result.exportExclusions,
         }
     }
 

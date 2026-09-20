@@ -13,6 +13,7 @@
   import {
     native,
     message,
+    updatePhase,
     type Backend,
     type Status,
     type Environment,
@@ -20,6 +21,9 @@
   } from "./api";
   import Overview from "./Overview.svelte";
   import Connections from "./Connections.svelte";
+  import Network from "./Network.svelte";
+  import Titlebar from "./Titlebar.svelte";
+  import type { NetworkSettings } from "./api";
   import logo from "./logo.svg";
   let { backend = native }: { backend?: Backend } = $props();
   let page = $state("overview");
@@ -28,17 +32,44 @@
   let connected = $state(false);
   let busy = $state(false);
   let notice = $state("");
-  let dialog = $state<"register" | "issued" | "revoke" | "stop" | null>(null);
+  let dialog = $state<"register" | "issued" | "revoke" | "stop" | "leave" | null>(null);
   let name = $state("");
   let selected = $state<Device | null>(null);
   let uri = $state("");
   let svg = $state("");
+  let connectionDraftDirty = $state(false);
+  let networkDirty = $state(false);
+  let connectionDirty = $derived(connectionDraftDirty || networkDirty);
+  let pendingPage = "";
+  let updating = $state(false);
   let dialogElement: HTMLDialogElement;
+  // The webview draws the title bar where the OS frame is hidden (Windows) or overlaid (macOS).
+  const titlebar: "windows" | "macos" | null = /Windows/.test(navigator.userAgent)
+    ? "windows"
+    : /Mac/.test(navigator.userAgent)
+      ? "macos"
+      : null;
+  let automaticUpdateRetryAfter = 0;
   const navigation = [
-    { id: "overview", label: "개요", icon: LayoutDashboard },
-    { id: "devices", label: "기기", icon: MonitorSmartphone },
-    { id: "connection", label: "연결", icon: Link },
-    { id: "settings", label: "실행 설정", icon: SlidersHorizontal },
+    { id: "overview", label: "개요", icon: LayoutDashboard, description: "" },
+    {
+      id: "devices",
+      label: "기기",
+      icon: MonitorSmartphone,
+      description: "이 라이브러리에 등록된 기기를 관리합니다.",
+    },
+    {
+      id: "connection",
+      label: "연결",
+      icon: Link,
+      description: "고정 주소와 임시 주소, 주소 레지스트리를 설정합니다.",
+    },
+    {
+      id: "settings",
+      label: "실행 설정",
+      icon: SlidersHorizontal,
+      description: "서버 실행 상태와 로그인 시 자동 실행 여부를 관리합니다.",
+    },
   ];
   const current = $derived(navigation.find((n) => n.id === page)!);
   let refreshSequence = 0;
@@ -56,14 +87,56 @@
   }
   async function loadEnvironment() {
     try {
-      environment = await backend.environment();
+      const next = await backend.environment();
+      environment = next;
+      if (
+        next.updateSettings.policy === "automatic" &&
+        next.updateStatus.phase === "deferred" &&
+        [
+          "management-active",
+          "management-app-open-or-install-locked",
+        ].includes(next.updateStatus.reason ?? "") &&
+        !busy &&
+        !updating &&
+        dialog === null &&
+        !connectionDirty &&
+        Date.now() >= automaticUpdateRetryAfter
+      ) {
+        automaticUpdateRetryAfter = Date.now() + 60 * 60 * 1000;
+        queueMicrotask(() => void checkUpdate(true));
+      }
     } catch {
       notice = "실행 설정을 확인하지 못했습니다.";
     }
   }
   function navigate(id: string) {
+    if (id !== page && connectionDirty) {
+      pendingPage = id;
+      open("leave");
+      return;
+    }
     page = id;
     if (id === "settings") void loadEnvironment();
+  }
+  function leavePage() {
+    const next = pendingPage;
+    close();
+    connectionDraftDirty = false;
+    networkDirty = false;
+    navigate(next);
+  }
+  async function saveNetwork(settings: NetworkSettings): Promise<boolean> {
+    busy = true;
+    notice = "";
+    try {
+      await backend.network(settings);
+      await loadEnvironment();
+      notice = "네트워크 설정을 저장했습니다. 다음 서버 시작부터 적용됩니다.";
+      return true;
+    } catch (error) {
+      notice = message(error);
+      return false;
+    } finally { busy = false; }
   }
   async function refreshAll() {
     await Promise.all([refresh(), loadEnvironment()]);
@@ -75,11 +148,13 @@
       if (!stopped) timer = setTimeout(poll, 3000);
     }
     let timer: ReturnType<typeof setTimeout>;
+    const environmentTimer = setInterval(() => void loadEnvironment(), 15000);
     void poll();
     void loadEnvironment();
     return () => {
       stopped = true;
       clearTimeout(timer);
+      clearInterval(environmentTimer);
       uri = "";
       svg = "";
     };
@@ -87,19 +162,29 @@
   async function mutate(
     path: string,
     body: Record<string, unknown> = {},
-  ): Promise<boolean> {
-    if (!connected || busy || !status) return false;
+  ): Promise<string | null> {
+    if (!connected || busy || !status) return null;
     busy = true;
     notice = "";
     try {
-      await backend.mutate(path, { revision: status.revision, ...body });
+      const result = await backend.mutate(path, {
+        revision: status.revision,
+        ...body,
+      });
+      const resultRevision =
+        result &&
+        typeof result === "object" &&
+        "revision" in result &&
+        typeof result.revision === "string"
+          ? result.revision
+          : null;
       await refresh();
       notice = "변경 사항을 적용했습니다.";
-      return true;
+      return resultRevision ?? status?.revision ?? null;
     } catch (error) {
       notice = message(error);
       await refresh();
-      return false;
+      return null;
     } finally {
       busy = false;
     }
@@ -195,9 +280,73 @@
       busy = false;
     }
   }
+  async function updatePolicy(policy: "automatic" | "notify" | "off") {
+    busy = true;
+    notice = "";
+    try {
+      await backend.updatePolicy(policy);
+      await loadEnvironment();
+      notice = "업데이트 정책과 예약 확인 설정을 변경했습니다.";
+    } catch (error) {
+      notice = message(error);
+      await loadEnvironment();
+    } finally {
+      busy = false;
+    }
+  }
+  function deferredUpdateMessage(reason?: string): string {
+    if (reason === "management-active")
+      return "관리 작업이 끝난 뒤 다시 확인하세요.";
+    if (reason === "management-app-open-or-install-locked")
+      return "다른 관리 앱을 닫거나 설치 잠금이 해제된 뒤 다시 확인하세요.";
+    if (reason === "server-busy")
+      return "서버 작업이 끝난 뒤 업데이트를 다시 확인합니다.";
+    return `업데이트가 연기되었습니다${reason ? `: ${reason}` : "."}`;
+  }
+  async function checkUpdate(automatic = false) {
+    if (busy || updating || dialog !== null || connectionDirty) {
+      if (!automatic)
+        notice = "진행 중인 작업이나 적용하지 않은 설정을 마친 뒤 업데이트를 확인하세요.";
+      return;
+    }
+    updating = true;
+    busy = true;
+    let exitingForUpdate = false;
+    notice = automatic
+      ? "관리 앱을 종료하고 예약된 업데이트를 안전하게 적용합니다."
+      : "업데이트를 확인하고 있습니다.";
+    try {
+      const outcome = await backend.updateCheck(automatic);
+      if (outcome.result === "started") {
+        exitingForUpdate = true;
+        notice = "관리 앱을 종료하고 적용합니다.";
+      } else if (outcome.result === "available") {
+        notice = `Sync ${outcome.value ?? "새 버전"} 업데이트를 사용할 수 있습니다.`;
+      } else if (outcome.result === "deferred") {
+        notice = deferredUpdateMessage(outcome.value);
+      } else if (outcome.result === "skipped") {
+        notice = "예약된 업데이트 확인 시간이 아직 되지 않았습니다.";
+      } else if (outcome.result === "completed") {
+        notice = `Sync ${outcome.value ?? "새 버전"} 업데이트를 완료했습니다.`;
+      } else {
+        notice = "현재 최신 버전입니다.";
+      }
+      await loadEnvironment();
+    } catch (error) {
+      notice = message(error);
+      await loadEnvironment();
+    } finally {
+      if (!exitingForUpdate) {
+        busy = false;
+        updating = false;
+      }
+    }
+  }
 </script>
 
-<div class="app-shell" class:mac={environment?.platform === "macos"}>
+<div class="app-shell" class:mac={titlebar === "macos"}>
+  {#if titlebar}<Titlebar platform={titlebar} />{/if}
+  <div class="body">
   <aside>
     <div class="identity">
       <img src={logo} alt="RisuNest" />
@@ -209,18 +358,21 @@
           class:active={page === item.id}
           aria-current={page === item.id ? "page" : undefined}
           onclick={() => navigate(item.id)}
-          ><item.icon size={19} />{item.label}</button
+          ><item.icon size={17} />{item.label}</button
         >{/each}
     </nav>
     <div class="sidebar-bottom">
       <span class:offline={!connected}
-        >● {connected ? "로컬 서버 연결됨" : "서버 연결 안 됨"}</span
+        >{connected ? "로컬 서버 연결됨" : "서버 연결 안 됨"}</span
       ><small>RisuNest Sync · 0.1</small>
     </div>
   </aside>
   <main>
     <header class="page-heading">
-      <h1>{current.label}</h1>
+      <div>
+        <h1>{current.label}</h1>
+        {#if current.description}<p>{current.description}</p>{/if}
+      </div>
       <div class="actions">
         <button
           class="icon-button"
@@ -247,19 +399,20 @@
           >서버 시작</button
         >
       </section>{/if}
+    {#if page === "connection" && environment}
+      <Network settings={environment.network} listener={connected ? status?.listener ?? null : null} {busy} save={saveNetwork} activity={(dirty) => (networkDirty = dirty)} />
+    {/if}
     {#if status}
       {#if page === "overview"}<Overview
           {status}
+          {connected}
           {copy}
           showDevices={() => (page = "devices")}
         />
       {:else if page === "devices"}
-        <p class="page-description">
-          이 라이브러리에 등록된 기기를 관리합니다.
-        </p>
         <div class="card device-list">
           {#each status.devices as device}<div class="device-row">
-              <MonitorSmartphone size={21} />
+              <span class="device-icon"><MonitorSmartphone size={18} /></span>
               <div>
                 <strong>{device.name || device.id.slice(0, 12)}</strong><small
                   >{device.id}</small
@@ -284,13 +437,53 @@
           busy={busy || !connected}
           {mutate}
           {copy}
+          activity={(active) => (connectionDraftDirty = active)}
         />{/if}
     {/if}
     {#if page === "settings"}
-      <p class="page-description">
-        서버 실행 상태와 로그인 시 자동 실행 여부를 관리합니다.
-      </p>
       <section class="card settings-group">
+        <div class="setting">
+          <div class="setting-heading">
+            <h2>Sync 업데이트</h2>
+            <span class="pill">{updatePhase(environment?.updateStatus.phase ?? "idle")}</span>
+          </div>
+          <label
+            >업데이트 정책<select
+              aria-label="업데이트 정책"
+              value={environment?.updateSettings.policy ?? "automatic"}
+              disabled={busy || !environment || !!environment.updateScheduleError}
+              onchange={(e) =>
+                updatePolicy(
+                  e.currentTarget.value as "automatic" | "notify" | "off",
+                )}
+              ><option value="automatic">안전할 때 자동 적용</option><option
+                value="notify">새 버전만 알림</option
+              ><option value="off">예약 확인 끄기</option></select
+            ></label
+          >
+          <p>
+            관리 화면을 닫아도 예약 확인이 실행됩니다. 자동 적용은 작업이
+            없고 서버가 안전하게 종료될 때만 진행합니다.
+          </p>
+          {#if environment?.updateStatus.targetVersion}<p>
+              대상 버전: {environment.updateStatus.targetVersion}
+            </p>{/if}
+          {#if environment?.updateStatus.reason}<p class="warning">
+              마지막 결과: {environment.updateStatus.reason}
+            </p>{/if}
+          {#if environment?.updateScheduleError}<p class="warning">
+              예약 업데이트 상태를 확인하지 못했습니다.
+            </p>{/if}
+          <div class="actions">
+            <button
+              disabled={busy || updating || dialog !== null || connectionDirty}
+              onclick={() => void checkUpdate(false)}
+              >{environment?.updateSettings.policy === "notify"
+                ? "업데이트 확인"
+                : "업데이트 확인 및 적용"}</button
+            >
+          </div>
+        </div>
         <div class="setting">
           <div class="setting-heading">
             <h2>로그인 시 서버 자동 실행</h2>
@@ -298,7 +491,8 @@
               ><input
                 type="checkbox"
                 aria-label="서버 자동 실행"
-                checked={environment?.startup?.enabled ?? false}
+                checked={(environment?.startup?.enabled ?? false) &&
+                  (environment?.startup?.actionMatches ?? false)}
                 disabled={busy || !environment || !!environment.startupError}
                 onchange={(e) => startup(e.currentTarget.checked)}
               /><span></span></label
@@ -307,6 +501,9 @@
           <p>관리 화면을 닫아도 서버는 계속 동작합니다.</p>
           {#if environment?.startupError}<p class="warning">
               자동 실행 상태를 확인하지 못했습니다.
+            </p>{:else if environment?.startup?.registered &&
+              !environment.startup.actionMatches}<p class="warning">
+              이전 설치 위치의 자동 실행 설정입니다. 다시 등록하거나 해제하세요.
             </p>{/if}
         </div>
         <div class="setting">
@@ -345,6 +542,7 @@
       </p>
     {/if}
   </main>
+  </div>
 </div>
 <dialog
   bind:this={dialogElement}
@@ -359,7 +557,10 @@
     onclick={close}
     disabled={busy}><X size={20} /></button
   >
-  {#if dialog === "register"}<h2>새 기기 등록</h2>
+  {#if dialog === "leave"}
+    <p>저장하지 않은 변경사항이 있습니다. 정말로 이동하시겠습니까? 변경한 내용이 초기화됩니다.</p>
+    <div class="actions"><button onclick={leavePage}>네</button><button onclick={close}>아니오</button></div>
+  {:else if dialog === "register"}<h2>새 기기 등록</h2>
     <p>등록할 기기의 이름을 입력하세요.</p>
     <form
       onsubmit={(e) => {

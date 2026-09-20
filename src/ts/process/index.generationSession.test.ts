@@ -8,14 +8,22 @@ const mocks = vi.hoisted(() => ({
     events: [] as string[],
     modelResponse: null as any,
     modelRequestCount: 0,
+    authorityEpoch: 0,
     modelRequests: [] as any[],
     presetActivationCount: 0,
     presetActivation: null as null | (() => Promise<void> | void),
     outputTrigger: null as null | ((chat: any) => Promise<any> | any),
+    outputTriggerReturnsNull: false,
     tokenizeResult: null as Promise<number> | null,
     inlay: null as null | ((data: string) => { text: string, promise?: Promise<string> }),
+    moduleTriggers: [] as any[],
+    moduleRegex: [] as any[],
+    editHooks: new Set<unknown>(),
     listeners: new Set<(event: any) => Promise<void> | void>(),
     selectedTarget: null as any,
+    selectedAuthority: null as any,
+    windowedController: null as any,
+    persistentStore: null as any,
     acquireCompleteConversation: vi.fn(),
     activeCompleteLeases: 0,
     completeLeaseReleases: 0,
@@ -38,7 +46,6 @@ const mocks = vi.hoisted(() => ({
         return { data, emoChanged: false }
     }),
     sayTTS: vi.fn(async (_char: unknown, _data: string) => undefined),
-    addRerolls: vi.fn((_generationId: string, _values: string[]) => undefined),
     trimUntilPunctuation: vi.fn((value: string) => value),
 }))
 
@@ -87,6 +94,7 @@ vi.mock('./triggers', () => ({
         if (mode === 'start') return null
         mocks.events.push('output-trigger')
         const clone = JSON.parse(JSON.stringify(arg.chat))
+        if (mocks.outputTriggerReturnsNull) return null
         return mocks.outputTrigger ? await mocks.outputTrigger(clone) : { chat: clone }
     }),
 }))
@@ -101,18 +109,37 @@ vi.mock('./inlayScreen', () => ({
         return mocks.inlay ? mocks.inlay(data) : { text: data }
     },
 }))
-vi.mock('./prereroll', async () => (await import('./tests/sendChatTestHarness')).prerollModule({
-    addRerolls: mocks.addRerolls,
-}))
 vi.mock('./transformers', async () => (await import('./tests/sendChatTestHarness')).transformersModule())
-vi.mock('./memory/hanuraiMemory', async () => (await import('./tests/sendChatTestHarness')).hanuraiMemoryModule())
-vi.mock('./memory/hypav2', async () => (await import('./tests/sendChatTestHarness')).hypav2Module())
-vi.mock('./memory/hypav3', async () => (await import('./tests/sendChatTestHarness')).hypav3Module())
+vi.mock('./memory/hanuraiMemory', () => ({
+    hanuraiMemory: vi.fn(async (chats, { currentTokens }) => ({ chats, tokens: currentTokens })),
+}))
+vi.mock('./memory/hypav2', () => ({
+    hypaMemoryV2: vi.fn(async (chats, currentTokens) => ({ chats, currentTokens })),
+}))
+vi.mock('./memory/hypav3', async () => (await import('./tests/sendChatTestHarness')).hypav3Module({
+    getCurrentHypaV3Preset: () => ({
+        settings: {
+            preserveOrphanedMemory: false,
+            useExperimentalImpl: false,
+            recentMemoryRatio: 0,
+            similarMemoryRatio: 0,
+        },
+    }),
+    hypaMemoryV3: vi.fn(async (chats: any[], currentTokens: number, _max: number, room: any) => ({
+        chats,
+        currentTokens,
+        memory: room.hypaV3Data,
+    })),
+}))
 vi.mock('./scriptings', async () => (await import('./tests/sendChatTestHarness')).scriptingsModule())
 vi.mock('../model/modellist', async () => (await import('./tests/sendChatTestHarness')).modellistModule())
-vi.mock('./modules', async () => (await import('./tests/sendChatTestHarness')).modulesModule())
+vi.mock('./modules', async () => (await import('./tests/sendChatTestHarness')).modulesModule({
+    getModuleTriggers: () => mocks.moduleTriggers,
+    getModuleRegexScripts: () => mocks.moduleRegex,
+}))
 vi.mock('../globalApi.svelte', async () => (await import('./tests/sendChatTestHarness')).globalApiModule())
-vi.mock('../plugins/plugins.svelte', async () => (await import('./tests/sendChatTestHarness')).pluginsModule(mocks.listeners))
+vi.mock('../plugins/plugins.svelte', () => ({ pluginV2: { chatOutput: mocks.listeners, editprocess: mocks.editHooks } }))
+vi.mock('../plugins/pluginDatabaseAccess', async (importOriginal) => (await import('./tests/sendChatTestHarness')).pluginDatabaseAccessModule(importOriginal as () => Promise<Record<string, unknown>>))
 vi.mock('./presetChain', () => ({
     activatePresetChainForRequest: vi.fn(async () => {
         mocks.presetActivationCount += 1
@@ -120,8 +147,18 @@ vi.mock('./presetChain', () => ({
     }),
 }))
 vi.mock('../storage/persistentDataRuntime.svelte', () => ({
+    assertPersistentMutationAllowed: (epoch = mocks.authorityEpoch) => {
+        if (epoch !== mocks.authorityEpoch) throw new PersistentMutationFencedError()
+    },
+    getPersistentStorageAuthorityEpoch: () => mocks.authorityEpoch,
+    getPersistentNavigationGeneration: () => 0,
     acknowledgeGenerationCompletion: mocks.acknowledge,
     captureSelectedConversationTarget: () => mocks.selectedTarget,
+    captureSelectedConversationAuthority: () => mocks.selectedAuthority,
+    captureWindowedConversationMutationController: (...args: any[]) =>
+        typeof mocks.windowedController === 'function'
+            ? mocks.windowedController(...args)
+            : mocks.windowedController,
     acquireCompleteConversation: mocks.acquireCompleteConversation,
     getActiveConversationSession: () => mocks.session,
     invalidateActiveConversationSession: () => {
@@ -130,10 +167,14 @@ vi.mock('../storage/persistentDataRuntime.svelte', () => ({
         mocks.session = null
     },
 }))
+vi.mock('../storage/persistentDataStoreFactory', () => ({
+    getPersistentDataStore: () => mocks.persistentStore,
+}))
 
 import type { character, Chat, Database, Message } from '../storage/database.svelte'
 import { ActiveConversationSession } from '../storage/activeConversationSession'
 import { SelectedConversationPromotionStaleError } from '../storage/activeWorkingSet.svelte'
+import { PersistentMutationFencedError } from '../storage/saveCoordinator'
 import { DBState, selectedCharID } from '../stores.svelte'
 import { doingChat, sendChat } from './index.svelte'
 
@@ -286,14 +327,22 @@ describe('sendChat generation session integration', () => {
         mocks.events.length = 0
         mocks.modelResponse = streamingResponse('answer')
         mocks.modelRequestCount = 0
+        mocks.authorityEpoch = 0
         mocks.modelRequests.length = 0
         mocks.presetActivationCount = 0
         mocks.presetActivation = null
         mocks.outputTrigger = null
+        mocks.outputTriggerReturnsNull = false
         mocks.tokenizeResult = null
         mocks.inlay = null
         mocks.listeners.clear()
+        mocks.editHooks.clear()
+        mocks.moduleTriggers = []
+        mocks.moduleRegex = []
         mocks.selectedTarget = null
+        mocks.selectedAuthority = null
+        mocks.windowedController = null
+        mocks.persistentStore = null
         mocks.activeCompleteLeases = 0
         mocks.completeLeaseReleases = 0
         mocks.lastCharPunctuation = true
@@ -314,7 +363,6 @@ describe('sendChat generation session integration', () => {
             return { data, emoChanged: false }
         })
         mocks.sayTTS.mockReset().mockResolvedValue(undefined)
-        mocks.addRerolls.mockReset()
         mocks.trimUntilPunctuation.mockReset().mockImplementation((value: string) => value)
         mocks.acquireCompleteConversation.mockReset()
         mocks.acquireCompleteConversation.mockImplementation(async (_reason, target) => {
@@ -334,6 +382,191 @@ describe('sendChat generation session integration', () => {
                 },
             }
         })
+    })
+
+    it.each(['disabled', 'v2', 'hanurai'])('retains covered messages when the active memory route is %s', async (route) => {
+        const installed = installDatabase(makeChat([
+            { role: 'user', data: 'covered-a', chatId: 'a' },
+            { role: 'user', data: 'tail', chatId: 'b' },
+        ]))
+        installed.chat.hypaV3Data = {
+            summaries: [{ chatMemos: ['a'], text: 'covered' }],
+        } as any
+        DBState.db.hypaV3 = true
+        installed.currentCharacter.supaMemory = route !== 'disabled'
+        DBState.db.hypav2 = route === 'v2'
+        DBState.db.hanuraiEnable = route === 'hanurai'
+
+        await sendChat()
+
+        expect(mocks.processScriptFull.mock.calls.some((call) => call[1] === 'covered-a')).toBe(true)
+    })
+
+    it.each(['plugin-editprocess', 'plugin-output', 'character-trigger', 'module-trigger', 'character-regex', 'module-regex'])
+    ('preserves complete compatibility history with %s', async (consumer) => {
+        const installed = installDatabase(makeChat([
+            { role: 'user', data: 'covered-a', chatId: 'a' },
+            { role: 'user', data: 'tail', chatId: 'b' },
+        ]))
+        installed.chat.hypaV3Data = { summaries: [{ chatMemos: ['a'], text: 'summary' }] } as any
+        installed.currentCharacter.supaMemory = true
+        DBState.db.hypaV3 = true
+        mocks.selectedTarget = { characterId: installed.currentCharacter.chaId, conversationId: installed.chat.id, storeRevision: 1 }
+        mocks.selectedAuthority = { sessionVersion: 0, persistedSessionVersion: 0 }
+        const output = vi.fn(async () => undefined)
+        if (consumer === 'plugin-editprocess') mocks.editHooks.add(() => undefined)
+        if (consumer === 'plugin-output') mocks.listeners.add(output)
+        if (consumer === 'character-trigger') installed.currentCharacter.triggerscript = [{}] as any
+        if (consumer === 'module-trigger') mocks.moduleTriggers = [{}]
+        if (consumer === 'character-regex') installed.currentCharacter.customscript = [{ type: 'editprocess', in: 'a', out: '@@inject', flag: 'g' }] as any
+        if (consumer === 'module-regex') mocks.moduleRegex = [{ type: 'editprocess', in: 'a', out: '{{setvar::test::1}}', flag: 'g' }]
+
+        await expect(sendChat()).resolves.toBe(true)
+
+        expect(mocks.acquireCompleteConversation).toHaveBeenCalledOnce()
+        const preservesEffects = ['plugin-editprocess', 'character-regex', 'module-regex'].includes(consumer)
+        expect(mocks.processScriptFull.mock.calls.some((call) => call[1] === 'covered-a')).toBe(preservesEffects)
+        expect(mocks.events).toContain('output-trigger')
+        expect(mocks.events).toContain('output-script')
+        if (consumer === 'plugin-output') expect(output).toHaveBeenCalledOnce()
+    })
+
+    it('generates from a pinned unsummarized tail without complete promotion', async () => {
+        const installed = installDatabase(makeChat([]))
+        const storedMessages = [
+            { role: 'user', data: 'covered-a', chatId: 'a' },
+            { role: 'char', data: 'covered-b', chatId: 'b' },
+            { role: 'user', data: 'tail', chatId: 'c' },
+        ] as Message[]
+        installed.chat.hypaV3Data = {
+            summaries: [{ chatMemos: ['a', 'b'], summary: 'covered' }],
+        } as any
+        DBState.db.hypaV3 = true
+        installed.currentCharacter.supaMemory = true
+        mocks.session = null
+        mocks.outputTriggerReturnsNull = true
+        mocks.selectedTarget = {
+            characterId: installed.currentCharacter.chaId,
+            conversationId: installed.chat.id,
+            navigationGeneration: 0,
+            storeRevision: 1,
+        }
+        mocks.selectedAuthority = {
+            kind: 'windowed',
+            characterId: installed.currentCharacter.chaId,
+            conversationId: installed.chat.id,
+            sessionToken: 'windowed-session',
+            storeRevision: 1,
+            persistedSessionVersion: 0,
+            sessionVersion: 0,
+            totalMessages: storedMessages.length,
+        }
+        const bodyReads: number[] = []
+        const lease = {
+            revision: 1,
+            async readConversationMessageMetadataWindow(input: any) {
+                const end = Math.min(storedMessages.length, input.startIndex + input.limit)
+                return {
+                    revision: 1,
+                    value: {
+                        characterId: input.characterId,
+                        conversationId: input.conversationId,
+                        messages: storedMessages.slice(input.startIndex, end).map((message) => ({
+                            chatId: message.chatId,
+                            role: message.role,
+                            parserInert: true,
+                        })),
+                        startIndex: input.startIndex,
+                        endIndex: end,
+                        totalMessages: storedMessages.length,
+                        hasMoreBefore: input.startIndex > 0,
+                        hasMoreAfter: end < storedMessages.length,
+                    },
+                }
+            },
+            async readConversationWindow(input: any) {
+                bodyReads.push(input.startIndex)
+                return {
+                    revision: 1,
+                    value: {
+                        characterId: input.characterId,
+                        conversationId: input.conversationId,
+                        messages: [structuredClone(storedMessages[input.startIndex])],
+                        startIndex: input.startIndex,
+                        endIndex: input.startIndex + 1,
+                        totalMessages: storedMessages.length,
+                        hasMoreBefore: input.startIndex > 0,
+                        hasMoreAfter: input.startIndex + 1 < storedMessages.length,
+                    },
+                }
+            },
+            release: vi.fn(async () => undefined),
+        }
+        mocks.persistentStore = {
+            readConversationMessageMetadataWindow: vi.fn(),
+            acquireRevision: vi.fn(async () => lease),
+        }
+        const mutations: any[] = []
+        mocks.windowedController = (_target: any, chat: Chat, absoluteStartIndex: number) => ({
+            chat,
+            absoluteStartIndex,
+            isCurrent: () => true,
+            applyRange(localStart: number, deleteCount: number, messages: Message[]) {
+                chat.message.splice(localStart, deleteCount, ...structuredClone(messages))
+                mutations.push({
+                    start: absoluteStartIndex + localStart,
+                    deleteCount,
+                    messages: structuredClone(messages),
+                })
+                return true
+            },
+            release: vi.fn(),
+        })
+
+        await expect(sendChat()).resolves.toBe(true)
+
+        expect(mocks.acquireCompleteConversation).not.toHaveBeenCalled()
+        expect(bodyReads).toEqual([2])
+        expect(mutations.some((mutation) =>
+            mutation.start === 3 && mutation.messages[0]?.data === 'answer',
+        )).toBe(true)
+        expect(lease.release).toHaveBeenCalledOnce()
+        expect(mocks.acknowledge).toHaveBeenCalledOnce()
+    })
+
+    it('discards a provider result from an old authority even when target IDs and objects are retained', async () => {
+        installDatabase()
+        const response = deferred<any>()
+        mocks.modelResponse = response.promise
+        const sending = sendChat()
+        await vi.waitFor(() => expect(mocks.modelRequestCount).toBe(1))
+        const before = JSON.stringify(DBState.db.characters[0].chats[0].message)
+        mocks.authorityEpoch++
+        response.resolve(streamingResponse('must not be applied'))
+
+        await expect(sending).resolves.toBe(false)
+        expect(JSON.stringify(DBState.db.characters[0].chats[0].message)).toBe(before)
+        expect(mocks.acknowledge).not.toHaveBeenCalled()
+        expect(get(doingChat)).toBe(false)
+    })
+
+    it('refuses late output-script results after an authority replacement', async () => {
+        installDatabase()
+        const script = deferred<{ data: string; emoChanged: boolean }>()
+        mocks.processScriptFull.mockImplementation(async (_char, data, mode) =>
+            mode === 'editoutput' ? script.promise : { data, emoChanged: false })
+        const sending = sendChat()
+        await vi.waitFor(() => expect(mocks.processScriptFull.mock.calls.some(
+            (call) => call[2] === 'editoutput',
+        )).toBe(true))
+        mocks.authorityEpoch++
+        const before = JSON.stringify(DBState.db.characters[0].chats[0].message)
+        script.resolve({ data: 'late transformed text', emoChanged: false })
+
+        await expect(sending).resolves.toBe(false)
+        expect(JSON.stringify(DBState.db.characters[0].chats[0].message)).toBe(before)
+        expect(mocks.acknowledge).not.toHaveBeenCalled()
+        expect(get(doingChat)).toBe(false)
     })
 
     it('promotes before generation reads history and holds one lease across awaited streaming work', async () => {
@@ -907,9 +1140,6 @@ describe('sendChat generation session integration', () => {
         mocks.sayTTS.mockImplementation(async (_char, data: string) => {
             mocks.events.push(`tts:${data}`)
         })
-        mocks.addRerolls.mockImplementation((_generationId, values: string[]) => {
-            mocks.events.push(`rerolls:${values.join(',')}`)
-        })
         mocks.listeners.add(async () => {
             mocks.events.push('output-listener')
         })
@@ -924,7 +1154,9 @@ describe('sendChat generation session integration', () => {
             saying: currentCharacter.chaId,
             generationInfo: expect.objectContaining({ generationId: expect.any(String) }),
         })
-        expect(mocks.addRerolls).toHaveBeenCalledWith(expect.any(String), [
+        expect(publishedChat.message.at(-1)?.responseVariants?.candidates.map(
+            (candidate) => candidate.messages[0].data,
+        )).toEqual([
             'First choice|script|inlay',
             'Second choice|script|inlay',
         ])
@@ -936,7 +1168,6 @@ describe('sendChat generation session integration', () => {
             event.startsWith('output-script:')
             || event === 'inlay-sync'
             || event.startsWith('tts:')
-            || event.startsWith('rerolls:')
             || event === 'output-trigger'
             || event === 'output-listener'
             || event === 'tokenize-result'
@@ -947,7 +1178,6 @@ describe('sendChat generation session integration', () => {
             'output-script:Second choice',
             'inlay-sync',
             'tts:Second choice|script|inlay',
-            'rerolls:First choice|script|inlay,Second choice|script|inlay',
             'output-trigger',
             'output-listener',
             'tokenize-result',
@@ -1035,7 +1265,6 @@ describe('sendChat generation session integration', () => {
             ['concurrent-message', 'Concurrent mutation'],
         ])
         expect(chat.message.some((message) => message.data === 'Late inlay result')).toBe(false)
-        expect(mocks.addRerolls).not.toHaveBeenCalled()
         expect(mocks.sayTTS).not.toHaveBeenCalled()
         expect(mocks.events).not.toContain('output-trigger')
         expect(mocks.acknowledge).toHaveBeenCalledOnce()
@@ -1049,7 +1278,6 @@ describe('sendChat generation session integration', () => {
             expectedStored: 'script:trim:Second raw',
             expectedOutputInputs: ['trim:First raw', 'trim:Second raw'],
             expectedTrimInputs: ['First raw', 'Second raw'],
-            expectedRerolls: ['Second raw'],
         },
         {
             name: 'multiline',
@@ -1063,14 +1291,13 @@ describe('sendChat generation session integration', () => {
             expectedStored: 'trim:script:First raw',
             expectedOutputInputs: ['First raw', 'Second raw'],
             expectedTrimInputs: ['script:First raw', 'script:Second raw'],
-            expectedRerolls: ['trim:script:First raw', 'trim:script:Second raw'],
         },
     ])('preserves removeIncompleteResponse trimming for $name response application', async ({
         response,
         expectedStored,
         expectedOutputInputs,
         expectedTrimInputs,
-        expectedRerolls,
+        name,
     }) => {
         const { session } = installDatabase()
         DBState.db.removeIncompleteResponse = true
@@ -1090,7 +1317,11 @@ describe('sendChat generation session integration', () => {
             expectedTrimInputs,
         )
         expect(DBState.db.characters[0].chats[0].message.at(-1)?.data).toBe(expectedStored)
-        expect(mocks.addRerolls).toHaveBeenCalledWith(expect.any(String), expectedRerolls)
+        const candidates = DBState.db.characters[0].chats[0].message.at(-1)
+            ?.responseVariants?.candidates.map((candidate) => candidate.messages[0].data)
+        expect(candidates).toEqual(name === 'multiline'
+            ? ['trim:script:First raw', 'trim:script:Second raw']
+            : undefined)
         expect(mocks.acknowledge).toHaveBeenCalledOnce()
         expect(session.pinCount('transaction')).toBe(0)
     })

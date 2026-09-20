@@ -7,12 +7,16 @@ export interface InlayEncodeOptions {
     quality: number
     maxDimension: number
     skipReencode: boolean
+    /** Frames per second an animation is thinned down to, or 0 to keep its own rate. */
+    animationMaxFps: number
+    animationDecodeBytes?: number
 }
 
 export const MAX_INLAY_DIMENSION = 0xffff_ffff
+export const MAX_INLAY_ANIMATION_FPS = 240
 
 export const defaultInlayEncodeOptions: InlayEncodeOptions = {
-    format: 'webp', quality: 85, maxDimension: 0, skipReencode: true,
+    format: 'webp', quality: 85, maxDimension: 0, skipReencode: true, animationMaxFps: 0, animationDecodeBytes: 256 * 1024 * 1024,
 }
 
 export function normalizeInlayEncodeOptions(
@@ -28,7 +32,13 @@ export function normalizeInlayEncodeOptions(
         Number.isFinite(input?.maxDimension) ? input!.maxDimension! : defaultInlayEncodeOptions.maxDimension,
     )))
     const skipReencode = typeof input?.skipReencode === 'boolean' ? input.skipReencode : defaultInlayEncodeOptions.skipReencode
-    return { format, quality, maxDimension, skipReencode }
+    const animationMaxFps = Math.min(MAX_INLAY_ANIMATION_FPS, Math.max(0, Math.round(
+        Number.isFinite(input?.animationMaxFps) ? input!.animationMaxFps! : defaultInlayEncodeOptions.animationMaxFps,
+    )))
+    const animationDecodeBytes = Math.min(512 * 1024 * 1024, Math.max(1, Math.floor(
+        Number.isFinite(input?.animationDecodeBytes) ? input!.animationDecodeBytes! : defaultInlayEncodeOptions.animationDecodeBytes!,
+    )))
+    return { format, quality, maxDimension, skipReencode, animationMaxFps, animationDecodeBytes }
 }
 
 export interface AssetBlobMetadata {
@@ -50,6 +60,7 @@ export interface InlayBlobMetadata {
     inlayType: InlayBlobType
     width?: number
     height?: number
+    preservationReason?: 'animation-cost'
 }
 
 export type BlobMetadata = AssetBlobMetadata | InlayBlobMetadata

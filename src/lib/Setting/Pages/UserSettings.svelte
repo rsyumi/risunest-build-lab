@@ -1,22 +1,19 @@
 <script lang="ts">
     import { language } from "src/lang";
     import { hubURL } from "src/ts/characterCards";
-    import {
-        loadRisuAccountBackup,
-        loadRisuAccountData,
-        saveRisuAccountData,
-    } from "src/ts/drive/accounter";
+    import { getDeviceMarkers } from "src/ts/storage/deviceMarkers";
+    import { loadRisuAccountBackup } from "src/ts/drive/accounter";
 
     import { DBState } from "src/ts/stores.svelte";
     import Check from "src/lib/UI/GUI/CheckInput.svelte";
     import { alertConfirm, alertError, alertNormal } from "src/ts/alert";
     import { forageStorage } from "src/ts/globalApi.svelte";
-    import { isTauri, isNodeServer } from "src/ts/platform";
+    import { isTauri } from "src/ts/platform";
+    import { openDataHealthScreen } from "src/ts/storage/dataHealthNavigation";
     import {
         unMigrationAccount,
         accountUnmigrationBusy,
     } from "src/ts/storage/accountStorage";
-    import { checkDriver } from "src/ts/drive/drive";
     import {
         SavePartialLocalBackup,
         SaveLocalBackup,
@@ -25,10 +22,8 @@
     import Button from "src/lib/UI/GUI/Button.svelte";
     import { exportAsDataset } from "src/ts/storage/exportAsDataset";
     import { loginToSionyw, testSionywLogin } from "src/ts/sionyw";
-    import { cleanColdStorage } from "src/ts/process/coldstorage.svelte";
     import { getNativeOfficialAccountFlow } from "src/ts/storage/sync/nativeOfficialAccountFlow";
     import {
-        createHubPopupController,
         isExpectedHubMessage,
         resolveExpectedOfficialAccountMessageUrl,
     } from "src/ts/storage/officialAccountMessage";
@@ -36,11 +31,13 @@
         exportPortableBackupFromSystemPicker,
         restoreBackupFromSystemPicker,
     } from "src/ts/storage/portableBackupFileRouteProduction.svelte";
-    import { onDestroy } from "svelte";
     import {
         nativeFileOperation,
         exportRisuSaveFromSystemPicker,
     } from "src/ts/storage/risuSaveFileRouteProduction.svelte";
+    import {
+        formatRisuSaveExportResult,
+    } from "src/ts/storage/exportExcludedReport";
     import {
         alertPartialDestinationWarning,
         hasPartialDestinationWarning,
@@ -49,13 +46,16 @@
         NativeFileJobActivationCommittedError,
         NativeFileJobError,
     } from "src/ts/storage/nativeFileJobs";
-    import { NativeFileOperationBusyError } from "src/ts/storage/nativeFileJobManager";
+    import {
+        NativeFileOperationBusyError,
+        dismissNativeFileOperationOutcome,
+        nativeFileOperationOutcomeShown,
+    } from "src/ts/storage/nativeFileJobManager";
     import { exportCompatibilityBackupFromSystemPicker } from "src/ts/storage/compatibleBackupFileRouteProduction.svelte";
     import { formatCompatibilityBackupReport } from "src/ts/storage/compatibleBackupReport";
     import type { NativeCompatibilityTarget } from "src/ts/storage/nativeFileJobs";
     let openIframe = $state(false);
     let openIframeURL = $state("");
-    const drivePopup = createHubPopupController();
     let accountIframe = $state<HTMLIFrameElement>();
     let nativeAccountBusy = $state(false);
     let risuSaveOperation = $derived($nativeFileOperation?.kind ?? null);
@@ -119,7 +119,9 @@
             error instanceof NativeFileJobError &&
             error.code === "source-preserved-repair-required"
         ) {
-            alertError(language.risuNest.backup.sourceRepairRequired);
+            void offerDataHealth(
+                language.risuNest.backup.sourceRepairRequired,
+            );
             return;
         }
         alertError(
@@ -128,9 +130,29 @@
                 : language.risuNest.backup.actionFailed,
         );
     }
+    // A failure the data check can explain offers it, instead of ending at the message.
+    async function offerDataHealth(message: string): Promise<void> {
+        if (!isTauri) {
+            alertError(message);
+            return;
+        }
+        if (
+            await alertConfirm(
+                `${message} ${language.risuNest.dataHealth.openResult}`,
+            )
+        )
+            openDataHealthScreen();
+    }
+
+    // Exports run behind the shared progress dialog, which reports how they ended.
+    function showExportError(error: unknown): void {
+        if (!nativeFileOperationOutcomeShown("export")) showRisuSaveError(error);
+    }
+
     async function runLocalBackupOperation(
         kind: "import" | "export",
     ): Promise<void> {
+        if (kind === "export") dismissNativeFileOperationOutcome();
         try {
             const result = isTauri
                 ? kind === "import"
@@ -141,6 +163,7 @@
                   : await SaveLocalBackup();
             if (!result || ("mode" in result && result.mode === "legacy"))
                 return;
+            if (isTauri && kind === "export") return;
             const message = result.warningCodes.includes(
                 "source-preserved-repair-required",
             )
@@ -154,17 +177,20 @@
                     : message,
             );
         } catch (error) {
-            showRisuSaveError(error);
+            if (kind === "export") showExportError(error);
+            else showRisuSaveError(error);
         }
     }
 
     async function runCompatibleExport(
         target: NativeCompatibilityTarget,
     ): Promise<void> {
+        dismissNativeFileOperationOutcome();
         try {
             const result =
                 await exportCompatibilityBackupFromSystemPicker(target);
             if (!result) return;
+            dismissNativeFileOperationOutcome();
             const report = result.compatibilityReport
                 ? formatCompatibilityBackupReport(result.compatibilityReport, {
                       ...language.portableBackup,
@@ -180,13 +206,10 @@
                     : message,
             );
         } catch (error) {
-            showRisuSaveError(error);
+            showExportError(error);
         }
     }
 
-    onDestroy(() => {
-        drivePopup.close();
-    });
 </script>
 
 {#if risuSaveOperation !== null}
@@ -201,29 +224,29 @@
             hubURL,
             openIframeURL,
         );
-        const expectedSource =
-            message?.type === "drive"
-                ? drivePopup.source
-                : accountIframe?.contentWindow;
+        const expectedSource = accountIframe?.contentWindow;
         if (!isExpectedHubMessage(e, expectedUrl, expectedSource)) return;
-        if (message?.type === "drive") {
-            if (!isTauri) await loadRisuAccountData();
-            DBState.db.account.data.refresh_token = message.data.refresh_token;
-            DBState.db.account.data.access_token = message.data.access_token;
-            DBState.db.account.data.expires_in =
-                message.data.expires_in * 700 + Date.now();
-            if (!isTauri) await saveRisuAccountData();
-            drivePopup.close();
-        } else if (message?.data.vaild) {
-            openIframe = false;
+        if (message?.data.vaild) {
             const credential = {
                 id: message.id,
                 token: message.token,
                 data: message.data,
             };
-            DBState.db.account = isTauri
-                ? await getNativeOfficialAccountFlow().login(credential)
-                : credential;
+            if (isTauri) {
+                try {
+                    const account = await runNativeAccountOperation(() =>
+                        getNativeOfficialAccountFlow().login(credential),
+                    );
+                    if (!account) return;
+                    DBState.db.account = account;
+                } catch {
+                    alertError(language.risuNest.backup.actionFailed);
+                    return;
+                }
+            } else {
+                DBState.db.account = credential;
+            }
+            openIframe = false;
         }
     }}
 />
@@ -248,16 +271,15 @@
     <Button
         disabled={risuSaveOperation !== null}
         onclick={async () => {
+            dismissNativeFileOperationOutcome();
             try {
                 const result = await exportRisuSaveFromSystemPicker();
-                if (result)
-                    alertNormal(
-                        result.warningCodes.includes("cleanup-failed")
-                            ? language.risuSaveCleanupWarning
-                            : language.risuSaveExportComplete,
-                    );
+                if (!result) return;
+                // The exclusion report replaces the dialog's plain completion message.
+                dismissNativeFileOperationOutcome();
+                alertNormal(formatRisuSaveExportResult(result));
             } catch (error) {
-                showRisuSaveError(error);
+                showExportError(error);
             }
         }}
         className="mt-2"
@@ -317,53 +339,6 @@
     </Button>
 {/if}
 
-<Button
-    onclick={async () => {
-        if (await alertConfirm(language.cleanColdStorageConfirm)) {
-            cleanColdStorage();
-        }
-    }}
-    className="mt-2"
->
-    {language.cleanColdStorage}
-</Button>
-
-<Button
-    onclick={async () => {
-        if (await alertConfirm(language.backupConfirm)) {
-            localStorage.setItem("backup", "save");
-
-            if (isTauri || isNodeServer) {
-                checkDriver("savetauri");
-            } else {
-                checkDriver("save");
-            }
-        }
-    }}
-    className="mt-2"
->
-    {language.savebackup}
-</Button>
-
-<Button
-    onclick={async () => {
-        if (
-            (await alertConfirm(language.backupLoadConfirm)) &&
-            (await alertConfirm(language.backupLoadConfirm2))
-        ) {
-            localStorage.setItem("backup", "load");
-            if (isTauri || isNodeServer) {
-                checkDriver("loadtauri");
-            } else {
-                checkDriver("load");
-            }
-        }
-    }}
-    className="mt-2"
->
-    {language.loadbackup}
-</Button>
-
 <Button onclick={exportAsDataset} className="mt-2">
     {language.exportAsDataset}
 </Button>
@@ -379,9 +354,14 @@
                         if ($accountUnmigrationBusy) return;
                         if (isTauri) {
                             if (nativeAccountBusy) return;
-                            await runNativeAccountOperation(() =>
-                                getNativeOfficialAccountFlow().logout(),
-                            );
+                            try {
+                                await runNativeAccountOperation(() =>
+                                    getNativeOfficialAccountFlow().logout(),
+                                );
+                            } catch {
+                                alertError(language.risuNest.backup.actionFailed);
+                                return;
+                            }
                         } else if (
                             DBState.db.account.useSync ||
                             forageStorage.isAccount
@@ -419,28 +399,6 @@
     {#if DBState.db.account}
         <span class="mb-4 text-textcolor2">ID: {DBState.db.account.id}</span>
         {#if !isTauri}
-            <h1 class="text-xl font-bold mt-2">
-                {language.googleDriveConnection}
-            </h1>
-            {#if !DBState.db.account.data.refresh_token}
-                <span class="text-sm font-light mb-2 text-textcolor2"
-                    >{language.googleDriveInfo}</span
-                >
-                <button
-                    class="bg-selected p-2 rounded-md hover:bg-blue-500 transition-colors"
-                    onclick={async () => {
-                        const authorizationUrl = await checkDriver("reftoken");
-                        if (typeof authorizationUrl === "string")
-                            drivePopup.open(authorizationUrl);
-                    }}
-                >
-                    Connect to Google Drive
-                </button>
-            {:else}
-                <span class="text-sm font-light mb-2 text-textcolor2"
-                    >{language.googleDriveConnected}</span
-                >
-            {/if}
             <fieldset
                 disabled={$accountUnmigrationBusy}
                 class="flex items-center mt-2"
@@ -469,8 +427,9 @@
                         name={language.SaveDataInAccount}
                         onChange={(v) => {
                             if (v) {
-                                localStorage.setItem("dosync", "sync");
-                                location.reload();
+                                const markers = getDeviceMarkers();
+                                markers.setItem("dosync", "sync");
+                                void markers.flush().then(() => location.reload());
                             }
                         }}
                     />

@@ -55,6 +55,7 @@ export interface CommitTransportDependencies {
     windows(): boolean
     android?(): boolean
     linux?(): boolean
+    ios?(): boolean
     macos?(): boolean
     androidBinary?(): AndroidBinaryCommitBridge | null
     invoke<T>(
@@ -78,10 +79,10 @@ export class NativeCommitTransport {
     private async send(input: CommitEnvelope): Promise<{ revision: number }> {
         const deps = this.dependencies
         const android = deps.android?.() ?? false
-        const rawDesktop =
-            (deps.linux?.() ?? false) || (deps.macos?.() ?? false)
+        const rawPlatform =
+            (deps.linux?.() ?? false) || (deps.macos?.() ?? false) || (deps.ios?.() ?? false)
         if (
-            (!android && !rawDesktop && !deps.windows()) ||
+            (!android && !rawPlatform && !deps.windows()) ||
             !isLargeCommit(
                 input,
                 android ? ANDROID_LARGE_COMMIT_SIZE : LARGE_COMMIT_BYTES,
@@ -108,7 +109,7 @@ export class NativeCommitTransport {
                 deps.androidBinary ? deps.androidBinary() : getAndroidBinaryCommitBridge(),
             )
         }
-        if (rawDesktop) return deps.invoke('pds_commit_raw', bytes)
+        if (rawPlatform) return deps.invoke('pds_commit_raw', bytes)
         const webview = deps.shared()
         if (!webview || bytes.byteLength > MAX_SHARED_COMMIT_BYTES)
             return deps.invoke('pds_commit_raw', bytes)
@@ -175,14 +176,21 @@ export class NativeCommitTransport {
             return await deps.invoke('pds_commit_shared_finish', { id: nativeId })
         } finally {
             if (timer !== undefined) clearTimeout(timer)
-            webview.removeEventListener('sharedbufferreceived', listener)
+            try {
+                webview.removeEventListener('sharedbufferreceived', listener)
+            } catch (cleanupError) {
+                console.error('Persistence shared commit listener cleanup failed', cleanupError)
+            }
             try {
                 if (buffer) webview.releaseBuffer(buffer)
+            } catch (cleanupError) {
+                console.error('Persistence shared commit buffer cleanup failed', cleanupError)
             } finally {
-                if (nativeId)
-                    await deps
-                        .invoke('pds_commit_shared_cancel', { id: nativeId })
-                        .catch(() => undefined)
+                try {
+                    await deps.invoke('pds_commit_shared_cancel', { requestId })
+                } catch (cleanupError) {
+                    console.error('Persistence shared commit cleanup failed', cleanupError)
+                }
             }
         }
     }
@@ -226,6 +234,11 @@ export function encodeNativeCommit(input: CommitEnvelope): Promise<Uint8Array> {
 }
 
 export const nativeCommitTransport = new NativeCommitTransport({
+    ios: () =>
+        Boolean(
+            (window as Window & { __TAURI_INTERNALS__?: unknown })
+                .__TAURI_INTERNALS__,
+        ) && platform() === 'ios',
     macos: () =>
         Boolean(
             (window as Window & { __TAURI_INTERNALS__?: unknown })

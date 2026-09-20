@@ -1,4 +1,3 @@
-import type { Database } from './database.svelte'
 import type {
     AssetAlias,
     AssetAliasIdentity,
@@ -6,8 +5,6 @@ import type {
     AssetAliasListQuery,
     AssetRepositoryMigrationInput,
     AssetOwnerLocator,
-    ColdAlias,
-    ColdPayloadMigrationInput,
     CharacterPage,
     CharacterQuery,
     ConversationPage,
@@ -34,6 +31,7 @@ export function createMutationGatedPersistentDataStore(
         readPreset: (id: string) => store.readPreset(id),
         queryCharacters: (input: CharacterQuery): Promise<CharacterPage> =>
             store.queryCharacters(input),
+        readCharacterSummary: (id: string) => store.readCharacterSummary(id),
         readCharacter: (id: string): Promise<Versioned<CharacterDetail> | null> =>
             store.readCharacter(id),
         queryConversations: (input: ConversationQuery): Promise<ConversationPage> =>
@@ -46,35 +44,40 @@ export function createMutationGatedPersistentDataStore(
             input: ConversationWindowQuery,
         ): Promise<Versioned<ConversationWindow> | null> => store.readConversationWindow(input),
         queryPluginStorage: () => store.queryPluginStorage(),
-        readPluginStorage: (key: string) => store.readPluginStorage(key),
+        readPluginStorage: (owner: string, key: string) => store.readPluginStorage(owner, key),
+        listPluginStorage: () => store.listPluginStorage(),
+        ...(store.commitWorkingSetChangeCursor === undefined
+            ? {}
+            : {
+                commitWorkingSetChangeCursor: (revision: DataRevision) =>
+                    store.commitWorkingSetChangeCursor!(revision),
+            }),
         readAssetAlias: (identity: AssetAliasIdentity) => store.readAssetAlias(identity),
         readAssetAliasesByKeys: (kind: AssetAliasKind, keys: string[]) =>
             store.readAssetAliasesByKeys(kind, keys),
         listAssetAliases: (input: AssetAliasListQuery) => store.listAssetAliases(input),
         readAssetRepositoryAuthority: () => store.readAssetRepositoryAuthority(),
         readAssetOwnerHead: (owner: AssetOwnerLocator) => store.readAssetOwnerHead(owner),
-        readColdPayloadAuthority: () => store.readColdPayloadAuthority(),
-        readColdAlias: (key: string) => store.readColdAlias(key),
-        listColdAliases: () => store.listColdAliases(),
         commitAssetAlias: (alias: AssetAlias, expectedRevision: DataRevision) =>
             gate.runWrite(() => store.commitAssetAlias(alias, expectedRevision)),
         deleteAssetAlias: (identity: AssetAliasIdentity, expectedRevision: DataRevision) =>
             gate.runWrite(() => store.deleteAssetAlias(identity, expectedRevision)),
         activateAssetRepositoryMigration: (input: AssetRepositoryMigrationInput) =>
             gate.runTransition(() => store.activateAssetRepositoryMigration(input)),
-        commitColdAlias: (alias: ColdAlias, expectedRevision: DataRevision) =>
-            gate.runWrite(() => store.commitColdAlias(alias, expectedRevision)),
-        deleteColdAlias: (key: string, expectedRevision: DataRevision) =>
-            gate.runWrite(() => store.deleteColdAlias(key, expectedRevision)),
-        activateColdPayloadMigration: (input: ColdPayloadMigrationInput) =>
-            gate.runTransition(() => store.activateColdPayloadMigration(input)),
         commit: (input: WorkingSetCommit) => gate.runWrite(() => store.commit(input)),
-        replaceFromDatabase: (
-            database: Database,
-            expectedRevision?: DataRevision,
-            assetAliases?: AssetAlias[],
-        ) => gate.runTransition(() =>
-            store.replaceFromDatabase(database, expectedRevision, assetAliases)),
+        archivePreview: (characterId: string) => store.archivePreview(characterId),
+        archiveCharacter: (
+            characterId: string,
+            expectedRevision: DataRevision,
+            signal?: AbortSignal,
+        ) => gate.runWrite(() => store.archiveCharacter(characterId, expectedRevision, signal)),
+        restoreCharacter: (
+            characterId: string,
+            expectedRevision: DataRevision,
+            signal?: AbortSignal,
+        ) => gate.runWrite(() => store.restoreCharacter(characterId, expectedRevision, signal)),
+        replaceFromDatabase: (...args: Parameters<PersistentDataStore['replaceFromDatabase']>) =>
+            gate.runTransition(() => store.replaceFromDatabase(...args)),
         materializeDatabase: (revision?: DataRevision) => store.materializeDatabase(revision),
         acquireRevision: (revision: DataRevision): Promise<PersistentRevisionLease> =>
             store.acquireRevision(revision),

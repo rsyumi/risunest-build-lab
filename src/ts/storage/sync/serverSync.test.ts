@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createServerSyncFacade, type ServerCycle } from "./serverSync";
+import type { CommittedApplyOutcome } from '../persistentDataRuntime';
 
 const head = {
   libraryId: "library",
@@ -7,6 +8,11 @@ const head = {
   seq: "1",
   headId: "a".repeat(64),
   minRetainedSeq: "0",
+  sections: {
+    hypa: { stateId: "hypa-state", changedSeq: "0", gcFloor: "0" },
+    library: { stateId: "library-state", changedSeq: "0", gcFloor: "0" },
+    "local-plugins": { stateId: "plugins-state", changedSeq: "0", gcFloor: "0" },
+  },
 };
 const result: ServerCycle = {
   endpoint: "http://localhost",
@@ -18,13 +24,18 @@ const result: ServerCycle = {
   appliedRecords: 1,
   proposedRecords: 0,
 };
-function fixture(onVerifiedBytes?: (bytes: string) => void) {
+function fixture(
+  onVerifiedBytes?: (bytes: string) => void,
+  onRetryableFailure?: (code: string | undefined) => void,
+) {
   const trace: string[] = [];
   let fenced = false;
   const fence = {
-    refreshCommittedWorkingSet: vi.fn(async () => {
+    revision: 7,
+    refreshCommittedWorkingSet: vi.fn(async (): Promise<CommittedApplyOutcome> => {
       expect(fenced).toBe(true);
       trace.push("refresh");
+      return { kind: 'committed', revision: 8, projection: 'applied' };
     }),
     release: vi.fn(() => {
       fenced = false;
@@ -35,13 +46,17 @@ function fixture(onVerifiedBytes?: (bytes: string) => void) {
     flushPendingData: vi.fn(async () => {
       expect(fenced).toBe(false);
     }),
-    capturePersistentMutationToken: vi.fn(async () => ({ revision: 7 })),
+    capturePersistentMutationToken: vi.fn(async () => ({ revision: 7, mutationGeneration: 1 })),
     acquireDestructiveReplacementFence: vi.fn(async () => {
       fenced = true;
       trace.push("fence");
       return fence;
     }),
-    acquireCommittedWorkingSetRefreshFence: vi.fn(async () => fence),
+    refreshActiveWorkingSetFromStore: vi.fn(async (revision: number): Promise<CommittedApplyOutcome> => {
+      expect(fenced).toBe(false);
+      trace.push('read-only-refresh');
+      return { kind: 'committed', revision, projection: 'applied' };
+    }),
   };
   const native = vi.fn(async (command: string) => {
     trace.push(command);
@@ -57,7 +72,7 @@ function fixture(onVerifiedBytes?: (bytes: string) => void) {
     }
     if (command === "server_sync_activate") {
       expect(fenced).toBe(true);
-      return 8;
+      return { revision: 8, pluginsChanged: true, devicePluginsChanged: false };
     }
     if (command === "server_sync_publish") {
       expect(fenced).toBe(false);
@@ -66,15 +81,87 @@ function fixture(onVerifiedBytes?: (bytes: string) => void) {
     return undefined;
   });
   const facade = createServerSyncFacade({
-    runtime: runtime as never,
+    runtime,
     invoke: native as never,
     onProgress: (phase) => progress.push(phase),
     onVerifiedBytes,
+    onRetryableFailure,
   });
   const progress: string[] = [];
   return { facade, native, runtime, fence, trace, progress };
 }
 describe("server sync activation boundary", () => {
+  it('refreshes chat changes without restarting unrelated plugins', async () => {
+    const { runtime, native, fence } = fixture();
+    const original = native.getMockImplementation()!;
+    native.mockImplementation(async (command) => command === 'server_sync_activate'
+      ? { revision: 8, pluginsChanged: false, devicePluginsChanged: false } as never
+      : original(command));
+    const restorePlugins = vi.fn();
+    const invalidateDevicePlugins = vi.fn();
+    const facade = createServerSyncFacade({ runtime, invoke: native as never, restorePlugins, invalidateDevicePlugins });
+    await facade.cycle();
+    expect(fence.refreshCommittedWorkingSet).toHaveBeenCalledOnce();
+    expect(restorePlugins).not.toHaveBeenCalled();
+    expect(invalidateDevicePlugins).not.toHaveBeenCalled();
+  });
+
+  it('invalidates a section-only application before release and retries only plugin reload', async () => {
+    const { runtime, native, fence } = fixture();
+    const original = native.getMockImplementation()!;
+    native.mockImplementation(async (command) => {
+      const reply = await original(command);
+      if (command === 'server_sync_prepare') return { ...reply, appliedRecords: 0 } as never;
+      if (command === 'server_sync_activate') return {
+        revision: 7, pluginsChanged: true, devicePluginsChanged: true,
+      } as never;
+      return reply;
+    });
+    const invalidateDevicePlugins = vi.fn(() => expect(fence.release).not.toHaveBeenCalled());
+    const restorePlugins = vi.fn().mockRejectedValueOnce(new Error('synthetic reload failure')).mockResolvedValue(undefined);
+    const facade = createServerSyncFacade({ runtime, invoke: native as never, restorePlugins, invalidateDevicePlugins });
+    await expect(facade.cycle()).rejects.toMatchObject({ code: 'committed-refresh-pending' });
+    expect(invalidateDevicePlugins).toHaveBeenCalledOnce();
+    expect(fence.release).toHaveBeenCalledOnce();
+    expect(fence.refreshCommittedWorkingSet).not.toHaveBeenCalled();
+    await expect(facade.cycle()).resolves.toEqual(result);
+    expect(invalidateDevicePlugins).toHaveBeenCalledOnce();
+    expect(restorePlugins).toHaveBeenCalledTimes(2);
+    expect(runtime.refreshActiveWorkingSetFromStore).not.toHaveBeenCalled();
+    expect(native.mock.calls.filter(([command]) => command === 'server_sync_activate')).toHaveLength(1);
+  });
+  it.each(['flush', 'token', 'fence'] as const)(
+    'releases an unactivated preparation when %s fails and permits another cycle',
+    async (failure) => {
+      const { facade, native, runtime, fence } = fixture();
+      const original = native.getMockImplementation()!;
+      let prepared = false;
+      native.mockImplementation(async (command) => {
+        if (command === 'server_sync_prepare') {
+          if (prepared) throw { code: 'preparation-pending' };
+          prepared = true;
+        }
+        if (command === 'server_sync_cancel' || command === 'server_sync_publish') {
+          prepared = false;
+        }
+        return original(command);
+      });
+      const error = new Error('synthetic local failure');
+      if (failure === 'flush') {
+        runtime.flushPendingData.mockResolvedValueOnce(undefined).mockRejectedValueOnce(error);
+      } else if (failure === 'token') {
+        runtime.capturePersistentMutationToken.mockRejectedValueOnce(error);
+      } else {
+        runtime.acquireDestructiveReplacementFence.mockRejectedValueOnce(error);
+      }
+      await expect(facade.cycle()).rejects.toMatchObject({ code: 'server-sync-failed' });
+      expect(native).toHaveBeenCalledWith('server_sync_cancel');
+      expect(prepared).toBe(false);
+      expect(facade.needsRefresh()).toBe(false);
+      expect(fence.release).not.toHaveBeenCalled();
+      await expect(facade.cycle()).resolves.toEqual(result);
+    },
+  );
   it("does not let a stalled progress reply hold completion or update a later cycle", async () => {
     vi.useFakeTimers();
     try {
@@ -106,6 +193,30 @@ describe("server sync activation boundary", () => {
       await Promise.resolve();
       expect(receive).not.toHaveBeenCalled();
       expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  it("reports a sanitized retryable server failure while the transfer keeps running", async () => {
+    vi.useFakeTimers();
+    try {
+      const receive = vi.fn();
+      const { facade, native } = fixture(undefined, receive);
+      let finish!: (value: unknown) => void;
+      native.mockImplementation((command) => {
+        if (command === "server_sync_prepare")
+          return new Promise((resolve) => {
+            finish = resolve;
+          }) as never;
+        if (command === "server_sync_retryable_failure")
+          return Promise.resolve("storage-io") as never;
+        throw new Error("Unexpected command");
+      });
+      const active = facade.cycle();
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(receive).toHaveBeenCalledWith("storage-io");
+      finish({ kind: "report", result });
+      await expect(active).resolves.toEqual(result);
     } finally {
       vi.useRealTimers();
     }
@@ -164,15 +275,20 @@ describe("server sync activation boundary", () => {
     ]);
     expect(fence.refreshCommittedWorkingSet).toHaveBeenCalledWith(8);
   });
-  it("retains the mutation fence after a committed refresh failure and retries without a second activation", async () => {
-    const { facade, native, fence } = fixture();
-    fence.refreshCommittedWorkingSet.mockRejectedValueOnce(
-      new Error("synthetic refresh failure"),
-    );
+  it.each(['returned', 'thrown'] as const)("releases the physical fence after a %s refresh failure and retries read-only", async (failure) => {
+    const { facade, native, fence, runtime } = fixture();
+    if (failure === 'returned') {
+      fence.refreshCommittedWorkingSet.mockResolvedValueOnce({
+        kind: 'committed', revision: 8, projection: 'refresh-required',
+      });
+    } else {
+      fence.refreshCommittedWorkingSet.mockRejectedValueOnce(new Error('synthetic refresh failure'));
+    }
     await expect(facade.cycle()).rejects.toMatchObject({
       code: "committed-refresh-pending",
     });
-    expect(fence.release).not.toHaveBeenCalled();
+    expect(fence.release).toHaveBeenCalledOnce();
+    expect(facade.needsRefresh()).toBe(true);
     await expect(facade.reconcile()).rejects.toMatchObject({
       code: "committed-refresh-pending",
     });
@@ -186,6 +302,8 @@ describe("server sync activation boundary", () => {
       ),
     ).toHaveLength(1);
     expect(fence.release).toHaveBeenCalledTimes(1);
+    expect(runtime.refreshActiveWorkingSetFromStore).toHaveBeenCalledExactlyOnceWith(8);
+    expect(fence.refreshCommittedWorkingSet).toHaveBeenCalledOnce();
   });
   it("releases the fence and discards preparation if local edits invalidate the prepared revision", async () => {
     const { facade, native, fence } = fixture();

@@ -29,6 +29,7 @@ private val NATIVE_FILE_JOB_SPOOL_SUFFIXES = BACKUP_SOURCE_SUFFIXES + listOf(
   ".jpg",
   ".png",
   ".risum",
+  ".lorebook",
 )
 private val CANONICAL_TOKEN = Regex(
   "[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
@@ -54,6 +55,9 @@ private val MANAGED_LEGACY_BACKUP_NAME = Regex(
 )
 private val MANAGED_PORTABLE_BACKUP_NAME = Regex(
   "risunest-backup-([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\\.risunest",
+)
+private val MANAGED_RAW_RECOVERY_NAME = Regex(
+  "risunest-rescue-([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\\.risunest-rescue\\.zip",
 )
 private val MANAGED_CHARACTER_CHARX_NAME = Regex(
   "risu-charx-([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\\.(?:charx|jpeg)",
@@ -85,7 +89,19 @@ internal data class SafSpoolReady(
   val displayName: String,
   val bytes: Long,
   val totalBytes: Long?,
+  val importDestination: SafContentImportDestination? = null,
 )
+
+internal enum class SafContentImportDestination(val wireName: String) {
+  CHARACTER("character"),
+  MODULE("module");
+
+  companion object {
+    fun fromWireName(value: String): SafContentImportDestination? = values().firstOrNull {
+      it.wireName == value
+    }
+  }
+}
 
 internal data class SafSpoolFailure(
   val displayName: String,
@@ -137,6 +153,7 @@ internal class SafSpoolStore(
 
   fun spool(
     sources: List<SafInputSource>,
+    importDestination: SafContentImportDestination? = null,
     isCancelled: () -> Boolean = { false },
     onProgress: (SafSpoolProgress) -> Unit = {},
   ): SafSpoolBatch {
@@ -164,6 +181,7 @@ internal class SafSpoolStore(
           displayName,
           bytes = null,
           totalBytes = source.totalBytes,
+          importDestination = importDestination,
         )
         val copiedBytes = copySource(
           source,
@@ -179,9 +197,16 @@ internal class SafSpoolStore(
           displayName,
           bytes = copiedBytes,
           totalBytes = source.totalBytes,
+          importDestination = importDestination,
         )
         atomicPublisher.publish(stagingDirectory, ownedDirectory)
-        ready.add(SafSpoolReady(token, displayName, copiedBytes, source.totalBytes))
+        ready.add(SafSpoolReady(
+          token,
+          displayName,
+          copiedBytes,
+          source.totalBytes,
+          importDestination,
+        ))
       } catch (error: SafSpoolException) {
         deleteGeneratedDirectory(stagingDirectory, token)
         deleteGeneratedDirectory(ownedDirectory, token)
@@ -347,13 +372,16 @@ internal class SafSpoolStore(
     displayName: String,
     bytes: Long?,
     totalBytes: Long?,
+    importDestination: SafContentImportDestination?,
   ) {
     val json = "{" +
       "\"token\":${jsonString(token)}," +
       "\"state\":${jsonString(state)}," +
       "\"displayName\":${jsonString(displayName)}," +
       "\"bytes\":${bytes ?: "null"}," +
-      "\"totalBytes\":${totalBytes ?: "null"}" +
+      "\"totalBytes\":${totalBytes ?: "null"}," +
+      "\"importDestination\":" +
+      (importDestination?.let { jsonString(it.wireName) } ?: "null") +
       "}"
     writeDurableJson(directory, "source.json", json, "SAF spool manifest")
   }
@@ -416,10 +444,11 @@ internal class SafSpoolStore(
 internal suspend fun spoolOpenedFilesOnIo(
   store: SafSpoolStore,
   sources: List<SafInputSource>,
+  importDestination: SafContentImportDestination? = null,
   isCancelled: () -> Boolean = { false },
   onProgress: (SafSpoolProgress) -> Unit = {},
 ): SafSpoolBatch = withContext(Dispatchers.IO) {
-  store.spool(sources, isCancelled, onProgress)
+  store.spool(sources, importDestination, isCancelled, onProgress)
 }
 
 internal data class SafDestinationResult(
@@ -493,6 +522,9 @@ private class ManagedHandoffKind(
 )
 
 private val MANAGED_HANDOFF_KINDS = listOf(
+  ManagedHandoffKind(MANAGED_RAW_RECOVERY_NAME, SafDestinationSourceKind.RISU_SAVE) { id ->
+    listOf("risunest-rescue-$id.risunest-rescue.zip")
+  },
   ManagedHandoffKind(MANAGED_PORTABLE_BACKUP_NAME, SafDestinationSourceKind.RISU_SAVE) { id ->
     listOf("risunest-backup-$id.risunest")
   },
@@ -734,6 +766,13 @@ private fun readReadySpool(directory: File, token: String): SafSpoolReady? {
   val totalText = Regex("\\\"totalBytes\\\":(null|[0-9]+)")
     .find(json)?.groupValues?.get(1)
   val totalBytes = totalText?.takeUnless { it == "null" }?.toLongOrNull()
+  val importDestinationText = Regex("\\\"importDestination\\\":(null|\\\"([^\\\"]+)\\\")")
+    .find(json)
+  val importDestination = importDestinationText?.groupValues?.get(1)?.let { value ->
+    if (value == "null") null else SafContentImportDestination.fromWireName(
+      importDestinationText.groupValues[2],
+    ) ?: return null
+  }
   val source = directory.resolve("source.risudat")
   if (
     manifestToken != token ||
@@ -742,10 +781,11 @@ private fun readReadySpool(directory: File, token: String): SafSpoolReady? {
     safeSafDisplayName(displayName) != displayName ||
     bytes == null ||
     totalText == null ||
+    importDestinationText == null ||
     !source.isFile ||
     source.length() != bytes
   ) return null
-  return SafSpoolReady(token, displayName, bytes, totalBytes)
+  return SafSpoolReady(token, displayName, bytes, totalBytes, importDestination)
 }
 
 private fun spoolReadyJson(ready: List<SafSpoolReady>): String = ready.joinToString(",") { source ->
@@ -753,7 +793,9 @@ private fun spoolReadyJson(ready: List<SafSpoolReady>): String = ready.joinToStr
     "\"token\":${jsonString(source.token)}," +
     "\"displayName\":${jsonString(source.displayName)}," +
     "\"bytes\":${source.bytes}," +
-    (source.totalBytes?.let { "\"totalBytes\":$it" } ?: "\"totalBytes\":null") +
+    (source.totalBytes?.let { "\"totalBytes\":$it," } ?: "\"totalBytes\":null,") +
+    "\"importDestination\":" +
+    (source.importDestination?.let { jsonString(it.wireName) } ?: "null") +
     "}"
 }
 

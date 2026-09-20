@@ -1,5 +1,6 @@
 use crate::{
     store::{CommitSubmission, Device, Store},
+    workload::{WorkKind, Workload},
     Error, Result,
 };
 use axum::{
@@ -8,11 +9,12 @@ use axum::{
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
+    response::sse::{Event, KeepAlive, Sse},
     routing::{get, post, put},
     Extension, Json, Router,
 };
 use risunest_sync_wire::{
-    batch, canonical, ChangeSet, CommitIntent, Receipt, Sequence, TerminalStatus,
+    canonical, transfer, ChangeSet, CommitIntent, Domain, Receipt, Sequence, TerminalStatus,
     MAX_METADATA_BYTES,
 };
 use serde::Deserialize;
@@ -23,6 +25,11 @@ use std::{
 };
 use tokio::sync::Semaphore;
 
+/// How long a held notification stream waits before confirming the head on its
+/// own. It bounds the delay of a change no writer announced.
+const HEAD_NOTICE_INTERVAL: Duration = Duration::from_secs(20);
+const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(15 * 60);
+
 #[derive(Clone)]
 struct App {
     store: Arc<Store>,
@@ -31,7 +38,9 @@ struct App {
     buffers: Arc<Semaphore>,
     materializers: Arc<Semaphore>,
     media_slots: Arc<Semaphore>,
+    notice_slots: Arc<Semaphore>,
     devices: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
+    workload: Workload,
     _lifetime: Arc<()>,
 }
 #[derive(Clone)]
@@ -39,39 +48,77 @@ struct BufferedRequest {
     _permit: Arc<tokio::sync::OwnedSemaphorePermit>,
 }
 pub fn router(store: Arc<Store>) -> Router {
+    router_with_workload(store, Workload::new())
+}
+
+pub fn router_with_workload(store: Arc<Store>, workload: Workload) -> Router {
     let lifetime = Arc::new(());
     let maintenance_alive = Arc::downgrade(&lifetime);
     let maintenance_store = Arc::downgrade(&store);
+    let maintenance_workload = workload.clone();
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(Duration::from_secs(60)).await;
+            tokio::time::sleep(MAINTENANCE_INTERVAL).await;
             if maintenance_alive.strong_count() == 0 {
                 break;
             }
             let Some(store) = maintenance_store.upgrade() else {
                 break;
             };
-            let _ = blocking(move || store.maintain()).await;
+            let Ok(mut work) = maintenance_workload.begin(WorkKind::Background) else {
+                continue;
+            };
+            if let Err(error) = blocking(move || {
+                let result = store.maintain();
+                work.set_performed_work(true);
+                result
+            })
+            .await {
+                eprintln!("sync maintenance failed: {}", error.code);
+            }
         }
     });
     let uploads_alive = Arc::downgrade(&lifetime);
     let uploads = Arc::downgrade(&store);
+    let upload_workload = workload.clone();
     tokio::spawn(async move {
         while uploads_alive.strong_count() > 0 {
             let Some(store) = uploads.upgrade() else {
                 break;
             };
-            if !matches!(blocking(move || store.run_pending_upload()).await, Ok(true)) {
+            let Ok(mut work) = upload_workload.begin(WorkKind::Background) else {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                continue;
+            };
+            if !matches!(
+                blocking(move || {
+                    let result = store.run_pending_upload();
+                    work.set_performed_work(!matches!(&result, Ok(false)));
+                    result
+                })
+                .await,
+                Ok(true)
+            ) {
                 tokio::time::sleep(Duration::from_millis(250)).await;
             }
         }
     });
     let alive = Arc::downgrade(&lifetime);
     let jobs = Arc::downgrade(&store);
+    let commit_workload = workload.clone();
     tokio::spawn(async move {
         while alive.strong_count() > 0 {
             let Some(store) = jobs.upgrade() else { break };
-            let result = blocking(move || store.run_pending_commit()).await;
+            let Ok(mut work) = commit_workload.begin(WorkKind::Background) else {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                continue;
+            };
+            let result = blocking(move || {
+                let result = store.run_pending_commit();
+                work.set_performed_work(!matches!(&result, Ok(false)));
+                result
+            })
+            .await;
             if !matches!(result, Ok(true)) {
                 tokio::time::sleep(Duration::from_millis(250)).await;
             }
@@ -79,13 +126,23 @@ pub fn router(store: Arc<Store>) -> Router {
     });
     let delta_alive = Arc::downgrade(&lifetime);
     let delta_store = Arc::downgrade(&store);
+    let delta_workload = workload.clone();
     tokio::spawn(async move {
         while delta_alive.strong_count() > 0 {
             let Some(store) = delta_store.upgrade() else {
                 break;
             };
+            let Ok(mut work) = delta_workload.begin(WorkKind::Background) else {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                continue;
+            };
             if !matches!(
-                blocking(move || store.run_pending_download_delta()).await,
+                blocking(move || {
+                    let result = store.run_pending_download_delta();
+                    work.set_performed_work(!matches!(&result, Ok(false)));
+                    result
+                })
+                .await,
                 Ok(true)
             ) {
                 tokio::time::sleep(Duration::from_millis(250)).await;
@@ -99,7 +156,9 @@ pub fn router(store: Arc<Store>) -> Router {
         buffers: Arc::new(Semaphore::new(4)),
         materializers: Arc::new(Semaphore::new(1)),
         media_slots: Arc::new(Semaphore::new(16)),
+        notice_slots: Arc::new(Semaphore::new(32)),
         devices: Arc::new(Mutex::new(HashMap::new())),
+        workload,
         _lifetime: lifetime,
     };
     Router::new()
@@ -123,9 +182,7 @@ pub fn router(store: Arc<Store>) -> Router {
         .route("/media/access", post(media_access))
         .route("/scopes", get(scope))
         .route("/objects/missing", post(missing))
-        .route("/objects/batch", post(download_batch))
         .route("/objects/{hash}", get(object))
-        .route("/uploads/batch", post(upload_batch))
         .route("/uploads/frames", post(upload_frames))
         .route("/objects/transfer", post(transfer_objects))
         .route("/uploads", post(begin_upload))
@@ -149,8 +206,11 @@ pub fn router(store: Arc<Store>) -> Router {
         .route("/commits", post(commit))
         .route("/operations/{id}", get(receipt))
         .route("/acks", post(ack))
-        .layer(DefaultBodyLimit::max(batch::MAX_BATCH_BYTES))
+        .layer(DefaultBodyLimit::max(transfer::MAX_BATCH_BYTES))
         .route_layer(middleware::from_fn_with_state(app.clone(), authorize))
+        // A held notification stream must not occupy an admission slot or a
+        // device slot for its whole life, so it authenticates on its own.
+        .route("/events", get(events))
         .route("/media/{token}", get(media))
         .with_state(app)
 }
@@ -161,7 +221,7 @@ impl IntoResponse for Error {
             Json(serde_json::json!({"error":self.code})),
         )
             .into_response();
-        if self.status == 429 {
+        if self.status == 429 || self.code == "server-updating" {
             response
                 .headers_mut()
                 .insert("retry-after", "1".parse().unwrap());
@@ -180,6 +240,22 @@ fn header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     }
     headers.get(name)?.to_str().ok()
 }
+fn retain_guard_until_body_eof<T: Send + 'static>(
+    body: axum::body::Body,
+    guard: T,
+) -> axum::body::Body {
+    use futures_util::Stream;
+    let mut body = Box::pin(body.into_data_stream());
+    let mut guard = Some(guard);
+    let stream = futures_util::stream::poll_fn(move |context| {
+        let next = body.as_mut().poll_next(context);
+        if matches!(next, std::task::Poll::Ready(None)) {
+            drop(guard.take());
+        }
+        next
+    });
+    axum::body::Body::from_stream(stream)
+}
 async fn authorize(State(app): State<App>, request: Request, next: Next) -> Response {
     let result = async {
         let token = header(request.headers(), "authorization")
@@ -197,12 +273,12 @@ async fn authorize(State(app): State<App>, request: Request, next: Next) -> Resp
             let length = header(request.headers(), "content-length")
                 .and_then(|v| v.parse::<u64>().ok())
                 .ok_or(Error::new("invalid-content-length", 400))?;
-            let limit = if ["/uploads/batch", "/uploads/frames"].contains(&request.uri().path())
+            let limit = if request.uri().path() == "/uploads/frames"
                 || request.uri().path().contains("/chunks/")
                 || (request.uri().path().starts_with("/uploads/")
                     && request.uri().path().ends_with("/delta"))
             {
-                batch::MAX_BATCH_BYTES
+                transfer::MAX_BATCH_BYTES
             } else {
                 MAX_METADATA_BYTES
             };
@@ -213,6 +289,7 @@ async fn authorize(State(app): State<App>, request: Request, next: Next) -> Resp
         if header(request.headers(), "content-encoding").is_some_and(|v| v != "identity") {
             return Err(Error::new("unsupported-content-encoding", 415));
         }
+        let work = app.workload.begin(WorkKind::Request)?;
         let semaphore = {
             let mut devices = app
                 .devices
@@ -239,7 +316,7 @@ async fn authorize(State(app): State<App>, request: Request, next: Next) -> Resp
         let path = request.uri().path();
         let buffered = if matches!(
             path,
-            "/uploads/frames" | "/uploads/batch" | "/objects/transfer" | "/objects/batch"
+            "/uploads/frames" | "/objects/transfer"
         ) || path.contains("/chunks/")
             || (path.starts_with("/uploads/") && path.ends_with("/delta"))
         {
@@ -259,7 +336,7 @@ async fn authorize(State(app): State<App>, request: Request, next: Next) -> Resp
         if let Some(buffered) = &buffered {
             request.extensions_mut().insert(buffered.clone());
         }
-        let deadline = if matches!(request.uri().path(), "/uploads/frames" | "/uploads/batch")
+        let deadline = if request.uri().path() == "/uploads/frames"
             || (request.uri().path().starts_with("/uploads/")
                 && request.uri().path().ends_with("/delta"))
         {
@@ -267,22 +344,23 @@ async fn authorize(State(app): State<App>, request: Request, next: Next) -> Resp
         } else {
             60
         };
-        let mut response = tokio::time::timeout(Duration::from_secs(deadline), next.run(request))
+        // The task owns every admission permit. If the HTTP deadline expires,
+        // blocking work continues to hold admission until it actually returns.
+        let task = tokio::spawn(async move {
+            let response = next.run(request).await;
+            (response, (_device_permit, _global_permit, buffered, work))
+        });
+        let (mut response, permits) = tokio::time::timeout(Duration::from_secs(deadline), task)
             .await
-            .map_err(|_| Error::new("request-timeout", 408))?;
+            .map_err(|_| Error::new("request-timeout", 408))?
+            .map_err(|_| Error::new("worker-unavailable", 503))?;
         response
             .headers_mut()
             .insert("cache-control", "no-store".parse().unwrap());
         // A slow response must retain its slot until the stream is consumed or
         // disconnected, not just until response headers are ready.
-        use futures_util::StreamExt;
         let (parts, body) = response.into_parts();
-        let permits = (_device_permit, _global_permit, buffered);
-        let stream = body.into_data_stream().map(move |chunk| {
-            let _ = &permits;
-            chunk
-        });
-        let response = Response::from_parts(parts, axum::body::Body::from_stream(stream));
+        let response = Response::from_parts(parts, retain_guard_until_body_eof(body, permits));
         Ok::<_, Error>(response)
     }
     .await;
@@ -298,6 +376,56 @@ async fn head(State(app): State<App>, headers: HeaderMap) -> Result<Response> {
     };
     response.headers_mut().insert("etag", etag.parse().unwrap());
     Ok(response)
+}
+/// Notifies a held client that the ledger head may have moved. The change
+/// itself still travels over the ordinary endpoints, so a client that never
+/// connects here, or whose connection drops, reaches the same state by asking.
+async fn events(State(app): State<App>, headers: HeaderMap) -> Result<Response> {
+    let token = header(&headers, "authorization")
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .ok_or(Error::new("unauthorized", 401))?
+        .to_owned();
+    let library = header(&headers, "x-risu-library")
+        .ok_or(Error::new("unauthorized", 401))?
+        .to_owned();
+    let store = app.store.clone();
+    blocking(move || store.authenticate(&library, &token)).await?;
+    let permit = app
+        .notice_slots
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| Error::new("server-busy", 429))?;
+    let announced = app.store.head_announcements();
+    let stream = futures_util::stream::unfold(
+        (app, announced, None::<String>, permit),
+        |(app, mut announced, last, permit)| async move {
+            loop {
+                // A stream outlives the drain a maintenance owner waits for, so
+                // it closes as soon as admission does.
+                if !app
+                    .workload
+                    .status()
+                    .is_ok_and(|status| status.state == "open")
+                {
+                    return None;
+                }
+                let store = app.store.clone();
+                let head = blocking(move || store.head()).await.ok()?;
+                if last.as_deref() != Some(head.head_id.as_str()) {
+                    let event = Event::default().event("head").data(&head.head_id);
+                    return Some((
+                        Ok::<_, std::convert::Infallible>(event),
+                        (app, announced, Some(head.head_id), permit),
+                    ));
+                }
+                let _ =
+                    tokio::time::timeout(HEAD_NOTICE_INTERVAL, announced.changed()).await;
+            }
+        },
+    );
+    Ok(Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response())
 }
 async fn session(State(app): State<App>, Extension(device): Extension<Device>) -> Result<Response> {
     blocking(move || Ok(Json(app.store.device_session(&device)?).into_response())).await
@@ -322,7 +450,15 @@ struct ChangesQuery {
     after_seq: Sequence,
     after_ordinal: Sequence,
     through_seq: Sequence,
+    domains: String,
     limit: Option<usize>,
+}
+/// Sections are named explicitly. There is no implicit all-sections read.
+fn query_domains(value: &str) -> Result<Vec<Domain>> {
+    value
+        .split(',')
+        .map(|name| Ok(Domain::try_from(name)?))
+        .collect()
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -349,28 +485,10 @@ async fn changes(State(app): State<App>, Query(query): Query<ChangesQuery>) -> R
             &query.epoch,
             &cursor,
             &query.through_seq,
+            &query_domains(&query.domains)?,
             query.limit.unwrap_or(128),
         )?)
         .into_response())
-    })
-    .await
-}
-async fn upload_batch(
-    State(app): State<App>,
-    Extension(device): Extension<Device>,
-    Extension(buffer): Extension<BufferedRequest>,
-    body: Bytes,
-) -> Result<Response> {
-    blocking(move || {
-        let _buffer = buffer;
-        // Decode and validate the entire batch before publishing any frame.
-        let frames = batch::decode(&body)?;
-        let mut hashes = Vec::new();
-        for frame in frames {
-            app.store.put_object(&device, &frame.hash, frame.bytes)?;
-            hashes.push(frame.hash);
-        }
-        Ok(Json(serde_json::json!({"verified":hashes})).into_response())
     })
     .await
 }
@@ -397,41 +515,6 @@ async fn missing(State(app): State<App>, body: Bytes) -> Result<Response> {
             }
         }
         Ok(Json(serde_json::json!({"missing":absent})).into_response())
-    })
-    .await
-}
-async fn download_batch(
-    State(app): State<App>,
-    Extension(buffer): Extension<BufferedRequest>,
-    body: Bytes,
-) -> Result<Response> {
-    let hashes: Vec<String> = canonical::decode(&body, MAX_METADATA_BYTES)?;
-    if hashes.len() > batch::MAX_BATCH_OBJECTS {
-        return Err(Error::new("too-many-candidates", 400));
-    }
-    blocking(move || {
-        let _buffer = buffer;
-        let mut budget = 8u64;
-        // Preflight without allocating payloads.
-        for digest in &hashes {
-            let size = app
-                .store
-                .object_size(digest)?
-                .ok_or(Error::new("object-not-found", 404))?;
-            budget = budget
-                .checked_add(size)
-                .and_then(|v| v.checked_add(41))
-                .ok_or(Error::new("batch-too-large", 413))?;
-            if budget > batch::MAX_BATCH_BYTES as u64 {
-                return Err(Error::new("batch-too-large", 413));
-            }
-        }
-        let objects: Vec<Vec<u8>> = hashes
-            .iter()
-            .map(|h| app.store.get_object(h))
-            .collect::<Result<_>>()?;
-        let bytes = batch::encode(&objects.iter().map(Vec::as_slice).collect::<Vec<_>>())?;
-        Ok(([("content-type", "application/octet-stream")], bytes).into_response())
     })
     .await
 }
@@ -724,7 +807,7 @@ async fn receipt(
 #[serde(deny_unknown_fields)]
 struct Ack {
     epoch: String,
-    seq: Sequence,
+    sections: std::collections::BTreeMap<Domain, Sequence>,
 }
 async fn ack(
     State(app): State<App>,
@@ -732,7 +815,7 @@ async fn ack(
     body: Bytes,
 ) -> Result<StatusCode> {
     let ack: Ack = canonical::decode(&body, MAX_METADATA_BYTES)?;
-    blocking(move || app.store.acknowledge(&device, &ack.epoch, &ack.seq)).await?;
+    blocking(move || app.store.acknowledge(&device, &ack.epoch, &ack.sections)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -824,6 +907,7 @@ async fn cancel_upload(
 struct PinRequest {
     epoch: String,
     after_seq: Sequence,
+    domains: Vec<Domain>,
 }
 async fn pin_changes(
     State(app): State<App>,
@@ -834,10 +918,12 @@ async fn pin_changes(
     blocking(move || {
         Ok((
             StatusCode::CREATED,
-            Json(
-                app.store
-                    .pin_changes(&device, &request.epoch, &request.after_seq)?,
-            ),
+            Json(app.store.pin_changes(
+                &device,
+                &request.epoch,
+                &request.after_seq,
+                &request.domains,
+            )?),
         )
             .into_response())
     })
@@ -878,14 +964,21 @@ async fn release_pin(
     blocking(move || app.store.release_pin(&device, &id)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CheckpointRequest {
+    domains: Vec<Domain>,
+}
 async fn create_checkpoint(
     State(app): State<App>,
     Extension(device): Extension<Device>,
+    body: Bytes,
 ) -> Result<Response> {
+    let request: CheckpointRequest = canonical::decode(&body, MAX_METADATA_BYTES)?;
     blocking(move || {
         Ok((
             StatusCode::CREATED,
-            Json(app.store.create_checkpoint(&device)?),
+            Json(app.store.create_checkpoint(&device, &request.domains)?),
         )
             .into_response())
     })
@@ -894,6 +987,7 @@ async fn create_checkpoint(
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CheckpointQuery {
+    after_domain: Option<Domain>,
     after_key: Option<String>,
     limit: Option<usize>,
 }
@@ -903,11 +997,16 @@ async fn checkpoint_page(
     Path(id): Path<String>,
     Query(query): Query<CheckpointQuery>,
 ) -> Result<Response> {
+    let after = match (query.after_domain, query.after_key) {
+        (Some(domain), Some(key)) => Some(crate::store::CheckpointCursor { domain, key }),
+        (None, None) => None,
+        _ => return Err(Error::new("invalid-cursor", 400)),
+    };
     blocking(move || {
         Ok(Json(app.store.checkpoint_page(
             &device,
             &id,
-            query.after_key.as_deref(),
+            after.as_ref(),
             query.limit.unwrap_or(128),
         )?)
         .into_response())
@@ -1110,4 +1209,31 @@ async fn release_download_delta(
 ) -> Result<StatusCode> {
     blocking(move || app.store.release_download_delta(&device, &id)).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::retain_guard_until_body_eof;
+    use axum::body::Body;
+    use futures_util::StreamExt;
+    use std::sync::Arc;
+    use tokio::sync::Semaphore;
+
+    #[tokio::test]
+    async fn exhausted_body_releases_its_guard_before_the_stream_is_dropped() {
+        let semaphore = Arc::new(Semaphore::new(1));
+        let guard = semaphore.clone().try_acquire_owned().unwrap();
+        let body = retain_guard_until_body_eof(Body::from("synthetic body"), guard);
+        let mut stream = Box::pin(body.into_data_stream());
+
+        assert!(semaphore.clone().try_acquire_owned().is_err());
+        let chunk = stream.next().await.unwrap().unwrap();
+        assert_eq!(chunk.as_ref(), b"synthetic body");
+        assert!(semaphore.clone().try_acquire_owned().is_err());
+
+        assert!(stream.next().await.is_none());
+        let available = semaphore.clone().try_acquire_owned().unwrap();
+        assert!(stream.next().await.is_none());
+        drop(available);
+    }
 }

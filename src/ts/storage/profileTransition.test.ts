@@ -3,7 +3,6 @@ import type { Chat, Database } from './database.svelte'
 import {
     capturePersistentRoot,
     createPersistentDataRuntime,
-    installMaximumCompatibilityWorkingSet,
 } from './persistentDataRuntime'
 import type {
     CharacterDetail,
@@ -133,6 +132,7 @@ function createReader(
     const pluginCatalog: PluginStorageCatalog = {
         revision,
         items: Object.keys(pluginCustomStorage).map((key) => ({
+            owner: 'test-plugin',
             key,
             byteSize: JSON.stringify(pluginCustomStorage[key]).length,
         })),
@@ -156,6 +156,8 @@ function createReader(
             const values = characterSummaries.filter((summary) => summary.trashed === query.trash)
             return { revision, ...page(values, query.cursor) }
         },
+        readCharacterSummary: vi.fn(async (id: string) =>
+            characterSummaries.find((summary) => summary.id === id) ?? null),
         readCharacter: async (id) => {
             const character = characters.find((candidate) => candidate.chaId === id)
             if (!character) return null
@@ -191,7 +193,7 @@ function createReader(
         readConversationMetadata: vi.fn(async () => null),
         readConversationWindow: async () => null,
         queryPluginStorage: vi.fn(async () => clone(pluginCatalog)),
-        readPluginStorage: async (key) => Object.hasOwn(pluginCustomStorage, key)
+        readPluginStorage: async (_owner, key) => Object.hasOwn(pluginCustomStorage, key)
             ? { revision, value: clone(pluginCustomStorage[key]) }
             : null,
         readAssetAlias: async () => null,
@@ -202,12 +204,6 @@ function createReader(
             value: { format: 'legacy' },
         }),
         readAssetOwnerHead: async () => null,
-        readColdPayloadAuthority: async () => ({
-            revision,
-            value: { format: 'legacy' },
-        }),
-        readColdAlias: async () => null,
-        listColdAliases: async () => ({ revision, value: [] }),
         release: onRelease,
     }
     return reader
@@ -512,185 +508,4 @@ describe('scalable profile return', () => {
             expect(leaseRelease).toHaveBeenCalledOnce()
         },
     )
-})
-
-describe('maximum compatibility pinned installation', () => {
-    it('installs complete records while the legacy full materializer is unusable', async () => {
-        const fixture = fixtureDatabase()
-        const release = vi.fn(async () => undefined)
-        const installCompleteDatabase = vi.fn()
-        const materializeDatabase = vi.fn(async () => {
-            throw new Error('legacy materializer must not be called')
-        })
-
-        const dependencies = {
-            getSelectedCharacterId: () => 'group-a',
-            getSelectedConversationId: () => 'group-selected',
-            flushPendingData: vi.fn(async () => undefined),
-            getRevision: () => 7,
-            getMutationGeneration: () => 0,
-            getNavigationGeneration: () => 0,
-            acquireRevision: vi.fn(async () => createReader(fixture, 7, release)),
-            materializeDatabase,
-            installCompleteDatabase,
-            restoreSelection: vi.fn(),
-            adoptMaterializedDatabase: vi.fn(() => true),
-        }
-
-        await installMaximumCompatibilityWorkingSet(dependencies)
-
-        const installed = installCompleteDatabase.mock.calls[0][0] as Database
-        expect(installed).toEqual(fixture)
-        expect(Object.keys(installed.pluginCustomStorage)).toEqual([
-            '0',
-            'zeta',
-            '__proto__',
-            'alpha',
-        ])
-        expect(installed.pluginCustomStorage['0']).toBe(0)
-        expect(Object.hasOwn(installed.pluginCustomStorage, '__proto__')).toBe(true)
-        expect(materializeDatabase).not.toHaveBeenCalled()
-        expect(release).toHaveBeenCalledOnce()
-    })
-
-    it('releases a failed pinned read and preserves its primary error', async () => {
-        const primary = new Error('paged read failed')
-        const cleanup = new Error('lease cleanup failed')
-        const lease = createReader(fixtureDatabase(), 7, vi.fn(async () => {
-            throw cleanup
-        }))
-        lease.readRoot = vi.fn(async () => {
-            throw primary
-        })
-
-        await expect(installMaximumCompatibilityWorkingSet({
-            getSelectedCharacterId: () => 'group-a',
-            getSelectedConversationId: () => 'group-selected',
-            flushPendingData: vi.fn(async () => undefined),
-            getRevision: () => 7,
-            getMutationGeneration: () => 0,
-            getNavigationGeneration: () => 0,
-            acquireRevision: vi.fn(async () => lease),
-            installCompleteDatabase: vi.fn(),
-            restoreSelection: vi.fn(),
-            adoptMaterializedDatabase: vi.fn(() => true),
-        })).rejects.toBe(primary)
-
-        expect(lease.release).toHaveBeenCalledTimes(2)
-    })
-
-    it('round-trips an own proto plugin key through maximum save and scalable exit', async () => {
-        const fixture = fixtureDatabase()
-        const pluginRecords = new Map(Object.entries(fixture.pluginCustomStorage))
-        let revision = 7
-        let database = clone(fixture)
-        const authoritativeDatabase = (): Database => {
-            const value = clone(fixture)
-            value.pluginCustomStorage = Object.fromEntries(pluginRecords)
-            return value
-        }
-        const commit = vi.fn(async (input: any) => {
-            for (const mutation of input.pluginStorage ?? []) {
-                if (mutation.type === 'clear') pluginRecords.clear()
-                else if (mutation.type === 'delete') pluginRecords.delete(mutation.key)
-                else pluginRecords.set(mutation.key, clone(mutation.value))
-            }
-            revision++
-            return { revision }
-        })
-        const store = {
-            open: vi.fn(async () => undefined),
-            readRoot: vi.fn(async () => ({
-                revision,
-                value: capturePersistentRoot(authoritativeDatabase()),
-            })),
-            acquireRevision: vi.fn(async (requestedRevision: number) =>
-                createReader(authoritativeDatabase(), requestedRevision)),
-            readPluginStorage: vi.fn(async (key: string) => pluginRecords.has(key)
-                ? { revision, value: clone(pluginRecords.get(key)) }
-                : null),
-            commit,
-            materializeDatabase: vi.fn(async () => {
-                throw new Error('legacy materializer must not be called')
-            }),
-        } as unknown as PersistentDataStore
-        const runtime = createPersistentDataRuntime({
-            store,
-            state: {
-                captureRoot: () => capturePersistentRoot(database),
-                capturePluginStorage: () => database.pluginCustomStorage,
-                capturePresets: () => database.botPresets,
-                captureSelectedCharacter: () => database.characters.find(
-                    (character) => character.chaId === 'group-a',
-                ) ?? null,
-                captureCharacter: (id) => database.characters.find(
-                    (character) => character.chaId === id,
-                ) ?? null,
-                getSelectedCharacterId: () => 'group-a',
-                getSelectedConversationId: () => 'group-selected',
-                replaceDatabase: (replacement) => {
-                    database = replacement
-                },
-                installCompleteDatabase: (replacement) => {
-                    database = replacement
-                },
-                publishPluginStorageWorkingSet: (storage) => {
-                    database.pluginCustomStorage = storage
-                },
-                restoreSelection: vi.fn(),
-                publishCharacter: vi.fn(),
-                publishConversation: vi.fn(),
-            },
-            clock: {
-                setTimeout: vi.fn(() => 1),
-                clearTimeout: vi.fn(),
-            },
-            prepareDatabase: async (value) => value,
-        })
-        await runtime.initializeActiveWorkingSet(database)
-        await runtime.materializeMaximumCompatibilityWorkingSet()
-        const maximumPrototype = Object.getPrototypeOf(database.pluginCustomStorage)
-        const updatedValue = JSON.parse(
-            '{"enabled":false,"empty":"","nested":{"__proto__":0}}',
-        )
-
-        database.pluginCustomStorage.__proto__ = updatedValue
-        runtime.markPersistentDataDirty(1)
-        await runtime.flushPendingData('maximum-plugin-save')
-
-        expect(Object.keys(database.pluginCustomStorage)).toEqual([
-            '0',
-            'zeta',
-            '__proto__',
-            'alpha',
-        ])
-        expect(Object.hasOwn(database.pluginCustomStorage, '__proto__')).toBe(true)
-        expect(database.pluginCustomStorage.__proto__).toEqual(updatedValue)
-        expect(Object.getPrototypeOf(database.pluginCustomStorage)).toBe(maximumPrototype)
-        expect(commit).toHaveBeenCalledWith(expect.objectContaining({
-            pluginStorage: [{ type: 'set', key: '__proto__', value: updatedValue }],
-        }))
-
-        await expect(runtime.releaseInactiveWorkingSet()).resolves.toBe(true)
-        expect(database.pluginCustomStorage).toEqual({})
-
-        const persistedStorage = Object.fromEntries(pluginRecords)
-        expect(Object.keys(persistedStorage)).toEqual([
-            '0',
-            'zeta',
-            '__proto__',
-            'alpha',
-        ])
-        expect(Object.hasOwn(persistedStorage, '__proto__')).toBe(true)
-        expect(persistedStorage.__proto__).toEqual(updatedValue)
-        expect(Object.getPrototypeOf(persistedStorage)).toBe(Object.prototype)
-        expect(Object.hasOwn(
-            (persistedStorage.__proto__ as any).nested,
-            '__proto__',
-        )).toBe(true)
-        expect((persistedStorage.__proto__ as any).nested.__proto__).toBe(0)
-        expect(persistedStorage['0']).toBe(0)
-        expect(persistedStorage.alpha).toBe(false)
-        expect(store.materializeDatabase).not.toHaveBeenCalled()
-    })
 })

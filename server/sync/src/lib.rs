@@ -10,6 +10,10 @@ pub mod store;
 pub mod tunnel;
 #[cfg(windows)]
 mod tunnel_job;
+pub mod workload;
+
+pub const PROTOCOL_ID: &str = "risunest-sync/v1";
+pub const STORE_FORMAT_ID: &str = "risunest-sync-store/v1";
 
 #[derive(Debug)]
 pub struct Error {

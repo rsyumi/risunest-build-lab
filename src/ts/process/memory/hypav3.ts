@@ -1,4 +1,11 @@
 import { type memoryVector, HypaProcesser, similarity } from "./hypamemory";
+import { hypaCacheKeys } from "./hypaCacheKey";
+import {
+    consistentEmbeddings,
+    getHypaEmbeddingCache,
+    staleEmbeddingKeys,
+    type HypaEmbeddingEntry,
+} from "src/ts/storage/hypaEmbeddingCache";
 import { isContextModel, getContextProvider } from "./contextualEmbedding";
 import { TaskRateLimiter } from "./taskRateLimiter";
 import {
@@ -98,6 +105,12 @@ export interface HypaV3Result {
     memory?: SerializableHypaV3Data;
 }
 
+export interface HypaV3PreparedHistory {
+    boundaryMemo: string;
+    effectiveMessageMemos: readonly string[];
+    historyStartIndex: number;
+}
+
 const logPrefix = "[HypaV3]";
 const memoryPromptTag = "Past Events Summary";
 const summarySeparator = "\n\n";
@@ -121,12 +134,14 @@ export async function hypaMemoryV3(
     maxContextTokens: number,
     room: Chat,
     char: character | groupChat,
-    tokenizer: ChatTokenizer
+    tokenizer: ChatTokenizer,
+    preparedHistory?: HypaV3PreparedHistory,
 ): Promise<HypaV3Result> {
     const settings = getCurrentHypaV3Preset().settings;
 
     try {
         if (settings.useExperimentalImpl) {
+            if (preparedHistory) throw new Error('Prepared history is unsupported by experimental Hypa V3');
             console.log(logPrefix, "Using experimental implementation.");
 
             return await hypaMemoryV3MainExp(
@@ -145,7 +160,8 @@ export async function hypaMemoryV3(
             maxContextTokens,
             room,
             char,
-            tokenizer
+            tokenizer,
+            preparedHistory,
         );
     } catch (error) {
         if (error instanceof Error) {
@@ -958,7 +974,8 @@ async function hypaMemoryV3Main(
     maxContextTokens: number,
     room: Chat,
     char: character | groupChat,
-    tokenizer: ChatTokenizer
+    tokenizer: ChatTokenizer,
+    preparedHistory?: HypaV3PreparedHistory,
 ): Promise<HypaV3Result> {
     const db = getDatabase();
     const settings = getCurrentHypaV3Preset().settings;
@@ -984,7 +1001,7 @@ async function hypaMemoryV3Main(
 
     // Clean orphaned summaries
     if (!settings.preserveOrphanedMemory) {
-        cleanOrphanedSummary(chats, data);
+        cleanOrphanedSummary(chats, data, preparedHistory?.effectiveMessageMemos);
     }
 
     // Determine starting index
@@ -992,8 +1009,18 @@ async function hypaMemoryV3Main(
 
     if (data.summaries.length > 0) {
         const lastSummary = data.summaries.at(-1);
+        const lastSummaryMemo = [...lastSummary.chatMemos].at(-1);
+        if (preparedHistory) {
+            if (lastSummaryMemo !== preparedHistory.boundaryMemo) {
+                throw new Error('Prepared history summary boundary became stale');
+            }
+            startIdx = preparedHistory.historyStartIndex;
+            for (const chat of chats.slice(0, startIdx)) {
+                currentTokens -= await tokenizer.tokenizeChat(chat);
+            }
+        } else {
         const lastChatIndex = chats.findIndex(
-            (chat) => chat.memo === [...lastSummary.chatMemos].at(-1)
+            (chat) => chat.memo === lastSummaryMemo
         );
 
         if (lastChatIndex !== -1) {
@@ -1004,6 +1031,7 @@ async function hypaMemoryV3Main(
             for (const chat of summarizedChats) {
                 currentTokens -= await tokenizer.tokenizeChat(chat);
             }
+        }
         }
     }
 
@@ -1643,9 +1671,16 @@ function toSerializableHypaV3Data(data: HypaV3Data): SerializableHypaV3Data {
     };
 }
 
-function cleanOrphanedSummary(chats: OpenAIChat[], data: HypaV3Data): void {
+function cleanOrphanedSummary(
+    chats: OpenAIChat[],
+    data: HypaV3Data,
+    additionalMemos: readonly string[] = [],
+): void {
     // Collect all memos from current chats
-    const currentChatMemos = new Set(chats.map((chat) => chat.memo));
+    const currentChatMemos = new Set([
+        ...chats.map((chat) => chat.memo),
+        ...additionalMemos,
+    ]);
     const originalLength = data.summaries.length;
 
     // Filter summaries - keep only those whose chatMemos are subset of current chat memos
@@ -1920,7 +1955,7 @@ interface SummaryChunkVector {
     vector: memoryVector;
 }
 
-class HypaProcesserEx extends HypaProcesser {
+export class HypaProcesserEx extends HypaProcesser {
     // Maintain references to SummaryChunks and their associated memoryVectors
     summaryChunkVectors: SummaryChunkVector[] = [];
 
@@ -1949,10 +1984,8 @@ class HypaProcesserEx extends HypaProcesser {
 
     private async addSummaryChunksContextual(chunks: SummaryChunk[]): Promise<void> {
         const provider = getContextProvider(this.model);
-
-        const cacheKeyFor = (text: string, groupTexts: string[]) => {
-            return `${text}${provider.getCacheKeySuffix(groupTexts)}`;
-        };
+        const identity = this.cacheIdentity();
+        const cache = getHypaEmbeddingCache();
 
         const summaryGroups = new Map<Summary, SummaryChunk[]>();
         for (const chunk of chunks) {
@@ -1961,56 +1994,76 @@ class HypaProcesserEx extends HypaProcesser {
             summaryGroups.set(chunk.summary, group);
         }
 
-        const groupsToEmbed: SummaryChunk[][] = [];
+        const groups = [...summaryGroups.values()];
+        const groupTextsOf = groups.map(group => group.map(c => c.text));
+        const keysOf: string[][] = [];
+        for (let i = 0; i < groups.length; i++) {
+            keysOf.push(
+                await hypaCacheKeys(
+                    groups[i].map(chunk => ({
+                        producer: 'hypa-v3-group' as const,
+                        content: chunk.text,
+                        identity,
+                        contextSuffix: provider.getCacheKeySuffix(groupTextsOf[i]),
+                    }))
+                )
+            );
+        }
+
+        const cached = consistentEmbeddings(await cache.read(keysOf.flat()));
+
+        const groupsToEmbed: number[] = [];
         const cachedVectors = new Map<string, memoryVector>();
 
-        for (const [, group] of summaryGroups) {
-            const groupTexts = group.map(c => c.text);
-            let allCached = true;
-            const groupCache = new Map<string, memoryVector>();
-
-            for (const chunk of group) {
-                const cached: memoryVector = await this.forage.getItem(cacheKeyFor(chunk.text, groupTexts));
-                if (cached) {
-                    groupCache.set(chunk.text, cached);
-                } else {
-                    allCached = false;
-                }
-            }
-
-            if (allCached) {
-                for (const [text, vector] of groupCache) {
-                    cachedVectors.set(text, vector);
+        for (let i = 0; i < groups.length; i++) {
+            const hits = keysOf[i].map(key => cached.get(key));
+            if (hits.every(Boolean)) {
+                for (let j = 0; j < groups[i].length; j++) {
+                    cachedVectors.set(groups[i][j].text, {
+                        content: groups[i][j].text,
+                        embedding: hits[j].vector,
+                    });
                 }
             } else {
-                groupsToEmbed.push(group);
+                groupsToEmbed.push(i);
             }
         }
 
-        if (groupsToEmbed.length > 0) {
-            const groups = groupsToEmbed.map(group =>
-                group.map(chunk => chunk.text)
+        const pendingWrites: HypaEmbeddingEntry[] = [];
+        const embedGroups = async (indexes: number[]): Promise<number> => {
+            if (indexes.length === 0) return 0;
+            const results = await provider.embedDocumentGroups(
+                indexes.map(index => groupTextsOf[index])
             );
-
-            const results = await provider.embedDocumentGroups(groups);
-
-            for (let i = 0; i < groupsToEmbed.length; i++) {
-                const group = groupsToEmbed[i];
-                const groupTexts = group.map(c => c.text);
+            let dimensions = 0;
+            for (let i = 0; i < indexes.length; i++) {
+                const group = groups[indexes[i]];
                 const embeddings = results[i];
-
                 for (let j = 0; j < group.length; j++) {
                     const chunk = group[j];
                     const embedding = embeddings[j];
-                    const vector: memoryVector = {
-                        content: chunk.text,
-                        embedding
-                    };
-
-                    await this.forage.setItem(cacheKeyFor(chunk.text, groupTexts), vector);
-                    cachedVectors.set(chunk.text, vector);
+                    dimensions ||= embedding.length;
+                    cachedVectors.set(chunk.text, { content: chunk.text, embedding });
+                    pendingWrites.push(
+                        this.cacheEntry('hypa-v3-group', keysOf[indexes[i]][j], embedding)
+                    );
                 }
             }
+            return dimensions;
+        };
+
+        const dimensions = await embedGroups(groupsToEmbed);
+        const stale = new Set(staleEmbeddingKeys(cached, dimensions));
+        if (stale.size > 0) {
+            const embedded = new Set(groupsToEmbed);
+            const recompute = groups
+                .map((_, index) => index)
+                .filter(index => !embedded.has(index) && keysOf[index].some(key => stale.has(key)));
+            await embedGroups(recompute);
+        }
+
+        if (pendingWrites.length > 0) {
+            await cache.write(pendingWrites);
         }
 
         for (const chunk of chunks) {

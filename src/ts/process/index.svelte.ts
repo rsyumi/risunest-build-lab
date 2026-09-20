@@ -20,23 +20,19 @@ import { runTrigger } from "./triggers";
 import { HypaProcesser } from "./memory/hypamemory";
 import { additionalInformations } from "./embedding/addinfo";
 import { getInlayAsset } from "./files/inlays";
+import { inlayImageForProvider } from "./files/inlayProviderImage";
 import { getGenerationModelString } from "./models/modelString";
 import { connectionOpen, peerRevertChat, peerSafeCheck, peerSync } from "../sync/multiuser";
 import { runInlayScreen } from "./inlayScreen";
-import { addRerolls } from "./prereroll";
 import { runImageEmbedding } from "./transformers";
 import { hanuraiMemory } from "./memory/hanuraiMemory";
 import { hypaMemoryV2 } from "./memory/hypav2";
 import { runLuaEditTrigger } from "./scriptings";
 import { getModelInfo, LLMFlags } from "../model/modellist";
-import { hypaMemoryV3 } from "./memory/hypav3";
-import { getModuleAssets, getModuleToggles } from "./modules";
+import { getCurrentHypaV3Preset, hypaMemoryV3 } from "./memory/hypav3";
+import { getModuleAssets, getModuleLorebooks, getModuleRegexScripts, getModuleToggles, getModuleTriggers } from "./modules";
 import { readImage } from "../globalApi.svelte";
-import {
-    chatOutputListenerProvenance,
-    pluginCompatibility,
-    pluginV2,
-} from "../plugins/plugins.svelte";
+import { pluginV2 } from "../plugins/plugins.svelte";
 import { dispatchChatOutputListeners } from '../plugins/pluginChatOutputListeners'
 import { createProductionPluginChatOutputProjector } from '../plugins/pluginDatabaseAccess'
 import { activatePresetChainForRequest } from "./presetChain";
@@ -46,12 +42,19 @@ import {
 } from './generationState'
 import {
     acknowledgeGenerationCompletion,
+    assertPersistentMutationAllowed,
+    getPersistentStorageAuthorityEpoch,
+    getPersistentNavigationGeneration,
     acquireCompleteConversation,
+    captureSelectedConversationAuthority,
+    captureWindowedConversationMutationController,
     captureSelectedConversationTarget,
     getActiveConversationSession,
     invalidateActiveConversationSession,
 } from '../storage/persistentDataRuntime.svelte'
+import { getPersistentDataStore } from '../storage/persistentDataStoreFactory'
 import { ensureCurrentConversationMessageIds } from '../conversationMutations'
+import { PersistentMutationFencedError } from '../storage/saveCoordinator'
 import { requireCurrentConversationSession } from '../storage/activeConversationSession'
 import {
     beginPinnedConversationHistoryOperation,
@@ -68,13 +71,23 @@ import {
     type PromptHistoryCompatibilitySnapshot,
 } from './promptHistory'
 import { runCurrentChatParserPass } from './currentChatParserPass'
+import {
+    planSummaryAwareProcessedHistory,
+    type SummaryAwarePromptHistoryPlan,
+} from './summaryAwarePromptHistory'
 import { applyGenerationErrorResponse } from './generationErrorResponse'
 import { applyGenerationResponse } from './generationResponseApplication'
+import { prepareSummaryAwareGeneration, type SummaryAwareGenerationPreparation } from './summaryAwareGenerationPreparation'
+import { bindWindowedGenerationController } from './generationConversationOperation'
 import {
     SelectedConversationPromotionStaleError,
     type CompleteConversationLease,
+    type WindowedConversationMutationController,
 } from '../storage/activeWorkingSet.svelte'
 import { beginAndroidGenerationKeepAlive, endAndroidGenerationKeepAlive } from '../androidGenerationKeepAlive'
+import { beginIOSGeneration, notifyIOSGenerationComplete } from "../iosNative";
+import { isTauriIOS } from "../platform";
+import { classifyChatParserHistory } from '../chatParserHistory'
 
 export { doingChat } from './generationState'
 
@@ -100,15 +113,12 @@ export async function runChatOutputListeners(char: any, chat: any, characterInde
     }
     await dispatchChatOutputListeners({
         listeners: pluginV2.chatOutput,
-        provenance: chatOutputListenerProvenance,
-        profile: pluginCompatibility.profile,
         char,
         chat,
         characterIndex,
         chatIndex,
         messageIndex,
         signal,
-        snapshot: <T>(value: T) => $state.snapshot(value) as T,
         projectScalable: projectPluginChatOutput,
         onError: (error) => console.error(error),
     })
@@ -160,6 +170,9 @@ function hasMismatchedActiveConversationSession(): boolean {
 }
 
 interface GenerationCompletionLifecycle {
+    authorityEpoch: number
+    isTargetCurrent(): boolean
+    onProgress?(completed: number): void
     responseCompleted: boolean
     reroll: boolean
     responseApplied: boolean
@@ -169,13 +182,24 @@ interface GenerationCompletionLifecycle {
 export async function notifyGenerationCompletion(result: string): Promise<void> {
     if (DBState.db.notification) {
         try {
-            if (await Notification.requestPermission() === 'granted') {
-                const notification = new Notification('RisuNest', { body: result })
-                notification.onclick = () => window.focus()
+            if (isTauriIOS) {
+              await notifyIOSGenerationComplete();
+            } else if ((await Notification.requestPermission()) === "granted") {
+              const notification = new Notification("RisuNest", {
+                body: result,
+              });
+              notification.onclick = () => window.focus();
             }
         } catch {}
     }
     void peerSync()
+}
+
+interface GenerationConversationResources {
+    completeLease: CompleteConversationLease | null
+    preparation: SummaryAwareGenerationPreparation | null
+    windowedController: WindowedConversationMutationController | null
+    unbindWindowedController: (() => void) | null
 }
 
 export async function sendChat(chatProcessIndex = -1,arg:{
@@ -186,11 +210,45 @@ export async function sendChat(chatProcessIndex = -1,arg:{
     preview?:boolean
     previewPrompt?:boolean
 } = {}, inheritedReservation?: GenerationReservation):Promise<boolean> {
+    const authorityEpoch = getPersistentStorageAuthorityEpoch()
+    try {
+        assertPersistentMutationAllowed(authorityEpoch)
+    } catch (error) {
+        if (error instanceof PersistentMutationFencedError) return false
+        throw error
+    }
+    const initialCharacter = DBState.db.characters[get(selectedCharID)]
+    const initialConversation = initialCharacter?.chats[initialCharacter.chatPage]
+    const characterId = initialCharacter?.chaId
+    const conversationId = initialConversation?.id
+    const navigationGeneration = getPersistentNavigationGeneration()
+    const isTargetCurrent = () => {
+        try {
+            assertPersistentMutationAllowed(authorityEpoch)
+        } catch (error) {
+            if (error instanceof PersistentMutationFencedError) return false
+            throw error
+        }
+        const currentCharacter = DBState.db.characters[get(selectedCharID)]
+        const currentConversation = currentCharacter?.chats[currentCharacter.chatPage]
+        return currentCharacter?.chaId === characterId &&
+            getPersistentNavigationGeneration() === navigationGeneration &&
+            (conversationId
+                ? currentConversation?.id === conversationId
+                : currentConversation === initialConversation)
+    }
     const ownedReservation = inheritedReservation ? null : reserveGeneration()
     const reservation = inheritedReservation ?? ownedReservation
     if (!reservation?.isCurrent()) return false
-    let completeLease: CompleteConversationLease | null = null
+    const conversationResources: GenerationConversationResources = {
+        completeLease: null,
+        preparation: null,
+        windowedController: null,
+        unbindWindowedController: null,
+    }
     const lifecycle: GenerationCompletionLifecycle = {
+        authorityEpoch,
+        isTargetCurrent,
         responseCompleted: false,
         reroll: !!DBState.db.characters[get(selectedCharID)]?.chats[
             DBState.db.characters[get(selectedCharID)]?.chatPage
@@ -201,38 +259,71 @@ export async function sendChat(chatProcessIndex = -1,arg:{
     let enteredGeneration = false
     let generationReturned = false
     let generationKeepAliveAcquired = false
+    let iosGeneration:
+      | Awaited<ReturnType<typeof beginIOSGeneration>>
+      | undefined;
     try {
-        const target = captureSelectedConversationTarget()
-        if (target) {
+        const initialTarget = captureSelectedConversationTarget()
+        const mayUseBoundedHistory = DBState.db.hypaV3
+            && initialTarget !== null
+            && typeof captureSelectedConversationAuthority === 'function'
+            && captureSelectedConversationAuthority() !== null
+        if (initialTarget && !mayUseBoundedHistory) {
             try {
-                completeLease = await acquireCompleteConversation('generation', target)
+                conversationResources.completeLease = await acquireCompleteConversation(
+                    'generation',
+                    initialTarget,
+                )
             } catch (error) {
                 if (error instanceof SelectedConversationPromotionStaleError) return false
                 throw error
             }
         }
+        if (!lifecycle.isTargetCurrent()) return false
         enteredGeneration = true
-        generationKeepAliveAcquired = beginAndroidGenerationKeepAlive()
-        const result = await sendChatInternal(chatProcessIndex, arg, lifecycle, reservation)
+        generationKeepAliveAcquired = await beginAndroidGenerationKeepAlive()
+        iosGeneration = await beginIOSGeneration(arg.signal)
+        lifecycle.onProgress = iosGeneration.progress;
+        const result = await sendChatInternal(
+          chatProcessIndex,
+          { ...arg, signal: iosGeneration.signal },
+          lifecycle,
+          reservation,
+          conversationResources,
+        );
         generationReturned = true
-        return result
+        return lifecycle.isTargetCurrent() && result
     } catch (error) {
+        if (!arg.preview && (error instanceof PersistentMutationFencedError || !lifecycle.isTargetCurrent())) {
+            generationReturned = true
+            return false
+        }
         if (lifecycle.reroll && lifecycle.responseCompleted && !arg.signal?.aborted) {
             alertError(error)
             return true
         }
         throw error
     } finally {
-        if (!lifecycle.reroll && lifecycle.responseApplied && !lifecycle.acknowledgementAttempted) {
+        if (!lifecycle.reroll && lifecycle.responseApplied && !lifecycle.acknowledgementAttempted &&
+            lifecycle.isTargetCurrent()) {
             lifecycle.acknowledgementAttempted = true
             try {
-                await acknowledgeGenerationCompletion()
+                await acknowledgeGenerationCompletion(lifecycle.authorityEpoch)
+                lifecycle.onProgress?.(3)
             } catch (acknowledgeError) {
                 console.error(acknowledgeError)
             }
         }
-        completeLease?.release()
-        endAndroidGenerationKeepAlive(generationKeepAliveAcquired)
+        conversationResources.unbindWindowedController?.()
+        conversationResources.windowedController?.release()
+        await conversationResources.preparation?.release()
+        conversationResources.completeLease?.release()
+        await endAndroidGenerationKeepAlive(generationKeepAliveAcquired)
+        await iosGeneration
+          ?.dispose(generationReturned && lifecycle.responseCompleted && !iosGeneration.signal?.aborted)
+          .catch((error) =>
+            console.error("iOS generation cleanup failed", error),
+          );
         ownedReservation?.release({
             preserveBusy: enteredGeneration && !generationReturned,
         })
@@ -246,8 +337,10 @@ async function sendChatInternal(chatProcessIndex: number,arg:{
     usedContinueTokens?:number,
     preview?:boolean
     previewPrompt?:boolean
-}, lifecycle: GenerationCompletionLifecycle, reservation: GenerationReservation):Promise<boolean> {
+}, lifecycle: GenerationCompletionLifecycle, reservation: GenerationReservation,
+conversationResources: GenerationConversationResources):Promise<boolean> {
 
+    if (!lifecycle.isTargetCurrent()) return false
     chatProcessStage.set(0)
     const abortSignal = arg.signal ?? (new AbortController()).signal
     
@@ -256,6 +349,11 @@ async function sendChatInternal(chatProcessIndex: number,arg:{
     let selectedChar = -1
     let selectedChat = -1
     let currentChar:character
+    let boundedChat: Chat | null = null
+    let summaryAwareHistoryPlan: SummaryAwarePromptHistoryPlan | null = null
+    const hasObservableHistoryTokenizer = () => DBState.db.googleClaudeTokenizing
+        || (DBState.db.aiModel === 'custom'
+            && pluginV2.providerOptions?.get(DBState.db.currentPluginProvider)?.tokenizer === 'custom')
     let generationInfo:MessageGenerationInfo|undefined = undefined
 
     const stageTimings = {
@@ -285,14 +383,25 @@ async function sendChatInternal(chatProcessIndex: number,arg:{
 
 
     function runCurrentChatFunction(chat:Chat){
-        return runCurrentChatParserPass({
-            chat,
+        if (!lifecycle.isTargetCurrent()) throw new PersistentMutationFencedError()
+        const controller = conversationResources.windowedController
+        const source = controller?.chat === chat ? structuredClone(chat) : chat
+        const parsed = runCurrentChatParserPass({
+            chat: source,
             database: DBState.db,
             ownerCharacterId: nowChatroom.chaId,
             parserCharacter: currentChar,
-            session: getActiveConversationSession(),
+            session: controller ? null : getActiveConversationSession(),
             parser: risuChatParser,
         })
+        if (!controller) return parsed
+        for (let index = 0; index < parsed.message.length; index++) {
+            if (JSON.stringify(parsed.message[index]) === JSON.stringify(chat.message[index])) continue
+            if (!controller.applyRange(index, 1, [parsed.message[index]], 'edit')) {
+                throw new PersistentMutationFencedError()
+            }
+        }
+        return chat
     }
 
     function reformatContent(data:string){
@@ -303,7 +412,7 @@ async function sendChatInternal(chatProcessIndex: number,arg:{
     }
 
     function throwError(error:string){
-        if(!DBState?.db?.inlayErrorResponse){
+        if(!lifecycle.isTargetCurrent() || !DBState?.db?.inlayErrorResponse){
             alertError(error)
             return
         }
@@ -319,7 +428,7 @@ async function sendChatInternal(chatProcessIndex: number,arg:{
                 return
             }
             const st = selectedChat >= 0 ? selectedChat : charRoom.chatPage
-            const chatRoom = charRoom.chats?.[st]
+            const chatRoom = boundedChat ?? charRoom.chats?.[st]
             if(!chatRoom || !Array.isArray(chatRoom.message)){
                 alertError(error)
                 return
@@ -344,6 +453,11 @@ async function sendChatInternal(chatProcessIndex: number,arg:{
                 characterId: charRoom.chaId,
                 chat: chatRoom,
                 getCurrentChat: () => {
+                    if (boundedChat) {
+                        return conversationResources.windowedController?.isCurrent()
+                            ? boundedChat
+                            : null
+                    }
                     const currentOwner = DBState.db.characters?.[sc]
                     return currentOwner === charRoom && currentOwner.chatPage === st
                         ? currentOwner.chats?.[st]
@@ -388,27 +502,183 @@ async function sendChatInternal(chatProcessIndex: number,arg:{
     }
 
     if (
-        (generationSetupSession && getActiveConversationSession() !== generationSetupSession)
+        !lifecycle.isTargetCurrent()
+        || (generationSetupSession && getActiveConversationSession() !== generationSetupSession)
         || hasMismatchedActiveConversationSession()
     ) return false
+
+    const target = captureSelectedConversationTarget()
+    if (target) {
+        const ownerIndex = get(selectedCharID)
+        const owner = DBState.db.characters[ownerIndex]
+        const conversation = owner?.chats[owner.chatPage]
+        const hypaSettings = owner?.type !== 'group' && owner?.supaMemory
+            && DBState.db.hypaV3 && !DBState.db.hypav2 && !DBState.db.hanuraiEnable
+            ? getCurrentHypaV3Preset().settings
+            : null
+        const authority = hypaSettings ? captureSelectedConversationAuthority() : null
+        const scripts = owner?.type !== 'group' && hypaSettings
+            ? [
+                ...(DBState.db.presetRegex ?? []),
+                ...(owner.customscript ?? []),
+                ...getModuleRegexScripts(),
+            ]
+            : []
+        const parserHistory = owner?.type !== 'group' && conversation && hypaSettings
+            ? classifyChatParserHistory({
+                source: [
+                    DBState.db.mainPrompt,
+                    DBState.db.additionalPrompt,
+                    DBState.db.globalNote,
+                    DBState.db.jailbreak,
+                    DBState.db.promptTemplate,
+                    owner.systemPrompt,
+                    owner.desc,
+                    owner.personality,
+                    owner.scenario,
+                    owner.replaceGlobalNote,
+                    owner.exampleMessage,
+                    owner.postHistoryInstructions,
+                    DBState.db.groupTemplate,
+                    DBState.db.promptSettings,
+                    owner.firstMessage,
+                    owner.alternateGreetings,
+                    conversation,
+                    getPersonaPrompt(),
+                ],
+                indirections: DBState.db.globalChatVariables,
+            })
+            : null
+        const boundedFallbackReason = !owner || !conversation
+            ? 'selected-conversation-unavailable'
+            : owner.type === 'group'
+                ? 'group-conversation'
+                : !hypaSettings
+                    ? 'standard-hypa-v3-disabled'
+                    : !authority
+                        ? 'selected-conversation-not-windowed'
+                        : hasObservableHistoryTokenizer()
+                            ? 'custom-or-remote-tokenizer'
+                            : hypaSettings.useExperimentalImpl
+                            ? 'experimental-hypa-v3'
+                            : (pluginV2.editprocess?.size ?? 0) > 0
+                                ? 'plugin-editprocess'
+                                : (pluginV2.editoutput?.size ?? 0) > 0
+                                    ? 'plugin-editoutput'
+                                    : pluginV2.chatOutput.size > 0
+                                    ? 'plugin-chat-output'
+                                    : owner.triggerscript.length > 0 || getModuleTriggers().length > 0
+                                        ? 'generation-trigger'
+                                        : scripts.some((script) =>
+                                            script.type === 'editprocess'
+                                            || script.type === 'editoutput')
+                                            ? 'history-regex'
+                                            : (owner.globalLore?.length ?? 0) > 0
+                                                || (conversation.localLore?.length ?? 0) > 0
+                                                || getModuleLorebooks().length > 0
+                                                ? 'old-history-lorebook-consumer'
+                                                : owner.additionalText
+                                                    ? 'additional-text-consumer'
+                                                    : owner.inlayViewScreen
+                                                        ? 'inlay-view-consumer'
+                                                        : parserHistory?.requiresFullHistory !== false
+                                                            ? 'dynamic-history-indirection'
+                                                            : parserHistory.absoluteMessageIndices.length > 0
+                                                                ? 'explicit-history-reference'
+                                                                : null
+        const boundedAdmission = boundedFallbackReason === null
+        if (boundedAdmission) {
+            const navigationGeneration = getPersistentNavigationGeneration()
+            const isCurrent = () => {
+                const currentTarget = captureSelectedConversationTarget()
+                const currentAuthority = captureSelectedConversationAuthority()
+                return lifecycle.isTargetCurrent()
+                    && getPersistentNavigationGeneration() === navigationGeneration
+                    && currentTarget?.characterId === target.characterId
+                    && currentTarget.conversationId === target.conversationId
+                    && currentTarget.storeRevision === target.storeRevision
+                    && currentAuthority?.characterId === authority.characterId
+                    && currentAuthority.conversationId === authority.conversationId
+                    && currentAuthority.sessionToken === authority.sessionToken
+                    && currentAuthority.storeRevision === authority.storeRevision
+                    && currentAuthority.sessionVersion === authority.sessionVersion
+                    && currentAuthority.persistedSessionVersion ===
+                        authority.persistedSessionVersion
+                    && currentAuthority.totalMessages === authority.totalMessages
+            }
+            const decision = await prepareSummaryAwareGeneration({
+                store: getPersistentDataStore(),
+                authority,
+                conversation,
+                preserveOrphanedMemory: hypaSettings.preserveOrphanedMemory,
+                minimumTailMessages: hypaSettings.queryChatCount,
+                signal: abortSignal,
+                isCurrent,
+            })
+            if (decision.route === 'summary-aware') {
+                if (arg.continue && decision.preparation.chat.message.length === 0) {
+                    await decision.preparation.release()
+                } else {
+                const controller = captureWindowedConversationMutationController(
+                    target,
+                    decision.preparation.chat,
+                    decision.preparation.plan.bodyStartIndex,
+                )
+                if (!controller) {
+                    await decision.preparation.release()
+                    return false
+                }
+                conversationResources.preparation = decision.preparation
+                conversationResources.windowedController = controller
+                conversationResources.unbindWindowedController =
+                    bindWindowedGenerationController(decision.preparation.chat, controller)
+                boundedChat = decision.preparation.chat
+                summaryAwareHistoryPlan = decision.preparation.plan
+                console.debug('[Generation history] bounded summary-aware', decision.preparation.metrics)
+                }
+            } else {
+                console.debug('[Generation history] complete materialization', {
+                    reason: decision.reason,
+                })
+            }
+        } else if (hypaSettings) {
+            console.debug('[Generation history] complete materialization', {
+                reason: boundedFallbackReason,
+            })
+        }
+        if (!boundedChat && !conversationResources.completeLease) {
+            try {
+                conversationResources.completeLease = await acquireCompleteConversation(
+                    'generation',
+                    target,
+                )
+            } catch (error) {
+                if (error instanceof SelectedConversationPromotionStaleError) return false
+                throw error
+            }
+        }
+    }
+    if (!lifecycle.isTargetCurrent()) return false
 
     DBState.db.statics.messages += 1
     selectedChar = get(selectedCharID)
     const nowChatroom = DBState.db.characters[selectedChar]
     nowChatroom.lastInteraction = Date.now()
     selectedChat = nowChatroom.chatPage
-    const selectedConversation = nowChatroom.chats[selectedChat]
+    const selectedConversation = boundedChat ?? nowChatroom.chats[selectedChat]
     const activeSession = getActiveConversationSession()
     if (
         activeSession &&
         !activeSession.matchesConversation(nowChatroom.chaId, selectedConversation)
     ) return false
-    ensureCurrentConversationMessageIds(
-        nowChatroom,
-        selectedConversation,
-        activeSession,
-        v4,
-    )
+    if (!boundedChat) {
+        ensureCurrentConversationMessageIds(
+            nowChatroom,
+            selectedConversation,
+            activeSession,
+            v4,
+        )
+    }
     
     let promptInfo: MessagePresetInfo = {}
     let initialPresetNameForPromptInfo = null
@@ -491,9 +761,10 @@ async function sendChatInternal(chatProcessIndex: number,arg:{
     }
 
     let chatAdditonalTokens = arg.chatAdditonalTokens ?? caculatedChatTokens
-    const tokenizer = new ChatTokenizer(chatAdditonalTokens, DBState.db.aiModel.startsWith('gpt') ? 'noName' : 'name')
-    let currentChat = runCurrentChatFunction(nowChatroom.chats[selectedChat])
-    nowChatroom.chats[selectedChat] = currentChat
+    const tokenizer = new ChatTokenizer(chatAdditonalTokens, DBState.db.aiModel.startsWith('gpt') ? 'noName' : 'name',
+        nowChatroom.supaMemory && DBState.db.hypaV3 && !DBState.db.hypav2 && !DBState.db.hanuraiEnable)
+    let currentChat = runCurrentChatFunction(selectedConversation)
+    if (!boundedChat) nowChatroom.chats[selectedChat] = currentChat
     let maxContextTokens = DBState.db.maxContext
 
     chatProcessStage.set(1)
@@ -1056,14 +1327,41 @@ async function sendChatInternal(chatProcessIndex: number,arg:{
     }
 
     const requiresLivePromptCompatibility = (pluginV2.editprocess?.size ?? 0) > 0
+    if (!summaryAwareHistoryPlan && nowChatroom.type !== 'group' && nowChatroom.supaMemory
+        && DBState.db.hypaV3 && !DBState.db.hypav2 && !DBState.db.hanuraiEnable) {
+        const settings = getCurrentHypaV3Preset().settings
+        if (!settings.useExperimentalImpl && !requiresLivePromptCompatibility && !hasObservableHistoryTokenizer()
+            && !(usingPromptTemplate && DBState.db.promptSettings.sendName)) {
+            const decision = planSummaryAwareProcessedHistory(currentChat, [
+                ...(DBState.db.presetRegex ?? []),
+                ...(currentChar.customscript ?? []),
+                ...getModuleRegexScripts(),
+            ], settings.preserveOrphanedMemory, settings.queryChatCount, nowChatroom.chaId)
+            if (decision.route === 'summary-aware') {
+                summaryAwareHistoryPlan = decision.plan
+                console.debug('[Generation history] complete view, summary-aware preprocessing', {
+                    coveredMessages: decision.plan.coveredMessageIds.size,
+                })
+            } else console.debug('[Generation history] complete preprocessing', { reason: decision.reason })
+        }
+    }
     const promptHistory = beginPromptHistoryOperation(nowChatroom, currentChat)
     let promptHistoryCompatibilitySnapshot: PromptHistoryCompatibilitySnapshot | null = null
     let promptScriptOperationScope: PromptScriptOperationScope | null = null
+    let preparedHistoryStartIndex = 0
     try {
     promptScriptOperationScope = createPromptScriptOperationScope(nowChatroom, {
         pluginCompatibility: requiresLivePromptCompatibility,
     })
     const promptHistorySelection = selectPromptHistory(promptHistory)
+    if (summaryAwareHistoryPlan) {
+        if (conversationResources.windowedController) {
+            if (!conversationResources.windowedController.isCurrent()) {
+                throw new PersistentMutationFencedError()
+            }
+        }
+    }
+    preparedHistoryStartIndex = chats.length
     const promptHistoryEntries = requiresLivePromptCompatibility
         ? (promptHistoryCompatibilitySnapshot = createLivePromptHistoryCompatibilitySnapshot(
             currentChat.message,
@@ -1080,6 +1378,7 @@ async function sendChatInternal(chatProcessIndex: number,arg:{
         } else {
             msg = ensurePromptHistoryEntryId(promptHistory, entry, v4)
         }
+        if (msg.chatId && summaryAwareHistoryPlan?.coveredMessageIds.has(msg.chatId)) continue
         promptScriptOperationScope?.adoptMessageId(entry.locator, msg.chatId)
         const parsedMessage = promptScriptOperationScope
             ? promptScriptOperationScope.parse(nowChatroom, msg.data, {
@@ -1134,11 +1433,16 @@ async function sendChatInternal(chatProcessIndex: number,arg:{
                 const inlayData = await getInlayAsset(inlayName)
                 if(inlayData?.type === 'image'){
                     if(modelinfo.flags.includes(LLMFlags.hasImageInput)){
+                        const sendable = await inlayImageForProvider(inlayName, {
+                            data: inlayData.data as string,
+                            width: inlayData.width,
+                            height: inlayData.height,
+                        })
                         multimodal.push({
                             type: 'image',
-                            base64: inlayData.data,
-                            width: inlayData.width,
-                            height: inlayData.height
+                            base64: sendable.data,
+                            width: sendable.width,
+                            height: sendable.height
                         })
                     }
                     else{
@@ -1303,12 +1607,30 @@ async function sendChatInternal(chatProcessIndex: number,arg:{
         }
         else if(DBState.db.hypaV3){
             console.log("Current chat's hypaV3 Data: ", currentChat.hypaV3Data)
-            const sp = await hypaMemoryV3(chats, currentTokens, maxContextTokens, currentChat, nowChatroom, tokenizer)
+            const sp = await hypaMemoryV3(
+                chats,
+                currentTokens,
+                maxContextTokens,
+                currentChat,
+                nowChatroom,
+                tokenizer,
+                summaryAwareHistoryPlan ? {
+                    boundaryMemo: summaryAwareHistoryPlan.boundaryMemo,
+                    effectiveMessageMemos: summaryAwareHistoryPlan.effectiveMessageMemos,
+                    historyStartIndex: preparedHistoryStartIndex,
+                } : undefined,
+            )
             if(sp.error){
                 // Save new summary
                 if (sp.memory) {
                     currentChat.hypaV3Data = sp.memory
-                    DBState.db.characters[selectedChar].chats[selectedChat].hypaV3Data = currentChat.hypaV3Data
+                    if (conversationResources.windowedController) {
+                        if (!conversationResources.windowedController.applyRange(
+                            0, 0, [], 'update-metadata',
+                        )) throw new PersistentMutationFencedError()
+                    } else {
+                        DBState.db.characters[selectedChar].chats[selectedChat].hypaV3Data = currentChat.hypaV3Data
+                    }
                 }
                 console.log(sp)
                 throwError(sp.error)
@@ -1317,9 +1639,14 @@ async function sendChatInternal(chatProcessIndex: number,arg:{
             chats = sp.chats
             currentTokens = sp.currentTokens
             currentChat.hypaV3Data = sp.memory ?? currentChat.hypaV3Data
-            DBState.db.characters[selectedChar].chats[selectedChat].hypaV3Data = currentChat.hypaV3Data
-    
-            currentChat = DBState.db.characters[selectedChar].chats[selectedChat];
+            if (conversationResources.windowedController) {
+                if (!conversationResources.windowedController.applyRange(
+                    0, 0, [], 'update-metadata',
+                )) throw new PersistentMutationFencedError()
+            } else {
+                DBState.db.characters[selectedChar].chats[selectedChat].hypaV3Data = currentChat.hypaV3Data
+                currentChat = DBState.db.characters[selectedChar].chats[selectedChat];
+            }
             console.log("[Expected to be updated] chat's HypaV3Data: ", currentChat.hypaV3Data)
         }
         else{
@@ -1757,16 +2084,20 @@ async function sendChatInternal(chatProcessIndex: number,arg:{
     const requestSourceCharacter = nowChatroom
     const requestSourceCharacterId = requestSourceCharacter.chaId
     const requestSourceChatPage = selectedChat
-    const requestSourceConversation = requestSourceCharacter.chats[requestSourceChatPage]
+    const requestSourceConversation = boundedChat
+        ?? requestSourceCharacter.chats[requestSourceChatPage]
+    const requestSourceShell = requestSourceCharacter.chats[requestSourceChatPage]
     const requestSourceMessages = requestSourceConversation.message
     const requestSourceSession = getActiveConversationSession()
     const requestSourceSessionVersion = requestSourceSession?.version
     const isRequestSourceCurrent = () =>
+        lifecycle.isTargetCurrent() &&
         get(selectedCharID) === requestSourceCharacterIndex &&
         DBState.db.characters[requestSourceCharacterIndex]?.chaId === requestSourceCharacterId &&
         DBState.db.characters[requestSourceCharacterIndex]?.chatPage === requestSourceChatPage &&
         DBState.db.characters[requestSourceCharacterIndex]?.chats[requestSourceChatPage] ===
-            requestSourceConversation &&
+            requestSourceShell &&
+        (conversationResources.windowedController?.isCurrent() ?? true) &&
         getActiveConversationSession() === requestSourceSession &&
         (requestSourceSession === null
             ? requestSourceConversation.message === requestSourceMessages
@@ -1810,14 +2141,17 @@ async function sendChatInternal(chatProcessIndex: number,arg:{
     async function completeGeneration(): Promise<true> {
         if (lifecycle.reroll) return true
         await acknowledgeCompletedGeneration()
+        if (!lifecycle.isTargetCurrent()) throw new PersistentMutationFencedError()
         await notifyGenerationCompletion(result)
         return true
     }
 
     async function acknowledgeCompletedGeneration(): Promise<void> {
         if (lifecycle.reroll) return
+        if (!lifecycle.isTargetCurrent()) throw new PersistentMutationFencedError()
         lifecycle.acknowledgementAttempted = true
-        await acknowledgeGenerationCompletion()
+        await acknowledgeGenerationCompletion(lifecycle.authorityEpoch)
+        lifecycle.onProgress?.(3)
     }
     
     const responseApplication = await applyGenerationResponse({
@@ -1834,16 +2168,24 @@ async function sendChatInternal(chatProcessIndex: number,arg:{
         ttsAutoSpeech: () => DBState.db.ttsAutoSpeech,
         operation: {
             getCurrentSession: getActiveConversationSession,
-            getTargetChat: () => DBState.db.characters[selectedChar]?.chats[selectedChat],
+            getTargetChat: () => boundedChat
+                ?? DBState.db.characters[selectedChar]?.chats[selectedChat],
             isOwnerCurrent: () =>
+                lifecycle.isTargetCurrent() &&
                 get(selectedCharID) === selectedChar &&
                 DBState.db.characters[selectedChar]?.chaId === requestSourceCharacterId &&
                 DBState.db.characters[selectedChar]?.chatPage === selectedChat,
             publishTargetChat: (chat) => {
-                DBState.db.characters[selectedChar].chats[selectedChat] = chat
+                if (!lifecycle.isTargetCurrent()) throw new PersistentMutationFencedError()
+                if (boundedChat) {
+                    if (chat !== boundedChat) throw new PersistentMutationFencedError()
+                } else DBState.db.characters[selectedChar].chats[selectedChat] = chat
             },
-            invalidateSession: invalidateActiveConversationSession,
+            invalidateSession: () => {
+                if (!boundedChat) invalidateActiveConversationSession()
+            },
             incrementReloadKeys: () => {
+                if (!lifecycle.isTargetCurrent()) throw new PersistentMutationFencedError()
                 DBState.db.characters[selectedChar].reloadKeys += 1
             },
         },
@@ -1889,16 +2231,17 @@ async function sendChatInternal(chatProcessIndex: number,arg:{
                     alertError(error)
                 }
             },
-            addRerolls,
             trimIncompleteResponse: trimUntilPunctuation,
             markResponseApplied: () => {
                 lifecycle.responseApplied = true
+                lifecycle.onProgress?.(1)
             },
             onProviderFailure: throwError,
         },
     })
     if (!responseApplication) return false
     lifecycle.responseCompleted = true
+    lifecycle.onProgress?.(2)
     result = responseApplication.result
     emoChanged = responseApplication.emoChanged
     resendChat = responseApplication.resendChat

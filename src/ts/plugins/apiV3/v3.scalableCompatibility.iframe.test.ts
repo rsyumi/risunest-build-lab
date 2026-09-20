@@ -8,10 +8,36 @@ import { dispatchChatOutputListeners } from '../pluginChatOutputListeners'
 const fixture = vi.hoisted(() => {
     const requestedPermissions: string[] = []
     const listeners = new Set<any>()
-    const listenerProvenance = new WeakMap<any, 'v2.1-live' | 'v3-legacy'>()
     const releaseRevisionLease = vi.fn()
     const projectScalable = vi.fn()
     const scopedAccess = {
+        getFullObjectSnapshotStream: async (target: { characterIndex?: number; chatIndex?: number }, context: unknown) => {
+            const access = fixture.scopedAccess
+            const value = await (target.characterIndex === undefined
+                ? access.getCurrentCharacter(context)
+                : target.chatIndex === undefined
+                    ? access.getCharacterFromIndex(target.characterIndex, context)
+                    : access.getChatFromIndex(target.characterIndex, target.chatIndex, context))
+            if (!value) return value
+            const isConversation = target.chatIndex !== undefined
+            return {
+                __type: 'IFRAME_OBJECT_STREAM',
+                select: isConversation ? 'conversation' : 'character',
+                value: new ReadableStream({
+                    start(controller) {
+                        controller.enqueue({ type: 'arrayStart', key: 'characters' })
+                        const { chats, ...detail } = isConversation ? { chats: [value] } : value
+                        controller.enqueue({ type: 'characterStart', key: 'characters', value: detail })
+                        for (const chat of chats) {
+                            const { message, ...metadata } = chat
+                            controller.enqueue({ type: 'conversationStart', key: 'characters', value: metadata })
+                            for (const value of message) controller.enqueue({ type: 'message', key: 'characters', value })
+                        }
+                        controller.close()
+                    },
+                }),
+            }
+        },
         getCurrentCharacter: vi.fn(),
         getCharacterFromIndex: vi.fn(),
         getChatFromIndex: vi.fn(),
@@ -26,7 +52,6 @@ const fixture = vi.hoisted(() => {
     return {
         requestedPermissions,
         listeners,
-        listenerProvenance,
         releaseRevisionLease,
         projectScalable,
         scopedAccess,
@@ -38,6 +63,12 @@ const fixture = vi.hoisted(() => {
         }),
     }
 })
+
+const ownedStorageStub = {
+    getItem: vi.fn(), setItem: vi.fn(), removeItem: vi.fn(), clear: vi.fn(),
+    key: vi.fn(), keys: vi.fn(), length: vi.fn(), snapshot: vi.fn(async () => ({})),
+    mutate: vi.fn(),
+}
 
 vi.mock('../plugins.svelte', () => {
     const unrelated = vi.fn()
@@ -55,18 +86,17 @@ vi.mock('../plugins.svelte', () => {
     return {
         allowedDbKeys: [],
         applyPreparedPluginDatabaseUpdate: vi.fn(),
-        chatOutputListenerProvenance: fixture.listenerProvenance,
         customProviderStore: {
             subscribe(run: (value: string[]) => void) { run([]); return () => undefined },
             set: vi.fn(),
         },
         getV2PluginAPIs: () => oldApis,
         handlePluginInstallViaPlugin: vi.fn(),
-        pluginCompatibility: {
-            profile: 'scalable-v3',
-            allowsEviction: true,
-        },
         pluginStorageStore: {
+            forOwner: () => ownedStorageStub,
+            ownerOf: () => 'test-plugin',
+            invalidateOwner: vi.fn(),
+            synchronizeCommittedMutation: vi.fn(),
             snapshot: vi.fn(async () => []), mutate: unrelated, invalidate: unrelated,
             getItem: unrelated, setItem: unrelated, removeItem: unrelated,
             clear: unrelated, key: unrelated, keys: unrelated, length: unrelated,
@@ -79,7 +109,7 @@ vi.mock('../plugins.svelte', () => {
     }
 })
 vi.mock('src/ts/storage/database.svelte', () => ({ getDatabase: () => fixture.database }))
-vi.mock('../pluginSafeClass', () => ({ SafeLocalPluginStorage: class {}, tagWhitelist: [] }))
+vi.mock('../pluginSafeClass', () => ({ SafeLocalPluginStorage: class {}, SafeLocalStorage: class {}, tagWhitelist: [] }))
 vi.mock('src/ts/stores.svelte', () => ({
     DBState: { get db() { return fixture.database } },
     selectedCharID: {
@@ -128,7 +158,9 @@ vi.mock('src/ts/process/ttsHooks', () => ({
 vi.mock('src/ts/storage/persistentDataRuntime.svelte', () => ({
     acquireCompleteConversation: vi.fn(),
     captureSelectedConversationTarget: vi.fn(() => null),
-    flushPendingData: vi.fn(),
+    flushPendingDataLocally: vi.fn(),
+    assertPersistentMutationAllowed: vi.fn(),
+    getPersistentStorageAuthorityEpoch: () => 0,
     getActiveConversationSession: vi.fn(() => null),
     getPersistentNavigationGeneration: vi.fn(() => 0),
     invalidateActiveConversationSession: vi.fn(),
@@ -202,8 +234,8 @@ async function executeIframeSrcdoc(frame: HTMLIFrameElement): Promise<void> {
     vi.spyOn(child.parent, 'postMessage').mockImplementation((data) => {
         window.dispatchEvent(new MessageEvent('message', { data, source: child }))
     })
-    vi.spyOn(child, 'postMessage').mockImplementation((data) => {
-        child.dispatchEvent(new childRealm.MessageEvent('message', { data, source: window }))
+    vi.spyOn(child, 'postMessage').mockImplementation((data, _origin, transfer?: Transferable[]) => {
+        child.dispatchEvent(new childRealm.MessageEvent('message', { data, source: window, ports: transfer ?? [] }))
     })
     const source = frame.srcdoc.match(/<script nonce="[^"]+">([\s\S]*)<\/script>/)?.[1]
     if (!source) throw new Error('Sandbox guest script was not found')
@@ -281,14 +313,11 @@ window.acceptance = (async () => {
 
         await dispatchChatOutputListeners({
             listeners: fixture.listeners,
-            provenance: fixture.listenerProvenance,
-            profile: 'scalable-v3',
             char: finalLiveCharacter,
             chat: finalLiveChat,
             characterIndex: 1,
             chatIndex: 0,
             messageIndex: 1,
-            snapshot: structuredClone,
             projectScalable: fixture.projectScalable,
             onError: (error) => { throw error },
         })
@@ -365,14 +394,11 @@ window.ready = (async () => {
         expect(fixture.listeners).toHaveLength(0)
         await dispatchChatOutputListeners({
             listeners: fixture.listeners,
-            provenance: fixture.listenerProvenance,
-            profile: 'scalable-v3',
             char: finalLiveCharacter,
             chat: finalLiveChat,
             characterIndex: 1,
             chatIndex: 0,
             messageIndex: 1,
-            snapshot: structuredClone,
             projectScalable: fixture.projectScalable,
             onError: (error) => { throw error },
         })

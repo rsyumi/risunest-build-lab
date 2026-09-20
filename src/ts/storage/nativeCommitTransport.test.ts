@@ -27,9 +27,10 @@ function harness(
         windows?: boolean
         android?: boolean
         linux?: boolean
+        ios?: boolean
         macos?: boolean
         unsupported?: boolean
-        fail?: string
+        fail?: string | string[]
         ack?: number
     } = {},
 ) {
@@ -45,7 +46,10 @@ function harness(
     const received: number[] = []
     const buffer = new ArrayBuffer(3)
     const invoke = vi.fn(async (command: string, args: any) => {
-        if (options.fail === command) throw new Error('native failed')
+        if (
+            options.fail === command
+            || (Array.isArray(options.fail) && options.fail.includes(command))
+        ) throw new Error('native failed')
         if (command === 'pds_commit_android_open')
             return { capacity: 32 * 1024 }
         if (command === 'pds_commit_android_chunk')
@@ -73,6 +77,7 @@ function harness(
         windows: () => options.windows ?? true,
         android: () => options.android ?? false,
         linux: () => options.linux ?? false,
+        ios: () => options.ios ?? false,
         macos: () => options.macos ?? false,
         invoke,
         encode,
@@ -82,7 +87,7 @@ function harness(
 }
 
 describe('native commit transport', () => {
-    it.each(['linux', 'macos'] as const)(
+    it.each(['linux', 'ios', 'macos'] as const)(
         'encodes %s large saves and submits raw bytes without touching shared buffers',
         async (os) => {
             const h = harness({ windows: false, [os]: true })
@@ -98,7 +103,7 @@ describe('native commit transport', () => {
         },
     )
 
-    it.each(['linux', 'macos'] as const)(
+    it.each(['linux', 'ios', 'macos'] as const)(
         'keeps small %s saves on JSON and only falls back before raw submission',
         async (os) => {
             const h = harness({ windows: false, [os]: true })
@@ -120,7 +125,7 @@ describe('native commit transport', () => {
         },
     )
 
-    it.each(['linux', 'macos'] as const)(
+    it.each(['linux', 'ios', 'macos'] as const)(
         'does not replay an ambiguous %s raw commit and allows the next queued save',
         async (os) => {
             const h = harness({
@@ -139,7 +144,7 @@ describe('native commit transport', () => {
         },
     )
 
-    it.each(['linux', 'macos'] as const)(
+    it.each(['linux', 'ios', 'macos'] as const)(
         'does not turn the Windows shared-buffer budget into a %s save limit',
         async (os) => {
             const h = harness({ windows: false, [os]: true })
@@ -164,14 +169,20 @@ describe('native commit transport', () => {
         expect(h.invoke).not.toHaveBeenCalled()
     })
 
-    it('releases the native producer even when releasing the JS view fails', async () => {
+    it.each(['releaseBuffer', 'removeEventListener'] as const)('preserves the confirmed commit when %s fails', async (cleanup) => {
         const h = harness()
-        vi.mocked(h.webview.releaseBuffer).mockImplementation(() => {
+        const report = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+        vi.mocked(h.webview[cleanup]).mockImplementation(() => {
             throw new Error('Detached')
         })
-        await expect(h.transport.commit(fixture())).rejects.toThrow('Detached')
+        await expect(h.transport.commit(fixture())).resolves.toEqual({ revision: 2 })
+        expect(report).toHaveBeenCalledWith(expect.stringContaining('cleanup failed'), expect.any(Error))
+        report.mockRestore()
+        const requestId = h.invoke.mock.calls.find(
+            ([command]) => command === 'pds_commit_shared_open',
+        )?.[1].requestId
         expect(h.invoke).toHaveBeenLastCalledWith('pds_commit_shared_cancel', {
-            id: 'session',
+            requestId,
         })
         expect(
             h.invoke.mock.calls.filter(([command]) => command === 'pds_commit_shared_finish'),
@@ -248,7 +259,34 @@ describe('native commit transport', () => {
         expect(h.invoke.mock.calls.map(([command]) => command)).toEqual([
             'pds_commit_shared_open',
             'pds_commit_raw',
+            'pds_commit_shared_cancel',
         ])
+    })
+    it('cancels by the client request ID when the shared-open response is lost', async () => {
+        const h = harness({ fail: 'pds_commit_shared_open' })
+
+        await expect(h.transport.commit(fixture())).rejects.toThrow('native failed')
+
+        const open = h.invoke.mock.calls.find(
+            ([command]) => command === 'pds_commit_shared_open',
+        )!
+        expect(h.invoke).toHaveBeenLastCalledWith('pds_commit_shared_cancel', {
+            requestId: open[1].requestId,
+        })
+    })
+    it('reports cleanup failure without replacing a lost shared-open response', async () => {
+        const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+        const h = harness({
+            fail: ['pds_commit_shared_open', 'pds_commit_shared_cancel'],
+        })
+
+        await expect(h.transport.commit(fixture())).rejects.toThrow('native failed')
+
+        expect(consoleError).toHaveBeenCalledWith(
+            'Persistence shared commit cleanup failed',
+            expect.objectContaining({ message: 'native failed' }),
+        )
+        consoleError.mockRestore()
     })
     it.each(['pds_commit_shared_chunk', 'pds_commit_shared_finish'])(
         'never replays a failed %s and permits the next request',
@@ -257,8 +295,11 @@ describe('native commit transport', () => {
             await expect(h.transport.commit(fixture())).rejects.toThrow('native failed')
             expect(h.invoke.mock.calls.map(([command]) => command)).not.toContain('pds_commit_raw')
             expect(h.webview.releaseBuffer).toHaveBeenCalledOnce()
+            const requestId = h.invoke.mock.calls.find(
+                ([command]) => command === 'pds_commit_shared_open',
+            )?.[1].requestId
             expect(h.invoke).toHaveBeenCalledWith('pds_commit_shared_cancel', {
-                id: 'session',
+                requestId,
             })
             await h.transport.commit(fixture(false))
             expect(h.invoke).toHaveBeenLastCalledWith('pds_commit', fixture(false))

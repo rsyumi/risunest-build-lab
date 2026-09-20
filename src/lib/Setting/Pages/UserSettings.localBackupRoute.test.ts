@@ -1,12 +1,14 @@
 import { describe, expect, it } from 'vitest'
 import { parse } from 'svelte/compiler'
 
-import source from './UserSettings.svelte?raw'
+import { readFileSync } from 'node:fs'
+const source = readFileSync('src/lib/Setting/Pages/UserSettings.svelte', 'utf8')
+const backupSource = readFileSync('src/lib/Setting/Pages/RisuNestBackupRestore.svelte', 'utf8')
+const storageSource = readFileSync('src/lib/Setting/Pages/RisuNestStorageDashboard.svelte', 'utf8')
 
 describe('UserSettings local backup route', () => {
-    it('makes the existing backup import action reachable on Android and uses the common native picker', async () => {
-        const backup = (await import('./RisuNestBackupRestore.svelte?raw'))
-            .default
+    it('makes the existing backup import action reachable on Android and uses the common native picker', () => {
+        const backup = backupSource
         const ast = parse(backup)
         const guards: string[][] = []
         function visit(node: any, parents: string[] = []) {
@@ -23,7 +25,7 @@ describe('UserSettings local backup route', () => {
                     : parents
             if (
                 node.type === 'InlineComponent' &&
-                node.name === 'Button' &&
+                node.name === 'SettingButton' &&
                 /runRisuSaveOperation\(['"]import['"]\)/.test(
                     backup.slice(node.start, node.end),
                 )
@@ -75,48 +77,44 @@ describe('UserSettings local backup route', () => {
         )
     })
 
-    it('keeps upstream local backup, account, and Drive controls on this page', () => {
+    it('keeps local backup and official account controls but removes legacy Drive controls', () => {
         expect(source).toContain('SavePartialLocalBackup()')
-        expect(source).toContain('loadRisuAccountData')
-        expect(source).toContain('checkDriver')
+        expect(source).toContain('loadRisuAccountBackup')
+        expect(source).not.toContain('checkDriver')
+        expect(source).not.toContain('googleDriveConnection')
     })
 
-    it('moves RisuNest backup and sync controls to the dedicated page', async () => {
-        const backupSource = await import('./RisuNestBackupRestore.svelte?raw')
-
+    it('moves RisuNest backup and sync controls to the dedicated page', () => {
+        expect(storageSource).toContain('restoreNativePersistentSnapshot')
+        expect(source).not.toContain('restoreNativePersistentSnapshot')
         for (const control of [
             'runRisuSaveOperation',
-            'restoreNativePersistentSnapshot',
             'openSyncConflictBackups()',
             'getNativeOfficialAccountFlow().publish',
             'getNativeOfficialAccountFlow().restore',
             'nativePublishController?.abort()',
         ]) {
-            expect(backupSource.default).toContain(control)
+            expect(backupSource).toContain(control)
             expect(source).not.toContain(control)
         }
     })
 
-    it('keeps official account actions behind the existing account gate', async () => {
-        const backupSource = await import('./RisuNestBackupRestore.svelte?raw')
-        const snapshot = backupSource.default.indexOf(
-            '{language.restoreLocalSnapshot}',
+    it('keeps official account actions behind the existing account gate', () => {
+        const restoreGroup = backupSource.indexOf(
+            '{language.risuNest.backup.groupRestore}',
         )
-        const accountGate = backupSource.default.indexOf(
+        const accountGate = backupSource.indexOf(
             '{#if isTauri && DBState.db.account}',
         )
-        const officialRestore = backupSource.default.indexOf(
+        const officialRestore = backupSource.indexOf(
             '{language.risuNest.backup.officialRestore}',
         )
-        expect(snapshot).toBeGreaterThan(-1)
-        expect(accountGate).toBeGreaterThan(snapshot)
+        expect(restoreGroup).toBeGreaterThan(-1)
+        expect(accountGate).toBeGreaterThan(restoreGroup)
         expect(officialRestore).toBeGreaterThan(accountGate)
     })
 
-    it('uses localized safe copy for official backup actions and native failures', async () => {
-        const backupSource = (
-            await import('./RisuNestBackupRestore.svelte?raw')
-        ).default
+    it('uses localized safe copy for official backup actions and native failures', () => {
 
         for (const key of [
             'officialRestoreConfirm',

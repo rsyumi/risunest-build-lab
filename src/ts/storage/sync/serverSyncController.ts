@@ -4,11 +4,17 @@ import {
   ServerSyncError,
   type ServerConfig,
   type ServerCycle,
+  type ServerCycleItems,
   type ServerCycleOptions,
   type ServerStatus,
   type ServerSyncFacade,
   type ServerSyncProgress,
 } from "./serverSync";
+import type { SyncExitDrainResult } from "../syncExitCoordinator";
+import {
+  matchesCompletedServerCycle,
+  type ServerAttemptIdentity,
+} from "./serverSyncCompletion";
 
 export interface ServerSyncSnapshot {
   status?: ServerStatus;
@@ -19,8 +25,14 @@ export interface ServerSyncSnapshot {
   lastSuccessAt?: number;
   progress?: ServerSyncProgress;
   verifiedBytes?: string;
+  /** Throughput of the current attempt, from successive byte samples. */
+  bytesPerSecond?: number;
+  cycleItems?: ServerCycleItems;
+  retryableFailure?: string;
   attemptId?: number;
-  attemptIdentity?: { endpoint: string; libraryId: string; deviceId: string };
+  /** Wall-clock start of the current attempt, for the elapsed time. */
+  attemptStartedAt?: number;
+  attemptIdentity?: ServerAttemptIdentity;
   initialSyncComplete?: boolean;
   refreshPending?: boolean;
   replacing?: boolean;
@@ -41,6 +53,8 @@ export function createServerSyncController(
   let attemptSequence = 0;
   let statusFresh = false;
   let statusSequence = 0;
+  let byteSample: { at: number; bytes: bigint } | undefined;
+  let exitDrainActive = 0;
   const listeners = new Set<(snapshot: ServerSyncSnapshot) => void>();
   const publish = (): void => {
     state = {
@@ -67,12 +81,17 @@ export function createServerSyncController(
   ): Promise<void> => {
     state.running = true;
     state.attemptId = ++attemptSequence;
+    state.attemptStartedAt = Date.now();
     state.attemptIdentity = undefined;
     state.initialSyncComplete = false;
     state.result = undefined;
     state.progress = undefined;
     state.verifiedBytes = undefined;
+    state.bytesPerSecond = undefined;
+    state.cycleItems = undefined;
+    state.retryableFailure = undefined;
     state.error = "";
+    byteSample = undefined;
     publish();
     try {
       await refreshStatus();
@@ -113,27 +132,10 @@ export function createServerSyncController(
           endpoint: result.endpoint,
         };
       }
-      const identityNow = state.attemptIdentity;
       state.initialSyncComplete = Boolean(
         !state.error &&
-        identityNow &&
-        status?.configured &&
-        result?.phase === "idle" &&
-        status.endpoint === identityNow.endpoint &&
-        status.libraryId === identityNow.libraryId &&
-        status.deviceId === identityNow.deviceId &&
-        !status.registrationRequired &&
-        !status.reconciling &&
-        !status.operationPending &&
-        !status.fullScan &&
-        status.dirtyRecords === 0 &&
-        !facade.needsRefresh() &&
-        status.localRevision === result.localRevision &&
-        status.head &&
-        status.head.libraryId === result.head?.libraryId &&
-        status.head.epoch === result.head?.epoch &&
-        status.head.seq === result.head?.seq &&
-        status.head.headId === result.head?.headId,
+          !facade.needsRefresh() &&
+          matchesCompletedServerCycle(status, result, state.attemptIdentity),
       );
       if (state.initialSyncComplete) state.lastSuccessAt = Date.now();
     } catch (cause) {
@@ -142,6 +144,10 @@ export function createServerSyncController(
     } finally {
       state.running = false;
       state.progress = undefined;
+      state.bytesPerSecond = undefined;
+      state.cycleItems = undefined;
+      state.retryableFailure = undefined;
+      state.attemptStartedAt = undefined;
       publish();
     }
   };
@@ -153,6 +159,87 @@ export function createServerSyncController(
     state.initialSyncComplete = false;
     state.result = undefined;
     state.attemptIdentity = undefined;
+  };
+  const startSynchronization = (
+    options: ServerCycleOptions,
+    explicitResume: boolean,
+  ): Promise<void> => {
+    if (active) return active;
+    if (state.replacing || isLibraryFileOperationReserved())
+      return Promise.reject(new ServerSyncError("library-operation-busy"));
+    if (explicitResume) controllerOptions.onExplicitResume?.();
+    state.paused = false;
+    let complete!: () => void;
+    let fail!: (cause: unknown) => void;
+    const attempt = new Promise<void>((resolve, reject) => {
+      complete = resolve;
+      fail = reject;
+    });
+    active = attempt;
+    void synchronize(options).then(
+      () => {
+        active = undefined;
+        complete();
+      },
+      (cause) => {
+        active = undefined;
+        fail(cause);
+      },
+    );
+    return attempt;
+  };
+  const completedRevision = (targetRevision: number): boolean =>
+    Boolean(
+      state.initialSyncComplete &&
+        state.status &&
+        state.result &&
+        state.status.localRevision >= targetRevision &&
+        state.result.localRevision >= targetRevision,
+    );
+  const exitDrainBlock = (): string | undefined => {
+    if (state.error) return state.error;
+    if (!state.status?.configured) return "server-not-configured";
+    if (state.status.registrationRequired)
+      return "new-device-registration-required";
+    if (state.status.reconciling) return "epoch-reconciliation-required";
+    if (state.result?.phase === "conflict") return "server-sync-conflict";
+    if (state.replacing) return "library-operation-busy";
+    return undefined;
+  };
+  const beginReplacement = async (): Promise<() => Promise<void>> => {
+    if (state.running || state.replacing || facade.needsRefresh())
+      throw new ServerSyncError("resolve-pending-operation-first");
+    state.replacing = true;
+    invalidateCompletion();
+    publish();
+    let released = false;
+    const release = async (): Promise<void> => {
+      if (released) return;
+      released = true;
+      try {
+        await refreshStatus();
+      } catch (cause) {
+        state.error = serverSyncError(cause).code;
+      }
+      state.replacing = false;
+      publish();
+    };
+    try {
+      await facade.cancel();
+      await refreshStatus();
+      if (
+        !statusFresh ||
+        !state.status ||
+        state.status.operationPending ||
+        facade.needsRefresh()
+      ) {
+        throw new ServerSyncError("resolve-pending-operation-first");
+      }
+      return release;
+    } catch (cause) {
+      await release();
+      throw cause;
+    }
   };
   return {
     holdAutomaticSync(): void {
@@ -181,38 +268,42 @@ export function createServerSyncController(
         throw new ServerSyncError("resolve-pending-operation-first");
       }
     },
+    beginReplacement,
     async withReplacement<T>(operation: () => Promise<T>): Promise<T> {
-      if (state.running || state.replacing || facade.needsRefresh())
-        throw new ServerSyncError("resolve-pending-operation-first");
-      // Reservation precedes asynchronous status/cancellation checks, without a PDS fence.
-      state.replacing = true;
-      invalidateCompletion();
-      publish();
+      const release = await beginReplacement();
       try {
-        await facade.cancel();
-        await refreshStatus();
-        if (
-          !statusFresh ||
-          !state.status ||
-          state.status.operationPending ||
-          facade.needsRefresh()
-        ) {
-          throw new ServerSyncError("resolve-pending-operation-first");
-        }
         return await operation();
       } finally {
-        try {
-          await refreshStatus();
-        } catch (cause) {
-          state.error = serverSyncError(cause).code;
-        }
-        state.replacing = false;
-        publish();
+        await release();
       }
     },
     reportVerifiedBytes(verifiedBytes: string): void {
       if (!state.running) return;
       state.verifiedBytes = verifiedBytes;
+      const now = Date.now();
+      const bytes = BigInt(verifiedBytes);
+      if (byteSample && now > byteSample.at) {
+        const rate =
+          (Number(bytes - byteSample.bytes) * 1000) / (now - byteSample.at);
+        // Smooth the one-second samples so the rate does not flicker.
+        state.bytesPerSecond = Math.max(
+          0,
+          state.bytesPerSecond === undefined
+            ? rate
+            : (state.bytesPerSecond + rate) / 2,
+        );
+      }
+      byteSample = { at: now, bytes };
+      publish();
+    },
+    reportCycleItems(items: ServerCycleItems): void {
+      if (!state.running) return;
+      state.cycleItems = items;
+      publish();
+    },
+    reportRetryableFailure(code: string | undefined): void {
+      if (!state.running) return;
+      state.retryableFailure = code;
       publish();
     },
     reportProgress(progress: ServerSyncProgress): void {
@@ -287,29 +378,44 @@ export function createServerSyncController(
       publish();
     },
     synchronize(options: ServerCycleOptions = {}): Promise<void> {
-      if (active) return active;
-      if (state.replacing || isLibraryFileOperationReserved())
-        return Promise.reject(new ServerSyncError("library-operation-busy"));
-      controllerOptions.onExplicitResume?.();
+      return startSynchronization(options, true);
+    },
+    async drainToRevision(
+      targetRevision: number,
+      signal: AbortSignal,
+    ): Promise<SyncExitDrainResult> {
+      if (!Number.isSafeInteger(targetRevision) || targetRevision < 0)
+        throw new RangeError("Exit drain revision must be a nonnegative safe integer");
+      const pausedBeforeDrain = state.paused;
+      exitDrainActive += 1;
       state.paused = false;
-      let complete!: () => void;
-      let fail!: (cause: unknown) => void;
-      const attempt = new Promise<void>((resolve, reject) => {
-        complete = resolve;
-        fail = reject;
-      });
-      active = attempt;
-      void synchronize(options).then(
-        () => {
-          active = undefined;
-          complete();
-        },
-        (cause) => {
-          active = undefined;
-          fail(cause);
-        },
-      );
-      return attempt;
+      publish();
+      const cancelOnAbort = () => {
+        void facade.cancel();
+      };
+      signal.addEventListener("abort", cancelOnAbort, { once: true });
+      try {
+        while (true) {
+          if (signal.aborted) throw new DOMException("Exit drain aborted", "AbortError");
+          await startSynchronization({}, false);
+          if (signal.aborted) throw new DOMException("Exit drain aborted", "AbortError");
+          if (completedRevision(targetRevision)) return { kind: "complete" };
+          const reason = exitDrainBlock();
+          if (reason) return { kind: "blocked", reason };
+          await new Promise<void>((resolve) => setTimeout(resolve, 300));
+        }
+      } finally {
+        signal.removeEventListener("abort", cancelOnAbort);
+        exitDrainActive -= 1;
+        if (exitDrainActive === 0) {
+          state.paused = pausedBeforeDrain;
+          publish();
+        }
+      }
+    },
+    async cancelExitDrain(): Promise<void> {
+      await facade.cancel();
+      await (active ?? Promise.resolve());
     },
     async pause(): Promise<void> {
       state.paused = true;
@@ -322,6 +428,7 @@ export function createServerSyncController(
       }
     },
     async suspend(): Promise<void> {
+      if (exitDrainActive > 0) return;
       try {
         await facade.cancel();
       } catch (cause) {

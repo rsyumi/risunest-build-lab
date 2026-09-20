@@ -168,14 +168,14 @@ describe('Android SAF bridge', () => {
         expect(isAndroidSafFileJobsEnabled({})).toBe(true)
     })
 
-    it('accepts only canonical persisted destination export IDs', () => {
-        expect(getAndroidSafExportSourceId({
+    it('accepts only canonical persisted destination export IDs', async () => {
+        expect(await getAndroidSafExportSourceId({
             copyExport: vi.fn(),
-            getExportSourceId: () => '123e4567-e89b-42d3-a456-426614174004',
+            getExportSourceId: async () => '123e4567-e89b-42d3-a456-426614174004',
         })).toBe('123e4567-e89b-42d3-a456-426614174004')
-        expect(getAndroidSafExportSourceId({
+        expect(await getAndroidSafExportSourceId({
             copyExport: vi.fn(),
-            getExportSourceId: () => 'not-owned',
+            getExportSourceId: async () => 'not-owned',
         })).toBeNull()
     })
 
@@ -219,10 +219,10 @@ describe('Android SAF bridge', () => {
         expect(listeners.size).toBe(0)
     })
 
-    it('discards a ready source through the token-only native bridge', () => {
-        const discardSource = vi.fn(() => true)
+    it('discards a ready source through the token-only native bridge', async () => {
+        const discardSource = vi.fn(async () => true)
 
-        expect(discardAndroidSafSource(
+        expect(await discardAndroidSafSource(
             '11111111-1111-4111-8111-111111111111',
             { copyExport: vi.fn(), discardSource },
         )).toBe(true)
@@ -772,13 +772,16 @@ describe('Android SAF bridge', () => {
 
 it('selects a 500 MiB content spool without passing bytes through the WebView', async () => {
     const listeners = new Set<(event: Event) => void>()
+    const destinations: string[] = []
+    const onSource = vi.fn()
     const source = await pickAndroidContentSource(
-        {},
+        { destination: 'module', onSource },
         {
             createRequestId: () => 'request',
             bridge: {
                 copyExport: vi.fn(),
-                pickContentSource: (requestId) =>
+                pickContentSource: (requestId, destination) => {
+                    destinations.push(destination)
                     queueMicrotask(() => {
                         for (const listener of listeners)
                             listener(
@@ -792,6 +795,7 @@ it('selects a 500 MiB content spool without passing bytes through the WebView', 
                                                     token: '11111111-1111-4111-8111-111111111111',
                                                     displayName: 'large.CHARX',
                                                     bytes: 500 * 1024 * 1024,
+                                                    importDestination: 'module',
                                                 },
                                             ],
                                             failures: [],
@@ -799,7 +803,8 @@ it('selects a 500 MiB content spool without passing bytes through the WebView', 
                                     },
                                 ),
                             )
-                    }),
+                    })
+                },
             },
             addEventListener: (_name, listener) => {
                 listeners.add(listener)
@@ -812,6 +817,11 @@ it('selects a 500 MiB content spool without passing bytes through the WebView', 
     expect(source).toEqual({
         type: 'androidSpool',
         token: '11111111-1111-4111-8111-111111111111',
+    })
+    expect(destinations).toEqual(['module'])
+    expect(onSource).toHaveBeenCalledExactlyOnceWith({
+        displayName: 'large.CHARX',
+        bytes: 500 * 1024 * 1024,
     })
     expect(listeners.size).toBe(0)
 })
