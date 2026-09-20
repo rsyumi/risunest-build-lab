@@ -111,14 +111,20 @@
     {
       "path": "benchmarks/ios/NativeUITests.swift",
       "mode": "100644",
-      "bytes": 17810,
-      "sha256": "52d74c5048d22198ba6fb1d200d3ef33022728bb2312ab301338e824e0520107"
+      "bytes": 17963,
+      "sha256": "ddcafa06860d47c5206e07d43f6dec24bbfd4f89352a1920a5ade03e82139666"
     },
     {
       "path": "benchmarks/ios/buildTestLab.py",
       "mode": "100644",
       "bytes": 7575,
       "sha256": "08274f6666706b335bcda5f4126324d161f4368fcd3f4f98513750770561f7c1"
+    },
+    {
+      "path": "benchmarks/ios/capabilities.test.ts",
+      "mode": "100644",
+      "bytes": 907,
+      "sha256": "4e7d3a2ec03f9fa673ff19f3665ef628833bc451cf3a78a38b4f82505f6cade5"
     },
     {
       "path": "benchmarks/ios/cloudContracts.ts",
@@ -171,8 +177,8 @@
     {
       "path": "benchmarks/ios/native/capabilities/ios.json",
       "mode": "100644",
-      "bytes": 1669,
-      "sha256": "a2a21b5b6e2c541f0c6e496b00492250218a5d1430fa07e8aa458fee7870542e"
+      "bytes": 1759,
+      "sha256": "6cfb074574e6dbc849ff285405afc8e5ba643049c1adb6cb02a03537420b291b"
     },
     {
       "path": "benchmarks/ios/native/src/lib.rs",

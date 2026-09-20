@@ -211,6 +211,10 @@ final class NativeUITests: XCTestCase {
         app.launchEnvironment["RISUNEST_IOS_PHASE"] = "app"
         app.launch()
         XCTAssertTrue(app.webViews.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "ios-synthetic-ui-edit")).firstMatch.waitForExistence(timeout: 90))
+        let staleAlertButton = app.buttons["OK"]
+        if staleAlertButton.waitForExistence(timeout: 2) {
+            staleAlertButton.tap()
+        }
         let input = app.webViews.textViews.firstMatch
         XCTAssertTrue(input.waitForExistence(timeout: 15))
         input.tap()
