@@ -327,8 +327,15 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
                 protected.insert(folder)
             }
         }
-        for folder in (try? manager.contentsOfDirectory(at: staging, includingPropertiesForKeys: nil)) ?? [] {
-            if UUID(uuidString: folder.lastPathComponent) != nil && !protected.contains(folder.lastPathComponent) {
+        let staleBefore = Date().addingTimeInterval(-60)
+        for folder in (try? manager.contentsOfDirectory(
+            at: staging,
+            includingPropertiesForKeys: [.contentModificationDateKey]
+        )) ?? [] {
+            let modified = try? folder.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+            if UUID(uuidString: folder.lastPathComponent) != nil
+                && !protected.contains(folder.lastPathComponent)
+                && modified.map({ $0 < staleBefore }) == true {
                 try? manager.removeItem(at: folder)
             }
         }

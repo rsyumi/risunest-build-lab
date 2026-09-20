@@ -1,5 +1,5 @@
 {
-  "version": "0.1.0",
+  "version": "1.0.0",
   "compatibility": {
     "protocolId": "risunest-sync/v1",
     "storeFormatId": "risunest-sync-store/v1",

@@ -21,7 +21,18 @@ function json(path, value) {
 function repository(product, version) {
   const root = mkdtempSync(join(tmpdir(), "risunest-source-check-"));
   write(join(root, "crates/release-update/Cargo.lock"));
-  write(join(root, "release-notes", product, `${version}.md`), `# ${product} ${version}\n`);
+  write(join(root, "release-notes", product, `${version}.md`), [
+    `# ${product} ${version}`,
+    "",
+    "## English",
+    "",
+    "- Initial release.",
+    "",
+    "## 한국어",
+    "",
+    "- 최초 릴리즈.",
+    "",
+  ].join("\n"));
   if (product === "app") {
     json(join(root, "version.json"), { version });
     json(join(root, "src-tauri/tauri.conf.json"), { version });
@@ -71,6 +82,11 @@ test("source check binds an app tag, commit, notes and mobile build number", () 
   assert.equal(result.mobileBuildNumber, 2_026_008_250);
   assert.equal(result.iosBuildNumber, "2026.8.250");
   assert.equal(result.compatibility, null);
+  assert.match(result.notes, /## English[\s\S]*## 한국어/);
+  assert.deepEqual(result.localizedNotes, {
+    en: "- Initial release.",
+    ko: "- 최초 릴리즈.",
+  });
 });
 
 test("source check carries authoritative Sync compatibility and pinned vendor input", () => {
@@ -108,6 +124,25 @@ test("source check rejects tag drift, missing notes and incomplete compatibility
     publishedAt: "2026-09-15T00:00:00Z",
     registryUrl: "https://sync.example.invalid/",
   }), /compatibility/);
+});
+
+test("source check rejects missing, duplicate, or empty localized release-note sections", () => {
+  const cases = [
+    ["missing Korean", "# app 1.2.3\n\n## English\n\n- Ready.\n"],
+    ["duplicate English", "# app 1.2.3\n\n## English\n\n- One.\n\n## English\n\n- Two.\n\n## 한국어\n\n- 준비됨.\n"],
+    ["empty English", "# app 1.2.3\n\n## English\n\n## 한국어\n\n- 준비됨.\n"],
+  ];
+  for (const [label, notes] of cases) {
+    const app = repository("app", "1.2.3");
+    write(join(app, "release-notes/app/1.2.3.md"), notes);
+    assert.throws(() => sourceCheck({
+      repository: app,
+      product: "app",
+      tag: "app-v1.2.3",
+      sourceCommit: "f".repeat(40),
+      publishedAt: "2026-09-15T00:00:00Z",
+    }), /localized release notes/, label);
+  }
 });
 
 test("source check requires the directly tested sync-wire lockfile", () => {

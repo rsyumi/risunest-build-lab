@@ -1,15 +1,40 @@
+import markdownit from 'markdown-it'
+
 export type ReleaseNoteInline =
     | { type: 'text'; text: string }
     | { type: 'strong'; text: string }
+    | { type: 'em'; text: string }
     | { type: 'code'; text: string }
     | { type: 'link'; text: string; url: string }
 
 export type ReleaseNoteBlock =
-    | { type: 'heading'; level: 2 | 3; content: ReleaseNoteInline[] }
+    | { type: 'heading'; level: number; content: ReleaseNoteInline[] }
     | { type: 'paragraph'; content: ReleaseNoteInline[] }
-    | { type: 'list-item'; depth: 1 | 2; content: ReleaseNoteInline[] }
+    // An empty marker continues the previous item (a second paragraph inside it).
+    | { type: 'list-item'; depth: number; marker: string; content: ReleaseNoteInline[] }
+
+type Token = ReturnType<ReturnType<typeof markdownit>['parse']>[number]
 
 const NOTE_LIMIT_BYTES = 4096
+
+// Notes arrive from the signed manifest and are rendered as Svelte elements, never as HTML.
+// The zero preset starts with paragraphs and plain text only; everything else stays literal
+// unless enabled here. HTML and tables are intentionally absent, images reduce to their
+// alt text and fenced code becomes a plain code paragraph.
+const md = markdownit('zero').enable([
+    'heading',
+    'list',
+    'hr',
+    'blockquote',
+    'fence',
+    'newline',
+    'escape',
+    'entity',
+    'backticks',
+    'emphasis',
+    'link',
+    'image',
+])
 
 export function selectLocalizedNotes(
     localized: Record<string, string>,
@@ -32,68 +57,111 @@ export function selectLocalizedNotes(
 
 export function parseReleaseNotes(markdown: string): ReleaseNoteBlock[] {
     const blocks: ReleaseNoteBlock[] = []
-    const paragraphs: string[] = []
-    const flush = () => {
-        const text = paragraphs.join(' ').trim()
-        if (text) blocks.push({ type: 'paragraph', content: parseInline(text) })
-        paragraphs.length = 0
+    const lists: { ordered: boolean; next: number }[] = []
+    let itemStarted = false
+    let heading = 0
+    for (const token of md.parse(markdown, {})) {
+        switch (token.type) {
+            case 'heading_open':
+                heading = Number(token.tag.slice(1)) || 1
+                break
+            case 'heading_close':
+                heading = 0
+                break
+            case 'bullet_list_open':
+                lists.push({ ordered: false, next: 0 })
+                break
+            case 'ordered_list_open':
+                lists.push({ ordered: true, next: Number(token.attrGet('start') ?? '1') || 1 })
+                break
+            case 'bullet_list_close':
+            case 'ordered_list_close':
+                lists.pop()
+                break
+            case 'list_item_open':
+                itemStarted = true
+                break
+            case 'fence': {
+                const code = token.content.trimEnd()
+                if (code) blocks.push({ type: 'paragraph', content: [{ type: 'code', text: code }] })
+                break
+            }
+            case 'inline': {
+                const content = parseInline(token.children ?? [])
+                if (!content.length) break
+                const list = lists.at(-1)
+                if (list) {
+                    let marker = ''
+                    if (itemStarted) {
+                        marker = list.ordered ? `${list.next}.` : '•'
+                        if (list.ordered) list.next += 1
+                        itemStarted = false
+                    }
+                    blocks.push({ type: 'list-item', depth: lists.length, marker, content })
+                } else if (heading) {
+                    blocks.push({ type: 'heading', level: heading, content })
+                } else {
+                    blocks.push({ type: 'paragraph', content })
+                }
+                break
+            }
+        }
     }
-    let inCodeBlock = false
-    for (const sourceLine of markdown.replace(/\r\n?/g, '\n').split('\n')) {
-        const line = sourceLine.replace(/<[^>]*>/g, match => match.replace(/[<>]/g, ''))
-        if (line.trimStart().startsWith('```')) {
-            flush()
-            inCodeBlock = !inCodeBlock
-            continue
-        }
-        if (inCodeBlock) {
-            paragraphs.push(line)
-            continue
-        }
-        const heading = line.match(/^(#{2,3})\s+(.+)$/)
-        if (heading) {
-            flush()
-            blocks.push({ type: 'heading', level: heading[1].length as 2 | 3, content: parseInline(heading[2]) })
-            continue
-        }
-        const item = line.match(/^(\s{0,4})[-*+]\s+(.+)$/)
-        if (item) {
-            flush()
-            blocks.push({ type: 'list-item', depth: item[1].length >= 2 ? 2 : 1, content: parseInline(item[2]) })
-            continue
-        }
-        if (!line.trim()) {
-            flush()
-            continue
-        }
-        if (/^(!?\||#{1}\s|>\s)/.test(line)) {
-            paragraphs.push(line.replace(/^[>|]\s?/, ''))
-        } else {
-            paragraphs.push(line)
-        }
-    }
-    flush()
     return blocks
 }
 
-function parseInline(value: string): ReleaseNoteInline[] {
+function parseInline(children: Token[]): ReleaseNoteInline[] {
     const tokens: ReleaseNoteInline[] = []
-    const pattern = /(`[^`\n]+`|\*\*[^*\n]+\*\*|\[[^\]\n]+\]\([^\s)]+\))/g
-    let offset = 0
-    for (const match of value.matchAll(pattern)) {
-        if (match.index! > offset) tokens.push({ type: 'text', text: value.slice(offset, match.index) })
-        const token = match[0]
-        if (token.startsWith('`')) tokens.push({ type: 'code', text: token.slice(1, -1) })
-        else if (token.startsWith('**')) tokens.push({ type: 'strong', text: token.slice(2, -2) })
-        else {
-            const link = token.match(/^\[([^\]]+)\]\(([^)]+)\)$/)!
-            if (isSafeLink(link[2])) tokens.push({ type: 'link', text: link[1], url: link[2] })
-            else tokens.push({ type: 'text', text: link[1] })
-        }
-        offset = match.index! + token.length
+    let strong = 0
+    let em = 0
+    let link: { url: string; text: string } | null = null
+    const push = (token: ReleaseNoteInline) => {
+        const last = tokens.at(-1)
+        if (last && last.type !== 'link' && last.type === token.type) last.text += token.text
+        else tokens.push(token)
     }
-    if (offset < value.length) tokens.push({ type: 'text', text: value.slice(offset) })
-    return tokens
+    const text = (value: string) => {
+        if (link) link.text += value
+        else push({ type: strong ? 'strong' : em ? 'em' : 'text', text: value })
+    }
+    for (const child of children) {
+        switch (child.type) {
+            case 'text':
+                text(child.content)
+                break
+            case 'softbreak':
+            case 'hardbreak':
+                text(' ')
+                break
+            case 'code_inline':
+                if (link) link.text += child.content
+                else push({ type: 'code', text: child.content })
+                break
+            case 'image':
+                text(child.content)
+                break
+            case 'strong_open': strong += 1; break
+            case 'strong_close': strong -= 1; break
+            case 'em_open': em += 1; break
+            case 'em_close': em -= 1; break
+            case 'link_open':
+                link = { url: child.attrGet('href') ?? '', text: '' }
+                break
+            case 'link_close':
+                if (link) {
+                    if (isSafeLink(link.url)) tokens.push({ type: 'link', text: link.text, url: link.url })
+                    else push({ type: strong ? 'strong' : em ? 'em' : 'text', text: link.text })
+                }
+                link = null
+                break
+        }
+    }
+    if (link) {
+        const pending = link.text
+        link = null
+        text(pending)
+    }
+    return tokens.filter(token => token.text)
 }
 
 function isSafeLink(value: string): boolean {

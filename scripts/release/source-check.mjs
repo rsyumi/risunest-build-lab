@@ -29,6 +29,37 @@ function requireVersion(value, expected, label) {
     throw new Error(`${label} version ${JSON.stringify(value)} does not match ${expected}.`);
 }
 
+export function parseLocalizedReleaseNotes(notes) {
+  const locales = new Map([["English", "en"], ["한국어", "ko"]]);
+  const sections = {};
+  let current = null;
+  let fence = null;
+  for (const line of notes.replace(/\r\n?/g, "\n").split("\n")) {
+    const marker = /^\s*(```|~~~)/.exec(line)?.[1] ?? null;
+    if (!fence && marker) fence = marker;
+    else if (fence === marker) fence = null;
+    if (!fence) {
+      const heading = /^##[ \t]+(.+?)[ \t]*$/.exec(line)?.[1] ?? null;
+      if (heading !== null) {
+        const locale = locales.get(heading) ?? null;
+        if (locale && Object.hasOwn(sections, locale))
+          throw new Error(`Duplicate localized release notes section: ${heading}.`);
+        if (locale) sections[locale] = [];
+        current = locale;
+        continue;
+      }
+    }
+    if (current) sections[current].push(line);
+  }
+  const localized = {};
+  for (const [heading, locale] of locales) {
+    const value = sections[locale]?.join("\n").trim();
+    if (!value) throw new Error(`Missing or empty localized release notes section: ${heading}.`);
+    localized[locale] = value;
+  }
+  return localized;
+}
+
 export function validateVendorInput(value) {
   if (!/^\d{4}\.\d{1,2}\.\d+$/.test(value.version))
     throw new Error("Pinned cloudflared version is invalid.");
@@ -91,6 +122,7 @@ export function sourceCheck({
   );
   const notes = readFileSync(notesPath, "utf8").trimEnd();
   if (!/^#\s+\S+/m.test(notes)) throw new Error("Release notes must contain a title.");
+  const localizedNotes = parseLocalizedReleaseNotes(notes);
 
   const lockfiles = product === "app"
     ? ["pnpm-lock.yaml", "src-tauri/Cargo.lock"]
@@ -155,7 +187,7 @@ export function sourceCheck({
     pub_date: pubDate,
     releasePage: `https://github.com/rsyumi/RisuNest/releases/tag/${encodeURIComponent(tag)}`,
     notes,
-    localizedNotes: {},
+    localizedNotes,
     compatibility,
     vendorInput,
     mobileBuildNumber,

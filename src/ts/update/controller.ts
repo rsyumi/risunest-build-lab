@@ -80,7 +80,7 @@ async function runCheck(manual: boolean, dependencies: UpdateControllerDependenc
         if (!settings.autoUpdateCheck) return
         if (dependencies.now() - settings.lastCheckedAt < UPDATE_CHECK_INTERVAL_MS) return
     }
-    appUpdateState.update(state => ({ ...state, phase: 'checking', error: '', manual, popupVisible: manual }))
+    appUpdateState.update(state => ({ ...state, phase: 'checking', update: null, progress: null, error: '', manual, popupVisible: manual }))
     try {
         dependencies.saveSettings({ lastCheckedAt: dependencies.now() })
         const result = await withTimeout(dependencies.check(), UPDATE_CHECK_TIMEOUT_MS)
