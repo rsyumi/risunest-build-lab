@@ -150,6 +150,10 @@ jobs:
       - name: Build isolated Mac WKWebView harness
         run: |
           set -euo pipefail
+          if [[ "$CHECK_SCOPE" == streaming ]]; then
+            mkdir -p dist
+            printf '<!doctype html><title>compile placeholder</title>\n' > dist/index.html
+          fi
           pnpm exec vite build --mode agent --config benchmarks/macos/vite.config.ts 2>&1 | tee artifacts/harness-frontend.log
           node benchmarks/macos/prepare.mjs
           shasum -a 256 benchmarks/macos/native/Cargo.lock >> artifacts/environment.txt
