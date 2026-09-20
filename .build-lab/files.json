@@ -591,8 +591,8 @@
     {
       "path": "benchmarks/streaming/main.ts",
       "mode": "100644",
-      "bytes": 218,
-      "sha256": "7f8e17cf9b5407a3e6a80f3f93e6698ac73cfbfaa9d3061d20ee3099bb596951"
+      "bytes": 432,
+      "sha256": "aa01109c7aa98a21b58d6af1ede95da13498052571d760f705f984f9e991c390"
     },
     {
       "path": "benchmarks/streaming/persistence.ts",
