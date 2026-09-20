@@ -1,5 +1,5 @@
 name: macOS check
-run-name: macOS ${{ inputs.runner }} / ${{ inputs.source_sha }}
+run-name: macOS ${{ inputs.runner }} ${{ inputs.scope }} / ${{ inputs.source_sha }}
 on:
   workflow_dispatch:
     inputs:
@@ -11,10 +11,14 @@ on:
         type: choice
         default: macos-15
         options: [macos-15, macos-14, macos-15-intel, macos-26]
+      scope:
+        type: choice
+        default: full
+        options: [full, streaming]
 permissions:
   contents: read
 concurrency:
-  group: macos-check-snapshots-macos-${{ inputs.runner }}
+  group: macos-check-snapshots-macos-${{ inputs.runner }}-${{ inputs.scope }}
   cancel-in-progress: true
 jobs:
   native:
@@ -31,6 +35,7 @@ jobs:
       APPLE_SIGNING_IDENTITY: "-"
       SNAPSHOT_SHA: ${{ inputs.source_sha }}
       RUNNER_LABEL: ${{ inputs.runner }}
+      CHECK_SCOPE: ${{ inputs.scope }}
     steps:
       - name: Validate dispatch inputs
         working-directory: ${{ github.workspace }}
@@ -39,6 +44,7 @@ jobs:
           test "$GITHUB_REF" = refs/heads/main
           [[ "$SNAPSHOT_SHA" =~ ^[0-9a-f]{40}$ ]]
           case "$RUNNER_LABEL" in macos-15|macos-14|macos-15-intel|macos-26) ;; *) exit 1;; esac
+          case "$CHECK_SCOPE" in full|streaming) ;; *) exit 1;; esac
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.sha }}
@@ -89,10 +95,13 @@ jobs:
       - name: Install locked frontend inputs
         run: pnpm install --frozen-lockfile
       - name: Build agent frontend once
+        if: inputs.scope == 'full'
         run: pnpm build:agent 2>&1 | tee artifacts/frontend.log
       - name: Verify agent configuration and frontend
+        if: inputs.scope == 'full'
         run: node ../control/scripts/verify-macos-inputs.mjs .
       - name: Rust contracts
+        if: inputs.scope == 'full'
         run: |
           set -euo pipefail
           # macOS defaults to /var/folders; /var is a symlink rejected by the
@@ -102,6 +111,7 @@ jobs:
           printf 'rust_test_tmpdir=%s\n' "$TMPDIR" >> artifacts/environment.txt
           cargo test --manifest-path src-tauri/Cargo.toml --release --locked --lib -- --test-threads=1 2>&1 | tee artifacts/rust-contracts.log
       - name: Build agent app
+        if: inputs.scope == 'full'
         run: |
           set -euo pipefail
           printf '%s\n' '{"build":{"beforeBuildCommand":"test -f dist/index.html"}}' > "$RUNNER_TEMP/macos-prebuilt.json"
@@ -109,6 +119,7 @@ jobs:
             --config src-tauri/tauri.agent.conf.json \
             --config "$RUNNER_TEMP/macos-prebuilt.json" -- --locked 2>&1 | tee artifacts/native-build.log
       - name: Verify and archive app
+        if: inputs.scope == 'full'
         run: |
           set -euo pipefail
           app="$CARGO_TARGET_DIR/release/bundle/macos/RisuNest.app"
@@ -125,6 +136,7 @@ jobs:
           shasum -a 256 artifacts/RisuNest-agent.app.zip > artifacts/app.sha256
           cat artifacts/binary.txt artifacts/app.sha256
       - name: Verify native product boundary
+        if: inputs.scope == 'full'
         run: |
           python3 - <<'PY'
           import os
@@ -147,6 +159,9 @@ jobs:
           set -euo pipefail
           app="$CARGO_TARGET_DIR/release/bundle/macos/RisuNest Mac Bench.app"
           codesign --verify --deep --strict "$app"
+          if [[ "$CHECK_SCOPE" == streaming ]]; then
+            export RISUNEST_MACOS_PHASES=streaming
+          fi
           python3 benchmarks/macos/run.py --app "$app" --artifacts artifacts/wkwebview 2>&1 | tee artifacts/wkwebview.log
       - uses: actions/upload-artifact@v4
         if: always()
