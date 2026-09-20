@@ -215,10 +215,21 @@ export async function runStreamingSuite(api: FixtureApi, profile = "smoke") {
     }
     return { passed: true, cases };
   } catch (error) {
+    const body = root();
     return {
       passed: false,
       phase,
       assertion: error instanceof Error ? error.message : "unknown",
+      diagnostics: {
+        strongText: body.querySelector("strong")?.textContent ?? null,
+        hasDetails: !!body.querySelector("details"),
+        hasPreview: !!preview(),
+        hasAnswerText: !!body.textContent?.includes("Answer"),
+        hasRawAnswerMarkdown: !!body.textContent?.includes("**Answer**"),
+        hasLatestThought: !!body.textContent?.includes("LATEST-SYNTHETIC"),
+        textLength: body.textContent?.length ?? 0,
+        htmlLength: body.innerHTML.length,
+      },
       cases,
     };
   }

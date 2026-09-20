@@ -28,10 +28,6 @@
   export function sourceMatches(source: string) {
     return message === source;
   }
-
-  export function refreshCharacter() {
-    instance++;
-  }
 </script>
 
 <main data-streaming-smoke="synthetic-v1">

@@ -309,8 +309,8 @@
     {
       "path": "benchmarks/macos/main.ts",
       "mode": "100644",
-      "bytes": 13094,
-      "sha256": "3da51c1efae297fc6a8bfab8491046a80bf98b9cf943155024a6a3a0b10603b4"
+      "bytes": 13243,
+      "sha256": "debe529e3a4382da7a6f6d9a50d56022f0e6f3eafad6ad3c021ea04e82df9d52"
     },
     {
       "path": "benchmarks/macos/native/Cargo.lock",
@@ -345,8 +345,8 @@
     {
       "path": "benchmarks/macos/run.py",
       "mode": "100644",
-      "bytes": 5479,
-      "sha256": "ffd105ff22bfa9e90a4baa680a5e48f4bdd2d2d1bcdf960b9d46189f1f402903"
+      "bytes": 5834,
+      "sha256": "2bfc3e28e23fde8bef58c7983fff9a98f881f5c9baf606dbd97364b011b0506d"
     },
     {
       "path": "benchmarks/macos/vite.config.ts",
@@ -567,8 +567,8 @@
     {
       "path": "benchmarks/streaming/Fixture.svelte",
       "mode": "100644",
-      "bytes": 1717,
-      "sha256": "2fbd051d8a78d4b80375df8f4c97a6cd8f62c00b1c21a7be221ce2f1c364a19f"
+      "bytes": 1657,
+      "sha256": "d4c463b41120942462635226b71dd1d0653646b0cacc576fbc7a343f7b140b70"
     },
     {
       "path": "benchmarks/streaming/android-smoke.mjs",
@@ -579,8 +579,8 @@
     {
       "path": "benchmarks/streaming/fixture.ts",
       "mode": "100644",
-      "bytes": 3112,
-      "sha256": "3949a47274e9e9c840c0b12687e3795141ecd5a7f8c043180506bda0865886d6"
+      "bytes": 2933,
+      "sha256": "28b30df0bfce120717522fb36f0451b2ebdc317ffdde81eb7e4a349fe8279a9e"
     },
     {
       "path": "benchmarks/streaming/index.html",
@@ -603,8 +603,8 @@
     {
       "path": "benchmarks/streaming/suite.ts",
       "mode": "100644",
-      "bytes": 7856,
-      "sha256": "8f9df20cbeb911e203f228946b983b57221ca5a9446765d156a23b534342ba83"
+      "bytes": 8375,
+      "sha256": "362b175c4ef77e46ddcd638a2ea21658c1a7adb6cdaa9eb75f855303169d0302"
     },
     {
       "path": "benchmarks/streaming/tauri.conf.json",

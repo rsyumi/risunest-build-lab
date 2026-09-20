@@ -98,7 +98,12 @@ def main():
     fixtures = [fixture_root / 'synthetic 한글 # %.risup', fixture_root / 'synthetic-two.risum']
     for fixture in fixtures:
         fixture.write_text('synthetic file association fixture')
-    results = {phase: run_phase(app, phase, artifacts, fixtures) for phase in ['contracts', 'restart', 'app', 'app-restart', 'streaming']}
+    configured_phases = os.environ.get('RISUNEST_MACOS_PHASES')
+    phases = configured_phases.split(',') if configured_phases else ['contracts', 'restart', 'app', 'app-restart', 'streaming']
+    allowed_phases = {'contracts', 'restart', 'app', 'app-restart', 'streaming'}
+    if not phases or any(phase not in allowed_phases for phase in phases):
+        raise RuntimeError('invalid RISUNEST_MACOS_PHASES')
+    results = {phase: run_phase(app, phase, artifacts, fixtures) for phase in phases}
     (artifacts / 'result.json').write_text(json.dumps({'passed': True, 'phases': results}, indent=2))
     print('Mac WKWebView contracts, restart and product app passed', flush=True)
 

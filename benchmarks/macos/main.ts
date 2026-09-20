@@ -360,12 +360,19 @@ async function main() {
     const api = (
       window as unknown as {
         __streamingSmoke: {
-          run(): Promise<{ passed: boolean; assertion?: string }>;
+          run(): Promise<{
+            passed: boolean;
+            assertion?: string;
+            diagnostics?: Record<string, unknown>;
+          }>;
         };
       }
     ).__streamingSmoke;
     const result = await api.run();
-    check(result.passed, `streaming suite: ${result.assertion ?? "failed"}`);
+    check(
+      result.passed,
+      `streaming suite: ${result.assertion ?? "failed"} ${JSON.stringify(result.diagnostics ?? {})}`,
+    );
     await report("streaming", result);
     await invoke("macos_bench_quit");
   } else {
