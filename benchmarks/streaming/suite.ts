@@ -3,6 +3,7 @@ interface FixtureApi {
   configure(mode: Mode, defer: boolean): Promise<void>;
   publish(source: string, active?: boolean): Promise<void>;
   sourceMatches(source: string): boolean;
+  debugState(): Record<string, unknown>;
   setRemoval(enabled: boolean): Promise<void>;
 }
 
@@ -221,6 +222,8 @@ export async function runStreamingSuite(api: FixtureApi, profile = "smoke") {
       phase,
       assertion: error instanceof Error ? error.message : "unknown",
       diagnostics: {
+        ...api.debugState(),
+        completedCases: cases.length,
         strongText: body.querySelector("strong")?.textContent ?? null,
         hasDetails: !!body.querySelector("details"),
         hasPreview: !!preview(),

@@ -38,6 +38,13 @@
     scripts = value;
     instance++;
   }
+
+  export function inspectScripts() {
+    return {
+      propScriptCount: scripts.length,
+      derivedScriptCount: character.customscript.length,
+    };
+  }
 </script>
 
 <main data-streaming-smoke="synthetic-v1">

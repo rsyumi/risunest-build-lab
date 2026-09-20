@@ -567,8 +567,8 @@
     {
       "path": "benchmarks/streaming/Fixture.svelte",
       "mode": "100644",
-      "bytes": 1884,
-      "sha256": "cce7b1938c45e50ae3815821ca016520bdc5b56331ec7e48699043d1c5bf3356"
+      "bytes": 2042,
+      "sha256": "a4aef86b248451ea91dc206b3aacf73901144b12511ada935a68a5d107a71be7"
     },
     {
       "path": "benchmarks/streaming/android-smoke.mjs",
@@ -579,8 +579,8 @@
     {
       "path": "benchmarks/streaming/fixture.ts",
       "mode": "100644",
-      "bytes": 3025,
-      "sha256": "758e02bf19c83106e3434b91613e7f7f00ce04cf74155c9980f0417b1ee608c5"
+      "bytes": 3160,
+      "sha256": "8ee396a8709d193fabfd118a4880819973aad504e2b492ad851dab17263e8300"
     },
     {
       "path": "benchmarks/streaming/index.html",
@@ -603,8 +603,8 @@
     {
       "path": "benchmarks/streaming/suite.ts",
       "mode": "100644",
-      "bytes": 8402,
-      "sha256": "aedc7b659dffb8b6d2ab12287577282fb54e0e03f9f8373050f76c81a3b069d6"
+      "bytes": 8510,
+      "sha256": "2bb50c9962a73c29b4028ff7cb1d3c8aad734c7c0a0937b8d63f3ae255d26df1"
     },
     {
       "path": "benchmarks/streaming/tauri.conf.json",
