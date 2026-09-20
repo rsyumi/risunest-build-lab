@@ -381,7 +381,12 @@ async function main() {
 }
 void main().catch(async (error) => {
   await report("failure", {
-    message: error instanceof Error ? error.message : String(error),
+    message:
+      error instanceof Error
+        ? error.message
+        : typeof error === "string"
+          ? error
+          : JSON.stringify(error),
     stack: error instanceof Error ? error.stack : undefined,
   });
   // The controller records the failure and terminates this isolated process.

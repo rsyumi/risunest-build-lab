@@ -309,8 +309,8 @@
     {
       "path": "benchmarks/macos/main.ts",
       "mode": "100644",
-      "bytes": 13243,
-      "sha256": "debe529e3a4382da7a6f6d9a50d56022f0e6f3eafad6ad3c021ea04e82df9d52"
+      "bytes": 13329,
+      "sha256": "3a2018f81a5b1be13e381142700b3bc605564185345d5553d28becd2b2e9fca8"
     },
     {
       "path": "benchmarks/macos/native/Cargo.lock",
@@ -591,8 +591,8 @@
     {
       "path": "benchmarks/streaming/main.ts",
       "mode": "100644",
-      "bytes": 432,
-      "sha256": "aa01109c7aa98a21b58d6af1ede95da13498052571d760f705f984f9e991c390"
+      "bytes": 513,
+      "sha256": "fcc6b2f627b0333a8664f8ff6c1f36caab7bb01e5e64a22b38aa649d15ad8d38"
     },
     {
       "path": "benchmarks/streaming/persistence.ts",
