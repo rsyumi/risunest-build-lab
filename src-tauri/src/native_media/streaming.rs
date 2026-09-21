@@ -25,15 +25,45 @@ struct Files {
 }
 
 pub(crate) struct MediaServer {
+    slots: Arc<Semaphore>,
     base_url: String,
     task: tauri::async_runtime::JoinHandle<()>,
 }
 
-pub(crate) struct MediaServerState(Result<MediaServer, String>);
+pub(crate) struct MediaServerState(std::sync::Mutex<Result<MediaServer, String>>);
 
 impl MediaServerState {
+    pub(crate) fn begin_cleanup(&self) -> Result<(), String> {
+        let state = self.0.lock().map_err(|_| "cleanup-media-busy")?;
+        if let Ok(server) = state.as_ref() {
+            server.slots.close();
+            server.task.abort();
+        }
+        Ok(())
+    }
+
+    pub(crate) fn cleanup_drained(&self) -> Result<bool, String> {
+        let mut state = self.0.lock().map_err(|_| "cleanup-media-busy")?;
+        if state.as_ref().is_ok_and(|server| server.slots.available_permits() != MAX_TRANSFERS) {
+            return Ok(false);
+        }
+        *state = Err("cleanup-pending".into());
+        Ok(true)
+    }
+
+    pub(crate) fn reopen_after_cleanup(&self, root: PathBuf) -> Result<(), String> {
+        let server = MediaServer::start(root).map_err(|_| "cleanup-media-unavailable")?;
+        *self.0.lock().map_err(|_| "cleanup-media-busy")? = Ok(server);
+        Ok(())
+    }
+
+    pub(crate) fn initialize_after_cleanup(root: PathBuf) -> Result<Self, String> {
+        let server = MediaServer::start(root).map_err(|_| "cleanup-media-unavailable")?;
+        Ok(Self(std::sync::Mutex::new(Ok(server))))
+    }
+
     pub(crate) fn initialize(root: PathBuf) -> Self {
-        Self(MediaServer::start(root).map_err(|_| "native-media-unavailable".to_owned()))
+        Self(std::sync::Mutex::new(MediaServer::start(root).map_err(|_| "native-media-unavailable".to_owned())))
     }
 }
 
@@ -65,13 +95,14 @@ impl MediaServer {
             slots: Arc::new(Semaphore::new(MAX_TRANSFERS)),
             remote,
         };
+        let slots = state.slots.clone();
         let task = tauri::async_runtime::spawn(async move {
             let Ok(listener) = tokio::net::TcpListener::from_std(listener) else {
                 return;
             };
             let _ = axum::serve(listener, Router::new().fallback(serve).with_state(state)).await;
         });
-        Ok(Self { base_url, task })
+        Ok(Self { base_url, task, slots })
     }
 }
 
@@ -81,6 +112,7 @@ pub(crate) fn native_media_base_url(
 ) -> Result<String, String> {
     state
         .0
+        .lock().map_err(|_| "native-media-unavailable".to_owned())?
         .as_ref()
         .map(|server| server.base_url.clone())
         .map_err(Clone::clone)
@@ -120,7 +152,7 @@ async fn serve(State(state): State<Files>, request: Request<Body>) -> Response<B
             return empty(StatusCode::NOT_FOUND);
         };
         let key = format!(
-            "assets-v2/objects/{}/{}",
+            "assets/objects/{}/{}",
             &object.hash[..2],
             &object.hash[2..]
         );
@@ -155,7 +187,8 @@ async fn serve(State(state): State<Files>, request: Request<Body>) -> Response<B
         };
     let mut request = request.map(|_| ());
     *request.uri_mut() = uri;
-    let response = match tokio::task::spawn_blocking(move || {
+    let (response, permit) = match tokio::task::spawn_blocking(move || {
+        let response = (|| {
         let response = super::prepare_response(&state.root, request);
         if response.status() == StatusCode::NOT_FOUND {
             if let Some(object) = remote {
@@ -179,6 +212,8 @@ async fn serve(State(state): State<Files>, request: Request<Body>) -> Response<B
             }
         }
         response
+        })();
+        (response, permit)
     })
     .await
     {

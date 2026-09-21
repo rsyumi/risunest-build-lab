@@ -18,7 +18,7 @@ async fn run() -> Result<()> {
             "--data-dir" => root = PathBuf::from(args.next().ok_or("data-dir-required")?),
             "--server" => executable = PathBuf::from(args.next().ok_or("server-path-required")?),
             "--help" | "-h" => {
-                println!("risunest-sync-manager [--data-dir PATH] [--server EXECUTABLE] [status|start|stop|autostart install|autostart remove|update status|update policy automatic|notify|off|update check]\n명령을 생략하면 관리 메뉴를 엽니다.");
+                println!("risunest-sync-manager [--data-dir PATH] [--server EXECUTABLE] [status|start|stop|autostart install|autostart remove|update status|update policy automatic|notify|off|update check|uninstall [--delete-data] [--dry-run] [--yes]]\n명령을 생략하면 관리 메뉴를 엽니다.");
                 return Ok(());
             }
             _ => command.push(arg),
@@ -97,26 +97,24 @@ async fn run() -> Result<()> {
         ["installer", "guard", nonce] => {
             update::run_installer_guard(&root, &executable, nonce).await
         }
+        ["installer", "guard", nonce, "--scheduled-task", task] => {
+            let result = update::run_installer_guard(&root, &executable, nonce).await;
+            let cleanup = platform::finish_update_helper(&root, task);
+            result?;
+            cleanup
+        }
         ["installer", "finish", nonce] => update::finish_installer_guard(&root, nonce),
-        ["uninstall"] => {
-            let _lock = update::try_lock(&root)?;
-            risunest_sync_manager::lifecycle::stop(&root, &client).await?;
-            update::remove_schedule_while_locked(&root, &manager, &executable)?;
-            platform::startup(&root, &executable, "remove")?;
-            #[cfg(any(windows, target_os = "macos"))]
-            platform::gui::setting(&root, Some(false))?;
-            println!("실행 등록을 제거했습니다. 서버 데이터는 유지됩니다.");
-            Ok(())
+        #[cfg(not(windows))]
+        ["removal-helper", parent, mode @ ("delete" | "preserve")] => {
+            risunest_sync_manager::removal::finish_after_exit(&root, &executable,
+                parent.parse().map_err(|_| "invalid-removal-parent")?, *mode == "delete").await
         }
         ["uninstall", "lock-held"] => {
-            risunest_sync_manager::lifecycle::stop(&root, &client).await?;
-            update::remove_schedule_while_locked(&root, &manager, &executable)?;
-            platform::startup(&root, &executable, "remove")?;
-            #[cfg(any(windows, target_os = "macos"))]
-            platform::gui::setting(&root, Some(false))?;
-            println!("실행 등록을 제거했습니다. 서버 데이터는 유지됩니다.");
-            Ok(())
+            risunest_sync_manager::removal::cleanup_services(&root, &executable).await
         }
+        ["installer", "forget-removal"] => risunest_sync_manager::removal::forget_registration(&root, &executable),
+        ["installer", "delete-data"] => risunest_sync_manager::removal::delete_registered_data(&root, &executable),
+        ["uninstall", ..] => risunest_sync_manager::removal::cli(&root, &executable, &command[1..]).await,
         ["autostart", "status"] => {
             let status = platform::startup(&root, &executable, "status")?;
             println!(

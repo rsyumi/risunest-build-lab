@@ -2,7 +2,7 @@
 use super::*;
 use std::{
     borrow::Cow,
-    io::{Seek, SeekFrom, Write},
+    io::{Read, Seek, SeekFrom, Write},
     time::{Duration, Instant},
 };
 use tao::{
@@ -12,6 +12,7 @@ use tao::{
     window::WindowBuilder,
 };
 use wry::{WebContext, WebViewBuilder, WebViewBuilderExtWindows};
+use sha2::{Digest, Sha256};
 
 #[test]
 #[ignore = "manual synthetic Windows WebView memory experiment"]
@@ -20,9 +21,8 @@ fn compare_file_display() {
     let root = TempDir::new().unwrap();
     let dimension = 4096u32;
     let size = 54 + u64::from(dimension) * u64::from(dimension) * 4;
-    super::super::super::tests::write_blob(root.path(), "assets/probe.bmp", &[], "image/bmp");
-    let payload = root.path().join("assets/probe.bmp");
-    let mut file = fs::OpenOptions::new().write(true).open(&payload).unwrap();
+    let staged = root.path().join("probe.bmp");
+    let mut file = fs::OpenOptions::new().create_new(true).write(true).open(&staged).unwrap();
     file.set_len(size).unwrap();
     let mut header = vec![0u8; 54];
     header[..2].copy_from_slice(b"BM");
@@ -36,13 +36,28 @@ fn compare_file_display() {
     file.seek(SeekFrom::Start(0)).unwrap();
     file.write_all(&header).unwrap();
     drop(file);
-    fs::write(root.path().join("blobstore/metadata").join(format!("{}.json", hex::encode("assets/probe.bmp"))),
-        serde_json::to_vec(&serde_json::json!({"key":"assets/probe.bmp","kind":"asset","mime":"image/bmp","size":size})).unwrap()).unwrap();
+    let mut file = fs::File::open(&staged).unwrap();
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0; 64 * 1024];
+    loop {
+        let read = file.read(&mut buffer).unwrap();
+        if read == 0 { break; }
+        digest.update(&buffer[..read]);
+    }
+    let hash = hex::encode(digest.finalize());
+    let physical_key = format!("assets/objects/{}/{}", &hash[..2], &hash[2..]);
+    let payload = root.path().join(&physical_key);
+    fs::create_dir_all(payload.parent().unwrap()).unwrap();
+    fs::rename(staged, &payload).unwrap();
     let server = MediaServer::start(root.path().to_path_buf()).unwrap();
     let url = if buffered {
         "http://risuasset.localhost/probe".to_owned()
     } else {
-        format!("{}{}", server.base_url, hex::encode("assets/probe.bmp"))
+        format!(
+            "{}{}?mime=image%2Fbmp&size={size}",
+            server.base_url,
+            hex::encode(physical_key),
+        )
     };
     let page = format!(
         r#"<html><body><script>

@@ -211,7 +211,7 @@ describe('native prepared content import', () => {
                 if (command === 'asset_cas_job_finalize_content') return {
                     contentHash: manifestHash,
                     byteSize: 3,
-                    physicalKey: `assets-v2/objects/cd/${manifestHash.slice(2)}`,
+                    physicalKey: `assets/objects/cd/${manifestHash.slice(2)}`,
                     deduplicated: false,
                 }
                 if (
@@ -361,7 +361,7 @@ describe('native prepared content import', () => {
         resolveFinalize({
             contentHash: manifestHash,
             byteSize: 1,
-            physicalKey: `assets-v2/objects/cd/${manifestHash.slice(2)}`,
+            physicalKey: `assets/objects/cd/${manifestHash.slice(2)}`,
             deduplicated: false,
         })
 
@@ -408,7 +408,7 @@ describe('native prepared content import', () => {
         resolveFinalize({
             contentHash: manifestHash,
             byteSize: 1,
-            physicalKey: `assets-v2/objects/cd/${manifestHash.slice(2)}`,
+            physicalKey: `assets/objects/cd/${manifestHash.slice(2)}`,
             deduplicated: false,
         })
         await first
@@ -433,7 +433,7 @@ describe('native prepared content import', () => {
                 if (command === 'asset_cas_job_finalize_content') return {
                     contentHash: manifestHash,
                     byteSize: 1,
-                    physicalKey: `assets-v2/objects/cd/${manifestHash.slice(2)}`,
+                    physicalKey: `assets/objects/cd/${manifestHash.slice(2)}`,
                     deduplicated: false,
                 }
                 if (command === 'asset_cas_job_release') throw new Error('release response lost')
@@ -515,7 +515,7 @@ describe('native prepared content import', () => {
                 if (command === 'asset_cas_job_finalize_content') return {
                     contentHash: 'cd'.repeat(32),
                     byteSize: 1,
-                    physicalKey: `assets-v2/objects/cd/${'cd'.repeat(32).slice(2)}`,
+                    physicalKey: `assets/objects/cd/${'cd'.repeat(32).slice(2)}`,
                     deduplicated: false,
                 }
                 if (command === 'native_file_job_forget') return null
@@ -785,7 +785,7 @@ describe('native prepared content import', () => {
                 if (command === 'asset_cas_job_finalize_content') return {
                     contentHash: 'cd'.repeat(32),
                     byteSize: 1,
-                    physicalKey: `assets-v2/objects/cd/${'cd'.repeat(32).slice(2)}`,
+                    physicalKey: `assets/objects/cd/${'cd'.repeat(32).slice(2)}`,
                     deduplicated: false,
                 }
                 if (command === 'asset_cas_job_release') return true

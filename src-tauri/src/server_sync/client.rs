@@ -57,6 +57,13 @@ impl RetryBudget {
         }
     }
 
+    fn progress(&self) {
+        if let Ok(mut spent) = self.spent.lock() {
+            *spent = Duration::ZERO;
+            self.attempt.store(0, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     fn remaining(&self) -> Result<Duration> {
         let spent = self
             .spent
@@ -134,6 +141,24 @@ pub(crate) struct ServerClient {
     retry_budget: Arc<RetryBudget>,
     pub(crate) verified_bytes: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
     pub(crate) retryable_failure: Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
+    /// The cycle's activity slot. The transfer layer raises it while object
+    /// bytes are on the wire and restores what it replaced afterwards.
+    pub(crate) activity: Option<std::sync::Arc<std::sync::atomic::AtomicU8>>,
+}
+/// The activity id shown while frames or chunks are in flight.
+pub(crate) const ACTIVITY_UPLOADING: u8 = 4;
+/// Restores the activity the transfer replaced, on every exit path. Nested
+/// transfers restore in reverse order, so the outermost one ends the phase.
+pub(crate) struct TransferActivity<'a> {
+    activity: Option<&'a std::sync::atomic::AtomicU8>,
+    previous: u8,
+}
+impl Drop for TransferActivity<'_> {
+    fn drop(&mut self) {
+        if let Some(activity) = self.activity {
+            activity.store(self.previous, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
 }
 pub(crate) struct Reply {
     pub status: u16,
@@ -156,6 +181,7 @@ struct Identity {
     device_id: String,
     operation_watermark: risunest_sync_wire::Sequence,
     operation_pending: bool,
+    protocol_id: String,
 }
 impl ServerClient {
     /// Resolve only at an identity GET boundary. Never replay a mutation on a new URL.
@@ -233,6 +259,7 @@ impl ServerClient {
         candidate.retry_budget = self.retry_budget.clone();
         candidate.verified_bytes = self.verified_bytes.clone();
         candidate.retryable_failure = self.retryable_failure.clone();
+        candidate.activity = self.activity.clone();
         let head = verify(&candidate)?;
         *self.url.write().unwrap_or_else(|error| error.into_inner()) = candidate
             .url
@@ -265,6 +292,11 @@ impl ServerClient {
             return Err(response_error(reply));
         }
         let identity: Identity = canonical::decode(&reply.body, MAX_METADATA_BYTES)?;
+        // Checked before anything else this cycle would attempt, so an
+        // incompatible peer is named instead of rejecting a later request.
+        if identity.protocol_id != risunest_sync_wire::PROTOCOL_ID {
+            return Err(SyncError::new("server-incompatible", 409));
+        }
         identity.head.validate()?;
         let config = self.config();
         if identity.head.library_id != config.library_id || identity.device_id != config.device_id {
@@ -303,14 +335,33 @@ impl ServerClient {
             retry_budget,
             verified_bytes: None,
             retryable_failure: None,
+            activity: None,
         })
     }
     pub(crate) fn retry_budget(&self) -> Arc<RetryBudget> {
         self.retry_budget.clone()
     }
+    pub(crate) fn progress(&self) {
+        self.retry_budget.progress();
+        self.report_retryable_failure(None);
+    }
     pub fn verified(&self, bytes: u64) {
+        self.progress();
         if let Some(counter) = &self.verified_bytes {
             counter.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+    pub(crate) fn transferring(&self) -> TransferActivity<'_> {
+        match self.activity.as_deref() {
+            Some(activity) => TransferActivity {
+                previous: activity
+                    .swap(ACTIVITY_UPLOADING, std::sync::atomic::Ordering::Relaxed),
+                activity: Some(activity),
+            },
+            None => TransferActivity {
+                activity: None,
+                previous: 0,
+            },
         }
     }
     pub fn report_retryable_failure(&self, code: Option<&str>) {
@@ -377,6 +428,18 @@ impl ServerClient {
                 }
             }
         }
+    }
+
+    pub(crate) fn frame_request(&self, body: Vec<u8>) -> Result<Reply> {
+        self.request_with_policy(
+            Method::POST,
+            "uploads/frames",
+            &[],
+            Some(body),
+            &[],
+            MAX_METADATA_BYTES,
+            false,
+        )
     }
 
     fn request_with_policy(
@@ -603,7 +666,7 @@ impl ServerClient {
     }
 }
 
-fn response_code(reply: &Reply) -> Option<String> {
+pub(crate) fn response_code(reply: &Reply) -> Option<String> {
     serde_json::from_slice::<serde_json::Value>(&reply.body)
         .ok()
         .and_then(|value| {
@@ -709,7 +772,28 @@ pub(crate) fn response_error(reply: Reply) -> SyncError {
         .and_then(|v| v.as_str())
         .filter(|s| s.len() <= 64 && s.bytes().all(|b| b.is_ascii_lowercase() || b == b'-'))
         .unwrap_or("server-response-error");
+    // A rejection that names a record is the only one worth a log line. The key
+    // is a locator and stays in this device's own log.
+    if let Some(key) = value.as_ref().and_then(|v| v.get("key")).and_then(|v| v.as_str()) {
+        crate::native_log::global_state().record(
+            "error",
+            "server-sync",
+            format!(
+                "server rejected a record: status={} code={code} key={}",
+                reply.status,
+                log_key(key)
+            ),
+        );
+    }
     SyncError::new(code, reply.status)
+}
+/// Bounds a reported key and drops control characters before it reaches a log line.
+pub(crate) fn log_key(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(512)
+        .collect()
 }
 
 #[cfg(test)]
@@ -737,6 +821,40 @@ mod tests {
         }
     }
     #[test]
+    fn verified_progress_renews_more_than_five_minutes_of_transient_failures() {
+        let current = Arc::new(Mutex::new(Instant::now()));
+        let clock = current.clone();
+        let sleeper = current.clone();
+        let budget = Arc::new(RetryBudget::with_driver(
+            None,
+            Arc::new(move || *clock.lock().unwrap()),
+            Arc::new(move |d| *sleeper.lock().unwrap() += d),
+        ));
+        let mut client =
+            ServerClient::with_retry_budget(config("http://127.0.0.1:1"), None, budget.clone())
+                .unwrap();
+        client.retryable_failure = Some(Arc::new(Mutex::new(None)));
+        for _ in 0..10 {
+            budget.wait(None, Duration::from_secs(60)).unwrap();
+            client.report_retryable_failure(Some("server-timeout"));
+            client.verified(1024);
+            assert_eq!(budget.remaining().unwrap(), RETRY_BUDGET);
+            assert!(client
+                .retryable_failure
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .is_none());
+        }
+        budget.charge(RETRY_BUDGET).unwrap();
+        assert_eq!(
+            budget.wait(None, Duration::ZERO).unwrap_err().code,
+            "sync-retry-budget-exhausted"
+        );
+    }
+
+    #[test]
     fn fixed_endpoint_requires_https_except_loopback_and_rejects_embedded_credentials() {
         for url in [
             "https://sync.example/base",
@@ -755,6 +873,60 @@ mod tests {
         ] {
             assert!(config(url).validate().is_err());
         }
+    }
+
+    #[test]
+    fn a_peer_on_another_protocol_is_named_before_any_other_request() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let recorded = seen.clone();
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                let mut bytes = Vec::new();
+                // The blank line that ends a request head.
+                while !bytes.ends_with(&[13, 10, 13, 10]) {
+                    let mut byte = [0];
+                    if stream.read_exact(&mut byte).is_err() {
+                        break;
+                    }
+                    bytes.push(byte[0]);
+                }
+                let input = String::from_utf8(bytes).unwrap();
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push(input.lines().next().unwrap_or_default().to_owned());
+                let head = serde_json::to_value(risunest_sync_wire::RemoteHead {
+                    head_id: "a".repeat(64),
+                    ..risunest_sync_wire::RemoteHead::genesis("library".into(), "epoch".into())
+                        .unwrap()
+                })
+                .unwrap();
+                let body = serde_json::json!({"head":head,"deviceId":"device","operationWatermark":"0","operationPending":false,"protocolId":"risunest-sync/v0"}).to_string();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+                stream.flush().unwrap();
+            }
+        });
+        let client = ServerClient::new(config(&endpoint)).unwrap();
+        // Registration and the start of a cycle answer the same way, and neither
+        // goes on to ask the peer for anything else.
+        for new_registration in [true, false] {
+            let error = client.resolve_identity(new_registration).unwrap_err();
+            assert_eq!(error.code, "server-incompatible");
+            assert_eq!(error.status, 409);
+            assert!(!error.retryable);
+        }
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 2);
+        assert!(seen.iter().all(|line| line.starts_with("GET /session ")));
     }
 
     #[test]

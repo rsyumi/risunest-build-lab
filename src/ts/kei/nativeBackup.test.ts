@@ -26,7 +26,6 @@ function nativeRuntime() {
             readAssetAlias: vi.fn(),
             readAssetAliasesByKeys: vi.fn(),
             listAssetAliases: vi.fn(),
-            readAssetRepositoryAuthority: vi.fn(),
             readAssetOwnerHead: vi.fn(),
             release,
         }) as PersistentRevisionLease,
@@ -121,7 +120,6 @@ describe('tryNativeKeiBackup', () => {
             readAssetAlias: vi.fn(),
             readAssetAliasesByKeys: vi.fn(),
             listAssetAliases: vi.fn(),
-            readAssetRepositoryAuthority: vi.fn(),
             readAssetOwnerHead: vi.fn(),
             release,
         })

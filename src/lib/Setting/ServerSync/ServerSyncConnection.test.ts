@@ -14,16 +14,18 @@ const state = vi.hoisted(() => {
       };
     }),
     initialize: vi.fn(),
-    bind: vi.fn(async () => {
+    bind: vi.fn(async (_config: unknown, prepare?: () => Promise<unknown>) => {
       trace.push("bind");
+      await prepare?.();
     }),
-    reregister: vi.fn(async () => {
+    reregister: vi.fn(async (_config: unknown, prepare?: () => Promise<unknown>) => {
       trace.push("reregister");
+      await prepare?.();
     }),
     synchronize: vi.fn(async () => {
       trace.push("synchronize");
     }),
-    unbind: vi.fn(async () => {}),
+    unbind: vi.fn(async (_config: unknown, prepare?: () => Promise<unknown>) => { await prepare?.(); }),
     pause: vi.fn(async () => {}),
     waitForIdle: vi.fn(async () => {}),
   };
@@ -135,6 +137,20 @@ afterEach(async () => {
   target.remove();
 });
 describe("settings server connection", () => {
+  it("clears an old action error when a new sync attempt starts", async () => {
+    const snapshot = bound();
+    state.controller.snapshot.mockReturnValue(snapshot);
+    state.controller.unbind.mockRejectedValueOnce({ code: "library-operation-busy" });
+    component = mount(ServerSyncConnection, { target });
+    await tick();
+    button(text.disconnect).click();
+    await vi.waitFor(() => expect(target.textContent).toContain("library-operation-busy"));
+    snapshot.attemptId = 1;
+    snapshot.running = true;
+    state.emit({ ...snapshot });
+    await tick();
+    expect(target.textContent).not.toContain("library-operation-busy");
+  });
   it("prefills public navigation in the manual entry without binding or initializing an engine", async () => {
     component = mount(ServerSyncConnection, {
       target,
@@ -153,7 +169,7 @@ describe("settings server connection", () => {
       "",
       "",
     ]);
-    expect(target.querySelector("details")!.open).toBe(true);
+    expect(button(text.manualEntry).getAttribute("aria-expanded")).toBe("true");
     expect(state.controller.bind).not.toHaveBeenCalled();
     expect(state.controller.initialize).not.toHaveBeenCalled();
     expect(state.controller.synchronize).not.toHaveBeenCalled();
@@ -198,7 +214,7 @@ describe("settings server connection", () => {
       libraryId: "lib",
       deviceId: "device",
       token: "a".repeat(64),
-    });
+    }, expect.any(Function));
     expect(state.trace).toEqual(["bind", "policy:remote", "synchronize"]);
     await vi.waitFor(() => expect(target.querySelector("dl.review")).toBeNull());
     expect(
@@ -249,7 +265,9 @@ describe("settings server connection", () => {
     });
     await tick();
     expect(target.textContent).toContain(`${text.running}: (corrupt-chunk)`);
-    expect(target.textContent).toContain(`${text.progress.applying} · 12 / 48 (25%)`);
+    const bar = target.querySelector("[data-setting-progress]")!;
+    expect(bar.textContent).toContain(`${text.progress.applying} · 12 / 48`);
+    expect(bar.textContent).toContain("25%");
     expect(target.textContent).toContain("2.0 MiB");
     expect(target.textContent).not.toContain("Sync could not finish");
     expect(button(text.syncNow).disabled).toBe(true);
@@ -277,7 +295,7 @@ describe("settings server connection", () => {
         libraryId: "bound",
         deviceId: "device2",
         token: "b".repeat(64),
-      }),
+      }, expect.any(Function)),
     );
     expect(state.controller.bind).not.toHaveBeenCalled();
     await vi.waitFor(() =>
@@ -307,7 +325,7 @@ it("receives a cold registration after mounting, shows the check without secrets
     expect(state.controller.bind).toHaveBeenCalledExactlyOnceWith({
       ...vector.registration,
       endpoint: "https://sync.example/base/",
-    }),
+    }, expect.any(Function)),
   );
   await vi.waitFor(() => expect(target.querySelector("dl.review")).toBeNull());
   expect(target.textContent).not.toContain(

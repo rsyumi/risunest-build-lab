@@ -1,8 +1,11 @@
 <script lang="ts">
     import { onDestroy, onMount } from 'svelte'
     import QRCode from 'qrcode'
+    import NumberInput from 'src/lib/UI/GUI/NumberInput.svelte'
     import SettingGroup from '../RisuNest/SettingGroup.svelte'
     import SettingButton from '../RisuNest/SettingButton.svelte'
+    import SettingProgress from '../RisuNest/SettingProgress.svelte'
+    import SettingToggle from '../RisuNest/SettingToggle.svelte'
     import { alertConfirm, alertNormal } from 'src/ts/alert'
     import { DBState } from 'src/ts/stores.svelte'
     import { getExternalStorageBridge } from 'src/ts/storage/sync/external/bridge'
@@ -44,6 +47,8 @@
     let storageState = $state<ExternalStorageState | null>(null)
     let adding = $state(false)
     let busy = $state(false)
+    /** Which action is running, so only the button that started it shows a spinner. */
+    let activeAction = $state('')
     let error = $state('')
     let expanded = $state<Record<string, 'history' | 'conflicts' | 'quota' | ''>>({})
     let history = $state<Record<string, ExternalHistoryItem[]>>({})
@@ -51,15 +56,18 @@
     let historyLoading = $state<Record<string, boolean>>({})
     let conflicts = $state<Record<string, ExternalConflictSummary[]>>({})
     let conflictCursor = $state<Record<string, ExternalConflictCursor | undefined>>({})
+    let conflictsLoading = $state<Record<string, boolean>>({})
     let quota = $state<Record<string, ExternalQuotaSummary>>({})
     let recoveryKey = $state('')
+    let recoveryPanel = $state<HTMLDivElement | undefined>()
     let connectionSettings = $state<ExternalConnectionSettingsMaterial | null>(null)
+    let connectionSettingsPanel = $state<HTMLDivElement | undefined>()
     let connectionSettingsQr = $state('')
     /** The history entry whose restore scope is open, and what is ticked in it. */
     let restoreScope = $state<{ id: string; sections: ExternalRestoreSection[] } | null>(null)
     let pollTimer: ReturnType<typeof setTimeout> | undefined
 
-    const sectionLabels: Record<ExternalRestoreSection, keyof typeof strings> = {
+    const sectionLabels: Record<ExternalRestoreSection, 'hypa' | 'devicePlugins' | 'deviceSettings'> = {
         hypa: 'hypa',
         'local-plugins': 'devicePlugins',
         'local-settings': 'deviceSettings',
@@ -113,14 +121,20 @@
     })
 
     async function refresh(silent = false): Promise<void> {
-        if (!silent) busy = true
+        if (!silent) {
+            busy = true
+            activeAction = 'refresh'
+        }
         try {
             storageState = await bridge.getState()
             error = ''
         } catch (reason) {
             error = externalErrorMessage(strings, reason)
         } finally {
-            if (!silent) busy = false
+            if (!silent) {
+                busy = false
+                activeAction = ''
+            }
         }
     }
 
@@ -160,6 +174,7 @@
     ): Promise<void> {
         if (job === 'restore' && !(await alertConfirm(strings.restore))) return
         busy = true
+        activeAction = `${job}:${connection.id}`
         try {
             if (job === 'backup' || job === 'sync' || job === 'cleanup') {
                 const operation = requestExternalStorageNow(connection.id, job)
@@ -201,6 +216,7 @@
             error = externalErrorMessage(strings, reason)
         } finally {
             busy = false
+            activeAction = ''
         }
     }
 
@@ -256,10 +272,6 @@
 
     async function openDetails(connection: ExternalConnectionSummary, kind: 'history' | 'conflicts' | 'quota'): Promise<void> {
         restoreScope = null
-        if (expanded[connection.id] === kind) {
-            expanded[connection.id] = ''
-            return
-        }
         expanded[connection.id] = kind
         try {
             if (kind === 'history') await loadHistory(connection, false)
@@ -274,17 +286,22 @@
         connection: ExternalConnectionSummary,
         append: boolean,
     ): Promise<void> {
-        const page = await bridge.listConflicts(
-            append ? conflictCursor[connection.id] : undefined,
-            50,
-        )
-        const pageItems = page.conflicts.filter(
-            conflict => conflict.connectionId === connection.id,
-        )
-        conflicts[connection.id] = append
-            ? [...(conflicts[connection.id] ?? []), ...pageItems]
-            : pageItems
-        conflictCursor[connection.id] = page.nextCursor
+        conflictsLoading[connection.id] = true
+        try {
+            const page = await bridge.listConflicts(
+                append ? conflictCursor[connection.id] : undefined,
+                50,
+            )
+            const pageItems = page.conflicts.filter(
+                conflict => conflict.connectionId === connection.id,
+            )
+            conflicts[connection.id] = append
+                ? [...(conflicts[connection.id] ?? []), ...pageItems]
+                : pageItems
+            conflictCursor[connection.id] = page.nextCursor
+        } finally {
+            conflictsLoading[connection.id] = false
+        }
     }
 
     async function loadHistory(connection: ExternalConnectionSummary, append: boolean): Promise<void> {
@@ -361,6 +378,7 @@
     async function removeConnection(connection: ExternalConnectionSummary): Promise<void> {
         if (!(await alertConfirm(`${strings.remove}: ${externalConnectionTitle(strings, connection)}`))) return
         busy = true
+        activeAction = `remove:${connection.id}`
         try {
             await bridge.removeConnection(connection.id)
             await refreshExternalStorageProductionState()
@@ -369,6 +387,7 @@
             error = externalErrorMessage(strings, reason)
         } finally {
             busy = false
+            activeAction = ''
         }
     }
 
@@ -451,12 +470,14 @@
 
     async function createConnectionSettings(connection: ExternalConnectionSummary): Promise<void> {
         busy = true
+        activeAction = `settings:${connection.id}`
         try {
             await displayConnectionSettings(await bridge.beginConnectionSettingsExport(connection.id))
         } catch (reason) {
             error = externalErrorMessage(strings, reason)
         } finally {
             busy = false
+            activeAction = ''
         }
     }
 
@@ -545,13 +566,17 @@
         return connectionStatusLabel(connection.status)
     }
 
+    function jobSize(job: ExternalJobSummary): string {
+        return `${bytes(job.completedBytes)}${job.totalBytes ? ` / ${bytes(job.totalBytes)}` : ''}`
+    }
+
     function jobSummary(job: ExternalJobSummary): string {
         if (job.kind === 'cleanup' && job.state === 'succeeded' && job.result?.deletedObjects !== undefined && job.result.deletedBytes !== undefined) {
             const summary = strings.cleanupSummary.replace('{0}', job.result.deletedObjects).replace('{1}', bytes(job.result.deletedBytes))
             return job.result.stopReason === 'complete' ? summary : `${summary} ${strings.cleanupPartial}`
         }
         const progress = externalJobProgress(job)
-        const size = `${bytes(job.completedBytes)}${job.totalBytes ? ` / ${bytes(job.totalBytes)}` : ''}`
+        const size = jobSize(job)
         const state = externalJobIsActive(job) ? strings.jobActive[job.kind] : `${strings.jobKinds[job.kind]} · ${jobLabel(job)}`
         return progress === null ? `${state} · ${size}` : `${state} · ${size} (${Math.round(progress * 100)}%)`
     }
@@ -577,6 +602,13 @@
         return strings.atLeast.replace('{0}', bytes(value))
     }
 
+    $effect(() => {
+        if (recoveryKey) recoveryPanel?.focus()
+    })
+    $effect(() => {
+        if (connectionSettings) connectionSettingsPanel?.focus()
+    })
+
     onMount(async () => {
         await refresh()
         schedulePoll()
@@ -590,7 +622,7 @@
 <SettingGroup id="risunest-external-storage" title={strings.title} description={strings.help}>
     {#snippet actions()}
         {#if storageState?.supported && !adding}<SettingButton disabled={busy} onclick={() => adding = true}>{strings.add}</SettingButton>{/if}
-        <SettingButton variant="secondary" disabled={busy} onclick={() => refresh()}>{strings.refresh}</SettingButton>
+        {#if storageState?.supported !== false}<SettingButton variant="secondary" busy={activeAction === 'refresh'} disabled={busy} onclick={() => refresh()}>{strings.refresh}</SettingButton>{/if}
     {/snippet}
 
     {#if !storageState && busy}<p class="p-4 text-sm text-textcolor2">{strings.loading}</p>
@@ -623,43 +655,43 @@
                 <dl class="kv">
                     {#if connection.purpose === 'sync'}<dt>{strings.lastSync}</dt><dd>{when(connection.lastSyncAtMs)}</dd>{/if}
                     <dt>{strings.lastBackup}</dt><dd>{when(connection.lastBackupAtMs)}</dd>
-                    {#if job && (externalJobIsActive(job) || job.state === 'succeeded')}<dt>{strings.progress}</dt><dd role="status" aria-live="polite">{jobSummary(job)}</dd>{/if}
+                    {#if job && job.state === 'succeeded'}<dt>{strings.progress}</dt><dd role="status" aria-live="polite">{jobSummary(job)}</dd>{/if}
                 </dl>
                 {#if job && externalJobIsActive(job)}
                     {@const progress = externalJobProgress(job)}
-                    <div class="thin" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow={progress === null ? undefined : Math.round(progress * 100)}>
-                        <i class={progress === null ? 'pulse' : ''} style={`width:${progress === null ? 100 : progress * 100}%`}></i>
-                    </div>
+                    <SettingProgress label={strings.jobActive[job.kind]} detail={jobSize(job)} fraction={progress} />
                 {/if}
 
                 {#if connection.capturePolicy}
                     {@const policy = connection.capturePolicy}
-                    <h4 class="policy-title">{strings.scope}</h4>
+                    <h3 class="policy-title">{strings.scope}</h3>
                     <p class="policy-note">{strings.scopeHelp}</p>
-                    <p class="policy-row fixed"><span>{strings.library}</span><span class="value">{strings.included}</span></p>
-                    <label class="policy-row"><input type="checkbox" disabled={busy} checked={policy.hypa} onchange={event => changeCapturePolicy(connection, { ...policy, hypa: event.currentTarget.checked })} /><span>{strings.hypa}</span></label>
-                    <label class="policy-row"><input type="checkbox" disabled={busy} checked={policy.localPlugins} onchange={event => changeCapturePolicy(connection, { ...policy, localPlugins: event.currentTarget.checked })} /><span>{strings.devicePlugins}</span></label>
-                    <label class="policy-row"><input type="checkbox" disabled={busy} checked={policy.localSettings} onchange={event => changeCapturePolicy(connection, { ...policy, localSettings: event.currentTarget.checked })} /><span>{strings.deviceSettings}</span></label>
+                    <p class="always"><span>{strings.library}</span><span class="value">{strings.included}</span></p>
+                    <SettingToggle showLabel label={strings.hypa} disabled={busy} checked={policy.hypa} onchange={checked => changeCapturePolicy(connection, { ...policy, hypa: checked })} />
+                    <SettingToggle showLabel label={strings.devicePlugins} disabled={busy} checked={policy.localPlugins} onchange={checked => changeCapturePolicy(connection, { ...policy, localPlugins: checked })} />
+                    <SettingToggle showLabel label={strings.deviceSettings} disabled={busy} checked={policy.localSettings} onchange={checked => changeCapturePolicy(connection, { ...policy, localSettings: checked })} />
                 {/if}
 
                 <div class="actions">
                     {#if job && job.state === 'waiting' && job.error?.action === 'retry' && (job.kind === 'backup' || job.kind === 'sync')}
                         <SettingButton disabled={busy} onclick={() => runJob(connection, job.kind === 'backup' ? 'backup' : 'sync')}>{strings.retryAction}</SettingButton>
                     {/if}
-                    <SettingButton disabled={busy || (job && externalJobIsActive(job))} onclick={() => runJob(connection, 'backup')}>{strings.runBackup}</SettingButton>
-                    {#if connection.purpose === 'sync'}<SettingButton disabled={busy || (job && externalJobIsActive(job))} onclick={() => runJob(connection, 'sync')}>{strings.runSync}</SettingButton>{/if}
+                    <SettingButton busy={activeAction === `backup:${connection.id}`} disabled={busy || (job && externalJobIsActive(job))} onclick={() => runJob(connection, 'backup')}>{strings.runBackup}</SettingButton>
+                    {#if connection.purpose === 'sync'}<SettingButton busy={activeAction === `sync:${connection.id}`} disabled={busy || (job && externalJobIsActive(job))} onclick={() => runJob(connection, 'sync')}>{strings.runSync}</SettingButton>{/if}
                     {#if connection.purpose === 'sync' && !syncTarget}<SettingButton variant="secondary" disabled={busy} onclick={() => selectSyncTarget(connection)}>{strings.makeSyncTarget}</SettingButton>{/if}
                     {#if job && externalJobIsActive(job)}<SettingButton variant="secondary" onclick={async () => { await bridge.cancelJob(job.id); await refresh(true) }}>{strings.cancel}</SettingButton>{/if}
                 </div>
 
                 <div class="tabs" role="tablist">
                     {#each (['history', 'conflicts', 'quota'] as const) as tab (tab)}
-                        <button type="button" role="tab" aria-selected={expanded[connection.id] === tab} class="tab" onclick={() => openDetails(connection, tab)}>{tab === 'history' ? strings.history : tab === 'conflicts' ? strings.conflicts : strings.quota}</button>
+                        <button type="button" role="tab" id="{connection.id}-{tab}-tab" aria-controls="{connection.id}-{tab}-panel" aria-selected={expanded[connection.id] === tab} class="tab" onclick={() => openDetails(connection, tab)}>{tab === 'history' ? strings.history : tab === 'conflicts' ? strings.conflicts : strings.quota}</button>
                     {/each}
                 </div>
 
                 {#if expanded[connection.id] === 'history'}
-                    <div class="list" role="tabpanel">
+                    <div class="list" role="tabpanel" id="{connection.id}-history-panel" aria-labelledby="{connection.id}-history-tab">
+                        {#if historyLoading[connection.id]}<p class="empty">{strings.loading}</p>
+                        {:else if (history[connection.id] ?? []).length === 0}<p class="empty">{strings.noHistory}</p>{/if}
                         {#each history[connection.id] ?? [] as item (item.id)}
                             <div class="item">
                                 <div class="line">
@@ -669,16 +701,16 @@
                                         <SettingButton variant="secondary" disabled={!item.complete || !item.verified} onclick={() => exportSnapshot(connection.id, item.snapshotId ?? item.id)}>{strings.download}</SettingButton>
                                         {#if item.pinned}<SettingButton variant="secondary" disabled>{strings.pinned}</SettingButton>
                                         {:else}<SettingButton variant="secondary" onclick={() => runJob(connection, 'pin-history', { snapshotId: item.snapshotId ?? item.id })}>{strings.pin}</SettingButton>{/if}
-                                        {#if item.deletable}<SettingButton variant="secondary" disabled={busy} onclick={() => deleteHistory(connection, item)}>{strings.deleteHistory}</SettingButton>{/if}
+                                        {#if item.deletable}<SettingButton variant="danger" disabled={busy} onclick={() => deleteHistory(connection, item)}>{strings.deleteHistory}</SettingButton>{/if}
                                     </span>
                                 </div>
                                 {#if restoreScope && restoreScope.id === item.id}
                                     {@const chosen = restoreScope.sections}
                                     <div class="scope">
-                                        <h4 class="policy-title">{strings.chooseRestore}</h4>
-                                        <p class="policy-row fixed"><span>{strings.library}</span><span class="value">{strings.included}</span></p>
+                                        <h3 class="policy-title">{strings.chooseRestore}</h3>
+                                        <p class="always"><span>{strings.library}</span><span class="value">{strings.included}</span></p>
                                         {#each externalRestorableSections(item) as section (section)}
-                                            <label class="policy-row"><input type="checkbox" disabled={busy} checked={chosen.includes(section)} onchange={event => toggleRestoreSection(section, event.currentTarget.checked)} /><span>{strings[sectionLabels[section]]}</span></label>
+                                            <SettingToggle showLabel label={strings[sectionLabels[section]]} disabled={busy} checked={chosen.includes(section)} onchange={checked => toggleRestoreSection(section, checked)} />
                                             <p class="policy-note">{strings[sectionHelp[section]]}</p>
                                         {/each}
                                         <div class="actions">
@@ -692,7 +724,9 @@
                         {#if historyCursor[connection.id]}<div><SettingButton variant="secondary" busy={historyLoading[connection.id]} onclick={() => loadHistory(connection, true)}>{strings.loadMore}</SettingButton></div>{/if}
                     </div>
                 {:else if expanded[connection.id] === 'conflicts'}
-                    <div class="list" role="tabpanel">
+                    <div class="list" role="tabpanel" id="{connection.id}-conflicts-panel" aria-labelledby="{connection.id}-conflicts-tab">
+                        {#if conflictsLoading[connection.id]}<p class="empty">{strings.loading}</p>
+                        {:else if (conflicts[connection.id] ?? []).length === 0}<p class="empty">{strings.noConflicts}</p>{/if}
                         {#each conflicts[connection.id] ?? [] as conflict (conflict.id)}
                             {@const pending = !conflict.remotePointConfirmed}
                             {@const actions = externalConflictActions(conflict)}
@@ -721,7 +755,7 @@
                                         <SettingButton variant="secondary" disabled={busy} onclick={() => restoreConflict(conflict, 'remote')}>{strings.restoreRemoteCopy}</SettingButton>
                                         <SettingButton variant="secondary" disabled={busy} onclick={() => exportConflict(conflict, 'remote')}>{strings.exportRemoteCopy}</SettingButton>
                                     {/if}
-                                    <SettingButton variant="secondary" disabled={busy} onclick={() => deleteConflict(connection, conflict)}>{strings.deleteConflict}</SettingButton>
+                                    <SettingButton variant="danger" disabled={busy} onclick={() => deleteConflict(connection, conflict)}>{strings.deleteConflict}</SettingButton>
                                 </div>
                             </div>
                         {/each}
@@ -730,7 +764,7 @@
                 {:else if expanded[connection.id] === 'quota'}
                     {@const usage = quota[connection.id]}
                     {@const retention = connection.retentionPolicy}
-                    <div class="usage" role="tabpanel">
+                    <div class="usage" role="tabpanel" id="{connection.id}-quota-panel" aria-labelledby="{connection.id}-quota-tab">
                         {#if usage}
                             <dl class="kv">
                                 <dt>{strings.usedByService}</dt>
@@ -750,20 +784,20 @@
                             {/if}
                         {/if}
                         {#if connection.capabilities.snapshotDiscovery && connection.capabilities.leaseOperations && connection.capabilities.deleteObjects}
-                            <SettingButton disabled={busy || connection.status !== 'ready' || storageState.jobs.some(job => job.connectionId === connection.id && externalJobIsActive(job))} onclick={() => runJob(connection, 'cleanup')}>{strings.cleanup}</SettingButton>
+                            <SettingButton busy={activeAction === `cleanup:${connection.id}`} disabled={busy || connection.status !== 'ready' || storageState.jobs.some(job => job.connectionId === connection.id && externalJobIsActive(job))} onclick={() => runJob(connection, 'cleanup')}>{strings.cleanup}</SettingButton>
                         {/if}
                         <p class="text-textcolor2">{strings.retentionHelp} {strings.retentionOtherDevices}</p>
                         <p class="text-textcolor2">{strings.cleanupTrashNotice} {strings.providerCapacityHelp}</p>
-                        <label class="policy-row fixed">
+                        <label class="policy-row spread">
                             <span>{strings.retentionCount}</span>
                             <span class="amount">
-                                <input type="number" class="number" disabled={busy} inputmode="numeric" min={RETENTION_LIMITS.keepCount[0]} max={RETENTION_LIMITS.keepCount[1]} value={retention.keepCount} onchange={event => commitRetentionLimit(connection, 'keepCount', event.currentTarget)} />
+                                <NumberInput size="sm" className="w-20 text-right tabular-nums" disabled={busy} min={RETENTION_LIMITS.keepCount[0]} max={RETENTION_LIMITS.keepCount[1]} value={retention.keepCount} onChange={event => commitRetentionLimit(connection, 'keepCount', event.currentTarget)} />
                             </span>
                         </label>
-                        <label class="policy-row fixed">
+                        <label class="policy-row spread">
                             <span>{strings.retentionDays}</span>
                             <span class="amount">
-                                <input type="number" class="number" disabled={busy} inputmode="numeric" min={RETENTION_LIMITS.keepDays[0]} max={RETENTION_LIMITS.keepDays[1]} value={retention.keepDays} onchange={event => commitRetentionLimit(connection, 'keepDays', event.currentTarget)} />
+                                <NumberInput size="sm" className="w-20 text-right tabular-nums" disabled={busy} min={RETENTION_LIMITS.keepDays[0]} max={RETENTION_LIMITS.keepDays[1]} value={retention.keepDays} onChange={event => commitRetentionLimit(connection, 'keepDays', event.currentTarget)} />
                                 <span class="value">{strings.retentionDaysUnit}</span>
                             </span>
                         </label>
@@ -771,23 +805,30 @@
                 {/if}
 
                 <div class="foot">
-                    <SettingButton variant="secondary" onclick={() => createConnectionSettings(connection)}>{strings.connectionSettings}</SettingButton>
-                    <SettingButton variant="danger" disabled={busy} onclick={() => removeConnection(connection)}>{strings.remove}</SettingButton>
+                    <SettingButton variant="secondary" busy={activeAction === `settings:${connection.id}`} disabled={busy} onclick={() => createConnectionSettings(connection)}>{strings.connectionSettings}</SettingButton>
+                    <SettingButton variant="danger" busy={activeAction === `remove:${connection.id}`} disabled={busy} onclick={() => removeConnection(connection)}>{strings.remove}</SettingButton>
                 </div>
             </article>
         {/each}
     {/if}
-    {#if error}<p class="px-4 pb-4 text-sm text-danger-400" role="alert">{error}</p>{/if}
+    {#if error}<p class="px-4 py-3 text-sm text-danger-400" role="alert">{error}</p>{/if}
 </SettingGroup>
 
 {#if recoveryKey}
-    <div class="fixed inset-0 z-60 flex items-center justify-center bg-black/65 p-4" role="dialog" aria-modal="true" aria-label={strings.recovery}>
-        <div class="dialog">
-            <h3 class="text-lg font-bold">{strings.recovery}</h3>
+    <div class="fixed inset-0 z-[1000] flex items-center justify-center bg-black/60 p-4">
+        <div
+            bind:this={recoveryPanel}
+            tabindex="-1"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="external-recovery-title"
+            class="dialog outline-hidden"
+        >
+            <h3 id="external-recovery-title" class="text-lg font-bold">{strings.recovery}</h3>
             <p class="text-sm text-textcolor2">{strings.recoveryNotice}</p>
             <label class="block text-sm">
                 <span class="font-medium">{strings.recoveryCode}</span>
-                <input readonly class="mt-1 w-full select-all rounded border border-darkborderc bg-darkbg p-2 font-mono" value={recoveryKey} />
+                <input readonly class="mt-1 w-full select-all rounded-md border border-darkborderc bg-darkbg p-2 font-mono shadow-xs" value={recoveryKey} />
                 <span class="mt-1 block text-[13px] text-textcolor2">{strings.recoveryCodeHelp}</span>
             </label>
             <div class="actions"><SettingButton onclick={closeRecoveryKey}>{strings.closeRecovery}</SettingButton></div>
@@ -796,11 +837,18 @@
 {/if}
 
 {#if connectionSettings}
-    <div class="fixed inset-0 z-60 flex items-center justify-center bg-black/65 p-4" role="dialog" aria-modal="true" aria-label={strings.connectionSettings}>
-        <div class="dialog">
-            <h3 class="text-lg font-bold">{strings.connectionSettings}</h3>
+    <div class="fixed inset-0 z-[1000] flex items-center justify-center bg-black/60 p-4">
+        <div
+            bind:this={connectionSettingsPanel}
+            tabindex="-1"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="external-connection-settings-title"
+            class="dialog outline-hidden"
+        >
+            <h3 id="external-connection-settings-title" class="text-lg font-bold">{strings.connectionSettings}</h3>
             <p class="text-sm text-textcolor2">{strings.connectionSettingsNotice}</p>
-            {#if connectionSettingsQr}<img class="mx-auto rounded bg-white p-2" src={connectionSettingsQr} alt={strings.connectionSettingsQr} />
+            {#if connectionSettingsQr}<img class="mx-auto rounded-md bg-white p-2" src={connectionSettingsQr} alt={strings.connectionSettingsQr} />
             {:else}<p class="rounded-md border border-darkborderc bg-darkbg p-3 text-sm">{strings.connectionSettingsFileOnly}</p>{/if}
             <div class="actions"><SettingButton onclick={saveConnectionSettingsFile}>{strings.saveConnectionSettings}</SettingButton><SettingButton variant="secondary" onclick={closeConnectionSettings}>{strings.closeRecovery}</SettingButton></div>
         </div>
@@ -811,7 +859,7 @@
     .card {
         display: grid;
         gap: 0.75rem;
-        padding: 1rem;
+        padding: 0.75rem 1rem;
         min-width: 0;
     }
     .card-head {
@@ -840,7 +888,7 @@
     }
     .policy-title {
         margin: 0.25rem 0 0;
-        font-size: 0.875rem;
+        font-size: 0.9375rem;
         font-weight: 600;
     }
     .policy-note {
@@ -856,10 +904,27 @@
         margin: 0;
         font-size: 0.875rem;
     }
-    .policy-row.fixed {
+    .policy-row.spread {
         justify-content: space-between;
     }
     .policy-row .value {
+        color: var(--risu-theme-textcolor2);
+    }
+    .always {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.35rem;
+        margin: 0;
+        font-size: 0.8125rem;
+        color: var(--risu-theme-textcolor2);
+    }
+    .always .value {
+        font-weight: 600;
+    }
+    .empty {
+        margin: 0;
+        padding: 0.25rem 0;
+        font-size: 0.8125rem;
         color: var(--risu-theme-textcolor2);
     }
     .status {
@@ -908,20 +973,6 @@
         align-items: center;
         gap: 0.35rem;
     }
-    .number {
-        width: 5rem;
-        padding: 0.25rem 0.4rem;
-        border: 1px solid var(--risu-theme-darkborderc);
-        border-radius: 0.375rem;
-        background: var(--risu-theme-darkbg);
-        color: var(--risu-theme-textcolor);
-        font-size: 0.875rem;
-        font-variant-numeric: tabular-nums;
-        text-align: right;
-    }
-    .number:disabled {
-        opacity: 0.6;
-    }
     .kv {
         display: grid;
         grid-template-columns: auto minmax(0, 1fr);
@@ -930,28 +981,13 @@
         font-size: 0.8125rem;
     }
     .kv dt {
-        color: color-mix(in srgb, var(--risu-theme-textcolor) 60%, transparent);
+        color: var(--risu-theme-textcolor2);
     }
     .kv dd {
         margin: 0;
         min-width: 0;
         overflow-wrap: anywhere;
         font-variant-numeric: tabular-nums;
-    }
-    .thin {
-        height: 4px;
-        border-radius: 99px;
-        background: color-mix(in srgb, var(--risu-theme-textcolor) 8%, transparent);
-        overflow: hidden;
-    }
-    .thin i {
-        display: block;
-        height: 100%;
-        background: linear-gradient(90deg, #22c8c6, var(--risu-theme-primary-500));
-        transition: width 0.3s;
-    }
-    .thin i.pulse {
-        animation: pulse 1.4s ease-in-out infinite;
     }
     .actions,
     .foot,
@@ -1056,8 +1092,7 @@
         }
     }
     @media (prefers-reduced-motion: reduce) {
-        .status-dot,
-        .thin i.pulse {
+        .status-dot {
             animation: none;
         }
     }

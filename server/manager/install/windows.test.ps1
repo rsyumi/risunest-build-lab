@@ -37,6 +37,10 @@ fn main() {
 
     $installer = Join-Path $testRoot "guard-test.exe"
     $hook = (Resolve-Path (Join-Path $PSScriptRoot "windows.nsh")).Path
+    $defaultInstallDir = Join-Path $testRoot "default-install"
+    $installDir = Join-Path $testRoot "installed"
+    $payload = Join-Path $testRoot "hook-output.txt"
+    "installed" | Set-Content -Encoding utf8 $payload
     $nsi = Join-Path $testRoot "guard-test.nsi"
     @"
 Unicode true
@@ -45,9 +49,20 @@ OutFile "$installer"
 InstallDir "`$TEMP\RisuNestGuardTest"
 RequestExecutionLevel user
 SilentInstall silent
+!include LogicLib.nsh
+!include FileFunc.nsh
+Var DeleteAppDataCheckboxState
+Var UpdateMode
+!define RISUNEST_SYNC_DEFAULT_INSTALL_DIR "$defaultInstallDir"
+!define RISUNEST_SYNC_INSTALL_DIR "$installDir"
+!macro CheckIfAppIsRunning APP PRODUCT
+!macroend
 !include "$hook"
 Section
+  SetOutPath `$INSTDIR
   !insertmacro NSIS_HOOK_PREINSTALL
+  File /oname=hook-output.txt "$payload"
+  CreateShortcut "`$INSTDIR\RisuNest Sync.lnk" "`$INSTDIR\hook-output.txt"
   !insertmacro NSIS_HOOK_POSTINSTALL
 SectionEnd
 Section "Uninstall"
@@ -65,14 +80,24 @@ SectionEnd
         throw "makensis failed with exit code $LASTEXITCODE."
     }
 
-    $installDir = Join-Path $testRoot "installed"
     New-Item -ItemType Directory -Path $installDir | Out-Null
     Copy-Item $fake (Join-Path $installDir "risunest-sync-manager.exe")
     $log = Join-Path $testRoot "commands.log"
     $env:RISUNEST_NSIS_TEST_LOG = $log
-    $process = Start-Process -FilePath $installer -ArgumentList @("/S", "/D=$installDir") -Wait -PassThru -WindowStyle Hidden
+    $process = Start-Process -FilePath $installer -ArgumentList @("/S", "/D=$defaultInstallDir") -Wait -PassThru -WindowStyle Hidden
     if ($process.ExitCode -ne 0) {
         throw "NSIS success harness exited with $($process.ExitCode)."
+    }
+    if (!(Test-Path (Join-Path $installDir "hook-output.txt"))) {
+        throw "NSIS copied files to the output directory selected before the install hook changed `$INSTDIR."
+    }
+    if (Test-Path (Join-Path $defaultInstallDir "hook-output.txt")) {
+        throw "NSIS left installed files in the superseded install directory."
+    }
+    $shortcutPath = Join-Path $installDir "RisuNest Sync.lnk"
+    $shortcut = (New-Object -ComObject WScript.Shell).CreateShortcut($shortcutPath)
+    if ($shortcut.TargetPath -ne (Join-Path $installDir "hook-output.txt") -or !(Test-Path -LiteralPath $shortcut.TargetPath)) {
+        throw "NSIS created a shortcut whose target does not match the installed file location."
     }
     $expected = "installer|finish|" + ("a" * 64)
     if ((Get-Content $log) -notcontains $expected) {
@@ -80,7 +105,7 @@ SectionEnd
     }
 
     $env:RISUNEST_NSIS_FAIL_AUTOSTART = "1"
-    $process = Start-Process -FilePath $installer -ArgumentList @("/S", "/D=$installDir") -Wait -PassThru -WindowStyle Hidden
+    $process = Start-Process -FilePath $installer -ArgumentList @("/S", "/D=$defaultInstallDir") -Wait -PassThru -WindowStyle Hidden
     if ($process.ExitCode -eq 0) {
         throw "A quiet postinstall failure returned success."
     }

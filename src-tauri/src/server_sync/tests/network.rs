@@ -126,11 +126,14 @@ impl axum::serve::Listener for Listener {
 }
 #[derive(Default)]
 struct Faults {
+    frame_code: AtomicU16,
+    frame_lengths: Mutex<Vec<usize>>,
     code: AtomicU16,
     after_accept: bool,
     latency: Duration,
     chunks: Mutex<BTreeMap<String, usize>>,
     requests: AtomicU64,
+    paths: Mutex<BTreeMap<String, usize>>,
     uploads_active: AtomicU64,
     downloads_active: AtomicU64,
     uploads_peak: AtomicU64,
@@ -146,7 +149,8 @@ impl Drop for InFlight<'_> {
 }
 async fn proxy(State(state): State<Arc<Faults>>, request: Request, next: Next) -> Response {
     state.requests.fetch_add(1, Ordering::Relaxed);
-    let counters = if request.uri().path().contains("/chunks/") {
+    *state.paths.lock().unwrap().entry(request.uri().path().to_owned()).or_default() += 1;
+    let counters = if request.uri().path().contains("/chunks/") || request.uri().path() == "/uploads/frames" {
         Some((&state.uploads_active, &state.uploads_peak))
     } else if request.method().as_str() == "GET" && request.uri().path().starts_with("/objects/") {
         Some((&state.downloads_active, &state.downloads_peak))
@@ -160,6 +164,14 @@ async fn proxy(State(state): State<Arc<Faults>>, request: Request, next: Next) -
     });
     tokio::time::sleep(state.latency).await;
     let path = request.uri().path();
+    if path == "/uploads/frames" {
+        state.frame_lengths.lock().unwrap().push(request.headers().get("content-length").unwrap().to_str().unwrap().parse().unwrap());
+        let code = state.frame_code.swap(0, Ordering::Relaxed);
+        if code > 0 {
+            axum::body::to_bytes(request.into_body(), risunest_sync_wire::transfer::MAX_BATCH_BYTES).await.unwrap();
+            return Response::builder().status(code).header("retry-after", "0").body(Body::empty()).unwrap();
+        }
+    }
     if path.starts_with("/objects/") && request.method().as_str() == "GET" {
         if let Some(range) = request.headers().get("range") {
             let range = range.to_str().unwrap().to_owned();
@@ -272,7 +284,7 @@ fn run_case(
     let target_dir = tempfile::tempdir().unwrap();
     let source = Cache::open(source_dir.path()).unwrap();
     let target = Cache::open(target_dir.path()).unwrap();
-    let payload: Vec<_> = (0..2 * risunest_sync_wire::transfer::UPLOAD_CHUNK_BYTES + 17)
+    let payload: Vec<_> = (0..4 * risunest_sync_wire::transfer::UPLOAD_CHUNK_BYTES + 17)
         .map(|i| (i.wrapping_mul(137) % 251) as u8)
         .collect();
     let hash = source.put(&payload).unwrap();
@@ -324,7 +336,7 @@ fn run_case(
         // The second parallel response was persisted even though the first
         // request failed, and is reused after reopening the native journal.
         assert_eq!(ranges.get("bytes=1048576-2097151"), Some(&1));
-        assert_eq!(ranges.get("bytes=2097152-2097168"), Some(&1));
+        assert_eq!(ranges.get("bytes=4194304-4194320"), Some(&1));
     }
     let result = (
         bytes.load(Ordering::Relaxed),
@@ -363,6 +375,114 @@ fn slow_network_full_transfer_gate() {
     for (bits, millis) in [(10_000_000, 80), (1_000_000, 200)] {
         let result = run_case(bits / 8, Duration::from_millis(millis), 0, false, 0);
         eprintln!("synthetic bits/sec={bits}, request delay={millis}ms: (HTTP bytes, requests, upload ms, download ms, upload concurrency, download concurrency)={result:?}");
-        assert!(result.0 < 4 * 1024 * 1024 + 32 * 1024);
+        assert!(result.0 < 8 * 1024 * 1024 + 64 * 1024);
     }
+}
+
+#[test]
+#[ignore = "Explicit synthetic cross-record transfer measurement"]
+fn bounded_record_upload_measurement() {
+    for latency in [0, 50] {
+        for batched in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let server = Arc::new(Store::init(root.path()).unwrap());
+            let device = server.add_device().unwrap();
+            let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+            let listener = runtime.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+            let endpoint = format!("http://{}", listener.local_addr().unwrap());
+            let faults = Arc::new(Faults { latency: Duration::from_millis(latency), ..Default::default() });
+            let served = server.clone();
+            let observed = faults.clone();
+            let task = runtime.spawn(async move {
+                let router = http::router(served).layer(axum::middleware::from_fn_with_state(observed, proxy));
+                axum::serve(listener, router).await.unwrap();
+            });
+            let client = ServerClient::new(ServerConfig { directory: None, endpoint, library_id: device.library_id, device_id: device.device_id, token: device.token }).unwrap();
+            let local = tempfile::tempdir().unwrap();
+            let cache = Cache::open(local.path()).unwrap();
+            let records = (0..200).map(|n| cache.project_bytes(format!("synthetic record {n:04}").as_bytes(), &[], &[], vec![]).unwrap()).collect::<Vec<_>>();
+            let transfer = Transfer::new(&client, &cache).unwrap();
+            let started = Instant::now();
+            if batched {
+                let objects = records.iter().flat_map(|r| r.objects.clone()).collect::<std::collections::BTreeSet<_>>().into_iter().collect::<Vec<_>>();
+                transfer.upload(&objects, &[]).unwrap();
+            } else {
+                for record in &records { transfer.upload(&record.objects, &[]).unwrap(); }
+            }
+            let elapsed = started.elapsed().as_millis();
+            for record in records { for hash in record.objects { assert_eq!(server.get_object(&hash).unwrap(), cache.read(&hash, 1024 * 1024).unwrap()); } }
+            let paths = faults.paths.lock().unwrap();
+            eprintln!("records=200 delay_ms={latency} batched={batched} elapsed_ms={elapsed} missing={} frames={} requests={}", paths.get("/objects/missing").unwrap_or(&0), paths.get("/uploads/frames").unwrap_or(&0), faults.requests.load(Ordering::Relaxed));
+            if batched { assert_eq!(paths.get("/objects/missing"), Some(&1)); assert_eq!(paths.get("/uploads/frames"), Some(&1)); }
+            task.abort();
+            runtime.shutdown_timeout(Duration::from_secs(2));
+        }
+    }
+}
+
+fn frame_case(sizes: &[usize], depth: usize, rate: u64, failure: u16, mixed_bases: bool) {
+    let root = tempfile::tempdir().unwrap();
+    let server = Arc::new(Store::init(root.path()).unwrap());
+    let device = server.add_device().unwrap();
+    let runtime = tokio::runtime::Builder::new_multi_thread().worker_threads(2).enable_all().build().unwrap();
+    let listener = runtime.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+    let endpoint = format!("http://{}", listener.local_addr().unwrap());
+    let faults = Arc::new(Faults { frame_code: AtomicU16::new(failure), latency: Duration::from_millis(50), ..Default::default() });
+    let served = server.clone();
+    let observed = faults.clone();
+    let wire = Arc::new(AtomicU64::new(0));
+    let counted = wire.clone();
+    let task = runtime.spawn(async move {
+        let router = http::router(served).layer(axum::middleware::from_fn_with_state(observed, proxy));
+        axum::serve(Listener { listener, rate, bytes: counted }, router).await.unwrap();
+    });
+    let client = ServerClient::new(ServerConfig { directory: None, endpoint, library_id: device.library_id, device_id: device.device_id, token: device.token }).unwrap();
+    let local = tempfile::tempdir().unwrap();
+    let cache = Cache::open(local.path()).unwrap();
+    let hashes = sizes.iter().enumerate().map(|(i, size)| cache.put(&vec![(i + 1) as u8; *size]).unwrap()).collect::<Vec<_>>();
+    let transfer = Transfer::new(&client, &cache).unwrap().with_frame_depth(depth);
+    let mut targets = Vec::new();
+    if mixed_bases {
+        for (i, hash) in hashes.iter().enumerate() {
+            let mut base = cache.read(hash, sizes[i]).unwrap();
+            base[0] = 42;
+            let base = cache.put(&base).unwrap();
+            if i < 2 { transfer.upload(std::slice::from_ref(&base), &[]).unwrap(); }
+            targets.push(crate::server_sync::transfer::UploadTarget { hash: hash.clone(), bases: vec![base].into(), base_lease: i == 0 });
+        }
+    }
+    let started = Instant::now();
+    if mixed_bases { transfer.upload_targets(&targets).unwrap(); }
+    else { transfer.upload(&hashes, &[]).unwrap(); }
+    let elapsed = started.elapsed().as_millis();
+    for (hash, size) in hashes.iter().zip(sizes) { assert_eq!(server.get_object(hash).unwrap(), cache.read(hash, *size).unwrap()); }
+    let peak = faults.uploads_peak.load(Ordering::Relaxed);
+    if rate > 0 { assert!(transfer.frame_byte_limit() < 2 * 1024 * 1024); }
+    eprintln!("adapted_frame_limit={}", transfer.frame_byte_limit());
+    assert!(peak <= 2);
+    let lengths = faults.frame_lengths.lock().unwrap();
+    assert!(lengths.iter().all(|size| *size <= 4 * 1024 * 1024 + 53));
+    if failure > 0 { assert!(lengths.iter().skip(2).any(|size| *size < lengths[0])); }
+    if sizes.iter().all(|size| *size < 4 * 1024 * 1024) && failure == 0 && rate == 0 && !mixed_bases { assert_eq!(peak, depth as u64); }
+    eprintln!("sizes={sizes:?} depth={depth} rate={rate} failure={failure} elapsed_ms={elapsed} wire_bytes={} requests={} peak={peak} frames={lengths:?} paths={:?}", wire.load(Ordering::Relaxed), faults.requests.load(Ordering::Relaxed), faults.paths.lock().unwrap());
+    task.abort();
+    runtime.shutdown_timeout(Duration::from_secs(2));
+}
+
+#[test]
+fn frame_batches_join_two_requests_and_shrink_after_transient_failure() {
+    frame_case(&[1024 * 1024; 8], 2, 0, 503, false);
+}
+
+#[test]
+fn one_batch_keeps_leased_unleased_and_missing_base_contexts() {
+    frame_case(&[64 * 1024; 3], 2, 0, 0, true);
+}
+
+#[test]
+#[ignore = "Explicit synthetic frame sizing and concurrency measurement"]
+fn frame_sizing_measurement() {
+    for depth in [1, 2] { frame_case(&[1024 * 1024; 8], depth, 0, 0, false); }
+    frame_case(&[256 * 1024, 1024 * 1024, 2 * 1024 * 1024, 3 * 1024 * 1024, 4 * 1024 * 1024, 8 * 1024 * 1024], 2, 0, 0, false);
+    frame_case(&[1024 * 1024; 8], 2, 32 * 1024, 0, false);
 }

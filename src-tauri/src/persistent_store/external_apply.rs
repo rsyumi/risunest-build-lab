@@ -5,7 +5,7 @@
 use super::{
     active_generation, current_revision, record_apply as rows,
     server_sync_projection::{preserve_local_view, ServerPayload},
-    AssetRepositoryAuthorityState, PersistentStore,
+    PersistentStore,
     PreparedReplaceCommit, StoreError, StoreResult,
 };
 use crate::{
@@ -116,15 +116,6 @@ impl PersistentStore {
                 return invalid("External snapshot logical fingerprint differs from its catalog");
             }
 
-            let compatibility_hash = hex::encode(application.fingerprint);
-            let migration_id = format!("external-{}", &compatibility_hash[..32]);
-            self.replace_put_asset_repository_authority(
-                &stage.staging_id,
-                &AssetRepositoryAuthorityState::V2 {
-                    migration_id,
-                    compatibility_hash,
-                },
-            )?;
             self.prepare_replace_commit(&stage.staging_id, Some(application.expected_revision))
         })();
 

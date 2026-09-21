@@ -50,6 +50,7 @@ vi.mock('src/ts/storage/nativeFileJobManager', () => ({
 }))
 vi.mock('src/ts/gui/nativeFileJobProgress', () => ({
     nativeFileJobProgressText: vi.fn(() => 'Writing backup'),
+    nativeFileJobTitle: vi.fn(() => 'Export RisuSave'),
 }))
 vi.mock('src/ts/storage/sync/external/bridge', () => ({
     getExternalStorageBridge: () => ({

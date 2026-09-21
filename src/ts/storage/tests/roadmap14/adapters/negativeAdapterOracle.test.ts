@@ -5,7 +5,7 @@ import { observeRisuSaveNegativeFixture } from './negativeAdapterOracle'
 
 vi.mock('../../../database.svelte', () => ({ presetTemplate: {} }))
 vi.mock('../../../../globalApi.svelte', () => ({ forageStorage: {} }))
-vi.mock('src/ts/platform', () => ({ isNodeServer: false, isTauri: false }))
+vi.mock('src/ts/platform', () => ({ isTauri: false }))
 
 describe('Roadmap 14 negative adapter oracle', () => {
     beforeEach(async () => {

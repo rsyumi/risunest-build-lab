@@ -17,6 +17,7 @@ import { open } from '@tauri-apps/plugin-dialog'
 import { readFile } from '@tauri-apps/plugin-fs'
 import type { NativeFileJobOptions, NativeFileJobSource } from '../storage/nativeFileJobs'
 import { importDesktopNativeModulePath } from '../storage/nativeModuleFileRoute'
+import { assertModuleMCPImportAllowed, StdioModuleImportError } from './mcp/moduleImport'
 
 export interface MCPModule{
     url: string
@@ -221,6 +222,7 @@ export async function readModule(buf:Buffer):Promise<RisuModule> {
     }
 
     let module = main.module
+    assertModuleMCPImportAllowed(module)
 
     const maxConcurrentAssetSaves = 10
     const retryDelayMs = 5000
@@ -344,7 +346,7 @@ export async function importModule() {
                 {},
                 (error) => {
                     console.error(error)
-                    alertError(language.errors.noData)
+                    alertError(error instanceof StdioModuleImportError ? error : language.errors.noData)
                 },
             )
             return
@@ -378,7 +380,8 @@ export async function importModuleData(f: { name: string; data: Uint8Array }) {
             DBState.db.modules.push(module)
         } catch (error) {
             console.error(error)
-            alertError(language.errors.noData)
+            alertError(error instanceof StdioModuleImportError ? error : language.errors.noData)
+            return
         }
         alertNormal(language.successImport)
         return
@@ -390,13 +393,14 @@ export async function importModuleData(f: { name: string; data: Uint8Array }) {
             DBState.db.modules.push(module)
         } catch (error) {
             console.error(error)
-            alertError(language.errors.noData)
+            alertError(error instanceof StdioModuleImportError ? error : language.errors.noData)
         }
         return
     }
     try {
         const importData = JSON.parse(Buffer.from(fileData).toString())
         if (importData.type === 'risuModule') {
+            assertModuleMCPImportAllowed(importData)
             if (!importData.name || !importData.id) {
                 alertError(language.errors.noData)
                 return
@@ -459,6 +463,10 @@ export async function importModuleData(f: { name: string; data: Uint8Array }) {
         }
     } catch (error) {
         console.error(error)
+        if (error instanceof StdioModuleImportError) {
+            alertError(error)
+            return
+        }
     }
 
     alertNormal(language.errors.noData)

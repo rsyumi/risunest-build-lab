@@ -5,16 +5,15 @@ use super::{
         android_web_authorization_policy, authorization_policy, exchange_authorization_code,
         ios_authorization_policy, verify_google_grant,
     },
-    config::AuthorizationSettings,
+    config::{self, AuthorizationSettings},
     create,
+    provider::GoogleDrive,
 };
 use crate::external_storage::{
     auth::{AuthorizationCode, SecretBytes},
     cleanup::{self, CleanupLimits, CleanupRequest, JobRoots, ObservedRoots, RepositoryView},
     contract::*,
-    fake::{
-        loopback_dependencies, with_transport, FakeLeaseClock, MemoryVault, TestDependencies,
-    },
+    fake::{loopback_dependencies, with_transport, FakeLeaseClock, MemoryVault, TestDependencies},
     http::{HttpRequest, HttpResponse, HttpTransport, NativeHttpTransport},
     leases::LeaseContext,
     packaging::RemoteObject,
@@ -128,9 +127,7 @@ impl HttpTransport for InspectingTransport {
     }
 }
 
-fn deps_with_inspection(
-    secret: Vec<u8>,
-) -> (Arc<InspectingTransport>, TestDependencies) {
+fn deps_with_inspection(secret: Vec<u8>) -> (Arc<InspectingTransport>, TestDependencies) {
     let transport = Arc::new(InspectingTransport::new());
     let dependencies = with_transport(
         transport.clone(),
@@ -264,6 +261,58 @@ fn request_lines(server: &WireServer) -> Vec<String> {
                 .to_owned()
         })
         .collect()
+}
+
+#[test]
+fn setup_inspects_and_creates_visible_drive_folders() {
+    runtime().block_on(async {
+        let server = WireServer::start(vec![
+            json_reply(
+                200,
+                json!({
+                    "id": "picked-folder",
+                    "name": "Existing",
+                    "mimeType": "application/vnd.google-apps.folder",
+                    "trashed": false
+                }),
+            ),
+            json_reply(
+                201,
+                json!({
+                    "id": "created-folder",
+                    "name": "Backups",
+                    "mimeType": "application/vnd.google-apps.folder",
+                    "trashed": false
+                }),
+            ),
+        ]);
+        let test = deps_with(Some(stored_secret(NOW_MS + 3_600_000)));
+        let provider = GoogleDrive::new(test.dependencies);
+        let config = connection(server.url.as_str());
+        let cancel = Cancellation::default();
+
+        let inspected = provider
+            .inspect_setup_folder(&config, &secret_ref(), ACCOUNT, "picked-folder", &cancel)
+            .await
+            .unwrap();
+        assert_eq!(inspected.id, "picked-folder");
+        assert_eq!(inspected.name, "Existing");
+
+        let created = provider
+            .create_setup_folder(&config, &secret_ref(), ACCOUNT, "Backups", &cancel)
+            .await
+            .unwrap();
+        assert_eq!(created.id, "created-folder");
+        assert_eq!(created.name, "Backups");
+
+        let lines = request_lines(&server);
+        assert!(lines[0].starts_with("GET /synthetic/drive/v3/files/picked-folder?"));
+        assert!(lines[1].starts_with("POST /synthetic/drive/v3/files?"));
+        let requests = server.requests.lock().unwrap();
+        let body = String::from_utf8(requests[1].body.clone()).unwrap();
+        assert!(body.contains("\"name\":\"Backups\""));
+        assert!(body.contains("application/vnd.google-apps.folder"));
+    });
 }
 
 struct UnusedCleanupView;
@@ -1633,8 +1682,7 @@ fn listing_accepts_false_and_absent_incomplete_search_with_a_cursor() {
             }),
         ));
         let server = WireServer::start(replies);
-        let (transport, test) =
-            deps_with_inspection(stored_secret(NOW_MS + 3_600_000));
+        let (transport, test) = deps_with_inspection(stored_secret(NOW_MS + 3_600_000));
         let cancel = Cancellation::default();
         let (provider, repository) = opened(&server, &test, &cancel).await;
         for limit in [0u16, 1001] {
@@ -1721,8 +1769,7 @@ fn second_control_page_authorization_failure_aborts_open_without_a_later_request
             error_reply(403, "insufficientFilePermissions"),
             control_reply(vec![descriptor_file("must-not-be-requested")]),
         ]);
-        let (transport, test) =
-            deps_with_inspection(stored_secret(NOW_MS + 3_600_000));
+        let (transport, test) = deps_with_inspection(stored_secret(NOW_MS + 3_600_000));
         let provider = provider_of(&test.dependencies);
         let cancel = Cancellation::default();
         let error = provider
@@ -1929,18 +1976,9 @@ fn control_listing_rejects_a_repeated_page_token_cycle() {
         let server = WireServer::start(vec![
             about_reply(),
             folder_reply(),
-            json_reply(
-                200,
-                json!({ "files": [], "nextPageToken": "page-2" }),
-            ),
-            json_reply(
-                200,
-                json!({ "files": [], "nextPageToken": "page-1" }),
-            ),
-            json_reply(
-                200,
-                json!({ "files": [], "nextPageToken": "page-2" }),
-            ),
+            json_reply(200, json!({ "files": [], "nextPageToken": "page-2" })),
+            json_reply(200, json!({ "files": [], "nextPageToken": "page-1" })),
+            json_reply(200, json!({ "files": [], "nextPageToken": "page-2" })),
         ]);
         let test = deps_with(Some(stored_secret(NOW_MS + 3_600_000)));
         let provider = provider_of(&test.dependencies);
@@ -2100,11 +2138,8 @@ async fn rejected_android_token_info(reply: Reply) -> (ProviderError, String) {
     let test = deps_with(None);
     let config = connection(server.url.as_str());
     let settings = AuthorizationSettings::parse(&config, "android").unwrap();
-    let account = AccountKey::pending(
-        super::config::PROVIDER_ID,
-        &settings.api("/").unwrap(),
-    )
-    .unwrap();
+    let account =
+        AccountKey::pending(super::config::PROVIDER_ID, &settings.api("/").unwrap()).unwrap();
     let cancel = Cancellation::default();
     let error = verify_google_grant(
         &test.dependencies,
@@ -2167,6 +2202,7 @@ fn android_grant_binding_fails_before_account_lookup() {
 #[test]
 fn a_code_exchange_returns_a_storable_refresh_payload() {
     runtime().block_on(async {
+        let platform_client_id = client_id(config::platform_key());
         let server = WireServer::start(vec![
             json_reply(
                 200,
@@ -2184,8 +2220,9 @@ fn a_code_exchange_returns_a_storable_refresh_payload() {
         let grant = || AuthorizationCode {
             code: SecretBytes(zeroize::Zeroizing::new(b"synthetic-code".to_vec())),
             verifier: SecretBytes(zeroize::Zeroizing::new(b"synthetic-verifier".to_vec())),
-            client_id: client_id("windows"),
+            client_id: platform_client_id.clone(),
             redirect_url: url::Url::parse("http://127.0.0.1:52001/oauth").unwrap(),
+            picked_file_id: None,
         };
         let config = connection(server.url.as_str());
         let payload = exchange_authorization_code(
@@ -2211,7 +2248,7 @@ fn a_code_exchange_returns_a_storable_refresh_payload() {
         assert!(body.contains("grant_type=authorization_code"));
         assert!(body.contains("code_verifier=synthetic-verifier"));
         assert!(body.contains("client_secret=synthetic-client-secret"));
-        assert!(body.contains(&format!("client_id={}", client_id("windows"))));
+        assert!(body.contains(&format!("client_id={platform_client_id}")));
         assert!(records[1]
             .headers
             .starts_with("GET /synthetic/drive/v3/about?fields=user"));
@@ -2228,6 +2265,57 @@ fn a_code_exchange_returns_a_storable_refresh_payload() {
                 .unwrap()
                 .kind,
             ErrorKind::ReauthRequired
+        );
+    });
+}
+
+#[test]
+fn a_rejected_code_exchange_preserves_the_oauth_error_details() {
+    runtime().block_on(async {
+        let server = WireServer::start(vec![json_reply(
+            400,
+            json!({
+                "error": "invalid_grant",
+                "error_description": "synthetic description that must stay native"
+            }),
+        )]);
+        let test = deps_with(Some(stored_secret(NOW_MS)));
+        let grant = AuthorizationCode {
+            code: SecretBytes(zeroize::Zeroizing::new(b"synthetic-code".to_vec())),
+            verifier: SecretBytes(zeroize::Zeroizing::new(b"synthetic-verifier".to_vec())),
+            client_id: client_id(config::platform_key()),
+            redirect_url: url::Url::parse("http://127.0.0.1:52001/oauth").unwrap(),
+            picked_file_id: None,
+        };
+        let error = match exchange_authorization_code(
+            &test.dependencies,
+            &connection(server.url.as_str()),
+            &grant,
+            None,
+            &Cancellation::default(),
+        )
+        .await
+        {
+            Ok(_) => panic!("the synthetic token rejection must fail"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind, ErrorKind::ReauthRequired);
+        assert_eq!(error.http_status, Some(400));
+        assert_eq!(error.oauth_error.as_deref(), Some("invalid_grant"));
+        assert_eq!(
+            error.oauth_error_description.as_deref(),
+            Some("synthetic description that must stay native")
+        );
+        assert_eq!(
+            serde_json::to_value(&error).unwrap(),
+            json!({
+                "kind": "reauthRequired",
+                "httpStatus": 400,
+                "retryAtMs": null,
+                "oauthError": "invalid_grant",
+                "oauthErrorDescription": "synthetic description that must stay native"
+            })
         );
     });
 }
@@ -2253,7 +2341,11 @@ fn deleting_checks_the_parent_and_role_of_the_file_before_removing_it() {
         replies.push(json_reply(200, member("descriptor", FOLDER)));
         replies.push(json_reply(200, member("pack", "another-folder")));
         replies.push(json_reply(200, member("inventoryPage", FOLDER)));
-        replies.push(Reply::Http { status: 204, headers: vec![], body: Vec::new() });
+        replies.push(Reply::Http {
+            status: 204,
+            headers: vec![],
+            body: Vec::new(),
+        });
         let server = WireServer::start(replies);
         let test = deps_with(Some(stored_secret(NOW_MS + 3_600_000)));
         let cancel = Cancellation::default();
@@ -2298,10 +2390,16 @@ fn deleting_checks_the_parent_and_role_of_the_file_before_removing_it() {
             );
         }
 
-        provider.delete_object(&repository, &locator("inventory-file"), &cancel).await.unwrap();
+        provider
+            .delete_object(&repository, &locator("inventory-file"), &cancel)
+            .await
+            .unwrap();
         let lines = request_lines(&server);
         assert_eq!(lines.len(), 10);
-        assert_eq!(lines[9], "DELETE /synthetic/drive/v3/files/inventory-file HTTP/1.1");
+        assert_eq!(
+            lines[9],
+            "DELETE /synthetic/drive/v3/files/inventory-file HTTP/1.1"
+        );
         assert!(lines[3].contains("fields=id%2Cparents%2CappProperties"));
         assert_eq!(
             lines[4],

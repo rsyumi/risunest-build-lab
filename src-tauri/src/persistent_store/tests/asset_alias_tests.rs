@@ -699,65 +699,7 @@ fn alias_catalog_pages_and_deletes_only_the_typed_alias() {
 }
 
 #[test]
-fn authority_marker_rejects_preparing_and_activates_v2_with_the_generation() {
-    let directory = tempfile::tempdir().expect("create authority directory");
-    let mut store = PersistentStore::open(directory.path()).expect("open persistent store");
-    assert_eq!(
-        store
-            .read_asset_repository_authority(None)
-            .expect("read initial authority")
-            .value,
-        AssetRepositoryAuthorityState::Legacy
-    );
-
-    let staging = store.replace_begin().expect("begin preparing replacement");
-    store
-        .replace_put_asset_repository_authority(
-            &staging.staging_id,
-            &AssetRepositoryAuthorityState::Preparing {
-                migration_id: "migration-atomic".to_owned(),
-                source_revision: 0,
-            },
-        )
-        .expect("stage preparing authority");
-    assert!(store.replace_commit(&staging.staging_id, Some(0)).is_err());
-    assert_eq!(store.revision().expect("read unchanged revision"), 0);
-    assert_eq!(
-        store
-            .read_asset_repository_authority(None)
-            .expect("read unchanged authority")
-            .value,
-        AssetRepositoryAuthorityState::Legacy
-    );
-
-    store
-        .replace_put_asset_repository_authority(
-            &staging.staging_id,
-            &AssetRepositoryAuthorityState::V2 {
-                migration_id: "migration-atomic".to_owned(),
-                compatibility_hash: "9a".repeat(32),
-            },
-        )
-        .expect("stage v2 authority");
-    let activated = store
-        .replace_commit(&staging.staging_id, Some(0))
-        .expect("activate v2 authority");
-    assert_eq!(
-        store
-            .read_asset_repository_authority(None)
-            .expect("read v2 authority"),
-        super::Versioned {
-            revision: activated.revision,
-            value: AssetRepositoryAuthorityState::V2 {
-                migration_id: "migration-atomic".to_owned(),
-                compatibility_hash: "9a".repeat(32),
-            },
-        }
-    );
-}
-
-#[test]
-fn v2_compatibility_materialization_and_export_fail_closed_on_corrupt_owner_manifest() {
+fn materialization_and_export_fail_closed_on_corrupt_owner_manifest() {
     use crate::asset_repository::{owner_manifest_codec, PayloadCas};
 
     let directory = tempfile::tempdir().expect("create owner projection directory");
@@ -813,15 +755,6 @@ fn v2_compatibility_materialization_and_export_fail_closed_on_corrupt_owner_mani
             )],
         )
         .expect("stage owner head");
-    store
-        .replace_put_asset_repository_authority(
-            &staging.staging_id,
-            &AssetRepositoryAuthorityState::V2 {
-                migration_id: "projection-test".to_owned(),
-                compatibility_hash: "ab".repeat(32),
-            },
-        )
-        .expect("stage v2 authority");
     let activated = store
         .replace_commit(&staging.staging_id, Some(0))
         .expect("activate v2 generation");
@@ -1522,7 +1455,9 @@ fn staged_asset_aliases_activate_with_zero_and_missing_payloads() {
 
 #[test]
 fn working_set_asset_alias_batch_is_atomic_with_imported_owners() {
-    let (_directory, mut store, database) = open_fixture();
+    use crate::asset_repository::{owner_manifest_codec, PayloadCas};
+
+    let (directory, mut store, database) = open_fixture();
     let mut imported_root = root(&database);
     imported_root["modules"] = json!([{
         "id": "native-module",
@@ -1563,17 +1498,48 @@ fn working_set_asset_alias_batch_is_atomic_with_imported_owners() {
             metadata: json!({}),
         },
     ];
+    let cas = PayloadCas::new(directory.path()).expect("open payload CAS");
+    let character_manifest = cas
+        .prepare_bytes(
+            &owner_manifest_codec::encode_owner_manifest(&[
+                owner_manifest_codec::OwnerManifestEntry {
+                    tuple: [
+                        "character asset".to_owned(),
+                        "assets/native-character.bin".to_owned(),
+                        "BIN".to_owned(),
+                    ],
+                    payload_hash: Some(hex::decode("91".repeat(32)).unwrap().try_into().unwrap()),
+                },
+            ])
+            .unwrap(),
+        )
+        .expect("prepare character owner manifest");
+    let module_manifest = cas
+        .prepare_bytes(
+            &owner_manifest_codec::encode_owner_manifest(&[
+                owner_manifest_codec::OwnerManifestEntry {
+                    tuple: [
+                        "module asset".to_owned(),
+                        "assets/native-module.bin".to_owned(),
+                        "BIN".to_owned(),
+                    ],
+                    payload_hash: Some(hex::decode("92".repeat(32)).unwrap().try_into().unwrap()),
+                },
+            ])
+            .unwrap(),
+        )
+        .expect("prepare module owner manifest");
     let heads = vec![
         AssetOwnerHead::present(
             AssetOwnerLocator::CharacterAdditionalAssets {
                 character_id: "native-character".to_owned(),
             },
-            "93".repeat(32),
+            character_manifest.content_hash,
             1,
         ),
         AssetOwnerHead::present(
             AssetOwnerLocator::RootModuleAssets { index: 0 },
-            "94".repeat(32),
+            module_manifest.content_hash,
             1,
         ),
     ];

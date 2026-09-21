@@ -18,6 +18,15 @@ struct Secrets {
     directory: Option<risunest_sync_connect::Directory>,
 }
 
+#[cfg(target_os = "android")]
+pub(crate) fn remove_android_keys() -> std::result::Result<(), String> {
+    protection::remove_keys().map_err(|_| "secret-cleanup-unavailable".into())
+}
+
+pub(crate) fn remove_owned(root: &Path, id: &str) -> std::result::Result<(), String> {
+    platform::remove(root, id).map_err(|_| "secret-cleanup-unavailable".into())
+}
+
 fn unavailable() -> SyncError {
     SyncError::new("device-credential-unavailable", 409)
 }
@@ -35,7 +44,13 @@ impl StoredConfig {
             directory: config.directory.clone(),
         })
         .map_err(|_| unavailable())?;
-        platform::write(root, &stored.credential_id, &bytes)?;
+        crate::cleanup_secrets::tracked_write(
+            root,
+            crate::cleanup_secrets::Purpose::ServerSync,
+            &stored.credential_id,
+            || Ok(platform::write(root, &stored.credential_id, &bytes)),
+        )
+        .map_err(|_| unavailable())??;
         Ok(stored)
     }
     pub fn resolve(&self, root: &Path) -> Result<ServerConfig> {
@@ -182,6 +197,17 @@ mod protection {
             let _ = JAVA.set((vm, class));
         }
     }
+    pub fn remove_keys() -> Result<()> {
+        let (vm, class) = JAVA.get().ok_or_else(unavailable)?;
+        let mut env = vm.attach_current_thread().map_err(|_| unavailable())?;
+        let class: &JClass = class.as_obj().into();
+        let result = env.call_static_method(class, "removeKeys", "()V", &[]);
+        if result.is_err() {
+            let _ = env.exception_clear();
+        }
+        result.map(|_| ()).map_err(|_| unavailable())
+    }
+
     pub fn transform(bytes: &[u8], seal: bool) -> Result<Vec<u8>> {
         let (vm, class) = JAVA.get().ok_or_else(unavailable)?;
         let mut env = vm.attach_current_thread().map_err(|_| unavailable())?;
@@ -219,7 +245,11 @@ mod platform {
         get_generic_password(SERVICE, id).map_err(|_| unavailable())
     }
     pub fn remove(_: &Path, id: &str) -> Result<()> {
-        delete_generic_password(SERVICE, id).map_err(|_| unavailable())
+        match delete_generic_password(SERVICE, id) {
+            Ok(()) => Ok(()),
+            Err(error) if error.code() == -25300 => Ok(()),
+            Err(_) => Err(unavailable()),
+        }
     }
 }
 
@@ -239,9 +269,12 @@ mod platform {
             .map_err(|_| unavailable())
     }
     pub fn remove(_: &Path, id: &str) -> Result<()> {
-        keyring::Entry::new("io.github.rsyumi.risunest.server-sync", id)
+        match keyring::Entry::new("io.github.rsyumi.risunest.server-sync", id)
             .and_then(|entry| entry.delete_credential())
-            .map_err(|_| unavailable())
+        {
+            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Err(_) => Err(unavailable()),
+        }
     }
 }
 
@@ -281,9 +314,17 @@ mod macos_tests {
             stored.resolve(root.path()).unwrap().directory.unwrap().key,
             directory.key
         );
-        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
+        let inventory = root.path().join("owned-secret-index");
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+        let marker = std::fs::read_dir(inventory).unwrap().next().unwrap().unwrap();
+        let ownership = std::fs::read_to_string(marker.path()).unwrap();
+        assert!(ownership.contains(&stored.credential_id));
+        assert!(!ownership.contains(&config.token));
+        assert!(!ownership.contains(&directory.key));
         stored.remove(root.path()).unwrap();
         assert!(stored.resolve(root.path()).is_err());
+        crate::cleanup_secrets::remove_all(root.path()).unwrap();
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 0);
     }
 }
 

@@ -20,6 +20,7 @@ pub(crate) struct AuthorizationPolicy {
     pub client_id: String,
     pub redirect_url: url::Url,
     pub scopes: Vec<String>,
+    pub picker: bool,
 }
 pub(crate) struct PendingAuthorization {
     policy: AuthorizationPolicy,
@@ -31,6 +32,7 @@ pub(crate) struct AuthorizationCode {
     pub verifier: SecretBytes,
     pub client_id: String,
     pub redirect_url: url::Url,
+    pub picked_file_id: Option<String>,
 }
 impl PendingAuthorization {
     pub fn start(policy: AuthorizationPolicy) -> Result<(Self, url::Url)> {
@@ -57,6 +59,15 @@ impl PendingAuthorization {
             .append_pair("state", state.secret())
             .append_pair("code_challenge", challenge.as_str())
             .append_pair("code_challenge_method", "S256");
+        if policy.picker {
+            authorize
+                .query_pairs_mut()
+                .append_pair("prompt", "consent")
+                .append_pair("trigger_onepick", "true")
+                .append_pair("allow_multiple", "false")
+                .append_pair("allow_folder_selection", "true")
+                .append_pair("mimetypes", "application/vnd.google-apps.folder");
+        }
         Ok((
             Self {
                 policy,
@@ -76,9 +87,11 @@ impl PendingAuthorization {
         let states: Vec<_> = pairs.iter().filter(|(name, _)| name == "state").collect();
         let codes: Vec<_> = pairs.iter().filter(|(name, _)| name == "code").collect();
         let errors: Vec<_> = pairs.iter().filter(|(name, _)| name == "error").collect();
-        if states.len() != 1
-            || states[0].1 != *self.state.secret()
-        {
+        let picked: Vec<_> = pairs
+            .iter()
+            .filter(|(name, _)| name == "picked_file_ids")
+            .collect();
+        if states.len() != 1 || states[0].1 != *self.state.secret() {
             return Err(ProviderError::new(ErrorKind::ReauthRequired));
         }
         if !errors.is_empty() {
@@ -94,6 +107,21 @@ impl PendingAuthorization {
         if codes.len() != 1 || codes[0].1.is_empty() || codes[0].1.len() > 8192 {
             return Err(ProviderError::new(ErrorKind::ReauthRequired));
         }
+        let picked_file_id = match picked.as_slice() {
+            [] if !self.policy.picker => None,
+            [value]
+                if self.policy.picker
+                    && !value.1.is_empty()
+                    && value.1.len() <= 256
+                    && !value.1.contains(',')
+                    && value.1.bytes().all(|byte| {
+                        byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'
+                    }) =>
+            {
+                Some(value.1.to_string())
+            }
+            _ => return Err(ProviderError::new(ErrorKind::ReauthRequired)),
+        };
         Ok(AuthorizationCode {
             code: SecretBytes(zeroize::Zeroizing::new(codes[0].1.as_bytes().into())),
             verifier: SecretBytes(zeroize::Zeroizing::new(
@@ -101,6 +129,7 @@ impl PendingAuthorization {
             )),
             client_id: self.policy.client_id,
             redirect_url: self.policy.redirect_url,
+            picked_file_id,
         })
     }
 }
@@ -114,6 +143,7 @@ mod tests {
             client_id: "user-owned-public-client".into(),
             redirect_url: url::Url::parse("risunest://oauth/callback").unwrap(),
             scopes: vec!["synthetic".into()],
+            picker: false,
         }
     }
     #[test]
@@ -169,5 +199,55 @@ mod tests {
             pending.finish(&denied).err().unwrap().kind,
             ErrorKind::Cancelled
         );
+    }
+
+    #[test]
+    fn picker_policy_requests_one_folder_and_binds_its_callback_id() {
+        let mut picker = policy();
+        picker.picker = true;
+        let (pending, url) = PendingAuthorization::start(picker).unwrap();
+        let pairs: std::collections::BTreeMap<_, _> = url.query_pairs().into_owned().collect();
+        assert_eq!(
+            pairs.get("trigger_onepick").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            pairs.get("allow_folder_selection").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            pairs.get("mimetypes").map(String::as_str),
+            Some("application/vnd.google-apps.folder")
+        );
+        let mut callback = policy().redirect_url;
+        callback
+            .query_pairs_mut()
+            .append_pair("state", pairs.get("state").unwrap())
+            .append_pair("code", "synthetic-code")
+            .append_pair("picked_file_ids", "folder_123");
+        assert_eq!(
+            pending.finish(&callback).unwrap().picked_file_id.as_deref(),
+            Some("folder_123")
+        );
+
+        let mut picker = policy();
+        picker.picker = true;
+        let (pending, url) = PendingAuthorization::start(picker).unwrap();
+        let state = url
+            .query_pairs()
+            .find(|(name, _)| name == "state")
+            .unwrap()
+            .1
+            .into_owned();
+        let mut callback = policy().redirect_url;
+        callback
+            .query_pairs_mut()
+            .append_pair("state", &state)
+            .append_pair("code", "synthetic-code");
+        let error = match pending.finish(&callback) {
+            Ok(_) => panic!("a picker callback without a selected folder must fail"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind, ErrorKind::ReauthRequired);
     }
 }

@@ -393,6 +393,36 @@ describe('RisuNestDataHealth', () => {
         ).toContain('characters:char-9')
     })
 
+    it('locks every repair choice while the repair runs', async () => {
+        let release: (result: unknown) => void = () => {}
+        maintenance.applyNativeDataHealthRepair.mockImplementation(
+            () => new Promise((resolve) => { release = resolve }),
+        )
+        const target = await setup(damaged)
+        const boxes = () => [
+            ...target.querySelectorAll<HTMLInputElement>(
+                '[data-data-health-select-all] input[type="checkbox"], [data-data-health-choice] input[type="checkbox"], [data-data-health-apply] input[type="checkbox"]',
+            ),
+        ]
+        expect(boxes().length).toBeGreaterThan(2)
+        expect(boxes().some((box) => box.disabled)).toBe(false)
+
+        const apply = [...target.querySelectorAll('button')].find(
+            (button) => button.textContent?.trim() === strings.repairApply,
+        )
+        apply?.click()
+        await settle()
+
+        expect(boxes().every((box) => box.disabled)).toBe(true)
+        release({
+            revision: 13,
+            journalId: 'repair-1',
+            snapshot: null,
+            result: { ...damaged, items: [], counts: { blocking: 0, degraded: 0, informational: 0 } },
+        })
+        await settle()
+    })
+
     it('says so when nothing can be fixed automatically', async () => {
         const target = await setup(damaged, {}, [])
         expect(

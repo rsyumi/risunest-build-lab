@@ -12,13 +12,12 @@ type BrowserNavigator = Navigator & {
     standalone?: boolean
 }
 
-export type RisuEnvironmentLabel = "local" | "node" | "web" | "web(dev)"
+export type RisuEnvironmentLabel = "local" | "web" | "web(dev)"
 
 const browserNavigator = navigator as BrowserNavigator
 
 export const isTauri: boolean = !!(window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__
-export const isNodeServer: boolean = !!(globalThis as typeof globalThis & { __NODE__?: boolean }).__NODE__
-export const isWeb: boolean = !isTauri && !isNodeServer && location.hostname === 'risuai.xyz'
+export const isWeb: boolean = !isTauri && location.hostname === 'risuai.xyz'
 export const isAndroid: boolean = /Android/i.test(browserNavigator.userAgent)
 export const isMobile: boolean =
   /Android|webOS/i.test(browserNavigator.userAgent) || isIOS();
@@ -126,10 +125,6 @@ export function getRisuEnvironmentLabel(): RisuEnvironmentLabel {
 
     if (import.meta.env.DEV) {
         return "web(dev)"
-    }
-
-    if (isNodeServer) {
-        return "node"
     }
 
     return "web"

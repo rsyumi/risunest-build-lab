@@ -1,6 +1,8 @@
 use super::*;
 use futures::StreamExt;
+use sha2::{Digest, Sha256};
 use std::fs;
+use std::path::PathBuf;
 use tempfile::TempDir;
 
 #[cfg(windows)]
@@ -8,22 +10,27 @@ mod desktop_probe;
 #[cfg(windows)]
 mod redirect_probe;
 
-fn fixture(size: u64) -> (TempDir, Files, String) {
+fn fixture(size: u64) -> (TempDir, Files, String, PathBuf) {
     let root = TempDir::new().unwrap();
-    super::super::tests::write_blob(
-        root.path(),
-        "assets/stream.bin",
-        &[],
-        "application/octet-stream",
-    );
+    let zeroes = vec![0; CHUNK_BYTES];
+    let mut remaining = size;
+    let mut digest = Sha256::new();
+    while remaining > 0 {
+        let count = remaining.min(zeroes.len() as u64) as usize;
+        digest.update(&zeroes[..count]);
+        remaining -= count as u64;
+    }
+    let hash = hex::encode(digest.finalize());
+    let physical_key = format!("assets/objects/{}/{}", &hash[..2], &hash[2..]);
+    let payload = root.path().join(&physical_key);
+    fs::create_dir_all(payload.parent().unwrap()).unwrap();
     fs::OpenOptions::new()
+        .create_new(true)
         .write(true)
-        .open(root.path().join("assets/stream.bin"))
+        .open(&payload)
         .unwrap()
         .set_len(size)
         .unwrap();
-    fs::write(root.path().join("blobstore/metadata").join(format!("{}.json", hex::encode("assets/stream.bin"))),
-        serde_json::to_vec(&serde_json::json!({"key":"assets/stream.bin","kind":"asset","mime":"application/octet-stream","size":size})).unwrap()).unwrap();
     let state = Files {
         root: root.path().to_path_buf(),
         authority: "127.0.0.1:12345".into(),
@@ -33,8 +40,12 @@ fn fixture(size: u64) -> (TempDir, Files, String) {
             MediaProvider::new(root.path().to_path_buf(), "http://127.0.0.1:12345".into()).unwrap(),
         ),
     };
-    let path = format!("{}{}", state.prefix, hex::encode("assets/stream.bin"));
-    (root, state, path)
+    let path = format!(
+        "{}{}?mime=application%2Foctet-stream&size={size}",
+        state.prefix,
+        hex::encode(physical_key),
+    );
+    (root, state, path, payload)
 }
 
 fn request(state: &Files, path: &str, method: &str) -> Request<Body> {
@@ -49,7 +60,7 @@ fn request(state: &Files, path: &str, method: &str) -> Request<Body> {
 #[tokio::test]
 async fn full_file_stream_is_bounded_and_byte_exact() {
     let size = 64 * 1024 * 1024 + 17;
-    let (_root, state, path) = fixture(size);
+    let (_root, state, path, _) = fixture(size);
     let response = serve(State(state.clone()), request(&state, &path, "GET")).await;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()[header::CONTENT_LENGTH], size.to_string());
@@ -71,9 +82,9 @@ async fn full_file_stream_is_bounded_and_byte_exact() {
 
 #[tokio::test]
 async fn cancelled_transfer_releases_slot_and_open_handle_survives_cleanup() {
-    let (root, state, path) = fixture(1024 * 1024);
+    let (_root, state, path, payload) = fixture(1024 * 1024);
     let response = serve(State(state.clone()), request(&state, &path, "GET")).await;
-    fs::remove_file(root.path().join("assets/stream.bin")).unwrap();
+    fs::remove_file(payload).unwrap();
     let mut stream = response.into_body().into_data_stream();
     assert_eq!(stream.next().await.unwrap().unwrap().len(), CHUNK_BYTES);
     drop(stream);
@@ -82,7 +93,7 @@ async fn cancelled_transfer_releases_slot_and_open_handle_survives_cleanup() {
 
 #[tokio::test]
 async fn rejects_wrong_host_capability_paths_and_methods() {
-    let (_root, state, path) = fixture(10);
+    let (_root, state, path, _) = fixture(10);
     for path in [
         "/wrong/asset".to_owned(),
         format!("{}{}", state.prefix, hex::encode("../secret")),
@@ -109,7 +120,7 @@ async fn rejects_wrong_host_capability_paths_and_methods() {
 
 #[tokio::test]
 async fn head_and_ranges_keep_headers_and_exact_lengths() {
-    let (_root, state, path) = fixture(10);
+    let (_root, state, path, _) = fixture(10);
     let head = serve(State(state.clone()), request(&state, &path, "HEAD")).await;
     assert_eq!(head.headers()[header::CONTENT_LENGTH], "10");
     assert!(head.into_body().into_data_stream().next().await.is_none());
@@ -139,10 +150,12 @@ async fn head_and_ranges_keep_headers_and_exact_lengths() {
 
 #[tokio::test]
 async fn if_range_with_a_weak_or_changed_validator_returns_the_full_file() {
-    let (_root, state, path) = fixture(10);
+    let (_root, state, path, _) = fixture(10);
     let first = serve(State(state.clone()), request(&state, &path, "HEAD")).await;
     for tag in [
-        first.headers()[header::ETAG].clone(),
+        format!("W/{}", first.headers()[header::ETAG].to_str().unwrap())
+            .parse()
+            .unwrap(),
         "\"changed\"".parse().unwrap(),
     ] {
         let mut req = request(&state, &path, "GET");
@@ -163,7 +176,7 @@ async fn if_range_with_a_weak_or_changed_validator_returns_the_full_file() {
 
 #[tokio::test]
 async fn simultaneous_transfers_wait_for_a_cancelled_slot() {
-    let (_root, state, path) = fixture(1024 * 1024);
+    let (_root, state, path, _) = fixture(1024 * 1024);
     let mut responses = Vec::new();
     for _ in 0..MAX_TRANSFERS {
         responses.push(serve(State(state.clone()), request(&state, &path, "GET")).await);
@@ -186,10 +199,11 @@ async fn simultaneous_transfers_wait_for_a_cancelled_slot() {
 
 #[tokio::test]
 async fn actual_loopback_http_serves_only_capability_url() {
-    let (root, _, _) = fixture(100);
+    let (root, state, path, _) = fixture(100);
     let server = MediaServer::start(root.path().to_path_buf()).unwrap();
     let client = reqwest::Client::new();
-    let url = format!("{}{}", server.base_url, hex::encode("assets/stream.bin"));
+    let capability = path.strip_prefix(&state.prefix).unwrap();
+    let url = format!("{}{}", server.base_url, capability);
     let response = client.get(&url).send().await.unwrap();
     assert_eq!(response.status().as_u16(), 200);
     assert_eq!(response.bytes().await.unwrap().as_ref(), &[0; 100]);
@@ -204,4 +218,24 @@ async fn actual_loopback_http_serves_only_capability_url() {
             .as_u16(),
         404
     );
+}
+
+#[test]
+fn cleanup_media_waits_for_owned_transfers_and_revokes_the_previous_capability() {
+    let root = TempDir::new().unwrap();
+    let state = MediaServerState::initialize(root.path().to_owned());
+    let (previous, slots) = {
+        let server = state.0.lock().unwrap();
+        let server = server.as_ref().unwrap();
+        (server.base_url.clone(), server.slots.clone())
+    };
+    let transfer = slots.clone().try_acquire_owned().unwrap();
+    state.begin_cleanup().unwrap();
+    assert!(slots.try_acquire_owned().is_err());
+    assert!(!state.cleanup_drained().unwrap());
+    drop(transfer);
+    assert!(state.cleanup_drained().unwrap());
+    assert!(state.0.lock().unwrap().is_err());
+    state.reopen_after_cleanup(root.path().to_owned()).unwrap();
+    assert_ne!(state.0.lock().unwrap().as_ref().unwrap().base_url, previous);
 }

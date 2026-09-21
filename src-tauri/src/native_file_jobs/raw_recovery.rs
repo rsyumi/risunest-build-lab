@@ -22,7 +22,7 @@ const DATABASE_FILES: [&str; 6] = [
     "persistent/device.sqlite-wal",
     "persistent/device.sqlite-shm",
 ];
-const DATA_DIRECTORIES: [&str; 4] = ["assets-v2/objects", "assets", "blobstore", "coldstorage"];
+const DATA_DIRECTORIES: [&str; 1] = ["assets/objects"];
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -680,7 +680,7 @@ mod tests {
 
     impl CaptureSource for SyntheticSourceProblems {
         fn before_enumerate(&mut self, relative: &Path) -> std::io::Result<()> {
-            if relative == Path::new("blobstore") {
+            if relative == Path::new("assets/objects/unreadable") {
                 Err(std::io::Error::new(
                     std::io::ErrorKind::PermissionDenied,
                     "synthetic enumeration failure",
@@ -691,13 +691,13 @@ mod tests {
         }
 
         fn before_open(&mut self, root: &Path, relative: &Path) {
-            if relative == Path::new("assets/disappeared.bin") {
+            if relative == Path::new("assets/objects/aa/disappeared.bin") {
                 fs::remove_file(root.join(relative)).unwrap();
             }
         }
 
         fn after_open(&mut self, root: &Path, relative: &Path) {
-            if relative == Path::new("assets/changed.bin") {
+            if relative == Path::new("assets/objects/aa/changed.bin") {
                 OpenOptions::new()
                     .append(true)
                     .open(root.join(relative))
@@ -713,7 +713,7 @@ mod tests {
             source: &mut File,
             buffer: &mut [u8],
         ) -> std::io::Result<usize> {
-            if relative == Path::new("assets/truncated.bin") {
+            if relative == Path::new("assets/objects/aa/truncated.bin") {
                 if self.truncated_once {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::Other,
@@ -738,9 +738,13 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let owned = tempfile::tempdir().unwrap();
         fs::create_dir_all(root.path().join("persistent")).unwrap();
-        fs::create_dir_all(root.path().join("assets/nested")).unwrap();
+        fs::create_dir_all(root.path().join("assets/objects/aa")).unwrap();
         fs::write(root.path().join(MAIN_DATABASE), b"not sqlite").unwrap();
-        fs::write(root.path().join("assets/nested/image.bin"), [0, 1, 2, 255]).unwrap();
+        fs::write(
+            root.path().join("assets/objects/aa/image.bin"),
+            [0, 1, 2, 255],
+        )
+        .unwrap();
         fs::write(root.path().join("credentials.json"), b"excluded").unwrap();
 
         let captured = capture(root.path(), owned.path(), "1.2.3", &job()).unwrap();
@@ -748,7 +752,7 @@ mod tests {
         assert!(is_raw_recovery_archive(&mut renamed).unwrap());
         let mut zip = zip::ZipArchive::new(File::open(captured.path).unwrap()).unwrap();
         let database = encoded_entry_path(Path::new(MAIN_DATABASE));
-        let asset = encoded_entry_path(Path::new("assets/nested/image.bin"));
+        let asset = encoded_entry_path(Path::new("assets/objects/aa/image.bin"));
         let mut bytes = Vec::new();
         zip.by_name(&database)
             .unwrap()
@@ -768,8 +772,12 @@ mod tests {
     fn missing_main_database_is_partial_but_empty_sources_fail() {
         let root = tempfile::tempdir().unwrap();
         let owned = tempfile::tempdir().unwrap();
-        fs::create_dir_all(root.path().join("assets")).unwrap();
-        fs::write(root.path().join("assets/only.bin"), b"recoverable").unwrap();
+        fs::create_dir_all(root.path().join("assets/objects/aa")).unwrap();
+        fs::write(
+            root.path().join("assets/objects/aa/only.bin"),
+            b"recoverable",
+        )
+        .unwrap();
         let captured = capture(root.path(), owned.path(), "1.2.3", &job()).unwrap();
         assert!(captured.partial);
 
@@ -788,13 +796,25 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let owned = tempfile::tempdir().unwrap();
         fs::create_dir_all(root.path().join("persistent")).unwrap();
-        fs::create_dir_all(root.path().join("assets")).unwrap();
-        fs::create_dir_all(root.path().join("blobstore")).unwrap();
+        fs::create_dir_all(root.path().join("assets/objects/aa")).unwrap();
+        fs::create_dir_all(root.path().join("assets/objects/unreadable")).unwrap();
         fs::write(root.path().join(MAIN_DATABASE), b"database bytes").unwrap();
-        fs::write(root.path().join("assets/changed.bin"), b"old").unwrap();
-        fs::write(root.path().join("assets/disappeared.bin"), b"gone").unwrap();
-        fs::write(root.path().join("assets/truncated.bin"), b"abcdef").unwrap();
-        fs::write(root.path().join("blobstore/unknown.bin"), b"not enumerated").unwrap();
+        fs::write(root.path().join("assets/objects/aa/changed.bin"), b"old").unwrap();
+        fs::write(
+            root.path().join("assets/objects/aa/disappeared.bin"),
+            b"gone",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("assets/objects/aa/truncated.bin"),
+            b"abcdef",
+        )
+        .unwrap();
+        fs::write(
+            root.path().join("assets/objects/unreadable/unknown.bin"),
+            b"not enumerated",
+        )
+        .unwrap();
         let captured = capture_with_source(
             root.path(),
             owned.path(),
@@ -809,7 +829,9 @@ mod tests {
 
         let mut zip = zip::ZipArchive::new(File::open(captured.path).unwrap()).unwrap();
         let mut truncated = Vec::new();
-        zip.by_name(&encoded_entry_path(Path::new("assets/truncated.bin")))
+        zip.by_name(&encoded_entry_path(Path::new(
+            "assets/objects/aa/truncated.bin",
+        )))
             .unwrap()
             .read_to_end(&mut truncated)
             .unwrap();
@@ -828,19 +850,32 @@ mod tests {
                 .find(|entry| entry["originalRelativePath"] == relative)
                 .unwrap()
         };
-        assert_eq!(entry("assets/changed.bin")["status"], "changed");
-        assert_eq!(entry("assets/changed.bin")["capturedBytes"], 4);
+        assert_eq!(entry("assets/objects/aa/changed.bin")["status"], "changed");
+        assert_eq!(entry("assets/objects/aa/changed.bin")["capturedBytes"], 4);
         assert_eq!(
-            entry("assets/disappeared.bin")["status"],
+            entry("assets/objects/aa/disappeared.bin")["status"],
             "missing-during-capture"
         );
-        assert_eq!(entry("assets/disappeared.bin")["capturedBytes"], 0);
-        assert_eq!(entry("assets/truncated.bin")["status"], "truncated");
-        assert_eq!(entry("assets/truncated.bin")["capturedBytes"], 3);
-        assert_eq!(entry("blobstore")["status"], "unreadable");
+        assert_eq!(
+            entry("assets/objects/aa/disappeared.bin")["capturedBytes"],
+            0
+        );
+        assert_eq!(
+            entry("assets/objects/aa/truncated.bin")["status"],
+            "truncated"
+        );
+        assert_eq!(
+            entry("assets/objects/aa/truncated.bin")["capturedBytes"],
+            3
+        );
+        assert_eq!(
+            entry("assets/objects/unreadable")["status"],
+            "unreadable"
+        );
         assert!(paths
             .iter()
-            .all(|entry| entry["originalRelativePath"] != "blobstore/unknown.bin"));
+            .all(|entry| entry["originalRelativePath"]
+                != "assets/objects/unreadable/unknown.bin"));
     }
 
     #[cfg(unix)]

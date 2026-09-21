@@ -3,6 +3,9 @@ import { pathToFileURL } from "node:url";
 
 const forbiddenMarkers = [
   "macos_bench_",
+  "boundary_phase",
+  "boundary_finish",
+  "RISUNEST_BOUNDARY_",
   "macos-synthetic-expected",
   "__RISUNEST_LINUX_BENCHMARK__",
   "__RISUNEST_TOKENIZER_BENCHMARK__",
@@ -39,7 +42,7 @@ const forbiddenMarkers = [
 export function isVerificationModule(id) {
   const normalized = id.replaceAll("\\", "/").split("?")[0];
   if (normalized.includes("/node_modules/")) {
-    return /\/(?:@vitest|vitest|happy-dom|jsdom|fake-indexeddb|fast-check)\//.test(
+    return /\/(?:@playwright|playwright|playwright-core|@vitest|vitest|happy-dom|jsdom|fake-indexeddb|fast-check)\//.test(
       normalized,
     );
   }

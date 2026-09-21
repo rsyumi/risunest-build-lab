@@ -352,7 +352,7 @@ describe("native server synchronization scheduling", () => {
     listeners.get("visibilitychange")!(new Event("visibilitychange"));
     expect(state.invoke).toHaveBeenCalledWith("server_sync_events_stop");
   });
-  it("starts holding as soon as this device has a binding", async () => {
+  it("starts notifications after connection preparation without racing backup cleanup", async () => {
     const { startServerSync } = await import("./serverSyncProduction");
     vi.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
     startServerSync();
@@ -360,7 +360,11 @@ describe("native server synchronization scheduling", () => {
     state.invoke.mockClear();
     state.controllerListener!({ status: { configured: false } });
     expect(state.invoke).not.toHaveBeenCalledWith("server_sync_events_start");
-    state.controllerListener!({ status: { configured: true } });
+    state.controllerListener!({ status: { configured: true }, connecting: true });
+    expect(state.invoke).not.toHaveBeenCalledWith("server_sync_events_start");
+    expect(state.invoke).not.toHaveBeenCalledWith("server_sync_backup_cleanup");
+    state.controllerListener!({ status: { configured: true }, connecting: false });
+    expect(state.invoke).not.toHaveBeenCalledWith("server_sync_backup_cleanup");
     expect(state.invoke).toHaveBeenCalledWith("server_sync_events_start");
   });
   it("does not install a native scheduler in the browser build", async () => {

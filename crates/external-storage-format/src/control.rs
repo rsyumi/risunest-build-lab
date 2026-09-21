@@ -10,7 +10,7 @@ use risunest_sync_wire::head::Sequence;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-const HEAD_SCHEMA: &str = "risunest.external-head/v2";
+const HEAD_SCHEMA: &str = "risunest.external-head/v1";
 const POINT_SCHEMA: &str = "risunest.external-backup-point/v1";
 const BUNDLE_SCHEMA: &str = "risunest.external-backup-bundle/v1";
 const INVENTORY_SCHEMA: &str = "risunest.external-inventory-page/v1";
@@ -719,9 +719,6 @@ mod tests {
         assert!(std::str::from_utf8(&encoded).unwrap().contains("\"deleting\""));
         assert!(LeaseDocument::new("".into(), "job".into(), LeaseKind::Work, 0, 1).is_err());
         assert!(LeaseDocument::new("writer".into(), "".into(), LeaseKind::Work, 0, 1).is_err());
-        let mut reordered: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
-        reordered["schema"] = serde_json::json!("risunest.external-lease/v2");
-        assert!(LeaseDocument::decode(&serde_json::to_vec(&reordered).unwrap(), 4096).is_err());
     }
 
     #[test]
@@ -959,40 +956,6 @@ mod tests {
         assert!(emptied.sections.contains_key(SectionKind::Hypa.id()));
         assert_ne!(absent.state_fingerprint, emptied.state_fingerprint);
         assert_eq!(absent.library_fingerprint, emptied.library_fingerprint);
-    }
-
-    #[test]
-    fn previous_schema_control_documents_are_reported_rather_than_narrowed() {
-        let previous_head = serde_json::json!({
-            "schema": "risunest.external-head/v1",
-            "repositoryId": "repository",
-            "libraryId": "library",
-            "commitId": "commit",
-            "parentCommitId": null,
-            "scopeId": vec![4u8; 32],
-            "fingerprint": vec![5u8; 32],
-            "snapshot": stored("snapshot-a", ObjectRole::SyncState),
-        });
-        assert!(HeadDocument::decode(
-            &serde_json::to_vec(&previous_head).unwrap(),
-            MAX_CONTROL_BYTES
-        )
-        .is_err());
-        let previous_point = serde_json::json!({
-            "schema": "risunest.external-backup-point/v1",
-            "repositoryId": "repository",
-            "pointId": "point",
-            "kind": "manual",
-            "createdAtMs": 1,
-            "logicalRevision": 7,
-            "scopeId": vec![4u8; 32],
-            "snapshots": [stored("snapshot-a", ObjectRole::BackupBundle)],
-        });
-        assert!(BackupPointDocument::decode(
-            &serde_json::to_vec(&previous_point).unwrap(),
-            MAX_CONTROL_BYTES
-        )
-        .is_err());
     }
 
     #[test]

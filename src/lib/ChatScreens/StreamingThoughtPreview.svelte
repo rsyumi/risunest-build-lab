@@ -26,7 +26,7 @@
         bind:open={expanded}
         data-streaming-thought-preview
     >
-        <summary>{language.cot}</summary>
+        <summary class="cursor-pointer">{language.cot}</summary>
         {#if expanded}
             <span class="whitespace-pre-wrap"
                 >{getStreamingThoughtPreview(source, true)?.full ??

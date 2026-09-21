@@ -91,6 +91,21 @@ pub(crate) struct AuthorizedSecret {
     pub account_id: String,
 }
 
+pub(crate) struct SetupDrive {
+    pub drive_id: String,
+    pub root_item_id: String,
+}
+
+pub(crate) struct SetupFolder {
+    pub id: String,
+    pub name: String,
+}
+
+pub(crate) struct SetupFolderPage {
+    pub folders: Vec<SetupFolder>,
+    pub next_cursor: Option<String>,
+}
+
 struct Context {
     settings: Settings,
     secret: SecretRef,
@@ -177,6 +192,230 @@ impl OneDrive {
             .insert("content-type".to_owned(), "application/json".to_owned());
         request.content_length = Some(body.len() as u64);
         request.body = Some(Box::pin(std::io::Cursor::new(body)));
+    }
+
+    fn setup_context(
+        &self,
+        config: &ConnectionConfig,
+        secret: &SecretRef,
+        account_id: &str,
+        drive_id: &str,
+        root_item_id: &str,
+    ) -> Result<Context> {
+        let mut bound = config.clone();
+        bound.account_id = account_id.to_owned();
+        bound.location.remove("folderName");
+        bound.location.insert("driveId".into(), drive_id.into());
+        bound
+            .location
+            .insert("rootItemId".into(), root_item_id.into());
+        let settings = config::validate(&bound)?;
+        let account = AccountKey::new(config::PROVIDER_ID, &settings.endpoint, account_id)?;
+        Ok(Context {
+            settings,
+            secret: secret.clone(),
+            root_item_id: root_item_id.to_owned(),
+            account,
+        })
+    }
+
+    fn setup_folder(item: graph::Item, drive_id: &str) -> Result<SetupFolder> {
+        if item.folder.is_none()
+            || item
+                .parent_reference
+                .as_ref()
+                .and_then(|parent| parent.drive_id.as_deref())
+                .is_some_and(|parent| parent != drive_id)
+        {
+            return Err(ProviderError::new(ErrorKind::FolderUnsupportedLocation));
+        }
+        let id = item
+            .id
+            .as_deref()
+            .and_then(|value| config::identifier(value).ok())
+            .map(str::to_owned)
+            .ok_or_else(|| ProviderError::new(ErrorKind::FolderInaccessible))?;
+        let name = item
+            .name
+            .filter(|value| !value.is_empty() && value.len() <= 255)
+            .ok_or_else(|| ProviderError::new(ErrorKind::FolderInaccessible))?;
+        Ok(SetupFolder { id, name })
+    }
+
+    pub(crate) async fn resolve_setup_drive(
+        &self,
+        config: &ConnectionConfig,
+        secret: &SecretRef,
+        account_id: &str,
+        cancel: &Cancellation,
+    ) -> Result<SetupDrive> {
+        let placeholder_root =
+            if config.location.get("accountType").map(String::as_str) == Some("appFolder") {
+                config::APP_ROOT
+            } else {
+                "pending"
+            };
+        let context =
+            self.setup_context(config, secret, account_id, "pending", placeholder_root)?;
+        let token = self.access_token(&context, cancel).await?;
+        let request = self.request(
+            reqwest::Method::GET,
+            graph::signed_in_drive_url(&context.settings)?,
+            ProviderOperation::Metadata,
+            &context.account,
+            Some(token.as_str()),
+        );
+        let mut response = self.send(request, cancel).await?;
+        graph::require(&response, &[200], self.now()).map_err(|error| match error.kind {
+            ErrorKind::NotFound | ErrorKind::Unauthorized => {
+                ProviderError::new(ErrorKind::FolderInaccessible)
+            }
+            _ => error,
+        })?;
+        let drive: graph::Drive = graph::json(&mut response, cancel).await?;
+        let drive_id = config::identifier(&drive.id)
+            .map(str::to_owned)
+            .map_err(|_| ProviderError::new(ErrorKind::FolderInaccessible))?;
+
+        let root_item_id = if placeholder_root == config::APP_ROOT {
+            config::APP_ROOT.to_owned()
+        } else {
+            let context = self.setup_context(config, secret, account_id, &drive_id, "pending")?;
+            let request = self.request(
+                reqwest::Method::GET,
+                graph::drive_root_url(&context.settings, &drive_id)?,
+                ProviderOperation::Metadata,
+                &context.account,
+                Some(token.as_str()),
+            );
+            let mut response = self.send(request, cancel).await?;
+            graph::require(&response, &[200], self.now()).map_err(|error| match error.kind {
+                ErrorKind::NotFound | ErrorKind::Unauthorized => {
+                    ProviderError::new(ErrorKind::FolderInaccessible)
+                }
+                _ => error,
+            })?;
+            let root: graph::Item = graph::json(&mut response, cancel).await?;
+            Self::setup_folder(root, &drive_id)?.id
+        };
+        Ok(SetupDrive {
+            drive_id,
+            root_item_id,
+        })
+    }
+
+    pub(crate) async fn inspect_setup_folder(
+        &self,
+        config: &ConnectionConfig,
+        secret: &SecretRef,
+        account_id: &str,
+        drive_id: &str,
+        folder_id: &str,
+        cancel: &Cancellation,
+    ) -> Result<SetupFolder> {
+        let context = self.setup_context(config, secret, account_id, drive_id, folder_id)?;
+        let token = self.access_token(&context, cancel).await?;
+        let request = self.request(
+            reqwest::Method::GET,
+            graph::drive_item_url(&context.settings, drive_id, folder_id)?,
+            ProviderOperation::Metadata,
+            &context.account,
+            Some(token.as_str()),
+        );
+        let mut response = self.send(request, cancel).await?;
+        graph::require(&response, &[200], self.now()).map_err(|error| match error.kind {
+            ErrorKind::NotFound | ErrorKind::Unauthorized => {
+                ProviderError::new(ErrorKind::FolderInaccessible)
+            }
+            _ => error,
+        })?;
+        Self::setup_folder(graph::json(&mut response, cancel).await?, drive_id)
+    }
+
+    pub(crate) async fn list_setup_folders(
+        &self,
+        config: &ConnectionConfig,
+        secret: &SecretRef,
+        account_id: &str,
+        drive_id: &str,
+        folder_id: &str,
+        cursor: Option<&str>,
+        cancel: &Cancellation,
+    ) -> Result<SetupFolderPage> {
+        let context = self.setup_context(config, secret, account_id, drive_id, folder_id)?;
+        let token = self.access_token(&context, cancel).await?;
+        let request = self.request(
+            reqwest::Method::GET,
+            graph::drive_children_url(&context.settings, drive_id, folder_id, cursor)?,
+            ProviderOperation::List,
+            &context.account,
+            Some(token.as_str()),
+        );
+        let mut response = self.send(request, cancel).await?;
+        graph::require(&response, &[200], self.now()).map_err(|error| match error.kind {
+            ErrorKind::NotFound | ErrorKind::Unauthorized => {
+                ProviderError::new(ErrorKind::FolderInaccessible)
+            }
+            _ => error,
+        })?;
+        let page: graph::ChildrenPage = graph::json(&mut response, cancel).await?;
+        let folders = page
+            .value
+            .into_iter()
+            .filter(|item| item.folder.is_some())
+            .map(|item| Self::setup_folder(item, drive_id))
+            .collect::<Result<Vec<_>>>()?;
+        let next_cursor = page
+            .next_link
+            .as_deref()
+            .map(|link| graph::skip_token(link, &context.settings))
+            .transpose()?;
+        Ok(SetupFolderPage {
+            folders,
+            next_cursor,
+        })
+    }
+
+    pub(crate) async fn create_setup_folder(
+        &self,
+        config: &ConnectionConfig,
+        secret: &SecretRef,
+        account_id: &str,
+        drive_id: &str,
+        root_item_id: &str,
+        name: &str,
+        cancel: &Cancellation,
+    ) -> Result<SetupFolder> {
+        let context = self.setup_context(config, secret, account_id, drive_id, root_item_id)?;
+        let token = self.access_token(&context, cancel).await?;
+        let mut request = self.request(
+            reqwest::Method::POST,
+            graph::drive_children_create_url(&context.settings, drive_id, root_item_id)?,
+            ProviderOperation::Create,
+            &context.account,
+            Some(token.as_str()),
+        );
+        let body = serde_json::to_vec(&serde_json::json!({
+            "name": name,
+            "folder": {},
+            "@microsoft.graph.conflictBehavior": "fail"
+        }))
+        .map_err(|_| corrupt())?;
+        Self::json_body(&mut request, body);
+        let mut response = self.send(request, cancel).await?;
+        if response.status == 409 {
+            return Err(ProviderError::new(ErrorKind::FolderNameConflict));
+        }
+        graph::require(&response, &[200, 201], self.now()).map_err(|error| match error.kind {
+            ErrorKind::Cancelled | ErrorKind::ReauthRequired | ErrorKind::Unauthorized => error,
+            _ => ProviderError::new(ErrorKind::FolderCreateFailed),
+        })?;
+        let folder = Self::setup_folder(graph::json(&mut response, cancel).await?, drive_id)
+            .map_err(|_| ProviderError::new(ErrorKind::FolderCreateFailed))?;
+        if folder.name != name {
+            return Err(ProviderError::new(ErrorKind::FolderCreateFailed));
+        }
+        Ok(folder)
     }
 
     async fn create_repository_folder(
@@ -344,18 +583,10 @@ impl OneDrive {
             return Ok(token);
         }
         let form = tokens::refresh_form(&context.settings, &stored.refresh_token);
-        let request = tokens::token_request(
-            &context.settings,
-            form,
-            context.account.clone(),
-        )?;
+        let request = tokens::token_request(&context.settings, form, context.account.clone())?;
         let mut response = self.send(request, cancel).await?;
         if response.status != 200 {
-            return Err(graph::classify_token(
-                response.status,
-                &response.headers,
-                self.now(),
-            ));
+            return Err(tokens::token_error(&mut response, self.now(), cancel).await);
         }
         let refreshed = tokens::parse_grant(
             &mut response,
@@ -387,18 +618,10 @@ impl OneDrive {
         }
         let account = AccountKey::pending(config::PROVIDER_ID, &settings.endpoint)?;
         let form = tokens::authorization_code_form(&settings, grant)?;
-        let request = tokens::token_request(
-            &settings,
-            form,
-            account.clone(),
-        )?;
+        let request = tokens::token_request(&settings, form, account.clone())?;
         let mut response = self.send(request, cancel).await?;
         if response.status != 200 {
-            return Err(graph::classify_token(
-                response.status,
-                &response.headers,
-                self.now(),
-            ));
+            return Err(tokens::token_error(&mut response, self.now(), cancel).await);
         }
         let granted = tokens::parse_grant(&mut response, None, self.now(), cancel).await?;
         let access_token = granted
@@ -423,7 +646,9 @@ impl OneDrive {
         let identity: graph::SignedInUser = graph::json(&mut response, cancel).await?;
         let account_id = config::account_id(&identity.id)?;
         let authenticated = AccountKey::new(config::PROVIDER_ID, &settings.endpoint, &account_id)?;
-        self.deps.requests.resolve_pending(&account, &authenticated)?;
+        self.deps
+            .requests
+            .resolve_pending(&account, &authenticated)?;
         let secret = self.deps.vault.store(&tokens::encode(&granted)?).await?;
         Ok(AuthorizedSecret { secret, account_id })
     }
@@ -993,13 +1218,7 @@ impl Provider for OneDrive {
             locator.validate_for(repository)?;
             let path = config::removable_path(locator)?;
             let token = self.access_token(context, cancel).await?;
-            let url = graph::item_url(
-                &context.settings,
-                &context.root_item_id,
-                &path,
-                "",
-                None,
-            )?;
+            let url = graph::item_url(&context.settings, &context.root_item_id, &path, "", None)?;
             let request = self.request(
                 reqwest::Method::DELETE,
                 url,
@@ -1155,5 +1374,4 @@ impl Provider for OneDrive {
             object: HEAD_OBJECT.to_owned(),
         })
     }
-
 }

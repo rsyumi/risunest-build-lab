@@ -360,12 +360,19 @@ async function main() {
     const api = (
       window as unknown as {
         __streamingSmoke: {
-          run(): Promise<{ passed: boolean; assertion?: string }>;
+          run(): Promise<{
+            passed: boolean;
+            assertion?: string;
+            diagnostics?: Record<string, unknown>;
+          }>;
         };
       }
     ).__streamingSmoke;
     const result = await api.run();
-    check(result.passed, `streaming suite: ${result.assertion ?? "failed"}`);
+    check(
+      result.passed,
+      `streaming suite: ${result.assertion ?? "failed"} ${JSON.stringify(result.diagnostics ?? {})}`,
+    );
     await report("streaming", result);
     await invoke("macos_bench_quit");
   } else {
@@ -374,7 +381,12 @@ async function main() {
 }
 void main().catch(async (error) => {
   await report("failure", {
-    message: error instanceof Error ? error.message : String(error),
+    message:
+      error instanceof Error
+        ? error.message
+        : typeof error === "string"
+          ? error
+          : JSON.stringify(error),
     stack: error instanceof Error ? error.stack : undefined,
   });
   // The controller records the failure and terminates this isolated process.

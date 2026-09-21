@@ -16,9 +16,13 @@ pub(crate) fn validate(bundle: &Path) -> Result<()> {
 
 pub(crate) fn from_executable(executable: &Path) -> Result<PathBuf> {
     let executable = executable.canonicalize()?;
-    let macos = executable.parent().ok_or(Error::FailedToDetermineExtractPath)?;
+    let macos = executable
+        .parent()
+        .ok_or(Error::FailedToDetermineExtractPath)?;
     let contents = macos.parent().ok_or(Error::FailedToDetermineExtractPath)?;
-    let bundle = contents.parent().ok_or(Error::FailedToDetermineExtractPath)?;
+    let bundle = contents
+        .parent()
+        .ok_or(Error::FailedToDetermineExtractPath)?;
     if !executable.is_file()
         || macos.file_name() != Some(std::ffi::OsStr::new("MacOS"))
         || contents.file_name() != Some(std::ffi::OsStr::new("Contents"))
@@ -42,7 +46,10 @@ mod tests {
         std::fs::write(&executable, b"synthetic executable").unwrap();
         assert!(from_executable(&executable).is_err());
         std::fs::write(bundle.join("Contents/Info.plist"), b"synthetic metadata").unwrap();
-        assert_eq!(from_executable(&executable).unwrap(), bundle.canonicalize().unwrap());
+        assert_eq!(
+            from_executable(&executable).unwrap(),
+            bundle.canonicalize().unwrap()
+        );
         assert!(from_executable(executable.parent().unwrap()).is_err());
     }
 

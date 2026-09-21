@@ -4,14 +4,14 @@ import * as fflate from "fflate";
 import { getDatabase, presetTemplate, type Database } from "./database.svelte";
 import localforage from "localforage";
 import { forageStorage } from "../globalApi.svelte";
-import { isNodeServer, isTauri } from "src/ts/platform"
+import { isTauri } from "src/ts/platform"
 import {
     writeFile,
-    BaseDirectory,
     exists,
     mkdir,
     readFile,
 } from "@tauri-apps/plugin-fs"
+import { nativeDataPath } from "./nativePaths"
 
 const packr = new Packr({
     useRecords:false
@@ -360,10 +360,7 @@ export class RisuSaveEncoder {
             option.remote === 'force' ||
             (
                 option.remote === 'prefer' &&
-                (
-                    isTauri ||
-                    isNodeServer
-                )
+                isTauri
             ) &&
             !disableRemoteSaving()
         ){
@@ -387,11 +384,12 @@ export class RisuSaveEncoder {
         console.log(`Encoding remote block: ${arg.name}`);
         const encoded = new TextEncoder().encode(arg.data);
         const fileName = `remotes/${arg.name}.local.bin`
+        const nativeName = async () => await nativeDataPath('remotes', `${arg.name}.local.bin`)
 
         if(arg.skipRemoteSaving && checkedRemoteExistence.has(arg.name) === false){
             let fileExists = false;
             if(isTauri){
-                fileExists = await exists(fileName, { baseDir: BaseDirectory.AppData });
+                fileExists = await exists(await nativeName());
             }
             else{
                 const stored = await forageStorage.keys();
@@ -408,10 +406,11 @@ export class RisuSaveEncoder {
 
         if(!arg.skipRemoteSaving){
             if(isTauri){
-                if(!(await exists('remotes', { baseDir: BaseDirectory.AppData }))){
-                    await mkdir('remotes', { recursive: true, baseDir: BaseDirectory.AppData });
+                const directory = await nativeDataPath('remotes')
+                if(!(await exists(directory))){
+                    await mkdir(directory, { recursive: true });
                 }
-                await writeFile(fileName, encoded!, { baseDir: BaseDirectory.AppData });
+                await writeFile(await nativeName(), encoded!);
             }
             else{
                 await forageStorage.setItem(fileName, encoded);
@@ -576,8 +575,9 @@ export class RisuSaveDecoder {
                         let remoteData:Uint8Array|null = null
                         if(isTauri){
                             try {
-                                if(await exists(fileName, { baseDir: BaseDirectory.AppData })){
-                                    remoteData = await readFile(fileName, { baseDir: BaseDirectory.AppData });
+                                const native = await nativeDataPath('remotes', `${remoteInfo.name}.local.bin`)
+                                if(await exists(native)){
+                                    remoteData = await readFile(native);
                                 }
                             } catch (error) {
                                 console.error(`Error reading remote file ${fileName} in Tauri:`, error);

@@ -38,15 +38,6 @@ pub(crate) fn export_compatible_local_backup(
                 "compatibility snapshot revision changed",
             ));
         }
-        if !matches!(
-            inventory.asset_authority,
-            AssetRepositoryAuthorityState::V2 { .. }
-        ) {
-            return Err(NativeJobError::new(
-                "capability-unavailable",
-                "compatibility export requires a migrated attachment repository",
-            ));
-        }
         durable = Some(
             DurableCasJob::begin(
                 &repository_root,
@@ -1065,15 +1056,6 @@ mod tests {
                         owner_manifest.content_hash,
                         1,
                     )],
-                )
-                .unwrap();
-            store
-                .replace_put_asset_repository_authority(
-                    &staging,
-                    &AssetRepositoryAuthorityState::V2 {
-                        migration_id: "synthetic-assets".into(),
-                        compatibility_hash: "ab".repeat(32),
-                    },
                 )
                 .unwrap();
             let revision = store.replace_commit(&staging, Some(0)).unwrap().revision;

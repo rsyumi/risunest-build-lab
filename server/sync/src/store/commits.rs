@@ -101,6 +101,7 @@ impl Store {
             status: TerminalStatus::Failed,
             head: head.clone(),
             error: None,
+            error_key: None,
         };
         let stage = &intent.staged_changes_id;
         let validation = (|| -> Result<()> {
@@ -118,7 +119,7 @@ impl Store {
             }
             Self::each_change(&tx, stage, |change| {
                 if Self::read_version(&tx, change.domain, &change.key)? != change.before {
-                    return Err(Error::new("before-version-mismatch", 409));
+                    return Err(Error::new("before-version-mismatch", 409).for_key(&change.key));
                 }
                 for digest in change.after.object_hashes() {
                     let present: bool = tx.query_row(
@@ -127,14 +128,14 @@ impl Store {
                         |r| r.get(0),
                     )?;
                     if !present {
-                        return Err(Error::new("missing-dependency", 409));
+                        return Err(Error::new("missing-dependency", 409).for_key(&change.key));
                     }
                 }
                 Ok(())
             })?;
             Self::each_fence(&tx, stage, |fence| {
                 if Self::read_version(&tx, fence.domain, &fence.key)? != fence.version {
-                    return Err(Error::new("read-fence-mismatch", 409));
+                    return Err(Error::new("read-fence-mismatch", 409).for_key(&fence.key));
                 }
                 Ok(())
             })?;
@@ -189,6 +190,7 @@ impl Store {
                     }
                     tx.execute_batch("ROLLBACK TO apply_records; RELEASE apply_records")?;
                     receipt.error = Some(error.code.into());
+                    receipt.error_key = error.key;
                 } else {
                     Self::update_scopes(&tx, stage, &operation)?;
                     tx.execute_batch("RELEASE apply_records")?;
@@ -207,6 +209,7 @@ impl Store {
                     TerminalStatus::Failed
                 };
                 receipt.error = Some(error.code.into());
+                receipt.error_key = error.key;
             }
             Err(error) => return Err(error),
         }

@@ -29,13 +29,24 @@ const mocks = vi.hoisted(() => {
             const staged = { key, data: data.slice(), metadata: { ...metadata } }
             stagedPayloads.push(staged.data)
             lockOrder.push(`prepare:end:${key}:${data[0] ?? 'empty'}`)
-            return staged
+            return {
+                prepared: {
+                    activate: () => assetDispatcher.activatePrepared(staged),
+                    abort: async () => undefined,
+                },
+            }
         }),
         stageNewInlayImage: vi.fn(async (key, data, input) => {
             await assetPrepareHook?.(key, data)
-            return { key, data: data.slice(), input: { ...input }, inlay: true as const }
+            const staged = { key, data: data.slice(), input: { ...input }, inlay: true as const }
+            return {
+                prepared: {
+                    activate: () => assetDispatcher.activatePrepared(staged),
+                    abort: async () => undefined,
+                },
+            }
         }),
-        activateStagedWrite: vi.fn(async (staged: {
+        activatePrepared: vi.fn(async (staged: {
             key: string
             data: Uint8Array
             metadata?: Record<string, unknown>
@@ -64,7 +75,8 @@ const mocks = vi.hoisted(() => {
             }
             return { ...staged.metadata, key: staged.key, size: staged.data.byteLength }
         }),
-        abortStagedWrite: vi.fn(async () => undefined),
+        activateStagedWrite: vi.fn(async (staged) => staged.prepared.activate()),
+        abortStagedWrite: vi.fn(async (staged) => staged.prepared.abort()),
         putNewInlayImage: vi.fn(async (key, data, input) => {
             rootRevision++
             return {
@@ -109,10 +121,6 @@ const mocks = vi.hoisted(() => {
             }
             return { revision: rootRevision, value: {} }
         }),
-        readAssetRepositoryAuthority: vi.fn(async () => ({
-            revision: rootRevision,
-            value: { format: 'v2' },
-        })),
     }
     const gate = {
         runKeyedWrite: vi.fn(async <T>(key: string, operation: () => Promise<T>) => {
@@ -145,7 +153,7 @@ const mocks = vi.hoisted(() => {
 
 let configuredAssetStore: BlobStore | null = null
 
-vi.mock('../platform', () => ({ isNodeServer: false, isTauri: true }))
+vi.mock('../platform', () => ({ isTauri: true }))
 vi.mock('./persistentDataRuntime.svelte', () => ({
     getPersistentDataRuntime: () => ({
         flushPendingData: mocks.flushPendingData,
@@ -172,15 +180,12 @@ vi.mock('./platformBlobStore', () => ({
             gate.runKeyedWrite(key, () => store.putNewInlayImage!(key, data, input)),
         remove: (key) => gate.runKeyedWrite(key, () => store.remove(key)),
     })),
-    getLegacyBlobStore: () => ({}),
     getPlatformBlobKeyValueBackend: vi.fn(async () => ({})),
 }))
-vi.mock('./assetRepositoryMigration', () => ({ migrateLegacyAssetRepository: vi.fn() }))
 vi.mock('./assetRepositoryRuntime', async (importOriginal) => ({
     ...await importOriginal<typeof import('./assetRepositoryRuntime')>(),
-    createNativeV2BlobStore: vi.fn(() => mocks.assetDispatcher),
-    createRuntimeAssetRepositoryDispatcher: vi.fn((selection) => selection.v2),
-    selectRuntimeAssetRepository: vi.fn(async (selection) => selection.v2),
+    createNativeAssetBlobStore: vi.fn(() => mocks.assetDispatcher),
+    createRuntimeAssetRepositoryDispatcher: vi.fn(() => mocks.assetDispatcher),
 }))
 vi.mock('./nativeAssetRepository', () => ({
     createNativeAssetObjectUrlResolver: vi.fn(() => ({})),

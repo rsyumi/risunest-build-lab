@@ -101,6 +101,25 @@ describe('ExternalStorageBridge', () => {
         })
     })
 
+    it('keeps folder navigation behind opaque native session handles', async () => {
+        const invoke = vi.fn(async (command: string) => command === 'external_storage_list_folders'
+            ? { path: [], folders: [], selectable: false }
+            : command === 'external_storage_select_folder'
+              ? { name: 'Backups' }
+              : undefined)
+        const bridge = new ExternalStorageBridge({ supported: () => true, invoke })
+
+        await bridge.listFolders({ selectionId: 'selection', folder: 'folder-handle', cursor: 'cursor' })
+        await bridge.selectFolder({ selectionId: 'selection', folder: 'folder-handle' })
+        await bridge.cancelFolderSelection('selection')
+
+        expect(invoke.mock.calls).toEqual([
+            ['external_storage_list_folders', { request: { selectionId: 'selection', folder: 'folder-handle', cursor: 'cursor' } }],
+            ['external_storage_select_folder', { request: { selectionId: 'selection', folder: 'folder-handle' } }],
+            ['external_storage_cancel_folder_selection', { selectionId: 'selection' }],
+        ])
+    })
+
     it('authenticates connection settings with the recovery key in the native boundary', async () => {
         const invoke = vi.fn(async () => ({ preparationId: 'prepared' }))
         const bridge = new ExternalStorageBridge({ supported: () => true, invoke })

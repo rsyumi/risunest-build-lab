@@ -29,6 +29,11 @@ pub(crate) enum ErrorKind {
     Transient,
     Unsupported,
     Cancelled,
+    FolderNameConflict,
+    FolderCreateFailed,
+    FolderInaccessible,
+    FolderNotRepository,
+    FolderUnsupportedLocation,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -36,6 +41,10 @@ pub(crate) struct ProviderError {
     pub kind: ErrorKind,
     pub http_status: Option<u16>,
     pub retry_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oauth_error_description: Option<String>,
 }
 impl ProviderError {
     pub fn new(kind: ErrorKind) -> Self {
@@ -43,6 +52,8 @@ impl ProviderError {
             kind,
             http_status: None,
             retry_at_ms: None,
+            oauth_error: None,
+            oauth_error_description: None,
         }
     }
 }

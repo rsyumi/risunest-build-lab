@@ -1,6 +1,7 @@
 use crate::update::UpdatePolicy;
 use crate::Result;
 pub mod gui;
+pub mod paths;
 use serde::Serialize;
 #[cfg(target_os = "macos")]
 use std::{
@@ -32,81 +33,25 @@ pub struct UpdateScheduleStatus {
     pub action_matches: bool,
 }
 
-#[cfg(any(test, all(unix, not(target_os = "macos"))))]
-fn user_service_directory(xdg: Option<PathBuf>, home: impl FnOnce() -> Result<PathBuf>) -> Result<PathBuf> {
-    let config = match xdg.filter(|path| path.is_absolute()) {
-        Some(path) => path,
-        None => {
-            let home = home()?;
-            if !home.is_absolute() {
-                return Err("absolute-config-path-required".into());
-            }
-            home.join(".config")
-        }
-    };
-    Ok(config.join("systemd/user"))
+#[cfg(unix)]
+fn user_service_directory() -> Result<PathBuf> {
+    paths::current()?
+        .user_services
+        .ok_or_else(|| "absolute-config-path-required".into())
 }
 
 pub fn default_data_dir() -> Result<PathBuf> {
-    #[cfg(windows)]
-    let root = windows_data_root(
-        std::env::var_os("LOCALAPPDATA").map(PathBuf::from),
-        "RisuNestSyncData",
-    );
-    #[cfg(target_os = "macos")]
-    let root = macos_data_root(std::env::var_os("HOME").map(PathBuf::from));
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let root = linux_data_root(
-        std::env::var_os("XDG_DATA_HOME").map(PathBuf::from),
-        std::env::var_os("HOME").map(PathBuf::from),
-        "risunest-sync",
-    );
-    root
-        .ok_or("user-data-directory-unavailable".into())
+    Ok(paths::current()?.data)
 }
 
 pub fn webview_data_dir() -> Result<Option<PathBuf>> {
-    #[cfg(target_os = "macos")]
-    return Ok(None);
-    #[cfg(windows)]
-    let root = windows_data_root(
-        std::env::var_os("LOCALAPPDATA").map(PathBuf::from),
-        "RisuNestSyncWebViewData",
-    );
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let root = linux_data_root(
-        std::env::var_os("XDG_DATA_HOME").map(PathBuf::from),
-        std::env::var_os("HOME").map(PathBuf::from),
-        "risunest-sync-webview",
-    );
-    #[cfg(not(target_os = "macos"))]
-    {
-        root.map(Some)
-            .ok_or("user-data-directory-unavailable".into())
-    }
+    Ok(paths::current()?.webview)
 }
 
-#[cfg(any(test, windows))]
-fn windows_data_root(base: Option<PathBuf>, leaf: &str) -> Option<PathBuf> {
-    base.filter(|path| path.is_absolute())
-        .map(|path| path.join(leaf))
-}
-
-#[cfg(any(test, target_os = "macos"))]
-fn macos_data_root(home: Option<PathBuf>) -> Option<PathBuf> {
-    home.filter(|path| path.is_absolute()).map(|path| {
-        path.join("Library/Application Support/io.github.rsyumi.risunest.sync-manager")
-    })
-}
-
-#[cfg(any(test, all(unix, not(target_os = "macos"))))]
-fn linux_data_root(xdg: Option<PathBuf>, home: Option<PathBuf>, leaf: &str) -> Option<PathBuf> {
-    xdg.filter(|path| path.is_absolute())
-        .or_else(|| {
-            home.filter(|path| path.is_absolute())
-                .map(|path| path.join(".local/share"))
-        })
-        .map(|path| path.join(leaf))
+/// The directories Tauri would resolve from the GUI identifier. Nothing writes
+/// to them, so they are swept with the GUI profile rather than owned.
+pub fn identifier_directories() -> Result<Vec<PathBuf>> {
+    Ok(paths::current()?.tauri_derived)
 }
 
 pub fn server_executable() -> Result<PathBuf> {
@@ -157,6 +102,7 @@ pub fn initialize(root: &Path, executable: &Path) -> Result<()> {
             return Err("server-init-failed".into());
         }
     }
+    crate::removal::register(root, executable)?;
     Ok(())
 }
 
@@ -260,6 +206,25 @@ pub fn spawn_update_helper(root: &Path, command: &mut Command) -> Result<u32> {
     }
     #[cfg(windows)]
     windows::spawn_update_helper(root, command)
+}
+
+pub fn spawn_installer_guard(root: &Path, command: &mut Command) -> Result<()> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    #[cfg(windows)]
+    {
+        windows::spawn_update_helper(root, command)?;
+        Ok(())
+    }
+    #[cfg(not(windows))]
+    {
+        command
+            .spawn()
+            .map(|_| ())
+            .map_err(|_| "installer-guard-unavailable".into())
+    }
 }
 
 pub fn finish_update_helper(root: &Path, task_name: &str) -> Result<()> {
@@ -548,65 +513,8 @@ pub fn xml(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(windows))]
     use super::*;
-
-    #[test]
-    fn absolute_xdg_config_does_not_require_home() {
-        let root = tempfile::tempdir().unwrap();
-        let xdg = root.path().join("config");
-        let resolved = user_service_directory(Some(xdg.clone()), || panic!("HOME must stay lazy")).unwrap();
-        assert_eq!(resolved, xdg.join("systemd/user"));
-    }
-
-    #[test]
-    fn absent_empty_or_relative_xdg_uses_an_absolute_home() {
-        let root = tempfile::tempdir().unwrap();
-        for xdg in [None, Some(PathBuf::new()), Some(PathBuf::from("relative/config"))] {
-            let resolved = user_service_directory(xdg.clone(), || Ok(root.path().to_owned())).unwrap();
-            assert_eq!(resolved, root.path().join(".config/systemd/user"));
-            assert!(user_service_directory(xdg.clone(), || Err("home-unavailable".into())).is_err());
-            assert!(user_service_directory(xdg, || Ok(PathBuf::from("relative/home"))).is_err());
-        }
-    }
-
-    #[test]
-    fn platform_data_leaf_names_follow_native_conventions() {
-        let windows_base = tempfile::tempdir().unwrap();
-        let linux_home = tempfile::tempdir().unwrap();
-        let macos_home = tempfile::tempdir().unwrap();
-        assert_eq!(
-            windows_data_root(Some(windows_base.path().to_owned()), "RisuNestSyncData"),
-            Some(windows_base.path().join("RisuNestSyncData"))
-        );
-        assert_eq!(
-            windows_data_root(
-                Some(windows_base.path().to_owned()),
-                "RisuNestSyncWebViewData"
-            ),
-            Some(windows_base.path().join("RisuNestSyncWebViewData"))
-        );
-        assert_eq!(
-            linux_data_root(None, Some(linux_home.path().to_owned()), "risunest-sync"),
-            Some(linux_home.path().join(".local/share/risunest-sync"))
-        );
-        assert_eq!(
-            linux_data_root(
-                None,
-                Some(linux_home.path().to_owned()),
-                "risunest-sync-webview"
-            ),
-            Some(linux_home.path().join(".local/share/risunest-sync-webview"))
-        );
-        assert_eq!(
-            macos_data_root(Some(macos_home.path().to_owned())),
-            Some(macos_home.path().join(
-                "Library/Application Support/io.github.rsyumi.risunest.sync-manager"
-            ))
-        );
-        assert!(
-            windows_data_root(Some(PathBuf::from("relative")), "RisuNestSyncData").is_none()
-        );
-    }
 
     #[cfg(not(windows))]
     #[test]
@@ -628,4 +536,12 @@ mod tests {
         }
         panic!("background child was not reaped");
     }
+}
+
+
+pub fn remove_startup(root: &Path, executable: &Path) -> Result<()> {
+    #[cfg(windows)]
+    { startup(root, executable, "remove").map(|_| ()) }
+    #[cfg(unix)]
+    { unix::remove_startup(root, executable) }
 }

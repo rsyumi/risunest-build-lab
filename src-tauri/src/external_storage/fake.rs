@@ -486,16 +486,23 @@ impl Provider for FakeProvider {
                     kind: ErrorKind::RateLimited,
                     http_status: Some(429),
                     retry_at_ms: None,
+                    oauth_error: None,
+                    oauth_error_description: None,
                 }),
                 Some(DeleteFault::Accepted) => Err(ProviderError {
                     kind: ErrorKind::Unsupported, http_status: Some(202), retry_at_ms: None,
+                    oauth_error: None, oauth_error_description: None,
                 }),
                 Some(DeleteFault::NotFound) => {
                     self.forget(&l.object);
-                    Err(ProviderError { kind: ErrorKind::NotFound, http_status: Some(404), retry_at_ms: None })
+                    Err(ProviderError {
+                        kind: ErrorKind::NotFound, http_status: Some(404), retry_at_ms: None,
+                        oauth_error: None, oauth_error_description: None,
+                    })
                 }
                 Some(DeleteFault::Unauthorized) => Err(ProviderError {
                     kind: ErrorKind::Unauthorized, http_status: Some(401), retry_at_ms: None,
+                    oauth_error: None, oauth_error_description: None,
                 }),
                 // A target that is already gone answers the same as one removed now.
                 None => {

@@ -273,18 +273,6 @@ fn validate_row(table: &PortableTable, row: &Row<'_>) -> StoreResult<()> {
                 "portable asset key is invalid",
             )?;
         }
-        "asset_repository_authority" => {
-            let authority: super::AssetRepositoryAuthorityState =
-                parse_json(&row.get::<_, String>(0)?)?;
-            authority.validate()?;
-            require(
-                !matches!(
-                    authority,
-                    super::AssetRepositoryAuthorityState::Preparing { .. }
-                ),
-                "portable asset authority is preparing",
-            )?;
-        }
         "asset_owner_heads" => {
             let kind: String = row.get(0)?;
             let locator: String = row.get(1)?;
@@ -346,12 +334,6 @@ const RELATIONSHIPS: &[(&str, &str, &str, &str)] = &[
         codes::RECORD_INVALID,
         "root",
         "portable root record count is not one",
-    ),
-    (
-        "SELECT (SELECT count(*) FROM asset_repository_authority)>1",
-        codes::RECORD_INVALID,
-        "authority",
-        "portable storage authority has more than one record",
     ),
     (
         "SELECT EXISTS(SELECT 1 FROM conversations c WHERE NOT EXISTS(SELECT 1 FROM characters p WHERE p.character_id=c.character_id))",

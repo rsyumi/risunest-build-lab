@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 
 const state = vi.hoisted(() => ({
     isTauri: false,
-    isNodeServer: false,
     database: { usePlainFetch: true },
     isTauriMobile: false,
     blobStore: null as any,
@@ -14,9 +13,6 @@ vi.mock('./platform', () => ({
     },
     get isTauriMobile() {
         return state.isTauriMobile
-    },
-    get isNodeServer() {
-        return state.isNodeServer
     },
 }))
 vi.mock('./storage/platformBlobStore', () => ({
@@ -94,7 +90,6 @@ vi.mock('./storage/persistentSaveNotifications', () => ({
     createPersistentSaveObserverInstallation: () => ({ install: vi.fn() }),
     installPersistentSaveNotifications: vi.fn(),
 }))
-vi.mock('./storage/nodeStorage', () => ({ getNodeServerProxyAuth: vi.fn() }))
 vi.mock('./storage/databasePreparation', () => ({ checkCharOrder: vi.fn() }))
 vi.mock('./storage/risuSave', () => ({ decodeRisuSave: vi.fn() }))
 vi.mock('./storage/defaultPrompts', () => ({
@@ -144,7 +139,6 @@ vi.mock('@tauri-apps/api/core', () => ({
     convertFileSrc: (path: string) => `asset://${path}`,
 }))
 vi.mock('@tauri-apps/api/path', () => ({
-    appDataDir: vi.fn(async () => '/data'),
     join: vi.fn(async (...parts: string[]) => parts.join('/')),
 }))
 vi.mock('@tauri-apps/plugin-shell', () => ({ open: vi.fn() }))
@@ -159,7 +153,6 @@ import { fetchNative, globalFetch } from './globalApi.svelte'
 describe('network requests without application URL restrictions', () => {
     beforeEach(() => {
         state.isTauri = false
-        state.isNodeServer = false
         state.database.usePlainFetch = true
         vi.stubGlobal(
             'fetch',

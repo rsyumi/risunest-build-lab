@@ -1,7 +1,8 @@
 <script lang="ts">
     import { CheckIcon, CopyIcon, LoaderCircleIcon, XIcon } from '@lucide/svelte'
     import { language } from 'src/lang'
-    import Button from 'src/lib/UI/GUI/Button.svelte'
+    import SettingButton from 'src/lib/Setting/RisuNest/SettingButton.svelte'
+    import SettingProgress from 'src/lib/Setting/RisuNest/SettingProgress.svelte'
     import { buildNativeFileJobDialogModel } from 'src/ts/gui/nativeFileJobDialogModel'
     import {
         cancelActiveNativeFileOperation,
@@ -83,7 +84,7 @@
             {#if model.terminal}
                 <div class="flex flex-col gap-1 text-sm" role="status">
                     <p
-                        class:text-borderc={model.terminal.state === 'succeeded'}
+                        class:text-success-500={model.terminal.state === 'succeeded'}
                         class:text-textcolor2={model.terminal.state === 'cancelled'}
                         class:text-danger-400={model.terminal.state === 'failed'}>
                         {model.terminal.summary}
@@ -94,19 +95,11 @@
                 </div>
             {/if}
 
-            <div class="flex flex-col gap-1" aria-live="polite">
-                <div role="progressbar" aria-label={model.title} aria-valuemin={0} aria-valuemax={100} aria-valuenow={model.overallPercent ?? undefined} class="h-2 w-full overflow-hidden rounded-md border border-darkborderc bg-bgcolor">
-                    {#if model.indeterminate}
-                        <div class="h-full w-full bg-borderc/60 motion-safe:animate-pulse"></div>
-                    {:else}
-                        <div class="h-full bg-borderc transition-[width] duration-300" style:width={`${model.overallPercent ?? 0}%`}></div>
-                    {/if}
-                </div>
-                <div class="flex justify-between text-xs tabular-nums text-textcolor2">
-                    <span>{model.overallPercent !== null ? `${model.overallPercent}%` : model.terminal ? '' : copy.preparing}</span>
-                    <span>{model.overallText}</span>
-                </div>
-            </div>
+            <SettingProgress
+                label={model.overallPercent === null && !model.terminal ? copy.preparing : model.title}
+                detail={model.overallText}
+                fraction={model.indeterminate ? null : (model.overallPercent ?? 0) / 100}
+            />
 
             {#if model.stages.length > 0}
                 <ol class="flex flex-col gap-1.5 text-sm">
@@ -146,7 +139,7 @@
             {/if}
 
             {#if model.warnings.length > 0}
-                <ul class="flex flex-col gap-1 rounded-md border border-danger-700 bg-bgcolor p-2 text-sm text-textcolor2">
+                <ul class="flex flex-col gap-1 rounded-md border border-danger-400/50 bg-bgcolor p-2 text-sm">
                     {#each model.warnings as warning}
                         <li>{warning}</li>
                     {/each}
@@ -155,9 +148,9 @@
 
             {#if model.terminal?.details}
                 <div class="flex flex-col items-start gap-2">
-                    <Button styled="outlined" size="sm" onclick={() => { showDetails = !showDetails }}>
-                        {copy.errorDetails}
-                    </Button>
+                    <SettingButton variant="secondary" onclick={() => { showDetails = !showDetails }}>
+                        {showDetails ? copy.errorDetailsHide : copy.errorDetails}
+                    </SettingButton>
                     {#if showDetails}
                         <div class="relative w-full">
                             <button
@@ -178,19 +171,21 @@
                 </div>
             {/if}
 
-            <footer class="flex flex-col items-end gap-1">
-                {#if model.cancelVisible}
-                    <Button styled="outlined" size="sm" disabled={!model.cancelEnabled} onclick={cancelActiveNativeFileOperation}>
-                        {model.cancelLabel}
-                    </Button>
-                    {#if model.cancelNote}
-                        <span class="text-xs text-textcolor2">{model.cancelNote}</span>
+            {#if model.cancelVisible || model.closeVisible}
+                <footer class="flex flex-wrap items-center justify-end gap-2">
+                    {#if model.cancelVisible}
+                        {#if model.cancelNote}
+                            <span class="mr-auto text-xs text-textcolor2">{model.cancelNote}</span>
+                        {/if}
+                        <SettingButton variant="secondary" disabled={!model.cancelEnabled} onclick={cancelActiveNativeFileOperation}>
+                            {model.cancelLabel}
+                        </SettingButton>
                     {/if}
-                {/if}
-                {#if model.closeVisible}
-                    <Button size="sm" onclick={dismissNativeFileOperationOutcome}>{copy.close}</Button>
-                {/if}
-            </footer>
+                    {#if model.closeVisible}
+                        <SettingButton onclick={dismissNativeFileOperationOutcome}>{copy.close}</SettingButton>
+                    {/if}
+                </footer>
+            {/if}
         </div>
     </div>
 {/if}

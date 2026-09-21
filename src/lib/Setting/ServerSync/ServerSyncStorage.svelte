@@ -4,6 +4,7 @@
   import { alertConfirm, alertNormal } from "src/ts/alert";
   import SettingButton from "../RisuNest/SettingButton.svelte";
   import { formatRisuNestStorageBytes as bytes } from "src/ts/storage/risuNestStorageDashboard";
+  import { describeBlockedReason } from "src/ts/storage/sync/blockedReasonText";
   import { serverSyncError } from "src/ts/storage/sync/serverSync";
   import {
     getServerSyncBackupInventory,
@@ -17,12 +18,11 @@
     type ServerSyncCacheUsage,
   } from "src/ts/storage/sync/serverSyncProduction";
   /** `backups` lists the conflict backups, `cache` the space they and the
-   * temporary files take; `all` shows both under one heading. */
+   * temporary files take. */
   let {
     onChange,
-    section = "all",
-  }: { onChange?: () => void; section?: "all" | "backups" | "cache" } =
-    $props();
+    section,
+  }: { onChange?: () => void; section: "backups" | "cache" } = $props();
   let inventory = $state<ServerSyncBackupInventory>();
   let cache = $state<ServerSyncCacheUsage>();
   let pending = $state("");
@@ -30,6 +30,7 @@
   let error = $state("");
   const text = $derived(language.risuNest.serverSync);
   const labels = $derived(text.management);
+  const heading = $derived(section === "backups" ? text.backups : labels.title);
   const backupBytes = (side: ServerSyncBackupSide) =>
     side.localRequiredBytes + side.remoteDependentBytes;
   async function load(older = false): Promise<void> {
@@ -94,39 +95,35 @@
   });
 </script>
 
-<section
-  class="grid min-w-0 gap-3 py-3 text-textcolor"
-  aria-label={labels.title}
->
+<section class="grid min-w-0 gap-3 py-3 text-textcolor" aria-label={heading}>
   <div class="flex flex-wrap items-center justify-between gap-2">
-    {#if section === "all"}<h3 class="font-bold">{labels.title}</h3>{/if}
+    <h3 class="text-[15px] font-semibold">{heading}</h3>
     <SettingButton
       variant="secondary"
-      class="ml-auto"
       busy={pending === "refresh"}
       disabled={busy}
       onclick={() => action(() => load())}>{labels.refresh}</SettingButton
     >
   </div>
-  {#if error}<p role="alert" class="text-sm">
+  {#if error}<p role="alert" class="text-sm text-danger-400">
       {language.risuNest.storage.actionFailed} ({error})
     </p>{/if}
-  {#if inventory && section !== "backups"}
-    <dl class="grid grid-cols-[1fr_auto] gap-2 text-sm">
-      <dt>{labels.disk}</dt>
-      <dd>{bytes(inventory.diskBytes)}</dd>
-      <dt>{labels.complete} ({inventory.completeCount})</dt>
-      <dd>{bytes(inventory.completeBytes)}</dd>
-      <dt>{labels.incomplete} ({inventory.incompleteCount})</dt>
-      <dd>{bytes(inventory.incompleteBytes)}</dd>
+  {#if inventory && section === "cache"}
+    <dl class="grid grid-cols-[auto_minmax(0,1fr)] gap-x-4 gap-y-1 text-[13px]">
+      <dt class="text-textcolor2">{labels.disk}</dt>
+      <dd class="m-0 tabular-nums">{bytes(inventory.diskBytes)}</dd>
+      <dt class="text-textcolor2">{labels.complete} ({inventory.completeCount})</dt>
+      <dd class="m-0 tabular-nums">{bytes(inventory.completeBytes)}</dd>
+      <dt class="text-textcolor2">{labels.incomplete} ({inventory.incompleteCount})</dt>
+      <dd class="m-0 tabular-nums">{bytes(inventory.incompleteBytes)}</dd>
     </dl>
   {/if}
-  {#if inventory && section !== "cache"}
+  {#if inventory && section === "backups"}
     {#if inventory.items.length === 0}<p class="text-sm">
         {text.noBackups}
       </p>{/if}
     {#each inventory.items as item (item.id)}
-      <div class="grid gap-2 rounded border border-darkborderc p-3">
+      <div class="grid gap-2 rounded-lg border border-darkborderc p-3">
         <p class="text-sm">
           {new Date(item.createdAt).toLocaleString()} · {bytes(
             backupBytes(item.local) + backupBytes(item.remote),
@@ -164,14 +161,14 @@
             onclick={() => exportBackup(item.id, "remote")}>{text.exportRemoteBackup}</SettingButton
           >
           <SettingButton
-            variant="secondary"
+            variant="danger"
             busy={pending === `remove:${item.id}`}
             disabled={busy || !item.deletable}
             onclick={() => remove(item.id)}>{language.remove}</SettingButton
           >
         </div>
-        {#if item.blockedReason}<p class="text-xs text-textcolor2">
-            {item.blockedReason}
+        {#if item.blockedReason}<p class="text-[13px] text-textcolor2">
+            {describeBlockedReason(item.blockedReason)}
           </p>{/if}
       </div>
     {/each}
@@ -182,13 +179,8 @@
         onclick={() => action(() => load(true), false, "more")}>{labels.more}</SettingButton
       >{/if}
   {/if}
-  {#if cache && section !== "backups"}
-    <div
-      class="grid gap-2 text-sm"
-      class:border-t={section === "all"}
-      class:border-darkborderc={section === "all"}
-      class:pt-3={section === "all"}
-    >
+  {#if cache && section === "cache"}
+    <div class="grid gap-2 text-sm">
       <p>{labels.cache}: {bytes(cache.totalBytes)}</p>
       <p>
         {labels.protected}: {bytes(cache.protectedBytes)} · {labels.reclaimable}:
@@ -202,8 +194,8 @@
           Boolean(cache.blockedReason)}
         onclick={clean}>{labels.clean}</SettingButton
       >
-      {#if cache.blockedReason}<p class="text-textcolor2">
-          {cache.blockedReason}
+      {#if cache.blockedReason}<p class="text-[13px] text-textcolor2">
+          {describeBlockedReason(cache.blockedReason)}
         </p>{/if}
     </div>
   {/if}

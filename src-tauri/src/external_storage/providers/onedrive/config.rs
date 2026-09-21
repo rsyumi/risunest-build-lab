@@ -205,7 +205,7 @@ fn service_url(raw: &str) -> Result<url::Url> {
     Ok(parsed)
 }
 
-fn identifier(value: &str) -> Result<&str> {
+pub(super) fn identifier(value: &str) -> Result<&str> {
     let acceptable = !value.is_empty()
         && value.len() <= 512
         && value

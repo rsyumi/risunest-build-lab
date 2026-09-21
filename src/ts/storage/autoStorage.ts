@@ -1,6 +1,4 @@
 import localforage from "localforage"
-import { isNodeServer } from "src/ts/platform"
-import { NodeStorage } from "./nodeStorage"
 import { OpfsStorage } from "./opfsStorage"
 import { alertStore } from "../alert"
 import { getDeviceMarkers } from "./deviceMarkers"
@@ -9,7 +7,7 @@ export class AutoStorage{
     isAccount:boolean = false
     private sessionAccountMode:boolean|null = null
 
-    realStorage:LocalForage|NodeStorage|OpfsStorage
+    realStorage:LocalForage|OpfsStorage
 
     async setItem(key:string, value:Uint8Array):Promise<string|null> {
         await this.Init()
@@ -40,12 +38,7 @@ export class AutoStorage{
         this.isAccount = this.sessionAccountMode
             ?? getDeviceMarkers().getItem('accountst') === 'able'
         if(!this.realStorage){
-            if(isNodeServer){
-                console.log("using node storage")
-                this.realStorage = new NodeStorage()
-                return
-            }
-            else if(window.navigator?.storage?.getDirectory &&
+            if(window.navigator?.storage?.getDirectory &&
                     FileSystemFileHandle?.prototype?.createWritable &&
                     localStorage.getItem('opfs_flag!') === "able"){
                 console.log("using opfs storage")

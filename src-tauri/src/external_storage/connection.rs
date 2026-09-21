@@ -271,6 +271,7 @@ pub(crate) struct PreparedConnection {
     pub requires_o_auth: bool,
     pub requires_recovery_key: bool,
     pub requires_platform_o_auth_client: bool,
+    pub requires_folder_selection: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub oauth_project_hint: Option<String>,
 }
@@ -453,8 +454,75 @@ pub(crate) fn validate_preparation(
     {
         return Err(ProviderError::new(ErrorKind::Unsupported));
     }
-    validate_config_shape(&request.config)?;
+    validate_preparation_config_shape(&request.config, request.mode)?;
     endpoint_confirmation(&request.config, false)
+}
+
+pub(crate) fn requires_folder_selection(request: &PrepareConnectionRequest) -> bool {
+    if request.mode != ConnectionOpenMode::Existing { return false; }
+    match request.config.provider.as_str() {
+        "google_drive" => request.config.location.get("space").map(String::as_str) != Some("appDataFolder")
+            && !request.config.location.contains_key("folderId"),
+        "onedrive" => request.config.location.get("accountType").map(String::as_str) != Some("appFolder")
+            && !request.config.location.contains_key("rootItemId"),
+        _ => false,
+    }
+}
+
+fn validate_preparation_config_shape(config: &ConnectionConfig, mode: ConnectionOpenMode) -> Result<()> {
+    let setup = match config.provider.as_str() {
+        "google_drive" => {
+            let space = config.location.get("space").map(String::as_str).unwrap_or("drive");
+            let fixed = space == "appDataFolder";
+            let allowed = ["space", "folderName", "oauthRedirectUri"];
+            let only_allowed = config.location.keys().all(|key| allowed.contains(&key.as_str()));
+            let name = config.location.get("folderName").map(|value| value.trim());
+            matches!(config.profile.as_deref(), None | Some("drive"))
+                && matches!(space, "drive" | "appDataFolder") && only_allowed
+                && if fixed { name.is_none() } else if mode == ConnectionOpenMode::Create {
+                    name.is_some_and(|value| !value.is_empty() && value.len() <= 255)
+                } else { name.is_none() }
+        }
+        "onedrive" => {
+            let account_type = config.location.get("accountType").map(String::as_str);
+            let fixed = account_type == Some("appFolder");
+            let allowed = ["accountType", "tenant", "folderName", "redirectUri"];
+            let only_allowed = config.location.keys().all(|key| allowed.contains(&key.as_str()));
+            let name = config.location.get("folderName").map(|value| value.trim());
+            config.profile.is_none()
+                && matches!(account_type, Some("personal" | "business" | "appFolder"))
+                && config.location.get("tenant").is_some_and(|value| !value.trim().is_empty())
+                && only_allowed
+                && if fixed { name.is_none() } else if mode == ConnectionOpenMode::Create {
+                    name.is_some_and(|value| !value.is_empty() && value.len() <= 255)
+                } else { name.is_none() }
+        }
+        _ => false,
+    };
+    if setup { validate_common_config_shape(config) } else { validate_config_shape(config) }
+}
+
+fn validate_common_config_shape(config: &ConnectionConfig) -> Result<()> {
+    let mut canonical = config.clone();
+    match canonical.provider.as_str() {
+        "google_drive" => {
+            let fixed = canonical.location.get("space").map(String::as_str) == Some("appDataFolder");
+            canonical.location.remove("folderName");
+            canonical.location.entry("folderId".into()).or_insert_with(|| {
+                if fixed { "appDataFolder".into() } else { "pending".into() }
+            });
+        }
+        "onedrive" => {
+            let fixed = canonical.location.get("accountType").map(String::as_str) == Some("appFolder");
+            canonical.location.remove("folderName");
+            canonical.location.entry("driveId".into()).or_insert_with(|| "pending".into());
+            canonical.location.entry("rootItemId".into()).or_insert_with(|| {
+                if fixed { "special/approot".into() } else { "pending".into() }
+            });
+        }
+        _ => {}
+    }
+    validate_config_shape(&canonical)
 }
 
 pub(crate) fn validate_config_shape(config: &ConnectionConfig) -> Result<()> {
@@ -548,7 +616,7 @@ pub(crate) fn validate_config_shape(config: &ConnectionConfig) -> Result<()> {
         "google_drive" => {
             matches!(config.profile.as_deref(), None | Some("drive"))
                 && required(&["folderId"])
-                && only(&["folderId", "space"])
+                && only(&["folderId", "space", "oauthRedirectUri"])
                 && config
                     .location
                     .get("space")
@@ -649,8 +717,8 @@ pub(crate) fn endpoint_confirmation(
                     .unwrap_or_default()
             )
         }),
-        "google_drive" => config.location.get("folderId").cloned(),
-        "onedrive" => config.location.get("rootItemId").cloned(),
+        "google_drive" => config.location.get("folderName").cloned().or_else(|| config.location.get("folderId").cloned()),
+        "onedrive" => config.location.get("folderName").cloned().or_else(|| config.location.get("rootItemId").cloned()),
         "mybox" => config.location.get("rootFolderName").cloned(),
         "github_releases" => Some(format!(
             "{}/{}",
@@ -884,6 +952,7 @@ pub(crate) fn provider_for(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::external_storage::{contract::OAuthProfile, recovery};
     use std::collections::BTreeMap;
 
     fn request(
@@ -1178,6 +1247,48 @@ mod tests {
         let mut request = request("webdav", ConnectionPurpose::Backup);
         request.config.location.clear();
         assert!(validate_preparation(&request).is_err());
+    }
+
+    #[test]
+    fn oauth_folder_setup_accepts_names_or_deferred_selection_without_provider_ids() {
+        let oauth = OAuthProfile {
+            project_id: "123456789012".into(),
+            platform_client_ids: BTreeMap::from([(
+                "windows".into(),
+                "123456789012-client.apps.googleusercontent.com".into(),
+            )]),
+        };
+        let mut google = request("google_drive", ConnectionPurpose::Backup);
+        google.config.account_id.clear();
+        google.config.oauth_profile = Some(oauth.clone());
+        google.config.location = BTreeMap::from([
+            ("space".into(), "drive".into()),
+            ("folderName".into(), "RisuNest".into()),
+        ]);
+        assert!(validate_preparation(&google).is_ok());
+        google.mode = ConnectionOpenMode::Existing;
+        google.recovery_key = Some(recovery::generate_key().unwrap().to_string());
+        google.config.location.remove("folderName");
+        assert!(validate_preparation(&google).is_ok());
+
+        let mut onedrive = request("onedrive", ConnectionPurpose::Backup);
+        onedrive.config.profile = None;
+        onedrive.config.account_id.clear();
+        onedrive.config.oauth_profile = Some(OAuthProfile {
+            project_id: "entra-application".into(),
+            platform_client_ids: BTreeMap::from([("windows".into(), "entra-client".into())]),
+        });
+        onedrive.config.location = BTreeMap::from([
+            ("accountType".into(), "personal".into()),
+            ("tenant".into(), "common".into()),
+            ("folderName".into(), "RisuNest".into()),
+            ("redirectUri".into(), "risunest://oauth/callback".into()),
+        ]);
+        assert!(validate_preparation(&onedrive).is_ok());
+        onedrive.mode = ConnectionOpenMode::Existing;
+        onedrive.recovery_key = Some(recovery::generate_key().unwrap().to_string());
+        onedrive.config.location.remove("folderName");
+        assert!(validate_preparation(&onedrive).is_ok());
     }
 
     #[test]

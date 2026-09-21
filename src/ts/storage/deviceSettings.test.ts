@@ -4,7 +4,7 @@ import { setRuntimePerformanceProfile } from '../runtimePerformanceProfile'
 type DeviceSettingsUpdate = Parameters<typeof import('./deviceSettings').updateDeviceSettings>[0]
 
 // @ts-expect-error The persisted settings schema is not caller-configurable.
-const schemaUpdate: DeviceSettingsUpdate = { schema: 'risunest.device-settings/v2' }
+const schemaUpdate: DeviceSettingsUpdate = { schema: 'risunest.device-settings/v1' }
 void schemaUpdate
 
 async function loadDeviceSettings() {
@@ -13,7 +13,7 @@ async function loadDeviceSettings() {
 }
 
 const defaults = {
-    schema: 'risunest.device-settings/v2',
+    schema: 'risunest.device-settings/v1',
     performanceProfile: 'normal',
     androidKeepAliveDuringGeneration: true,
     nativeFileLogEnabled: true,

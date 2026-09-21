@@ -40,8 +40,6 @@ pub(crate) enum RepairAction {
     KeepSingleRecord { table: String },
     /// Gives orphans an owner again by restoring the missing container as a trashed record.
     RecoverOrphans { table: String },
-    /// Re-examines the stored files and settles a storage authority that stopped half-way.
-    SettleAuthority { subject: String },
 }
 
 impl RepairAction {
@@ -53,7 +51,6 @@ impl RepairAction {
             Self::NormalizeRecords { table }
             | Self::KeepSingleRecord { table }
             | Self::RecoverOrphans { table } => table,
-            Self::SettleAuthority { subject } => subject,
         }
     }
 }
@@ -81,7 +78,6 @@ fn action_id(action: &RepairAction) -> String {
         RepairAction::NormalizeRecords { .. } => "normalize-records".to_owned(),
         RepairAction::KeepSingleRecord { .. } => "keep-single-record".to_owned(),
         RepairAction::RecoverOrphans { .. } => "recover-orphans".to_owned(),
-        RepairAction::SettleAuthority { .. } => "settle-authority".to_owned(),
     }
 }
 
@@ -94,7 +90,7 @@ const NORMALIZABLE: &[&str] = &[
     "bot_presets",
     "plugin_storage",
 ];
-const SINGLETON: &[&str] = &["root", "authority"];
+const SINGLETON: &[&str] = &["root"];
 const ORPHANABLE: &[&str] = &["conversations", "messages"];
 
 fn record_candidates(index: usize, finding: &Finding) -> Vec<RepairCandidate> {
@@ -201,14 +197,6 @@ pub(crate) fn plan(result: &ScanResult) -> Vec<RepairCandidate> {
                     ));
                 }
             }
-            codes::AUTHORITY_INCOMPLETE => candidates.push(candidate(
-                index,
-                RepairAction::SettleAuthority {
-                    subject: finding.owner.kind.clone(),
-                },
-                true,
-                false,
-            )),
             // Unreferenced files are deleted by the unused image cleanup, never by a repair, and
             // an unclassified failure has no fixed transformation to offer.
             _ => {}

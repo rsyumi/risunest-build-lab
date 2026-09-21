@@ -72,7 +72,6 @@ describe('SqlitePersistentDataStore', () => {
         await store.readPluginStorage('test-plugin', 'memory')
         await store.readAssetAlias({ kind: alias.kind, key: alias.key })
         await store.listAssetAliases({ kind: 'asset', limit: 2, cursor: 'alias-cursor' })
-        await store.readAssetRepositoryAuthority()
         await store.readAssetOwnerHead(owner)
         await store.commitAssetAlias(alias, 8)
         await store.deleteAssetAlias({ kind: alias.kind, key: alias.key }, 9)
@@ -103,7 +102,6 @@ describe('SqlitePersistentDataStore', () => {
                 'pds_list_asset_aliases',
                 { query: { kind: 'asset', limit: 2, cursor: 'alias-cursor' } },
             ],
-            ['pds_read_asset_repository_authority', {}],
             ['pds_read_asset_owner_head', { owner }],
             ['pds_commit_asset_alias', { alias, expectedRevision: 8 }],
             [
@@ -409,82 +407,6 @@ describe('SqlitePersistentDataStore', () => {
         ])
     })
 
-    it('activates a complete asset repository migration through one staged generation', async () => {
-        mocks.invoke.mockImplementation(async (command: string) => {
-            if (command === 'pds_replace_begin') return { stagingId: 'staging-migration' }
-            if (command === 'pds_replace_commit') return { revision: 8 }
-            return undefined
-        })
-        const database = structuredClone(fixtureDatabase)
-        database.modules = [{
-            id: 'module',
-            name: 'Module',
-            description: '',
-            assets: [['asset', 'assets/migrated.bin', 'BIN']],
-        }]
-        const alias = {
-            key: 'assets/migrated.bin',
-            objectHash: '55'.repeat(32),
-            kind: 'asset' as const,
-            size: 5,
-            mime: 'application/octet-stream',
-            name: 'Migrated',
-            ext: 'BIN',
-        }
-        const head = {
-            owner: { kind: 'root-module-assets' as const, index: 0 },
-            present: true as const,
-            manifestHash: '66'.repeat(32),
-            entryCount: 1,
-        }
-        const { characters, botPresets, ...root } = database
-        const store = new SqlitePersistentDataStore()
-
-        await expect(store.activateAssetRepositoryMigration({
-            sourceRevision: 7,
-            migrationId: 'migration-atomic',
-            compatibilityHash: '77'.repeat(32),
-            database,
-            assetAliases: [alias],
-            assetOwnerHeads: [head],
-        })).resolves.toEqual({ revision: 8 })
-
-        expect(mocks.invoke.mock.calls).toEqual([
-            ['pds_replace_begin'],
-            ['pds_replace_put_asset_repository_authority', {
-                stagingId: 'staging-migration',
-                authority: {
-                    format: 'preparing',
-                    migrationId: 'migration-atomic',
-                    sourceRevision: 7,
-                },
-            }],
-            ['pds_replace_put_root', { stagingId: 'staging-migration', root }],
-            ['pds_replace_put_presets', { stagingId: 'staging-migration', presets: botPresets }],
-            ['pds_replace_add_characters', { stagingId: 'staging-migration', characters }],
-            ['pds_replace_put_asset_aliases', {
-                stagingId: 'staging-migration',
-                aliases: [alias],
-            }],
-            ['pds_replace_put_asset_owner_heads', {
-                stagingId: 'staging-migration',
-                heads: [head],
-            }],
-            ['pds_replace_put_asset_repository_authority', {
-                stagingId: 'staging-migration',
-                authority: {
-                    format: 'v2',
-                    migrationId: 'migration-atomic',
-                    compatibilityHash: '77'.repeat(32),
-                },
-            }],
-            ['pds_replace_commit', {
-                stagingId: 'staging-migration',
-                expectedRevision: 7,
-            }],
-        ])
-    })
-
     it('splits staged character batches at approximately four MiB', async () => {
         mocks.invoke.mockImplementation(async (command: string) => {
             if (command === 'pds_replace_begin') return { stagingId: 'staging-large' }
@@ -536,7 +458,6 @@ describe('SqlitePersistentDataStore', () => {
         await lease.readPluginStorage('test-plugin', 'memory')
         await lease.readAssetAlias({ kind: 'asset', key: 'assets/pinned.bin' })
         await lease.listAssetAliases({ kind: 'asset', limit: 2 })
-        await lease.readAssetRepositoryAuthority()
         await lease.readAssetOwnerHead({ kind: 'root-module-assets', index: 0 })
         await lease.release()
         await lease.release()
@@ -583,7 +504,6 @@ describe('SqlitePersistentDataStore', () => {
                 'pds_list_asset_aliases',
                 { query: { kind: 'asset', limit: 2 }, lease: 'lease-7' },
             ],
-            ['pds_read_asset_repository_authority', { lease: 'lease-7' }],
             [
                 'pds_read_asset_owner_head',
                 { owner: { kind: 'root-module-assets', index: 0 }, lease: 'lease-7' },
@@ -594,7 +514,7 @@ describe('SqlitePersistentDataStore', () => {
         await expect(lease.readConversationMetadata('char-a', 'conv-long')).rejects.toBeInstanceOf(
             SnapshotReleasedError,
         )
-        expect(mocks.invoke).toHaveBeenCalledTimes(17)
+        expect(mocks.invoke).toHaveBeenCalledTimes(16)
     })
 
     it('retains the native open report and warns when a snapshot restore was skipped', async () => {

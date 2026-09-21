@@ -34,6 +34,12 @@ impl Default for DurableCasJobState {
 }
 
 impl DurableCasJobState {
+    pub(crate) fn close_for_cleanup(&self) -> Result<(), String> {
+        self.reset_renderer_session()?;
+        self.jobs.lock().map_err(|_| "cleanup-cas-busy")?.clear();
+        Ok(())
+    }
+
     pub(crate) fn reset_renderer_session(&self) -> Result<(), String> {
         self.uploads
             .lock()
@@ -195,8 +201,7 @@ impl CasUploadPool {
 }
 
 fn repository_root(app: &AppHandle) -> Result<std::path::PathBuf, String> {
-    crate::app_data_root::resolve(app)
-        .map_err(|error| format!("failed to resolve application data directory: {error}"))
+    crate::app_paths::data_root(app)
 }
 
 fn now_ms() -> Result<i64, String> {

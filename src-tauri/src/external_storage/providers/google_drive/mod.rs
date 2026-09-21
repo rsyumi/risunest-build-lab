@@ -48,6 +48,8 @@ mod provider;
 mod tests;
 mod wire;
 
+pub(crate) use provider::GoogleDrive;
+
 pub(crate) fn create(dependencies: Dependencies) -> Result<Arc<dyn Provider>> {
     Ok(provider::provider(dependencies))
 }

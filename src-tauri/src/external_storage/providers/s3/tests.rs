@@ -1553,6 +1553,8 @@ fn documented_failure_statuses_map_to_provider_kinds_without_a_server_message() 
                     kind: ErrorKind::Unauthorized,
                     http_status: Some(403),
                     retry_at_ms: None,
+                    oauth_error: None,
+                    oauth_error_description: None,
                 },
             ),
             (
@@ -1563,6 +1565,8 @@ fn documented_failure_statuses_map_to_provider_kinds_without_a_server_message() 
                     kind: ErrorKind::NotFound,
                     http_status: Some(404),
                     retry_at_ms: None,
+                    oauth_error: None,
+                    oauth_error_description: None,
                 },
             ),
             (
@@ -1573,6 +1577,8 @@ fn documented_failure_statuses_map_to_provider_kinds_without_a_server_message() 
                     kind: ErrorKind::RateLimited,
                     http_status: Some(429),
                     retry_at_ms: Some(NOW_MS + 30_000),
+                    oauth_error: None,
+                    oauth_error_description: None,
                 },
             ),
             (
@@ -1583,6 +1589,8 @@ fn documented_failure_statuses_map_to_provider_kinds_without_a_server_message() 
                     kind: ErrorKind::Transient,
                     http_status: Some(503),
                     retry_at_ms: Some(NOW_MS + 5_000),
+                    oauth_error: None,
+                    oauth_error_description: None,
                 },
             ),
             (
@@ -1593,6 +1601,8 @@ fn documented_failure_statuses_map_to_provider_kinds_without_a_server_message() 
                     kind: ErrorKind::RateLimited,
                     http_status: Some(503),
                     retry_at_ms: Some(NOW_MS + 5_000),
+                    oauth_error: None,
+                    oauth_error_description: None,
                 },
             ),
             (
@@ -1603,6 +1613,8 @@ fn documented_failure_statuses_map_to_provider_kinds_without_a_server_message() 
                     kind: ErrorKind::StorageFull,
                     http_status: Some(507),
                     retry_at_ms: None,
+                    oauth_error: None,
+                    oauth_error_description: None,
                 },
             ),
         ] {

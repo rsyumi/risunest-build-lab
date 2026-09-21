@@ -126,7 +126,7 @@ export const getServerSyncBackupInventory = (before?: ServerSyncBackupCursor) =>
   });
 let deletionCleanup: Promise<void> | undefined;
 function cleanupDeletedBackups(): void {
-  if (!isTauri || deletionCleanup) return;
+  if (!isTauri || deletionCleanup || getServerSyncController().snapshot().connecting) return;
   // Native admission rejects busy attempts. Retry on the next safe lifecycle
   // signal, without cancelling work or making startup depend on cleanup.
   deletionCleanup = invoke("server_sync_backup_cleanup")
@@ -238,9 +238,12 @@ export function startServerSync(): void {
   );
   let configured = false;
   controller.subscribe((state) => {
-    const bound = Boolean(state.status?.configured);
+    const bound = Boolean(state.status?.configured && !state.connecting);
     // A connection can only be held once this device has a binding to hold.
-    if (bound && !configured) resumeServerSyncAfterBackup();
+    if (bound && !configured) {
+      scheduler.resume();
+      if (available()) void invoke("server_sync_events_start").catch(() => {});
+    }
     configured = bound;
   });
   void controller.initialize().then(() => resumeServerSyncAfterBackup());

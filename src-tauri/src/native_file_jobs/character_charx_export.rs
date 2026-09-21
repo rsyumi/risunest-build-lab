@@ -1027,7 +1027,7 @@ mod tests {
     use crate::native_file_jobs::charx::{inspect_charx_file, CharXInspection, CharXLimits};
     use crate::native_file_jobs::{CharacterCharxContainer, JobKind, JobRegistry};
     use crate::persistent_store::{
-        AssetAlias, AssetOwnerHead, AssetOwnerLocator, AssetRepositoryAuthorityState,
+        AssetAlias, AssetOwnerHead, AssetOwnerLocator,
         PersistentStore, StoreError,
     };
     use serde_json::json;
@@ -1157,15 +1157,6 @@ mod tests {
                     manifest.content_hash,
                     2,
                 )],
-            )
-            .unwrap();
-        store
-            .replace_put_asset_repository_authority(
-                &staging.staging_id,
-                &AssetRepositoryAuthorityState::V2 {
-                    migration_id: "character-charx-test".to_owned(),
-                    compatibility_hash: "ab".repeat(32),
-                },
             )
             .unwrap();
         let revision = store

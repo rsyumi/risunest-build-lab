@@ -8,6 +8,7 @@ import {
 } from "../../src/ts/storage/database.svelte";
 import { changeLanguage } from "../../src/lang";
 import { updateColorScheme } from "../../src/ts/gui/colorscheme";
+import { processScriptFull } from "../../src/ts/process/scripts";
 import { runStreamingSuite } from "./suite";
 import {
   runPersistenceSpike,
@@ -93,8 +94,30 @@ export function startStreamingSmoke() {
       await tick();
     },
     sourceMatches: fixture.sourceMatches,
-    setRemoval: (enabled: boolean) => {
-      DBState.db.characters[0].customscript = enabled ? removalScripts : [];
+    debugState: () => ({
+      dbScriptCount: DBState.db.characters[0].customscript.length,
+      ...fixture.inspectScripts(),
+    }),
+    debugFinal: async (source: string) => {
+      const result = await processScriptFull(
+        DBState.db.characters[0],
+        source,
+        "editdisplay",
+        -1,
+        { chatRole: "char" },
+        { cache: "bypass" },
+      );
+      return {
+        directHasLatestThought: result.data.includes("LATEST-SYNTHETIC"),
+        directHasRawAnswerMarkdown: result.data.includes("**Answer**"),
+        directLength: result.data.length,
+      };
+    },
+    setRemoval: async (enabled: boolean) => {
+      const scripts = enabled ? removalScripts : [];
+      DBState.db.characters[0].customscript = scripts;
+      fixture.setScripts(scripts);
+      await tick();
     },
   };
   Object.assign(window, {

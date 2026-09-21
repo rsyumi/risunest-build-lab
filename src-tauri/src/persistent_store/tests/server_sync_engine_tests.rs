@@ -7,6 +7,7 @@ use risunest_sync_wire::{ChangeSet, Domain, ScopeFence};
 mod initial;
 #[path = "server_sync_matrix_tests.rs"]
 mod matrix;
+mod publication;
 mod residency;
 #[path = "server_sync_retained_fixture_tests.rs"]
 mod retained_fixture;
@@ -43,21 +44,6 @@ fn prepared() -> (tempfile::TempDir, PersistentStore) {
             asset_owner_heads: Some(heads),
             ..empty_working_set_commit(1)
         })
-        .unwrap();
-    // This synthetic profile has a complete (empty) alias inventory. Its
-    // deliberately missing images are proven missing, as on an initialized app.
-    let generation = active_generation(&store.connection).unwrap();
-    let assets = serde_json::to_string(&AssetRepositoryAuthorityState::V2 {
-        migration_id: "synthetic".into(),
-        compatibility_hash: "a".repeat(64),
-    })
-    .unwrap();
-    store
-        .connection
-        .execute(
-            "UPDATE asset_repository_authority SET value=?2 WHERE generation=?1",
-            params![generation, assets],
-        )
         .unwrap();
     (directory, store)
 }

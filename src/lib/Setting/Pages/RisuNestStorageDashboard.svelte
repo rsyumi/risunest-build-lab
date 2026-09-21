@@ -26,6 +26,7 @@
         restartNativeApp,
     } from 'src/ts/storage/nativePersistentMaintenance'
     import { getSyncConflictBackupStore } from 'src/ts/storage/sync/syncConflictBackup'
+    import { describeBlockedReason } from 'src/ts/storage/sync/blockedReasonText'
     import { openDataHealthScreen } from 'src/ts/storage/dataHealthNavigation'
     import type { NativeAssetGcCandidate } from 'src/ts/storage/nativePersistentMaintenance'
     import {
@@ -104,7 +105,7 @@
                       id: 'cache',
                       label: syncLabels.cache,
                       bytes: rollup.cacheBytes,
-                      color: 'bg-borderc',
+                      color: 'bg-neutral-500',
                   },
                   {
                       id: 'snapshots',
@@ -271,16 +272,18 @@
         <SettingButton variant="secondary" busy={view.loading} onclick={() => dashboard.load()}>{strings.refresh}</SettingButton>
     {/snippet}
     {#if view.loadFailed}
-        <div class="flex flex-wrap items-center gap-2 px-4 py-3 text-sm text-textcolor2" role="alert" aria-live="assertive">
-            <span>{rollup ? strings.staleTotals : strings.loadFailed}</span>
-            <SettingButton busy={view.loading} onclick={() => dashboard.load()}>{strings.retry}</SettingButton>
-        </div>
+        <p class="px-4 py-3 text-sm text-textcolor2" role="alert" aria-live="assertive">{rollup ? strings.staleTotals : strings.loadFailed}</p>
     {/if}
     {#if view.loading && !rollup}
-        <div class="grid grid-cols-2 gap-2 p-4 sm:grid-cols-3" role="status" aria-live="polite" aria-label={language.loading}>
-            {#each Array(6) as _}
-                <div data-storage-card-placeholder class="h-[68px] animate-pulse rounded-md bg-darkbutton" aria-hidden="true"></div>
-            {/each}
+        <!-- The placeholder keeps the loaded shape: the total, the bar, and one legend line. -->
+        <div data-storage-summary-placeholder class="p-4" role="status" aria-live="polite" aria-label={language.loading}>
+            <div class="h-9 w-40 animate-pulse rounded-md bg-darkbutton" aria-hidden="true"></div>
+            <div class="mt-3 h-3 w-full animate-pulse rounded-full bg-darkbutton" aria-hidden="true"></div>
+            <div class="mt-3 grid grid-cols-1 gap-x-5 gap-y-1.5 @md:grid-cols-3" aria-hidden="true">
+                {#each Array(3) as _}
+                    <div class="h-4 animate-pulse rounded-xs bg-darkbutton"></div>
+                {/each}
+            </div>
         </div>
     {:else if rollup}
         <div data-storage-summary class="p-4">
@@ -310,7 +313,7 @@
                 {#each segments as segment (segment.id)}
                     <li class="flex items-center gap-2">
                         <span class="h-2.5 w-2.5 shrink-0 rounded-xs {segment.color}" aria-hidden="true"></span>
-                        <span class="flex-1 text-textcolor2">{segment.label}</span>
+                        <span class="flex-1 text-textcolor2 break-keep">{segment.label}</span>
                         <span class="tabular-nums">{formatRisuNestStorageBytes(segment.bytes)}</span>
                     </li>
                 {/each}
@@ -326,7 +329,7 @@
             <summary class={listHeaderClass}>
                 <ChevronRight size={16} class="shrink-0 text-textcolor2 transition-transform duration-200 group-open:rotate-90" aria-hidden="true" />
                 <span>{label}</span>
-                {#if summary}{' '}<span class="ml-auto text-sm text-textcolor2 tabular-nums">{summary}</span>{/if}
+                {#if summary}<span class="ml-auto text-sm text-textcolor2 tabular-nums">{summary}</span>{/if}
             </summary>
         {/snippet}
         <details data-storage-backup-list="snapshots" class="group">
@@ -371,7 +374,7 @@
                     <SettingButton variant="secondary" busy={isBusy(`export-server-backup:${backup.id}:local`)} disabled={serverBackupBusy || backup.local.availability === 'unavailable' || Boolean(backup.blockedReason)} onclick={() => exportServerBackup(backup.id, 'local')}>{syncText.exportLocalBackup}</SettingButton>
                     <SettingButton variant="secondary" busy={isBusy(`export-server-backup:${backup.id}:remote`)} disabled={serverBackupBusy || backup.remote.availability === 'unavailable' || Boolean(backup.blockedReason)} onclick={() => exportServerBackup(backup.id, 'remote')}>{syncText.exportRemoteBackup}</SettingButton>
                     <SettingButton variant="secondary" busy={isBusy(`delete-server-backup:${backup.id}`)} disabled={serverBackupBusy || !backup.deletable} onclick={() => deleteServerBackup(backup.id)}>{language.remove}</SettingButton>
-                    {#if backup.blockedReason}<p class="basis-full text-xs text-textcolor2">{backup.blockedReason}</p>{/if}
+                    {#if backup.blockedReason}<p class="basis-full text-xs text-textcolor2">{describeBlockedReason(backup.blockedReason)}</p>{/if}
                 </div>
             {:else}
                 <p class={listEmptyClass}>{strings.emptyList}</p>
@@ -385,81 +388,85 @@
         <details data-storage-backup-list="temp-files" class="group">
             {@render listHeader(syncLabels.cache, rollup.cacheBytes > 0 ? formatRisuNestStorageBytes(rollup.cacheBytes) : '')}
             {#if view.tempUsage}
-                <div data-storage-temp-row class={listRowClass}>
-                    <span class="min-w-0 flex-1 text-textcolor2 tabular-nums">{syncLabels.protected} {formatRisuNestStorageBytes(view.tempUsage.protectedBytes)} · {syncLabels.reclaimable} {formatRisuNestStorageBytes(view.tempUsage.reclaimableBytes)}</span>
-                    <SettingButton variant="secondary" busy={isBusy('cleanup-temp')} disabled={view.tempUsage.reclaimableBytes === 0 || Boolean(view.tempUsage.blockedReason)} onclick={cleanupTemp}>{syncLabels.clean}</SettingButton>
-                    {#if view.tempUsage.blockedReason}<p class="basis-full text-xs text-textcolor2">{view.tempUsage.blockedReason}</p>{/if}
+                <div data-storage-temp-row class="grid items-center gap-x-6 gap-y-2 border-t border-darkborderc/55 py-2 pr-4 pl-10 text-sm @xl:grid-cols-[minmax(50%,1fr)_auto]">
+                    <div class="min-w-0">
+                        <span class="text-textcolor2 tabular-nums">{syncLabels.protected} {formatRisuNestStorageBytes(view.tempUsage.protectedBytes)} · {syncLabels.reclaimable} {formatRisuNestStorageBytes(view.tempUsage.reclaimableBytes)}</span>
+                        {#if view.tempUsage.blockedReason}<p class="mt-0.5 text-xs text-textcolor2">{describeBlockedReason(view.tempUsage.blockedReason)}</p>{/if}
+                    </div>
+                    <div class="flex flex-wrap items-center gap-2 @xl:justify-self-end">
+                        <SettingButton variant="secondary" busy={isBusy('cleanup-temp')} disabled={view.tempUsage.reclaimableBytes === 0 || Boolean(view.tempUsage.blockedReason)} onclick={cleanupTemp}>{syncLabels.clean}</SettingButton>
+                    </div>
                 </div>
             {:else}
                 <p class={listEmptyClass}>{strings.emptyList}</p>
             {/if}
         </details>
 
-        <div data-storage-action-row class="divide-y divide-darkborderc/55">
-            <SettingRow data-storage-action="snapshot" label={strings.createSnapshotTitle} help={strings.createSnapshotHelp}>
-                <SettingButton busy={isBusy('create-snapshot')} onclick={createSnapshot}>{strings.createSnapshot}</SettingButton>
-            </SettingRow>
-            <SettingRow data-storage-action="gc" label={strings.gcTitle} help={strings.gcHelp}>
-                {#snippet below()}
-                    <p class="mt-0.5 max-w-[62ch] text-[13px] leading-normal text-textcolor2">{strings.gcSeparation}</p>
-                    <div role="status" aria-live="polite">
-                        {#if view.gcPreview}
-                            <p class="mt-1 text-sm tabular-nums">{strings.gcResult.replace('{0}', formatCount(view.gcPreview.candidateCount)).replace('{1}', formatRisuNestStorageBytes(view.gcPreview.candidateBytes))}</p>
-                        {:else if view.gcResult}
-                            <p class="mt-1 text-sm tabular-nums">{strings.gcDeletedResult.replace('{0}', formatCount(view.gcResult.deletedCount)).replace('{1}', formatRisuNestStorageBytes(view.gcResult.deletedBytes))}</p>
-                        {/if}
+        <SettingRow data-storage-action="snapshot" label={strings.createSnapshotTitle} help={strings.createSnapshotHelp}>
+            <SettingButton busy={isBusy('create-snapshot')} onclick={createSnapshot}>{strings.createSnapshot}</SettingButton>
+        </SettingRow>
+        <SettingRow data-storage-action="gc" label={strings.gcTitle} help={`${strings.gcHelp} ${strings.gcSeparation}`}>
+            {#snippet below()}
+                <!-- The controls stay above the lists they produce instead of beside them. -->
+                <div class="mt-2 flex flex-wrap items-center gap-2">
+                    <SettingButton variant="secondary" busy={isBusy('preview-gc')} disabled={isBusy('execute-gc')} onclick={previewGc}>{strings.gcRun}</SettingButton>
+                    {#if view.gcPreview}
+                        <SettingButton busy={isBusy('execute-gc')} onclick={executeGc}>{strings.gcRunConfirm}</SettingButton>
+                    {/if}
+                </div>
+                <div role="status" aria-live="polite">
+                    {#if view.gcPreview}
+                        <p class="mt-1 text-sm tabular-nums">{strings.gcResult.replace('{0}', formatCount(view.gcPreview.candidateCount)).replace('{1}', formatRisuNestStorageBytes(view.gcPreview.candidateBytes))}</p>
+                    {:else if view.gcResult}
+                        <p class="mt-1 text-sm tabular-nums">{strings.gcDeletedResult.replace('{0}', formatCount(view.gcResult.deletedCount)).replace('{1}', formatRisuNestStorageBytes(view.gcResult.deletedBytes))}</p>
+                    {/if}
+                </div>
+                {#if isBusy('preview-gc') || isBusy('execute-gc')}
+                    <div data-storage-gc-progress class="mt-2">
+                        <SettingProgress label={isBusy('execute-gc') ? strings.gcDeleting : strings.gcSearching} />
                     </div>
-                    {#if isBusy('preview-gc') || isBusy('execute-gc')}
-                        <div data-storage-gc-progress class="mt-2">
-                            <SettingProgress label={isBusy('execute-gc') ? strings.gcDeleting : strings.gcSearching} />
-                        </div>
-                    {/if}
-                    {#if view.gcPreview?.candidates?.length}
-                        {#snippet gcRow(candidate: NativeAssetGcCandidate)}
-                            <div data-storage-gc-row class="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 px-3 py-1.5 text-sm">
-                                <span class="font-mono text-xs break-all">{candidate.objectHash.slice(0, 12)}</span>
-                                <span class="tabular-nums text-textcolor2">{formatRisuNestStorageBytes(candidate.bytes)}</span>
-                                <span class="min-w-0 flex-1 text-textcolor2">{gcReason(candidate)}</span>
-                            </div>
-                        {/snippet}
-                        {#if gcDeletable.length > 0}
-                            <details data-storage-gc-list class="group mt-2" open>
-                                <summary class="flex cursor-pointer list-none items-center gap-2 text-sm select-none [&::-webkit-details-marker]:hidden">
-                                    <ChevronRight size={16} class="shrink-0 text-textcolor2 transition-transform duration-200 group-open:rotate-90" aria-hidden="true" />
-                                    <span>{strings.gcListTitle}</span>
-                                    <span class="text-textcolor2 tabular-nums">{formatCount(gcDeletable.length)}</span>
-                                </summary>
-                                <div class="mt-1 divide-y divide-darkborderc/55 rounded-md border border-darkborderc/55">
-                                    {#each gcDeletable as candidate (candidate.objectHash)}
-                                        {@render gcRow(candidate)}
-                                    {/each}
-                                    {#if view.gcPreview.omitted}
-                                        <p class="px-3 py-1.5 text-sm text-textcolor2">{strings.gcListMore.replace('{0}', formatCount(view.gcPreview.omitted))}</p>
-                                    {/if}
-                                </div>
-                            </details>
-                        {/if}
-                        {#if gcKept.length > 0}
-                            <details data-storage-gc-kept class="group mt-2">
-                                <summary class="flex cursor-pointer list-none items-center gap-2 text-sm text-textcolor2 select-none [&::-webkit-details-marker]:hidden">
-                                    <ChevronRight size={16} class="shrink-0 transition-transform duration-200 group-open:rotate-90" aria-hidden="true" />
-                                    <span>{strings.gcListKept.replace('{0}', formatCount(gcKept.length))}</span>
-                                </summary>
-                                <p class="mt-1 text-[13px] leading-normal text-textcolor2">{strings.gcListKeptHelp}</p>
-                                <div class="mt-1 divide-y divide-darkborderc/55 rounded-md border border-darkborderc/55">
-                                    {#each gcKept as candidate (candidate.objectHash)}
-                                        {@render gcRow(candidate)}
-                                    {/each}
-                                </div>
-                            </details>
-                        {/if}
-                    {/if}
-                {/snippet}
-                <SettingButton variant="secondary" busy={isBusy('preview-gc')} disabled={isBusy('execute-gc')} onclick={previewGc}>{strings.gcRun}</SettingButton>
-                {#if view.gcPreview}
-                    <SettingButton busy={isBusy('execute-gc')} onclick={executeGc}>{strings.gcRunConfirm}</SettingButton>
                 {/if}
-            </SettingRow>
-        </div>
+                {#if view.gcPreview?.candidates?.length}
+                    {#snippet gcRow(candidate: NativeAssetGcCandidate)}
+                        <div data-storage-gc-row class="flex flex-wrap items-baseline gap-x-3 gap-y-0.5 px-3 py-1.5 text-sm">
+                            <span class="font-mono text-xs break-all">{candidate.objectHash.slice(0, 12)}</span>
+                            <span class="tabular-nums text-textcolor2">{formatRisuNestStorageBytes(candidate.bytes)}</span>
+                            <span class="min-w-0 flex-1 text-textcolor2">{gcReason(candidate)}</span>
+                        </div>
+                    {/snippet}
+                    {#if gcDeletable.length > 0}
+                        <details data-storage-gc-list class="group mt-2" open>
+                            <summary class="flex cursor-pointer list-none items-center gap-2 text-sm select-none [&::-webkit-details-marker]:hidden">
+                                <ChevronRight size={16} class="shrink-0 text-textcolor2 transition-transform duration-200 group-open:rotate-90" aria-hidden="true" />
+                                <span>{strings.gcListTitle}</span>
+                                <span class="text-textcolor2 tabular-nums">{formatCount(gcDeletable.length)}</span>
+                            </summary>
+                            <div class="mt-1 divide-y divide-darkborderc/55 rounded-md border border-darkborderc/55">
+                                {#each gcDeletable as candidate (candidate.objectHash)}
+                                    {@render gcRow(candidate)}
+                                {/each}
+                                {#if view.gcPreview.omitted}
+                                    <p class="px-3 py-1.5 text-sm text-textcolor2">{strings.gcListMore.replace('{0}', formatCount(view.gcPreview.omitted))}</p>
+                                {/if}
+                            </div>
+                        </details>
+                    {/if}
+                    {#if gcKept.length > 0}
+                        <details data-storage-gc-kept class="group mt-2">
+                            <summary class="flex cursor-pointer list-none items-center gap-2 text-sm text-textcolor2 select-none [&::-webkit-details-marker]:hidden">
+                                <ChevronRight size={16} class="shrink-0 transition-transform duration-200 group-open:rotate-90" aria-hidden="true" />
+                                <span>{strings.gcListKept.replace('{0}', formatCount(gcKept.length))}</span>
+                            </summary>
+                            <p class="mt-1 text-[13px] leading-normal text-textcolor2">{strings.gcListKeptHelp}</p>
+                            <div class="mt-1 divide-y divide-darkborderc/55 rounded-md border border-darkborderc/55">
+                                {#each gcKept as candidate (candidate.objectHash)}
+                                    {@render gcRow(candidate)}
+                                {/each}
+                            </div>
+                        </details>
+                    {/if}
+                {/if}
+            {/snippet}
+        </SettingRow>
     {/if}
 </SettingGroup>

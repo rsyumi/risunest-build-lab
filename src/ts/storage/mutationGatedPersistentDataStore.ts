@@ -3,7 +3,6 @@ import type {
     AssetAliasIdentity,
     AssetAliasKind,
     AssetAliasListQuery,
-    AssetRepositoryMigrationInput,
     AssetOwnerLocator,
     CharacterPage,
     CharacterQuery,
@@ -56,14 +55,11 @@ export function createMutationGatedPersistentDataStore(
         readAssetAliasesByKeys: (kind: AssetAliasKind, keys: string[]) =>
             store.readAssetAliasesByKeys(kind, keys),
         listAssetAliases: (input: AssetAliasListQuery) => store.listAssetAliases(input),
-        readAssetRepositoryAuthority: () => store.readAssetRepositoryAuthority(),
         readAssetOwnerHead: (owner: AssetOwnerLocator) => store.readAssetOwnerHead(owner),
         commitAssetAlias: (alias: AssetAlias, expectedRevision: DataRevision) =>
             gate.runWrite(() => store.commitAssetAlias(alias, expectedRevision)),
         deleteAssetAlias: (identity: AssetAliasIdentity, expectedRevision: DataRevision) =>
             gate.runWrite(() => store.deleteAssetAlias(identity, expectedRevision)),
-        activateAssetRepositoryMigration: (input: AssetRepositoryMigrationInput) =>
-            gate.runTransition(() => store.activateAssetRepositoryMigration(input)),
         commit: (input: WorkingSetCommit) => gate.runWrite(() => store.commit(input)),
         archivePreview: (characterId: string) => store.archivePreview(characterId),
         archiveCharacter: (

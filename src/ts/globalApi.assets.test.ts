@@ -19,7 +19,6 @@ vi.mock('./platform', () => ({
     get isTauriMobile() {
         return state.isTauriMobile
     },
-    isNodeServer: false,
 }))
 vi.mock('./storage/platformBlobStore', () => ({
     configureBlobStoreStorageProvider: vi.fn(),
@@ -88,7 +87,6 @@ vi.mock('./storage/persistentSaveNotifications', () => ({
     createPersistentSaveObserverInstallation: () => ({ install: vi.fn() }),
     installPersistentSaveNotifications: vi.fn(),
 }))
-vi.mock('./storage/nodeStorage', () => ({ getNodeServerProxyAuth: vi.fn() }))
 vi.mock('./storage/databasePreparation', () => ({ checkCharOrder: vi.fn() }))
 vi.mock('./storage/risuSave', () => ({ decodeRisuSave: vi.fn() }))
 vi.mock('./storage/defaultPrompts', () => ({
@@ -122,7 +120,7 @@ vi.mock('@tauri-apps/plugin-fs', () => ({
     readDir: vi.fn(), remove: vi.fn(), BaseDirectory: { Download: 1, AppData: 2 },
 }))
 vi.mock('@tauri-apps/api/core', () => ({ convertFileSrc: (path: string) => `asset://${path}` }))
-vi.mock('@tauri-apps/api/path', () => ({ appDataDir: vi.fn(async () => '/data'), join: vi.fn(async (...parts: string[]) => parts.join('/')) }))
+vi.mock('@tauri-apps/api/path', () => ({ join: vi.fn(async (...parts: string[]) => parts.join('/')) }))
 vi.mock('@tauri-apps/plugin-shell', () => ({ open: vi.fn() }))
 vi.mock('@tauri-apps/plugin-dialog', () => ({ save: vi.fn() }))
 vi.mock('@tauri-apps/api/webviewWindow', () => ({ getCurrentWebviewWindow: vi.fn(() => ({})) }))

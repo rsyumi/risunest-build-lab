@@ -170,7 +170,7 @@ fn stores_exact_bytes_at_the_sha256_shard_path() {
     assert_eq!(prepared.byte_size, 3);
     assert_eq!(
         prepared.physical_key,
-        "assets-v2/objects/ba/7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        "assets/objects/ba/7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
     );
     assert!(!prepared.deduplicated);
     assert_eq!(prepared.directory_entries_synced, cfg!(unix));
@@ -257,7 +257,7 @@ fn interrupted_stream_removes_its_unique_staging_file() {
         .expect_err("interrupted prepare");
 
     assert_eq!(error.kind(), io::ErrorKind::Interrupted);
-    let staging = directory.path().join("assets-v2/staging");
+    let staging = directory.path().join("assets/staging");
     let staged_count = std::fs::read_dir(staging)
         .map(|entries| entries.count())
         .unwrap_or_default();
@@ -336,7 +336,7 @@ fn rejects_a_linked_object_target_without_reading_or_replacing_it() {
     let object_path =
         directory
             .path()
-            .join(format!("assets-v2/objects/{}/{}", &hash[..2], &hash[2..]));
+            .join(format!("assets/objects/{}/{}", &hash[..2], &hash[2..]));
     std::fs::create_dir_all(object_path.parent().expect("object parent"))
         .expect("create object parent");
     symlink_file(external.path(), &object_path).expect("link external payload");
@@ -365,7 +365,7 @@ fn rejects_a_linked_object_target_without_reading_or_replacing_it() {
 fn rejects_a_linked_repository_component_without_writing_outside_the_root() {
     let directory = tempfile::tempdir().expect("temporary repository");
     let external = tempfile::tempdir().expect("external directory");
-    let assets_path = directory.path().join("assets-v2");
+    let assets_path = directory.path().join("assets");
     symlink_directory(external.path(), &assets_path).expect("link external directory");
     let cas = PayloadCas::new(directory.path()).expect("open repository");
 
@@ -474,7 +474,7 @@ fn concurrent_publish_race_creates_one_object_and_cleans_all_staging_files() {
         b"race payload"
     );
     assert_eq!(
-        std::fs::read_dir(directory.path().join("assets-v2/staging"))
+        std::fs::read_dir(directory.path().join("assets/staging"))
             .expect("staging directory")
             .count(),
         0
@@ -550,7 +550,7 @@ fn cross_process_publish_race_creates_exactly_one_object() {
         7
     );
     assert_eq!(
-        std::fs::read_dir(directory.path().join("assets-v2/staging"))
+        std::fs::read_dir(directory.path().join("assets/staging"))
             .expect("cross-process staging directory")
             .count(),
         0

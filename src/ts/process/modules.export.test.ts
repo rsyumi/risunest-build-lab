@@ -24,6 +24,7 @@ vi.mock('src/lang', () => ({
     language: {
         errors: { noData: 'no data' },
         successExport: 'exported',
+        mcpStdioModuleImportBlocked: 'Local MCP module import blocked',
     },
 }))
 vi.mock('../alert', () => ({
@@ -76,12 +77,16 @@ vi.mock('../characterCards', () => ({
     importCharacterProcess: vi.fn(),
 }))
 
-import { exportModuleLegacy, importModule, readModule, type RisuModule } from './modules'
+import { exportModuleLegacy, importModule, importModuleData, readModule, type RisuModule } from './modules'
+import { DBState } from '../stores.svelte'
+import { alertConfirm, alertError, alertNormal } from '../alert'
+import { StdioModuleImportError } from './mcp/moduleImport'
 
 describe('legacy module export', () => {
     beforeEach(() => {
         vi.clearAllMocks()
         mocks.platform = 'web'
+        DBState.db.modules = []
         const rpackMap = readFileSync('src/ts/rpack/rpack_map.bin')
         vi.stubGlobal('fetch', vi.fn(async () => ({
             arrayBuffer: async () => rpackMap.buffer.slice(
@@ -89,6 +94,46 @@ describe('legacy module export', () => {
                 rpackMap.byteOffset + rpackMap.byteLength,
             ),
         })))
+    })
+
+    it.each([false, true, undefined])('rejects JSON stdio modules regardless of lowLevelAccess=%s', async lowLevelAccess => {
+        await importModuleData({
+            name: 'synthetic.json',
+            data: Buffer.from(JSON.stringify({
+                type: 'risuModule', id: 'source', name: 'Synthetic', lowLevelAccess,
+                mcp: { url: 'stdio:{"command":"node","args":["synthetic.js"]}' },
+            })),
+        })
+        expect(DBState.db.modules).toEqual([])
+        expect(alertConfirm).not.toHaveBeenCalled()
+        expect(alertError).toHaveBeenCalledWith(expect.any(StdioModuleImportError))
+        expect(alertNormal).not.toHaveBeenCalled()
+    })
+
+    it.each([false, true])('rejects legacy RISUM stdio before saving assets with lowLevelAccess=%s', async lowLevelAccess => {
+        mocks.readImage.mockResolvedValue(new Uint8Array([1, 2, 3]))
+        const exported = await exportModuleLegacy({
+            id: 'source', name: 'Synthetic', description: '', lowLevelAccess,
+            mcp: { url: 'stdio:{"command":"node","args":["synthetic.js"]}' },
+            assets: [['synthetic', 'asset://synthetic', 'bin']],
+        }, { alertEnd: false, saveData: false })
+
+        await expect(readModule(Buffer.from(exported))).rejects.toBeInstanceOf(StdioModuleImportError)
+        await importModuleData({ name: 'synthetic.risum', data: exported })
+        expect(mocks.saveAsset).not.toHaveBeenCalled()
+        expect(DBState.db.modules).toEqual([])
+        expect(alertError).toHaveBeenCalledWith(expect.any(StdioModuleImportError))
+    })
+
+    it.each(['https://synthetic.invalid/mcp', 'internal:dice', 'plugin:synthetic'])('preserves %s in JSON and RISUM imports', async url => {
+        const module = { id: 'source', name: 'Synthetic', description: '', mcp: { url } }
+        await importModuleData({
+            name: 'synthetic.json', data: Buffer.from(JSON.stringify({ ...module, type: 'risuModule' })),
+        })
+        const exported = await exportModuleLegacy(module, { alertEnd: false, saveData: false })
+        await importModuleData({ name: 'synthetic.risum', data: exported })
+        expect(DBState.db.modules.map(module => module.mcp?.url)).toEqual([url, url])
+        expect(alertError).not.toHaveBeenCalled()
     })
 
     it.each(['ios', 'android', 'desktop'] as const)('routes the public module picker only to %s', async platform => {

@@ -16,6 +16,8 @@ cc = "1"
 [dependencies]
 axum = "0.8.9"
 tempfile = "3"
+dirs = "6"
+fs2 = "0.4"
 risunest-release-update = { path = "../crates/release-update" }
 risunest-sync-wire = { path = "../crates/sync-wire" }
 risunest-sync-connect = { path = "../crates/sync-connect" }
@@ -32,7 +34,6 @@ base64 = "0.21.0"
 cap-primitives = "4.0.3"
 darling = "0.20.3"
 zip = "0.6.6"
-eventsource-client = "0.12.2"
 futures = "0.3.30"
 async-trait = "0.1"
 url = "2.2"
@@ -43,6 +44,7 @@ tauri-plugin-os = "2.3.2"
 tauri-plugin-dialog = "2.7.2"
 tauri-plugin-process = "2.3.1"
 tauri-plugin-shell = "2.3.5"
+tauri-plugin-opener = "2.5.5"
 # Native callers may supply Cookie, Origin, Referer and other HTTP headers.
 tauri-plugin-http = { version = "2.5.9", features = ["unsafe-headers"] }
 oauth2 = "5.0.0"
@@ -86,9 +88,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-single-instance = { version = "2.4.3", features = ["deep-link"] }
-tauri-plugin-updater = "2.10.1"
+tauri-plugin-updater = "2.12.0"
 getrandom = "0.2.15"
-reqwest = { version = "0.11.16", features = ["blocking", "json"] }
+reqwest = { version = "0.12.28", features = ["blocking", "json"] }
 
 [target.'cfg(any(windows, target_os = "android", target_os = "linux", target_os = "ios", target_os = "macos"))'.dependencies]
 regex = "1.13.1"
@@ -114,11 +116,11 @@ libc = "0.2"
 security-framework = "2.11.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
+webkit2gtk = { version = "2.0", features = ["v2_16"] }
 keyring = { version = "3.6.3", default-features = false, features = ["sync-secret-service", "crypto-rust"] }
 
 [target.'cfg(target_os = "ios")'.dependencies]
 tauri-plugin-ios-native = { path = "../crates/tauri-plugin-ios-native" }
-tauri-plugin-opener = "2.5.5"
 
 [target.'cfg(any(target_os = "android", target_os = "ios"))'.dependencies]
 tauri-plugin-barcode-scanner = { path = "../crates/tauri-plugin-barcode-scanner" }
@@ -126,10 +128,10 @@ tauri-plugin-barcode-scanner = { path = "../crates/tauri-plugin-barcode-scanner"
 [target.'cfg(target_os = "android")'.dependencies]
 getrandom = "0.2.15"
 jni = "0.21.1"
-reqwest = { version = "0.11.16", default-features = false, features = ["blocking", "json", "rustls-tls", "stream"] }
+reqwest = { version = "0.12.28", default-features = false, features = ["blocking", "json", "rustls-tls", "stream"] }
 
 [target.'cfg(not(target_os = "android"))'.dependencies]
-reqwest = { version = "0.11.16", features = ["blocking", "json", "stream"] }
+reqwest = { version = "0.12.28", features = ["blocking", "json", "stream"] }
 
 [dev-dependencies]
 wry = "=0.55.1"
@@ -145,3 +147,6 @@ regex = "1.13.1"
 [patch.crates-io]
 # Keep failed desktop updates from closing or discarding the installed app.
 tauri-plugin-updater = { path = "../crates/tauri-plugin-updater" }
+# Let the window state file follow the manifest root instead of the
+# identifier-derived configuration directory.
+tauri-plugin-window-state = { path = "../crates/tauri-plugin-window-state" }

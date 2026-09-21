@@ -18,12 +18,12 @@ fn named_issuance_is_not_replayed_and_status_has_no_credentials() {
     let (_root, store) = configured_store();
     let request = "a".repeat(64);
     let uri = store
-        .issue_named_registration("테스트 기기", &request)
+        .issue_named_registration("테스트 기기", &request, None)
         .unwrap();
     let registration = risunest_sync_connect::Registration::parse_uri(&uri).unwrap();
     assert_eq!(
         store
-            .issue_named_registration("테스트 기기", &request)
+            .issue_named_registration("테스트 기기", &request, None)
             .unwrap_err()
             .code,
         "registration-already-issued"
@@ -77,11 +77,13 @@ fn disabling_registry_preserves_identity_without_publication_or_uri_key() {
 fn bad_registration_input_allocates_no_device() {
     let (_root, store) = configured_store();
     assert!(store
-        .issue_named_registration("\u{1b}[31m", &"a".repeat(64))
+        .issue_named_registration("\u{1b}[31m", &"a".repeat(64), None)
         .is_err());
-    assert!(store.issue_named_registration("", &"b".repeat(64)).is_err());
     assert!(store
-        .issue_named_registration("기기", "bad request")
+        .issue_named_registration("", &"b".repeat(64), None)
+        .is_err());
+    assert!(store
+        .issue_named_registration("기기", "bad request", None)
         .is_err());
     assert!(store.managed_devices().unwrap().is_empty());
 }
@@ -462,4 +464,137 @@ fn storage_counts_files_without_reading_payloads() {
     assert_eq!(usage.temporary_bytes, 13);
     assert_eq!(usage.other_bytes, 23);
     assert!(usage.available_bytes.is_some());
+}
+
+#[test]
+fn local_issuance_replaces_the_endpoint_and_omits_directory() {
+    let (_root, store) = configured_store();
+    let local = risunest_sync_connect::Registration::parse_uri(
+        &store
+            .issue_named_registration("이 컴퓨터", &"a".repeat(64), Some("http://127.0.0.1:14319"))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(local.endpoint, "http://127.0.0.1:14319");
+    assert!(local.directory.is_none());
+    let configured = risunest_sync_connect::Registration::parse_uri(
+        &store
+            .issue_named_registration("다른 기기", &"b".repeat(64), None)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(configured.endpoint, "https://sync.example.com");
+    assert!(configured.directory.is_some());
+}
+
+async fn management_client(
+    store: std::sync::Arc<Store>,
+    root: &std::path::Path,
+    origin: &str,
+) -> (
+    crate::management::Management,
+    reqwest::Client,
+    String,
+    String,
+) {
+    let manager = crate::management::Management::start(store, origin.parse().unwrap())
+        .await
+        .unwrap();
+    let discovery = crate::management::discovery::Discovery::load(root).unwrap();
+    let url = format!("http://{}", manager.address());
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    (manager, client, url, discovery.token)
+}
+
+#[tokio::test]
+async fn local_target_issues_a_loopback_registration_without_a_ready_public_endpoint() {
+    let root = tempfile::tempdir().unwrap();
+    let executable = root.path().join("synthetic-cloudflared");
+    std::fs::write(&executable, b"").unwrap();
+    let store = std::sync::Arc::new(Store::init(root.path()).unwrap());
+    store
+        .configure_connection(ConnectionOptions {
+            endpoint: None,
+            cloudflared: Some(executable),
+            registry_url: Some("https://registry.example.com".into()),
+        })
+        .unwrap();
+    let (manager, client, url, token) =
+        management_client(store.clone(), root.path(), "0.0.0.0:14319").await;
+    let status = |client: reqwest::Client, url: String, token: String| async move {
+        client
+            .get(format!("{url}/status"))
+            .bearer_auth(token)
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap()
+    };
+    let before = status(client.clone(), url.clone(), token.clone()).await;
+    assert_eq!(before["localEndpoint"], "http://127.0.0.1:14319");
+    let blocked = client
+        .post(format!("{url}/devices"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({"revision":before["revision"],"requestId":"a".repeat(64),"name":"공개 기기"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(blocked.status(), 409);
+    assert_eq!(
+        blocked.json::<serde_json::Value>().await.unwrap()["error"],
+        "public-endpoint-not-ready"
+    );
+    let current = status(client.clone(), url.clone(), token.clone()).await;
+    let issued: serde_json::Value = client
+        .post(format!("{url}/devices"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({"revision":current["revision"],"requestId":"b".repeat(64),"name":"이 컴퓨터","target":"local"}))
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let registration =
+        risunest_sync_connect::Registration::parse_uri(issued["uri"].as_str().unwrap()).unwrap();
+    assert_eq!(registration.endpoint, "http://127.0.0.1:14319");
+    assert!(registration.directory.is_none());
+    assert!(store
+        .authenticate(&registration.library_id, &registration.token)
+        .is_ok());
+    manager.close().await;
+}
+
+#[tokio::test]
+async fn a_specific_listener_rejects_local_registration_before_allocating_a_device() {
+    let (root, store) = configured_store();
+    let store = std::sync::Arc::new(store);
+    let (manager, client, url, token) =
+        management_client(store.clone(), root.path(), "192.0.2.1:14319").await;
+    let before: serde_json::Value = client
+        .get(format!("{url}/status"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert!(before["localEndpoint"].is_null());
+    let rejected = client
+        .post(format!("{url}/devices"))
+        .bearer_auth(&token)
+        .json(&serde_json::json!({"revision":before["revision"],"requestId":"a".repeat(64),"name":"이 컴퓨터","target":"local"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), 409);
+    assert_eq!(
+        rejected.json::<serde_json::Value>().await.unwrap()["error"],
+        "local-endpoint-unavailable"
+    );
+    assert!(store.managed_devices().unwrap().is_empty());
+    manager.close().await;
 }

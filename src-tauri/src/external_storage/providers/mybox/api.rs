@@ -56,6 +56,8 @@ pub(super) fn classify(
             kind: ErrorKind::ReauthRequired,
             http_status: Some(status),
             retry_at_ms: None,
+            oauth_error: None,
+            oauth_error_description: None,
         },
         423 => common::error(ErrorKind::Transient, status),
         _ => common::classify_status(status, headers, now_ms),

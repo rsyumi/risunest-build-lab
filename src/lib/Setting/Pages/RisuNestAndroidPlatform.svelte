@@ -92,7 +92,7 @@
     <SettingRow inline label={language.risuNest.platform.keepAlive} help={language.risuNest.platform.keepAliveHelp}>
         {#snippet below()}
             {#if notificationStatus === false}
-                <p class="mt-1 text-sm text-draculared" role="alert">{language.risuNest.platform.keepAliveNeedsNotifications}</p>
+                <p class="mt-1 text-sm text-danger-400" role="alert">{language.risuNest.platform.keepAliveNeedsNotifications}</p>
             {/if}
         {/snippet}
         <SettingToggle checked={keepAlive} onchange={setKeepAlive} label={language.risuNest.platform.keepAlive} />

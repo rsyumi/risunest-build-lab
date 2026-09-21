@@ -43,8 +43,18 @@
     help={language.risuNest.platform.iosNotificationsHelp}
   >
     {#if notifications !== null}
-      <span role="status" class="text-sm text-textcolor2"
-        >{notifications
+      <span
+        role="status"
+        aria-live="polite"
+        class={`inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs font-semibold text-textcolor ${notifications
+          ? "border-success-500 bg-success-500/10"
+          : "border-draculared bg-draculared/10"}`}
+        ><span
+          class="h-2 w-2 rounded-full {notifications
+            ? 'bg-success-500'
+            : 'bg-draculared'}"
+          aria-hidden="true"
+        ></span>{notifications
           ? language.risuNest.platform.notificationsOn
           : language.risuNest.platform.notificationsOff}</span
       >
@@ -57,7 +67,15 @@
     label={language.risuNest.platform.keepAlive}
     help={language.risuNest.platform.iosBackgroundHelp}
   />
-  <SettingRow label={language.risuNest.platform.operatingSystem}
-    ><span class="text-sm text-textcolor2">{os}</span></SettingRow
-  >
+  {#if os}
+    <dl
+      data-platform-info
+      class="grid grid-cols-[auto_1fr] gap-x-5 gap-y-1 px-4 py-3 text-sm"
+    >
+      <dt class="text-textcolor2">
+        {language.risuNest.platform.operatingSystem}
+      </dt>
+      <dd>{os}</dd>
+    </dl>
+  {/if}
 </SettingGroup>

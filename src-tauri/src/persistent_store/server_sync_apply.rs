@@ -47,6 +47,10 @@ impl ValidatedRecord {
 pub(crate) struct ReplicaAdvance {
     pub scope_clears: Vec<(String, String)>,
     pub publish_keys: Vec<ServerDirtyKey>,
+    /// Library keys whose remote record this activation applies. Applied content
+    /// is the only local change that leaves no outbox row, so their projections
+    /// are dropped here instead.
+    pub applied_keys: Vec<String>,
     pub clear_revision: Option<i64>,
     pub bases: Vec<(Domain, String, RecordVersion, Option<String>)>,
     pub finish_operation: bool,
@@ -58,6 +62,7 @@ impl Default for ReplicaAdvance {
         Self {
             scope_clears: Vec::new(),
             publish_keys: Vec::new(),
+            applied_keys: Vec::new(),
             clear_revision: None,
             bases: Vec::new(),
             finish_operation: false,
@@ -443,6 +448,9 @@ impl PersistentStore {
             return invalid("Server plugin order contains duplicate positions");
         }
         acknowledge_keys(&tx, acknowledged)?;
+        for key in &advance.applied_keys {
+            tx.execute("DELETE FROM server_sync_prepared WHERE key=?1", [key])?;
+        }
         // Explicit conflict choices can create an outgoing intent for a key
         // which had no local edit (for example rejecting a newly added remote
         // key after clear). Persist it before the prepared worker can disappear.
@@ -472,6 +480,12 @@ impl PersistentStore {
                 return invalid("Pending receipt is not included in the applied server revision");
             }
             tx.execute("DELETE FROM server_sync_dirty WHERE EXISTS(SELECT 1 FROM server_sync_operation_records AS sent WHERE sent.kind=server_sync_dirty.kind AND sent.key1=server_sync_dirty.key1 AND sent.key2=server_sync_dirty.key2 AND sent.revision>=server_sync_dirty.revision)",[])?;
+            // A deleted key keeps no projection. Re-creating it writes an outbox
+            // row, so the next cycle projects it again from the current payload.
+            tx.execute(
+                "DELETE FROM server_sync_prepared WHERE json_extract(version,'$.state') IN ('absent','tombstone')",
+                [],
+            )?;
             tx.execute(
                 "DELETE FROM server_sync_clears WHERE revision<=?1",
                 [operation_revision],

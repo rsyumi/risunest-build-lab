@@ -461,6 +461,8 @@ pub(crate) async fn send_signed(
                     u64::try_from(remaining.as_millis()).unwrap_or(u64::MAX),
                 ),
             ),
+            oauth_error: None,
+            oauth_error_description: None,
         });
     }
     dispatch_ready(transport, clock, state, request, cancel, deadline).await
@@ -614,6 +616,8 @@ mod tests {
                     kind: ErrorKind::RateLimited,
                     http_status: Some(403),
                     retry_at_ms: Some(now_ms + 3_600_000),
+                    oauth_error: None,
+                    oauth_error_description: None,
                 },
                 &BTreeMap::from([
                     ("x-ratelimit-remaining".into(), "0".into()),
@@ -632,6 +636,8 @@ mod tests {
                     kind: ErrorKind::RateLimited,
                     http_status: Some(429),
                     retry_at_ms: Some(now_ms + 3_600_000),
+                    oauth_error: None,
+                    oauth_error_description: None,
                 },
                 &BTreeMap::from([("retry-after".into(), "3600".into())]),
                 now_ms,

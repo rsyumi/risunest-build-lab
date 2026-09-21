@@ -23,6 +23,7 @@
     import ServerSyncSettings from './ServerSyncSettings.svelte'
     import RisuNestUpdateSettings from './RisuNestUpdateSettings.svelte'
     import ExternalStorageSettings from '../ExternalStorage/ExternalStorageSettings.svelte'
+    import LocalDataReset from '../RisuNest/LocalDataReset.svelte'
 
     const tabLabels: Record<RisuNestSettingsTab, string> = {
         settings: language.risuNest.tabs.settings,
@@ -113,9 +114,10 @@
                 <RisuNestDataHealth onOpenUnusedImages={() => jumpTo('risunest-storage')} />
             {/if}
             <RisuNestBackupRestore />
+            <LocalDataReset />
         {:else if activeTab === 'sync'}
             {#if isTauri}
-                <section id="risunest-server-sync" class="scroll-mt-4"><ServerSyncSettings /></section>
+                <ServerSyncSettings />
             {/if}
             <ExternalStorageSettings />
             {#if isTauri}

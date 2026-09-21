@@ -746,7 +746,7 @@ fn counts(archive: &VerifiedArchive) -> Result<(u64, u64), NativeJobError> {
 mod tests {
     use super::*;
     use crate::local_backup::NeverCancelled;
-    use crate::persistent_store::{portable::digest_raw_tables, AssetRepositoryAuthorityState};
+    use crate::persistent_store::portable::digest_raw_tables;
     use std::io::Write;
 
     fn raw_recovery_archive(path: &Path) -> u64 {
@@ -822,15 +822,6 @@ mod tests {
             .replace_add_characters(
                 &stage.staging_id,
                 database["characters"].as_array().unwrap(),
-            )
-            .unwrap();
-        store
-            .replace_put_asset_repository_authority(
-                &stage.staging_id,
-                &AssetRepositoryAuthorityState::V2 {
-                    migration_id: "synthetic".into(),
-                    compatibility_hash: "ab".repeat(32),
-                },
             )
             .unwrap();
         store.replace_commit(&stage.staging_id, Some(0)).unwrap();
@@ -1025,7 +1016,7 @@ mod tests {
             let store = library(&target);
             let before = store.read_root(None).unwrap().value;
             let object = target
-                .join("assets-v2/objects")
+                .join("assets/objects")
                 .join(&hash[..2])
                 .join(&hash[2..]);
             fs::create_dir_all(object.parent().unwrap()).unwrap();
@@ -1225,7 +1216,7 @@ mod tests {
         }
     }
     #[test]
-    fn native_portable_restore_keeps_unclassified_files_out_of_cas() {
+    fn native_portable_restore_preserves_unregistered_cas_files_outside_live_cas() {
         use sha2::{Digest, Sha256};
         let directory = tempfile::tempdir().unwrap();
         let source = directory.path().join("source");
@@ -1237,10 +1228,12 @@ mod tests {
         fs::create_dir_all(&restore_jobs).unwrap();
         let store = library(&source);
         let revision = store.revision().unwrap();
-        fs::create_dir_all(source.join("assets")).unwrap();
         let payload = b"synthetic unclassified original";
         let hash = hex::encode(Sha256::digest(payload));
-        fs::write(source.join("assets/orphan.bin"), payload).unwrap();
+        let physical_key = crate::asset_repository::object_physical_key(&hash);
+        let source_object = source.join(&physical_key);
+        fs::create_dir_all(source_object.parent().unwrap()).unwrap();
+        fs::write(source_object, payload).unwrap();
         let registry = super::super::JobRegistry::default();
         let export = registry
             .create_internal(
@@ -1307,9 +1300,9 @@ mod tests {
         .unwrap();
         let (key,stored_hash,metadata):(String,String,String)=captured.catalog.db.query_row("SELECT logical_key,lower(hex(object_hash)),metadata FROM files WHERE kind='preserved'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
         assert!(key.starts_with("source-preservation/"));
-        assert!(key.ends_with("/assets/orphan.bin"));
+        assert!(key.ends_with(&format!("/{physical_key}")));
         assert_eq!(stored_hash, hash);
-        assert_eq!(metadata, "{\"storage\":\"unclassified\"}");
+        assert_eq!(metadata, "{\"storage\":\"cas\"}");
         pins.release(CasReleaseOutcome::Aborted).unwrap();
     }
     #[test]

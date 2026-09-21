@@ -59,3 +59,13 @@ export function isRealmUrl(input) {
     }
     return REALM_PATH_PREFIXES.some((prefix) => parsed.pathname.startsWith(prefix))
 }
+
+/** Path-only guard for isolated fixture servers and redirected transports. */
+export function isRealmPath(input) {
+    try {
+        const url = new URL(String(input), 'http://localhost')
+        return REALM_PATH_PREFIXES.some(prefix => url.pathname.startsWith(prefix))
+    } catch {
+        return false
+    }
+}

@@ -99,7 +99,6 @@ pub(super) const GENERATION_TABLES: &[(&str, &str)] = &[
         "asset_owner_heads",
         "owner_kind, owner_locator, present, manifest_hash, entry_count",
     ),
-    ("asset_repository_authority", "value"),
 ];
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -320,84 +319,6 @@ pub(crate) struct AssetAliasPage {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(
-    tag = "format",
-    rename_all = "lowercase",
-    rename_all_fields = "camelCase",
-    deny_unknown_fields
-)]
-pub(crate) enum AssetRepositoryAuthorityState {
-    Legacy,
-    Preparing {
-        migration_id: String,
-        source_revision: i64,
-    },
-    #[serde(rename = "v2")]
-    V2 {
-        migration_id: String,
-        compatibility_hash: String,
-    },
-}
-
-impl AssetRepositoryAuthorityState {
-    pub(crate) fn validate(&self) -> StoreResult<()> {
-        match self {
-            Self::Legacy => Ok(()),
-            Self::Preparing {
-                migration_id,
-                source_revision,
-            } => validate_authority_fields(
-                "Asset repository",
-                migration_id,
-                Some(*source_revision),
-                None,
-            ),
-            Self::V2 {
-                migration_id,
-                compatibility_hash,
-            } => validate_authority_fields(
-                "Asset repository",
-                migration_id,
-                None,
-                Some(compatibility_hash),
-            ),
-        }
-    }
-}
-
-// Shared field validation for the two structurally identical authority-state
-// enums so their rules cannot drift; the enums themselves stay distinct for
-// type safety between the two authorities.
-fn validate_authority_fields(
-    subject: &str,
-    migration_id: &str,
-    source_revision: Option<i64>,
-    compatibility_hash: Option<&str>,
-) -> StoreResult<()> {
-    if let Some(source_revision) = source_revision {
-        if !(0..=JAVASCRIPT_MAX_SAFE_INTEGER).contains(&source_revision) {
-            return Err(StoreError::Validation {
-                message: format!("{subject} sourceRevision is invalid"),
-            });
-        }
-    }
-    if let Some(compatibility_hash) = compatibility_hash {
-        validate_hash(compatibility_hash, &format!("{subject} compatibilityHash"))?;
-    }
-    if migration_id.is_empty()
-        || migration_id.len() > 64
-        || !migration_id
-            .bytes()
-            .all(|value| value.is_ascii_alphanumeric() || matches!(value, b'_' | b'-'))
-    {
-        return Err(StoreError::Validation {
-            message: format!("{subject} migrationId is invalid"),
-        });
-    }
-    Ok(())
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AssetAlias {
     pub(crate) key: String,
@@ -600,15 +521,6 @@ fn validate_object_hash(hash: &Option<String>, subject: &str) -> StoreResult<()>
             message: format!(
                 "{subject} objectHash must be null or 64 lowercase hexadecimal characters"
             ),
-        });
-    }
-    Ok(())
-}
-
-fn validate_hash(hash: &str, subject: &str) -> StoreResult<()> {
-    if !is_lowercase_sha256_hex(hash) {
-        return Err(StoreError::Validation {
-            message: format!("{subject} must be 64 lowercase hexadecimal characters"),
         });
     }
     Ok(())
@@ -1372,10 +1284,6 @@ impl PersistentStore {
             "INSERT OR IGNORE INTO root (generation, value) VALUES (?1, ?2)",
             params!["revision-0", "{}"],
         )?;
-        transaction.execute(
-            "INSERT OR IGNORE INTO asset_repository_authority (generation, value) VALUES (?1, ?2)",
-            params!["revision-0", r#"{"format":"legacy"}"#],
-        )?;
         transaction.commit()?;
         export::sweep_abandoned(&snapshots_dir)?;
         #[cfg(feature = "native-kei-upload-pilot")]
@@ -1674,14 +1582,6 @@ impl PersistentStore {
         query::list_asset_alias_page(connection, query_input, &target)
     }
 
-    pub(crate) fn read_asset_repository_authority(
-        &self,
-        lease: Option<&str>,
-    ) -> StoreResult<Versioned<AssetRepositoryAuthorityState>> {
-        let (connection, target) = self.read_view(lease)?;
-        query::read_asset_repository_authority(connection, &target)
-    }
-
     pub(crate) fn read_asset_owner_head(
         &self,
         owner: &AssetOwnerLocator,
@@ -1931,14 +1831,6 @@ impl PersistentStore {
         heads: &[AssetOwnerHead],
     ) -> StoreResult<()> {
         commit::replace_put_asset_owner_heads(&mut self.connection, staging_id, heads)
-    }
-
-    pub(crate) fn replace_put_asset_repository_authority(
-        &mut self,
-        staging_id: &str,
-        authority: &AssetRepositoryAuthorityState,
-    ) -> StoreResult<()> {
-        commit::replace_put_asset_repository_authority(&mut self.connection, staging_id, authority)
     }
 
     pub(crate) fn replace_preserve_repositories(
@@ -2960,7 +2852,6 @@ impl PersistentStore {
             collect_durable_cas_job_roots, collect_durable_cas_job_roots_already_guarded,
             collect_durable_cas_job_roots_read_only,
         };
-        use crate::asset_repository::migration_gc::collect_staged_migration_roots;
 
         #[cfg(test)]
         ASSET_GC_ROOT_COLLECTIONS.with(|count| {
@@ -2996,6 +2887,15 @@ impl PersistentStore {
             )?
             .assets,
         ));
+        if self.server_config().map_err(|e| StoreError::Store { message: e.code })?.is_some() {
+            let cache = self.server_cache().map_err(|e| StoreError::Store { message: e.code })?;
+            let mut set = crate::asset_repository::migration_gc::AssetRootSet::default();
+            let native = crate::asset_repository::PayloadCas::new(&self.repository_root)?;
+            for hash in self.server_cache_references(&cache).map_err(|e| StoreError::Store { message: e.code })? {
+                if native.stat_object(&hash)?.is_some() { set.object_hashes.insert(hash); }
+            }
+            roots.push(("server-sync", set));
+        }
         let mut server_conflicts =
             crate::asset_repository::migration_gc::AssetRootSet::default();
         crate::server_sync::backups::references::visit_roots(
@@ -3016,11 +2916,6 @@ impl PersistentStore {
                 .roots()?
                 .into_iter()
                 .map(|set| ("snapshot", set)),
-        );
-        roots.extend(
-            collect_staged_migration_roots(&self.repository_root)?
-                .into_iter()
-                .map(|set| ("migration", set)),
         );
         // A repair journal holds what a repair stopped referencing, so an undo still has it.
         roots.push((

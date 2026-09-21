@@ -473,12 +473,18 @@ pub async fn run(root: &Path, executable: &Path) -> Result<()> {
             } else {
                 "RisuNest 동기화 서버 · 연결 안 됨"
             },
-            &["개요", "기기", "연결", "실행 설정", "네트워크 설정"],
+            &["개요", "기기", "연결", "실행 설정", "네트워크 설정", "RisuNest Sync 제거"],
         )?
         else {
             break;
         };
-        let result = if action == 4 {
+        let result = if action == 5 {
+            let Some(choice) = menu("RisuNest Sync 제거", &["서버 데이터 보존", "서버 데이터 삭제"])? else { continue; };
+            println!("프로그램과 실행 등록을 제거합니다. 연결된 기기의 동기화가 멈춥니다.");
+            if input("제거하려면 '제거' 입력", "")? != "제거" { continue; }
+            crate::removal::execute(root, executable, choice == 1).await?;
+            return Ok(());
+        } else if action == 4 {
             network_settings(root, status.as_ref().ok())
         } else if action == 3 {
             match menu(

@@ -1,6 +1,6 @@
 use super::*;
 use crate::data_health::repair::RepairCandidate;
-use crate::persistent_store::{active_generation, AssetRepositoryAuthorityState};
+use crate::persistent_store::active_generation;
 use serde_json::json;
 
 fn candidate(action: RepairAction) -> RepairCandidate {
@@ -27,15 +27,6 @@ fn fixture() -> (tempfile::TempDir, PersistentStore) {
                 "customBackground": "assets/kept.png",
                 "enabledModules": ["module-a", "module-b"],
             }),
-        )
-        .unwrap();
-    store
-        .replace_put_asset_repository_authority(
-            &staging,
-            &AssetRepositoryAuthorityState::V2 {
-                migration_id: "fixture".to_owned(),
-                compatibility_hash: "1a".repeat(32),
-            },
         )
         .unwrap();
     store.replace_commit(&staging, Some(0)).unwrap();

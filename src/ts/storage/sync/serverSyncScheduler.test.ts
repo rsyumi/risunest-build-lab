@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createServerSyncController } from "./serverSyncController";
+import { connectServerSync } from "./serverSyncConnectFlow";
 import { createServerSyncScheduler } from "./serverSyncScheduler";
 import type { ServerCycle, ServerStatus, ServerSyncFacade } from "./serverSync";
 
@@ -43,6 +44,8 @@ function fixture() {
   const cycle = vi.fn(async () => result);
   const controller = createServerSyncController({
     status: async () => status,
+    bind: async () => status,
+    reregister: async () => status,
     cycle,
     cancel: async () => {},
     needsRefresh: () => false,
@@ -65,6 +68,52 @@ function fixture() {
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
 describe("server sync scheduler", () => {
+  it.each([false, true])("holds automatic sync until connection policy is saved (replacing=%s)", async (replacing) => {
+    const f = fixture();
+    let release!: () => void;
+    const policy = vi.fn(() => new Promise<void>((resolve) => { release = resolve; }));
+    const connecting = connectServerSync(f.controller, policy, {
+      config: { endpoint: "http://localhost", libraryId: "library", deviceId: "device", token: "a".repeat(64) },
+      residency: "remote",
+      replacing,
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(policy).toHaveBeenCalledOnce();
+    expect(f.cycle).not.toHaveBeenCalled();
+    expect(f.controller.snapshot().connecting).toBe(true);
+    expect(f.controller.canAutoSync()).toBe(false);
+    expect(f.controller.canRestore()).toBe(false);
+    f.scheduler.resume();
+    f.scheduler.localCommit();
+    f.scheduler.remoteHint();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(f.cycle).not.toHaveBeenCalled();
+    await expect(f.controller.synchronize()).rejects.toMatchObject({ code: "library-operation-busy" });
+    release();
+    await connecting;
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.cycle).toHaveBeenCalledTimes(1);
+    expect(f.controller.snapshot()).toMatchObject({ connecting: false, error: "" });
+    f.scheduler.stop();
+  });
+  it("keeps automatic sync paused after policy failure and allows a connection retry", async () => {
+    const f = fixture();
+    const request = {
+      config: { endpoint: "http://localhost", libraryId: "library", deviceId: "device", token: "a".repeat(64) },
+      residency: "remote" as const,
+    };
+    await expect(connectServerSync(f.controller, async () => {
+      throw { code: "library-operation-busy" };
+    }, request)).rejects.toMatchObject({ code: "library-operation-busy" });
+    f.scheduler.resume();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(f.cycle).not.toHaveBeenCalled();
+    expect(f.controller.snapshot()).toMatchObject({ connecting: false, paused: true });
+    await connectServerSync(f.controller, async () => {}, request);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.cycle).toHaveBeenCalledTimes(1);
+    f.scheduler.stop();
+  });
   it("checks after initialization and lengthens idle polls without reading every local object", async () => {
     const f = fixture();
     await f.controller.initialize();
@@ -137,10 +186,54 @@ describe("server sync scheduler", () => {
     await f.controller.synchronize();
     await vi.advanceTimersByTimeAsync(1000);
     expect(f.cycle).toHaveBeenCalledTimes(5);
-    f.cycle.mockRejectedValue({ code: "unauthorized" });
+    f.cycle.mockRejectedValue({ code: "unauthorized", retryable: false });
     await f.controller.synchronize();
     await vi.advanceTimersByTimeAsync(300_000);
     expect(f.cycle).toHaveBeenCalledTimes(6);
+    f.scheduler.stop();
+  });
+  it("stops retrying a rejection the same attempt would receive again", async () => {
+    const f = fixture();
+    f.cycle.mockRejectedValue({
+      code: "invalid-control-schema",
+      status: 400,
+      retryable: false,
+    });
+    await f.controller.initialize();
+    await vi.advanceTimersByTimeAsync(0);
+    f.scheduler.localCommit();
+    await vi.advanceTimersByTimeAsync(999);
+    expect(f.cycle).toHaveBeenCalledTimes(1);
+    expect(f.controller.snapshot().errorRetryable).toBe(false);
+    // Neither backoff nor an ongoing edit nor a remote notice may start another.
+    await vi.advanceTimersByTimeAsync(300_000);
+    f.scheduler.localCommit();
+    f.scheduler.remoteHint();
+    await vi.advanceTimersByTimeAsync(300_000);
+    expect(f.cycle).toHaveBeenCalledTimes(1);
+    // The manual action clears the error itself, which releases the block.
+    f.cycle.mockResolvedValue(f.result);
+    await f.controller.synchronize();
+    expect(f.cycle).toHaveBeenCalledTimes(2);
+    f.scheduler.resume();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.cycle).toHaveBeenCalledTimes(3);
+    f.scheduler.stop();
+  });
+  it("keeps backing off a failure that is worth another attempt", async () => {
+    const f = fixture();
+    f.cycle.mockRejectedValue({
+      code: "server-unreachable",
+      status: 503,
+      retryable: true,
+    });
+    await f.controller.initialize();
+    await vi.advanceTimersByTimeAsync(0);
+    f.scheduler.localCommit();
+    await vi.advanceTimersByTimeAsync(999);
+    expect(f.cycle).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(f.cycle).toHaveBeenCalledTimes(2);
     f.scheduler.stop();
   });
   it("reaches the same state from polling alone when no notification arrives", async () => {

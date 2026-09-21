@@ -247,8 +247,8 @@ describe('repair selection', () => {
             discards: false,
         },
         {
-            id: '1:settle-authority',
-            action: { action: 'settle-authority', subject: 'asset' },
+            id: '1:normalize-records',
+            action: { action: 'normalize-records', table: 'characters' },
             finding: 1,
             preferred: true,
             discards: false,
@@ -258,17 +258,17 @@ describe('repair selection', () => {
     it('starts from the choices the planner marked', () => {
         expect(preferredRepairSelection(candidates)).toEqual([
             '0:drop-alias',
-            '1:settle-authority',
+            '1:normalize-records',
         ])
     })
 
     it('lets one finding carry only one answer', () => {
         const selection = toggleRepairSelection(
             candidates,
-            ['0:drop-alias', '1:settle-authority'],
+            ['0:drop-alias', '1:normalize-records'],
             '0:adopt-stored-payload',
         )
-        expect(selection).toEqual(['1:settle-authority', '0:adopt-stored-payload'])
+        expect(selection).toEqual(['1:normalize-records', '0:adopt-stored-payload'])
     })
 
     it('deselects what is already chosen and ignores what was never offered', () => {

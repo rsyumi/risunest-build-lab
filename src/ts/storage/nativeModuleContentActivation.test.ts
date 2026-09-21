@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 
 vi.mock('../alert', () => ({ alertConfirm: vi.fn() }))
-vi.mock('../../lang', () => ({ language: { lowLevelAccessConfirm: 'confirm' } }))
+vi.mock('../../lang', () => ({ language: { lowLevelAccessConfirm: 'confirm', mcpStdioModuleImportBlocked: 'Local MCP module import blocked' } }))
 vi.mock('./persistentDataRuntime.svelte', () => ({ appendPersistentRootModule: vi.fn() }))
 
 import type {
@@ -14,6 +14,7 @@ import {
 } from './nativeModuleContentActivation'
 import { runNativePreparedContentRoute } from './nativePreparedContentRoute'
 import { PersistentRootModuleAppendRejectedError } from './saveCoordinator'
+import { StdioModuleImportError } from '../process/mcp/moduleImport'
 
 const hash = (byte: string) => byte.repeat(64)
 
@@ -58,6 +59,45 @@ function risumContent(assets: unknown = [
 }
 
 describe('native RISUM module activation', () => {
+    it.each([false, true, undefined])('rejects stdio before confirmation, sealing or persistence with lowLevelAccess=%s', async lowLevelAccess => {
+        const content = risumContent()
+        content.metadata.lowLevelAccess = lowLevelAccess
+        content.metadata.mcp = { url: 'stdio:{"command":"node","args":["synthetic.js"]}' }
+        const receipt = {
+            jobId: 'synthetic-job', warningCodes: [],
+            content,
+            prepareOwnerManifestAndSeal: vi.fn(), sealPreparedContent: vi.fn(),
+            cancel: vi.fn(), confirmActivated: vi.fn(),
+        }
+        const dependencies = { confirmLowLevelAccess: vi.fn(), createId: vi.fn(), append: vi.fn() }
+        await expect(runNativePreparedContentRoute(
+            { type: 'desktopPath', path: 'C:/synthetic/module.risum' }, 'module.risum',
+            {
+                prepare: async () => receipt,
+                map: async content => content,
+                activate: (content, lifecycle) => activatePreparedNativeModuleContent(content, lifecycle, dependencies),
+            },
+        )).rejects.toBeInstanceOf(StdioModuleImportError)
+        expect(dependencies.confirmLowLevelAccess).not.toHaveBeenCalled()
+        expect(dependencies.append).not.toHaveBeenCalled()
+        expect(receipt.sealPreparedContent).not.toHaveBeenCalled()
+        expect(receipt.prepareOwnerManifestAndSeal).not.toHaveBeenCalled()
+        expect(receipt.cancel).toHaveBeenCalledOnce()
+        expect(receipt.confirmActivated).not.toHaveBeenCalled()
+    })
+
+    it.each(['https://synthetic.invalid/mcp', 'internal:dice', 'plugin:synthetic'])('preserves %s on native import', async url => {
+        const content = risumContent()
+        content.metadata.mcp = { url }
+        const append = vi.fn()
+        await activatePreparedNativeModuleContent(content, {
+            prepareOwnerManifestAndSeal: vi.fn(), sealPreparedContent: vi.fn(),
+        }, { confirmLowLevelAccess: async () => true, createId: () => 'new-id', append })
+        expect(append).toHaveBeenCalledWith(expect.objectContaining({
+            module: expect.objectContaining({ mcp: { url } }),
+        }), undefined)
+    })
+
     it('confirms low-level access, seals native roots, then atomically appends full metadata', async () => {
         const events: string[] = []
         const append = vi.fn(async () => { events.push('append') })

@@ -234,6 +234,7 @@ fn operation_identity_survives_reopen_staging_changes_and_terminal_receipts() {
         status: TerminalStatus::Stale,
         head: head(1),
         error: Some("stale-head".into()),
+        error_key: None,
     };
     receipt.intent_digest = "c".repeat(64);
     assert!(reopened.server_observe_receipt(&receipt).is_err());

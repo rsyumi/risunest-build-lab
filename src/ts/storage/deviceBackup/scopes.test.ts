@@ -237,7 +237,7 @@ describe("device plugin storage scopes", () => {
     const environment = fixtureEnvironment();
     const spool = fixtureSpool();
     const settings = {
-      schema: "risunest.device-settings/v2",
+      schema: "risunest.device-settings/v1",
       performanceProfile: "low-spec",
       androidKeepAliveDuringGeneration: true,
       nativeFileLogEnabled: false,
@@ -311,7 +311,7 @@ describe("device plugin storage scopes", () => {
     async (key, value) => {
       const environment = fixtureEnvironment();
       const raw = JSON.stringify({
-        schema: "risunest.device-settings/v2",
+        schema: "risunest.device-settings/v1",
         performanceProfile: "low-spec",
         androidKeepAliveDuringGeneration: true,
         nativeFileLogEnabled: false,

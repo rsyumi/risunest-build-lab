@@ -2,7 +2,8 @@ import type { ExportExclusions } from './exportExcludedReport'
 import { open, save } from '@tauri-apps/plugin-dialog'
 
 import { downloadFile } from '../globalApi.svelte'
-import { appDataDir, join } from '@tauri-apps/api/path'
+import { join } from '@tauri-apps/api/path'
+import { iosStagingPath } from './nativePaths'
 import { mkdir, remove } from '@tauri-apps/plugin-fs'
 import { pickIOSFile, discardIOSFile, exportIOSFile } from './iosFiles'
 import { isTauriIOS, isTauriAndroid, isTauriDesktop } from '../platform'
@@ -58,11 +59,7 @@ const productionDependencies: RisuSaveFileRouteDependencies = {
     },
     chooseNativeExport: async (name) => {
         if (isTauriIOS) {
-            const folder = await join(
-                await appDataDir(),
-                'ios-file-staging',
-                crypto.randomUUID(),
-            )
+            const folder = await iosStagingPath()
             await mkdir(folder, { recursive: true })
             return join(folder, name)
         }

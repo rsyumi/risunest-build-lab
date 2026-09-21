@@ -1,10 +1,7 @@
 import { bench, describe } from 'vitest'
 
 import type { BlobWriteMetadata } from './blobStore'
-import type {
-    RuntimeAssetRepositoryDispatcher,
-    StagedRuntimeAssetWrite,
-} from './assetRepositoryRuntime'
+import type { RuntimeAssetRepositoryDispatcher } from './assetRepositoryRuntime'
 import { createCoordinatorOwnedAssetBlobStore } from './assetRepositoryRuntime'
 import type { PersistentStorageAuthority } from './persistentStorageAuthority'
 
@@ -46,24 +43,29 @@ function createHarness() {
         async stagePut(key, ownedData, stagedMetadata) {
             resolvePreparationStarted()
             await crypto.subtle.digest('SHA-256', ownedData.slice().buffer as ArrayBuffer)
-            return { authority: { format: 'legacy' }, key, ownedData, stagedMetadata }
+            return {
+                prepared: {
+                    async activate() {
+                        revision++
+                        return {
+                            ...stagedMetadata,
+                            key,
+                            size: ownedData.byteLength,
+                        }
+                    },
+                    async abort() {},
+                },
+            }
         },
         async stageNewInlayImage() {
             throw new Error('benchmark does not stage Inlay images')
         },
-        async activateStagedWrite(staged: StagedRuntimeAssetWrite & {
-            key: string
-            ownedData: Uint8Array
-            stagedMetadata: BlobWriteMetadata
-        }) {
-            revision++
-            return {
-                ...staged.stagedMetadata,
-                key: staged.key,
-                size: staged.ownedData.byteLength,
-            }
+        async activateStagedWrite(staged) {
+            return staged.prepared.activate()
         },
-        async abortStagedWrite() {},
+        async abortStagedWrite(staged) {
+            await staged.prepared.abort()
+        },
         async put() { throw new Error('benchmark requires staged put') },
         async putNewInlayImage() { throw new Error('benchmark requires staged put') },
         async read() { return null },

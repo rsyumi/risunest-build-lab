@@ -877,7 +877,7 @@ mod tests {
         );
         assert!(!directory
             .path()
-            .join("assets-v2")
+            .join("assets")
             .join("job-pins")
             .join(format!("job-{job_id}.journal"))
             .exists());

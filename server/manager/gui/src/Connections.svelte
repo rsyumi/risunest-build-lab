@@ -5,6 +5,7 @@
   let {
     status,
     environment,
+    connected,
     busy,
     mutate,
     copy,
@@ -12,6 +13,7 @@
   }: {
     status: Status;
     environment: Environment | null;
+    connected: boolean;
     busy: boolean;
     mutate: (
       path: string,
@@ -115,7 +117,7 @@
     <div class="setting">
       <div class="setting-heading">
         <h2>임시 주소</h2>
-        <span class="pill">{phase(status.tunnel.phase)}</span>
+        <span class="pill">{connected ? phase(status.tunnel.phase) : "확인할 수 없음"}</span>
       </div>
       <label
         >제공자<select
@@ -125,13 +127,13 @@
         ></label
       >
       <p>
-        인터넷을 통해 연결할 수 있는 주소를 발급합니다. 다시 시작하면 주소가
-        바뀔 수 있습니다.
+        인터넷을 통해 연결할 수 있는 주소를 발급하며, 서버를 중지하면 임시 주소
+        연결도 함께 종료됩니다. 다시 시작하면 주소가 바뀔 수 있습니다.
       </p>
       {#if status.tunnel.error}<p class="warning" role="alert">{message(status.tunnel.error)} <code>{status.tunnel.error}</code></p>{/if}
       {#if status.tunnel.logs.length}<details><summary>cloudflared 출력</summary><pre class="tunnel-output">{status.tunnel.logs.join("\n")}</pre></details>{/if}
       {#if status.tunnel.endpoint}<label
-          >현재 임시 주소
+          >{connected ? "현재 임시 주소" : "마지막 임시 주소"}
           <div class="copy-field">
             <input readonly value={status.tunnel.endpoint} /><button
               type="button"
@@ -236,6 +238,6 @@
         >서버 설정 다시 불러오기</button
       >
     </div>
-    <button type="submit" class="primary" disabled={busy}>설정 적용</button>
+    <button type="submit" class="primary" disabled={busy || !dirty}>설정 적용</button>
   </div>
 </form>

@@ -9,6 +9,7 @@
     } from 'src/ts/storage/nativeFileJobs'
     import PluginDataManager from './PluginDataManager.svelte'
     import SettingButton from './SettingButton.svelte'
+    import SettingToggle from './SettingToggle.svelte'
 
     interface Props {
         values: NativeStagedPluginValue[]
@@ -46,38 +47,38 @@
     }
 </script>
 
-<div class="fixed inset-0 z-[1300] flex items-center justify-center bg-black/65 p-4">
+<div class="fixed inset-0 z-[1300] flex items-center justify-center bg-black/60 p-4">
     <div
         role="dialog"
         aria-modal="true"
         aria-labelledby="plugin-value-assign-title"
         data-plugin-value-assign
-        class="flex max-h-[90vh] w-full max-w-2xl flex-col gap-3 overflow-y-auto rounded-xl border border-darkborderc bg-darkbg p-5 text-textcolor"
+        class="flex max-h-[90vh] w-full max-w-2xl flex-col rounded-xl border border-darkborderc bg-darkbg text-textcolor"
     >
-        <h3 id="plugin-value-assign-title" class="text-lg font-bold">{strings.stageTitle}</h3>
-        <p class="text-sm text-textcolor2">{strings.stageDescription}</p>
-        {#if !automatic}
-            <div class="rounded-md border border-darkborderc px-3 py-2 text-[13px] leading-normal text-textcolor2">
-                {strings.autoAssignOffNotice}
+        <h3 id="plugin-value-assign-title" class="shrink-0 px-5 pt-5 text-lg font-bold">{strings.stageTitle}</h3>
+        <!-- Only the list scrolls, so the title and the closing actions stay reachable. -->
+        <div class="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-5 py-3">
+            <p class="text-sm text-textcolor2">{strings.stageDescription}</p>
+            {#if !automatic}
+                <div class="rounded-md border border-darkborderc px-3 py-2 text-[13px] leading-normal text-textcolor2">
+                    {strings.autoAssignOffNotice}
+                </div>
+            {/if}
+            <div class="rounded-lg border border-darkborderc">
+                <PluginDataManager
+                    place="import"
+                    {staged}
+                    {pluginNames}
+                    initialAssignments={remembered?.assignments}
+                    onselectionchange={(chosen) => { assignments = chosen }}
+                />
             </div>
-        {/if}
-        <div class="rounded-lg border border-darkborderc">
-            <PluginDataManager
-                place="import"
-                {staged}
-                {pluginNames}
-                initialAssignments={remembered?.assignments}
-                onselectionchange={(chosen) => { assignments = chosen }}
-            />
+            <div>
+                <SettingToggle bind:checked={automatic} label={strings.autoAssign} showLabel />
+                <p class="mt-0.5 pl-7 text-xs text-textcolor2">{strings.autoAssignHelp}</p>
+            </div>
         </div>
-        <label class="flex items-start gap-2 text-sm">
-            <input type="checkbox" class="mt-1" bind:checked={automatic} />
-            <span>
-                {strings.autoAssign}
-                <span class="mt-0.5 block text-xs text-textcolor2">{strings.autoAssignHelp}</span>
-            </span>
-        </label>
-        <div class="flex flex-wrap justify-end gap-2">
+        <div class="flex shrink-0 flex-wrap justify-end gap-2 px-5 pt-1 pb-5">
             <SettingButton variant="secondary" onclick={() => onchoose({ assignments: [], automatic })}>
                 {strings.skipAll}
             </SettingButton>

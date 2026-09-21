@@ -168,16 +168,22 @@ pub(super) fn classify(
             kind: ErrorKind::ReauthRequired,
             http_status: Some(401),
             retry_at_ms: None,
+            oauth_error: None,
+            oauth_error_description: None,
         },
         403 => ProviderError {
             kind: ErrorKind::Unauthorized,
             http_status: Some(403),
             retry_at_ms: None,
+            oauth_error: None,
+            oauth_error_description: None,
         },
         429 => ProviderError {
             kind: ErrorKind::RateLimited,
             http_status: Some(429),
             retry_at_ms: retry_at(headers, now_ms),
+            oauth_error: None,
+            oauth_error_description: None,
         },
         _ => common::classify_status(status, headers, now_ms),
     }

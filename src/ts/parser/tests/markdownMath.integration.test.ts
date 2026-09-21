@@ -7,7 +7,7 @@ import { parseMarkdownSafe } from '../parser.svelte'
 
 vi.unmock('katex')
 vi.mock('../../platform', () => ({
-    isTauri: false, isNodeServer: false, isMobile: false, isTauriMobile: false,
+    isTauri: false, isMobile: false, isTauriMobile: false,
     isTauriAndroid: false, isTauriIOS: false, isIOS: () => false, isInStandaloneMode: false,
 }))
 vi.mock('../../storage/database.svelte', () => ({

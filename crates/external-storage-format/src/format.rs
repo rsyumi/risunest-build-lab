@@ -2,7 +2,7 @@ use super::{content_identity::hash, FormatError, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-pub const SCHEMA: &str = "risunest.external-storage/v2";
+pub const SCHEMA: &str = "risunest.external-storage/v1";
 
 /// The library and its referenced assets are the whole content of every
 /// repository, so their fingerprints are separated by one fixed domain rather
@@ -97,26 +97,6 @@ mod tests {
         // A device section selection is no longer part of repository identity,
         // so a strategy-carrying repository accepts every device's choice.
         assert!(Descriptor::new("repository".into(), Some(Strategy::Sequential)).is_ok());
-    }
-    #[test]
-    fn a_descriptor_from_the_previous_schema_is_reported_rather_than_narrowed() {
-        let previous = serde_json::json!({
-            "schema": "risunest.external-storage/v1",
-            "repositoryId": "repository",
-            "scope": {
-                "library": true,
-                "referencedAssets": true,
-                "deviceSettings": false,
-                "devicePlugins": false,
-            },
-            "scopeId": vec![4u8; 32],
-            "encrypted": true,
-            "publicationStrategy": "cas",
-        });
-        assert_eq!(
-            Descriptor::decode(&serde_json::to_vec(&previous).unwrap()),
-            Err(FormatError("invalid-descriptor"))
-        );
     }
 }
 

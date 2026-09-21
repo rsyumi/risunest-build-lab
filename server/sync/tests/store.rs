@@ -102,6 +102,9 @@ fn missing_dependencies_and_wrong_before_or_fence_never_advance_head() {
     let intent = stage(&store, &a, &head, 1, &changes("a", b"missing"));
     let failed = store.commit(&a, &intent, &head.etag()).unwrap();
     assert_eq!(failed.error.as_deref(), Some("missing-dependency"));
+    // The rejection names the record it failed on, so a retry loop has something
+    // to report beyond the code.
+    assert_eq!(failed.error_key.as_deref(), Some("a"));
     store.put_object(&a, &hash(b"missing"), b"missing").unwrap();
     assert_eq!(store.commit(&a, &intent, &head.etag()).unwrap(), failed);
     let mut c = changes("a", b"missing");
@@ -109,14 +112,9 @@ fn missing_dependencies_and_wrong_before_or_fence_never_advance_head() {
         deletion_id: "deleted".into(),
     };
     let intent = stage(&store, &a, &head, 2, &c);
-    assert_eq!(
-        store
-            .commit(&a, &intent, &head.etag())
-            .unwrap()
-            .error
-            .as_deref(),
-        Some("before-version-mismatch")
-    );
+    let rejected = store.commit(&a, &intent, &head.etag()).unwrap();
+    assert_eq!(rejected.error.as_deref(), Some("before-version-mismatch"));
+    assert_eq!(rejected.error_key.as_deref(), Some("a"));
     let mut c = changes("a", b"missing");
     c.read_fences.push(ReadFence {
         domain: Domain::Library,
@@ -126,14 +124,9 @@ fn missing_dependencies_and_wrong_before_or_fence_never_advance_head() {
         },
     });
     let intent = stage(&store, &a, &head, 3, &c);
-    assert_eq!(
-        store
-            .commit(&a, &intent, &head.etag())
-            .unwrap()
-            .error
-            .as_deref(),
-        Some("read-fence-mismatch")
-    );
+    let rejected = store.commit(&a, &intent, &head.etag()).unwrap();
+    assert_eq!(rejected.error.as_deref(), Some("read-fence-mismatch"));
+    assert_eq!(rejected.error_key.as_deref(), Some("owner"));
     assert_eq!(store.head().unwrap(), head);
 }
 #[test]

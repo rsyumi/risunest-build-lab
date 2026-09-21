@@ -53,11 +53,6 @@ export interface PluginStorageCatalog {
 export type AssetAliasKind = 'asset' | 'inlay'
 export type AssetAliasInlayType = 'image' | 'video' | 'audio' | 'signature'
 
-export type AssetRepositoryAuthorityState =
-    | { format: 'legacy' }
-    | { format: 'preparing'; migrationId: string; sourceRevision: DataRevision }
-    | { format: 'v2'; migrationId: string; compatibilityHash: string }
-
 export interface AssetAliasIdentity {
     kind: AssetAliasKind
     key: string
@@ -116,15 +111,6 @@ export type AssetOwnerHead = { owner: AssetOwnerLocator } & (
         entryCount: number
     }
 )
-
-export interface AssetRepositoryMigrationInput {
-    sourceRevision: DataRevision
-    migrationId: string
-    compatibilityHash: string
-    database: Database
-    assetAliases: AssetAlias[]
-    assetOwnerHeads: AssetOwnerHead[]
-}
 
 export function assetOwnerLocatorKey(owner: AssetOwnerLocator): string {
     validateAssetOwnerLocator(owner)
@@ -513,7 +499,6 @@ export interface PersistentRevisionReader {
     readAssetAlias(identity: AssetAliasIdentity): Promise<Versioned<AssetAlias> | null>
     readAssetAliasesByKeys(kind: AssetAliasKind, keys: string[]): Promise<Versioned<AssetAlias[]>>
     listAssetAliases(query: AssetAliasListQuery): Promise<AssetAliasPage>
-    readAssetRepositoryAuthority(): Promise<Versioned<AssetRepositoryAuthorityState>>
     readAssetOwnerHead(owner: AssetOwnerLocator): Promise<Versioned<AssetOwnerHead> | null>
     /// Present only where the store tracks changes. The window and every record
     /// reprojected for it must be read through this one lease.
@@ -558,15 +543,11 @@ export interface PersistentDataStore {
     readAssetAlias(identity: AssetAliasIdentity): Promise<Versioned<AssetAlias> | null>
     readAssetAliasesByKeys(kind: AssetAliasKind, keys: string[]): Promise<Versioned<AssetAlias[]>>
     listAssetAliases(query: AssetAliasListQuery): Promise<AssetAliasPage>
-    readAssetRepositoryAuthority(): Promise<Versioned<AssetRepositoryAuthorityState>>
     readAssetOwnerHead(owner: AssetOwnerLocator): Promise<Versioned<AssetOwnerHead> | null>
     commitAssetAlias(alias: AssetAlias, expectedRevision: DataRevision): Promise<{ revision: DataRevision }>
     deleteAssetAlias(
         identity: AssetAliasIdentity,
         expectedRevision: DataRevision,
-    ): Promise<{ revision: DataRevision }>
-    activateAssetRepositoryMigration(
-        input: AssetRepositoryMigrationInput,
     ): Promise<{ revision: DataRevision }>
     commit(input: WorkingSetCommit): Promise<{ revision: DataRevision }>
     archivePreview(characterId: string): Promise<ArchivePreview>

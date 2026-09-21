@@ -13,6 +13,8 @@
     "process:default",
     "shell:default",
     "http:default",
+    "opener:allow-open-url",
+    "opener:allow-default-urls",
     "deep-link:default"
   ]
 }

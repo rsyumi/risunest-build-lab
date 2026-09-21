@@ -41,6 +41,33 @@ fn read_vector(store: &PersistentStore, seed: u8) -> Option<Vec<u8>> {
         .vector
 }
 
+#[test]
+fn progress_counts_library_hypa_and_plugins_and_waits_for_acknowledgement() {
+    use crate::persistent_store::server_sync_engine::{CycleItemCounter, Preparation};
+    let fleet = fleet();
+    let (_root, mut store) = prepared();
+    for section in [Section::Hypa, Section::LocalPlugins] {
+        store.device_store_mut().unwrap().set_section_participating(section, true).unwrap();
+    }
+    store.device_store_mut().unwrap().write_hypa_embeddings(&[embedding(1, 4, 0x11)]).unwrap();
+    store.device_store_mut().unwrap().write_plugin_device_values("synthetic", &[PluginDeviceMutation::Set {
+        space: "string".into(), key: "key".into(), value: "value".into(),
+    }]).unwrap();
+    fleet.bind(&mut store);
+    let counter = Arc::new(CycleItemCounter::default());
+    let options = CycleOptions { cycle_items: Some(counter.clone()), ..Default::default() };
+    let Preparation::Ready(mut ready) = store.server_prepare_cycle(&options).unwrap() else { panic!("expected prepared cycle"); };
+    store.server_activate_cycle(&mut ready).unwrap();
+    assert_eq!(store.server_publish_cycle(&ready).unwrap().phase, "pending");
+    let count: i64 = store.connection.query_row("SELECT count(*) FROM server_sync_operation_records", [], |r| r.get(0)).unwrap();
+    let sections: i64 = store.connection.query_row("SELECT count(DISTINCT domain) FROM server_sync_operation_records", [], |r| r.get(0)).unwrap();
+    assert_eq!(sections, 3);
+    assert_eq!(counter.total.load(AtomicOrdering::Relaxed), count as u64);
+    assert_eq!(counter.done.load(AtomicOrdering::Relaxed), count as u64);
+    assert_eq!(counter.activity.load(AtomicOrdering::Relaxed), 5);
+    assert_eq!(settle(&mut store).phase, "idle");
+}
+
 fn section_clock(store: &PersistentStore, section: Section) -> Sequence {
     let value: String = store
         .device_store()

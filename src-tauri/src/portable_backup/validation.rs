@@ -4,9 +4,7 @@ use crate::{
     asset_repository::PayloadCas,
     data_health::{codes, Finding, FindingSink, FirstFinding, Report},
     lossless_f0::{scan_portable_fragment, F0Reference, F0ReferenceStatus, PortableFragment},
-    persistent_store::{
-        portable_validation, AssetRepositoryAuthorityState,
-    },
+    persistent_store::portable_validation,
 };
 use rusqlite::{params, OptionalExtension};
 use serde_json::Value;
@@ -449,7 +447,6 @@ impl LibraryView<'_> {
         let mut counts = ReferenceCounts::default();
         portable_validation::validate_records_into(self.db, probe, report)?;
         if report.running() {
-            self.validate_authority(report)?;
         }
         if report.running() {
             self.objects
@@ -594,32 +591,6 @@ impl LibraryView<'_> {
             )?;
         }
         Ok(counts)
-    }
-
-    fn validate_authority(&self, report: &mut Report<'_>) -> Result<()> {
-        for (table, subject) in [("asset_repository_authority", "asset")] {
-            let serialized: Option<String> = self
-                .db
-                .query_row(&format!("SELECT value FROM {table}"), [], |r| r.get(0))
-                .optional()?;
-            let complete = serialized.is_some_and(|serialized| {
-                matches!(
-                    serde_json::from_str::<AssetRepositoryAuthorityState>(&serialized),
-                    Ok(AssetRepositoryAuthorityState::V2 { .. })
-                )
-            });
-            if !complete
-                && !report.record(Finding::new(
-                    codes::AUTHORITY_INCOMPLETE,
-                    subject,
-                    "",
-                    "storage authority is not complete v2",
-                ))
-            {
-                return Ok(());
-            }
-        }
-        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]

@@ -9,7 +9,7 @@ use crate::external_storage::{
     auth::{AuthorizationCode, AuthorizationPolicy, SecretBytes},
     contract::*,
     http::HttpRequest,
-    providers::Dependencies,
+    providers::{common, Dependencies},
     quota::AccountKey,
 };
 use serde::Deserialize;
@@ -181,10 +181,14 @@ async fn post_token(
     if matches!(response.status, 400 | 401) {
         // invalid_grant covers a revoked, replaced or testing-expired grant;
         // every other grant failure equally needs a new user authorization.
+        let (oauth_error, oauth_error_description) =
+            common::oauth_error_details(&mut response.body, cancel).await;
         return Err(ProviderError {
             kind: ErrorKind::ReauthRequired,
             http_status: Some(response.status),
             retry_at_ms: None,
+            oauth_error,
+            oauth_error_description,
         });
     }
     Err(wire::classify(&mut response, dependencies.clock.now_ms(), cancel).await)
@@ -397,6 +401,9 @@ pub(crate) fn authorization_policy(
         client_id: settings.client_id,
         redirect_url,
         scopes: settings.scopes,
+        picker: config.location.get("space").map(String::as_str) != Some(config::APP_DATA_FOLDER)
+            && !config.location.contains_key("folderId")
+            && !config.location.contains_key("folderName"),
     })
 }
 
@@ -425,6 +432,9 @@ pub(crate) fn ios_authorization_policy(
         client_id: settings.client_id,
         redirect_url,
         scopes: settings.scopes,
+        picker: config.location.get("space").map(String::as_str) != Some(config::APP_DATA_FOLDER)
+            && !config.location.contains_key("folderId")
+            && !config.location.contains_key("folderName"),
     };
     Ok((policy, callback_scheme))
 }
@@ -450,6 +460,9 @@ pub(crate) fn android_web_authorization_policy(
             .android_web_redirect
             .ok_or_else(config::unsupported)?,
         scopes: settings.scopes,
+        picker: config.location.get("space").map(String::as_str) != Some(config::APP_DATA_FOLDER)
+            && !config.location.contains_key("folderId")
+            && !config.location.contains_key("folderName"),
     })
 }
 

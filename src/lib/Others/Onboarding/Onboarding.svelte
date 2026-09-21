@@ -705,8 +705,12 @@
 {#snippet steps(place: 'top' | 'bottom')}
     <ol class="steps {place}">
         {#each [t.stepStart, t.stepData, t.stepDone] as label, index}
-            <li class:on={step === index + 1} class:past={step > index + 1}>
-                <i></i><span>{label}</span>
+            <li
+                class:on={step === index + 1}
+                class:past={step > index + 1}
+                aria-current={step === index + 1 ? 'step' : undefined}
+            >
+                <i aria-hidden="true"></i><span>{label}</span>
             </li>
         {/each}
     </ol>
@@ -798,7 +802,7 @@
             </div>
             <div class="brand-copy">
                 <p class="eyebrow">{t.eyebrow}</p>
-                <h2>{t.brandTitle}</h2>
+                <p class="brand-title">{t.brandTitle}</p>
                 <p class="desc">{t.brandDesc}</p>
             </div>
             {@render steps('bottom')}
@@ -825,7 +829,7 @@
                     {/if}
                     {@render bar(
                         job.indeterminate ? null : (job.overallPercent ?? 0),
-                        strings.risuNest.importDialog.titleImport,
+                        job.title,
                     )}
                     <p class="meta">
                         <span
@@ -883,7 +887,10 @@
                                     jobDetailsOpen = !jobDetailsOpen
                                 }}
                             >
-                                {strings.risuNest.importDialog.errorDetails}
+                                {jobDetailsOpen
+                                    ? strings.risuNest.importDialog
+                                          .errorDetailsHide
+                                    : strings.risuNest.importDialog.errorDetails}
                             </button>
                             {#if jobDetailsOpen}
                                 <div class="details-body">
@@ -1100,7 +1107,7 @@
                             {#if !isTauri}
                                 {@render back('sync', t.back)}
                                 <h1>{t.hub.title}</h1>
-                                <p class="lead">{t.hub.stepLink}</p>
+                                <p class="lead">{t.hub.unsupported}</p>
                             {:else if hubSyncing}
                                 <h1>{s.running}</h1>
                                 <p class="lead">{t.hub.syncingLead}</p>
@@ -1171,9 +1178,6 @@
                                     </button>
                                 </div>
                             {:else if hubStarted}
-                                <button class="back" type="button" onclick={resetHub}>
-                                    <ChevronLeft />{s.otherCode}
-                                </button>
                                 <h1>{t.hub.title}</h1>
                                 {@render hubServerChip()}
                                 <p class="result failed" role="status">
@@ -1256,6 +1260,7 @@
                                         : ex.restoring}
                                 </h1>
                                 <p class="lead">{ex.syncingLead}</p>
+                                {@render externalRepositoryChip()}
                                 {@render bar(
                                     externalPercent,
                                     externalConnection
@@ -1591,7 +1596,8 @@
         --o-blue: var(--color-primary-500);
         --o-ok: var(--color-success-500);
         --o-warn: var(--color-danger-400);
-        /* The logo gradient. Onboarding-only, not part of the theme. */
+        /* The logo gradient. Onboarding-only, not part of the theme, so what is
+           drawn on top of it stays white whatever the theme does. */
         --o-teal: #22c8c6;
         --o-indigo: #6e7cf8;
         --o-safe-top: env(safe-area-inset-top, 0px);
@@ -1612,20 +1618,12 @@
         cursor: pointer;
     }
     .onb button:disabled {
-        opacity: 0.55;
+        opacity: 0.5;
         cursor: default;
     }
     .onb :is(button, select):focus-visible {
         outline: 2px solid var(--o-blue);
         outline-offset: 2px;
-    }
-    .sr-only {
-        position: absolute;
-        width: 1px;
-        height: 1px;
-        overflow: hidden;
-        clip-path: inset(50%);
-        white-space: nowrap;
     }
 
     /* ── brand panel ── */
@@ -1663,7 +1661,7 @@
         letter-spacing: 0.14em;
         color: var(--o-teal);
     }
-    .brand h2 {
+    .brand .brand-title {
         margin: 0;
         font-size: 22px;
         font-weight: 700;
@@ -1705,18 +1703,25 @@
         border-radius: 50%;
         background: color-mix(in srgb, var(--o-ink) 22%, transparent);
     }
+    /* Only the dots fit beside the wordmark, so the labels stay for assistive
+       technology until the wide layout shows them. */
     .steps li span {
-        display: none;
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        overflow: hidden;
+        clip-path: inset(50%);
+        white-space: nowrap;
     }
     .steps li.on {
         color: var(--o-ink);
     }
     .steps li.on i {
         background: var(--o-teal);
-        box-shadow: 0 0 0 3px rgba(34, 200, 198, 0.22);
+        box-shadow: 0 0 0 3px color-mix(in srgb, var(--o-teal) 22%, transparent);
     }
     .steps li.past i {
-        background: rgba(34, 200, 198, 0.55);
+        background: color-mix(in srgb, var(--o-teal) 55%, transparent);
     }
 
     /* ── content panel ── */
@@ -1919,7 +1924,7 @@
     .btn.primary {
         border-color: transparent;
         background: var(--o-blue);
-        color: #fff;
+        color: var(--risu-theme-textcolor);
     }
     .btn.primary:hover:not(:disabled) {
         background: var(--color-primary-600);
@@ -1947,7 +1952,7 @@
         padding: 26px 18px;
         border: 1px solid var(--o-line);
         border-radius: 16px;
-        background: rgba(59, 130, 246, 0.05);
+        background: color-mix(in srgb, var(--o-blue) 5%, transparent);
         text-align: center;
     }
     .drop .ic {
@@ -1990,9 +1995,9 @@
         gap: 12px;
         margin-top: 16px;
         padding: 12px 14px;
-        border: 1px solid rgba(34, 200, 198, 0.35);
+        border: 1px solid color-mix(in srgb, var(--o-teal) 35%, transparent);
         border-radius: 14px;
-        background: rgba(34, 200, 198, 0.08);
+        background: color-mix(in srgb, var(--o-teal) 8%, transparent);
     }
     .detect .ic {
         display: grid;
@@ -2000,7 +2005,7 @@
         width: 36px;
         height: 36px;
         border-radius: 10px;
-        background: rgba(34, 200, 198, 0.18);
+        background: color-mix(in srgb, var(--o-teal) 18%, transparent);
         color: var(--o-teal);
     }
     .detect .ic :global(svg) {
@@ -2049,31 +2054,6 @@
         font-weight: 600;
         color: var(--o-ink);
     }
-    .connect {
-        display: flex;
-        flex-direction: column;
-        gap: 12px;
-    }
-    .field {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        padding: 5px 5px 5px 12px;
-        border: 1px solid var(--o-line);
-        border-radius: 12px;
-        background: color-mix(in srgb, var(--o-ink) 3%, transparent);
-    }
-    .field :global(svg) {
-        flex: none;
-        width: 16px;
-        height: 16px;
-        color: var(--o-faint);
-    }
-    .error {
-        margin: 0;
-        font-size: 12.5px;
-        color: var(--color-draculared);
-    }
 
     /* ── progress: native file imports ── */
     .file {
@@ -2102,13 +2082,22 @@
     .file .tag {
         padding: 2px 8px;
         border-radius: 999px;
-        background: rgba(34, 200, 198, 0.14);
+        background: color-mix(in srgb, var(--o-teal) 14%, transparent);
         font-size: 12px;
         color: var(--o-teal);
+    }
+    /* The chip names the source of the line right under it. */
+    .file + .result,
+    .file + .lead {
+        margin-top: 14px;
     }
     .dim {
         font-size: 12.5px;
         color: var(--o-faint);
+    }
+    .file .dim {
+        min-width: 0;
+        overflow-wrap: anywhere;
     }
     .track {
         width: 100%;
@@ -2167,11 +2156,14 @@
         font-size: 13px;
         color: var(--o-soft);
     }
+    .actions + .reason {
+        margin-top: 14px;
+    }
     .stages {
         display: flex;
         flex-direction: column;
         gap: 6px;
-        margin: 0 0 16px;
+        margin: 0 0 8px;
         padding: 0;
         list-style: none;
         font-size: 13.5px;
@@ -2226,7 +2218,7 @@
         color: var(--o-soft);
     }
     .item {
-        margin: -8px 0 16px;
+        margin: 0 0 16px;
         overflow: hidden;
         text-overflow: ellipsis;
         white-space: nowrap;
@@ -2353,8 +2345,8 @@
         cursor: pointer;
     }
     .pick.on {
-        border-color: rgba(34, 200, 198, 0.55);
-        background: rgba(34, 200, 198, 0.08);
+        border-color: color-mix(in srgb, var(--o-teal) 55%, transparent);
+        background: color-mix(in srgb, var(--o-teal) 8%, transparent);
     }
     .pick input {
         flex: none;
@@ -2372,9 +2364,9 @@
         gap: 12px;
         margin-bottom: 14px;
         padding: 14px;
-        border: 1px solid rgba(34, 200, 198, 0.35);
+        border: 1px solid color-mix(in srgb, var(--o-teal) 35%, transparent);
         border-radius: 14px;
-        background: rgba(34, 200, 198, 0.08);
+        background: color-mix(in srgb, var(--o-teal) 8%, transparent);
     }
     .found .ic {
         display: grid;
@@ -2382,7 +2374,7 @@
         width: 40px;
         height: 40px;
         border-radius: 11px;
-        background: rgba(34, 200, 198, 0.18);
+        background: color-mix(in srgb, var(--o-teal) 18%, transparent);
         color: var(--o-teal);
     }
     .found b {
@@ -2435,7 +2427,7 @@
         border-radius: 50%;
         background: linear-gradient(135deg, var(--o-teal), var(--o-indigo));
         color: #fff;
-        box-shadow: 0 12px 30px rgba(59, 130, 246, 0.35);
+        box-shadow: 0 12px 30px color-mix(in srgb, var(--o-blue) 35%, transparent);
     }
     .check-ring :global(svg) {
         width: 28px;
@@ -2454,7 +2446,7 @@
         flex-direction: column;
         padding: calc(12px + var(--o-safe-top)) 12px
             calc(12px + env(safe-area-inset-bottom, 0px));
-        background: rgba(0, 0, 0, 0.55);
+        background: color-mix(in srgb, black 60%, transparent);
         color: var(--color-textcolor);
     }
     .login-bar {
@@ -2502,6 +2494,17 @@
         background: #fff;
     }
 
+    /* A short window has no room for the band and the panel at once, so the band
+       keeps the wordmark and the steps and gives the rest to the panel. */
+    @media (max-height: 640px) {
+        .onb {
+            grid-template-rows: 180px 1fr;
+        }
+        .brand-copy {
+            display: none;
+        }
+    }
+
     @container (min-width: 720px) {
         .onb {
             grid-template-rows: none;
@@ -2513,7 +2516,7 @@
         .brand .wm {
             width: 150px;
         }
-        .brand h2 {
+        .brand .brand-title {
             font-size: 27px;
         }
         .brand .desc {
@@ -2527,7 +2530,11 @@
             gap: 18px;
         }
         .steps li span {
-            display: inline;
+            position: static;
+            width: auto;
+            height: auto;
+            overflow: visible;
+            clip-path: none;
         }
         .panel {
             margin: 0;

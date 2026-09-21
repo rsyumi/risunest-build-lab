@@ -12,7 +12,7 @@ import type { PromptItem, PromptSettings } from '../process/prompt';
 import type { OobaChatCompletionRequestParams } from '../model/ooba';
 import { type HypaV3Settings, type HypaV3Preset, createHypaV3Preset } from '../process/memory/hypav3'
 import { normalizeTranslatorPresetState, type TranslatorPreset } from '../translator/presets'
-import { isTauri, isNodeServer } from "src/ts/platform"
+import { isTauri } from "src/ts/platform"
 import { safeStructuredClone } from '../polyfill';
 import {
     DEFAULT_CHAT_LOAD_ADDITIONAL_PAGES,
@@ -713,7 +713,7 @@ export function normalizeDatabaseDefaults(data:Database): Database {
     data.streamingDeferDisplayProcessing ??= false
     data.echoMessage ??= "Echo Message"
     data.echoDelay ??= 0
-    if(!isNodeServer && !isTauri){
+    if(!isTauri){
         //this is intended to forcely reduce the size of the database in web
         data.promptInfoInsideChat = false
     }

@@ -5,15 +5,14 @@
 //! implementation is shared with the external storage provider credentials
 //! that already use it; only the namespace differs.
 use crate::{
-    app_data_root,
+    app_paths,
     external_storage::{auth::SecretBytes, secrets::account_credential_slot},
 };
 use serde_json::Value;
 use tauri::AppHandle;
 
 fn slot(app: &AppHandle) -> Result<crate::external_storage::secrets::NamedSecretSlot, String> {
-    let root = app_data_root::resolve(app)
-        .map_err(|error| format!("application data root unavailable: {error}"))?;
+    let root = app_paths::data_root(app)?;
     Ok(account_credential_slot(&root))
 }
 

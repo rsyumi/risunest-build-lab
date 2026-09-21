@@ -94,6 +94,25 @@ export interface PreparedExternalConnection {
     requiresRecoveryKey: boolean
     requiresPlatformOAuthClient: boolean
     oauthProjectHint?: string
+    requiresFolderSelection: boolean
+}
+
+export interface ExternalFolderSelection {
+    name: string
+    accountHint?: string
+}
+
+export interface ExternalFolderEntry {
+    name: string
+    /** Opaque native handle for this selection session. */
+    handle: string
+}
+
+export interface ExternalFolderPage {
+    path: ExternalFolderEntry[]
+    folders: ExternalFolderEntry[]
+    nextCursor?: string
+    selectable: boolean
 }
 
 export type ExternalProviderSecretInput =
@@ -367,6 +386,13 @@ export interface ExternalAuthorizationPending {
     authorizationPending: true
     callbackRejected?: true
 }
+
+export type ExternalAuthorizationOutcome =
+    | ExternalConnectionResult
+    | ExternalAuthorizationPending
+    | { folderSelected: true; folder: ExternalFolderSelection }
+    | { folderSelectionRequired: true; selectionId: string; accountHint?: string }
+    | { folderSelectionCancelled: true }
 
 export interface ExternalProviderDescriptor {
     id: ExternalProviderId

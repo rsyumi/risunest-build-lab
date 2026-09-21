@@ -2,7 +2,7 @@ use super::{
     active_generation, archive, asset_object_catalog, current_revision, hash_exact_file, schema,
     snapshot,
     AnchorOccurrence, AssetAlias, AssetAliasListQuery, AssetOwnerHead, AssetOwnerLocator,
-    AssetRepositoryAuthorityState, CharacterQuery, CheckpointMode, ConversationMutation,
+    CharacterQuery, CheckpointMode, ConversationMutation,
     ConversationPage, ConversationQuery, ConversationWindowQuery, PersistentStore,
     PluginStorageMutation, QueryOrder,
     StoreError, Versioned, WorkingSetCommit, ASSET_GC_PRODUCT_MINIMUM_GRACE_MS,
@@ -140,8 +140,8 @@ mod external_storage_tests;
 mod plugin_owner_tests;
 #[path = "tests/replacement_tests.rs"]
 mod replacement_tests;
-#[path = "tests/schema_migration_tests.rs"]
-mod schema_migration_tests;
+#[path = "tests/schema_tests.rs"]
+mod schema_tests;
 mod server_sync_apply_tests;
 mod server_sync_engine_tests;
 #[path = "tests/server_sync_outbox_tests.rs"]

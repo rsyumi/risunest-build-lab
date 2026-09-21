@@ -258,7 +258,7 @@ async function main() {
         if (!/^\d+$/.test(uid) || !/^\d+$/.test(gid)) throw new Error('Invalid app archive owner')
         const pack = spawnSync(
             'tar',
-            ['--uid', uid, '--gid', gid, '-cf', assembled, '-C', root, 'persistent', 'assets-v2'],
+            ['--uid', uid, '--gid', gid, '-cf', assembled, '-C', root, 'persistent', 'assets'],
             {
                 timeout: 180_000,
                 windowsHide: true,

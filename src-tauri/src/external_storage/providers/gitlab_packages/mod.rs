@@ -714,6 +714,8 @@ impl GitlabPackages {
                     kind: ErrorKind::PreconditionFailed,
                     http_status: Some(400),
                     retry_at_ms: None,
+                    oauth_error: None,
+                    oauth_error_description: None,
                 })
             }
             status => return Err(api::classify(status, &response.headers, self.now())),
@@ -861,6 +863,8 @@ impl Provider for GitlabPackages {
                         kind: ErrorKind::PreconditionFailed,
                         http_status: Some(200),
                         retry_at_ms: None,
+                        oauth_error: None,
+                        oauth_error_description: None,
                     })
                 }
                 (200, OpenMode::Existing | OpenMode::ResumeCreate) => {
@@ -878,6 +882,8 @@ impl Provider for GitlabPackages {
                         kind: ErrorKind::NotFound,
                         http_status: Some(404),
                         retry_at_ms: None,
+                        oauth_error: None,
+                        oauth_error_description: None,
                     })
                 }
                 (404, OpenMode::Create | OpenMode::ResumeCreate) => {
@@ -934,6 +940,8 @@ impl Provider for GitlabPackages {
                     kind: ErrorKind::NotFound,
                     http_status: Some(404),
                     retry_at_ms: None,
+                    oauth_error: None,
+                    oauth_error_description: None,
                 });
             };
             let declared = common::content_length(&response.headers)?;
@@ -1071,6 +1079,8 @@ impl Provider for GitlabPackages {
                         kind: ErrorKind::PreconditionFailed,
                         http_status: Some(400),
                         retry_at_ms: None,
+                        oauth_error: None,
+                        oauth_error_description: None,
                     }),
                     Verification::Absent => Err(api::classify(400, &response.headers, self.now())),
                 },

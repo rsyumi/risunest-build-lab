@@ -13,6 +13,7 @@ use crate::external_storage::{
         Cancellation, ConnectionConfig, ErrorKind, ProviderError, ProviderOperation, Result,
     },
     http::{HttpRequest, HttpResponse},
+    providers::common,
     quota::AccountKey,
 };
 use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
@@ -238,6 +239,19 @@ pub(super) async fn parse_grant(
     })
 }
 
+pub(super) async fn token_error(
+    response: &mut HttpResponse,
+    now_ms: u64,
+    cancel: &Cancellation,
+) -> ProviderError {
+    let mut error = graph::classify_token(response.status, &response.headers, now_ms);
+    let (oauth_error, oauth_error_description) =
+        common::oauth_error_details(&mut response.body, cancel).await;
+    error.oauth_error = oauth_error;
+    error.oauth_error_description = oauth_error_description;
+    error
+}
+
 pub(super) fn bearer(token: &str) -> String {
     format!("Bearer {token}")
 }
@@ -265,5 +279,6 @@ pub(super) fn authorization_policy(
             .iter()
             .map(|scope| (*scope).to_owned())
             .collect(),
+        picker: false,
     })
 }

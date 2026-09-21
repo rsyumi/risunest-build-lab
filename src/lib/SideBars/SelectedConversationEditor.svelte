@@ -95,24 +95,34 @@
 {#if active}
     {#if ready}
         {@render children()}
-    {:else if failed}
-        <div class="p-2 text-textcolor" role="alert">
-            <span>{language.error}</span>
-            <button
-                class="ml-2 rounded-md border border-darkborderc px-3 py-1"
-                onclick={() => sourceVersion++}
-                >{language.risuNest.storage.retry}</button
-            >
-        </div>
     {:else}
-        <div class="p-2 text-textcolor">
-            <LoadingIndicator label={language.loadingChatData} compact />
-        </div>
-    {/if}
-    {#if !ready && close}
-        <button
-            class="m-2 rounded-md border border-darkborderc bg-darkbg px-3 py-1 text-textcolor"
-            onclick={close}>{language.cancel}</button
+        <!-- Overlay mounts pass `close` and get no backdrop from the parent. -->
+        <div
+            class={close
+                ? 'absolute inset-0 flex flex-col items-center justify-center gap-3 bg-black/50 p-4 text-textcolor'
+                : 'flex flex-col items-start gap-3 p-2 text-textcolor'}
         >
+            {#if failed}
+                <div
+                    class="flex flex-col items-center gap-3 text-center"
+                    role="alert"
+                >
+                    <span>{language.error}</span>
+                    <button
+                        class="rounded-lg border border-borderc px-3 py-1.5 hover:bg-darkbg"
+                        onclick={() => sourceVersion++}
+                        >{language.hypaV3Modal.retry}</button
+                    >
+                </div>
+            {:else}
+                <LoadingIndicator label={language.loadingChatData} compact />
+            {/if}
+            {#if close}
+                <button
+                    class="rounded-lg border border-borderc px-3 py-1.5 hover:bg-darkbg"
+                    onclick={close}>{language.cancel}</button
+                >
+            {/if}
+        </div>
     {/if}
 {/if}

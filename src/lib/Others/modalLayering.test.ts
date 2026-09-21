@@ -9,6 +9,8 @@ const categoryManagerModal = readFileSync('src/lib/Others/HypaV3Modal/category-m
 const tagManagerModal = readFileSync('src/lib/Others/HypaV3Modal/tag-manager-modal.svelte', 'utf8')
 const irisModal = readFileSync('src/lib/Others/IrisModal.svelte', 'utf8')
 const nativeFileJobDialog = readFileSync('src/lib/Others/NativeFileJobDialog.svelte', 'utf8')
+const persistentWorkingSetRecovery = readFileSync('src/lib/Others/PersistentWorkingSetRecovery.svelte', 'utf8')
+const updatePopup = readFileSync('src/lib/Others/UpdatePopup.svelte', 'utf8')
 const popupEditor = readFileSync('src/lib/Others/PopupEditor.svelte', 'utf8')
 const promptDiffModal = readFileSync('src/lib/Others/PromptDiffModal.svelte', 'utf8')
 const easyPanel = readFileSync('src/lib/Others/ProTools/EasyPanel.svelte', 'utf8')
@@ -29,9 +31,12 @@ const observer = readFileSync('src/ts/observer.svelte.ts', 'utf8')
 
 /**
  * Full-screen modals (alerts, confirmations, permission prompts, pickers) sit on the shared
- * `z-modal` layer above the z-[1000] work dialogs. In-screen layers such as chat overlay
- * buttons, context menus, drag ghosts, and the text area stack keep their local z-index so
- * their internal ordering (for example the z-100 autocomplete above the z-50 editor) survives.
+ * `z-modal` layer above the z-[1000] work dialogs. The two work dialogs that have to cover
+ * the z-[1000] ones name their layer instead of writing it out: `z-work-dialog-update` for
+ * the update dialog and `z-work-dialog-recovery` for the working-set recovery. In-screen
+ * layers such as chat overlay buttons, context menus, drag ghosts, and the text area stack
+ * keep their local z-index so their internal ordering (for example the z-100 autocomplete
+ * above the z-50 editor) survives.
  */
 const modalSources: Record<string, string> = {
     'AlertComp.svelte': alertComp,
@@ -65,6 +70,11 @@ const workDialogSources: Record<string, string> = {
     'ChatScreens/ChatScreenshotDialog.svelte': chatScreenshotDialog,
 }
 
+const coveringDialogSources: Record<string, string> = {
+    'UpdatePopup.svelte': updatePopup,
+    'PersistentWorkingSetRecovery.svelte': persistentWorkingSetRecovery,
+}
+
 // Vitest serves CSS modules as empty strings, so read the stylesheet from disk.
 const styles = readFileSync(join(process.cwd(), 'src', 'styles.css'), 'utf8')
 
@@ -95,6 +105,17 @@ describe('modal layering', () => {
     it('keeps work dialogs below the modal layer', () => {
         for (const [name, source] of Object.entries(workDialogSources)) {
             expect(count(source, 'z-[1000]'), name).toBe(1)
+            expect(count(source, 'z-modal'), name).toBe(0)
+        }
+    })
+
+    it('names the layers of the work dialogs that cover the others', () => {
+        expect(styles).toMatch(/@utility z-work-dialog-update \{\s*z-index: 1001;\s*\}/)
+        expect(styles).toMatch(/@utility z-work-dialog-recovery \{\s*z-index: 1100;\s*\}/)
+        expect(count(updatePopup, 'z-work-dialog-update')).toBe(1)
+        expect(count(persistentWorkingSetRecovery, 'z-work-dialog-recovery')).toBe(1)
+        for (const [name, source] of Object.entries(coveringDialogSources)) {
+            expect(/z-\[\d+\]/.test(source), `${name} still writes its z-index out`).toBe(false)
             expect(count(source, 'z-modal'), name).toBe(0)
         }
     })

@@ -14,6 +14,8 @@ export interface ExternalProviderField {
     type?: 'text' | 'password' | 'select' | 'datetime-local'
     options?: string[]
     location?: boolean
+    /** Only when a new repository is created in a visible folder. */
+    createOnly?: boolean
 }
 
 export interface ExternalProviderDefinition {
@@ -61,8 +63,8 @@ export const externalProviderDefinitions: ExternalProviderDefinition[] = [
         id: 'google_drive', oauth: true, customEndpoint: false,
         defaultEndpoint: 'https://www.googleapis.com', profiles: [{ value: 'drive', label: 'Google Drive' }],
         fields: [
-            { key: 'folderId', required: true, location: true },
             { key: 'space', location: true, type: 'select', options: ['drive', 'appDataFolder'] },
+            { key: 'folderName', required: true, location: true, createOnly: true, placeholder: 'RisuNest' },
             { key: 'oauthRedirectUri', required: true, location: true },
             { key: 'projectId', required: true },
             { key: 'clientId', required: true },
@@ -74,9 +76,8 @@ export const externalProviderDefinitions: ExternalProviderDefinition[] = [
         defaultEndpoint: 'https://graph.microsoft.com/v1.0', profiles: [],
         fields: [
             { key: 'accountType', required: true, location: true, type: 'select', options: ['personal', 'business', 'appFolder'] },
+            { key: 'folderName', required: true, location: true, createOnly: true, placeholder: 'RisuNest' },
             { key: 'tenant', required: true, location: true, placeholder: 'common' },
-            { key: 'driveId', required: true, location: true },
-            { key: 'rootItemId', required: true, location: true },
             { key: 'redirectUri', required: true, location: true },
             { key: 'projectId', required: true },
             { key: 'clientId', required: true },
@@ -120,7 +121,8 @@ export function buildConnectionConfig(
     const definition = getExternalProviderDefinition(providerId)
     const location: Record<string, string> = {}
     for (const field of definition.fields) {
-        if (field.location && values[field.key]) location[field.key] = values[field.key]
+        const value = field.createOnly ? values[field.key]?.trim() : values[field.key]
+        if (field.location && value) location[field.key] = value
     }
     const projectId = values.projectId?.trim()
     const clientId = values.clientId?.trim()

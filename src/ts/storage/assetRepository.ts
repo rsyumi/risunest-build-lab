@@ -29,7 +29,7 @@ import type {
     Versioned,
 } from './persistentDataStore'
 
-export type AssetAliasPayloadSource = 'cas' | 'remote' | 'legacy' | 'missing'
+export type AssetAliasPayloadSource = 'cas' | 'remote' | 'missing'
 
 /** Remote availability is distinct from physical CAS existence. */
 export interface RemoteAssetReader {
@@ -58,12 +58,6 @@ export interface AssetAliasCatalog {
     ): Promise<{ revision: DataRevision }>
 }
 
-export interface AssetAliasLegacyReader {
-    read(identity: AssetAliasIdentity, range?: BlobReadRange): Promise<Uint8Array | null>
-    stat(identity: AssetAliasIdentity): Promise<BlobMetadata | null>
-    resolveUrl?(identity: AssetAliasIdentity): Promise<string | null>
-}
-
 interface TypedAssetRepositoryReader {
     read(
         identity: AssetAliasIdentity,
@@ -76,17 +70,6 @@ interface TypedAssetRepositoryReaderOptions {
     remote?: RemoteAssetReader
     reader: Pick<AssetAliasCatalog, 'readAssetAlias'>
     cas: ImmutablePayloadCas
-    legacy: AssetAliasLegacyReader
-    legacyFallback: boolean | 'null-hash-only'
-}
-
-function blobRange(data: Uint8Array, range?: BlobReadRange): Uint8Array {
-    if (!range) return data
-    validateBlobReadRange(range)
-    return data.slice(
-        Math.min(range.start, data.byteLength),
-        Math.min(range.endExclusive, data.byteLength),
-    )
 }
 
 function aliasBlobMetadata(alias: AssetAlias): BlobMetadata {
@@ -119,7 +102,7 @@ function aliasBlobMetadata(alias: AssetAlias): BlobMetadata {
 function createTypedAssetRepositoryReader(
     options: TypedAssetRepositoryReaderOptions,
 ): TypedAssetRepositoryReader {
-    const { reader, cas, legacy } = options
+    const { reader, cas } = options
     return {
         async read(identity, range) {
             validateAssetAliasIdentity(identity)
@@ -190,41 +173,6 @@ function createTypedAssetRepositoryReader(
                     }
                 }
             }
-            if (
-                options.legacyFallback
-                && (alias.objectHash === null || options.legacyFallback === true)
-            ) {
-                const boundedNullHashRead = alias.objectHash === null ? range : undefined
-                const data = boundedNullHashRead
-                    ? await legacy.read(identity, boundedNullHashRead)
-                    : await legacy.read(identity)
-                if (data !== null) {
-                    const expectedSize = boundedNullHashRead
-                        ? Math.max(
-                            0,
-                            Math.min(boundedNullHashRead.endExclusive, alias.size)
-                            - Math.min(boundedNullHashRead.start, alias.size),
-                        )
-                        : alias.size
-                    if (data.byteLength !== expectedSize) {
-                        throw new Error(`Asset alias legacy size mismatch for ${key}`)
-                    }
-                    if (
-                        alias.objectHash !== null
-                        && await hashPayloadBytes(data) !== alias.objectHash
-                    ) {
-                        throw new Error(`Asset alias legacy hash mismatch for ${key}`)
-                    }
-                    return {
-                        revision: versioned.revision,
-                        value: {
-                            alias,
-                            data: boundedNullHashRead ? data : blobRange(data, range),
-                            source: 'legacy',
-                        },
-                    }
-                }
-            }
             return {
                 revision: versioned.revision,
                 value: { alias, data: null, source: 'missing' },
@@ -260,24 +208,6 @@ function createTypedAssetRepositoryReader(
                     return {
                         revision: versioned.revision,
                         value: { alias, objectSize, source: 'remote' },
-                    }
-                }
-            }
-            if (
-                options.legacyFallback
-                && (alias.objectHash === null || options.legacyFallback === true)
-            ) {
-                const metadata = await legacy.stat(identity)
-                if (metadata !== null) {
-                    if (metadata.kind !== identity.kind || metadata.key !== identity.key) {
-                        throw new TypeError(`Asset alias legacy metadata does not match ${key}`)
-                    }
-                    if (metadata.size !== alias.size) {
-                        throw new Error(`Asset alias legacy size mismatch for ${key}`)
-                    }
-                    return {
-                        revision: versioned.revision,
-                        value: { alias, objectSize: metadata.size, source: 'legacy' },
                     }
                 }
             }
@@ -333,8 +263,6 @@ export interface CompleteAssetRepositoryBlobStoreOptions {
     remote?: RemoteAssetReader
     store: CompleteAssetAliasStore
     cas: ImmutablePayloadCas
-    legacy: AssetAliasLegacyReader
-    legacyFallback: boolean
     objectUrls: AssetObjectUrlResolver
     newInlayImages: NewInlayImageEncoder
     writeSessions?: DurableAssetWriteSessionFactory
@@ -422,8 +350,6 @@ export function createCompleteTypedAssetRepository(
         remote: options.remote,
         reader: options.store,
         cas: options.cas,
-        legacy: options.legacy,
-        legacyFallback: options.legacyFallback ? 'null-hash-only' : false,
     })
 
     const preparePublish = async (
@@ -600,10 +526,7 @@ export function createCompleteTypedAssetRepository(
             const versioned = await readValidatedAlias(options.store, identity)
             if (!versioned) return null
             const alias = versioned.value
-            if (alias.objectHash === null) {
-                if (!options.legacyFallback) return null
-                return await options.legacy.resolveUrl?.(identity) ?? null
-            }
+            if (alias.objectHash === null) return null
             const size = await options.cas.statObject(alias.objectHash)
                 ?? await options.remote?.statObject(alias.objectHash) ?? null
             if (size === null) return null

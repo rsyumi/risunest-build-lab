@@ -199,10 +199,6 @@ function createReader(
         readAssetAlias: async () => null,
         readAssetAliasesByKeys: async () => ({ revision, value: [] }),
         listAssetAliases: async () => ({ revision, items: [] }),
-        readAssetRepositoryAuthority: async () => ({
-            revision,
-            value: { format: 'legacy' },
-        }),
         readAssetOwnerHead: async () => null,
         release: onRelease,
     }

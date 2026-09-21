@@ -18,7 +18,11 @@ pub struct TransferRequest {
 }
 impl Store {
     pub fn receive_frames(&self, device: &Device, bytes: &[u8]) -> Result<Vec<String>> {
+        #[cfg(test)]
+        let measured = std::time::Instant::now();
         let frames = transfer::decode(bytes)?;
+        #[cfg(test)]
+        super::objects::frame_metrics::record(0, measured);
         if frames
             .iter()
             .any(|f| matches!(f, Frame::FullRequired { .. }))
@@ -26,7 +30,11 @@ impl Store {
             return Err(Error::new("invalid-upload-frame", 400));
         }
         let mut verified = Vec::new();
+        let mut objects: Vec<(String, Vec<u8>)> = Vec::new();
+        let mut materialized = 0usize;
         for frame in frames {
+            #[cfg(test)]
+            let measured = std::time::Instant::now();
             let bytes = match frame {
                 Frame::Full(bytes) => bytes,
                 Frame::Delta(recipe) => {
@@ -35,19 +43,34 @@ impl Store {
                         .iter()
                         .map(|b| b.hash.clone())
                         .collect::<Vec<_>>();
-                    self.pin_objects(device, &hashes)?;
+                    let remote = hashes
+                        .iter()
+                        .filter(|hash| !objects.iter().any(|(h, _)| h == *hash))
+                        .cloned()
+                        .collect::<Vec<_>>();
+                    self.pin_objects(device, &remote)?;
                     let bases = hashes
                         .iter()
-                        .map(|h| self.get_object(h))
+                        .map(|h| match objects.iter().find(|(hash, _)| hash == h) {
+                            Some((_, bytes)) => Ok(bytes.clone()),
+                            None => self.get_object(h),
+                        })
                         .collect::<Result<Vec<_>>>()?;
                     recipe.apply(&bases.iter().map(Vec::as_slice).collect::<Vec<_>>())?
                 }
                 Frame::FullRequired { .. } => unreachable!(),
             };
             let digest = hash(&bytes);
-            self.put_object(device, &digest, &bytes)?;
+            #[cfg(test)]
+            super::objects::frame_metrics::record(1, measured);
+            materialized = materialized
+                .checked_add(bytes.len())
+                .filter(|size| *size <= 32 * 1024 * 1024)
+                .ok_or(Error::new("batch-too-large", 413))?;
+            objects.push((digest.clone(), bytes));
             verified.push(digest);
         }
+        self.put_objects(device, &objects)?;
         Ok(verified)
     }
     pub fn transfer_objects(

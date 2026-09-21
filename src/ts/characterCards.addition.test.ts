@@ -84,7 +84,6 @@ vi.mock('src/ts/platform', () => ({
     get isTauriDesktop() { return mocks.platform === 'desktop' },
     get isTauriAndroid() { return mocks.platform === 'android' },
     get isTauriIOS() { return mocks.platform === 'ios' },
-    isNodeServer: false,
 }))
 vi.mock('./storage/androidContentPicker', () => ({ importAndroidContentFromPicker: mocks.importAndroid }))
 vi.mock('./storage/iosContentPicker', () => ({ importIOSContentFromPicker: mocks.importIOS }))

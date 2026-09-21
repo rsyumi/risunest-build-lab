@@ -135,14 +135,6 @@ impl PreparedContentCapture {
     ) -> StoreResult<usize> {
         check(probe)?;
         let db = &self.reader.connection;
-        if !matches!(
-            super::commit::read_asset_repository_authority(db, &self.identity.generation)?,
-            super::AssetRepositoryAuthorityState::V2 { .. }
-        ) {
-            return Err(StoreError::Validation {
-                message: "Canonical asset authority required before external capture".into(),
-            });
-        }
         let cas = PayloadCas::new(&self.repository_root)?;
         let after = match content_change_index::window(&self.reader, &self.consumer)? {
             ChangeWindow::Rebuild => None,

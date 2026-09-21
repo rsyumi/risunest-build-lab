@@ -24,6 +24,5 @@ pub(super) fn tracked_tables() -> Vec<(&'static str, &'static str, &'static str,
             "ROW.owner_kind",
             "ROW.owner_locator",
         ),
-        ("asset_repository_authority", "'full'", "''", "''"),
     ]
 }

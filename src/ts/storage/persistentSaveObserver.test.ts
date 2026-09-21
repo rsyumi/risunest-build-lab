@@ -30,6 +30,42 @@ function fixture(): Database {
 }
 
 describe('persistent save mutation observation', () => {
+    it('tracks added and removed root fields without reading hidden properties', () => {
+        const database = fixture()
+        Object.defineProperty(database, 'hiddenObserverProbe', {
+            enumerable: false,
+            get() { throw new Error('Hidden properties are not persistent fields') },
+        })
+        const state = createPersistentSaveObserverHarness(database)
+        const markDirty = vi.fn()
+        disposers.push(observePersistentSaveChanges({
+            readDatabase: () => state.database,
+            readSelectedCharacter: () => null,
+            markDirty,
+        }))
+        flushSync()
+        markDirty.mockClear()
+        const root = state.database as unknown as Record<string, unknown>
+        root.syntheticObserverField = { value: 'one' }
+        flushSync()
+        expect(markDirty).toHaveBeenCalled()
+
+        const added = root.syntheticObserverField as { value: string }
+        markDirty.mockClear()
+        added.value = 'two'
+        flushSync()
+        expect(markDirty).toHaveBeenCalledOnce()
+
+        markDirty.mockClear()
+        delete root.syntheticObserverField
+        flushSync()
+        expect(markDirty).toHaveBeenCalled()
+        markDirty.mockClear()
+        added.value = 'detached'
+        flushSync()
+        expect(markDirty).not.toHaveBeenCalled()
+    })
+
     it('keeps observing when compatibility code temporarily clears the message value', () => {
         const state = createPersistentSaveObserverHarness(fixture())
         const markDirty = vi.fn()

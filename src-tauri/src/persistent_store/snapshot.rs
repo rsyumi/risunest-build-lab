@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 const MIN_SNAPSHOT_BYTES: u64 = 512 * 1024 * 1024;
 const UNSCANNABLE_BLOCKER: &str = "record-unscannable";
-const CAS_PHYSICAL_PREFIX: &[u8] = b"assets-v2/objects/";
+const CAS_PHYSICAL_PREFIX: &[u8] = b"assets/objects/";
 const COLD_STORAGE_HEADER: &str = "\u{ef01}COLDSTORAGE\u{ef01}";
 
 #[cfg(test)]

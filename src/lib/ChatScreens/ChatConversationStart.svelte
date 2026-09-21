@@ -112,7 +112,7 @@
     {/if}
     {#if parserLoadFailed}
         <div
-            class="flex items-center justify-center gap-3 p-3"
+            class="flex flex-col items-center gap-3 p-3 text-center"
             role="alert"
             data-chat-greeting-load-error
         >

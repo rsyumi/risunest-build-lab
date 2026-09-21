@@ -19,7 +19,7 @@ vi.mock('./database.svelte', () => ({
     presetTemplate: {},
 }))
 vi.mock('../globalApi.svelte', () => ({ forageStorage: {} }))
-vi.mock('src/ts/platform', () => ({ isNodeServer: false, isTauri: false }))
+vi.mock('src/ts/platform', () => ({ isTauri: false }))
 
 function makeDatabase(username: string): Database {
     return {

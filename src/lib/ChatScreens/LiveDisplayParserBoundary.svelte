@@ -99,10 +99,20 @@
     {@render children(readySignal)}
 {/if}
 {#if failed}
-    <div role="alert" data-live-display-load-error>
-        {language.chatDataLoadFailed}
-        <button onclick={() => (retry += 1)}>{language.hypaV3Modal.retry}</button>
+    <div
+        class="flex flex-col items-center gap-3 p-3 text-center"
+        role="alert"
+        data-live-display-load-error
+    >
+        <span>{language.chatDataLoadFailed}</span>
+        <button
+            class="rounded-lg border border-borderc px-3 py-1.5 hover:bg-darkbg"
+            onclick={() => (retry += 1)}
+        >
+            {language.hypaV3Modal.retry}
+        </button>
     </div>
 {:else if !readySignal}
-    <LoadingIndicator label={language.loadingChatData} />
+    <!-- Both mount points are inline: a background layer and an expanded bookmark row. -->
+    <LoadingIndicator label={language.loadingChatData} compact />
 {/if}

@@ -3,7 +3,7 @@ import { formatElapsed } from "../../gui/nativeFileJobDialogModel";
 import { formatRisuNestStorageBytes } from "../risuNestStorageDashboard";
 import type { AssetResidencyPolicy } from "./serverAssetResidency";
 import type { ServerConfig, ServerSyncProgress } from "./serverSync";
-import type { ServerSyncSnapshot } from "./serverSyncController";
+import { serverSyncBlocked, type ServerSyncSnapshot } from "./serverSyncController";
 
 /** The strings both connection screens draw from. */
 export type ServerSyncText = (typeof languageEnglish)["risuNest"]["serverSync"];
@@ -15,8 +15,8 @@ export interface ServerSyncConnectRequest {
   replacing?: boolean;
 }
 export interface ServerSyncConnectPort {
-  bind(config: ServerConfig): Promise<void>;
-  reregister(config: ServerConfig): Promise<void>;
+  bind(config: ServerConfig, prepare?: () => Promise<unknown>): Promise<void>;
+  reregister(config: ServerConfig, prepare?: () => Promise<unknown>): Promise<void>;
   synchronize(): Promise<void>;
 }
 
@@ -32,9 +32,9 @@ export async function connectServerSync(
   setAssetResidencyPolicy: (policy: AssetResidencyPolicy) => Promise<unknown>,
   request: ServerSyncConnectRequest,
 ): Promise<void> {
-  if (request.replacing) await controller.reregister(request.config);
-  else await controller.bind(request.config);
-  await setAssetResidencyPolicy(request.residency);
+  const prepare = () => setAssetResidencyPolicy(request.residency);
+  if (request.replacing) await controller.reregister(request.config, prepare);
+  else await controller.bind(request.config, prepare);
   await controller.synchronize();
 }
 
@@ -45,17 +45,26 @@ export function serverSyncRefreshRequired(error: string): boolean {
   );
 }
 
-/** The sentence shown for a failed action or attempt. */
-export function serverSyncErrorHelp(code: string, text: ServerSyncText): string {
+/** The sentence shown for a failed action or attempt. A rejection the same
+ * attempt would receive again says what to do instead of asking for a retry. */
+export function serverSyncErrorHelp(
+  code: string,
+  text: ServerSyncText,
+  retryable = true,
+): string {
   switch (code) {
     case "activation-confirmation-pending":
       return text.activationHelp;
     case "committed-refresh-pending":
       return text.refreshHelp;
+    case "library-operation-busy":
+      return text.busyHelp;
     case "device-credential-unavailable":
       return text.credentialUnavailable;
+    case "server-incompatible":
+      return text.incompatibleHelp;
     default:
-      return text.errorHelp;
+      return retryable ? text.errorHelp : text.blockedHelp;
   }
 }
 
@@ -89,11 +98,26 @@ export function serverSyncStatus(
       tone: "working",
     };
   if (snapshot.paused) return { label: text.paused, tone: "paused" };
+  if (error === "server-incompatible")
+    return { label: text.incompatible, tone: "attention" };
+  if (serverSyncBlocked(snapshot))
+    return { label: text.blocked, tone: "attention" };
   if (snapshot.status?.operationPending)
     return { label: text.pending, tone: "connected" };
+  if (snapshot.status?.configured && snapshot.status.fullScan)
+    return { label: text.initialScan, tone: "connected" };
   if (snapshot.status?.configured)
     return { label: text.ready, tone: "connected" };
   return { label: text.disconnected, tone: "idle" };
+}
+/** The local changes waiting to be sent. Both connection screens show this. */
+export function serverSyncPendingChanges(
+  snapshot: ServerSyncSnapshot,
+  text: ServerSyncText,
+): string {
+  return snapshot.status
+    ? fill(text.count, formatCount(snapshot.status.dirtyRecords))
+    : "";
 }
 
 export const SERVER_SYNC_STAGES: readonly ServerSyncProgress[] = [
@@ -157,6 +181,8 @@ export function serverSyncProgressView(
     return { stage, label: text.progress[stage], state, detail };
   });
   const active = stages[activeIndex];
+  const activity = snapshot.progress === "preparing" || snapshot.progress === "publishing" ? items?.activity : undefined;
+  const activityCount = items?.expected ? `${formatCount(items.processed ?? 0)} / ${formatCount(items.expected)}` : formatCount(items?.processed ?? 0);
   const bytes =
     snapshot.verifiedBytes === undefined
       ? NO_VALUE
@@ -165,18 +191,14 @@ export function serverSyncProgressView(
     snapshot.bytesPerSecond === undefined
       ? NO_VALUE
       : `${formatRisuNestStorageBytes(snapshot.bytesPerSecond)}/s`;
-  const pending = snapshot.status
-    ? snapshot.status.fullScan
-      ? text.initialScan
-      : fill(text.count, formatCount(snapshot.status.dirtyRecords))
-    : NO_VALUE;
+  const pending = serverSyncPendingChanges(snapshot, text) || NO_VALUE;
   return {
-    percent: counted ? Math.min(100, Math.round((items.done / items.total) * 100)) : null,
-    current: active.detail ? `${active.label} · ${active.detail}` : active.label,
+    percent: counted && activity !== "confirming" ? Math.min(100, Math.round((items.done / items.total) * 100)) : null,
+    current: activity ? `${text.activity[activity]}${activity === "confirming" ? "" : ` · ${activityCount}`}` : active.detail ? `${active.label} · ${active.detail}` : active.label,
     elapsed:
       snapshot.attemptStartedAt === undefined
         ? ""
-        : `${text.elapsed} ${formatElapsed(now - snapshot.attemptStartedAt)}`,
+        : `${text.elapsed} ${formatElapsed(now - (snapshot.phaseStartedAt ?? snapshot.attemptStartedAt))}`,
     stages,
     counters: [
       { key: "bytes", label: text.verifiedBytes, value: bytes },

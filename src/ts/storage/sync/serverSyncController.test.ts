@@ -280,6 +280,7 @@ describe("server sync controller", () => {
     await controller.initialize();
     facade.cycle.mockRejectedValueOnce({
       code: "epoch-reconciliation-required",
+      retryable: false,
     });
     await controller.synchronize();
     expect(controller.canAutoSync()).toBe(false);
@@ -292,11 +293,34 @@ describe("server sync controller", () => {
     expect(controller.snapshot().error).toBe("");
     expect(controller.snapshot().status?.reconciling).toBe(true);
   });
+  it("carries the retry classification and treats its own errors as retryable", async () => {
+    const { controller, facade } = fixture();
+    await controller.initialize();
+    facade.cycle.mockRejectedValueOnce({
+      code: "invalid-control-schema",
+      status: 400,
+      retryable: false,
+    });
+    await controller.synchronize();
+    expect(controller.snapshot().error).toBe("invalid-control-schema");
+    expect(controller.snapshot().errorRetryable).toBe(false);
+    expect(controller.canAutoSync()).toBe(false);
+    // A failure raised here rather than by native carries no classification and
+    // keeps the existing backoff.
+    facade.cycle.mockRejectedValueOnce({ code: "server-status-changed" });
+    await controller.synchronize();
+    expect(controller.snapshot().errorRetryable).toBe(true);
+    expect(controller.canAutoSync()).toBe(true);
+    await controller.synchronize();
+    expect(controller.snapshot().error).toBe("");
+    expect(controller.snapshot().errorRetryable).toBeUndefined();
+  });
   it("keeps credential loss actionable without repeatedly opening the key store", async () => {
     const { controller, facade } = fixture();
     await controller.initialize();
     facade.cycle.mockRejectedValueOnce({
       code: "device-credential-unavailable",
+      retryable: false,
     });
     await controller.synchronize();
     expect(controller.snapshot().status?.configured).toBe(true);

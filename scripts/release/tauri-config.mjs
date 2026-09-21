@@ -15,22 +15,31 @@ export function mergeTauriConfig(base, ...overrides) {
   return result;
 }
 
+export const APP_IDENTIFIER = "io.github.rsyumi.risunest";
+export const SYNC_IDENTIFIER = "io.github.rsyumi.risunest.sync-manager";
+
 export function assertAppIdentifier(config, os) {
-  const expected = os === "windows" ? "RisuNest"
-    : os === "linux" ? "risunest"
-    : ["macos", "android", "ios"].includes(os) ? "io.github.rsyumi.risunest" : null;
-  if (!expected || config.identifier !== expected)
+  if (!["windows", "linux", "macos", "android", "ios"].includes(os))
     throw new Error(`Unexpected effective ${os} app identifier: ${config.identifier}`);
-  return expected;
+  if (config.identifier !== APP_IDENTIFIER)
+    throw new Error(`Unexpected effective ${os} app identifier: ${config.identifier}`);
+  return APP_IDENTIFIER;
 }
 
 export function assertSyncIdentifier(config, os) {
-  const expected = os === "windows" ? "RisuNestSync"
-    : os === "linux" ? "risunest-sync"
-    : os === "macos" ? "io.github.rsyumi.risunest.sync-manager" : null;
-  if (!expected || config.identifier !== expected)
+  if (!["windows", "linux", "macos"].includes(os))
     throw new Error(`Unexpected effective ${os} Sync identifier: ${config.identifier}`);
-  return expected;
+  if (config.identifier !== SYNC_IDENTIFIER)
+    throw new Error(`Unexpected effective ${os} Sync identifier: ${config.identifier}`);
+  return SYNC_IDENTIFIER;
+}
+
+// The identifier is an identity key, not a naming knob. A platform override
+// would move the bundle id, the WebView profile, and four Tauri directories at
+// once, so no overlay may set one.
+export function assertNoIdentifierOverride(overlay, label) {
+  if (overlay && Object.hasOwn(overlay, "identifier"))
+    throw new Error(`${label} must not override identifier: ${overlay.identifier}`);
 }
 
 export function releaseTauriConfig(releaseInput, publicKey) {

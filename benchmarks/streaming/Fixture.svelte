@@ -1,13 +1,18 @@
 <script lang="ts">
   import Chat from "../../src/lib/ChatScreens/Chat.svelte";
   import { DBState } from "../../src/ts/stores.svelte";
-  import type { StreamingThoughtMode } from "../../src/ts/storage/database.svelte";
+  import type {
+    customscript,
+    StreamingThoughtMode,
+  } from "../../src/ts/storage/database.svelte";
 
   let message = $state("Synthetic initial answer");
   let streaming = $state(false);
   let instance = $state(0);
+  let scripts = $state<customscript[]>(DBState.db.characters[0].customscript);
   let character = $derived({
     ...DBState.db.characters[0],
+    customscript: scripts,
     type: "simple" as const,
   });
 
@@ -27,6 +32,18 @@
 
   export function sourceMatches(source: string) {
     return message === source;
+  }
+
+  export function setScripts(value: customscript[]) {
+    scripts = value;
+    instance++;
+  }
+
+  export function inspectScripts() {
+    return {
+      propScriptCount: scripts.length,
+      derivedScriptCount: character.customscript.length,
+    };
   }
 </script>
 

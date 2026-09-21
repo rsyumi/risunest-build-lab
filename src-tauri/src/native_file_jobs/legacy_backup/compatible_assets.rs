@@ -1005,7 +1005,6 @@ mod tests {
                 manifest_hash: Some(manifest.content_hash),
                 entry_count: 1,
             }],
-            asset_authority: AssetRepositoryAuthorityState::Legacy,
         };
         for target in [CompatibilityTarget::RisuAi, CompatibilityTarget::PocketRisu] {
             let output = root.join(if target == CompatibilityTarget::RisuAi {
@@ -1106,7 +1105,6 @@ mod tests {
                 synthetic_alias(&cas, &reserved_id, "inlay", b"reserved inlay"),
             ],
             owner_heads: vec![],
-            asset_authority: AssetRepositoryAuthorityState::Legacy,
         };
         let mut pins = DurableCasJob::begin(
             &root.join("repository"),
@@ -1189,7 +1187,6 @@ mod tests {
             revision: 1,
             assets,
             owner_heads: vec![],
-            asset_authority: AssetRepositoryAuthorityState::Legacy,
         };
         for target in [CompatibilityTarget::RisuAi, CompatibilityTarget::PocketRisu] {
             let output = root.join(if target == CompatibilityTarget::RisuAi {
@@ -1285,7 +1282,6 @@ mod tests {
             revision: 1,
             assets: vec![asset, inlay, unused],
             owner_heads: vec![],
-            asset_authority: AssetRepositoryAuthorityState::Legacy,
         };
         let mut prepared = PreparedAttachments::default();
         prepared

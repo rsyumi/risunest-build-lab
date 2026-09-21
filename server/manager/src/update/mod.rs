@@ -5,7 +5,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{Read, Seek, Write},
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::Command,
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -13,7 +13,7 @@ use std::{
 mod archive;
 mod transaction;
 pub use archive::{
-    extract_package, managed_bundle_version, validate_installed_marker, ExtractedBundle,
+    extract_package, managed_bundle_version, validate_installed_marker, validate_removal_inventory, ExtractedBundle,
 };
 mod engine;
 pub use engine::{run, run_helper, run_recovery_helper, run_while_locked, RunMode, RunOutcome};
@@ -656,17 +656,8 @@ pub fn begin_installer_guard(root: &Path, server: &Path) -> Result<String> {
         .arg(root)
         .args(["--server"])
         .arg(server)
-        .args(["installer", "guard", &nonce])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    platform::process(command.get_program())
-        .args(command.get_args())
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|_| "installer-guard-unavailable".to_owned())?;
+        .args(["installer", "guard", &nonce]);
+    platform::spawn_installer_guard(root, &mut command)?;
     let deadline = std::time::Instant::now() + INSTALLER_GUARD_PREPARE_TIMEOUT;
     while std::time::Instant::now() < deadline {
         if ready.is_file() {

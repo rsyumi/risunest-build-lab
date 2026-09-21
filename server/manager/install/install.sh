@@ -25,6 +25,8 @@ command -v systemctl >/dev/null 2>&1 && command -v loginctl >/dev/null 2>&1 || {
 }
 
 target_user=$(id -un)
+RISUNEST_SYNC_LINGER_CHANGED=false
+export RISUNEST_SYNC_LINGER_CHANGED
 linger=$(loginctl show-user "$target_user" -p Linger --value 2>/dev/null || true)
 if test "$linger" != yes; then
   printf '로그인 전에도 Sync를 시작하도록 %s 계정에 linger를 설정합니다.\n' "$target_user"
@@ -37,6 +39,7 @@ if test "$linger" != yes; then
     printf '%s\n' 'linger를 설정하지 못했습니다. 시스템 정책에 따라 최초 한 번 관리자 승인이 필요할 수 있습니다.' >&2
     exit 4
   fi
+  RISUNEST_SYNC_LINGER_CHANGED=true
 fi
 test "$(loginctl show-user "$target_user" -p Linger --value 2>/dev/null || true)" = yes || {
   printf '%s\n' 'linger 활성화를 확인하지 못했습니다.' >&2

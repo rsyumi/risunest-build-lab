@@ -2125,7 +2125,7 @@ mod tests {
             }
         }
         let _cas = PayloadCas::new(root).unwrap();
-        let asset_root = root.join("assets-v2").join("objects");
+        let asset_root = root.join("assets").join("objects");
         for shard in 0u16..=255 {
             fs::create_dir_all(asset_root.join(format!("{shard:02x}"))).unwrap();
         }

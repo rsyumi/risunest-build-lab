@@ -1,4 +1,10 @@
 fn main() {
+    if matches!(std::env::var("CARGO_CFG_TARGET_OS").as_deref(), Ok("macos") | Ok("ios")) {
+        println!("cargo:rerun-if-changed=src/cleanup_webview.m");
+        cc::Build::new().file("src/cleanup_webview.m").flag("-fobjc-arc")
+            .flag("-fblocks").compile("risunest_cleanup_webview");
+        println!("cargo:rustc-link-lib=framework=WebKit");
+    }
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
         println!("cargo:rerun-if-changed=src/macos_termination.m");
         cc::Build::new().file("src/macos_termination.m").compile("risunest_termination");

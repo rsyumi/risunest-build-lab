@@ -769,3 +769,18 @@ fn missing_journal_owned_stage_blocks_open_without_discarding_source_spool() {
     assert!(coordinator.is_blocking().unwrap());
     assert!(!coordinator.section_list(&id, Spool::Source).unwrap().is_empty());
 }
+
+#[test]
+fn cleanup_closes_the_device_database_and_reopens_only_a_fresh_store() {
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("device-backup");
+    let state = DeviceBackupState::initialize(directory.clone());
+    state.close_for_cleanup().unwrap();
+    assert!(state.lock().is_err());
+    std::fs::remove_dir_all(&directory).unwrap();
+    state.reopen_after_cleanup().unwrap();
+    let inner = state.lock().unwrap();
+    assert!(inner.connection.is_some());
+    assert!(inner.cold_session.is_none());
+    assert!(!inner.reconciled);
+}

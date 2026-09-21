@@ -57,7 +57,21 @@ struct WebAuthenticationResponse {
 struct OpenedFilesRequest { urls: Vec<String> }
 
 #[cfg(target_os = "ios")]
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DataRootRequest<'a> { data_root: &'a str }
+
+#[cfg(target_os = "ios")]
 impl<R: Runtime> IosNative<R> {
+    /// Hands over the store root. The native side enforces file ownership
+    /// against it, so it must not derive one of its own.
+    pub async fn set_data_root(&self, data_root: &str) -> Result<(), String> {
+        self.0
+            .run_mobile_plugin_async::<()>("setDataRoot", DataRootRequest { data_root })
+            .await
+            .map_err(|error| error.to_string())
+    }
+
     pub async fn receive_opened_files(&self, urls: Vec<String>) {
         let _ = self.0.run_mobile_plugin_async::<()>(
             "receiveOpenedFiles", OpenedFilesRequest { urls },

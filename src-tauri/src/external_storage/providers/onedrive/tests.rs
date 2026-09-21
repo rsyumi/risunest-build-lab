@@ -655,7 +655,6 @@ fn reading_follows_the_download_redirect_to_another_origin_without_authorization
         let download_records = download.requests.lock().unwrap();
         assert_eq!(download_records.len(), 1);
         assert!(!head(&download_records[0]).contains("authorization"));
-
     });
 }
 
@@ -692,8 +691,7 @@ fn resume_create_reconciles_only_missing_folders_and_refuses_ambiguous_layouts()
         let records = server.requests.lock().unwrap();
         assert_eq!(
             records.len(),
-            2 + config::REPOSITORY_FOLDERS.len() - present.len()
-                + config::REPOSITORY_FOLDERS.len()
+            2 + config::REPOSITORY_FOLDERS.len() - present.len() + config::REPOSITORY_FOLDERS.len()
         );
         assert!(line(&records[1]).contains("/children?$top=1000"));
         let created_end = 2 + config::REPOSITORY_FOLDERS.len() - present.len();
@@ -865,7 +863,11 @@ fn an_unchanged_token_produces_a_conditional_not_modified_read() {
         assert_eq!(receipt, ReadReceipt::NotModified(token));
         let records = server.requests.lock().unwrap();
         assert_eq!(records.len(), 3);
-        assert!(head(&records[2]).contains("if-none-match: etag-head"));
+        assert!(
+            head(&records[2]).contains("if-none-match: etag-head"),
+            "{}",
+            head(&records[2])
+        );
     });
 }
 
@@ -1392,8 +1394,16 @@ fn head_preconditions_use_create_if_absent_and_an_exact_version() {
         for record in &records[4..] {
             assert!(!line(record).contains("conflictBehavior"));
         }
-        assert!(head(&records[4]).contains("if-match: etag-new"));
-        assert!(head(&records[5]).contains("if-match: etag-stale"));
+        assert!(
+            head(&records[4]).contains("if-match: etag-new"),
+            "{}",
+            head(&records[4])
+        );
+        assert!(
+            head(&records[5]).contains("if-match: etag-stale"),
+            "{}",
+            head(&records[5])
+        );
     });
 }
 
@@ -1598,6 +1608,8 @@ fn a_rejected_grant_requires_reauthentication_and_a_rotated_token_is_persisted()
         .await);
         assert_eq!(error.kind, ErrorKind::ReauthRequired);
         assert_eq!(error.http_status, Some(400));
+        assert_eq!(error.oauth_error.as_deref(), Some("invalid_grant"));
+        assert_eq!(error.oauth_error_description.as_deref(), Some("AADSTS70000"));
         assert_eq!(rejected.requests.lock().unwrap().len(), 1);
     });
 }
@@ -1692,10 +1704,9 @@ fn the_authorization_policy_requests_the_scopes_of_its_account_type() {
         authorization_policy(&config, "android").unwrap().client_id,
         "android-client"
     );
-    config.location.insert(
-        "redirectUri".to_owned(),
-        IOS_REDIRECT_URI.to_owned(),
-    );
+    config
+        .location
+        .insert("redirectUri".to_owned(), IOS_REDIRECT_URI.to_owned());
     config
         .oauth_profile
         .as_mut()
@@ -1761,7 +1772,10 @@ fn redeeming_an_authorization_code_stores_the_first_token_document() {
             .as_mut()
             .unwrap()
             .platform_client_ids
-            .insert("windows".to_owned(), "windows-client".to_owned());
+            .insert(
+                config::platform_key().to_owned(),
+                "platform-client".to_owned(),
+            );
         config.location.insert(
             "redirectUri".to_owned(),
             "risunest://oauth/callback".to_owned(),
@@ -1773,8 +1787,9 @@ fn redeeming_an_authorization_code_stores_the_first_token_document() {
             verifier: crate::external_storage::auth::SecretBytes(zeroize::Zeroizing::new(
                 b"synthetic-verifier".to_vec(),
             )),
-            client_id: "windows-client".to_owned(),
+            client_id: "platform-client".to_owned(),
             redirect_url: url::Url::parse("risunest://oauth/callback").unwrap(),
+            picked_file_id: None,
         };
         let stored = connector
             .exchange_authorization_code(&config, &grant, &cancel)
@@ -1793,7 +1808,7 @@ fn redeeming_an_authorization_code_stores_the_first_token_document() {
         );
         let body = String::from_utf8(records[0].body.clone()).unwrap();
         assert!(body.contains("grant_type=authorization_code"));
-        assert!(body.contains("client_id=windows-client"));
+        assert!(body.contains("client_id=platform-client"));
         assert!(body.contains("code=synthetic-code"));
         assert!(body.contains("code_verifier=synthetic-verifier"));
         assert!(body.contains("redirect_uri=risunest%3A%2F%2Foauth%2Fcallback"));
@@ -1807,6 +1822,164 @@ fn redeeming_an_authorization_code_stores_the_first_token_document() {
 }
 
 #[test]
+fn a_rejected_authorization_code_preserves_the_oauth_error_details() {
+    runtime().block_on(async {
+        let server = WireServer::start(vec![json(
+            400,
+            "{\"error\":\"invalid_request\",\"error_description\":\"AADSTS900144: The request body must contain the following parameter.\"}",
+        )]);
+        let harness = with_transport(
+            Arc::new(crate::external_storage::http::NativeHttpTransport::for_loopback_tests()),
+            MemoryVault::default(),
+            NOW_MS,
+        );
+        let connector = OneDrive::new(harness.dependencies.clone());
+        let cancel = Cancellation::default();
+        let mut config = config_for(&server, "business");
+        config.account_id.clear();
+        config
+            .oauth_profile
+            .as_mut()
+            .unwrap()
+            .platform_client_ids
+            .insert(
+                config::platform_key().to_owned(),
+                "platform-client".to_owned(),
+            );
+        config.location.insert(
+            "redirectUri".to_owned(),
+            "risunest://oauth/callback".to_owned(),
+        );
+        let grant = AuthorizationCode {
+            code: crate::external_storage::auth::SecretBytes(zeroize::Zeroizing::new(
+                b"synthetic-code".to_vec(),
+            )),
+            verifier: crate::external_storage::auth::SecretBytes(zeroize::Zeroizing::new(
+                b"synthetic-verifier".to_vec(),
+            )),
+            client_id: "platform-client".to_owned(),
+            redirect_url: url::Url::parse("risunest://oauth/callback").unwrap(),
+            picked_file_id: None,
+        };
+
+        let error = match connector
+            .exchange_authorization_code(&config, &grant, &cancel)
+            .await
+        {
+            Ok(_) => panic!("the synthetic token rejection must fail"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind, ErrorKind::ReauthRequired);
+        assert_eq!(error.http_status, Some(400));
+        assert_eq!(error.oauth_error.as_deref(), Some("invalid_request"));
+        assert_eq!(
+            error.oauth_error_description.as_deref(),
+            Some("AADSTS900144: The request body must contain the following parameter.")
+        );
+        assert_eq!(server.requests.lock().unwrap().len(), 1);
+    });
+}
+
+#[test]
+fn setup_resolves_drive_lists_folders_and_creates_the_requested_folder() {
+    runtime().block_on(async {
+        let server = WireServer::start(vec![
+            json(200, "{\"id\":\"drive-setup\"}"),
+            json(
+                200,
+                "{\"id\":\"root-setup\",\"name\":\"Root\",\"folder\":{}}",
+            ),
+            json(
+                200,
+                "{\"value\":[{\"id\":\"folder-docs\",\"name\":\"Documents\",\"folder\":{},\"parentReference\":{\"driveId\":\"drive-setup\"}},{\"id\":\"file-ignored\",\"name\":\"note.txt\",\"file\":{}}]}",
+            ),
+            json(
+                201,
+                "{\"id\":\"folder-backups\",\"name\":\"Backups\",\"folder\":{},\"parentReference\":{\"driveId\":\"drive-setup\"}}",
+            ),
+            json(409, "{}"),
+        ]);
+        let test = harness(NOW_MS);
+        let provider = OneDrive::new(test.dependencies);
+        let cancel = Cancellation::default();
+        let config = config_for(&server, "personal");
+
+        let drive = provider
+            .resolve_setup_drive(&config, &secret(), "account-1", &cancel)
+            .await
+            .unwrap();
+        assert_eq!(drive.drive_id, "drive-setup");
+        assert_eq!(drive.root_item_id, "root-setup");
+
+        let page = provider
+            .list_setup_folders(
+                &config,
+                &secret(),
+                "account-1",
+                &drive.drive_id,
+                &drive.root_item_id,
+                None,
+                &cancel,
+            )
+            .await
+            .unwrap();
+        assert_eq!(page.folders.len(), 1);
+        assert_eq!(page.folders[0].id, "folder-docs");
+        assert_eq!(page.folders[0].name, "Documents");
+        assert!(page.next_cursor.is_none());
+
+        let created = provider
+            .create_setup_folder(
+                &config,
+                &secret(),
+                "account-1",
+                &drive.drive_id,
+                &drive.root_item_id,
+                "Backups",
+                &cancel,
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.id, "folder-backups");
+        assert_eq!(created.name, "Backups");
+
+        let conflict = match provider
+            .create_setup_folder(
+                &config,
+                &secret(),
+                "account-1",
+                &drive.drive_id,
+                &drive.root_item_id,
+                "Backups",
+                &cancel,
+            )
+            .await
+        {
+            Ok(_) => panic!("a same-name OneDrive folder must be rejected"),
+            Err(error) => error,
+        };
+        assert_eq!(conflict.kind, ErrorKind::FolderNameConflict);
+
+        let records = server.requests.lock().unwrap();
+        assert!(line(&records[0]).starts_with("GET /synthetic/me/drive?"));
+        assert!(line(&records[1]).starts_with("GET /synthetic/drives/drive-setup/root?"));
+        assert!(line(&records[2]).contains("/items/root-setup/children?"));
+        assert_eq!(
+            line(&records[3]),
+            "POST /synthetic/drives/drive-setup/items/root-setup/children HTTP/1.1"
+        );
+        let body = String::from_utf8(records[3].body.clone()).unwrap();
+        assert!(body.contains("\"name\":\"Backups\""));
+        assert!(body.contains("\"@microsoft.graph.conflictBehavior\":\"fail\""));
+        assert_eq!(
+            line(&records[4]),
+            "POST /synthetic/drives/drive-setup/items/root-setup/children HTTP/1.1"
+        );
+    });
+}
+
+#[test]
 fn deleting_addresses_one_member_path_and_refuses_the_head_and_descriptors() {
     runtime().block_on(async {
         let mut replies = existing_open();
@@ -1816,10 +1989,14 @@ fn deleting_addresses_one_member_path_and_refuses_the_head_and_descriptors() {
         let test = harness(NOW_MS);
         let provider = super::create(test.dependencies.clone()).unwrap();
         let cancel = Cancellation::default();
-        let (repository, capabilities) =
-            open(&provider, &config_for(&server, "personal"), OpenMode::Existing, &cancel)
-                .await
-                .unwrap();
+        let (repository, capabilities) = open(
+            &provider,
+            &config_for(&server, "personal"),
+            OpenMode::Existing,
+            &cancel,
+        )
+        .await
+        .unwrap();
         assert!(capabilities.require_cleanup().is_ok());
 
         let target = locator_for(&repository, "packs/pack-1");

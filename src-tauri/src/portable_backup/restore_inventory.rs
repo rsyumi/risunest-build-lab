@@ -98,7 +98,7 @@ impl RestoreInventory {
             let size = sql_u64(row.get(3)?)?;
             // A live canonical CAS path is recreated by installation. Equal bytes alone do
             // not prove that another source path or its metadata can be discarded.
-            let canonical = format!("assets-v2/objects/{}/{}", &hash[..2], &hash[2..]);
+            let canonical = format!("assets/objects/{}/{}", &hash[..2], &hash[2..]);
             if live && original == canonical && metadata == "{\"storage\":\"cas\"}" {
                 continue;
             }

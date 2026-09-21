@@ -10,7 +10,7 @@ vi.mock('../../../database.svelte', () => ({
     presetTemplate: {},
 }))
 vi.mock('../../../../globalApi.svelte', () => ({ forageStorage: {} }))
-vi.mock('src/ts/platform', () => ({ isNodeServer: false, isTauri: false }))
+vi.mock('src/ts/platform', () => ({ isTauri: false }))
 
 describe('frozen legacy reverse-import oracle', () => {
     it('normalizes only CRLF checkout text before frozen hash and exact comparison', () => {

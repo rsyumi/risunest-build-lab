@@ -805,7 +805,7 @@ fn job_pin_directory(
     create: bool,
 ) -> io::Result<Option<(PathBuf, PathBuf)>> {
     let repository_root = fs::canonicalize(repository_root)?;
-    let assets = ensure_child_directory(&repository_root, "assets-v2", create)?;
+    let assets = ensure_child_directory(&repository_root, "assets", create)?;
     let Some(assets) = assets else {
         return Ok(None);
     };
@@ -1300,7 +1300,7 @@ mod tests {
     #[test]
     fn read_only_root_collection_fails_closed_at_the_journal_limit_without_cleanup() {
         let directory = tempfile::tempdir().expect("create journal-limit directory");
-        let journal_directory = directory.path().join("assets-v2/job-pins");
+        let journal_directory = directory.path().join("assets/job-pins");
         std::fs::create_dir_all(&journal_directory).expect("create journal directory");
         for index in 0..=MAX_DURABLE_CAS_JOB_JOURNALS {
             std::fs::write(

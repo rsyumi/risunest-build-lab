@@ -34,13 +34,6 @@ impl restore::ReplacementSink for StoreSink {
     fn commit(&self, id: &str, revision: i64) -> StoreResult<RevisionResult> {
         let mut store = self.store.lock().unwrap();
         store.replace_put_asset_aliases(id, &self.payloads.asset_aliases)?;
-        store.replace_put_asset_repository_authority(
-            id,
-            &AssetRepositoryAuthorityState::V2 {
-                migration_id: "synthetic-pocket-restore".to_owned(),
-                compatibility_hash: payload_compatibility_hash(&self.payloads),
-            },
-        )?;
         self.durable
             .lock()
             .unwrap()

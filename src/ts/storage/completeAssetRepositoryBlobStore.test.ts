@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { BlobMetadata, InlayBlobMetadata } from './blobStore'
+import type { InlayBlobMetadata } from './blobStore'
 import { createTauriCasObjectUrl } from './platformBlobStore'
 import {
     createCompleteAssetRepositoryBlobStore,
@@ -32,7 +32,7 @@ function createCas(overrides: Partial<ImmutablePayloadCas> = {}): ImmutablePaylo
         prepare: vi.fn(async (data: Uint8Array) => ({
             contentHash: assetHash,
             byteSize: data.byteLength,
-            physicalKey: `assets-v2/objects/aa/${'a'.repeat(62)}`,
+            physicalKey: `assets/objects/aa/${'a'.repeat(62)}`,
             deduplicated: false,
         })),
         readObject: vi.fn(async () => null),
@@ -53,20 +53,10 @@ function createStore(overrides: Partial<CompleteAssetAliasStore> = {}): Complete
     }
 }
 
-function createLegacy() {
-    return {
-        read: vi.fn(async (_identity: AssetAliasIdentity) => null as Uint8Array | null),
-        stat: vi.fn(async (_identity: AssetAliasIdentity) => null as BlobMetadata | null),
-        resolveUrl: vi.fn(async (_identity: AssetAliasIdentity) => null as string | null),
-    }
-}
-
 function createFacade(input: {
     remote?: RemoteAssetReader
     store?: CompleteAssetAliasStore
     cas?: ImmutablePayloadCas
-    legacyFallback?: boolean
-    legacy?: ReturnType<typeof createLegacy>
     writeSessions?: DurableAssetWriteSessionFactory
     resolveObjectUrl?: (
         input: Parameters<typeof createTauriCasObjectUrl>[0],
@@ -74,7 +64,6 @@ function createFacade(input: {
 } = {}) {
     const store = input.store ?? createStore()
     const cas = input.cas ?? createCas()
-    const legacy = input.legacy ?? createLegacy()
     const resolveObjectUrl = vi.fn(
         input.resolveObjectUrl ?? (async () => 'risuasset://cas-object'),
     )
@@ -95,8 +84,6 @@ function createFacade(input: {
         remote: input.remote,
         store,
         cas,
-        legacy,
-        legacyFallback: input.legacyFallback ?? true,
         objectUrls: { resolveObjectUrl },
         newInlayImages: { encodeNewInlayImage },
         ...(input.writeSessions === undefined ? {} : { writeSessions: input.writeSessions }),
@@ -105,7 +92,6 @@ function createFacade(input: {
     return {
         store,
         cas,
-        legacy,
         resolveObjectUrl,
         encodeNewInlayImage,
         facade: createCompleteAssetRepositoryBlobStore(options),
@@ -123,7 +109,7 @@ describe('complete AssetRepository BlobStore facade', () => {
             statObject: vi.fn(async () => 4),
             readObject: vi.fn(async () => data),
         }
-        const { facade, typed, cas, legacy } = createFacade({
+        const { facade, typed, cas } = createFacade({
             remote,
             store: createStore({
                 readAssetAlias: vi.fn(async () => ({ revision: 10, value: alias })),
@@ -134,7 +120,6 @@ describe('complete AssetRepository BlobStore facade', () => {
         expect((await typed.stat({ kind: 'asset', key: alias.key }))?.size).toBe(4)
         expect(await cas.statObject(hash)).toBeNull()
         expect(await facade.read(alias.key)).toEqual(data)
-        expect(legacy.read).not.toHaveBeenCalled()
         remote.readObject.mockResolvedValue(new Uint8Array([1, 1, 1, 1]))
         await expect(facade.read(alias.key)).rejects.toThrow(
             'Remote asset identity mismatch',
@@ -251,7 +236,7 @@ describe('complete AssetRepository BlobStore facade', () => {
                     return {
                         contentHash: assetHash,
                         byteSize: data.byteLength,
-                        physicalKey: `assets-v2/objects/aa/${'a'.repeat(62)}`,
+                        physicalKey: `assets/objects/aa/${'a'.repeat(62)}`,
                         deduplicated: false,
                     }
                 }),
@@ -294,7 +279,7 @@ describe('complete AssetRepository BlobStore facade', () => {
                         return {
                             contentHash: assetHash,
                             byteSize: data.byteLength,
-                            physicalKey: `assets-v2/objects/aa/${'a'.repeat(62)}`,
+                            physicalKey: `assets/objects/aa/${'a'.repeat(62)}`,
                             deduplicated: false,
                         }
                     }),
@@ -341,7 +326,7 @@ describe('complete AssetRepository BlobStore facade', () => {
                 prepare: vi.fn(async (data) => ({
                     contentHash: assetHash,
                     byteSize: data.byteLength,
-                    physicalKey: `assets-v2/objects/aa/${'a'.repeat(62)}`,
+                    physicalKey: `assets/objects/aa/${'a'.repeat(62)}`,
                     deduplicated: false,
                 })),
                 seal,
@@ -376,7 +361,7 @@ describe('complete AssetRepository BlobStore facade', () => {
                 prepare: vi.fn(async (data) => ({
                     contentHash: assetHash,
                     byteSize: data.byteLength,
-                    physicalKey: `assets-v2/objects/aa/${'a'.repeat(62)}`,
+                    physicalKey: `assets/objects/aa/${'a'.repeat(62)}`,
                     deduplicated: false,
                 })),
                 seal: vi.fn(async () => {
@@ -432,7 +417,7 @@ describe('complete AssetRepository BlobStore facade', () => {
                 prepare: vi.fn(async (data) => ({
                     contentHash: assetHash,
                     byteSize: data.byteLength,
-                    physicalKey: `assets-v2/objects/aa/${'a'.repeat(62)}`,
+                    physicalKey: `assets/objects/aa/${'a'.repeat(62)}`,
                     deduplicated: false,
                 })),
                 seal: vi.fn(async () => undefined),
@@ -455,7 +440,7 @@ describe('complete AssetRepository BlobStore facade', () => {
         expect(sealedRelease).not.toHaveBeenCalled()
     })
 
-    it('uses bounded CAS reads and never falls back for a non-null object hash', async () => {
+    it('uses bounded CAS reads for a non-null object hash', async () => {
         const alias = assetAlias()
         const store = createStore({
             readAssetAlias: vi.fn(async () => ({ revision: 4, value: alias })),
@@ -464,9 +449,7 @@ describe('complete AssetRepository BlobStore facade', () => {
             statObject: vi.fn(async () => 4),
             readObjectRange: vi.fn(async () => new Uint8Array([2, 3])),
         })
-        const legacy = createLegacy()
-        legacy.read.mockResolvedValue(new Uint8Array([9, 9, 9, 9]))
-        const { facade } = createFacade({ store, cas, legacy })
+        const { facade } = createFacade({ store, cas })
 
         await expect(facade.read('assets/photo.bin', { start: 1, endExclusive: 3 }))
             .resolves.toEqual(new Uint8Array([2, 3]))
@@ -474,45 +457,21 @@ describe('complete AssetRepository BlobStore facade', () => {
             start: 1,
             endExclusive: 3,
         })
-        expect(legacy.read).not.toHaveBeenCalled()
 
         vi.mocked(cas.readObjectRange).mockResolvedValueOnce(null)
         await expect(facade.read('assets/photo.bin', { start: 1, endExclusive: 3 }))
             .resolves.toBeNull()
-        expect(legacy.read).not.toHaveBeenCalled()
     })
 
-    it('allows legacy fallback only for an explicit null-hash alias', async () => {
+    it('treats an explicit null-hash alias as missing payload', async () => {
         const alias = assetAlias({ objectHash: null })
         const store = createStore({
             readAssetAlias: vi.fn(async () => ({ revision: 4, value: alias })),
         })
-        const legacy = createLegacy()
-        legacy.read.mockResolvedValue(new Uint8Array([1, 2, 3, 4]))
-        legacy.resolveUrl.mockResolvedValue('risuasset://legacy')
-        const { facade } = createFacade({ store, legacy })
+        const { facade } = createFacade({ store })
 
-        await expect(facade.read('assets/photo.bin')).resolves.toEqual(new Uint8Array([1, 2, 3, 4]))
-        await expect(facade.resolveUrl('assets/photo.bin')).resolves.toBe('risuasset://legacy')
-        expect(legacy.read).toHaveBeenCalledWith({ kind: 'asset', key: 'assets/photo.bin' })
-        expect(legacy.resolveUrl).toHaveBeenCalledWith({ kind: 'asset', key: 'assets/photo.bin' })
-    })
-
-    it('keeps explicit null-hash legacy Range reads bounded', async () => {
-        const alias = assetAlias({ objectHash: null })
-        const store = createStore({
-            readAssetAlias: vi.fn(async () => ({ revision: 4, value: alias })),
-        })
-        const legacy = createLegacy()
-        legacy.read.mockResolvedValue(new Uint8Array([2, 3]))
-        const { facade } = createFacade({ store, legacy })
-
-        await expect(facade.read('assets/photo.bin', { start: 1, endExclusive: 3 }))
-            .resolves.toEqual(new Uint8Array([2, 3]))
-        expect(legacy.read).toHaveBeenCalledWith(
-            { kind: 'asset', key: 'assets/photo.bin' },
-            { start: 1, endExclusive: 3 },
-        )
+        await expect(facade.read('assets/photo.bin')).resolves.toBeNull()
+        await expect(facade.resolveUrl('assets/photo.bin')).resolves.toBeNull()
     })
 
     it('pages the typed alias catalog without enumerating CAS objects', async () => {
@@ -564,9 +523,7 @@ describe('complete AssetRepository BlobStore facade', () => {
             readAssetAlias: vi.fn(async () => ({ revision: 3, value: alias })),
         })
         const cas = createCas({ statObject: vi.fn(async () => 4) })
-        const legacy = createLegacy()
-        legacy.resolveUrl.mockResolvedValue('risuasset://legacy')
-        const { facade, resolveObjectUrl } = createFacade({ store, cas, legacy })
+        const { facade, resolveObjectUrl } = createFacade({ store, cas })
 
         await expect(facade.resolveUrl('assets/photo.bin')).resolves.toBe('risuasset://cas-object')
         expect(resolveObjectUrl).toHaveBeenCalledWith({
@@ -577,7 +534,6 @@ describe('complete AssetRepository BlobStore facade', () => {
 
         vi.mocked(cas.statObject).mockResolvedValueOnce(null)
         await expect(facade.resolveUrl('assets/photo.bin')).resolves.toBeNull()
-        expect(legacy.resolveUrl).not.toHaveBeenCalled()
     })
 
     it('derives a display MIME for an empty-MIME CAS alias without mutating persisted metadata', async () => {
@@ -653,7 +609,7 @@ describe('complete AssetRepository BlobStore facade', () => {
             prepare: vi.fn(async (data) => ({
                 contentHash: inlayHash,
                 byteSize: data.byteLength,
-                physicalKey: `assets-v2/objects/bb/${'b'.repeat(62)}`,
+                physicalKey: `assets/objects/bb/${'b'.repeat(62)}`,
                 deduplicated: false,
             })),
         })

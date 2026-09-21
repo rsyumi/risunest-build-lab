@@ -9,8 +9,7 @@ use super::{
     },
     descriptor,
     providers::{self, Dependencies},
-    recovery,
-    runtime, secrets,
+    recovery, runtime, secrets,
 };
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use risunest_external_storage_format::{crypto::root_key, format::Descriptor};
@@ -40,7 +39,43 @@ struct PendingPreparation {
     recovery_key: Option<Zeroizing<String>>,
     expected_repository_id: Option<String>,
     imported_credential: Option<ImportedCredential>,
+    bound_credential: Option<BoundCredential>,
+    selected_folder_name: Option<String>,
     transferred: bool,
+}
+
+#[derive(Clone)]
+struct BoundCredential {
+    reference: SecretRef,
+    account_id: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FolderEntry {
+    name: String,
+    handle: String,
+}
+
+#[derive(Clone)]
+struct FolderNode {
+    id: String,
+    path: Vec<FolderEntry>,
+}
+
+struct FolderCursor {
+    folder_id: String,
+    provider_cursor: String,
+}
+
+struct FolderSelectionSession {
+    preparation_id: String,
+    expires_at_ms: u64,
+    account_hint: String,
+    drive_id: String,
+    root_item_id: String,
+    handles: HashMap<String, FolderNode>,
+    cursors: HashMap<String, FolderCursor>,
 }
 
 struct ImportedCredential {
@@ -88,10 +123,67 @@ struct PendingConnectionSettings {
 
 #[derive(Default)]
 pub(crate) struct ConnectionCommandState {
+    activity: Arc<Mutex<ConnectionActivity>>,
     preparations: Mutex<HashMap<String, PendingPreparation>>,
     authorizations: Mutex<HashMap<String, PendingAuthorization>>,
     authorization_cancellations: Mutex<HashMap<String, Cancellation>>,
+    folder_selections: Mutex<HashMap<String, FolderSelectionSession>>,
     connection_settings: Mutex<HashMap<String, PendingConnectionSettings>>,
+}
+
+#[derive(Default)]
+struct ConnectionActivity {
+    closed: bool,
+    active: usize,
+}
+
+struct ConnectionCommandGuard(Arc<Mutex<ConnectionActivity>>);
+impl Drop for ConnectionCommandGuard {
+    fn drop(&mut self) {
+        if let Ok(mut activity) = self.0.lock() {
+            activity.active -= 1;
+        }
+    }
+}
+
+impl ConnectionCommandState {
+    fn admit(&self) -> Result<ConnectionCommandGuard> {
+        let mut activity = lock(&self.activity)?;
+        if activity.closed {
+            return Err(ProviderError::new(ErrorKind::Cancelled));
+        }
+        activity.active += 1;
+        Ok(ConnectionCommandGuard(self.activity.clone()))
+    }
+
+    pub(crate) fn begin_cleanup(&self) -> Result<()> {
+        lock(&self.activity)?.closed = true;
+        for cancel in lock(&self.authorization_cancellations)?.values() {
+            cancel.cancel();
+        }
+        Ok(())
+    }
+
+    pub(crate) fn cleanup_drained(&self) -> Result<bool> {
+        if lock(&self.activity)?.active != 0 {
+            return Ok(false);
+        }
+        lock(&self.preparations)?.clear();
+        lock(&self.authorizations)?.clear();
+        lock(&self.authorization_cancellations)?.clear();
+        lock(&self.folder_selections)?.clear();
+        lock(&self.connection_settings)?.clear();
+        Ok(true)
+    }
+
+    pub(crate) fn finish_cleanup(&self) -> Result<()> {
+        let mut activity = lock(&self.activity)?;
+        if activity.active != 0 {
+            return Err(ProviderError::new(ErrorKind::PreconditionFailed));
+        }
+        activity.closed = false;
+        Ok(())
+    }
 }
 
 #[derive(Deserialize)]
@@ -116,6 +208,17 @@ pub(crate) struct CompleteAuthorizationRequest {
     client_secret: Option<String>,
 }
 
+fn authorization_client_secret(
+    provider: &str,
+    client_secret: Option<String>,
+) -> Result<Option<Zeroizing<String>>> {
+    let client_secret = client_secret.map(Zeroizing::new);
+    if client_secret.is_some() && provider != "google_drive" {
+        return Err(ProviderError::new(ErrorKind::Unsupported));
+    }
+    Ok(client_secret)
+}
+
 #[derive(Serialize)]
 #[serde(untagged)]
 pub(crate) enum CompleteAuthorizationResult {
@@ -129,6 +232,52 @@ pub(crate) enum CompleteAuthorizationResult {
         )]
         callback_rejected: bool,
     },
+    FolderSelected {
+        #[serde(rename = "folderSelected")]
+        folder_selected: bool,
+        folder: FolderSelection,
+    },
+    FolderSelectionRequired {
+        #[serde(rename = "folderSelectionRequired")]
+        folder_selection_required: bool,
+        #[serde(rename = "selectionId")]
+        selection_id: String,
+        #[serde(rename = "accountHint")]
+        account_hint: String,
+    },
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FolderSelection {
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    account_hint: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FolderPage {
+    path: Vec<FolderEntry>,
+    folders: Vec<FolderEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_cursor: Option<String>,
+    selectable: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ListFoldersRequest {
+    selection_id: String,
+    folder: Option<String>,
+    cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct SelectFolderRequest {
+    selection_id: String,
+    folder: String,
 }
 
 /// A connect command's failure. A repository this device already holds is
@@ -160,13 +309,11 @@ pub(crate) fn external_storage_cancel_authorization(
     state: State<'_, ConnectionCommandState>,
     authorization_id: String,
 ) -> Result<()> {
+    let _cleanup_guard = state.admit()?;
     cancel_authorization(&state, &authorization_id)
 }
 
-fn cancel_authorization(
-    state: &ConnectionCommandState,
-    authorization_id: &str,
-) -> Result<()> {
+fn cancel_authorization(state: &ConnectionCommandState, authorization_id: &str) -> Result<()> {
     lock(&state.authorizations)?.remove(authorization_id);
     if let Some(cancel) = lock(&state.authorization_cancellations)?.remove(authorization_id) {
         cancel.cancel();
@@ -249,9 +396,7 @@ fn insert_preparation(
     imported_credential: Option<ImportedCredential>,
     transferred: bool,
 ) -> Result<PreparedConnection> {
-    if transferred
-        && request.config.oauth_profile.is_some()
-        && request.config.account_id.is_empty()
+    if transferred && request.config.oauth_profile.is_some() && request.config.account_id.is_empty()
     {
         return Err(ProviderError::new(ErrorKind::Corrupt));
     }
@@ -281,6 +426,7 @@ fn insert_preparation(
         requires_o_auth: request.config.oauth_profile.is_some(),
         requires_recovery_key: false,
         requires_platform_o_auth_client: missing_platform_client,
+        requires_folder_selection: connection::requires_folder_selection(&request),
         oauth_project_hint: missing_platform_client.then(|| {
             request
                 .config
@@ -299,6 +445,8 @@ fn insert_preparation(
             recovery_key,
             expected_repository_id,
             imported_credential,
+            bound_credential: None,
+            selected_folder_name: None,
             transferred,
         },
     );
@@ -377,7 +525,27 @@ fn authorization_config(
         return Err(ProviderError::new(ErrorKind::ReauthRequired));
     }
     apply_recovery_platform_client(preparation, current_platform_client_id)?;
-    Ok(preparation.request.config.clone())
+    let mut config = preparation.request.config.clone();
+    if config.provider == "onedrive" {
+        let app_folder =
+            config.location.get("accountType").map(String::as_str) == Some("appFolder");
+        config
+            .location
+            .entry("driveId".into())
+            .or_insert_with(|| "pending".into());
+        config
+            .location
+            .entry("rootItemId".into())
+            .or_insert_with(|| {
+                if app_folder {
+                    "special/approot".into()
+                } else {
+                    "pending".into()
+                }
+            });
+        config.location.remove("folderName");
+    }
+    Ok(config)
 }
 
 fn validate_authenticated_account(
@@ -392,6 +560,267 @@ fn validate_authenticated_account(
         return Err(ProviderError::new(ErrorKind::ReauthRequired));
     }
     Ok(())
+}
+
+async fn exchange_oauth_credential(
+    dependencies: &Dependencies,
+    exchange_config: &super::contract::ConnectionConfig,
+    grant: &super::auth::AuthorizationCode,
+    client_secret: Option<Zeroizing<String>>,
+    cancel: &Cancellation,
+) -> Result<BoundCredential> {
+    match exchange_config.provider.as_str() {
+        "google_drive" => {
+            let authorized = providers::google_drive::auth::exchange_authorization_code(
+                dependencies,
+                exchange_config,
+                grant,
+                client_secret,
+                cancel,
+            )
+            .await?;
+            Ok(BoundCredential {
+                reference: dependencies.vault.store(&authorized.secret).await?,
+                account_id: authorized.account_id,
+            })
+        }
+        "onedrive" => {
+            if client_secret.is_some() {
+                return Err(ProviderError::new(ErrorKind::Unsupported));
+            }
+            let provider = providers::onedrive::OneDrive::new(dependencies.clone());
+            let authorized = provider
+                .exchange_authorization_code(exchange_config, grant, cancel)
+                .await?;
+            Ok(BoundCredential {
+                reference: authorized.secret,
+                account_id: authorized.account_id,
+            })
+        }
+        _ => Err(ProviderError::new(ErrorKind::Unsupported)),
+    }
+}
+
+async fn finish_oauth_connection(
+    app: &AppHandle,
+    state: &ConnectionCommandState,
+    preparation_id: String,
+    mut pending: PendingPreparation,
+    exchange_config: super::contract::ConnectionConfig,
+    grant: super::auth::AuthorizationCode,
+    client_secret: Option<Zeroizing<String>>,
+    cancel: &Cancellation,
+) -> ConnectResult<CompleteAuthorizationResult> {
+    let root = connection_root(app)?;
+    let dependencies = connection::dependencies(&root)?;
+    let credential = match exchange_oauth_credential(
+        &dependencies,
+        &exchange_config,
+        &grant,
+        client_secret,
+        cancel,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            restore_preparation(state, preparation_id, pending);
+            return Err(error.into());
+        }
+    };
+    if let Err(error) = validate_authenticated_account(&pending, Some(&credential.account_id)) {
+        let _ = dependencies.vault.remove(&credential.reference).await;
+        restore_preparation(state, preparation_id, pending);
+        return Err(error.into());
+    }
+    pending.request.config.account_id = credential.account_id.clone();
+
+    let setup_result: Result<Option<CompleteAuthorizationResult>> = async {
+        match pending.request.config.provider.as_str() {
+            "google_drive" => {
+                let space = pending
+                    .request
+                    .config
+                    .location
+                    .get("space")
+                    .map(String::as_str)
+                    .unwrap_or("drive");
+                if space == "appDataFolder" {
+                    pending
+                        .request
+                        .config
+                        .location
+                        .insert("folderId".into(), "appDataFolder".into());
+                    Ok(None)
+                } else if let Some(name) =
+                    pending.request.config.location.get("folderName").cloned()
+                {
+                    let provider = providers::google_drive::GoogleDrive::new(dependencies.clone());
+                    let folder = provider
+                        .create_setup_folder(
+                            &pending.request.config,
+                            &credential.reference,
+                            &credential.account_id,
+                            &name,
+                            cancel,
+                        )
+                        .await?;
+                    pending.request.config.location.remove("folderName");
+                    pending
+                        .request
+                        .config
+                        .location
+                        .insert("folderId".into(), folder.id);
+                    pending.selected_folder_name = Some(folder.name);
+                    Ok(None)
+                } else if pending.request.config.location.contains_key("folderId") {
+                    Ok(None)
+                } else {
+                    let folder_id = grant
+                        .picked_file_id
+                        .as_deref()
+                        .ok_or_else(|| ProviderError::new(ErrorKind::FolderInaccessible))?;
+                    let provider = providers::google_drive::GoogleDrive::new(dependencies.clone());
+                    let folder = provider
+                        .inspect_setup_folder(
+                            &pending.request.config,
+                            &credential.reference,
+                            &credential.account_id,
+                            folder_id,
+                            cancel,
+                        )
+                        .await?;
+                    pending
+                        .request
+                        .config
+                        .location
+                        .insert("folderId".into(), folder.id);
+                    pending.selected_folder_name = Some(folder.name.clone());
+                    Ok(Some(CompleteAuthorizationResult::FolderSelected {
+                        folder_selected: true,
+                        folder: FolderSelection {
+                            name: folder.name,
+                            account_hint: Some(credential.account_id.clone()),
+                        },
+                    }))
+                }
+            }
+            "onedrive" => {
+                let provider = providers::onedrive::OneDrive::new(dependencies.clone());
+                let account_type = pending
+                    .request
+                    .config
+                    .location
+                    .get("accountType")
+                    .map(String::as_str);
+                if pending.request.config.location.contains_key("driveId")
+                    && pending.request.config.location.contains_key("rootItemId")
+                {
+                    Ok(None)
+                } else {
+                    let drive = provider
+                        .resolve_setup_drive(
+                            &pending.request.config,
+                            &credential.reference,
+                            &credential.account_id,
+                            cancel,
+                        )
+                        .await?;
+                    if account_type == Some("appFolder") {
+                        pending
+                            .request
+                            .config
+                            .location
+                            .insert("driveId".into(), drive.drive_id);
+                        pending
+                            .request
+                            .config
+                            .location
+                            .insert("rootItemId".into(), drive.root_item_id);
+                        Ok(None)
+                    } else if let Some(name) =
+                        pending.request.config.location.get("folderName").cloned()
+                    {
+                        let folder = provider
+                            .create_setup_folder(
+                                &pending.request.config,
+                                &credential.reference,
+                                &credential.account_id,
+                                &drive.drive_id,
+                                &drive.root_item_id,
+                                &name,
+                                cancel,
+                            )
+                            .await?;
+                        pending.request.config.location.remove("folderName");
+                        pending
+                            .request
+                            .config
+                            .location
+                            .insert("driveId".into(), drive.drive_id);
+                        pending
+                            .request
+                            .config
+                            .location
+                            .insert("rootItemId".into(), folder.id);
+                        pending.selected_folder_name = Some(folder.name);
+                        Ok(None)
+                    } else {
+                        let selection_id = uuid::Uuid::new_v4().to_string();
+                        lock(&state.folder_selections)?.insert(
+                            selection_id.clone(),
+                            FolderSelectionSession {
+                                preparation_id: preparation_id.clone(),
+                                expires_at_ms: pending.expires_at_ms,
+                                account_hint: credential.account_id.clone(),
+                                drive_id: drive.drive_id,
+                                root_item_id: drive.root_item_id,
+                                handles: HashMap::new(),
+                                cursors: HashMap::new(),
+                            },
+                        );
+                        Ok(Some(CompleteAuthorizationResult::FolderSelectionRequired {
+                            folder_selection_required: true,
+                            selection_id,
+                            account_hint: credential.account_id.clone(),
+                        }))
+                    }
+                }
+            }
+            _ => Err(ProviderError::new(ErrorKind::Unsupported)),
+        }
+    }
+    .await;
+    let outcome = match setup_result {
+        Ok(value) => value,
+        Err(error) => {
+            let _ = dependencies.vault.remove(&credential.reference).await;
+            restore_preparation(state, preparation_id, pending);
+            return Err(error.into());
+        }
+    };
+    if let Some(outcome) = outcome {
+        if let Some(previous) = pending.bound_credential.replace(credential) {
+            let _ = dependencies.vault.remove(&previous.reference).await;
+        }
+        restore_preparation(state, preparation_id, pending);
+        return Ok(outcome);
+    }
+    let committed = commit_preparation(
+        app,
+        &preparation_id,
+        &pending,
+        CredentialInput::Reference {
+            reference: credential.reference,
+            account_id: Some(credential.account_id),
+        },
+        cancel,
+    )
+    .await;
+    if committed.is_err() {
+        restore_preparation(state, preparation_id, pending);
+    }
+    committed.map(CompleteAuthorizationResult::Connected)
 }
 
 fn google_project_number(client_id: &str) -> Option<&str> {
@@ -423,7 +852,10 @@ pub(crate) fn summary(connection: &StoredConnection) -> Result<ConnectionSummary
     if connection.config.oauth_profile.is_some() && connection.config.account_id.is_empty() {
         return Err(ProviderError::new(ErrorKind::Corrupt));
     }
-    require_repository_strategy(&connection.capabilities, connection.descriptor.publication_strategy)?;
+    require_repository_strategy(
+        &connection.capabilities,
+        connection.descriptor.publication_strategy,
+    )?;
     Ok(connection::summary(connection))
 }
 
@@ -437,6 +869,7 @@ pub(crate) fn external_storage_prepare_connection(
     state: State<'_, ConnectionCommandState>,
     request: PrepareConnectionRequest,
 ) -> Result<PreparedConnection> {
+    let _cleanup_guard = state.admit()?;
     insert_preparation(&state, request, None, None, false)
 }
 
@@ -446,37 +879,52 @@ pub(crate) async fn external_storage_commit_connection(
     state: State<'_, ConnectionCommandState>,
     request: CommitConnectionRequest,
 ) -> ConnectResult<ConnectionResult> {
+    let _cleanup_guard = state.admit()?;
     let preparation_id = request.preparation_id;
-    let pending = take_preparation(&state, &preparation_id)?;
-    if pending.request.config.oauth_profile.is_some() {
-        restore_preparation(&state, preparation_id, pending);
-        return Err(ProviderError::new(ErrorKind::Unsupported).into());
-    }
-    let secret = match (&pending.imported_credential, request.secret) {
-        (Some(imported), None) => EncodedProviderSecret {
-            bytes: SecretBytes(Zeroizing::new(imported.bytes.to_vec())),
-            account_id: imported.account_id.clone(),
-        },
-        (None, Some(secret)) => {
-            connection::encode_secret(&pending.request.config.provider, secret)?
-        }
-        _ => {
+    let mut pending = take_preparation(&state, &preparation_id)?;
+    let credential = if pending.request.config.oauth_profile.is_some() {
+        if request.secret.is_some() {
             restore_preparation(&state, preparation_id, pending);
             return Err(ProviderError::new(ErrorKind::Unsupported).into());
         }
+        let Some(bound) = pending.bound_credential.take() else {
+            restore_preparation(&state, preparation_id, pending);
+            return Err(ProviderError::new(ErrorKind::Unsupported).into());
+        };
+        CredentialInput::Reference {
+            reference: bound.reference,
+            account_id: Some(bound.account_id),
+        }
+    } else {
+        let secret = match (&pending.imported_credential, request.secret) {
+            (Some(imported), None) => EncodedProviderSecret {
+                bytes: SecretBytes(Zeroizing::new(imported.bytes.to_vec())),
+                account_id: imported.account_id.clone(),
+            },
+            (None, Some(secret)) => {
+                connection::encode_secret(&pending.request.config.provider, secret)?
+            }
+            _ => {
+                restore_preparation(&state, preparation_id, pending);
+                return Err(ProviderError::new(ErrorKind::Unsupported).into());
+            }
+        };
+        CredentialInput::Bytes(secret)
     };
     let cancel = Cancellation::default();
-    match commit_preparation(
-        &app,
-        &preparation_id,
-        &pending,
-        CredentialInput::Bytes(secret),
-        &cancel,
-    )
-    .await
-    {
+    match commit_preparation(&app, &preparation_id, &pending, credential, &cancel).await {
         Ok(result) => Ok(result),
         Err(error) => {
+            let error = match error {
+                ConnectionFailure::Provider(provider)
+                    if pending.selected_folder_name.is_some()
+                        && pending.request.mode == ConnectionOpenMode::Existing
+                        && provider.kind == ErrorKind::NotFound =>
+                {
+                    ConnectionFailure::Provider(ProviderError::new(ErrorKind::FolderNotRepository))
+                }
+                other => other,
+            };
             restore_preparation(&state, preparation_id, pending);
             Err(error)
         }
@@ -489,13 +937,13 @@ pub(crate) async fn external_storage_begin_authorization(
     state: State<'_, ConnectionCommandState>,
     request: BeginAuthorizationRequest,
 ) -> Result<PendingAuthorizationSummary> {
+    let _cleanup_guard = state.admit()?;
     let BeginAuthorizationRequest {
         preparation_id,
         current_platform_client_id,
     } = request;
-    let mut exchange_config = {
-        authorization_config(&state, &preparation_id, current_platform_client_id)?
-    };
+    let mut exchange_config =
+        { authorization_config(&state, &preparation_id, current_platform_client_id)? };
     let provider = exchange_config.provider.clone();
     let (flow, authorization_url) = match provider.as_str() {
         "google_drive" => {
@@ -542,27 +990,22 @@ pub(crate) async fn external_storage_begin_authorization(
 #[cfg(target_os = "ios")]
 #[tauri::command]
 pub(crate) async fn external_storage_begin_authorization(
-    app: AppHandle,
+    _app: AppHandle,
     state: State<'_, ConnectionCommandState>,
     request: BeginAuthorizationRequest,
 ) -> Result<PendingAuthorizationSummary> {
+    let _cleanup_guard = state.admit()?;
     let BeginAuthorizationRequest {
         preparation_id,
         current_platform_client_id,
     } = request;
-    let config = {
-        authorization_config(&state, &preparation_id, current_platform_client_id)?
-    };
+    let config = { authorization_config(&state, &preparation_id, current_platform_client_id)? };
     let mut exchange_config = config;
     let flow = match exchange_config.provider.as_str() {
         "google_drive" => {
             let (policy, callback_scheme) =
                 providers::google_drive::auth::ios_authorization_policy(&exchange_config)?;
-            super::oauth::IosWebAuthenticationAuthorization::start(
-                policy,
-                callback_scheme,
-                true,
-            )?
+            super::oauth::IosWebAuthenticationAuthorization::start(policy, callback_scheme, true)?
         }
         "onedrive" => {
             exchange_config.location.insert(
@@ -571,11 +1014,7 @@ pub(crate) async fn external_storage_begin_authorization(
             );
             let policy = providers::onedrive::authorization_policy(&exchange_config, "ios")?;
             let callback_scheme = policy.redirect_url.scheme().to_owned();
-            super::oauth::IosWebAuthenticationAuthorization::start(
-                policy,
-                callback_scheme,
-                false,
-            )?
+            super::oauth::IosWebAuthenticationAuthorization::start(policy, callback_scheme, false)?
         }
         _ => return Err(ProviderError::new(ErrorKind::Unsupported)),
     };
@@ -604,17 +1043,16 @@ pub(crate) async fn external_storage_begin_authorization(
 #[cfg(target_os = "android")]
 #[tauri::command]
 pub(crate) async fn external_storage_begin_authorization(
-    app: AppHandle,
+    _app: AppHandle,
     state: State<'_, ConnectionCommandState>,
     request: BeginAuthorizationRequest,
 ) -> Result<PendingAuthorizationSummary> {
+    let _cleanup_guard = state.admit()?;
     let BeginAuthorizationRequest {
         preparation_id,
         current_platform_client_id,
     } = request;
-    let config = {
-        authorization_config(&state, &preparation_id, current_platform_client_id)?
-    };
+    let config = { authorization_config(&state, &preparation_id, current_platform_client_id)? };
     let authorization_id = uuid::Uuid::new_v4().to_string();
     let expires_at_ms = now_ms().saturating_add(PREPARATION_LIFETIME_MS);
     let (authorization, authorization_url, authorization_state) = match config.provider.as_str() {
@@ -669,16 +1107,23 @@ pub(crate) async fn external_storage_begin_authorization(
 pub(crate) async fn external_storage_complete_authorization(
     app: AppHandle,
     state: State<'_, ConnectionCommandState>,
-    request: CompleteAuthorizationRequest,
+    mut request: CompleteAuthorizationRequest,
 ) -> ConnectResult<CompleteAuthorizationResult> {
-    let client_secret = request.client_secret.map(Zeroizing::new);
-    if client_secret.is_some() {
-        return Err(ProviderError::new(ErrorKind::Unsupported).into());
-    }
+    let _cleanup_guard = state.admit()?;
     if let Some(mut redirect_url) = request.redirect_url {
         redirect_url.zeroize();
         return Err(ProviderError::new(ErrorKind::Unsupported).into());
     }
+    let client_secret = {
+        let authorizations = lock(&state.authorizations)?;
+        let authorization = authorizations
+            .get(&request.authorization_id)
+            .ok_or_else(|| ProviderError::new(ErrorKind::NotFound))?;
+        authorization_client_secret(
+            &authorization.exchange_config.provider,
+            request.client_secret.take(),
+        )?
+    };
     let authorization = lock(&state.authorizations)?
         .remove(&request.authorization_id)
         .ok_or_else(|| ProviderError::new(ErrorKind::NotFound))?;
@@ -697,41 +1142,7 @@ pub(crate) async fn external_storage_complete_authorization(
             return Err(error.into());
         }
     };
-    let credential_result: Result<(SecretRef, Option<String>)> = async {
-        let root = connection_root(&app)?;
-        let dependencies = connection::dependencies(&root)?;
-        let grant = authorization.flow.wait(&cancel).await?;
-        match pending.request.config.provider.as_str() {
-            "google_drive" => {
-                let authorized = providers::google_drive::auth::exchange_authorization_code(
-                    &dependencies,
-                    &authorization.exchange_config,
-                    &grant,
-                    None,
-                    &cancel,
-                )
-                .await?;
-                Ok((
-                    dependencies.vault.store(&authorized.secret).await?,
-                    Some(authorized.account_id),
-                ))
-            }
-            "onedrive" => {
-                let provider = providers::onedrive::OneDrive::new(dependencies.clone());
-                let authorized = provider
-                    .exchange_authorization_code(
-                        &authorization.exchange_config,
-                        &grant,
-                        &cancel,
-                    )
-                    .await?;
-                Ok((authorized.secret, Some(authorized.account_id)))
-            }
-            _ => Err(ProviderError::new(ErrorKind::Unsupported)),
-        }
-    }
-    .await;
-    let (credential, account_id) = match credential_result {
+    let grant = match authorization.flow.wait(&cancel).await {
         Ok(value) => value,
         Err(error) => {
             lock(&state.authorization_cancellations)?.remove(&request.authorization_id);
@@ -739,25 +1150,19 @@ pub(crate) async fn external_storage_complete_authorization(
             return Err(error.into());
         }
     };
-    let committed = commit_preparation(
+    let result = finish_oauth_connection(
         &app,
-        &authorization.preparation_id,
-        &pending,
-        CredentialInput::Reference {
-            reference: credential,
-            account_id,
-        },
+        &state,
+        authorization.preparation_id,
+        pending,
+        authorization.exchange_config,
+        grant,
+        client_secret,
         &cancel,
     )
     .await;
     lock(&state.authorization_cancellations)?.remove(&request.authorization_id);
-    match committed {
-        Ok(result) => Ok(CompleteAuthorizationResult::Connected(result)),
-        Err(error) => {
-            restore_preparation(&state, authorization.preparation_id, pending);
-            Err(error)
-        }
-    }
+    result
 }
 
 #[cfg(target_os = "ios")]
@@ -765,11 +1170,22 @@ pub(crate) async fn external_storage_complete_authorization(
 pub(crate) async fn external_storage_complete_authorization(
     app: AppHandle,
     state: State<'_, ConnectionCommandState>,
-    request: CompleteAuthorizationRequest,
+    mut request: CompleteAuthorizationRequest,
 ) -> ConnectResult<CompleteAuthorizationResult> {
-    if request.redirect_url.is_some() || request.client_secret.is_some() {
+    let _cleanup_guard = state.admit()?;
+    if request.redirect_url.is_some() {
         return Err(ProviderError::new(ErrorKind::Unsupported).into());
     }
+    let client_secret = {
+        let authorizations = lock(&state.authorizations)?;
+        let authorization = authorizations
+            .get(&request.authorization_id)
+            .ok_or_else(|| ProviderError::new(ErrorKind::NotFound))?;
+        authorization_client_secret(
+            &authorization.exchange_config.provider,
+            request.client_secret.take(),
+        )?
+    };
     let authorization = lock(&state.authorizations)?
         .remove(&request.authorization_id)
         .ok_or_else(|| ProviderError::new(ErrorKind::NotFound))?;
@@ -788,66 +1204,19 @@ pub(crate) async fn external_storage_complete_authorization(
             return Err(error.into());
         }
     };
-    let credential_result: Result<(SecretRef, Option<String>)> = async {
-        let root = connection_root(&app)?;
-        let dependencies = connection::dependencies(&root)?;
-        match authorization.exchange_config.provider.as_str() {
-            "google_drive" => {
-                let authorized = providers::google_drive::auth::exchange_authorization_code(
-                    &dependencies,
-                    &authorization.exchange_config,
-                    &authorization.grant,
-                    None,
-                    &cancel,
-                )
-                .await?;
-                Ok((
-                    dependencies.vault.store(&authorized.secret).await?,
-                    Some(authorized.account_id),
-                ))
-            }
-            "onedrive" => {
-                let provider = providers::onedrive::OneDrive::new(dependencies);
-                let authorized = provider
-                    .exchange_authorization_code(
-                        &authorization.exchange_config,
-                        &authorization.grant,
-                        &cancel,
-                    )
-                    .await?;
-                Ok((authorized.secret, Some(authorized.account_id)))
-            }
-            _ => Err(ProviderError::new(ErrorKind::Unsupported)),
-        }
-    }
-    .await;
-    let (credential, account_id) = match credential_result {
-        Ok(value) => value,
-        Err(error) => {
-            lock(&state.authorization_cancellations)?.remove(&request.authorization_id);
-            restore_preparation(&state, authorization.preparation_id, pending);
-            return Err(error.into());
-        }
-    };
-    let committed = commit_preparation(
+    let result = finish_oauth_connection(
         &app,
-        &authorization.preparation_id,
-        &pending,
-        CredentialInput::Reference {
-            reference: credential,
-            account_id,
-        },
+        &state,
+        authorization.preparation_id,
+        pending,
+        authorization.exchange_config,
+        authorization.grant,
+        client_secret,
         &cancel,
     )
     .await;
     lock(&state.authorization_cancellations)?.remove(&request.authorization_id);
-    match committed {
-        Ok(result) => Ok(CompleteAuthorizationResult::Connected(result)),
-        Err(error) => {
-            restore_preparation(&state, authorization.preparation_id, pending);
-            Err(error)
-        }
-    }
+    result
 }
 
 #[cfg(target_os = "android")]
@@ -857,6 +1226,7 @@ pub(crate) async fn external_storage_complete_authorization(
     state: State<'_, ConnectionCommandState>,
     request: CompleteAuthorizationRequest,
 ) -> ConnectResult<CompleteAuthorizationResult> {
+    let _cleanup_guard = state.admit()?;
     let redirect_url = request.redirect_url.map(Zeroizing::new);
     let client_secret = request.client_secret.map(Zeroizing::new);
     let cancel = lock(&state.authorization_cancellations)?
@@ -926,65 +1296,218 @@ pub(crate) async fn external_storage_complete_authorization(
             return Err(error.into());
         }
     };
-    let credential_result: Result<(SecretRef, Option<String>)> = async {
-        let root = connection_root(&app)?;
-        let dependencies = connection::dependencies(&root)?;
-        match authorization {
-            PendingAuthorization::Google {
-                exchange_config, ..
-            } => {
-                let authorized = providers::google_drive::auth::exchange_authorization_code(
-                    &dependencies,
-                    &exchange_config,
-                    &grant,
-                    client_secret,
-                    &cancel,
-                )
-                .await?;
-                Ok((
-                    dependencies.vault.store(&authorized.secret).await?,
-                    Some(authorized.account_id),
-                ))
-            }
-            PendingAuthorization::OneDrive {
-                exchange_config, ..
-            } => {
-                let provider = providers::onedrive::OneDrive::new(dependencies);
-                let authorized = provider
-                    .exchange_authorization_code(&exchange_config, &grant, &cancel)
-                    .await?;
-                Ok((authorized.secret, Some(authorized.account_id)))
-            }
+    let exchange_config = match authorization {
+        PendingAuthorization::Google {
+            exchange_config, ..
         }
-    }
-    .await;
-    let (credential, account_id) = match credential_result {
-        Ok(value) => value,
-        Err(error) => {
-            lock(&state.authorization_cancellations)?.remove(&request.authorization_id);
-            restore_preparation(&state, preparation_id, pending);
-            return Err(error.into());
-        }
+        | PendingAuthorization::OneDrive {
+            exchange_config, ..
+        } => exchange_config,
     };
-    let committed = commit_preparation(
+    let result = finish_oauth_connection(
         &app,
-        &preparation_id,
-        &pending,
-        CredentialInput::Reference {
-            reference: credential,
-            account_id,
-        },
+        &state,
+        preparation_id,
+        pending,
+        exchange_config,
+        grant,
+        client_secret,
         &cancel,
     )
     .await;
     lock(&state.authorization_cancellations)?.remove(&request.authorization_id);
-    match committed {
-        Ok(result) => Ok(CompleteAuthorizationResult::Connected(result)),
-        Err(error) => {
-            restore_preparation(&state, preparation_id, pending);
-            Err(error)
-        }
+    result
+}
+
+#[tauri::command]
+pub(crate) async fn external_storage_list_folders(
+    app: AppHandle,
+    state: State<'_, ConnectionCommandState>,
+    request: ListFoldersRequest,
+) -> Result<FolderPage> {
+    let _cleanup_guard = state.admit()?;
+    let mut session = lock(&state.folder_selections)?
+        .remove(&request.selection_id)
+        .ok_or_else(|| ProviderError::new(ErrorKind::NotFound))?;
+    if session.expires_at_ms <= now_ms() {
+        return Err(ProviderError::new(ErrorKind::Cancelled));
     }
+    let (config, credential) = {
+        let preparations = lock(&state.preparations)?;
+        let pending = preparations
+            .get(&session.preparation_id)
+            .ok_or_else(|| ProviderError::new(ErrorKind::NotFound))?;
+        let credential = pending
+            .bound_credential
+            .clone()
+            .ok_or_else(|| ProviderError::new(ErrorKind::ReauthRequired))?;
+        (pending.request.config.clone(), credential)
+    };
+    let current = request
+        .folder
+        .as_deref()
+        .map(|handle| {
+            session
+                .handles
+                .get(handle)
+                .cloned()
+                .ok_or_else(|| ProviderError::new(ErrorKind::NotFound))
+        })
+        .transpose()?;
+    let folder_id = current
+        .as_ref()
+        .map(|node| node.id.as_str())
+        .unwrap_or(session.root_item_id.as_str());
+    let provider_cursor = request
+        .cursor
+        .as_deref()
+        .map(|cursor| {
+            let cursor = session
+                .cursors
+                .get(cursor)
+                .ok_or_else(|| ProviderError::new(ErrorKind::NotFound))?;
+            if cursor.folder_id != folder_id {
+                return Err(ProviderError::new(ErrorKind::PreconditionFailed));
+            }
+            Ok(cursor.provider_cursor.as_str())
+        })
+        .transpose()?;
+    let root = connection_root(&app)?;
+    let dependencies = connection::dependencies(&root)?;
+    let provider = providers::onedrive::OneDrive::new(dependencies);
+    let cancel = Cancellation::default();
+    let page = provider
+        .list_setup_folders(
+            &config,
+            &credential.reference,
+            &credential.account_id,
+            &session.drive_id,
+            folder_id,
+            provider_cursor,
+            &cancel,
+        )
+        .await;
+    let page = match page {
+        Ok(page) => page,
+        Err(error) => {
+            lock(&state.folder_selections)?.insert(request.selection_id, session);
+            return Err(error);
+        }
+    };
+    let parent_path = current
+        .as_ref()
+        .map(|node| node.path.clone())
+        .unwrap_or_default();
+    let mut folders = Vec::with_capacity(page.folders.len());
+    for folder in page.folders {
+        let entry = FolderEntry {
+            name: folder.name.clone(),
+            handle: uuid::Uuid::new_v4().to_string(),
+        };
+        let mut path = parent_path.clone();
+        path.push(entry.clone());
+        session.handles.insert(
+            entry.handle.clone(),
+            FolderNode {
+                id: folder.id,
+                path,
+            },
+        );
+        folders.push(entry);
+    }
+    let next_cursor = page.next_cursor.map(|provider_cursor| {
+        let cursor = uuid::Uuid::new_v4().to_string();
+        session.cursors.insert(
+            cursor.clone(),
+            FolderCursor {
+                folder_id: folder_id.to_owned(),
+                provider_cursor,
+            },
+        );
+        cursor
+    });
+    let result = FolderPage {
+        path: parent_path,
+        folders,
+        next_cursor,
+        selectable: current.is_some(),
+    };
+    lock(&state.folder_selections)?.insert(request.selection_id, session);
+    Ok(result)
+}
+
+#[tauri::command]
+pub(crate) async fn external_storage_select_folder(
+    app: AppHandle,
+    state: State<'_, ConnectionCommandState>,
+    request: SelectFolderRequest,
+) -> Result<FolderSelection> {
+    let _cleanup_guard = state.admit()?;
+    let session = lock(&state.folder_selections)?
+        .remove(&request.selection_id)
+        .ok_or_else(|| ProviderError::new(ErrorKind::NotFound))?;
+    if session.expires_at_ms <= now_ms() {
+        return Err(ProviderError::new(ErrorKind::Cancelled));
+    }
+    let node = session
+        .handles
+        .get(&request.folder)
+        .cloned()
+        .ok_or_else(|| ProviderError::new(ErrorKind::NotFound))?;
+    let mut pending = take_preparation(&state, &session.preparation_id)?;
+    let credential = pending
+        .bound_credential
+        .clone()
+        .ok_or_else(|| ProviderError::new(ErrorKind::ReauthRequired))?;
+    let root = connection_root(&app)?;
+    let dependencies = connection::dependencies(&root)?;
+    let provider = providers::onedrive::OneDrive::new(dependencies);
+    let cancel = Cancellation::default();
+    let inspected = provider
+        .inspect_setup_folder(
+            &pending.request.config,
+            &credential.reference,
+            &credential.account_id,
+            &session.drive_id,
+            &node.id,
+            &cancel,
+        )
+        .await;
+    let folder = match inspected {
+        Ok(folder) => folder,
+        Err(error) => {
+            restore_preparation(&state, session.preparation_id.clone(), pending);
+            lock(&state.folder_selections)?.insert(request.selection_id, session);
+            return Err(error);
+        }
+    };
+    pending
+        .request
+        .config
+        .location
+        .insert("driveId".into(), session.drive_id);
+    pending
+        .request
+        .config
+        .location
+        .insert("rootItemId".into(), folder.id);
+    pending.request.config.location.remove("folderName");
+    pending.selected_folder_name = Some(folder.name.clone());
+    restore_preparation(&state, session.preparation_id, pending);
+    Ok(FolderSelection {
+        name: folder.name,
+        account_hint: Some(session.account_hint),
+    })
+}
+
+#[tauri::command]
+pub(crate) fn external_storage_cancel_folder_selection(
+    state: State<'_, ConnectionCommandState>,
+    selection_id: String,
+) -> Result<()> {
+    let _cleanup_guard = state.admit()?;
+    lock(&state.folder_selections)?.remove(&selection_id);
+    Ok(())
 }
 
 enum CredentialInput {
@@ -1014,13 +1537,7 @@ async fn ensure_create_descriptor(
         None => descriptor::upload(root, provider, handle, descriptor, root_key, cancel).await?,
     };
     descriptor::read(
-        root,
-        provider,
-        handle,
-        &locator,
-        descriptor,
-        root_key,
-        cancel,
+        root, provider, handle, &locator, descriptor, root_key, cancel,
     )
     .await?;
     Ok(locator)
@@ -1053,7 +1570,9 @@ async fn commit_preparation(
         config.account_id = account_id.clone();
     }
     let effective_connection_id = if preparation.request.mode == ConnectionOpenMode::Create
-        && store.pending(connection_id).is_err_and(|error| error.kind == ErrorKind::NotFound)
+        && store
+            .pending(connection_id)
+            .is_err_and(|error| error.kind == ErrorKind::NotFound)
     {
         store
             .pending_create_for(&config, preparation.request.capture_policy)?
@@ -1077,9 +1596,10 @@ async fn commit_preparation(
                     account_id,
                 } => (reference, account_id),
             };
-            if account_id.as_ref().is_some_and(|account_id| {
-                account_id != &pending.config.account_id
-            }) {
+            if account_id
+                .as_ref()
+                .is_some_and(|account_id| account_id != &pending.config.account_id)
+            {
                 let _ = provider_vault.remove(&replacement).await;
                 return Err(ProviderError::new(ErrorKind::ReauthRequired).into());
             }
@@ -1106,7 +1626,10 @@ async fn commit_preparation(
                     provider_vault.store(&secret.bytes).await?,
                     secret.account_id,
                 ),
-                CredentialInput::Reference { reference, account_id } => (reference, account_id),
+                CredentialInput::Reference {
+                    reference,
+                    account_id,
+                } => (reference, account_id),
             };
             if let Some(account_id) = account_id {
                 config.account_id = account_id;
@@ -1187,7 +1710,10 @@ async fn commit_preparation(
                         )
                     }
                 };
-            let key_ref = match key_vault.store(&SecretBytes(Zeroizing::new(key.to_vec()))).await {
+            let key_ref = match key_vault
+                .store(&SecretBytes(Zeroizing::new(key.to_vec())))
+                .await
+            {
                 Ok(reference) => reference,
                 Err(error) => {
                     let _ = provider_vault.remove(&credential_ref).await;
@@ -1195,7 +1721,9 @@ async fn commit_preparation(
                 }
             };
             let recovery_key_ref = match key_vault
-                .store(&SecretBytes(Zeroizing::new(recovery_key.as_bytes().to_vec())))
+                .store(&SecretBytes(Zeroizing::new(
+                    recovery_key.as_bytes().to_vec(),
+                )))
                 .await
             {
                 Ok(reference) => reference,
@@ -1286,7 +1814,10 @@ async fn commit_preparation(
     }
     store.put_pending(&updated)?;
 
-    let descriptor = updated.descriptor.as_ref().ok_or_else(|| ProviderError::new(ErrorKind::Corrupt))?;
+    let descriptor = updated
+        .descriptor
+        .as_ref()
+        .ok_or_else(|| ProviderError::new(ErrorKind::Corrupt))?;
     require_repository_strategy(&capabilities, descriptor.publication_strategy)?;
     let root_key = read_root_key(key_vault.as_ref(), &updated.root_key_ref).await?;
     let recovery_key = read_recovery_key(key_vault.as_ref(), &updated.recovery_key_ref).await?;
@@ -1318,14 +1849,9 @@ async fn commit_preparation(
             locator
         }
         ConnectionOpenMode::Existing => {
-            let recovered = recovery::open_bootstrap(
-                &root,
-                provider.as_ref(),
-                &handle,
-                &recovery_key,
-                cancel,
-            )
-            .await?;
+            let recovered =
+                recovery::open_bootstrap(&root, provider.as_ref(), &handle, &recovery_key, cancel)
+                    .await?;
             if recovered.metadata.descriptor != *descriptor || *recovered.key != *root_key {
                 return Err(ProviderError::new(ErrorKind::Corrupt).into());
             }
@@ -1368,13 +1894,10 @@ async fn read_root_key(vault: &dyn SecretVault, reference: &str) -> Result<Zeroi
     Ok(key)
 }
 
-async fn read_recovery_key(
-    vault: &dyn SecretVault,
-    reference: &str,
-) -> Result<Zeroizing<String>> {
+async fn read_recovery_key(vault: &dyn SecretVault, reference: &str) -> Result<Zeroizing<String>> {
     let mut bytes = vault.read(&SecretRef(reference.into())).await?;
-    let key = std::str::from_utf8(&bytes.0)
-        .map_err(|_| ProviderError::new(ErrorKind::ReauthRequired))?;
+    let key =
+        std::str::from_utf8(&bytes.0).map_err(|_| ProviderError::new(ErrorKind::ReauthRequired))?;
     risunest_external_storage_format::crypto::RecoveryKey::parse(key)
         .map_err(|_| ProviderError::new(ErrorKind::ReauthRequired))?;
     let result = Zeroizing::new(key.to_owned());
@@ -1440,6 +1963,8 @@ pub(crate) fn external_storage_set_capture_policy(
     connection_id: String,
     policy: super::connection::CapturePolicy,
 ) -> Result<()> {
+    let cleanup_state = app.state::<ConnectionCommandState>();
+    let _cleanup_guard = cleanup_state.admit()?;
     let root = connection_root(&app)?;
     let mut store = ConnectionStore::open(&root)?;
     store.set_capture_policy(&connection_id, policy)?;
@@ -1454,6 +1979,8 @@ pub(crate) fn external_storage_set_retention_policy(
     connection_id: String,
     policy: super::connection::RetentionPolicy,
 ) -> Result<()> {
+    let cleanup_state = app.state::<ConnectionCommandState>();
+    let _cleanup_guard = cleanup_state.admit()?;
     let root = connection_root(&app)?;
     let mut store = ConnectionStore::open(&root)?;
     store.set_retention_policy(&connection_id, policy)?;
@@ -1465,6 +1992,8 @@ pub(crate) async fn external_storage_remove_connection(
     app: AppHandle,
     connection_id: String,
 ) -> Result<()> {
+    let cleanup_state = app.state::<ConnectionCommandState>();
+    let _cleanup_guard = cleanup_state.admit()?;
     runtime::require_connection_idle(&app, &connection_id).await?;
     let root = connection_root(&app)?;
     let file_jobs = app.state::<crate::native_file_jobs::NativeFileJobState>();
@@ -1497,6 +2026,7 @@ pub(crate) async fn external_storage_begin_connection_settings_export(
     state: State<'_, ConnectionCommandState>,
     connection_id: String,
 ) -> Result<ConnectionSettingsMaterial> {
+    let _cleanup_guard = state.admit()?;
     let root = connection_root(&app)?;
     let stored = ConnectionStore::open(&root)?.read(&connection_id)?;
     let recovery_key = read_recovery_key(
@@ -1543,6 +2073,7 @@ pub(crate) async fn external_storage_save_connection_settings_file(
     state: State<'_, ConnectionCommandState>,
     transfer_id: String,
 ) -> Result<()> {
+    let _cleanup_guard = state.admit()?;
     let pending = lock(&state.connection_settings)?
         .remove(&transfer_id)
         .ok_or_else(|| ProviderError::new(ErrorKind::NotFound))?;
@@ -1577,11 +2108,10 @@ pub(crate) async fn external_storage_save_connection_settings_file(
     file.seek(std::io::SeekFrom::Start(0))
         .map_err(|_| ProviderError::new(ErrorKind::Transient))?;
     let mut verified = Vec::new();
-    let max_encoded =
-        risunest_external_storage_format::crypto::MAX_CONNECTION_SETTINGS_BYTES
-            .saturating_add(2)
-            / 3
-            * 4;
+    let max_encoded = risunest_external_storage_format::crypto::MAX_CONNECTION_SETTINGS_BYTES
+        .saturating_add(2)
+        / 3
+        * 4;
     file.take((max_encoded + 1) as u64)
         .read_to_end(&mut verified)
         .map_err(|_| ProviderError::new(ErrorKind::Transient))?;
@@ -1598,7 +2128,8 @@ pub(crate) async fn external_storage_save_connection_settings_file(
     )
     .await?;
     let imported = recovery::import_connection_settings(&verified, &recovery_key)?;
-    if imported.repository_id != stored.descriptor.repository_id || imported.config != stored.config {
+    if imported.repository_id != stored.descriptor.repository_id || imported.config != stored.config
+    {
         return Err(ProviderError::new(ErrorKind::Corrupt));
     }
     Ok(())
@@ -1609,11 +2140,11 @@ pub(crate) fn external_storage_prepare_connection_settings_import(
     state: State<'_, ConnectionCommandState>,
     request: PrepareConnectionSettingsImportRequest,
 ) -> Result<PreparedConnection> {
-    let max_encoded =
-        risunest_external_storage_format::crypto::MAX_CONNECTION_SETTINGS_BYTES
-            .saturating_add(2)
-            / 3
-            * 4;
+    let _cleanup_guard = state.admit()?;
+    let max_encoded = risunest_external_storage_format::crypto::MAX_CONNECTION_SETTINGS_BYTES
+        .saturating_add(2)
+        / 3
+        * 4;
     if request.payload.is_empty() || request.payload.len() > max_encoded {
         return Err(ProviderError::new(ErrorKind::Corrupt));
     }
@@ -1666,6 +2197,31 @@ mod tests {
     /// The form reads the kind to tell a repository this device already holds
     /// from a provider failure, and a provider failure keeps its own shape.
     #[test]
+    fn cleanup_fences_and_drains_connection_commands_before_reopening() {
+        let state = ConnectionCommandState::default();
+        let first = state.admit().unwrap();
+        let second = state.admit().unwrap();
+        let cancellation = Cancellation::default();
+        state
+            .authorization_cancellations
+            .lock()
+            .unwrap()
+            .insert("synthetic".into(), cancellation.clone());
+        state.begin_cleanup().unwrap();
+        assert!(cancellation.check().is_err());
+        assert!(state.admit().is_err());
+        assert!(!state.cleanup_drained().unwrap());
+        assert!(state.finish_cleanup().is_err());
+        drop(first);
+        assert!(!state.cleanup_drained().unwrap());
+        drop(second);
+        assert!(state.cleanup_drained().unwrap());
+        assert!(state.authorization_cancellations.lock().unwrap().is_empty());
+        state.finish_cleanup().unwrap();
+        assert!(state.admit().is_ok());
+    }
+
+    #[test]
     fn a_refused_connection_reports_its_own_kind() {
         assert_eq!(
             serde_json::to_value(ConnectionFailure::ALREADY_CONNECTED).unwrap(),
@@ -1697,6 +2253,24 @@ mod tests {
         assert_eq!(
             serde_json::to_value(rejected).unwrap(),
             serde_json::json!({"authorizationPending":true,"callbackRejected":true})
+        );
+    }
+
+    #[test]
+    fn only_google_authorization_accepts_a_client_secret() {
+        let secret =
+            authorization_client_secret("google_drive", Some("synthetic-secret".to_owned()))
+                .unwrap()
+                .unwrap();
+        assert_eq!(secret.as_str(), "synthetic-secret");
+        assert!(authorization_client_secret("google_drive", None)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            authorization_client_secret("onedrive", Some("synthetic-secret".to_owned()))
+                .unwrap_err()
+                .kind,
+            ErrorKind::Unsupported
         );
     }
 
@@ -1793,9 +2367,7 @@ mod tests {
 
     #[test]
     fn connection_settings_are_authenticated_before_endpoint_review() {
-        let descriptor = Descriptor::new("synthetic-repository".into(), None,
-        )
-        .unwrap();
+        let descriptor = Descriptor::new("synthetic-repository".into(), None).unwrap();
         let stored = StoredConnection {
             id: "source-device-only".into(),
             config: super::super::contract::ConnectionConfig {
@@ -1820,7 +2392,8 @@ mod tests {
             last_backup_at_ms: None,
         };
         let key = recovery::generate_key().unwrap();
-        let exported = recovery::export_connection_settings(&stored, &key, Some(b"secret")).unwrap();
+        let exported =
+            recovery::export_connection_settings(&stored, &key, Some(b"secret")).unwrap();
         let recovered = recovery::import_connection_settings(&exported, &key).unwrap();
         assert_eq!(recovered.config.endpoint, "https://synthetic.invalid");
         assert_eq!(recovered.credential.unwrap().as_slice(), b"secret");
@@ -1862,7 +2435,8 @@ mod tests {
             None,
             None,
             false,
-        ).unwrap();
+        )
+        .unwrap();
         let id = prepared.preparation_id;
         assert!(authorization_config(&state, &id, None).is_ok());
         let authenticated = "authenticated-account".to_string();
@@ -1875,14 +2449,27 @@ mod tests {
             validate_authenticated_account(pending, Some(&authenticated)).unwrap();
             assert_eq!(
                 validate_authenticated_account(pending, Some(&"another-account".into()))
-                    .unwrap_err().kind,
+                    .unwrap_err()
+                    .kind,
                 ErrorKind::ReauthRequired,
             );
             pending.recovery_key = None;
         }
-        assert_eq!(authorization_config(&state, &id, None).err().unwrap().kind, ErrorKind::ReauthRequired);
-        state.preparations.lock().unwrap().get_mut(&id).unwrap().expires_at_ms = 0;
-        assert_eq!(authorization_config(&state, &id, None).err().unwrap().kind, ErrorKind::Cancelled);
+        assert_eq!(
+            authorization_config(&state, &id, None).err().unwrap().kind,
+            ErrorKind::ReauthRequired
+        );
+        state
+            .preparations
+            .lock()
+            .unwrap()
+            .get_mut(&id)
+            .unwrap()
+            .expires_at_ms = 0;
+        assert_eq!(
+            authorization_config(&state, &id, None).err().unwrap().kind,
+            ErrorKind::Cancelled
+        );
     }
 
     #[test]
@@ -1917,6 +2504,8 @@ mod tests {
             recovery_key: Some(recovery::generate_key().unwrap()),
             expected_repository_id: Some("synthetic-repository".into()),
             imported_credential: None,
+            bound_credential: None,
+            selected_folder_name: None,
             transferred: true,
         };
 

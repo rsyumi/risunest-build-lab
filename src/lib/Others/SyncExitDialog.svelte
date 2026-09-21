@@ -1,7 +1,8 @@
 <script lang="ts">
     import { AlertTriangleIcon, LoaderCircleIcon, SaveIcon } from '@lucide/svelte'
     import { language } from 'src/lang'
-    import Button from 'src/lib/UI/GUI/Button.svelte'
+    import { serverSyncErrorHelp } from 'src/ts/storage/sync/serverSyncConnectFlow'
+    import SettingButton from 'src/lib/Setting/RisuNest/SettingButton.svelte'
     import {
         decideSyncExit,
         syncExitDialogState,
@@ -17,6 +18,7 @@
     const needsChoice = $derived(
         dialogState.phase === 'local-failed'
         || dialogState.phase === 'edit-blocked'
+        || dialogState.phase === 'remote-waiting'
         || dialogState.phase === 'remote-delayed'
         || dialogState.phase === 'remote-blocked',
     )
@@ -27,16 +29,23 @@
     const title = $derived(
         localFailure ? copy.saveFailedTitle
             : editBlocked ? copy.editBlockedTitle
-                : copy.title,
+                : dialogState.phase === 'remote-blocked' ? copy.syncFailedTitle
+                    : copy.title,
     )
     const detail = $derived.by(() => {
         switch (dialogState.phase) {
             case 'saving': return copy.saving
             case 'edit-blocked': return copy.editBlocked
             case 'capturing': return copy.capturing
+            case 'remote-waiting':
             case 'syncing': return copy.syncing
             case 'remote-delayed': return copy.delayed
-            case 'remote-blocked': return copy.blocked
+            case 'remote-blocked': {
+                const help = (dialogState.destination === 'server' || dialogState.destination.startsWith('server:'))
+                    ? serverSyncErrorHelp(dialogState.reason, language.risuNest.serverSync)
+                    : copy.blocked
+                return `${help} (${dialogState.reason})`
+            }
             case 'local-failed': return copy.saveFailed
             default: return ''
         }
@@ -86,22 +95,24 @@
                 </header>
 
                 {#if !needsChoice}
-                    <div class="h-1.5 overflow-hidden rounded-full border border-darkborderc bg-bgcolor" role="progressbar" aria-label={detail}>
+                    <div class="h-1.5 overflow-hidden rounded-full bg-darkbutton" role="progressbar" aria-label={detail}>
                         <div class="sync-exit-progress h-full w-2/5 rounded-full bg-borderc"></div>
                     </div>
                 {:else}
                     <div class="flex flex-col-reverse gap-2 sm:flex-row sm:flex-wrap sm:justify-end">
-                        <Button styled="outlined" onclick={() => decideSyncExit('cancel-exit')}>
+                        <SettingButton variant="secondary" onclick={() => decideSyncExit('cancel-exit')}>
                             {copy.cancelExit}
-                        </Button>
+                        </SettingButton>
                         {#if !editBlocked}
-                            <Button styled="danger" onclick={() => decideSyncExit('exit-unsynced')}>
+                            <SettingButton variant="danger" onclick={() => decideSyncExit('exit-unsynced')}>
                                 {localFailure ? copy.exitWithoutSaving : copy.exitWithoutSync}
-                            </Button>
+                            </SettingButton>
                         {/if}
-                        <Button onclick={() => decideSyncExit('wait')}>
-                            {localFailure ? copy.retrySaving : copy.keepWaiting}
-                        </Button>
+                        {#if dialogState.phase !== 'remote-waiting'}
+                            <SettingButton onclick={() => decideSyncExit('wait')}>
+                                {localFailure ? copy.retrySaving : dialogState.phase === 'remote-blocked' ? copy.retrySync : copy.keepWaiting}
+                            </SettingButton>
+                        {/if}
                     </div>
                 {/if}
             </div>

@@ -226,6 +226,15 @@ pub(crate) fn project(
 }
 
 pub(crate) fn dependencies(payload: &ServerPayload, cas: &PayloadCas) -> StoreResult<Vec<String>> {
+    dependencies_with(payload, |hash| cas.read_object(hash)?.ok_or_else(|| StoreError::Validation {
+        message: "Server source owner object is missing".into(),
+    }))
+}
+
+pub(crate) fn dependencies_with(
+    payload: &ServerPayload,
+    mut read: impl FnMut(&str) -> StoreResult<Vec<u8>>,
+) -> StoreResult<Vec<String>> {
     let mut hashes = BTreeSet::new();
     match &payload.record {
         LogicalRecordEnvelope::Root { owner_heads, .. }
@@ -236,10 +245,7 @@ pub(crate) fn dependencies(payload: &ServerPayload, cas: &PayloadCas) -> StoreRe
                     let bytes = if let Some(bytes) = payload.derived_objects.get(hash) {
                         bytes.clone()
                     } else {
-                        cas.read_object(hash)?
-                            .ok_or_else(|| StoreError::Validation {
-                                message: "Server source owner object is missing".into(),
-                            })?
+                        read(hash)?
                     };
                     for entry in
                         decode_owner_manifest(&bytes).map_err(|_| StoreError::Validation {
@@ -264,11 +270,7 @@ pub(crate) fn dependencies(payload: &ServerPayload, cas: &PayloadCas) -> StoreRe
             for head in owner_heads {
                 if let Some(hash) = &head.manifest_hash {
                     hashes.insert(hash.clone());
-                    let bytes = cas
-                        .read_object(hash)?
-                        .ok_or_else(|| StoreError::Validation {
-                            message: "Server source owner object is missing".into(),
-                        })?;
+                    let bytes = read(hash)?;
                     for entry in decode_owner_manifest(&bytes).map_err(|_| {
                         StoreError::Validation {
                             message: "Server source owner object is invalid".into(),

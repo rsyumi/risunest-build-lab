@@ -69,7 +69,7 @@ it('binds the current toggle values, counts later changes and saves them', async
     DBState.db.globalChatVariables.toggle_c = 'x'
     await tick()
     expect(save.disabled).toBe(false)
-    expect(save.textContent?.trim()).toBe('2')
+    expect(save.textContent?.trim()).toBe(`${languageEnglish.saveTogglesLabel} (2)`)
     save.click()
     await vi.waitFor(() => expect(mocks.save).toHaveBeenCalledTimes(2))
     expect(chat().savedToggleValues).toEqual({ toggle_a: '1', toggle_b: '1', toggle_c: 'x' })

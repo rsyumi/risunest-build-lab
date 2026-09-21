@@ -23,9 +23,6 @@
     {
       "identifier": "fs:scope",
       "allow": [
-        "$APPDATA",
-        "$APPDATA/*",
-        "$APPDATA/**/*",
         "$DOWNLOAD/*",
         "/data/**/*",
         "$RESOURCE/*"

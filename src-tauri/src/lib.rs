@@ -1,7 +1,10 @@
 mod account_credential;
 #[cfg(any(test, target_os = "android"))]
 mod android_commit_transport;
-mod app_data_root;
+mod app_paths;
+mod cleanup_secrets;
+mod cleanup_webview;
+mod app_cleanup;
 mod app_update;
 #[cfg(desktop)]
 mod appimage_integration;
@@ -52,20 +55,12 @@ mod test_memory;
 mod windows_appearance;
 
 use base64::{engine::general_purpose, Engine as _};
-use oauth2::basic::{BasicClient, BasicErrorResponseType, BasicTokenType};
-use oauth2::{
-    AuthUrl, AuthorizationCode, ClientId, ClientSecret, CsrfToken, EmptyExtraTokenFields,
-    EndpointNotSet, EndpointSet, PkceCodeChallenge, RedirectUrl, RevocationErrorResponseType,
-    Scope, StandardErrorResponse, StandardRevocableToken, StandardTokenIntrospectionResponse,
-    StandardTokenResponse, TokenResponse, TokenUrl,
-};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tauri::{AppHandle, Emitter, Listener, Manager};
+use tauri::Manager;
 
 const MAX_NATIVE_STARTUP_ERROR_CHARS: usize = 4096;
 
@@ -102,6 +97,19 @@ impl NativeStartupState {
         }
     }
 
+    pub(crate) fn release_cleanup_gates(&self) -> Result<(), String> {
+        let mut failure = self.0.lock().map_err(|_| "cleanup-startup-state-unavailable")?;
+        failure._persistent_gate.take();
+        failure._native_file_gate.take();
+        Ok(())
+    }
+
+    pub(crate) fn finish_cleanup(&self) -> Result<(), String> {
+        let mut failure = self.0.lock().map_err(|_| "cleanup-startup-state-unavailable")?;
+        failure.message = None;
+        Ok(())
+    }
+
     pub(crate) fn ensure_ready(&self) -> Result<(), String> {
         let failure = self
             .0
@@ -120,9 +128,7 @@ fn native_startup_status(state: tauri::State<'_, NativeStartupState>) -> Result<
 }
 
 fn boot_marker_root(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
-    app_data_root::resolve(app).map_err(|error| {
-        format!("failed to resolve application data directory: {error}")
-    })
+    app_paths::data_root(app)
 }
 
 fn boot_marker_now() -> i64 {
@@ -224,133 +230,22 @@ async fn native_request(url: String, body: String, header: String, method: Strin
     }
 }
 
-fn get_oauth_client() -> oauth2::Client<
-    StandardErrorResponse<BasicErrorResponseType>,
-    StandardTokenResponse<EmptyExtraTokenFields, BasicTokenType>,
-    StandardTokenIntrospectionResponse<EmptyExtraTokenFields, BasicTokenType>,
-    StandardRevocableToken,
-    StandardErrorResponse<RevocationErrorResponseType>,
-    EndpointSet,
-    EndpointNotSet,
-    EndpointNotSet,
-    EndpointNotSet,
-    EndpointSet,
-> {
-    let auth_url = AuthUrl::new("http://authorize".to_string()).unwrap();
-    let token_url = TokenUrl::new("http://token".to_string()).unwrap();
-    let redirection_url = RedirectUrl::new("http://redirect".to_string()).unwrap();
-    let client = BasicClient::new(ClientId::new("client_id".to_string()))
-        .set_client_secret(ClientSecret::new("client_secret".to_string()))
-        .set_auth_uri(auth_url)
-        .set_token_uri(token_url)
-        // Set the URL the user will be redirected to after the authorization process.
-        .set_redirect_uri(redirection_url);
+pub use app_paths::{AppPaths, Integration};
 
-    return client;
-}
-
-#[tauri::command]
-async fn oauth_login(app: AppHandle) -> Result<String, String> {
-    let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
-    let client = get_oauth_client();
-    // Write pkce_verifier to a file or session for later use.
-    std::fs::write("pkce_verifier.txt", pkce_verifier.secret()).unwrap();
-
-    let (auth_url, _csrf_token) = client
-        .authorize_url(CsrfToken::new_random)
-        // Set the desired scopes.
-        .add_scope(Scope::new("read".to_string()))
-        .add_scope(Scope::new("write".to_string()))
-        // Set the PKCE code challenge.
-        .set_pkce_challenge(pkce_challenge)
-        .url();
-
-    let http_client = oauth2::reqwest::ClientBuilder::new()
-        // Following redirects opens the client up to SSRF vulnerabilities.
-        .redirect(oauth2::reqwest::redirect::Policy::none())
+/// Remembers the main window geometry beside the store. The plugin resolves its
+/// directory once at registration, so it is wired where the manifest is known.
+#[cfg(windows)]
+fn window_state_plugin(directory: &std::path::Path) -> tauri::plugin::TauriPlugin<tauri::Wry> {
+    use tauri_plugin_window_state::StateFlags;
+    tauri_plugin_window_state::Builder::default()
+        .with_state_flags(StateFlags::SIZE | StateFlags::POSITION | StateFlags::MAXIMIZED)
+        .with_filter(|label| label == "main")
+        .with_directory(directory.to_path_buf())
         .build()
-        .expect("Client should build");
-
-    app.emit("oauth_open_url", auth_url.to_string()).unwrap();
-
-    let auth_code = Arc::new(Mutex::new(String::new()));
-    let auth_code_clone = Arc::clone(&auth_code);
-
-    let handle = app.app_handle().clone();
-    //promise
-    app.listen("oauth_callback_event", move |event| {
-        // Handle the event
-        let mut code = auth_code_clone.lock().unwrap();
-        *code = event.payload().to_string();
-        handle.unlisten(event.id());
-    });
-
-    //wait for auth_code to be set
-    loop {
-        {
-            let code = auth_code.lock().unwrap();
-            if !code.is_empty() {
-                break;
-            }
-        } // MutexGuard is dropped here before await
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-    }
-
-    // Now you can trade it for an access token.
-    let auth_code_value = auth_code.lock().unwrap().clone();
-    let token_result = client
-        .exchange_code(AuthorizationCode::new(auth_code_value))
-        // Set the PKCE code verifier.
-        .set_pkce_verifier(pkce_verifier)
-        .request_async(&http_client)
-        .await;
-
-    return Ok(token_result.unwrap().access_token().secret().to_string());
 }
 
-#[tauri::command]
-fn check_auth(fpath: String, auth: String) -> bool {
-    //check file exists
-    let path = Path::new(&fpath);
-    if !path.exists() {
-        crate::nlog!("warn", "authentication file does not exist");
-        return false;
-    }
-
-    // check file is a file
-    if !path.is_file() {
-        crate::nlog!("warn", "authentication path is not a file");
-        return false;
-    }
-
-    // check file size
-    let size = std::fs::metadata(&fpath).unwrap().len();
-
-    //check file size is less than 1000 bytes
-    if size > 1000 {
-        crate::nlog!("warn", "authentication file is too large");
-        return false;
-    }
-
-    // read file, return false when error
-    let got_auth = std::fs::read_to_string(&path);
-
-    // check read error
-    if got_auth.is_err() {
-        crate::nlog!("warn", "authentication file could not be read");
-        return false;
-    } else {
-        // check auth
-        if got_auth.unwrap() != auth {
-            crate::nlog!("warn", "authentication did not match");
-            return false;
-        }
-        crate::nlog!("info", "authentication matched");
-        return true;
-    }
-}
-
-/// Product initialization shared by native entry points.
+/// Product initialization shared by native entry points. An alternative entry
+/// manages its own [`AppPaths`] before building.
 pub fn builder() -> tauri::Builder<tauri::Wry> {
     builder_with_main_window(None)
 }
@@ -363,7 +258,9 @@ fn builder_with_main_window(
     let setup_native_log_state = native_log_state.clone();
     let native_startup_state = NativeStartupState::default();
     let setup_native_startup_state = native_startup_state.clone();
-    let mut builder = tauri::Builder::default().manage(native_startup_state);
+    let mut builder = tauri::Builder::default()
+        .manage(native_startup_state)
+        .plugin(tauri_plugin_opener::init());
     #[cfg(desktop)]
     {
         // Reject a second process before plugins with startup side effects run.
@@ -382,8 +279,7 @@ fn builder_with_main_window(
     {
         builder = builder
             .append_invoke_initialization_script(include_str!("ios_ipc.js"))
-            .manage(ios_lifecycle::RestartState::default())
-            .plugin(tauri_plugin_opener::init());
+            .manage(ios_lifecycle::RestartState::default());
     }
     #[cfg(not(target_os = "ios"))]
     {
@@ -391,17 +287,7 @@ fn builder_with_main_window(
     }
     #[cfg(windows)]
     {
-        use tauri_plugin_window_state::StateFlags;
-        builder = builder
-            .plugin(
-                tauri_plugin_window_state::Builder::default()
-                    .with_state_flags(
-                        StateFlags::SIZE | StateFlags::POSITION | StateFlags::MAXIMIZED,
-                    )
-                    .with_filter(|label| label == "main")
-                    .build(),
-            )
-            .plugin(windows_appearance::init());
+        builder = builder.plugin(windows_appearance::init());
     }
     #[cfg(target_os = "macos")]
     {
@@ -535,6 +421,26 @@ fn builder_with_main_window(
 
     builder
         .setup(move |app| {
+            #[cfg(mobile)]
+            app.manage(app_paths::AppPaths::resolve(app)?);
+            app.manage(app_cleanup::CleanupState::initialize(app.handle())?);
+            // Before the WebView exists, so no renderer call can precede it.
+            app_paths::permit_renderer_access(app.handle())?;
+            #[cfg(target_os = "ios")]
+            {
+                use tauri_plugin_ios_native::IosNativeExt;
+                let root = app_paths::manifest(app)?
+                    .data
+                    .to_str()
+                    .ok_or("application data root is not valid UTF-8")?
+                    .to_owned();
+                let native = app.ios_native().clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(error) = native.set_data_root(&root).await {
+                        crate::nlog!("error", "native staging root unavailable: {error}");
+                    }
+                });
+            }
             if let Some((config, data_directory)) = &main_window {
                 tauri::WebviewWindowBuilder::from_config(app, config)?
                     .data_directory(data_directory.clone())
@@ -551,8 +457,7 @@ fn builder_with_main_window(
                 app.handle()
                     .plugin(tauri_plugin_ios_native::init())
                     .map_err(|error| format!("iOS native initialization failed: {error}"))?;
-                let app_data_dir = app_data_root::resolve(app)
-                    .map_err(|error| format!("application data root unavailable: {error}"))?;
+                let app_data_dir = app_paths::data_root(app)?;
                 app.state::<external_storage::job_store::JobCommandState>()
                     .root
                     .set(app_data_dir.clone())
@@ -604,8 +509,6 @@ fn builder_with_main_window(
                 }
                 app.state::<native_media::ipc::NativeMediaIpcState>()
                     .configure(app_data_dir.join("native-media-ipc"))?;
-                native_media::recover_inlay_writes(&app_data_dir)
-                    .map_err(|error| format!("Inlay recovery failed: {error}"))?;
                 app.manage(native_media::streaming::MediaServerState::initialize(
                     app_data_dir.clone(),
                 ));
@@ -661,13 +564,20 @@ fn builder_with_main_window(
 
 /// The product command router, reusable by alternative native entries.
 pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static {
-    tauri::generate_handler![
+    let handler: Box<dyn Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync> = Box::new(tauri::generate_handler![
+        app_paths::app_paths_roots,
+        app_cleanup::app_cleanup_status,
+        app_cleanup::app_cleanup_request,
+        app_cleanup::app_cleanup_resume,
         external_storage::connection_commands::external_storage_list_providers,
         external_storage::connection_commands::external_storage_prepare_connection,
         external_storage::connection_commands::external_storage_commit_connection,
         external_storage::connection_commands::external_storage_begin_authorization,
         external_storage::connection_commands::external_storage_complete_authorization,
         external_storage::connection_commands::external_storage_cancel_authorization,
+        external_storage::connection_commands::external_storage_list_folders,
+        external_storage::connection_commands::external_storage_select_folder,
+        external_storage::connection_commands::external_storage_cancel_folder_selection,
         external_storage::connection_commands::external_storage_set_capture_policy,
         external_storage::connection_commands::external_storage_set_retention_policy,
         external_storage::connection_commands::external_storage_remove_connection,
@@ -731,7 +641,6 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         boot_attempt_begin,
         boot_attempt_complete,
         native_request,
-        check_auth,
         #[cfg(desktop)]
         opened_files::opened_files_take,
         #[cfg(desktop)]
@@ -755,15 +664,12 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         native_log::native_log_error,
         native_log::native_log_file_path,
         native_log::native_log_set_file_enabled,
-        oauth_login,
         native_tokenizer::tokenize_batch,
-        native_media::native_media_write_inlay_image,
         native_media::native_media_encode_inlay_image,
         native_media::ipc::native_media_inlay_input_open,
         native_media::ipc::native_media_inlay_input_chunk,
         native_media::ipc::native_media_inlay_input_cancel,
         native_media::ipc::native_media_encode_inlay_finish,
-        native_media::ipc::native_media_write_inlay_finish,
         native_media::ipc::native_media_inlay_output_read,
         native_media::ipc::native_media_inlay_output_cancel,
         asset_repository::commands::asset_cas_read_object_range,
@@ -825,7 +731,6 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         persistent_store::commands::pds_read_asset_alias,
         persistent_store::commands::pds_read_asset_aliases_by_keys,
         persistent_store::commands::pds_list_asset_aliases,
-        persistent_store::commands::pds_read_asset_repository_authority,
         persistent_store::commands::pds_read_asset_owner_head,
         persistent_store::commands::pds_commit_asset_alias,
         persistent_store::commands::pds_delete_asset_alias,
@@ -858,7 +763,6 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         persistent_store::commands::pds_replace_add_characters,
         persistent_store::commands::pds_replace_put_asset_aliases,
         persistent_store::commands::pds_replace_put_asset_owner_heads,
-        persistent_store::commands::pds_replace_put_asset_repository_authority,
         persistent_store::commands::pds_replace_preserve_repositories,
         persistent_store::commands::pds_replace_commit,
         persistent_store::commands::pds_replace_abort,
@@ -922,10 +826,19 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         persistent_store::commands::pds_commit_working_set_change_cursor,
         server_sync::events::server_sync_events_start,
         server_sync::events::server_sync_events_stop,
-    ]
+    ]);
+    move |invoke: tauri::ipc::Invoke<tauri::Wry>| {
+        if app_cleanup::pending(invoke.message.webview_ref().app_handle())
+            && !invoke.message.command().starts_with("app_cleanup_") {
+            invoke.resolver.reject("cleanup-pending");
+            return true;
+        }
+        handler(invoke)
+    }
 }
 
 pub fn handle_run_event(_app: &tauri::AppHandle, _event: tauri::RunEvent) {
+    if app_cleanup::closing(_app) { return; }
     #[cfg(target_os = "ios")]
     if let tauri::RunEvent::Opened { urls } = &_event {
         use tauri_plugin_ios_native::IosNativeExt;
@@ -946,11 +859,28 @@ pub fn handle_run_event(_app: &tauri::AppHandle, _event: tauri::RunEvent) {
 pub fn run() {
     let mut context = tauri::generate_context!();
     #[cfg(desktop)]
-    let main_window = app_data_root::take_main_window_with_webview_root(&mut context)
+    let paths = app_paths::AppPaths::desktop(context.config())
+        .expect("application data roots unavailable");
+    #[cfg(desktop)]
+    if let Some(code) = app_cleanup::run_cli(&paths) {
+        std::process::exit(code);
+    }
+    #[cfg(desktop)]
+    let main_window = app_paths::take_main_window_with_webview_root(&mut context, &paths)
         .expect("desktop WebView data directory unavailable");
     #[cfg(not(desktop))]
     let main_window = None;
-    builder_with_main_window(main_window)
+    #[allow(unused_mut)]
+    let mut builder = builder_with_main_window(main_window);
+    #[cfg(windows)]
+    {
+        builder = builder.plugin(window_state_plugin(&paths.data));
+    }
+    #[cfg(desktop)]
+    {
+        builder = builder.manage(paths.prepared().expect("application data root unavailable"));
+    }
+    builder
         .build(context)
         .expect("error while building tauri application")
         .run(handle_run_event);

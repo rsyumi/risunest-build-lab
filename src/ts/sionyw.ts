@@ -2,7 +2,8 @@ import { hubURL } from "./characterCards";
 import { fetchNative } from "./globalApi.svelte";
 import { DBState } from "./stores.svelte";
 import { getDeviceMarkers } from "./storage/deviceMarkers";
-import { readFile, BaseDirectory, writeFile } from "@tauri-apps/plugin-fs";
+import { readFile, writeFile } from "@tauri-apps/plugin-fs";
+import { nativeDataPath } from "./storage/nativePaths";
 import { isTauri } from "src/ts/platform"
 import * as client from 'openid-client'
 import { getKeypairStore, saveKeypairStore } from "./util";
@@ -64,7 +65,7 @@ export async function fetchProtectedResource(url: string, options: RequestInit =
     return fetchProtectedResourceSPA(url, options, arg)
 }
 
-const readFileInsecure = isTauri ? readFile : (path:string, options:any) => {
+const readFileInsecure = isTauri ? readFile : (path:string) => {
     const data = localStorage.getItem(path)
     if(!data){
         throw new Error("File not found")
@@ -72,9 +73,12 @@ const readFileInsecure = isTauri ? readFile : (path:string, options:any) => {
     return Buffer.from(data, 'base64')
 }
 
-const writeFileUnSecure = isTauri ? writeFile : (path:string, data:Uint8Array, options:any) => {
+const writeFileUnSecure = isTauri ? writeFile : (path:string, data:Uint8Array) => {
     localStorage.setItem(path, Buffer.from(data).toString('base64'))
 }
+
+// Native builds keep this beside the store; the web fallback keys localStorage.
+const oauthDataFile = async () => isTauri ? await nativeDataPath('oauthData.json') : 'oauthData.json'
 
 
 //Tauri version of fetchProtectedResource
@@ -87,7 +91,7 @@ async function fetchProtectedResourceSPA(url: string, options: RequestInit = {},
     
     if(!tokenInitalized || arg.forceRefresh){
 
-        const oauthDataText = await readFileInsecure('oauthData.json', { baseDir: BaseDirectory.AppData })
+        const oauthDataText = await readFileInsecure(await oauthDataFile())
         const oauthData: SionywOauthData = JSON.parse(new TextDecoder().decode(oauthDataText))
 
         refreshToken = oauthData.refresh_token
@@ -129,11 +133,11 @@ async function fetchProtectedResourceSPA(url: string, options: RequestInit = {},
 
                 if(newRefresh && newRefresh !== oauthData.refresh_token){
                     //Store the new refresh token securely
-                    await writeFileUnSecure('oauthData.json', new TextEncoder().encode(JSON.stringify({
+                    await writeFileUnSecure(await oauthDataFile(), new TextEncoder().encode(JSON.stringify({
                         refresh_token: newRefresh,
                         client_id: oauthData.client_id,
                         client_secret: oauthData.client_secret,
-                    })), { baseDir: BaseDirectory.AppData })
+                    })))
                 }
 
                 break
@@ -289,11 +293,11 @@ async function loginToSionywSPAVersion(){
             await saveKeypairStore('',dPoPKeyPair)
 
             // Store the refresh token securely
-            await writeFileUnSecure('oauthData.json', new TextEncoder().encode(JSON.stringify({
+            await writeFileUnSecure(await oauthDataFile(), new TextEncoder().encode(JSON.stringify({
                 refresh_token: exchanged.refresh_token,
                 client_id: registration.client_id,
                 client_secret: registration.client_secret,
-            })), { baseDir: BaseDirectory.AppData })
+            })))
 
             accessToken = exchanged.access_token!
             refreshToken = exchanged.refresh_token!

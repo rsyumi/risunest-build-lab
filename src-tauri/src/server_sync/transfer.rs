@@ -15,6 +15,8 @@ use std::{
     collections::BTreeSet,
     io::{Read, Seek, SeekFrom},
 };
+// Include the envelope for one 4 MiB full frame.
+const FRAME_TARGET_BYTES: usize = 4 * 1024 * 1024 + 53;
 const CHUNK: usize = transfer::UPLOAD_CHUNK_BYTES;
 #[path = "transfer_references.rs"]
 mod references;
@@ -25,9 +27,19 @@ pub(crate) struct Transfer<'a> {
     pub client: &'a ServerClient,
     pub cache: &'a Cache,
     check: Option<&'a dyn Fn() -> Result<()>>,
+    destination: Option<(&'a crate::asset_repository::PayloadCas, &'a Connection)>,
     db: Connection,
+    frame_limit: std::cell::Cell<usize>,
+    #[cfg(test)]
+    frame_depth: usize,
     base_sizes: std::cell::RefCell<Option<(Vec<String>, Vec<(String, u64)>)>>,
 }
+pub(crate) struct UploadTarget {
+    pub hash: String,
+    pub bases: std::sync::Arc<[String]>,
+    pub base_lease: bool,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct UploadProgress {
@@ -116,7 +128,8 @@ impl<'a> Transfer<'a> {
         .into_iter()
         .filter_map(|(root, base)| root.map(|root| (root, base.into_iter().collect())))
         .collect();
-        let dependencies = self.download_reference_tree(roots)?;
+        let mut dependencies = self.download_reference_tree(roots)?;
+        dependencies.extend(descriptor.dependencies);
         if metadata_only {
             let (payload, _) = self.cache.restore_with(version, |hash, limit| {
                 self.download(&[hash.to_owned()], bases)?;
@@ -126,12 +139,10 @@ impl<'a> Transfer<'a> {
             let local = match &payload.record {
                 Envelope::Root { owner_heads, .. }
                 | Envelope::Character { owner_heads, .. }
-                | Envelope::ArchivedCharacter { owner_heads, .. } => {
-                    owner_heads
-                        .iter()
-                        .filter_map(|h| h.manifest_hash.clone())
-                        .collect()
-                }
+                | Envelope::ArchivedCharacter { owner_heads, .. } => owner_heads
+                    .iter()
+                    .filter_map(|h| h.manifest_hash.clone())
+                    .collect(),
                 Envelope::Cold { object_hash, .. } => object_hash.iter().cloned().collect(),
                 _ => Vec::new(),
             };
@@ -148,7 +159,11 @@ impl<'a> Transfer<'a> {
             client,
             cache,
             check: None,
+            destination: None,
             db,
+            frame_limit: std::cell::Cell::new(FRAME_TARGET_BYTES),
+            #[cfg(test)]
+            frame_depth: 2,
             base_sizes: std::cell::RefCell::new(None),
         })
     }
@@ -157,6 +172,42 @@ impl<'a> Transfer<'a> {
     pub(crate) fn with_check(mut self, check: &'a dyn Fn() -> Result<()>) -> Self {
         self.check = Some(check);
         self
+    }
+    #[cfg(test)]
+    pub(crate) fn with_frame_depth(mut self, depth: usize) -> Self {
+        assert!((1..=2).contains(&depth));
+        self.frame_depth = depth;
+        self
+    }
+    #[cfg(test)]
+    pub(crate) fn frame_byte_limit(&self) -> usize {
+        self.frame_limit.get()
+    }
+    pub(crate) fn with_destination(
+        mut self,
+        cas: &'a crate::asset_repository::PayloadCas,
+        db: &'a Connection,
+    ) -> Self {
+        self.destination = Some((cas, db));
+        self
+    }
+    fn destination(&self, hash: &str, size: u64) -> Result<&crate::asset_repository::PayloadCas> {
+        if let Some((cas, db)) = self.destination {
+            let _guard = crate::asset_repository::coordinator::lock_repository_mutation()?;
+            db.execute("INSERT INTO server_sync_objects VALUES(?1,?2,?3) ON CONFLICT(hash) DO UPDATE SET size=excluded.size", params![hash,size as i64,crate::asset_repository::object_physical_key(hash)])?;
+            Ok(cas)
+        } else {
+            Ok(&self.cache.cas)
+        }
+    }
+    fn store_download(&self, hash: &str, bytes: &[u8]) -> Result<()> {
+        prepare_checked(
+            self.destination(hash, bytes.len() as u64)?,
+            &mut std::io::Cursor::new(bytes),
+            hash,
+            bytes.len() as u64,
+            &|| self.ensure_active(),
+        )
     }
     fn ensure_active(&self) -> Result<()> {
         self.client.ensure_active()?;
@@ -192,14 +243,36 @@ impl<'a> Transfer<'a> {
         base_lease: bool,
         hints: &std::collections::BTreeMap<String, Vec<String>>,
     ) -> Result<()> {
-        for page in hashes.chunks(1024) {
+        let bases: std::sync::Arc<[String]> = base_candidates.into();
+        let targets = hashes
+            .iter()
+            .map(|hash| UploadTarget {
+                hash: hash.clone(),
+                bases: hints
+                    .get(hash)
+                    .map(|values| std::sync::Arc::from(values.as_slice()))
+                    .unwrap_or_else(|| bases.clone()),
+                base_lease,
+            })
+            .collect::<Vec<_>>();
+        self.upload_targets(&targets)
+    }
+    pub(crate) fn upload_targets(&self, targets: &[UploadTarget]) -> Result<()> {
+        for targets in targets.chunks(1024) {
+            let page = targets
+                .iter()
+                .map(|target| target.hash.clone())
+                .collect::<Vec<_>>();
+            let contexts = targets
+                .iter()
+                .map(|target| (target.hash.as_str(), target))
+                .collect::<std::collections::BTreeMap<_, _>>();
             self.ensure_active()?;
             let mut descriptors = Vec::with_capacity(page.len());
             let mut sizes = std::collections::BTreeMap::new();
-            for hash in page {
+            for hash in &page {
                 let size = self
                     .cache
-                    .cas
                     .stat_object(hash)?
                     .ok_or_else(|| SyncError::new("cached-object-missing", 409))?;
                 descriptors.push(serde_json::json!({"hash":hash,"size":size.to_string()}));
@@ -229,8 +302,12 @@ impl<'a> Transfer<'a> {
                 .cloned()
                 .collect::<Vec<_>>();
             let mut candidates = BTreeSet::new();
-            for target in missing.missing.iter().filter(|_| !base_lease) {
-                let base_candidates = hints.get(target).map_or(base_candidates, Vec::as_slice);
+            for target in missing
+                .missing
+                .iter()
+                .filter(|target| !contexts[target.as_str()].base_lease)
+            {
+                let base_candidates = contexts[target.as_str()].bases.as_ref();
                 let size = sizes[target.as_str()];
                 candidates.extend(if size > delta::MAX_TARGET_BYTES as u64 {
                     self.large_bases(target, size, base_candidates)?
@@ -253,7 +330,7 @@ impl<'a> Transfer<'a> {
             let mut materialized = 0usize;
             for target in &missing.missing {
                 self.ensure_active()?;
-                let base_candidates = hints.get(target).map_or(base_candidates, Vec::as_slice);
+                let base_candidates = contexts[target.as_str()].bases.as_ref();
                 let size = sizes[target.as_str()];
                 if size > delta::MAX_TARGET_BYTES as u64 {
                     self.upload_large(target, size, base_candidates)?;
@@ -300,12 +377,12 @@ impl<'a> Transfer<'a> {
                     }
                     Err(e) => return Err(e.into()),
                 };
-                if length + 8 > transfer::PREFERRED_BATCH_BYTES && matches!(frame, Frame::Full(_)) {
+                if length + 8 > self.frame_limit.get() && matches!(frame, Frame::Full(_)) {
                     self.upload_large(target, size, base_candidates)?;
                     self.client.verified(size);
                     continue;
                 }
-                if used + length > transfer::PREFERRED_BATCH_BYTES
+                if used + length > self.frame_limit.get().saturating_mul(2)
                     || materialized + size as usize > 32 * 1024 * 1024
                 {
                     self.send_frames(&frames)?;
@@ -326,23 +403,133 @@ impl<'a> Transfer<'a> {
         if frames.is_empty() {
             return Ok(());
         }
-        let reply = self.client.request(
-            Method::POST,
-            "uploads/frames",
-            &[],
-            Some(transfer::encode(frames)?),
-            &[],
-            MAX_METADATA_BYTES,
-        )?;
-        if !(200..300).contains(&reply.status) {
-            return Err(response_error(reply));
-        }
-        for frame in frames {
-            self.client.verified(match frame {
-                Frame::Full(bytes) => bytes.len() as u64,
-                Frame::Delta(recipe) => recipe.target_size,
-                Frame::FullRequired { .. } => 0,
+        let _activity = self.client.transferring();
+        // Two bounded requests run together; all other transfer requests run
+        // on the coordinator only after both workers have joined.
+        let mut remaining = frames;
+        while !remaining.is_empty() {
+            if transfer::encode(&remaining[..1])?.len() > self.frame_limit.get() {
+                let (target, size) = match &remaining[0] {
+                    Frame::Full(bytes) => (hash(bytes), bytes.len() as u64),
+                    Frame::Delta(recipe) => (recipe.target_hash.clone(), recipe.target_size),
+                    Frame::FullRequired { .. } => {
+                        return Err(SyncError::new("invalid-upload-frame", 400))
+                    }
+                };
+                self.upload_large(&target, size, &[])?;
+                self.client.verified(size);
+                remaining = &remaining[1..];
+                continue;
+            }
+            let mut groups = Vec::with_capacity(2);
+            #[cfg(not(test))]
+            let depth = 2;
+            #[cfg(test)]
+            let depth = self.frame_depth;
+            for _ in 0..depth {
+                if remaining.is_empty() {
+                    break;
+                }
+                let mut split = 0;
+                let mut used = 8;
+                while split < remaining.len() {
+                    let size = transfer::encode(&remaining[split..split + 1])?.len() - 8;
+                    if used + size > self.frame_limit.get() {
+                        break;
+                    }
+                    used += size;
+                    split += 1;
+                }
+                if split == 0 {
+                    break;
+                }
+                groups.push(&remaining[..split]);
+                remaining = &remaining[split..];
+            }
+            let client = self.client;
+            let results = std::thread::scope(|scope| {
+                let workers = groups
+                    .into_iter()
+                    .filter(|group| !group.is_empty())
+                    .map(|group| {
+                        scope.spawn(move || {
+                            let bytes = transfer::encode(group)?;
+                            let length = bytes.len();
+                            let started = std::time::Instant::now();
+                            let result = client.frame_request(bytes);
+                            Ok::<_, SyncError>((length, started.elapsed(), result, group))
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                workers
+                    .into_iter()
+                    .map(|worker| {
+                        worker
+                            .join()
+                            .map_err(|_| SyncError::new("frame-worker-failed", 500))
+                    })
+                    .collect::<Vec<_>>()
             });
+            let mut failed = Vec::new();
+            let mut measured_limit = self.frame_limit.get();
+            for result in results {
+                let (length, elapsed, reply, group) = result??;
+                match reply {
+                    Ok(reply) if reply.status == 204 => {
+                        let safe =
+                            (length as f64 * 60.0 / elapsed.as_secs_f64().max(0.001)) as usize;
+                        measured_limit =
+                            measured_limit.min(safe.clamp(64 * 1024, FRAME_TARGET_BYTES));
+                        for frame in group {
+                            client.verified(match frame {
+                                Frame::Full(bytes) => bytes.len() as u64,
+                                Frame::Delta(recipe) => recipe.target_size,
+                                Frame::FullRequired { .. } => 0,
+                            });
+                        }
+                    }
+                    result => {
+                        failed.push((result, group, elapsed));
+                    }
+                }
+            }
+            self.frame_limit.set(measured_limit);
+            for (result, group, elapsed) in failed {
+                match result {
+                    Ok(reply) if matches!(reply.status, 502 | 503 | 504) => {
+                        let _ = client.resolve_identity(false);
+                        client.wait_transient_response(
+                            reply.retry_after,
+                            "server-unreachable",
+                            elapsed,
+                        )?
+                    }
+                    Err(error) if super::client::is_ambiguous_transient(&error) => {
+                        let _ = client.resolve_identity(false);
+                        client.wait_after_ambiguous(&error, elapsed)?
+                    }
+                    Ok(reply) => return Err(response_error(reply)),
+                    Err(error) => return Err(error),
+                }
+                self.frame_limit
+                    .set((self.frame_limit.get() / 2).max(64 * 1024));
+                if group.len() == 1 {
+                    let (target, size) = match &group[0] {
+                        Frame::Full(bytes) => (hash(bytes), bytes.len() as u64),
+                        Frame::Delta(recipe) => (recipe.target_hash.clone(), recipe.target_size),
+                        Frame::FullRequired { .. } => {
+                            return Err(SyncError::new("invalid-upload-frame", 400))
+                        }
+                    };
+                    self.upload_large(&target, size, &[])?;
+                    client.verified(size);
+                } else {
+                    let middle = group.len() / 2;
+                    self.send_frames(&group[..middle])?;
+                    self.send_frames(&group[middle..])?;
+                }
+            }
+            self.ensure_active()?;
         }
         self.ensure_active()
     }
@@ -360,6 +547,7 @@ impl<'a> Transfer<'a> {
             if reply.status != 204 {
                 return Err(response_error(reply));
             }
+            self.client.progress();
         }
         self.ensure_active()
     }
@@ -411,7 +599,7 @@ impl<'a> Transfer<'a> {
         }
         let mut sizes = Vec::new();
         for candidate in candidates {
-            if let Some(size) = self.cache.cas.stat_object(candidate)? {
+            if let Some(size) = self.cache.stat_object(candidate)? {
                 sizes.push((candidate.clone(), size));
             }
         }
@@ -437,7 +625,7 @@ impl<'a> Transfer<'a> {
             if let Err(error) = self.ensure_active() {
                 return Some(Err(error));
             }
-            match self.cache.cas.stat_object(h) {
+            match self.cache.stat_object(h) {
                 Ok(Some(_)) => None,
                 Ok(None) => Some(Ok(h.clone())),
                 Err(e) => Some(Err(SyncError::from(e))),
@@ -475,7 +663,7 @@ impl<'a> Transfer<'a> {
                         if hash(&bytes) != *target {
                             return Err(SyncError::new("transfer-target-mismatch", 502));
                         }
-                        self.cache.put(&bytes)?;
+                        self.store_download(target, &bytes)?;
                         self.client.verified(bytes.len() as u64);
                     }
                     Frame::Delta(recipe) => {
@@ -489,7 +677,7 @@ impl<'a> Transfer<'a> {
                             .collect::<Result<Vec<_>>>()?;
                         let bytes =
                             recipe.apply(&bases.iter().map(Vec::as_slice).collect::<Vec<_>>())?;
-                        self.cache.put(&bytes)?;
+                        self.store_download(target, &bytes)?;
                         self.client.verified(bytes.len() as u64);
                     }
                     Frame::FullRequired { hash, size } => {
@@ -552,7 +740,6 @@ impl<'a> Transfer<'a> {
             .iter()
             .map(|h| {
                 self.cache
-                    .cas
                     .open_object(h)?
                     .ok_or_else(|| SyncError::new("cached-object-missing", 409))
             })
@@ -569,7 +756,6 @@ impl<'a> Transfer<'a> {
             .collect::<Result<Vec<_>>>()?;
         let mut file = self
             .cache
-            .cas
             .open_object(target)?
             .ok_or_else(|| SyncError::new("cached-object-missing", 409))?;
         let started = std::time::Instant::now();
@@ -678,7 +864,6 @@ impl<'a> Transfer<'a> {
                         .iter()
                         .map(|b| {
                             self.cache
-                                .cas
                                 .open_object(&b.hash)?
                                 .ok_or_else(|| SyncError::new("cached-object-missing", 409))
                         })
@@ -689,9 +874,13 @@ impl<'a> Transfer<'a> {
                         self.ensure_active().map_err(|_| WireError("cancelled"))
                     })?;
                     temporary.seek(SeekFrom::Start(0))?;
-                    prepare_checked(&self.cache.cas, &mut temporary, target, size, &|| {
-                        self.ensure_active()
-                    })?;
+                    prepare_checked(
+                        self.destination(target, size)?,
+                        &mut temporary,
+                        target,
+                        size,
+                        &|| self.ensure_active(),
+                    )?;
                     let released = self.client.request(
                         Method::DELETE,
                         &path,
@@ -725,6 +914,7 @@ impl<'a> Transfer<'a> {
     }
     fn upload_large(&self, hash: &str, size: u64, base_candidates: &[String]) -> Result<()> {
         self.ensure_active()?;
+        let _activity = self.client.transferring();
         let cached: Option<(String, String)> = self
             .db
             .query_row("SELECT id,size FROM uploads WHERE hash=?1", [hash], |r| {
@@ -817,7 +1007,6 @@ impl<'a> Transfer<'a> {
         }
         let mut file = self
             .cache
-            .cas
             .open_object(hash)?
             .ok_or_else(|| SyncError::new("cached-object-missing", 409))?;
         let mut missing = (0..size.div_ceil(CHUNK as u64)).filter(|i| !verified.contains(i));
@@ -852,6 +1041,7 @@ impl<'a> Transfer<'a> {
                             if reply.status != 204 {
                                 return Err(response_error(reply));
                             }
+                            client.progress();
                             Ok(())
                         })
                     })
@@ -1022,6 +1212,7 @@ impl<'a> Transfer<'a> {
                 let stored = result.and_then(|(index, length, bytes)| {
                     let hash = self.cache.put(&bytes)?;
                     self.db.execute("INSERT INTO chunks VALUES(?1,?2,?3,?4) ON CONFLICT(target,part) DO UPDATE SET hash=excluded.hash,size=excluded.size",params![target,index as i64,hash,length as i64])?;
+                    self.client.progress();
                     Ok(())
                 });
                 if let Err(error) = stored {
@@ -1042,9 +1233,13 @@ impl<'a> Transfer<'a> {
             count: size.div_ceil(CHUNK as u64),
             chunk: std::io::Cursor::new(Vec::new()),
         };
-        prepare_checked(&self.cache.cas, &mut reader, target, size, &|| {
-            self.ensure_active()
-        })?;
+        prepare_checked(
+            self.destination(target, size)?,
+            &mut reader,
+            target,
+            size,
+            &|| self.ensure_active(),
+        )?;
         self.db
             .execute("DELETE FROM chunks WHERE target=?1", [target])?;
         Ok(())

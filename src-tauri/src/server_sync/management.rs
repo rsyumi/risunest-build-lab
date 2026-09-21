@@ -264,7 +264,7 @@ fn cache_object_hash(root: &Path, file: &Path) -> Option<String> {
         .components()
         .map(|part| part.as_os_str().to_str())
         .collect::<Option<Vec<_>>>()?;
-    if parts.len() != 4 || parts[0] != "assets-v2" || parts[1] != "objects" || parts[2].len() != 2 {
+    if parts.len() != 4 || parts[0] != "assets" || parts[1] != "objects" || parts[2].len() != 2 {
         return None;
     }
     let hash = format!("{}{}", parts[2], parts[3]);

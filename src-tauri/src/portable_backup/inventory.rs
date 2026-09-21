@@ -12,7 +12,7 @@ use crate::{
 use rusqlite::{params, OptionalExtension};
 use std::{fs, path::Path};
 
-const ROOTS: &[&str] = &["assets-v2/objects", "assets", "blobstore", "coldstorage"];
+const ROOTS: &[&str] = &["assets/objects"];
 
 impl Catalog {
     /// Caller holds the exclusive native file admission and a stable revision lease. Registered
@@ -84,7 +84,7 @@ impl Catalog {
                 let Some(hash)=hash.filter(|v|hash_valid(v)) else {
                     self.add_file(kind,&key,"{}",None,None,probe)?;continue;
                 };
-                let path=format!("assets-v2/objects/{}/{}",&hash[..2],&hash[2..]);
+                let path=format!("assets/objects/{}/{}",&hash[..2],&hash[2..]);
                 let physical:Option<(Vec<u8>,i64)>=self.db.query_row("SELECT object_hash,byte_length FROM physical_inventory WHERE path=?1",[&path],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
                 match physical {
                     Some((actual,bytes))=>{
@@ -105,7 +105,7 @@ impl Catalog {
             let page = store.query_asset_object_catalog(4096, cursor.as_deref())?;
             for object in page.items {
                 let path = format!(
-                    "assets-v2/objects/{}/{}",
+                    "assets/objects/{}/{}",
                     &object.object_hash[..2],
                     &object.object_hash[2..]
                 );
@@ -173,7 +173,7 @@ impl Catalog {
                 .ok_or(Error::Invalid("non-Unicode source file name"))?
                 .replace('\\', "/");
             let cas_hash = relative
-                .strip_prefix("assets-v2/objects/")
+                .strip_prefix("assets/objects/")
                 .and_then(|tail| {
                     let (first, last) = tail.split_once('/')?;
                     let hash = format!("{first}{last}");

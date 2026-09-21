@@ -363,7 +363,6 @@ fn derive_json_columns(transaction: &Connection, staging: &str, table: &str) -> 
 fn keep_single(transaction: &Connection, staging: &str, table: &str) -> StoreResult<()> {
     let names: &[&str] = match table {
         "root" => &["root"],
-        "authority" => &["asset_repository_authority"],
         _ => return Err(validation(format!("{table} is not a single-record table"))),
     };
     for name in names {
@@ -453,65 +452,6 @@ fn adopt_stored_payload(
         ),
     )?;
     Ok(())
-}
-
-/// Settles a storage authority by re-examining the aliases that are actually stored. The
-/// compatibility hash is recomputed from those aliases, never declared.
-fn settle_authority(transaction: &Connection, staging: &str, subject: &str) -> StoreResult<()> {
-    let table = match subject {
-        "asset" => "asset_repository_authority",
-        _ => return Err(validation(format!("{subject} is not a storage authority"))),
-    };
-    let migration_id: String = transaction
-        .query_row(
-            &format!("SELECT json_extract(value,'$.migrationId') FROM {table} WHERE generation=?1"),
-            [staging],
-            |row| row.get::<_, Option<String>>(0),
-        )
-        .map_err(StoreError::from)?
-        .unwrap_or_else(|| format!("data-health-{}", uuid::Uuid::new_v4()));
-    let hash = alias_compatibility_hash(transaction, staging)?;
-    let value = serde_json::json!({
-        "format": "v2",
-        "migrationId": migration_id,
-        "compatibilityHash": hash,
-    });
-    transaction.execute(
-        &format!("UPDATE {table} SET value=?2 WHERE generation=?1"),
-        rusqlite::params![staging, serde_json::to_string(&value)?],
-    )?;
-    Ok(())
-}
-
-/// Digest of the alias set a generation registers. Two libraries with the same aliases settle to
-/// the same value, which is what the authority records.
-fn alias_compatibility_hash(transaction: &Connection, staging: &str) -> StoreResult<String> {
-    use sha2::{Digest, Sha256};
-    let mut digest = Sha256::new();
-    for (sql, label) in [(
-        "SELECT kind,logical_key,object_hash,size FROM asset_aliases WHERE generation=?1 ORDER BY kind,logical_key",
-        "asset",
-    )] {
-        digest.update(label.as_bytes());
-        let mut statement = transaction.prepare(sql)?;
-        let mut rows = statement.query([staging])?;
-        while let Some(row) = rows.next()? {
-            for index in 0..4 {
-                digest.update(
-                    match row.get_ref(index)? {
-                        ValueRef::Null => String::new(),
-                        ValueRef::Integer(value) => value.to_string(),
-                        ValueRef::Real(value) => value.to_string(),
-                        ValueRef::Text(value) => String::from_utf8_lossy(value).into_owned(),
-                        ValueRef::Blob(_) => "blob".to_owned(),
-                    }
-                    .as_bytes(),
-                );
-                digest.update([0]);
-            }
-        }
-    }
-    Ok(hex::encode(digest.finalize()))
 }
 
 /// Raw stored columns of one row, in the table's own column order.
@@ -707,9 +647,6 @@ impl PersistentStore {
                 }
                 RepairAction::RecoverOrphans { table } => {
                     recover_orphans(&transaction, staging, table, now_ms)?
-                }
-                RepairAction::SettleAuthority { subject } => {
-                    settle_authority(&transaction, staging, subject)?
                 }
             }
         }

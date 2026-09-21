@@ -1,7 +1,7 @@
 <script lang="ts">
     import { onMount } from 'svelte'
     import { language } from 'src/lang'
-    import Button from 'src/lib/UI/GUI/Button.svelte'
+    import SettingButton from '../RisuNest/SettingButton.svelte'
     import SettingGroup from '../RisuNest/SettingGroup.svelte'
     import SettingRow from '../RisuNest/SettingRow.svelte'
     import SettingToggle from '../RisuNest/SettingToggle.svelte'
@@ -69,25 +69,24 @@
             onchange={setAutomatic} />
     </SettingRow>
     <SettingRow label={text.currentVersion}>
-        <span class="font-mono text-sm">{$appUpdateState.environment?.currentVersion ?? '…'}</span>
+        <span class="text-sm">{$appUpdateState.environment?.currentVersion ?? language.loading}</span>
     </SettingRow>
     <SettingRow label={text.installMethod}>
-        <span class="text-sm text-textcolor2">{text.strategies[$appUpdateState.environment?.installStrategy ?? 'disabled']}</span>
+        <span class="text-sm">{text.strategies[$appUpdateState.environment?.installStrategy ?? 'disabled']}</span>
     </SettingRow>
     <SettingRow label={text.lastChecked}>
-        <span class="text-sm text-textcolor2">{checkedAt(settings.lastCheckedAt)}</span>
-        <Button size="sm" disabled={$appUpdateState.phase === 'checking'} onclick={() => void checkForAppUpdate(true)}>
-            {$appUpdateState.phase === 'checking' ? text.checking : text.checkNow}
-        </Button>
+        <span class="text-sm">{checkedAt(settings.lastCheckedAt)}</span>
+        <SettingButton busy={$appUpdateState.phase === 'checking'} onclick={() => void checkForAppUpdate(true)}>{text.checkNow}</SettingButton>
     </SettingRow>
     {#if settings.skippedVersion}
-        <SettingRow label={text.skippedVersion} help={settings.skippedVersion}>
-            <Button styled="outlined" size="sm" onclick={clearSkipped}>{text.clearSkipped}</Button>
+        <SettingRow label={text.skippedVersion}>
+            <span class="text-sm">{settings.skippedVersion}</span>
+            <SettingButton variant="secondary" onclick={clearSkipped}>{text.clearSkipped}</SettingButton>
         </SettingRow>
     {/if}
     {#if $appUpdateState.update}
         <SettingRow label={text.releasePage}>
-            <Button styled="outlined" size="sm" onclick={() => openURL($appUpdateState.update!.releasePage)}>{text.openRelease}</Button>
+            <SettingButton variant="secondary" onclick={() => openURL($appUpdateState.update!.releasePage)}>{text.openRelease}</SettingButton>
         </SettingRow>
     {/if}
     {#if settingsError}

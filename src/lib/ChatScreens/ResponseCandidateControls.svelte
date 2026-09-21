@@ -27,11 +27,11 @@
 <button
     disabled={busy || (!greeting && currentPage <= 1)}
     title={language.previousResponseCandidate}
-    class="flex items-center p-1 hover:text-blue-500 disabled:opacity-30 transition-colors button-icon-unreroll"
+    class="flex items-center hover:text-blue-500 disabled:opacity-30 transition-colors button-icon-unreroll"
     class:dyna-icon={dynamic}
     onclick={previous}><ArrowLeft size={22} /></button
 >
-{#if showPages}
+{#if showPages && totalPages > 1}
     <span
         class="flex items-center text-xs text-textcolor2 tabular-nums"
         class:dyna-icon={dynamic}
@@ -41,7 +41,7 @@
 <button
     disabled={busy}
     title={language.nextResponseCandidate}
-    class="flex items-center p-1 hover:text-blue-500 disabled:opacity-30 transition-colors"
+    class="flex items-center hover:text-blue-500 disabled:opacity-30 transition-colors"
     class:button-icon-reroll={greeting}
     class:dyna-icon={dynamic}
     onclick={next}><ArrowRight size={22} /></button
@@ -50,7 +50,7 @@
     <button
         disabled={busy}
         title={language.newResponseCandidate}
-        class="flex items-center p-1 hover:text-blue-500 disabled:opacity-30 transition-colors button-icon-reroll"
+        class="flex items-center hover:text-blue-500 disabled:opacity-30 transition-colors button-icon-reroll"
         class:dyna-icon={dynamic}
         onclick={generate}><RefreshCcwIcon size={20} /></button
     >

@@ -6,3 +6,4 @@ pub mod tui;
 pub mod update;
 
 pub type Result<T> = std::result::Result<T, String>;
+pub mod removal;

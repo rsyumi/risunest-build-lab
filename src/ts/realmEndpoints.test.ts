@@ -1,11 +1,7 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { classifyTestRequest } from '../../tests/support/testNetwork'
+import { describe, expect, it } from 'vitest'
 import { isRealmUrl, REALM_BLOCKED_URL_PATTERNS } from '../../scripts/realmBlocklist.mjs'
 import { REALM_HUB_URL, REALM_NIGHTLY_HUB_URL, REALM_SITE_URL } from './realmEndpoints'
-
-afterEach(() => {
-    vi.unstubAllGlobals()
-    vi.restoreAllMocks()
-})
 
 describe('isRealmUrl', () => {
     it.each([
@@ -60,46 +56,12 @@ describe('REALM_BLOCKED_URL_PATTERNS', () => {
     })
 })
 
-describe('vitest Realm fetch guard', () => {
-    it('throws before the request leaves the test', () => {
-        expect(() => fetch(`${REALM_HUB_URL}/realm/search`)).toThrow(/RisuRealm/)
-    })
-
-    it('inspects URL and Request inputs, not just strings', () => {
-        expect(() => fetch(new URL(`${REALM_SITE_URL}/upload`))).toThrow(/RisuRealm/)
-        expect(() => fetch(new Request(`${REALM_HUB_URL}/hub/info/id`))).toThrow(/RisuRealm/)
-    })
-
-    it('reports the offending URL on the console even when the caller swallows the error', () => {
-        const error = vi.spyOn(console, 'error').mockImplementation(() => {})
-        expect(() => fetch(`${REALM_HUB_URL}/realm/search`)).toThrow()
-        expect(error).toHaveBeenCalledWith(expect.stringContaining(`${REALM_HUB_URL}/realm/search`))
-    })
-
-    it('survives a test that stubs and then unstubs fetch', () => {
-        vi.stubGlobal('fetch', vi.fn())
-        vi.unstubAllGlobals()
-        expect(() => fetch(`${REALM_HUB_URL}/realm/search`)).toThrow(/RisuRealm/)
-    })
-
-    it('also stops happy-dom iframe navigation, which bypasses globalThis.fetch', async () => {
-        const error = vi.spyOn(console, 'error').mockImplementation(() => {})
-        // happy-dom reports the failed navigation on the console it captured at
-        // environment setup, which is not the object `vi.spyOn(console, ...)` patches.
-        // Keep that expected line out of a passing run.
-        vi.spyOn(process.stderr, 'write').mockImplementation(() => true)
-        const frame = document.createElement('iframe')
-        const outcome = new Promise<string>((resolve) => {
-            frame.addEventListener('load', () => resolve('load'))
-            frame.addEventListener('error', () => resolve('error'))
-        })
-        frame.src = `${REALM_HUB_URL}/realm/guard-probe`
-        document.body.appendChild(frame)
-        try {
-            await expect(outcome).resolves.toBe('error')
-            expect(error).toHaveBeenCalledWith(expect.stringContaining(`${REALM_HUB_URL}/realm/guard-probe`))
-        } finally {
-            frame.remove()
-        }
+describe('Realm request policy inputs', () => {
+    it('rejects strings, URLs and Requests before dispatch', () => {
+        for (const input of [
+            `${REALM_HUB_URL}/realm/search`,
+            new URL(`${REALM_SITE_URL}/upload`),
+            new Request(`${REALM_HUB_URL}/hub/info/id`),
+        ]) expect(classifyTestRequest(input, new Set())).toContain('RisuRealm')
     })
 })

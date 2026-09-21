@@ -1,13 +1,10 @@
-use super::{
-    encode_inlay_image, write_inlay_image_with_options, EncodedInlayImage, InlayEncodeOptions,
-    InlayImageMetadata,
-};
+use super::{encode_inlay_image, EncodedInlayImage, InlayEncodeOptions, InlayImageMetadata};
 use crate::persistent_store::PersistentStoreState;
 use std::{
     collections::HashMap,
     fs,
     io::{Read, Seek, SeekFrom, Write},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{Mutex, MutexGuard},
 };
 use tauri::{AppHandle, Manager};
@@ -671,69 +668,6 @@ pub(crate) async fn native_media_encode_inlay_finish(
 }
 
 #[tauri::command(async)]
-pub(crate) async fn native_media_write_inlay_finish(
-    app: AppHandle,
-    upload_id: String,
-    id: String,
-    name: String,
-    options: Option<InlayEncodeOptions>,
-) -> Result<InlayImageMetadata, String> {
-    let cleanup_app = app.clone();
-    let cleanup_id = upload_id.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        app.state::<crate::NativeStartupState>().ensure_ready()?;
-        let _operation = app
-            .state::<PersistentStoreState>()
-            .admit_renderer_operation()
-            .map_err(|error| error.to_string())?;
-        let state = app.state::<NativeMediaIpcState>();
-        let input = state
-            .pool
-            .lock()
-            .map_err(|error| format!("native media transfer mutex poisoned: {error}"))?
-            .begin_uploaded_processing(&upload_id)?;
-        let _admission = state.admit_processing(&upload_id)?;
-        let (input, data) = match read_processing_input(input) {
-            Ok(value) => value,
-            Err(error) => {
-                if let Ok(mut pool) = state.pool.lock() {
-                    pool.finish_processing(&upload_id);
-                }
-                return Err(error);
-            }
-        };
-        let result = (|| {
-            drop(input.file);
-            let root = crate::app_data_root::resolve(&app).map_err(|error| {
-                format!("failed to resolve application data directory: {error}")
-            })?;
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                write_inlay_image_with_options(&root, &id, &data, &name, options)
-            }))
-            .unwrap_or_else(|_| Err("native Inlay writer panicked".to_owned()))
-        })();
-        if let Ok(mut pool) = state.pool.lock() {
-            pool.finish_processing(&upload_id);
-        }
-        result
-    })
-    .await;
-    match result {
-        Ok(result) => result,
-        Err(error) => {
-            if let Some(state) = cleanup_app.try_state::<NativeMediaIpcState>() {
-                if let Ok(mut pool) = state.pool.lock() {
-                    pool.finish_processing(&cleanup_id);
-                }
-            }
-            Err(format!(
-                "failed to join native Inlay streamed writer: {error}"
-            ))
-        }
-    }
-}
-
-#[tauri::command(async)]
 pub(crate) async fn native_media_inlay_output_read(
     app: AppHandle,
     output_id: String,
@@ -802,33 +736,6 @@ pub(super) fn encode_direct(
         }
     };
     finish_encoded_result(state, output_id, generation, encoded)
-}
-
-pub(super) fn write_direct(
-    state: &NativeMediaIpcState,
-    root: &Path,
-    id: &str,
-    data: &[u8],
-    name: &str,
-    options: Option<InlayEncodeOptions>,
-) -> Result<InlayImageMetadata, String> {
-    if data.len() > NATIVE_MEDIA_IPC_CHUNK_BYTES {
-        return Err("native Inlay direct writer input exceeds one IPC chunk".to_owned());
-    }
-    let (processing_id, _) = state
-        .pool
-        .lock()
-        .map_err(|error| format!("native media transfer mutex poisoned: {error}"))?
-        .begin_direct_processing(data.len() as u64)?;
-    let _admission = state.admit_processing(&processing_id)?;
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        write_inlay_image_with_options(root, id, data, name, options)
-    }))
-    .unwrap_or_else(|_| Err("native Inlay writer panicked".to_owned()));
-    if let Ok(mut pool) = state.pool.lock() {
-        pool.finish_processing(&processing_id);
-    }
-    result
 }
 
 #[cfg(test)]

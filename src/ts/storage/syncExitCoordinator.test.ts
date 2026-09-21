@@ -197,16 +197,41 @@ describe('sync exit coordinator', () => {
         expect(h.coordinator.snapshot()).toMatchObject({ phase: 'remote-delayed' })
         expect(h.coordinator.decide('wait')).toBe(true)
         expect(adapter.drain).toHaveBeenCalledOnce()
-        await vi.waitFor(() => expect(h.coordinator.snapshot()).toMatchObject({
-            phase: 'syncing',
-        }))
-        await vi.advanceTimersByTimeAsync(5_000)
-        expect(h.coordinator.snapshot()).toMatchObject({ phase: 'remote-delayed' })
+        await vi.advanceTimersByTimeAsync(60_000)
+        expect(h.coordinator.snapshot()).toMatchObject({ phase: 'remote-waiting' })
         expect(adapter.drain).toHaveBeenCalledOnce()
 
         pending.resolve({ kind: 'complete' })
         await expect(exit).resolves.toBe('exit')
         vi.useRealTimers()
+    })
+
+    it('shows a failure that arrives after choosing to keep waiting', async () => {
+        vi.useFakeTimers()
+        try {
+            const pending = deferred<{ kind: 'blocked'; reason: string }>()
+            const adapter = {
+                id: 'server',
+                drain: vi.fn(() => pending.promise),
+                cancel: vi.fn(async () => {}),
+            }
+            const h = harness(adapter)
+            const exit = h.coordinator.requestExit()
+            await vi.advanceTimersByTimeAsync(5_000)
+            h.coordinator.decide('wait')
+            await vi.advanceTimersByTimeAsync(60_000)
+            expect(h.coordinator.snapshot()).toMatchObject({ phase: 'remote-waiting' })
+            pending.resolve({ kind: 'blocked', reason: 'server-sync-failed' })
+            await vi.advanceTimersByTimeAsync(0)
+            expect(h.coordinator.snapshot()).toMatchObject({
+                phase: 'remote-blocked', reason: 'server-sync-failed',
+            })
+            h.coordinator.decide('cancel-exit')
+            await expect(exit).resolves.toBe('cancelled')
+            expect(adapter.cancel).toHaveBeenCalledOnce()
+        } finally {
+            vi.useRealTimers()
+        }
     })
 
     it('keeps blocked choices active when a delayed drain settles', async () => {
@@ -262,6 +287,33 @@ describe('sync exit coordinator', () => {
             vi.useRealTimers()
         },
     )
+
+    it.each([
+        ['exit-unsynced', 'exit'],
+        ['cancel-exit', 'cancelled'],
+    ] as const)('allows %s after choosing to keep waiting', async (choice, expected) => {
+        vi.useFakeTimers()
+        try {
+            const pending = deferred<{ kind: 'complete' }>()
+            const adapter = {
+                id: 'server',
+                drain: vi.fn(() => pending.promise),
+                cancel: vi.fn(async () => {}),
+            }
+            const h = harness(adapter)
+            const exit = h.coordinator.requestExit()
+            await vi.advanceTimersByTimeAsync(5_000)
+            h.coordinator.decide('wait')
+            await vi.advanceTimersByTimeAsync(60_000)
+            expect(h.coordinator.decide(choice)).toBe(true)
+            await expect(exit).resolves.toBe(expected)
+            expect(adapter.drain).toHaveBeenCalledOnce()
+            expect(adapter.cancel).toHaveBeenCalledExactlyOnceWith(choice)
+            expect(h.fence.release).toHaveBeenCalledOnce()
+        } finally {
+            vi.useRealTimers()
+        }
+    })
 
     it('retries a blocked remote drain without recapturing an older target', async () => {
         const adapter = {

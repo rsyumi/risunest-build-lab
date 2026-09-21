@@ -9,5 +9,3 @@
 export const REALM_HUB_URL = 'https://realm-blocked.invalid'
 export const REALM_NIGHTLY_HUB_URL = 'https://realm-blocked.invalid'
 export const REALM_SITE_URL = 'https://realm-blocked.invalid'
-// Use an absolute address to avoid the Node server's relative hub proxy route.
-export const REALM_NODE_PROXY_BASE = 'https://realm-blocked.invalid'

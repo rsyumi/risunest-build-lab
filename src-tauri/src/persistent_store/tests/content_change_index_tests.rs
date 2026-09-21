@@ -305,11 +305,6 @@ impl crate::local_backup::CancellationProbe for Never {
 
 fn capture_fixture() -> (tempfile::TempDir, PersistentStore) {
     let (directory, store, _) = open_fixture();
-    let authority = json!({"format": "v2", "migrationId": "synthetic-index", "compatibilityHash": "a".repeat(64)});
-    store.connection.execute(
-        "UPDATE asset_repository_authority SET value=?2 WHERE generation=?1",
-        params![active_generation(&store.connection).unwrap(), authority.to_string()],
-    ).unwrap();
     (directory, store)
 }
 

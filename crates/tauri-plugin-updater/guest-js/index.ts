@@ -22,10 +22,6 @@ interface CheckOptions {
    * Target identifier for the running application. This is sent to the backend.
    */
   target?: string
-  /**
-   * Allow downgrades to previous versions by not checking if the current version is greater than the available version.
-   */
-  allowDowngrades?: boolean
 }
 
 /** Options used when downloading an update */
@@ -38,6 +34,14 @@ interface DownloadOptions {
    * Timeout in milliseconds
    */
   timeout?: number
+}
+
+/** Options used when installing an update */
+interface InstallOptions {
+  /**
+   * If the Windows installer should restart the app after installed, default is `true`
+   */
+  restartAfterInstall?: boolean
 }
 
 interface UpdateMetadata {
@@ -76,7 +80,7 @@ class Update extends Resource {
     this.rawJson = metadata.rawJson
   }
 
-  /** Download the updater package */
+  /** Download the updater package. Call {@linkcode install} later to install it */
   async download(
     onEvent?: (progress: DownloadEvent) => void,
     options?: DownloadOptions
@@ -94,25 +98,40 @@ class Update extends Resource {
     this.downloadedBytes = new Resource(downloadedBytesRid)
   }
 
-  /** Install downloaded updater package */
-  async install(): Promise<void> {
+  /**
+   * Install downloaded updater package. Must be called after {@linkcode download}.
+   *
+   * ## Platform-specific:
+   *
+   * - **Windows:** This function exits the app after launching the updater installer successfully
+   * - **macOS / Linux:** You need to relaunch the app to run the newly install version
+   */
+  async install(options?: InstallOptions): Promise<void> {
     if (!this.downloadedBytes) {
       throw new Error('Update.install called before Update.download')
     }
 
     await invoke('plugin:updater|install', {
       updateRid: this.rid,
-      bytesRid: this.downloadedBytes.rid
+      bytesRid: this.downloadedBytes.rid,
+      ...options
     })
 
     // Don't need to call close, we did it in rust side already
     this.downloadedBytes = undefined
   }
 
-  /** Downloads the updater package and installs it */
+  /**
+   * Downloads the updater package and installs it
+   *
+   * ## Platform-specific:
+   *
+   * - **Windows:** This function exits the app after launching the updater installer successfully
+   * - **macOS / Linux:** You need to relaunch the app to run the newly install version
+   */
   async downloadAndInstall(
     onEvent?: (progress: DownloadEvent) => void,
-    options?: DownloadOptions
+    options?: DownloadOptions & InstallOptions
   ): Promise<void> {
     convertToRustHeaders(options)
     const channel = new Channel<DownloadEvent>()

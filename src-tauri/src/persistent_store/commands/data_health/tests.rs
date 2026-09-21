@@ -174,8 +174,6 @@ fn a_damaged_library_reports_every_finding_up_to_the_bound() {
     let (_directory, state, _) = damaged_payload_fixture();
     let health = DataHealthState::default();
     let quick = quick_scan(&state, &health).unwrap();
-    // The fresh store still carries its legacy storage authorities, which block a backup.
-    assert!(has(&quick, codes::AUTHORITY_INCOMPLETE));
     assert_eq!(
         quick.counts.blocking,
         quick
@@ -187,18 +185,22 @@ fn a_damaged_library_reports_every_finding_up_to_the_bound() {
     assert_eq!(quick.omitted, 0);
 }
 
-/// The candidates that settle the two storage authorities. The fixture also reports references
-/// the empty root has always named, which this leaves alone.
-fn authority_selection(state: &PersistentStoreState) -> Vec<String> {
+/// The preferred repair for the fixture's alias whose stored bytes no longer match its digest.
+fn damaged_alias_selection(
+    state: &PersistentStoreState,
+    health: &DataHealthState,
+) -> Vec<String> {
+    deep_to_completion(state, health);
     let guard = state.admit_renderer_operation().unwrap();
     let (_, diagnosis) = current_diagnosis(state, &guard).unwrap();
     repair::plan(&diagnosis)
         .into_iter()
         .filter(|candidate| {
-            matches!(
-                candidate.action,
-                crate::data_health::repair::RepairAction::SettleAuthority { .. }
-            )
+            candidate.preferred
+                && matches!(
+                    candidate.action,
+                    crate::data_health::repair::RepairAction::DropAlias { .. }
+                )
         })
         .map(|candidate| candidate.id)
         .collect()
@@ -208,15 +210,15 @@ fn authority_selection(state: &PersistentStoreState) -> Vec<String> {
 fn a_repair_is_selected_against_the_diagnosis_and_reported_with_a_fresh_one() {
     let (directory, state, _) = damaged_payload_fixture();
     let health = DataHealthState::default();
-    let before = quick_scan(&state, &health).unwrap();
-    assert!(has(&before, codes::AUTHORITY_INCOMPLETE));
+    let before = deep_to_completion(&state, &health);
+    assert!(has(&before, codes::ALIAS_OBJECT_MISMATCH));
 
-    let selection = authority_selection(&state);
-    assert_eq!(selection.len(), 1, "one for the storage authority");
+    let selection = damaged_alias_selection(&state, &health);
+    assert_eq!(selection.len(), 1, "one for the damaged alias");
     let applied = apply_repair(&state, &health, &selection, false).unwrap();
     assert_eq!(applied.revision, before.revision + 1);
     assert!(
-        !has(&applied.result, codes::AUTHORITY_INCOMPLETE),
+        !has(&applied.result, codes::ALIAS_OBJECT_MISMATCH),
         "the reported diagnosis is the repaired library: {:?}",
         applied.result.items
     );
@@ -236,14 +238,17 @@ fn a_repair_is_selected_against_the_diagnosis_and_reported_with_a_fresh_one() {
 fn an_undo_returns_the_library_and_drops_the_repair_it_replayed() {
     let (_directory, state, _) = damaged_payload_fixture();
     let health = DataHealthState::default();
-    quick_scan(&state, &health).unwrap();
-    let applied = apply_repair(&state, &health, &authority_selection(&state), false).unwrap();
+    let selection = damaged_alias_selection(&state, &health);
+    let applied = apply_repair(&state, &health, &selection, false).unwrap();
 
     let undone = undo_repair(&state, &health, &applied.journal_id).unwrap();
     assert_eq!(undone.revision, applied.revision + 1);
     assert!(undone.skipped.is_empty());
     assert!(
-        has(&undone.result, codes::AUTHORITY_INCOMPLETE),
+        has(
+            &deep_to_completion(&state, &health),
+            codes::ALIAS_OBJECT_MISMATCH
+        ),
         "the library is what it was before the repair"
     );
     assert!(journals(&state).unwrap().is_empty());
@@ -253,8 +258,7 @@ fn an_undo_returns_the_library_and_drops_the_repair_it_replayed() {
 fn a_repair_selected_against_an_older_diagnosis_is_refused() {
     let (_directory, state, _) = damaged_payload_fixture();
     let health = DataHealthState::default();
-    quick_scan(&state, &health).unwrap();
-    let selection = authority_selection(&state);
+    let selection = damaged_alias_selection(&state, &health);
 
     let guard = state.admit_renderer_operation().unwrap();
     with_store_mutex_mut_admitted(&state, &guard, |store| {
@@ -293,8 +297,8 @@ fn a_repair_needs_a_diagnosis_and_a_selection() {
 fn the_repair_keeps_a_snapshot_of_the_library_it_was_selected_against() {
     let (_directory, state, _) = damaged_payload_fixture();
     let health = DataHealthState::default();
-    quick_scan(&state, &health).unwrap();
-    let applied = apply_repair(&state, &health, &authority_selection(&state), true).unwrap();
+    let selection = damaged_alias_selection(&state, &health);
+    let applied = apply_repair(&state, &health, &selection, true).unwrap();
     let kept = applied.snapshot.expect("a snapshot was asked for");
     let guard = state.admit_renderer_operation().unwrap();
     let listed = with_store_mutex_admitted(&state, &guard, |store| store.snapshot_list()).unwrap();
@@ -305,8 +309,8 @@ fn the_repair_keeps_a_snapshot_of_the_library_it_was_selected_against() {
 fn the_journal_and_the_diagnosis_stay_in_the_working_folder() {
     let (directory, state, _) = damaged_payload_fixture();
     let health = DataHealthState::default();
-    quick_scan(&state, &health).unwrap();
-    apply_repair(&state, &health, &authority_selection(&state), false).unwrap();
+    let selection = damaged_alias_selection(&state, &health);
+    apply_repair(&state, &health, &selection, false).unwrap();
 
     let working = directory.path().join("persistent").join("data-health");
     assert!(working.join("result.json").exists());
@@ -374,8 +378,8 @@ fn a_registered_file_is_not_reported_as_unused() {
 fn a_backup_never_carries_the_diagnosis_or_a_repair_journal() {
     let (directory, state, _) = damaged_payload_fixture();
     let health = DataHealthState::default();
-    quick_scan(&state, &health).unwrap();
-    apply_repair(&state, &health, &authority_selection(&state), false).unwrap();
+    let selection = damaged_alias_selection(&state, &health);
+    apply_repair(&state, &health, &selection, false).unwrap();
 
     let guard = state.admit_renderer_operation().unwrap();
     let working = directory.path().join("persistent").join("data-health");

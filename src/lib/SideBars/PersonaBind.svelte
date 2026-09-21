@@ -48,7 +48,7 @@
         <ContactIcon size={16} class="shrink-0" />
         <span class="min-w-0 truncate text-sm">{label}</span>
         {#if bound?.note}
-            <span class="min-w-0 truncate text-xs opacity-60">({bound.note})</span>
+            <span class="min-w-0 truncate text-xs opacity-75">({bound.note})</span>
         {/if}
     </button>
 </div>

@@ -131,7 +131,13 @@ impl MyboxBudget {
                     (used, oldest.unwrap_or(state.now_ms).saturating_add(60_000), ErrorKind::RateLimited)
                 };
                 if used >= counter.limit(charge.plan) {
-                    let error = ProviderError { kind, http_status: None, retry_at_ms: Some(until) };
+                    let error = ProviderError {
+                        kind,
+                        http_status: None,
+                        retry_at_ms: Some(until),
+                        oauth_error: None,
+                        oauth_error_description: None,
+                    };
                     if denied.as_ref().is_none_or(|previous| previous.retry_at_ms < error.retry_at_ms) {
                         denied = Some(error);
                     }

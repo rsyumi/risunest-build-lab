@@ -1,6 +1,14 @@
+!ifndef RISUNEST_SYNC_DEFAULT_INSTALL_DIR
+  !define RISUNEST_SYNC_DEFAULT_INSTALL_DIR "$LOCALAPPDATA\RisuNest Sync"
+!endif
+!ifndef RISUNEST_SYNC_INSTALL_DIR
+  !define RISUNEST_SYNC_INSTALL_DIR "$LOCALAPPDATA\RisuNestSync"
+!endif
+
 !macro NSIS_HOOK_PREINSTALL
-  StrCmp $INSTDIR "$LOCALAPPDATA\RisuNest Sync" 0 sync_install_dir_ready
-  StrCpy $INSTDIR "$LOCALAPPDATA\RisuNestSync"
+  StrCmp $INSTDIR "${RISUNEST_SYNC_DEFAULT_INSTALL_DIR}" 0 sync_install_dir_ready
+  StrCpy $INSTDIR "${RISUNEST_SYNC_INSTALL_DIR}"
+  SetOutPath $INSTDIR
   sync_install_dir_ready:
   StrCpy $R7 ""
   IfFileExists "$INSTDIR\risunest-sync-manager.exe" 0 sync_prepare_done
@@ -74,29 +82,76 @@
 
 !macro NSIS_HOOK_PREUNINSTALL
   StrCpy $R7 ""
-  nsExec::ExecToStack '"$INSTDIR\risunest-sync-manager.exe" installer prepare'
+  ${If} $UpdateMode = 1
+    nsExec::ExecToStack '"$INSTDIR\risunest-sync-manager.exe" prepare-update'
+    Pop $0
+    Pop $1
+    StrCmp $0 "0" sync_uninstall_done sync_uninstall_failed
+  ${EndIf}
+  !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
+  InitPluginsDir
+  ClearErrors
+  CopyFiles /SILENT "$INSTDIR\risunest-sync-manager.exe" "$PLUGINSDIR\risunest-sync-remove.exe"
+  IfErrors sync_uninstall_failed
+  StrCpy $R9 "$LOCALAPPDATA\RisuNestSyncData"
+  ${un.GetParameters} $0
+  ReadEnvStr $1 RISUNEST_SYNC_UNINSTALL_DATA_DIR
+  ${If} $1 != ""
+    StrCpy $R9 $1
+  ${EndIf}
+  ClearErrors
+  ${un.GetOptions} $0 "/DELETEAPPDATA" $1
+  ${IfNot} ${Errors}
+    StrCpy $DeleteAppDataCheckboxState 1
+  ${EndIf}
+  ${If} $DeleteAppDataCheckboxState = 1
+    nsExec::ExecToStack '"$INSTDIR\risunest-sync-manager.exe" --data-dir "$R9" uninstall --dry-run --delete-data'
+  ${Else}
+    nsExec::ExecToStack '"$INSTDIR\risunest-sync-manager.exe" --data-dir "$R9" uninstall --dry-run'
+  ${EndIf}
+  Pop $0
+  Pop $1
+  StrCmp $0 "0" 0 sync_uninstall_failed
+  StrCpy $R7 ""
+  IfFileExists "$R9\risunest-sync-instance.json" 0 sync_uninstall_cleanup
+  nsExec::ExecToStack '"$INSTDIR\risunest-sync-manager.exe" --data-dir "$R9" installer prepare'
   Pop $0
   Pop $1
   StrCmp $0 "0" 0 sync_uninstall_failed
   StrCpy $R7 $1 64
   StrLen $2 $R7
   StrCmp $2 "64" 0 sync_uninstall_failed
-  nsExec::ExecToStack '"$INSTDIR\risunest-sync-manager.exe" uninstall lock-held'
+  sync_uninstall_cleanup:
+  nsExec::ExecToStack '"$INSTDIR\risunest-sync-manager.exe" --data-dir "$R9" uninstall lock-held'
   Pop $0
   Pop $1
-  StrCmp $0 "0" sync_uninstall_done
+  StrCmp $0 "0" 0 sync_uninstall_failed
+  ${If} $DeleteAppDataCheckboxState = 1
+    StrCmp $R7 "" sync_uninstall_delete_data
+    nsExec::ExecToStack '"$INSTDIR\risunest-sync-manager.exe" --data-dir "$R9" installer finish "$R7"'
+    Pop $0
+    Pop $1
+    StrCmp $0 "0" 0 sync_uninstall_failed
+    StrCpy $R7 ""
+    sync_uninstall_delete_data:
+    nsExec::ExecToStack '"$INSTDIR\risunest-sync-manager.exe" --data-dir "$R9" installer delete-data'
+    Pop $0
+    Pop $1
+    StrCmp $0 "0" 0 sync_uninstall_failed
+  ${EndIf}
+  Goto sync_uninstall_done
   sync_uninstall_failed:
   StrCmp $R7 "" sync_uninstall_cancel_done
-  CreateDirectory "$LOCALAPPDATA\RisuNestSyncData\manager-update"
-  FileOpen $0 "$LOCALAPPDATA\RisuNestSyncData\manager-update\installer-$R7.cancel" w
+  CreateDirectory "$R9\manager-update"
+  FileOpen $0 "$R9\manager-update\installer-$R7.cancel" w
   IfErrors sync_uninstall_cancel_done
   FileWrite $0 '{"cancel":true}'
   FileClose $0
   sync_uninstall_cancel_done:
-  DetailPrint "Server shutdown or startup removal failed. Server data was preserved."
+  DetailPrint "RisuNest Sync removal did not finish. Program files were preserved."
   IfSilent sync_uninstall_quiet sync_uninstall_interactive
   sync_uninstall_interactive:
-  MessageBox MB_OK|MB_ICONSTOP "Server shutdown or startup removal failed. Close the server and retry. Server data will be preserved."
+  MessageBox MB_OK|MB_ICONSTOP "RisuNest Sync removal did not finish. Close the app and retry. Program files were preserved."
   sync_uninstall_quiet:
   SetErrorLevel 1
   Abort
@@ -104,15 +159,31 @@
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL
+  ${If} $UpdateMode = 1
+    Goto sync_uninstall_finished
+  ${EndIf}
   StrCmp $R7 "" sync_uninstall_guard_done
-  CreateDirectory "$LOCALAPPDATA\RisuNestSyncData\manager-update"
-  FileOpen $0 "$LOCALAPPDATA\RisuNestSyncData\manager-update\installer-$R7.release" w
+  CreateDirectory "$R9\manager-update"
+  FileOpen $0 "$R9\manager-update\installer-$R7.release" w
   IfErrors sync_uninstall_guard_failed
   FileWrite $0 '{"release":true}'
   FileClose $0
-  Goto sync_uninstall_guard_done
+  StrCpy $R6 300
+  sync_uninstall_wait_guard:
+  IfFileExists "$R9\manager-update\installer-$R7.ready" 0 sync_uninstall_guard_done
+  Sleep 100
+  IntOp $R6 $R6 - 1
+  IntCmp $R6 0 sync_uninstall_guard_failed sync_uninstall_guard_failed sync_uninstall_wait_guard
   sync_uninstall_guard_failed:
   DetailPrint "The installer update lock could not be released."
   SetErrorLevel 1
+  Goto sync_uninstall_finished
   sync_uninstall_guard_done:
+  nsExec::ExecToStack '"$PLUGINSDIR\risunest-sync-remove.exe" --data-dir "$R9" --server "$INSTDIR\risunest-sync-server.exe" installer forget-removal'
+  Pop $0
+  Pop $1
+  StrCmp $0 "0" sync_uninstall_finished
+  DetailPrint "RisuNest Sync installation registration could not be removed."
+  SetErrorLevel 1
+  sync_uninstall_finished:
 !macroend

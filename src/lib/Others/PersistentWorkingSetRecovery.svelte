@@ -1,5 +1,6 @@
 <script lang="ts">
     import { language } from 'src/lang'
+    import SettingButton from 'src/lib/Setting/RisuNest/SettingButton.svelte'
     import {
         persistentWorkingSetRefreshRevision,
         retryCommittedWorkingSetRefresh,
@@ -44,7 +45,7 @@
 </script>
 
 {#if open}
-    <div class="fixed inset-0 z-[1100] flex items-center justify-center bg-darkbg/70 p-4">
+    <div class="fixed inset-0 z-work-dialog-recovery flex items-center justify-center bg-black/60 p-4">
         <div
             bind:this={panel}
             tabindex="-1"
@@ -52,25 +53,21 @@
             aria-modal="true"
             aria-label={title}
             data-testid="persistent-working-set-recovery"
-            class="flex w-full max-w-lg flex-col gap-4 rounded-lg border border-darkborderc bg-darkbg p-5 text-textcolor outline-hidden">
-                <h2 class="text-lg font-bold">{title}</h2>
-                <p class="text-sm text-textcolor2">{unknown
-                    ? language.risuNest.persistentData.confirmApplicationHelp
-                    : language.risuNest.persistentData.refreshHelp}</p>
-                {#if refreshFailed}
-                    <p role="alert" class="text-sm text-textcolor2">{unknown
-                        ? language.risuNest.persistentData.confirmApplicationFailed
-                        : language.risuNest.persistentData.refreshFailed}</p>
-                {/if}
-                <button
-                    type="button"
-                    disabled={refreshing}
-                    class="self-end rounded-md border border-darkborderc bg-darkbutton px-4 py-2 hover:bg-selected disabled:opacity-50"
-                    onclick={refresh}>
-                    {refreshing ? language.loading : unknown
-                        ? language.risuNest.persistentData.confirmApplication
-                        : language.risuNest.persistentData.refresh}
-                </button>
+            class="flex max-h-[90dvh] w-full max-w-lg flex-col gap-4 overflow-y-auto rounded-lg border border-darkborderc bg-darkbg p-5 text-textcolor outline-hidden">
+            <h2 class="text-lg font-bold">{title}</h2>
+            <p class="text-sm text-textcolor2">{unknown
+                ? language.risuNest.persistentData.confirmApplicationHelp
+                : language.risuNest.persistentData.refreshHelp}</p>
+            {#if refreshFailed}
+                <p role="alert" class="text-sm text-danger-400">{unknown
+                    ? language.risuNest.persistentData.confirmApplicationFailed
+                    : language.risuNest.persistentData.refreshFailed}</p>
+            {/if}
+            <SettingButton class="self-end" busy={refreshing} onclick={refresh}>
+                {unknown
+                    ? language.risuNest.persistentData.confirmApplication
+                    : language.risuNest.persistentData.refresh}
+            </SettingButton>
         </div>
     </div>
 {/if}

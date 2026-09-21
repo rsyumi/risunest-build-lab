@@ -8,12 +8,21 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 
 /// JSON/XML pages and heads are read into memory; anything larger is refused.
 pub(crate) const MAX_CONTROL_BODY: usize = 4 * 1024 * 1024;
+const MAX_OAUTH_ERROR_BODY: usize = 8 * 1024;
+
+#[derive(serde::Deserialize)]
+struct OAuthErrorResponse {
+    error: Option<String>,
+    error_description: Option<String>,
+}
 
 pub(crate) fn error(kind: ErrorKind, status: u16) -> ProviderError {
     ProviderError {
         kind,
         http_status: Some(status),
         retry_at_ms: None,
+        oauth_error: None,
+        oauth_error_description: None,
     }
 }
 fn io_error(cancel: &Cancellation) -> ProviderError {
@@ -38,6 +47,23 @@ pub(crate) async fn read_bounded(
         return Err(ProviderError::new(ErrorKind::Corrupt));
     }
     Ok(bytes)
+}
+
+pub(crate) async fn oauth_error_details(
+    body: &mut Pin<Box<dyn AsyncRead + Send>>,
+    cancel: &Cancellation,
+) -> (Option<String>, Option<String>) {
+    let bytes = read_bounded(body, MAX_OAUTH_ERROR_BODY, cancel).await.ok();
+    let Some(details) = bytes
+        .as_deref()
+        .and_then(|bytes| serde_json::from_slice::<OAuthErrorResponse>(bytes).ok())
+    else {
+        return (None, None);
+    };
+    (
+        details.error.filter(|value| !value.is_empty()),
+        details.error_description.filter(|value| !value.is_empty()),
+    )
 }
 
 /// Streams a body into the sink from offset 0 and finishes it with the hash of
@@ -137,6 +163,8 @@ pub(crate) fn classify_status(
         } else {
             None
         },
+        oauth_error: None,
+        oauth_error_description: None,
     }
 }
 

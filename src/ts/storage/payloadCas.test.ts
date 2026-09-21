@@ -64,7 +64,7 @@ describe('immutable payload CAS', () => {
         expect(prepared).toEqual({
             contentHash: 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
             byteSize: 3,
-            physicalKey: 'assets-v2/objects/ba/7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
+            physicalKey: 'assets/objects/ba/7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad',
             deduplicated: false,
         })
         expect(backend.values.get(prepared.physicalKey)).toEqual(

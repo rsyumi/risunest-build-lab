@@ -9,7 +9,7 @@ import {
 import { getDeviceMarkers, type DeviceMarkerStorage } from './deviceMarkers'
 
 export interface RisuNestDeviceSettings {
-    schema: 'risunest.device-settings/v2'
+    schema: 'risunest.device-settings/v1'
     performanceProfile: RuntimePerformanceProfile
     androidKeepAliveDuringGeneration: boolean
     nativeFileLogEnabled: boolean
@@ -24,7 +24,7 @@ export interface RisuNestDeviceSettings {
 const storageKey = 'risuNestDeviceSettings'
 
 const defaults: RisuNestDeviceSettings = {
-    schema: 'risunest.device-settings/v2',
+    schema: 'risunest.device-settings/v1',
     performanceProfile: 'normal',
     androidKeepAliveDuringGeneration: true,
     nativeFileLogEnabled: true,

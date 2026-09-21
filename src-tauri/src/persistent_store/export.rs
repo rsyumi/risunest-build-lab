@@ -1,7 +1,6 @@
 use super::owner_projection::OwnerManifestProjector;
 use super::{
-    compare_plugin_storage_keys, AssetAlias, AssetOwnerHead, AssetOwnerLocator,
-    AssetRepositoryAuthorityState, ReadTarget, StoreError,
+    compare_plugin_storage_keys, AssetAlias, AssetOwnerHead, AssetOwnerLocator, ReadTarget, StoreError,
     StoreResult,
 };
 use crate::asset_repository::owner_manifest_codec::OwnerManifestEntry;
@@ -35,7 +34,6 @@ pub(crate) struct PinnedLegacyBackupInventory {
     pub(crate) revision: i64,
     pub(crate) assets: Vec<AssetAlias>,
     pub(crate) owner_heads: Vec<AssetOwnerHead>,
-    pub(crate) asset_authority: AssetRepositoryAuthorityState,
 }
 
 pub(crate) fn pinned_legacy_backup_inventory(
@@ -46,7 +44,6 @@ pub(crate) fn pinned_legacy_backup_inventory(
         revision: target.revision,
         assets: super::query::list_asset_aliases(connection, target)?.value,
         owner_heads: super::query::list_asset_owner_heads(connection, target)?.value,
-        asset_authority: super::query::read_asset_repository_authority(connection, target)?.value,
     })
 }
 
@@ -1382,7 +1379,7 @@ mod tests {
     use super::*;
     use crate::asset_repository::{owner_manifest_codec, PayloadCas};
     use crate::persistent_store::{
-        AssetOwnerHead, AssetOwnerLocator, AssetRepositoryAuthorityState, PersistentStore,
+        AssetOwnerHead, AssetOwnerLocator, PersistentStore,
     };
     use flate2::read::GzDecoder;
     use serde_json::{json, Value};
@@ -1611,15 +1608,6 @@ mod tests {
                         0,
                     ),
                 ],
-            )
-            .unwrap();
-        store
-            .replace_put_asset_repository_authority(
-                &staging,
-                &AssetRepositoryAuthorityState::V2 {
-                    migration_id: "native-content-export-corpus".to_owned(),
-                    compatibility_hash: "ab".repeat(32),
-                },
             )
             .unwrap();
         let revision = store.replace_commit(&staging, Some(0)).unwrap().revision;

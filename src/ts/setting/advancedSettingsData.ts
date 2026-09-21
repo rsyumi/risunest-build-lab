@@ -1,6 +1,6 @@
 
 import type { SettingItem } from './types';
-import { isNodeServer, isTauri } from '../platform';
+import { isTauri } from '../platform';
 
 export const advancedSettingsItems: SettingItem[] = [
     { type: 'header', id: 'adv.header', labelKey: 'advancedSettings', options: { level: 'h2' }, classes: '!mb-0' },
@@ -94,10 +94,10 @@ export const advancedSettingsItems: SettingItem[] = [
         }
     },
 
-    // Request Location (Non-Node/Tauri)
+    // Request Location (Web)
     {
         id: 'adv.reqLoc', type: 'segmented', labelKey: 'requestLocation', bindKey: 'requestLocation',
-        condition: () => !isNodeServer && !isTauri,
+        condition: () => !isTauri,
         options: {
             segmentOptions: [
                 { value: '', label: 'Default' },
@@ -179,14 +179,14 @@ export const advancedSettingsItems: SettingItem[] = [
     { id: 'adv.devTools', type: 'check', labelKey: 'enableDevTools', bindKey: 'enableDevTools', classes: 'mt-4' },
     { id: 'adv.scrollToActive', type: 'check', labelKey: 'enableScrollToActiveChar', bindKey: 'enableScrollToActiveChar', helpKey: 'enableScrollToActiveChar', classes: 'mt-4' },
 
-    // Node/Tauri Specific
+    // Tauri Specific
     {
         id: 'adv.promptInfo', type: 'check', labelKey: 'promptInfoInsideChat', bindKey: 'promptInfoInsideChat',
-        condition: () => isNodeServer || isTauri, helpKey: 'promptInfoInsideChatDesc', classes: 'mt-4'
+        condition: () => isTauri, helpKey: 'promptInfoInsideChatDesc', classes: 'mt-4'
     },
     {
         id: 'adv.promptTextInfo', type: 'check', labelKey: 'promptTextInfoInsideChat', bindKey: 'promptTextInfoInsideChat',
-        condition: (ctx) => (isNodeServer || isTauri) && ctx.db.promptInfoInsideChat, classes: 'mt-4'
+        condition: (ctx) => isTauri && ctx.db.promptInfoInsideChat, classes: 'mt-4'
     },
     {
         id: 'adv.remoteSave', type: 'check', labelKey: 'enableRemoteSaving', bindKey: 'enableRemoteSaving',

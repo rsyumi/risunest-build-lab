@@ -11,7 +11,7 @@
     <div class="loading-indicator" class:compact role="status" aria-live="polite">
         <span class="loading-ring" aria-hidden="true"></span>
         <span class="loading-copy">
-            <span>{label}</span>
+            <span class="text-base">{label}</span>
             {#if detail}
                 <span class="loading-detail">{detail}</span>
             {/if}

@@ -100,10 +100,10 @@ fn descriptor_content_and_missing_dependency_cannot_be_forged() {
     if let RecordVersion::Live { object_hash, .. } = &mut c.changes[0].after {
         *object_hash = hash(b"wrong");
     }
-    assert_eq!(
-        store.stage_changes(&a, &c).err().unwrap().code,
-        "descriptor-object-mismatch"
-    );
+    let rejection = store.stage_changes(&a, &c).err().unwrap();
+    assert_eq!(rejection.code, "descriptor-object-mismatch");
+    // The reply names the record the page failed on, not only the reason.
+    assert_eq!(rejection.key.as_deref(), Some("child"));
     let (root, pages) = build_reference_tree(&[hash(b"missing dependency")], false).unwrap();
     for (digest, bytes) in pages {
         store.put_object(&a, &digest, &bytes).unwrap();
@@ -119,8 +119,43 @@ fn descriptor_content_and_missing_dependency_cannot_be_forged() {
         object_hash: descriptor.object_hash,
         descriptor_hash: Some(digest),
     };
-    assert_eq!(
-        store.stage_changes(&a, &c).err().unwrap().code,
-        "missing-dependency"
-    );
+    let rejection = store.stage_changes(&a, &c).err().unwrap();
+    assert_eq!(rejection.code, "missing-dependency");
+    assert_eq!(rejection.key.as_deref(), Some("child"));
+}
+
+#[test]
+fn inline_dependencies_survive_lease_expiry_and_inline_relations_are_enforced() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::init(dir.path()).unwrap();
+    let device = device(&store);
+    let body = b"synthetic inline body";
+    let asset = b"synthetic inline asset";
+    store.put_object(&device, &hash(body), body).unwrap();
+    let descriptor = RecordDescriptor {
+        dependencies: vec![hash(asset)],
+        relations: vec!["parent".into()],
+        ..RecordDescriptor::content(hash(body))
+    };
+    let bytes = descriptor.bytes().unwrap();
+    store.put_object(&device, &hash(&bytes), &bytes).unwrap();
+    let mut change = ChangeSet {
+        changes: vec![RecordChange { domain: Domain::Library, key: "child".into(), before: RecordVersion::Absent,
+            after: RecordVersion::Live { object_hash: hash(body), descriptor_hash: Some(hash(&bytes)) } }],
+        read_fences: vec![], scope_fences: vec![],
+    };
+    assert_eq!(store.stage_changes(&device, &change).err().unwrap().code, "missing-dependency");
+    store.put_object(&device, &hash(asset), asset).unwrap();
+    let head = store.head().unwrap();
+    let intent = stage(&store, &device, &head, 1, &change);
+    assert_eq!(store.commit(&device, &intent, &head.etag()).unwrap().error.as_deref(), Some("missing-related-record"));
+    change.changes.push(changes("parent", body).changes.remove(0));
+    let intent = stage(&store, &device, &head, 2, &change);
+    assert_eq!(store.commit(&device, &intent, &head.etag()).unwrap().status, TerminalStatus::Committed);
+    let db = rusqlite::Connection::open(dir.path().join("metadata.sqlite")).unwrap();
+    db.execute("DELETE FROM object_leases", []).unwrap();
+    store.maintain().unwrap();
+    drop(store);
+    let store = Store::open(dir.path()).unwrap();
+    assert_eq!(store.get_object(&hash(asset)).unwrap(), asset);
 }

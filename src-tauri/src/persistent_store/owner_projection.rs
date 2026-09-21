@@ -1,7 +1,4 @@
-use super::{
-    query, AssetOwnerHead, AssetOwnerLocator, AssetRepositoryAuthorityState, ReadTarget,
-    StoreError, StoreResult,
-};
+use super::{query, AssetOwnerHead, AssetOwnerLocator, ReadTarget, StoreError, StoreResult};
 use crate::asset_repository::{owner_manifest_codec, PayloadCas};
 use rusqlite::Connection;
 use serde_json::{Map, Value};
@@ -34,48 +31,35 @@ impl OwnerManifestProjector {
         snapshots_dir: &Path,
         replacement_keys: HashMap<AssetOwnerLocator, Vec<String>>,
     ) -> StoreResult<Self> {
-        let authority = query::read_asset_repository_authority(connection, target)?.value;
-        match authority {
-            AssetRepositoryAuthorityState::Legacy => Ok(Self {
-                cas: None,
-                heads: HashMap::new(),
-                replacement_keys,
-            }),
-            AssetRepositoryAuthorityState::Preparing { .. } => Err(validation(
-                "owner manifest projection cannot read a preparing asset repository",
-            )),
-            AssetRepositoryAuthorityState::V2 { .. } => {
-                let persistent_dir = snapshots_dir.parent().ok_or_else(|| {
-                    validation("owner manifest projection cannot locate the persistent directory")
-                })?;
-                let repository_root = persistent_dir.parent().ok_or_else(|| {
-                    validation("owner manifest projection cannot locate the repository root")
-                })?;
-                // Archived characters leave the projection entirely, so their
-                // retained owner head must not reach it either.
-                let archived = super::archive::archived_character_ids(connection, &target.generation)?
-                    .into_iter()
-                    .collect::<HashSet<_>>();
-                let heads = query::list_asset_owner_heads(connection, target)?
-                    .value
-                    .into_iter()
-                    .filter(|head| match &head.owner {
-                        AssetOwnerLocator::CharacterAdditionalAssets { character_id } => {
-                            !archived.contains(character_id)
-                        }
-                        _ => true,
-                    })
-                    .map(|head| (head.owner.clone(), head))
-                    .collect();
-                Ok(Self {
-                    cas: Some(PayloadCas::new(repository_root).map_err(|error| {
-                        validation(format!("owner manifest repository is unavailable: {error}"))
-                    })?),
-                    heads,
-                    replacement_keys,
-                })
-            }
-        }
+        let persistent_dir = snapshots_dir.parent().ok_or_else(|| {
+            validation("owner manifest projection cannot locate the persistent directory")
+        })?;
+        let repository_root = persistent_dir.parent().ok_or_else(|| {
+            validation("owner manifest projection cannot locate the repository root")
+        })?;
+        // Archived characters leave the projection entirely, so their retained
+        // owner head must not reach it either.
+        let archived = super::archive::archived_character_ids(connection, &target.generation)?
+            .into_iter()
+            .collect::<HashSet<_>>();
+        let heads = query::list_asset_owner_heads(connection, target)?
+            .value
+            .into_iter()
+            .filter(|head| match &head.owner {
+                AssetOwnerLocator::CharacterAdditionalAssets { character_id } => {
+                    !archived.contains(character_id)
+                }
+                _ => true,
+            })
+            .map(|head| (head.owner.clone(), head))
+            .collect();
+        Ok(Self {
+            cas: Some(PayloadCas::new(repository_root).map_err(|error| {
+                validation(format!("owner manifest repository is unavailable: {error}"))
+            })?),
+            heads,
+            replacement_keys,
+        })
     }
 
     pub(crate) fn project_database(&self, database: &mut Value) -> StoreResult<()> {

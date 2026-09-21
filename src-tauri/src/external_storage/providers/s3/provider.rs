@@ -119,6 +119,8 @@ fn precondition(status: Option<u16>) -> ProviderError {
         kind: ErrorKind::PreconditionFailed,
         http_status: status,
         retry_at_ms: None,
+        oauth_error: None,
+        oauth_error_description: None,
     }
 }
 

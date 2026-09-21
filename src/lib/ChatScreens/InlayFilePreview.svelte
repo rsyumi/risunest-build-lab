@@ -124,7 +124,12 @@
                 Your browser does not support the audio tag.
             </audio>
         {:else if descriptor}
-            <div class="max-w-24 max-h-24">{id}</div>
+            <div class="max-w-24 max-h-24 truncate" title={id}>{id}</div>
+        {:else}
+            <div
+                class="h-full w-full rounded-md border border-darkborderc bg-darkbutton motion-safe:animate-pulse"
+                aria-hidden="true"
+            ></div>
         {/if}
     </div>
 </div>

@@ -18,10 +18,20 @@ use std::{
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RecordObject {
     schema: String,
-    payload: payload::Payload,
+    payload: RecordContent,
 }
+const INLINE_PAYLOAD_BYTES: usize = 16 * 1024;
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+enum RecordContent {
+    Inline { bytes: String },
+    Tree { value: payload::Payload },
+}
+
 pub(crate) struct Cache {
     pub cas: PayloadCas,
+    library: Option<PayloadCas>,
 }
 pub(crate) struct ProjectedRecord {
     pub version: RecordVersion,
@@ -33,14 +43,64 @@ impl Cache {
         std::fs::create_dir_all(root)?;
         Ok(Self {
             cas: PayloadCas::new(root)?,
+            library: None,
         })
     }
+    pub fn with_library(mut self, root: &Path) -> Result<Self> {
+        self.library = Some(PayloadCas::new(root)?);
+        Ok(self)
+    }
+    pub fn stat_object(&self, hash: &str) -> Result<Option<u64>> {
+        if let Some(size) = self.cas.stat_object(hash)? {
+            return Ok(Some(size));
+        }
+        Ok(match &self.library {
+            Some(library) => library.stat_object(hash)?,
+            None => None,
+        })
+    }
+    pub fn open_object(&self, hash: &str) -> Result<Option<std::fs::File>> {
+        if let Some(file) = self.cas.open_object(hash)? {
+            return Ok(Some(file));
+        }
+        Ok(match &self.library {
+            Some(library) => library.open_object(hash)?,
+            None => None,
+        })
+    }
+    pub fn verify(&self, hash: &str, check: impl Fn() -> Result<()>) -> Result<()> {
+        use sha2::{Digest, Sha256};
+        let mut file = self
+            .open_object(hash)?
+            .ok_or_else(|| SyncError::new("cached-object-missing", 409))?;
+        let mut digest = Sha256::new();
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            check()?;
+            let size = file.read(&mut buffer)?;
+            if size == 0 {
+                break;
+            }
+            digest.update(&buffer[..size]);
+        }
+        if hex::encode(digest.finalize()) != hash {
+            return Err(SyncError::new("cached-object-corrupt", 409));
+        }
+        Ok(())
+    }
     pub fn put(&self, bytes: &[u8]) -> Result<String> {
-        Ok(self.cas.prepare_bytes(bytes)?.content_hash)
+        let hash = risunest_sync_wire::hash(bytes);
+        if self.cas.stat_object(&hash)?.is_some() {
+            self.read(&hash, bytes.len())?;
+            return Ok(hash);
+        }
+        Ok(self
+            .cas
+            .prepare_reader_expected(&mut Cursor::new(bytes), &hash, bytes.len() as u64)?
+            .content_hash)
     }
     pub fn read(&self, hash: &str, limit: usize) -> Result<Vec<u8>> {
         let file = self
-            .cas
             .open_object(hash)?
             .ok_or_else(|| SyncError::new("cached-object-missing", 409))?;
         if file.metadata()?.len() > limit as u64 {
@@ -56,6 +116,17 @@ impl Cache {
             return Err(SyncError::new("cached-object-corrupt", 409));
         }
         Ok(bytes)
+    }
+    pub fn dependencies(&self, payload: &ServerPayload) -> Result<Vec<String>> {
+        Ok(
+            crate::persistent_store::server_sync_projection::dependencies_with(payload, |hash| {
+                self.read(hash, usize::MAX).map_err(|error| {
+                    crate::persistent_store::StoreError::Validation {
+                        message: error.code,
+                    }
+                })
+            })?,
+        )
     }
     pub fn project(
         &self,
@@ -79,25 +150,49 @@ impl Cache {
     ) -> Result<ProjectedRecord> {
         let local_hash = risunest_sync_wire::hash(bytes);
         let mut objects = BTreeSet::new();
-        let segmented = payload::build(&mut Cursor::new(bytes), |bytes| {
-            let hash = self
-                .put(bytes)
-                .map_err(|_| WireError("cache-write-failed"))?;
-            objects.insert(hash);
-            Ok(())
-        })?;
+        let segmented = if bytes.len() <= INLINE_PAYLOAD_BYTES {
+            RecordContent::Inline {
+                bytes: hex::encode(bytes),
+            }
+        } else {
+            RecordContent::Tree {
+                value: payload::build(&mut Cursor::new(bytes), |bytes| {
+                    let hash = self
+                        .put(bytes)
+                        .map_err(|_| WireError("cache-write-failed"))?;
+                    objects.insert(hash);
+                    Ok(())
+                })?,
+            }
+        };
         let object_hash = self.put(&canonical::encode(&RecordObject {
             schema: "risunest-server-record-v1".into(),
             payload: segmented,
         })?)?;
         objects.extend(dependencies.iter().cloned());
-        let (dependency_root, pages) =
-            build_reference_tree(&objects.iter().cloned().collect::<Vec<_>>(), false)?;
+        let dependencies = objects.iter().cloned().collect::<Vec<_>>();
+        let inline_dependencies = risunest_sync_wire::descriptor::inline_references(&dependencies)?;
+        let (dependency_root, pages) = if inline_dependencies {
+            (None, Vec::new())
+        } else {
+            build_reference_tree(&dependencies, false)?
+        };
         for (hash, bytes) in pages {
             self.put(&bytes)?;
             objects.insert(hash);
         }
-        let (relation_root, pages) = build_reference_tree(relations, true)?;
+        let relations = relations
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+        let inline_relations = risunest_sync_wire::descriptor::inline_references(&relations)?;
+        let (relation_root, pages) = if inline_relations {
+            (None, Vec::new())
+        } else {
+            build_reference_tree(&relations, true)?
+        };
         for (hash, bytes) in pages {
             self.put(&bytes)?;
             objects.insert(hash);
@@ -106,6 +201,16 @@ impl Cache {
             object_hash: object_hash.clone(),
             dependency_root,
             relation_root,
+            dependencies: if inline_dependencies {
+                dependencies
+            } else {
+                Vec::new()
+            },
+            relations: if inline_relations {
+                relations
+            } else {
+                Vec::new()
+            },
             scopes,
         };
         let descriptor_hash = self.put(&descriptor.bytes()?)?;
@@ -141,13 +246,36 @@ impl Cache {
         if object.schema != "risunest-server-record-v1" {
             return Err(SyncError::new("unsupported-server-record", 409));
         }
-        let mut bytes = Vec::new();
-        payload::restore(
-            &object.payload,
-            |hash| read(hash, payload::MAX_CHUNK).map_err(|_| WireError("cached-payload-invalid")),
-            &mut bytes,
-        )?;
-        Ok((bytes, object.payload.content_hash))
+        match object.payload {
+            RecordContent::Inline { bytes } => {
+                if bytes.len() > INLINE_PAYLOAD_BYTES * 2
+                    || bytes
+                        .bytes()
+                        .any(|b| !b.is_ascii_digit() && !(b'a'..=b'f').contains(&b))
+                {
+                    return Err(SyncError::new("invalid-inline-payload", 409));
+                }
+                let bytes = hex::decode(bytes)
+                    .map_err(|_| SyncError::new("invalid-inline-payload", 409))?;
+                let hash = risunest_sync_wire::hash(&bytes);
+                Ok((bytes, hash))
+            }
+            RecordContent::Tree { value } => {
+                let mut bytes = Vec::new();
+                payload::restore(
+                    &value,
+                    |hash| {
+                        read(hash, payload::MAX_CHUNK)
+                            .map_err(|_| WireError("cached-payload-invalid"))
+                    },
+                    &mut bytes,
+                )?;
+                if bytes.len() <= INLINE_PAYLOAD_BYTES {
+                    return Err(SyncError::new("noncanonical-server-payload", 409));
+                }
+                Ok((bytes, value.content_hash))
+            }
+        }
     }
     pub fn restore_with(
         &self,
@@ -186,6 +314,7 @@ impl Cache {
             return Err(SyncError::new("descriptor-record-mismatch", 409));
         }
         let mut hashes = BTreeSet::from([object_hash.clone(), descriptor_hash.clone()]);
+        hashes.extend(descriptor.dependencies);
         for (root, relations) in [
             (descriptor.dependency_root, false),
             (descriptor.relation_root, true),
@@ -261,7 +390,15 @@ impl Cache {
         if object.schema != "risunest-server-record-v1" {
             return Err(SyncError::new("unsupported-server-record", 409));
         }
-        let mut pending = vec![(object.payload.root, 0)];
+        let mut pending = match object.payload {
+            RecordContent::Inline { bytes } if bytes.len() <= INLINE_PAYLOAD_BYTES * 2 => {
+                Vec::new()
+            }
+            RecordContent::Inline { .. } => {
+                return Err(SyncError::new("invalid-inline-payload", 409))
+            }
+            RecordContent::Tree { value } => vec![(value.root, 0)],
+        };
         let mut seen = BTreeSet::new();
         while let Some((hash, depth)) = pending.pop() {
             if depth >= 8 || !seen.insert(hash.clone()) || seen.len() > payload::MAX_PARTS {
@@ -315,6 +452,193 @@ impl Cache {
 mod tests {
     use super::*;
     use crate::logical_records::LogicalRecordEnvelope;
+    #[test]
+    fn small_records_use_two_objects_and_verified_cache_reuse() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = Cache::open(dir.path()).unwrap();
+        let asset = cache.put(b"synthetic asset").unwrap();
+        for bytes in [
+            vec![],
+            vec![0xff; INLINE_PAYLOAD_BYTES],
+            b"synthetic record".to_vec(),
+        ] {
+            let record = cache
+                .project_bytes(&bytes, &[asset.clone()], &["parent".into()], vec![])
+                .unwrap();
+            assert_eq!(record.objects.len(), 3);
+            assert_eq!(cache.restore_bytes(&record.version).unwrap().0, bytes);
+            assert_eq!(cache.closure(&record.version).unwrap().len(), 3);
+            let paths = record
+                .objects
+                .iter()
+                .map(|h| cache.cas.object_path(h).unwrap().unwrap())
+                .collect::<Vec<_>>();
+            let modified = paths
+                .iter()
+                .map(|p| std::fs::metadata(p).unwrap().modified().unwrap())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                cache
+                    .project_bytes(&bytes, &[asset.clone()], &["parent".into()], vec![])
+                    .unwrap()
+                    .version,
+                record.version
+            );
+            for (path, before) in paths.iter().zip(modified) {
+                assert_eq!(std::fs::metadata(path).unwrap().modified().unwrap(), before);
+            }
+        }
+        let path = cache.cas.object_path(&asset).unwrap().unwrap();
+        std::fs::write(&path, b"corrupted asset").unwrap();
+        assert!(cache.put(b"synthetic asset").is_err());
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(cache.put(b"synthetic asset").unwrap(), asset);
+        let large = vec![255; INLINE_PAYLOAD_BYTES + 1];
+        let record = cache.project_bytes(&large, &[], &[], vec![]).unwrap();
+        assert!(record.objects.len() > 2);
+        assert_eq!(cache.restore_bytes(&record.version).unwrap().0, large);
+    }
+
+    #[test]
+    fn library_source_is_checked_without_copying_into_derived_cache() {
+        let root = tempfile::tempdir().unwrap();
+        let native = PayloadCas::new(root.path()).unwrap();
+        let object = native.prepare_bytes(b"synthetic native asset").unwrap();
+        let cache = Cache::open(&root.path().join("derived"))
+            .unwrap()
+            .with_library(root.path())
+            .unwrap();
+        cache.verify(&object.content_hash, || Ok(())).unwrap();
+        assert_eq!(
+            cache.read(&object.content_hash, 1024).unwrap(),
+            b"synthetic native asset"
+        );
+        assert!(cache
+            .cas
+            .stat_object(&object.content_hash)
+            .unwrap()
+            .is_none());
+        std::fs::write(
+            native.object_path(&object.content_hash).unwrap().unwrap(),
+            b"corruption",
+        )
+        .unwrap();
+        assert!(cache.verify(&object.content_hash, || Ok(())).is_err());
+    }
+
+    #[test]
+    fn concurrent_insertion_and_malformed_inline_payloads_preserve_integrity() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = Cache::open(root.path()).unwrap();
+        std::thread::scope(|scope| {
+            let workers = (0..4)
+                .map(|_| scope.spawn(|| cache.put(b"concurrent synthetic").unwrap()))
+                .collect::<Vec<_>>();
+            for worker in workers {
+                assert_eq!(
+                    worker.join().unwrap(),
+                    risunest_sync_wire::hash(b"concurrent synthetic")
+                );
+            }
+        });
+        for bytes in [
+            "GG".to_owned(),
+            "a".to_owned(),
+            "00".repeat(INLINE_PAYLOAD_BYTES + 1),
+        ] {
+            let object_hash = cache
+                .put(
+                    &canonical::encode(&RecordObject {
+                        schema: "risunest-server-record-v1".into(),
+                        payload: RecordContent::Inline { bytes },
+                    })
+                    .unwrap(),
+                )
+                .unwrap();
+            let descriptor_hash = cache
+                .put(
+                    &RecordDescriptor::content(object_hash.clone())
+                        .bytes()
+                        .unwrap(),
+                )
+                .unwrap();
+            assert!(cache
+                .restore_bytes(&RecordVersion::Live {
+                    object_hash,
+                    descriptor_hash: Some(descriptor_hash)
+                })
+                .is_err());
+        }
+    }
+
+    #[test]
+    #[ignore = "Explicit synthetic 1 GiB source IO measurement"]
+    fn library_cas_gib_measurement() {
+        let root = tempfile::tempdir().unwrap();
+        let native = PayloadCas::new(root.path()).unwrap();
+        let mut hashes = Vec::new();
+        let mut bytes = vec![37; 4 * 1024 * 1024];
+        for index in 0u32..256 {
+            bytes[..4].copy_from_slice(&index.to_le_bytes());
+            hashes.push(native.prepare_bytes(&bytes).unwrap().content_hash);
+        }
+        drop(bytes);
+        for copy in [true, false] {
+            let derived = tempfile::tempdir().unwrap();
+            let cache = Cache::open(derived.path())
+                .unwrap()
+                .with_library(root.path())
+                .unwrap();
+            let started = std::time::Instant::now();
+            for hash in &hashes {
+                if copy {
+                    let mut source = native.open_object(hash).unwrap().unwrap();
+                    cache
+                        .cas
+                        .prepare_reader_expected(&mut source, hash, 4 * 1024 * 1024)
+                        .unwrap();
+                } else {
+                    cache.verify(hash, || Ok(())).unwrap();
+                }
+            }
+            let written: u64 = hashes
+                .iter()
+                .map(|h| cache.cas.stat_object(h).unwrap().unwrap_or(0))
+                .sum();
+            eprintln!("source_bytes=1073741824 objects=256 copy={copy} derived_body_bytes={written} elapsed_ms={}", started.elapsed().as_millis());
+            assert_eq!(written, if copy { 1073741824 } else { 0 });
+        }
+    }
+
+    #[test]
+    #[ignore = "Explicit synthetic cache preparation measurement"]
+    fn preparation_reduction_measurement() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = Cache::open(root.path()).unwrap();
+        for pass in 0..2 {
+            let started = std::time::Instant::now();
+            let mut objects = BTreeSet::new();
+            for i in 0..1000 {
+                let bytes = format!("synthetic record {i:04}");
+                objects.extend(
+                    cache
+                        .project_bytes(bytes.as_bytes(), &[], &[], vec![])
+                        .unwrap()
+                        .objects,
+                );
+            }
+            let disk: u64 = objects
+                .iter()
+                .map(|h| cache.cas.stat_object(h).unwrap().unwrap())
+                .sum();
+            eprintln!(
+                "pass={pass} records=1000 distinct_objects={} derived_bytes={disk} elapsed_ms={}",
+                objects.len(),
+                started.elapsed().as_millis()
+            );
+        }
+    }
+
     #[test]
     fn candidate_inventory_excludes_a_hundred_thousand_opaque_dependencies() {
         use crate::logical_records::{encode_logical_record_key, LogicalRecordLocator};

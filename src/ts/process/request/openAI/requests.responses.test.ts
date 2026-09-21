@@ -12,7 +12,6 @@ const __testResponsesAPI = (responses as typeof responses & { __testResponsesAPI
     .__testResponsesAPI
 
 const mocks = vi.hoisted(() => ({
-    isNodeServer: true,
     db: {
         OaiCompAPIKeys: {},
         additionalParams: [],
@@ -63,7 +62,6 @@ vi.mock('src/ts/alert', () => ({
 }))
 
 vi.mock('src/ts/platform', () => ({
-    get isNodeServer() { return mocks.isNodeServer },
     isTauri: false,
 }))
 
@@ -187,7 +185,6 @@ function sseStream(events: string[]) {
 
 describe('OpenAI Responses API helpers', () => {
     beforeEach(() => {
-        mocks.isNodeServer = true
         mocks.fetchNative.mockReset()
         mocks.globalFetch.mockReset()
         mocks.db.OaiCompAPIKeys = {}
@@ -204,7 +201,6 @@ describe('OpenAI Responses API helpers', () => {
     })
 
     it('attempts a browser localhost streaming request instead of rejecting its URL', async () => {
-        mocks.isNodeServer = false
         mocks.fetchNative.mockResolvedValue(
             new Response('synthetic endpoint reached', { status: 503 }),
         )

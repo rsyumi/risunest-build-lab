@@ -12,15 +12,17 @@ crate-type = ["lib", "cdylib", "staticlib"]
 custom-protocol = ["tauri/custom-protocol"]
 
 [build-dependencies]
+cc = "1"
 tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
 tauri = { version = "2.11.5", features = ["tray-icon", "macos-private-api"] }
+tauri-plugin-single-instance = "2.4.3"
 risunest-sync-manager = { path = "../.." }
 risunest-sync-server = { path = "../../../sync" }
 risunest-sync-connect = { path = "../../../../crates/sync-connect" }
 serde_json = "1"
-tokio = { version = "1", features = ["time"] }
+tokio = { version = "1", features = ["time", "sync"] }
 qrcode = { version = "0.14", default-features = false }
 
 [target.'cfg(windows)'.dependencies]

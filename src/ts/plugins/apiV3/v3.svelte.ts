@@ -12,7 +12,7 @@ import { alertConfirm, alertError, alertNormal } from "src/ts/alert";
 import { language } from "src/lang";
 import { checkCharOrder, forageStorage, getFetchLogs } from "src/ts/globalApi.svelte";
 import { changeColorScheme, updateColorScheme, updateTextThemeAndCSS, type ColorScheme } from "src/ts/gui/colorscheme";
-import { isNodeServer, isTauri } from "src/ts/platform";
+import { isTauri } from "src/ts/platform";
 import { get } from "svelte/store";
 import { registerMCPModule, unregisterMCPModule } from "src/ts/process/mcp/pluginmcp";
 import { getInlayAsset } from "src/ts/process/files/inlays";
@@ -812,7 +812,10 @@ const makeRisuaiAPIV3 = (
             let provs = get(customProviderStore)
             provs.push(name)
             pluginV2.providers.set(name, async (arg, abortSignal) => {
-               await getPluginPermission(plugin.name, 'provider', 'periodically');
+               const allowed = await getPluginPermission(plugin.name, 'provider', 'periodically');
+               if(!allowed){
+                   return { success: false, content: language.pluginProviderPermissionDenied };
+               }
                //mode is overridden to v3, due to vulnerabilities using mode.
                //Alternative to mode will be added in future
                arg.mode = 'v3'
@@ -1360,10 +1363,7 @@ const makeRisuaiAPIV3 = (
         getRuntimeInfo: () => {
             return {
                 apiVersion: "3.0",
-                platform: 
-                    isNodeServer ? 'node' :
-                    isTauri ? 'tauri' :
-                    'web',
+                platform: isTauri ? 'tauri' : 'web',
                 saveMethod:
                     isTauri ? 'tauri' :
                     forageStorage.isAccount ? 'account' :

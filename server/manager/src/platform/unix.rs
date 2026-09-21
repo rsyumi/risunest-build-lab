@@ -1,11 +1,5 @@
 use super::*;
 
-fn home() -> Result<PathBuf> {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .ok_or("home-unavailable".into())
-}
 fn checked(command: &mut Command) -> Result<()> {
     let output = command
         .stdin(Stdio::null())
@@ -34,8 +28,7 @@ fn systemd_arg(path: &Path) -> Result<String> {
 }
 #[cfg(not(target_os = "macos"))]
 pub(super) fn startup(root: &Path, executable: &Path, action: &str) -> Result<StartupStatus> {
-    let directory =
-        user_service_directory(std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from), home)?;
+    let directory = user_service_directory()?;
     let name = format!("{}.service", instance_name(root));
     let path = directory.join(&name);
     match action {
@@ -106,8 +99,7 @@ pub(super) fn update_schedule(
     policy: UpdatePolicy,
     action: &str,
 ) -> Result<UpdateScheduleStatus> {
-    let directory =
-        user_service_directory(std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from), home)?;
+    let directory = user_service_directory()?;
     let update_service = format!("{}-update.service", instance_name(root));
     let timer = format!("{}-update.timer", instance_name(root));
     let service_path = directory.join(&update_service);
@@ -125,8 +117,10 @@ pub(super) fn update_schedule(
         checked(process("systemctl").args(["--user", "daemon-reload"]))?;
         checked(process("systemctl").args(["--user", "enable", "--now", &timer]))?;
     } else if action == "remove" || (action == "install" && policy == UpdatePolicy::Off) {
+        stop_systemd(&timer)?;
+        stop_systemd(&update_service)?;
         if timer_path.exists() {
-            checked(process("systemctl").args(["--user", "disable", "--now", &timer]))?;
+            checked(process("systemctl").args(["--user", "disable", &timer]))?;
         }
         if service_path.exists() {
             std::fs::remove_file(&service_path).map_err(|_| "user-service-remove-failed")?;
@@ -204,7 +198,7 @@ fn startup_agent_body(name: &str, root: &Path, executable: &Path) -> String {
 
 #[cfg(target_os = "macos")]
 pub(super) fn startup(root: &Path, executable: &Path, action: &str) -> Result<StartupStatus> {
-    let directory = home()?.join("Library/LaunchAgents");
+    let directory = user_service_directory()?;
     let name = format!("io.github.rsyumi.{}", instance_name(root));
     let path = directory.join(format!("{name}.plist"));
     let uid = process("id")
@@ -257,7 +251,7 @@ pub(super) fn update_schedule(
     policy: UpdatePolicy,
     action: &str,
 ) -> Result<UpdateScheduleStatus> {
-    let directory = home()?.join("Library/LaunchAgents");
+    let directory = user_service_directory()?;
     let name = format!("io.github.rsyumi.{}-update", instance_name(root));
     let path = directory.join(format!("{name}.plist"));
     let uid = process("id")
@@ -282,11 +276,11 @@ pub(super) fn update_schedule(
             checked(process("launchctl").args(["bootout", &service]))?;
         }
         checked(process("launchctl").args(["bootstrap", &domain]).arg(&path))?;
-    } else if (action == "remove" || (action == "install" && policy == UpdatePolicy::Off))
-        && path.exists()
-    {
-        let _ = process("launchctl").args(["bootout", &service]).output();
-        std::fs::remove_file(&path).map_err(|_| "user-service-remove-failed")?;
+    } else if action == "remove" || (action == "install" && policy == UpdatePolicy::Off) {
+        unload_launchd(&service)?;
+        if path.exists() {
+            std::fs::remove_file(&path).map_err(|_| "user-service-remove-failed")?;
+        }
     }
     let enabled = path.exists()
         && process("launchctl")
@@ -301,4 +295,39 @@ pub(super) fn update_schedule(
         action_matches: path.exists()
             && std::fs::read_to_string(&path).is_ok_and(|body| body == expected_body),
     })
+}
+
+#[cfg(not(target_os = "macos"))]
+fn stop_systemd(name: &str) -> Result<()> {
+    let state = process("systemctl").args(["--user", "show", "--property=LoadState", "--property=ActiveState", name])
+        .output().map_err(|_| "user-service-unavailable")?;
+    if !state.status.success() { return Err("user-service-status-unavailable".into()); }
+    let state = String::from_utf8_lossy(&state.stdout);
+    if !state.lines().any(|line| line == "LoadState=not-found")
+        || !state.lines().any(|line| line == "ActiveState=inactive") {
+        checked(process("systemctl").args(["--user", "stop", name]))?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+pub(super) fn unload_launchd(service: &str) -> Result<()> {
+    let domain = service.rsplit_once('/').ok_or("user-service-invalid")?.0;
+    checked(process("launchctl").args(["print", domain]))?;
+    let loaded = process("launchctl").args(["print", service]).output()
+        .map_err(|_| "user-service-unavailable")?.status.success();
+    if loaded { checked(process("launchctl").args(["bootout", service]))?; }
+    Ok(())
+}
+
+pub(super) fn remove_startup(root: &Path, executable: &Path) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        let service = format!("{}/io.github.rsyumi.{}", launchd_user_domain()?, instance_name(root));
+        unload_launchd(&service)?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    stop_systemd(&format!("{}.service", instance_name(root)))?;
+    startup(root, executable, "remove")?;
+    Ok(())
 }

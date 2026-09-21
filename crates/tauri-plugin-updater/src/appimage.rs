@@ -37,7 +37,9 @@ fn replace_with(path: &Path, write: impl FnOnce(&mut File) -> Result<()>) -> Res
         .suffix(".AppImage")
         .tempfile_in(parent)?;
     write(candidate.as_file_mut())?;
-    candidate.as_file().set_permissions(metadata.permissions())?;
+    candidate
+        .as_file()
+        .set_permissions(metadata.permissions())?;
     candidate.as_file().sync_all()?;
     candidate.persist(path).map_err(|error| error.error)?;
     #[cfg(unix)]
@@ -77,7 +79,8 @@ mod tests {
             candidate.write_all(b"complete update")?;
             assert_eq!(std::fs::read(&path).unwrap(), b"installed");
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"complete update");
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
     }
@@ -103,7 +106,10 @@ mod tests {
         std::fs::write(&path, b"installed").unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o751)).unwrap();
         install(&path, b"update").unwrap();
-        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o751);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o751
+        );
         let link = root.path().join("linked.AppImage");
         symlink(&path, &link).unwrap();
         assert!(install(&link, b"must not replace").is_err());
@@ -128,7 +134,11 @@ mod tests {
         std::fs::write(&path, b"installed").unwrap();
         assert!(install(&path, &archive("other.txt", b"not a binary")).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), b"installed");
-        install(&path, &archive("nested/update.AppImage", b"complete binary")).unwrap();
+        install(
+            &path,
+            &archive("nested/update.AppImage", b"complete binary"),
+        )
+        .unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"complete binary");
         assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
     }

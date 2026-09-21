@@ -18,7 +18,7 @@ const maintenance = vi.hoisted(() => ({
 vi.mock('src/ts/storage/nativePersistentMaintenance', () => maintenance)
 vi.mock('src/ts/alert', () => ({ alertError: vi.fn(), alertNormal: vi.fn() }))
 vi.mock('src/ts/globalApi.svelte', () => ({ downloadFile: vi.fn() }))
-vi.mock('src/ts/platform', () => ({ isTauri: true }))
+vi.mock('src/ts/platform', () => ({ isTauri: true, isTauriAndroid: false, isTauriIOS: false }))
 const core = vi.hoisted(() => ({ invoke: vi.fn().mockResolvedValue({ revision: 0 }) }))
 const rawRecovery = vi.hoisted(() => ({
     exportOriginalData: vi.fn().mockResolvedValue({ warningCodes: [] }),

@@ -3,7 +3,9 @@ interface FixtureApi {
   configure(mode: Mode, defer: boolean): Promise<void>;
   publish(source: string, active?: boolean): Promise<void>;
   sourceMatches(source: string): boolean;
-  setRemoval(enabled: boolean): void;
+  debugState(): Record<string, unknown>;
+  debugFinal(source: string): Promise<Record<string, unknown>>;
+  setRemoval(enabled: boolean): Promise<void>;
 }
 
 const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -37,12 +39,13 @@ const percentile = (values: number[], ratio: number) => {
 export async function runStreamingSuite(api: FixtureApi, profile = "smoke") {
   const cases: Record<string, unknown>[] = [];
   let phase = "start";
+  let lastSource = "";
   try {
     for (const mode of ["recent", "collapsed", "off"] as const) {
       for (const defer of [true, false]) {
         phase = `${mode}-${defer ? "deferred" : "effects"}`;
         progress(phase);
-        api.setRemoval(false);
+        await api.setRemoval(false);
         await api.configure(mode, defer);
         await until(
           () => !!root().textContent?.includes("Synthetic initial answer"),
@@ -55,6 +58,7 @@ export async function runStreamingSuite(api: FixtureApi, profile = "smoke") {
         );
         const source =
           "<Thoughts>" + thought + "\nLATEST-SYNTHETIC</Thoughts>\n**Answer**";
+        lastSource = source;
         const started = performance.now();
         await api.publish(source);
         await until(
@@ -109,7 +113,7 @@ export async function runStreamingSuite(api: FixtureApi, profile = "smoke") {
           );
         }
         // Completion must execute the real editdisplay regex against the whole input.
-        api.setRemoval(true);
+        await api.setRemoval(true);
         const finalStarted = performance.now();
         progress(phase + "-final");
         await api.publish(source, false);
@@ -137,7 +141,7 @@ export async function runStreamingSuite(api: FixtureApi, profile = "smoke") {
 
     phase = "split-nested-replacement";
     progress(phase);
-    api.setRemoval(false);
+    await api.setRemoval(false);
     await api.configure("recent", true);
     for (const source of [
       "<Thou",
@@ -215,10 +219,24 @@ export async function runStreamingSuite(api: FixtureApi, profile = "smoke") {
     }
     return { passed: true, cases };
   } catch (error) {
+    const body = root();
     return {
       passed: false,
       phase,
       assertion: error instanceof Error ? error.message : "unknown",
+      diagnostics: {
+        ...api.debugState(),
+        ...(lastSource ? await api.debugFinal(lastSource) : {}),
+        completedCases: cases.length,
+        strongText: body.querySelector("strong")?.textContent ?? null,
+        hasDetails: !!body.querySelector("details"),
+        hasPreview: !!preview(),
+        hasAnswerText: !!body.textContent?.includes("Answer"),
+        hasRawAnswerMarkdown: !!body.textContent?.includes("**Answer**"),
+        hasLatestThought: !!body.textContent?.includes("LATEST-SYNTHETIC"),
+        textLength: body.textContent?.length ?? 0,
+        htmlLength: body.innerHTML.length,
+      },
       cases,
     };
   }

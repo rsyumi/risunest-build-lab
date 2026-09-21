@@ -116,7 +116,7 @@ impl PayloadCas {
         let mut directory_entries_synced = true;
         let assets_directory = self.ensure_directory(
             &self.repository_root,
-            "assets-v2",
+            "assets",
             &mut directory_entries_synced,
         )?;
         let staging_directory =
@@ -194,7 +194,7 @@ impl PayloadCas {
         let mut directory_entries_synced = true;
         let assets = self.ensure_directory(
             &self.repository_root,
-            "assets-v2",
+            "assets",
             &mut directory_entries_synced,
         )?;
         let objects = self.ensure_directory(&assets, "objects", &mut directory_entries_synced)?;
@@ -252,7 +252,7 @@ impl PayloadCas {
         let mut directory_entries_synced = true;
         let assets_directory = self.ensure_directory(
             &self.repository_root,
-            "assets-v2",
+            "assets",
             &mut directory_entries_synced,
         )?;
         let staging_directory =
@@ -514,7 +514,7 @@ impl PayloadCas {
     fn existing_object_path(&self, content_hash: &str) -> io::Result<Option<PathBuf>> {
         validate_content_hash(content_hash)?;
         self.ensure_repository_root()?;
-        let assets_directory = self.repository_root.join("assets-v2");
+        let assets_directory = self.repository_root.join("assets");
         if !self.existing_owned_directory(&assets_directory)? {
             return Ok(None);
         }
@@ -680,7 +680,7 @@ impl PayloadCasReadScan {
 
     fn checked_objects_directory(&self) -> io::Result<Option<PathBuf>> {
         self.cas.ensure_repository_root()?;
-        let assets_directory = self.cas.repository_root.join("assets-v2");
+        let assets_directory = self.cas.repository_root.join("assets");
         if !self.cas.existing_owned_directory(&assets_directory)? {
             return Ok(None);
         }
@@ -764,7 +764,7 @@ fn validate_content_hash(content_hash: &str) -> io::Result<()> {
 
 pub(crate) fn object_physical_key(content_hash: &str) -> String {
     format!(
-        "assets-v2/objects/{}/{}",
+        "assets/objects/{}/{}",
         &content_hash[..2],
         &content_hash[2..]
     )
@@ -983,7 +983,7 @@ mod tests {
             .contains("payload collision or corruption"));
         assert_eq!(std::fs::read(object).unwrap(), corrupted);
         assert_eq!(
-            std::fs::read_dir(directory.path().join("assets-v2/staging"))
+            std::fs::read_dir(directory.path().join("assets/staging"))
                 .unwrap()
                 .count(),
             0
@@ -1023,7 +1023,7 @@ mod tests {
             b"concurrent synthetic object"
         );
         assert_eq!(
-            std::fs::read_dir(directory.path().join("assets-v2/staging"))
+            std::fs::read_dir(directory.path().join("assets/staging"))
                 .unwrap()
                 .count(),
             0
@@ -1034,7 +1034,7 @@ mod tests {
     fn existing_directory_from_a_crash_window_resyncs_its_parent_before_acceptance() {
         let directory = tempfile::tempdir().expect("temporary repository");
         let cas = PayloadCas::new(directory.path()).expect("open repository");
-        let existing = directory.path().join("assets-v2");
+        let existing = directory.path().join("assets");
         std::fs::create_dir(&existing).expect("simulate concurrent directory creation");
         let mut directory_entries_synced = true;
         let mut synced_parent = None;
@@ -1042,7 +1042,7 @@ mod tests {
         let accepted = cas
             .ensure_directory_with_sync(
                 &cas.repository_root,
-                "assets-v2",
+                "assets",
                 &mut directory_entries_synced,
                 |parent| {
                     synced_parent = Some(parent.to_path_buf());
@@ -1051,7 +1051,7 @@ mod tests {
             )
             .expect("accept existing directory");
 
-        assert_eq!(accepted, cas.repository_root.join("assets-v2"));
+        assert_eq!(accepted, cas.repository_root.join("assets"));
         assert_eq!(
             synced_parent.as_deref(),
             Some(cas.repository_root.as_path())
@@ -1097,7 +1097,7 @@ mod tests {
             assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
             assert_eq!(cas.stat_object(&wrong_hash).unwrap(), None);
             assert_eq!(
-                std::fs::read_dir(directory.path().join("assets-v2").join("staging"))
+                std::fs::read_dir(directory.path().join("assets").join("staging"))
                     .unwrap()
                     .count(),
                 0
@@ -1135,7 +1135,7 @@ mod tests {
             .unlink_exact_object(
                 &prepared.content_hash,
                 prepared.byte_size,
-                "assets-v2/objects/00/not-the-canonical-object",
+                "assets/objects/00/not-the-canonical-object",
             )
             .expect_err("mismatched physical key must fail closed");
         assert_eq!(wrong_path.kind(), std::io::ErrorKind::InvalidData);

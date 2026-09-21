@@ -151,7 +151,7 @@ impl Store {
                 .as_ref()
                 .is_some_and(|(d, k)| (d.as_str(), k.as_str()) >= (domain.as_str(), key))
             {
-                return Err(Error::new("unordered-keys", 400));
+                return Err(Error::new("unordered-keys", 400).for_key(key));
             }
             tx.execute(
                 &format!("INSERT INTO {table} VALUES(?1,?2,?3,?4)"),
@@ -213,7 +213,9 @@ impl Store {
         }
         let mut digest = ChangeDigest::new();
         Self::each_change(&db, id, |change| {
-            digest.change(&change)?;
+            digest
+                .change(&change)
+                .map_err(|error| Error::from(error).for_key(&change.key))?;
             Ok(())
         })?;
         Self::each_fence(&db, id, |fence| {
