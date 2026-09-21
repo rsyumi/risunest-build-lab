@@ -66,9 +66,11 @@ fn half_million_dependencies_use_bounded_immutable_pages_and_small_root() {
         object_hash: hash(b"content"),
         dependency_root: root,
         relation_root: None,
+        dependencies: vec![],
+        relations: vec![],
         scopes: vec![],
     };
-    assert!(descriptor.bytes().unwrap().len() < 256);
+    assert!(descriptor.bytes().unwrap().len() < 320);
 }
 #[test]
 fn maximal_legal_keys_are_paged_by_bytes_not_only_count() {
@@ -128,4 +130,21 @@ fn bad_hash_wrong_kind_duplicate_and_unsorted_references_fail() {
         |_, _| Ok(())
     )
     .is_err());
+}
+
+#[test]
+fn inline_references_are_bounded_ordered_and_exclusive_with_roots() {
+    let mut descriptor = RecordDescriptor::content(hash(b"content"));
+    descriptor.dependencies = vec![hash(b"a")];
+    assert!(descriptor.validate().is_ok());
+    descriptor.dependency_root = Some(hash(b"page"));
+    assert!(descriptor.validate().is_err());
+    descriptor.dependency_root = None;
+    descriptor.dependencies = vec![hash(b"a"); 2];
+    assert!(descriptor.validate().is_err());
+    descriptor.dependencies.clear();
+    descriptor.relations = vec!["x".repeat(16385)];
+    assert!(descriptor.validate().is_err());
+    descriptor.relations = (0..65).map(|n| format!("key{n:02}")).collect();
+    assert!(descriptor.validate().is_err());
 }

@@ -14,7 +14,7 @@ use crate::local_backup::{
 };
 use crate::persistent_store::export::{self, destination};
 use crate::persistent_store::{
-    AssetAlias, AssetOwnerHead, AssetOwnerLocator, AssetRepositoryAuthorityState, PersistentStore,
+    AssetAlias, AssetOwnerHead, AssetOwnerLocator, PersistentStore,
     RevisionResult, StagingResult, StoreResult,
 };
 use crate::server_sync::residency::RemotePayloadAccess;
@@ -362,15 +362,6 @@ pub(crate) fn export_legacy_local_backup(
     let outcome = (|| {
         let inventory = export::pinned_legacy_backup_inventory(&reader.connection, &reader.target)
             .map_err(store_job_error)?;
-        if !matches!(
-            inventory.asset_authority,
-            AssetRepositoryAuthorityState::V2 { .. }
-        ) {
-            return Err(NativeJobError::new(
-                "capability-unavailable",
-                "native legacy backup export requires a migrated asset repository",
-            ));
-        }
         if inventory.revision != expected_revision {
             return Err(NativeJobError::new(
                 "revision-conflict",
@@ -888,7 +879,6 @@ impl StrictLocalBackupDatabaseRestore for LegacyDatabaseRestore<'_> {
             app: self.app.clone(),
             payloads,
             durable: Mutex::new(durable),
-            migration_id: format!("legacy-backup-{}", self.job.id()),
         };
         let result = restore::restore_started_risu_save(
             OpenedJobSource {
@@ -917,7 +907,6 @@ struct LegacyReplacementSink {
     app: AppHandle,
     payloads: PreparedLegacyRestorePayloads,
     durable: Mutex<DurableCasJob>,
-    migration_id: String,
 }
 
 impl restore::ReplacementSink for LegacyReplacementSink {
@@ -962,13 +951,6 @@ impl restore::ReplacementSink for LegacyReplacementSink {
     fn commit(&self, staging_id: &str, expected_revision: i64) -> StoreResult<RevisionResult> {
         crate::persistent_store::commands::with_store_mut(self.app.state(), |store| {
             store.replace_put_asset_aliases(staging_id, &self.payloads.asset_aliases)?;
-            store.replace_put_asset_repository_authority(
-                staging_id,
-                &AssetRepositoryAuthorityState::V2 {
-                    migration_id: self.migration_id.clone(),
-                    compatibility_hash: payload_compatibility_hash(&self.payloads),
-                },
-            )?;
             self.durable
                 .lock()
                 .map_err(|error| crate::persistent_store::StoreError::Store {
@@ -1015,13 +997,6 @@ impl Drop for LegacyReplacementSink {
             let _ = durable.release(CasReleaseOutcome::Aborted);
         }
     }
-}
-
-fn payload_compatibility_hash(payloads: &PreparedLegacyRestorePayloads) -> String {
-    use sha2::{Digest, Sha256};
-    let bytes = serde_json::to_vec(&payloads.asset_aliases)
-        .expect("legacy payload aliases are serializable");
-    hex::encode(Sha256::digest(bytes))
 }
 
 fn local_backup_error(error: LocalBackupError) -> NativeJobError {
@@ -1604,9 +1579,7 @@ mod tests {
     use crate::native_file_jobs::{
         character_json_export::export_character_json, JobKind, JobRegistry, JobState,
     };
-    use crate::persistent_store::{
-        AssetOwnerHead, AssetOwnerLocator, AssetRepositoryAuthorityState,
-    };
+    use crate::persistent_store::{AssetOwnerHead, AssetOwnerLocator};
     use sha2::{Digest, Sha256};
     use std::fs;
     use std::io::Cursor;
@@ -1964,15 +1937,6 @@ mod tests {
                 ],
             )
             .unwrap();
-        store
-            .replace_put_asset_repository_authority(
-                &staging,
-                &AssetRepositoryAuthorityState::V2 {
-                    migration_id: "legacy-owner-assets".to_owned(),
-                    compatibility_hash: "ab".repeat(32),
-                },
-            )
-            .unwrap();
         let revision = store.replace_commit(&staging, Some(0)).unwrap().revision;
         let owned = directory.path().join("export-owned");
         let handoff = directory.path().join("handoff");
@@ -2095,15 +2059,6 @@ mod tests {
             )
             .unwrap();
         store.replace_put_presets(&staging, &[]).unwrap();
-        store
-            .replace_put_asset_repository_authority(
-                &staging,
-                &AssetRepositoryAuthorityState::V2 {
-                    migration_id: "ordinary-assets".to_owned(),
-                    compatibility_hash: "ab".repeat(32),
-                },
-            )
-            .unwrap();
         let revision = store.replace_commit(&staging, Some(0)).unwrap().revision;
         let owned = directory.path().join("ordinary-owned");
         let handoff = directory.path().join("ordinary-handoff");
@@ -2282,15 +2237,6 @@ mod tests {
             .replace_add_characters(&staging, &[character])
             .unwrap();
         store.replace_put_asset_aliases(&staging, &[alias]).unwrap();
-        store
-            .replace_put_asset_repository_authority(
-                &staging,
-                &AssetRepositoryAuthorityState::V2 {
-                    migration_id: "legacy-json-test".to_owned(),
-                    compatibility_hash: "ab".repeat(32),
-                },
-            )
-            .unwrap();
         let revision = store.replace_commit(&staging, Some(0)).unwrap().revision;
         let metadata = serde_json::json!({
             "spec": "chara_card_v3",
@@ -2388,7 +2334,7 @@ mod tests {
             crate::local_backup::LocalBackupErrorCode::UnsupportedEncryption
         );
         assert_eq!(
-            fs::read_dir(directory.path().join("assets-v2/objects"))
+            fs::read_dir(directory.path().join("assets/objects"))
                 .map(|entries| entries.count())
                 .unwrap_or(0),
             0,

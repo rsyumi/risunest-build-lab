@@ -171,16 +171,20 @@ describe('RisuNestStorageDashboard', () => {
         ).not.toBeNull()
     })
 
-    it('renders six gray card-position placeholders during the initial load', async () => {
+    it('places the loading placeholder where the total, bar and legend appear', async () => {
         let resolveStats: ((value: typeof stats) => void) | undefined
         const target = setup(new Promise((resolve) => { resolveStats = resolve }))
 
-        await vi.waitFor(() => expect(target.querySelectorAll('[data-storage-card-placeholder]')).toHaveLength(6))
-        const placeholders = [...target.querySelectorAll<HTMLElement>('[data-storage-card-placeholder]')]
-        expect(placeholders.every((placeholder) => placeholder.classList.contains('bg-darkbutton'))).toBe(true)
+        await vi.waitFor(() => expect(target.querySelector('[data-storage-summary-placeholder]')).not.toBeNull())
+        const placeholder = target.querySelector<HTMLElement>('[data-storage-summary-placeholder]')!
+        const blocks = [...placeholder.querySelectorAll<HTMLElement>('.animate-pulse')]
+        expect(blocks.length).toBeGreaterThan(0)
+        expect(blocks.every((block) => block.classList.contains('bg-darkbutton'))).toBe(true)
+        expect(placeholder.innerHTML).not.toContain('sm:')
 
         resolveStats?.(stats)
         await vi.waitFor(() => expect(target.textContent).toContain('Total data'))
+        expect(target.querySelector('[data-storage-summary-placeholder]')).toBeNull()
     })
 
     it('summarizes each backup list with its count and size and keeps delete beside the row text', async () => {
@@ -341,18 +345,18 @@ describe('RisuNestStorageDashboard', () => {
             .toBe('이 충돌 백업을 삭제할까요? 삭제한 충돌 백업은 복구할 수 없습니다.')
     })
 
-    it('orders all backup lists before the storage action row', async () => {
+    it('orders all backup lists before the storage action rows', async () => {
         const target = setup()
         await vi.waitFor(() => expect(target.textContent).toContain('Create now'))
 
-        const actionRow = target.querySelector<HTMLElement>('[data-storage-action-row]')
+        const actionRow = target.querySelector<HTMLElement>('[data-storage-action="snapshot"]')
         const lists = [...target.querySelectorAll<HTMLElement>('[data-storage-backup-list]')]
         expect(actionRow).not.toBeNull()
         expect(lists).toHaveLength(4)
         expect(lists.every((list) => Boolean(list.compareDocumentPosition(actionRow!) & Node.DOCUMENT_POSITION_FOLLOWING))).toBe(true)
     })
 
-    it('keeps stale totals visible and offers retry after a post-snapshot reload fails', async () => {
+    it('keeps stale totals visible and leaves one reload control after a post-snapshot reload fails', async () => {
         const target = setup()
         maintenance.createNativePersistentSnapshot.mockResolvedValue({ path: 'new.db', bytes: 1, modifiedAt: 4 })
         await vi.waitFor(() => expect(target.textContent).toContain('Total data'))
@@ -362,7 +366,10 @@ describe('RisuNestStorageDashboard', () => {
 
         await vi.waitFor(() => expect(target.textContent).toContain('Storage totals may be out of date.'))
         expect(target.textContent).toContain('Total data')
-        expect(target.textContent).toContain('Retry')
+        // The header refresh is the only control that reloads the page.
+        expect(target.textContent).not.toContain('Retry')
+        expect([...target.querySelectorAll<HTMLButtonElement>('button')]
+            .filter((button) => button.textContent?.trim() === 'Refresh')).toHaveLength(1)
     })
 
     it('restores a snapshot from its row after confirmation and restarts through the guarded flow', async () => {
@@ -413,6 +420,15 @@ describe('RisuNestStorageDashboard', () => {
         await vi.waitFor(() => expect(server.cleanupServerSyncCache).toHaveBeenCalledOnce())
         expect(alerts.alertConfirm).toHaveBeenCalledWith(syncText.management.cleanConfirm)
         expect(target.querySelector('[data-storage-backup-list="temp-files"]')?.textContent).toContain(syncText.management.reclaimable)
+    })
+
+    it('explains a blocked backup in words instead of printing the native token', async () => {
+        const target = setup(Promise.resolve(stats), [{ ...serverBackup, deletable: false, blockedReason: 'backup-in-use' }])
+        await vi.waitFor(() => expect(target.textContent).toContain('Sync backups'))
+
+        const syncList = target.querySelector<HTMLElement>('[data-storage-backup-list="sync-backups"]')!
+        expect(syncList.textContent).toContain(syncText.management.blockedReasons['backup-in-use'])
+        expect(syncList.textContent).not.toContain('backup-in-use')
     })
 
     it('marks a running action busy on its button instead of swapping the label', async () => {

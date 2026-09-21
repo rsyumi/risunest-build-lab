@@ -107,6 +107,9 @@
         toggleValueChanged(DBState.db.globalChatVariables[`toggle_${key}`], savedToggles[`toggle_${key}`])
     const dirtyClass = (key: string | undefined) => (isToggleDirty(key) ? 'bg-draculared/15' : '')
 
+    // Switch rows sit in the same list as the select/text rows below, which set their own spacing.
+    const switchRow = 'mt-2 px-1'
+
     const getGlobalChatVarNH = (key: string) => {
         const value = getGlobalChatVar(key)
         if (value === 'null') {
@@ -135,7 +138,7 @@
 {#snippet toggles(items: sidebarToggle[], reverse: boolean = false)}
     {#each items as toggle, index}
         {#if index > 0 && toggle.type !== 'divider' && items[index - 1]?.type !== 'divider' && toggle.type !== 'caption' && items[index - 1]?.type !== 'caption' && !(toggle.type === 'group' && items[index - 1]?.type === 'group')}
-            <div class="w-full mt-0.5 -mb-1.5 border-t border-darkborderc/20"></div>
+            <div class="w-full my-2 border-t border-darkborderc/20"></div>
         {/if}
         {#if toggle.type === 'group' && toggle.children.length > 0}
             <div class="w-full mt-1">
@@ -202,6 +205,7 @@
             {/if}
         {:else}
             <SwitchInput
+                className={switchRow}
                 check={getGlobalChatVarNH(`toggle_${toggle.key}`) === '1'}
                 name={toggle.value}
                 highlight={isToggleDirty(toggle.key)}
@@ -225,12 +229,13 @@
         <CustomSideBar />
 
         {#if hasJailbreakPrompt}
-            <SwitchInput bind:check={DBState.db.jailbreakToggle} name={language.jailbreakToggle} />
+            <SwitchInput className={switchRow} bind:check={DBState.db.jailbreakToggle} name={language.jailbreakToggle} />
         {/if}
 
         {@render toggles(groupedToggles, true)}
         {#if chara && (DBState.db.supaModelType !== 'none' || DBState.db.hanuraiEnable || DBState.db.hypaV3)}
             <SwitchInput
+                className={switchRow}
                 bind:check={chara.supaMemory}
                 name={DBState.db.hypaV3
                     ? language.ToggleHypaMemory
@@ -246,11 +251,12 @@
     <CustomSideBar />
 
     {#if hasJailbreakPrompt}
-        <SwitchInput bind:check={DBState.db.jailbreakToggle} name={language.jailbreakToggle} />
+        <SwitchInput className={switchRow} bind:check={DBState.db.jailbreakToggle} name={language.jailbreakToggle} />
     {/if}
     {@render toggles(groupedToggles)}
     {#if chara && (DBState.db.supaModelType !== 'none' || DBState.db.hanuraiEnable || DBState.db.hypaV3)}
         <SwitchInput
+            className={switchRow}
             bind:check={chara.supaMemory}
             name={DBState.db.hypaV3
                 ? language.ToggleHypaMemory
@@ -264,6 +270,7 @@
 
     {#if chara}
         <SwitchInput
+            className={switchRow}
             check={getCurrentChat()?.useLocallySetGlobalVariables}
             name={language.localToggles}
             onChange={(checked) => {

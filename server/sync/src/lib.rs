@@ -12,17 +12,28 @@ pub mod tunnel;
 mod tunnel_job;
 pub mod workload;
 
-pub const PROTOCOL_ID: &str = "risunest-sync/v1";
+pub use risunest_sync_wire::PROTOCOL_ID;
 pub const STORE_FORMAT_ID: &str = "risunest-sync-store/v1";
 
 #[derive(Debug)]
 pub struct Error {
     pub code: &'static str,
     pub status: u16,
+    /// The record a page or seal rejection failed on. A locator, not content,
+    /// so the client can name the change without another round of guessing.
+    pub key: Option<String>,
 }
 impl Error {
     pub fn new(code: &'static str, status: u16) -> Self {
-        Self { code, status }
+        Self {
+            code,
+            status,
+            key: None,
+        }
+    }
+    pub fn for_key(mut self, key: &str) -> Self {
+        self.key = Some(key.to_owned());
+        self
     }
 }
 impl std::fmt::Display for Error {

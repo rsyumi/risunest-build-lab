@@ -120,7 +120,6 @@ async function createPreviousSchemaDatabase(
             'pluginStorageMetadata',
             'assetAliases',
             'assetOwnerHeads',
-            'assetRepositoryAuthority',
         ]
         for (const storeName of version === 1 ? ['meta', 'root'] : currentStoreNames) {
             request.result.createObjectStore(storeName, { keyPath: 'key' })
@@ -667,7 +666,7 @@ describe('IndexedDbPersistentDataStore I/O shape', () => {
                 version === 1
                     ? ['meta', 'root']
                     : [
-                        'assetAliases', 'assetOwnerHeads', 'assetRepositoryAuthority', 'catalog',
+                        'assetAliases', 'assetOwnerHeads', 'catalog',
                         'characters', 'conversations',
                         'messageOccurrences', 'messagePages', 'meta', 'pluginStorage',
                         'pluginStorageMetadata', 'presets', 'root',
@@ -1595,7 +1594,6 @@ describe('IndexedDbPersistentDataStore I/O shape', () => {
             'pluginStorageMetadata',
             'assetAliases',
             'assetOwnerHeads',
-            'assetRepositoryAuthority',
         ]
         const residueTransaction = rawDatabase.transaction(generationStores, 'readonly')
         const targetResidue = await Promise.all(generationStores.map(async (storeName) => {

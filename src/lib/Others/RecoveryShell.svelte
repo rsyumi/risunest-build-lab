@@ -4,8 +4,11 @@
     import { invoke } from '@tauri-apps/api/core'
     import { language } from 'src/lang'
     import SettingButton from 'src/lib/Setting/RisuNest/SettingButton.svelte'
-    import Check from 'src/lib/UI/GUI/CheckInput.svelte'
+    import SettingGroup from 'src/lib/Setting/RisuNest/SettingGroup.svelte'
+    import SettingRow from 'src/lib/Setting/RisuNest/SettingRow.svelte'
+    import SettingToggle from 'src/lib/Setting/RisuNest/SettingToggle.svelte'
     import RisuNestDataHealth from 'src/lib/Setting/Pages/RisuNestDataHealth.svelte'
+    import LocalDataReset from 'src/lib/Setting/RisuNest/LocalDataReset.svelte'
     import { isTauri } from 'src/ts/platform'
     import { exportOriginalData } from 'src/ts/storage/rawRecoveryExport'
     import {
@@ -23,9 +26,11 @@
 
     let { onStart }: Props = $props()
     let exportMessage = $state('')
+    let exporting = $state(false)
 
     const exportSource = async () => {
         exportMessage = ''
+        exporting = true
         try {
             const result = await exportOriginalData()
             if (!result) return
@@ -38,6 +43,8 @@
             } else {
                 exportMessage = strings.exportFailed
             }
+        } finally {
+            exporting = false
         }
     }
 
@@ -61,31 +68,55 @@
         account: strings.excludeAccount,
     }
 
+    interface SummaryLine {
+        key: string
+        /** The message around the recorded value, so only the value breaks. */
+        prefix: string
+        suffix: string
+        value?: string
+    }
+
+    const plain = (key: string, text: string): SummaryLine => ({
+        key,
+        prefix: text,
+        suffix: '',
+    })
+    const around = (key: string, template: string, value: string): SummaryLine => {
+        const [prefix, suffix = ''] = template.split('{0}')
+        return { key, prefix, suffix, value }
+    }
+
     let summary = $derived.by(() => {
-        const lines = [
-            strings.failures.replace(
-                '{0}',
-                (recovery.decision?.consecutiveFailures ?? 0).toLocaleString(),
+        const lines: SummaryLine[] = [
+            plain(
+                'failures',
+                strings.failures.replace(
+                    '{0}',
+                    (recovery.decision?.consecutiveFailures ?? 0).toLocaleString(),
+                ),
             ),
             recovery.trail.stage
-                ? strings.stage.replace('{0}', recovery.trail.stage)
-                : strings.stageUnknown,
+                ? around('stage', strings.stage, recovery.trail.stage)
+                : plain('stage', strings.stageUnknown),
         ]
         if (recovery.trail.suspect)
-            lines.push(strings.suspect.replace('{0}', recovery.trail.suspect))
+            lines.push(around('suspect', strings.suspect, recovery.trail.suspect))
         const previous = recovery.decision?.previous
         if (previous)
             lines.push(
-                strings.lastAttempt
-                    .replace('{0}', new Date(previous.startedAt).toLocaleString())
-                    .replace('{1}', previous.appVersion),
+                plain(
+                    'lastAttempt',
+                    strings.lastAttempt
+                        .replace('{0}', new Date(previous.startedAt).toLocaleString())
+                        .replace('{1}', previous.appVersion),
+                ),
             )
         return lines
     })
 </script>
 
 <div data-recovery-shell class="h-full w-full overflow-y-auto bg-darkbg text-textcolor">
-    <div class="mx-auto flex w-full max-w-3xl flex-col gap-4 p-4 sm:p-6">
+    <div class="mx-auto flex w-full max-w-3xl flex-col p-4 sm:p-6">
         <header>
             <h1 class="text-2xl font-bold">{strings.title}</h1>
             <p class="mt-1 text-sm text-textcolor2">
@@ -93,45 +124,53 @@
             </p>
         </header>
 
-        <section data-recovery-summary class="rounded-lg border border-darkborderc bg-bgcolor p-4">
-            <h2 class="text-lg font-bold">{strings.summaryTitle}</h2>
-            <ul class="mt-1.5 text-sm text-textcolor2">
-                {#each summary as line (line)}
-                    <li>{line}</li>
-                {/each}
-            </ul>
-        </section>
+        <SettingGroup title={strings.summaryTitle} panelProps={{ 'data-recovery-summary': '' }}>
+            {#each summary as line (line.key)}
+                <SettingRow>
+                    {#snippet below()}
+                        <p class="text-[15px]">{line.prefix}{#if line.value}<span class="break-all">{line.value}</span>{/if}{line.suffix}</p>
+                    {/snippet}
+                </SettingRow>
+            {/each}
+        </SettingGroup>
 
-        <section data-recovery-exclusions class="rounded-lg border border-darkborderc bg-bgcolor p-4">
-            <h2 class="text-lg font-bold">{strings.excludeTitle}</h2>
-            <p class="mt-1 text-sm text-textcolor2">{strings.excludeHelp}</p>
-            <div class="mt-2 flex flex-col gap-1">
-                {#each RECOVERY_EXCLUSIONS as exclusion (exclusion)}
-                    <Check
-                        check={recovery.excluded.includes(exclusion)}
-                        margin={false}
-                        name={exclusionLabels[exclusion]}
-                        onChange={() => toggleExclusion(exclusion)}
+        <SettingGroup
+            title={strings.excludeTitle}
+            description={strings.excludeHelp}
+            panelProps={{ 'data-recovery-exclusions': '' }}
+        >
+            {#each RECOVERY_EXCLUSIONS as exclusion (exclusion)}
+                <SettingRow inline label={exclusionLabels[exclusion]}>
+                    <SettingToggle
+                        checked={recovery.excluded.includes(exclusion)}
+                        label={exclusionLabels[exclusion]}
+                        onchange={() => toggleExclusion(exclusion)}
                     />
-                {/each}
-            </div>
-        </section>
+                </SettingRow>
+            {/each}
+        </SettingGroup>
 
         <RisuNestDataHealth prepare={openStore} />
 
         {#if isTauri}
-        <section data-recovery-export class="rounded-lg border border-darkborderc bg-bgcolor p-4">
-            <h2 class="text-lg font-bold">{strings.exportTitle}</h2>
-            <p class="mt-1 mb-2 text-sm text-textcolor2">{strings.exportHelp}</p>
-            <SettingButton variant="secondary" onclick={exportSource}>{strings.exportAction}</SettingButton>
-            {#if exportMessage}
-                <p class="mt-2 text-sm text-textcolor2" role="status">{exportMessage}</p>
-            {/if}
-        </section>
+            <SettingGroup title={strings.exportTitle} panelProps={{ 'data-recovery-export': '' }}>
+                <SettingRow help={strings.exportHelp}>
+                    {#snippet below()}
+                        {#if exportMessage}
+                            <p
+                                class="mt-1.5 text-sm {exportMessage === strings.exportFailed ? 'text-danger-400' : 'text-textcolor2'}"
+                                role="status"
+                            >{exportMessage}</p>
+                        {/if}
+                    {/snippet}
+                    <SettingButton variant="secondary" busy={exporting} onclick={exportSource}>{strings.exportAction}</SettingButton>
+                </SettingRow>
+            </SettingGroup>
         {/if}
 
-        <div class="flex flex-wrap gap-2">
+        <div class="mt-7 flex flex-wrap gap-2">
             <SettingButton onclick={() => onStart(startNormally())}>{strings.startNormally}</SettingButton>
         </div>
+        <LocalDataReset />
     </div>
 </div>

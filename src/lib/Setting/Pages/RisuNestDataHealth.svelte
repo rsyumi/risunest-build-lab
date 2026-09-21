@@ -4,7 +4,6 @@
     import { language } from 'src/lang'
     import { alertError, alertNormal } from 'src/ts/alert'
     import SettingButton from '../RisuNest/SettingButton.svelte'
-    import Check from 'src/lib/UI/GUI/CheckInput.svelte'
     import SettingGroup from '../RisuNest/SettingGroup.svelte'
     import SettingRow from '../RisuNest/SettingRow.svelte'
     import SettingToggle from '../RisuNest/SettingToggle.svelte'
@@ -91,7 +90,6 @@
         'alias-object-mismatch': strings.codeAliasObjectMismatch,
         'record-invalid': strings.codeRecordInvalid,
         'record-orphan': strings.codeRecordOrphan,
-        'authority-incomplete': strings.codeAuthorityIncomplete,
         'object-unreferenced': strings.codeObjectUnreferenced,
         unclassified: strings.codeUnclassified,
     }
@@ -236,7 +234,6 @@
         'normalize-records': strings.actionNormalizeRecords,
         'keep-single-record': strings.actionKeepSingleRecord,
         'recover-orphans': strings.actionRecoverOrphans,
-        'settle-authority': strings.actionSettleAuthority,
     }
     let choices = $derived(repairChoicesByFinding(view.candidates))
     // Select all is checked once every finding has an answer chosen.
@@ -322,7 +319,7 @@
                 {/if}
             {/if}
             {#if view.failed}
-                <p class="mt-1 text-sm text-textcolor2" role="alert">{strings.scanFailed}</p>
+                <p class="mt-1 text-sm text-danger-400" role="alert">{strings.scanFailed}</p>
             {/if}
         </div>
         {#if view.running}
@@ -351,17 +348,15 @@
         >{strings.quickScan}</SettingButton>
     </SettingRow>
     <SettingRow data-data-health-deep label={strings.deepScan} help={strings.deepScanHelp}>
-        {#if view.running === 'deep'}
-            <SettingButton variant="secondary" onclick={() => run(() => model.cancel())}>{strings.cancel}</SettingButton>
-        {:else}
-            {#if view.resumable}
-                <SettingButton variant="secondary" disabled={Boolean(view.running) || view.loading} onclick={() => run(() => model.deepScan(true))}>{strings.resume}</SettingButton>
-            {/if}
-            <SettingButton
-                disabled={Boolean(view.running) || view.loading}
-                onclick={() => run(() => model.deepScan(false))}
-            >{view.resumable ? strings.restart : strings.deepScan}</SettingButton>
+        <!-- Stopping a running check is offered once, beside the progress bar above. -->
+        {#if view.resumable}
+            <SettingButton variant="secondary" disabled={Boolean(view.running) || view.loading} onclick={() => run(() => model.deepScan(true))}>{strings.resume}</SettingButton>
         {/if}
+        <SettingButton
+            busy={view.running === 'deep'}
+            disabled={Boolean(view.running) || view.loading}
+            onclick={() => run(() => model.deepScan(false))}
+        >{view.resumable ? strings.restart : strings.deepScan}</SettingButton>
     </SettingRow>
 
     {#each view.groups as group (group.severity + group.code)}
@@ -393,10 +388,10 @@
     {/each}
 
     {#if view.groups.length > 0}
-        <SettingRow data-data-health-report label={strings.copyReport} help={includeNames ? strings.includeNamesWarning : ''}>
+        <SettingRow data-data-health-report label={strings.copyReport} help={strings.includeNamesWarning}>
             {#snippet below()}
-                <div class="mt-1.5 text-sm">
-                    <Check bind:check={includeNames} name={strings.includeNames} margin={false} />
+                <div class="mt-1.5">
+                    <SettingToggle bind:checked={includeNames} label={strings.includeNames} showLabel />
                 </div>
             {/snippet}
             <SettingButton variant="secondary" onclick={copyReport}>{strings.copyReport}</SettingButton>
@@ -410,7 +405,7 @@
         {#if view.candidates.length === 0}
             <p class="px-4 py-3 text-sm text-textcolor2">{strings.repairNone}</p>
         {:else}
-            <div data-data-health-select-all class="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 px-4 py-2.5">
+            <div data-data-health-select-all class="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 px-4 py-3">
                 <SettingToggle
                     label={strings.selectAll}
                     showLabel
@@ -426,17 +421,18 @@
                     <p class="text-sm break-words">{findingLabel(finding)}</p>
                     <div class="mt-1.5 flex flex-col gap-1">
                         {#each options as option (option.id)}
-                            <Check
-                                check={view.selection.includes(option.id)}
-                                margin={false}
-                                name={actionLabels[option.action.action]}
-                                onChange={() => { void model.toggle(option.id) }}
+                            <SettingToggle
+                                checked={view.selection.includes(option.id)}
+                                showLabel
+                                disabled={view.repairing}
+                                label={actionLabels[option.action.action]}
+                                onchange={() => { void model.toggle(option.id) }}
                             />
                             {#if option.discards && view.selection.includes(option.id)}
-                                <p class="pl-6 text-xs text-textcolor2">{strings.actionDiscards}</p>
+                                <p class="pl-7 text-xs text-textcolor2">{strings.actionDiscards}</p>
                             {/if}
                             {#if option.action.action === 'adopt-stored-payload' && view.selection.includes(option.id)}
-                                <p class="pl-6 text-xs text-textcolor2">{strings.actionRisky}</p>
+                                <p class="pl-7 text-xs text-textcolor2">{strings.actionRisky}</p>
                             {/if}
                         {/each}
                     </div>
@@ -448,12 +444,13 @@
                 help={strings.repairSnapshotHelp.replace('{0}', count(view.selection.length))}
             >
                 {#snippet below()}
-                    <div class="mt-1.5 text-sm">
-                        <Check
-                            check={keepSnapshot}
-                            margin={false}
-                            name={strings.repairSnapshot}
-                            onChange={(next) => { snapshotTouched = true; keepSnapshot = next }}
+                    <div class="mt-1.5">
+                        <SettingToggle
+                            checked={keepSnapshot}
+                            showLabel
+                            disabled={view.repairing}
+                            label={strings.repairSnapshot}
+                            onchange={(next) => { snapshotTouched = true; keepSnapshot = next }}
                         />
                     </div>
                     {#if view.repairing}
@@ -469,10 +466,7 @@
             <p data-data-health-skipped class="px-4 py-3 text-sm text-textcolor2" role="status">{strings.undoSkipped.replace('{0}', view.skipped.join(', '))}</p>
         {/if}
         <div data-data-health-journals class="divide-y divide-darkborderc/55">
-            <div class="px-4 py-3">
-                <div class="text-[15px]">{strings.undoTitle}</div>
-                <p class="mt-0.5 max-w-[62ch] text-[13px] leading-normal text-textcolor2">{strings.undoHelp}</p>
-            </div>
+            <SettingRow label={strings.undoTitle} help={strings.undoHelp} />
             {#each view.journals as entry (entry.id)}
                 <div class="flex flex-wrap items-center gap-3 px-4 py-2.5 text-sm">
                     <span class="min-w-0 flex-1 break-words tabular-nums">{strings.undoEntry

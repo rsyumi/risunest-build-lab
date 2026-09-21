@@ -47,7 +47,6 @@ const NATIVE_RESIDUAL: Record<string, string> = {
 /** Reached only by the web build, which has no device tier. */
 const WEB_ONLY: Record<string, string> = {
     'localStorage fallbackRisuToken': 'a native install holds the token in the vault',
-    'localStorage risuauth': 'the node server build signs in without a vault',
     'localStorage dynamic src/ts/sionyw.ts': 'the insecure file fallback replaces native files',
     'localStorage dynamic src/ts/storage/deviceBackup/scopes.ts':
         'restores the keys it captured from the same storage',

@@ -62,12 +62,19 @@ const inventory = (): ServerSyncBackupInventory => ({
   diskBytes: 5000,
 });
 let target: HTMLDivElement;
-let component: ReturnType<typeof mount>;
+let component: ReturnType<typeof mount> | undefined;
 let changed = vi.fn<() => void>();
 const button = (label: string) =>
   [...target.querySelectorAll<HTMLButtonElement>("button")].find((b) =>
     b.textContent?.trim().startsWith(label),
   )!;
+/** The row that opens the list decides which half it shows, so each test names it. */
+function show(section: "backups" | "cache"): void {
+  component = mount(ServerSyncStorage, {
+    target,
+    props: { onChange: changed, section },
+  });
+}
 beforeEach(() => {
   vi.resetAllMocks();
   native.getServerSyncBackupInventory.mockResolvedValue(inventory());
@@ -85,21 +92,22 @@ beforeEach(() => {
   changed = vi.fn();
   target = document.createElement("div");
   document.body.append(target);
-  component = mount(ServerSyncStorage, {
-    target,
-    props: { onChange: changed },
-  });
 });
 afterEach(async () => {
-  await unmount(component);
+  if (component) await unmount(component);
+  component = undefined;
   target.remove();
 });
 describe("shared local server storage management", () => {
   it("displays whole-inventory totals separately from the current page and fetches older rows by cursor", async () => {
-    await vi.waitFor(() => expect(button(labels.more)).toBeDefined());
-    expect(target.textContent).toContain("(105)");
+    show("cache");
+    await vi.waitFor(() => expect(target.textContent).toContain("(105)"));
     expect(target.textContent).toContain("4.9 KiB");
     expect(target.textContent).toContain(labels.incomplete);
+    await unmount(component!);
+    component = undefined;
+    show("backups");
+    await vi.waitFor(() => expect(button(labels.more)).toBeDefined());
     button(labels.more).click();
     await vi.waitFor(() =>
       expect(native.getServerSyncBackupInventory).toHaveBeenLastCalledWith(
@@ -108,6 +116,7 @@ describe("shared local server storage management", () => {
     );
   });
   it("requires confirmation and sends only the chosen native ID for deletion", async () => {
+    show("backups");
     await vi.waitFor(() =>
       expect(button(languageEnglish.remove)).toBeDefined(),
     );
@@ -128,6 +137,7 @@ describe("shared local server storage management", () => {
       localDeleted: true,
       cleanup: "pending",
     });
+    show("backups");
     await vi.waitFor(() => expect(button(languageEnglish.remove)).toBeDefined());
 
     button(languageEnglish.remove).click();
@@ -137,6 +147,7 @@ describe("shared local server storage management", () => {
     );
   });
   it("restores the chosen side through the existing guarded file route", async () => {
+    show("backups");
     await vi.waitFor(() =>
       expect(
         button(languageEnglish.risuNest.serverSync.restoreRemoteBackup),
@@ -152,6 +163,7 @@ describe("shared local server storage management", () => {
     expect(confirm).toHaveBeenCalledWith(labels.restoreConfirm);
   });
   it("exports an available side through the reference portable route", async () => {
+    show("backups");
     await vi.waitFor(() => expect(button(text.exportLocalBackup)).toBeDefined());
 
     button(text.exportLocalBackup).click();
@@ -164,7 +176,8 @@ describe("shared local server storage management", () => {
     );
   });
   it("rechecks listing after refresh and disables deletion, restoration and cache cleanup when native reports protection", async () => {
-    await vi.waitFor(() => expect(button(labels.clean)).toBeDefined());
+    show("backups");
+    await vi.waitFor(() => expect(button(languageEnglish.remove)).toBeDefined());
     const blocked = inventory();
     blocked.items[0] = {
       ...blocked.items[0],
@@ -185,9 +198,17 @@ describe("shared local server storage management", () => {
     expect(
       button(languageEnglish.risuNest.serverSync.restoreLocalBackup).disabled,
     ).toBe(true);
-    expect(button(labels.clean).disabled).toBe(true);
+    expect(target.textContent).toContain(labels.blockedReasons["backup-in-use"]);
+    expect(target.textContent).not.toContain("backup-in-use");
+    await unmount(component!);
+    component = undefined;
+    show("cache");
+    await vi.waitFor(() => expect(button(labels.clean).disabled).toBe(true));
+    expect(target.textContent).toContain(labels.blockedReasonUnknown);
+    expect(target.textContent).not.toContain("resolve-pending-operation-first");
   });
   it("hides stale usage after a partial cleanup failure, refreshes dashboard totals and never renders native detail", async () => {
+    show("cache");
     await vi.waitFor(() => expect(button(labels.clean)).toBeDefined());
     native.cleanupServerSyncCache.mockRejectedValue(
       new Error("synthetic private path and secret"),

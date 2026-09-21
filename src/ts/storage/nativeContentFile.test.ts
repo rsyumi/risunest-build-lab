@@ -7,8 +7,13 @@ vi.mock("./contentImportOperation", () => ({
   ) => operation({ signal: new AbortController().signal }),
 }));
 vi.mock("@tauri-apps/api/path", () => ({
-  appDataDir: async () => "/synthetic",
   join: async (...parts: string[]) => parts.join("/"),
+}));
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: async (command: string) => {
+    if (command !== "app_paths_roots") throw new Error(`unexpected ${command}`);
+    return { data: "/synthetic" };
+  },
 }));
 vi.mock("@tauri-apps/plugin-fs", () => ({
   mkdir: vi.fn(),

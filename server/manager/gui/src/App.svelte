@@ -32,9 +32,11 @@
   let connected = $state(false);
   let busy = $state(false);
   let notice = $state("");
-  let dialog = $state<"register" | "issued" | "revoke" | "stop" | "leave" | null>(null);
+  let dialog = $state<"register" | "issued" | "revoke" | "stop" | "leave" | "uninstall" | null>(null);
+  let deleteServerData = $state(false);
   let name = $state("");
   let selected = $state<Device | null>(null);
+  let local = $state(false);
   let uri = $state("");
   let svg = $state("");
   let connectionDraftDirty = $state(false);
@@ -179,7 +181,12 @@
           ? result.revision
           : null;
       await refresh();
-      notice = "변경 사항을 적용했습니다.";
+      notice =
+        {
+          "tunnel/start": "임시 주소 연결을 시작했습니다.",
+          "tunnel/stop": "임시 주소 연결을 중지했습니다.",
+          "tunnel/restart": "임시 주소 연결을 다시 시작했습니다.",
+        }[path] ?? "변경 사항을 적용했습니다.";
       return resultRevision ?? status?.revision ?? null;
     } catch (error) {
       notice = message(error);
@@ -199,7 +206,9 @@
   }
   function open(kind: typeof dialog, device: Device | null = null) {
     dialog = kind;
+    if (kind === "uninstall") deleteServerData = false;
     selected = device;
+    local = false;
     name = "";
     uri = "";
     svg = "";
@@ -213,6 +222,7 @@
     uri = "";
     svg = "";
     selected = null;
+    local = false;
     name = "";
   }
   async function register() {
@@ -225,6 +235,7 @@
         revision: status.revision,
         name,
         requestId,
+        target: local ? "local" : "configured",
       })) as { uri: string };
       let code = "";
       try {
@@ -434,6 +445,7 @@
       {:else if page === "connection"}<Connections
           {status}
           {environment}
+          {connected}
           busy={busy || !connected}
           {mutate}
           {copy}
@@ -537,6 +549,13 @@
           </div>
         </div>
       </section>
+      <section class="card settings-group">
+        <div class="setting">
+          <h2>RisuNest Sync 제거</h2>
+          <p>프로그램과 실행 등록을 제거하며, 서버 데이터는 선택에 따라 보존하거나 삭제합니다.</p>
+          <div class="actions"><button disabled={busy || updating || connectionDirty} onclick={() => open("uninstall")}>제거</button></div>
+        </div>
+      </section>
       <p class="notice">
         자동 실행 설정을 꺼도 실행 중인 서버는 중지되지 않습니다.
       </p>
@@ -557,7 +576,21 @@
     onclick={close}
     disabled={busy}><X size={20} /></button
   >
-  {#if dialog === "leave"}
+  {#if dialog === "uninstall"}
+    <h2>RisuNest Sync를 제거하시겠습니까?</h2>
+    <p>서버와 자동 실행을 중지하며, 연결된 기기의 동기화가 멈춥니다. 관리 앱이 종료됩니다.</p>
+    <label><input type="checkbox" bind:checked={deleteServerData} disabled={busy} /> 서버 데이터 삭제</label>
+    <p>다른 기기의 데이터와 별도로 내보낸 백업은 유지됩니다.</p>
+    <div class="dialog-actions">
+      <button onclick={close} disabled={busy}>취소</button>
+      <button class="primary" disabled={busy} onclick={async () => {
+        busy = true;
+        notice = "";
+        try { await backend.uninstall(deleteServerData); }
+        catch (error) { notice = message(error); busy = false; }
+      }}>제거</button>
+    </div>
+  {:else if dialog === "leave"}
     <p>저장하지 않은 변경사항이 있습니다. 정말로 이동하시겠습니까? 변경한 내용이 초기화됩니다.</p>
     <div class="actions"><button onclick={leavePage}>네</button><button onclick={close}>아니오</button></div>
   {:else if dialog === "register"}<h2>새 기기 등록</h2>
@@ -575,6 +608,10 @@
         required
         disabled={busy}
       />
+      {#if status?.localEndpoint}<label
+          ><input type="checkbox" bind:checked={local} disabled={busy} /> 이 컴퓨터에서
+          연결</label
+        >{/if}
       <div class="dialog-actions">
         <button type="button" onclick={close} disabled={busy}>취소</button
         ><button class="primary" disabled={busy || !connected}
@@ -583,10 +620,13 @@
       </div>
     </form>
   {:else if dialog === "issued"}<h2>기기 등록 코드</h2>
-    <p>
-      등록할 기기의 RisuNest 앱에서 QR 코드를 스캔하거나 등록 링크를 붙여
-      넣으세요.
-    </p>
+    {#if local}<p>
+        이 컴퓨터에서 실행하는 RisuNest 앱에만 등록할 수 있습니다. 해당 앱에서 QR
+        코드를 스캔하거나 등록 링크를 붙여 넣으세요.
+      </p>{:else}<p>
+        등록할 기기의 RisuNest 앱에서 QR 코드를 스캔하거나 등록 링크를 붙여
+        넣으세요.
+      </p>{/if}
     {#if svg}<div class="qr">{@html svg}</div>{/if}<textarea
       readonly
       aria-label="기기 등록 링크"

@@ -257,7 +257,7 @@ fn asset_object_catalog_revives_a_recreated_deleted_hash_transactionally() {
         .register(&[registration.clone()], 5)
         .expect("register original object");
     let physical_key = format!(
-        "assets-v2/objects/{}/{}",
+        "assets/objects/{}/{}",
         &registration.object_hash[..2],
         &registration.object_hash[2..]
     );
@@ -501,11 +501,8 @@ fn asset_gc_delete_page_recollects_a_late_durable_pin_under_writer_exclusion() {
 }
 
 #[test]
-fn asset_gc_delete_page_refuses_unsealed_jobs_and_unready_migrations() {
-    use crate::asset_repository::{
-        job_pins::{CasJobKind, DurableCasJob},
-        migration_gc::StagedAssetMigration,
-    };
+fn asset_gc_delete_page_refuses_unsealed_jobs() {
+    use crate::asset_repository::job_pins::{CasJobKind, DurableCasJob};
 
     let directory = tempfile::tempdir().expect("create blocker directory");
     let mut store = PersistentStore::open(directory.path()).expect("open persistent store");
@@ -519,8 +516,6 @@ fn asset_gc_delete_page_refuses_unsealed_jobs_and_unready_migrations() {
         1,
     )
     .unwrap();
-    let _migration =
-        StagedAssetMigration::begin(directory.path(), "gc-blocker-migration", 0).unwrap();
     let generation = super::active_generation(&store.connection).expect("read generation");
     store
         .connection
@@ -539,10 +534,6 @@ fn asset_gc_delete_page_refuses_unsealed_jobs_and_unready_migrations() {
         .report
         .blockers
         .contains(&"job-pin-unsealed:gc-blocker-job".to_owned()));
-    assert!(page
-        .report
-        .blockers
-        .contains(&"staged-migration-unready:gc-blocker-migration".to_owned()));
     assert!(page
         .report
         .blockers
@@ -786,7 +777,7 @@ fn asset_gc_delete_page_is_bounded_and_never_enumerates_untracked_cas_entries() 
     register_gc_candidate(&mut store, &second);
     let sentinel = directory
         .path()
-        .join("assets-v2/objects/aa/not-a-catalog-object");
+        .join("assets/objects/aa/not-a-catalog-object");
     fs::create_dir_all(sentinel.parent().unwrap()).unwrap();
     fs::write(&sentinel, b"untracked sentinel").unwrap();
 
@@ -1231,7 +1222,7 @@ fn asset_gc_recovery_rejects_a_noncanonical_tombstone_path_without_data_loss() {
     register_gc_candidate(&mut store, &prepared);
     let wrong_hash = "55".repeat(32);
     let wrong_key = format!(
-        "assets-v2/objects/{}/{}",
+        "assets/objects/{}/{}",
         &wrong_hash[..2],
         &wrong_hash[2..]
     );

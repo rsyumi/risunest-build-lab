@@ -64,6 +64,15 @@ export type ServerSyncProgress =
 export interface ServerCycleItems {
   done: number;
   total: number;
+  activity?:
+    | "enumerating"
+    | "preparing"
+    | "downloading"
+    | "verifying"
+    | "uploading"
+    | "confirming";
+  processed?: number;
+  expected?: number;
 }
 type Prepared =
   | { kind: "report"; result: ServerCycle }
@@ -84,14 +93,25 @@ type NativeInvoke = <T>(
   args?: Record<string, unknown>,
 ) => Promise<T>;
 export class ServerSyncError extends Error {
-  constructor(readonly code: string) {
+  /** False for a rejection the same request would receive again. Errors raised
+   * here rather than by native are worth another attempt. */
+  constructor(
+    readonly code: string,
+    readonly retryable = true,
+  ) {
     super(code);
     this.name = "ServerSyncError";
   }
 }
 function isCycleItems(value: unknown): value is ServerCycleItems {
   if (typeof value !== "object" || value === null) return false;
-  const { done, total } = value as Record<string, unknown>;
+  const { done, total, activity, processed, expected } = value as Record<string, unknown>;
+  if (activity !== undefined && (
+    typeof activity !== "string" ||
+    !["enumerating", "preparing", "downloading", "verifying", "uploading", "confirming"].includes(activity) ||
+    !Number.isSafeInteger(processed) || Number(processed) < 0 ||
+    !Number.isSafeInteger(expected) || Number(expected) < 0
+  )) return false;
   return (
     typeof done === "number" &&
     typeof total === "number" &&
@@ -107,10 +127,15 @@ export function serverSyncError(cause: unknown): ServerSyncError {
     typeof cause === "object" && cause !== null && "code" in cause
       ? cause.code
       : undefined;
+  const retryable =
+    typeof cause === "object" && cause !== null && "retryable" in cause
+      ? cause.retryable
+      : undefined;
   return new ServerSyncError(
     typeof code === "string" && /^[a-z-]{1,64}$/.test(code)
       ? code
       : "server-sync-failed",
+    typeof retryable === "boolean" ? retryable : true,
   );
 }
 
@@ -170,6 +195,9 @@ export function createServerSyncFacade(options: {
           options.onCycleItems?.({
             done: items.value.done,
             total: items.value.total,
+            activity: items.value.activity,
+            processed: items.value.processed,
+            expected: items.value.expected,
           });
       } catch {
         /* Progress must never change the synchronization outcome. */

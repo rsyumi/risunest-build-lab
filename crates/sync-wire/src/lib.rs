@@ -13,6 +13,10 @@ pub use changes::*;
 pub use head::*;
 use sha2::{Digest, Sha256};
 
+/// Identifies the wire contract both sides speak. A release raises it only when
+/// an older peer must recognize that it cannot talk to this one.
+pub const PROTOCOL_ID: &str = "risunest-sync/v1";
+
 pub type Result<T> = std::result::Result<T, WireError>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -31,7 +31,7 @@ vi.mock("./ts/stores.svelte", async () => {
 });
 
 const deviceSettings = {
-  schema: "risunest.device-settings/v2",
+  schema: "risunest.device-settings/v1",
   performanceProfile: "low-spec",
   androidKeepAliveDuringGeneration: false,
   nativeFileLogEnabled: true,

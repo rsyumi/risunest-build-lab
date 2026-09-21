@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
-import { appDataDir, join } from '@tauri-apps/api/path'
+import { join } from '@tauri-apps/api/path'
+import { iosStagingPath } from './nativePaths'
 import { mkdir, remove, writeFile } from '@tauri-apps/plugin-fs'
 
 export interface IOSPickedFile {
@@ -72,11 +73,7 @@ export async function downloadIOSFile(
     name: string,
     bytes: Uint8Array,
 ): Promise<boolean> {
-    const folder = await join(
-        await appDataDir(),
-        'ios-file-staging',
-        crypto.randomUUID(),
-    )
+    const folder = await iosStagingPath()
     const path = await join(folder, 'export.bin')
     await mkdir(folder, { recursive: true })
     try {

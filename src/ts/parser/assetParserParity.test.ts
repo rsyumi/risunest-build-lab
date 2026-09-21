@@ -1,5 +1,9 @@
+// @vitest-environment jsdom
+
 import { describe, expect, it, vi } from 'vitest'
 import { writable } from 'svelte/store'
+
+vi.mock('../platform', () => ({ isTauri: false, isNodeServer: false }))
 
 const parserMocks = vi.hoisted(() => ({
     characters: [] as unknown[],

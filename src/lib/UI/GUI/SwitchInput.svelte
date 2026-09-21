@@ -7,16 +7,26 @@
         disabled?: boolean
         /** Tints the row, used for toggles whose value differs from the chat binding. */
         highlight?: boolean
+        /** Spacing the surrounding list needs; lists with their own `gap-*` pass nothing. */
+        className?: string
         onChange?: (checked: boolean) => void
         children?: Snippet
     }
 
-    let { check = $bindable(), name, disabled = false, highlight = false, onChange, children }: Props = $props()
+    let {
+        check = $bindable(),
+        name,
+        disabled = false,
+        highlight = false,
+        className = '',
+        onChange,
+        children,
+    }: Props = $props()
     const id = $props.id()
 </script>
 
 <div
-    class="w-full flex gap-2 mt-2 items-center justify-between min-h-10 rounded-md px-1 transition-colors {highlight
+    class="w-full flex gap-2 items-center justify-between min-h-10 rounded-md transition-colors {className} {highlight
         ? 'bg-draculared/15'
         : ''}"
 >
@@ -36,13 +46,13 @@
         />
         <span
             aria-hidden="true"
-            class="inline-flex h-[18.4px] w-8 items-center rounded-full border border-transparent shadow-xs transition-colors peer-focus-visible:ring-2 peer-focus-visible:ring-borderc peer-focus-visible:ring-offset-2 peer-focus-visible:ring-offset-bgcolor peer-disabled:opacity-50 peer-disabled:cursor-not-allowed {check
+            class="inline-flex h-5 w-9 items-center rounded-full border-2 border-transparent shadow-xs transition-colors peer-focus-visible:ring-2 peer-focus-visible:ring-borderc peer-focus-visible:ring-offset-2 peer-focus-visible:ring-offset-bgcolor peer-disabled:opacity-50 peer-disabled:cursor-not-allowed {check
                 ? 'bg-primary-500'
                 : 'bg-darkbutton'}"
         >
             <span
                 class="size-4 rounded-full bg-white shadow-xs transition-transform {check
-                    ? 'translate-x-[14px] rtl:-translate-x-[14px]'
+                    ? 'translate-x-4 rtl:-translate-x-4'
                     : 'translate-x-0'}"
             ></span>
         </span>

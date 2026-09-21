@@ -12,7 +12,7 @@ use super::kei::KeiUploadResult;
 use super::content_change_index::{ContentChangeWindow, ContentKey};
 use super::{
     AssetAlias, AssetAliasListQuery, AssetAliasPage, AssetOwnerHead, AssetOwnerLocator,
-    AssetRepositoryAuthorityState, AssignedPluginStorage, CharacterPage, CharacterQuery,
+    AssignedPluginStorage, CharacterPage, CharacterQuery,
     CharacterSummary, CheckpointMode, ClaimedPluginValue, ConversationPage, ConversationQuery,
     ConversationWindow, ConversationWindowQuery, LeaseResult, PersistentStorageStats,
     PersistentStore, PluginStorageCatalog, PluginStorageListItem, PresetCatalog, RevisionResult,
@@ -170,6 +170,28 @@ impl PersistentStoreState {
         Ok(RendererOperationGuard {
             gate: Arc::clone(&self.renderer_gate),
         })
+    }
+
+    pub(crate) fn acquire_cleanup_maintenance(&self, timeout: std::time::Duration) -> StoreResult<DeviceMaintenanceGuard> {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut state = self.renderer_gate.state.lock().map_err(|_| renderer_gate_error())?;
+        if state.maintenance_active { return Err(renderer_gate_error()); }
+        state.maintenance_active = true;
+        let maintenance = DeviceMaintenanceGuard { gate: Arc::clone(&self.renderer_gate) };
+        while state.operations != 0 {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                drop(state);
+                drop(maintenance);
+                return Err(renderer_gate_error());
+            }
+            let waited = self.renderer_gate.drained.wait_timeout(state, remaining)
+                .map_err(|_| renderer_gate_error())?;
+            state = waited.0;
+        }
+        drop(state);
+        self.store.lock().map_err(|_| renderer_gate_error())?.take();
+        Ok(maintenance)
     }
 
     pub(crate) fn acquire_device_maintenance(&self) -> StoreResult<DeviceMaintenanceGuard> {
@@ -398,9 +420,7 @@ pub(crate) fn pds_open(
     state: State<'_, PersistentStoreState>,
 ) -> Result<PersistentStoreOpenResult, StoreError> {
     let operation_guard = state.admit_renderer_operation()?;
-    let app_data_dir = crate::app_data_root::resolve(&app).map_err(|error| StoreError::Store {
-        message: format!("failed to resolve application data directory: {error}"),
-    })?;
+    let app_data_dir = crate::app_paths::data_root(&app).map_err(|message| StoreError::Store { message })?;
     open_renderer_persistent_store_admitted(&state, &operation_guard, &app_data_dir)
 }
 
@@ -674,16 +694,6 @@ pub(crate) fn pds_list_asset_aliases(
 }
 
 #[tauri::command(async)]
-pub(crate) fn pds_read_asset_repository_authority(
-    state: State<'_, PersistentStoreState>,
-    lease: Option<String>,
-) -> Result<Versioned<AssetRepositoryAuthorityState>, StoreError> {
-    with_store(state, |store| {
-        store.read_asset_repository_authority(lease.as_deref())
-    })
-}
-
-#[tauri::command(async)]
 pub(crate) fn pds_read_asset_owner_head(
     state: State<'_, PersistentStoreState>,
     owner: AssetOwnerLocator,
@@ -847,17 +857,6 @@ pub(crate) fn pds_replace_put_asset_owner_heads(
 ) -> Result<(), StoreError> {
     with_store_mut(state, |store| {
         store.replace_put_asset_owner_heads(&staging_id, &heads)
-    })
-}
-
-#[tauri::command(async)]
-pub(crate) fn pds_replace_put_asset_repository_authority(
-    state: State<'_, PersistentStoreState>,
-    staging_id: String,
-    authority: AssetRepositoryAuthorityState,
-) -> Result<(), StoreError> {
-    with_store_mut(state, |store| {
-        store.replace_put_asset_repository_authority(&staging_id, &authority)
     })
 }
 
@@ -1562,6 +1561,19 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn cleanup_maintenance_timeout_preserves_admission_for_retry() {
+        let state = PersistentStoreState::default();
+        let operation = state.admit_renderer_operation().unwrap();
+        assert!(state.acquire_cleanup_maintenance(std::time::Duration::from_millis(1)).is_err());
+        assert!(state.admit_renderer_operation().is_ok());
+        drop(operation);
+        let maintenance = state.acquire_cleanup_maintenance(std::time::Duration::from_secs(1)).unwrap();
+        assert!(state.admit_renderer_operation().is_err());
+        drop(maintenance);
+        assert!(state.admit_renderer_operation().is_ok());
+    }
+
+    #[test]
     fn archive_operation_cancellation_reaches_the_active_operation_and_is_released() {
         let state = PersistentStoreState::default();
         let operation = state
@@ -2175,7 +2187,7 @@ mod tests {
             .expect("leave released journal fixture");
         let released_journal = directory
             .path()
-            .join("assets-v2/job-pins/job-preview-released-job.journal");
+            .join("assets/job-pins/job-preview-released-job.journal");
         assert!(released_journal.is_file());
         let expected_bytes = prepared
             .iter()

@@ -1,6 +1,9 @@
 <script lang="ts">
+  import { ChevronDownIcon, ChevronRightIcon } from "@lucide/svelte";
   import { language } from "src/lang";
+  import TextInput from "src/lib/UI/GUI/TextInput.svelte";
   import SegmentedButtons from "../RisuNest/SegmentedButtons.svelte";
+  import SettingButton from "../RisuNest/SettingButton.svelte";
   import ServerSyncRegistrationInput from "./ServerSyncRegistrationInput.svelte";
   import type { AssetResidencyPolicy } from "src/ts/storage/sync/serverAssetResidency";
   import type { ServerConfig } from "src/ts/storage/sync/serverSync";
@@ -105,8 +108,6 @@
       ...(replacing ? { replacing: true } : {}),
     });
   }
-  const button =
-    "rounded border border-darkborderc px-4 py-2 text-sm hover:bg-selected disabled:cursor-not-allowed disabled:opacity-45";
 </script>
 
 <div class="connect text-textcolor">
@@ -115,10 +116,24 @@
       <ServerSyncRegistrationInput {available} {busy} onRegistration={accept} />
     {/key}
     {#if available}
-      <details class="manual" bind:open={manualOpen}>
-        <summary class="text-sm">{text.manualEntry}</summary>
+      <div class="manual">
+        <button
+          type="button"
+          class="inline-flex items-center gap-1.5 rounded-md text-sm text-textcolor2 transition-colors duration-200 hover:text-textcolor focus:outline-hidden focus-visible:ring-2 focus-visible:ring-selected"
+          aria-expanded={manualOpen}
+          onclick={() => {
+            manualOpen = !manualOpen;
+          }}
+        >
+          {#if manualOpen}<ChevronDownIcon size={16} aria-hidden="true" />{:else}<ChevronRightIcon
+              size={16}
+              aria-hidden="true"
+            />{/if}
+          <span>{text.manualEntry}</span>
+        </button>
         <form
           class="fields"
+          hidden={!manualOpen}
           onsubmit={(event) => {
             event.preventDefault();
             readManualEntry();
@@ -126,60 +141,52 @@
         >
           <p class="text-sm text-textcolor2">{text.credentialsHelp}</p>
           <label class="field"
-            ><span>{text.endpoint}</span><input
-              type="url"
+            ><span>{text.endpoint}</span><TextInput
+              fullwidth
               bind:value={endpoint}
-              placeholder="https://sync.example.com"
-              required
-              autocomplete="url"
+              placeholder={text.endpointPlaceholder}
               disabled={busy}
+              className="disabled:opacity-50"
             /></label
           >
           <div class="identity">
             <label class="field"
-              ><span>{text.libraryId}</span><input
+              ><span>{text.libraryId}</span><TextInput
+                fullwidth
                 bind:value={libraryId}
-                required
-                autocomplete="off"
-                autocapitalize="none"
-                spellcheck="false"
                 disabled={busy}
+                className="disabled:opacity-50"
               /></label
             >
             <label class="field"
-              ><span>{text.deviceId}</span><input
+              ><span>{text.deviceId}</span><TextInput
+                fullwidth
                 bind:value={deviceId}
-                required
-                autocomplete="off"
-                autocapitalize="none"
-                spellcheck="false"
                 disabled={busy}
+                className="disabled:opacity-50"
               /></label
             >
           </div>
           <label class="field"
-            ><span>{text.token}</span><input
-              type="password"
+            ><span>{text.token}</span><TextInput
+              fullwidth
+              hideText
               bind:value={token}
-              required
-              autocomplete="new-password"
-              spellcheck="false"
               disabled={busy}
+              className="disabled:opacity-50"
             /></label
           >
-          {#if formError}<p class="text-sm" role="alert">
-              {text.credentialsHelp} <span class="opacity-60">({formError})</span>
+          {#if formError}<p class="text-sm text-danger-400" role="alert">
+              {text.credentialsHelp} <span class="text-textcolor2">({formError})</span>
             </p>{/if}
           <div class="actions">
-            <button type="submit" class="{button} bg-darkbutton" disabled={busy}
-              >{text.reviewTitle}</button
-            >
-            <button type="button" class={button} disabled={busy} onclick={discard}
-              >{text.discardRegistration}</button
+            <SettingButton type="submit" {busy}>{text.reviewTitle}</SettingButton>
+            <SettingButton variant="secondary" disabled={busy} onclick={discard}
+              >{text.discardRegistration}</SettingButton
             >
           </div>
         </form>
-      </details>
+      </div>
     {/if}
   {:else if config}
     <form
@@ -207,29 +214,34 @@
         {/if}
       </dl>
       <div class="policy">
-        <b class="text-sm font-semibold">{text.residency.title}</b>
-        <small class="text-sm text-textcolor2">{text.residency.description}</small>
+        <div class="min-w-0">
+          <div class="text-[15px]">{text.residency.title}</div>
+          <p class="policy-help mt-0.5 max-w-[62ch] text-[13px] leading-normal">
+            {text.residency.description}
+          </p>
+        </div>
         <SegmentedButtons
           bind:value={residency}
           options={residencyOptions}
           label={text.residency.title}
           role="radiogroup"
+          disabled={busy}
         />
       </div>
       <div class="actions">
-        <button type="submit" class="{button} bg-darkbutton" disabled={busy}
-          >{replacing ? text.reregister : text.connect}</button
+        <SettingButton type="submit" {busy}
+          >{replacing ? text.reregister : text.connect}</SettingButton
         >
-        <button type="button" class={button} disabled={busy} onclick={discard}
-          >{text.otherCode}</button
+        <SettingButton variant="secondary" disabled={busy} onclick={discard}
+          >{text.otherCode}</SettingButton
         >
       </div>
       <p class="text-sm text-textcolor2">{text.connectHint}</p>
     </form>
   {/if}
   {#if error && error !== "cancelled"}
-    <p class="text-sm" role="alert">
-      {serverSyncErrorHelp(error, text)} <span class="opacity-60">({error})</span>
+    <p class="text-sm text-danger-400" role="alert">
+      {serverSyncErrorHelp(error, text)} <span class="text-textcolor2">({error})</span>
     </p>
   {/if}
 </div>
@@ -242,13 +254,6 @@
     min-width: 0;
     gap: 0.85rem;
     overflow-wrap: anywhere;
-  }
-  .manual summary {
-    cursor: pointer;
-    opacity: 0.8;
-  }
-  .manual summary:hover {
-    opacity: 1;
   }
   .fields,
   .review-form,
@@ -268,19 +273,6 @@
     font-size: 0.875rem;
     font-weight: 500;
   }
-  .field input {
-    color: inherit;
-    background: transparent;
-    border: 1px solid var(--risu-theme-darkborderc);
-    border-radius: 0.35rem;
-    padding: 0.65rem 0.75rem;
-    min-width: 0;
-    width: 100%;
-  }
-  .field input:disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
-  }
   .identity {
     display: grid;
     grid-template-columns: minmax(0, 1fr);
@@ -293,9 +285,9 @@
     margin: 0;
     padding: 0.85rem 1rem;
     /* The onboarding's confirmation card tint. */
-    border: 1px solid rgba(34, 200, 198, 0.35);
-    border-radius: 0.75rem;
-    background: rgba(34, 200, 198, 0.08);
+    border: 1px solid color-mix(in srgb, var(--risu-theme-primary-500) 35%, transparent);
+    border-radius: 0.5rem;
+    background: color-mix(in srgb, var(--risu-theme-primary-500) 8%, transparent);
     font-size: 0.85rem;
   }
   .review dt {
@@ -315,18 +307,16 @@
     gap: 0.5rem;
     padding: 0.75rem 0.85rem;
     border: 1px solid var(--risu-theme-darkborderc);
-    border-radius: 0.75rem;
+    border-radius: 0.5rem;
+  }
+  .policy-help {
+    color: color-mix(in srgb, var(--risu-theme-textcolor2) 62%, var(--risu-theme-textcolor) 38%);
   }
   .actions {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
     gap: 0.5rem;
-  }
-  button:focus-visible,
-  input:focus-visible {
-    outline: 2px solid currentColor;
-    outline-offset: 3px;
   }
   @container (min-width: 480px) {
     .identity {

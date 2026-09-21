@@ -4,6 +4,7 @@ import type { Database, groupChat } from '../database.svelte'
 import type {
     AssetAlias,
     AssetOwnerHead,
+    CharacterDetail,
     PersistentDataStore,
 } from '../persistentDataStore'
 import { RevisionConflictError, SnapshotReleasedError } from '../persistentDataStore'
@@ -12,6 +13,14 @@ import { fixtureDatabase } from './persistentDataFixtures'
 export interface PersistentDataStoreHarness {
     store: PersistentDataStore
     reopen(): Promise<PersistentDataStore>
+}
+
+function assetOwnerCharacterDetails(database: Database): CharacterDetail[] {
+    return database.characters.map((character) => {
+        const detail = structuredClone(character) as CharacterDetail & { chats?: unknown }
+        delete detail.chats
+        return detail
+    })
 }
 
 export function persistentDataStoreContract(createHarness: () => Promise<PersistentDataStoreHarness>): void {
@@ -878,7 +887,7 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
             await lease.release()
         })
 
-        it('activates DB, aliases, owner heads, and v2 authority in one revision', async () => {
+        it('commits aliases and owner heads in one revision', async () => {
             const { store, reopen } = await createHarness()
             const database = structuredClone(fixtureDatabase)
             database.modules = [{
@@ -905,27 +914,13 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
                 entryCount: 1,
             }
 
-            expect(await store.readAssetRepositoryAuthority()).toEqual({
-                revision: initial.revision,
-                value: { format: 'legacy' },
-            })
-            const activated = await store.activateAssetRepositoryMigration({
-                sourceRevision: initial.revision,
-                migrationId: 'migration-atomic',
-                compatibilityHash: '9a'.repeat(32),
-                database,
+            const activated = await store.commit({
+                expectedRevision: initial.revision,
+                root: database,
                 assetAliases: [alias],
                 assetOwnerHeads: [head],
             })
 
-            expect(await store.readAssetRepositoryAuthority()).toEqual({
-                revision: activated.revision,
-                value: {
-                    format: 'v2',
-                    migrationId: 'migration-atomic',
-                    compatibilityHash: '9a'.repeat(32),
-                },
-            })
             expect(await store.readAssetAlias({ kind: 'asset', key: alias.key })).toEqual({
                 revision: activated.revision,
                 value: alias,
@@ -934,25 +929,17 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
                 revision: activated.revision,
                 value: head,
             })
-            expect(await lease.readAssetRepositoryAuthority()).toEqual({
-                revision: initial.revision,
-                value: { format: 'legacy' },
-            })
             expect(await lease.readAssetAlias({ kind: 'asset', key: alias.key })).toBeNull()
             await lease.release()
 
             const reopened = await reopen()
-            expect(await reopened.readAssetRepositoryAuthority()).toEqual({
+            expect(await reopened.readAssetAlias({ kind: 'asset', key: alias.key })).toEqual({
                 revision: activated.revision,
-                value: {
-                    format: 'v2',
-                    migrationId: 'migration-atomic',
-                    compatibilityHash: '9a'.repeat(32),
-                },
+                value: alias,
             })
         })
 
-        it('rolls back a rejected or stale migration without exposing preparing authority', async () => {
+        it('rolls back rejected or stale asset metadata commits', async () => {
             const { store } = await createHarness()
             const database = structuredClone(fixtureDatabase)
             const initial = await store.replaceFromDatabase(database)
@@ -963,35 +950,21 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
                 entryCount: 0,
             } as unknown as AssetOwnerHead
 
-            await expect(store.activateAssetRepositoryMigration({
-                sourceRevision: initial.revision,
-                migrationId: 'migration-invalid',
-                compatibilityHash: 'ab'.repeat(32),
-                database,
-                assetAliases: [],
+            await expect(store.commit({
+                expectedRevision: initial.revision,
                 assetOwnerHeads: [invalidHead],
             })).rejects.toThrow('manifestHash')
-            expect(await store.readAssetRepositoryAuthority()).toEqual({
-                revision: initial.revision,
-                value: { format: 'legacy' },
-            })
+            expect((await store.readRoot()).revision).toBe(initial.revision)
 
             const changed = await store.commit({
                 expectedRevision: initial.revision,
                 root: { ...(await store.readRoot()).value, username: 'changed' },
             })
-            await expect(store.activateAssetRepositoryMigration({
-                sourceRevision: initial.revision,
-                migrationId: 'migration-stale',
-                compatibilityHash: 'cd'.repeat(32),
-                database,
-                assetAliases: [],
+            await expect(store.commit({
+                expectedRevision: initial.revision,
                 assetOwnerHeads: [],
             })).rejects.toBeInstanceOf(RevisionConflictError)
-            expect(await store.readAssetRepositoryAuthority()).toEqual({
-                revision: changed.revision,
-                value: { format: 'legacy' },
-            })
+            expect((await store.readRoot()).revision).toBe(changed.revision)
         })
 
         it('preserves repository aliases and only unchanged owner heads across a database-only replacement', async () => {
@@ -1074,16 +1047,10 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
                     entryCount: 0,
                 },
             ]
-            const assetAuthority = {
-                format: 'v2' as const,
-                migrationId: 'asset-database-replacement',
-                compatibilityHash: '65'.repeat(32),
-            }
-            const assetsActivated = await store.activateAssetRepositoryMigration({
-                sourceRevision: imported.revision,
-                migrationId: assetAuthority.migrationId,
-                compatibilityHash: assetAuthority.compatibilityHash,
-                database,
+            const assetsActivated = await store.commit({
+                expectedRevision: imported.revision,
+                root: database,
+                characterDetails: assetOwnerCharacterDetails(database),
                 assetAliases: aliases,
                 assetOwnerHeads: heads,
             })
@@ -1094,10 +1061,6 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
 
             const replaced = await store.replaceFromDatabase(replacement, assetsActivated.revision)
 
-            expect(await store.readAssetRepositoryAuthority()).toEqual({
-                revision: replaced.revision,
-                value: assetAuthority,
-            })
             expect(await store.listAssetAliases({ limit: 8 })).toEqual({
                 revision: replaced.revision,
                 items: aliases,
@@ -1144,12 +1107,9 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
                 manifestHash: '69'.repeat(32),
                 entryCount: 1,
             }
-            const activated = await store.activateAssetRepositoryMigration({
-                sourceRevision: imported.revision,
-                migrationId: 'asset-semantic-owner-tuple',
-                compatibilityHash: '6a'.repeat(32),
-                database,
-                assetAliases: [],
+            const activated = await store.commit({
+                expectedRevision: imported.revision,
+                root: database,
                 assetOwnerHeads: [head],
             })
             const replacement = structuredClone(database)
@@ -1218,17 +1178,11 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
                     entryCount: 1,
                 },
             ]
-            const authority = {
-                format: 'v2' as const,
-                migrationId: 'asset-malformed-parent',
-                compatibilityHash: '75'.repeat(32),
-            }
             const imported = await store.replaceFromDatabase(database)
-            const activated = await store.activateAssetRepositoryMigration({
-                sourceRevision: imported.revision,
-                migrationId: authority.migrationId,
-                compatibilityHash: authority.compatibilityHash,
-                database,
+            const activated = await store.commit({
+                expectedRevision: imported.revision,
+                root: database,
+                characterDetails: assetOwnerCharacterDetails(database),
                 assetAliases: [alias],
                 assetOwnerHeads: heads,
             })
@@ -1248,10 +1202,6 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
             expect(await store.readAssetAlias({ kind: 'asset', key: alias.key })).toEqual({
                 revision: replaced.revision,
                 value: alias,
-            })
-            expect(await store.readAssetRepositoryAuthority()).toEqual({
-                revision: replaced.revision,
-                value: authority,
             })
         })
 

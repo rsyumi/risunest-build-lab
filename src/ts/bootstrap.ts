@@ -1,12 +1,13 @@
 import {
     writeFile,
-    BaseDirectory,
     readFile,
     exists,
     mkdir,
     readDir,
     remove
 } from "@tauri-apps/plugin-fs"
+import { join } from "@tauri-apps/api/path"
+import { nativeDataPath } from "./storage/nativePaths"
 import { changeFullscreen, sleep } from "./util"
 import { get } from "svelte/store";
 import { setDatabase, getDatabase, type Database } from "./storage/database.svelte";
@@ -78,7 +79,6 @@ import { getSyncConflictBackupStore } from "./storage/sync/syncConflictBackup";
 import { formatNameList, summarizePinnedSyncConflict } from "./storage/sync/syncConflictSummary";
 import { withPersistentRevisionLease } from "./storage/persistentRecordIterator";
 import {
-    activateNativeAssetRepository,
     initializePersistentStorage,
 } from "./storage/persistentStorageRuntime";
 import {
@@ -241,12 +241,6 @@ export async function loadData() {
         if (isTauri) {
             await transition('app-data-directories', language.risuNest.startup.storage)
             if (isTauriDesktop) appWindow.maximize()
-            if (!await exists('', { baseDir: BaseDirectory.AppData })) {
-                await mkdir('', { baseDir: BaseDirectory.AppData })
-            }
-            if (!await exists('assets', { baseDir: BaseDirectory.AppData })) {
-                await mkdir('assets', { baseDir: BaseDirectory.AppData })
-            }
         } else {
             stage = 'browser-storage'
             await forageStorage.Init()
@@ -312,16 +306,12 @@ export async function loadData() {
         })
         stage = 'persistent-database'
         const local = await resolvePersistentWorkingSet()
-        await transition('asset-repository', language.risuNest.startup.data)
-        const assetRepositoryRevision = await activateNativeAssetRepository()
-        if (assetRepositoryRevision !== null) local.revision = assetRepositoryRevision
         // The web build has no OS vault, so it keeps the account token in
         // localStorage. A native install holds it in the vault alone.
         const nativeCredentialVault = isTauri ? createNativeAccountCredentialVault() : null
         const nativeDeviceSettings = isTauri ? createNativeDeviceSettings() : null
         if (nativeCredentialVault) {
             localStorage.removeItem('fallbackRisuToken')
-            localStorage.removeItem('risuauth')
         }
         const nativeCredential = nativeCredentialVault
             ? normalizeNativeOfficialAccountCredential(await nativeCredentialVault.read())
@@ -935,29 +925,15 @@ async function cleanChunks() {
         return
     }
 
-    const uncleanable = new Set(await getUncleanables(db))
-    const blobStore = await resolveBlobStore()
     if (isTauri) {
-        const assets = await readDir('assets', { baseDir: BaseDirectory.AppData })
-        console.log(assets)
-        for (const asset of assets) {
-            try {
-                const n = getBasename(asset.name)
-                if (!uncleanable.has(n)) {
-                    await blobStore.remove('assets/' + asset.name)
-                    invalidateAssetSourceCache('assets/' + asset.name)
-                }
-            } catch (error) {
-                console.log('error', asset.name)
-            }
+        // Asset objects are reclaimed by the native repository, which owns the
+        // job pins and GC roots the content-addressed store is keyed on.
+        const remotesDirectory = await nativeDataPath('remotes')
+        if(!await exists(remotesDirectory)) {
+            await mkdir(remotesDirectory, { recursive: true })
         }
 
-        
-        if(!await exists('remotes', { baseDir: BaseDirectory.AppData })) {
-            await mkdir('remotes', { baseDir: BaseDirectory.AppData })
-        }
-
-        const remotes = await readDir('remotes', { baseDir: BaseDirectory.AppData })
+        const remotes = await readDir(remotesDirectory)
 
         const remoteUncleanables = new Set<string>(
             db.characters.map((v) => v.chaId)
@@ -972,13 +948,13 @@ async function cleanChunks() {
                 const fexists = remoteUncleanables.has(remotePayloadName)
                 if(!fexists){
 
-                    const metaPath = 'remotes/' + remote.name + '.meta'
+                    const metaPath = await join(remotesDirectory, remote.name + '.meta')
                     let metaExists = false
                     let metaLastUsed:unknown
                     try {
-                        metaExists = await exists(metaPath, { baseDir: BaseDirectory.AppData })
+                        metaExists = await exists(metaPath)
                         if (metaExists) {
-                            const meta = await readFile(metaPath, { baseDir: BaseDirectory.AppData })
+                            const meta = await readFile(metaPath)
                             const metaJson = JSON.parse(new TextDecoder().decode(meta))
                             metaLastUsed = metaJson.lastUsed
                         }
@@ -994,11 +970,11 @@ async function cleanChunks() {
                         const metaJson = {
                             lastUsed: Date.now()
                         }
-                        await writeFile(metaPath, new TextEncoder().encode(JSON.stringify(metaJson)), { baseDir: BaseDirectory.AppData })
+                        await writeFile(metaPath, new TextEncoder().encode(JSON.stringify(metaJson)))
                     }
                     else if(cleanupAction === 'delete'){
-                        await remove('remotes/' + remote.name, { baseDir: BaseDirectory.AppData })
-                        await remove(metaPath, { baseDir: BaseDirectory.AppData })
+                        await remove(await join(remotesDirectory, remote.name))
+                        await remove(metaPath)
                     }
                 }
             } catch (error) {
@@ -1007,6 +983,8 @@ async function cleanChunks() {
         }
     }
     else {
+        const uncleanable = new Set(await getUncleanables(db))
+        const blobStore = await resolveBlobStore()
         const indexes = await forageStorage.keys()
         const characterIds = new Set<string>(
             db.characters.map((v) => v.chaId)

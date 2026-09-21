@@ -717,19 +717,6 @@ fn external_receive_rechecks_revision_and_target_before_activation() {
 
 fn capture_fixture() -> (tempfile::TempDir, PersistentStore, Value) {
     let (directory, store, database) = open_fixture();
-    let generation = active_generation(&store.connection).unwrap();
-    // This synthetic library has a complete empty alias inventory. Its missing
-    // fixture images are explicitly absent, not undiscovered legacy files.
-    let authority=json!({"format":"v2","migrationId":"synthetic-external","compatibilityHash":"a".repeat(64)}).to_string();
-    for table in ["asset_repository_authority"] {
-        store
-            .connection
-            .execute(
-                &format!("UPDATE {table} SET value=?2 WHERE generation=?1"),
-                params![generation, authority],
-            )
-            .unwrap();
-    }
     (directory, store, database)
 }
 
@@ -1043,36 +1030,6 @@ fn external_capture_text_delta_does_not_hydrate_unchanged_remote_only_payloads()
     assert_eq!(delta.projected_records, 1);
     assert!(!delta.catalog.rebuilt);
     assert!(cas.stat_object(&payload.content_hash).unwrap().is_none());
-}
-
-#[test]
-fn external_capture_refuses_to_omit_unresolved_legacy_asset_storage() {
-    use crate::external_storage::capture::CaptureCatalog;
-    struct Never;
-    impl crate::local_backup::CancellationProbe for Never {
-        fn is_cancelled(&self) -> bool {
-            false
-        }
-    }
-    let (directory, mut store, _) = open_fixture();
-    let mut catalog = CaptureCatalog::create(
-        &directory.path().join("capture"),
-        &directory.path().join("objects"),
-        None,
-    )
-    .unwrap();
-    let prepared = store
-        .prepare_content_capture("legacy", "consumer", 1)
-        .unwrap();
-    assert_eq!(
-        prepared
-            .project(&mut catalog, &Never)
-            .unwrap_err()
-            .to_string(),
-        "Canonical asset authority required before external capture"
-    );
-    assert!(catalog.manifest().is_err());
-    assert_eq!(count(&store, "external_storage_captures"), 0);
 }
 
 #[test]

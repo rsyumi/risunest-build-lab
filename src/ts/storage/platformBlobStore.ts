@@ -1,29 +1,13 @@
-import {
-    BaseDirectory,
-    SeekMode,
-    exists,
-    mkdir,
-    open,
-    readDir,
-    readFile,
-    remove,
-    stat,
-    writeFile,
-} from '@tauri-apps/plugin-fs'
 import { invoke } from '@tauri-apps/api/core'
 import { isTauri } from '../platform'
 import {
     createKeyValueBlobStore,
     type BlobKeyValueBackend,
-    type InlayBlobMetadata,
     type BlobPhysicalKeyMapper,
-    type BlobReadRange,
     type BlobStore,
-    normalizeInlayEncodeOptions,
 } from './blobStore'
 import type { StorageMutationGate } from './storageMutationGate'
 import { objectPhysicalKey } from './payloadCas'
-import { invokeWithBoundedNativeMediaInput } from './nativeMediaIpc'
 
 function logicalKeyHex(key: string): string {
     return Buffer.from(key, 'utf-8').toString('hex')
@@ -95,30 +79,6 @@ const blobKeyMapper: BlobPhysicalKeyMapper = {
 
 export function createBackedBlobStore(backend: BlobKeyValueBackend): BlobStore {
     return createKeyValueBlobStore(backend, blobKeyMapper)
-}
-
-export function createTauriBlobStore(
-    backend: BlobKeyValueBackend,
-    invokeCommand: (command: string, args?: Record<string, unknown>) => Promise<unknown> = invoke,
-): BlobStore {
-    return {
-        ...createBackedBlobStore(backend),
-        async putNewInlayImage(key, data, input) {
-            const options = input.options === undefined
-                ? undefined
-                : normalizeInlayEncodeOptions(input.options)
-            return invokeWithBoundedNativeMediaInput<InlayBlobMetadata>(invokeCommand, {
-                data,
-                directCommand: 'native_media_write_inlay_image',
-                streamedFinishCommand: 'native_media_write_inlay_finish',
-                args: {
-                    id: key,
-                    name: input.name,
-                    ...(options === undefined ? {} : { options }),
-                },
-            })
-        },
-    }
 }
 
 export function createGatedBlobStore(store: BlobStore, gate: StorageMutationGate): BlobStore {
@@ -221,90 +181,6 @@ export function createOpfsBlobBackend(directory: FileSystemDirectoryHandle): Blo
     }
 }
 
-async function listTauriFiles(path: string): Promise<string[]> {
-    if (!await exists(path, { baseDir: BaseDirectory.AppData })) return []
-    const output: string[] = []
-    for (const entry of await readDir(path, { baseDir: BaseDirectory.AppData })) {
-        if (!entry.name) continue
-        const child = `${path}/${entry.name}`
-        if (entry.isDirectory) output.push(...await listTauriFiles(child))
-        else output.push(child)
-    }
-    return output
-}
-
-export interface TauriBlobBackendDependencies {
-    exists(key: string): Promise<boolean>
-    mkdir(path: string): Promise<void>
-    write(key: string, value: Uint8Array): Promise<void>
-    read(key: string): Promise<Uint8Array>
-    list(path: string): Promise<string[]>
-    remove(key: string): Promise<void>
-    size(key: string): Promise<number>
-    open(key: string): Promise<{
-        seek(offset: number, mode: SeekMode): Promise<number>
-        read(buffer: Uint8Array): Promise<number | null>
-        close(): Promise<void>
-    }>
-    resolveUrl(key: string): Promise<string>
-}
-
-export function createTauriBlobBackend(dependencies?: TauriBlobBackendDependencies): BlobKeyValueBackend {
-    const deps = dependencies ?? {
-        exists: (key: string) => exists(key, { baseDir: BaseDirectory.AppData }),
-        mkdir: (path: string) => mkdir(path, { baseDir: BaseDirectory.AppData, recursive: true }).then(() => undefined),
-        write: (key: string, value: Uint8Array) => writeFile(key, value, { baseDir: BaseDirectory.AppData }),
-        read: (key: string) => readFile(key, { baseDir: BaseDirectory.AppData }),
-        list: async (path: string) => listTauriFiles(path),
-        remove: (key: string) => remove(key, { baseDir: BaseDirectory.AppData }),
-        size: async (key: string) => (await stat(key, { baseDir: BaseDirectory.AppData })).size,
-        open: (key: string) => open(key, { read: true, baseDir: BaseDirectory.AppData }),
-        resolveUrl: async (key: string) => createTauriNativeMediaUrl(key, await getNativeMediaEndpoint()),
-    }
-    return {
-        async write(key, value) {
-            const parent = key.split('/').slice(0, -1).join('/')
-            if (parent) await deps.mkdir(parent)
-            await deps.write(key, value)
-        },
-        async read(key) {
-            if (!await deps.exists(key)) return null
-            return deps.read(key)
-        },
-        async readRange(key: string, range: BlobReadRange) {
-            if (!await deps.exists(key)) return null
-            const file = await deps.open(key)
-            try {
-                await file.seek(range.start, SeekMode.Start)
-                const fileSize = await deps.size(key)
-                const requested = Math.max(0, Math.min(range.endExclusive, fileSize) - Math.min(range.start, fileSize))
-                const result = new Uint8Array(requested)
-                let offset = 0
-                while (offset < requested) {
-                    const count = await file.read(result.subarray(offset))
-                    if (count === null || count === 0) break
-                    offset += count
-                }
-                return result.slice(0, offset)
-            } finally {
-                await file.close()
-            }
-        },
-        async size(key) { return await deps.exists(key) ? deps.size(key) : null },
-        async keys() {
-            return [
-                ...await deps.list('assets'),
-                ...await deps.list('blobstore'),
-                ...await deps.list('coldstorage'),
-            ]
-        },
-        async remove(key) {
-            if (await deps.exists(key)) await deps.remove(key)
-        },
-        async resolveUrl(key) { return deps.resolveUrl(key) },
-    }
-}
-
 let productionStore: Promise<BlobStore> | undefined
 let productionBackend: Promise<BlobKeyValueBackend> | undefined
 let storageProvider: () => Promise<KeyValueStorage | null> = async () => null
@@ -342,7 +218,7 @@ export async function readBlobForFacade(
 }
 
 async function createProductionBackend(): Promise<BlobKeyValueBackend> {
-    if (isTauri) return createTauriBlobBackend()
+    if (isTauri) throw new Error('Native asset repository is not configured')
     return createBrowserBlobBackend(await storageProvider())
 }
 
@@ -352,7 +228,7 @@ export function getPlatformBlobKeyValueBackend(): Promise<BlobKeyValueBackend> {
 
 async function createProductionStore(): Promise<BlobStore> {
     const backend = await getPlatformBlobKeyValueBackend()
-    return isTauri ? createTauriBlobStore(backend) : createBackedBlobStore(backend)
+    return createBackedBlobStore(backend)
 }
 
 /** Defers backend selection so callers can hold a store before storage is initialized. */
@@ -384,10 +260,6 @@ export function configureActiveBlobStore(
     gatedProductionStore = options.alreadyGuarded
         ? authoritative
         : createGatedBlobStore(authoritative, gate)
-}
-
-export function getLegacyBlobStore(): BlobStore {
-    return deferredStore
 }
 
 export function getBlobStore(): BlobStore {

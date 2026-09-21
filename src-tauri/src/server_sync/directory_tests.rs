@@ -71,7 +71,7 @@ fn tls_identity_requests(
             })
             .unwrap();
             let body = if input.starts_with("GET /session ") {
-                serde_json::json!({"head":head,"deviceId":device,"operationWatermark":"0","operationPending":false}).to_string()
+                serde_json::json!({"head":head,"deviceId":device,"operationWatermark":"0","operationPending":false,"protocolId":risunest_sync_wire::PROTOCOL_ID}).to_string()
             } else {
                 head.to_string()
             };

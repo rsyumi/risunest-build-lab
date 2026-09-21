@@ -129,3 +129,33 @@ fn offline_ack_keeps_tombstones_history_and_staged_objects_and_epoch_rotates() {
         "epoch-changed"
     );
 }
+
+#[test]
+fn maintenance_folds_the_write_ahead_log_back_and_reports_a_blocked_checkpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::init(dir.path()).unwrap();
+    let a = device(&store);
+    let head = store.head().unwrap();
+    store.put_object(&a, &hash(b"old"), b"old").unwrap();
+    let intent = stage(&store, &a, &head, 1, &changes("key", b"old"));
+    store.commit(&a, &intent, &head.etag()).unwrap();
+    let wal = dir.path().join("metadata.sqlite-wal");
+    assert!(std::fs::metadata(&wal).unwrap().len() > 0);
+    let result = store.maintain().unwrap();
+    assert_eq!(result.wal_checkpoint.busy, 0);
+    assert_eq!(
+        result.wal_checkpoint.checkpointed_frames,
+        result.wal_checkpoint.log_frames
+    );
+    assert!(!result.wal_checkpoint.incomplete());
+    assert_eq!(std::fs::metadata(&wal).unwrap().len(), 0);
+    // A reader holding the database keeps frames in the log, which the result
+    // reports instead of leaving the growth unexplained.
+    store.put_object(&a, &hash(b"new"), b"new").unwrap();
+    let reader = rusqlite::Connection::open(dir.path().join("metadata.sqlite")).unwrap();
+    reader.execute_batch("BEGIN; SELECT count(*) FROM objects;").unwrap();
+    let blocked = store.checkpoint_wal().unwrap();
+    assert!(blocked.incomplete());
+    reader.execute_batch("COMMIT").unwrap();
+    assert!(!store.checkpoint_wal().unwrap().incomplete());
+}

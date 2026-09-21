@@ -347,16 +347,55 @@ pub(crate) struct AutomaticTarget {
 
 #[derive(Default)]
 pub(crate) struct JobCommandState {
+    cleanup_closed: std::sync::atomic::AtomicBool,
+    background_workers: Arc<std::sync::atomic::AtomicUsize>,
     pub root: std::sync::OnceLock<std::path::PathBuf>,
     pub active: ActiveJobs,
     pub session: Mutex<Session>,
     pub automatic_targets: Mutex<HashMap<String, AutomaticTarget>>,
     pub prepared_receives: Mutex<HashMap<String, super::sync_engine::PreparedReceive>>,
 }
+pub(crate) struct BackgroundWorker(Arc<std::sync::atomic::AtomicUsize>);
+impl Drop for BackgroundWorker {
+    fn drop(&mut self) { self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel); }
+}
+
 impl JobCommandState {
+    pub(crate) fn track_worker(&self) -> BackgroundWorker {
+        self.background_workers.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        BackgroundWorker(self.background_workers.clone())
+    }
+
+    pub(crate) fn begin_cleanup(&self) -> Result<()> {
+        let active = self.active.lock().map_err(failure)?;
+        self.cleanup_closed.store(true, std::sync::atomic::Ordering::Release);
+        for (_, cancel) in active.values() { cancel.cancel(); }
+        self.automatic_targets.lock().map_err(failure)?.clear();
+        Ok(())
+    }
+
+    pub(crate) fn cleanup_drained(&self) -> Result<bool> {
+        let active = self.active.lock().map_err(failure)?;
+        if !active.is_empty() || self.background_workers.load(std::sync::atomic::Ordering::Acquire) != 0 {
+            return Ok(false);
+        }
+        self.prepared_receives.lock().map_err(failure)?.clear();
+        *self.session.lock().map_err(failure)? = Session::default();
+        Ok(true)
+    }
+
+    pub(crate) fn finish_cleanup(&self) -> Result<()> {
+        if !self.cleanup_drained()? { return Err(ProviderError::new(ErrorKind::PreconditionFailed)); }
+        self.cleanup_closed.store(false, std::sync::atomic::Ordering::Release);
+        Ok(())
+    }
+
     pub fn claim(&self, job: &DurableJob) -> Result<(Cancellation, JobClaim)> {
         let cancel = Cancellation::default();
         let mut active = self.active.lock().map_err(failure)?;
+        if self.cleanup_closed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(ProviderError::new(ErrorKind::Cancelled));
+        }
         if active.contains_key(&job.id)
             || active.values().any(|(connection, _)| connection == &job.request.connection_id)
         {
@@ -388,6 +427,9 @@ impl JobCommandState {
             return Ok(true);
         }
         let mut queued = self.automatic_targets.lock().map_err(failure)?;
+        if self.cleanup_closed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(ProviderError::new(ErrorKind::Cancelled));
+        }
         if queued.get(&request.connection_id).is_some_and(|held| {
             held.owner_job_id == running.id && requested_revision(&held.request, held.identity.revision)
                 .is_ok_and(|revision| revision >= target)
@@ -436,6 +478,24 @@ mod tests {
             revision: 1,
         }
     }
+    #[test]
+    fn cleanup_waits_for_worker_tail_after_the_job_claim_is_released() {
+        let state = JobCommandState::default();
+        let job = DurableJob::new(request(), false, 1, identity());
+        let (cancel, claim) = state.claim(&job).unwrap();
+        let worker = state.track_worker();
+        state.begin_cleanup().unwrap();
+        assert!(cancel.check().is_err());
+        assert!(state.claim(&job).is_err());
+        drop(claim);
+        assert!(!state.cleanup_drained().unwrap());
+        assert!(state.finish_cleanup().is_err());
+        drop(worker);
+        assert!(state.cleanup_drained().unwrap());
+        state.finish_cleanup().unwrap();
+        assert!(state.claim(&job).is_ok());
+    }
+
     #[test]
     fn a_retried_restore_start_never_overwrites_its_original_job() {
         let root = tempfile::tempdir().unwrap();

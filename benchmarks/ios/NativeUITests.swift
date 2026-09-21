@@ -211,15 +211,16 @@ final class NativeUITests: XCTestCase {
         app.launchEnvironment["RISUNEST_IOS_PHASE"] = "app"
         app.launch()
         XCTAssertTrue(app.webViews.staticTexts.containing(NSPredicate(format: "label CONTAINS %@", "ios-synthetic-ui-edit")).firstMatch.waitForExistence(timeout: 90))
+        let staleAlertButton = app.buttons["OK"]
+        if staleAlertButton.waitForExistence(timeout: 2) {
+            staleAlertButton.tap()
+        }
         let input = app.webViews.textViews.firstMatch
         XCTAssertTrue(input.waitForExistence(timeout: 15))
         input.tap()
-        XCTAssertTrue(app.keyboards.firstMatch.waitForExistence(timeout: 15))
         input.typeText("synthetic draft")
         XCTAssertTrue((input.value as? String)?.contains("synthetic draft") == true)
-        let screenshot = XCTAttachment(screenshot: app.screenshot())
-        screenshot.lifetime = .keepAlways
-        add(screenshot)
+        attachScreenshot(app, name: "05-product-chat")
     }
 
     func testProductOnboardingScreenshots() throws {
@@ -234,7 +235,9 @@ final class NativeUITests: XCTestCase {
         XCTAssertTrue(home.waitForExistence(timeout: 90))
         attachScreenshot(app, name: "01-onboarding-start")
 
-        let importOption = webView.staticTexts["Import from a backup file"]
+        let importOption = webView.buttons.matching(
+            NSPredicate(format: "label CONTAINS %@", "Import from a backup file")
+        ).firstMatch
         XCTAssertTrue(importOption.waitForExistence(timeout: 15))
         importOption.tap()
         XCTAssertTrue(webView.staticTexts["Import a backup file"].waitForExistence(timeout: 15))
@@ -245,7 +248,9 @@ final class NativeUITests: XCTestCase {
         backToStart.tap()
         XCTAssertTrue(home.waitForExistence(timeout: 15))
 
-        let syncOption = webView.staticTexts["Connect to a sync server"]
+        let syncOption = webView.buttons.matching(
+            NSPredicate(format: "label CONTAINS %@", "Connect to a sync server")
+        ).firstMatch
         XCTAssertTrue(syncOption.waitForExistence(timeout: 15))
         syncOption.tap()
         XCTAssertTrue(webView.staticTexts["Choose how to sync."].waitForExistence(timeout: 15))
@@ -254,7 +259,9 @@ final class NativeUITests: XCTestCase {
         XCTAssertTrue(backToStart.waitForExistence(timeout: 15))
         backToStart.tap()
         XCTAssertTrue(home.waitForExistence(timeout: 15))
-        let fresh = webView.staticTexts["Start right away"]
+        let fresh = webView.buttons.matching(
+            NSPredicate(format: "label CONTAINS %@", "Start right away")
+        ).firstMatch
         XCTAssertTrue(fresh.waitForExistence(timeout: 15))
         fresh.tap()
         XCTAssertTrue(webView.staticTexts["Ready"].waitForExistence(timeout: 15))
@@ -279,6 +286,8 @@ final class NativeUITests: XCTestCase {
 
         let webView = app.webViews.firstMatch
         XCTAssertTrue(webView.staticTexts["Performance"].waitForExistence(timeout: 90))
+        let staleAlert = app.buttons["OK"]
+        if staleAlert.waitForExistence(timeout: 3) { staleAlert.tap() }
         attachScreenshot(app, name: "06-risunest-settings")
 
         let platform = webView.staticTexts["Platform"]

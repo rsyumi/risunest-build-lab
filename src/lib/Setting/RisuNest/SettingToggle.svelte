@@ -1,5 +1,7 @@
 <script lang="ts">
-    interface Props {
+    import type { HTMLInputAttributes } from 'svelte/elements'
+
+    interface Props extends Omit<HTMLInputAttributes, 'checked' | 'disabled' | 'id' | 'onchange' | 'type' | 'class'> {
         checked?: boolean
         label: string
         /** Show the label beside the box instead of exposing it only to assistive technology. */
@@ -11,11 +13,11 @@
         onchange?: (checked: boolean) => void
     }
 
-    let { checked = $bindable(false), label, showLabel = false, indeterminate = false, disabled = false, id, onchange }: Props = $props()
+    let { checked = $bindable(false), label, showLabel = false, indeterminate = false, disabled = false, id, onchange, ...rest }: Props = $props()
 </script>
 
-<label class="inline-flex items-center gap-2 rounded-md text-textcolor focus-within:outline focus-within:outline-2 focus-within:outline-darkborderc focus-within:outline-offset-2 {disabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'}">
-    <input {id} class="sr-only" type="checkbox" bind:checked {indeterminate} {disabled} onchange={(event) => onchange?.(event.currentTarget.checked)} />
+<label class="inline-flex min-w-0 items-center gap-2 rounded-md text-textcolor focus-within:outline focus-within:outline-2 focus-within:outline-darkborderc focus-within:outline-offset-2 {disabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'}">
+    <input {...rest} {id} class="sr-only" type="checkbox" bind:checked {indeterminate} {disabled} onchange={(event) => onchange?.(event.currentTarget.checked)} />
     <span class="flex h-5 w-5 min-h-5 min-w-5 items-center justify-center rounded-md border-2 border-darkborderc transition-colors duration-200 {checked || indeterminate ? 'bg-darkborderc' : 'bg-darkbutton'}" aria-hidden="true">
         {#if checked}
             <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="white" class="h-3 w-3" aria-hidden="true">
@@ -25,5 +27,5 @@
             <span class="h-0.5 w-2.5 rounded-full bg-white"></span>
         {/if}
     </span>
-    <span class="text-sm" class:sr-only={!showLabel}>{label}</span>
+    <span class="min-w-0 text-sm break-words" class:sr-only={!showLabel}>{label}</span>
 </label>

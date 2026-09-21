@@ -41,18 +41,34 @@ afterEach(() => {
 });
 
 describe("device maintenance bootstrap ordering", () => {
+  it("resumes pending app cleanup before any device recovery or normal app import", async () => {
+    state.invoke.mockImplementation((command: string) => {
+      if (command === "app_cleanup_status") return Promise.resolve({ pending: true, mode: "reset", error: null });
+      if (command === "app_cleanup_resume") return Promise.resolve();
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    await import("../../../main");
+    await vi.waitFor(() => expect(state.invoke).toHaveBeenCalledWith("app_cleanup_resume"));
+    expect(state.invoke.mock.calls.map(([command]) => command)).toEqual([
+      "app_cleanup_status", "app_cleanup_resume",
+    ]);
+    expect(state.normalStarted).not.toHaveBeenCalled();
+  });
+
   it("does not evaluate the normal app before the native recovery decision", async () => {
     let decide!: (value: unknown) => void;
     state.invoke.mockImplementation((command: string) => {
+      if (command === "app_cleanup_status") return Promise.resolve({ pending: false, mode: null, error: null });
       if (command === "native_startup_status") return Promise.resolve();
       return new Promise((resolve) => {
         decide = resolve;
       });
     });
     const main = await import("../../../main");
-    expect(state.invoke).toHaveBeenNthCalledWith(1, "native_startup_status");
+    expect(state.invoke).toHaveBeenNthCalledWith(1, "app_cleanup_status");
+    expect(state.invoke).toHaveBeenNthCalledWith(2, "native_startup_status");
     expect(state.invoke).toHaveBeenNthCalledWith(
-      2,
+      3,
       "native_device_backup_bootstrap",
     );
     expect(state.normalStarted).not.toHaveBeenCalled();
@@ -62,7 +78,9 @@ describe("device maintenance bootstrap ordering", () => {
   });
 
   it("blocks normal imports when the native recovery decision fails", async () => {
-    state.invoke.mockImplementation((command: string) => command === "native_startup_status"
+    state.invoke.mockImplementation((command: string) => command === "app_cleanup_status"
+      ? Promise.resolve({ pending: false, mode: null, error: null })
+      : command === "native_startup_status"
       ? Promise.resolve()
       : Promise.reject(new Error("synthetic journal failure")));
     await import("../../../main");
@@ -71,9 +89,10 @@ describe("device maintenance bootstrap ordering", () => {
         "Normal app startup is blocked",
       ),
     );
-    expect(state.invoke).toHaveBeenNthCalledWith(1, "native_startup_status");
+    expect(state.invoke).toHaveBeenNthCalledWith(1, "app_cleanup_status");
+    expect(state.invoke).toHaveBeenNthCalledWith(2, "native_startup_status");
     expect(state.invoke).toHaveBeenNthCalledWith(
-      2,
+      3,
       "native_device_backup_bootstrap",
     );
     expect(state.normalStarted).not.toHaveBeenCalled();
@@ -91,6 +110,7 @@ describe("device maintenance bootstrap ordering", () => {
   it("holds server sync before acknowledging a completed native library restore", async () => {
     let bootstraps = 0;
     state.invoke.mockImplementation((command: string, args?: unknown) => {
+      if (command === "app_cleanup_status") return Promise.resolve({ pending: false, mode: null, error: null });
       if (command === "native_startup_status") return Promise.resolve();
       if (command === "native_device_backup_bootstrap")
         return Promise.resolve(
@@ -112,6 +132,7 @@ describe("device maintenance bootstrap ordering", () => {
     await main.default;
 
     expect(state.invoke.mock.calls.map(([command]) => command)).toEqual([
+      "app_cleanup_status",
       "native_startup_status",
       "native_device_backup_bootstrap",
       "native_device_backup_recovery_complete",
@@ -123,6 +144,7 @@ describe("device maintenance bootstrap ordering", () => {
   it("acknowledges a device-only native restore without holding server sync", async () => {
     let bootstraps = 0;
     state.invoke.mockImplementation((command: string) => {
+      if (command === "app_cleanup_status") return Promise.resolve({ pending: false, mode: null, error: null });
       if (command === "native_startup_status") return Promise.resolve();
       if (command === "native_device_backup_bootstrap")
         return Promise.resolve(
@@ -145,6 +167,7 @@ describe("device maintenance bootstrap ordering", () => {
 
   it("blocks a malformed native completion before writing the restore hold", async () => {
     state.invoke.mockImplementation((command: string) => {
+      if (command === "app_cleanup_status") return Promise.resolve({ pending: false, mode: null, error: null });
       if (command === "native_startup_status") return Promise.resolve();
       if (command === "native_device_backup_bootstrap")
         return Promise.resolve({
@@ -173,6 +196,7 @@ describe("device maintenance bootstrap ordering", () => {
     let acknowledgementAttempts = 0;
     let bootstraps = 0;
     state.invoke.mockImplementation((command: string) => {
+      if (command === "app_cleanup_status") return Promise.resolve({ pending: false, mode: null, error: null });
       if (command === "native_startup_status") return Promise.resolve();
       if (command === "native_device_backup_bootstrap") {
         bootstraps++;
@@ -211,6 +235,7 @@ describe("device maintenance bootstrap ordering", () => {
   it("reloads native completion directly instead of requesting clone recovery", async () => {
     const reload = vi.fn();
     state.invoke.mockImplementation((command: string) => {
+      if (command === "app_cleanup_status") return Promise.resolve({ pending: false, mode: null, error: null });
       if (command === "native_startup_status") return Promise.resolve();
       if (command === "native_device_backup_bootstrap")
         return Promise.resolve(nativeComplete(true));

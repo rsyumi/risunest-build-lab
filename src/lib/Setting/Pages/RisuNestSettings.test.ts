@@ -102,10 +102,13 @@ describe('RisuNest settings navigation', () => {
     it('groups the sync tab as sync server, external storage, local data', () => {
         const panel = between(pageSource, "{:else if activeTab === 'sync'}", '{:else}')
         inOrder(panel, [
-            'id="risunest-server-sync"',
+            '<ServerSyncSettings />',
             '<ExternalStorageSettings />',
             '<RisuNestLocalData />',
         ])
+        // The deep link scrolls to the group the sync section renders itself.
+        expect(readFileSync('src/lib/Setting/ServerSync/ServerSyncConnection.svelte', 'utf8'))
+            .toContain('id="risunest-server-sync"')
         expect(backupRestoreSource).not.toContain('ExternalStorageSettings')
     })
 

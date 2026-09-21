@@ -294,19 +294,16 @@ export const languageEnglish = {
         forcePlainFetch: "If enabled, it will use browser fetch api instead of native http request. this can cause CORS errors.",
         autoFillRequestURL: "If enabled, it will autofill request url to match the current model.",
         localNetworkModeDesc:
-            "Routes private/LAN model URLs through the local runtime path instead of browser direct fetch.\n\n" +
+            "Routes private/LAN model URLs through the native runtime path instead of browser direct fetch.\n\n" +
             "**Purpose**\n" +
-            "- Avoid browser private-network/CORS restrictions for `192.168.x.x`, `10.x.x.x`, `localhost`, `.local`, and similar local hosts.\n" +
-            "- Mitigate timeout risk for slow first-token local inference in Node self-host mode.\n\n" +
+            "- Avoid browser private-network/CORS restrictions for `192.168.x.x`, `10.x.x.x`, `localhost`, `.local`, and similar local hosts.\n\n" +
             "**How it works**\n" +
             "- Applies only when Local Network Mode is enabled and the target URL is detected as local/private.\n" +
-            "- Node self-host: streaming uses experimental Job+WebSocket relay first (fallback to `/proxy2` on failure); non-streaming uses `/proxy2`.\n" +
             "- Tauri: uses native/direct path.\n" +
             "- Public web mode: blocked for local/private direct calls by design.\n\n" +
             "**Constraints**\n" +
             "- Scope is OpenAI-compatible request paths only.\n" +
-            "- This does not bypass Cloudflare origin limits between two public domains.\n" +
-            "- Use your self-host URL (where `globalThis.__NODE__ === true`) for this feature to take effect.",
+            "- This does not bypass Cloudflare origin limits between two public domains.",
         chainOfThought: "If enabled, it will add chain of thought prompt to the prompt.",
         gptVisionQuality: "This option is used to set the quality of the image detection model. The higher the quality, the more accurate the detection, but more tokens are used.",
         genTimes:
@@ -1710,6 +1707,8 @@ export const languageEnglish = {
     folderRemoveLengthError: "To remove a folder, it must not contain any entries.",
     personaNote: "Persona Note",
     mcpAccessPrompt: '{{tool}} is trying to "{{action}}". Do you want to allow this?',
+    mcpStdioModuleImportBlocked: "This module cannot be imported because it contains a local MCP program configuration. Register local MCPs directly in the module settings.",
+    mcpStdioRegisterConfirm: "Registering this MCP runs the program configured below on your computer with your user permissions. The program can access files and the network, and may run again while the module is enabled. Only register programs you trust. Do you want to run the program and register this MCP?",
     rememberToolUsage: "Remember tool usage",
     simplifiedToolUse: "Simplified tool usage",
     toolCalled: "Tool '{{tool}}' Called",
@@ -1795,6 +1794,7 @@ export const languageEnglish = {
     mainDomAccessConsent: "Plugin {} is requesting to access the main Document, which may expose sensitive information. Do you want to allow this?",
     replacerPermissionConsent: "Plugin {} is requesting permission to replace content in the chat, which may be used to manipulate the conversation. Do you want to allow this?",
     providerPermissionConsent: "Plugin {} is requesting permission to access the provider, which may allow it to make unauthorized API calls. Do you want to allow this?",
+    pluginProviderPermissionDenied: "Plugin provider permission was denied.",
     inlayPermissionConsent: "Plugin {} is requesting permission to access the inlay, which may allow it to read, write or edit the inlay content. Do you want to allow this?",
     sendChatConsent: "Plugin {} is requesting permission to send chat messages on your behalf, which will trigger AI responses. Do you want to allow this?",
     resetAllPluginPermissions: "Reset plugin permissions",
@@ -1944,6 +1944,7 @@ export const languageEnglish = {
         pluginData: {
             title: 'Plugin data',
             description: 'Manage the values plugins have stored. Deleted data cannot be restored, so back it up separately before you continue.',
+            scopeTitle: 'Storage scope',
             scopeAllDevices: 'All devices',
             scopeThisDevice: 'This device',
             scopeAllDevicesHelp: 'Included in sync and backups.',
@@ -2054,9 +2055,11 @@ export const languageEnglish = {
             capturing: 'Locking the saved revision for this exit.',
             syncing: 'Publishing saved changes before the app closes.',
             delayed: 'Synchronization is taking longer than usual. The app will stay open until you choose what to do.',
-            blocked: 'Synchronization needs attention before it can finish. You can keep waiting, exit without syncing, or return to the app.',
+            blocked: 'Synchronization needs attention before it can finish. You can retry, exit without syncing, or return to the app.',
             saveFailed: 'Local changes could not be saved. Retry saving, exit without saving, or return to the app.',
             keepWaiting: 'Keep waiting',
+            retrySync: 'Retry',
+            syncFailedTitle: 'Could not finish synchronization',
             retrySaving: 'Retry saving',
             exitWithoutSync: 'Exit without syncing',
             exitWithoutSaving: 'Exit without saving',
@@ -2087,8 +2090,8 @@ export const languageEnglish = {
             installNow: 'Update now',
             download: 'Download',
             openDownload: 'Open download',
-            downloading: 'Downloading and verifying…',
-            applying: 'Applying the verified update…',
+            downloading: 'Downloading…',
+            applying: 'Applying the update…',
             cancel: 'Cancel',
             close: 'Close',
             iosResign: 'This unsigned IPA must be re-signed with your own certificate before installing it on a device.',
@@ -2146,6 +2149,7 @@ export const languageEnglish = {
             discardRegistration: 'Clear input',
             directoryEnabled: 'Server address lookup',
             manualEntry: 'Enter manually',
+            endpointPlaceholder: 'https://sync.example.com',
             reviewTitle: 'Check the server',
             reviewLead: 'These server details were read from the registration code. Check them, then connect.',
             otherCode: 'Another code',
@@ -2187,6 +2191,13 @@ export const languageEnglish = {
                 clean: 'Clear unneeded temporary files',
                 more: 'Older backups',
                 refresh: 'Refresh list',
+                blockedReasons: {
+                    'server-sync-busy': 'Sync is running',
+                    'incomplete-preservation': 'This backup is not fully preserved yet',
+                    'backup-in-use': 'This backup is in use',
+                    'cache-references-unavailable': 'Temporary files cannot be checked right now',
+                },
+                blockedReasonUnknown: 'Unavailable right now',
                 restoreConfirm:
                     'Go back to this backup? The current library is backed up first, and sync stays paused.',
                 deleteConfirm: 'Delete this conflict backup from this device?',
@@ -2236,13 +2247,13 @@ export const languageEnglish = {
             transferRate: 'Transfer speed',
             progressItems: 'Items processed',
             pendingChanges: 'Changes to upload',
-            progressLabel: 'Progress',
             elapsed: 'Elapsed',
             count: '{0}',
             itemsCount: '{0} items',
+            activity: { enumerating: 'Counting items', preparing: 'Checking assets and preparing changes', downloading: 'Downloading', verifying: 'Checking items on the server', uploading: 'Uploading', confirming: 'Waiting for server confirmation' },
             progress: {
                 saving: 'Saving changes on this device',
-                preparing: 'Receiving changes from the server',
+                preparing: 'Comparing changes on this device and the server',
                 applying: 'Applying received changes',
                 refreshing: 'Updating the screen',
                 publishing: 'Uploading this device’s changes',
@@ -2251,7 +2262,13 @@ export const languageEnglish = {
             pending: 'Finishing sync',
             registrationRequired: 'New registration code required',
             refreshPending: 'Screen refresh needed',
-            initialScan: 'Preparing the first full comparison with the server',
+            initialScan: 'Waiting for the first full comparison with the server',
+            blocked: 'Automatic sync stopped',
+            blockedHelp:
+                'The server is not accepting this device’s changes, so automatic sync has stopped. Your edits on this device are unchanged. If the same error repeats when you sync again, update the server and the app to the latest version.',
+            incompatible: 'Server and app versions do not match',
+            incompatibleHelp:
+                'The server and the app are different versions, so they cannot sync. Update both the server and the app to the latest version and try again.',
             pendingHelp:
                 'The sync in progress has to finish before disconnecting. Select Sync now.',
             conflict: 'Conflicts need attention',
@@ -2260,8 +2277,9 @@ export const languageEnglish = {
                 'The same items were edited on this device and on the server. Choose which side to keep. Both sides are saved as conflict backups before applying.',
             keepLocal: 'Keep this device',
             keepRemote: 'Keep server version',
+            busyHelp: 'Another operation is using the library. Wait for it to finish and try again.',
             errorHelp:
-                'Sync could not finish. Your edits on this device are unchanged. Check your internet connection and try again.',
+                'Sync could not finish. Your edits on this device are unchanged. Try again.',
             refreshHelp:
                 'The received changes are saved. Refresh the screen to continue editing.',
         },
@@ -2272,6 +2290,11 @@ export const languageEnglish = {
             storage: 'Storage',
             sync: 'Backup and sync',
             pluginData: 'Plugin data',
+        },
+        pager: {
+            pages: 'Pages',
+            previous: 'Previous page',
+            next: 'Next page',
         },
         perf: {
             title: 'Performance',
@@ -2501,7 +2524,6 @@ export const languageEnglish = {
             actionNormalizeRecords: 'Recalculate the values',
             actionKeepSingleRecord: 'Keep one and drop the rest',
             actionRecoverOrphans: 'Put them back under an owner',
-            actionSettleAuthority: 'Finish the storage setup',
             actionDiscards: 'deletes the value',
             actionRisky:
                 'The file may not be what this was meant to point at.',
@@ -2518,7 +2540,6 @@ export const languageEnglish = {
             codeAliasObjectMismatch: 'Files whose contents changed',
             codeRecordInvalid: 'Records in the wrong shape',
             codeRecordOrphan: 'Records with no owner',
-            codeAuthorityIncomplete: 'Storage setup left unfinished',
             codeObjectUnreferenced: 'Files nothing uses',
             codeUnclassified: 'Problems that could not be sorted',
             rootFieldCharacters: 'characters',
@@ -2629,6 +2650,7 @@ export const languageEnglish = {
             resultFailedAfterCommit:
                 'The data was imported, but the screen could not be refreshed. Use the refresh prompt before doing anything else.',
             errorDetails: 'Error details',
+            errorDetailsHide: 'Hide error details',
             copyDetails: 'Copy',
             copied: 'Copied',
             reasonUnsupportedFormat: 'The file format is not supported.',
@@ -2660,6 +2682,19 @@ export const languageEnglish = {
             resultExportCancelledPartial:
                 'Export cancelled. Part of the file being saved may remain.',
             resultExportFailed: 'Export failed.',
+        },
+        cleanup: {
+            webViewUpdateRequired: 'Update Android System WebView, then retry deleting local data.',
+            cancel: 'Cancel',
+            title: 'Reset',
+            scope: 'Deletes local chats, characters, settings, plugins, connection information, internal backups and cache on this device. Remote data and exported backups remain.',
+            resetHelp: 'Returns to onboarding after deleting local data.',
+            prepareRemoval: 'Prepare for app removal',
+            removalHelp: 'Deletes local data folders and exits the app. Remove the program using your operating system.',
+            deleteAndExit: 'Delete and exit',
+            confirmReset: 'Delete local data and reset RisuNest?',
+            confirmRemoval: 'Delete local data and prepare RisuNest for removal?',
+            failed: 'Local data deletion could not start. Please retry.',
         },
         platform: {
             appImageLinks: 'AppImage links',
@@ -2773,6 +2808,7 @@ export const languageEnglish = {
                 stepPaste:
                     'Paste the code below. On mobile you can scan the QR code instead.',
                 stepReview: 'Check the server details, then connect.',
+                unsupported: 'Connecting to a sync server is available in the Android and desktop apps.',
                 linkHint: 'Opening a registration link also leads here.',
                 reviewLead: 'These server details were read from the registration code. Check them, then connect.',
                 serverTag: 'Sync server',

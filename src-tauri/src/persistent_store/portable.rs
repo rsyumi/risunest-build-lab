@@ -113,11 +113,6 @@ pub(crate) const TABLES: &[PortableTable] = &[
         ],
         order: "owner_kind, owner_locator",
     },
-    PortableTable {
-        name: "asset_repository_authority",
-        columns: &[("value", "TEXT")],
-        order: "value",
-    },
 ];
 
 impl PortableTable {
@@ -596,6 +591,7 @@ fn validate_live_columns(source: &Connection) -> StoreResult<()> {
                 "asset_alias_replacement_candidates"
                     | "snapshot_leases"
                     | "server_sync_context"
+                    | "server_sync_prepared"
                     | "content_change_context"
                     | "content_changes"
                     | "content_change_consumers"

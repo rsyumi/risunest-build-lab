@@ -33,7 +33,7 @@ fn storage_stats_only_counts_active_generation_rows() {
          ('revision-0', 'asset-active', NULL, 'asset', 17, '', '', '', NULL, NULL, NULL, '{}'),
          ('revision-old', 'asset-old', NULL, 'asset', 19, '', '', '', NULL, NULL, NULL, '{}');
          INSERT INTO asset_objects (object_hash, byte_size, created_at_ms) VALUES ('aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 23, 0);
-         INSERT INTO asset_object_deletions (object_hash, byte_size, physical_key, state, created_at_ms) VALUES ('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 29, 'assets-v2/objects/bb/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'pending', 0);"
+         INSERT INTO asset_object_deletions (object_hash, byte_size, physical_key, state, created_at_ms) VALUES ('bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 29, 'assets/objects/bb/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', 'pending', 0);"
     ).expect("seed rows");
 
     let stats = store.storage_stats().expect("storage stats");

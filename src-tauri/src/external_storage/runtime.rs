@@ -847,7 +847,9 @@ pub(crate) fn wake_job(app: AppHandle, id: String) -> Result<()> {
     }
     read_job_session(&app, &id)?;
     let (cancel, claim) = app.state::<JobCommandState>().claim(&job)?;
+    let worker = app.state::<JobCommandState>().track_worker();
     tauri::async_runtime::spawn(async move {
+        let _worker = worker;
         let result = match run_job(&app, &id, &cancel).await {
             Err(error) => {
                 let completed = if job.request.kind == JobKind::Restore {

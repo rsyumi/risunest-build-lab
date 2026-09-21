@@ -5,7 +5,7 @@
     import { alertConfirm } from 'src/ts/alert'
     import SettingGroup from '../RisuNest/SettingGroup.svelte'
     import SettingRow from '../RisuNest/SettingRow.svelte'
-    import Button from 'src/lib/UI/GUI/Button.svelte'
+    import SettingButton from '../RisuNest/SettingButton.svelte'
 
     interface Integration { available: boolean; registered: boolean; replacesExisting: boolean; token: string; error?: string }
     let integration = $state<Integration>()
@@ -34,9 +34,9 @@
 {#if integration?.available}
     <SettingGroup title={text.title} id="risunest-appimage">
         <SettingRow label={text.appImageLinks} help={text.appImageLinksHelp}>
-            <Button disabled={busy} onclick={() => void integrate()}>{text.appImageRegister}</Button>
+            <SettingButton busy={busy} onclick={() => void integrate()}>{text.appImageRegister}</SettingButton>
         </SettingRow>
-        {#if integration.registered}<p class="px-3 py-2 text-sm">{text.appImageRegistered}</p>{/if}
-        {#if error}<p role="status" class="px-3 py-2 text-sm text-textcolor2">{error}</p>{/if}
+        {#if integration.registered}<p class="px-4 py-3 text-sm">{text.appImageRegistered}</p>{/if}
+        {#if error}<p role="status" class="px-4 py-3 text-sm text-danger-400">{error}</p>{/if}
     </SettingGroup>
 {/if}

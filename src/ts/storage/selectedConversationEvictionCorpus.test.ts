@@ -23,15 +23,12 @@ import type { Chat, Database, Message, character } from './database.svelte'
 import { IndexedDbPersistentDataStore } from './indexedDbPersistentDataStore'
 import { RevisionConflictError, type WorkingSetCommit } from './persistentDataStore'
 import {
-    capturePersistentRoot,
     createPersistentDataRuntime,
-    publishPersistentConversationReplacementToWorkingSet,
-    type PersistentDataRuntimeStateAdapter,
 } from './persistentDataRuntime'
 import { createPluginDatabaseAccess } from '../plugins/pluginDatabaseAccess'
 
 const INITIAL_MESSAGE_COUNT = 10_000
-const VIEWPORT_ROW_BUDGET = 64
+import { createEvictionFixture, makeConversation, VIEWPORT_ROW_BUDGET } from './tests/selectedConversationEvictionFixture'
 
 const interfaceMockModules = [
     '../parser/parser.svelte', '../parser/chatML', '../alert', '../globalApi.svelte',
@@ -67,62 +64,6 @@ function deferred<T>() {
         resolve = resolvePromise
     })
     return { promise, resolve }
-}
-
-function makeMessage(index: number): Message {
-    return {
-        role: index % 2 === 0 ? 'user' : 'char',
-        data: `turn-${index.toString().padStart(5, '0')}`,
-        chatId: index === 100 || index === 9_000 ? 'duplicate-anchor' : `message-${index}`,
-        name: index % 97 === 0 ? `speaker-${index}` : undefined,
-        saying: index % 131 === 0 ? `aside-${index}` : undefined,
-    }
-}
-
-function makeConversation(): Chat {
-    return {
-        id: 'chat-a',
-        name: 'Corpus conversation',
-        note: 'synthetic 10,000-turn owner',
-        localLore: [],
-        fmIndex: -1,
-        message: Array.from({ length: INITIAL_MESSAGE_COUNT }, (_, index) => makeMessage(index)),
-    }
-}
-
-function makeDatabase(conversation: Chat): Database {
-    return {
-        username: 'Eviction corpus',
-        botPresets: [],
-        botPresetsId: 0,
-        pluginCustomStorage: {},
-        statics: { messages: 0 },
-        aiModel: 'test-model',
-        maxContext: 8_192,
-        maxResponse: 128,
-        promptTemplate: [{ type: 'chat', rangeStart: 0, rangeEnd: 'end' }],
-        promptSettings: { trimStartNewChat: true, sendName: false },
-        customPromptTemplateToggle: '', globalChatVariables: {}, mainPrompt: '',
-        additionalPrompt: '', globalNote: '', jailbreak: '', jailbreakToggle: false,
-        chainOfThought: false, personaPrompt: false, promptPreprocess: false,
-        descriptionPrefix: '', formatingOrder: [], bias: [], outputImageModal: false,
-        rememberToolUsage: false, streamingDisplayOptimizationMode: 'off',
-        autoContinueMinTokens: 0, autoContinueChat: false, notification: false,
-        ttsAutoSpeech: false, supaModelType: 'none', hanuraiEnable: false,
-        hypav2: false, hypaV3: false,
-        characters: [{
-            type: 'character',
-            chaId: 'char-a',
-            name: 'Synthetic owner',
-            firstMessage: 'Greeting',
-            alternateGreetings: [],
-            desc: '', personality: '', scenario: '', bias: [], additionalAssets: [],
-            emotionImages: [], reloadKeys: 0, viewScreen: 'none', inlayViewScreen: false,
-            supaMemory: false, utilityBot: false,
-            chatPage: 0,
-            chats: [conversation],
-        }],
-    } as unknown as Database
 }
 
 function screenshotRenderContext(owner: character): ChatScreenshotRenderContext {
@@ -188,72 +129,18 @@ describe('selected conversation eviction correctness corpus', () => {
     it('matches a complete-owner oracle across forced 10,000-turn demotion cycles', async () => {
         const initialConversation = makeConversation()
         const oracle = structuredClone(initialConversation)
-        let workingCopy = structuredClone(makeDatabase(initialConversation))
-        workingCopy.characters.push({
-            type: 'character',
-            chaId: 'char-b',
-            name: 'Non-target owner',
-            chatPage: 0,
-            chats: [{
-                id: 'chat-b',
-                name: 'Non-target conversation',
-                note: '',
-                localLore: [],
-                message: [{ role: 'user', data: 'must remain unread' }],
-            }],
-        } as character)
-        const store = new IndexedDbPersistentDataStore(
-            `selected-eviction-corpus-${crypto.randomUUID()}`,
-            indexedDB,
-            IDBKeyRange,
-        )
-        await store.open()
-        const initial = await store.replaceFromDatabase(workingCopy)
+        const fixture = await createEvictionFixture(initialConversation)
+        const { store, initial, state, runtime, selectedConversation, backgroundErrors } = fixture
         const storeMaterializeDatabase = vi.spyOn(store, 'materializeDatabase')
         const storeReplaceFromDatabase = vi.spyOn(store, 'replaceFromDatabase')
         const storeReadCharacter = vi.spyOn(store, 'readCharacter')
-        const selectedConversation = () => {
-            const owner = workingCopy.characters[0]
-            return owner.chats[owner.chatPage ?? 0]
-        }
-        const state: PersistentDataRuntimeStateAdapter = {
-            captureRoot: () => capturePersistentRoot(workingCopy),
-            captureSelectedCharacter: () => workingCopy.characters[0] ?? null,
-            captureCharacter: (id) =>
-                workingCopy.characters.find((candidate) => candidate.chaId === id) ?? null,
-            getSelectedCharacterId: () => workingCopy.characters[0]?.chaId,
-            getSelectedConversationId: () => selectedConversation()?.id,
-            replaceDatabase: (next) => {
-                workingCopy = next
-            },
-            publishCharacter: (next) => {
-                workingCopy.characters[0] = next
-            },
-            publishConversation: (_characterId, conversation, nextCharacter) => {
-                if (nextCharacter) workingCopy.characters[0] = nextCharacter
-                else workingCopy.characters[0].chats[workingCopy.characters[0].chatPage ?? 0] = conversation
-            },
-            publishConversationReplacement: (result) => {
-                publishPersistentConversationReplacementToWorkingSet(workingCopy, result)
-            },
-            canUseWindowedSelectedConversation: () => true,
-            isConversationOperationActive: () => false,
-            conversationViewportRowBudget: VIEWPORT_ROW_BUDGET,
-        }
-        const backgroundErrors: unknown[] = []
-        const runtime = createPersistentDataRuntime({
-            store,
-            state,
-            onBackgroundError: (error) => { backgroundErrors.push(error) },
-            prepareDatabase: async (candidate) => candidate,
-        })
-        await runtime.initializeActiveWorkingSet(workingCopy)
+        await runtime.initializeActiveWorkingSet(fixture.workingCopy)
         await waitForWindowed(runtime)
         let expectedRevision = initial.revision
 
         const context = {
             captureCurrent: () => ({
-                character: workingCopy.characters[0],
+                character: fixture.workingCopy.characters[0],
                 conversation: selectedConversation(),
             }),
             getCurrentSession: () => runtime.getActiveConversationSession(),
@@ -308,8 +195,8 @@ describe('selected conversation eviction correctness corpus', () => {
         owner: PLUGIN_ACCESS_OWNER,
             store,
             flushPendingData: (reason) => runtime.flushPendingData(reason),
-            getCompatibilityDatabase: () => workingCopy,
-            getSelectedCharacterId: () => workingCopy.characters[0]?.chaId ?? null,
+            getCompatibilityDatabase: () => fixture.workingCopy,
+            getSelectedCharacterId: () => fixture.workingCopy.characters[0]?.chaId ?? null,
             captureSelectedConversationTarget: () => runtime.captureSelectedConversationTarget(),
             acquireCompleteConversation: (reason, target) =>
                 runtime.acquireCompleteConversation(reason, target),
@@ -663,7 +550,6 @@ describe('selected conversation eviction correctness corpus', () => {
         vi.doMock('../globalApi.svelte', () => ({ fetchNative: vi.fn(), readImage: vi.fn() }))
         vi.doMock('../platform', () => ({
             isTauriMobile: true,
-            isNodeServer: false,
             isTauri: false,
             isMobile: false,
         }))
@@ -675,13 +561,13 @@ describe('selected conversation eviction correctness corpus', () => {
             getUserName: vi.fn(() => 'User'),
         }))
         vi.doMock('./database.svelte', () => ({
-            getCurrentCharacter: () => workingCopy.characters[0],
+            getCurrentCharacter: () => fixture.workingCopy.characters[0],
             getCurrentChat: () => selectedConversation(),
-            getDatabase: () => workingCopy,
+            getDatabase: () => fixture.workingCopy,
             setDatabase: vi.fn(),
         }))
         vi.doMock('../stores.svelte', () => ({
-            DBState: { db: workingCopy },
+            DBState: { db: fixture.workingCopy },
             ReloadChatPointer: { update: vi.fn() },
             ReloadGUIPointer: { update: vi.fn() },
             selectedCharID: { subscribe: (run: (value: number) => void) => (run(0), () => undefined) },
@@ -719,7 +605,7 @@ describe('selected conversation eviction correctness corpus', () => {
                     return false
                 end)
             `, {
-                char: workingCopy.characters[0],
+                char: fixture.workingCopy.characters[0],
                 mode: 'editInput',
                 operationContext: luaOperation,
             })
@@ -759,8 +645,8 @@ describe('selected conversation eviction correctness corpus', () => {
         vi.resetModules()
 
         const generationDBState = {
-            get db() { return workingCopy },
-            set db(value: Database) { workingCopy = value },
+            get db() { return fixture.workingCopy },
+            set db(value: Database) { fixture.workingCopy = value },
         }
         vi.doMock('../stores.svelte', () => ({
             DBState: generationDBState,
@@ -805,7 +691,7 @@ describe('selected conversation eviction correctness corpus', () => {
         vi.doMock('../parser/parser.svelte', () => ({ risuChatParser: (value: string) => value }))
         vi.doMock('../util', () => ({
             checkNullish: (value: unknown) => value == null,
-            findCharacterbyId: () => workingCopy.characters[0],
+            findCharacterbyId: () => fixture.workingCopy.characters[0],
             getAuthorNoteDefaultText: () => '', getPersonaPrompt: () => '', getUserName: () => 'User',
             isLastCharPunctuation: () => true, trimUntilPunctuation: (value: string) => value,
             parseToggleSyntax: () => [], prebuiltAssetCommand: '',
@@ -880,14 +766,14 @@ describe('selected conversation eviction correctness corpus', () => {
         const { defaultCBSRegisterArg, registerCBS } = await import('../cbs')
         registerCBS({
             ...defaultCBSRegisterArg,
-            getDatabase: () => cbsOperation.createDatabaseView(workingCopy),
+            getDatabase: () => cbsOperation.createDatabaseView(fixture.workingCopy),
             getSelectedCharID: () => 0,
             registerFunction: ({ name, alias, callback }) => {
                 if (callback === 'doc_only') return
                 for (const key of [name, ...alias]) cbsCallbacks.set(key, callback)
             },
         })
-        const cbsDatabase = cbsOperation.createDatabaseView(workingCopy)
+        const cbsDatabase = cbsOperation.createDatabaseView(fixture.workingCopy)
         expect(cbsCallbacks.get('previouscharchat')!('', {
             chatID: -1,
             db: cbsDatabase,
@@ -911,13 +797,13 @@ describe('selected conversation eviction correctness corpus', () => {
         expect(triggerOperation.mode).toBe('compatibility')
         vi.doUnmock('../process/triggers')
         vi.doUnmock('../util')
-        const triggerStoreState = { DBState: { db: workingCopy } }
+        const triggerStoreState = { DBState: { db: fixture.workingCopy } }
         vi.doMock('../stores.svelte', () => ({
             ...triggerStoreState,
             CurrentTriggerIdStore: writable(null),
             selectedCharID: writable(0),
         }))
-        vi.doMock('./database.svelte', () => ({ getDatabase: () => workingCopy }))
+        vi.doMock('./database.svelte', () => ({ getDatabase: () => fixture.workingCopy }))
         vi.doMock('./persistentDataRuntime.svelte', () => ({
             acquireDestructiveReplacementFence: vi.fn(),
             capturePersistentMutationToken: vi.fn(),
@@ -931,7 +817,7 @@ describe('selected conversation eviction correctness corpus', () => {
         vi.doMock('../process/request/request', () => ({ requestChatData: vi.fn() }))
         vi.doMock('../process/stableDiff', () => ({ generateAIImage: vi.fn() }))
         vi.doMock('../process/files/inlays', () => ({ writeInlayImage: vi.fn() }))
-        const triggerCharacter = workingCopy.characters[0] as character
+        const triggerCharacter = fixture.workingCopy.characters[0] as character
         triggerCharacter.triggerscript = [{
             comment: 'corpus trigger',
             type: 'manual',
@@ -977,7 +863,7 @@ describe('selected conversation eviction correctness corpus', () => {
         const screenshot = await openChatScreenshotSourceLease({
             characterId: 'char-a',
             chatId: 'chat-a',
-            renderContext: screenshotRenderContext(workingCopy.characters[0] as character),
+            renderContext: screenshotRenderContext(fixture.workingCopy.characters[0] as character),
         }, runtime)
         onTestFinished(() => screenshot.close())
         const screenshotJob = await screenshot.createJob(9_501, 9_502)
@@ -1001,7 +887,7 @@ describe('selected conversation eviction correctness corpus', () => {
         expect(runtime.getSelectedConversationMode()).toBe('windowed')
         expect(runtime.getActiveConversationSession()).toBeNull()
         vi.doMock('../stores.svelte', () => ({
-            DBState: { db: workingCopy },
+            DBState: { db: fixture.workingCopy },
             selectedCharID: writable(0),
         }))
         vi.doMock('./persistentDataRuntime.svelte', () => ({
@@ -1027,7 +913,7 @@ describe('selected conversation eviction correctness corpus', () => {
         const { createMetadataOnlySelectedConversation } = await import(
             './selectedConversationLifecycle'
         )
-        const hypaOwner = workingCopy.characters[0]
+        const hypaOwner = fixture.workingCopy.characters[0]
         const hypaChatIndex = hypaOwner.chatPage ?? 0
         const runtimeMetadataShell = hypaOwner.chats[hypaChatIndex]
         hypaOwner.chats[hypaChatIndex] = createMetadataOnlySelectedConversation(

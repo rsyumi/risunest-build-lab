@@ -57,7 +57,7 @@ describe('native asset repository adapters', () => {
                 return {
                     contentHash: hash,
                     byteSize: 64 * 1024 + 3,
-                    physicalKey: `assets-v2/objects/22/${hash.slice(2)}`,
+                    physicalKey: `assets/objects/22/${hash.slice(2)}`,
                     deduplicated: false,
                 }
             }
@@ -279,7 +279,7 @@ describe('native asset repository adapters', () => {
             if (command === 'asset_cas_job_prepare') return {
                 contentHash: '44'.repeat(32),
                 byteSize: 3,
-                physicalKey: `assets-v2/objects/44/${'44'.repeat(32).slice(2)}`,
+                physicalKey: `assets/objects/44/${'44'.repeat(32).slice(2)}`,
                 deduplicated: false,
                 directoryEntriesSynced: false,
             }
@@ -313,7 +313,7 @@ describe('native asset repository adapters', () => {
             if (command === 'asset_cas_job_prepare') return {
                 contentHash: '66'.repeat(32),
                 byteSize: 2,
-                physicalKey: `assets-v2/objects/66/${'66'.repeat(32).slice(2)}`,
+                physicalKey: `assets/objects/66/${'66'.repeat(32).slice(2)}`,
                 deduplicated: true,
             }
             return null
@@ -346,7 +346,7 @@ describe('native asset repository adapters', () => {
             if (command === 'asset_cas_job_prepare') return {
                 contentHash: '77'.repeat(32),
                 byteSize: 1,
-                physicalKey: `assets-v2/objects/77/${'77'.repeat(32).slice(2)}`,
+                physicalKey: `assets/objects/77/${'77'.repeat(32).slice(2)}`,
                 deduplicated: false,
             }
             return null
@@ -372,7 +372,7 @@ describe('native asset repository adapters', () => {
         const invoke = vi.fn(async () => ({
             contentHash: manifestHash,
             byteSize: 3,
-            physicalKey: `assets-v2/objects/66/${manifestHash.slice(2)}`,
+            physicalKey: `assets/objects/66/${manifestHash.slice(2)}`,
             deduplicated: false,
         }))
 

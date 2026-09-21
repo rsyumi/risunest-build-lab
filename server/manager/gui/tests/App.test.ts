@@ -20,6 +20,7 @@ beforeEach(() => {
   document.body.append(target);
   snapshot = {
     listener: "127.0.0.1:14319",
+    localEndpoint: "http://127.0.0.1:14319",
     revision: "synthetic:0",
     uptimeSeconds: 5,
     connection: {
@@ -77,6 +78,7 @@ beforeEach(() => {
     trayStartup: vi.fn(async () => {}),
     updatePolicy: vi.fn(async () => {}),
     updateCheck: vi.fn(async () => ({ result: "current" })),
+    uninstall: vi.fn(async () => {}),
     requestId: vi.fn(async () => "a".repeat(64)),
     qr: vi.fn(async () => '<svg aria-label="synthetic-qr"></svg>'),
   };
@@ -138,6 +140,34 @@ it("keeps a dirty form tied to its original revision during status refresh", asy
   );
 });
 
+it("keeps an untouched connection form clean as the tunnel becomes ready", async () => {
+  snapshot.connectionState.mode = "managed";
+  snapshot.connection.cloudflared = "C:\\synthetic\\cloudflared.exe";
+  snapshot.connection.endpoint = null;
+  snapshot.tunnel = { phase: "starting", endpoint: null, error: null, logs: [] };
+  await open();
+  button("연결").click();
+  await settle();
+  expect(button("설정 적용").disabled).toBe(true);
+
+  snapshot.connection.endpoint = "https://synthetic.trycloudflare.com";
+  snapshot.tunnel = {
+    phase: "connected",
+    endpoint: "https://synthetic.trycloudflare.com",
+    error: null,
+    logs: ["registered"],
+  };
+  await vi.advanceTimersByTimeAsync(3000);
+  await settle();
+
+  expect(target.textContent).toContain("현재 설정입니다.");
+  expect(target.textContent).not.toContain("아직 적용하지 않은 변경이 있습니다.");
+  expect(button("설정 적용").disabled).toBe(true);
+  button("개요").click();
+  await settle();
+  expect(target.querySelector("dialog[open]")).toBeNull();
+});
+
 it("rebases a dirty connection draft after an action from the same form", async () => {
   vi.mocked(backend.mutate).mockImplementation(async (path) => {
     if (path === "tunnel/restart") {
@@ -157,7 +187,7 @@ it("rebases a dirty connection draft after an action from the same form", async 
   registry.click();
   button("다시 시작").click();
   await vi.waitFor(() =>
-    expect(target.textContent).toContain("변경 사항을 적용했습니다."),
+    expect(target.textContent).toContain("임시 주소 연결을 다시 시작했습니다."),
   );
   await settle();
   target
@@ -171,6 +201,15 @@ it("rebases a dirty connection draft after an action from the same form", async 
 });
 
 it("labels retained overview data as last-known after losing the daemon", async () => {
+  snapshot.connectionState.mode = "managed";
+  snapshot.connection.cloudflared = "C:\\synthetic\\cloudflared.exe";
+  snapshot.connection.endpoint = "https://synthetic.trycloudflare.com";
+  snapshot.tunnel = {
+    phase: "connected",
+    endpoint: "https://synthetic.trycloudflare.com",
+    error: null,
+    logs: [],
+  };
   await open();
   expect(target.textContent).toContain("서버 실행 중");
   vi.mocked(backend.status).mockRejectedValue("daemon-unavailable");
@@ -178,6 +217,13 @@ it("labels retained overview data as last-known after losing the daemon", async 
   await settle();
   expect(target.textContent).toContain("마지막으로 확인한 서버 정보");
   expect(target.textContent).not.toContain("서버 실행 중");
+  button("연결").click();
+  await settle();
+  expect(target.textContent).toContain("확인할 수 없음");
+  expect(target.textContent).toContain("마지막 임시 주소");
+  expect(target.textContent?.replace(/\s+/g, " ")).toContain(
+    "서버를 중지하면 임시 주소 연결도 함께 종료됩니다.",
+  );
 });
 
 it("shows a registration URI once and clears it on modal close", async () => {
@@ -391,4 +437,109 @@ it("shows the last tunnel failure and output while retrying, as text", async () 
   expect(target.textContent).toContain("tunnel-exited");
   expect(target.querySelector("pre")?.textContent).toContain("DNS lookup failed");
   expect(target.querySelector("pre script")).toBeNull();
+});
+
+
+it("preserves server data unless deletion is explicitly selected and confirmation is accepted", async () => {
+  await open();
+  button("실행 설정").click();
+  await settle();
+  button("제거").click();
+  await settle();
+  const dialog = target.querySelector("dialog")!;
+  const checkbox = dialog.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+  expect(checkbox.checked).toBe(false);
+  button("취소").click();
+  await settle();
+  expect(backend.uninstall).not.toHaveBeenCalled();
+  button("제거").click();
+  await settle();
+  const confirmation = [...dialog.querySelectorAll("button")].find(b => b.textContent?.trim() === "제거")!;
+  confirmation.click();
+  await settle();
+  expect(backend.uninstall).toHaveBeenCalledWith(false);
+});
+
+it("passes the explicit data deletion choice and keeps removal errors visible", async () => {
+  vi.mocked(backend.uninstall).mockRejectedValue("removal-shared-installation-or-data");
+  await open();
+  button("실행 설정").click();
+  await settle();
+  button("제거").click();
+  await settle();
+  const dialog = target.querySelector("dialog")!;
+  const checkbox = dialog.querySelector<HTMLInputElement>('input[type="checkbox"]')!;
+  checkbox.click();
+  await settle();
+  [...dialog.querySelectorAll("button")].find(b => b.textContent?.trim() === "제거")!.click();
+  await settle();
+  expect(backend.uninstall).toHaveBeenCalledWith(true);
+  expect(dialog.hasAttribute("open")).toBe(true);
+});
+
+function localCheckbox() {
+  return [...target.querySelectorAll<HTMLInputElement>("dialog input[type=checkbox]")].at(0);
+}
+
+it("issues a local registration only when the listener offers a loopback endpoint", async () => {
+  const uri = "risunestlocal://sync-server/register#SYNTHETIC_LOCAL_ONLY_TEST";
+  vi.mocked(backend.mutate).mockResolvedValue({ uri });
+  await open();
+  button("기기 등록").click();
+  await settle();
+  const name = target.querySelector<HTMLInputElement>(
+    'input[aria-label="기기 이름"]',
+  )!;
+  name.value = "이 컴퓨터";
+  name.dispatchEvent(new Event("input", { bubbles: true }));
+  localCheckbox()!.click();
+  await settle();
+  target
+    .querySelector("dialog form")!
+    .dispatchEvent(new Event("submit", { cancelable: true, bubbles: true }));
+  await settle();
+  expect(backend.mutate).toHaveBeenCalledWith("devices", {
+    revision: "synthetic:0",
+    name: "이 컴퓨터",
+    requestId: "a".repeat(64),
+    target: "local",
+  });
+  await vi.waitFor(() =>
+    expect(target.textContent?.replace(/\s+/g, " ")).toContain(
+      "이 컴퓨터에서 실행하는 RisuNest 앱에만 등록할 수 있습니다.",
+    ),
+  );
+  button("완료").click();
+  await settle();
+  expect(target.innerHTML).not.toContain("SYNTHETIC_LOCAL_ONLY_TEST");
+});
+
+it("hides the local option and keeps configured issuance for a specific listener", async () => {
+  snapshot.listener = "192.0.2.1:14319";
+  snapshot.localEndpoint = null;
+  vi.mocked(backend.mutate).mockResolvedValue({ uri: "risunestlocal://sync-server/register#X" });
+  await open();
+  button("기기 등록").click();
+  await settle();
+  expect(localCheckbox()).toBeUndefined();
+  const name = target.querySelector<HTMLInputElement>(
+    'input[aria-label="기기 이름"]',
+  )!;
+  name.value = "다른 기기";
+  name.dispatchEvent(new Event("input", { bubbles: true }));
+  target
+    .querySelector("dialog form")!
+    .dispatchEvent(new Event("submit", { cancelable: true, bubbles: true }));
+  await settle();
+  expect(backend.mutate).toHaveBeenCalledWith("devices", {
+    revision: "synthetic:0",
+    name: "다른 기기",
+    requestId: "a".repeat(64),
+    target: "configured",
+  });
+  await vi.waitFor(() =>
+    expect(target.textContent?.replace(/\s+/g, " ")).toContain(
+      "등록할 기기의 RisuNest 앱에서 QR 코드를 스캔하거나",
+    ),
+  );
 });

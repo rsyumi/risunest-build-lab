@@ -39,11 +39,13 @@ describe("connecting a sync server", () => {
   it("binds, stores the asset policy, then runs the first sync in that order", async () => {
     const trace: string[] = [];
     const controller = {
-      bind: vi.fn(async () => {
+      bind: vi.fn(async (_config: unknown, prepare?: () => Promise<unknown>) => {
         trace.push("bind");
+      await prepare?.();
       }),
-      reregister: vi.fn(async () => {
+      reregister: vi.fn(async (_config: unknown, prepare?: () => Promise<unknown>) => {
         trace.push("reregister");
+      await prepare?.();
       }),
       synchronize: vi.fn(async () => {
         trace.push("synchronize");
@@ -54,12 +56,12 @@ describe("connecting a sync server", () => {
     });
     await connectServerSync(controller, setPolicy, { config, residency: "remote" });
     expect(trace).toEqual(["bind", "policy:remote", "synchronize"]);
-    expect(controller.bind).toHaveBeenCalledWith(config);
+    expect(controller.bind).toHaveBeenCalledWith(config, expect.any(Function));
   });
   it("re-registers instead of binding when replacing the device credentials", async () => {
     const controller = {
-      bind: vi.fn(async () => {}),
-      reregister: vi.fn(async () => {}),
+      bind: vi.fn(async (_config: unknown, prepare?: () => Promise<unknown>) => { await prepare?.(); }),
+      reregister: vi.fn(async (_config: unknown, prepare?: () => Promise<unknown>) => { await prepare?.(); }),
       synchronize: vi.fn(async () => {}),
     };
     await connectServerSync(controller, async () => {}, {
@@ -67,16 +69,16 @@ describe("connecting a sync server", () => {
       residency: "full",
       replacing: true,
     });
-    expect(controller.reregister).toHaveBeenCalledWith(config);
+    expect(controller.reregister).toHaveBeenCalledWith(config, expect.any(Function));
     expect(controller.bind).not.toHaveBeenCalled();
     expect(controller.synchronize).toHaveBeenCalledOnce();
   });
   it("does not sync when binding fails", async () => {
     const controller = {
-      bind: vi.fn(async () => {
+      bind: vi.fn(async (_config: unknown, prepare?: () => Promise<unknown>) => {
         throw { code: "unauthorized" };
       }),
-      reregister: vi.fn(async () => {}),
+      reregister: vi.fn(async (_config: unknown, prepare?: () => Promise<unknown>) => { await prepare?.(); }),
       synchronize: vi.fn(async () => {}),
     };
     const setPolicy = vi.fn(async () => {});
@@ -150,6 +152,36 @@ describe("status and error copy", () => {
       text.credentialUnavailable,
     );
     expect(serverSyncErrorHelp("server-unreachable", text)).toBe(text.errorHelp);
+    expect(serverSyncErrorHelp("library-operation-busy", text)).toBe(text.busyHelp);
+  });
+  it("names the stopped state and the mismatched versions", () => {
+    const blocked: ServerSyncSnapshot = {
+      ...bound(),
+      error: "invalid-control-schema",
+      errorRetryable: false,
+    };
+    expect(serverSyncStatus(blocked, text)).toEqual({
+      label: text.blocked,
+      tone: "attention",
+    });
+    expect(serverSyncErrorHelp("invalid-control-schema", text, false)).toBe(
+      text.blockedHelp,
+    );
+    expect(serverSyncErrorHelp("invalid-control-schema", text)).toBe(
+      text.errorHelp,
+    );
+    const incompatible: ServerSyncSnapshot = {
+      ...bound(),
+      error: "server-incompatible",
+      errorRetryable: false,
+    };
+    expect(serverSyncStatus(incompatible, text)).toEqual({
+      label: text.incompatible,
+      tone: "attention",
+    });
+    expect(serverSyncErrorHelp("server-incompatible", text, false)).toBe(
+      text.incompatibleHelp,
+    );
   });
   it("shows the address without its scheme", () => {
     expect(serverSyncHostLabel("https://sync.example/base/")).toBe(
@@ -160,6 +192,38 @@ describe("status and error copy", () => {
 });
 
 describe("progress view", () => {
+  it("shows backend preparation counts and server waiting without claiming completion", () => {
+    const snapshot = { ...bound(), running: true, progress: "preparing" as const,
+      attemptStartedAt: 0, phaseStartedAt: 10_000,
+      cycleItems: { done: 0, total: 0, activity: "preparing" as const, processed: 17, expected: 100 } };
+    const view = serverSyncProgressView(snapshot, text, 15_000);
+    expect(view.current).toBe(`${text.activity.preparing} · 17 / 100`);
+    expect(view.elapsed).toBe(`${text.elapsed} 00:05`);
+    expect(view.percent).toBeNull();
+    const waiting = serverSyncProgressView({ ...snapshot, progress: "publishing",
+      cycleItems: { done: 100, total: 100, activity: "confirming", processed: 0, expected: 0 } }, text, 15_000);
+    expect(waiting.current).toBe(text.activity.confirming);
+    expect(waiting.percent).toBeNull();
+  });
+  it("names the verification pass that sends no bytes", () => {
+    const view = serverSyncProgressView(
+      {
+        ...bound(),
+        running: true,
+        progress: "publishing",
+        cycleItems: {
+          done: 0,
+          total: 11_618,
+          activity: "verifying",
+          processed: 4_096,
+          expected: 11_618,
+        },
+      },
+      text,
+      0,
+    );
+    expect(view.current).toBe(`${text.activity.verifying} · 4,096 / 11,618`);
+  });
   it("is indeterminate until native reports the cycle's record count", () => {
     const view = serverSyncProgressView(
       { ...bound(), running: true, progress: "preparing", attemptStartedAt: 1000 },
@@ -209,11 +273,15 @@ describe("progress view", () => {
       { key: "pending", label: text.pendingChanges, value: "37" },
     ]);
   });
-  it("names the first full comparison instead of a change count", () => {
+  it("counts the changes to send while the first full comparison is pending", () => {
     const snapshot = bound();
     snapshot.status!.fullScan = true;
     const view = serverSyncProgressView({ ...snapshot, running: true }, text, 0);
-    expect(view.counters[3].value).toBe(text.initialScan);
+    expect(view.counters[3].value).toBe("37");
     expect(view.elapsed).toBe("");
+    expect(serverSyncStatus(snapshot, text)).toEqual({
+      label: text.initialScan,
+      tone: "connected",
+    });
   });
 });

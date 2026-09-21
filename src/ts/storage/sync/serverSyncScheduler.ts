@@ -1,6 +1,7 @@
-import type {
-  ServerSyncController,
-  ServerSyncSnapshot,
+import {
+  serverSyncBlocked,
+  type ServerSyncController,
+  type ServerSyncSnapshot,
 } from "./serverSyncController";
 
 /** Schedules durable local revisions, never streamed tokens. Transport remains
@@ -20,6 +21,9 @@ export function createServerSyncScheduler(
   let previous = { ...controller.snapshot() };
   let automatic = false;
   let stopped = false;
+  // A rejection the same attempt would receive again ends automatic retries
+  // until an explicit action asks for another one.
+  let blocked = false;
   const random = options.random ?? Math.random;
   const clear = () => {
     if (timer !== undefined) clearTimeout(timer);
@@ -27,7 +31,8 @@ export function createServerSyncScheduler(
   };
   const schedule = (delay: number) => {
     clear();
-    if (stopped || !options.available() || !controller.canAutoSync()) return;
+    if (stopped || blocked || !options.available() || !controller.canAutoSync())
+      return;
     timer = setTimeout(run, delay);
   };
   const due = () => {
@@ -38,13 +43,19 @@ export function createServerSyncScheduler(
   };
   const run = () => {
     clear();
-    if (stopped || !options.available() || !controller.canAutoSync()) return;
+    if (stopped || blocked || !options.available() || !controller.canAutoSync())
+      return;
     localSince = localDue = hintDue = undefined;
     automatic = true;
     void controller.synchronize();
     automatic = false;
   };
   const completed = (state: ServerSyncSnapshot) => {
+    if (serverSyncBlocked(state)) {
+      blocked = true;
+      clear();
+      return;
+    }
     if (state.error) {
       failures += 1;
       const ceiling = Math.min(60_000, 1000 * 2 ** Math.min(failures - 1, 6));
@@ -67,6 +78,8 @@ export function createServerSyncScheduler(
     previous = { ...state };
     if (state.running && !before.running) {
       clear();
+      blocked = false;
+      localSince = localDue = hintDue = undefined;
       if (!automatic) failures = 0;
     } else if (!state.running && before.running) {
       completed(state);
@@ -76,9 +89,11 @@ export function createServerSyncScheduler(
       !state.running &&
       ((!before.status?.configured && state.status?.configured) ||
         (before.paused && !state.paused) ||
+        (before.connecting && !state.connecting) ||
         (before.error && !state.error))
     ) {
       failures = 0;
+      blocked = false;
       schedule(0);
     }
   });
@@ -87,8 +102,10 @@ export function createServerSyncScheduler(
       const now = Date.now();
       localSince ??= now;
       localDue = Math.min(now + 500, localSince + 5000);
-      // Ongoing edits cannot continuously postpone retries after a failure.
-      if (failures === 0) schedule(Math.max(0, (due() ?? localDue) - now));
+      // Ongoing edits cannot continuously postpone retries after a failure, and
+      // never restart a device the server keeps rejecting.
+      if (failures === 0 && !blocked)
+        schedule(Math.max(0, (due() ?? localDue) - now));
     },
     /** A notification that the remote may have moved. The run it brings forward
      * confirms the head; a missed notification only costs the poll interval. */
@@ -96,10 +113,12 @@ export function createServerSyncScheduler(
       const now = Date.now();
       if (hintDue !== undefined && hintDue > now) return;
       hintDue = now + 250;
-      if (failures === 0) schedule(Math.max(0, (due() ?? hintDue) - now));
+      if (failures === 0 && !blocked)
+        schedule(Math.max(0, (due() ?? hintDue) - now));
     },
     resume() {
       failures = 0;
+      blocked = false;
       poll = 60_000;
       schedule(0);
     },

@@ -7,7 +7,7 @@ import { language } from "src/lang"
 import { v4 as uuidv4, v4 } from 'uuid';
 import { changeChar, characterFormatUpdate, commitDetachedCharacter } from "./characters"
 import { AppendableBuffer, BlankWriter, checkCharOrder, downloadFile, loadAsset, LocalWriter, openURL, readImage, saveAsset, VirtualWriter } from "./globalApi.svelte"
-import { isTauri, isNodeServer, isTauriDesktop, isTauriAndroid, isTauriIOS } from "src/ts/platform"
+import { isTauri, isTauriDesktop, isTauriAndroid, isTauriIOS } from "src/ts/platform"
 import { getImageType } from "./media"
 import { DBState, SettingsMenuIndex, ShowRealmFrameStore, selectedCharID, settingsOpen } from "./stores.svelte"
 import { hasher } from "./parser/parser.svelte"
@@ -19,7 +19,7 @@ import { CharXImporter, CharXWriter } from "./process/processzip"
 import { exportModuleLegacy, readModule, type RisuModule } from "./process/modules"
 import { readFile } from "@tauri-apps/plugin-fs"
 import { open } from "@tauri-apps/plugin-dialog"
-import { REALM_HUB_URL, REALM_NIGHTLY_HUB_URL, REALM_NODE_PROXY_BASE, REALM_SITE_URL } from "./realmEndpoints"
+import { REALM_HUB_URL, REALM_NIGHTLY_HUB_URL, REALM_SITE_URL } from "./realmEndpoints"
 import { registerOpenedFileListeners } from "./openedFiles"
 import { type DeviceMarkerStorage } from './storage/deviceMarkers'
 import { importDesktopNativeCharacterPath } from './storage/nativeCharacterFileRoute'
@@ -37,9 +37,7 @@ const NIGHTLY_HUB_URL = 'https://nightly.sv.risuai.xyz'
 const nightlyBuild = import.meta.env.VITE_RISU_NIGHTLY_BUILD === 'TRUE'
 // The hub choice belongs to the device file, which only opens once the start
 // reaches it, so the start applies the choice before anything requests a hub.
-export let hubURL = isNodeServer
-    ? '/hub-proxy'
-    : nightlyBuild
+export let hubURL = nightlyBuild
     ? NIGHTLY_HUB_URL
     : EXTERNAL_HUB_URL;
 
@@ -47,14 +45,11 @@ export let hubURL = isNodeServer
 // Drive callbacks keep using `hubURL`, so agent mode does not affect them.
 // `/rs/` serves both account and Realm-shared assets, so it is classified as Realm
 // by scripts/realmBlocklist.mjs. Build every `/rs/` URL from this value.
-export let realmHubURL = isNodeServer
-    ? REALM_NODE_PROXY_BASE
-    : nightlyBuild
+export let realmHubURL = nightlyBuild
     ? REALM_NIGHTLY_HUB_URL
     : REALM_HUB_URL;
 
 export function applyHubSelection(markers: DeviceMarkerStorage): void {
-    if (isNodeServer) return
     const nightly = nightlyBuild || markers.getItem('hub') === 'nightly'
     hubURL = nightly ? NIGHTLY_HUB_URL : EXTERNAL_HUB_URL
     realmHubURL = nightly ? REALM_NIGHTLY_HUB_URL : REALM_HUB_URL
@@ -2250,11 +2245,11 @@ export async function getRisuHub(arg:{
 }):Promise<hubType[]> {
     try {
         arg.search += ' __shared'
-        const stringArg = `search==${arg.search}&&page==${arg.page}&&nsfw==${arg.nsfw}&&sort==${arg.sort}&&web==${(!isNodeServer && !isTauri) ? 'web' : 'other'}`
+        const stringArg = `search==${arg.search}&&page==${arg.page}&&nsfw==${arg.nsfw}&&sort==${arg.sort}&&web==${!isTauri ? 'web' : 'other'}`
 
         const da = await fetch(realmHubURL + '/realm/' + encodeURIComponent(stringArg) + "?cache=30", {
             headers: {
-                "x-risuai-info": appVer + ';' + (isNodeServer ? 'node' : (isTauri ? 'tauri' : 'web'))
+                "x-risuai-info": appVer + ';' + (isTauri ? 'tauri' : 'web')
             }
         })
         if(da.status !== 200){

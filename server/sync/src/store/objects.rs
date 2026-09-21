@@ -124,6 +124,92 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+    pub(super) fn put_objects(
+        &self,
+        device: &super::Device,
+        objects: &[(String, Vec<u8>)],
+    ) -> Result<()> {
+        Self::require_device(&*self.db()?, device)?;
+        let staging = self.root.join("staging");
+        check_path(&staging)?;
+        let mut prepared = Vec::with_capacity(objects.len());
+        let mut directories = std::collections::BTreeSet::new();
+        for (digest, bytes) in objects {
+            #[cfg(test)]
+            let measured = std::time::Instant::now();
+            validate_hash(digest)?;
+            if bytes.len() > MAX_TARGET_BYTES || hash(bytes) != *digest {
+                return Err(Error::new("hash-mismatch", 400));
+            }
+            #[cfg(test)]
+            frame_metrics::record(1, measured);
+            #[cfg(test)]
+            let measured = std::time::Instant::now();
+            let destination = self.object_path(digest)?;
+            fs::create_dir_all(destination.parent().unwrap())?;
+            directories.insert(destination.parent().unwrap().to_path_buf());
+            let mut temp = tempfile::NamedTempFile::new_in(&staging)?;
+            temp.write_all(bytes)?;
+            #[cfg(test)]
+            frame_metrics::record(2, measured);
+            #[cfg(test)]
+            let measured = std::time::Instant::now();
+            temp.as_file().sync_all()?;
+            #[cfg(test)]
+            frame_metrics::record(3, measured);
+            prepared.push((temp, destination));
+        }
+        #[cfg(test)]
+        let measured = std::time::Instant::now();
+        let _gate = self
+            .objects_gate
+            .lock()
+            .map_err(|_| Error::new("storage-unavailable", 503))?;
+        #[cfg(test)]
+        frame_metrics::record(4, measured);
+        #[cfg(test)]
+        let measured = std::time::Instant::now();
+        sync_directory(&self.root.join("objects"))?;
+        #[cfg(test)]
+        frame_metrics::record(6, measured);
+        for (temp, destination) in &prepared {
+            #[cfg(test)]
+            let measured = std::time::Instant::now();
+            #[cfg(windows)]
+            publish(temp.path(), destination)?;
+            #[cfg(not(windows))]
+            fs::rename(temp.path(), destination)?;
+            #[cfg(test)]
+            frame_metrics::record(5, measured);
+        }
+        for directory in directories {
+            #[cfg(test)]
+            let measured = std::time::Instant::now();
+            sync_directory(&directory)?;
+            #[cfg(test)]
+            frame_metrics::record(6, measured);
+        }
+        #[cfg(test)]
+        let measured = std::time::Instant::now();
+        let mut db = self.db()?;
+        #[cfg(test)]
+        frame_metrics::record(4, measured);
+        #[cfg(test)]
+        let measured = std::time::Instant::now();
+        Self::require_device(&db, device)?;
+        let tx = db.transaction()?;
+        for (digest, bytes) in objects {
+            tx.execute(
+                "INSERT INTO objects(hash,size) VALUES(?1,?2) ON CONFLICT(hash) DO NOTHING",
+                params![digest, bytes.len() as i64],
+            )?;
+            Self::lease_object(&tx, device, digest)?;
+        }
+        tx.commit()?;
+        #[cfg(test)]
+        frame_metrics::record(7, measured);
+        Ok(())
+    }
     pub fn object_size(&self, digest: &str) -> Result<Option<u64>> {
         validate_hash(digest)?;
         let size: Option<i64> = self
@@ -155,8 +241,97 @@ impl Store {
 }
 
 #[cfg(test)]
+pub(super) mod frame_metrics {
+    std::thread_local! {
+        pub static SAMPLES: std::cell::RefCell<Option<[Vec<u128>; 8]>> = const { std::cell::RefCell::new(None) };
+    }
+    pub fn record(stage: usize, started: std::time::Instant) {
+        SAMPLES.with(|samples| {
+            if let Some(samples) = &mut *samples.borrow_mut() {
+                samples[stage].push(started.elapsed().as_micros());
+            }
+        });
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frame_body_write_failure_leaves_no_metadata_or_lease() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::init(directory.path()).unwrap();
+        let registration = store.add_device().unwrap();
+        let device = super::super::Device {
+            id: registration.device_id,
+        };
+        let staging = directory.path().join("staging");
+        std::fs::remove_dir(&staging).unwrap();
+        std::fs::write(&staging, b"synthetic obstruction").unwrap();
+        let bytes = b"synthetic body".to_vec();
+        let digest = hash(&bytes);
+        assert!(store
+            .put_objects(&device, &[(digest.clone(), bytes)])
+            .is_err());
+        assert!(store.object_size(&digest).unwrap().is_none());
+        assert_eq!(
+            store
+                .db()
+                .unwrap()
+                .query_row("SELECT count(*) FROM object_leases", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn frame_batch_metadata_failure_is_atomic_and_replay_survives_reopen() {
+        use risunest_sync_wire::{
+            delta,
+            transfer::{self, Frame},
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let store = Store::init(directory.path()).unwrap();
+        let credential = store.add_device().unwrap();
+        let device = super::super::Device {
+            id: credential.device_id,
+        };
+        let base = vec![b'a'; 2048];
+        let mut target = base.clone();
+        target[1024] = b'b';
+        let recipe = delta::create(&[base.as_slice()], &target).unwrap();
+        let frames = transfer::encode(&[Frame::Full(base.clone()), Frame::Delta(recipe)]).unwrap();
+        store.db().unwrap().execute_batch(&format!("CREATE TRIGGER synthetic_batch_failure BEFORE INSERT ON objects WHEN NEW.hash='{}' BEGIN SELECT RAISE(ABORT,'synthetic metadata failure'); END", hash(&target))).unwrap();
+        assert!(store.receive_frames(&device, &frames).is_err());
+        assert!(store.object_size(&hash(&base)).unwrap().is_none());
+        assert!(store.object_size(&hash(&target)).unwrap().is_none());
+        assert_eq!(
+            store
+                .db()
+                .unwrap()
+                .query_row("SELECT count(*) FROM object_leases", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        drop(store);
+        let store = Store::open(directory.path()).unwrap();
+        store
+            .db()
+            .unwrap()
+            .execute_batch("DROP TRIGGER synthetic_batch_failure")
+            .unwrap();
+        for _ in 0..2 {
+            assert_eq!(
+                store.receive_frames(&device, &frames).unwrap(),
+                vec![hash(&base), hash(&target)]
+            );
+        }
+        assert_eq!(store.get_object(&hash(&base)).unwrap(), base);
+        assert_eq!(store.get_object(&hash(&target)).unwrap(), target);
+    }
 
     #[test]
     fn sqlite_capacity_failure_cannot_publish_partial_object_metadata() {
@@ -222,5 +397,46 @@ mod tests {
                 .unwrap(),
             "ok"
         );
+    }
+    #[test]
+    #[ignore = "Explicit synthetic receive_frames persistence measurement"]
+    fn frame_persistence_measurement() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::init(root.path()).unwrap();
+        let registration = store.add_device().unwrap();
+        let device = super::super::Device {
+            id: registration.device_id,
+        };
+        for count in [1, 200] {
+            frame_metrics::SAMPLES.with(|samples| *samples.borrow_mut() = Some(Default::default()));
+            let frames = (0..count)
+                .map(|index| {
+                    risunest_sync_wire::transfer::Frame::Full(
+                        format!("synthetic {count} {index}").repeat(16).into_bytes(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            let bytes = risunest_sync_wire::transfer::encode(&frames).unwrap();
+            let started = std::time::Instant::now();
+            store.receive_frames(&device, &bytes).unwrap();
+            eprintln!(
+                "frame_count={count} wall_us={}",
+                started.elapsed().as_micros()
+            );
+            frame_metrics::SAMPLES.with(|samples| {
+                for (stage, mut values) in
+                    samples.borrow_mut().take().unwrap().into_iter().enumerate()
+                {
+                    values.sort_unstable();
+                    eprintln!(
+                        "stage={stage} calls={} sum_us={} p50_us={} p95_us={}",
+                        values.len(),
+                        values.iter().sum::<u128>(),
+                        values[values.len() / 2],
+                        values[values.len() * 95 / 100]
+                    );
+                }
+            });
+        }
     }
 }

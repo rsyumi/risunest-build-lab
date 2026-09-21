@@ -258,7 +258,7 @@ async fn session_identity_and_previous_device_status_are_authenticated_and_revoc
         .unwrap();
     assert_eq!(
         session,
-        serde_json::json!({"head":server.store.head().unwrap(),"deviceId":server.a.device_id,"operationWatermark":"0","operationPending":false})
+        serde_json::json!({"head":server.store.head().unwrap(),"deviceId":server.a.device_id,"operationWatermark":"0","operationPending":false,"protocolId":risunest_sync_server::PROTOCOL_ID})
     );
     let scope: serde_json::Value = server
         .auth(
@@ -1044,4 +1044,77 @@ async fn chunk_upload_delta_download_checkpoint_and_durable_job_over_tcp() {
     assert_eq!(page["records"][0]["domain"], "library");
     assert_eq!(page["next"]["domain"], "library");
     assert!(page["next"]["key"].is_string());
+}
+
+#[tokio::test]
+async fn a_page_rejection_names_the_record_it_failed_on() {
+    use risunest_sync_wire::{
+        descriptor::RecordDescriptor, ChangeSet, Domain, RecordChange, RecordVersion,
+    };
+    let s = Server::start().await;
+    let body = b"synthetic page body";
+    s.upload(&s.a, body).await;
+    let descriptor = RecordDescriptor {
+        dependencies: vec![hash(b"synthetic dependency the server never received")],
+        ..RecordDescriptor::content(hash(body))
+    };
+    let bytes = descriptor.bytes().unwrap();
+    s.upload(&s.a, &bytes).await;
+    let id = s
+        .auth(
+            s.client.post(format!("{}/staged-changes/start", s.base)),
+            &s.a,
+        )
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json::<serde_json::Value>()
+        .await
+        .unwrap()["stagedChangesId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let page = ChangeSet {
+        changes: vec![RecordChange {
+            domain: Domain::Library,
+            key: "synthetic-rejected-key".into(),
+            before: RecordVersion::Absent,
+            after: RecordVersion::Live {
+                object_hash: hash(body),
+                descriptor_hash: Some(hash(&bytes)),
+            },
+        }],
+        read_fences: vec![],
+        scope_fences: vec![],
+    };
+    let response = s
+        .auth(
+            s.client.put(format!("{}/staged-changes/{id}/pages/0", s.base)),
+            &s.a,
+        )
+        .json(&page)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        response.json::<serde_json::Value>().await.unwrap(),
+        serde_json::json!({"error":"missing-dependency","key":"synthetic-rejected-key"})
+    );
+    // A rejection with no single record keeps the body it always had.
+    let response = s
+        .auth(
+            s.client.post(format!("{}/staged-changes/{id}/seal", s.base)),
+            &s.a,
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(
+        response.json::<serde_json::Value>().await.unwrap(),
+        serde_json::json!({"error":"empty-staged-changes"})
+    );
 }

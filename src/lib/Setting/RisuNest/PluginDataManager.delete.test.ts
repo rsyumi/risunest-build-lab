@@ -120,7 +120,8 @@ describe('plugin data manager deletions', () => {
 
     it('asks twice with the shown-values wording when a filter narrows the list', async () => {
         const root = await open()
-        const search = root.querySelector<HTMLInputElement>('input[type="search"]')!
+        const search = [...root.querySelectorAll<HTMLInputElement>('input')]
+            .find((input) => input.placeholder === strings.searchKey)!
         search.value = 'pm_'
         search.dispatchEvent(new Event('input', { bubbles: true }))
         await settle()

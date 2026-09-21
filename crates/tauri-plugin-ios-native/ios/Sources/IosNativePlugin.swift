@@ -10,6 +10,7 @@ private struct EndArgs: Decodable { let id: String; let success: Bool? }
 private struct ProgressArgs: Decodable { let id: String; let completed: Int64 }
 private struct OpenedArgs: Decodable { let urls: [String] }
 private struct PathArgs: Decodable { let path: String }
+private struct DataRootArgs: Decodable { let dataRoot: String }
 private struct ExportArgs: Decodable { let sourcePath: String; let suggestedName: String; let requestId: String }
 private struct NotificationArgs: Decodable { let body: String }
 private struct WebAuthenticationArgs: Decodable {
@@ -38,15 +39,13 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
     private var authenticationSession: ASWebAuthenticationSession?
     private var taskIdentifier: String { Bundle.main.bundleIdentifier! + ".generation" }
 
-    private var dataRoot: URL {
-        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent(Bundle.main.bundleIdentifier!, isDirectory: true)
-    }
-    private var staging: URL { dataRoot.appendingPathComponent("ios-file-staging", isDirectory: true) }
+    // Supplied by Rust, which owns the path manifest. File ownership is
+    // enforced against this root, so deriving it here would check nothing.
+    private var dataRoot: URL?
+    private var staging: URL? { dataRoot?.appendingPathComponent("ios-file-staging", isDirectory: true) }
 
     override func load(webview: WKWebView) {
         webView = webview
-        sweepStaging()
         #if compiler(>=6.2)
         if #available(iOS 26.0, *) {
             continuedRegistered = BGTaskScheduler.shared.register(forTaskWithIdentifier: taskIdentifier, using: .main) { [weak self] task in
@@ -309,7 +308,7 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
     }
 
     private func sweepStaging() {
-        guard !stagingSweepStarted else { return }
+        guard !stagingSweepStarted, let staging = staging else { return }
         stagingSweepStarted = true
         let manager = FileManager.default
         let receipts = staging.appendingPathComponent("receipts", isDirectory: true)
@@ -327,8 +326,15 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
                 protected.insert(folder)
             }
         }
-        for folder in (try? manager.contentsOfDirectory(at: staging, includingPropertiesForKeys: nil)) ?? [] {
-            if UUID(uuidString: folder.lastPathComponent) != nil && !protected.contains(folder.lastPathComponent) {
+        let staleBefore = Date().addingTimeInterval(-60)
+        for folder in (try? manager.contentsOfDirectory(
+            at: staging,
+            includingPropertiesForKeys: [.contentModificationDateKey]
+        )) ?? [] {
+            let modified = try? folder.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+            if UUID(uuidString: folder.lastPathComponent) != nil
+                && !protected.contains(folder.lastPathComponent)
+                && modified.map({ $0 < staleBefore }) == true {
                 try? manager.removeItem(at: folder)
             }
         }
@@ -336,6 +342,7 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
 
     private func stageFile(_ url: URL) throws -> [String: Any] {
         sweepStaging()
+        guard let staging = staging else { throw rootUnavailable() }
         let access = url.startAccessingSecurityScopedResource()
         defer { if access { url.stopAccessingSecurityScopedResource() } }
         let folder = staging.appendingPathComponent(UUID().uuidString, isDirectory: true)
@@ -389,7 +396,9 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
 
     private func failPreparation(_ invoke: Invoke, folder: URL?, error: Error) {
         if let folder = folder { try? FileManager.default.removeItem(at: folder) }
-        if let id = publicationId { try? FileManager.default.removeItem(at: staging.appendingPathComponent("receipts/\(id).json")) }
+        if let id = publicationId, let staging = staging {
+            try? FileManager.default.removeItem(at: staging.appendingPathComponent("receipts/\(id).json"))
+        }
         pickerCall = nil
         publicationId = nil
         exportCopy = nil
@@ -418,6 +427,25 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
         }
     }
 
+    @objc func setDataRoot(_ invoke: Invoke) throws {
+        let args = try invoke.parseArgs(DataRootArgs.self)
+        let root = URL(fileURLWithPath: args.dataRoot, isDirectory: true).standardizedFileURL
+        guard root.path.hasPrefix("/") else { invoke.reject("Expected an absolute data root"); return }
+        DispatchQueue.main.async {
+            self.dataRoot = root
+            self.fileQueue.async { self.sweepStaging() }
+            invoke.resolve()
+        }
+    }
+
+    private func rootUnavailable() -> NSError {
+        NSError(
+            domain: "RisuNest",
+            code: 2,
+            userInfo: [NSLocalizedDescriptionKey: "The application data root has not been received yet"]
+        )
+    }
+
     private func ownedFile(_ path: String, under root: URL) throws -> URL {
         let url = URL(fileURLWithPath: path).standardizedFileURL
         let resolved = url.resolvingSymlinksInPath()
@@ -439,12 +467,15 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
                       args.suggestedName.utf8.count <= 240 else {
                     invoke.reject("Invalid export filename"); return
                 }
-                let source = try self.ownedFile(args.sourcePath, under: self.dataRoot)
+                guard let root = self.dataRoot, let staging = self.staging else {
+                    invoke.reject(self.rootUnavailable().localizedDescription); return
+                }
+                let source = try self.ownedFile(args.sourcePath, under: root)
                 guard UUID(uuidString: args.requestId) != nil else { invoke.reject("Invalid publication identifier"); return }
-                let receipt = self.staging.appendingPathComponent("receipts/\(args.requestId).json")
+                let receipt = staging.appendingPathComponent("receipts/\(args.requestId).json")
                 guard !FileManager.default.fileExists(atPath: receipt.path) else { invoke.reject("Publication identifier already used"); return }
                 try FileManager.default.createDirectory(at: receipt.deletingLastPathComponent(), withIntermediateDirectories: true)
-                let folder = self.staging.appendingPathComponent(UUID().uuidString, isDirectory: true)
+                let folder = staging.appendingPathComponent(UUID().uuidString, isDirectory: true)
                 try JSONSerialization.data(withJSONObject: ["state": "pending", "folder": folder.lastPathComponent]).write(to: receipt, options: .atomic)
                 self.publicationId = args.requestId
                 // Reserve the picker before copying so overlapping requests cannot race.
@@ -472,6 +503,7 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
     @objc func discardFile(_ invoke: Invoke) throws {
         let args = try invoke.parseArgs(PathArgs.self)
         do {
+            guard let staging = staging else { invoke.reject(rootUnavailable().localizedDescription); return }
             let file = try ownedFile(args.path, under: staging)
             guard UUID(uuidString: file.deletingLastPathComponent().lastPathComponent) != nil,
                   file.deletingLastPathComponent().deletingLastPathComponent() == staging.resolvingSymlinksInPath() else {
@@ -485,6 +517,7 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
     @objc func publication(_ invoke: Invoke) throws {
         let args = try invoke.parseArgs(EndArgs.self)
         guard UUID(uuidString: args.id) != nil else { invoke.reject("Invalid publication identifier"); return }
+        guard let staging = staging else { invoke.reject(rootUnavailable().localizedDescription); return }
         let receipt = staging.appendingPathComponent("receipts/\(args.id).json")
         guard FileManager.default.fileExists(atPath: receipt.path) else { invoke.resolve(["state": "unknown"]); return }
         guard let result = try JSONSerialization.jsonObject(with: Data(contentsOf: receipt)) as? [String: Any] else {
@@ -517,6 +550,7 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
     @objc func acknowledgePublication(_ invoke: Invoke) throws {
         let args = try invoke.parseArgs(EndArgs.self)
         guard UUID(uuidString: args.id) != nil else { invoke.reject("Invalid publication identifier"); return }
+        guard let staging = staging else { invoke.reject(rootUnavailable().localizedDescription); return }
         let receipt = staging.appendingPathComponent("receipts/\(args.id).json")
         guard FileManager.default.fileExists(atPath: receipt.path) else { invoke.resolve(); return }
         guard let value = try JSONSerialization.jsonObject(with: Data(contentsOf: receipt)) as? [String: Any],
@@ -530,7 +564,7 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
     private func finishPicker(_ result: [String: Any]) {
         let call = pickerCall
         pickerCall = nil
-        if exporting, let id = publicationId {
+        if exporting, let id = publicationId, let staging = staging {
             let receipt = staging.appendingPathComponent("receipts/\(id).json")
             do {
                 var terminal = result

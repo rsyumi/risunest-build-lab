@@ -1,0 +1,49 @@
+{
+  "identifier": "io.github.rsyumi.risunest.boundary",
+  "productName": "RisuNest Persistence Boundary",
+  "build": {
+    "frontendDist": "../../../.tmp/test-results/native/dist"
+  },
+  "bundle": {
+    "active": false,
+    "icon": [
+      "../../../src-tauri/icons/icon.ico"
+    ]
+  },
+  "plugins": {
+    "risunest": {
+      "agent": true
+    },
+    "updater": {
+      "pubkey": "",
+      "endpoints": []
+    }
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "Synthetic persistence verification",
+        "visible": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; connect-src ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-src 'none'",
+      "capabilities": [
+        {
+          "identifier": "boundary",
+          "windows": [
+            "main"
+          ],
+          "permissions": [
+            "core:default"
+          ]
+        }
+      ],
+      "assetProtocol": {
+        "enable": true,
+        "scope": []
+      }
+    }
+  }
+}

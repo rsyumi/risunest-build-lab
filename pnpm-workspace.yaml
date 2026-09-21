@@ -1,2 +1,5 @@
 neverBuiltDependencies:
   - sharp
+minimumReleaseAgeExclude:
+  - svelte@5.57.1
+  - '@tauri-apps/plugin-updater@2.12.0'

@@ -5,7 +5,6 @@ import type {
 } from './blobStore'
 import {
     createCompleteAssetRepositoryBlobStore,
-    type AssetAliasLegacyReader,
     type AssetObjectUrlResolver,
     type CompleteAssetRepositoryBlobStore,
     type DurableAssetWriteSessionFactory,
@@ -13,24 +12,13 @@ import {
     type PreparedCompleteAssetWrite,
     type RemoteAssetReader,
 } from './assetRepository'
-import { selectAssetRepositoryAuthority } from './assetRepositoryAuthority'
 import type { ImmutablePayloadCas } from './payloadCas'
 import { RevisionConflictError, type PersistentDataStore } from './persistentDataStore'
-import type { AssetRepositoryAuthorityState } from './persistentDataStore'
 import type { PersistentStorageAuthority } from './persistentStorageAuthority'
 
-function typedLegacyReader(legacy: BlobStore): AssetAliasLegacyReader {
-    return {
-        read: (identity, range) => legacy.read(identity.key, range),
-        stat: (identity) => legacy.stat(identity.key),
-        resolveUrl: (identity) => legacy.resolveUrl(identity.key),
-    }
-}
-
-export function createNativeV2BlobStore(input: {
+export function createNativeAssetBlobStore(input: {
     remote?: RemoteAssetReader
     store: PersistentDataStore
-    legacy: BlobStore
     cas: ImmutablePayloadCas
     objectUrls: AssetObjectUrlResolver
     newInlayImages: NewInlayImageEncoder
@@ -40,8 +28,6 @@ export function createNativeV2BlobStore(input: {
         remote: input.remote,
         store: input.store,
         cas: input.cas,
-        legacy: typedLegacyReader(input.legacy),
-        legacyFallback: true,
         objectUrls: input.objectUrls,
         newInlayImages: input.newInlayImages,
         writeSessions: input.writeSessions,
@@ -49,9 +35,7 @@ export function createNativeV2BlobStore(input: {
 }
 
 export interface StagedRuntimeAssetWrite {
-    readonly authority: AssetRepositoryAuthorityState
-    readonly prepared?: PreparedCompleteAssetWrite
-    readonly activateLegacy?: () => Promise<BlobMetadata>
+    readonly prepared: PreparedCompleteAssetWrite
 }
 
 export type RuntimeAssetRepositoryDispatcher = BlobStore &
@@ -208,139 +192,35 @@ export function createCoordinatorOwnedAssetBlobStore(
     return coordinated
 }
 
-function hasPreparationSeam(store: BlobStore): store is CompleteAssetRepositoryBlobStore {
-    const candidate = store as Partial<CompleteAssetRepositoryBlobStore>
-    return typeof candidate.prepareOwnedPut === 'function'
-        && typeof candidate.prepareOwnedNewInlayImage === 'function'
-}
-
-function sameAuthority(
-    left: AssetRepositoryAuthorityState,
-    right: AssetRepositoryAuthorityState,
-): boolean {
-    if (left.format !== right.format) return false
-    if (left.format === 'legacy') return true
-    if (right.format === 'legacy') return false
-    if (left.format === 'preparing' || right.format === 'preparing') {
-        return left.format === 'preparing'
-            && right.format === 'preparing'
-            && left.migrationId === right.migrationId
-            && left.sourceRevision === right.sourceRevision
-    }
-    return left.migrationId === right.migrationId
-        && left.compatibilityHash === right.compatibilityHash
-}
-
-export async function selectRuntimeAssetRepository(input: {
-    store: PersistentDataStore
-    legacy: BlobStore
-    v2?: BlobStore
-    v2Capability: boolean
-}): Promise<BlobStore> {
-    const authority = await input.store.readAssetRepositoryAuthority()
-    return selectAssetRepositoryAuthority(authority.value, {
-        legacy: input.legacy,
-        v2: input.v2,
-        v2Capability: input.v2Capability,
-    })
-}
-
-export function createRuntimeAssetRepositoryDispatcher(input: {
-    store: PersistentDataStore
-    legacy: BlobStore
-    v2?: BlobStore
-    v2Capability: boolean
-}): RuntimeAssetRepositoryDispatcher {
-    const selected = () => selectRuntimeAssetRepository(input)
+export function createRuntimeAssetRepositoryDispatcher(
+    store: CompleteAssetRepositoryBlobStore,
+): RuntimeAssetRepositoryDispatcher {
     const activationStarted = new WeakSet<StagedRuntimeAssetWrite>()
     const abortStarted = new WeakSet<StagedRuntimeAssetWrite>()
-    const stage = async (
-        activateLegacy: (store: BlobStore) => Promise<BlobMetadata>,
-        prepareV2: (store: CompleteAssetRepositoryBlobStore) => Promise<PreparedCompleteAssetWrite>,
-    ): Promise<StagedRuntimeAssetWrite> => {
-        const versioned = await input.store.readAssetRepositoryAuthority()
-        const store = selectAssetRepositoryAuthority(versioned.value, input)
-        if (store === input.v2 && hasPreparationSeam(store)) {
-            return {
-                authority: versioned.value,
-                prepared: await prepareV2(store),
-            }
-        }
-        return {
-            authority: versioned.value,
-            activateLegacy: () => activateLegacy(store),
-        }
-    }
     return {
-        stagePut(key, ownedData, metadata) {
-            return stage(
-                (store) => store.put(key, ownedData, metadata),
-                (store) => store.prepareOwnedPut(key, ownedData, metadata),
-            )
+        async stagePut(key, ownedData, metadata) {
+            return { prepared: await store.prepareOwnedPut(key, ownedData, metadata) }
         },
-        stageNewInlayImage(key, ownedData, request) {
-            return stage(
-                async (store) => {
-                    if (!store.putNewInlayImage) {
-                        throw new Error('Selected asset repository cannot encode new Inlay images')
-                    }
-                    return store.putNewInlayImage(key, ownedData, request)
-                },
-                (store) => store.prepareOwnedNewInlayImage(key, ownedData, request),
-            )
+        async stageNewInlayImage(key, ownedData, request) {
+            return {
+                prepared: await store.prepareOwnedNewInlayImage(key, ownedData, request),
+            }
         },
         async activateStagedWrite(staged) {
-            const current = await input.store.readAssetRepositoryAuthority()
-            if (!sameAuthority(staged.authority, current.value)) {
-                const authorityError = new Error(
-                    'Asset repository authority changed before staged write activation',
-                )
-                if (staged.prepared) {
-                    try {
-                        await this.abortStagedWrite(staged)
-                    } catch (abortError) {
-                        throw new AggregateError(
-                            [authorityError, abortError],
-                            'Asset repository authority change and staged write cleanup failed',
-                        )
-                    }
-                }
-                throw authorityError
-            }
             activationStarted.add(staged)
-            if (staged.prepared) return staged.prepared.activate()
-            if (staged.activateLegacy) return staged.activateLegacy()
-            throw new Error('Staged asset write has no activation operation')
+            return staged.prepared.activate()
         },
         async abortStagedWrite(staged) {
             if (activationStarted.has(staged) || abortStarted.has(staged)) return
             abortStarted.add(staged)
-            await staged.prepared?.abort()
+            await staged.prepared.abort()
         },
-        async put(key, data, metadata) {
-            return (await selected()).put(key, data, metadata)
-        },
-        async putNewInlayImage(key, data, request) {
-            const store = await selected()
-            if (!store.putNewInlayImage) {
-                throw new Error('Selected asset repository cannot encode new Inlay images')
-            }
-            return store.putNewInlayImage(key, data, request)
-        },
-        async read(key, range) {
-            return (await selected()).read(key, range)
-        },
-        async stat(key) {
-            return (await selected()).stat(key)
-        },
-        async list(query) {
-            return (await selected()).list(query)
-        },
-        async remove(key) {
-            return (await selected()).remove(key)
-        },
-        async resolveUrl(key) {
-            return (await selected()).resolveUrl(key)
-        },
+        put: (key, data, metadata) => store.put(key, data, metadata),
+        putNewInlayImage: (key, data, request) => store.putNewInlayImage(key, data, request),
+        read: (key, range) => store.read(key, range),
+        stat: (key) => store.stat(key),
+        list: (query) => store.list(query),
+        remove: (key) => store.remove(key),
+        resolveUrl: (key) => store.resolveUrl(key),
     }
 }

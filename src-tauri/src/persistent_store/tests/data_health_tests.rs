@@ -2,9 +2,7 @@ use super::*;
 use crate::data_health::{codes, Findings, Severity};
 use crate::local_backup::NeverCancelled;
 
-/// The shared fixture leaves the storage authority at its legacy state, which is itself a
-/// blocking finding. This one completes it so the scan starts from a healthy baseline.
-fn v2_fixture() -> (tempfile::TempDir, PersistentStore) {
+fn healthy_fixture() -> (tempfile::TempDir, PersistentStore) {
     let directory = tempfile::tempdir().expect("create temporary directory");
     let mut store = PersistentStore::open(directory.path()).expect("open persistent store");
     let database = fixture();
@@ -24,15 +22,6 @@ fn v2_fixture() -> (tempfile::TempDir, PersistentStore) {
             database["characters"].as_array().expect("fixture characters"),
         )
         .expect("stage fixture characters");
-    store
-        .replace_put_asset_repository_authority(
-            &staging.staging_id,
-            &AssetRepositoryAuthorityState::V2 {
-                migration_id: "data-health".to_owned(),
-                compatibility_hash: "1a".repeat(32),
-            },
-        )
-        .expect("stage v2 asset authority");
     store
         .replace_commit(&staging.staging_id, Some(0))
         .expect("commit fixture");
@@ -68,7 +57,7 @@ fn insert_alias(store: &PersistentStore, key: &str, object_hash: &str, size: i64
 
 #[test]
 fn live_scan_reports_dangling_references_without_refusing_the_library() {
-    let (_directory, mut store) = v2_fixture();
+    let (_directory, mut store) = healthy_fixture();
     let findings = scan(&mut store);
     assert_eq!(findings.omitted, 0);
     assert!(
@@ -93,7 +82,7 @@ fn live_scan_reports_dangling_references_without_refusing_the_library() {
 
 #[test]
 fn live_scan_reports_an_alias_whose_object_is_absent_or_differs() {
-    let (_directory, mut store) = v2_fixture();
+    let (_directory, mut store) = healthy_fixture();
     insert_alias(&store, "assets/absent", &"3c".repeat(32), 4);
     let absent = scan(&mut store);
     let finding = absent
@@ -105,7 +94,7 @@ fn live_scan_reports_an_alias_whose_object_is_absent_or_differs() {
     assert_eq!(finding.owner.kind, "asset");
     assert_eq!(finding.owner.id, "assets/absent");
 
-    let (_stored_directory, mut stored) = v2_fixture();
+    let (_stored_directory, mut stored) = healthy_fixture();
     let cas =
         crate::asset_repository::PayloadCas::new(stored.repository_root()).expect("open the CAS");
     let stored_payload = cas.prepare_bytes(b"synthetic").expect("store a payload");
@@ -121,7 +110,7 @@ fn live_scan_reports_an_alias_whose_object_is_absent_or_differs() {
 
 #[test]
 fn live_scan_keeps_going_past_a_damaged_record() {
-    let (_directory, mut store) = v2_fixture();
+    let (_directory, mut store) = healthy_fixture();
     let generation = active_generation(&store.connection).expect("read active generation");
     let damaged = store
         .connection
@@ -151,7 +140,7 @@ fn live_scan_keeps_going_past_a_damaged_record() {
 
 #[test]
 fn a_conversation_whose_character_is_gone_is_reported_as_an_orphan() {
-    let (_directory, mut store) = v2_fixture();
+    let (_directory, mut store) = healthy_fixture();
     let generation = active_generation(&store.connection).expect("read active generation");
     store
         .connection

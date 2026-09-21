@@ -59,7 +59,11 @@
                 onclick={() => bind()}
             >
                 <SaveIcon size={16} class="shrink-0" />
-                <span class="truncate">{changes > 0 ? changes : language.saveTogglesLabel}</span>
+                <span class="truncate"
+                    >{changes > 0
+                        ? `${language.saveTogglesLabel} (${changes})`
+                        : language.saveTogglesLabel}</span
+                >
             </button>
         {:else}
             <button

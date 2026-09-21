@@ -12,6 +12,9 @@ use tauri::{Manager, State};
 #[cfg(windows)]
 mod snap;
 
+#[cfg(any(target_os = "macos", test))]
+mod removal_profile;
+
 /// Opens the native window menu for the title bar drawn by the webview.
 #[tauri::command]
 fn window_system_menu(window: tauri::WebviewWindow, x: f64, y: f64) {
@@ -90,6 +93,10 @@ impl UpdateCoordination {
 }
 fn path_text(path: &Path) -> String {
     path.to_string_lossy().into_owned()
+}
+
+fn reveal_existing_window(arguments: &[String]) -> bool {
+    !arguments.iter().any(|argument| argument == "--tray")
 }
 
 fn reconcile_schedule_environment(
@@ -330,7 +337,30 @@ fn manager_qr(uri: String) -> Result<String> {
     Ok(format!("<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {} {}\" shape-rendering=\"crispEdges\"><rect width=\"100%\" height=\"100%\" fill=\"white\"/><path d=\"{path}\" fill=\"black\"/></svg>",width+8,width+8))
 }
 
+#[tauri::command]
+async fn manager_uninstall(app: tauri::AppHandle, ctx: State<'_, Context>, delete_data: bool) -> Result<()> {
+    let preview = risunest_sync_manager::removal::plan(&ctx.root, &ctx.executable, delete_data)?;
+    if !preview.blockers.is_empty() { return Err(preview.blockers.join(", ")); }
+    let lock = ctx.updates.begin(&ctx.root)?;
+    let result: Result<()> = async {
+        #[cfg(windows)]
+        risunest_sync_manager::removal::execute(&ctx.root, &ctx.executable, delete_data).await?;
+        #[cfg(not(windows))]
+        risunest_sync_manager::removal::spawn_after_exit(&ctx.root, &ctx.executable, delete_data)?;
+        Ok(())
+    }.await;
+    if let Err(error) = result { ctx.updates.restore(&ctx.root, lock)?; return Err(error); }
+    ctx.updates.retain_until_exit(lock)?;
+    app.exit(0);
+    Ok(())
+}
+
 pub fn run() {
+    #[cfg(target_os = "macos")]
+    if std::env::args().skip(1).any(|arg| arg == "--clear-removal-profile") {
+        removal_profile::run();
+        return;
+    }
     let mut root = platform::default_data_dir().expect("user data directory unavailable");
     let mut args = std::env::args().skip(1);
     let mut tray = false;
@@ -343,6 +373,7 @@ pub fn run() {
     }
     assert!(root.is_absolute(), "absolute data directory required");
     let executable = platform::server_executable().expect("server path unavailable");
+    risunest_sync_manager::removal::register(&root, &executable).expect("installation registration unavailable");
     let client = Client::new(root.clone()).expect("management client unavailable");
     let updates = UpdateCoordination::new(&root).expect("update activity unavailable");
     let mut tauri_context = tauri::generate_context!();
@@ -361,6 +392,15 @@ pub fn run() {
         None
     };
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, arguments, _cwd| {
+            if reveal_existing_window(&arguments) {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.unminimize();
+                    let _ = window.set_focus();
+                }
+            }
+        }))
         .manage(Context {
             root,
             executable,
@@ -368,6 +408,7 @@ pub fn run() {
             updates,
         })
         .invoke_handler(tauri::generate_handler![
+            manager_uninstall,
             manager_status,
             manager_mutate,
             manager_start,
@@ -483,6 +524,19 @@ mod tests {
         };
         let path = PathBuf::from(value);
         assert!(json!({"path":path_text(&path)})["path"].is_string());
+    }
+
+    #[test]
+    fn second_manual_launch_reveals_the_existing_window_but_tray_startup_does_not() {
+        assert!(reveal_existing_window(&[
+            "risunest-sync-gui".into(),
+            "--data-dir".into(),
+            "synthetic".into(),
+        ]));
+        assert!(!reveal_existing_window(&[
+            "risunest-sync-gui".into(),
+            "--tray".into(),
+        ]));
     }
 
     #[test]

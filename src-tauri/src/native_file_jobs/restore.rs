@@ -3841,7 +3841,7 @@ mod tests {
         assert_eq!(status.result.unwrap().warning_codes, vec!["cleanup-failed"]);
         assert!(jobs_root.join("jobs").join(&started.job_id).exists());
         let relaunched = NativeFileJobState::initialize(jobs_root);
-        assert!(relaunched.capability_error.is_none());
+        assert!(relaunched.capability_error.lock().unwrap().is_none());
     }
 
     struct BlockingReader {

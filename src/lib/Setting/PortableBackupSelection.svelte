@@ -10,6 +10,13 @@
     NativePortableSelection,
   } from "../../ts/storage/nativeFileJobs";
   import type { DataHealthResult } from "../../ts/storage/dataHealth";
+  import SettingButton from "./RisuNest/SettingButton.svelte";
+  import SettingToggle from "./RisuNest/SettingToggle.svelte";
+
+  /** One row treatment for every choice in this dialog. */
+  const rowClass =
+    "flex min-h-12 flex-wrap items-center gap-3 px-3 py-2 transition-colors hover:bg-selected";
+  const boxedRowClass = `${rowClass} rounded-lg border border-darkborderc bg-darkbutton`;
 
   let {
     mode,
@@ -179,7 +186,7 @@
     <div class="overflow-y-auto px-5 py-4">
       {#if repairRequired}
         <p
-          class="mb-4 rounded-lg border border-borderc bg-darkbutton p-3 text-sm"
+          class="mb-4 rounded-lg border border-darkborderc bg-darkbutton p-3 text-sm"
           role="note"
         >
           {text.repair}
@@ -188,23 +195,16 @@
       {#if damagedCount > 0}
         <p
           data-portable-diagnosis
-          class="mb-4 rounded-lg border border-borderc bg-darkbutton p-3 text-sm"
+          class="mb-4 rounded-lg border border-darkborderc bg-darkbutton p-3 text-sm"
           role="note"
         >
           {text.damaged.replace("{0}", damagedCount.toLocaleString())}
         </p>
       {/if}
       {#if items && groups.some((group) => group[1].length > 0)}
-        <label
-          class="mb-4 flex min-h-12 cursor-pointer items-center gap-3 rounded-lg border border-darkborderc bg-darkbutton px-3 py-2"
-        >
-          <input
-            type="checkbox"
-            bind:checked={partial}
-            class="h-4 w-4 shrink-0 accent-[var(--risu-theme-borderc)]"
-          />
-          <span class="font-medium">{text.choosePart}</span>
-        </label>
+        <div class="{boxedRowClass} mb-4">
+          <SettingToggle label={text.choosePart} showLabel bind:checked={partial} />
+        </div>
         {#if partial}
           {#each groups as [kind, entries, label] (kind)}
             {#if entries.length > 0}
@@ -218,25 +218,22 @@
                   class="divide-y divide-darkborderc rounded-lg border border-darkborderc"
                 >
                   {#each entries as entry (entry.id)}
-                    <label
-                      class="flex min-h-12 cursor-pointer items-center gap-3 px-3 py-2"
-                    >
-                      <input
-                        type="checkbox"
+                    <div class={rowClass}>
+                      <SettingToggle
+                        label={entry.id}
+                        showLabel
                         checked={chosen[kind].includes(entry.id)}
                         onchange={() => toggleItem(kind, entry.id)}
-                        class="h-4 w-4 shrink-0 accent-[var(--risu-theme-borderc)]"
                       />
-                      <span class="min-w-0 flex-1 break-all">{entry.id}</span>
                       {#if entry.damaged > 0}
-                        <span class="shrink-0 text-xs text-textcolor2"
+                        <span class="ml-auto shrink-0 text-xs text-textcolor2"
                           >{text.itemDamaged.replace(
                             "{0}",
                             entry.damaged.toLocaleString(),
                           )}</span
                         >
                       {/if}
-                    </label>
+                    </div>
                   {/each}
                 </div>
               </fieldset>
@@ -246,17 +243,14 @@
         {/if}
       {/if}
       {#if libraryIncluded}
-        <label
-          class="mb-4 flex min-h-12 cursor-pointer items-center gap-3 rounded-lg border border-darkborderc bg-darkbutton px-3 py-2 has-disabled:cursor-default has-disabled:opacity-50"
-        >
-          <input
-            type="checkbox"
-            bind:checked={library}
+        <div class="{boxedRowClass} mb-4">
+          <SettingToggle
+            label={text.library}
+            showLabel
             disabled={repairRequired}
-            class="h-4 w-4 shrink-0 accent-[var(--risu-theme-borderc)]"
+            bind:checked={library}
           />
-          <span class="font-medium">{text.library}</span>
-        </label>
+        </div>
       {/if}
       {#if sections.some((choice) => choice.sectionId !== "local-settings")}
         <fieldset class="min-w-0">
@@ -269,50 +263,36 @@
             class="divide-y divide-darkborderc rounded-lg border border-darkborderc"
           >
             {#each sections.filter((choice) => choice.sectionId !== "local-settings") as choice (choice.sectionId)}
-              <label
-                class="flex min-h-12 cursor-pointer items-center gap-3 px-3 py-2 transition-colors hover:bg-darkbutton"
-              >
-                <input
-                  type="checkbox"
+              <div class={rowClass}>
+                <SettingToggle
+                  label={choice.label}
+                  showLabel
                   bind:checked={choice.selected}
-                  class="h-4 w-4 shrink-0 accent-[var(--risu-theme-borderc)]"
                 />
-                <span class="min-w-0 break-words text-sm">{choice.label}</span>
-              </label>
+              </div>
             {/each}
           </div>
         </fieldset>
       {/if}
       {#each sections.filter((choice) => choice.sectionId === "local-settings") as choice (choice.sectionId)}
-        <label
-          class="mt-4 flex min-h-12 cursor-pointer items-center gap-3 rounded-lg border border-darkborderc px-3 py-2 hover:bg-darkbutton"
-        >
-          <input
-            type="checkbox"
+        <div class="{rowClass} mt-4 rounded-lg border border-darkborderc">
+          <SettingToggle
+            label={text.settings}
+            showLabel
             bind:checked={choice.selected}
-            class="h-4 w-4 shrink-0 accent-[var(--risu-theme-borderc)]"
           />
-          <span class="text-sm">{text.settings}</span>
-        </label>
+        </div>
       {/each}
     </div>
     <footer
       class="flex shrink-0 justify-end gap-2 border-t border-darkborderc bg-darkbg px-5 py-4"
     >
-      <button
-        type="button"
-        onclick={() => finish(null)}
-        class="min-h-10 rounded-lg px-4 text-sm hover:bg-darkbutton focus-visible:outline-2 focus-visible:outline-borderc"
-      >
+      <SettingButton variant="secondary" onclick={() => finish(null)}>
         {text.cancel}
-      </button>
-      <button
-        type="submit"
-        disabled={!selectedCount}
-        class="min-h-10 rounded-lg border border-borderc bg-darkbutton px-5 text-sm font-medium hover:bg-selected focus-visible:outline-2 focus-visible:outline-borderc disabled:cursor-not-allowed disabled:opacity-40"
-      >
+      </SettingButton>
+      <SettingButton type="submit" disabled={!selectedCount}>
         {text.continue}
-      </button>
+      </SettingButton>
     </footer>
   </form>
 </dialog>

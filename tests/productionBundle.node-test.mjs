@@ -37,6 +37,9 @@ test("rejects a test module in a dynamic chunk and a test framework", () => {
     "/tests/support/helper.ts",
     "/node_modules/vitest/dist/index.js",
     "/node_modules/jsdom/lib/api.js",
+    "/node_modules/@playwright/test/index.js",
+    "/tests/native/main.ts",
+    "/tests/browser/main.ts",
   ]) {
     assert.throws(
       () =>

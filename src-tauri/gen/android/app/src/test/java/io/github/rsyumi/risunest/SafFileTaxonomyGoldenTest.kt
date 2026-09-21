@@ -115,6 +115,10 @@ class SafFileTaxonomyGoldenTest {
     var repository = fixtureFile()
     repeat(6) { repository = requireNotNull(repository.parentFile) }
     val manifest = repository.resolve("src-tauri/gen/android/app/src/main/AndroidManifest.xml")
+    assertFalse(manifest.readText().contains("tauri-file-associations. AUTO-GENERATED"))
+    val androidConfiguration = repository.resolve("src-tauri/tauri.android.conf.json").readText()
+    assertTrue("Android must disable Tauri file association generation",
+      Regex("\"fileAssociations\"\\s*:\\s*\\[\\s*\\]").containsMatchIn(androidConfiguration))
     val factory = DocumentBuilderFactory.newInstance().apply { isNamespaceAware = true }
     val document = factory.newDocumentBuilder().parse(manifest)
     val filters = document.getElementsByTagName("intent-filter")
@@ -130,17 +134,26 @@ class SafFileTaxonomyGoldenTest {
       if (!actionNames.contains("android.intent.action.VIEW")) continue
       val data = filter.getElementsByTagName("data")
       val dataElements = (0 until data.length).map { data.item(it) as Element }
+      val categories = filter.getElementsByTagName("category")
+      val categoryNames = (0 until categories.length).map {
+        (categories.item(it) as Element).getAttributeNS(androidNamespace, "name")
+      }.toSet()
       if (dataElements.any {
           it.getAttributeNS(androidNamespace, "mimeType") == "application/x-risunest"
         }) {
         assertTrue(actionNames.contains("android.intent.action.SEND"))
         assertTrue(actionNames.contains("android.intent.action.SEND_MULTIPLE"))
+        assertFalse(categoryNames.contains("android.intent.category.BROWSABLE"))
+        assertTrue(dataElements.none { it.hasAttributeNS(androidNamespace, "pathPattern") })
         mimeAssociationFound = true
       }
       val schemes = dataElements.map {
         it.getAttributeNS(androidNamespace, "scheme")
       }.filter { it == "content" || it == "file" }.toSet()
       if (schemes.isEmpty()) continue
+      assertEquals(setOf("android.intent.action.VIEW"), actionNames)
+      assertEquals(setOf("android.intent.category.DEFAULT"), categoryNames)
+      assertTrue(dataElements.none { it.hasAttributeNS(androidNamespace, "mimeType") })
       assertEquals(setOf("*"), dataElements.map {
         it.getAttributeNS(androidNamespace, "host")
       }.filter { it.isNotEmpty() }.toSet())
@@ -157,6 +170,12 @@ class SafFileTaxonomyGoldenTest {
     val configuration = repository.resolve("src-tauri/tauri.conf.json").readText(Charsets.UTF_8)
     val configured = Regex("\"ext\"\\s*:\\s*\\[([^\\]]*)\\]")
       .findAll(configuration).flatMap { quotedStrings(it.groupValues[1]) }.toSet()
+    val expectedExtensions = setOf("risum", "risup", "charx", "risunest", "risudat")
+    assertEquals(expectedExtensions, configured)
+    for (scheme in listOf("content", "file")) {
+      assertEquals(expectedExtensions.map { ".*\\\\.$it" }.toSet(),
+        registered.getValue(scheme).filter { it.isNotEmpty() }.toSet())
+    }
     for (suffix in taxonomy.databaseSuffixes) {
       if (suffix == ".bin") {
         // Generic binary backups remain explicit picker inputs, not an OS-wide association.

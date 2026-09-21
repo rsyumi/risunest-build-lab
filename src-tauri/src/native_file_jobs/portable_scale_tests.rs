@@ -106,7 +106,7 @@ fn native_portable_scale_acceptance() {
                 .unwrap();
                 drop(file);
                 let destination = source
-                    .join("assets-v2/objects")
+                    .join("assets/objects")
                     .join(&hash[..2])
                     .join(&hash[2..]);
                 fs::create_dir_all(destination.parent().unwrap()).unwrap();
@@ -115,7 +115,7 @@ fn native_portable_scale_acceptance() {
             } else {
                 let hash = hex::encode(Sha256::digest(&value));
                 let path = source
-                    .join("assets-v2/objects")
+                    .join("assets/objects")
                     .join(&hash[..2])
                     .join(&hash[2..]);
                 fs::create_dir_all(path.parent().unwrap()).unwrap();

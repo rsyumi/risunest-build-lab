@@ -9,5 +9,3 @@
 export const REALM_HUB_URL = 'https://sv.risuai.xyz'
 export const REALM_NIGHTLY_HUB_URL = 'https://nightly.sv.risuai.xyz'
 export const REALM_SITE_URL = 'https://realm.risuai.net'
-// The Node server forwards Realm requests under this prefix to the hub.
-export const REALM_NODE_PROXY_BASE = '/hub-proxy'

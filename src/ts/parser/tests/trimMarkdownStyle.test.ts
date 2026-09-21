@@ -1,6 +1,10 @@
+// @vitest-environment jsdom
+
 import { describe, it, expect, vi } from 'vitest'
 import { writable } from 'svelte/store'
 import { ParseMarkdown, trimMarkdown } from '../parser.svelte'
+
+vi.mock('../../platform', () => ({ isTauri: false, isNodeServer: false }))
 
 //#region module mocks
 
@@ -43,7 +47,13 @@ vi.mock(import('../../stores.svelte'), () => {
 
 //#endregion
 
-const parse = (html: string) => new DOMParser().parseFromString(html, 'text/html').body
+const parse = (html: string) => {
+    // Chat output is inserted as a fragment, not parsed as a document whose
+    // leading style elements are moved into <head>.
+    const body = document.createElement('div')
+    body.innerHTML = html
+    return body
+}
 
 /**
  * Every rendered style rule must stay scoped to the chat text container.

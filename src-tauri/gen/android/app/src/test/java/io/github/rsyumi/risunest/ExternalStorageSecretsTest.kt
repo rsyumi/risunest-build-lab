@@ -8,6 +8,24 @@ import java.lang.reflect.Modifier
 
 class ExternalStorageSecretsTest {
   @Test
+  fun cleanupDeletesOnlyOwnedAliasesAndPropagatesFailures() {
+    val expected = listOf("risunest.external-storage.secrets", "risunest.external-storage.root-key", "risunest.account.credential")
+    val removed = mutableListOf<String>()
+    ExternalStorageSecrets.removeOwnedKeys { removed.add(it) }
+    assertEquals(expected, removed)
+    assertThrows(IllegalStateException::class.java) {
+      ExternalStorageSecrets.removeOwnedKeys { throw IllegalStateException("locked synthetic store") }
+    }
+    removed.clear()
+    ExternalStorageSecrets.removeOwnedKeys { removed.add(it) }
+    assertEquals(expected, removed)
+    val method = ExternalStorageSecrets::class.java.getDeclaredMethod("removeKeys")
+    assertTrue(Modifier.isPublic(method.modifiers))
+    assertTrue(Modifier.isStatic(method.modifiers))
+    assertEquals(Void.TYPE, method.returnType)
+  }
+
+  @Test
   fun nativeEntryPointsMatchTheJniSignatures() {
     val type = ExternalStorageSecrets::class.java
     for (name in listOf("seal", "open")) {

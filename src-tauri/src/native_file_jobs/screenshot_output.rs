@@ -40,6 +40,7 @@ pub(crate) struct ScreenshotOutputPublished {
 
 #[derive(Clone)]
 pub(crate) struct ScreenshotOutputState {
+    cleanup_closed: Arc<std::sync::RwLock<bool>>,
     root: PathBuf,
     jobs: Arc<Mutex<HashMap<String, Arc<ScreenshotOutputJob>>>>,
     initialization: Arc<Mutex<ScreenshotOutputInitialization>>,
@@ -51,6 +52,28 @@ struct ScreenshotOutputInitialization {
 }
 
 impl ScreenshotOutputState {
+    fn admit_cleanup_operation(&self) -> Result<std::sync::RwLockReadGuard<'_, bool>, NativeJobError> {
+        let guard = self.cleanup_closed.read().map_err(registry_error)?;
+        if *guard { return Err(NativeJobError::new("cleanup-pending", "Application cleanup is pending")); }
+        Ok(guard)
+    }
+
+    pub(crate) fn close_for_cleanup(&self) -> Result<(), String> {
+        let mut closed = self.cleanup_closed.try_write().map_err(|_| "cleanup-screenshot-busy")?;
+        *closed = true;
+        self.jobs.lock().map_err(|_| "cleanup-screenshot-busy")?.clear();
+        self.initialization.lock().map_err(|_| "cleanup-screenshot-busy")?.ready = false;
+        Ok(())
+    }
+
+    pub(crate) fn reopen_after_cleanup(&self) -> Result<(), String> {
+        let mut closed = self.cleanup_closed.write().map_err(|_| "cleanup-screenshot-busy")?;
+        let warnings = initialize_root(&self.root).map_err(|_| "cleanup-screenshot-unavailable")?;
+        *self.initialization.lock().map_err(|_| "cleanup-screenshot-busy")? = ScreenshotOutputInitialization { ready: true, warning_codes: warnings };
+        *closed = false;
+        Ok(())
+    }
+
     pub(crate) fn initialize(root: PathBuf) -> Self {
         let initialization = match initialize_root(&root) {
             Ok(warning_codes) => ScreenshotOutputInitialization {
@@ -63,6 +86,7 @@ impl ScreenshotOutputState {
             },
         };
         Self {
+            cleanup_closed: Arc::new(std::sync::RwLock::new(false)),
             root,
             jobs: Arc::new(Mutex::new(HashMap::new())),
             initialization: Arc::new(Mutex::new(initialization)),
@@ -73,6 +97,7 @@ impl ScreenshotOutputState {
         &self,
         destination: Option<PathBuf>,
     ) -> Result<NativeFileJobStarted, NativeJobError> {
+        let _cleanup_operation = self.admit_cleanup_operation()?;
         let warning_codes = {
             let mut initialization = self.initialization.lock().map_err(registry_error)?;
             if !initialization.ready {
@@ -175,6 +200,7 @@ impl ScreenshotOutputState {
     }
 
     pub(crate) fn append(&self, job_id: &str, chunk: &[u8]) -> Result<(), NativeJobError> {
+        let _cleanup_operation = self.admit_cleanup_operation()?;
         if chunk.len() > MAX_SCREENSHOT_OUTPUT_APPEND_BYTES {
             return Err(NativeJobError::new(
                 "invalid-input",
@@ -221,6 +247,7 @@ impl ScreenshotOutputState {
         &self,
         job_id: &str,
     ) -> Result<ScreenshotOutputPublished, NativeJobError> {
+        let _cleanup_operation = self.admit_cleanup_operation()?;
         let job = self.lookup(job_id)?;
         let mut file = {
             let mut inner = job.inner.lock().map_err(job_error)?;
@@ -302,6 +329,7 @@ impl ScreenshotOutputState {
         &self,
         job_id: &str,
     ) -> Result<ScreenshotOutputCancelOutcome, NativeJobError> {
+        let _cleanup_operation = self.admit_cleanup_operation()?;
         let Some(job) = self.lookup_optional(job_id)? else {
             return Ok(ScreenshotOutputCancelOutcome::Missing);
         };
@@ -385,6 +413,7 @@ impl ScreenshotOutputState {
     }
 
     pub(crate) fn release(&self, job_id: &str) -> Result<(), NativeJobError> {
+        let _cleanup_operation = self.admit_cleanup_operation()?;
         parse_job_id(job_id)?;
         if let Some(job) = self.lookup_optional(job_id)? {
             {
@@ -813,4 +842,24 @@ pub(crate) fn native_file_job_screenshot_output_release(
     job_id: String,
 ) -> Result<(), NativeJobError> {
     state.release(&job_id)
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::*;
+
+    #[test]
+    fn cleanup_waits_for_operations_and_blocks_stale_starts_until_rebuilt() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = root.path().join("screenshots");
+        let state = ScreenshotOutputState::initialize(directory.clone());
+        let operation = state.admit_cleanup_operation().unwrap();
+        assert!(state.close_for_cleanup().is_err());
+        drop(operation);
+        state.close_for_cleanup().unwrap();
+        assert!(state.start(None).is_err());
+        std::fs::remove_dir_all(&directory).unwrap();
+        state.reopen_after_cleanup().unwrap();
+        assert!(state.start(None).is_ok());
+    }
 }

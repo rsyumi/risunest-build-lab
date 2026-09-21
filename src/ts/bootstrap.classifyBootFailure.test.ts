@@ -13,7 +13,7 @@ vi.mock('@tauri-apps/plugin-fs', () => ({
 }))
 vi.mock('@tauri-apps/api/webviewWindow', () => ({ getCurrentWebviewWindow: () => ({ maximize: vi.fn() }) }))
 vi.mock('@tauri-apps/api/core', () => ({ convertFileSrc: vi.fn() }))
-vi.mock('@tauri-apps/api/path', () => ({ appDataDir: vi.fn(), join: vi.fn() }))
+vi.mock('@tauri-apps/api/path', () => ({ join: vi.fn() }))
 vi.mock('./util', () => ({ changeFullscreen: vi.fn(), sleep: vi.fn() }))
 vi.mock('./update', () => ({ checkRisuUpdate: vi.fn() }))
 vi.mock('./gui/animation', () => ({ updateAnimationSpeed: vi.fn() }))

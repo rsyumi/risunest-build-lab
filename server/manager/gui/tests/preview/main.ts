@@ -7,6 +7,7 @@ import type { Backend, Status } from "../../src/api";
 let counter = 0;
 const status: Status = {
   listener: "127.0.0.1:14319",
+  localEndpoint: "http://127.0.0.1:14319",
   revision: "synthetic:0",
   uptimeSeconds: 7200,
   connection: {
@@ -60,6 +61,8 @@ const backend: Backend = {
     status.revision = `synthetic:${++counter}`;
     if (path === "connection")
       status.connection = { ...status.connection, ...(body.options as object) };
+    if (path === "devices")
+      return { uri: `risunestlocal://sync-server/register#SYNTHETIC_${String(body.target)}` };
     return {};
   },
   start: async () => {},
@@ -68,6 +71,7 @@ const backend: Backend = {
   updatePolicy: async () => {},
   updateCheck: async () => ({ result: "current" }),
   trayStartup: async () => {},
+  uninstall: async () => {},
   requestId: async () => "a".repeat(64),
   qr: async () => "",
 };

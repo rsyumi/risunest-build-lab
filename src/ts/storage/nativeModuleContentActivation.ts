@@ -3,6 +3,7 @@ import { language } from '../../lang'
 import { v4 } from 'uuid'
 
 import type { RisuModule } from '../process/modules'
+import { assertModuleMCPImportAllowed } from '../process/mcp/moduleImport'
 import type { AssetAlias } from './persistentDataStore'
 import type {
     PreparedNativeContent,
@@ -98,6 +99,7 @@ export async function activatePreparedNativeModuleContent(
     }
     const content = requireRisum(prepared)
     const module = structuredClone(content.metadata) as unknown as RisuModule
+    assertModuleMCPImportAllowed(module)
     if (module.lowLevelAccess && !(await dependencies.confirmLowLevelAccess()))
         return null
 

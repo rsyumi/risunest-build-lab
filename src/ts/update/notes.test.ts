@@ -10,11 +10,50 @@ describe('release notes', () => {
         expect(selectLocalizedNotes({}, 'de', 'Default')).toBe('Default')
     })
 
-    it('parses only safe display tokens and never emits HTML', () => {
-        const blocks = parseReleaseNotes('## Changes\n\n- **Fast** `code` [safe](https://example.com) [bad](javascript:alert(1))\n<script>run()</script>')
-        expect(JSON.stringify(blocks)).not.toContain('<script>')
-        expect(JSON.stringify(blocks)).toContain('https://example.com')
-        expect(JSON.stringify(blocks)).not.toContain('javascript:')
+    it('parses headings, paragraphs and inline emphasis', () => {
+        expect(parseReleaseNotes('## Changes\n### Fixed\nPlain **bold** *em* `code`\nnext line')).toEqual([
+            { type: 'heading', level: 2, content: [{ type: 'text', text: 'Changes' }] },
+            { type: 'heading', level: 3, content: [{ type: 'text', text: 'Fixed' }] },
+            { type: 'paragraph', content: [
+                { type: 'text', text: 'Plain ' },
+                { type: 'strong', text: 'bold' },
+                { type: 'text', text: ' ' },
+                { type: 'em', text: 'em' },
+                { type: 'text', text: ' ' },
+                { type: 'code', text: 'code' },
+                { type: 'text', text: ' next line' },
+            ] },
+        ])
+    })
+
+    it('numbers ordered items, nests lists and keeps continuation paragraphs', () => {
+        const blocks = parseReleaseNotes('3. three\n4. four\n- bullet\n  wrapped\n\n  second paragraph\n  - nested\n    - deeper')
+        expect(blocks).toEqual([
+            { type: 'list-item', depth: 1, marker: '3.', content: [{ type: 'text', text: 'three' }] },
+            { type: 'list-item', depth: 1, marker: '4.', content: [{ type: 'text', text: 'four' }] },
+            { type: 'list-item', depth: 1, marker: '•', content: [{ type: 'text', text: 'bullet wrapped' }] },
+            { type: 'list-item', depth: 1, marker: '', content: [{ type: 'text', text: 'second paragraph' }] },
+            { type: 'list-item', depth: 2, marker: '•', content: [{ type: 'text', text: 'nested' }] },
+            { type: 'list-item', depth: 3, marker: '•', content: [{ type: 'text', text: 'deeper' }] },
+        ])
+    })
+
+    it('keeps https links only and flattens their contents to text', () => {
+        const blocks = parseReleaseNotes('[safe](https://example.com/a_(b) "title") [http](http://example.com) [bad](javascript:alert(1)) [user](https://u:p@example.com)')
+        expect(blocks).toEqual([{ type: 'paragraph', content: [
+            { type: 'link', text: 'safe', url: 'https://example.com/a_(b)' },
+            { type: 'text', text: ' http [bad](javascript:alert(1)) user' },
+        ] }])
+    })
+
+    it('keeps HTML as text and reduces images, fences and rules to text', () => {
+        const blocks = parseReleaseNotes('<script>run()</script>\n\n![alt text](https://example.com/i.png)\n\n---\n\n```\nline 1\nline 2\n```\n\n> quoted')
+        expect(blocks).toEqual([
+            { type: 'paragraph', content: [{ type: 'text', text: '<script>run()</script>' }] },
+            { type: 'paragraph', content: [{ type: 'text', text: 'alt text' }] },
+            { type: 'paragraph', content: [{ type: 'code', text: 'line 1\nline 2' }] },
+            { type: 'paragraph', content: [{ type: 'text', text: 'quoted' }] },
+        ])
     })
 
     it('truncates oversized localized notes at a line boundary', () => {

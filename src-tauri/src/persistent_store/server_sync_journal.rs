@@ -28,6 +28,11 @@ pub(crate) struct PendingOperation {
     pub intent: CommitIntent,
     pub phase: String,
     pub local_revision: i64,
+    /// Start of the object verification pass that last completed for this
+    /// operation, in unix seconds on the client clock, with the stage it ran
+    /// against. Null until a pass completes and after every restage.
+    pub verified_at: Option<i64>,
+    pub verified_stage: Option<String>,
 }
 
 impl PersistentStore {
@@ -40,6 +45,7 @@ impl PersistentStore {
             "server_sync_base",
             "server_sync_remote",
             "server_sync_operation_records",
+            "server_sync_prepared",
         ] {
             let mut statement = self
                 .connection
@@ -47,7 +53,11 @@ impl PersistentStore {
             for version in statement.query_map([], |row| row.get::<_, String>(0))? {
                 let version: RecordVersion = serde_json::from_str(&version?)
                     .map_err(|_| SyncError::new("invalid-local-server-version", 409))?;
-                hashes.extend(cache.closure(&version)?);
+                match cache.closure(&version) {
+                    Ok(closure) => hashes.extend(closure),
+                    Err(error) if table == "server_sync_remote" && error.code == "cached-object-missing" => (),
+                    Err(error) => return Err(error),
+                }
             }
         }
         let mut statement = self
@@ -200,6 +210,7 @@ impl PersistentStore {
             "server_sync_remote_cursor",
             "server_sync_remote_sections",
             "server_sync_operation_records",
+            "server_sync_prepared",
             "server_sync_operation_pages",
             "server_sync_operation_scopes",
             "server_sync_operation_sections",
@@ -238,8 +249,9 @@ impl PersistentStore {
                         .map_err(|_| SyncError::new("invalid-local-cursor", 409))
                 })
                 .transpose()?,
+            // The full-comparison marker is a scan request, not a change to send.
             dirty_records: self.connection.query_row(
-                "SELECT count(*) FROM server_sync_dirty",
+                "SELECT count(*) FROM server_sync_dirty WHERE kind<>'full'",
                 [],
                 |r| r.get(0),
             )?,
@@ -314,6 +326,7 @@ impl PersistentStore {
             "server_sync_remote_sections",
             "server_sync_operation",
             "server_sync_operation_records",
+            "server_sync_prepared",
             "server_sync_operation_pages",
             "server_sync_operation_scopes",
             "server_sync_operation_sections",
@@ -411,28 +424,51 @@ impl PersistentStore {
         let row = self
             .connection
             .query_row(
-                "SELECT intent,phase,local_revision FROM server_sync_operation WHERE singleton=1",
+                "SELECT intent,phase,local_revision,verified_at,verified_stage FROM server_sync_operation WHERE singleton=1",
                 [],
                 |r| {
                     Ok((
                         r.get::<_, String>(0)?,
                         r.get::<_, String>(1)?,
                         r.get::<_, i64>(2)?,
+                        r.get::<_, Option<i64>>(3)?,
+                        r.get::<_, Option<String>>(4)?,
                     ))
                 },
             )
             .optional()?;
-        row.map(|(intent, phase, local_revision)| {
-            Ok(PendingOperation {
-                intent: canonical::decode(
-                    intent.as_bytes(),
-                    risunest_sync_wire::MAX_METADATA_BYTES,
-                )?,
-                phase,
-                local_revision,
-            })
-        })
+        row.map(
+            |(intent, phase, local_revision, verified_at, verified_stage)| {
+                Ok(PendingOperation {
+                    intent: canonical::decode(
+                        intent.as_bytes(),
+                        risunest_sync_wire::MAX_METADATA_BYTES,
+                    )?,
+                    phase,
+                    local_revision,
+                    verified_at,
+                    verified_stage,
+                })
+            },
+        )
         .transpose()
+    }
+    /// Records that every object of this operation was confirmed present on the
+    /// server. The pass start is stored so a long pass cannot push the computed
+    /// lease window past the real expiry.
+    pub(crate) fn server_record_verification(&self, stage_id: &str, started_at: i64) -> Result<()> {
+        self.connection.execute(
+            "UPDATE server_sync_operation SET verified_at=?1,verified_stage=?2 WHERE singleton=1",
+            params![started_at, stage_id],
+        )?;
+        Ok(())
+    }
+    pub(crate) fn server_clear_verification(&self) -> Result<()> {
+        self.connection.execute(
+            "UPDATE server_sync_operation SET verified_at=NULL,verified_stage=NULL WHERE singleton=1",
+            [],
+        )?;
+        Ok(())
     }
     /// Reserve the sequence and exact intent before any commit HTTP request.
     /// Stage IDs may later change; the logical digest and sequence cannot.
@@ -477,8 +513,9 @@ impl PersistentStore {
             .ok_or_else(|| SyncError::new("missing-operation", 409))?;
         pending.intent.staged_changes_id = stage_id;
         pending.intent.validate()?;
+        // A new stage holds none of the previous stage's confirmations.
         self.connection.execute(
-            "UPDATE server_sync_operation SET intent=?1 WHERE singleton=1",
+            "UPDATE server_sync_operation SET intent=?1,verified_at=NULL,verified_stage=NULL WHERE singleton=1",
             [String::from_utf8(canonical::encode(&pending.intent)?)
                 .map_err(|_| SyncError::new("invalid-intent", 400))?],
         )?;
@@ -495,6 +532,7 @@ impl PersistentStore {
         for table in [
             "server_sync_operation",
             "server_sync_operation_records",
+            "server_sync_prepared",
             "server_sync_operation_pages",
             "server_sync_operation_scopes",
         ] {
@@ -542,11 +580,23 @@ impl PersistentStore {
                     .map_err(|_| SyncError::new("invalid-receipt", 409))?],
             )?;
         } else {
+            if let (Some(code), Some(key)) = (&receipt.error, &receipt.error_key) {
+                crate::native_log::global_state().record(
+                    "error",
+                    "server-sync",
+                    format!(
+                        "server rejected a record: status={:?} code={code} key={}",
+                        receipt.status,
+                        crate::server_sync::client::log_key(key)
+                    ),
+                );
+            }
             // Stale/failed is terminal for this sequence, while every local dirty
             // record and clear intent remains available for a new proposal.
             for table in [
                 "server_sync_operation",
                 "server_sync_operation_records",
+                "server_sync_prepared",
                 "server_sync_operation_pages",
                 "server_sync_operation_scopes",
             ] {

@@ -22,6 +22,15 @@ pub(super) struct ExternalReferenceSources {
     entries: Mutex<BTreeMap<String, ExternalReferenceEntry>>,
 }
 
+impl ExternalReferenceSources {
+    pub(super) fn clear_for_cleanup(&self) -> Result<(), String> {
+        let mut entries = self.entries.lock().map_err(|_| "cleanup-native-jobs-busy")?;
+        if entries.values().any(|entry| entry.workers != 0) { return Err("cleanup-native-jobs-busy".into()); }
+        entries.clear();
+        Ok(())
+    }
+}
+
 pub(crate) struct ExternalReferenceSourceGuard {
     sources: Arc<ExternalReferenceSources>,
     token: String,
@@ -70,6 +79,11 @@ fn provider_error(error: crate::external_storage::contract::ProviderError) -> Na
         ErrorKind::FileTooLarge => "file-too-large",
         ErrorKind::Unsupported => "capability-unavailable",
         ErrorKind::Transient => "transport-failed",
+        ErrorKind::FolderNameConflict
+        | ErrorKind::FolderCreateFailed
+        | ErrorKind::FolderInaccessible
+        | ErrorKind::FolderNotRepository => "source-unavailable",
+        ErrorKind::FolderUnsupportedLocation => "capability-unavailable",
     };
     NativeJobError::new(code, "Conflict source operation failed")
 }

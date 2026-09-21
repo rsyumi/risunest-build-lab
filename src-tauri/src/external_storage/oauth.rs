@@ -36,10 +36,10 @@ impl IosWebAuthenticationAuthorization {
         }
         let (pending, mut authorization_url) = PendingAuthorization::start(policy)?;
         if offline_access {
-            authorization_url
-                .query_pairs_mut()
-                .append_pair("access_type", "offline")
-                .append_pair("prompt", "consent");
+            let has_prompt = authorization_url.query_pairs().any(|(name, _)| name == "prompt");
+            let mut query = authorization_url.query_pairs_mut();
+            query.append_pair("access_type", "offline");
+            if !has_prompt { query.append_pair("prompt", "consent"); }
         }
         Ok(Self {
             pending,
@@ -87,9 +87,7 @@ impl IosWebAuthenticationAuthorization {
 
 #[cfg(not(target_os = "android"))]
 pub(crate) struct LoopbackAuthorization {
-    listener: tokio::net::TcpListener,
-    redirect_url: url::Url,
-    pending: PendingAuthorization,
+    callback: Option<tokio::task::JoinHandle<Result<AuthorizationCode>>>,
 }
 
 #[cfg(not(target_os = "android"))]
@@ -110,33 +108,65 @@ impl LoopbackAuthorization {
         .map_err(|_| ProviderError::new(ErrorKind::Unsupported))?;
         let (pending, authorization_url) =
             PendingAuthorization::start(policy(redirect_url.clone())?)?;
+        let callback = tokio::spawn(async move {
+            tokio::time::timeout(
+                std::time::Duration::from_secs(300),
+                receive_loopback_callback(listener, redirect_url, pending),
+            )
+            .await
+            .map_err(|_| ProviderError::new(ErrorKind::ReauthRequired))?
+        });
         Ok((
             Self {
-                listener,
-                redirect_url,
-                pending,
+                callback: Some(callback),
             },
             authorization_url,
         ))
     }
 
-    pub(crate) async fn wait(self, cancel: &Cancellation) -> Result<AuthorizationCode> {
-        let accepted = tokio::select! {
-            result = self.listener.accept() => result.map_err(|_| ProviderError::new(ErrorKind::Transient))?,
-            _ = cancel.cancelled() => return Err(ProviderError::new(ErrorKind::Cancelled)),
-            _ = tokio::time::sleep(std::time::Duration::from_secs(300)) => {
-                return Err(ProviderError::new(ErrorKind::ReauthRequired));
-            }
-        };
-        let (mut stream, peer) = accepted;
-        if !peer.ip().is_loopback() {
-            return Err(ProviderError::new(ErrorKind::ReauthRequired));
+    pub(crate) async fn wait(mut self, cancel: &Cancellation) -> Result<AuthorizationCode> {
+        let mut callback = self
+            .callback
+            .take()
+            .ok_or_else(|| ProviderError::new(ErrorKind::Transient))?;
+        tokio::select! {
+            result = &mut callback => {
+                result.map_err(|_| ProviderError::new(ErrorKind::Transient))?
+            },
+            _ = cancel.cancelled() => {
+                callback.abort();
+                Err(ProviderError::new(ErrorKind::Cancelled))
+            },
         }
-        let callback = read_callback(&mut stream, &self.redirect_url, cancel).await;
-        let success = callback.is_ok();
-        write_browser_response(&mut stream, success).await;
-        self.pending.finish(&callback?)
     }
+}
+
+#[cfg(not(target_os = "android"))]
+impl Drop for LoopbackAuthorization {
+    fn drop(&mut self) {
+        if let Some(callback) = &self.callback {
+            callback.abort();
+        }
+    }
+}
+
+#[cfg(not(target_os = "android"))]
+async fn receive_loopback_callback(
+    listener: tokio::net::TcpListener,
+    redirect_url: url::Url,
+    pending: PendingAuthorization,
+) -> Result<AuthorizationCode> {
+    let (mut stream, peer) = listener
+        .accept()
+        .await
+        .map_err(|_| ProviderError::new(ErrorKind::Transient))?;
+    if !peer.ip().is_loopback() {
+        return Err(ProviderError::new(ErrorKind::ReauthRequired));
+    }
+    let callback = read_callback(&mut stream, &redirect_url, &Cancellation::default()).await;
+    let success = callback.is_ok();
+    write_browser_response(&mut stream, success).await;
+    pending.finish(&callback?)
 }
 
 #[cfg(not(target_os = "android"))]
@@ -533,10 +563,10 @@ fn start_android_redirect(
     }
     let (pending, mut authorization_url) = PendingAuthorization::start(policy)?;
     if offline_access {
-        authorization_url
-            .query_pairs_mut()
-            .append_pair("access_type", "offline")
-            .append_pair("prompt", "consent");
+        let has_prompt = authorization_url.query_pairs().any(|(name, _)| name == "prompt");
+        let mut query = authorization_url.query_pairs_mut();
+        query.append_pair("access_type", "offline");
+        if !has_prompt { query.append_pair("prompt", "consent"); }
     }
     let states = authorization_url
         .query_pairs()
@@ -575,6 +605,7 @@ mod tests {
             client_id: "synthetic-public-client".into(),
             redirect_url,
             scopes: vec!["synthetic.scope".into()],
+            picker: false,
         })
     }
 
@@ -611,6 +642,55 @@ mod tests {
             stream.read_to_string(&mut response).await.unwrap();
             assert!(response.starts_with("HTTP/1.1 200 OK"));
             assert_eq!(task.await.unwrap().code.0.as_slice(), b"synthetic-code");
+        });
+    }
+
+    #[test]
+    fn loopback_callback_responds_before_authorization_is_collected() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let (pending, authorization_url) = LoopbackAuthorization::start(policy).await.unwrap();
+            let state = authorization_url
+                .query_pairs()
+                .find(|(name, _)| name == "state")
+                .unwrap()
+                .1
+                .to_string();
+            let redirect = authorization_url
+                .query_pairs()
+                .find(|(name, _)| name == "redirect_uri")
+                .unwrap()
+                .1
+                .to_string();
+            let redirect = url::Url::parse(&redirect).unwrap();
+            let mut stream =
+                tokio::net::TcpStream::connect(("127.0.0.1", redirect.port().unwrap()))
+                    .await
+                    .unwrap();
+            let target = format!("{}?state={state}&code=synthetic-code", redirect.path());
+            stream
+                .write_all(format!("GET {target} HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n").as_bytes())
+                .await
+                .unwrap();
+            let mut response = String::new();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                stream.read_to_string(&mut response),
+            )
+            .await
+            .expect("the browser response must not wait for authorization collection")
+            .unwrap();
+            assert!(response.starts_with("HTTP/1.1 200 OK"));
+            assert_eq!(
+                pending
+                    .wait(&Cancellation::default())
+                    .await
+                    .unwrap()
+                    .code
+                    .0
+                    .as_slice(),
+                b"synthetic-code"
+            );
         });
     }
 

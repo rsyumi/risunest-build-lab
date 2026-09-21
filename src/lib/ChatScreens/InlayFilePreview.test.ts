@@ -147,6 +147,18 @@ describe('InlayFilePreview', () => {
         expect(inlayMocks.getInlayAssetBlob).toHaveBeenCalledTimes(2)
     })
 
+    test('fills the placeholder box while the attachment is still loading', async () => {
+        inlayMocks.getInlayAssetMetadata.mockReturnValue(new Promise(() => {}))
+        const target = document.createElement('div')
+        document.body.appendChild(target)
+        mounted = mount(InlayFilePreview, { target, props: { id: 'pending-id' } })
+        await tick()
+
+        const box = target.querySelector<HTMLElement>('[data-inlay-file-preview-box]')!
+        expect(box.style.width).toBe('192px')
+        expect(box.firstElementChild?.className).toContain('motion-safe:animate-pulse')
+    })
+
     test('shows an unavailable attachment on failed reentry and recovers on the next load', async () => {
         vi.stubGlobal('IntersectionObserver', TestIntersectionObserver)
         const metadata = {

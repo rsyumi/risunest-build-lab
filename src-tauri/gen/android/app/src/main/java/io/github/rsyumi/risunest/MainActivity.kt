@@ -506,6 +506,17 @@ internal class GenerationKeepAliveOwner {
 private val postNotificationsRequestedInProcess = AtomicBoolean(false)
 
 class MainActivity : TauriActivity(), RendererRecoveryHost {
+  private val webviewCleanup = AndroidWebviewCleanup()
+
+  @androidx.annotation.Keep
+  fun cleanupWebviewSupported(): Int = webviewCleanup.supported()
+
+  @androidx.annotation.Keep
+  fun cleanupWebviewStart(): Int = webviewCleanup.start()
+
+  @androidx.annotation.Keep
+  fun cleanupWebviewStatus(): Int = webviewCleanup.status()
+
   private val backNavigationPolicy = BackNavigationPolicy()
   private var lifecycleWebView: WebView? = null
   private var frontendReady = AndroidFrontendReady()

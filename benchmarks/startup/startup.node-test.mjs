@@ -247,8 +247,15 @@ test('asset counts reject a replacement generation with no aliases', async () =>
         assert.equal(first.objects, 2)
         assert.equal(first.aliases, 2)
         const replaced = new DatabaseSync(file)
+        const objects = replaced.prepare('SELECT object_hash FROM asset_aliases ORDER BY logical_key').all()
         replaced.exec("UPDATE meta SET value='2' WHERE key='activeGeneration'")
         replaced.close()
+        for (const [index, { object_hash: hash }] of objects.entries()) {
+            assert.deepEqual(
+                await readFile(path.join(root, 'assets/objects', hash.slice(0, 2), hash.slice(2))),
+                Buffer.from('Synthetic startup asset ' + index),
+            )
+        }
         await assert.rejects(addSyntheticAssets(root, identifier, 2), /catalog counts/)
     } finally {
         await rm(parent, { recursive: true, force: true })

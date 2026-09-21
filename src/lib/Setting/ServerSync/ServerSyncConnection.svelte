@@ -4,6 +4,7 @@
   import SettingGroup from "../RisuNest/SettingGroup.svelte";
   import SettingRow from "../RisuNest/SettingRow.svelte";
   import SettingButton from "../RisuNest/SettingButton.svelte";
+  import SettingProgress from "../RisuNest/SettingProgress.svelte";
   import ServerAssetResidency from "./ServerAssetResidency.svelte";
   import ServerSyncConnect from "./ServerSyncConnect.svelte";
   import ServerSyncRegistrationInput from "./ServerSyncRegistrationInput.svelte";
@@ -14,6 +15,7 @@
   import {
     connectServerSync,
     serverSyncErrorHelp,
+    serverSyncPendingChanges,
     serverSyncProgressView,
     serverSyncRefreshRequired,
     serverSyncStatus,
@@ -45,6 +47,8 @@
   let connectStage = $state<"code" | "review">("code");
   let connectKey = $state(0);
   let replacingOpen = $state(false);
+  /** What the folded registration input reports, such as a refused delivery. */
+  let registrationBlocked = $state("");
   let backupsOpen = $state(false);
   let storageOpen = $state(false);
   let backupCount = $state<number | undefined>();
@@ -53,6 +57,9 @@
   let appliedNavigation: ServerSyncNavigation | undefined;
   const text = $derived(language.risuNest.serverSync);
   const error = $derived(actionError || snapshot.error);
+  const errorRetryable = $derived(
+    Boolean(actionError) || snapshot.errorRetryable !== false,
+  );
   const refreshRequired = $derived(serverSyncRefreshRequired(error));
   const configured = $derived(Boolean(snapshot.status?.configured));
   const conflict = $derived(
@@ -63,22 +70,14 @@
       pausing ||
       disconnecting ||
       snapshot.running ||
-      snapshot.replacing,
+      snapshot.replacing ||
+      snapshot.connecting,
   );
   const status = $derived(serverSyncStatus(snapshot, text, actionError));
   const progress = $derived(
     snapshot.running ? serverSyncProgressView(snapshot, text, now) : undefined,
   );
-  const pendingChanges = $derived(
-    snapshot.status
-      ? snapshot.status.fullScan
-        ? text.initialScan
-        : text.count.replace(
-            "{0}",
-            snapshot.status.dirtyRecords.toLocaleString(),
-          )
-      : "",
-  );
+  const pendingChanges = $derived(serverSyncPendingChanges(snapshot, text));
   const backupsHelp = $derived(
     backupCount === undefined
       ? text.backupHelp
@@ -113,7 +112,10 @@
     if (!snapshot.running) void loadSummaries();
   });
   onMount(() => {
+    let attemptId = snapshot.attemptId;
     const unsubscribe = controller.subscribe((value) => {
+      if (value.running && value.attemptId !== attemptId) actionError = "";
+      attemptId = value.attemptId;
       snapshot = value;
     });
     // Startup owns initialization; mounting a view must preserve its attempt.
@@ -197,6 +199,7 @@
 </script>
 
 <SettingGroup
+  id="risunest-server-sync"
   title={text.title}
   description={text.description}
   panelProps={{ "data-origin": origin }}
@@ -209,10 +212,10 @@
   {/snippet}
   {#if conflict}
     <div class="conflict m-4 mb-1" role="status">
-      <h3 class="font-bold">
+      <h3 class="text-[15px] font-semibold">
         {text.conflictCount.replace("{0}", String(conflict.conflictCount))}
       </h3>
-      <p class="text-sm opacity-80">{text.conflictHelp}</p>
+      <p class="text-sm text-textcolor2">{text.conflictHelp}</p>
       <div class="flex flex-wrap gap-2">
         <SettingButton disabled={busy} onclick={() => resolve("keep-local")}
           >{text.keepLocal}</SettingButton
@@ -232,12 +235,6 @@
         <dt>{text.deviceId}</dt>
         <dd>{snapshot.status.deviceId}</dd>
         {#if progress}
-          <dt>{text.progressLabel}</dt>
-          <dd>
-            {progress.current}{progress.percent === null
-              ? ""
-              : ` (${progress.percent}%)`}
-          </dd>
           <dt>{text.verifiedBytes}</dt>
           <dd>{progress.counters[0].value} · {progress.counters[1].value}</dd>
           <dt>{text.pendingChanges}</dt>
@@ -256,25 +253,16 @@
         {/if}
       </dl>
       {#if progress}
-        <div
-          class="thin"
-          role="progressbar"
-          aria-label={text.running}
-          aria-valuemin={0}
-          aria-valuemax={100}
-          aria-valuenow={progress.percent ?? undefined}
-        >
-          <i
-            class:pulse={progress.percent === null}
-            style:width={progress.percent === null
-              ? "100%"
-              : `${progress.percent}%`}
-          ></i>
+        <div class="mt-2.5">
+          <SettingProgress
+            label={progress.current}
+            fraction={progress.percent === null ? null : progress.percent / 100}
+          />
         </div>
       {/if}
       {#if snapshot.running && snapshot.retryableFailure}
         <p class="mt-2 text-sm" role="status">
-          {text.running}: <span class="opacity-75">({snapshot.retryableFailure})</span>
+          {text.running}: <span class="text-textcolor2">({snapshot.retryableFailure})</span>
         </p>
       {/if}
       <div class="mt-3 flex flex-wrap gap-2">
@@ -284,6 +272,13 @@
           onclick={() => void controller.synchronize()}
           >{refreshRequired ? text.refresh : text.syncNow}</SettingButton
         >
+        {#if error === "epoch-reconciliation-required"}
+          <SettingButton
+            busy={connecting}
+            disabled={busy || refreshRequired}
+            onclick={() => void reconcile()}>{text.reconcile}</SettingButton
+          >
+        {/if}
         <SettingButton
           variant="secondary"
           busy={pausing}
@@ -297,21 +292,16 @@
           onclick={() => void disconnect()}>{text.disconnect}</SettingButton
         >
       </div>
-      {#if snapshot.status.operationPending}<p class="mt-2 text-sm opacity-75">
+      {#if snapshot.status.operationPending}<p class="mt-2 text-sm text-textcolor2">
           {text.pendingHelp}
         </p>{/if}
       {#if error === "epoch-reconciliation-required"}
-        <p class="mt-2 text-sm opacity-75">{text.reconcileHelp}</p>
-        <SettingButton
-          class="mt-2"
-          busy={connecting}
-          disabled={busy || refreshRequired}
-          onclick={() => void reconcile()}>{text.reconcile}</SettingButton
-        >
+        <p class="mt-2 text-sm text-textcolor2">{text.reconcileHelp}</p>
       {/if}
       {#if error && error !== "cancelled" && !replacingOpen}
-        <p class="mt-2 text-sm" role="alert">
-          {serverSyncErrorHelp(error, text)} <span class="opacity-60">({error})</span>
+        <p class="mt-2 text-sm text-danger-400" role="alert">
+          {serverSyncErrorHelp(error, text, errorRetryable)}
+          <span class="text-textcolor2">({error})</span>
         </p>
       {/if}
     </div>
@@ -323,6 +313,7 @@
         aria-expanded={replacingOpen}
         onclick={() => {
           replacingOpen = !replacingOpen;
+          registrationBlocked = "";
           connectKey++;
         }}>{text.register}</SettingButton
       >
@@ -344,8 +335,12 @@
         {/key}
       </div>
     {:else}
-      <div class="contents">
-        <ServerSyncRegistrationInput available={false} onRegistration={() => {}} />
+      <div class="px-4 py-3" hidden={!registrationBlocked}>
+        <ServerSyncRegistrationInput
+          available={false}
+          bind:message={registrationBlocked}
+          onRegistration={() => {}}
+        />
       </div>
     {/if}
   {:else}
@@ -452,28 +447,13 @@
     font-size: 0.8125rem;
   }
   .kv dt {
-    color: color-mix(in srgb, var(--risu-theme-textcolor) 60%, transparent);
+    color: var(--risu-theme-textcolor2);
   }
   .kv dd {
     margin: 0;
     min-width: 0;
+    overflow-wrap: anywhere;
     font-variant-numeric: tabular-nums;
-  }
-  .thin {
-    height: 4px;
-    margin-top: 0.6rem;
-    border-radius: 99px;
-    background: color-mix(in srgb, var(--risu-theme-textcolor) 8%, transparent);
-    overflow: hidden;
-  }
-  .thin i {
-    display: block;
-    height: 100%;
-    background: linear-gradient(90deg, #22c8c6, var(--risu-theme-primary-500));
-    transition: width 0.3s;
-  }
-  .thin i.pulse {
-    animation: pulse 1.4s ease-in-out infinite;
   }
   .conflict {
     display: grid;
@@ -490,8 +470,7 @@
     }
   }
   @media (prefers-reduced-motion: reduce) {
-    .status-dot,
-    .thin i.pulse {
+    .status-dot {
       animation: none;
     }
   }

@@ -68,13 +68,21 @@ pub fn router_with_workload(store: Arc<Store>, workload: Workload) -> Router {
             let Ok(mut work) = maintenance_workload.begin(WorkKind::Background) else {
                 continue;
             };
-            if let Err(error) = blocking(move || {
+            match blocking(move || {
                 let result = store.maintain();
                 work.set_performed_work(true);
                 result
             })
-            .await {
-                eprintln!("sync maintenance failed: {}", error.code);
+            .await
+            {
+                Err(error) => eprintln!("sync maintenance failed: {}", error.code),
+                Ok(result) if result.wal_checkpoint.incomplete() => eprintln!(
+                    "sync maintenance wal checkpoint incomplete: busy={} log={} checkpointed={}",
+                    result.wal_checkpoint.busy,
+                    result.wal_checkpoint.log_frames,
+                    result.wal_checkpoint.checkpointed_frames
+                ),
+                Ok(_) => (),
             }
         }
     });
@@ -216,9 +224,13 @@ pub fn router_with_workload(store: Arc<Store>, workload: Workload) -> Router {
 }
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
+        let body = match &self.key {
+            Some(key) => serde_json::json!({"error":self.code,"key":key}),
+            None => serde_json::json!({"error":self.code}),
+        };
         let mut response = (
             StatusCode::from_u16(self.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
-            Json(serde_json::json!({"error":self.code})),
+            Json(body),
         )
             .into_response();
         if self.status == 429 || self.code == "server-updating" {

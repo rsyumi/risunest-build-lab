@@ -16,6 +16,8 @@ const MAX_ERROR_BODY: usize = 8 * 1024;
 #[serde(rename_all = "camelCase")]
 pub(super) struct DriveFile {
     pub id: Option<String>,
+    pub name: Option<String>,
+    pub drive_id: Option<String>,
     pub size: Option<String>,
     pub version: Option<String>,
     pub sha256_checksum: Option<String>,

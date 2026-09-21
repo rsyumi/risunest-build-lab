@@ -13,6 +13,8 @@ pub struct RecordDescriptor {
     pub object_hash: String,
     pub dependency_root: Option<String>,
     pub relation_root: Option<String>,
+    pub dependencies: Vec<String>,
+    pub relations: Vec<String>,
     /// Generic keyspace membership, for example the client's shared plugin store.
     pub scopes: Vec<String>,
 }
@@ -22,6 +24,8 @@ impl RecordDescriptor {
             object_hash,
             dependency_root: None,
             relation_root: None,
+            dependencies: Vec::new(),
+            relations: Vec::new(),
             scopes: Vec::new(),
         }
     }
@@ -32,6 +36,26 @@ impl RecordDescriptor {
             .flatten()
         {
             validate_hash(root)?;
+        }
+        for (values, root, relations) in [
+            (&self.dependencies, &self.dependency_root, false),
+            (&self.relations, &self.relation_root, true),
+        ] {
+            if !values.is_empty() {
+                if root.is_some() || !inline_references(values)? {
+                    return Err(WireError("invalid-inline-references"));
+                }
+                let page = if relations {
+                    ReferencePage::Relations {
+                        keys: values.clone(),
+                    }
+                } else {
+                    ReferencePage::Objects {
+                        hashes: values.clone(),
+                    }
+                };
+                page.validate()?;
+            }
         }
         if self.scopes.len() > 16 || self.scopes.windows(2).any(|w| w[0] >= w[1]) {
             return Err(WireError("invalid-scopes"));
@@ -93,6 +117,10 @@ impl ReferencePage {
         }
         Ok(())
     }
+}
+
+pub fn inline_references(values: &[String]) -> Result<bool> {
+    Ok(values.len() <= 64 && canonical::encode(&values)?.len() <= 16 * 1024)
 }
 
 pub type BuiltReferenceTree = (Option<String>, Vec<(String, Vec<u8>)>);

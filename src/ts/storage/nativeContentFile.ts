@@ -1,4 +1,5 @@
-import { appDataDir, join } from "@tauri-apps/api/path";
+import { join } from "@tauri-apps/api/path";
+import { nativeDataPath } from "./nativePaths";
 import { mkdir, open, readDir, remove, stat } from "@tauri-apps/plugin-fs";
 import { runContentImport } from "./contentImportOperation";
 import { syntheticNativeFileJobStatus } from "./nativeFileJobs";
@@ -9,7 +10,7 @@ export async function importNativeContentFile(
   destination: "character" | "module",
 ): Promise<string | null> {
   return runContentImport(file.name, {}, async (options) => {
-    const directory = await join(await appDataDir(), "content-import-inbox");
+    const directory = await nativeDataPath("content-import-inbox");
     await mkdir(directory, { recursive: true });
     await cleanupContentInbox(directory);
     const suffix = file.name.split(".").at(-1)?.toLowerCase() ?? "bin";

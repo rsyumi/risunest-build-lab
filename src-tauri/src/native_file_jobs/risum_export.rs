@@ -436,7 +436,7 @@ mod tests {
     use crate::import_export_jobs::{parse_risum, ImportLimits, JobStaging};
     use crate::native_file_jobs::{JobKind, JobRegistry};
     use crate::persistent_store::{
-        AssetAlias, AssetOwnerHead, AssetOwnerLocator, AssetRepositoryAuthorityState,
+        AssetAlias, AssetOwnerHead, AssetOwnerLocator,
         PersistentStore, StoreError,
     };
     use serde_json::json;
@@ -661,15 +661,6 @@ mod tests {
                     manifest.content_hash,
                     3,
                 )],
-            )
-            .unwrap();
-        store
-            .replace_put_asset_repository_authority(
-                &staging,
-                &AssetRepositoryAuthorityState::V2 {
-                    migration_id: "risum-test".to_owned(),
-                    compatibility_hash: "ab".repeat(32),
-                },
             )
             .unwrap();
         let revision = store.replace_commit(&staging, Some(0)).unwrap().revision;

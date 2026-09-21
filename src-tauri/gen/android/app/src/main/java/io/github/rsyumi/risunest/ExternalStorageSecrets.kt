@@ -30,6 +30,17 @@ internal object ExternalStorageSecrets {
     else -> throw IllegalArgumentException("unsupported external-storage secret purpose")
   }
 
+  @JvmStatic
+  @Synchronized
+  fun removeKeys() {
+    val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+    removeOwnedKeys { alias -> store.deleteEntry(alias) }
+  }
+
+  internal fun removeOwnedKeys(remove: (String) -> Unit) {
+    for (alias in listOf(PROVIDER_ALIAS, ROOT_KEY_ALIAS, ACCOUNT_ALIAS)) remove(alias)
+  }
+
   @Synchronized
   private fun key(purpose: String): SecretKey {
     val alias = alias(purpose)

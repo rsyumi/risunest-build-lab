@@ -491,6 +491,17 @@ select optgroup {
   z-index: 2000;
 }
 
+/* Work dialogs that have to cover the z-[1000] ones. The update dialog covers an import that
+   is already running, and the working-set recovery covers both because nothing else can be
+   used until the data is read again. Both stay below z-modal. */
+@utility z-work-dialog-update {
+  z-index: 1001;
+}
+
+@utility z-work-dialog-recovery {
+  z-index: 1100;
+}
+
 .saving-animation {
   animation: saving-anime 1s infinite;
   background-size: 200% auto;
@@ -572,7 +583,8 @@ annotation {
 }
 
 /* Shared by the live parser and the deferred streaming preview. */
-.x-risu-streaming-thought-preview {
+.x-risu-streaming-thought-preview,
+details[data-risu-streaming-thought] {
   display: block;
   margin: 0.5em 0;
   padding: 0.5em 0.75em;

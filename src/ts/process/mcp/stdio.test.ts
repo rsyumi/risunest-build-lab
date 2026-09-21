@@ -7,17 +7,23 @@ const mocks = vi.hoisted(() => ({
     write: vi.fn(),
     spawn: vi.fn(),
     create: vi.fn(),
+    input: vi.fn(),
+    confirm: vi.fn(),
+    error: vi.fn(),
+    database: { modules: [] as Array<{ mcp: { url: string } }> },
+    desktop: true,
 }))
-vi.mock('src/ts/storage/database.svelte', () => ({ getDatabase: () => ({}), getCurrentChat: vi.fn() }))
+vi.mock('src/ts/storage/database.svelte', () => ({ getDatabase: () => mocks.database, getCurrentChat: vi.fn() }))
 vi.mock('src/ts/stores.svelte', () => ({ DBState: { db: {} } }))
 vi.mock('../modules', () => ({ getModuleMcps: () => [...mocks.configured] }))
-vi.mock('src/ts/alert', () => ({ alertError: vi.fn(), alertInput: vi.fn(), alertNormal: vi.fn() }))
-vi.mock('src/ts/platform', () => ({ isTauriDesktop: true }))
+vi.mock('src/ts/alert', () => ({ alertError: mocks.error, alertInput: mocks.input, alertConfirm: mocks.confirm, alertNormal: vi.fn() }))
+vi.mock('src/ts/platform', () => ({ get isTauriDesktop() { return mocks.desktop } }))
 vi.mock('src/ts/util', () => ({ sleep: async () => {} }))
 vi.mock('./pluginmcp', () => ({ registeredCustomPluginMCPs: new Map() }))
 vi.mock('@tauri-apps/plugin-shell', () => ({ Command: { create: mocks.create } }))
 vi.mock('./mcplib', () => ({
     MCPClient: class {
+        serverInfo = { serverInfo: { name: 'Synthetic MCP', version: '1' } }
         customTransport?: { send(message: unknown): Promise<void> }
         async checkHandshake() {
             await this.customTransport?.send({ jsonrpc: '2.0', id: 'init', method: 'initialize' })
@@ -32,11 +38,73 @@ describe('desktop MCP stdio framing', () => {
         vi.clearAllMocks()
         mocks.stdout = undefined
         mocks.configured = []
+        mocks.database.modules = []
+        mocks.desktop = true
+        mocks.confirm.mockResolvedValue(false)
         mocks.create.mockImplementation(() => ({
             stdout: { on: (_event: string, listener: (line: string) => void) => { mocks.stdout = listener } },
             spawn: mocks.spawn,
         }))
         mocks.spawn.mockResolvedValue({ write: mocks.write, kill: vi.fn() })
+    })
+
+    it('does not start or register a directly entered local MCP when confirmation is declined', async () => {
+        const configuration = { command: 'node', args: ['synthetic.js'], env: { PATH: '/synthetic/bin' } }
+        mocks.input.mockResolvedValue(`stdio:${JSON.stringify(configuration)}`)
+        const { importMCPModule } = await import('./mcp')
+        await importMCPModule()
+        expect(mocks.confirm).toHaveBeenCalledOnce()
+        expect(mocks.confirm.mock.calls[0][0]).toContain(JSON.stringify(configuration, null, 2))
+        expect(mocks.create).not.toHaveBeenCalled()
+        expect(mocks.spawn).not.toHaveBeenCalled()
+        expect(mocks.database.modules).toEqual([])
+    })
+
+    it('confirms before starting a directly registered MCP and does not ask again on initialization', async () => {
+        const configuration = { command: 'node', args: ['synthetic.js'] }
+        const url = `stdio:${JSON.stringify(configuration)}`
+        mocks.input.mockResolvedValue(url)
+        mocks.confirm.mockResolvedValue(true)
+        mocks.write.mockImplementation(async (line: string) => {
+            const message = JSON.parse(line)
+            if (message.method === 'ping') mocks.stdout?.(JSON.stringify({ jsonrpc: '2.0', id: message.id, result: {} }))
+        })
+        const { importMCPModule, initializeMCPs, MCPs } = await import('./mcp')
+        MCPs['internal:risuai'] = { checkHandshake: async () => ({}) } as never
+        await importMCPModule()
+        expect(mocks.error).not.toHaveBeenCalled()
+        expect(mocks.confirm).toHaveBeenCalledOnce()
+        expect(mocks.confirm.mock.invocationCallOrder[0]).toBeLessThan(mocks.create.mock.invocationCallOrder[0])
+        expect(mocks.spawn).toHaveBeenCalledOnce()
+        expect(mocks.database.modules).toEqual([expect.objectContaining({ mcp: { url } })])
+
+        mocks.configured = [url]
+        MCPs['internal:risuai'] = { checkHandshake: async () => ({}) } as never
+        await initializeMCPs()
+        expect(mocks.confirm).toHaveBeenCalledOnce()
+        expect(mocks.spawn).toHaveBeenCalledOnce()
+    })
+
+    it.each(['https://synthetic.invalid/mcp', 'stdio:{"url":"https://synthetic.invalid/mcp"}'])('registers %s without a local process confirmation', async url => {
+        mocks.input.mockResolvedValue(url)
+        const { importMCPModule, MCPs } = await import('./mcp')
+        MCPs['internal:risuai'] = { checkHandshake: async () => ({}) } as never
+        await importMCPModule()
+        expect(mocks.confirm).not.toHaveBeenCalled()
+        expect(mocks.spawn).not.toHaveBeenCalled()
+        expect(mocks.error).not.toHaveBeenCalled()
+        expect(mocks.database.modules).toEqual([expect.objectContaining({ mcp: { url } })])
+    })
+
+    it('keeps direct local MCP registration unavailable outside desktop', async () => {
+        mocks.desktop = false
+        mocks.input.mockResolvedValue('stdio:{"command":"node","args":["synthetic.js"]}')
+        const { importMCPModule } = await import('./mcp')
+        await importMCPModule()
+        expect(mocks.confirm).not.toHaveBeenCalled()
+        expect(mocks.spawn).not.toHaveBeenCalled()
+        expect(mocks.database.modules).toEqual([])
+        expect(mocks.error).toHaveBeenCalledWith(expect.objectContaining({ message: 'stdio MCPs are only supported in Local Version' }))
     })
 
     it('writes exactly one complete JSON line including messages containing newlines', async () => {

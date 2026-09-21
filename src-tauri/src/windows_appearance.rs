@@ -169,7 +169,7 @@ pub(crate) fn init<R: Runtime>() -> TauriPlugin<R> {
     Builder::new("windows-appearance")
         .js_init_script(include_str!("windows_appearance/startup.js").to_owned())
         .setup(|app, _| {
-            let cache = app.path().app_config_dir()?.join("windows-appearance.json");
+            let cache = crate::app_paths::data_root(app)?.join("windows-appearance.json");
             let mut appearance = Appearance::default();
             match std::fs::read(&cache) {
                 Ok(bytes) => match serde_json::from_slice::<Appearance>(&bytes) {

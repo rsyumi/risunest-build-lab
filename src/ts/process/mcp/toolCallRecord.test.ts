@@ -17,7 +17,7 @@ vi.mock('src/ts/alert', () => ({
     alertError: vi.fn(), alertInput: vi.fn(), alertNormal: vi.fn(),
 }))
 vi.mock('src/ts/platform', () => ({
-    isTauri: false, isNodeServer: false, isWeb: false, isAndroid: false, isMobile: false,
+    isTauri: false, isWeb: false, isAndroid: false, isMobile: false,
     isTauriIOS: false, isTauriAndroid: false, isTauriMobile: false, isTauriDesktop: false,
     isFirefox: false, isInStandaloneMode: false, isIOS: () => false,
 }))

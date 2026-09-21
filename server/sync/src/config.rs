@@ -79,6 +79,13 @@ pub fn tunnel_origin(listener: SocketAddr) -> SocketAddr {
     }
 }
 
+/// Endpoint a RisuNest app on this computer can reach, or None when the listener
+/// is bound to a specific address that may not accept loopback connections.
+pub fn local_endpoint(listener: SocketAddr) -> Option<String> {
+    let ip = listener.ip();
+    (ip.is_loopback() || ip.is_unspecified()).then(|| format!("http://{}", tunnel_origin(listener)))
+}
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub data_dir: PathBuf,
@@ -134,6 +141,23 @@ mod tests {
             ("192.0.2.1:14319", "192.0.2.1:14319"),
         ] {
             assert_eq!(tunnel_origin(input.parse().unwrap()).to_string(), expected);
+        }
+    }
+
+    #[test]
+    fn local_endpoint_covers_loopback_and_wildcard_binds_only() {
+        for (input, expected) in [
+            ("127.0.0.1:14319", Some("http://127.0.0.1:14319")),
+            ("[::1]:14319", Some("http://[::1]:14319")),
+            ("0.0.0.0:14319", Some("http://127.0.0.1:14319")),
+            ("[::]:24319", Some("http://[::1]:24319")),
+            ("192.0.2.1:14319", None),
+        ] {
+            assert_eq!(
+                local_endpoint(input.parse().unwrap()).as_deref(),
+                expected,
+                "{input}"
+            );
         }
     }
 }

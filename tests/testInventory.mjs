@@ -39,6 +39,27 @@ export function vitestInventory(root, directory = '.', owner) {
   }
 }
 
+
+export function browserInventory(root) {
+  const require = createRequire(pathToFileURL(join(root, 'package.json')))
+  const cli = join(dirname(require.resolve('@playwright/test/package.json')), 'cli.js')
+  const result = spawnSync(process.execPath, [cli, 'test', '--config', 'tests/browser/playwright.config.ts', '--list', '--reporter=json'], {
+    cwd: root, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, windowsHide: true,
+  })
+  if (result.error) throw result.error
+  if (result.status !== 0) throw new Error(`Browser inventory failed: ${result.stderr}`)
+  const report = JSON.parse(result.stdout)
+  if (report.errors?.length) throw new Error('Browser test discovery failed')
+  const files = new Set()
+  function visit(suite) {
+    for (const spec of suite.specs ?? []) files.add(normalizePath(relative(root, resolve(report.config.rootDir, spec.file))))
+    for (const child of suite.suites ?? []) visit(child)
+  }
+  for (const suite of report.suites) visit(suite)
+  if (files.size === 0) throw new Error('Empty browser inventory')
+  return [...files].sort()
+}
+
 export async function main() {
   const root = resolve(dirname(fileURLToPath(import.meta.url)), '..')
   const files = await discoverTestEntries(root)
@@ -47,6 +68,7 @@ export async function main() {
     ...vitestInventory(root, 'server/manager/gui', 'manager'),
     ...vitestInventory(root, 'server/endpoint-registry', 'registry'),
     node: selectNodeTests(files),
+    browser: browserInventory(root),
   }
   assertInventory(files, inventories)
   for (const [owner, selected] of Object.entries(inventories)) console.log(`${owner}: ${selected.length} files`)

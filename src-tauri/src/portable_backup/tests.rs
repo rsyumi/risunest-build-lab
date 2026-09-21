@@ -22,7 +22,7 @@ fn preservation_keeps_distinct_source_paths_even_when_bytes_are_live() {
             "{\"storage\":\"unclassified\"}",
         ),
         (
-            format!("assets-v2/objects/{}/{}", &hash[..2], &hash[2..]),
+            format!("assets/objects/{}/{}", &hash[..2], &hash[2..]),
             "{\"storage\":\"cas\"}",
         ),
     ] {

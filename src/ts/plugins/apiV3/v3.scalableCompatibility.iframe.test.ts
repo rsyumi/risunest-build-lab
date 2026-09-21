@@ -133,7 +133,7 @@ vi.mock('src/ts/globalApi.svelte', () => ({
 vi.mock('src/ts/gui/colorscheme', () => ({
     changeColorScheme: vi.fn(), updateColorScheme: vi.fn(), updateTextThemeAndCSS: vi.fn(),
 }))
-vi.mock('src/ts/platform', () => ({ isNodeServer: false, isTauri: false }))
+vi.mock('src/ts/platform', () => ({ isTauri: false }))
 vi.mock('src/ts/process/mcp/pluginmcp', () => ({
     registerMCPModule: vi.fn(), unregisterMCPModule: vi.fn(),
 }))

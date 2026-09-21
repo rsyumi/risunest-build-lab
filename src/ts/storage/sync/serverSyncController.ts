@@ -32,10 +32,20 @@ export interface ServerSyncSnapshot {
   attemptId?: number;
   /** Wall-clock start of the current attempt, for the elapsed time. */
   attemptStartedAt?: number;
+  phaseStartedAt?: number;
   attemptIdentity?: ServerAttemptIdentity;
   initialSyncComplete?: boolean;
+  /** False when the same attempt would be rejected again, so automatic
+   * synchronization stops instead of backing off. */
+  errorRetryable?: boolean;
   refreshPending?: boolean;
   replacing?: boolean;
+  connecting?: boolean;
+}
+/** The state an error leaves when repeating the same attempt cannot change its
+ * outcome. Automatic synchronization stops until an explicit action clears it. */
+export function serverSyncBlocked(snapshot: ServerSyncSnapshot): boolean {
+  return Boolean(snapshot.error) && snapshot.errorRetryable === false;
 }
 export function createServerSyncController(
   facade: ServerSyncFacade,
@@ -66,6 +76,15 @@ export function createServerSyncController(
     };
     for (const listener of listeners) listener(state);
   };
+  const recordError = (cause: unknown): void => {
+    const failure = serverSyncError(cause);
+    state.error = failure.code;
+    state.errorRetryable = failure.retryable;
+  };
+  const clearError = (): void => {
+    state.error = "";
+    state.errorRetryable = undefined;
+  };
   const refreshStatus = async (): Promise<void> => {
     const request = ++statusSequence;
     statusFresh = false;
@@ -90,7 +109,7 @@ export function createServerSyncController(
     state.bytesPerSecond = undefined;
     state.cycleItems = undefined;
     state.retryableFailure = undefined;
-    state.error = "";
+    clearError();
     byteSample = undefined;
     publish();
     try {
@@ -139,7 +158,7 @@ export function createServerSyncController(
       );
       if (state.initialSyncComplete) state.lastSuccessAt = Date.now();
     } catch (cause) {
-      state.error = serverSyncError(cause).code;
+      recordError(cause);
       state.initialSyncComplete = false;
     } finally {
       state.running = false;
@@ -152,7 +171,7 @@ export function createServerSyncController(
     }
   };
   const requireAvailable = (): void => {
-    if (state.running || state.replacing || isLibraryFileOperationReserved())
+    if (state.running || state.connecting || state.replacing || isLibraryFileOperationReserved())
       throw new ServerSyncError("library-operation-busy");
   };
   const invalidateCompletion = (): void => {
@@ -165,7 +184,7 @@ export function createServerSyncController(
     explicitResume: boolean,
   ): Promise<void> => {
     if (active) return active;
-    if (state.replacing || isLibraryFileOperationReserved())
+    if (state.connecting || state.replacing || isLibraryFileOperationReserved())
       return Promise.reject(new ServerSyncError("library-operation-busy"));
     if (explicitResume) controllerOptions.onExplicitResume?.();
     state.paused = false;
@@ -203,11 +222,11 @@ export function createServerSyncController(
       return "new-device-registration-required";
     if (state.status.reconciling) return "epoch-reconciliation-required";
     if (state.result?.phase === "conflict") return "server-sync-conflict";
-    if (state.replacing) return "library-operation-busy";
+    if (state.connecting || state.replacing) return "library-operation-busy";
     return undefined;
   };
   const beginReplacement = async (): Promise<() => Promise<void>> => {
-    if (state.running || state.replacing || facade.needsRefresh())
+    if (state.running || state.connecting || state.replacing || facade.needsRefresh())
       throw new ServerSyncError("resolve-pending-operation-first");
     state.replacing = true;
     invalidateCompletion();
@@ -219,7 +238,7 @@ export function createServerSyncController(
       try {
         await refreshStatus();
       } catch (cause) {
-        state.error = serverSyncError(cause).code;
+        recordError(cause);
       }
       state.replacing = false;
       publish();
@@ -241,6 +260,33 @@ export function createServerSyncController(
       throw cause;
     }
   };
+  const register = async (
+    config: ServerConfig,
+    replacing: boolean,
+    prepare?: () => Promise<unknown>,
+  ): Promise<void> => {
+    requireAvailable();
+    state.connecting = true;
+    invalidateCompletion();
+    publish();
+    try {
+      const status = await (replacing ? facade.reregister(config) : facade.bind(config));
+      state.status = status;
+      state.lastSuccessAt = undefined;
+      publish();
+      await prepare?.();
+      clearError();
+      controllerOptions.onExplicitResume?.();
+      state.paused = false;
+    } catch (cause) {
+      recordError(cause);
+      state.paused = true;
+      throw cause;
+    } finally {
+      state.connecting = false;
+      publish();
+    }
+  };
   return {
     holdAutomaticSync(): void {
       state.paused = true;
@@ -252,7 +298,7 @@ export function createServerSyncController(
       publish();
     },
     assertFileOperationAvailable(): void {
-      if (state.running || state.replacing || facade.needsRefresh())
+      if (state.running || state.connecting || state.replacing || facade.needsRefresh())
         throw new ServerSyncError("server-sync-busy");
     },
     async confirmReplacement(): Promise<void> {
@@ -298,6 +344,7 @@ export function createServerSyncController(
     },
     reportCycleItems(items: ServerCycleItems): void {
       if (!state.running) return;
+      if (state.cycleItems?.activity !== items.activity) state.phaseStartedAt = Date.now();
       state.cycleItems = items;
       publish();
     },
@@ -308,6 +355,7 @@ export function createServerSyncController(
     },
     reportProgress(progress: ServerSyncProgress): void {
       if (!state.running) return;
+      if (state.progress !== progress) state.phaseStartedAt = Date.now();
       state.progress = progress;
       publish();
     },
@@ -315,6 +363,7 @@ export function createServerSyncController(
     waitForIdle: () => active ?? Promise.resolve(),
     canRestore: () =>
       !state.running &&
+      !state.connecting &&
       !state.replacing &&
       statusFresh &&
       Boolean(state.status) &&
@@ -332,20 +381,12 @@ export function createServerSyncController(
       try {
         await refreshStatus();
       } catch (cause) {
-        state.error = serverSyncError(cause).code;
+        recordError(cause);
         publish();
       }
     },
-    async bind(config: ServerConfig): Promise<void> {
-      requireAvailable();
-      invalidateCompletion();
-      const status = await facade.bind(config);
-      state.status = status;
-      state.lastSuccessAt = undefined;
-      state.error = "";
-      controllerOptions.onExplicitResume?.();
-      state.paused = false;
-      publish();
+    bind(config: ServerConfig, prepare?: () => Promise<unknown>): Promise<void> {
+      return register(config, false, prepare);
     },
     async unbind(): Promise<void> {
       requireAvailable();
@@ -355,16 +396,8 @@ export function createServerSyncController(
       state.result = undefined;
       await refreshStatus();
     },
-    async reregister(config: ServerConfig): Promise<void> {
-      requireAvailable();
-      invalidateCompletion();
-      const status = await facade.reregister(config);
-      state.status = status;
-      state.result = undefined;
-      state.error = "";
-      controllerOptions.onExplicitResume?.();
-      state.paused = false;
-      publish();
+    reregister(config: ServerConfig, prepare?: () => Promise<unknown>): Promise<void> {
+      return register(config, true, prepare);
     },
     async reconcile(): Promise<void> {
       requireAvailable();
@@ -372,7 +405,7 @@ export function createServerSyncController(
       const status = await facade.reconcile();
       state.status = status;
       state.result = undefined;
-      state.error = "";
+      clearError();
       controllerOptions.onExplicitResume?.();
       state.paused = false;
       publish();
@@ -423,7 +456,7 @@ export function createServerSyncController(
       try {
         await facade.cancel();
       } catch (cause) {
-        state.error = serverSyncError(cause).code;
+        recordError(cause);
         publish();
       }
     },
@@ -432,7 +465,7 @@ export function createServerSyncController(
       try {
         await facade.cancel();
       } catch (cause) {
-        state.error = serverSyncError(cause).code;
+        recordError(cause);
         publish();
       }
     },
@@ -441,15 +474,11 @@ export function createServerSyncController(
         state.status?.configured &&
         !state.status.registrationRequired &&
         !state.running &&
+        !state.connecting &&
         !state.replacing &&
         !isLibraryFileOperationReserved() &&
         !state.paused &&
-        ![
-          "epoch-reconciliation-required",
-          "unauthorized",
-          "new-device-registration-required",
-          "device-credential-unavailable",
-        ].includes(state.error) &&
+        !serverSyncBlocked(state) &&
         state.result?.phase !== "conflict" &&
         !facade.needsRefresh(),
       ),

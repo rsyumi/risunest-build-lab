@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mount, tick, unmount } from "svelte";
-vi.mock("src/ts/platform", () => ({ isTauriAndroid: false }));
+vi.mock("src/ts/platform", () => ({ isTauriAndroid: false, isTauriIOS: false }));
 vi.mock("src/lang", async () => ({
   language: (await import("src/lang/en")).languageEnglish,
 }));

@@ -24,6 +24,14 @@ enum Purpose {
 }
 
 impl Purpose {
+    fn cleanup_purpose(self) -> crate::cleanup_secrets::Purpose {
+        match self {
+            Self::Provider => crate::cleanup_secrets::Purpose::Provider,
+            Self::RepositoryKey => crate::cleanup_secrets::Purpose::RepositoryKey,
+            Self::AccountCredential => crate::cleanup_secrets::Purpose::AccountCredential,
+        }
+    }
+
     fn reference_prefix(self) -> &'static str {
         match self {
             Self::Provider => "provider-v1:",
@@ -73,12 +81,11 @@ pub(crate) fn repository_key_vault(root: &Path) -> Arc<dyn SecretVault> {
     })
 }
 
-/// One well-known secret addressed by a fixed name instead of an issued
-/// reference, so nothing has to be stored beside it to find it again.
+/// One secret addressed by a root-scoped name instead of an issued reference.
 pub(crate) struct NamedSecretSlot {
     root: PathBuf,
     purpose: Purpose,
-    name: &'static str,
+    name: String,
 }
 
 /// The account token. An installation holds at most one, and a new device
@@ -87,14 +94,14 @@ pub(crate) fn account_credential_slot(root: &Path) -> NamedSecretSlot {
     NamedSecretSlot {
         root: root.to_owned(),
         purpose: Purpose::AccountCredential,
-        name: "official-account",
+        name: crate::cleanup_secrets::account_id(root),
     }
 }
 
 impl NamedSecretSlot {
     /// An unreadable slot reads as an absent one: the account signs in again.
     pub(crate) fn read(&self) -> Option<SecretBytes> {
-        platform::read(&self.root, self.purpose, self.name)
+        platform::read(&self.root, self.purpose, &self.name)
             .ok()
             .map(|bytes| SecretBytes(zeroize::Zeroizing::new(bytes)))
     }
@@ -103,19 +110,48 @@ impl NamedSecretSlot {
         if bytes.0.is_empty() || bytes.0.len() > MAX_PLAINTEXT_BYTES {
             return Err(ProviderError::new(ErrorKind::Corrupt));
         }
-        match platform::replace(&self.root, self.purpose, self.name, &bytes.0) {
-            // Every platform reports a missing destination this way, and only
-            // that case may create the slot.
-            Err(error) if error.kind == ErrorKind::ReauthRequired => {
-                platform::write_new(&self.root, self.purpose, self.name, &bytes.0)
-            }
-            result => result,
-        }
+        crate::cleanup_secrets::tracked_write(
+            &self.root,
+            self.purpose.cleanup_purpose(),
+            &self.name,
+            || {
+                Ok(
+                    match platform::replace(&self.root, self.purpose, &self.name, &bytes.0) {
+                        // Every platform reports a missing destination this way, and only
+                        // that case may create the slot.
+                        Err(error) if error.kind == ErrorKind::ReauthRequired => {
+                            platform::write_new(&self.root, self.purpose, &self.name, &bytes.0)
+                        }
+                        result => result,
+                    },
+                )
+            },
+        )
+        .map_err(|_| transient())?
     }
 
     pub(crate) fn remove(&self) -> Result<()> {
-        platform::remove(&self.root, self.purpose, self.name)
+        platform::remove(&self.root, self.purpose, &self.name)
     }
+}
+
+#[cfg(target_os = "android")]
+pub(crate) fn remove_android_keys() -> std::result::Result<(), String> {
+    protection::remove_keys().map_err(|_| "secret-cleanup-unavailable".into())
+}
+
+pub(crate) fn remove_owned(
+    root: &Path,
+    purpose: crate::cleanup_secrets::Purpose,
+    id: &str,
+) -> std::result::Result<(), String> {
+    let purpose = match purpose {
+        crate::cleanup_secrets::Purpose::Provider => Purpose::Provider,
+        crate::cleanup_secrets::Purpose::RepositoryKey => Purpose::RepositoryKey,
+        crate::cleanup_secrets::Purpose::AccountCredential => Purpose::AccountCredential,
+        crate::cleanup_secrets::Purpose::ServerSync => return Err("secret-index-corrupt".into()),
+    };
+    platform::remove(root, purpose, id).map_err(|_| "secret-cleanup-unavailable".into())
 }
 
 fn unavailable() -> ProviderError {
@@ -159,7 +195,13 @@ impl SecretVault for NativeSecretVault {
                 return Err(ProviderError::new(ErrorKind::Corrupt));
             }
             let id = uuid::Uuid::new_v4().to_string();
-            platform::write_new(&self.root, self.purpose, &id, &bytes.0)?;
+            crate::cleanup_secrets::tracked_write(
+                &self.root,
+                self.purpose.cleanup_purpose(),
+                &id,
+                || Ok(platform::write_new(&self.root, self.purpose, &id, &bytes.0)),
+            )
+            .map_err(|_| transient())??;
             Ok(self.reference(&id))
         })
     }
@@ -174,7 +216,13 @@ impl SecretVault for NativeSecretVault {
                 return Err(ProviderError::new(ErrorKind::Corrupt));
             }
             let id = self.parse_reference(reference)?;
-            platform::replace(&self.root, self.purpose, &id, &bytes.0)
+            crate::cleanup_secrets::tracked_write(
+                &self.root,
+                self.purpose.cleanup_purpose(),
+                &id,
+                || Ok(platform::replace(&self.root, self.purpose, &id, &bytes.0)),
+            )
+            .map_err(|_| transient())?
         })
     }
 
@@ -386,6 +434,17 @@ mod protection {
         }
     }
 
+    pub fn remove_keys() -> Result<()> {
+        let (vm, class) = JAVA.get().ok_or_else(unavailable)?;
+        let mut env = vm.attach_current_thread().map_err(|_| unavailable())?;
+        let class: &JClass = class.as_obj().into();
+        let result = env.call_static_method(class, "removeKeys", "()V", &[]);
+        if result.is_err() {
+            let _ = env.exception_clear();
+        }
+        result.map(|_| ()).map_err(|_| unavailable())
+    }
+
     pub fn transform(purpose: Purpose, bytes: &[u8], seal: bool) -> Result<Vec<u8>> {
         let (vm, class) = JAVA.get().ok_or_else(unavailable)?;
         let mut env = vm.attach_current_thread().map_err(|_| unavailable())?;
@@ -555,12 +614,8 @@ mod tests {
         slot.write(&rotated).unwrap();
         assert_eq!(slot.read().unwrap().0.as_slice(), rotated.0.as_slice());
 
-        let sealed = std::fs::read(
-            root.path()
-                .join("account-credentials")
-                .join("official-account"),
-        )
-        .unwrap();
+        let sealed =
+            std::fs::read(root.path().join("account-credentials").join(&slot.name)).unwrap();
         assert!(!sealed
             .windows(rotated.0.len())
             .any(|part| part == rotated.0.as_slice()));

@@ -389,3 +389,41 @@ fn replacement_restore_preserves_server_replica_reconciliation() {
         1
     );
 }
+
+#[test]
+fn the_replica_schema_requires_the_object_verification_columns() {
+    let directory = tempfile::tempdir().unwrap();
+    drop(PersistentStore::open(directory.path()).unwrap());
+    // What this version creates opens again unchanged.
+    let store = PersistentStore::open(directory.path()).unwrap();
+    store
+        .connection
+        .execute_batch(
+            "DROP TABLE server_sync_operation;
+             CREATE TABLE server_sync_operation(singleton INTEGER PRIMARY KEY CHECK(singleton=1),sequence TEXT NOT NULL,intent TEXT NOT NULL,phase TEXT NOT NULL,local_revision INTEGER NOT NULL);",
+        )
+        .unwrap();
+    drop(store);
+    // A replica that cannot record a completed object pass is not this schema,
+    // and the store reports that instead of running against it.
+    assert!(matches!(
+        PersistentStore::open(directory.path()),
+        Err(StoreError::Validation { .. })
+    ));
+
+    // Adding the two columns to that table is all the old shape is missing.
+    let file = directory
+        .path()
+        .join("persistent")
+        .join(super::super::DATABASE_FILE);
+    let database = Connection::open(file).unwrap();
+    database
+        .execute_batch(
+            "ALTER TABLE server_sync_operation ADD COLUMN verified_at INTEGER;
+             ALTER TABLE server_sync_operation ADD COLUMN verified_stage TEXT;",
+        )
+        .unwrap();
+    drop(database);
+    let store = PersistentStore::open(directory.path()).unwrap();
+    assert!(store.server_pending().unwrap().is_none());
+}

@@ -9,7 +9,8 @@ import {
 import { changeFullscreen, sleep } from "./util"
 import { convertFileSrc } from "@tauri-apps/api/core"
 import { v4 as uuidv4, v4 } from 'uuid';
-import { appDataDir, join } from "@tauri-apps/api/path";
+import { join } from "@tauri-apps/api/path";
+import { nativeDataPath } from "./storage/nativePaths";
 import { get } from "svelte/store";
 import { open } from '@tauri-apps/plugin-shell'
 import { openUrl } from '@tauri-apps/plugin-opener'
@@ -46,10 +47,8 @@ import {
 } from "./process/coldstorageData";
 import { collectExactPluginStorageAssetReferences } from "./drive/backupAssets";
 import { downloadIOSFile } from "./storage/iosFiles";
-import { isTauriIOS, isTauri, isTauriMobile, isNodeServer } from "./platform";
+import { isTauriIOS, isTauri, isTauriMobile } from "./platform";
 import { isLocalNetworkUrl } from "./network/localNetwork";
-import { decodeProxyJobWsChunk, formatProxyStreamErrorMessage, parseProxyJobWsEvent } from "./network/proxyJobWs";
-import { getNodeServerProxyAuth } from "./storage/nodeStorage";
 import { ByteBudgetLru } from "./util/byteBudgetLru";
 import { getRuntimePerformanceBudgets, subscribeRuntimePerformanceProfile } from "./runtimePerformanceProfile";
 import { checkCharOrder as repairDatabaseCharacterOrder } from "./storage/databasePreparation";
@@ -327,8 +326,6 @@ export async function getFileSrc(loc: string) {
     }
 }
 
-let appDataDirPath = ''
-
 /**
  * Reads an image file and returns its data.
  * 
@@ -346,10 +343,7 @@ export async function readImage(data: string) {
     }
     if (isTauri) {
         if (data.startsWith('assets')) {
-            if (appDataDirPath === '') {
-                appDataDirPath = await appDataDir();
-            }
-            return await readFile(await join(appDataDirPath, data))
+            return await readFile(await nativeDataPath(data))
         }
         return await readFile(data)
     }
@@ -477,14 +471,9 @@ export function getFetchData(id: string) {
 }
 
 const knownHostes = ["localhost", "127.0.0.1", "0.0.0.0"];
-const defaultProxyJobHeartbeatSec = 15;
 
 function getProxy2Url() {
-    return !isTauri && !isNodeServer ? `${hubURL}/proxy2` : `/proxy2`;
-}
-
-function getProxyStreamJobBaseUrl() {
-    return isNodeServer ? '' : `${hubURL}`;
+    return !isTauri ? `${hubURL}/proxy2` : `/proxy2`;
 }
 
 function buildTimeoutSignal(originalSignal?: AbortSignal, timeoutMs?: number) {
@@ -611,7 +600,7 @@ export async function globalFetch(url: string, arg: GlobalFetchArgs = {}): Promi
 
         const urlHost = new URL(url).hostname
         const useLocalNetworkRoute = isLocalNetworkUrl(url)
-            && (arg.networkRoute === 'local_network' || (!isTauri && !isNodeServer))
+            && (arg.networkRoute === 'local_network' || !isTauri)
         const forcePlainFetch = ((knownHostes.includes(urlHost) && !isTauri) || db.usePlainFetch || arg.plainFetchForce) && !arg.plainFetchDeforce && !useLocalNetworkRoute
 
         if(arg.interceptor){
@@ -635,12 +624,9 @@ export async function globalFetch(url: string, arg: GlobalFetchArgs = {}): Promi
                 if (isTauri) {
                     return await fetchWithTauri(url, requestArg);
                 }
-                if (!isNodeServer) {
-                    return window.userScriptFetch
-                        ? await fetchWithUSFetch(url, requestArg)
-                        : await fetchWithPlainFetch(url, requestArg);
-                }
-                return await fetchWithProxy(url, requestArg);
+                return window.userScriptFetch
+                    ? await fetchWithUSFetch(url, requestArg)
+                    : await fetchWithPlainFetch(url, requestArg);
             }
             if (forcePlainFetch) {
                 return await fetchWithPlainFetch(url, requestArg);
@@ -774,14 +760,12 @@ async function fetchWithProxy(url: string, arg: GlobalFetchArgs): Promise<Global
         const furl = getProxy2Url();
         arg.headers ??= {};
         arg.headers["Content-Type"] ??= arg.body instanceof URLSearchParams ? "application/x-www-form-urlencoded" : "application/json";
-        const nodeProxyAuth = isNodeServer ? await getNodeServerProxyAuth() : null;
         const headers = {
             "risu-header": encodeURIComponent(JSON.stringify(arg.headers)),
             "risu-url": encodeURIComponent(url),
             "Content-Type": arg.body instanceof URLSearchParams ? "application/x-www-form-urlencoded" : "application/json",
             ...(arg.useRisuToken && { "x-risu-tk": "use" }),
             ...(arg.requestTimeoutMs && { "risu-timeout-ms": Math.max(1, Math.floor(arg.requestTimeoutMs)).toString() }),
-            ...(nodeProxyAuth && { "risu-auth": nodeProxyAuth }),
             ...(DBState?.db?.requestLocation && { "risu-location": DBState.db.requestLocation }),
         };
 
@@ -1156,206 +1140,6 @@ export class VirtualWriter {
 }
 
 /**
- * Pipes the fetch log to a readable stream.
- * @param {number} fetchLogIndex - The index of the fetch log.
- * @param {ReadableStream<Uint8Array>} readableStream - The readable stream to pipe.
- * @returns {ReadableStream<Uint8Array>} - The new readable stream.
- */
-const pipeFetchLog = (fetchLogIndex: number, readableStream: ReadableStream<Uint8Array>) => {
-    
-    const splited = readableStream.tee();
-    
-    (async () => {
-        const text = await (new Response(splited[0])).text()
-        fetchLog[fetchLogIndex].response = text
-    })()
-    
-    return splited[1]
-}
-
-async function fetchViaProxyJobWs(url: string, arg: {
-    body: Uint8Array,
-    headers?: { [key: string]: string },
-    method: "POST" | "GET" | "PUT" | "DELETE",
-    signal?: AbortSignal,
-    requestTimeoutMs?: number,
-    chatId?: string,
-    fetchLogIndex?: number | null
-}): Promise<Response> {
-    const auth = await getNodeServerProxyAuth();
-
-    const requestSignal = arg.signal;
-    const baseUrl = getProxyStreamJobBaseUrl();
-
-    let jobId = '';
-    const createRes = await fetch(`${baseUrl}/proxy-stream-jobs`, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-            'risu-auth': auth
-        },
-        body: JSON.stringify({
-            url,
-            method: arg.method,
-            headers: arg.headers ?? {},
-            bodyBase64: Buffer.from(arg.body).toString('base64'),
-            timeoutMs: arg.requestTimeoutMs,
-            heartbeatSec: defaultProxyJobHeartbeatSec
-        }),
-        signal: requestSignal
-    });
-
-    if (!createRes.ok) {
-        const errText = await createRes.text();
-        throw new Error(`Proxy stream job creation failed: ${createRes.status} ${errText}`);
-    }
-
-    const created = await createRes.json() as { jobId?: string };
-    if (!created.jobId) {
-        throw new Error('Proxy stream job creation returned no jobId');
-    }
-    jobId = created.jobId;
-
-    const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${wsProtocol}//${location.host}/proxy-stream-jobs/${encodeURIComponent(jobId)}/ws?risu-auth=${encodeURIComponent(auth)}`;
-
-    let headersReady = false;
-    let status = 200;
-    let responseHeaders: HeadersInit = { 'content-type': 'text/event-stream' };
-    let settled = false;
-    let resolveHeaders: () => void = () => {};
-    const waitHeaders = new Promise<void>((resolve) => {
-        resolveHeaders = resolve;
-    });
-    let streamController: ReadableStreamDefaultController<Uint8Array> | null = null;
-    const encoder = new TextEncoder();
-
-    const ws = new WebSocket(wsUrl);
-    const readable = new ReadableStream<Uint8Array>({
-        start(controller) {
-            streamController = controller;
-        },
-        cancel() {
-            try {
-                ws.close();
-            } catch {
-                // no-op
-            }
-        }
-    });
-    const pipedReadable = arg.fetchLogIndex != null ? pipeFetchLog(arg.fetchLogIndex, readable) : readable;
-
-    const ensureHeadersReady = () => {
-        if (!headersReady) {
-            headersReady = true;
-            resolveHeaders();
-        }
-    };
-
-    const closeAndEnd = () => {
-        if (settled) {
-            return;
-        }
-        settled = true;
-        if (streamController) {
-            try {
-                streamController.close();
-            } catch {
-                // no-op
-            }
-        }
-        try {
-            ws.close();
-        } catch {
-            // no-op
-        }
-    };
-
-    ws.onmessage = (event) => {
-        const parsed = parseProxyJobWsEvent(typeof event.data === 'string' ? event.data : '');
-        if (!parsed || !streamController) {
-            return;
-        }
-        switch (parsed.type) {
-            case 'job_accepted':
-            case 'ping':
-                return;
-            case 'upstream_headers':
-                status = parsed.status;
-                responseHeaders = parsed.headers ?? {};
-                ensureHeadersReady();
-                return;
-            case 'chunk':
-                ensureHeadersReady();
-                streamController.enqueue(decodeProxyJobWsChunk(parsed.dataBase64));
-                return;
-            case 'error': {
-                status = parsed.status ?? 502;
-                responseHeaders = { 'content-type': 'text/plain; charset=utf-8' };
-                ensureHeadersReady();
-                const msg = formatProxyStreamErrorMessage(parsed.status, parsed.message);
-                streamController.enqueue(encoder.encode(msg));
-                closeAndEnd();
-                return;
-            }
-            case 'done':
-                ensureHeadersReady();
-                closeAndEnd();
-                return;
-        }
-    };
-
-    ws.onerror = () => {
-        if (!streamController) {
-            return;
-        }
-        status = 502;
-        responseHeaders = { 'content-type': 'text/plain; charset=utf-8' };
-        ensureHeadersReady();
-        streamController.enqueue(encoder.encode('Proxy WebSocket stream error'));
-        closeAndEnd();
-    };
-
-    ws.onclose = () => {
-        if (!headersReady) {
-            status = 502;
-            responseHeaders = { 'content-type': 'text/plain; charset=utf-8' };
-            ensureHeadersReady();
-        }
-        closeAndEnd();
-    };
-
-    const abortHandler = () => {
-        status = 499;
-        responseHeaders = { 'content-type': 'text/plain; charset=utf-8' };
-        ensureHeadersReady();
-        if (streamController && !settled) {
-            streamController.enqueue(encoder.encode('Aborted'));
-        }
-        void fetch(`${baseUrl}/proxy-stream-jobs/${encodeURIComponent(jobId)}`, {
-            method: 'DELETE',
-            headers: {
-                'risu-auth': auth
-            }
-        }).catch(() => {});
-        closeAndEnd();
-    };
-    if (requestSignal?.aborted) {
-        abortHandler();
-    }
-    else {
-        requestSignal?.addEventListener('abort', abortHandler, { once: true });
-    }
-
-    await waitHeaders;
-    requestSignal?.removeEventListener('abort', abortHandler);
-    return new Response(pipedReadable, {
-        status,
-        headers: new Headers(responseHeaders)
-    });
-}
-
-/**
  * Fetches data from a given URL using native fetch or through a proxy.
  * @param {string} url - The URL to fetch data from.
  * @param {Object} arg - The arguments for the fetch request.
@@ -1426,15 +1210,10 @@ export async function fetchNative(url: string, arg: {
 
     const db = getDatabase()
     const useLocalNetworkRoute = isLocalNetworkUrl(url)
-        && (arg.networkRoute === 'local_network' || (!isTauri && !isNodeServer))
-    let throughProxy = (!isTauri) && (!isNodeServer) && (!db.usePlainFetch)
+        && (arg.networkRoute === 'local_network' || !isTauri)
+    let throughProxy = !isTauri && !db.usePlainFetch
     if (useLocalNetworkRoute) {
-        if (isNodeServer) {
-            throughProxy = true
-        }
-        else {
-            throughProxy = false
-        }
+        throughProxy = false
     }
     const route: 'userscript' | 'tauri' | 'proxy' | 'plain' =
         window.userScriptFetch && !throughProxy ? 'userscript'
@@ -1488,28 +1267,6 @@ export async function fetchNative(url: string, arg: {
             })
         }
     else if (route === 'proxy') {
-        const useProxyJobWs = isNodeServer
-            && arg.interceptor === 'openai_streaming'
-            && arg.method === 'POST'
-            && useLocalNetworkRoute;
-        const nodeProxyAuth = isNodeServer ? await getNodeServerProxyAuth() : null;
-
-        if (useProxyJobWs) {
-            try {
-                return await fetchViaProxyJobWs(url, {
-                    body: realBody,
-                    headers,
-                    method: 'POST',
-                    signal: requestSignal,
-                    requestTimeoutMs: arg.requestTimeoutMs,
-                    chatId: arg.chatId,
-                    fetchLogIndex
-                });
-            } catch (wsErr) {
-                console.warn('[ProxyJobWS] fallback to /proxy2 due to error:', wsErr);
-            }
-        }
-
         const r = await fetch(getProxy2Url(), {
             body: realBody as any,
             headers: arg.useRisuTk ? {
@@ -1518,14 +1275,12 @@ export async function fetchNative(url: string, arg: {
                 "Content-Type": "application/json",
                 "x-risu-tk": "use",
                 ...(arg.requestTimeoutMs && { "risu-timeout-ms": Math.max(1, Math.floor(arg.requestTimeoutMs)).toString() }),
-                ...(nodeProxyAuth ? { "risu-auth": nodeProxyAuth } : {}),
                 ...(DBState?.db?.requestLocation && { "risu-location": DBState.db.requestLocation }),
             } : {
                 "risu-header": encodeURIComponent(JSON.stringify(headers)),
                 "risu-url": encodeURIComponent(url),
                 "Content-Type": "application/json",
                 ...(arg.requestTimeoutMs && { "risu-timeout-ms": Math.max(1, Math.floor(arg.requestTimeoutMs)).toString() }),
-                ...(nodeProxyAuth ? { "risu-auth": nodeProxyAuth } : {}),
                 ...(DBState?.db?.requestLocation && { "risu-location": DBState.db.requestLocation }),
             },
             method: arg.method,

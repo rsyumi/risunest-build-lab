@@ -236,6 +236,9 @@ pub struct Receipt {
     pub status: TerminalStatus,
     pub head: RemoteHead,
     pub error: Option<String>,
+    /// The record the rejection names, when it names one. A locator, never
+    /// record content, and it travels no further than the client's own log.
+    pub error_key: Option<String>,
 }
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]

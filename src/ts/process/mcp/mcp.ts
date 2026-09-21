@@ -2,7 +2,8 @@ import { getCurrentChat, getDatabase } from "src/ts/storage/database.svelte";
 import { MCPClient, type JsonRPC, type MCPTool, type RPCToolCallContent } from "./mcplib";
 import { DBState } from "src/ts/stores.svelte";
 import { getModuleMcps } from "../modules";
-import { alertError, alertInput, alertNormal } from "src/ts/alert";
+import { alertConfirm, alertError, alertInput, alertNormal } from "src/ts/alert";
+import { language } from 'src/lang';
 import { v4 } from "uuid";
 import type { MCPClientLike } from "./internalmcp";
 import { isTauriDesktop } from "src/ts/platform"
@@ -306,6 +307,18 @@ export async function importMCPModule(){
         return;
     }
     try {
+        if (x.startsWith('stdio:')) {
+            const config = JSON.parse(x.slice('stdio:'.length));
+            if (!config.url && config.command && config.args) {
+                if (!isTauriDesktop) {
+                    throw new Error('stdio MCPs are only supported in Local Version');
+                }
+                const confirmed = await alertConfirm(
+                    language.mcpStdioRegisterConfirm + '\n\n' + JSON.stringify(config, null, 2)
+                );
+                if (!confirmed) return;
+            }
+        }
         const metas = (await getMCPMeta([x]))
         console.log(metas)
         const meta = metas[x];

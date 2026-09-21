@@ -418,6 +418,7 @@ fn refresh_once(
             params![if done { None } else { Some(json(&next)?) }, done],
         )?;
         tx.commit()?;
+        client.progress();
         if done {
             let reply =
                 client.request(Method::DELETE, &path, &[], None, &[], MAX_METADATA_BYTES)?;

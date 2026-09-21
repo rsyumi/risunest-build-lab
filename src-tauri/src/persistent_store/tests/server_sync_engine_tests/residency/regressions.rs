@@ -6,6 +6,7 @@ struct Cancellation {
     direction: AtomicUsize,
     requests: AtomicUsize,
     cancelled: Arc<AtomicBool>,
+    cancelled_at: std::sync::Mutex<Option<std::time::Instant>>,
 }
 impl Cancellation {
     fn check(&self) -> crate::server_sync::Result<()> {
@@ -16,6 +17,7 @@ impl Cancellation {
         }
     }
     fn arm(&self, direction: usize) {
+        *self.cancelled_at.lock().unwrap() = None;
         self.requests.store(0, Ordering::SeqCst);
         self.cancelled.store(false, Ordering::SeqCst);
         self.direction.store(direction, Ordering::SeqCst);
@@ -44,6 +46,7 @@ fn observed_fixture(cancellation: Arc<Cancellation>) -> Fixture {
                     || (direction == 2 && request.uri().path().contains("/chunks/"))
                 {
                     cancellation.requests.fetch_add(1, Ordering::SeqCst);
+                    cancellation.cancelled_at.lock().unwrap().get_or_insert_with(std::time::Instant::now);
                     cancellation.cancelled.store(true, Ordering::SeqCst);
                 }
                 next.run(request).await
@@ -262,7 +265,7 @@ fn cancellation_during_cas_copy_does_not_publish_partial_payload() {
     assert!(matches!(result, Err(error) if error.code == "cancelled"));
     assert_eq!(cas.stat_object(&hash).unwrap(), None);
     assert_eq!(
-        std::fs::read_dir(root.path().join("assets-v2/staging"))
+        std::fs::read_dir(root.path().join("assets/staging"))
             .unwrap()
             .count(),
         0
@@ -284,6 +287,8 @@ fn full_policy_cancels_during_last_object_and_can_retry() {
     store.asset_residency_evict(|| Ok(())).unwrap();
     cancellation.arm(1);
     let result = store.asset_residency_set_policy(AssetPolicy::Full, || cancellation.check());
+    let latency = cancellation.cancelled_at.lock().unwrap().unwrap().elapsed();
+    eprintln!("download_cancellation_us={}", latency.as_micros());
     assert!(matches!(result, Err(error) if error.code == "cancelled"));
     assert!((1..=2).contains(&cancellation.requests.load(Ordering::SeqCst)));
     let cas = PayloadCas::new(store.repository_root()).unwrap();
@@ -349,6 +354,8 @@ fn offload_cancels_between_chunks_and_preserves_local_payload() {
         .unwrap();
     cancellation.arm(2);
     let result = store.asset_residency_evict(|| cancellation.check());
+    let latency = cancellation.cancelled_at.lock().unwrap().unwrap().elapsed();
+    eprintln!("upload_cancellation_us={}", latency.as_micros());
     assert!(matches!(result, Err(error) if error.code == "cancelled"));
     assert!((1..=2).contains(&cancellation.requests.load(Ordering::SeqCst)));
     let cas = PayloadCas::new(store.repository_root()).unwrap();

@@ -222,7 +222,7 @@ async fn status(State(ctx): State<Arc<Context>>) -> Result<Json<Value>> {
     Ok(Json(json!({
         "revision":format!("{}:{}",ctx.session,rt.revision), "uptimeSeconds":ctx.started.elapsed().as_secs(),
         "connection":connection, "connectionState":persisted, "tunnel":tunnel, "publication":publication,
-        "listener":ctx.origin.to_string(),
+        "listener":ctx.origin.to_string(), "localEndpoint":crate::config::local_endpoint(ctx.origin),
         "storage":*ctx.usage.read().await, "devices":devices,
         "maintenance":maintenance,
         "version":env!("CARGO_PKG_VERSION"),
@@ -265,6 +265,14 @@ async fn maintenance_status(State(ctx): State<Arc<Context>>) -> Result<Json<Valu
     maintenance_response(&ctx, None).await
 }
 
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+enum RegistrationTarget {
+    #[default]
+    Configured,
+    Local,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Mutation {
@@ -272,6 +280,8 @@ struct Mutation {
     options: Option<ConnectionOptions>,
     name: Option<String>,
     request_id: Option<String>,
+    #[serde(default)]
+    target: RegistrationTarget,
 }
 
 #[derive(Deserialize)]
@@ -384,21 +394,32 @@ async fn issue(
     let _work = ctx.workload.begin(WorkKind::Request)?;
     let mut rt = ctx.runtime.lock().await;
     check(&ctx, &mut rt, &input)?;
-    let state = ctx.store.connection_status()?;
-    if state.mode == "managed"
-        && rt
-            .connection
-            .as_ref()
-            .is_none_or(|r| r.tunnel.borrow().phase != "connected")
-    {
-        return Err(Error::new("public-endpoint-not-ready", 409));
-    }
+    // Reject an unsupported local target before a device record is allocated.
+    let local = match input.target {
+        RegistrationTarget::Local => Some(
+            crate::config::local_endpoint(ctx.origin)
+                .ok_or(Error::new("local-endpoint-unavailable", 409))?,
+        ),
+        RegistrationTarget::Configured => {
+            let state = ctx.store.connection_status()?;
+            if state.mode == "managed"
+                && rt
+                    .connection
+                    .as_ref()
+                    .is_none_or(|r| r.tunnel.borrow().phase != "connected")
+            {
+                return Err(Error::new("public-endpoint-not-ready", 409));
+            }
+            None
+        }
+    };
     let name = input.name.ok_or(Error::new("device-name-required", 400))?;
     let request = input
         .request_id
         .ok_or(Error::new("registration-request-required", 400))?;
     let store = ctx.store.clone();
-    let uri = blocking(move || store.issue_named_registration(&name, &request)).await?;
+    let uri =
+        blocking(move || store.issue_named_registration(&name, &request, local.as_deref())).await?;
     Ok(Json(json!({"uri":uri})))
 }
 async fn revoke(

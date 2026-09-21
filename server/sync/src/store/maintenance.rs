@@ -9,6 +9,32 @@ use serde::Serialize;
 pub struct MaintenanceResult {
     pub min_retained_seq: Sequence,
     pub objects_removed: u64,
+    pub wal_checkpoint: WalCheckpoint,
+}
+/// What `PRAGMA wal_checkpoint` reported: whether a reader or writer blocked it,
+/// how many frames the log held, and how many reached the database file.
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WalCheckpoint {
+    pub busy: i64,
+    pub log_frames: i64,
+    pub checkpointed_frames: i64,
+}
+impl WalCheckpoint {
+    pub fn incomplete(&self) -> bool {
+        self.busy != 0 || self.checkpointed_frames < self.log_frames
+    }
+}
+fn checkpoint(db: &Connection) -> Result<WalCheckpoint> {
+    let (busy, log_frames, checkpointed_frames) =
+        db.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?;
+    Ok(WalCheckpoint {
+        busy,
+        log_frames,
+        checkpointed_frames,
+    })
 }
 impl Store {
     pub(super) fn drain_staging_trash(&self, db: &Connection) -> Result<()> {
@@ -142,6 +168,7 @@ impl Store {
             CREATE TEMP TABLE IF NOT EXISTS gc_alive(hash TEXT PRIMARY KEY); DELETE FROM gc_alive;
             WITH RECURSIVE edges(source,target) AS (
                 SELECT hash,object FROM descriptors UNION ALL SELECT hash,json_extract(body,'$.dependencyRoot') FROM descriptors UNION ALL SELECT hash,json_extract(body,'$.relationRoot') FROM descriptors
+                UNION ALL SELECT descriptors.hash,json_each.value FROM descriptors,json_each(descriptors.body,'$.dependencies')
                 UNION ALL SELECT root,child FROM reference_children UNION ALL SELECT root,object FROM reference_objects
             ), alive(hash) AS (SELECT hash FROM gc_roots UNION SELECT target FROM edges JOIN alive ON source=alive.hash WHERE target IS NOT NULL)
             INSERT INTO gc_alive SELECT hash FROM alive;
@@ -179,10 +206,20 @@ impl Store {
             }
             db.execute("DELETE FROM object_trash WHERE hash=?1", [&digest])?;
         }
+        // A write-ahead log that never folds back grows without bound. Its three
+        // result values travel with the maintenance outcome so a checkpoint the
+        // database refuses is visible instead of silent.
+        let wal_checkpoint = checkpoint(&db)?;
         Ok(MaintenanceResult {
             min_retained_seq: floor,
             objects_removed: removed,
+            wal_checkpoint,
         })
+    }
+    /// Folds the write-ahead log back into the database file. Called on a clean
+    /// stop so the next start does not rebuild an index over stale frames.
+    pub fn checkpoint_wal(&self) -> Result<WalCheckpoint> {
+        checkpoint(&*self.db()?)
     }
     /// Call only after restoring a stopped, complete server-directory backup.
     /// Old clients must reconcile against the restored checkpoint under a new epoch.

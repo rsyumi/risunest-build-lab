@@ -12,6 +12,7 @@ const mocks = vi.hoisted(() => ({
     selectedId: 0,
     confirm: vi.fn(async () => true),
     permissionValues: new Map<string, unknown>(),
+    providers: new Map<string, Function>(),
 }))
 
 const ownedStorageStub = {
@@ -42,7 +43,7 @@ vi.mock('../plugins.svelte', () => {
             setItem: vi.fn(), removeItem: vi.fn(), clear: vi.fn(), key: vi.fn(),
             keys: vi.fn(), length: vi.fn(),
         },
-        pluginV2: { providers: new Map(), providerOptions: new Map() },
+        pluginV2: { providers: mocks.providers, providerOptions: new Map() },
     }
 })
 vi.mock('src/ts/storage/database.svelte', () => ({ getDatabase: () => mocks.database }))
@@ -71,7 +72,7 @@ vi.mock('src/ts/util', () => ({ sleep: vi.fn(async () => undefined) }))
 vi.mock('src/lang', () => ({ language: {
     fetchLogConsent: '{}', getFullDatabaseConsent: '{}', mainDomAccessConsent: '{}',
     replacerPermissionConsent: '{}', providerPermissionConsent: '{}', sendChatConsent: '{}',
-    inlayPermissionConsent: '{}',
+    inlayPermissionConsent: '{}', pluginProviderPermissionDenied: 'permission denied',
 } }))
 vi.mock('src/ts/globalApi.svelte', () => ({
     checkCharOrder: vi.fn(), forageStorage: {}, getFetchLogs: vi.fn(),
@@ -79,7 +80,7 @@ vi.mock('src/ts/globalApi.svelte', () => ({
 vi.mock('src/ts/gui/colorscheme', () => ({
     changeColorScheme: vi.fn(), updateColorScheme: vi.fn(), updateTextThemeAndCSS: vi.fn(),
 }))
-vi.mock('src/ts/platform', () => ({ isNodeServer: false, isTauri: false }))
+vi.mock('src/ts/platform', () => ({ isTauri: false }))
 vi.mock('src/ts/process/mcp/pluginmcp', () => ({
     registerMCPModule: vi.fn(), unregisterMCPModule: vi.fn(),
 }))
@@ -258,6 +259,7 @@ function __postToParent(message) {
             guestEvaluations.push(guestEvaluation)
         })
         mocks.permissionValues.clear()
+        mocks.providers.clear()
         guestEvaluations = []
         mocks.confirm.mockResolvedValue(true)
         mocks.selectedId = 0
@@ -334,6 +336,28 @@ function __postToParent(message) {
         await startFixture()
 
         expect(mocks.confirm).toHaveBeenCalledTimes(2)
+    })
+
+    it('does not invoke a provider callback when provider permission is denied', async () => {
+        const name = 'denied-provider-fixture'
+        mocks.confirm.mockResolvedValue(false)
+        await startFixture(name, `
+            globalThis.providerCalls = 0;
+            globalThis.rpcReady = risuai.addProvider('denied-provider', async () => {
+                globalThis.providerCalls += 1;
+                return { success: true, content: 'unexpected' };
+            });
+        `)
+
+        const provider = mocks.providers.get('denied-provider')
+        expect(provider).toBeTypeOf('function')
+        const result = await provider!({
+            prompt_chat: [{ role: 'user', content: 'sensitive sentinel' }],
+            mode: 'chat',
+        })
+
+        expect(result).toEqual({ success: false, content: 'permission denied' })
+        expect(await guest(name, 'return globalThis.providerCalls')).toBe(0)
     })
 
     it('binds a SafeElement listener to its element and keeps SafeDocument at document scope', async () => {

@@ -65,21 +65,6 @@ fn the_account_token_never_reaches_a_snapshot_an_export_or_a_sync_capture() {
         )
         .expect("store the asset ledger");
 
-    let generation = active_generation(&store.connection).expect("read active generation");
-    let authority = json!({
-        "format": "v2",
-        "migrationId": "synthetic-vault-boundary",
-        "compatibilityHash": "a".repeat(64),
-    })
-    .to_string();
-    store
-        .connection
-        .execute(
-            "UPDATE asset_repository_authority SET value=?2 WHERE generation=?1",
-            params![generation, authority],
-        )
-        .expect("stamp the capture authority");
-
     let snapshot = store
         .snapshot_create("vault-boundary")
         .expect("create a snapshot");
@@ -102,7 +87,9 @@ fn the_account_token_never_reaches_a_snapshot_an_export_or_a_sync_capture() {
         .expect("capture the library");
     assert!(captured.projected_records > 0);
 
-    let vault_file = root.join("account-credentials").join("official-account");
+    let vault_file = root
+        .join("account-credentials")
+        .join(crate::cleanup_secrets::account_id(&root));
     assert!(vault_file.is_file(), "the vault slot must hold the token");
     assert!(
         !contains_token(&vault_file),

@@ -1698,8 +1698,6 @@ fn leased_family_canonical(store: &PersistentStore, lease: &str) -> Vec<u8> {
             .expect("list leased asset owner heads"),
         "assetOwnerHead": store.read_asset_owner_head(&owner, Some(lease))
             .expect("read leased asset owner head"),
-        "assetRepositoryAuthority": store.read_asset_repository_authority(Some(lease))
-            .expect("read leased asset repository authority"),
         "materialized": store.materialize_lease(lease).expect("materialize leased revision"),
     }))
     .expect("serialize leased record families")
@@ -1711,7 +1709,9 @@ fn sha256(bytes: &[u8]) -> String {
 
 #[test]
 fn wal_lease_keeps_every_final_record_family_and_native_export_canonical() {
-    let (_directory, mut store, database) = open_fixture();
+    use crate::asset_repository::{owner_manifest_codec, PayloadCas};
+
+    let (directory, mut store, database) = open_fixture();
     let alias = AssetAlias {
         key: "assets/lease.bin".to_owned(),
         object_hash: Some("11".repeat(32)),
@@ -1725,9 +1725,25 @@ fn wal_lease_keeps_every_final_record_family_and_native_export_canonical() {
         height: None,
         metadata: json!({ "fixture": "lease" }),
     };
+    let manifest = PayloadCas::new(directory.path())
+        .expect("open payload CAS")
+        .prepare_bytes(
+            &owner_manifest_codec::encode_owner_manifest(&[
+                owner_manifest_codec::OwnerManifestEntry {
+                    tuple: [
+                        "lease".to_owned(),
+                        "assets/lease.bin".to_owned(),
+                        "BIN".to_owned(),
+                    ],
+                    payload_hash: Some(hex::decode("11".repeat(32)).unwrap().try_into().unwrap()),
+                },
+            ])
+            .unwrap(),
+        )
+        .expect("prepare owner manifest");
     let owner = AssetOwnerHead::present(
         AssetOwnerLocator::RootModuleAssets { index: 0 },
-        "22".repeat(32),
+        manifest.content_hash,
         1,
     );
     let mut final_root = staged_root(&database);

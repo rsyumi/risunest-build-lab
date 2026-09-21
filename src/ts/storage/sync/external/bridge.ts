@@ -4,7 +4,6 @@ import type {
     ExternalCapturePolicy,
     DecimalString,
     ExternalConnectionResult,
-    ExternalAuthorizationPending,
     ExternalHistoryPage,
     ExternalHistoryDeletePreparation,
     ExternalJobSummary,
@@ -27,6 +26,9 @@ import type {
     ExternalConflictPage,
     ExternalConflictSource,
     ExternalExitCapture,
+    ExternalAuthorizationOutcome,
+    ExternalFolderPage,
+    ExternalFolderSelection,
 } from './types'
 
 export class ExternalStorageUnsupportedError extends Error {
@@ -116,7 +118,7 @@ export class ExternalStorageBridge {
         authorizationId: string,
         redirectUrl?: string,
         clientSecret?: string,
-    ): Promise<ExternalConnectionResult | ExternalAuthorizationPending> {
+    ): Promise<ExternalAuthorizationOutcome> {
         return this.native('external_storage_complete_authorization', {
             request: {
                 authorizationId,
@@ -124,6 +126,18 @@ export class ExternalStorageBridge {
                 ...(clientSecret ? { clientSecret } : {}),
             },
         })
+    }
+
+    listFolders(request: { selectionId: string; folder?: string; cursor?: string }): Promise<ExternalFolderPage> {
+        return this.native('external_storage_list_folders', { request })
+    }
+
+    selectFolder(request: { selectionId: string; folder: string }): Promise<ExternalFolderSelection> {
+        return this.native('external_storage_select_folder', { request })
+    }
+
+    cancelFolderSelection(selectionId: string): Promise<void> {
+        return this.native('external_storage_cancel_folder_selection', { selectionId })
     }
 
     cancelAuthorization(authorizationId: string): Promise<void> {

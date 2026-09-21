@@ -47,7 +47,7 @@ export function objectPhysicalKey(contentHash: string): string {
     if (!/^[0-9a-f]{64}$/.test(contentHash)) {
         throw new TypeError('Content hash must be 64 lowercase hexadecimal characters')
     }
-    return `assets-v2/objects/${contentHash.slice(0, 2)}/${contentHash.slice(2)}`
+    return `assets/objects/${contentHash.slice(0, 2)}/${contentHash.slice(2)}`
 }
 
 async function verifyObject(

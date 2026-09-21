@@ -12,7 +12,7 @@ describe('external storage connection request', () => {
     it('keeps a capture policy off synchronization connections and requires one for a backup', () => {
         expect(() => buildPrepareConnectionRequest({
             providerId: 'google_drive',
-            values: { folderId: 'folder', projectId: 'project', clientId: 'client' },
+            values: { folderName: 'RisuNest', projectId: 'project', clientId: 'client' },
             platform: 'windows', mode: 'create', purpose: 'sync',
             capturePolicy: { hypa: true, localPlugins: false, localSettings: false },
             acknowledgements: [],
@@ -70,7 +70,7 @@ describe('external storage connection request', () => {
         const request = buildPrepareConnectionRequest({
             providerId: 'google_drive',
             values: {
-                folderId: 'folder', space: 'drive', projectId: 'project',
+                folderName: 'RisuNest', space: 'drive', projectId: 'project',
                 clientId: 'web-client.apps.googleusercontent.com',
                 oauthRedirectUri: 'https://update.rsyumi.workers.dev/oauth/google-drive-callback',
                 clientSecret: 'must-stay-transient',
@@ -87,6 +87,13 @@ describe('external storage connection request', () => {
             android: 'web-client.apps.googleusercontent.com',
         })
         expect(JSON.stringify(request)).not.toContain('must-stay-transient')
+    })
+
+    it('does not copy a blank folder name into provider location', () => {
+        const config = buildConnectionConfig('google_drive', {
+            folderName: '   ', space: 'drive', projectId: 'project', clientId: 'client',
+        }, 'windows')
+        expect(config.location).not.toHaveProperty('folderName')
     })
 
     it('does not place provider secrets in the preparation DTO', () => {

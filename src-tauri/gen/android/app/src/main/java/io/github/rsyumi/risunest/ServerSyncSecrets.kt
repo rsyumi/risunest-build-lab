@@ -14,6 +14,17 @@ internal object ServerSyncSecrets {
 
   @JvmStatic external fun initialize()
 
+  @JvmStatic
+  @Synchronized
+  fun removeKeys() {
+    val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+    removeOwnedKeys { alias -> store.deleteEntry(alias) }
+  }
+
+  internal fun removeOwnedKeys(remove: (String) -> Unit) {
+    for (alias in listOf(ALIAS)) remove(alias)
+  }
+
   @Synchronized
   private fun key(): SecretKey {
     val store = KeyStore.getInstance("AndroidKeyStore").apply { load(null) }

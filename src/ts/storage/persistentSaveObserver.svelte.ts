@@ -7,6 +7,17 @@ interface PersistentSaveObserverDependencies {
     markDirty(estimatedChangedBytes: number): void
 }
 
+function enumerableKeys(value: object | null | undefined): string[] {
+    if (!value) return []
+    // Track key additions/deletions without subscribing the parent effect to
+    // values read by Svelte's property-descriptor trap during enumeration.
+    return Reflect.ownKeys(value).filter((key): key is string =>
+        typeof key === 'string' && untrack(() =>
+            Object.prototype.propertyIsEnumerable.call(value, key),
+        ),
+    )
+}
+
 /** Subscribe to arbitrary compatibility mutations without copying their values. */
 function subscribeDeep(value: unknown): void {
     if (value === null || typeof value !== 'object') return
@@ -25,7 +36,7 @@ export function observePersistentSaveChanges(
     return $effect.root(() => {
         $effect(() => {
             const database = dependencies.readDatabase()
-            for (const key in database) {
+            for (const key of enumerableKeys(database)) {
                 if (key !== 'characters') {
                     $effect(() => {
                         subscribeDeep(database[key])
@@ -41,7 +52,7 @@ export function observePersistentSaveChanges(
         $effect(() => {
             const character = dependencies.readSelectedCharacter()
             if (character) {
-                for (const key in character) {
+                for (const key of enumerableKeys(character)) {
                     if (key !== 'chats') subscribeDeep(character[key])
                 }
             }
@@ -56,7 +67,7 @@ export function observePersistentSaveChanges(
             for (let index = 0; index < chats.length; index++) {
                 $effect(() => {
                     const chat = chats[index]
-                    for (const key in chat) {
+                    for (const key of enumerableKeys(chat)) {
                         if (key !== 'message') subscribeDeep(chat[key])
                     }
                     untrack(() => dependencies.markDirty(0))
@@ -65,7 +76,7 @@ export function observePersistentSaveChanges(
                     const chat = chats[index]
                     // Metadata-only selected shells deliberately expose a
                     // non-enumerable message getter which must not be invoked.
-                    for (const key in chat) {
+                    for (const key of enumerableKeys(chat)) {
                         if (key === 'message') {
                             const messages = chat.message
                             if (Array.isArray(messages)) {

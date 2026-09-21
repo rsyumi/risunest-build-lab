@@ -32,7 +32,8 @@ const DESCRIPTOR_ROLE: &str = "descriptor";
 const FOLDER_MIME: &str = "application/vnd.google-apps.folder";
 const OCTET_STREAM: &str = "application/octet-stream";
 const FILE_FIELDS: &str = "id,size,version,sha256Checksum,appProperties";
-const LIST_FIELDS: &str = "nextPageToken,incompleteSearch,files(id,size,version,sha256Checksum,appProperties)";
+const LIST_FIELDS: &str =
+    "nextPageToken,incompleteSearch,files(id,size,version,sha256Checksum,appProperties)";
 const UPLOAD_ALIGNMENT: u64 = 256 * 1024;
 const UPLOAD_CHUNK_BYTES: u64 = 32 * UPLOAD_ALIGNMENT;
 /// Documented ceiling of a single multipart or simple upload request.
@@ -111,8 +112,13 @@ struct Session<'a> {
     token: &'a Mutex<Option<CachedToken>>,
 }
 
-pub(super) struct GoogleDrive {
+pub(crate) struct GoogleDrive {
     dependencies: Dependencies,
+}
+
+pub(crate) struct SetupFolder {
+    pub id: String,
+    pub name: String,
 }
 
 /// Opaque upload state sealed in the vault. The session URI is a bearer
@@ -163,8 +169,150 @@ fn parse_confirmed_offset(headers: &BTreeMap<String, String>) -> Result<u64> {
 }
 
 impl GoogleDrive {
-    pub(super) fn new(dependencies: Dependencies) -> Self {
+    pub(crate) fn new(dependencies: Dependencies) -> Self {
         Self { dependencies }
+    }
+
+    fn setup_context(
+        &self,
+        config: &ConnectionConfig,
+        secret: &SecretRef,
+        account_id: &str,
+        folder_id: &str,
+    ) -> Result<(Settings, AccountKey, Mutex<Option<auth::CachedToken>>)> {
+        let mut bound = config.clone();
+        bound.account_id = account_id.to_owned();
+        bound.location.remove("folderName");
+        bound.location.insert("folderId".into(), folder_id.into());
+        let settings = Settings::parse(&bound)?;
+        let account = AccountKey::new(config::PROVIDER_ID, &settings.api("/")?, account_id)?;
+        let _ = secret;
+        Ok((settings, account, Mutex::new(None)))
+    }
+
+    pub(crate) async fn inspect_setup_folder(
+        &self,
+        config: &ConnectionConfig,
+        secret: &SecretRef,
+        account_id: &str,
+        folder_id: &str,
+        cancel: &Cancellation,
+    ) -> Result<SetupFolder> {
+        let (settings, account, token) =
+            self.setup_context(config, secret, account_id, folder_id)?;
+        let session = Session {
+            settings: &settings,
+            secret,
+            account: &account,
+            token: &token,
+        };
+        let file: DriveFile = self
+            .control(
+                session,
+                &with_query(
+                    settings.api(&format!("/files/{folder_id}"))?,
+                    &[("fields", "id,name,mimeType,trashed,driveId")],
+                ),
+                ProviderOperation::Metadata,
+                cancel,
+            )
+            .await
+            .map_err(|error| match error.kind {
+                ErrorKind::NotFound | ErrorKind::Unauthorized => {
+                    ProviderError::new(ErrorKind::FolderInaccessible)
+                }
+                _ => error,
+            })?;
+        if file.file_id()? != folder_id
+            || file.mime_type.as_deref() != Some(FOLDER_MIME)
+            || file.trashed == Some(true)
+        {
+            return Err(ProviderError::new(ErrorKind::FolderInaccessible));
+        }
+        if file.drive_id.as_ref().is_some_and(|id| !id.is_empty()) {
+            return Err(ProviderError::new(ErrorKind::FolderUnsupportedLocation));
+        }
+        let name = file
+            .name
+            .filter(|name| !name.is_empty())
+            .ok_or_else(corrupt)?;
+        Ok(SetupFolder {
+            id: folder_id.to_owned(),
+            name,
+        })
+    }
+
+    pub(crate) async fn create_setup_folder(
+        &self,
+        config: &ConnectionConfig,
+        secret: &SecretRef,
+        account_id: &str,
+        name: &str,
+        cancel: &Cancellation,
+    ) -> Result<SetupFolder> {
+        let (settings, account, token) =
+            self.setup_context(config, secret, account_id, "pending")?;
+        let session = Session {
+            settings: &settings,
+            secret,
+            account: &account,
+            token: &token,
+        };
+        let url = with_query(
+            settings.api("/files")?,
+            &[("fields", "id,name,mimeType,trashed,driveId")],
+        );
+        let body =
+            serde_json::to_vec(&serde_json::json!({ "name": name, "mimeType": FOLDER_MIME }))
+                .map_err(|_| corrupt())?;
+        let access = self.token(session, false, cancel).await?;
+        let mut headers = authorized_headers(&access);
+        headers.insert(
+            "content-type".into(),
+            "application/json; charset=UTF-8".into(),
+        );
+        let length = body.len() as u64;
+        let request = HttpRequest {
+            method: reqwest::Method::POST,
+            url,
+            headers,
+            body: Some(Box::pin(std::io::Cursor::new(body))),
+            content_length: Some(length),
+            operation: ProviderOperation::Create,
+            account: account.clone(),
+            api_request: true,
+            mybox_charge: None,
+            control: true,
+        };
+        let mut response = self.dispatch(request, cancel).await?;
+        if let Err(error) = self
+            .require_status(&mut response, &[200, 201], &account, cancel)
+            .await
+        {
+            return Err(match error.kind {
+                ErrorKind::Cancelled | ErrorKind::ReauthRequired | ErrorKind::Unauthorized => error,
+                _ => ProviderError::new(ErrorKind::FolderCreateFailed),
+            });
+        }
+        let file: DriveFile = wire::json(&mut response, cancel).await?;
+        if file.mime_type.as_deref() != Some(FOLDER_MIME)
+            || file.trashed == Some(true)
+            || file.drive_id.is_some()
+        {
+            return Err(ProviderError::new(ErrorKind::FolderCreateFailed));
+        }
+        let id = file
+            .id
+            .filter(|id| config::is_drive_id(id))
+            .ok_or_else(|| ProviderError::new(ErrorKind::FolderCreateFailed))?;
+        let returned_name = file
+            .name
+            .filter(|value| value == name)
+            .ok_or_else(|| ProviderError::new(ErrorKind::FolderCreateFailed))?;
+        Ok(SetupFolder {
+            id,
+            name: returned_name,
+        })
     }
     fn now_ms(&self) -> u64 {
         self.dependencies.clock.now_ms()
@@ -254,7 +402,8 @@ impl GoogleDrive {
                 refreshed = true;
                 continue;
             }
-            self.require_status(&mut response, allowed, session.account, cancel).await?;
+            self.require_status(&mut response, allowed, session.account, cancel)
+                .await?;
             return Ok(response);
         }
     }
@@ -316,13 +465,17 @@ impl GoogleDrive {
                 parameters.push(("pageToken", token));
             }
             let url = self.list_url(session.settings, query, &parameters)?;
-            let page: FileList = self.control(session, &url, ProviderOperation::List, cancel).await?;
+            let page: FileList = self
+                .control(session, &url, ProviderOperation::List, cancel)
+                .await?;
             page.validate_page(cursor.as_deref())?;
             if files.len().saturating_add(page.files.len()) > maximum {
                 return Err(corrupt());
             }
             files.extend(page.files);
-            let Some(next) = page.next_page_token else { return Ok(files); };
+            let Some(next) = page.next_page_token else {
+                return Ok(files);
+            };
             if !seen.insert(next.clone()) {
                 return Err(corrupt());
             }
@@ -415,7 +568,8 @@ impl GoogleDrive {
             control: true,
         };
         let mut response = self.dispatch(request, cancel).await?;
-        self.require_status(&mut response, &[200, 201], session.account, cancel).await?;
+        self.require_status(&mut response, &[200, 201], session.account, cancel)
+            .await?;
         let location = response.headers.get("location").ok_or_else(corrupt)?;
         let session_uri = url::Url::options()
             .base_url(Some(&url))
@@ -490,7 +644,9 @@ impl GoogleDrive {
                 &response.headers,
             )?)),
             404 | 410 => Ok(SessionStatus::Gone),
-            _ => Err(self.classify_response(&mut response, session.account, cancel).await?),
+            _ => Err(self
+                .classify_response(&mut response, session.account, cancel)
+                .await?),
         }
     }
 
@@ -552,7 +708,11 @@ impl GoogleDrive {
                 404 | 410 => {
                     return Err(common::error(ErrorKind::NotFound, response.status));
                 }
-                _ => return Err(self.classify_response(&mut response, session.account, cancel).await?),
+                _ => {
+                    return Err(self
+                        .classify_response(&mut response, session.account, cancel)
+                        .await?)
+                }
             }
         }
         match self
@@ -616,7 +776,10 @@ impl GoogleDrive {
             session.settings.folder_id,
             config::escape_query_literal(&intent.object_id)?
         );
-        let mut files = self.list_control_files(session, &query, 2, cancel).await?.into_iter();
+        let mut files = self
+            .list_control_files(session, &query, 2, cancel)
+            .await?
+            .into_iter();
         let Some(file) = files.next() else {
             return Ok(None);
         };
@@ -665,7 +828,8 @@ impl GoogleDrive {
             control: false,
         };
         let mut response = self.dispatch(request, cancel).await?;
-        self.require_status(&mut response, &[200, 201], session.account, cancel).await?;
+        self.require_status(&mut response, &[200, 201], session.account, cancel)
+            .await?;
         let file: DriveFile = wire::json(&mut response, cancel).await?;
         self.completed_receipt(session.settings, intent, &file, Some(file_id))
     }
@@ -959,7 +1123,8 @@ impl Provider for GoogleDrive {
                 control: false,
             };
             let mut response = self.dispatch(request, cancel).await?;
-            self.require_status(&mut response, &[200], session.account, cancel).await?;
+            self.require_status(&mut response, &[200], session.account, cancel)
+                .await?;
             let declared = common::content_length(&response.headers)?;
             if declared.is_some_and(|declared| declared != length) {
                 return Err(corrupt());
@@ -998,7 +1163,10 @@ impl Provider for GoogleDrive {
             self.check_intent(intent)?;
             let session = context.session();
             if intent.role == ObjectRole::Descriptor
-                && self.existing_object(session, intent, cancel).await?.is_some()
+                && self
+                    .existing_object(session, intent, cancel)
+                    .await?
+                    .is_some()
             {
                 // Descriptor retries must converge before opening a new upload
                 // session, otherwise a lost completion can create a duplicate.
@@ -1166,7 +1334,8 @@ impl Provider for GoogleDrive {
             // Exactly one write attempt: an ambiguous outcome is reported so the
             // owner re-observes the head instead of writing again.
             let mut response = self.dispatch(request, cancel).await?;
-            self.require_status(&mut response, &[200, 201], session.account, cancel).await?;
+            self.require_status(&mut response, &[200, 201], session.account, cancel)
+                .await?;
             let file: DriveFile = wire::json(&mut response, cancel).await?;
             if file.file_id()? != file_id {
                 return Err(corrupt());
@@ -1381,7 +1550,6 @@ impl Provider for GoogleDrive {
             object: HEAD_OBJECT.to_owned(),
         })
     }
-
 }
 
 pub(super) fn provider(dependencies: Dependencies) -> Arc<dyn Provider> {

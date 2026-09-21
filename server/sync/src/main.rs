@@ -245,12 +245,23 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             let management =
                 Management::start_with_workload(store.clone(), origin, workload.clone()).await?;
             let mut stopped = management.shutdown_receiver();
+            let stopping = store.clone();
             let result = axum::serve(listener, http::router_with_workload(store, workload))
                 .with_graceful_shutdown(async move {
                     tokio::select! { _ = shutdown => (), _ = stopped.changed() => () }
                 })
                 .await;
             management.close().await;
+            // A clean stop folds the write-ahead log back, so the next start does
+            // not rebuild its index over frames nothing needs.
+            match stopping.checkpoint_wal() {
+                Ok(checkpoint) if checkpoint.incomplete() => eprintln!(
+                    "sync shutdown wal checkpoint incomplete: busy={} log={} checkpointed={}",
+                    checkpoint.busy, checkpoint.log_frames, checkpoint.checkpointed_frames
+                ),
+                Ok(_) => (),
+                Err(error) => eprintln!("sync shutdown wal checkpoint failed: {}", error.code),
+            }
             result?;
         }
         _ => unreachable!(),

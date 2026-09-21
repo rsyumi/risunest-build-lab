@@ -8,6 +8,7 @@
     import SettingGroup from '../RisuNest/SettingGroup.svelte'
     import SettingRow from '../RisuNest/SettingRow.svelte'
     import SettingButton from '../RisuNest/SettingButton.svelte'
+    import SettingProgress from '../RisuNest/SettingProgress.svelte'
     import { getNativeOfficialAccountFlow } from 'src/ts/storage/sync/nativeOfficialAccountFlow'
     import { DBState } from 'src/ts/stores.svelte'
     import {
@@ -32,7 +33,10 @@
         dismissNativeFileOperationOutcome,
         nativeFileOperationOutcomeShown,
     } from 'src/ts/storage/nativeFileJobManager'
-    import { nativeFileJobProgressText } from 'src/ts/gui/nativeFileJobProgress'
+    import {
+        nativeFileJobProgressText,
+        nativeFileJobTitle,
+    } from 'src/ts/gui/nativeFileJobProgress'
 
     let nativeAccountBusy = $state(false)
     let nativePublishController = $state<AbortController | null>(null)
@@ -179,44 +183,45 @@
 </script>
 
 <SettingGroup id="risunest-backup" title={language.risuNest.backup.title}>
-    <SettingRow
-        data-backup-group="files"
-        label={language.risuNest.backup.groupFiles}
-        help={language.risuNest.backup.filesHelp}
-    >
-        {#snippet below()}
-            {#if risuSaveOperation && inlineOperation}
-                <div
-                    class="mt-1 flex flex-wrap items-center gap-2 text-sm text-textcolor2"
-                    role="status"
-                    aria-live="polite"
-                >
-                    <span>{nativeFileJobProgressText(risuSaveStatus)}</span>
-                    <SettingButton
-                        variant="secondary"
-                        onclick={cancelActiveNativeFileOperation}
-                        >{language.cancelRisuSaveOperation}</SettingButton
-                    >
-                </div>
-            {/if}
-        {/snippet}
-        {#if !isTauri || isTauriDesktop || isTauriAndroid}
+    {#if !isTauri || isTauriDesktop || isTauriAndroid}
+        <SettingRow
+            data-backup-group="files"
+            label={language.risuNest.backup.groupFiles}
+            help={language.risuNest.backup.filesHelp}
+        >
+            {#snippet below()}
+                {#if risuSaveOperation && inlineOperation}
+                    <div class="mt-2">
+                        <SettingProgress
+                            label={nativeFileJobTitle(risuSaveOperation, risuSaveStatus)}
+                            detail={nativeFileJobProgressText(risuSaveStatus)}
+                        >
+                            {#snippet actions()}
+                                <SettingButton
+                                    variant="secondary"
+                                    onclick={cancelActiveNativeFileOperation}
+                                    >{language.cancelRisuSaveOperation}</SettingButton
+                                >
+                            {/snippet}
+                        </SettingProgress>
+                    </div>
+                {/if}
+            {/snippet}
             <SettingButton
                 busy={risuSaveOperation === 'import'}
                 disabled={risuSaveOperation !== null}
                 onclick={() => runRisuSaveOperation('import')}
                 >{language.risuNest.backup.importFile}</SettingButton
             >
-        {/if}
-        {#if !isTauri || isTauriDesktop || isTauriAndroid}
             <SettingButton
+                variant="secondary"
                 busy={risuSaveOperation === 'export'}
                 disabled={risuSaveOperation !== null}
                 onclick={() => runRisuSaveOperation('export')}
                 >{language.risuNest.backup.exportFile}</SettingButton
             >
-        {/if}
-    </SettingRow>
+        </SettingRow>
+    {/if}
     <SettingRow
         data-backup-group="restore"
         label={language.risuNest.backup.groupRestore}
@@ -244,6 +249,7 @@
                 >{language.risuNest.backup.officialPublish}</SettingButton
             >
             <SettingButton
+                variant="secondary"
                 busy={nativeAccountBusy && nativePublishController === null}
                 disabled={nativeAccountBusy}
                 onclick={restoreOfficialBackup}

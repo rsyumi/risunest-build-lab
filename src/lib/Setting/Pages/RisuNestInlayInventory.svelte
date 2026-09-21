@@ -100,14 +100,15 @@
 </script>
 
 {#snippet table(caption: string, rows: InlayInventoryEntry[])}
-    <table data-inlay-inventory-table class="w-full border-t border-darkborderc/55 text-sm">
+    <!-- Fixed layout so both tables place their bar, count and size columns alike. -->
+    <table data-inlay-inventory-table class="w-full table-fixed border-t border-darkborderc/55 text-sm">
         <caption class="px-4 pt-3 pb-1 text-left text-xs text-textcolor2">{caption}</caption>
         <thead>
             <tr class="text-xs text-textcolor2">
                 <th scope="col" class="px-4 py-1 text-left font-normal">{strings.inventoryExtension}</th>
                 <th aria-hidden="true" class="hidden w-[35%] @md:table-cell"></th>
-                <th scope="col" class="px-4 py-1 text-right font-normal">{strings.inventoryCount}</th>
-                <th scope="col" class="px-4 py-1 text-right font-normal">{strings.inventorySize}</th>
+                <th scope="col" class="w-20 px-4 py-1 text-right font-normal">{strings.inventoryCount}</th>
+                <th scope="col" class="w-28 px-4 py-1 text-right font-normal">{strings.inventorySize}</th>
             </tr>
         </thead>
         <tbody>
@@ -139,7 +140,7 @@
         {/if}
     {/snippet}
     {#if loadFailed}
-        <div class="px-4 py-3 text-sm text-textcolor2" role="alert" aria-live="assertive">{strings.inventoryLoadFailed}</div>
+        <div class="px-4 py-3 text-sm text-danger-400" role="alert" aria-live="assertive">{strings.inventoryLoadFailed}</div>
     {/if}
     {#if !inventory}
         <div class="flex justify-center px-4 py-4">
@@ -148,7 +149,7 @@
     {:else if inventory.total.count === 0}
         <div class="px-4 py-3 text-sm text-textcolor2">{strings.inventoryEmpty}</div>
     {:else}
-        <div data-inlay-inventory-summary class="px-4 pt-4 pb-1 text-[1.4rem] leading-tight font-bold tabular-nums">{summary}</div>
+        <div data-inlay-inventory-summary class="p-4 text-[1.7rem] leading-tight font-bold tabular-nums">{summary}</div>
         {@render table(strings.inventoryImages, inventory.images)}
         {#if inventory.others.length > 0}
             {@render table(strings.inventoryOthers, inventory.others)}

@@ -227,9 +227,15 @@ impl Store {
         self.write_connection(&state)
     }
     pub fn issue_registration(&self) -> Result<String> {
-        self.issue_registration_inner("", None)
+        self.issue_registration_inner("", None, None)
     }
-    pub fn issue_named_registration(&self, name: &str, request: &str) -> Result<String> {
+    /// `local` replaces the configured endpoint with a caller-derived loopback address.
+    pub fn issue_named_registration(
+        &self,
+        name: &str,
+        request: &str,
+        local: Option<&str>,
+    ) -> Result<String> {
         if name.trim().is_empty() || name.chars().count() > 80 || name.chars().any(char::is_control)
         {
             return Err(Error::new("invalid-device-name", 400));
@@ -237,23 +243,33 @@ impl Store {
         if request.len() != 64 || !request.bytes().all(|v| v.is_ascii_hexdigit()) {
             return Err(Error::new("invalid-registration-request", 400));
         }
-        self.issue_registration_inner(name.trim(), Some(request))
+        self.issue_registration_inner(name.trim(), Some(request), local)
     }
-    fn issue_registration_inner(&self, name: &str, request: Option<&str>) -> Result<String> {
+    fn issue_registration_inner(
+        &self,
+        name: &str,
+        request: Option<&str>,
+        local: Option<&str>,
+    ) -> Result<String> {
         let _gate = self
             .connection_gate
             .lock()
             .map_err(|_| Error::new("connection-state-unavailable", 503))?;
         let state = self.read_connection()?;
-        let endpoint = state
-            .endpoint
-            .ok_or(Error::new("public-endpoint-not-ready", 409))?;
+        let endpoint = match local {
+            Some(value) => value.to_owned(),
+            None => state
+                .endpoint
+                .ok_or(Error::new("public-endpoint-not-ready", 409))?,
+        };
         let mut registration = Registration {
             endpoint,
             library_id: self.head()?.library_id,
             device_id: "0".repeat(64),
             token: "0".repeat(64),
-            directory: if state.directory_enabled {
+            // A loopback device stays on this computer instead of failing over to
+            // the published internet endpoint.
+            directory: if state.directory_enabled && local.is_none() {
                 state.directory
             } else {
                 None

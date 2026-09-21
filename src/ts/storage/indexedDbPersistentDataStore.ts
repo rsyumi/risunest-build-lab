@@ -22,8 +22,6 @@ import type {
     ConversationWindow,
     ConversationWindowQuery,
     DataRevision,
-    AssetRepositoryAuthorityState,
-    AssetRepositoryMigrationInput,
     PersistentConversationMetadata,
     PersistentDataStore,
     PersistentRevisionLease,
@@ -49,7 +47,6 @@ import {
 } from './persistentDataStore'
 import type { PluginStorageMeta } from '../plugins/pluginOwner'
 import { readPluginStorageMetaOwner } from '../plugins/pluginOwner'
-import { parseAssetRepositoryAuthorityState } from './assetRepositoryAuthority'
 
 const DATABASE_VERSION = 1
 const DATABASE_SCHEMA_ID = 'risunest-persistent-data-v1'
@@ -68,7 +65,6 @@ const INDEXED_GENERATION_STORE_NAMES = [
     'pluginStorageMetadata',
     'assetAliases',
     'assetOwnerHeads',
-    'assetRepositoryAuthority',
 ] as const
 const DATA_STORE_NAMES = ['root', ...INDEXED_GENERATION_STORE_NAMES] as const
 const STORE_NAMES = ['meta', ...DATA_STORE_NAMES] as const
@@ -519,11 +515,6 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
                 'byGeneration',
                 'generation',
             )
-            this.createIndex(
-                transaction.objectStore('assetRepositoryAuthority'),
-                'byGeneration',
-                'generation',
-            )
             transaction.objectStore('meta').put({
                 key: 'schemaIdentity',
                 value: DATABASE_SCHEMA_ID,
@@ -546,10 +537,7 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
             this.database = undefined
         }
 
-        const transaction = this.database.transaction(
-            ['meta', 'root', 'assetRepositoryAuthority'],
-            'readwrite',
-        )
+        const transaction = this.database.transaction(['meta', 'root'], 'readwrite')
         const meta = transaction.objectStore('meta')
         const currentRevision = await requestResult(meta.get('currentRevision'))
         if (!currentRevision) {
@@ -557,14 +545,16 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
             meta.put({ key: 'activeGeneration', value: generation })
             meta.put({ key: 'currentRevision', value: 0 })
             transaction.objectStore('root').put({ key: generation, generation, value: {} })
-            this.putAssetRepositoryAuthority(transaction, generation, { format: 'legacy' })
         }
         await transactionDone(transaction)
         await this.sweepTemporaryGenerations()
     }
 
     private async validateDatabaseSchema(database: IDBDatabase): Promise<void> {
-        if (STORE_NAMES.some((storeName) => !database.objectStoreNames.contains(storeName))) {
+        if (
+            database.objectStoreNames.length !== STORE_NAMES.length
+            || STORE_NAMES.some((storeName) => !database.objectStoreNames.contains(storeName))
+        ) {
             throw new Error('Unsupported RisuNest IndexedDB schema')
         }
         const transaction = database.transaction('meta', 'readonly')
@@ -759,19 +749,6 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
         return this.listAssetAliasesFromTransaction(transaction, revision, generation, input)
     }
 
-    async readAssetRepositoryAuthority(): Promise<Versioned<AssetRepositoryAuthorityState>> {
-        const transaction = this.requireDatabase().transaction(
-            ['meta', 'assetRepositoryAuthority'],
-            'readonly',
-        )
-        const { revision, generation } = await this.readActive(transaction)
-        return this.readAssetRepositoryAuthorityFromTransaction(
-            transaction,
-            revision,
-            generation,
-        )
-    }
-
     async readAssetOwnerHead(
         owner: AssetOwnerLocator,
     ): Promise<Versioned<AssetOwnerHead> | null> {
@@ -836,62 +813,6 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
             transaction.objectStore('assetAliases').delete(
                 this.assetAliasKey(generation, identity.kind, identity.key),
             )
-            this.setActive(transaction, revision, generation)
-            await transactionDone(transaction)
-            return { revision }
-        } catch (error) {
-            try {
-                transaction.abort()
-            } catch {}
-            throw error
-        }
-    }
-
-    async activateAssetRepositoryMigration(
-        input: AssetRepositoryMigrationInput,
-    ): Promise<{ revision: DataRevision }> {
-        const authority = parseAssetRepositoryAuthorityState({
-            format: 'v2',
-            migrationId: input.migrationId,
-            compatibilityHash: input.compatibilityHash,
-        })
-        for (const alias of input.assetAliases) validateAssetAlias(alias)
-        const {
-            characters,
-            botPresets: _botPresets,
-            pluginCustomStorage: _pluginStorage,
-            pluginStorageMeta: _pluginStorageMeta,
-            ...root
-        } = input.database
-        const characterDetails = characters.map(({ chats: _chats, ...detail }) => detail)
-        validateOwnerHeadsForCommit({
-            expectedRevision: input.sourceRevision,
-            root,
-            characterDetails,
-            assetOwnerHeads: input.assetOwnerHeads,
-        })
-
-        const transaction = this.requireDatabase().transaction([...STORE_NAMES], 'readwrite')
-        try {
-            const active = await this.readActive(transaction)
-            if (active.revision !== input.sourceRevision) {
-                throw new RevisionConflictError(input.sourceRevision, active.revision)
-            }
-            const revision = active.revision + 1
-            const generation = this.generationFor(revision)
-            await this.stageDatabase(transaction, input.database, generation, input.assetAliases)
-            this.putAssetRepositoryAuthority(transaction, generation, {
-                format: 'preparing',
-                migrationId: input.migrationId,
-                sourceRevision: input.sourceRevision,
-            })
-            for (const head of input.assetOwnerHeads) {
-                this.putAssetOwnerHead(transaction, generation, head)
-            }
-            this.putAssetRepositoryAuthority(transaction, generation, authority)
-            if (!(await this.generationIsLeased(transaction, active.generation))) {
-                await this.deleteGenerationFromTransaction(transaction, active.generation)
-            }
             this.setActive(transaction, revision, generation)
             await transactionDone(transaction)
             return { revision }
@@ -1441,19 +1362,6 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
                     input,
                 )
             },
-            readAssetRepositoryAuthority: async () => {
-                assertActive()
-                const transaction = this.requireDatabase().transaction(
-                    ['meta', 'assetRepositoryAuthority'],
-                    'readonly',
-                )
-                await this.validateSnapshotLease(transaction, lease, generation, revision)
-                return this.readAssetRepositoryAuthorityFromTransaction(
-                    transaction,
-                    revision,
-                    generation,
-                )
-            },
             readAssetOwnerHead: async (owner) => {
                 assertActive()
                 const transaction = this.requireDatabase().transaction(
@@ -1658,25 +1566,6 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
         }
     }
 
-    private async readAssetRepositoryAuthorityFromTransaction(
-        transaction: IDBTransaction,
-        revision: DataRevision,
-        generation: string,
-    ): Promise<Versioned<AssetRepositoryAuthorityState>> {
-        const record = (await requestResult(
-            transaction.objectStore('assetRepositoryAuthority').get(generation),
-        )) as StoredRecord<AssetRepositoryAuthorityState> | undefined
-        await transactionDone(transaction)
-        if (!record) return { revision, value: { format: 'legacy' } }
-        if (record.generation !== generation) {
-            throw new Error('Persistent asset repository authority marker generation is invalid')
-        }
-        return {
-            revision,
-            value: parseAssetRepositoryAuthorityState(record.value),
-        }
-    }
-
     private async readAssetOwnerHeadFromTransaction(
         transaction: IDBTransaction,
         revision: DataRevision,
@@ -1834,18 +1723,6 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
             generation,
             value: structuredClone(head),
         } satisfies StoredRecord<AssetOwnerHead>)
-    }
-
-    private putAssetRepositoryAuthority(
-        transaction: IDBTransaction,
-        generation: string,
-        authority: AssetRepositoryAuthorityState,
-    ): void {
-        transaction.objectStore('assetRepositoryAuthority').put({
-            key: generation,
-            generation,
-            value: structuredClone(authority),
-        } satisfies StoredRecord<AssetRepositoryAuthorityState>)
     }
 
     private deleteAssetOwnerHeadKind(
@@ -2227,26 +2104,11 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
             throw new TypeError('Persistent root generation does not match its lookup key')
         }
 
-        const assetAuthorityRecord = (await requestResult(
-            transaction.objectStore('assetRepositoryAuthority').get(sourceGeneration),
-        )) as StoredRecord<AssetRepositoryAuthorityState> | undefined
-        if (assetAuthorityRecord && assetAuthorityRecord.generation !== sourceGeneration) {
-            throw new TypeError(
-                'Persistent asset repository authority marker generation is invalid',
-            )
-        }
-        const assetAuthority = assetAuthorityRecord
-            ? parseAssetRepositoryAuthorityState(assetAuthorityRecord.value)
-            : { format: 'legacy' as const }
-        if (assetAuthority.format === 'preparing') {
-            throw new Error('Active asset repository generation cannot be preparing')
-        }
         await this.copyGeneration(
             transaction.objectStore('assetAliases'),
             sourceGeneration,
             targetGeneration,
         )
-        this.putAssetRepositoryAuthority(transaction, targetGeneration, assetAuthority)
 
         const ownerHeadRecords = (await requestResult(
             transaction.objectStore('assetOwnerHeads').index('byGeneration').getAll(sourceGeneration),
@@ -2327,7 +2189,6 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
             ...root
         } = databaseValue as Database & { pluginStorageMeta?: PluginStorageMeta }
         this.putRoot(transaction, generation, root)
-        this.putAssetRepositoryAuthority(transaction, generation, { format: 'legacy' })
         this.writePresetRows(transaction, generation, botPresets ?? [])
         if (pluginStorageValues) {
             this.writePluginStorageValueRows(transaction, generation, pluginStorageValues)

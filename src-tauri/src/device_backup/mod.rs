@@ -163,6 +163,28 @@ impl DeviceBackupState {
         }
     }
 
+    pub(crate) fn release_cleanup_gates(&self) -> Result<()> {
+        self.maintenance_guard.lock().map_err(|_| error("device-storage-failed", "Device gate is unavailable"))?.take();
+        self.startup_admission.lock().map_err(|_| error("device-storage-failed", "Device gate is unavailable"))?.take();
+        Ok(())
+    }
+
+    pub(crate) fn close_for_cleanup(&self) -> Result<()> {
+        let mut inner = self.inner.lock().map_err(|_| error("device-storage-failed", "Device state is unavailable"))?;
+        inner.connection.take();
+        inner.cold_session = None;
+        inner.reconciled = false;
+        inner.initialization_error = Some(error("cleanup-pending", "Device cleanup is pending"));
+        Ok(())
+    }
+
+    pub(crate) fn reopen_after_cleanup(&self) -> Result<()> {
+        let mut inner = self.inner.lock().map_err(|_| error("device-storage-failed", "Device state is unavailable"))?;
+        let connection = open(&self.repository_root.join("device-backup"))?;
+        *inner = Inner { connection: Some(connection), initialization_error: None, reconciled: false, cold_session: None };
+        Ok(())
+    }
+
     pub(crate) fn repository_root(&self) -> &Path {
         &self.repository_root
     }

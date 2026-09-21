@@ -41,6 +41,21 @@ it('blocks all candidate actions during generation', async () => {
     await tick()
     expect([...document.querySelectorAll('button')].every((button) => button.disabled)).toBe(true)
 })
+it('hides the counter when there is only one candidate', async () => {
+    instance = mount(Controls, {
+        target: document.body,
+        props: {
+            currentPage: 1,
+            totalPages: 1,
+            previous: vi.fn(),
+            next: vi.fn(),
+            generate: vi.fn(),
+        },
+    })
+    await tick()
+    expect(document.querySelector('span')).toBeNull()
+    expect(document.querySelectorAll('button')).toHaveLength(3)
+})
 it('keeps greeting navigation separate from response generation', async () => {
     instance = mount(Controls, {
         target: document.body,

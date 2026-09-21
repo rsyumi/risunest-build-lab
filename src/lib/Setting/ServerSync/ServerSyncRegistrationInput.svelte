@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount, tick } from "svelte";
   import { language } from "src/lang";
+  import TextInput from "src/lib/UI/GUI/TextInput.svelte";
+  import SettingButton from "../RisuNest/SettingButton.svelte";
   import { isTauriAndroid, isTauriIOS } from "src/ts/platform";
   import { modalNavigation } from "src/ts/ui/modalNavigation";
   import type { ServerConfig } from "src/ts/storage/sync/serverSync";
@@ -13,14 +15,16 @@
   let {
     available = true,
     busy = false,
+    message = $bindable(""),
     onRegistration,
   }: {
     available?: boolean;
     busy?: boolean;
+    /** What the reader is told about the last code, such as a refused delivery. */
+    message?: string;
     onRegistration: (config: ServerConfig) => void;
   } = $props();
   let code = $state("");
-  let message = $state("");
   let scanning = $state(false);
   let camera = $state(false);
   let mounted = true;
@@ -111,35 +115,27 @@
 </script>
 
 {#if available}
-  <div class="registration border border-darkborderc bg-darkbg">
+  <div class="registration bg-bgcolor">
     <label class="flex flex-col gap-2 font-medium">
       <span>{text.registrationCode}</span>
-      <input
-        type="password"
+      <TextInput
+        fullwidth
+        hideText
         bind:value={code}
         disabled={busy || scanning}
-        maxlength="2048"
-        autocomplete="new-password"
-        autocapitalize="none"
-        spellcheck="false"
-        class="rounded border border-darkborderc bg-bgcolor p-3 font-mono text-sm"
+        className="font-mono text-sm"
       />
     </label>
-    <p class="text-sm opacity-75">{text.registrationCodeHelp}</p>
+    <p class="text-sm text-textcolor2">{text.registrationCodeHelp}</p>
     <div class="flex flex-wrap gap-2">
-      <button
-        type="button"
+      <SettingButton
         disabled={busy || scanning || !code.trim()}
-        onclick={read}
-        class="rounded border border-darkborderc bg-darkbutton px-4 py-2 hover:bg-selected"
-        >{text.readRegistration}</button
+        onclick={read}>{text.readRegistration}</SettingButton
       >
-      {#if isTauriAndroid || isTauriIOS}<button
-          type="button"
+      {#if isTauriAndroid || isTauriIOS}<SettingButton
+          variant="secondary"
           disabled={busy || scanning}
-          onclick={() => void scan()}
-          class="rounded border border-darkborderc px-4 py-2 hover:bg-selected"
-          >{text.scanRegistration}</button
+          onclick={() => void scan()}>{text.scanRegistration}</SettingButton
         >{/if}
     </div>
   </div>
@@ -159,11 +155,8 @@
       class="scanner-instructions bg-darkbg text-textcolor border border-darkborderc"
     >
       <p>{text.scanRegistrationHelp}</p>
-      <button
-        type="button"
-        onclick={() => scanner.cancel()}
-        class="rounded border border-darkborderc bg-darkbutton px-5 py-3 hover:bg-selected"
-        >{text.cancelScan}</button
+      <SettingButton class="min-h-11" onclick={() => scanner.cancel()}
+        >{text.cancelScan}</SettingButton
       >
     </div>
     {#if camera}<div class="scan-frame" aria-hidden="true"></div>{/if}
@@ -175,17 +168,7 @@
     display: grid;
     gap: 0.85rem;
     padding: 1rem;
-    border-radius: 0.75rem;
-  }
-  input {
-    min-width: 0;
-    width: 100%;
-  }
-  button {
-    min-height: 44px;
-  }
-  button:disabled {
-    opacity: 0.45;
+    border-radius: 0.375rem;
   }
   .scanner-overlay {
     position: fixed;
@@ -207,7 +190,7 @@
     display: grid;
     gap: 1rem;
     padding: 1rem;
-    border-radius: 0.75rem;
+    border-radius: 0.5rem;
     width: min(100%, 28rem);
   }
   .scan-frame {

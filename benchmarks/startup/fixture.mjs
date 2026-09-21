@@ -145,7 +145,7 @@ export async function addSyntheticAssets(root, identifier, count, images = false
                         ? syntheticPng(index)
                         : Buffer.from('Synthetic startup asset ' + index)
                     const hash = createHash('sha256').update(payload).digest('hex')
-                    const directory = path.join(root, 'assets-v2/objects', hash.slice(0, 2))
+                    const directory = path.join(root, 'assets/objects', hash.slice(0, 2))
                     await mkdir(directory, { recursive: true })
                     await writeFile(path.join(directory, hash.slice(2)), payload, { flag: 'wx' })
                     objectInsert.run(hash, payload.length, 0)

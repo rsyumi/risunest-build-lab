@@ -95,7 +95,7 @@
 
 {#if confirming}
     {@const section = confirming}
-    <div class="fixed inset-0 z-[1300] flex items-center justify-center bg-black/65 p-4">
+    <div class="fixed inset-0 z-[1300] flex items-center justify-center bg-black/60 p-4">
         <div
             role="dialog"
             aria-modal="true"
@@ -110,7 +110,7 @@
             {/if}
             <div class="flex flex-wrap justify-end gap-2">
                 <SettingButton variant="secondary" disabled={busy} onclick={cancelEnable}>{language.cancel}</SettingButton>
-                <SettingButton disabled={busy} onclick={() => void apply(section, true)}>{strings.enableConfirm}</SettingButton>
+                <SettingButton busy={busy} onclick={() => void apply(section, true)}>{strings.enableConfirm}</SettingButton>
             </div>
         </div>
     </div>

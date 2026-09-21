@@ -152,7 +152,7 @@
     <SettingRow label={language.risuNest.diag.logTitle} help={language.risuNest.diag.logHelp}>
         {#snippet below()}
             {#if errorMessage}
-                <p class="mt-1 text-sm text-draculared" role="alert" aria-live="assertive">{errorMessage}</p>
+                <p class="mt-1 text-sm text-danger-400" role="alert" aria-live="assertive">{errorMessage}</p>
             {:else if logLoaded && entries.length === 0}
                 <p class="mt-1 text-sm text-textcolor2" role="status" aria-live="polite">{language.risuNest.diag.logEmpty}</p>
             {/if}
@@ -160,7 +160,7 @@
         <SettingButton data-view-log busy={pending === 'view'} onclick={viewLog}>
             {language.risuNest.diag.viewLog}
         </SettingButton>
-        <SettingButton data-copy-log busy={pending === 'copy'} onclick={() => void copyLog()}>
+        <SettingButton data-copy-log variant="secondary" busy={pending === 'copy'} onclick={() => void copyLog()}>
             {language.risuNest.diag.copyLog}
         </SettingButton>
     </SettingRow>

@@ -74,6 +74,7 @@ pub struct DeviceSession {
     pub device_id: String,
     pub operation_watermark: Sequence,
     pub operation_pending: bool,
+    pub protocol_id: &'static str,
 }
 
 #[derive(Clone, Serialize)]
@@ -180,7 +181,7 @@ impl Store {
             return Err(Error::new("not-initialized", 404));
         }
         let mut db = Connection::open(db_path)?;
-        db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;")?;
+        db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA journal_size_limit=67108864;")?;
         if create {
             for name in ["objects", "staging"] {
                 fs::create_dir_all(root.join(name))?;
@@ -277,6 +278,7 @@ impl Store {
             device_id: device.id.clone(),
             operation_watermark: watermark.try_into()?,
             operation_pending: pending,
+            protocol_id: crate::PROTOCOL_ID,
         })
     }
     pub fn device_active(&self, actor: &Device, id: &str) -> Result<bool> {

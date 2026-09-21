@@ -15,9 +15,9 @@
 
 <div class="flex flex-col gap-1 w-full">
     <div class="text-xs text-textcolor2 px-0.5">{language.model}/{language.submodel}</div>
-    <ModelList compact bind:value={DBState.db.aiModel} />
+    <div class="model-trigger"><ModelList compact bind:value={DBState.db.aiModel} /></div>
     <div class="flex gap-1 items-stretch">
-        <div class="min-w-0 flex-1"><ModelList compact bind:value={DBState.db.subModel} /></div>
+        <div class="model-trigger min-w-0 flex-1"><ModelList compact bind:value={DBState.db.subModel} /></div>
         <button
             class="shrink-0 px-2 rounded-md border border-darkborderc bg-darkbutton hover:bg-selected transition-colors"
             title={language.seperateModelsForAxModels}
@@ -36,17 +36,30 @@
             />
             {#each auxModels as [key, label]}
                 <span class="text-xs text-textcolor2 px-0.5">{label}</span>
-                <ModelList
-                    compact
-                    blankable
-                    disabled={!DBState.db.seperateModelsForAxModels}
-                    value={DBState.db.seperateModels?.[key] ?? ''}
-                    onChange={(value) => {
-                        DBState.db.seperateModels ??= { memory: '', translate: '', emotion: '', otherAx: '' }
-                        DBState.db.seperateModels[key] = value
-                    }}
-                />
+                <div class="model-trigger">
+                    <ModelList
+                        compact
+                        blankable
+                        disabled={!DBState.db.seperateModelsForAxModels}
+                        value={DBState.db.seperateModels?.[key] ?? ''}
+                        onChange={(value) => {
+                            DBState.db.seperateModels ??= { memory: '', translate: '', emotion: '', otherAx: '' }
+                            DBState.db.seperateModels[key] = value
+                        }}
+                    />
+                </div>
             {/each}
         </div>
     {/if}
 </div>
+
+<style>
+    /* ModelList takes no class, so the compact trigger gets the chevron's hover here. */
+    .model-trigger > :global(button) {
+        transition: background-color 150ms;
+    }
+
+    .model-trigger > :global(button:hover:not(:disabled)) {
+        background-color: var(--risu-theme-selected);
+    }
+</style>

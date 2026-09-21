@@ -6,16 +6,13 @@ import {
     createGatedBlobStore,
     createOpfsBlobBackend,
     createStorageBlobStore,
-    createTauriBlobBackend,
     createTauriCasObjectUrl,
-    createTauriBlobStore,
     createTauriNativeMediaUrl,
     createNativeMediaEndpointProvider,
     getBlobStore,
     physicalBlobKeys,
     readBlobForFacade,
 } from './platformBlobStore'
-import { SeekMode } from '@tauri-apps/plugin-fs'
 import {
     createInRealmStorageLockManager,
     createStorageMutationGate,
@@ -84,7 +81,7 @@ describe('platform BlobStore', () => {
                 endpoint,
             ),
         ).toBe(
-            `${endpoint}${Buffer.from(`assets-v2/objects/ab/${hash.slice(2)}`).toString('hex')}` +
+            `${endpoint}${Buffer.from(`assets/objects/ab/${hash.slice(2)}`).toString('hex')}` +
                 '?mime=image%2Fcustom%3B+profile%3Dexact&size=42',
         )
         expect(() =>
@@ -97,113 +94,6 @@ describe('platform BlobStore', () => {
                 endpoint,
             ),
         ).toThrow('MIME')
-    })
-
-    test('Tauri BlobStore mutates original payloads without native cleanup commands', async () => {
-        const events: string[] = []
-        const backend = {
-            write: async (key: string) => { events.push(`write:${key}`) },
-            read: async () => null,
-            keys: async () => [],
-            remove: async (key: string) => { events.push(`remove:${key}`) },
-        }
-        const store = createTauriBlobStore(backend)
-
-        await store.put('assets/a.png', new Uint8Array([1]), {
-            kind: 'asset', mime: 'image/png', name: 'a', ext: 'png',
-        })
-        expect(events).toEqual([
-            'write:assets/a.png',
-            'write:blobstore/metadata/6173736574732f612e706e67.json',
-        ])
-
-        events.length = 0
-        await store.remove('assets/a.png')
-        expect(events).toEqual([
-            'remove:assets/a.png',
-            'remove:blobstore/metadata/6173736574732f612e706e67.json',
-        ])
-    })
-
-    test('Tauri new Inlay image writes invoke the native encoder with owned bytes and options', async () => {
-        const { backend } = memoryBackend()
-        const metadata = {
-            key: 'image-id', kind: 'inlay' as const, size: 7, mime: 'image/webp',
-            name: 'source.png', ext: 'webp', inlayType: 'image' as const, width: 5, height: 3,
-        }
-        const invoke = vi.fn(async () => metadata)
-        const store = createTauriBlobStore(backend, invoke)
-        const source = Uint8Array.of(1, 2, 3)
-
-        const pending = store.putNewInlayImage!('image-id', source, {
-            name: 'source.png', options: { format: 'original', quality: 85, maxDimension: 0, skipReencode: false, animationMaxFps: 0 },
-        })
-        source[0] = 9
-
-        await expect(pending).resolves.toEqual(metadata)
-        expect(invoke).toHaveBeenCalledWith('native_media_write_inlay_image', {
-            id: 'image-id', data: [1, 2, 3], name: 'source.png',
-            options: { format: 'original', quality: 85, maxDimension: 0, skipReencode: false, animationMaxFps: 0 },
-        })
-    })
-
-    test('Tauri new Inlay image writes stream input larger than one IPC chunk', async () => {
-        const { backend } = memoryBackend()
-        const metadata = {
-            key: 'large-image', kind: 'inlay' as const, size: 64 * 1024 + 1,
-            mime: 'image/png', name: 'large.png', ext: 'png', inlayType: 'image' as const,
-            width: 1, height: 1,
-        }
-        const invoke = vi.fn(async (command: string, args?: Record<string, unknown>) => {
-            if (command === 'native_media_inlay_input_open') return { capacity: 64 * 1024 }
-            if (command === 'native_media_inlay_input_chunk') {
-                return Number(args?.offset) + (args?.data as number[]).length
-            }
-            if (command === 'native_media_write_inlay_finish') return metadata
-            return undefined
-        })
-        const store = createTauriBlobStore(backend, invoke)
-
-        await expect(store.putNewInlayImage!(
-            'large-image',
-            new Uint8Array(64 * 1024 + 1),
-            { name: 'large.png' },
-        )).resolves.toEqual(metadata)
-
-        expect(invoke.mock.calls.map(([command]) => command)).toEqual([
-            'native_media_inlay_input_open',
-            'native_media_inlay_input_chunk',
-            'native_media_inlay_input_chunk',
-            'native_media_write_inlay_finish',
-            'native_media_inlay_input_cancel',
-        ])
-        expect(invoke).not.toHaveBeenCalledWith(
-            'native_media_write_inlay_image',
-            expect.anything(),
-        )
-    })
-
-    test('normalizes maximum dimension before native write invocation', async () => {
-        const { backend } = memoryBackend()
-        const metadata = {
-            key: 'image-id', kind: 'inlay' as const, size: 3, mime: 'image/png',
-            name: 'source.png', ext: 'png', inlayType: 'image' as const, width: 1, height: 1,
-        }
-        const invoke = vi.fn(async () => metadata)
-        const store = createTauriBlobStore(backend, invoke)
-
-        await store.putNewInlayImage!('image-id', Uint8Array.of(1, 2, 3), {
-            name: 'source.png',
-            options: {
-                format: 'original', quality: 85,
-                maxDimension: Number.MAX_SAFE_INTEGER, skipReencode: false, animationMaxFps: 0,
-            },
-        })
-
-        expect(invoke).toHaveBeenCalledWith('native_media_write_inlay_image', {
-            id: 'image-id', data: [1, 2, 3], name: 'source.png',
-            options: { format: 'original', quality: 85, maxDimension: 4_294_967_295, skipReencode: false, animationMaxFps: 0 },
-        })
     })
 
     test('gates writes and removals while leaving reads ungated', async () => {
@@ -370,7 +260,7 @@ describe('platform BlobStore', () => {
         expect(events).toEqual(['opaque-start', 'opaque-end', 'optimized'])
     })
 
-    test('preserves legacy paths and encodes raw inlay ids', () => {
+    test('maps web logical paths and encodes raw inlay ids', () => {
         expect(physicalBlobKeys('assets/photo.jpg')).toEqual({
             payload: 'assets/photo.jpg',
             metadata: 'blobstore/metadata/6173736574732f70686f746f2e6a7067.json',
@@ -393,84 +283,6 @@ describe('platform BlobStore', () => {
             removeItem: async () => { throw new Error('must not run') },
         }
         expect(() => createStorageBlobStore({ storage, isAccount: true })).toThrow(TypeError)
-    })
-
-    test('Tauri bounded reads clamp, seek once, fill, and close', async () => {
-        const source = new Uint8Array([0, 1, 2, 3, 4])
-        let cursor = 0
-        const seeks: number[] = []
-        const readSizes: number[] = []
-        let closes = 0
-        const backend = createTauriBlobBackend({
-            exists: async () => true,
-            mkdir: async () => {}, write: async () => {}, read: async () => source,
-            list: async () => [], remove: async () => {}, size: async () => source.byteLength,
-            open: async () => ({
-                async seek(offset, mode) { expect(mode).toBe(SeekMode.Start); seeks.push(offset); cursor = offset; return cursor },
-                async read(buffer) {
-                    readSizes.push(buffer.byteLength)
-                    const count = Math.min(1, buffer.byteLength, source.byteLength - cursor)
-                    if (count <= 0) return null
-                    buffer[0] = source[cursor++]
-                    return count
-                },
-                async close() { closes += 1 },
-            }),
-            resolveUrl: async (key) => `asset://${key}`,
-        })
-        expect(await backend.readRange!('assets/a', { start: 2, endExclusive: 99 })).toEqual(new Uint8Array([2, 3, 4]))
-        expect(seeks).toEqual([2])
-        expect(Math.max(...readSizes)).toBeLessThanOrEqual(3)
-        expect(closes).toBe(1)
-        expect(await backend.resolveUrl!('assets/a')).toBe('asset://assets/a')
-    })
-
-    test('Tauri keys include legacy cold payload files', async () => {
-        const listed: string[] = []
-        const backend = createTauriBlobBackend({
-            exists: async () => false,
-            mkdir: async () => {},
-            write: async () => {},
-            read: async () => new Uint8Array(),
-            list: async (path) => {
-                listed.push(path)
-                return path === 'coldstorage' ? ['coldstorage/one.json'] : []
-            },
-            remove: async () => {},
-            size: async () => 0,
-            open: async () => { throw new Error('not used') },
-            resolveUrl: async () => '',
-        })
-
-        expect(await backend.keys()).toEqual(['coldstorage/one.json'])
-        expect(listed).toEqual(['assets', 'blobstore', 'coldstorage'])
-    })
-
-    test('does not resolve a URL for a missing logical key', async () => {
-        const backend = createTauriBlobBackend({
-            exists: async () => false, mkdir: async () => {}, write: async () => {}, read: async () => new Uint8Array(),
-            list: async () => [], remove: async () => {}, size: async () => 0,
-            open: async () => { throw new Error('not used') }, resolveUrl: async (key) => `asset://${key}`,
-        })
-        const store = createBackedBlobStore(backend)
-        expect(await store.resolveUrl('assets/missing')).toBeNull()
-    })
-
-
-    test('Tauri bounded reads close after a read failure', async () => {
-        let closes = 0
-        const backend = createTauriBlobBackend({
-            exists: async () => true, mkdir: async () => {}, write: async () => {}, read: async () => new Uint8Array(),
-            list: async () => [], remove: async () => {}, size: async () => 2,
-            open: async () => ({
-                async seek() { return 0 },
-                async read() { throw new Error('read failed') },
-                async close() { closes += 1 },
-            }),
-            resolveUrl: async () => '',
-        })
-        await expect(backend.readRange!('assets/a', { start: 0, endExclusive: 2 })).rejects.toThrow('read failed')
-        expect(closes).toBe(1)
     })
 
     test('OPFS keys skip foreign non-hex names in the shared root', async () => {

@@ -1,7 +1,7 @@
 use super::{
     active_generation, compare_plugin_storage_keys, current_revision, AnchorOccurrence,
     ArchivedCharacterSummary, AssetAlias, AssetAliasListQuery, AssetAliasPage, AssetOwnerHead,
-    AssetOwnerLocator, AssetRepositoryAuthorityState, CharacterPage, CharacterQuery,
+    AssetOwnerLocator, CharacterPage, CharacterQuery,
     CharacterSummary, ConversationPage, ConversationQuery, ConversationSummary,
     ConversationMessageMetadata, ConversationMessageMetadataWindow, ConversationWindow,
     ConversationWindowQuery, PluginStorageCatalog, PluginStorageListItem, PluginStorageSummary,
@@ -313,30 +313,6 @@ pub(super) fn list_asset_alias_page(
         revision: target.revision,
         items,
         next_cursor,
-    })
-}
-
-pub(super) fn read_asset_repository_authority(
-    connection: &Connection,
-    target: &ReadTarget,
-) -> StoreResult<Versioned<AssetRepositoryAuthorityState>> {
-    let stored: Option<String> = connection
-        .query_row(
-            "SELECT value FROM asset_repository_authority WHERE generation = ?1",
-            [&target.generation],
-            |row| row.get(0),
-        )
-        .optional()?;
-    let value = match stored {
-        Some(stored) => serde_json::from_str(&stored).map_err(|_| StoreError::Validation {
-            message: "Asset repository authority state is invalid".to_owned(),
-        })?,
-        None => AssetRepositoryAuthorityState::Legacy,
-    };
-    value.validate()?;
-    Ok(Versioned {
-        revision: target.revision,
-        value,
     })
 }
 

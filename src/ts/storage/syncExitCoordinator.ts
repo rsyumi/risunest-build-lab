@@ -19,6 +19,7 @@ export type SyncExitState =
     | { phase: 'local-failed'; error: unknown }
     | { phase: 'capturing' }
     | { phase: 'syncing'; target: SyncExitTarget; destination: string }
+    | { phase: 'remote-waiting'; target: SyncExitTarget; destination: string }
     | { phase: 'remote-delayed'; target: SyncExitTarget; destination: string }
     | {
         phase: 'remote-blocked'
@@ -247,11 +248,26 @@ export function createSyncExitCoordinator(
                     }
                     if (next.choice === 'wait') {
                         publish({
-                            phase: 'syncing',
+                            phase: 'remote-waiting',
                             target,
                             destination: adapter.id,
                         })
-                        continue
+                        const continued = await Promise.race([
+                            drainOutcome,
+                            waitForDecision().then((choice) => ({
+                                kind: 'decision' as const,
+                                choice,
+                            })),
+                        ])
+                        if (continued.kind !== 'decision') {
+                            if (decision) decision.resolve('wait')
+                            outcome = continued
+                            break
+                        }
+                        if (continued.choice === 'wait') continue
+                        abort.abort()
+                        await cancelDrain(adapter, continued.choice)
+                        return continued.choice === 'exit-unsynced' ? 'exit' : 'cancelled'
                     }
                     abort.abort()
                     await cancelDrain(adapter, next.choice)

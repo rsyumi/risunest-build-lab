@@ -1222,17 +1222,54 @@ fn cleanup_errors_result(errors: Vec<String>) -> Result<(), String> {
 
 #[derive(Clone)]
 pub(crate) struct NativeFileJobState {
+    cleanup_closed: Arc<std::sync::RwLock<bool>>,
     root: PathBuf,
     registry: Arc<JobRegistry>,
     pub(crate) admission: Arc<admission::Admission>,
     active_workers: Arc<AtomicUsize>,
     max_concurrent_jobs: usize,
     startup_warnings: Vec<NativeJobError>,
-    capability_error: Option<NativeJobError>,
+    capability_error: Arc<Mutex<Option<NativeJobError>>>,
     external_reference_sources: Arc<reference_source::ExternalReferenceSources>,
 }
 
 impl NativeFileJobState {
+    fn admit_cleanup_operation(&self) -> Result<std::sync::RwLockReadGuard<'_, bool>, NativeJobError> {
+        let guard = self.cleanup_closed.read().map_err(|_| NativeJobError::new("store-error", "Native cleanup state is unavailable"))?;
+        if *guard { return Err(NativeJobError::new("cleanup-pending", "Application cleanup is pending")); }
+        Ok(guard)
+    }
+
+    pub(crate) fn finish_cleanup(&self) -> Result<(), String> {
+        *self.cleanup_closed.write().map_err(|_| "cleanup-native-jobs-busy")? = false;
+        Ok(())
+    }
+
+    pub(crate) fn begin_cleanup(&self) -> Result<(), String> {
+        *self.cleanup_closed.try_write().map_err(|_| "cleanup-native-jobs-busy")? = true;
+        for job in self.registry.list()? { self.registry.cancel(&job.job_id)?; }
+        Ok(())
+    }
+
+    pub(crate) fn cleanup_drained(&self) -> bool {
+        self.active_workers.load(Ordering::Acquire) == 0
+    }
+
+    pub(crate) fn close_for_cleanup(&self) -> Result<(), String> {
+        if self.active_workers.load(Ordering::Acquire) != 0 { return Err("cleanup-native-jobs-busy".into()); }
+        self.external_reference_sources.clear_for_cleanup()?;
+        self.registry.jobs.lock().map_err(|_| "cleanup-native-jobs-busy")?.clear();
+        Ok(())
+    }
+
+    pub(crate) fn reopen_after_cleanup(&self) -> Result<(), String> {
+        for directory in ["jobs", "sources", "handoffs"] {
+            fs::create_dir_all(self.root.join(directory)).map_err(|_| "cleanup-native-jobs-unavailable")?;
+        }
+        self.capability_error.lock().map_err(|_| "cleanup-native-jobs-unavailable")?.take();
+        Ok(())
+    }
+
     pub(crate) fn initialize(root: PathBuf) -> Self {
         Self::initialize_with_max_workers(root, MAX_CONCURRENT_JOBS)
     }
@@ -1274,13 +1311,14 @@ impl NativeFileJobState {
         }
         startup_warnings.truncate(MAX_WARNING_CODES);
         Self {
+            cleanup_closed: Arc::new(std::sync::RwLock::new(false)),
             root,
             registry: Arc::new(JobRegistry::default()),
             admission: Arc::new(admission::Admission::default()),
             active_workers: Arc::new(AtomicUsize::new(0)),
             max_concurrent_jobs,
             startup_warnings,
-            capability_error,
+            capability_error: Arc::new(Mutex::new(capability_error)),
             external_reference_sources: Arc::new(reference_source::ExternalReferenceSources::default()),
         }
     }
@@ -1290,7 +1328,8 @@ impl NativeFileJobState {
         request: NativeFileJobStartRequest,
         app: AppHandle,
     ) -> Result<NativeFileJobStarted, NativeJobError> {
-        if let Some(error) = &self.capability_error {
+        let _cleanup_operation = self.admit_cleanup_operation()?;
+        if let Some(error) = self.capability_error.lock().map_err(|_| NativeJobError::new("store-error", "Native capability state is unavailable"))?.as_ref() {
             return Err(error.clone());
         }
         let task = match request {
@@ -1740,7 +1779,8 @@ impl NativeFileJobState {
         &self,
         request: NativeFileJobStartRequest,
     ) -> Result<NativeFileJobStarted, NativeJobError> {
-        if let Some(error) = &self.capability_error {
+        let _cleanup_operation = self.admit_cleanup_operation()?;
+        if let Some(error) = self.capability_error.lock().map_err(|_| NativeJobError::new("store-error", "Native capability state is unavailable"))?.as_ref() {
             return Err(error.clone());
         }
         let NativeFileJobStartRequest::PrepareContentImport {
@@ -1866,6 +1906,7 @@ impl NativeFileJobState {
         request: NativeFileJobStartRequest,
         sink: Arc<dyn restore::ReplacementSink>,
     ) -> Result<NativeFileJobStarted, NativeJobError> {
+        let _cleanup_operation = self.admit_cleanup_operation()?;
         let NativeFileJobStartRequest::RestoreBlockRisuSave {
             source,
             expected_revision,
@@ -6675,7 +6716,7 @@ mod tests {
             Some("unsupported-without-destination")
         );
         assert!(prepared.prepared_content.is_none());
-        assert!(!directory.path().join("assets-v2").exists());
+        assert!(!directory.path().join("assets").exists());
     }
 
     #[test]
@@ -6694,7 +6735,7 @@ mod tests {
 
         assert_eq!(prepared.state, JobState::Failed);
         assert!(prepared.prepared_content.is_none());
-        assert!(directory.path().join("assets-v2/job-pins").is_dir());
+        assert!(directory.path().join("assets/job-pins").is_dir());
         assert!(crate::asset_repository::job_pins::DurableCasJob::open(
             directory.path(),
             &started.job_id,
@@ -6709,7 +6750,7 @@ mod tests {
         fs::create_dir_all(
             directory
                 .path()
-                .join("assets-v2/objects")
+                .join("assets/objects")
                 .join(&object_hash[..2])
                 .join(&object_hash[2..]),
         )
@@ -7919,7 +7960,7 @@ mod tests {
         let state = NativeFileJobState::initialize(root);
 
         assert_eq!(
-            state.capability_error.as_ref().unwrap().code,
+            state.capability_error.lock().unwrap().as_ref().unwrap().code,
             "capability-unavailable"
         );
         assert!(state

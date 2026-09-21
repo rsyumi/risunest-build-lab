@@ -16,7 +16,7 @@
 
     const variants = {
         primary: 'border-darkborderc bg-darkbutton text-textcolor hover:bg-selected',
-        secondary: 'border-darkborderc bg-transparent text-textcolor2 hover:bg-selected hover:text-textcolor',
+        secondary: 'border-darkborderc bg-transparent text-textcolor hover:bg-selected',
         danger: 'border-danger-400/50 bg-transparent text-danger-400 hover:bg-danger-400/10',
     }
 </script>

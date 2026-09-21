@@ -20,7 +20,7 @@ pub(super) const FRAGMENT_ALIGNMENT: u64 = 320 * 1024;
 /// transfers above 10 MiB, so the single request body stays small.
 pub(super) const SIMPLE_UPLOAD_MAX_BYTES: u64 = 4 * 1024 * 1024;
 
-const ITEM_FIELDS: &str = "$select=id,name,size,eTag,file,folder";
+const ITEM_FIELDS: &str = "$select=id,name,size,eTag,file,folder,parentReference";
 
 fn corrupt() -> ProviderError {
     ProviderError::new(ErrorKind::Corrupt)
@@ -41,6 +41,14 @@ pub(super) struct Item {
     pub file: Option<serde::de::IgnoredAny>,
     #[serde(default)]
     pub folder: Option<serde::de::IgnoredAny>,
+    #[serde(default)]
+    pub parent_reference: Option<ParentReference>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct ParentReference {
+    pub drive_id: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -52,6 +60,11 @@ pub(super) struct ChildrenPage {
 
 #[derive(serde::Deserialize)]
 pub(super) struct SignedInUser {
+    pub id: String,
+}
+
+#[derive(serde::Deserialize)]
+pub(super) struct Drive {
     pub id: String,
 }
 
@@ -88,11 +101,15 @@ pub(super) fn classify(
             kind: ErrorKind::Transient,
             http_status: Some(status),
             retry_at_ms: None,
+            oauth_error: None,
+            oauth_error_description: None,
         },
         509 => ProviderError {
             kind: ErrorKind::RateLimited,
             http_status: Some(status),
             retry_at_ms: common::retry_after_ms(headers, now_ms),
+            oauth_error: None,
+            oauth_error_description: None,
         },
         _ => common::classify_status(status, headers, now_ms),
     }
@@ -117,6 +134,8 @@ pub(super) fn classify_token(
             kind: ErrorKind::ReauthRequired,
             http_status: Some(status),
             retry_at_ms: None,
+            oauth_error: None,
+            oauth_error_description: None,
         },
         _ => classify(status, headers, now_ms),
     }
@@ -134,6 +153,62 @@ fn with_query(mut url: url::Url, query: Option<&str>) -> url::Url {
 pub(super) fn signed_in_user_url(settings: &Settings) -> Result<url::Url> {
     let url = parse(format!("{}/me", config::base(&settings.endpoint)))?;
     Ok(with_query(url, Some("$select=id")))
+}
+
+pub(super) fn signed_in_drive_url(settings: &Settings) -> Result<url::Url> {
+    let url = parse(format!("{}/me/drive", config::base(&settings.endpoint)))?;
+    Ok(with_query(url, Some("$select=id")))
+}
+
+pub(super) fn drive_root_url(settings: &Settings, drive_id: &str) -> Result<url::Url> {
+    let url = parse(format!(
+        "{}/drives/{}/root",
+        config::base(&settings.endpoint),
+        config::encode_segment(drive_id)
+    ))?;
+    Ok(with_query(url, Some(ITEM_FIELDS)))
+}
+
+pub(super) fn drive_item_url(
+    settings: &Settings,
+    drive_id: &str,
+    item_id: &str,
+) -> Result<url::Url> {
+    let url = parse(format!(
+        "{}/drives/{}/items/{}",
+        config::base(&settings.endpoint),
+        config::encode_segment(drive_id),
+        config::encode_segment(item_id)
+    ))?;
+    Ok(with_query(url, Some(ITEM_FIELDS)))
+}
+
+pub(super) fn drive_children_url(
+    settings: &Settings,
+    drive_id: &str,
+    item_id: &str,
+    cursor: Option<&str>,
+) -> Result<url::Url> {
+    let query = listing_query(100, cursor);
+    parse(format!(
+        "{}/drives/{}/items/{}/children?{query}",
+        config::base(&settings.endpoint),
+        config::encode_segment(drive_id),
+        config::encode_segment(item_id)
+    ))
+}
+
+pub(super) fn drive_children_create_url(
+    settings: &Settings,
+    drive_id: &str,
+    item_id: &str,
+) -> Result<url::Url> {
+    parse(format!(
+        "{}/drives/{}/items/{}/children",
+        config::base(&settings.endpoint),
+        config::encode_segment(drive_id),
+        config::encode_segment(item_id)
+    ))
 }
 
 /// Resolution target of the configured root: an item id, or the app folder
