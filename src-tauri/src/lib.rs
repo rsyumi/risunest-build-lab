@@ -426,21 +426,6 @@ fn builder_with_main_window(
             app.manage(app_cleanup::CleanupState::initialize(app.handle())?);
             // Before the WebView exists, so no renderer call can precede it.
             app_paths::permit_renderer_access(app.handle())?;
-            #[cfg(target_os = "ios")]
-            {
-                use tauri_plugin_ios_native::IosNativeExt;
-                let root = app_paths::manifest(app)?
-                    .data
-                    .to_str()
-                    .ok_or("application data root is not valid UTF-8")?
-                    .to_owned();
-                let native = app.ios_native().clone();
-                tauri::async_runtime::spawn(async move {
-                    if let Err(error) = native.set_data_root(&root).await {
-                        crate::nlog!("error", "native staging root unavailable: {error}");
-                    }
-                });
-            }
             if let Some((config, data_directory)) = &main_window {
                 tauri::WebviewWindowBuilder::from_config(app, config)?
                     .data_directory(data_directory.clone())
@@ -457,6 +442,22 @@ fn builder_with_main_window(
                 app.handle()
                     .plugin(tauri_plugin_ios_native::init())
                     .map_err(|error| format!("iOS native initialization failed: {error}"))?;
+                // The plugin manages its handle in its own setup, so the root can
+                // only be handed over once that registration above has run.
+                #[cfg(target_os = "ios")]
+                {
+                    use tauri_plugin_ios_native::IosNativeExt;
+                    let root = app_paths::data_root(app)?
+                        .to_str()
+                        .ok_or_else(|| "application data root is not valid UTF-8".to_owned())?
+                        .to_owned();
+                    let native = app.ios_native().clone();
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(error) = native.set_data_root(&root).await {
+                            crate::nlog!("error", "native staging root unavailable: {error}");
+                        }
+                    });
+                }
                 let app_data_dir = app_paths::data_root(app)?;
                 app.state::<external_storage::job_store::JobCommandState>()
                     .root

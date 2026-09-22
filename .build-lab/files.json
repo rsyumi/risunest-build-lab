@@ -321,14 +321,14 @@
     {
       "path": "benchmarks/macos/native/Cargo.lock",
       "mode": "100644",
-      "bytes": 182900,
-      "sha256": "7b4f7d26d594bcce7a88aee2c262147cb578e4646d83734e667694b584e930a9"
+      "bytes": 182924,
+      "sha256": "adf5305b434ce1a4df356c19a96e4920c328bc335ccf938adbeccdfcc6565dd7"
     },
     {
       "path": "benchmarks/macos/native/Cargo.toml",
       "mode": "100644",
-      "bytes": 923,
-      "sha256": "7423d957c68054d725f28be14959fa4e0c270f026a2f2b13f33ddcd9380a68f7"
+      "bytes": 953,
+      "sha256": "ba1e584c9fba7105d4f542e7cb2c536873b853c12f3e183162f572cf573a1fee"
     },
     {
       "path": "benchmarks/macos/native/build.rs",
@@ -5169,8 +5169,8 @@
     {
       "path": "src-tauri/src/lib.rs",
       "mode": "100644",
-      "bytes": 43482,
-      "sha256": "f0889dea67f4499def180b7ae43502fafc52ce406668ff2af2edbd46851e135a"
+      "bytes": 43692,
+      "sha256": "568423e1e63fd66a6fb2f6ea0752b43d5d55019b93c1943057682629fb4b006b"
     },
     {
       "path": "src-tauri/src/local_backup.rs",
