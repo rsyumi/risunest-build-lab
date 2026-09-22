@@ -1,0 +1,17 @@
+import { test, expect } from './fixture'
+test('keyboard focus and activation reach real setting controls', async ({ page }) => {
+    await page.goto('/')
+    const toggle = page.getByRole('checkbox', { name: 'Synthetic setting' })
+    await page.keyboard.press('Tab')
+    await expect(toggle).toBeFocused()
+    await page.keyboard.press('Space')
+    await expect(toggle).toBeChecked()
+    await page.keyboard.press('Tab')
+    await expect(page.getByRole('button', { name: 'First', exact: true })).toBeFocused()
+    await page.keyboard.press('Tab')
+    const second = page.getByRole('button', { name: 'Second', exact: true })
+    await expect(second).toBeFocused()
+    await page.keyboard.press('Enter')
+    await expect(second).toHaveAttribute('aria-pressed', 'true')
+    await expect(page.locator('output')).toHaveText('enabled:second')
+})

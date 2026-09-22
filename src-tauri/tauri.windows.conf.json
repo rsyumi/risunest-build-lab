@@ -1,0 +1,18 @@
+{
+  "app": {
+    "windows": [
+      {
+        "label": "main",
+        "title": "RisuNest",
+        "width": 1024,
+        "height": 768,
+        "minWidth": 300,
+        "minHeight": 500,
+        "resizable": true,
+        "dragDropEnabled": false,
+        "visible": false,
+        "backgroundColor": "#21222c"
+      }
+    ]
+  }
+}

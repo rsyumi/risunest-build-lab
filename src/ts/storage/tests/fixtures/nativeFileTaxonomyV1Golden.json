@@ -1,0 +1,58 @@
+{
+    "format": "risunest-native-file-taxonomy-golden",
+    "version": 1,
+    "uuid": "0f9d2c4a-1b2c-4d3e-8f4a-5b6c7d8e9f0a",
+    "spoolSuffixes": {
+        "database": [".risunest", ".risudat", ".bin"],
+        "content": [".charx", ".json", ".jpeg", ".jpg", ".png", ".risum", ".lorebook"]
+    },
+    "handoffDirectory": "native-file-jobs/handoffs",
+    "managedHandoffs": [
+      {
+        "kind": "raw-recovery",
+        "prefix": "risunest-rescue-",
+        "suffixes": [".risunest-rescue.zip"]
+      },
+      {
+        "kind": "portable-backup",
+        "prefix": "risunest-backup-",
+        "suffixes": [".risunest"]
+      },
+      {
+        "kind": "legacy-backup",
+        "prefix": "risu-backup-",
+        "suffixes": [".bin"]
+      },
+      {
+        "kind": "character-charx",
+        "prefix": "risu-charx-",
+        "suffixes": [".charx", ".jpeg"]
+      },
+      {
+        "kind": "character-card",
+        "prefix": "risu-character-card-",
+        "suffixes": [".json", ".png"]
+      },
+      {
+        "kind": "risu-module",
+        "prefix": "risu-module-",
+        "suffixes": [".risum"]
+      }
+    ],
+    "risuSaveExport": {
+        "directory": "persistent/exports",
+        "prefix": "risusave-",
+        "dataSuffix": ".risudat",
+        "temporarySuffix": ".tmp",
+        "leaseSuffix": ".lease"
+    },
+    "rejectedModuleNames": [
+        "risu-module-0F9D2C4A-1B2C-4D3E-8F4A-5B6C7D8E9F0A.risum",
+        "risu-module-0f9d2c4a-1b2c-1d3e-8f4a-5b6c7d8e9f0a.risum",
+        "risu-module-0f9d2c4a-1b2c-4d3e-cf4a-5b6c7d8e9f0a.risum",
+        "risu-module-0f9d2c4a-1b2c-4d3e-8f4a-5b6c7d8e9f0a.risudat",
+        "module-0f9d2c4a-1b2c-4d3e-8f4a-5b6c7d8e9f0a.risum",
+        "risu-module-0f9d2c4a-1b2c-4d3e-8f4a-5b6c7d8e9f0a.risum.txt",
+        "risu-module-.risum"
+    ]
+}

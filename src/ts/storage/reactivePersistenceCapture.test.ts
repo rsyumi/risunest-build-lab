@@ -1,0 +1,205 @@
+import { describe, expect, it, vi } from 'vitest'
+import { createPersistenceCanonicalCapture } from './reactivePersistenceCapture.svelte'
+import { createPersistentSaveObserverHarness } from './tests/persistentSaveObserverHarness.svelte'
+import {
+    canonicalJson,
+    pluginStorageJson,
+    PluginStorageCaptureCache,
+} from './saveCoordinatorHelpers'
+import type { Database } from './database.svelte'
+
+function fixture() {
+    return createPersistentSaveObserverHarness({
+        username: 'Before',
+        setting: { nested: { count: 0 } },
+        large: 'x'.repeat(6 * 1024 * 1024),
+        pluginCustomStorage: { nested: { count: 0 } },
+        botPresets: [{ name: 'Preset', nested: [1] }],
+        characters: [{ chaId: 'synthetic', chats: [{ message: [{ data: 'hello' }] }] }],
+    } as unknown as Database)
+}
+function capture(state: ReturnType<typeof fixture>, root = () => state.database) {
+    return createPersistenceCanonicalCapture({
+        root,
+        pluginStorage: () => state.database.pluginCustomStorage,
+        presets: () => state.database.botPresets,
+        character: () => state.database.characters[state.selectedIndex] ?? null,
+    })
+}
+function root(state: ReturnType<typeof fixture>) {
+    const {
+        characters: _,
+        pluginCustomStorage: __,
+        pluginStorageMeta: ___,
+        botPresets: ____,
+        ...value
+    } = state.database
+    return value
+}
+
+describe('production reactive persistence captures', () => {
+    it('keeps plugin storage ownership metadata out of the persistent root', () => {
+        const state = fixture()
+        state.database.pluginStorageMeta = {
+            nested: { plugin: 'plugin-a', updatedAt: 1 },
+        }
+        const cached = capture(state)
+        expect(JSON.parse(cached.root())).not.toHaveProperty('pluginStorageMeta')
+    })
+
+    it('reuses initialized strings on first reactive capture and defers whole-object encoding', () => {
+        const value = 'x'.repeat(16 * 1024 * 1024)
+        const state = fixture()
+        state.database.pluginCustomStorage = { payload: value }
+        const seeded = new PluginStorageCaptureCache().capture({ payload: value })
+        const cached = capture(state)
+        cached.seedPluginStorage!(seeded)
+        const stringify = vi.spyOn(JSON, 'stringify')
+        const join = vi.spyOn(Array.prototype, 'join')
+        let result: ReturnType<typeof cached.pluginStorage>
+        try {
+            result = cached.pluginStorage()
+            expect(stringify.mock.calls.some(([input]) => input === value)).toBe(false)
+            expect(join).not.toHaveBeenCalled()
+            expect(result!.entries).toEqual(seeded.entries)
+        } finally {
+            stringify.mockRestore()
+            join.mockRestore()
+        }
+        expect(result!.json).toBe(pluginStorageJson({ payload: value }))
+        state.database.pluginCustomStorage.payload = 'changed'
+        expect(cached.pluginStorage()!.json).toBe(pluginStorageJson({ payload: 'changed' }))
+    })
+
+    it('does not reuse a seed when the value changed before its first reactive capture', () => {
+        const state = fixture()
+        state.database.pluginCustomStorage = { payload: 'after', nested: { count: 2 } }
+        const cached = capture(state)
+        cached.seedPluginStorage!(
+            new PluginStorageCaptureCache().capture({
+                payload: 'before',
+                nested: { count: 1 },
+            }),
+        )
+        expect(cached.pluginStorage()!.json).toBe(
+            pluginStorageJson(state.database.pluginCustomStorage),
+        )
+        state.database.pluginCustomStorage.nested.count++
+        expect(cached.pluginStorage()!.json).toBe(
+            pluginStorageJson(state.database.pluginCustomStorage),
+        )
+    })
+
+    it('does not cache plain or raw objects whose edits cannot invalidate a derived', () => {
+        const raw = {
+            root: { nested: { value: 1 } },
+            storage: { a: { count: 1 } },
+            presets: [1],
+            character: { name: 'first' },
+        }
+        const cached = createPersistenceCanonicalCapture({
+            root: () => raw.root,
+            pluginStorage: () => raw.storage,
+            presets: () => raw.presets,
+            character: () => raw.character,
+        })
+        cached.root()
+        cached.pluginStorage()
+        cached.presets()
+        cached.character()
+        raw.root.nested.value++
+        raw.storage.a.count++
+        raw.presets.push(2)
+        raw.character.name = 'second'
+        expect(cached.root()).toBe(canonicalJson(raw.root))
+        expect(cached.pluginStorage()!.json).toBe(pluginStorageJson(raw.storage))
+        expect(cached.presets()).toBe(canonicalJson(raw.presets))
+        expect(cached.character()).toBe(canonicalJson(raw.character))
+    })
+
+    it('observes immediate nested edits without waiting for effects and creates only changed root fields', () => {
+        const state = fixture()
+        const cached = capture(state)
+        const before = cached.root()
+        ;(state.database as unknown as Record<string, any>).setting.nested.count++
+        const after = cached.root()
+        expect(after).toBe(canonicalJson(root(state)))
+        expect(cached.diffRoot(before, after)).toEqual([
+            { type: 'set', key: 'setting', value: { nested: { count: 1 } } },
+        ])
+        expect(JSON.stringify(cached.diffRoot(before, after)).length).toBeLessThan(256)
+        delete (state.database as unknown as Record<string, any>).setting
+        expect(cached.diffRoot(after, cached.root())).toEqual([{ type: 'delete', key: 'setting' }])
+    })
+
+    it('does not visit unchanged fields during a setting save', () => {
+        const state = fixture()
+        const reads = vi.fn()
+        const cached = capture(
+            state,
+            () =>
+                new Proxy(state.database, {
+                    get(target, key, receiver) {
+                        reads(key)
+                        return Reflect.get(target, key, receiver)
+                    },
+                }),
+        )
+        cached.root()
+        reads.mockClear()
+        state.database.username = 'After'
+        cached.root()
+        expect(reads.mock.calls.map(([key]) => key)).not.toContain('large')
+        expect(reads.mock.calls.map(([key]) => key)).not.toContain('setting')
+    })
+
+    it('keeps plugin order, array holes, selection and detached values correct', () => {
+        const state = fixture()
+        const cached = capture(state)
+        cached.pluginStorage()
+        cached.presets()
+        cached.character()
+        state.database.pluginCustomStorage.nested.count++
+        state.database.pluginCustomStorage['__proto__'] = { own: true }
+        expect(cached.pluginStorage()!.json).toBe(
+            pluginStorageJson(state.database.pluginCustomStorage),
+        )
+        const detached = cached.pluginStorage()!.value
+        detached.nested.count = 999
+        expect(cached.pluginStorage()!.value.nested.count).toBe(1)
+        delete state.database.botPresets[0]
+        expect(cached.presets()).toBe(canonicalJson(state.database.botPresets))
+        state.database.characters[0].chats[0].message[0].data += '!'
+        expect(cached.character()).toBe(canonicalJson(state.database.characters[0]))
+        state.selectedIndex = 1
+        expect(cached.character()).toBeNull()
+    })
+
+    it('refreshes getters and callable hooks backed by non-reactive values', () => {
+        const state = fixture()
+        let outside = 1
+        state.database = {
+            ...state.database,
+            get getter() {
+                return outside
+            },
+        } as Database
+        ;(state.database as unknown as Record<string, any>).setting = {
+            toJSON() {
+                return outside
+            },
+        }
+        state.database.pluginCustomStorage.hook = {
+            toJSON(key: string) {
+                return `${key}:${outside}`
+            },
+        }
+        const cached = capture(state)
+        expect(cached.root()).toBe(canonicalJson(root(state)))
+        outside++
+        expect(cached.root()).toBe(canonicalJson(root(state)))
+        expect(cached.pluginStorage()!.json).toBe(
+            pluginStorageJson(state.database.pluginCustomStorage),
+        )
+    })
+})
