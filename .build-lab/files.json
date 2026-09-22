@@ -6171,8 +6171,8 @@
     {
       "path": "src-tauri/src/server_sync/directory_tests.rs",
       "mode": "100644",
-      "bytes": 10327,
-      "sha256": "e2d6d64ac19b259231a4f374fda4a19bea82a5ac5615787597949e28251a88e2"
+      "bytes": 10981,
+      "sha256": "3de94603a5fe28ac9914bb4cbfa93f38d4399eebbb3cc731c7e30998c21d0df5"
     },
     {
       "path": "src-tauri/src/server_sync/engine.rs",
