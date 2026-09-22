@@ -423,6 +423,13 @@ fn builder_with_main_window(
         .setup(move |app| {
             #[cfg(mobile)]
             app.manage(app_paths::AppPaths::resolve(app)?);
+            // `run` resolves the desktop manifest before the builder, because the
+            // uninstall CLI and the WebView profile need it first. An entry that
+            // builds without it still gets one here, from the same configuration.
+            #[cfg(desktop)]
+            if app.try_state::<app_paths::AppPaths>().is_none() {
+                app.manage(app_paths::AppPaths::desktop(app.config())?.prepared()?);
+            }
             app.manage(app_cleanup::CleanupState::initialize(app.handle())?);
             // Before the WebView exists, so no renderer call can precede it.
             app_paths::permit_renderer_access(app.handle())?;
@@ -440,24 +447,15 @@ fn builder_with_main_window(
                     .map_err(|error| format!("barcode scanner initialization failed: {error}"))?;
                 #[cfg(target_os = "ios")]
                 app.handle()
-                    .plugin(tauri_plugin_ios_native::init())
+                    .plugin(tauri_plugin_ios_native::init(
+                        app_paths::data_root(app)?
+                            .to_str()
+                            .ok_or_else(|| {
+                                "application data root is not valid UTF-8".to_owned()
+                            })?
+                            .to_owned(),
+                    ))
                     .map_err(|error| format!("iOS native initialization failed: {error}"))?;
-                // The plugin manages its handle in its own setup, so the root can
-                // only be handed over once that registration above has run.
-                #[cfg(target_os = "ios")]
-                {
-                    use tauri_plugin_ios_native::IosNativeExt;
-                    let root = app_paths::data_root(app)?
-                        .to_str()
-                        .ok_or_else(|| "application data root is not valid UTF-8".to_owned())?
-                        .to_owned();
-                    let native = app.ios_native().clone();
-                    tauri::async_runtime::spawn(async move {
-                        if let Err(error) = native.set_data_root(&root).await {
-                            crate::nlog!("error", "native staging root unavailable: {error}");
-                        }
-                    });
-                }
                 let app_data_dir = app_paths::data_root(app)?;
                 app.state::<external_storage::job_store::JobCommandState>()
                     .root

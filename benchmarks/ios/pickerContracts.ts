@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { appDataDir, documentDir, join } from "@tauri-apps/api/path";
+import { documentDir, join } from "@tauri-apps/api/path";
 import { mkdir, readFile, writeFile } from "@tauri-apps/plugin-fs";
 import {
   discardIOSFile,
@@ -12,14 +12,11 @@ import {
   requestIOSNotifications,
   getIOSNativeState,
 } from "../../src/ts/iosNative";
+import { nativeDataPath } from "../../src/ts/storage/nativePaths";
 
 /** Installed only in the isolated synthetic UI-test app. */
 export async function installPickerContracts() {
-  const folder = await join(
-    await appDataDir(),
-    "ios-file-staging",
-    crypto.randomUUID(),
-  );
+  const folder = await nativeDataPath("ios-file-staging", crypto.randomUUID());
   await mkdir(folder, { recursive: true });
   const path = await join(folder, "synthetic.bin");
   await writeFile(path, Uint8Array.from([0, 1, 127, 128, 254, 255]));

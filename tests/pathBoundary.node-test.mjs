@@ -102,9 +102,17 @@ test('the iOS staging root is received from Rust rather than derived in Swift', 
         join(ROOT, 'crates', 'tauri-plugin-ios-native', 'src', 'lib.rs'),
         'utf8',
     )
-    assert.match(plugin, /run_mobile_plugin_async::<\(\)>\(\s*"setDataRoot"/)
+    assert.match(plugin, /run_mobile_plugin_async::<\(\)>\(\s*\n?\s*"setDataRoot"/)
+    // Only the plugin sends the root, and every call that can reach a staged
+    // file waits for that handover instead of racing it.
+    assert.match(plugin, /pub async fn ensure_data_root/)
+    assert.match(plugin, /self\.ensure_data_root\(\)\.await/)
     const entry = await readFile(join(ROOT, 'src-tauri', 'src', 'lib.rs'), 'utf8')
-    assert.match(entry, /set_data_root\(&root\)/)
+    assert.match(entry, /tauri_plugin_ios_native::init\(\s*\n?\s*app_paths::data_root\(app\)\?/)
+    // The renderer learns every path here, so this is the gate for the calls
+    // the renderer makes directly to the plugin.
+    const paths = await readFile(join(ROOT, 'src-tauri', 'src', 'app_paths.rs'), 'utf8')
+    assert.match(paths, /ios_native\(\)\.ensure_data_root\(\)\.await/)
 
     // Both consumers name the same leaf inside that root.
     const helper = await readFile(join(ROOT, 'src', 'ts', 'storage', 'nativePaths.ts'), 'utf8')
