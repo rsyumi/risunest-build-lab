@@ -1,0 +1,174 @@
+name: Linux check
+run-name: Linux ${{ inputs.scope }} / ${{ inputs.source_sha }}
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full snapshot commit SHA in this build-lab repository
+        type: string
+        required: true
+      scope:
+        type: choice
+        default: full
+        options: [full, packages]
+permissions:
+  contents: read
+concurrency:
+  group: linux-check-snapshots-linux-${{ inputs.scope }}
+  cancel-in-progress: true
+jobs:
+  native:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+        working-directory: source
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/source/src-tauri/target
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_RELEASE_DEBUG: "0"
+      APPIMAGE_EXTRACT_AND_RUN: "1"
+      SNAPSHOT_SHA: ${{ inputs.source_sha }}
+      CHECK_SCOPE: ${{ inputs.scope }}
+    steps:
+      - name: Validate dispatch inputs
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          [[ "$SNAPSHOT_SHA" =~ ^[0-9a-f]{40}$ ]]
+          case "$CHECK_SCOPE" in full|packages) ;; *) exit 1;; esac
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Verify snapshot identity and integrity
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SNAPSHOT_SHA"
+          node ../control/scripts/verify-snapshot.mjs . linux
+      - uses: pnpm/action-setup@v5
+        with:
+          version: 10.34.1
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-gnu
+      - name: Install Linux build and harness dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y build-essential pkg-config libwebkit2gtk-4.1-dev \
+            libssl-dev libdbus-1-dev libayatana-appindicator3-dev librsvg2-dev patchelf \
+            desktop-file-utils shared-mime-info libfuse2t64 dbus-x11 gnome-keyring \
+            xdg-utils webkit2gtk-driver xvfb
+      - name: Record environment and cache identity
+        id: environment
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          {
+            printf 'workflow_sha=%s\nsnapshot_sha=%s\nrun_attempt=%s\n' "$GITHUB_SHA" "$SNAPSHOT_SHA" "$GITHUB_RUN_ATTEMPT"
+            printf 'image_os=%s\nimage_version=%s\n' "$ImageOS" "$ImageVersion"
+            lsb_release -a; uname -a; rustc -Vv; cargo -V; node -v; pnpm -v
+            ldd --version | head -1
+            pkg-config --modversion webkit2gtk-4.1 gtk+-3.0
+            WebKitWebDriver --version || true
+            df -h .
+            sha256sum pnpm-lock.yaml src-tauri/Cargo.lock
+          } > artifacts/environment.txt
+          cat artifacts/environment.txt
+          cp .build-lab/source.json artifacts/source.json
+          cp .build-lab/files.json artifacts/files.json
+          printf 'target=%s\n' "$(rustc -Vv | sed -n 's/^host: //p')" >> "$GITHUB_OUTPUT"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: source/src-tauri -> target
+          cache-workspace-crates: true
+          cache-on-failure: true
+          key: linux-ubuntu-24.04-${{ runner.arch }}-${{ steps.environment.outputs.target }}
+      - name: Install locked frontend inputs
+        run: pnpm install --frozen-lockfile
+      - name: Build agent frontend once
+        run: pnpm build:agent 2>&1 | tee artifacts/frontend.log
+      - name: Verify agent configuration and frontend
+        run: node ../control/scripts/verify-linux-inputs.mjs .
+      - name: Rust contracts
+        if: inputs.scope == 'full'
+        run: |
+          set -euo pipefail
+          dbus-run-session -- bash scripts/linux-native-tests.sh --release --lib -- --test-threads=1 2>&1 | tee artifacts/rust-contracts.log
+      - name: Build agent packages
+        run: |
+          set -euo pipefail
+          printf '%s\n' '{"build":{"beforeBuildCommand":"test -f dist/index.html"}}' > "$RUNNER_TEMP/linux-prebuilt.json"
+          pnpm tauri build --ci --target x86_64-unknown-linux-gnu --bundles deb,appimage \
+            --config src-tauri/tauri.agent.conf.json \
+            --config "$RUNNER_TEMP/linux-prebuilt.json" -- --locked 2>&1 | tee artifacts/native-build.log
+      - name: Inspect and archive packages
+        run: |
+          set -euo pipefail
+          bundle="$CARGO_TARGET_DIR/x86_64-unknown-linux-gnu/release/bundle"
+          package="$(find "$bundle/deb" -maxdepth 1 -name '*.deb' -print -quit)"
+          test -n "$package"
+          image="$(find "$bundle/appimage" -maxdepth 1 -name '*.AppImage' -print -quit)"
+          test -n "$image"
+          dpkg-deb --info "$package" | tee artifacts/deb-info.txt
+          dpkg-deb --field "$package" Depends | grep -F 'libc6 (>= 2.39)'
+          dpkg-deb --extract "$package" "$RUNNER_TEMP/risunest-deb"
+          find "$RUNNER_TEMP/risunest-deb/usr/share/applications" -name '*.desktop' -exec desktop-file-validate {} +
+          grep -Fx 'Exec=RisuNest %U' "$RUNNER_TEMP/risunest-deb/usr/share/applications/RisuNest.desktop"
+          test -f "$RUNNER_TEMP/risunest-deb/usr/share/mime/packages/io.github.rsyumi.risunest.xml"
+          test -f "$RUNNER_TEMP/risunest-deb/usr/share/doc/risu-nest/copyright"
+          file "$RUNNER_TEMP/risunest-deb/usr/bin/RisuNest" > artifacts/binary.txt
+          sha256sum "$package" "$image" > artifacts/packages.sha256
+          cp "$package" artifacts/
+          cat artifacts/binary.txt artifacts/packages.sha256
+      - name: Verify packaged product is not the harness entry
+        run: |
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+          binary = Path(os.environ['RUNNER_TEMP']) / 'risunest-deb/usr/bin/RisuNest'
+          data = binary.read_bytes()
+          assert b'io.github.rsyumi.risunest' in data, 'Product identifier absent'
+          assert b'io.github.rsyumi.risunest.linux.bench' not in data, 'Harness entry packaged as the product'
+          print('Packaged product carries the product identifier and no harness entry')
+          PY
+      - name: Build isolated WebKitGTK harness
+        if: inputs.scope == 'full'
+        run: |
+          set -euo pipefail
+          pnpm tauri build --ci --target x86_64-unknown-linux-gnu --no-bundle \
+            --config benchmarks/linux/tauri.conf.json -- --locked 2>&1 | tee artifacts/harness-native.log
+          # The identifier is the only harness marker that survives asset
+          # compression, so prove it is detectable before trusting its absence
+          # from the packaged product.
+          grep -qa 'io.github.rsyumi.risunest.linux.bench' "$CARGO_TARGET_DIR/x86_64-unknown-linux-gnu/release/risunest"
+      - name: Actual WebKitGTK contracts and desktop lifecycle
+        if: inputs.scope == 'full'
+        run: |
+          set -euo pipefail
+          binary="$CARGO_TARGET_DIR/x86_64-unknown-linux-gnu/release/risunest"
+          test -x "$binary"
+          for phase in persistence reload regex; do
+            dbus-run-session -- xvfb-run -a python3 benchmarks/linux/run.py \
+              --binary "$binary" --output artifacts/webkitgtk --phase "$phase" 2>&1 | tee -a artifacts/webkitgtk.log
+          done
+          node benchmarks/linux/summarize.mjs artifacts/webkitgtk 2>&1 | tee artifacts/webkitgtk-summary.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: linux-ubuntu-24.04-${{ inputs.source_sha }}-${{ github.run_attempt }}
+          path: source/artifacts/
+          retention-days: 3
+          if-no-files-found: warn

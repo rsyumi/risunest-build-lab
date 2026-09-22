@@ -113,7 +113,7 @@ export function exclusion(name) {
 }
 export function exportSnapshot(repo, commit, lane, destination) {
   assert(/^[0-9a-f]{40}$/.test(commit), "source commit must be a full SHA");
-  assert(["macos", "ios"].includes(lane), "invalid lane");
+  assert(["macos", "ios", "linux"].includes(lane), "invalid lane");
   assert.equal(
     git(repo, ["rev-parse", `${commit}^{commit}`])
       .toString()
@@ -191,7 +191,7 @@ export function exportSnapshot(repo, commit, lane, destination) {
   return metadata;
 }
 export function verifySnapshot(root, lane) {
-  assert(["macos", "ios"].includes(lane), "invalid expected lane");
+  assert(["macos", "ios", "linux"].includes(lane), "invalid expected lane");
   const metadata = JSON.parse(
     readFileSync(path.join(root, ".build-lab/source.json")),
   );

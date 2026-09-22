@@ -42,7 +42,7 @@ function fixture(t) {
   const commit = git(repo, ["rev-parse", "HEAD"]).toString().trim();
   return { root, repo, put, commit, destination: path.join(root, "snapshot") };
 }
-test("exports only the selected commit, reproducibly, with licenses and both lanes", (t) => {
+test("exports only the selected commit, reproducibly, with licenses and every lane", (t) => {
   const f = fixture(t);
   f.put("src/main.ts", "uncommitted synthetic change");
   f.put("src/untracked.ts", "synthetic");
@@ -57,8 +57,16 @@ test("exports only the selected commit, reproducibly, with licenses and both lan
     "ios",
     path.join(f.root, "ios"),
   );
+  const third = exportSnapshot(
+    f.repo,
+    f.commit,
+    "linux",
+    path.join(f.root, "linux"),
+  );
   assert.equal(first.file_list_sha256, second.file_list_sha256);
+  assert.equal(first.file_list_sha256, third.file_list_sha256);
   assert.equal(first.source_tree, second.source_tree);
+  assert.equal(first.source_tree, third.source_tree);
   const manifest = JSON.parse(
     readFileSync(path.join(f.destination, ".build-lab/files.json")),
   );
