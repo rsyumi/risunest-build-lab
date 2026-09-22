@@ -106,7 +106,7 @@ jobs:
         if: inputs.scope == 'full'
         run: |
           set -euo pipefail
-          dbus-run-session -- bash scripts/linux-native-tests.sh --release --lib -- --test-threads=1 2>&1 | tee artifacts/rust-contracts.log
+          dbus-run-session -- bash scripts/linux-native-tests.sh --release --target x86_64-unknown-linux-gnu --lib -- --test-threads=1 2>&1 | tee artifacts/rust-contracts.log
       - name: Build agent packages
         run: |
           set -euo pipefail
@@ -150,19 +150,23 @@ jobs:
           set -euo pipefail
           pnpm tauri build --ci --target x86_64-unknown-linux-gnu --no-bundle \
             --config benchmarks/linux/tauri.conf.json -- --locked 2>&1 | tee artifacts/harness-native.log
+          release="$CARGO_TARGET_DIR/x86_64-unknown-linux-gnu/release"
+          harness="$release/RisuNest"
+          test -x "$harness" || harness="$release/risunest"
+          test -x "$harness"
           # The identifier is the only harness marker that survives asset
           # compression, so prove it is detectable before trusting its absence
-          # from the packaged product.
-          grep -qa 'io.github.rsyumi.risunest.linux.bench' "$CARGO_TARGET_DIR/x86_64-unknown-linux-gnu/release/risunest"
+          # from the packaged product. It also confirms this binary is the
+          # harness rather than the product build it replaced.
+          grep -qa 'io.github.rsyumi.risunest.linux.bench' "$harness"
+          printf 'HARNESS_BINARY=%s\n' "$harness" >> "$GITHUB_ENV"
       - name: Actual WebKitGTK contracts and desktop lifecycle
         if: inputs.scope == 'full'
         run: |
           set -euo pipefail
-          binary="$CARGO_TARGET_DIR/x86_64-unknown-linux-gnu/release/risunest"
-          test -x "$binary"
           for phase in persistence reload regex; do
             dbus-run-session -- xvfb-run -a python3 benchmarks/linux/run.py \
-              --binary "$binary" --output artifacts/webkitgtk --phase "$phase" 2>&1 | tee -a artifacts/webkitgtk.log
+              --binary "$HARNESS_BINARY" --output artifacts/webkitgtk --phase "$phase" 2>&1 | tee -a artifacts/webkitgtk.log
           done
           node benchmarks/linux/summarize.mjs artifacts/webkitgtk 2>&1 | tee artifacts/webkitgtk-summary.txt
       - uses: actions/upload-artifact@v4
