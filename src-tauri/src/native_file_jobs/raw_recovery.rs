@@ -885,11 +885,33 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let owned = tempfile::tempdir().unwrap();
         fs::create_dir_all(root.path().join("persistent")).unwrap();
-        fs::create_dir_all(root.path().join("assets")).unwrap();
+        fs::create_dir_all(root.path().join("assets/objects")).unwrap();
         fs::write(root.path().join(MAIN_DATABASE), b"db").unwrap();
         fs::write(root.path().join("outside"), b"secret").unwrap();
-        symlink(root.path().join("outside"), root.path().join("assets/link")).unwrap();
+        symlink(
+            root.path().join("outside"),
+            root.path().join("assets/objects/link"),
+        )
+        .unwrap();
         let captured = capture(root.path(), owned.path(), "1.2.3", &job()).unwrap();
         assert!(captured.partial);
+
+        let mut zip = zip::ZipArchive::new(File::open(captured.path).unwrap()).unwrap();
+        assert!(zip
+            .by_name(&encoded_entry_path(Path::new("assets/objects/link")))
+            .is_err());
+        let mut manifest = String::new();
+        zip.by_name("manifest.json")
+            .unwrap()
+            .read_to_string(&mut manifest)
+            .unwrap();
+        let manifest: serde_json::Value = serde_json::from_str(&manifest).unwrap();
+        let paths = manifest["paths"].as_array().unwrap();
+        let link = paths
+            .iter()
+            .find(|entry| entry["originalRelativePath"] == "assets/objects/link")
+            .unwrap();
+        assert_eq!(link["status"], "unsafe-path");
+        assert_eq!(link["capturedBytes"], 0);
     }
 }

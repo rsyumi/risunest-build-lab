@@ -990,7 +990,7 @@ pub(crate) async fn external_storage_begin_authorization(
 #[cfg(target_os = "ios")]
 #[tauri::command]
 pub(crate) async fn external_storage_begin_authorization(
-    _app: AppHandle,
+    app: AppHandle,
     state: State<'_, ConnectionCommandState>,
     request: BeginAuthorizationRequest,
 ) -> Result<PendingAuthorizationSummary> {
