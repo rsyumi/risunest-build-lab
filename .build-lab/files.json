@@ -1503,8 +1503,8 @@
     {
       "path": "crates/tauri-plugin-ios-native/src/lib.rs",
       "mode": "100644",
-      "bytes": 3710,
-      "sha256": "50d51769cc1c5ec230fe464924ca697d5573c098d3b98c34616cc7a16d68efc6"
+      "bytes": 3966,
+      "sha256": "6998d63fe55959b02d838f4aced2c255ee9d7f61e0f19c423579f50c6f9dead8"
     },
     {
       "path": "crates/tauri-plugin-updater/.cargo-ok",
@@ -4611,8 +4611,8 @@
     {
       "path": "src-tauri/src/external_storage/connection_commands.rs",
       "mode": "100644",
-      "bytes": 92244,
-      "sha256": "953e207e3c810271a27aca305af85a9e98883516097aa2f58f030596d7b77ae6"
+      "bytes": 92243,
+      "sha256": "494bce3f760c18f2d3aa8233925cf3e76b517a675d737b7b3df66e4629a97c2e"
     },
     {
       "path": "src-tauri/src/external_storage/connection_store.rs",
@@ -5397,8 +5397,8 @@
     {
       "path": "src-tauri/src/native_file_jobs/raw_recovery.rs",
       "mode": "100644",
-      "bytes": 29270,
-      "sha256": "57e86abd85fb5cdae9df6770a24bed90f500eae4925c28071f29c3abf426ee4e"
+      "bytes": 30097,
+      "sha256": "ff78e1603c852a7bf362928f3da39f5f5ef9e0324f1ef4c619894a4e77757977"
     },
     {
       "path": "src-tauri/src/native_file_jobs/reference_source.rs",

@@ -12,8 +12,16 @@ use tauri::{plugin::PluginHandle, Manager};
 tauri::ios_plugin_binding!(init_plugin_ios_native);
 
 #[cfg(target_os = "ios")]
-#[derive(Clone)]
 pub struct IosNative<R: Runtime>(PluginHandle<R>);
+
+// A derived Clone would only apply to a cloneable runtime, so `ios_native().clone()`
+// would copy the reference instead of the handle.
+#[cfg(target_os = "ios")]
+impl<R: Runtime> Clone for IosNative<R> {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
 
 #[cfg(target_os = "ios")]
 pub trait IosNativeExt<R: Runtime> {
