@@ -14,6 +14,7 @@ serde_json = "1"
 # These are the same plugins/versions already used by the product builder.
 tauri-plugin-deep-link = "2.4.9"
 tauri-plugin-fs = "2.5.1"
+tauri-plugin-opener = "2.5.5"
 tauri-plugin-os = "2.3.2"
 tauri-plugin-dialog = "2.7.2"
 tauri-plugin-process = "2.3.1"
