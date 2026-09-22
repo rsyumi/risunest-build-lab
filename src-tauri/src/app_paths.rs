@@ -302,7 +302,14 @@ pub(crate) struct Roots {
 }
 
 #[tauri::command]
-pub(crate) fn app_paths_roots(app: tauri::AppHandle) -> Result<Roots, String> {
+pub(crate) async fn app_paths_roots(app: tauri::AppHandle) -> Result<Roots, String> {
+    // The renderer cannot name a staged file before it has a root, so this is
+    // where the native side is guaranteed to have received one.
+    #[cfg(target_os = "ios")]
+    {
+        use tauri_plugin_ios_native::IosNativeExt;
+        app.ios_native().ensure_data_root().await?;
+    }
     let paths = manifest(&app)?;
     Ok(Roots {
         data: paths

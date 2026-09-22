@@ -1,7 +1,7 @@
 import { streaming, tokenizer, snapshotRestore } from "./runtimeContracts";
 import { installPickerContracts } from "./pickerContracts";
 import { invoke } from "@tauri-apps/api/core";
-import { appDataDir, join } from "@tauri-apps/api/path";
+import { join } from "@tauri-apps/api/path";
 import { mkdir, readFile, writeFile, remove } from "@tauri-apps/plugin-fs";
 import {
   beginIOSGeneration,
@@ -10,6 +10,7 @@ import {
   initializeIOSNative,
 } from "../../src/ts/iosNative";
 import { isTauriIOS, isTauriDesktop } from "../../src/ts/platform";
+import { nativeDataPath } from "../../src/ts/storage/nativePaths";
 import { persistence, reload, regex, guard, check, pause } from "./contracts";
 import { PersistentBenchmarkMarker } from "./persistentMarker";
 
@@ -142,7 +143,7 @@ async function main() {
     await report("regex", await regex());
     await report("streaming", await streaming());
     await report("tokenizer", await tokenizer());
-    const root = await appDataDir();
+    const root = await nativeDataPath();
     const folder = await join(root, "ios-file-staging", crypto.randomUUID());
     const path = await join(folder, "synthetic.bin");
     const bytes = Uint8Array.from({ length: 1024 * 1024 }, (_, i) => i % 251);

@@ -147,8 +147,8 @@
     {
       "path": "benchmarks/ios/main.ts",
       "mode": "100644",
-      "bytes": 10070,
-      "sha256": "fc5bf933b66d23591e99ba95e3641053660ee5e6ad8a108bcbbfcb506d0747f9"
+      "bytes": 10129,
+      "sha256": "4c7001dab04a8126f9911501f223d9b311f4dd15e9f1a57793f456e770a57f0e"
     },
     {
       "path": "benchmarks/ios/native/.gitignore",
@@ -207,8 +207,8 @@
     {
       "path": "benchmarks/ios/pickerContracts.ts",
       "mode": "100644",
-      "bytes": 3111,
-      "sha256": "287f6b45742f18ca73345ab02b2308caa98d4598c2d217dc42c186bcddb78aa2"
+      "bytes": 3139,
+      "sha256": "2835f2f6fc11d5083613cb5b9e320f5961506df0e9f06148efce122da9218b2f"
     },
     {
       "path": "benchmarks/ios/productContracts.ts",
@@ -1503,8 +1503,8 @@
     {
       "path": "crates/tauri-plugin-ios-native/src/lib.rs",
       "mode": "100644",
-      "bytes": 3966,
-      "sha256": "6998d63fe55959b02d838f4aced2c255ee9d7f61e0f19c423579f50c6f9dead8"
+      "bytes": 5223,
+      "sha256": "5dbd41478b98b643893399e663097c6f7d2c8ebc32838555188b7cc028700374"
     },
     {
       "path": "crates/tauri-plugin-updater/.cargo-ok",
@@ -4401,8 +4401,8 @@
     {
       "path": "src-tauri/src/app_paths.rs",
       "mode": "100644",
-      "bytes": 18306,
-      "sha256": "652344ac5c1a97e409206df284d11712bae2e5446d4630f10a3dcde36905536d"
+      "bytes": 18601,
+      "sha256": "87f8ed1b1877f2de86c047f4b21661732f51a6cb554724368909eaf8750b3354"
     },
     {
       "path": "src-tauri/src/app_paths/tests.rs",
@@ -5169,8 +5169,8 @@
     {
       "path": "src-tauri/src/lib.rs",
       "mode": "100644",
-      "bytes": 43692,
-      "sha256": "568423e1e63fd66a6fb2f6ea0752b43d5d55019b93c1943057682629fb4b006b"
+      "bytes": 43577,
+      "sha256": "0a20ee8c07411ce9dafab195766543cb4c24947dc5370f4e97c0b89e257c554b"
     },
     {
       "path": "src-tauri/src/local_backup.rs",
@@ -14025,8 +14025,8 @@
     {
       "path": "tests/pathBoundary.node-test.mjs",
       "mode": "100644",
-      "bytes": 5762,
-      "sha256": "8174292607a63c108ca42a3bd18ad8bb0f36d2d47661f83af4764ccf7ccfdbe3"
+      "bytes": 6359,
+      "sha256": "ecb0f3992e43de718d1f10ba4e300cbfd6f36bba7d89cee5a6dbda196027a43a"
     },
     {
       "path": "tests/pathManifest.mjs",
