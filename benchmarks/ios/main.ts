@@ -2,7 +2,7 @@ import { streaming, tokenizer, snapshotRestore } from "./runtimeContracts";
 import { installPickerContracts } from "./pickerContracts";
 import { invoke } from "@tauri-apps/api/core";
 import { join } from "@tauri-apps/api/path";
-import { mkdir, readFile, writeFile, remove } from "@tauri-apps/plugin-fs";
+import { mkdir, readFile, writeFile, exists } from "@tauri-apps/plugin-fs";
 import {
   beginIOSGeneration,
   getIOSNativeState,
@@ -156,7 +156,10 @@ async function main() {
       "native file binary roundtrip",
     );
     await invoke("plugin:ios-native|discard_file", { path });
-    await remove(folder);
+    check(
+      !(await exists(folder)),
+      "discarding a staged file removes the folder that held it",
+    );
     let rejected = false;
     try {
       await invoke("plugin:ios-native|discard_file", {

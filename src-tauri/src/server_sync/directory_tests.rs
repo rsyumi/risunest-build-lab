@@ -32,8 +32,21 @@ fn tls_identity_requests(
     device: &str,
     requests: usize,
 ) -> (String, reqwest::Certificate, std::thread::JoinHandle<()>) {
-    let key = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
-    let certificate = reqwest::Certificate::from_pem(key.cert.pem().as_bytes()).unwrap();
+    // Every rcgen certificate carries the same subject and no authority key
+    // identifier, so a client holding two of them cannot tell which key signed
+    // an endpoint and OpenSSL rejects the second one. Name each one apart.
+    static ISSUED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let mut params = rcgen::CertificateParams::new(vec!["localhost".to_owned()]).unwrap();
+    params.distinguished_name.push(
+        rcgen::DnType::CommonName,
+        format!(
+            "risunest synthetic endpoint {}",
+            ISSUED.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ),
+    );
+    let signing_key = rcgen::KeyPair::generate().unwrap();
+    let cert = params.self_signed(&signing_key).unwrap();
+    let certificate = reqwest::Certificate::from_pem(cert.pem().as_bytes()).unwrap();
     let config = rustls::ServerConfig::builder_with_provider(Arc::new(
         rustls::crypto::ring::default_provider(),
     ))
@@ -41,8 +54,8 @@ fn tls_identity_requests(
     .unwrap()
     .with_no_client_auth()
     .with_single_cert(
-        vec![key.cert.der().clone()],
-        rustls::pki_types::PrivatePkcs8KeyDer::from(key.signing_key.serialize_der()).into(),
+        vec![cert.der().clone()],
+        rustls::pki_types::PrivatePkcs8KeyDer::from(signing_key.serialize_der()).into(),
     )
     .unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
