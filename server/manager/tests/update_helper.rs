@@ -128,12 +128,14 @@ fn stopped_helper_rolls_back_when_the_replacement_cannot_be_started() {
         fixture.install.clone(),
     );
 
-    let started = std::time::Instant::now();
     assert!(result.recv_timeout(Duration::from_millis(250)).is_err());
     assert_old_install(&fixture.install);
-    let received = result.recv_timeout(Duration::from_secs(120));
-    panic!("diag-elapsed-ms={}", started.elapsed().as_millis());
-    let error = received.unwrap().unwrap_err();
+    // The parent and both Task Scheduler calls each start Windows PowerShell,
+    // which takes about 22 s per start on Windows ARM runners.
+    let error = result
+        .recv_timeout(Duration::from_secs(120))
+        .unwrap()
+        .unwrap_err();
     let _ = parent.wait();
 
     assert_eq!(error, "server-executable-or-data-path-invalid");
