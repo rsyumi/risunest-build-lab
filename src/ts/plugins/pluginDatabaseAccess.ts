@@ -1,0 +1,1495 @@
+import type { Chat, Database } from '../storage/database.svelte'
+import type { CommittedApplyOutcome } from '../storage/persistentDataRuntime'
+import type {
+    PersistentCompleteCharacterMutation,
+    PersistentReplacementOptions,
+    PersistentScopedReplacementOptions,
+} from '../storage/saveCoordinator'
+import type {
+    CompleteConversationLease,
+    SelectedConversationTarget,
+} from '../storage/activeWorkingSet.svelte'
+import type { ActiveConversationSession } from '../storage/activeConversationSession'
+import { getPersistentDataStore } from '../storage/persistentDataStoreFactory'
+import { isWorkingSetCharacterStub } from '../storage/workingSetCatalog'
+import type {
+    CharacterPage,
+    ConversationPage,
+    ConversationWindow,
+    DataRevision,
+    PersistentDataStore,
+    PersistentRevisionLease,
+    PluginStorageMutation,
+    PluginStorageValue,
+} from '../storage/persistentDataStore'
+import {
+    acquireCurrentRevisionWithRetry,
+    assertPinnedRevision,
+    iterateUnarchivedPinnedCharacterSummaries,
+    iteratePinnedCharacters,
+    iteratePinnedConversations,
+    releasePersistentRevisionLease,
+    withPersistentRevisionLease,
+} from '../storage/persistentRecordIterator'
+import { defineOwnEnumerableProperty } from '../storage/ownEnumerableProperty'
+import { isConversationSummaryStub } from '../storage/conversationResidency'
+import type { OwnerScopedStorageMutation } from './pluginStorageStore'
+import { resolveLifecyclePluginStorageOwner } from './pluginStorageStore'
+import type { PluginStorageMeta } from './pluginOwner'
+
+export const PLUGIN_SUMMARY_QUERY_DEFAULT_LIMIT = 50
+export const PLUGIN_SUMMARY_QUERY_MAX_LIMIT = 100
+export const PLUGIN_MESSAGE_QUERY_DEFAULT_LIMIT = 128
+export const PLUGIN_MESSAGE_QUERY_MAX_LIMIT = 128
+
+export interface PluginCharacterQuery {
+    search?: string
+    order?: 'configured' | 'recent'
+    trash?: boolean
+    limit?: number
+    cursor?: string
+}
+
+export interface PluginConversationQuery {
+    characterId: string
+    order?: 'configured' | 'recent'
+    limit?: number
+    cursor?: string
+}
+
+export interface PluginConversationMessageQuery {
+    characterId: string
+    conversationId: string
+    startIndex?: number
+    limit?: number
+    anchorMessageId?: string
+    before?: number
+    after?: number
+    signal?: AbortSignal
+}
+
+export interface PluginConversationWindow extends ConversationWindow {
+    revision: DataRevision
+}
+
+export type PluginCompleteCharacter = Database['characters'][number]
+
+export interface PluginChatOutputProjectionInput {
+    characterId: string
+    conversationId: string
+    liveCharacter: PluginCompleteCharacter
+    liveConversation: Chat
+}
+
+export interface PluginChatOutputProjection {
+    char: PluginCompleteCharacter
+    chat: Chat
+}
+
+export type PluginChatOutputProjector = (
+    input: PluginChatOutputProjectionInput,
+) => Promise<PluginChatOutputProjection>
+
+export interface PluginFullObjectCallContext {
+    pluginName: string
+    signal: AbortSignal
+}
+
+export interface PluginResolvedCharacterTarget {
+    revision: DataRevision
+    characterId: string
+}
+
+export interface PluginResolvedConversationTarget extends PluginResolvedCharacterTarget {
+    conversationId: string
+}
+
+export type PluginIdentityReplacementOperation =
+    | 'setCharacter'
+    | 'setCharacterToIndex'
+    | 'setChatToIndex'
+
+export interface PluginIdentityReplacementDiagnostic {
+    kind: 'plugin-identity-replacement-rejected'
+    pluginName: string
+    operation: PluginIdentityReplacementOperation
+    targetId: string
+    attemptedId: string
+}
+
+export class PluginIdentityReplacementRejectedError extends Error {
+    readonly diagnostic: PluginIdentityReplacementDiagnostic
+
+    constructor(diagnostic: PluginIdentityReplacementDiagnostic) {
+        super(`${diagnostic.operation} cannot replace identity ${diagnostic.targetId}`)
+        this.name = 'PluginIdentityReplacementRejectedError'
+        this.diagnostic = diagnostic
+    }
+}
+
+export class PluginFullObjectTargetStaleError extends Error {
+    constructor(characterId: string, conversationId?: string) {
+        super(
+            conversationId
+                ? `Plugin full-object target became stale: ${characterId}/${conversationId}`
+                : `Plugin full-object target became stale: ${characterId}`,
+        )
+        this.name = 'PluginFullObjectTargetStaleError'
+    }
+}
+
+export interface PluginDatabaseAccessDependencies {
+    /** The plugin every call in this instance is confined to. */
+    owner: string
+    store: PersistentDataStore
+    flushPendingData(reason: string): Promise<void>
+    getCompatibilityDatabase(): Database
+    getSelectedCharacterId(): string | null
+    captureSelectedConversationTarget(): SelectedConversationTarget | null
+    acquireCompleteConversation(
+        reason: string,
+        target?: SelectedConversationTarget | null,
+    ): Promise<CompleteConversationLease>
+    refreshSelectedConversationAfterReplacement(
+        target: SelectedConversationTarget,
+        expectedSession: ActiveConversationSession,
+    ): boolean
+    invalidateActiveConversationSession?(): void
+    replacePersistentCompleteCharacter(
+        characterId: string,
+        reason: string,
+        mutate: PersistentCompleteCharacterMutation,
+        options?: PersistentScopedReplacementOptions,
+    ): Promise<boolean>
+    replacePersistentConversation(
+        characterId: string,
+        conversationId: string,
+        reason: string,
+        replacement: Chat,
+        options?: PersistentScopedReplacementOptions,
+    ): Promise<boolean>
+    reportIdentityReplacementRejected(
+        diagnostic: PluginIdentityReplacementDiagnostic,
+    ): void
+    getNavigationGeneration(): number
+    getStorageAuthorityEpoch(): number
+    assertPersistentMutationAllowed(expectedAuthorityEpoch?: number): void
+    applyCompatibilityDatabaseLite(database: Record<string, unknown>): void
+    readPluginStorageSnapshot(): Promise<Record<string, unknown>>
+    mutatePluginStorage(mutations: readonly OwnerScopedStorageMutation[]): Promise<void>
+    invalidatePluginStorage(): void
+    materializeDatabaseSnapshot(
+        reason: string,
+        options?: { includePluginStorageValues?: boolean },
+    ): Promise<{
+        database: Database
+        revision: DataRevision
+        mutationGeneration: number
+        pluginStorageValues?: PluginStorageValue[]
+    }>
+    replacePersistentDatabase(
+        database: Database,
+        reason: string,
+        options: PersistentReplacementOptions,
+    ): Promise<CommittedApplyOutcome>
+    prepareAuthoritativeDatabaseUpdate?(
+        database: Record<string, unknown>,
+    ): Promise<Record<string, unknown>>
+    snapshot<T>(value: T): T
+}
+
+export interface PluginDatabaseAccess {
+    getFullObjectSnapshotStream(
+        target: { characterIndex?: number; chatIndex?: number },
+        context: PluginFullObjectCallContext,
+    ): Promise<PluginIframeSnapshot | null | undefined>
+    getCurrentCharacter(
+        context: PluginFullObjectCallContext,
+    ): Promise<PluginCompleteCharacter | undefined>
+    getCharacterFromIndex(
+        index: number,
+        context: PluginFullObjectCallContext,
+    ): Promise<PluginCompleteCharacter | null>
+    getChatFromIndex(
+        characterIndex: number,
+        chatIndex: number,
+        context: PluginFullObjectCallContext,
+    ): Promise<Chat | null>
+    setCurrentCharacter(
+        character: PluginCompleteCharacter,
+        context: PluginFullObjectCallContext,
+    ): Promise<void>
+    setCharacterToIndex(
+        index: number,
+        character: PluginCompleteCharacter,
+        context: PluginFullObjectCallContext,
+    ): Promise<void>
+    setChatToIndex(
+        characterIndex: number,
+        chatIndex: number,
+        chat: Chat,
+        context: PluginFullObjectCallContext,
+    ): Promise<void>
+    queryCharacters(input?: PluginCharacterQuery): Promise<CharacterPage>
+    queryConversations(input: PluginConversationQuery): Promise<ConversationPage>
+    queryConversationMessages(
+        input: PluginConversationMessageQuery,
+    ): Promise<PluginConversationWindow | null>
+    getDatabaseSnapshot(
+        includeOnly: string[] | 'all',
+        allowedKeys: readonly string[],
+    ): Promise<Record<string, unknown>>
+    getDatabaseSnapshotStream(
+        includeOnly: string[] | 'all',
+        allowedKeys: readonly string[],
+    ): Promise<ReadableStream<PluginDatabaseSnapshotChunk>>
+    setDatabaseLite(
+        database: Record<string, unknown>,
+        allowedKeys: readonly string[],
+    ): void | Promise<void>
+    setDatabase(
+        database: Record<string, unknown>,
+        allowedKeys: readonly string[],
+    ): Promise<void>
+}
+
+export interface PluginIframeSnapshot {
+    __type: 'IFRAME_OBJECT_STREAM'
+    value: ReadableStream<PluginDatabaseSnapshotChunk>
+    select: 'character' | 'conversation'
+}
+
+export type PluginDatabaseSnapshotChunk =
+    | { type: 'set'; key: string; value: unknown }
+    | { type: 'arrayStart'; key: string }
+    | { type: 'arrayPush'; key: string; value: unknown }
+    | { type: 'recordStart'; key: string }
+    | { type: 'recordSet'; key: string; entryKey: string; value: unknown }
+    | { type: 'characterStart'; key: 'characters'; value: unknown }
+    | { type: 'conversationStart'; key: 'characters'; value: unknown }
+    | { type: 'message'; key: 'characters'; value: unknown }
+
+async function* streamPinnedConversation(
+    reader: PersistentRevisionLease,
+    characterId: string,
+    conversationId: string,
+): AsyncGenerator<PluginDatabaseSnapshotChunk> {
+    const metadata = await reader.readConversationMetadata(characterId, conversationId)
+    if (!metadata) throw new Error(`Missing conversation ${conversationId}`)
+    assertPinnedRevision(reader.revision, metadata.revision, 'Conversation metadata')
+    yield { type: 'conversationStart', key: 'characters', value: metadata.value.conversation }
+    for (let startIndex = 0; startIndex < metadata.value.totalMessages; startIndex++) {
+        const page = await reader.readConversationWindow({
+            characterId, conversationId, startIndex, limit: 1,
+        })
+        if (!page) throw new Error(`Missing conversation ${conversationId}`)
+        assertPinnedRevision(reader.revision, page.revision, 'Conversation messages')
+        if (page.value.startIndex !== startIndex || page.value.messages.length !== 1
+            || page.value.totalMessages !== metadata.value.totalMessages) {
+            throw new Error('Incomplete plugin snapshot message page')
+        }
+        yield { type: 'message', key: 'characters', value: page.value.messages[0] }
+    }
+}
+
+async function* streamPinnedCharacter(
+    reader: PersistentRevisionLease,
+    characterId: string,
+    detail: unknown,
+): AsyncGenerator<PluginDatabaseSnapshotChunk> {
+    yield { type: 'characterStart', key: 'characters', value: detail }
+    let cursor: string | undefined
+    do {
+        const page = await reader.queryConversations({
+            characterId, order: 'configured', limit: 100, cursor,
+        })
+        assertPinnedRevision(reader.revision, page.revision, 'Conversation catalog')
+        for (const summary of page.items) {
+            yield* streamPinnedConversation(reader, characterId, summary.id)
+        }
+        cursor = page.nextCursor
+    } while (cursor !== undefined)
+}
+
+const SYNCHRONOUS_CHARACTER_SET_ERROR =
+    'Synchronous plugin character updates are unavailable. Use async setDatabase().'
+const STALE_DATABASE_SET_ERROR =
+    'Plugin database update became stale because navigation state changed.'
+const DANGEROUS_DATABASE_KEYS = new Set(['__proto__', 'prototype', 'constructor'])
+
+function positiveLimit(value: number | undefined, defaultValue: number, maximum: number): number {
+    const limit = value ?? defaultValue
+    if (!Number.isSafeInteger(limit) || limit <= 0) {
+        throw new RangeError('Query limit must be a positive safe integer')
+    }
+    return Math.min(limit, maximum)
+}
+
+function requiredId(value: string, name: string): void {
+    if (typeof value !== 'string' || value.trim().length === 0) {
+        throw new RangeError(`${name} must be a nonempty string`)
+    }
+}
+
+function nonnegativeWindow(value: number | undefined, name: string): number {
+    const size = value ?? 0
+    if (!Number.isSafeInteger(size) || size < 0) {
+        throw new RangeError(`${name} must be a nonnegative safe integer`)
+    }
+    return size
+}
+
+export function linkPluginQueryAbortSignals(
+    ...signals: Array<AbortSignal | undefined>
+): {
+    signal: AbortSignal
+    dispose(): void
+} {
+    const activeSignals = signals.filter((signal): signal is AbortSignal => Boolean(signal))
+    if (activeSignals.length === 1) {
+        return { signal: activeSignals[0], dispose() {} }
+    }
+
+    const controller = new AbortController()
+    const listeners = activeSignals.map((signal) => {
+        const listener = () => controller.abort(signal.reason)
+        if (signal.aborted) listener()
+        else signal.addEventListener('abort', listener, { once: true })
+        return { signal, listener }
+    })
+    return {
+        signal: controller.signal,
+        dispose() {
+            for (const { signal, listener } of listeners) {
+                signal.removeEventListener('abort', listener)
+            }
+        },
+    }
+}
+
+function throwIfQueryAborted(signal: AbortSignal | undefined): void {
+    if (!signal?.aborted) return
+    throw signal.reason ?? new DOMException('The operation was aborted', 'AbortError')
+}
+
+function throwIfFullObjectCallAborted(signal: AbortSignal): void {
+    if (!signal.aborted) return
+    throw signal.reason ?? new DOMException('The operation was aborted', 'AbortError')
+}
+
+async function resolvePinnedCharacterTarget(
+    reader: PersistentRevisionLease,
+    index: number,
+): Promise<PluginResolvedCharacterTarget | null> {
+    if (!Number.isSafeInteger(index) || index < 0) return null
+    let position = 0
+    // The position API walks the same filtered sequence the full database read
+    // walks, so an index means the same character in both.
+    for await (const summary of iterateUnarchivedPinnedCharacterSummaries(reader)) {
+        if (position++ === index) {
+            return { revision: reader.revision, characterId: summary.id }
+        }
+    }
+    return null
+}
+
+async function resolvePinnedConversationTarget(
+    reader: PersistentRevisionLease,
+    characterIndex: number,
+    chatIndex: number,
+): Promise<PluginResolvedConversationTarget | null> {
+    if (!Number.isSafeInteger(chatIndex) || chatIndex < 0) return null
+    const character = await resolvePinnedCharacterTarget(reader, characterIndex)
+    if (!character) return null
+    let position = 0
+    let cursor: string | undefined
+    do {
+        const page = await reader.queryConversations({
+            characterId: character.characterId,
+            order: 'configured',
+            limit: 128,
+            cursor,
+        })
+        assertPinnedRevision(
+            reader.revision,
+            page.revision,
+            `Conversation page for ${character.characterId}`,
+        )
+        for (const summary of page.items) {
+            if (position++ === chatIndex) {
+                return { ...character, conversationId: summary.id }
+            }
+        }
+        cursor = page.nextCursor
+    } while (cursor !== undefined)
+    return null
+}
+
+async function readPinnedCompleteCharacter(
+    reader: PersistentRevisionLease,
+    characterId: string,
+): Promise<PluginCompleteCharacter | null> {
+    const detail = await reader.readCharacter(characterId)
+    if (!detail) return null
+    assertPinnedRevision(reader.revision, detail.revision, `Character ${characterId}`)
+    const chats: Chat[] = []
+    for await (const conversation of iteratePinnedConversations(reader, characterId)) {
+        chats.push(conversation.value)
+    }
+    return { ...detail.value, chats } as PluginCompleteCharacter
+}
+
+function hasCharacterUpdate(database: Record<string, unknown>): boolean {
+    return Object.prototype.hasOwnProperty.call(database, 'characters')
+}
+
+function pluginStorageMutations(
+    update: Record<string, unknown>,
+    allowedKeys: readonly string[],
+): OwnerScopedStorageMutation[] {
+    const allowedKeySet = new Set(allowedKeys)
+    const hasExplicitStorage =
+        allowedKeySet.has('pluginCustomStorage') &&
+        Object.prototype.hasOwnProperty.call(update, 'pluginCustomStorage')
+    const mutations: OwnerScopedStorageMutation[] = []
+    if (hasExplicitStorage) {
+        mutations.push({ type: 'clear' })
+        const storage = { ...(update.pluginCustomStorage as Record<string, unknown>) }
+        for (const key of Object.keys(update).filter((key) => !allowedKeySet.has(key)).sort()) {
+            storage[key] = update[key]
+        }
+        for (const key of Object.keys(storage)) {
+            mutations.push({ type: 'set', key, value: storage[key] })
+        }
+        return mutations
+    }
+    for (const key of Object.keys(update).filter((key) => !allowedKeySet.has(key)).sort()) {
+        mutations.push({ type: 'set', key, value: update[key] })
+    }
+    return mutations
+}
+
+function applyOwnerScopedStorageMutations(
+    values: readonly PluginStorageValue[],
+    owner: string,
+    mutations: readonly OwnerScopedStorageMutation[],
+): PluginStorageValue[] {
+    const result = values.map((value) => ({ ...value }))
+    for (const mutation of mutations) {
+        if (mutation.type === 'clear') {
+            for (let index = result.length - 1; index >= 0; index--) {
+                if (result[index].owner === owner) result.splice(index, 1)
+            }
+            continue
+        }
+        const index = result.findIndex(
+            (value) => value.owner === owner && value.key === mutation.key,
+        )
+        if (mutation.type === 'delete') {
+            if (index >= 0) result.splice(index, 1)
+            continue
+        }
+        const value = { owner, key: mutation.key, value: mutation.value }
+        if (index >= 0) result[index] = value
+        else result.push(value)
+    }
+    return result
+}
+
+function compatibilityOnlyUpdate(
+    update: Record<string, unknown>,
+    allowedKeys: readonly string[],
+): Record<string, unknown> {
+    const allowedKeySet = new Set(allowedKeys)
+    return Object.fromEntries(Object.entries(update).filter(([key]) =>
+        key !== 'pluginCustomStorage' && allowedKeySet.has(key),
+    ))
+}
+
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+    if (value === null || typeof value !== 'object') return false
+    const prototype = Object.getPrototypeOf(value)
+    return prototype === Object.prototype || prototype === null
+}
+
+function validateSafeKeys(database: Record<string, unknown>): void {
+    for (const key of Object.keys(database)) {
+        if (DANGEROUS_DATABASE_KEYS.has(key)) {
+            throw new TypeError(`Unsafe plugin database key: ${key}`)
+        }
+    }
+}
+
+export function validatePluginDatabaseUpdate(
+    database: unknown,
+): asserts database is Record<string, unknown> {
+    if (!isPlainRecord(database)) {
+        throw new TypeError('Plugin database update must be a plain record')
+    }
+    validateSafeKeys(database)
+    if (Object.prototype.hasOwnProperty.call(database, 'pluginCustomStorage')) {
+        if (!isPlainRecord(database.pluginCustomStorage)) {
+            throw new TypeError('pluginCustomStorage must be a plain record')
+        }
+        validateSafeKeys(database.pluginCustomStorage)
+    }
+}
+
+function validatePluginCompleteChat(value: unknown): asserts value is Chat {
+    if (!value || typeof value !== 'object') {
+        throw new TypeError('Plugin conversation replacement must be a complete object')
+    }
+    const record = value as Record<string, unknown>
+    if (typeof record.id !== 'string' || record.id.length === 0) {
+        throw new TypeError('Plugin conversation replacement must have a nonempty ID')
+    }
+    if (!Array.isArray(record.message)) {
+        throw new TypeError('Plugin conversation replacement messages must be an array')
+    }
+}
+
+function validatePluginCompleteCharacter(
+    value: unknown,
+): asserts value is PluginCompleteCharacter {
+    if (!value || typeof value !== 'object') {
+        throw new TypeError('Plugin character replacement must be a complete object')
+    }
+    const record = value as Record<string, unknown>
+    if (typeof record.chaId !== 'string' || record.chaId.length === 0) {
+        throw new TypeError('Plugin character replacement must have a nonempty character ID')
+    }
+    if (isWorkingSetCharacterStub(value as PluginCompleteCharacter)) {
+        throw new TypeError('Plugin database characters cannot contain catalog working-set stubs')
+    }
+    if (!Array.isArray(record.chats)) {
+        throw new TypeError(`Plugin database character ${record.chaId} is not fully hydrated`)
+    }
+    const conversationIds = new Set<string>()
+    for (const conversation of record.chats) {
+        if (
+            !conversation ||
+            typeof conversation !== 'object' ||
+            typeof (conversation as Record<string, unknown>).id !== 'string' ||
+            (conversation as Record<string, unknown>).id === '' ||
+            !Array.isArray((conversation as Record<string, unknown>).message)
+        ) {
+            throw new TypeError(`Plugin database character ${record.chaId} is not fully hydrated`)
+        }
+        if (conversationIds.has(conversation.id!)) {
+            throw new TypeError(`Plugin character contains duplicate conversation ID ${conversation.id}`)
+        }
+        conversationIds.add(conversation.id!)
+    }
+}
+
+function validateCompleteCharacters(value: unknown): asserts value is Database['characters'] {
+    if (!Array.isArray(value)) {
+        throw new TypeError('Plugin database characters must be an array')
+    }
+    const characterIds = new Set<string>()
+    for (const character of value) {
+        validatePluginCompleteCharacter(character)
+        if (characterIds.has(character.chaId)) {
+            throw new TypeError(`Plugin database contains duplicate character ID ${character.chaId}`)
+        }
+        characterIds.add(character.chaId)
+    }
+}
+
+/**
+ * A full replacement writes the flat projection back, so the ownership sidecar
+ * has to ride along or every row would land unowned. Keys the calling plugin
+ * supplied belong to it; the rest keep the owner the store already records. A
+ * plugin that sends an explicit `pluginCustomStorage` replaces its own keys
+ * only, because the snapshot it read never showed it anyone else's.
+ */
+export function applyPluginDatabaseUpdate(
+    candidate: Database,
+    update: Record<string, unknown>,
+    allowedKeys: readonly string[],
+    owner: string,
+    ownerOf: (key: string) => string = resolveLifecyclePluginStorageOwner,
+): void {
+    validatePluginDatabaseUpdate(update)
+    const mutableCandidate = candidate as unknown as Record<string, unknown>
+    const allowedKeySet = new Set(allowedKeys)
+    const hasExplicitCustomStorage = Object.prototype.hasOwnProperty.call(
+        update,
+        'pluginCustomStorage',
+    ) && allowedKeySet.has('pluginCustomStorage')
+    const existingCustomStorage = candidate.pluginCustomStorage ?? {}
+    if (!isPlainRecord(existingCustomStorage)) {
+        throw new TypeError('Existing pluginCustomStorage must be a plain record')
+    }
+    const customStorage: Record<string, unknown> = {}
+    for (const [key, value] of Object.entries(existingCustomStorage)) {
+        if (hasExplicitCustomStorage && ownerOf(key) === owner) continue
+        customStorage[key] = value
+    }
+    if (hasExplicitCustomStorage) {
+        Object.assign(customStorage, update.pluginCustomStorage as Record<string, unknown>)
+    }
+
+    for (const key of Object.keys(update).filter((key) => allowedKeySet.has(key)).sort()) {
+        if (key !== 'pluginCustomStorage') mutableCandidate[key] = update[key]
+    }
+    const updatedKeys = new Set<string>()
+    for (const key of Object.keys(update).filter((key) => !allowedKeySet.has(key)).sort()) {
+        customStorage[key] = update[key]
+        updatedKeys.add(key)
+    }
+    if (hasExplicitCustomStorage) {
+        for (const key of Object.keys(update.pluginCustomStorage as Record<string, unknown>)) {
+            updatedKeys.add(key)
+        }
+    }
+    candidate.pluginCustomStorage = customStorage
+    const meta: PluginStorageMeta = {}
+    const now = Date.now()
+    for (const key of Object.keys(customStorage)) {
+        meta[key] = { plugin: updatedKeys.has(key) ? owner : ownerOf(key), updatedAt: now }
+    }
+    ;(candidate as Database & { pluginStorageMeta?: PluginStorageMeta }).pluginStorageMeta = meta
+}
+
+export function createPluginDatabaseAccess(
+    dependencies: PluginDatabaseAccessDependencies,
+): PluginDatabaseAccess {
+    let openPromise: Promise<void> | undefined
+    const openStore = () => (openPromise ??= dependencies.store.open().finally(() => {
+        openPromise = undefined
+    }))
+    const acquireCurrentRevisionReader = (): Promise<PersistentRevisionLease> =>
+        acquireCurrentRevisionWithRetry(
+            (revision) => dependencies.store.acquireRevision(revision),
+            async () => (await dependencies.store.readRoot()).revision,
+        )
+    const prepareQuery = async (signal?: AbortSignal) => {
+        throwIfQueryAborted(signal)
+        await dependencies.flushPendingData('plugin-database-query')
+        throwIfQueryAborted(signal)
+        await openStore()
+        throwIfQueryAborted(signal)
+    }
+    const rejectIdentityReplacement = (
+        context: PluginFullObjectCallContext,
+        operation: PluginIdentityReplacementOperation,
+        targetId: string,
+        attemptedId: string,
+    ): never => {
+        const diagnostic = {
+            kind: 'plugin-identity-replacement-rejected',
+            pluginName: context.pluginName,
+            operation,
+            targetId,
+            attemptedId,
+        } satisfies PluginIdentityReplacementDiagnostic
+        dependencies.reportIdentityReplacementRejected(diagnostic)
+        throw new PluginIdentityReplacementRejectedError(diagnostic)
+    }
+    const acquireSelectedLease = async (
+        selectedTarget: SelectedConversationTarget | null,
+        characterId: string,
+        conversationId?: string,
+    ): Promise<CompleteConversationLease | null> => {
+        if (!selectedTarget || selectedTarget.characterId !== characterId) return null
+        if (conversationId !== undefined && selectedTarget.conversationId !== conversationId) {
+            return null
+        }
+        return dependencies.acquireCompleteConversation(
+            'plugin-full-object-setter',
+            selectedTarget,
+        )
+    }
+    const captureSelectedCallBoundary = () => {
+        const authorityEpoch = dependencies.getStorageAuthorityEpoch()
+        dependencies.assertPersistentMutationAllowed(authorityEpoch)
+        return {
+            authorityEpoch,
+            characterId: dependencies.getSelectedCharacterId(),
+            navigationGeneration: dependencies.getNavigationGeneration(),
+            target: dependencies.captureSelectedConversationTarget(),
+        }
+    }
+    const recaptureSelectedTarget = (boundary: ReturnType<
+        typeof captureSelectedCallBoundary
+    >): SelectedConversationTarget | null => {
+        dependencies.assertPersistentMutationAllowed(boundary.authorityEpoch)
+        const target = dependencies.captureSelectedConversationTarget()
+        if (
+            !boundary.target ||
+            !target ||
+            boundary.characterId !== boundary.target.characterId ||
+            boundary.navigationGeneration !== boundary.target.navigationGeneration ||
+            dependencies.getSelectedCharacterId() !== boundary.characterId ||
+            dependencies.getNavigationGeneration() !== boundary.navigationGeneration ||
+            target.navigationGeneration !== boundary.navigationGeneration ||
+            target.characterId !== boundary.target.characterId ||
+            target.conversationId !== boundary.target.conversationId
+        ) return null
+        return target
+    }
+    // A leaseless scoped write is durably fenced by expectedRevision, but if
+    // it lands on the currently selected conversation (stale call boundary
+    // after navigating away and back), the published working-set replacement
+    // detaches any live session from its conversation object. Invalidate the
+    // session so it re-establishes against the replaced object.
+    const invalidateLeaselessSelectedWrite = (
+        characterId: string,
+        conversationId?: string,
+    ): void => {
+        if (dependencies.getSelectedCharacterId() !== characterId) return
+        if (conversationId !== undefined) {
+            const current = dependencies.captureSelectedConversationTarget()
+            if (!current || current.conversationId !== conversationId) return
+        }
+        dependencies.invalidateActiveConversationSession?.()
+    }
+
+    return {
+        async getFullObjectSnapshotStream(target, context) {
+            throwIfFullObjectCallAborted(context.signal)
+            await dependencies.flushPendingData('plugin-full-object-read')
+            throwIfFullObjectCallAborted(context.signal)
+            const selectedId = dependencies.getSelectedCharacterId()
+            if (target.characterIndex === undefined && selectedId === null) return undefined
+            await openStore()
+            const reader = await acquireCurrentRevisionReader()
+            let transferred = false
+            try {
+                throwIfFullObjectCallAborted(context.signal)
+                const resolved = target.characterIndex === undefined
+                    ? { characterId: selectedId! }
+                    : target.chatIndex === undefined
+                        ? await resolvePinnedCharacterTarget(reader, target.characterIndex)
+                        : await resolvePinnedConversationTarget(reader, target.characterIndex, target.chatIndex)
+                if (!resolved) return null
+                const detail = await reader.readCharacter(resolved.characterId)
+                if (!detail) return target.characterIndex === undefined ? undefined : null
+                assertPinnedRevision(reader.revision, detail.revision, 'Character')
+                const chunks = (async function* (): AsyncGenerator<PluginDatabaseSnapshotChunk> {
+                    yield { type: 'arrayStart', key: 'characters' }
+                    if ('conversationId' in resolved) {
+                        yield { type: 'characterStart', key: 'characters', value: detail.value }
+                        yield* streamPinnedConversation(reader, resolved.characterId, String(resolved.conversationId))
+                    } else {
+                        yield* streamPinnedCharacter(reader, resolved.characterId, detail.value)
+                    }
+                })()
+                let closed = false
+                const close = async () => {
+                    if (closed) return
+                    closed = true
+                    context.signal.removeEventListener('abort', abort)
+                    try { await chunks.return(undefined) }
+                    finally { await releasePersistentRevisionLease(reader) }
+                }
+                const abort = () => { void close().catch(() => undefined) }
+                context.signal.addEventListener('abort', abort, { once: true })
+                const value = new ReadableStream<PluginDatabaseSnapshotChunk>({
+                    async pull(controller) {
+                        try {
+                            throwIfFullObjectCallAborted(context.signal)
+                            const next = await chunks.next()
+                            throwIfFullObjectCallAborted(context.signal)
+                            if (next.done) {
+                                await close()
+                                controller.close()
+                            } else controller.enqueue(next.value)
+                        } catch (error) {
+                            await close().catch(() => undefined)
+                            controller.error(error)
+                        }
+                    },
+                    cancel: close,
+                })
+                transferred = true
+                return {
+                    __type: 'IFRAME_OBJECT_STREAM', value,
+                    select: target.chatIndex === undefined ? 'character' : 'conversation',
+                }
+            } finally {
+                if (!transferred) await releasePersistentRevisionLease(reader)
+            }
+        },
+
+        async getCurrentCharacter(context) {
+            throwIfFullObjectCallAborted(context.signal)
+            await dependencies.flushPendingData('plugin-full-object-read')
+            throwIfFullObjectCallAborted(context.signal)
+            const characterId = dependencies.getSelectedCharacterId()
+            if (characterId === null) {
+                return undefined
+            }
+            await openStore()
+            const lease = await acquireCurrentRevisionReader()
+            return withPersistentRevisionLease(lease, async (reader) => {
+                throwIfFullObjectCallAborted(context.signal)
+                const value = await readPinnedCompleteCharacter(reader, characterId)
+                throwIfFullObjectCallAborted(context.signal)
+                return value === null ? undefined : dependencies.snapshot(value)
+            })
+        },
+
+        async getCharacterFromIndex(index, context) {
+            throwIfFullObjectCallAborted(context.signal)
+            await dependencies.flushPendingData('plugin-full-object-read')
+            throwIfFullObjectCallAborted(context.signal)
+            await openStore()
+            const lease = await acquireCurrentRevisionReader()
+            return withPersistentRevisionLease(lease, async (reader) => {
+                throwIfFullObjectCallAborted(context.signal)
+                const target = await resolvePinnedCharacterTarget(reader, index)
+                const value = target
+                    ? await readPinnedCompleteCharacter(reader, target.characterId)
+                    : null
+                throwIfFullObjectCallAborted(context.signal)
+                return value === null ? null : dependencies.snapshot(value)
+            })
+        },
+
+        async getChatFromIndex(characterIndex, chatIndex, context) {
+            throwIfFullObjectCallAborted(context.signal)
+            await dependencies.flushPendingData('plugin-full-object-read')
+            throwIfFullObjectCallAborted(context.signal)
+            await openStore()
+            const lease = await acquireCurrentRevisionReader()
+            return withPersistentRevisionLease(lease, async (reader) => {
+                throwIfFullObjectCallAborted(context.signal)
+                const target = await resolvePinnedConversationTarget(
+                    reader,
+                    characterIndex,
+                    chatIndex,
+                )
+                const found = target
+                    ? await reader.readConversation(target.characterId, target.conversationId)
+                    : null
+                if (found) {
+                    assertPinnedRevision(
+                        reader.revision,
+                        found.revision,
+                        `Conversation ${target!.conversationId}`,
+                    )
+                }
+                throwIfFullObjectCallAborted(context.signal)
+                return found === null ? null : dependencies.snapshot(found.value)
+            })
+        },
+
+        async setCurrentCharacter(character, context) {
+            validatePluginCompleteCharacter(character)
+            const candidate = dependencies.snapshot(character)
+            const selectedBoundary = captureSelectedCallBoundary()
+            throwIfFullObjectCallAborted(context.signal)
+            await dependencies.flushPendingData('plugin-full-object-write')
+            throwIfFullObjectCallAborted(context.signal)
+            dependencies.assertPersistentMutationAllowed(selectedBoundary.authorityEpoch)
+            const characterId = selectedBoundary.characterId
+            if (characterId === null) return
+            await openStore()
+            const lease = await acquireCurrentRevisionReader()
+            const target = await withPersistentRevisionLease(lease, async (reader) => {
+                const found = await reader.readCharacter(characterId)
+                if (!found) return null
+                assertPinnedRevision(reader.revision, found.revision, `Character ${characterId}`)
+                return { revision: reader.revision, characterId }
+            })
+            if (!target) throw new PluginFullObjectTargetStaleError(characterId)
+            throwIfFullObjectCallAborted(context.signal)
+            if (candidate.chaId !== target.characterId) {
+                rejectIdentityReplacement(
+                    context,
+                    'setCharacter',
+                    target.characterId,
+                    candidate.chaId,
+                )
+            }
+            let completeLease: CompleteConversationLease | null = null
+            try {
+                completeLease = await acquireSelectedLease(
+                    recaptureSelectedTarget(selectedBoundary),
+                    target.characterId,
+                )
+                throwIfFullObjectCallAborted(context.signal)
+                dependencies.assertPersistentMutationAllowed(selectedBoundary.authorityEpoch)
+                const replaced = await dependencies.replacePersistentCompleteCharacter(
+                    target.characterId,
+                    'plugin-setCharacter',
+                    async () => dependencies.snapshot(candidate),
+                    { expectedRevision: target.revision },
+                )
+                if (!replaced) throw new PluginFullObjectTargetStaleError(target.characterId)
+                if (!completeLease) invalidateLeaselessSelectedWrite(target.characterId)
+            } finally {
+                if (completeLease) {
+                    completeLease.release()
+                    dependencies.refreshSelectedConversationAfterReplacement(
+                        completeLease.target,
+                        completeLease.session,
+                    )
+                }
+            }
+        },
+
+        async setCharacterToIndex(index, character, context) {
+            validatePluginCompleteCharacter(character)
+            const candidate = dependencies.snapshot(character)
+            const selectedBoundary = captureSelectedCallBoundary()
+            throwIfFullObjectCallAborted(context.signal)
+            await dependencies.flushPendingData('plugin-full-object-write')
+            throwIfFullObjectCallAborted(context.signal)
+            dependencies.assertPersistentMutationAllowed(selectedBoundary.authorityEpoch)
+            await openStore()
+            const lease = await acquireCurrentRevisionReader()
+            const target = await withPersistentRevisionLease(lease, async (reader) =>
+                resolvePinnedCharacterTarget(reader, index))
+            if (!target) return
+            throwIfFullObjectCallAborted(context.signal)
+            if (candidate.chaId !== target.characterId) {
+                rejectIdentityReplacement(
+                    context,
+                    'setCharacterToIndex',
+                    target.characterId,
+                    candidate.chaId,
+                )
+            }
+            let completeLease: CompleteConversationLease | null = null
+            try {
+                completeLease = await acquireSelectedLease(
+                    recaptureSelectedTarget(selectedBoundary),
+                    target.characterId,
+                )
+                throwIfFullObjectCallAborted(context.signal)
+                dependencies.assertPersistentMutationAllowed(selectedBoundary.authorityEpoch)
+                const replaced = await dependencies.replacePersistentCompleteCharacter(
+                    target.characterId,
+                    'plugin-setCharacterToIndex',
+                    async () => dependencies.snapshot(candidate),
+                    { expectedRevision: target.revision },
+                )
+                if (!replaced) throw new PluginFullObjectTargetStaleError(target.characterId)
+                if (!completeLease) invalidateLeaselessSelectedWrite(target.characterId)
+            } finally {
+                if (completeLease) {
+                    completeLease.release()
+                    dependencies.refreshSelectedConversationAfterReplacement(
+                        completeLease.target,
+                        completeLease.session,
+                    )
+                }
+            }
+        },
+
+        async setChatToIndex(characterIndex, chatIndex, chat, context) {
+            validatePluginCompleteChat(chat)
+            const candidate = dependencies.snapshot(chat)
+            const selectedBoundary = captureSelectedCallBoundary()
+            throwIfFullObjectCallAborted(context.signal)
+            await dependencies.flushPendingData('plugin-full-object-write')
+            throwIfFullObjectCallAborted(context.signal)
+            dependencies.assertPersistentMutationAllowed(selectedBoundary.authorityEpoch)
+            await openStore()
+            const lease = await acquireCurrentRevisionReader()
+            const target = await withPersistentRevisionLease(lease, async (reader) =>
+                resolvePinnedConversationTarget(reader, characterIndex, chatIndex))
+            if (!target) return
+            throwIfFullObjectCallAborted(context.signal)
+            if (candidate.id !== target.conversationId) {
+                rejectIdentityReplacement(
+                    context,
+                    'setChatToIndex',
+                    target.conversationId,
+                    candidate.id!,
+                )
+            }
+            let completeLease: CompleteConversationLease | null = null
+            try {
+                completeLease = await acquireSelectedLease(
+                    recaptureSelectedTarget(selectedBoundary),
+                    target.characterId,
+                    target.conversationId,
+                )
+                throwIfFullObjectCallAborted(context.signal)
+                dependencies.assertPersistentMutationAllowed(selectedBoundary.authorityEpoch)
+                const replaced = await dependencies.replacePersistentConversation(
+                    target.characterId,
+                    target.conversationId,
+                    'plugin-setChatToIndex',
+                    candidate,
+                    { expectedRevision: target.revision },
+                )
+                if (!replaced) {
+                    throw new PluginFullObjectTargetStaleError(
+                        target.characterId,
+                        target.conversationId,
+                    )
+                }
+                if (!completeLease) {
+                    invalidateLeaselessSelectedWrite(
+                        target.characterId,
+                        target.conversationId,
+                    )
+                }
+            } finally {
+                if (completeLease) {
+                    completeLease.release()
+                    dependencies.refreshSelectedConversationAfterReplacement(
+                        completeLease.target,
+                        completeLease.session,
+                    )
+                }
+            }
+        },
+
+        async queryCharacters(input = {}) {
+            const limit = positiveLimit(
+                input.limit,
+                PLUGIN_SUMMARY_QUERY_DEFAULT_LIMIT,
+                PLUGIN_SUMMARY_QUERY_MAX_LIMIT,
+            )
+            await prepareQuery()
+            return dependencies.store.queryCharacters({
+                search: input.search,
+                order: input.order ?? 'configured',
+                trash: input.trash ?? false,
+                limit,
+                cursor: input.cursor,
+            })
+        },
+
+        async queryConversations(input) {
+            requiredId(input.characterId, 'characterId')
+            const limit = positiveLimit(
+                input.limit,
+                PLUGIN_SUMMARY_QUERY_DEFAULT_LIMIT,
+                PLUGIN_SUMMARY_QUERY_MAX_LIMIT,
+            )
+            await prepareQuery()
+            return dependencies.store.queryConversations({
+                characterId: input.characterId,
+                order: input.order ?? 'configured',
+                limit,
+                cursor: input.cursor,
+            })
+        },
+
+        async queryConversationMessages(input) {
+            requiredId(input.characterId, 'characterId')
+            requiredId(input.conversationId, 'conversationId')
+
+            const ranged = input.startIndex !== undefined
+            const anchored = input.anchorMessageId !== undefined
+            let query
+            if (ranged) {
+                if (!Number.isSafeInteger(input.startIndex) || input.startIndex! < 0) {
+                    throw new RangeError(
+                        'Message range startIndex must be a nonnegative safe integer',
+                    )
+                }
+                if (input.limit === undefined) {
+                    throw new RangeError('Absolute message ranges require limit')
+                }
+                if (
+                    anchored ||
+                    input.before !== undefined ||
+                    input.after !== undefined
+                ) {
+                    throw new RangeError('Absolute message ranges cannot include anchor options')
+                }
+                query = {
+                    characterId: input.characterId,
+                    conversationId: input.conversationId,
+                    startIndex: input.startIndex,
+                    limit: positiveLimit(
+                        input.limit,
+                        PLUGIN_MESSAGE_QUERY_DEFAULT_LIMIT,
+                        PLUGIN_MESSAGE_QUERY_MAX_LIMIT,
+                    ),
+                }
+            } else if (anchored) {
+                requiredId(input.anchorMessageId!, 'anchorMessageId')
+                if (input.limit !== undefined) {
+                    throw new RangeError('Anchored message queries cannot include limit')
+                }
+                const before = nonnegativeWindow(input.before, 'before')
+                const after = nonnegativeWindow(input.after, 'after')
+                if (before + 1 + after > PLUGIN_MESSAGE_QUERY_MAX_LIMIT) {
+                    throw new RangeError('Anchored message window exceeds the maximum size')
+                }
+                query = {
+                    characterId: input.characterId,
+                    conversationId: input.conversationId,
+                    anchorMessageId: input.anchorMessageId,
+                    before,
+                    after,
+                }
+            } else {
+                if (input.before !== undefined || input.after !== undefined) {
+                    throw new RangeError('Message window offsets require anchorMessageId')
+                }
+                query = {
+                    characterId: input.characterId,
+                    conversationId: input.conversationId,
+                    limit: positiveLimit(
+                        input.limit,
+                        PLUGIN_MESSAGE_QUERY_DEFAULT_LIMIT,
+                        PLUGIN_MESSAGE_QUERY_MAX_LIMIT,
+                    ),
+                }
+            }
+
+            await prepareQuery(input.signal)
+            throwIfQueryAborted(input.signal)
+            const result = await dependencies.store.readConversationWindow(query)
+            throwIfQueryAborted(input.signal)
+            return result ? { ...result.value, revision: result.revision } : null
+        },
+
+        async getDatabaseSnapshotStream(includeOnly, allowedKeys) {
+            const requestedKeys =
+                includeOnly === 'all'
+                    ? [...allowedKeys]
+                    : allowedKeys.filter((key) => includeOnly.includes(key))
+            await dependencies.flushPendingData('plugin-full-database-snapshot')
+            await openStore()
+            const reader = await acquireCurrentRevisionReader()
+            const iterator = (async function* (): AsyncGenerator<PluginDatabaseSnapshotChunk> {
+                let failed = false
+                try {
+                    const pinnedRoot = await reader.readRoot()
+                    assertPinnedRevision(reader.revision, pinnedRoot.revision, 'Root')
+                    for (const key of requestedKeys) {
+                        if (key === 'characters') {
+                            yield { type: 'arrayStart', key }
+                            for await (const character of iteratePinnedCharacters(reader)) {
+                                yield* streamPinnedCharacter(reader, character.summary.id, character.detail)
+                            }
+                            continue
+                        }
+                        if (key === 'botPresets') {
+                            yield { type: 'arrayStart', key }
+                            const catalog = await reader.queryPresets()
+                            assertPinnedRevision(reader.revision, catalog.revision, 'Preset catalog')
+                            for (const summary of catalog.items) {
+                                const preset = await reader.readPreset(summary.id)
+                                if (!preset) throw new Error(`Missing preset ${summary.id}`)
+                                assertPinnedRevision(
+                                    reader.revision,
+                                    preset.revision,
+                                    `Preset ${summary.id}`,
+                                )
+                                yield { type: 'arrayPush', key, value: preset.value }
+                            }
+                            continue
+                        }
+                        if (key === 'pluginCustomStorage') {
+                            yield { type: 'recordStart', key }
+                            const catalog = await reader.queryPluginStorage()
+                            assertPinnedRevision(
+                                reader.revision,
+                                catalog.revision,
+                                'Plugin storage catalog',
+                            )
+                            for (const summary of catalog.items) {
+                                if (summary.owner !== dependencies.owner) continue
+                                const value = await reader.readPluginStorage(
+                                    dependencies.owner,
+                                    summary.key,
+                                )
+                                if (!value) {
+                                    throw new Error(
+                                        `Missing plugin storage value for ${summary.key}`,
+                                    )
+                                }
+                                assertPinnedRevision(
+                                    reader.revision,
+                                    value.revision,
+                                    `Plugin storage value ${summary.key}`,
+                                )
+                                yield {
+                                    type: 'recordSet',
+                                    key,
+                                    entryKey: summary.key,
+                                    value: value.value,
+                                }
+                            }
+                            continue
+                        }
+                        yield {
+                            type: 'set',
+                            key,
+                            value: (pinnedRoot.value as unknown as Record<string, unknown>)[key],
+                        }
+                    }
+                } catch (error) {
+                    failed = true
+                    throw error
+                } finally {
+                    try {
+                        await releasePersistentRevisionLease(reader)
+                    } catch (error) {
+                        if (!failed) throw error
+                    }
+                }
+            })()
+            return new ReadableStream<PluginDatabaseSnapshotChunk>({
+                async pull(controller) {
+                    try {
+                        const next = await iterator.next()
+                        if (next.done) controller.close()
+                        else controller.enqueue(next.value)
+                    } catch (error) {
+                        controller.error(error)
+                    }
+                },
+                async cancel() {
+                    await iterator.return(undefined)
+                },
+            })
+        },
+
+        async getDatabaseSnapshot(includeOnly, allowedKeys) {
+            const requestedKeys =
+                includeOnly === 'all'
+                    ? [...allowedKeys]
+                    : allowedKeys.filter((key) => includeOnly.includes(key))
+            const needsCharacters = requestedKeys.includes('characters')
+            const needsPersistentPresets = requestedKeys.includes('botPresets')
+            if (!needsCharacters && !needsPersistentPresets) {
+                const compatibilityDatabase = dependencies.getCompatibilityDatabase()
+                const result: Record<string, unknown> = {}
+                for (const key of requestedKeys) {
+                    if (key === 'pluginCustomStorage') {
+                        await dependencies.flushPendingData('plugin-storage-snapshot')
+                        result[key] = await dependencies.readPluginStorageSnapshot()
+                    } else {
+                        result[key] = dependencies.snapshot(
+                            (compatibilityDatabase as unknown as Record<string, unknown>)[key],
+                        )
+                    }
+                }
+                return result
+            }
+            await dependencies.flushPendingData('plugin-full-database-snapshot')
+            await openStore()
+            const reader = await acquireCurrentRevisionReader()
+            return withPersistentRevisionLease(reader, async (reader) => {
+                const pinnedRoot = await reader.readRoot()
+                assertPinnedRevision(reader.revision, pinnedRoot.revision, 'Root')
+                const result: Record<string, unknown> = {}
+                for (const key of requestedKeys) {
+                    if (key === 'characters') {
+                        const characters: Database['characters'] = []
+                        for await (const character of iteratePinnedCharacters(reader)) {
+                            const chats: Database['characters'][number]['chats'] = []
+                            for await (const conversation of iteratePinnedConversations(
+                                reader,
+                                character.summary.id,
+                            )) {
+                                chats.push(conversation.value)
+                            }
+                            characters.push(dependencies.snapshot({
+                                ...character.detail,
+                                chats,
+                            } as Database['characters'][number]))
+                        }
+                        result[key] = characters
+                        continue
+                    }
+                    if (key === 'botPresets') {
+                        const catalog = await reader.queryPresets()
+                        assertPinnedRevision(
+                            reader.revision,
+                            catalog.revision,
+                            'Preset catalog',
+                        )
+                        const presets: Database['botPresets'] = []
+                        for (const summary of catalog.items) {
+                            const preset = await reader.readPreset(summary.id)
+                            if (!preset) throw new Error(`Missing preset ${summary.id}`)
+                            assertPinnedRevision(
+                                reader.revision,
+                                preset.revision,
+                                `Preset ${summary.id}`,
+                            )
+                            presets.push(dependencies.snapshot(preset.value))
+                        }
+                        result[key] = presets
+                        continue
+                    }
+                    if (key === 'pluginCustomStorage') {
+                        const catalog = await reader.queryPluginStorage()
+                        assertPinnedRevision(
+                            reader.revision,
+                            catalog.revision,
+                            'Plugin storage catalog',
+                        )
+                        const storage: Record<string, unknown> = {}
+                        for (const summary of catalog.items) {
+                            if (summary.owner !== dependencies.owner) continue
+                            const value = await reader.readPluginStorage(
+                                dependencies.owner,
+                                summary.key,
+                            )
+                            if (!value) {
+                                throw new Error(
+                                    `Missing plugin storage value for ${summary.key}`,
+                                )
+                            }
+                            assertPinnedRevision(
+                                reader.revision,
+                                value.revision,
+                                `Plugin storage value ${summary.key}`,
+                            )
+                            defineOwnEnumerableProperty(
+                                storage,
+                                summary.key,
+                                dependencies.snapshot(value.value),
+                            )
+                        }
+                        result[key] = storage
+                        continue
+                    }
+                    result[key] = dependencies.snapshot(
+                        (pinnedRoot.value as unknown as Record<string, unknown>)[key],
+                    )
+                }
+                return result
+            })
+        },
+
+        setDatabaseLite(database, allowedKeys) {
+            dependencies.assertPersistentMutationAllowed()
+            validatePluginDatabaseUpdate(database)
+            if (hasCharacterUpdate(database)) {
+                throw new Error(SYNCHRONOUS_CHARACTER_SET_ERROR)
+            }
+            const prepared = dependencies.snapshot(database)
+            const compatibilityUpdate = compatibilityOnlyUpdate(prepared, allowedKeys)
+            if (Object.keys(compatibilityUpdate).length > 0) {
+                dependencies.applyCompatibilityDatabaseLite(compatibilityUpdate)
+            }
+            const mutations = pluginStorageMutations(prepared, allowedKeys)
+            if (mutations.length > 0) return dependencies.mutatePluginStorage(mutations)
+        },
+
+        async setDatabase(database, allowedKeys) {
+            const authorityEpoch = dependencies.getStorageAuthorityEpoch()
+            dependencies.assertPersistentMutationAllowed(authorityEpoch)
+            validatePluginDatabaseUpdate(database)
+            allowedKeys = [...allowedKeys]
+            const initialNavigationGeneration = dependencies.getNavigationGeneration()
+            if (hasCharacterUpdate(database)) {
+                validateCompleteCharacters(database.characters)
+            }
+            const detachedUpdate = dependencies.snapshot(database)
+            const preparedUpdate = dependencies.prepareAuthoritativeDatabaseUpdate
+                ? await dependencies.prepareAuthoritativeDatabaseUpdate(detachedUpdate)
+                : detachedUpdate
+            dependencies.assertPersistentMutationAllowed(authorityEpoch)
+            validatePluginDatabaseUpdate(preparedUpdate)
+            if (dependencies.getNavigationGeneration() !== initialNavigationGeneration) {
+                throw new Error(STALE_DATABASE_SET_ERROR)
+            }
+            if (hasCharacterUpdate(preparedUpdate)) {
+                validateCompleteCharacters(preparedUpdate.characters)
+            }
+            const compatibilityUpdate = compatibilityOnlyUpdate(preparedUpdate, allowedKeys)
+            const storageMutations = pluginStorageMutations(preparedUpdate, allowedKeys)
+            if (Object.keys(compatibilityUpdate).length === 0) {
+                await dependencies.mutatePluginStorage(storageMutations)
+                return
+            }
+            if (!hasCharacterUpdate(compatibilityUpdate)) {
+                dependencies.applyCompatibilityDatabaseLite(compatibilityUpdate)
+                if (storageMutations.length > 0)
+                    await dependencies.mutatePluginStorage(storageMutations)
+                dependencies.assertPersistentMutationAllowed(authorityEpoch)
+                await dependencies.flushPendingData('plugin-root-update')
+                return
+            }
+            const materialized = await dependencies.materializeDatabaseSnapshot(
+                'plugin-database-set',
+                { includePluginStorageValues: true },
+            )
+            dependencies.assertPersistentMutationAllowed(authorityEpoch)
+            if (dependencies.getNavigationGeneration() !== initialNavigationGeneration) {
+                throw new Error(STALE_DATABASE_SET_ERROR)
+            }
+            const candidate = dependencies.snapshot(materialized.database)
+            applyPluginDatabaseUpdate(
+                candidate,
+                dependencies.snapshot(preparedUpdate),
+                allowedKeys,
+                dependencies.owner,
+            )
+            await dependencies.replacePersistentDatabase(candidate, 'plugin-database-set', {
+                authoritative: true,
+                publishOfficial: true,
+                expectedRevision: materialized.revision,
+                expectedMutationGeneration: materialized.mutationGeneration,
+                ...(materialized.pluginStorageValues
+                    ? {
+                          pluginStorageValues: applyOwnerScopedStorageMutations(
+                              materialized.pluginStorageValues,
+                              dependencies.owner,
+                              storageMutations,
+                          ),
+                      }
+                    : {}),
+            })
+            dependencies.invalidatePluginStorage()
+        },
+    }
+}
+
+export function createProductionPluginDatabaseAccess(
+    dependencies: Omit<PluginDatabaseAccessDependencies, 'store'>,
+): PluginDatabaseAccess {
+    return createPluginDatabaseAccess({
+        ...dependencies,
+        store: getPersistentDataStore(),
+    })
+}
+
+export function createProductionPluginChatOutputProjector(
+    snapshot: <T>(value: T) => T,
+): PluginChatOutputProjector {
+    let store: ReturnType<typeof getPersistentDataStore> | undefined
+    let openPromise: Promise<void> | undefined
+    return async (input) => {
+        const persistentStore = store ??= getPersistentDataStore()
+        await (openPromise ??= persistentStore.open().finally(() => {
+            openPromise = undefined
+        }))
+        const lease = await acquireCurrentRevisionWithRetry(
+            (revision) => persistentStore.acquireRevision(revision),
+            async () => (await persistentStore.readRoot()).revision,
+        )
+        return withPersistentRevisionLease(lease, async (reader) => {
+            const durable = await readPinnedCompleteCharacter(reader, input.characterId)
+            if (!durable) throw new Error(`Missing listener character ${input.characterId}`)
+
+            const liveCompleteChats = new Map(
+                input.liveCharacter.chats
+                    .filter((chat) => !isConversationSummaryStub(chat) && chat.id)
+                    .map((chat) => [chat.id!, snapshot(chat)]),
+            )
+            liveCompleteChats.set(input.conversationId, snapshot(input.liveConversation))
+
+            const { chats: _liveChats, ...liveDetail } = snapshot(input.liveCharacter)
+            const char = {
+                ...durable,
+                ...liveDetail,
+                chats: durable.chats.map(
+                    (chat) => liveCompleteChats.get(chat.id!) ?? chat,
+                ),
+            } as PluginCompleteCharacter
+            const chat = char.chats.find(
+                (candidate) => candidate.id === input.conversationId,
+            )
+            if (!chat) throw new Error(`Missing listener conversation ${input.conversationId}`)
+            return { char: snapshot(char), chat: snapshot(chat) }
+        })
+    }
+}

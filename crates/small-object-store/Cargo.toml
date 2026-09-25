@@ -1,0 +1,15 @@
+[package]
+name = "risunest-small-object-store"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+# The consumer owns the connection and therefore the SQLite build. Linking a
+# second bundled copy here would give one process two runtimes.
+rusqlite = "0.40.2"
+sha2 = "0.10"
+
+[dev-dependencies]
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+tempfile = "3"

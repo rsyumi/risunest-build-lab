@@ -1,0 +1,5 @@
+# Rpack.js
+
+JavaScript implementation of the legacy rpack resource-pack obfuscation format used for RisuAI compatibility.
+
+It is based on the original Rust implementation with permission from its author. New RisuNest storage formats must not depend on rpack.
