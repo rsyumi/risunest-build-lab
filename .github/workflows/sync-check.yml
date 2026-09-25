@@ -41,6 +41,7 @@ jobs:
           set -euo pipefail
           test "$GITHUB_REF" = refs/heads/main
           [[ "$SNAPSHOT_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git config --global core.autocrlf false
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.sha }}
