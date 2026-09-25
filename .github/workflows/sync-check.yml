@@ -75,6 +75,11 @@ jobs:
           } > artifacts/environment.txt
           cat artifacts/environment.txt
           cp .build-lab/source.json artifacts/source.json
+      - name: Use a temporary directory without symlinked ancestors
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p "$RUNNER_TEMP/tests"
+          echo "TMPDIR=$(cd "$RUNNER_TEMP/tests" && pwd -P)" >> "$GITHUB_ENV"
       - name: Format
         run: |
           set -euo pipefail
