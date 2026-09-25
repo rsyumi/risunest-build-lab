@@ -1,0 +1,99 @@
+name: Sync check
+run-name: Sync ${{ inputs.source_sha }}
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full snapshot commit SHA in this build-lab repository
+        type: string
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: sync-check-snapshots-sync
+  cancel-in-progress: true
+jobs:
+  sync:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: windows-2022, target: x86_64-pc-windows-msvc }
+          - { runner: windows-11-arm, target: aarch64-pc-windows-msvc }
+          - { runner: ubuntu-22.04, target: x86_64-unknown-linux-gnu }
+          - { runner: ubuntu-22.04-arm, target: aarch64-unknown-linux-gnu }
+          - { runner: macos-15-intel, target: x86_64-apple-darwin }
+          - { runner: macos-15, target: aarch64-apple-darwin }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    defaults:
+      run:
+        shell: bash
+        working-directory: source
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/source/src-tauri/target
+      CARGO_INCREMENTAL: "0"
+      SNAPSHOT_SHA: ${{ inputs.source_sha }}
+    steps:
+      - name: Validate dispatch inputs
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF" = refs/heads/main
+          [[ "$SNAPSHOT_SHA" =~ ^[0-9a-f]{40}$ ]]
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.sha }}
+          path: control
+          persist-credentials: false
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.source_sha }}
+          path: source
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+      - name: Verify snapshot identity and integrity
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$SNAPSHOT_SHA"
+          node ../control/scripts/verify-snapshot.mjs . sync
+      - uses: dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5
+        with:
+          targets: ${{ matrix.target }}
+          components: clippy,rustfmt
+      - name: Record environment
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          {
+            printf 'workflow_sha=%s\nsnapshot_sha=%s\nrun_attempt=%s\n' "$GITHUB_SHA" "$SNAPSHOT_SHA" "$GITHUB_RUN_ATTEMPT"
+            printf 'image_os=%s\nimage_version=%s\ntarget=%s\n' "$ImageOS" "$ImageVersion" "${{ matrix.target }}"
+            uname -a; rustc -Vv; cargo -V; cargo clippy -V; node -v
+          } > artifacts/environment.txt
+          cat artifacts/environment.txt
+          cp .build-lab/source.json artifacts/source.json
+      - name: Format
+        run: |
+          set -euo pipefail
+          cargo fmt --manifest-path server/sync/Cargo.toml --check
+          cargo fmt --manifest-path server/manager/Cargo.toml --check
+      - name: Clippy
+        run: cargo clippy --manifest-path server/sync/Cargo.toml --all-targets --locked --target ${{ matrix.target }} -- -D warnings 2>&1 | tee artifacts/clippy.log
+      - name: Sync wire tests
+        run: cargo test --manifest-path crates/sync-wire/Cargo.toml --release --locked --target ${{ matrix.target }} 2>&1 | tee artifacts/sync-wire.log
+      - name: Sync server tests
+        run: cargo test --manifest-path server/sync/Cargo.toml --release --locked --target ${{ matrix.target }} 2>&1 | tee artifacts/sync-server.log
+      - name: Sync manager tests
+        run: cargo test --manifest-path server/manager/Cargo.toml --release --locked --target ${{ matrix.target }} 2>&1 | tee artifacts/sync-manager.log
+      - name: Linux installer checks
+        if: runner.os == 'Linux'
+        run: bash server/manager/install/install.test.sh 2>&1 | tee artifacts/installer.log
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sync-${{ matrix.target }}-${{ inputs.source_sha }}-${{ github.run_attempt }}
+          path: source/artifacts/
+          retention-days: 3
+          if-no-files-found: warn

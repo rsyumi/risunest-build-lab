@@ -7,7 +7,7 @@ import { git, verifySnapshot } from "./snapshot.mjs";
 const [repo, snapshot, lane, ...extra] = process.argv.slice(2);
 assert(
   snapshot && lane && !extra.length,
-  "Usage: commit-snapshot.mjs BUILD_LAB_REPO EXPORTED_SNAPSHOT macos|ios|linux",
+  "Usage: commit-snapshot.mjs BUILD_LAB_REPO EXPORTED_SNAPSHOT macos|ios|linux|sync",
 );
 const metadata = verifySnapshot(snapshot, lane);
 const origin = new URL(

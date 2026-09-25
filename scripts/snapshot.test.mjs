@@ -63,10 +63,18 @@ test("exports only the selected commit, reproducibly, with licenses and every la
     "linux",
     path.join(f.root, "linux"),
   );
+  const fourth = exportSnapshot(
+    f.repo,
+    f.commit,
+    "sync",
+    path.join(f.root, "sync"),
+  );
   assert.equal(first.file_list_sha256, second.file_list_sha256);
   assert.equal(first.file_list_sha256, third.file_list_sha256);
+  assert.equal(first.file_list_sha256, fourth.file_list_sha256);
   assert.equal(first.source_tree, second.source_tree);
   assert.equal(first.source_tree, third.source_tree);
+  assert.equal(first.source_tree, fourth.source_tree);
   const manifest = JSON.parse(
     readFileSync(path.join(f.destination, ".build-lab/files.json")),
   );
