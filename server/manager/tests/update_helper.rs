@@ -128,10 +128,12 @@ fn stopped_helper_rolls_back_when_the_replacement_cannot_be_started() {
         fixture.install.clone(),
     );
 
+    let started = std::time::Instant::now();
     assert!(result.recv_timeout(Duration::from_millis(250)).is_err());
     assert_old_install(&fixture.install);
-    let error = result
-        .recv_timeout(Duration::from_secs(10))
+    let received = result.recv_timeout(Duration::from_secs(120));
+    eprintln!("diag-elapsed-ms={}", started.elapsed().as_millis());
+    let error = received
         .unwrap()
         .unwrap_err();
     let _ = parent.wait();

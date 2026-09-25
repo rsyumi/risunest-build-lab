@@ -2991,8 +2991,8 @@
     {
       "path": "server/manager/tests/update_helper.rs",
       "mode": "100644",
-      "bytes": 67119,
-      "sha256": "6120b4809c79dd199092059cb3e04c8cd94f8134dd27900674f4c213eb6e08d0"
+      "bytes": 67253,
+      "sha256": "3e0cb2950c50812f41a8514f3a7dca67b9b76048234378ffcba5a6a7cda6067c"
     },
     {
       "path": "server/manager/tests/windows-startup.ps1",
@@ -14548,8 +14548,8 @@
     {
       "path": ".github/workflows/release.yml",
       "mode": "100644",
-      "bytes": 57797,
-      "sha256": "de5c11ad582e698eae32a75e497daaaed442e6da18d8200a1496aefdd42909c8",
+      "bytes": 58265,
+      "sha256": "166857dd2e364eabb222e360de2340a0b1c3d392e2b5c5baf013d7af16663cbd",
       "reason": "private-control-or-generated"
     },
     {
