@@ -2895,8 +2895,8 @@
     {
       "path": "server/manager/src/platform/windows.rs",
       "mode": "100644",
-      "bytes": 19075,
-      "sha256": "53ce3318b392e6758ba5bf331cf64e9e3faa4de9cecd59b513a302fa11a41076"
+      "bytes": 19236,
+      "sha256": "9945aa13735cd47b784b021bee80454af82ba0f1cd143cc9f9b42d98c1d67dfd"
     },
     {
       "path": "server/manager/src/removal.rs",
@@ -2991,8 +2991,8 @@
     {
       "path": "server/manager/tests/update_helper.rs",
       "mode": "100644",
-      "bytes": 67235,
-      "sha256": "7ca8b299981e9dba6cc5d60796faba670c652750b62ea5fce8e76d5d5eacaaf0"
+      "bytes": 67232,
+      "sha256": "98c9bbbdf4a4064d789f22c39193ce5718f0f8cd9f22a3e0737bda0d624822f7"
     },
     {
       "path": "server/manager/tests/windows-startup.ps1",

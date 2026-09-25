@@ -253,6 +253,7 @@ pub(super) fn startup(root: &Path, executable: &Path, action: &str) -> Result<St
     // Close the delete-on-close handle before .NET opens the definition. Its
     // default FileShare.Read cannot coexist with that Windows DELETE access.
     let path = file.into_temp_path();
+    let diag_started = std::time::Instant::now();
     let output = process("powershell.exe")
         .args([
             "-NoLogo",
@@ -276,6 +277,10 @@ pub(super) fn startup(root: &Path, executable: &Path, action: &str) -> Result<St
         .stdin(Stdio::null())
         .output()
         .map_err(|_| "task-scheduler-unavailable")?;
+    eprintln!(
+        "diag-startup action={action} ms={}",
+        diag_started.elapsed().as_millis()
+    );
     if !output.status.success() {
         let detail = String::from_utf8_lossy(&output.stderr);
         let detail = detail.trim();
