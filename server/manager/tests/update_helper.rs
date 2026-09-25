@@ -133,9 +133,7 @@ fn stopped_helper_rolls_back_when_the_replacement_cannot_be_started() {
     assert_old_install(&fixture.install);
     let received = result.recv_timeout(Duration::from_secs(120));
     eprintln!("diag-elapsed-ms={}", started.elapsed().as_millis());
-    let error = received
-        .unwrap()
-        .unwrap_err();
+    let error = received.unwrap().unwrap_err();
     let _ = parent.wait();
 
     assert_eq!(error, "server-executable-or-data-path-invalid");
