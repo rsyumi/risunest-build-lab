@@ -7,7 +7,7 @@ import { isTauri } from "src/ts/platform"
 import { getChatVar, setChatVar, getGlobalChatVar } from './chatVar.svelte';
 import { processScriptFull, type ProcessScriptCaptureContext } from '../process/scripts';
 import { get } from 'svelte/store';
-import css, { type CssAtRuleAST } from '@adobe/css-tools'
+import css, { type CssAtRuleAST, type CssDeclarationAST } from '@adobe/css-tools'
 import { selectedCharID } from '../stores.svelte';
 import { calcString } from '../process/infunctions';
 import { findCharacterbyId, getPersonaPrompt, getUserIcon, getUserName, pickHashRand, replaceAsync} from '../util';
@@ -977,7 +977,7 @@ function encodeStyle(txt:string){
     })
 }
 
-function decodeStyleRule(rule:CssAtRuleAST){
+function decodeStyleRule<T extends CssAtRuleAST | CssDeclarationAST>(rule:T):T{
     if(rule.type === 'rule'){
         if(rule.selectors){
             for(let i=0;i<rule.selectors.length;i++){

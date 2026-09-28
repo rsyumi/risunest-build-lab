@@ -45,7 +45,7 @@ fn copy_exact(source: &Path, target: &Path, expected: Option<&str>) -> Result<St
         output.write_all(&buffer[..n])?;
         digest.update(&buffer[..n]);
     }
-    let digest = format!("{:x}", digest.finalize());
+    let digest = hex::encode(digest.finalize());
     if expected.is_some_and(|hash| hash != digest) {
         return Err(Error::new("corrupt-backup-object", 409));
     }
@@ -64,23 +64,42 @@ fn file_hash(path: &Path) -> Result<String> {
         }
         digest.update(&buffer[..n]);
     }
-    Ok(format!("{:x}", digest.finalize()))
+    Ok(hex::encode(digest.finalize()))
 }
 fn copy_objects(db: &Connection, source: &Path, target: &Path) -> Result<u64> {
-    let mut statement = db.prepare("SELECT hash,size FROM objects ORDER BY hash")?;
+    let mut statement = db.prepare("SELECT hash,size,storage FROM objects ORDER BY hash")?;
     let mut rows = statement.query([])?;
     let mut count = 0;
     while let Some(row) = rows.next()? {
         let hash: String = row.get(0)?;
         risunest_sync_wire::validate_hash(&hash)?;
         let size: i64 = row.get(1)?;
+        let storage: String = row.get(2)?;
+        if size < 0 {
+            return Err(Error::new("corrupt-backup-object", 409));
+        }
+        count += 1;
+        if storage == "inline" {
+            // An inline body travels inside the metadata copy, which is
+            // verified whole against its hash. Checking that it is there at
+            // the recorded size keeps the count honest without writing out
+            // thousands of files a restore would only read back.
+            let present = risunest_small_object_store::size(db, &hash)
+                .map_err(|_| Error::new("corrupt-backup-object", 409))?;
+            if present != Some(size as u64) {
+                return Err(Error::new("corrupt-backup-object", 409));
+            }
+            continue;
+        }
+        if storage != "file" {
+            return Err(Error::new("corrupt-backup-object", 409));
+        }
         let from = source.join("objects").join(&hash[..2]).join(&hash);
         let to = target.join("objects").join(&hash[..2]).join(&hash);
-        if size < 0 || fs::metadata(&from)?.len() != size as u64 {
+        if fs::metadata(&from)?.len() != size as u64 {
             return Err(Error::new("corrupt-backup-object", 409));
         }
         copy_exact(&from, &to, Some(&hash))?;
-        count += 1;
     }
     sync_directory(&target.join("objects"))?;
     Ok(count)

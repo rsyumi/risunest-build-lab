@@ -16,8 +16,8 @@ cc = "1"
 tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
-tauri = { version = "2.11.5", features = ["tray-icon", "macos-private-api"] }
-tauri-plugin-single-instance = "2.4.3"
+tauri = { version = "2.11.6", features = ["tray-icon", "macos-private-api"] }
+tauri-plugin-single-instance = "2.4.5"
 risunest-sync-manager = { path = "../.." }
 risunest-sync-server = { path = "../../../sync" }
 risunest-sync-connect = { path = "../../../../crates/sync-connect" }

@@ -4,6 +4,7 @@ import { mount, tick, unmount } from "svelte";
 vi.mock("src/ts/platform", () => ({ isTauriAndroid: false, isTauriIOS: true }));
 import Input from "./ServerSyncRegistrationInput.svelte";
 import { serverRegistrationInbox } from "src/ts/storage/sync/serverSyncRegistrationInbox";
+import { MAX_REGISTRATION_URI_BYTES } from "src/ts/storage/sync/serverSyncRegistration";
 import vector from "../../../../crates/sync-connect/tests/registration-vector.json";
 let component: ReturnType<typeof mount> | undefined;
 afterEach(async () => {
@@ -19,6 +20,21 @@ describe("registration form input", () => {
     component = mount(Input, { target, props: { onRegistration: vi.fn() } });
     await tick();
     expect(target.querySelectorAll("button")).toHaveLength(2);
+  });
+  it("keeps the registration code masked, unchanged by the keyboard and bounded by the URI limit", async () => {
+    const target = document.createElement("div");
+    document.body.append(target);
+    component = mount(Input, { target, props: { onRegistration: vi.fn() } });
+    await tick();
+    const input = target.querySelector("input")!;
+    expect(input.type).toBe("password");
+    expect(input.getAttribute("autocomplete")).toBe("new-password");
+    expect(input.getAttribute("autocapitalize")).toBe("none");
+    expect(input.getAttribute("spellcheck")).toBe("false");
+    expect(input.getAttribute("maxlength")).toBe(
+      String(MAX_REGISTRATION_URI_BYTES),
+    );
+    expect(vector.uri.length).toBeLessThanOrEqual(MAX_REGISTRATION_URI_BYTES);
   });
   it("prefills only through explicit Read code and clears the raw secret", async () => {
     const target = document.createElement("div");

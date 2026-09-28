@@ -89,6 +89,35 @@ pub(crate) fn native_backup_source_format(
 mod tests {
     use super::*;
     #[test]
+    fn android_pocket_backups_probe_and_claim_the_kotlin_spool() {
+        for bytes in [
+            include_bytes!("legacy_backup/fixtures/pocket-risu-v1.10.0.bin").as_slice(),
+            include_bytes!("legacy_backup/fixtures/pocket-risu-v1.12.0.bin").as_slice(),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let token = Uuid::new_v4().to_string();
+            let spool = directory.path().join("sources").join(&token);
+            fs::create_dir_all(&spool).unwrap();
+            fs::write(spool.join("source.risudat"), bytes).unwrap();
+            fs::write(spool.join("ownership.json"), serde_json::to_vec(&serde_json::json!({
+                "format": ANDROID_SPOOL_FORMAT, "version": 1, "token": token, "createdAtMillis": 1,
+            })).unwrap()).unwrap();
+            fs::write(spool.join("source.json"), serde_json::to_vec(&serde_json::json!({
+                "token": token, "state": "ready", "displayName": "pocket.bin", "bytes": bytes.len(),
+                "totalBytes": bytes.len(), "importDestination": null,
+            })).unwrap()).unwrap();
+            let source = JobSource::AndroidSpool { token: token.clone() };
+            assert_eq!(detect(open_job_source(directory.path(), &source).unwrap().file).unwrap(), BackupSourceFormat::LocalBackup);
+            let jobs = directory.path().join("jobs");
+            fs::create_dir_all(&jobs).unwrap();
+            let owned = create_owned_directory(&jobs, &Uuid::new_v4().to_string()).unwrap();
+            let claimed = claim_spool_source(directory.path(), &token, &owned).unwrap();
+            assert_eq!(claimed.opened.total_bytes, bytes.len() as u64);
+            assert!(open_job_source(directory.path(), &source).is_err());
+        }
+    }
+
+    #[test]
     fn signatures_ignore_names_and_reject_truncated_frames() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("misleading.risunest");

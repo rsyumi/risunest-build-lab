@@ -579,7 +579,7 @@
   {#if dialog === "uninstall"}
     <h2>RisuNest Sync를 제거하시겠습니까?</h2>
     <p>서버와 자동 실행을 중지하며, 연결된 기기의 동기화가 멈춥니다. 관리 앱이 종료됩니다.</p>
-    <label><input type="checkbox" bind:checked={deleteServerData} disabled={busy} /> 서버 데이터 삭제</label>
+    <label class="check"><input type="checkbox" bind:checked={deleteServerData} disabled={busy} /> 서버 데이터 삭제</label>
     <p>다른 기기의 데이터와 별도로 내보낸 백업은 유지됩니다.</p>
     <div class="dialog-actions">
       <button onclick={close} disabled={busy}>취소</button>
@@ -608,7 +608,7 @@
         required
         disabled={busy}
       />
-      {#if status?.localEndpoint}<label
+      {#if status?.localEndpoint}<label class="check"
           ><input type="checkbox" bind:checked={local} disabled={busy} /> 이 컴퓨터에서
           연결</label
         >{/if}

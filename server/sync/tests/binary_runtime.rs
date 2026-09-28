@@ -1,5 +1,9 @@
 use reqwest::{Client, Method, RequestBuilder};
-use risunest_sync_wire::{hash, transfer::{self, Frame, UPLOAD_CHUNK_BYTES}, RemoteHead};
+use risunest_sync_wire::{
+    hash,
+    transfer::{self, Frame, UPLOAD_CHUNK_BYTES},
+    RemoteHead,
+};
 use std::{
     io::{BufRead, BufReader},
     path::Path,
@@ -178,18 +182,27 @@ async fn thousand_small_objects_use_one_verified_frame_batch() {
     assert!(response.bytes().await.unwrap().is_empty());
     let upload_elapsed = started.elapsed();
     let hashes = objects.iter().map(|b| hash(b)).collect::<Vec<_>>();
-    let requests = hashes.iter()
+    let requests = hashes
+        .iter()
         .map(|digest| serde_json::json!({"target":digest,"bases":[]}))
         .collect::<Vec<_>>();
     let downloaded = daemon
         .request(&http, &credential, Method::POST, "/objects/transfer")
         .json(&requests)
-        .send().await.unwrap().error_for_status().unwrap()
-        .bytes().await.unwrap();
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
     let downloaded = transfer::decode(&downloaded).unwrap();
     assert_eq!(downloaded.len(), objects.len());
     for (frame, expected) in downloaded.iter().zip(&objects) {
-        let Frame::Full(bytes) = frame else { panic!("small objects must fit full frames") };
+        let Frame::Full(bytes) = frame else {
+            panic!("small objects must fit full frames")
+        };
         assert_eq!(bytes, expected);
         assert_eq!(hash(bytes), hash(expected));
     }
@@ -306,11 +319,18 @@ async fn standalone_binary_serves_with_empty_path_and_resumes_after_process_kill
     let transfer = daemon
         .request(&http, &credential, Method::POST, "/objects/transfer")
         .json(&serde_json::json!([{"target":digest,"bases":[]}]))
-        .send().await.unwrap().error_for_status().unwrap()
-        .bytes().await.unwrap();
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
     let frames = transfer::decode(&transfer).unwrap();
-    assert!(matches!(frames.as_slice(), [Frame::FullRequired { hash, size }]
-        if hash == &digest && *size == body.len() as u64));
+    // The resumed object is below the reply target, so it arrives inline. The
+    // direct object request below still covers the separate download path.
+    assert!(matches!(frames.as_slice(), [Frame::Full(bytes)] if bytes == &body));
     let received = daemon
         .request(
             &http,

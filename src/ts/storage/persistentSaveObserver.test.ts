@@ -2,7 +2,7 @@ import { flushSync } from 'svelte'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Database } from './database.svelte'
 import { observePersistentSaveChanges } from './persistentSaveObserver.svelte'
-import { SaveCoordinator } from './saveCoordinator'
+import { PersistentMutationFencedError, SaveCoordinator } from './saveCoordinator'
 import type { PersistentDataStore } from './persistentDataStore'
 import { PENDING_SAVE_BYTE_LIMIT } from './pendingDataSize'
 import { createMetadataOnlySelectedConversation } from './selectedConversationLifecycle'
@@ -370,6 +370,42 @@ describe('persistent save mutation observation', () => {
         state.database.characters[0].chats[0].message[0].data += '!'
         flushSync()
         expect(markDirty.mock.calls).toEqual([[0]])
+    })
+
+    it('lets a replacement install its database while mutations are fenced', () => {
+        const state = createPersistentSaveObserverHarness(fixture())
+        let fenced = false
+        const markDirty = vi.fn(() => {
+            if (fenced) throw new PersistentMutationFencedError()
+        })
+        disposers.push(
+            observePersistentSaveChanges({
+                readDatabase: () => state.database,
+                readSelectedCharacter: () => state.database.characters[state.selectedIndex] ?? null,
+                markDirty,
+            }),
+        )
+        flushSync()
+
+        fenced = true
+        state.database = fixture()
+        expect(() => flushSync()).not.toThrow()
+
+        fenced = false
+        markDirty.mockClear()
+        state.database.username = 'Edited after the replacement'
+        flushSync()
+        expect(markDirty).toHaveBeenCalled()
+        markDirty.mockClear()
+        ;(state.database as unknown as Record<string, unknown>).syntheticObserverField = 'added'
+        flushSync()
+        expect(markDirty).toHaveBeenCalled()
+
+        markDirty.mockImplementation(() => {
+            throw new Error('Synthetic save failure')
+        })
+        state.database.username = 'Edited again'
+        expect(() => flushSync()).toThrow('Synthetic save failure')
     })
 
     it('keeps compatibility mutations observable and coordinator reads untracked', () => {

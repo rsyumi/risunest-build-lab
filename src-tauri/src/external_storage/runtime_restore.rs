@@ -310,14 +310,17 @@ pub(crate) async fn run_restore(
         snapshot_id,
         &remote,
     )?;
-    let staging_root =
-        runtime::job_directory(&root, &job.request.connection_id, &job.id).join("restore-snapshot");
+    let staging_root = staging_directory(&root, job);
+    let transferred = runtime::transfer_progress(&root, &job.id);
     let snapshot = snapshot_restore::download_snapshot(
         &remote,
         &staging_root,
         &connected.root_key,
+        None,
+        snapshot_restore::SourceTrust::ProvenLibrary(&root),
         connected.provider.as_ref(),
         &connected.handle,
+        &transferred,
         cancel,
     )
     .await?;
@@ -330,11 +333,14 @@ pub(crate) async fn run_restore(
         &selection.sections,
         &staging_root,
         &connected.root_key,
+        None,
         connected.provider.as_ref(),
         &connected.handle,
+        &transferred,
         cancel,
     )
     .await?;
+    transferred.flush();
     if sections.len() != selection.sections.len() {
         return Err(ProviderError::new(ErrorKind::NotFound));
     }
@@ -400,16 +406,17 @@ fn prepare_local_restore(
                 key: record.key,
                 content_hash: record.content_hash,
                 byte_length: record.byte_length,
-                path: record.path,
+                source: record.source,
             })
         });
         let objects = snapshot.objects.into_iter().map(|object| {
             Ok(ExternalSnapshotObject {
                 content_hash: object.content_hash,
                 byte_length: object.byte_length,
-                path: object.path,
+                source: object.source,
             })
         });
+        let probe = runtime::CancelProbe(cancel.clone());
         Some(
             store
                 .prepare_external_snapshot_application(
@@ -418,11 +425,18 @@ fn prepare_local_restore(
                         staging_root: &staging_root,
                         scope_id: &scope_id,
                         fingerprint: &fingerprint,
+                        probe: &probe,
                     },
                     records,
                     objects,
                 )
-                .map_err(pds_error)?,
+                .map_err(|error| {
+                    if cancel.check().is_err() {
+                        ProviderError::new(ErrorKind::Cancelled)
+                    } else {
+                        pds_error(error)
+                    }
+                })?,
         )
     } else {
         None
@@ -458,6 +472,18 @@ fn prepare_local_restore(
         "snapshotId": snapshot_id,
         "receivedRevision": revision.revision.to_string()
     }))
+}
+
+fn staging_directory(root: &Path, job: &DurableJob) -> std::path::PathBuf {
+    runtime::job_directory(root, &job.request.connection_id, &job.id).join("restore-snapshot")
+}
+
+/// A finished restore never reads its download again, whether it succeeded,
+/// failed or was cancelled.
+pub(crate) fn discard_finished_staging(root: &Path, job: &DurableJob) {
+    if job.request.kind == JobKind::Restore && job.terminal() {
+        cleanup_staging(&staging_directory(root, job));
+    }
 }
 
 fn cleanup_staging(path: &Path) {

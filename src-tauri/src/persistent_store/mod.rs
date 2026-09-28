@@ -10,6 +10,7 @@ pub(crate) mod device_store;
 pub(crate) mod export;
 pub(crate) mod external_apply;
 pub(crate) mod external_capture;
+pub(crate) mod external_content_gc;
 pub(crate) mod external_conflicts;
 pub(crate) mod external_runtime;
 pub(crate) mod external_storage_state;
@@ -689,6 +690,11 @@ pub(crate) enum ConversationMutation {
     Delete {
         character_id: String,
         conversation_id: String,
+    },
+    /// Lists every conversation of the character in its new order.
+    Reorder {
+        character_id: String,
+        conversation_ids: Vec<String>,
     },
 }
 
@@ -1957,16 +1963,25 @@ impl PersistentStore {
     /// Normal external sync receive, after complete staged logical/payload
     /// validation and under the existing replacement fence and file(true).
     /// The remote base and activation are committed atomically.
+    /// The library rows themselves, for a test that has to look at what a
+    /// receive did rather than at what it reported.
+    #[cfg(test)]
+    pub(crate) fn library_rows(&self) -> &rusqlite::Connection {
+        &self.connection
+    }
+
     pub(crate) fn finish_external_receive(
         &mut self,
         prepared: PreparedReplaceCommit,
         job: &str,
+        records: &std::collections::BTreeMap<String, String>,
     ) -> StoreResult<RevisionResult> {
         commit::replace_commit_from_external(
             &mut self.connection,
             &prepared.staging_id,
             prepared.revision,
             job,
+            records,
         )
     }
 

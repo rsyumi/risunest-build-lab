@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
     error: vi.fn(),
     save: vi.fn(async () => {}),
     popup: vi.fn(),
+    blocked: vi.fn(() => false),
 }))
 vi.mock('src/lang', () => ({ language: languageEnglish }))
 vi.mock('src/ts/stores.svelte', () => {
@@ -29,6 +30,7 @@ vi.mock('src/ts/chatBindings.svelte', () => ({
     }),
     updateChatBinding: (conversation: object, patch: object) => Object.assign(conversation, patch),
     saveChatBinding: mocks.save,
+    chatBindingBlockedByGeneration: mocks.blocked,
 }))
 vi.mock('./TogglePresetPopup.svelte', () => ({
     default: (anchor: unknown, props: { close: () => void }) => mocks.popup(props),
@@ -77,9 +79,22 @@ it('binds the current toggle values, counts later changes and saves them', async
     expect(button(languageEnglish.saveToggleChanges)!.disabled).toBe(true)
 })
 
+it('leaves the binding unchanged while a response is generating', async () => {
+    mocks.blocked.mockReturnValueOnce(true)
+    button(languageEnglish.bindToggles)!.click()
+    await tick()
+    expect(chat().savedToggleValues).toBeUndefined()
+    expect(mocks.save).not.toHaveBeenCalled()
+    expect(mocks.toast).not.toHaveBeenCalled()
+})
+
 it('unbinds only after confirmation and keeps the binding when declined', async () => {
     chat().savedToggleValues = { toggle_a: '1' }
     await tick()
+    const unbind = button(languageEnglish.unbindToggles)!
+    expect(unbind.classList).toContain('bg-primary-500')
+    expect(unbind.classList).toContain('text-primary-foreground')
+    expect(unbind.classList).not.toContain('text-white')
     mocks.confirm.mockResolvedValueOnce(false)
     button(languageEnglish.unbindToggles)!.click()
     await vi.waitFor(() => expect(mocks.confirm).toHaveBeenCalledWith(languageEnglish.unbindTogglesConfirm))
@@ -97,7 +112,10 @@ it('disables binding controls but keeps the preset popup reachable while binding
     chat().savedToggleValues = { toggle_a: '0' }
     DBState.db.disableToggleBinding = true
     await tick()
-    expect(button(languageEnglish.unbindToggles)!.disabled).toBe(true)
+    const unbind = button(languageEnglish.unbindToggles)!
+    expect(unbind.disabled).toBe(true)
+    expect(unbind.classList).toContain('text-primary-foreground')
+    expect(unbind.classList).toContain('disabled:opacity-40')
     const save = button(languageEnglish.saveToggleChanges)!
     expect(save.disabled).toBe(true)
     expect(save.textContent).toContain(languageEnglish.saveTogglesLabel)

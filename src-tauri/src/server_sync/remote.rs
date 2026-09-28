@@ -46,6 +46,8 @@ struct CheckpointPage {
     checkpoint: Checkpoint,
     records: Vec<Entry>,
     next: Option<CheckpointCursor>,
+    #[serde(rename = "totalRecords")]
+    _total_records: Option<Sequence>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

@@ -71,6 +71,6 @@ impl ChangeDigest {
     pub fn finish(mut self) -> Result<String> {
         self.advance(2)?;
         self.hash.update(b"]}");
-        Ok(format!("{:x}", self.hash.finalize()))
+        Ok(hex::encode(self.hash.finalize()))
     }
 }

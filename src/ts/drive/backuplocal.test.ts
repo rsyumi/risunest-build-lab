@@ -112,6 +112,8 @@ vi.mock('../process/coldstorage.svelte', () => ({
 vi.mock('src/ts/platform', () => ({
     isTauri: true,
     isTauriDesktop: true,
+    isTauriAndroid: false,
+    isTauriIOS: false,
 }))
 
 vi.mock('@tauri-apps/plugin-fs', () => ({

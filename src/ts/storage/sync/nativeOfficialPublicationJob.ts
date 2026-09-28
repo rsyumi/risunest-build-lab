@@ -1,3 +1,4 @@
+import { runWithMobileBackgroundTask, measuredTaskPercent } from '../../mobileBackgroundTask'
 import type { AccountStorage } from '../accountStorage'
 import {
     cancelNativeOfficialPublication,
@@ -54,7 +55,7 @@ export function createNativeOfficialPublicationJobPublisher(
     const runAttempt = dependencies.runAttempt ?? runNativeOfficialPublicationAttempt
     const continueAttempt = dependencies.continueAttempt ?? continueNativeOfficialPublication
     const cancelAttempt = dependencies.cancelAttempt ?? cancelNativeOfficialPublication
-    return async (input) => {
+    return async (input) => runWithMobileBackgroundTask('sync', async (background) => {
         const recovered = await dependencies.reconcilePendingPublications?.({
             accountId: input.accountId,
             revision: input.revision,
@@ -67,6 +68,8 @@ export function createNativeOfficialPublicationJobPublisher(
             }
         }
         if (!hasNativePersistentRevisionLease(input.lease)) return null
+        const onStatus: NonNullable<NativeFileJobOptions['onStatus']> = status =>
+            background.progress(measuredTaskPercent(status.progress.completedBytes, status.progress.totalBytes))
         let pendingJobId: string | null = null
         let result
         try {
@@ -85,7 +88,7 @@ export function createNativeOfficialPublicationJobPublisher(
                                 revision: input.revision,
                                 accountId: input.accountId,
                             },
-                            { signal: context.signal },
+                            { signal: context.signal, onStatus },
                         )
                         : await runAttempt({
                             expectedRevision: input.revision,
@@ -96,7 +99,7 @@ export function createNativeOfficialPublicationJobPublisher(
                             session: context.session,
                             saveDate: context.saveDate,
                             credential: context.credential,
-                        }, { signal: context.signal })
+                        }, { signal: context.signal, onStatus })
                     if (outcome === null) return null
                     if (outcome.kind === 'waiting-for-reauthentication') {
                         pendingJobId = outcome.jobId
@@ -134,7 +137,7 @@ export function createNativeOfficialPublicationJobPublisher(
                         receipt,
                     }
                 },
-                { signal: input.signal },
+                { signal: background.signal },
             )
         }
         catch (error) {
@@ -165,5 +168,5 @@ export function createNativeOfficialPublicationJobPublisher(
             acknowledge: result.receipt.acknowledge,
             completeReload: result.completeReload,
         }
-    }
+    }, input.signal)
 }

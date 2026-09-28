@@ -5,6 +5,7 @@
         type StreamingThoughtPreview,
     } from '../../ts/parser/streamingThoughtPreview'
     import type { StreamingThoughtMode } from '../../ts/storage/database.svelte'
+    import IncrementalPlainText from './IncrementalPlainText.svelte'
 
     let {
         preview,
@@ -28,10 +29,10 @@
     >
         <summary class="cursor-pointer">{language.cot}</summary>
         {#if expanded}
-            <span class="whitespace-pre-wrap"
-                >{getStreamingThoughtPreview(source, true)?.full ??
-                    preview.recent}</span
-            >
+            <IncrementalPlainText
+                text={getStreamingThoughtPreview(source, true)?.full ??
+                    preview.recent}
+            />
         {/if}
     </details>
 {:else}

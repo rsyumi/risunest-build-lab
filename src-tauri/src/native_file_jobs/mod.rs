@@ -100,6 +100,7 @@ struct SpoolManifest {
     bytes: Option<u64>,
     #[serde(deserialize_with = "deserialize_required_nullable_u64")]
     total_bytes: Option<u64>,
+    import_destination: Option<String>,
 }
 
 fn deserialize_required_nullable_u64<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
@@ -5471,7 +5472,7 @@ mod tests {
             directory.path(),
             &token,
             &format!(
-                "{{\"token\":\"{token}\",\"state\":\"ready\",\"displayName\":\"database.risudat\",\"bytes\":9,\"totalBytes\":12}}"
+                "{{\"token\":\"{token}\",\"state\":\"ready\",\"displayName\":\"database.risudat\",\"bytes\":9,\"totalBytes\":12,\"importDestination\":null}}"
             ),
             1,
         );
@@ -7854,6 +7855,7 @@ mod tests {
                 display_name: "external.risudat".to_owned(),
                 bytes: Some(9),
                 total_bytes: Some(9),
+                import_destination: None,
             })
             .unwrap(),
         )
@@ -7874,6 +7876,7 @@ mod tests {
                 display_name: "../../external.risudat".to_owned(),
                 bytes: Some(9),
                 total_bytes: Some(9),
+                import_destination: None,
             })
             .unwrap(),
         )
@@ -7894,6 +7897,7 @@ mod tests {
                 display_name: "external.risudat".to_owned(),
                 bytes: Some(9),
                 total_bytes: Some(12),
+                import_destination: None,
             })
             .unwrap(),
         )
@@ -8367,6 +8371,7 @@ mod tests {
                 display_name: "chosen.risudat".to_owned(),
                 bytes: None,
                 total_bytes: None,
+                import_destination: None,
             })
             .unwrap(),
         )

@@ -134,8 +134,9 @@ impl PersistentStore {
             local.extend(root.object_hashes);
             local.extend(root.manifest_hashes);
         }
-        // External captures require complete local payloads through publication,
-        // even when the source alias was removed by a later edit.
+        // External captures require their payloads, held locally or in custody,
+        // through publication, even when the source alias was removed by a
+        // later edit.
         local.extend(
             crate::external_storage::capture::registered_roots(
                 &self.connection,
@@ -340,6 +341,12 @@ impl PersistentStore {
     ) -> Result<()> {
         let mut residency = Residency::open(&self.repository_root)?;
         let cas = PayloadCas::new(&self.repository_root)?;
+        // Custody the library still uses is kept without asking the server.
+        // What remains is decided again under the mutation lock below.
+        let used = self.residency_inventory(false)?;
+        if used.release_blocked {
+            return Ok(());
+        }
         let mut after = String::new();
         loop {
             let page = residency.page(&after)?;
@@ -350,6 +357,9 @@ impl PersistentStore {
             for (cursor, hash, _) in page {
                 check()?;
                 after = cursor.clone();
+                if used.referenced.contains(&hash) || used.local.contains(&hash) {
+                    continue;
+                }
                 let context = cursor
                     .split_once('/')
                     .ok_or_else(|| SyncError::new("invalid-custody-cursor", 409))?

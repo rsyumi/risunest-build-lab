@@ -299,12 +299,23 @@ pub(super) fn update_schedule(
 
 #[cfg(not(target_os = "macos"))]
 fn stop_systemd(name: &str) -> Result<()> {
-    let state = process("systemctl").args(["--user", "show", "--property=LoadState", "--property=ActiveState", name])
-        .output().map_err(|_| "user-service-unavailable")?;
-    if !state.status.success() { return Err("user-service-status-unavailable".into()); }
+    let state = process("systemctl")
+        .args([
+            "--user",
+            "show",
+            "--property=LoadState",
+            "--property=ActiveState",
+            name,
+        ])
+        .output()
+        .map_err(|_| "user-service-unavailable")?;
+    if !state.status.success() {
+        return Err("user-service-status-unavailable".into());
+    }
     let state = String::from_utf8_lossy(&state.stdout);
     if !state.lines().any(|line| line == "LoadState=not-found")
-        || !state.lines().any(|line| line == "ActiveState=inactive") {
+        || !state.lines().any(|line| line == "ActiveState=inactive")
+    {
         checked(process("systemctl").args(["--user", "stop", name]))?;
     }
     Ok(())
@@ -314,16 +325,26 @@ fn stop_systemd(name: &str) -> Result<()> {
 pub(super) fn unload_launchd(service: &str) -> Result<()> {
     let domain = service.rsplit_once('/').ok_or("user-service-invalid")?.0;
     checked(process("launchctl").args(["print", domain]))?;
-    let loaded = process("launchctl").args(["print", service]).output()
-        .map_err(|_| "user-service-unavailable")?.status.success();
-    if loaded { checked(process("launchctl").args(["bootout", service]))?; }
+    let loaded = process("launchctl")
+        .args(["print", service])
+        .output()
+        .map_err(|_| "user-service-unavailable")?
+        .status
+        .success();
+    if loaded {
+        checked(process("launchctl").args(["bootout", service]))?;
+    }
     Ok(())
 }
 
 pub(super) fn remove_startup(root: &Path, executable: &Path) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
-        let service = format!("{}/io.github.rsyumi.{}", launchd_user_domain()?, instance_name(root));
+        let service = format!(
+            "{}/io.github.rsyumi.{}",
+            launchd_user_domain()?,
+            instance_name(root)
+        );
         unload_launchd(&service)?;
     }
     #[cfg(not(target_os = "macos"))]

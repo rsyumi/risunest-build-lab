@@ -62,6 +62,18 @@ afterEach(async () => {
     vi.clearAllMocks()
 })
 
+it('deletes the confirmed preset after its position changes', async () => {
+    let confirm!: (value: boolean) => void
+    mocks.confirm.mockReturnValueOnce(new Promise(resolve => { confirm = resolve }))
+    await openActions(0)
+    byText(languageEnglish.deleteTogglePreset).click()
+    presets().reverse()
+    await tick()
+    confirm(true)
+    await vi.waitFor(() => expect(presets()).toHaveLength(1))
+    expect(presets()[0].name).toBe('Two')
+})
+
 it('lists presets of the active prompt preset, shows all on request and applies after confirmation', async () => {
     expect(names().map((button) => button.textContent)).toEqual([expect.stringContaining('One')])
     expect(names()[0].textContent).toContain('Alpha')

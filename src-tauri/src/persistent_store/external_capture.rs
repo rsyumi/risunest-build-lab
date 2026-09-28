@@ -5,7 +5,7 @@ use super::{
     StoreResult,
 };
 use crate::{
-    asset_repository::{owner_manifest_codec::decode_owner_manifest, PayloadCas},
+    asset_repository::PayloadCas,
     external_storage::capture::{CaptureCatalog, DurableCaptureReference},
     local_backup::CancellationProbe,
 };
@@ -165,8 +165,7 @@ impl PersistentStore {
         if !path.canonicalize()?.starts_with(&root) {
             return Err(invalid("Capture cache escaped its native directory"));
         }
-        let catalog =
-            CaptureCatalog::reopen(path, &root.join("objects"), &file_hash, &candidate.identity)?;
+        let catalog = CaptureCatalog::reopen(path, &root, &file_hash, &candidate.identity)?;
         if hex::encode(catalog.content_fingerprint(&scope)?) != candidate.manifest_hash {
             return Err(invalid("Capture cache content differs"));
         }
@@ -282,7 +281,9 @@ impl PersistentStore {
         Ok(())
     }
 
-    fn cleanup_capture_cache(&mut self, keep: &str) -> StoreResult<()> {
+    /// Whether a registration was removed, which is when bodies may have
+    /// become unreferenced.
+    fn cleanup_capture_cache(&mut self, keep: &str) -> StoreResult<bool> {
         self.cleanup_terminal_capture_references()?;
         let protected_catalogs = match self.device_store() {
             Ok(device) => match super::external_conflicts::registered_conflict_roots(
@@ -292,14 +293,15 @@ impl PersistentStore {
                 Ok(roots) => roots.catalogs,
                 Err(error) => {
                     crate::nlog!("warn", "external capture cleanup deferred: {error}");
-                    return Ok(());
+                    return Ok(false);
                 }
             },
             Err(error) => {
                 crate::nlog!("warn", "external capture cleanup deferred: {error}");
-                return Ok(());
+                return Ok(false);
             }
         };
+        let mut removed = false;
         let mut paths = Vec::new();
         {
             let tx = self.connection.transaction()?;
@@ -343,6 +345,7 @@ impl PersistentStore {
                     [&id],
                 )?;
                 tx.execute("DELETE FROM external_storage_captures WHERE id=?1", [&id])?;
+                removed = true;
                 if let Some(path) = path {
                     paths.push(PathBuf::from(path));
                 }
@@ -352,7 +355,7 @@ impl PersistentStore {
         for path in paths {
             self.remove_capture_file(&path);
         }
-        Ok(())
+        Ok(removed)
     }
 
     fn hydrate_hash(&self, hash: &str, probe: &dyn CancellationProbe) -> StoreResult<()> {
@@ -388,32 +391,16 @@ impl PersistentStore {
         }
     }
 
+    /// Only owner manifests, which projection reads to enumerate payloads. A
+    /// payload is captured by its hash and size, whether its body is held
+    /// locally or only through custody.
     fn hydrate_dependencies(
         &self,
         dependencies: BTreeSet<Dependency>,
         probe: &dyn CancellationProbe,
     ) -> StoreResult<()> {
-        let manifests = dependencies
-            .iter()
-            .filter(|item| item.manifest)
-            .map(|item| item.hash.clone())
-            .collect::<Vec<_>>();
-        for dependency in dependencies {
+        for dependency in dependencies.into_iter().filter(|item| item.manifest) {
             self.hydrate_hash(&dependency.hash, probe)?;
-        }
-        let cas = PayloadCas::new(&self.repository_root)?;
-        for manifest in manifests {
-            check(probe)?;
-            let bytes = cas
-                .read_object(&manifest)?
-                .ok_or_else(|| invalid("Required owner manifest is unavailable"))?;
-            for entry in decode_owner_manifest(&bytes)
-                .map_err(|_| invalid("Required owner manifest is invalid"))?
-            {
-                if let Some(hash) = entry.payload_hash {
-                    self.hydrate_hash(&hex::encode(hash), probe)?;
-                }
-            }
         }
         Ok(())
     }
@@ -571,7 +558,8 @@ impl PersistentStore {
     }
 
     /// Call before acquiring file(true). Network hydration is restricted to
-    /// dependencies of changed records unless a full rebuild is unavoidable.
+    /// the owner manifests of changed records unless a full rebuild is
+    /// unavoidable.
     pub(crate) fn hydrate_external_capture_dependencies(
         &self,
         consumer: &str,
@@ -675,6 +663,40 @@ impl PersistentStore {
         }
     }
 
+    /// Call before acquiring file(true), like the dependency hydration. Makes a
+    /// capture serve local recovery: every payload it names is fetched through
+    /// custody when it is not held locally, and then held at its recorded
+    /// length and content. A local body that differs is not replaced, so the
+    /// capture fails rather than serving it.
+    pub(crate) fn complete_external_capture(
+        &self,
+        capture_id: &str,
+        probe: &dyn CancellationProbe,
+    ) -> StoreResult<()> {
+        let capture = self.reopen_external_capture(capture_id)?;
+        let cas = PayloadCas::new(&self.repository_root)?;
+        let mut query = capture.catalog.db.prepare(
+            "SELECT DISTINCT d.hash,d.bytes FROM dependencies d LEFT JOIN generated g ON g.hash=d.hash WHERE g.hash IS NULL ORDER BY d.hash",
+        )?;
+        let payloads = query
+            .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(query);
+        for (hash, bytes) in payloads {
+            check(probe)?;
+            if cas.stat_object(&hash)? != u64::try_from(bytes).ok() {
+                self.hydrate_hash(&hash, probe)?;
+            }
+        }
+        let reference = capture.durable_reference(&self.repository_root)?;
+        crate::external_storage::capture::validate_recovery_sources(
+            [&reference],
+            &self.repository_root,
+            probe,
+        )?;
+        Ok(())
+    }
+
     /// Call under file(true), using a hydration token prepared before admission.
     pub(crate) fn capture_external_library(
         &mut self,
@@ -694,7 +716,6 @@ impl PersistentStore {
         self.cleanup_terminal_capture_references()?;
         let scope_hex = hex::encode(scope_id);
         let root = self.repository_root.join("external-storage");
-        let objects = root.join("objects");
         if let Some((candidate, catalog)) = self.validated_candidate(&identity, &scope_hex)? {
             let tx = self.connection.transaction()?;
             content_change_index::commit_cursor(
@@ -705,7 +726,9 @@ impl PersistentStore {
             )?;
             content_change_index::prune(&tx)?;
             tx.commit()?;
-            self.cleanup_capture_cache(&candidate.id)?;
+            if self.cleanup_capture_cache(&candidate.id)? {
+                self.collect_released_external_content();
+            }
             return Ok(CapturedSnapshot {
                 id: candidate.id,
                 identity,
@@ -771,11 +794,13 @@ impl PersistentStore {
                     hash,
                 )
             });
-        let mut catalog = CaptureCatalog::create(&directory, &objects, prior)?;
+        let mut catalog = CaptureCatalog::create(&directory, &root, prior)?;
         let prepared = self.prepare_content_capture(&id, consumer, identity.revision)?;
         let projected_records = prepared.project(&mut catalog, probe)?;
         let capture_id = prepared.register(self, &catalog, &scope_id, CODEC)?;
-        self.cleanup_capture_cache(&capture_id)?;
+        if self.cleanup_capture_cache(&capture_id)? {
+            self.collect_released_external_content();
+        }
         Ok(CapturedSnapshot {
             id: capture_id,
             identity,
@@ -957,7 +982,7 @@ mod conflict_cleanup_tests {
             revision: 7,
         };
         let mut catalog =
-            CaptureCatalog::create(&capture_directory, &object_directory, None).unwrap();
+            CaptureCatalog::create(&capture_directory, &external, None).unwrap();
         catalog.begin(&identity, None).unwrap();
         catalog.record("root", b"device-owned conflict source").unwrap();
         catalog.finish().unwrap();

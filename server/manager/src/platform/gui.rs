@@ -82,11 +82,14 @@ pub fn setting(_: &Path, _: Option<bool>) -> Result<bool> {
     Err("gui-platform-not-supported".into())
 }
 
-
 pub fn remove(root: &Path) -> Result<()> {
     #[cfg(target_os = "macos")]
     {
-        let service = format!("{}/io.github.rsyumi.{}-gui", platform::launchd_user_domain()?, platform::instance_name(root));
+        let service = format!(
+            "{}/io.github.rsyumi.{}-gui",
+            platform::launchd_user_domain()?,
+            platform::instance_name(root)
+        );
         platform::unix::unload_launchd(&service)?;
     }
     setting(root, Some(false)).map(|_| ())

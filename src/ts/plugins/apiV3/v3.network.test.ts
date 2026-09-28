@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import versionData from '../../../../version.json'
 
 const mocks = vi.hoisted(() => ({
     api: null as any,
@@ -190,6 +191,50 @@ vi.mock('../pluginDatabaseAccess', () => ({
 }))
 
 import { executePluginV3 } from './v3.svelte'
+
+describe('Plugin v3 runtime information', () => {
+    it('returns application identity through RPC without sharing mutable metadata', async () => {
+        mocks.database = { plugins: [], characters: [] }
+        await executePluginV3({
+            name: `runtime-fixture-${crypto.randomUUID()}`,
+            script: '',
+        } as any)
+        const { SandboxHost } = await vi.importActual<typeof import('./factory')>('./factory')
+        const host = new SandboxHost(mocks.api)
+        const frame = document.createElement('iframe')
+        document.body.appendChild(frame)
+        host.run(frame, '', 'runtime-fixture')
+        const child = frame.contentWindow!
+        const postMessage = vi.spyOn(child, 'postMessage').mockImplementation(() => {})
+
+        try {
+            for (const reqId of ['first-runtime-read', 'second-runtime-read']) {
+                postMessage.mockClear()
+                window.dispatchEvent(new MessageEvent('message', {
+                    source: child,
+                    data: { type: 'CALL_ROOT', reqId, method: 'getRuntimeInfo', args: [] },
+                }))
+                await vi.waitFor(() => expect(postMessage).toHaveBeenCalled())
+                const response = postMessage.mock.calls[0][0]
+                expect(response).toEqual({
+                    type: 'RESPONSE',
+                    reqId,
+                    result: {
+                        app: { id: 'risunest', version: versionData.version },
+                        apiVersion: '3.0',
+                        platform: 'web',
+                        saveMethod: 'local',
+                    },
+                })
+                response.result.app.id = 'modified'
+                response.result.app.version = 'modified'
+            }
+        } finally {
+            postMessage.mockRestore()
+            host.terminate()
+        }
+    })
+})
 
 describe('Plugin v3 network access', () => {
     beforeEach(async () => {

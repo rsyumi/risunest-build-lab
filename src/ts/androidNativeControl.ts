@@ -86,6 +86,11 @@ function installAndroidNativeControl(): void {
         webViewVersion: () => control.request<string>('generation.webViewVersion'),
     }
     window.RisuGenerationKeepAlive = generation
+    window.RisuBackgroundTasks = {
+        begin: kind => control.request<string | null>('background.begin', kind),
+        progress: (id, percent) => control.request('background.progress', id, String(percent)),
+        end: id => control.request('background.end', id),
+    }
     if (!window.RisuNestSafControl) {
         control.notify('lifecycle.onFrontendReady')
         return

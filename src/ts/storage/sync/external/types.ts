@@ -185,6 +185,7 @@ export type ExternalJobKind =
     | 'delete-history'
     | 'cleanup'
     | 'resolve-conflict'
+    | 'check-repository'
 
 /** The areas beside the library that a backup can carry. */
 export type ExternalRestoreSection = 'hypa' | 'local-plugins' | 'local-settings'
@@ -219,6 +220,9 @@ export interface ExternalJobSummary {
         targetRevision: DecimalString
         restoreAreas: ExternalRestoreArea[]
     }
+    checkRequest?: {
+        snapshotId?: string
+    }
     connectionId: string
     kind: ExternalJobKind
     state:
@@ -231,6 +235,8 @@ export interface ExternalJobSummary {
         | 'uncertain'
         | 'conflict'
     phase: string
+    /** Which work the four counters below measure. */
+    counters?: 'prepared' | 'transferred'
     completedBytes: DecimalString
     totalBytes?: DecimalString
     completedItems: DecimalString
@@ -248,6 +254,9 @@ export interface ExternalJobSummary {
         expectedRevision?: DecimalString
         deletedObjects?: DecimalString
         deletedBytes?: DecimalString
+        verifiedObjects?: DecimalString
+        verifiedBytes?: DecimalString
+        damagedObjects?: DecimalString
         stopReason?: string
     }
 }

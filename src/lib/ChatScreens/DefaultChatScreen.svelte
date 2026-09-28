@@ -108,6 +108,7 @@
     let openMenu = $state(false)
     let autoMode = $state(false)
     let rerollBusy = $state(false)
+    let sending = $state(false)
     let doingChatInputTranslate = false
     let toggleStickers: boolean = $state(false)
     let fileInput: string[] = $state([])
@@ -300,42 +301,51 @@
     }
 
     async function sendMain(continueResponse:boolean) {
-        if($doingChat){
+        if($doingChat || sending || rerollBusy){
             return
         }
-        return runSelectedConversationOperation(
-            continueResponse ? 'continue-response' : 'send-message',
-            (context) => sendMainComplete(context, continueResponse),
-        )
+        sending = true
+        const submittedInput = messageInput
+        const submittedFiles = [...fileInput]
+        try {
+            return await runSelectedConversationOperation(
+                continueResponse ? 'continue-response' : 'send-message',
+                (context) => sendMainComplete(context, continueResponse, submittedInput, submittedFiles),
+            )
+        } catch (error) {
+            alertError(error)
+        } finally {
+            sending = false
+        }
     }
 
     async function sendMainComplete(
         context: ConversationOperationContext,
         continueResponse: boolean,
+        submittedInput: string,
+        submittedFiles: string[],
     ) {
+        let input = submittedInput
         let mutationTarget = requireConversationMutationTarget(context)
         const character = mutationTarget.character
         let messages = mutationTarget.conversation.message
 
-        if(messageInput.startsWith('/')){
-            const commandProcessed = await processMultiCommand(messageInput)
+        if(input.startsWith('/')){
+            const commandProcessed = await processMultiCommand(input)
             context.requireCurrent()
             if(commandProcessed !== false){
-                messageInput = ''
+                if (messageInput === submittedInput) messageInput = ''
                 return
             }
             mutationTarget = requireConversationMutationTarget(context)
             messages = mutationTarget.conversation.message
         }
 
-        if(fileInput.length > 0){
-            for(const file of fileInput){
-                messageInput += `{{inlayed::${file}}}`
-            }
-            fileInput = []
+        for(const file of submittedFiles){
+            input += `{{inlayed::${file}}}`
         }
 
-        if(messageInput === ''){
+        if(input === ''){
             if(character.type !== 'group'){
                 if(messages.length === 0 || messages[messages.length - 1].role !== 'user'){
                     if(DBState.db.useSayNothing){
@@ -362,7 +372,7 @@
                     processInput: (onConversationCommit) =>
                         processScript(
                             character,
-                            messageInput,
+                            input,
                             'editinput',
                             {},
                             { onConversationCommit },
@@ -385,14 +395,20 @@
             else{
                 appendConversationMessage(mutationTarget, {
                     role: 'user',
-                    data: messageInput,
+                    data: input,
                     time: Date.now(),
                     name: $ConnectionOpenStore ? DBState.db.username : null
                 })
             }
         }
-        messageInput = ''
-        messageInputTranslate = ''
+        if (messageInput === submittedInput) {
+            messageInput = ''
+            messageInputTranslate = ''
+        }
+        for (const file of submittedFiles) {
+            const index = fileInput.indexOf(file)
+            if (index >= 0) fileInput.splice(index, 1)
+        }
         mutationTarget = requireConversationMutationTarget(context)
         await sleep(10)
         context.requireCurrent()
@@ -404,7 +420,7 @@
     }
 
     async function reroll() {
-        if ($doingChat || rerollBusy) return
+        if ($doingChat || rerollBusy || sending) return
         rerollBusy = true
         abortController = new AbortController()
         try {
@@ -446,7 +462,7 @@
     }
 
     async function nextReroll() {
-        if ($doingChat || rerollBusy) return
+        if ($doingChat || rerollBusy || sending) return
         let generate = false
         await runSelectedConversationOperation('next-response-candidate', async (context) => {
             const { conversation, session } = context.requireCurrent()
@@ -468,7 +484,7 @@
     }
 
     async function unReroll() {
-        if ($doingChat || rerollBusy) return
+        if ($doingChat || rerollBusy || sending) return
         await runSelectedConversationOperation('previous-response-candidate', async (context) => {
             const { conversation, session } = context.requireCurrent()
             if (moveResponseCandidate(conversation, session, -1, v4)) {
@@ -536,7 +552,6 @@
         continued: boolean = false,
     ) {
         requireConversationMutationTarget(context)
-        messageInput = ''
         abortController = new AbortController()
         try {
             await sendChat(-1, {
@@ -567,6 +582,7 @@
             autoMode = false
             return
         }
+        if ($doingChat || sending || rerollBusy) return
         const selectedChar = $selectedCharID
         autoMode = true
         while(autoMode){
@@ -1246,6 +1262,7 @@
                 {:else}
                     <button
                             onclick={send}
+                            disabled={sending}
                             class="flex justify-center border-y border-darkborderc items-center text-textcolor p-3 peer-focus:border-textcolor hover:bg-blue-500 hover:text-white transition-colors button-icon-send"
                             style:height={inputHeight}
                     >

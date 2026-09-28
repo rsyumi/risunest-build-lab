@@ -130,8 +130,10 @@ fn stopped_helper_rolls_back_when_the_replacement_cannot_be_started() {
 
     assert!(result.recv_timeout(Duration::from_millis(250)).is_err());
     assert_old_install(&fixture.install);
+    // The parent and both Task Scheduler calls each start Windows PowerShell,
+    // which takes about 22 s per start on Windows ARM runners.
     let error = result
-        .recv_timeout(Duration::from_secs(10))
+        .recv_timeout(Duration::from_secs(120))
         .unwrap()
         .unwrap_err();
     let _ = parent.wait();

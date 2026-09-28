@@ -22,15 +22,16 @@ risunest-release-update = { path = "../crates/release-update" }
 risunest-sync-wire = { path = "../crates/sync-wire" }
 risunest-sync-connect = { path = "../crates/sync-connect" }
 risunest-external-storage-format = { path = "../crates/external-storage-format" }
+risunest-small-object-store = { path = "../crates/small-object-store" }
 zeroize = "1"
-tauri = { version = "2.11.5", features = ["protocol-asset", "devtools"] }
+tauri = { version = "2.11.6", features = ["protocol-asset", "devtools"] }
 rusqlite = { version = "0.40.2", features = ["bundled", "backup"] }
 ryu-js = { version = "1.0.3", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1.0", features = ["preserve_order"] }
-sha2 = "0.10"
-tiktoken-rs = "=0.12.0"
-base64 = "0.21.0"
+sha2 = "0.11.0"
+tiktoken-rs = "=0.12.1"
+base64 = "0.23.1"
 cap-primitives = "4.0.3"
 darling = "0.20.3"
 zip = "0.6.6"
@@ -38,18 +39,18 @@ futures = "0.3.30"
 async-trait = "0.1"
 url = "2.2"
 uuid = { version = "1.9.1", features = [ "v4" ] }
-tauri-plugin-deep-link = "2.4.9"
-tauri-plugin-fs = "2.5.1"
+tauri-plugin-deep-link = "2.4.10"
+tauri-plugin-fs = "2.5.2"
 tauri-plugin-os = "2.3.2"
-tauri-plugin-dialog = "2.7.2"
+tauri-plugin-dialog = "2.7.3"
 tauri-plugin-process = "2.3.1"
-tauri-plugin-shell = "2.3.5"
+tauri-plugin-shell = "2.3.6"
 tauri-plugin-opener = "2.5.5"
 # Native callers may supply Cookie, Origin, Referer and other HTTP headers.
-tauri-plugin-http = { version = "2.5.9", features = ["unsafe-headers"] }
+tauri-plugin-http = { version = "2.6.1", features = ["unsafe-headers"] }
 oauth2 = "5.0.0"
 # External storage adapters: request signing, DAV/S3 XML, path escaping, Retry-After dates.
-hmac = "0.12"
+hmac = "0.13.0"
 quick-xml = { version = "0.41", features = ["serialize"] }
 percent-encoding = "2"
 httpdate = "1"
@@ -87,7 +88,7 @@ name = "risunest_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
-tauri-plugin-single-instance = { version = "2.4.3", features = ["deep-link"] }
+tauri-plugin-single-instance = { version = "2.4.5", features = ["deep-link"] }
 tauri-plugin-updater = "2.12.0"
 getrandom = "0.2.15"
 reqwest = { version = "0.12.28", features = ["blocking", "json"] }
@@ -100,7 +101,7 @@ webview2-com = "0.38.2"
 windows = { version = "0.61.3", features = ["Win32_System_Com", "Win32_Graphics_Dwm", "Win32_UI_Accessibility", "Win32_UI_WindowsAndMessaging"] }
 # Trust internal HTTPS endpoints whose CA is installed in the Windows store.
 # Keep the default public roots and certificate/hostname verification enabled.
-tauri-plugin-http = { version = "2.5.9", features = ["rustls-tls-native-roots"] }
+tauri-plugin-http = { version = "2.6.1", features = ["rustls-tls-native-roots"] }
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
@@ -113,7 +114,7 @@ tauri-plugin-window-state = "2"
 libc = "0.2"
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
-security-framework = "2.11.1"
+security-framework = "3.7.0"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 webkit2gtk = { version = "2.0", features = ["v2_16"] }
@@ -134,6 +135,9 @@ reqwest = { version = "0.12.28", default-features = false, features = ["blocking
 reqwest = { version = "0.12.28", features = ["blocking", "json", "stream"] }
 
 [dev-dependencies]
+# Commit hooks let a test count durable transactions from outside the code
+# under test. Development only, so no shipped build gains the callback.
+rusqlite = { version = "0.40.2", features = ["hooks"] }
 wry = "=0.55.1"
 tao = "0.35.3"
 rcgen = "0.14"
@@ -141,7 +145,7 @@ rustls = { version = "0.23", default-features = false, features = ["ring", "std"
 tiny_http = "0.12.0"
 risunest-sync-server = { path = "../server/sync" }
 tokio = { version = "1", features = ["rt-multi-thread", "net"] }
-tauri = { version = "2.11.5", features = ["test"] }
+tauri = { version = "2.11.6", features = ["test"] }
 regex = "1.13.1"
 
 [patch.crates-io]

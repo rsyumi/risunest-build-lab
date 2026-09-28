@@ -9,20 +9,22 @@ import { v4 } from "uuid"
 import { DBState } from "./stores.svelte"
 
 export async function selectUserImg() {
+    const persona = DBState.db.personas[DBState.db.selectedPersona]
+    if (!persona) return
     const selected = await selectSingleFile(['png'])
     if (!selected) {
         return
     }
     const img = selected.data
     const imgp = await saveImage(img)
-    DBState.db.userIcon = imgp
-    DBState.db.personas[DBState.db.selectedPersona] = {
-        ...DBState.db.personas[DBState.db.selectedPersona],
-        name: DBState.db.username,
-        icon: DBState.db.userIcon,
-        personaPrompt: DBState.db.personaPrompt,
-        note: DBState.db.userNote,
-        id: v4()
+    const target = DBState.db.personas.find((entry) =>
+        persona.id ? entry.id === persona.id : entry === persona,
+    )
+    if (!target) return
+    target.icon = imgp
+    if (target === DBState.db.personas[DBState.db.selectedPersona]) {
+        DBState.db.userIcon = imgp
+        saveUserPersona()
     }
 }
 

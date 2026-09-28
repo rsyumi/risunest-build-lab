@@ -97,7 +97,7 @@ interface Props {
         <button class="valuer" onclick={async () => {
             const d = await alertConfirm(language.removeConfirm + value.comment)
             if(d){
-                if(!open){
+                if(open){
                     onClose()
                 }
                 onRemove()

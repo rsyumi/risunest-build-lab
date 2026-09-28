@@ -2436,6 +2436,48 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
             })
         })
 
+        it('reorders every conversation of a character without touching their messages', async () => {
+            const { store } = await createHarness()
+            const imported = await store.replaceFromDatabase(fixtureDatabase)
+            const before = await store.materializeDatabase()
+
+            const committed = await store.commit({
+                expectedRevision: imported.revision,
+                conversations: [{
+                    type: 'reorder',
+                    characterId: 'char-a',
+                    conversationIds: ['conv-short', 'conv-long'],
+                }],
+            })
+
+            const summaries = (await store.queryConversations({
+                characterId: 'char-a',
+                order: 'configured',
+                limit: 10,
+            })).items
+            expect(summaries.map(({ id, configuredIndex }) => ({ id, configuredIndex }))).toEqual([
+                { id: 'conv-short', configuredIndex: 0 },
+                { id: 'conv-long', configuredIndex: 1 },
+            ])
+            const materialized = await store.materializeDatabase()
+            expect(materialized.characters[1].chats).toEqual([
+                before.characters[1].chats[1],
+                before.characters[1].chats[0],
+            ])
+
+            for (const conversationIds of [
+                ['conv-short'],
+                ['conv-short', 'conv-short'],
+                ['conv-short', 'conv-missing'],
+            ]) {
+                await expect(store.commit({
+                    expectedRevision: committed.revision,
+                    conversations: [{ type: 'reorder', characterId: 'char-a', conversationIds }],
+                })).rejects.toThrow(/each conversation once/)
+            }
+            expect((await store.readRoot()).revision).toBe(committed.revision)
+        })
+
         it('rejects an explicit conversation insertion when the target ID already exists', async () => {
             const { store } = await createHarness()
             const imported = await store.replaceFromDatabase(fixtureDatabase)

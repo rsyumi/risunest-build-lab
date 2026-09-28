@@ -1,5 +1,6 @@
 import { untrack } from 'svelte'
 import type { Database, character, groupChat } from './database.svelte'
+import { PersistentMutationFencedError } from './saveCoordinator'
 
 interface PersistentSaveObserverDependencies {
     readDatabase(): Database
@@ -33,6 +34,16 @@ function subscribeDeep(value: unknown): void {
 export function observePersistentSaveChanges(
     dependencies: PersistentSaveObserverDependencies,
 ): () => void {
+    // While a replacement installs its database the coordinator refuses the
+    // mark and decides itself what an edit made meanwhile means. Throwing here
+    // would stop the rest of the effects Svelte runs for that replacement.
+    const markDirty = () => {
+        try {
+            dependencies.markDirty(0)
+        } catch (error) {
+            if (!(error instanceof PersistentMutationFencedError)) throw error
+        }
+    }
     return $effect.root(() => {
         $effect(() => {
             const database = dependencies.readDatabase()
@@ -40,14 +51,14 @@ export function observePersistentSaveChanges(
                 if (key !== 'characters') {
                     $effect(() => {
                         subscribeDeep(database[key])
-                        untrack(() => dependencies.markDirty(0))
+                        untrack(markDirty)
                     })
                 }
             }
             // A deep observer knows that something changed, not the byte size
             // of that change. The complete root size would force an immediate
             // save for every keystroke whenever an unchanged payload is large.
-            untrack(() => dependencies.markDirty(0))
+            untrack(markDirty)
         })
         $effect(() => {
             const character = dependencies.readSelectedCharacter()
@@ -57,7 +68,7 @@ export function observePersistentSaveChanges(
                 }
             }
             // Coordinator reads must not expand either observer's dependencies.
-            untrack(() => dependencies.markDirty(0))
+            untrack(markDirty)
         })
         $effect(() => {
             const chats = dependencies.readSelectedCharacter()?.chats ?? []
@@ -70,7 +81,7 @@ export function observePersistentSaveChanges(
                     for (const key of enumerableKeys(chat)) {
                         if (key !== 'message') subscribeDeep(chat[key])
                     }
-                    untrack(() => dependencies.markDirty(0))
+                    untrack(markDirty)
                 })
                 $effect(() => {
                     const chat = chats[index]
@@ -83,16 +94,16 @@ export function observePersistentSaveChanges(
                                 for (let index = 0; index < messages.length; index++) {
                                     $effect(() => {
                                         subscribeDeep(messages[index])
-                                        untrack(() => dependencies.markDirty(0))
+                                        untrack(markDirty)
                                     })
                                 }
                             } else subscribeDeep(messages)
                         }
                     }
-                    untrack(() => dependencies.markDirty(0))
+                    untrack(markDirty)
                 })
             }
-            untrack(() => dependencies.markDirty(0))
+            untrack(markDirty)
         })
     })
 }

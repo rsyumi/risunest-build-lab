@@ -156,10 +156,14 @@ fn tauri_derived(platform: Platform, hives: &Hives) -> Vec<PathBuf> {
             .collect::<Vec<_>>(),
         Platform::MacOs => Hives::absolute(&hives.home)
             .map(|home| {
-                ["Library/Application Support", "Library/Caches", "Library/Logs"]
-                    .into_iter()
-                    .map(|hive| home.join(hive).join(IDENTIFIER))
-                    .collect::<Vec<_>>()
+                [
+                    "Library/Application Support",
+                    "Library/Caches",
+                    "Library/Logs",
+                ]
+                .into_iter()
+                .map(|hive| home.join(hive).join(IDENTIFIER))
+                .collect::<Vec<_>>()
             })
             .unwrap_or_default(),
         Platform::Linux => [
@@ -231,10 +235,7 @@ mod tests {
         assert_eq!(macos.webview, None);
 
         let linux = layout(Platform::Linux, &hives()).unwrap();
-        assert_eq!(
-            linux.data,
-            base("home").join(".local/share/risunest-sync")
-        );
+        assert_eq!(linux.data, base("home").join(".local/share/risunest-sync"));
         assert_eq!(
             linux.webview,
             Some(base("home").join(".local/share/risunest-sync-webview"))

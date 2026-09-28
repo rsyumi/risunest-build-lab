@@ -1,6 +1,7 @@
 import type { SyncMutationRuntime } from "./syncMutationRuntime";
 import { invoke } from "@tauri-apps/api/core";
 import type { PersistentDestructiveReplacementFence } from "../persistentDataRuntime";
+import type { RetainableReplacementFence } from "../retainableReplacementFence";
 
 /** Ledger sections. Device-fixed data is never addressable on the server. */
 export type ServerSection = "library" | "hypa" | "local-plugins";
@@ -68,6 +69,10 @@ export interface ServerCycleItems {
     | "enumerating"
     | "preparing"
     | "downloading"
+    | "downloadingMetadata"
+    | "downloadingBackupMetadata"
+    | "preserving"
+    | "syncingSections"
     | "verifying"
     | "uploading"
     | "confirming";
@@ -108,7 +113,7 @@ function isCycleItems(value: unknown): value is ServerCycleItems {
   const { done, total, activity, processed, expected } = value as Record<string, unknown>;
   if (activity !== undefined && (
     typeof activity !== "string" ||
-    !["enumerating", "preparing", "downloading", "verifying", "uploading", "confirming"].includes(activity) ||
+    !["enumerating", "preparing", "downloading", "downloadingMetadata", "downloadingBackupMetadata", "preserving", "syncingSections", "verifying", "uploading", "confirming"].includes(activity) ||
     !Number.isSafeInteger(processed) || Number(processed) < 0 ||
     !Number.isSafeInteger(expected) || Number(expected) < 0
   )) return false;
@@ -148,6 +153,9 @@ export function createServerSyncFacade(options: {
   onVerifiedBytes?: (bytes: string) => void;
   onRetryableFailure?: (code: string | undefined) => void;
   onCycleItems?: (items: ServerCycleItems) => void;
+  /** Settles once library work outside this facade has released the library,
+   * so native admission does not turn the next claim away as busy. */
+  awaitLibrary?: () => Promise<void>;
 }) {
   const native = options.invoke ?? invoke;
   const transfer = async <T>(
@@ -312,8 +320,11 @@ export function createServerSyncFacade(options: {
   };
   const run = async (
     cycleOptions: ServerCycleOptions,
+    held: RetainableReplacementFence | undefined,
   ): Promise<ServerCycle> => {
     cancelled = false;
+    await options.awaitLibrary?.();
+    if (cancelled) throw new ServerSyncError("cancelled");
     if (pendingActivation) {
       const preparationId = await activate();
       options.onProgress?.("publishing");
@@ -324,8 +335,11 @@ export function createServerSyncFacade(options: {
       options.onProgress?.("publishing");
       return transfer<ServerCycle>("server_sync_publish", { preparationId });
     }
-    options.onProgress?.("saving");
-    await options.runtime.flushPendingData("server-sync-prepare");
+    // A held fence has already saved local data and refuses further writes.
+    if (!held) {
+      options.onProgress?.("saving");
+      await options.runtime.flushPendingData("server-sync-prepare");
+    }
     options.onProgress?.("preparing");
     const prepared = await transfer<Prepared>("server_sync_prepare", {
       options: cycleOptions,
@@ -335,11 +349,15 @@ export function createServerSyncFacade(options: {
     let ownsPreparation = true;
     try {
       if (cancelled) throw new ServerSyncError("cancelled");
-      await options.runtime.flushPendingData("server-sync-activate");
-      const token = await options.runtime.capturePersistentMutationToken(
-        "server-sync-activate",
-      );
-      fence = await options.runtime.acquireDestructiveReplacementFence(token);
+      if (held) {
+        fence = held.retain();
+      } else {
+        await options.runtime.flushPendingData("server-sync-activate");
+        const token = await options.runtime.capturePersistentMutationToken(
+          "server-sync-activate",
+        );
+        fence = await options.runtime.acquireDestructiveReplacementFence(token);
+      }
       if (cancelled) throw new ServerSyncError("cancelled");
       pendingActivation = { prepared, fence };
       ownsPreparation = false;
@@ -363,6 +381,7 @@ export function createServerSyncFacade(options: {
     command: string,
     config?: ServerConfig,
   ): Promise<ServerStatus> => {
+    await options.awaitLibrary?.();
     if (pendingRefresh) throw new ServerSyncError("committed-refresh-pending");
     if (pendingActivation)
       throw new ServerSyncError("activation-confirmation-pending");
@@ -376,17 +395,27 @@ export function createServerSyncFacade(options: {
   };
   return {
     status: () => native<ServerStatus>("server_sync_status"),
-    bind: (config: ServerConfig) =>
-      native<ServerStatus>("server_sync_bind", { config }),
-    unbind: () => native<void>("server_sync_unbind"),
+    bind: async (config: ServerConfig) => {
+      await options.awaitLibrary?.();
+      return native<ServerStatus>("server_sync_bind", { config });
+    },
+    unbind: async () => {
+      await options.awaitLibrary?.();
+      await native<void>("server_sync_unbind");
+    },
     reregister: (config: ServerConfig) =>
       recover("server_sync_reregister", config),
     reconcile: () => recover("server_sync_reconcile"),
     needsRefresh: () =>
       pendingRefresh !== undefined || pendingActivation !== undefined,
-    cycle(cycleOptions: ServerCycleOptions = {}): Promise<ServerCycle> {
+    /** A cycle given a held fence runs under it instead of saving and fencing
+     * again, and keeps its own hold while an activation or refresh is pending. */
+    cycle(
+      cycleOptions: ServerCycleOptions = {},
+      held?: RetainableReplacementFence,
+    ): Promise<ServerCycle> {
       if (active) return active;
-      active = run(cycleOptions)
+      active = run(cycleOptions, held)
         .catch((cause) => {
           throw serverSyncError(cause);
         })

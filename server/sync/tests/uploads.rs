@@ -15,7 +15,7 @@ fn large_finalization_reservation_survives_restart_and_completes_exactly_once() 
     for _ in 0..chunks {
         whole.update(&chunk);
     }
-    let digest = format!("{:x}", whole.finalize());
+    let digest = hex::encode(whole.finalize());
     let id = store
         .begin_upload(
             &a,
@@ -259,4 +259,48 @@ fn retryable_finalization_failure_is_visible_and_clears_after_recovery() {
     let progress = store.upload_progress(&a, &id, None).unwrap();
     assert!(progress.complete);
     assert_eq!(progress.retryable_failure, None);
+}
+
+#[test]
+fn an_upload_of_an_already_inline_body_publishes_no_second_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::init(dir.path()).unwrap();
+    let a = device(&store);
+    let bytes = b"synthetic already inline body".to_vec();
+    let digest = hash(&bytes);
+    store.put_object(&a, &digest, &bytes).unwrap();
+    let id = store
+        .begin_upload(
+            &a,
+            &UploadManifest {
+                hash: digest.clone(),
+                size: (bytes.len() as u64).into(),
+            },
+        )
+        .unwrap();
+    store.put_upload_chunk(&a, &id, 0, &digest, &bytes).unwrap();
+    if store.submit_upload(&a, &id).unwrap().is_none() {
+        while store.run_pending_upload().unwrap() {}
+    }
+    assert_eq!(store.submit_upload(&a, &id).unwrap(), Some(digest.clone()));
+    // The body stays where the metadata files it, so the upload leaves no file
+    // under the same identity for collection to miss.
+    assert!(!dir
+        .path()
+        .join("objects")
+        .join(&digest[..2])
+        .join(&digest)
+        .exists());
+    assert_eq!(store.get_object(&digest).unwrap(), bytes);
+    assert_eq!(
+        store.read_object_range(&digest, 10, 7).unwrap(),
+        bytes[10..17]
+    );
+    store.maintain().unwrap();
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("staging"))
+            .unwrap()
+            .count(),
+        0
+    );
 }

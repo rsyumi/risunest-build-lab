@@ -222,6 +222,16 @@ interface PendingWindowedActivationChange {
     change: WindowedConversationActivationChange
 }
 
+interface PendingWindowedChatListChange {
+    characterId: string
+    conversationId: string
+    sessionToken: ConversationSessionToken
+    beforeCanonical: string
+    before: WindowedCharacterShell
+    after: WindowedCharacterShell
+    insertedMessages: Map<string, Message[]>
+}
+
 export interface ConversationMutationPersistenceHandle {
     release(): void
 }
@@ -231,6 +241,7 @@ interface ConversationMutationProjection {
     coveredPending: PendingConversationMutation[]
     character?: CharacterDetail
     coveredActivation?: PendingWindowedActivationChange
+    coveredChatList?: PendingWindowedChatListChange
 }
 
 function cloneOwnPropertiesExcept(
@@ -551,6 +562,7 @@ export class SaveCoordinator {
     private characterBaselineId: string | null = null
     private windowedCharacterBaseline: WindowedSelectedCharacterCapture | null = null
     private pendingWindowedActivationChange: PendingWindowedActivationChange | null = null
+    private pendingWindowedChatListChange: PendingWindowedChatListChange | null = null
     private dirtyGeneration = 0
     private pendingByteCount = 0
     private debounceHandle: unknown
@@ -649,7 +661,8 @@ export class SaveCoordinator {
             this.pendingCharacterAddition !== null ||
             this.reservedCharacterAddition !== null ||
             this.pendingConversationMutations.length > 0 ||
-            this.pendingWindowedActivationChange !== null
+            this.pendingWindowedActivationChange !== null ||
+            this.pendingWindowedChatListChange !== null
         )
     }
 
@@ -728,9 +741,12 @@ export class SaveCoordinator {
         this.reservedCharacterAddition = null
         this.pendingConversationMutations = []
         this.pendingWindowedActivationChange = null
+        this.pendingWindowedChatListChange = null
         this.persistenceWasBusy = false
         this.lastBackgroundErrorMessage = null
-        if (this.destructiveReplacementFence?.state === 'held') {
+        // A destructive fence compares against the baselines reset above, so a
+        // later refresh under the same fence sees the installed state as clean.
+        if (this.destructiveReplacementFence?.state === 'held' && this.destructiveReplacementFence.refreshBaseline) {
             this.destructiveReplacementFence.refreshBaseline = captured
         }
         if (this.committedRefreshRevision !== null) {
@@ -784,6 +800,7 @@ export class SaveCoordinator {
         this.characterBaselineId = character.chaId
         this.windowedCharacterBaseline = null
         this.pendingWindowedActivationChange = null
+        this.pendingWindowedChatListChange = null
         return true
     }
 
@@ -988,6 +1005,78 @@ export class SaveCoordinator {
         const detached = safeStructuredClone(event)
         this.markPersistentDataDirty(estimatedBytes)
         this.pendingConversationMutations.push({ event: detached })
+    }
+
+    /**
+     * Records a chat-list edit of the windowed selected character as exact evidence.
+     * `after` carries the complete bodies of added chats. Returns false when the edit
+     * cannot be described against the persisted baseline, before anything is recorded.
+     */
+    recordWindowedChatListChange(
+        authority: WindowedConversationPersistenceAuthority,
+        before: CompleteCharacter,
+        after: CompleteCharacter,
+    ): boolean {
+        this.assertInitialized()
+        const baseline = this.windowedCharacterBaseline
+        if (
+            this.destructiveReplacementFence !== null ||
+            this.committedRefreshRevision !== null ||
+            this.selectedConversationTransitionActive ||
+            !baseline ||
+            !validWindowedAuthority(authority) ||
+            !sameWindowedAuthority(authority, baseline.authority) ||
+            authority.sessionVersion !== authority.persistedSessionVersion ||
+            authority.storeRevision !== this.revision ||
+            this.pendingConversationMutations.length > 0 ||
+            this.pendingWindowedActivationChange !== null ||
+            this.pendingWindowedChatListChange !== null ||
+            before.chaId !== authority.characterId ||
+            after.chaId !== authority.characterId
+        )
+            return false
+        const beforeShell = captureWindowedCharacterShell(before)
+        const beforeCanonical = canonicalJson(beforeShell)
+        if (beforeCanonical !== baseline.shellCanonical) return false
+        const afterShell = captureWindowedCharacterShell(after)
+        if (canonicalJson(afterShell) === beforeCanonical) return true
+
+        const afterIds = new Set<string>()
+        for (const conversation of afterShell.chats) {
+            if (!conversation.id || afterIds.has(conversation.id)) return false
+            afterIds.add(conversation.id)
+        }
+        if (!afterIds.has(authority.conversationId)) return false
+        const beforeIds = new Set(beforeShell.chats.map((conversation) => conversation.id))
+        const insertedMessages = new Map<string, Message[]>()
+        for (const conversation of after.chats) {
+            if (beforeIds.has(conversation.id)) continue
+            if (
+                isConversationSummaryStub(conversation) ||
+                isMetadataOnlySelectedConversation(conversation) ||
+                !Array.isArray(conversation.message)
+            )
+                return false
+            insertedMessages.set(conversation.id!, safeStructuredClone(conversation.message))
+        }
+
+        const estimatedBytes = Math.max(
+            1,
+            new TextEncoder().encode(
+                JSON.stringify([afterShell, ...insertedMessages.values()]),
+            ).byteLength,
+        )
+        this.markPersistentDataDirty(estimatedBytes)
+        this.pendingWindowedChatListChange = {
+            characterId: authority.characterId,
+            conversationId: authority.conversationId,
+            sessionToken: authority.sessionToken,
+            beforeCanonical,
+            before: beforeShell,
+            after: afterShell,
+            insertedMessages,
+        }
+        return true
     }
 
     flushPendingData(reason: string): Promise<void> {
@@ -2592,8 +2681,10 @@ export class SaveCoordinator {
             ) {
                 yieldedAfterCapture = true
                 const committedConversationKeys = new Set(
-                    (commit.conversations ?? []).map(
-                        (mutation) => `${mutation.characterId}\u0000${mutation.conversationId}`,
+                    (commit.conversations ?? []).flatMap((mutation) =>
+                        mutation.type === 'reorder'
+                            ? []
+                            : [`${mutation.characterId}\u0000${mutation.conversationId}`],
                     ),
                 )
                 const replacedCharacterId = commit.replaceCharacter?.chaId
@@ -2680,6 +2771,13 @@ export class SaveCoordinator {
                                 conversationProjection.coveredActivation
                         ) {
                             this.pendingWindowedActivationChange = null
+                        }
+                        if (
+                            conversationProjection?.coveredChatList &&
+                            this.pendingWindowedChatListChange ===
+                                conversationProjection.coveredChatList
+                        ) {
+                            this.pendingWindowedChatListChange = null
                         }
                         const persistedSessionVersion =
                             persistedConversationMutations.at(-1)?.event.sessionVersion ??
@@ -3179,6 +3277,7 @@ export class SaveCoordinator {
         this.characterBaselineId = captured.character?.chaId ?? null
         this.windowedCharacterBaseline = null
         this.pendingWindowedActivationChange = null
+        this.pendingWindowedChatListChange = null
     }
 
     private setWindowedCharacterBaseline(
@@ -3304,6 +3403,26 @@ export class SaveCoordinator {
                 })
             }
         }
+        const chatList = this.pendingWindowedChatListChange
+        if (chatList) {
+            if (
+                chatList.characterId !== authority.characterId ||
+                chatList.conversationId !== authority.conversationId ||
+                chatList.sessionToken !== authority.sessionToken
+            ) {
+                throw new WindowedConversationRequiresCompatibilityError(
+                    'chat-list evidence belongs to another authority',
+                )
+            }
+            const projected = await this.projectWindowedChatListChange(
+                chatList,
+                projectedShell,
+                authority.conversationId,
+            )
+            projectedShell = projected.shell
+            mutations.push(...projected.mutations)
+            if (projected.character) activationCharacter = projected.character
+        }
         if (relevantPending.length === 0) {
             if (
                 authority.sessionVersion !== authority.persistedSessionVersion ||
@@ -3319,6 +3438,7 @@ export class SaveCoordinator {
                 coveredPending: [],
                 character: activationCharacter,
                 coveredActivation: activation ?? undefined,
+                coveredChatList: chatList ?? undefined,
             }
         }
 
@@ -3419,6 +3539,129 @@ export class SaveCoordinator {
             coveredPending: [...relevantPending],
             character: activationCharacter,
             coveredActivation: activation ?? undefined,
+            coveredChatList: chatList ?? undefined,
+        }
+    }
+
+    /**
+     * Turns recorded chat-list evidence into store mutations. Unselected chats may be
+     * summary stubs with placeholder bodies, so their metadata changes are applied key
+     * by key onto the persisted metadata instead of being written whole.
+     */
+    private async projectWindowedChatListChange(
+        change: PendingWindowedChatListChange,
+        projectedShell: WindowedCharacterShell,
+        selectedConversationId: string,
+    ): Promise<{
+        shell: WindowedCharacterShell
+        mutations: ConversationMutation[]
+        character?: CharacterDetail
+    }> {
+        if (canonicalJson(projectedShell) !== change.beforeCanonical) {
+            throw new WindowedConversationRequiresCompatibilityError(
+                'chat-list evidence does not match the persisted baseline',
+            )
+        }
+        const characterId = change.before.chaId
+        const beforeById = new Map(
+            change.before.chats.map((conversation) => [conversation.id, conversation]),
+        )
+        const afterIds = change.after.chats.map((conversation) => conversation.id!)
+        const surviving = new Set(afterIds)
+        const mutations: ConversationMutation[] = []
+        const order: string[] = []
+        for (const conversation of change.before.chats) {
+            if (surviving.has(conversation.id!)) {
+                order.push(conversation.id!)
+                continue
+            }
+            mutations.push({ type: 'delete', characterId, conversationId: conversation.id! })
+        }
+        for (const conversation of change.after.chats) {
+            const previous = beforeById.get(conversation.id)
+            if (!previous || canonicalJson(previous) === canonicalJson(conversation)) continue
+            let metadata: Omit<Chat, 'message'>
+            if (conversation.id === selectedConversationId) {
+                metadata = safeStructuredClone(conversation)
+            } else {
+                const persisted = await this.dependencies.store.readConversationMetadata(
+                    characterId,
+                    conversation.id!,
+                )
+                if (!persisted || persisted.revision !== this.revision) {
+                    throw new WindowedConversationRequiresCompatibilityError(
+                        'persistent conversation metadata changed',
+                    )
+                }
+                const patched = safeStructuredClone(persisted.value.conversation) as Record<
+                    string,
+                    unknown
+                >
+                const before = previous as Record<string, unknown>
+                const after = conversation as Record<string, unknown>
+                for (const key of Object.keys(before)) {
+                    if (!Object.hasOwn(after, key)) delete patched[key]
+                }
+                for (const key of Object.keys(after)) {
+                    const unchanged =
+                        Object.hasOwn(before, key) &&
+                        (before[key] === after[key] ||
+                            (before[key] !== undefined &&
+                                after[key] !== undefined &&
+                                canonicalJson(before[key]) === canonicalJson(after[key])))
+                    if (!unchanged) patched[key] = safeStructuredClone(after[key])
+                }
+                metadata = patched as Omit<Chat, 'message'>
+            }
+            mutations.push({
+                type: 'replace-range',
+                characterId,
+                conversationId: conversation.id!,
+                start: 0,
+                deleteCount: 0,
+                messages: [],
+                conversation: metadata,
+            })
+        }
+        for (const conversation of change.after.chats) {
+            if (beforeById.has(conversation.id)) continue
+            const messages = change.insertedMessages.get(conversation.id!)
+            if (!messages) {
+                throw new WindowedConversationRequiresCompatibilityError(
+                    'added chat has no recorded body',
+                )
+            }
+            mutations.push({
+                type: 'replace-range',
+                characterId,
+                conversationId: conversation.id!,
+                start: 0,
+                deleteCount: 0,
+                messages: safeStructuredClone(messages),
+                conversation: safeStructuredClone(conversation),
+                // An explicit append position makes the store refuse an existing id.
+                configuredIndex: order.length,
+            })
+            order.push(conversation.id!)
+        }
+        if (order.some((id, index) => id !== afterIds[index])) {
+            mutations.push({ type: 'reorder', characterId, conversationIds: afterIds })
+        }
+        const beforeDetail = cloneOwnPropertiesExcept(
+            change.before as unknown as Record<string, unknown>,
+            'chats',
+        )
+        const afterDetail = cloneOwnPropertiesExcept(
+            change.after as unknown as Record<string, unknown>,
+            'chats',
+        ) as CharacterDetail
+        return {
+            shell: safeStructuredClone(change.after),
+            mutations,
+            character:
+                canonicalJson(beforeDetail) === canonicalJson(afterDetail)
+                    ? undefined
+                    : afterDetail,
         }
     }
 

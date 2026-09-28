@@ -2,6 +2,7 @@ import { mount } from 'svelte'
 import Settings from './Settings.svelte'
 import { fixtureState } from './hostAdapters'
 import { loadV3Plugins, getV3PluginInstance } from '../../src/ts/plugins/apiV3/v3.svelte'
+import { thoughtDriver } from './thoughtDriver'
 
 mount(Settings, { target: document.querySelector('#settings')! })
 const events: unknown[] = []
@@ -43,5 +44,5 @@ const driver = {
         document.body.append(other)
     },
 }
-Object.assign(window, { boundary: driver })
+Object.assign(window, { boundary: driver, thought: thoughtDriver })
 export type BrowserDriver = typeof driver

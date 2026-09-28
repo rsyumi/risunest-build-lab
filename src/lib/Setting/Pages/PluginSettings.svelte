@@ -41,7 +41,8 @@
         ></div>
         {/if}
         <!-- svelte-ignore a11y_click_events_have_key_events -->
-        <div class="flex gap-2" aria-labelledby="show-params" role='button' tabindex="0" onclick={() => {
+        <div class="flex gap-2" aria-labelledby="show-params" role='button' tabindex="0" onclick={(e) => {
+            if((e.target as Element).closest('button, a')) return
             if(showParams.includes(i)){
                 showParams.splice(showParams.indexOf(i),1)
             }

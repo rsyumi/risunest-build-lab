@@ -4,7 +4,14 @@
     <string name="webview_provider_missing">Android 시스템 WebView를 사용할 수 없습니다. 앱을 사용하기 전에 설치하거나 사용 설정하세요.</string>
     <string name="webview_provider_outdated">Android 시스템 WebView %1$s 버전은 이 앱에서 사용하기에 너무 오래되었습니다. %2$d 버전 이상으로 업데이트하세요.</string>
     <string name="webview_provider_unknown_version">Android 시스템 WebView 제공자 %1$s의 버전을 확인할 수 없습니다. 앱을 사용하기 전에 업데이트하세요.</string>
-    <string name="generation_notification_channel">응답 생성 중</string>
+    <string name="generation_notification_channel">백그라운드 작업</string>
     <string name="generation_notification_title">응답 생성 중</string>
     <string name="generation_notification_text">AI 응답을 받고 있습니다.</string>
+    <string name="background_notification_title">작업 진행 중</string>
+    <string name="background_backup">백업 중</string>
+    <string name="background_restore">복원 중</string>
+    <string name="background_sync">동기화 중</string>
+    <string name="background_import">가져오는 중</string>
+    <string name="background_export">내보내는 중</string>
+    <string name="background_maintenance">정리 중</string>
 </resources>

@@ -281,13 +281,13 @@ impl Store {
                         temp.write_all(&buffer[..n])?;
                     }
                     if length != expected_size as u64
-                        || format!("{:x}", chunk.finalize()) != expected
+                        || hex::encode(chunk.finalize()) != expected
                     {
                         return Err(Error::new("corrupt-chunk", 503));
                     }
                     total += length;
                 }
-                if total != size || format!("{:x}", full.finalize()) != digest {
+                if total != size || hex::encode(full.finalize()) != digest {
                     return Err(Error::new("hash-mismatch", 400));
                 }
             }
@@ -301,10 +301,29 @@ impl Store {
                 .map_err(|_| Error::new("storage-unavailable", 503))?;
             let mut db = self.db()?;
             Self::upload_row(&db, device, id)?;
-            publish(temp.path(), &destination)?;
+            let placed = super::objects::placement(&db, &digest)?;
+            if placed.is_some_and(|(recorded, _)| recorded != size) {
+                return Err(Error::new("corrupt-object", 503));
+            }
+            // An identity the metadata already files inline keeps its body
+            // there, so an upload of the same bytes does not leave a published
+            // file nothing accounts for. The verified upload restores a missing
+            // inline body, and one holding other bytes is refused.
+            let inline = matches!(placed, Some((_, true)));
+            if !inline {
+                publish(temp.path(), &destination)?;
+            }
             let tx = db.transaction()?;
+            if inline {
+                let bytes = fs::read(temp.path())?;
+                risunest_small_object_store::insert_batch(
+                    &tx,
+                    &[(digest.as_str(), bytes.as_slice())],
+                )
+                .map_err(super::objects::body_error)?;
+            }
             tx.execute(
-                "INSERT INTO objects VALUES(?1,?2) ON CONFLICT DO NOTHING",
+                "INSERT INTO objects(hash,size,storage) VALUES(?1,?2,'file') ON CONFLICT DO NOTHING",
                 params![digest, size as i64],
             )?;
             tx.execute("UPDATE uploads SET state='complete' WHERE id=?1", [id])?;
@@ -345,25 +364,14 @@ impl Store {
         if length > UPLOAD_CHUNK_BYTES {
             return Err(Error::new("range-too-large", 413));
         }
-        let _gate = self
-            .objects_gate
-            .lock()
-            .map_err(|_| Error::new("storage-unavailable", 503))?;
-        let size = self
-            .object_size(digest)?
-            .ok_or(Error::new("object-not-found", 404))?;
+        let (mut body, size) = self.open_object(digest)?;
         if start.checked_add(length).is_none_or(|v| v > size) {
             return Err(Error::new("invalid-range", 416));
         }
-        let mut file = File::open(self.object_path(digest)?)?;
-        drop(_gate);
-        if file.metadata()?.len() != size {
-            return Err(Error::new("corrupt-object", 503));
-        }
         use std::io::{Seek, SeekFrom};
-        file.seek(SeekFrom::Start(start))?;
+        body.seek(SeekFrom::Start(start))?;
         let mut bytes = vec![0; length as usize];
-        file.read_exact(&mut bytes)?;
+        body.read_exact(&mut bytes)?;
         Ok(bytes)
     }
 }

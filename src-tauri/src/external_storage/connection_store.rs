@@ -48,6 +48,35 @@ pub(crate) struct PendingStoredConnection {
     pub recovery_key_ref: String,
     pub created_at_ms: u64,
 }
+/// How many identities one connection remembers as unusable.
+const UNUSABLE_OBJECT_LIMIT: i64 = 1024;
+
+/// Why a remote object cannot be referenced again. Authorization, rate limit
+/// and transient answers are none of these and are never recorded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum UnusableReason {
+    /// The provider answered that the object is not there.
+    Missing,
+    /// The object was read and its bytes did not match what names it.
+    Damaged,
+}
+
+impl UnusableReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Missing => "missing",
+            Self::Damaged => "damaged",
+        }
+    }
+    fn parse(value: &str) -> Result<Self> {
+        match value {
+            "missing" => Ok(Self::Missing),
+            "damaged" => Ok(Self::Damaged),
+            _ => Err(corrupt()),
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum CompletionKind {
     Sync,
@@ -78,7 +107,8 @@ impl ConnectionStore {
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
             CREATE TABLE IF NOT EXISTS connections(id TEXT PRIMARY KEY,value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS pending_connections(id TEXT PRIMARY KEY,value TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS discovery(connection_id TEXT NOT NULL,id TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(connection_id,id));").map_err(storage)?;
+            CREATE TABLE IF NOT EXISTS discovery(connection_id TEXT NOT NULL,id TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(connection_id,id));
+            CREATE TABLE IF NOT EXISTS unusable_objects(connection_id TEXT NOT NULL,identity TEXT NOT NULL,object_id TEXT NOT NULL,reason TEXT NOT NULL,PRIMARY KEY(connection_id,identity));").map_err(storage)?;
         Ok(Self(db))
     }
     pub fn list(&self) -> Result<Vec<StoredConnection>> {
@@ -94,6 +124,17 @@ impl ConnectionStore {
             result.push(decode(&row.map_err(storage)?)?);
         }
         Ok(result)
+    }
+    /// Every stored connection, including one still being created.
+    pub fn ids(&self) -> Result<Vec<String>> {
+        let mut query = self
+            .0
+            .prepare("SELECT id FROM connections UNION SELECT id FROM pending_connections")
+            .map_err(storage)?;
+        let rows = query
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(storage)?;
+        rows.map(|row| row.map_err(storage)).collect()
     }
     pub fn read(&self, id: &str) -> Result<StoredConnection> {
         let encoded: Option<String> = self
@@ -325,6 +366,8 @@ impl ConnectionStore {
         let tx = self.0.transaction().map_err(storage)?;
         tx.execute("DELETE FROM discovery WHERE connection_id=?1", [id])
             .map_err(storage)?;
+        tx.execute("DELETE FROM unusable_objects WHERE connection_id=?1", [id])
+            .map_err(storage)?;
         tx.execute("DELETE FROM connections WHERE id=?1", [id])
             .map_err(storage)?;
         tx.commit().map_err(storage)?;
@@ -414,6 +457,67 @@ impl ConnectionStore {
         let value: RemoteObject = serde_json::from_str(&encoded).map_err(|_| corrupt())?;
         validate_discovery(&current, id, &value)?;
         Ok(value)
+    }
+
+    /// What a publication learned about one exact remote object, so the next
+    /// one cannot inherit a reference this connection already found missing or
+    /// damaged. It outlives the package cache on purpose.
+    pub(crate) fn record_unusable_object(
+        &self,
+        connection: &str,
+        identity: &str,
+        object_id: &str,
+        reason: UnusableReason,
+    ) -> Result<()> {
+        if identity.is_empty()
+            || identity.len() > 256
+            || object_id.is_empty()
+            || object_id.len() > 1024
+            || [identity, object_id].iter().any(|value| value.contains('\0'))
+        {
+            return Err(corrupt());
+        }
+        let tx = self.0.unchecked_transaction().map_err(storage)?;
+        tx.execute(
+            "INSERT INTO unusable_objects VALUES(?1,?2,?3,?4) ON CONFLICT(connection_id,identity) DO UPDATE SET object_id=excluded.object_id,reason=excluded.reason",
+            params![connection, identity, object_id, reason.as_str()],
+        ).map_err(storage)?;
+        // A failure is remembered per exact identity, and a repaired object has
+        // a different one, so the oldest rows give way rather than accumulating
+        // for a locator nothing names any more.
+        tx.execute(
+            "DELETE FROM unusable_objects WHERE connection_id=?1 AND rowid NOT IN
+             (SELECT rowid FROM unusable_objects WHERE connection_id=?1 ORDER BY rowid DESC LIMIT ?2)",
+            params![connection, UNUSABLE_OBJECT_LIMIT],
+        ).map_err(storage)?;
+        tx.commit().map_err(storage)
+    }
+
+    pub(crate) fn unusable_object(
+        &self,
+        connection: &str,
+        identity: &str,
+    ) -> Result<Option<UnusableReason>> {
+        let reason: Option<String> = self
+            .0
+            .query_row(
+                "SELECT reason FROM unusable_objects WHERE connection_id=?1 AND identity=?2",
+                params![connection, identity],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(storage)?;
+        reason.map(|value| UnusableReason::parse(&value)).transpose()
+    }
+
+    pub(crate) fn forget_unusable_object(&self, connection: &str, identity: &str) -> Result<()> {
+        self.0
+            .execute(
+                "DELETE FROM unusable_objects WHERE connection_id=?1 AND identity=?2",
+                params![connection, identity],
+            )
+            .map_err(storage)?;
+        Ok(())
     }
 
     pub(crate) fn forget_discovery(&self, connection: &str, id: &str) -> Result<()> {
@@ -732,6 +836,52 @@ mod tests {
         // A cache row is not enough once its connection has been removed.
         store.remove(&value.id).unwrap();
         assert_eq!(store.discovery_snapshot(&value.id, "b").unwrap_err().kind, ErrorKind::NotFound);
+    }
+
+    #[test]
+    fn a_connection_remembers_which_objects_it_found_unusable_until_they_answer() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = ConnectionStore::open(root.path()).unwrap();
+        let value = pending();
+        store.put_pending(&value).unwrap();
+        store.promote_pending(&value.id, locator("synthetic"), Capabilities::default()).unwrap();
+        store.record_unusable_object(&value.id, "identity-a", "snapshot-a", UnusableReason::Missing).unwrap();
+        store.record_unusable_object(&value.id, "identity-b", "snapshot-b", UnusableReason::Damaged).unwrap();
+        assert_eq!(store.unusable_object(&value.id, "identity-a").unwrap(), Some(UnusableReason::Missing));
+        assert_eq!(store.unusable_object(&value.id, "identity-b").unwrap(), Some(UnusableReason::Damaged));
+        assert_eq!(store.unusable_object("other-connection", "identity-a").unwrap(), None);
+        // A later answer about the same identity replaces the earlier one.
+        store.record_unusable_object(&value.id, "identity-a", "snapshot-a", UnusableReason::Damaged).unwrap();
+        assert_eq!(store.unusable_object(&value.id, "identity-a").unwrap(), Some(UnusableReason::Damaged));
+        store.forget_unusable_object(&value.id, "identity-a").unwrap();
+        store.forget_unusable_object(&value.id, "identity-a").unwrap();
+        assert_eq!(store.unusable_object(&value.id, "identity-a").unwrap(), None);
+        assert_eq!(store.unusable_object(&value.id, "identity-b").unwrap(), Some(UnusableReason::Damaged));
+        for identity in ["", &"i".repeat(257)] {
+            assert_eq!(store.record_unusable_object("connection", identity, "snapshot", UnusableReason::Missing)
+                .unwrap_err().kind, ErrorKind::Corrupt);
+        }
+        for object_id in ["", &"o".repeat(1025)] {
+            assert_eq!(store.record_unusable_object("connection", "identity", object_id, UnusableReason::Missing)
+                .unwrap_err().kind, ErrorKind::Corrupt);
+        }
+        // The oldest records give way rather than growing without a bound.
+        for index in 0..UNUSABLE_OBJECT_LIMIT + 8 {
+            store.record_unusable_object(&value.id, &format!("bounded-{index}"), "snapshot-c", UnusableReason::Missing).unwrap();
+        }
+        let held: i64 = store.0.query_row(
+            "SELECT count(*) FROM unusable_objects WHERE connection_id=?1", [&value.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(held, UNUSABLE_OBJECT_LIMIT);
+        assert_eq!(store.unusable_object(&value.id, "bounded-0").unwrap(), None);
+        assert_eq!(store.unusable_object(&value.id, &format!("bounded-{}", UNUSABLE_OBJECT_LIMIT + 7)).unwrap(),
+            Some(UnusableReason::Missing));
+        // A removed connection keeps nothing about the objects it saw.
+        store.remove(&value.id).unwrap();
+        let held: i64 = store.0.query_row(
+            "SELECT count(*) FROM unusable_objects WHERE connection_id=?1", [&value.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(held, 0);
     }
 
     #[test]

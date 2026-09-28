@@ -4,6 +4,7 @@ vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("./platform", () => ({ isTauriIOS: true }));
 import {
   beginIOSGeneration,
+  beginIOSBackgroundTask,
   initializeIOSNative,
   installIOSPersistenceLifecycle,
   type IOSNativeState,
@@ -155,4 +156,22 @@ describe("iOS generation lifecycle", () => {
     expect(lease.signal).toBe(controller.signal);
     expect(deps.begin).not.toHaveBeenCalled();
   });
+});
+
+it("reports measured task progress across stages and releases expired runtime", async () => {
+  invoke.mockResolvedValueOnce({ id: "background" } as never);
+  const release = vi.fn();
+  const task = await beginIOSBackgroundTask("backup", undefined, release);
+  expect(invoke).toHaveBeenCalledWith("plugin:ios-native|begin", { kind: "backup" });
+  task.progress(60);
+  task.progress(null);
+  task.progress(15);
+  window.dispatchEvent(new CustomEvent("risunest-ios-lifecycle", { detail: { event: "expired", id: "background" } }));
+  expect(task.signal?.aborted).toBe(true);
+  expect(release).toHaveBeenCalledOnce();
+  await task.dispose(false);
+  expect(invoke).toHaveBeenCalledWith("plugin:ios-native|generation_progress", { id: "background", completed: 60, total: 100 });
+  expect(invoke).toHaveBeenCalledWith("plugin:ios-native|generation_progress", { id: "background", completed: 0, total: 0 });
+  expect(invoke).toHaveBeenCalledWith("plugin:ios-native|generation_progress", { id: "background", completed: 15, total: 100 });
+  expect(invoke).toHaveBeenLastCalledWith("plugin:ios-native|end", { id: "background", success: false });
 });

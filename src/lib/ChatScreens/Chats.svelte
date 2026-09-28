@@ -104,7 +104,7 @@
         refreshMessageDisplay?: (state: ChatDisplayRefresh) => void
         hasActiveEditor?: () => boolean
         refreshParserProjection?: (projection?: BoundedLiveChatParserProjection) => void
-        refreshConversationStartParser?: () => void
+        refreshConversationStartParser?: (totalMessages?: number) => void
         updateConversationStartPresentation?: (state: { resolvedImage: string }) => void
         updateStreamingDisplay?: (state: {
             isOptimizedStreamingMessage: boolean
@@ -132,6 +132,7 @@
     let measuredHeightClock = 0
     let keyLookupScans = 0
     let pinReasons = new Map<string, Set<ChatViewportPinReason>>()
+    let blurredEditorPins = new Set<string>()
     let playingMedia = new Map<string, Set<EventTarget>>()
     let sourcePins = new Map<string, ConversationSourcePin>()
     let sourceLoads = new Map<string, AbortController>()
@@ -385,6 +386,7 @@
         measuredHeightClock = 0
         keyLookupScans = 0
         pinReasons = new Map()
+        blurredEditorPins = new Set()
         playingMedia = new Map()
         sourceHandoffRuntimeKeys = new Set()
         hasMountedUsableRow = false
@@ -824,6 +826,7 @@
                       pendingMissingRowsAnchor ??
                       viewportAnchor ??
                       captureDomAnchor())
+        releaseClosedEditorPins()
         const currentChat = currentCharacter.chats?.[currentCharacter.chatPage]
         const budget = getRuntimePerformanceBudgets().chatMountedMessageBudget
         const result = buildChatViewport({
@@ -1008,12 +1011,21 @@
                 ) &&
                 typeof mountInstances.get(key)?.refreshMessageDisplay === 'function'
 
-            const preserveMountedRuntime =
-                (sourceHandoff || parserProjectionState?.preserveMountedRuntime === true) &&
+            // An open editor holds an unsaved draft, so any remount waits until it
+            // closes. A shifted row still remounts so its actions keep the right index.
+            const deferRemountForEditor =
+                requiresRemount &&
+                !refreshMountedDisplay &&
+                previousSignature?.index === index &&
                 mountInstances.has(key) &&
-                (activeStreamingMessage ||
-                    hasFocusedEditor(key) ||
-                    pinReasons.get(key)?.has('playing-media') === true)
+                hasActiveEditor(key)
+            const preserveMountedRuntime =
+                deferRemountForEditor ||
+                ((sourceHandoff || parserProjectionState?.preserveMountedRuntime === true) &&
+                    mountInstances.has(key) &&
+                    (activeStreamingMessage ||
+                        hasFocusedEditor(key) ||
+                        pinReasons.get(key)?.has('playing-media') === true))
             if (requiresRemount && !preserveMountedRuntime) {
                 const source = activeViewportSource
                 const sourceToken = sourceSnapshot?.sourceToken
@@ -1194,6 +1206,19 @@
                         }),
                     )
                     renderSignatures.set(key, renderSignature)
+                    parserProjectionState.needsRemount = false
+                }
+                if (deferRemountForEditor && parserProjectionState?.needsRemount) {
+                    // The replacement projection aborted the retained lease. Keep the
+                    // previous signature so the row still remounts after the editor closes.
+                    untrack(() =>
+                        instance?.refreshMessageDisplay?.({
+                            message: message.data,
+                            totalMessages,
+                            parserProjection,
+                            parserAbortSignal: parserProjectionState.controller.signal,
+                        }),
+                    )
                     parserProjectionState.needsRemount = false
                 }
             }
@@ -1468,11 +1493,12 @@
         if (previousSignature && previousSignature !== signature && mountInstances.has(key)) {
             const previousInputs = JSON.parse(previousSignature)
             const nextInputs = JSON.parse(signature)
-            // Recheck history admission on reload without discarding the greeting.
+            // Recheck history admission on reload or a new message count without discarding the greeting.
+            previousInputs[9] = nextInputs[9]
             previousInputs[11] = nextInputs[11]
             if (JSON.stringify(previousInputs) === signature) {
                 element.dataset.chatConversationStartSignature = signature
-                untrack(() => mountInstances.get(key)?.refreshConversationStartParser?.())
+                untrack(() => mountInstances.get(key)?.refreshConversationStartParser?.(totalMessages))
                 return
             }
         }
@@ -1533,6 +1559,7 @@
         playingMedia.delete(key)
         // A remount can remove the focused control before focusout runs. Mirror
         // its released UI pin to the source even when no later input arrives.
+        blurredEditorPins.delete(key)
         if (pinReasons.delete(key)) queueProjectionReconcile()
         for (const target of media ?? []) {
             if (!(target instanceof HTMLMediaElement)) continue
@@ -1731,9 +1758,13 @@
         return target.closest<HTMLElement>('[data-chat-render-key]')?.dataset.chatRenderKey ?? null
     }
 
+    function hasActiveEditor(key: string): boolean {
+        return untrack(() => mountInstances.get(key)?.hasActiveEditor?.()) === true
+    }
+
     function hasFocusedEditor(key: string): boolean {
+        if (hasActiveEditor(key)) return true
         if (!pinReasons.get(key)?.has('editor')) return false
-        if (untrack(() => mountInstances.get(key)?.hasActiveEditor?.())) return true
         const focused = document.activeElement
         if (
             !(focused instanceof HTMLElement) ||
@@ -1767,7 +1798,9 @@
         // All focused controls keep their row resident. Only an actual editor
         // may postpone a changed message; a bot button must display its result.
         const key = rowKeyFromEvent(event)
-        if (key) addPin(key, 'editor')
+        if (!key) return
+        blurredEditorPins.delete(key)
+        addPin(key, 'editor')
     }
 
     function handleFocusOut(event: FocusEvent): void {
@@ -1777,8 +1810,26 @@
         if (event.relatedTarget instanceof Node && row?.contains(event.relatedTarget)) return
         queueMicrotask(() => {
             if (row && document.activeElement instanceof Node && row.contains(document.activeElement)) return
+            // An open editor keeps its row when focus leaves it, for example when an
+            // input fence makes the page inert, so its draft survives source handoffs.
+            if (hasActiveEditor(key)) {
+                blurredEditorPins.add(key)
+                return
+            }
             removePin(key, 'editor')
         })
+    }
+
+    function releaseClosedEditorPins(): void {
+        for (const key of blurredEditorPins) {
+            if (hasActiveEditor(key)) continue
+            blurredEditorPins.delete(key)
+            const row = mountedElements.get(key)
+            if (row && document.activeElement instanceof Node && row.contains(document.activeElement)) continue
+            const reasons = pinReasons.get(key)
+            if (!reasons?.delete('editor')) continue
+            if (reasons.size === 0) pinReasons.delete(key)
+        }
     }
 
     function handleMediaPlay(event: Event): void {
@@ -2327,6 +2378,7 @@
         measuredHeightIndexByKey.clear()
         measuredHeightRecency.clear()
         pinReasons.clear()
+        blurredEditorPins.clear()
         playingMedia.clear()
         sourceHandoffRuntimeKeys.clear()
         imageResolutionGeneration += 1
@@ -2374,4 +2426,8 @@
         </button>
     </div>
 {/if}
-<div class="flex flex-col-reverse" bind:this={chatBody}></div>
+<div
+    class="flex flex-col-reverse"
+    class:chat-history-isolated={(DBState.db.chatMessageOverflowScope ?? 'latest') !== 'all'}
+    bind:this={chatBody}
+></div>

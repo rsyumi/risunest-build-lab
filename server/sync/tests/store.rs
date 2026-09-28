@@ -275,11 +275,14 @@ fn linked_data_directory_and_cas_shard_cannot_escape_private_storage() {
     let root = parent.path().join("private");
     let store = Store::init(&root).unwrap();
     let a = device(&store);
-    let digest = hash(b"escape");
+    // Only a body large enough to become a file reaches the shard layout at
+    // all, so that is what the escape has to be attempted with.
+    let body = vec![b'e'; 128 * 1024];
+    let digest = hash(&body);
     let shard = root.join("objects").join(&digest[..2]);
     link_directory(&shard, external.path());
     assert_eq!(
-        store.put_object(&a, &digest, b"escape").unwrap_err().code,
+        store.put_object(&a, &digest, &body).unwrap_err().code,
         "unsafe-storage-path"
     );
     assert!(!external.path().join(&digest).exists());

@@ -79,9 +79,12 @@ beforeEach(() => {
   vi.resetAllMocks();
   native.getServerSyncBackupInventory.mockResolvedValue(inventory());
   native.getServerSyncCacheUsage.mockResolvedValue({
-    totalBytes: 2048,
+    totalBytes: 2048 + 3072,
+    cacheBytes: 2048,
     protectedBytes: 1024,
     reclaimableBytes: 1024,
+    ledgerBytes: 3072,
+    databaseBytes: 0,
     blockedReason: null,
   });
   confirm.mockResolvedValue(true);
@@ -175,6 +178,14 @@ describe("shared local server storage management", () => {
       ),
     );
   });
+  it("shows the asset storage records apart from the temporary files", async () => {
+    show("cache");
+    await vi.waitFor(() => expect(target.textContent).toContain(labels.ledger));
+    expect(target.textContent).toContain(`${labels.cache}: 2.0 KiB`);
+    expect(target.textContent).toContain(`${labels.ledger}: 3.0 KiB`);
+    expect(target.textContent).toContain(labels.ledgerHelp);
+    expect(target.textContent).not.toContain("5.0 KiB");
+  });
   it("rechecks listing after refresh and disables deletion, restoration and cache cleanup when native reports protection", async () => {
     show("backups");
     await vi.waitFor(() => expect(button(languageEnglish.remove)).toBeDefined());
@@ -187,8 +198,11 @@ describe("shared local server storage management", () => {
     native.getServerSyncBackupInventory.mockResolvedValue(blocked);
     native.getServerSyncCacheUsage.mockResolvedValue({
       totalBytes: 2048,
+      cacheBytes: 2048,
       protectedBytes: 2048,
       reclaimableBytes: 0,
+      ledgerBytes: 0,
+      databaseBytes: 0,
       blockedReason: "resolve-pending-operation-first",
     });
     button(labels.refresh).click();

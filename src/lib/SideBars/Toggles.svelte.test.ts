@@ -4,6 +4,9 @@ import { writable } from 'svelte/store'
 import { languageEnglish } from '../../lang/en'
 import { DBState } from 'src/ts/stores.svelte'
 import Toggles from './Toggles.svelte'
+import { doingChat } from 'src/ts/process/generationState'
+
+const syntax = vi.hoisted(() => ({ type: 'toggle' }))
 
 vi.mock('src/lang', () => ({ language: languageEnglish }))
 vi.mock('src/ts/stores.svelte', () => {
@@ -15,7 +18,7 @@ vi.mock('src/ts/storage/database.svelte', () => ({
 }))
 vi.mock('src/ts/process/modules', () => ({ getModuleToggles: () => '' }))
 vi.mock('src/ts/util', () => ({
-    parseToggleSyntax: () => [{ type: 'toggle', key: 'example', value: 'Example toggle' }],
+    parseToggleSyntax: () => [{ type: syntax.type, key: 'example', value: 'Example toggle', options: ['A', 'B'] }],
 }))
 vi.mock('./ModelBind.svelte', () => ({ default: () => {} }))
 vi.mock('./PersonaBind.svelte', () => ({ default: () => {} }))
@@ -29,6 +32,8 @@ const chat = () => DBState.db.characters[0].chats[0]
 const customSwitch = () => document.querySelector<HTMLInputElement>('input[role="switch"]')!
 
 beforeEach(async () => {
+    doingChat.set(false)
+    syntax.type = 'toggle'
     DBState.db = {
         characters: [{ chatPage: 0, chats: [{ useLocallySetGlobalVariables: false }] }],
         globalChatVariables: { toggle_example: '0' },
@@ -43,6 +48,7 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
+    doingChat.set(false)
     await unmount(instance)
     document.body.replaceChildren()
 })
@@ -112,4 +118,54 @@ it('tints toggles whose value differs from the chat binding unless binding is di
     DBState.db.disableToggleBinding = true
     await tick()
     expect(row().classList.contains('bg-draculared/15')).toBe(false)
+})
+
+it('holds local toggle edits and unpinning while a response is generating', async () => {
+    chat().useLocallySetGlobalVariables = true
+    chat().GLGlobalVariables = { toggle_example: '1' }
+    doingChat.set(true)
+    await tick()
+    const localSwitch = document.querySelectorAll<HTMLInputElement>('input[role="switch"]')[1]
+    const pin = [...document.querySelectorAll('button')].find(button => button.textContent?.includes('📌'))!
+    expect(customSwitch().disabled).toBe(true)
+    expect(localSwitch.disabled).toBe(true)
+    expect(pin.disabled).toBe(true)
+    customSwitch().click()
+    localSwitch.click()
+    pin.click()
+    expect(chat().useLocallySetGlobalVariables).toBe(true)
+    expect(chat().GLGlobalVariables.toggle_example).toBe('1')
+    doingChat.set(false)
+    await tick()
+    expect(customSwitch().disabled).toBe(false)
+    expect(localSwitch.disabled).toBe(false)
+    pin.click()
+    await tick()
+    expect(chat().GLGlobalVariables.toggle_example).toBeUndefined()
+})
+
+it('allows global toggle changes during generation unless they would delete a local override', async () => {
+    doingChat.set(true)
+    await tick()
+    expect(customSwitch().disabled).toBe(false)
+    customSwitch().click()
+    await tick()
+    expect(DBState.db.globalChatVariables.toggle_example).toBe('1')
+    chat().GLGlobalVariables = { toggle_example: '' }
+    await tick()
+    expect(customSwitch().disabled).toBe(true)
+})
+
+it.each(['select', 'text', 'textarea'])('holds a local %s toggle until generation finishes', async type => {
+    syntax.type = type
+    DBState.db.customPromptTemplateToggle = 'refresh'
+    chat().useLocallySetGlobalVariables = true
+    doingChat.set(true)
+    await tick()
+    if (type === 'text') expect(document.querySelector<HTMLInputElement>('input[type="text"]')!.disabled).toBe(true)
+    else expect(document.querySelector('[inert]')?.textContent).toContain('Example toggle')
+    doingChat.set(false)
+    await tick()
+    expect(document.querySelector('[inert]')).toBeNull()
+    if (type === 'text') expect(document.querySelector<HTMLInputElement>('input[type="text"]')!.disabled).toBe(false)
 })

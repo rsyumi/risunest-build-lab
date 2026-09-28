@@ -879,11 +879,7 @@
         }} />
     {/if}
     {#if editMode}
-        <AutoresizeArea bind:value={editDraft} handleLongPress={() => {
-            editIntent = null
-            editTarget = null
-            editMode = false
-        }} />
+        <AutoresizeArea bind:value={editDraft} handleLongPress={toggleOriginalEdit} />
     {:else if isComment}
         <div class="w-full flex justify-center text-textcolor2 italic mb-12">
 

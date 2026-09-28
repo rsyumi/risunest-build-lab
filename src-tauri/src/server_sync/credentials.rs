@@ -27,6 +27,7 @@ pub(crate) fn remove_owned(root: &Path, id: &str) -> std::result::Result<(), Str
     platform::remove(root, id).map_err(|_| "secret-cleanup-unavailable".into())
 }
 
+#[track_caller]
 fn unavailable() -> SyncError {
     SyncError::new("device-credential-unavailable", 409)
 }

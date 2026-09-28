@@ -18,12 +18,17 @@ import { doingChat } from "./process/index.svelte";
 import { importCharacter } from "./characterCards";
 import { PngChunk } from "./pngChunk";
 import {
+    acquireCompleteConversation,
     activateCharacter,
+    captureSelectedConversationTarget,
     commitCharacterAddition,
     deactivateActiveWorkingSet,
     deletePersistentCharacterWithGroupReferences,
+    editWindowedChatList,
     fencePersistentNavigation,
+    flushPendingData,
     getPersistentNavigationGeneration,
+    getSelectedConversationMode,
     mutatePersistentCharacterDetail,
     readPersistentCompleteCharacter,
     readPersistentConversation,
@@ -42,6 +47,8 @@ import {
     selectCharacterImageFile,
 } from './storage/characterImageFileRoute'
 import { importNativeJpegAsset } from './storage/nativeJpegAssetImport'
+import { SelectedConversationPromotionStaleError } from './storage/activeWorkingSet.svelte'
+import { PersistentMutationFencedError } from './storage/saveCoordinator'
 import { beginNavigationActivity } from './ui/navigationActivity'
 import { yieldToUi } from './ui/yieldToUi'
 
@@ -150,10 +157,10 @@ export async function selectCharImg(charIndex:number) {
         chooseLegacyFile: async () => selectSingleFile(['png', 'webp', 'gif', 'jpg', 'jpeg']),
         nativeImport: importNativeJpegAsset,
         legacyImport: async (img) => {
-            const db = DBState.db
             const type = getImageType(img)
+            const pngExif: Record<string, string> = {}
             try {
-                if(type === 'PNG' && db.characters[charIndex].type === 'character'){
+                if(type === 'PNG'){
                     const gen = PngChunk.readGenerator(img)
                     const allowedChunk = [
                         'parameters', 'Comment', 'Title', 'Description', 'Author', 'Software', 'Source', 'Disclaimer', 'Warning', 'Copyright',
@@ -169,20 +176,22 @@ export async function selectCharImg(charIndex:number) {
                             continue
                         }
                         if(allowedChunk.includes(chunk.key)){
-                            console.log(chunk.key, chunk.value)
-                            db.characters[charIndex].extentions ??= {}
-                            db.characters[charIndex].extentions.pngExif ??= {}
-                            db.characters[charIndex].extentions.pngExif[chunk.key] = chunk.value
+                            pngExif[chunk.key] = chunk.value
                         }
                     }
-                    console.log(db.characters[charIndex].extentions)
                 }
             } catch (error) {
                 console.error(error)
             }
             const imgp = await saveImage(img)
-            dumpCharImage(charIndex)
-            DBState.db.characters[charIndex].image = imgp
+            await mutatePersistentCharacterDetail(characterId, 'select-character-image', ({ character }) => {
+                archiveCurrentCharacterImage(character)
+                character.image = imgp
+                if (character.type === 'character' && Object.keys(pngExif).length > 0) {
+                    character.extentions ??= {}
+                    character.extentions.pngExif = { ...character.extentions.pngExif, ...pngExif }
+                }
+            })
             return imgp
         },
     })
@@ -210,24 +219,23 @@ export function changeCharImage(charIndex:number,changeIndex:number) {
 export const addingEmotion = writable(false)
 
 export async function addCharEmotion(charId:number) {
+    const characterId = DBState.db.characters[charId]?.chaId
+    if (!characterId || get(addingEmotion)) return
     addingEmotion.set(true)
-    const selected = await selectMultipleFile(['png', 'webp', 'gif'])
-    if(!selected){
-        addingEmotion.set(false)
-        return
-    }
-    let db = DBState.db
-    for(const f of selected){
-        const img = f.data
-        const imgp = await saveImage(img)
-        const name = f.name.replace('.png','').replace('.webp','')
-        let dbChar = db.characters[charId]
-        if(dbChar.type !== 'group'){
-            dbChar.emotionImages.push([name,imgp])
-            DBState.db.characters[charId] = dbChar
+    try {
+        const selected = await selectMultipleFile(['png', 'webp', 'gif'])
+        if (!selected?.length) return
+        const images: [string, string][] = []
+        for (const f of selected) {
+            const imgp = await saveImage(f.data)
+            images.push([f.name.replace('.png', '').replace('.webp', ''), imgp])
         }
+        await mutatePersistentCharacterDetail(characterId, 'add-character-emotions', ({ character }) => {
+            if (character.type === 'character') character.emotionImages.push(...images)
+        })
+    } finally {
+        addingEmotion.set(false)
     }
-    addingEmotion.set(false)
 }
 
 export function rmCharEmotion(charId:number, emotionId:number) {
@@ -426,6 +434,7 @@ export async function importChat(){
     }
     try {
         const selectedID = get(selectedCharID)
+        const characterId = DBState.db.characters[selectedID].chaId
 
         if(dat.name.endsWith('jsonl')){
             const lines = Buffer.from(dat.data).toString('utf-8').split('\n')
@@ -459,13 +468,15 @@ export async function importChat(){
                 return
             }
 
-            if(DBState.db.characters[selectedID].chatFolders
-                .filter(folder => folder.id === newChat.folderId).length === 0) {
-                newChat.folderId = null
-            }
-
-            DBState.db.characters[selectedID].chats.unshift(newChat)
-            if(await changeChatTo(newChat.id)){
+            const imported = await editSelectedChatList(characterId, 'import-chat', (character) => {
+                if(character.chatFolders
+                    .filter(folder => folder.id === newChat.folderId).length === 0) {
+                    newChat.folderId = null
+                }
+                character.chats.unshift(newChat)
+                return newChat.id
+            })
+            if(imported){
                 alertNormal(language.successImport)
             }
         }
@@ -474,48 +485,56 @@ export async function importChat(){
             if((json.type === 'risuAllChats' || json.type === 'risuChat') && json.ver === 2){
                 const folders = json.folders || []
                 const chats = Array.isArray(json.data) ? json.data : [json.data]
-                const selectedID = get(selectedCharID)
-                let db = getDatabase()
-                let folderIdMap = {}
-                folders.forEach(folder => {
-                    if(db.characters[selectedID].chatFolders?.some(f => f.id === folder.id)){
-                        const newId = uuidv4()
-                        folderIdMap[folder.id] = newId
-                        folder.id = newId
-                    } else {
-                        folderIdMap[folder.id] = folder.id
+                const imported = await editSelectedChatList(characterId, 'import-chat', (character) => {
+                    let folderIdMap = {}
+                    folders.forEach(folder => {
+                        if(character.chatFolders?.some(f => f.id === folder.id)){
+                            const newId = uuidv4()
+                            folderIdMap[folder.id] = newId
+                            folder.id = newId
+                        } else {
+                            folderIdMap[folder.id] = folder.id
+                        }
+                    })
+                    if(character.chatFolders === undefined){
+                        character.chatFolders = []
                     }
+                    character.chatFolders.push(...folders)
+                    chats.forEach(chat => {
+                        if(chat.folderId && folderIdMap[chat.folderId]){
+                            chat.folderId = folderIdMap[chat.folderId]
+                        }
+                        chat.id = v4()
+                    })
+                    character.chats.unshift(...chats)
+                    return null
                 })
-                if(db.characters[selectedID].chatFolders === undefined){
-                    db.characters[selectedID].chatFolders = []
+                if(imported){
+                    alertNormal(language.successImport)
                 }
-                db.characters[selectedID].chatFolders.push(...folders)
-                chats.forEach(chat => {
-                    if(chat.folderId && folderIdMap[chat.folderId]){
-                        chat.folderId = folderIdMap[chat.folderId]
-                    }
-                    chat.id = v4()
-                })
-                DBState.db.characters[selectedID].chats.unshift(...chats)
-                alertNormal(language.successImport)
                 return
             }
             if(json.type === 'risuAllChats' && json.ver === 1){
                 const chats = json.data
                 if(Array.isArray(chats) && chats.length > 0){
-                    const usedIds = new Set(DBState.db.characters[selectedID].chats.map((chat) => chat.id))
-                    DBState.db.characters[selectedID].chats.unshift(...(chats.map((v) => {
-                        if(!v.id || usedIds.has(v.id)){
-                            v.id = uuidv4()
-                        }
-                        usedIds.add(v.id)
-                        if(!v.localLore){
-                            v.localLore = []
-                        }
-                        v.fmIndex ??= -1
-                        return v
-                    })))
-                    alertNormal(language.successImport)
+                    const imported = await editSelectedChatList(characterId, 'import-chat', (character) => {
+                        const usedIds = new Set(character.chats.map((chat) => chat.id))
+                        character.chats.unshift(...(chats.map((v) => {
+                            if(!v.id || usedIds.has(v.id)){
+                                v.id = uuidv4()
+                            }
+                            usedIds.add(v.id)
+                            if(!v.localLore){
+                                v.localLore = []
+                            }
+                            v.fmIndex ??= -1
+                            return v
+                        })))
+                        return null
+                    })
+                    if(imported){
+                        alertNormal(language.successImport)
+                    }
                     return
                 } else {
                     alertError(language.errors.noData)
@@ -527,8 +546,13 @@ export async function importChat(){
                 if(!(checkNullish(das.message) || checkNullish(das.note) || checkNullish(das.name) || checkNullish(das.localLore))){
                     das.fmIndex ??= -1
                     das.id = v4()
-                    DBState.db.characters[selectedID].chats.unshift(das)
-                    alertNormal(language.successImport)
+                    const imported = await editSelectedChatList(characterId, 'import-chat', (character) => {
+                        character.chats.unshift(das)
+                        return null
+                    })
+                    if(imported){
+                        alertNormal(language.successImport)
+                    }
                     return
                 }
                 else{
@@ -547,8 +571,13 @@ export async function importChat(){
             const json = JSON.parse(chat)
             if(json.message && json.note && json.name && json.localLore){
                 json.id = v4()
-                DBState.db.characters[selectedID].chats.unshift(json)
-                alertNormal(language.successImport)
+                const imported = await editSelectedChatList(characterId, 'import-chat', (character) => {
+                    character.chats.unshift(json)
+                    return null
+                })
+                if(imported){
+                    alertNormal(language.successImport)
+                }
             }
             else{
                 alertError(language.errors.noData)
@@ -1037,12 +1066,21 @@ export async function changeChar(index: number, arg:{
     reseter?:()=>any,
 } = {}): Promise<boolean> {
     const reseter = arg.reseter ?? (() => {})
+    const target = DBState.db.characters?.[index]
+    const chaId = target?.chaId
+    // Reactivating the open character would reload it and reset the chat view.
+    if(
+        chaId &&
+        get(selectedCharID) === index &&
+        captureSelectedConversationTarget()?.characterId === chaId
+    ){
+        reseter()
+        return true
+    }
     if(get(doingChat)){
       alertToast(language.navigationBlockedWhileGenerating)
       return false
     }
-    const target = DBState.db.characters?.[index]
-    const chaId = target?.chaId
     if(!chaId) return false
     if(isArchivedCharacter(target)){
         await restoreArchivedCharacterWithConfirmation(chaId)
@@ -1081,29 +1119,134 @@ export async function changeChar(index: number, arg:{
     }
 }
 
-export async function addNewChat(character: character | groupChat): Promise<boolean> {
-    const chats = character.chats
-    const newChat: Chat = {
-        ...defaultChatToggleBinding(DBState.db),
-        message: [],
-        note: '',
-        name: `New Chat ${chats.length + 1}`,
-        localLore: [],
-        fmIndex: -1,
-        id: uuidv4(),
+/**
+ * Edits the selected character's chat list. A windowed selection records the
+ * edit as evidence against the saved list; otherwise the selected conversation
+ * is held complete, so neither path persists an unexplained list change. The
+ * previously selected chat stays selected unless `edit` returns the id of the
+ * chat to switch to. `edit` returns false to abandon the change. It may run
+ * twice, first on a draft and again on the complete path when the draft edit
+ * cannot be recorded.
+ */
+export async function editSelectedChatList(
+    characterId: string,
+    reason: string,
+    edit: (character: character | groupChat) => string | null | false,
+): Promise<boolean> {
+    const blockedByGeneration = () => {
+        if (!get(doingChat)) return false
+        alertToast(language.navigationBlockedWhileGenerating)
+        return true
     }
-    if(character.type === 'group'){
-        for(const memberId of character.characters){
-            newChat.message.push({
-                saying: memberId,
-                role: 'char',
-                data: findCharacterbyId(memberId).firstMessage,
-            })
+    const resolveCharacter = () => {
+        const current = DBState.db.characters[get(selectedCharID)]
+        return current?.chaId === characterId ? current : null
+    }
+    if (!resolveCharacter() || blockedByGeneration()) return false
+    const windowed = await editWindowedSelectedChatList(characterId, reason, resolveCharacter, edit)
+    if (windowed !== 'unsupported') return windowed
+    if (blockedByGeneration()) return false
+    const target = captureSelectedConversationTarget()
+    if (target && target.characterId !== characterId) return false
+    let lease: Awaited<ReturnType<typeof acquireCompleteConversation>> | null = null
+    if (target) {
+        try {
+            lease = await acquireCompleteConversation(reason, target)
+        } catch (error) {
+            if (error instanceof SelectedConversationPromotionStaleError) return false
+            throw error
         }
     }
-    chats.unshift(newChat)
-    character.chats = chats
-    return await changeChatTo(newChat.id)
+    try {
+        if (blockedByGeneration()) return false
+        const character = resolveCharacter()
+        if (!character) return false
+        const selectedId = character.chats[character.chatPage]?.id
+        if (lease && selectedId !== target?.conversationId) return false
+        const nextId = edit(character)
+        if (nextId === false) return false
+        const selectedIndex = character.chats.findIndex((chat) => chat.id === selectedId)
+        if (selectedIndex !== -1 && character.chatPage !== selectedIndex) {
+            character.chatPage = selectedIndex
+        }
+        if (lease) {
+            try {
+                await flushPendingData(reason)
+            } catch (error) {
+                // The edit stays in the working set and is saved once storage accepts input.
+                if (error instanceof PersistentMutationFencedError) return false
+                throw error
+            }
+        }
+        return nextId === null ? true : await changeChatTo(nextId)
+    } finally {
+        lease?.release()
+    }
+}
+
+async function editWindowedSelectedChatList(
+    characterId: string,
+    reason: string,
+    resolveCharacter: () => character | groupChat | null,
+    edit: (character: character | groupChat) => string | null | false,
+): Promise<boolean | 'unsupported'> {
+    const initial = captureSelectedConversationTarget()
+    if (
+        !initial ||
+        initial.characterId !== characterId ||
+        getSelectedConversationMode() !== 'windowed'
+    ) return 'unsupported'
+    const flush = async () => {
+        try {
+            await flushPendingData(reason)
+            return true
+        } catch (error) {
+            // The edit stays in the working set and is saved once storage accepts input.
+            if (error instanceof PersistentMutationFencedError) return false
+            throw error
+        }
+    }
+    // The edit is described against the saved list, so earlier changes go first.
+    if (!(await flush())) return false
+    const target = captureSelectedConversationTarget()
+    if (
+        !target ||
+        target.characterId !== characterId ||
+        target.conversationId !== initial.conversationId ||
+        !resolveCharacter()
+    ) return false
+    const result = editWindowedChatList(target, edit)
+    if (result.kind === 'unsupported') return 'unsupported'
+    if (result.kind === 'refused') return false
+    if (!(await flush())) return false
+    return result.nextId === null ? true : await changeChatTo(result.nextId)
+}
+
+export async function addNewChat(character: character | groupChat): Promise<boolean> {
+    return editSelectedChatList(character.chaId, 'add-chat', (current) => {
+        const chats = current.chats
+        const newChat: Chat = {
+            ...defaultChatToggleBinding(DBState.db),
+            message: [],
+            note: '',
+            name: `New Chat ${chats.length + 1}`,
+            localLore: [],
+            fmIndex: -1,
+            id: uuidv4(),
+        }
+        if(current.type === 'group'){
+            for(const memberId of current.characters){
+                newChat.message.push({
+                    saying: memberId,
+                    role: 'char',
+                    data: findCharacterbyId(memberId).firstMessage,
+                })
+            }
+        }
+        chats.unshift(newChat)
+        current.chats = chats
+        return newChat.id
+    })
 }
 
 export async function duplicateChat(characterId: string, chatId: string): Promise<boolean> {
@@ -1111,37 +1254,32 @@ export async function duplicateChat(characterId: string, chatId: string): Promis
     if (selectedBeforeRead !== characterId) return false
     const source = await readPersistentConversation(characterId, chatId, 'duplicate-chat')
     if (!source) return false
-    const database = getDatabase()
-    const selectedAfterRead = database.characters[get(selectedCharID)]
-    if (selectedAfterRead?.chaId !== characterId) return false
-    const character = database.characters.find((candidate) => candidate.chaId === characterId)
-    if (!character?.chats.some((conversation) => conversation.id === chatId)) return false
-    const duplicate = safeStructuredClone(source)
-    duplicate.name = createChatCopyName(duplicate.name, 'Copy')
-    duplicate.id = v4()
-    character.chats.unshift(duplicate)
-    character.chats = character.chats
-    return await changeChatTo(duplicate.id)
+    return editSelectedChatList(characterId, 'duplicate-chat', (character) => {
+        if (!character.chats.some((conversation) => conversation.id === chatId)) return false
+        const duplicate = safeStructuredClone(source)
+        duplicate.name = createChatCopyName(duplicate.name, 'Copy')
+        duplicate.id = v4()
+        character.chats.unshift(duplicate)
+        character.chats = character.chats
+        return duplicate.id
+    })
 }
 
 export async function removeChat(character: character | groupChat, chatId: string): Promise<boolean> {
     const chats = character.chats
-    const removeIndex = chats.findIndex((chat) => chat.id === chatId)
-    if(removeIndex === -1) return false
+    if(!chats.some((chat) => chat.id === chatId)) return false
     const selectedChatId = chats[character.chatPage]?.id
-    const survivingId = selectedChatId === chatId
-        ? chats.find((candidate) => candidate.id !== chatId)?.id
-        : selectedChatId
-    chats.splice(removeIndex, 1)
-    character.chats = chats
-    const survivingIndex = survivingId
-        ? chats.findIndex((chat) => chat.id === survivingId)
-        : -1
-    character.chatPage = survivingIndex !== -1
-        ? survivingIndex
-        : Math.max(0, Math.min(character.chatPage, chats.length - 1))
-    if(survivingId && !(await changeChatTo(survivingId))){
-        await changeChatTo(survivingId)
+    if (selectedChatId === chatId) {
+        // Leave the chat first so the removal never targets the selected conversation.
+        const survivingId = chats.find((candidate) => candidate.id !== chatId)?.id
+        if (!survivingId) return false
+        if (!(await changeChatTo(survivingId)) && !(await changeChatTo(survivingId))) return false
     }
-    return true
+    return editSelectedChatList(character.chaId, 'remove-chat', (current) => {
+        const removeIndex = current.chats.findIndex((chat) => chat.id === chatId)
+        if (removeIndex === -1 || removeIndex === current.chatPage) return false
+        current.chats.splice(removeIndex, 1)
+        current.chats = current.chats
+        return null
+    })
 }

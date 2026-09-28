@@ -90,6 +90,7 @@ export function storageDashboardRollup(
     conflictBackupBytes: number
     serverBackupBytes: number
     cacheBytes: number
+    ledgerBytes: number
 } {
     const snapshotBytes = stats.snapshotBytes
     const conflictBackupBytes = conflictBackups.reduce(
@@ -97,7 +98,8 @@ export function storageDashboardRollup(
         0,
     )
     const serverBackupBytes = serverBackups?.diskBytes ?? 0
-    const cacheBytes = cache?.totalBytes ?? 0
+    const cacheBytes = cache?.cacheBytes ?? 0
+    const ledgerBytes = cache?.ledgerBytes ?? 0
     const inlayBytes = stats.assetAliases
         .filter(isInlay)
         .reduce((total, alias) => total + alias.bytes, 0)
@@ -111,7 +113,8 @@ export function storageDashboardRollup(
                     snapshotBytes +
                     conflictBackupBytes +
                     serverBackupBytes +
-                    cacheBytes,
+                    cacheBytes +
+                    ledgerBytes,
             },
             { id: 'media', bytes: stats.assetObjects.bytes },
             { id: 'inlays', bytes: inlayBytes },
@@ -129,6 +132,7 @@ export function storageDashboardRollup(
         conflictBackupBytes,
         serverBackupBytes,
         cacheBytes,
+        ledgerBytes,
     }
 }
 

@@ -28,6 +28,7 @@ export const chatMountProbe = {
         signal?: AbortSignal
     }[],
     throwNextMount: false,
+    activeEditors: new Set<number>(),
 }
 
 export function resetChatMountProbe() {
@@ -37,4 +38,5 @@ export function resetChatMountProbe() {
     chatMountProbe.streamingUpdates = []
     chatMountProbe.displayUpdates = []
     chatMountProbe.throwNextMount = false
+    chatMountProbe.activeEditors = new Set()
 }

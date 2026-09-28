@@ -1,5 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Chat, character, customscript } from '../storage/database.svelte'
+import { selectSingleFile } from '../util'
+import { importRegex } from './scripts'
+
+it('keeps the existing regex list when file selection is cancelled', async () => {
+    const scripts: customscript[] = [{ comment: 'Existing', in: '', out: '', type: 'editinput' }]
+    vi.mocked(selectSingleFile).mockResolvedValueOnce(null)
+    await expect(importRegex(scripts)).resolves.toBe(scripts)
+    vi.mocked(selectSingleFile).mockResolvedValueOnce(null)
+    await expect(importRegex()).resolves.toEqual([])
+})
 import { setRuntimePerformanceProfile } from '../runtimePerformanceProfile'
 import {
     ActiveConversationSession,

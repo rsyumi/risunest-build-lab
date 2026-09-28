@@ -421,7 +421,9 @@ pub(crate) fn pds_open(
 ) -> Result<PersistentStoreOpenResult, StoreError> {
     let operation_guard = state.admit_renderer_operation()?;
     let app_data_dir = crate::app_paths::data_root(&app).map_err(|message| StoreError::Store { message })?;
-    open_renderer_persistent_store_admitted(&state, &operation_guard, &app_data_dir)
+    let opened = open_renderer_persistent_store_admitted(&state, &operation_guard, &app_data_dir)?;
+    crate::external_storage::receive_artifacts::reclaim_settled_later(&app);
+    Ok(opened)
 }
 
 #[cfg(test)]

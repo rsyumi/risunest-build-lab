@@ -4,7 +4,7 @@
     import { getModuleToggles } from 'src/ts/process/modules'
     import { parseToggleSyntax } from 'src/ts/util'
     import { isConversationSummaryStub } from 'src/ts/storage/conversationResidency'
-    import { applyToggleValues } from 'src/ts/toggleBindings'
+    import { createToggleBindingRestorer } from 'src/ts/toggleBindings'
     import { activeRerollConversations, recoverInterruptedReroll } from 'src/ts/durableReroll'
     import {
         acquireCompleteConversation,
@@ -38,26 +38,25 @@
             }
         })()
     })
-    let previous = ''
-    let previousDatabase: typeof DBState.db | undefined
+    const toggleBinding = createToggleBindingRestorer()
     $effect(() => {
         const db = DBState.db
         const character = db?.characters?.[$selectedCharID]
         const chat = character?.chats?.[character.chatPage]
         if (!chat || isConversationSummaryStub(chat)) {
-            previous = ''
+            toggleBinding.reset()
             return
         }
         const definitions = `${db.customPromptTemplateToggle ?? ''}\n${getModuleToggles()}\n${character.type === 'character' ? (character.customModuleToggle ?? '') : ''}`
-        const key = JSON.stringify([character.chaId, chat.id, db.disableToggleBinding, definitions])
-        if (previous === key && previousDatabase === db) return
-        previous = key
-        previousDatabase = db
+        const disabled = db.disableToggleBinding
         untrack(() => {
-            if (!db.disableToggleBinding && chat.savedToggleValues !== undefined) {
-                const keys = parseToggleSyntax(definitions).map((toggle) => `toggle_${toggle.key}`)
-                applyToggleValues(db.globalChatVariables, chat.savedToggleValues, keys)
-            }
+            const keys = parseToggleSyntax(definitions).map((toggle) => `toggle_${toggle.key}`)
+            toggleBinding.restore(
+                [db, character.chaId, chat.id, disabled],
+                db.globalChatVariables,
+                disabled ? undefined : chat.savedToggleValues,
+                keys,
+            )
         })
     })
 </script>

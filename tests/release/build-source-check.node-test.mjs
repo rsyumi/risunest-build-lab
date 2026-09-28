@@ -54,8 +54,9 @@ function repository(product, version) {
       "server/manager/gui/pnpm-lock.yaml",
       "server/manager/gui/src-tauri/Cargo.lock",
     ]) write(join(root, file));
+    write(join(root, "crates/sync-wire/src/lib.rs"), 'pub const PROTOCOL_ID: &str = "risunest-sync/v1";');
     write(join(root, "server/sync/src/lib.rs"), [
-      'pub const PROTOCOL_ID: &str = "risunest-sync/v1";',
+      "pub use risunest_sync_wire::PROTOCOL_ID;",
       'pub const STORE_FORMAT_ID: &str = "risunest-sync-store/v8";',
     ].join("\n"));
     for (const file of [
@@ -156,6 +157,19 @@ test("source check requires the directly tested sync-wire lockfile", () => {
     publishedAt: "2026-09-15T00:00:00Z",
     registryUrl: "https://sync.example.invalid/",
   }), /Lockfile is missing/);
+});
+
+test("source check compares Sync compatibility with the sync-wire protocol constant", () => {
+  const sync = repository("sync", "1.2.3");
+  write(join(sync, "crates/sync-wire/src/lib.rs"), 'pub const PROTOCOL_ID: &str = "risunest-sync/v2";');
+  assert.throws(() => sourceCheck({
+    repository: sync,
+    product: "sync",
+    tag: "sync-v1.2.3",
+    sourceCommit: "e".repeat(40),
+    publishedAt: "2026-09-15T00:00:00Z",
+    registryUrl: "https://sync.example.invalid/",
+  }), /does not match daemon constants/);
 });
 
 test("both products require the shared native update test lockfile", () => {

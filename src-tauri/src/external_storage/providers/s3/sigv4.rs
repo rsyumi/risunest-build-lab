@@ -1,7 +1,7 @@
 //! AWS Signature Version 4, header based. The payload hash is supplied by the
 //! caller so a multi-gigabyte body never has to be buffered to be signed.
 use crate::external_storage::contract::{ErrorKind, ProviderError, Result};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 

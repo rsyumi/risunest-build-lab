@@ -1,3 +1,4 @@
+import { measuredTaskPercent, runWithMobileBackgroundTask } from '../mobileBackgroundTask'
 import { Mutex } from '../mutex'
 import { get, writable } from 'svelte/store'
 import { doingChat } from '../process/generationState'
@@ -130,7 +131,11 @@ function outcomeError(kind: NativeFileOperationKind, error: unknown): NativeFile
             recoveryRequired: true,
         }
     }
-    if (error instanceof NativeFileJobError) {
+    if (
+        error !== null && typeof error === 'object' &&
+        'code' in error && typeof error.code === 'string' &&
+        'message' in error && typeof error.message === 'string'
+    ) {
         return { code: error.code, message: error.message, recoveryRequired: false }
     }
     return {
@@ -267,7 +272,16 @@ export function runSharedNativeFileOperation<T>(
         setPartialWritesPossible: (value) => updateActiveState({ partialWritesPossible: value }),
     }
     try {
-        operation(context).then(
+        const taskKind = options.format === 'library-backup' || options.format === 'risu-save'
+            ? (kind === 'export' ? 'backup' : 'restore') : kind
+        runWithMobileBackgroundTask(taskKind, task => operation({
+            ...context,
+            signal: task.signal ?? context.signal,
+            onStatus: status => {
+                recordStatus(status)
+                task.progress(measuredTaskPercent(status.progress.completedBytes, status.progress.totalBytes))
+            },
+        }), controller.signal).then(
             value => { settle({ value }); resolveOperation(value) },
             error => { settle({ error }); rejectOperation(error) },
         )

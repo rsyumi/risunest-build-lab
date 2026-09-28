@@ -209,7 +209,9 @@ describe('ChatBody deferred inlay lifecycle', () => {
         details.open = true
         details.dispatchEvent(new Event('toggle'))
         await tick()
-        expect(details.textContent).toContain(body)
+        // The large body is mounted over animation frames.
+        expect(details.textContent).toContain(body.slice(0, 1024))
+        await vi.waitFor(() => expect(details.textContent).toContain(body))
         ;(mounted as { setMessage(value: string): void }).setMessage(
             `<Thoughts>${body}LATEST</Thoughts>Answer`,
         )
@@ -1215,5 +1217,173 @@ describe('ChatBody deferred inlay lifecycle', () => {
         expect(inlayMocks.getInlayAssetBlob).toHaveBeenCalledWith('first')
         expect(inlayMocks.getInlayAssetBlob).not.toHaveBeenCalledWith('other')
         expect(target.querySelectorAll('[src="blob:first"]')).toHaveLength(1)
+    })
+})
+
+describe('ChatBody settings navigation round trip', () => {
+    // Stand-ins for the native alias table and the loopback media endpoint. Only
+    // synthetic hashes are used; no image bytes are read.
+    const endpoint = `http://127.0.0.1:4100/${'a'.repeat(32)}/`
+    const aliases = new Map<string, { hash: string, revision: number }>()
+    const parseGates: Array<Promise<void>> = []
+    const bodies: Array<ReturnType<typeof mount>> = []
+    const nativeUrl = (key: string) => {
+        const alias = aliases.get(key)
+        return alias ? `${endpoint}${alias.hash}?mime=image%2Fpng&size=1` : null
+    }
+
+    class ViewportObserver {
+        static live = new Set<ViewportObserver>()
+        readonly targets = new Set<Element>()
+        constructor(private readonly callback: IntersectionObserverCallback) {
+            ViewportObserver.live.add(this)
+        }
+        observe = (element: Element) => { this.targets.add(element) }
+        unobserve = (element: Element) => { this.targets.delete(element) }
+        disconnect = () => {
+            ViewportObserver.live.delete(this)
+            this.targets.clear()
+        }
+        takeRecords = () => []
+        readonly root = null
+        readonly rootMargin = '0px'
+        readonly thresholds = [0]
+        show() {
+            this.callback([...this.targets].map((target) => ({
+                target,
+                isIntersecting: true,
+                intersectionRatio: 1,
+            }) as IntersectionObserverEntry), this as unknown as IntersectionObserver)
+        }
+    }
+
+    const showAll = () => { for (const observer of [...ViewportObserver.live]) observer.show() }
+    const mountBody = (message: string) => {
+        const host = document.createElement('div')
+        document.body.append(host)
+        const body = mount(ChatBodyInlayHarness, { target: host, props: { initialMessage: message } })
+        bodies.push(body)
+        return { host, body }
+    }
+    const closeBody = async (body: ReturnType<typeof mount>) => {
+        bodies.splice(bodies.indexOf(body), 1)
+        await unmount(body)
+    }
+    const displayedSources = (host: ParentNode) =>
+        [...host.querySelectorAll('img')].map((image) => image.getAttribute('src'))
+
+    beforeEach(() => {
+        vi.clearAllMocks()
+        vi.stubGlobal('IntersectionObserver', ViewportObserver)
+        ViewportObserver.live.clear()
+        aliases.clear()
+        parseGates.length = 0
+        chatState.db = {}
+        schedulingMocks.state.controlled = false
+        parserMocks.trimMarkdown.mockImplementation((value: string) => value)
+    })
+
+    afterEach(async () => {
+        for (const body of bodies.splice(0)) await unmount(body)
+        document.body.replaceChildren()
+        vi.unstubAllGlobals()
+    })
+
+    test('restores native display URLs after leaving settings and follows a same-key replacement', async () => {
+        const revokeObjectURL = vi.fn()
+        const createObjectURL = vi.fn(() => 'blob:unexpected')
+        vi.stubGlobal('URL', { ...URL, createObjectURL, revokeObjectURL })
+        parserMocks.ParseMarkdown.mockImplementation(async (message: string, ...args: unknown[]) => {
+            // The URL is resolved before any delay so a late result carries its old identity.
+            const url = nativeUrl(message)
+            const gate = parseGates.shift()
+            if (gate) await gate
+            if (!url) return ''
+            const context = args[4] as { deferredInlays?: DeferredInlayMarkerRegistry } | undefined
+            const inlay = renderDeferredInlaySourceMarkup(message, { ...imageSource, url }, context?.deferredInlays)
+            return `${inlay}<img data-synthetic-asset src="${url}">`
+        })
+        aliases.set('synthetic', { hash: '11'.repeat(32), revision: 1 })
+        const firstUrl = nativeUrl('synthetic')!
+
+        // Two display owners of the same key, such as a chat body and a background layer.
+        const chat = mountBody('synthetic')
+        const other = mountBody('synthetic')
+        await vi.waitFor(() => expect(document.querySelectorAll('img[data-risu-inlay-token]')).toHaveLength(2))
+        expect(document.querySelectorAll('img[data-synthetic-asset][src]')).toHaveLength(0)
+        showAll()
+        await vi.waitFor(() => expect(displayedSources(document)).toEqual([firstUrl, firstUrl, firstUrl, firstUrl]))
+
+        // Entering settings unmounts the chat branch; one owner leaving must not strip the other.
+        await closeBody(chat.body)
+        expect(displayedSources(other.host)).toEqual([firstUrl, firstUrl])
+        await closeBody(other.body)
+        expect(ViewportObserver.live.size).toBe(0)
+
+        // A view that started resolving just before navigation settles while settings are open.
+        const stale = deferred<void>()
+        parseGates.push(stale.promise)
+        const abandoned = mountBody('synthetic')
+        await vi.waitFor(() => expect(parserMocks.ParseMarkdown).toHaveBeenCalledTimes(3))
+        await closeBody(abandoned.body)
+
+        // The same logical key now names a new object revision.
+        aliases.set('synthetic', { hash: '22'.repeat(32), revision: 2 })
+        const replacedUrl = nativeUrl('synthetic')!
+        const returned = mountBody('synthetic')
+        await vi.waitFor(() => expect(returned.host.querySelectorAll('img[data-risu-inlay-token]')).toHaveLength(1))
+        showAll()
+        await vi.waitFor(() => expect(displayedSources(returned.host)).toEqual([replacedUrl, replacedUrl]))
+
+        stale.resolve()
+        await Promise.resolve(); await Promise.resolve(); await tick()
+        expect(displayedSources(document)).toEqual([replacedUrl, replacedUrl])
+        expect(aliases.get('synthetic')?.revision).toBe(2)
+        expect(createObjectURL).not.toHaveBeenCalled()
+        expect(revokeObjectURL).not.toHaveBeenCalled()
+        expect(inlayMocks.getInlayAssetBlob).not.toHaveBeenCalled()
+    })
+
+    test('keeps each object URL lease per owner and retries a failed read after leaving settings', async () => {
+        let leases = 0
+        const createObjectURL = vi.fn(() => `blob:lease-${++leases}`)
+        const revokeObjectURL = vi.fn()
+        vi.stubGlobal('URL', { ...URL, createObjectURL, revokeObjectURL })
+        parserMocks.ParseMarkdown.mockImplementation(async (message: string, ...args: unknown[]) => {
+            const context = args[4] as { deferredInlays?: DeferredInlayMarkerRegistry } | undefined
+            return renderDeferredInlaySourceMarkup(message, imageSource, context?.deferredInlays)
+        })
+        inlayMocks.getInlayAssetBlob
+            .mockRejectedValueOnce(new Error('transient read failure'))
+            .mockImplementation(async (id: string) => ({
+                data: new Blob([id], { type: 'image/png' }),
+                type: 'image',
+                name: `${id}.png`,
+            }))
+
+        const failed = mountBody('synthetic')
+        await vi.waitFor(() => expect(failed.host.querySelector('img[data-risu-inlay-token]')).not.toBeNull())
+        showAll()
+        await vi.waitFor(() => expect(inlayMocks.getInlayAssetBlob).toHaveBeenCalledTimes(1))
+        await Promise.resolve(); await tick()
+        expect(displayedSources(failed.host)).toEqual([null])
+
+        // Settings round trip: the failure was not remembered as a missing asset.
+        await closeBody(failed.body)
+        const chat = mountBody('synthetic')
+        const other = mountBody('synthetic')
+        await vi.waitFor(() => expect(document.querySelectorAll('img[data-risu-inlay-token]')).toHaveLength(2))
+        showAll()
+        await vi.waitFor(() => expect(displayedSources(document).every((source) => source?.startsWith('blob:lease-'))).toBe(true))
+        expect(inlayMocks.getInlayAssetBlob).toHaveBeenCalledTimes(3)
+        const chatLease = displayedSources(chat.host)[0]!
+        const otherLease = displayedSources(other.host)[0]!
+        expect(chatLease).not.toBe(otherLease)
+
+        await closeBody(chat.body)
+        expect(revokeObjectURL.mock.calls).toEqual([[chatLease]])
+        expect(displayedSources(other.host)).toEqual([otherLease])
+        await closeBody(other.body)
+        expect(revokeObjectURL.mock.calls).toEqual([[chatLease], [otherLease]])
     })
 })

@@ -7,7 +7,7 @@ use serde::Serialize;
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase", untagged)]
 pub enum CommitSubmission {
-    Terminal(Receipt),
+    Terminal(Box<Receipt>),
     Pending {
         #[serde(rename = "operationId")]
         operation_id: String,
@@ -47,7 +47,7 @@ impl Store {
             if prior != digest {
                 return Err(Error::new("operation-intent-conflict", 409));
             }
-            return Ok(CommitSubmission::Terminal(parse(&body)?));
+            return Ok(CommitSubmission::Terminal(Box::new(parse(&body)?)));
         }
         let pending: Option<(String, String)> = db
             .query_row(
@@ -91,7 +91,7 @@ impl Store {
     }
     pub fn operation_status(&self, device: &Device, operation: &str) -> Result<CommitSubmission> {
         match self.receipt(device, operation) {
-            Ok(receipt) => return Ok(CommitSubmission::Terminal(receipt)),
+            Ok(receipt) => return Ok(CommitSubmission::Terminal(Box::new(receipt))),
             Err(e) if e.code == "operation-not-found" => (),
             Err(e) => return Err(e),
         }

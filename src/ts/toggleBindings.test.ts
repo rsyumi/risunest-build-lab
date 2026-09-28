@@ -2,6 +2,7 @@ import { expect, it } from 'vitest'
 import {
     applyToggleValues,
     countToggleChanges,
+    createToggleBindingRestorer,
     defaultChatToggleBinding,
     pickToggleValues,
     sanitizeToggleValues,
@@ -47,4 +48,40 @@ it('picks only defined toggle values for the listed keys and sanitizes imported 
     })
     expect(toggleValueChanged(undefined, '')).toBe(false)
     expect(toggleValueChanged('0', undefined)).toBe(true)
+})
+
+it('keeps unsaved toggle edits when definitions change within the same chat', () => {
+    const restorer = createToggleBindingRestorer()
+    const db = {}
+    const saved = { toggle_a: '1', toggle_b: '1' }
+    const variables: Record<string, string> = {}
+    restorer.restore([db, 'char', 'chat-1', false], variables, saved, ['toggle_a'])
+    expect(variables).toEqual({ toggle_a: '1', toggle_b: '1' })
+
+    variables.toggle_a = '0'
+    delete variables.toggle_b
+    variables.toggle_c = 'x'
+    restorer.restore([db, 'char', 'chat-1', false], variables, saved, ['toggle_a', 'toggle_b', 'toggle_c'])
+    expect(variables).toEqual({ toggle_a: '0', toggle_b: '1' })
+
+    restorer.restore([db, 'char', 'chat-1', false], variables, saved, ['toggle_a'])
+    expect(variables).toEqual({ toggle_a: '0', toggle_b: '1' })
+
+    restorer.restore([db, 'char', 'chat-2', false], variables, saved, ['toggle_a'])
+    expect(variables).toEqual({ toggle_a: '1', toggle_b: '1' })
+
+    variables.toggle_a = '0'
+    restorer.reset()
+    restorer.restore([db, 'char', 'chat-2', false], variables, saved, ['toggle_a'])
+    expect(variables.toggle_a).toBe('1')
+})
+
+it('does not restore toggles while binding is disabled and restores all once it is enabled', () => {
+    const restorer = createToggleBindingRestorer()
+    const db = {}
+    const variables: Record<string, string> = { toggle_a: '0' }
+    restorer.restore([db, 'char', 'chat', true], variables, undefined, ['toggle_a'])
+    expect(variables).toEqual({ toggle_a: '0' })
+    restorer.restore([db, 'char', 'chat', false], variables, { toggle_a: '1' }, ['toggle_a'])
+    expect(variables).toEqual({ toggle_a: '1' })
 })

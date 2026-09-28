@@ -3,7 +3,13 @@ import { formatElapsed } from "../../gui/nativeFileJobDialogModel";
 import { formatRisuNestStorageBytes } from "../risuNestStorageDashboard";
 import type { AssetResidencyPolicy } from "./serverAssetResidency";
 import type { ServerConfig, ServerSyncProgress } from "./serverSync";
-import { serverSyncBlocked, type ServerSyncSnapshot } from "./serverSyncController";
+import {
+  serverSyncActivity,
+  serverSyncBlocked,
+  serverSyncProgressPercent,
+  serverSyncReceiving,
+  type ServerSyncSnapshot,
+} from "./serverSyncController";
 
 /** The strings both connection screens draw from. */
 export type ServerSyncText = (typeof languageEnglish)["risuNest"]["serverSync"];
@@ -120,16 +126,18 @@ export function serverSyncPendingChanges(
     : "";
 }
 
-export const SERVER_SYNC_STAGES: readonly ServerSyncProgress[] = [
+export type ServerSyncStage = ServerSyncProgress | "downloading";
+export const SERVER_SYNC_STAGES: readonly ServerSyncStage[] = [
   "saving",
   "preparing",
+  "downloading",
   "applying",
   "refreshing",
   "publishing",
 ];
 export type ServerSyncStageState = "done" | "active" | "pending";
 export interface ServerSyncStageView {
-  stage: ServerSyncProgress;
+  stage: ServerSyncStage;
   label: string;
   state: ServerSyncStageState;
   detail: string;
@@ -162,9 +170,11 @@ export function serverSyncProgressView(
 ): ServerSyncProgressView {
   const items = snapshot.cycleItems;
   const counted = items !== undefined && items.total > 0;
-  const activeIndex = snapshot.progress
-    ? SERVER_SYNC_STAGES.indexOf(snapshot.progress)
-    : 0;
+  const activity = serverSyncActivity(snapshot);
+  const receiving = serverSyncReceiving(activity);
+  const stage = snapshot.progress === "preparing" && (receiving || activity === "preserving")
+    ? "downloading" : snapshot.progress ?? "saving";
+  const activeIndex = SERVER_SYNC_STAGES.indexOf(stage);
   const ratio = counted ? `${formatCount(items.done)} / ${formatCount(items.total)}` : "";
   const stages = SERVER_SYNC_STAGES.map((stage, index): ServerSyncStageView => {
     const state: ServerSyncStageState =
@@ -181,7 +191,6 @@ export function serverSyncProgressView(
     return { stage, label: text.progress[stage], state, detail };
   });
   const active = stages[activeIndex];
-  const activity = snapshot.progress === "preparing" || snapshot.progress === "publishing" ? items?.activity : undefined;
   const activityCount = items?.expected ? `${formatCount(items.processed ?? 0)} / ${formatCount(items.expected)}` : formatCount(items?.processed ?? 0);
   const bytes =
     snapshot.verifiedBytes === undefined
@@ -193,17 +202,17 @@ export function serverSyncProgressView(
       : `${formatRisuNestStorageBytes(snapshot.bytesPerSecond)}/s`;
   const pending = serverSyncPendingChanges(snapshot, text) || NO_VALUE;
   return {
-    percent: counted && activity !== "confirming" ? Math.min(100, Math.round((items.done / items.total) * 100)) : null,
+    percent: serverSyncProgressPercent(snapshot),
     current: activity ? `${text.activity[activity]}${activity === "confirming" ? "" : ` · ${activityCount}`}` : active.detail ? `${active.label} · ${active.detail}` : active.label,
     elapsed:
       snapshot.attemptStartedAt === undefined
         ? ""
-        : `${text.elapsed} ${formatElapsed(now - (snapshot.phaseStartedAt ?? snapshot.attemptStartedAt))}`,
+        : `${text.elapsed} ${formatElapsed(now - snapshot.attemptStartedAt)}`,
     stages,
     counters: [
       { key: "bytes", label: text.verifiedBytes, value: bytes },
       { key: "rate", label: text.transferRate, value: rate },
-      { key: "items", label: text.progressItems, value: counted ? ratio : NO_VALUE },
+      { key: "items", label: text.progressItems, value: activity && activity !== "confirming" ? activityCount : counted ? ratio : NO_VALUE },
       { key: "pending", label: text.pendingChanges, value: pending },
     ],
   };

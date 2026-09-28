@@ -397,7 +397,8 @@ fn paused_target_allows_only_live_exit_drain_publication_paths() {
         &foreground,
         "exit-commit",
         "snapshot",
-        "observation"
+        "observation",
+        None,
     )
     .is_err());
     external::confirm_publication(
@@ -406,6 +407,7 @@ fn paused_target_allows_only_live_exit_drain_publication_paths() {
         "exit-commit",
         "snapshot",
         "observation",
+        None,
     )
     .unwrap();
     tx.commit().unwrap();
@@ -493,7 +495,8 @@ fn external_intent_prevents_blind_retries_and_blocks_replacement_until_settlemen
         &permit,
         "wrong-commit",
         "snapshot",
-        "observation"
+        "observation",
+        None,
     )
     .is_err());
     external::confirm_publication(
@@ -502,6 +505,7 @@ fn external_intent_prevents_blind_retries_and_blocks_replacement_until_settlemen
         "synthetic-commit",
         "snapshot",
         "observation",
+        None,
     )
     .unwrap();
     tx.commit().unwrap();
@@ -543,6 +547,7 @@ fn external_base_and_job_phase_commit_atomically() {
         "synthetic-commit",
         "snapshot",
         "observation",
+        None,
     )
     .unwrap();
     tx.rollback().unwrap();
@@ -557,6 +562,7 @@ fn external_base_and_job_phase_commit_atomically() {
         "synthetic-commit",
         "snapshot",
         "observation",
+        None,
     )
     .unwrap();
     tx.commit().unwrap();
@@ -633,7 +639,7 @@ fn external_receive_activation_base_and_phase_rollback_and_reopen_together() {
         .unwrap();
     // Fail after the generation switch would have happened, during base write.
     store.connection.execute_batch("CREATE TRIGGER synthetic_base_failure BEFORE INSERT ON external_storage_bases BEGIN SELECT RAISE(ABORT,'synthetic'); END").unwrap();
-    assert!(store.finish_external_receive(prepared, "receive").is_err());
+    assert!(store.finish_external_receive(prepared, "receive", &Default::default()).is_err());
     assert_eq!(selection::identity(&store.connection).unwrap(), before);
     assert_eq!(count(&store, "external_storage_bases"), 0);
     let phase: String = store
@@ -667,7 +673,7 @@ fn external_receive_activation_base_and_phase_rollback_and_reopen_together() {
     let prepared = store
         .prepare_replace_commit(&stage, Some(before.revision))
         .unwrap();
-    store.finish_external_receive(prepared, "receive").unwrap();
+    store.finish_external_receive(prepared, "receive", &Default::default()).unwrap();
     drop(store);
     let store = PersistentStore::open(dir.path()).unwrap();
     let after = selection::identity(&store.connection).unwrap();
@@ -709,7 +715,7 @@ fn external_receive_rechecks_revision_and_target_before_activation() {
             edit(&mut store, 42);
         }
         let current = selection::identity(&store.connection).unwrap();
-        assert!(store.finish_external_receive(prepared, "receive").is_err());
+        assert!(store.finish_external_receive(prepared, "receive", &Default::default()).is_err());
         assert_eq!(selection::identity(&store.connection).unwrap(), current);
         assert_eq!(count(&store, "external_storage_bases"), 0);
     }
@@ -789,12 +795,11 @@ fn external_capture_carries_archived_character_state_and_payload_dependencies() 
         .db
         .query_row("SELECT hash FROM records WHERE key=?1", [&key], |row| row.get(0))
         .unwrap();
-    let bytes = std::fs::read(
-        directory
-            .path()
-            .join("external-storage/objects")
-            .join(record_hash),
+    let bytes = crate::external_storage::content_store::ContentStore::open(
+        &directory.path().join("external-storage"),
     )
+    .unwrap()
+    .read_all(&record_hash)
     .unwrap();
     assert!(matches!(
         decode_logical_record(&bytes).unwrap(),
@@ -1032,6 +1037,249 @@ fn external_capture_text_delta_does_not_hydrate_unchanged_remote_only_payloads()
     assert!(cas.stat_object(&payload.content_hash).unwrap().is_none());
 }
 
+/// An asset alias whose payload body this device no longer holds.
+fn released_payload_alias(
+    store: &mut PersistentStore,
+    root: &std::path::Path,
+    body: &[u8],
+) -> String {
+    let cas = crate::asset_repository::PayloadCas::new(root).unwrap();
+    let payload = cas.prepare_bytes(body).unwrap();
+    store
+        .commit_asset_alias(
+            &AssetAlias {
+                key: "assets/custody-only.bin".into(),
+                object_hash: Some(payload.content_hash.clone()),
+                kind: "asset".into(),
+                size: payload.byte_size as i64,
+                mime: "application/octet-stream".into(),
+                name: "custody-only".into(),
+                ext: "bin".into(),
+                inlay_type: None,
+                width: None,
+                height: None,
+                metadata: json!({}),
+            },
+            1,
+        )
+        .unwrap();
+    fs::remove_file(
+        cas.object_path(&payload.content_hash)
+            .unwrap()
+            .expect("payload path"),
+    )
+    .unwrap();
+    payload.content_hash
+}
+
+#[test]
+fn external_capture_sizes_a_custody_only_payload_without_fetching_it() {
+    struct Never;
+    impl crate::local_backup::CancellationProbe for Never {
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+    }
+    let (directory, mut store, _) = capture_fixture();
+    let body = b"synthetic custody-only payload";
+    let hash = released_payload_alias(&mut store, directory.path(), body);
+    assert!(capture_library(&mut store, "destination", &Never).is_err());
+
+    crate::server_sync::residency::test_remote::hold(
+        directory.path(),
+        &[(&hash, body.len() as u64)],
+    );
+    let capture = capture_library(&mut store, "destination", &Never).unwrap();
+    let bytes: i64 = capture
+        .catalog
+        .db
+        .query_row("SELECT bytes FROM dependencies WHERE hash=?1", [&hash], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(bytes, body.len() as i64);
+    assert_eq!(
+        crate::server_sync::residency::test_remote::fetched(directory.path()),
+        0
+    );
+    assert!(crate::asset_repository::PayloadCas::new(directory.path())
+        .unwrap()
+        .stat_object(&hash)
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn a_transfer_capture_serves_local_recovery_only_once_it_is_completed() {
+    struct Never;
+    impl crate::local_backup::CancellationProbe for Never {
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+    }
+    let (directory, mut store, _) = capture_fixture();
+    let root = directory.path();
+    let body = b"synthetic custody-only payload";
+    let hash = released_payload_alias(&mut store, root, body);
+    crate::server_sync::residency::test_remote::hold(root, &[(&hash, body.len() as u64)]);
+    crate::server_sync::residency::test_remote::serve(root, &hash, body.to_vec());
+    let capture = capture_library(&mut store, "destination", &Never).unwrap();
+    // The publishing job owns it, as it does while a conflict is preserved.
+    store.retain_external_capture(&capture.id, "job").unwrap();
+    let reference = capture.durable_reference(root).unwrap();
+
+    assert!(crate::external_storage::capture::validate_recovery_sources([&reference], root, &Never)
+        .is_err());
+    assert!(
+        crate::external_storage::snapshot_export::prepare_local_conflict_snapshot(
+            root,
+            "format-repository",
+            &reference,
+        )
+        .is_err()
+    );
+    assert_eq!(crate::server_sync::residency::test_remote::fetched(root), 0);
+
+    store.complete_external_capture(&capture.id, &Never).unwrap();
+    assert_eq!(crate::server_sync::residency::test_remote::fetched(root), 1);
+    crate::external_storage::capture::validate_recovery_sources([&reference], root, &Never).unwrap();
+    crate::external_storage::snapshot_export::prepare_local_conflict_snapshot(
+        root,
+        "format-repository",
+        &reference,
+    )
+    .unwrap();
+    // A completed capture holds everything, so completing it again fetches nothing.
+    store.complete_external_capture(&capture.id, &Never).unwrap();
+    assert_eq!(crate::server_sync::residency::test_remote::fetched(root), 1);
+    // The conflict store is the external root's own, not one nested in it.
+    let external = root.join("external-storage");
+    assert!(!external.join("objects").join("content.sqlite").exists());
+    assert!(!external.join("objects").join("objects").exists());
+}
+
+/// Flips one byte of a held payload, keeping its length.
+fn corrupt_payload_in_place(root: &std::path::Path, hash: &str) -> Vec<u8> {
+    let path = crate::asset_repository::PayloadCas::new(root)
+        .unwrap()
+        .object_path(hash)
+        .unwrap()
+        .expect("held payload");
+    let original = fs::read(&path).unwrap();
+    let mut changed = original.clone();
+    changed[0] ^= 0xff;
+    fs::write(&path, &changed).unwrap();
+    original
+}
+
+fn recovery_accepted(
+    store: &mut PersistentStore,
+    root: &std::path::Path,
+    capture: &super::super::external_capture::CapturedSnapshot,
+    probe: &dyn crate::local_backup::CancellationProbe,
+) -> [bool; 3] {
+    let reference = capture.durable_reference(root).unwrap();
+    [
+        store.complete_external_capture(&capture.id, probe).is_ok(),
+        crate::external_storage::capture::validate_recovery_sources([&reference], root, probe).is_ok(),
+        crate::external_storage::snapshot_export::prepare_local_conflict_snapshot(
+            root,
+            "format-repository",
+            &reference,
+        )
+        .is_ok(),
+    ]
+}
+
+#[test]
+fn a_completed_recovery_capture_rejects_a_payload_changed_at_its_length() {
+    struct Never;
+    impl crate::local_backup::CancellationProbe for Never {
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+    }
+    let (directory, mut store, _) = capture_fixture();
+    let root = directory.path();
+    let body = b"synthetic custody-only payload";
+    let hash = released_payload_alias(&mut store, root, body);
+    crate::server_sync::residency::test_remote::hold(root, &[(&hash, body.len() as u64)]);
+    crate::server_sync::residency::test_remote::serve(root, &hash, body.to_vec());
+    let capture = capture_library(&mut store, "destination", &Never).unwrap();
+    store.retain_external_capture(&capture.id, "job").unwrap();
+    assert_eq!(recovery_accepted(&mut store, root, &capture, &Never), [true; 3]);
+
+    let original = corrupt_payload_in_place(root, &hash);
+    assert_eq!(recovery_accepted(&mut store, root, &capture, &Never), [false; 3]);
+    // The differing body is not silently replaced from custody.
+    assert_eq!(crate::server_sync::residency::test_remote::fetched(root), 1);
+
+    let path = crate::asset_repository::PayloadCas::new(root)
+        .unwrap()
+        .object_path(&hash)
+        .unwrap()
+        .unwrap();
+    fs::write(path, original).unwrap();
+    assert_eq!(recovery_accepted(&mut store, root, &capture, &Never), [true; 3]);
+}
+
+#[test]
+fn completing_a_capture_rejects_a_held_payload_that_is_not_its_name() {
+    struct Never;
+    impl crate::local_backup::CancellationProbe for Never {
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+    }
+    let (directory, mut store, _) = capture_fixture();
+    let root = directory.path();
+    let cas = crate::asset_repository::PayloadCas::new(root).unwrap();
+    let payload = cas.prepare_bytes(b"synthetic held payload").unwrap();
+    store
+        .commit_asset_alias(
+            &AssetAlias {
+                key: "assets/held.bin".into(),
+                object_hash: Some(payload.content_hash.clone()),
+                kind: "asset".into(),
+                size: payload.byte_size as i64,
+                mime: "application/octet-stream".into(),
+                name: "held".into(),
+                ext: "bin".into(),
+                inlay_type: None,
+                width: None,
+                height: None,
+                metadata: json!({}),
+            },
+            1,
+        )
+        .unwrap();
+    let capture = capture_library(&mut store, "destination", &Never).unwrap();
+    store.retain_external_capture(&capture.id, "job").unwrap();
+    corrupt_payload_in_place(root, &payload.content_hash);
+
+    assert_eq!(recovery_accepted(&mut store, root, &capture, &Never), [false; 3]);
+    assert_eq!(crate::server_sync::residency::test_remote::fetched(root), 0);
+}
+
+#[test]
+fn completing_a_capture_fails_for_a_payload_custody_cannot_serve() {
+    struct Never;
+    impl crate::local_backup::CancellationProbe for Never {
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+    }
+    let (directory, mut store, _) = capture_fixture();
+    let root = directory.path();
+    let body = b"synthetic custody-only payload";
+    let hash = released_payload_alias(&mut store, root, body);
+    crate::server_sync::residency::test_remote::hold(root, &[(&hash, body.len() as u64)]);
+    let capture = capture_library(&mut store, "destination", &Never).unwrap();
+    store.retain_external_capture(&capture.id, "job").unwrap();
+
+    assert_eq!(recovery_accepted(&mut store, root, &capture, &Never), [false; 3]);
+}
+
 #[test]
 fn external_capture_projects_only_changed_records_at_the_pinned_snapshot() {
     use super::super::content_capture::ContentCaptureSink;
@@ -1044,10 +1292,10 @@ fn external_capture_projects_only_changed_records_at_the_pinned_snapshot() {
         }
     }
     let (directory, mut store, _) = capture_fixture();
-    let objects = directory.path().join("external-storage/objects");
+    let external = directory.path().join("external-storage");
     let mut full = CaptureCatalog::create(
         &directory.path().join("external-storage/full"),
-        &objects,
+        &external,
         None,
     )
     .unwrap();
@@ -1067,7 +1315,7 @@ fn external_capture_projects_only_changed_records_at_the_pinned_snapshot() {
     let (digest, path, _) = full.manifest().unwrap();
     let mut delta = CaptureCatalog::create(
         &directory.path().join("external-storage/delta"),
-        &objects,
+        &external,
         Some((path, &digest)),
     )
     .unwrap();
@@ -1092,8 +1340,12 @@ fn external_capture_projects_only_changed_records_at_the_pinned_snapshot() {
         .collect::<Result<_, _>>()
         .unwrap();
     let mut saw_root = false;
+    let content =
+        crate::external_storage::content_store::ContentStore::open(&external).unwrap();
     for (_, hash) in keys {
-        let bytes = fs::read(objects.join(hash)).unwrap();
+        let mut body = content.open_body(&hash).unwrap();
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut body, &mut bytes).unwrap();
         if let LogicalRecordEnvelope::Root { value, .. } = decode_logical_record(&bytes).unwrap() {
             assert_eq!(value["synthetic"], json!(2));
             saw_root = true;
@@ -1166,7 +1418,7 @@ fn external_capture_registration_failure_does_not_advance_capture_or_cursor() {
     let (directory, mut store, _) = capture_fixture();
     let mut catalog = CaptureCatalog::create(
         &directory.path().join("external-storage/job"),
-        &directory.path().join("external-storage/objects"),
+        &directory.path().join("external-storage"),
         None,
     )
     .unwrap();
@@ -1235,7 +1487,7 @@ fn external_capture_keeps_deleted_source_payload_pinned_after_reopen() {
     store.commit_asset_alias(&alias, 1).unwrap();
     let mut catalog = CaptureCatalog::create(
         &directory.path().join("external-storage/job"),
-        &directory.path().join("external-storage/objects"),
+        &directory.path().join("external-storage"),
         None,
     )
     .unwrap();
@@ -1331,4 +1583,242 @@ fn external_backup_consumers_share_capture_but_cancel_and_device_identity_are_in
     external::cancel_prepared(&tx, "job-b").unwrap();
     assert!(!external::capture_has_consumers(&tx, &shared).unwrap());
     tx.commit().unwrap();
+}
+
+fn catalog_records(
+    store: &PersistentStore,
+    capture: &str,
+) -> std::collections::BTreeMap<String, String> {
+    let reopened = store.reopen_external_capture(capture).unwrap();
+    let mut query = reopened
+        .catalog
+        .db
+        .prepare("SELECT key,hash FROM records")
+        .unwrap();
+    let rows = query
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap();
+    rows.map(|row| row.unwrap()).collect()
+}
+
+fn publish_real_capture(
+    store: &mut PersistentStore,
+    job: &str,
+    snapshot: &str,
+) -> std::collections::BTreeMap<String, String> {
+    struct Never;
+    impl crate::local_backup::CancellationProbe for Never {
+        fn is_cancelled(&self) -> bool {
+            false
+        }
+    }
+    let captured = capture_library(store, "synthetic-connection", &Never).unwrap();
+    let permit = publication_permit(
+        job,
+        &captured.identity,
+        crate::external_storage::publication::PublicationMode::Foreground,
+    );
+    let tx = store.connection.transaction().unwrap();
+    external::prepare_publication(
+        &tx,
+        &external::PublishIntent {
+            job_id: job,
+            connection_id: "synthetic-connection",
+            repository_id: "synthetic-repository",
+            capture_id: &captured.id,
+            identity: &captured.identity,
+            strategy: "sequential",
+            expected_head: None,
+            commit_id: "synthetic-commit",
+        },
+        &permit,
+    )
+    .unwrap();
+    external::begin_publication(&tx, &permit).unwrap();
+    tx.commit().unwrap();
+    // The confirmation releases the capture, so what it published is read
+    // while the reference that pins it still exists.
+    let published = catalog_records(store, &captured.id);
+    store
+        .external_confirm_publication(&permit, "synthetic-commit", snapshot, "observation")
+        .unwrap();
+    published
+}
+
+#[test]
+fn a_publication_leaves_behind_the_records_it_published() {
+    let (_dir, mut store, _) = open_fixture();
+    select_external(&mut store);
+    let published = publish_real_capture(&mut store, "publish", "snapshot");
+    assert!(!published.is_empty());
+    assert_eq!(
+        store.external_base_records("synthetic-connection").unwrap(),
+        Some(published)
+    );
+}
+
+/// A publication settled without its capture still has to be settled. The rows
+/// are dropped rather than left describing the snapshot before this one.
+#[test]
+fn a_publication_whose_capture_cannot_be_read_keeps_no_view() {
+    let (_dir, mut store, _) = open_fixture();
+    select_external(&mut store);
+    publish_real_capture(&mut store, "publish", "snapshot");
+    assert!(store
+        .external_base_records("synthetic-connection")
+        .unwrap()
+        .is_some());
+    let identity = capture(&mut store, "second");
+    let permit = publication_permit(
+        "second",
+        &identity,
+        crate::external_storage::publication::PublicationMode::Foreground,
+    );
+    let tx = store.connection.transaction().unwrap();
+    external::begin_publication(&tx, &permit).unwrap();
+    tx.commit().unwrap();
+    store
+        .external_confirm_publication(&permit, "synthetic-commit", "second-snapshot", "observation")
+        .unwrap();
+    assert_eq!(
+        store.external_base_records("synthetic-connection").unwrap(),
+        None
+    );
+}
+
+/// The head moved without its content moving, so the same records describe it
+/// and only what they are bound to follows the base.
+#[test]
+fn an_equivalent_head_carries_the_view_to_the_snapshot_it_names() {
+    let (_dir, mut store, _) = open_fixture();
+    select_external(&mut store);
+    let published = publish_real_capture(&mut store, "publish", "snapshot");
+    let identity = selection::identity(&store.connection).unwrap();
+    let permit = publication_permit(
+        "equivalent",
+        &identity,
+        crate::external_storage::publication::PublicationMode::Foreground,
+    );
+    store
+        .external_accept_equivalent(
+            &permit,
+            "synthetic-connection",
+            "synthetic-repository",
+            "synthetic-commit",
+            "observation",
+            "equivalent-snapshot",
+            "equivalent-commit",
+            "observation",
+            &identity,
+        )
+        .unwrap();
+    assert_eq!(
+        store.external_base("synthetic-connection").unwrap().unwrap().snapshot_id,
+        "equivalent-snapshot"
+    );
+    assert_eq!(
+        store.external_base_records("synthetic-connection").unwrap(),
+        Some(published)
+    );
+}
+
+#[test]
+fn removing_a_connection_removes_the_view_with_its_base() {
+    let (_dir, mut store, _) = open_fixture();
+    select_external(&mut store);
+    publish_real_capture(&mut store, "publish", "snapshot");
+    store
+        .external_prepare_connection_removal("synthetic-connection")
+        .unwrap();
+    assert_eq!(count(&store, "external_storage_base_records"), 0);
+    assert_eq!(count(&store, "external_storage_base_record_state"), 0);
+}
+
+/// Says "cancelled" from its `at`th question on and counts the questions it
+/// answered that way.
+struct CancelAt {
+    at: usize,
+    asked: std::cell::Cell<usize>,
+    refused: std::cell::Cell<usize>,
+}
+
+impl CancelAt {
+    fn new(at: usize) -> Self {
+        Self {
+            at,
+            asked: std::cell::Cell::new(0),
+            refused: std::cell::Cell::new(0),
+        }
+    }
+}
+
+impl crate::local_backup::CancellationProbe for CancelAt {
+    fn is_cancelled(&self) -> bool {
+        self.asked.set(self.asked.get() + 1);
+        let cancelled = self.asked.get() >= self.at;
+        if cancelled {
+            self.refused.set(self.refused.get() + 1);
+        }
+        cancelled
+    }
+}
+
+/// Recovery validation stops at whichever question first finds it cancelled,
+/// between payloads, between records and inside one long payload, and the
+/// capture it was checking stays owned and completes afterwards.
+#[test]
+fn cancelling_recovery_validation_stops_at_the_next_object_or_chunk() {
+    let (directory, mut store, _) = capture_fixture();
+    let root = directory.path();
+    let cas = crate::asset_repository::PayloadCas::new(root).unwrap();
+    let bodies = [vec![3u8; 300 * 1024], b"second payload".to_vec(), b"third payload".to_vec()];
+    for (index, body) in bodies.iter().enumerate() {
+        let payload = cas.prepare_bytes(body).unwrap();
+        let revision = store.revision().unwrap();
+        store
+            .commit_asset_alias(
+                &AssetAlias {
+                    key: format!("assets/held-{index}.bin"),
+                    object_hash: Some(payload.content_hash.clone()),
+                    kind: "asset".into(),
+                    size: payload.byte_size as i64,
+                    mime: "application/octet-stream".into(),
+                    name: format!("held-{index}"),
+                    ext: "bin".into(),
+                    inlay_type: None,
+                    width: None,
+                    height: None,
+                    metadata: json!({}),
+                },
+                revision,
+            )
+            .unwrap();
+    }
+    let never = CancelAt::new(usize::MAX);
+    let capture = capture_library(&mut store, "destination", &never).unwrap();
+    store.retain_external_capture(&capture.id, "job").unwrap();
+    let reference = capture.durable_reference(root).unwrap();
+
+    let counted = CancelAt::new(usize::MAX);
+    crate::external_storage::capture::validate_recovery_sources([&reference], root, &counted)
+        .unwrap();
+    let questions = counted.asked.get();
+    // Three payloads, the long one in five reads, and the capture's records.
+    assert!(questions > 3 + 5, "{questions}");
+    for at in 1..=questions {
+        let probe = CancelAt::new(at);
+        assert!(
+            crate::external_storage::capture::validate_recovery_sources([&reference], root, &probe)
+                .is_err(),
+            "{at}"
+        );
+        assert_eq!((probe.asked.get(), probe.refused.get()), (at, 1), "{at}");
+    }
+
+    let probe = CancelAt::new(questions / 2);
+    assert!(store.complete_external_capture(&capture.id, &probe).is_err());
+    assert_eq!(probe.refused.get(), 1);
+    store.complete_external_capture(&capture.id, &never).unwrap();
+    crate::external_storage::capture::validate_recovery_sources([&reference], root, &never)
+        .unwrap();
 }

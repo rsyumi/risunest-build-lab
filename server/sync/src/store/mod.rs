@@ -8,6 +8,7 @@ mod jobs;
 pub use jobs::CommitSubmission;
 mod checkpoints;
 mod descriptors;
+mod descriptors_index;
 mod journal;
 mod maintenance;
 mod media;
@@ -15,6 +16,7 @@ pub use media::MediaResponse;
 mod retention;
 pub use retention::{ObjectIdentity, RetainedObject, RetentionPage, RetentionRelease};
 mod objects;
+pub use objects::Body;
 mod schema;
 mod scopes;
 mod staged;
@@ -181,6 +183,12 @@ impl Store {
             return Err(Error::new("not-initialized", 404));
         }
         let mut db = Connection::open(db_path)?;
+        if create {
+            // Incremental, so maintenance can return the pages a collected
+            // inline body frees without rewriting the database. It must
+            // precede both the first table and the write-ahead log.
+            db.execute_batch("PRAGMA auto_vacuum=INCREMENTAL;")?;
+        }
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA journal_size_limit=67108864;")?;
         if create {
             for name in ["objects", "staging"] {
@@ -188,6 +196,8 @@ impl Store {
             }
             let tx = db.transaction()?;
             tx.execute_batch(schema::SCHEMA)?;
+            risunest_small_object_store::initialize(&tx)
+                .map_err(|_| Error::new("metadata-storage", 503))?;
             let head = RemoteHead::genesis(random_id()?, random_id()?)?;
             tx.execute("INSERT INTO library VALUES(1,?1)", [json(&head)?])?;
             tx.execute(
@@ -257,7 +267,8 @@ impl Store {
         self.heads.subscribe()
     }
     pub(super) fn announce_head(&self) {
-        self.heads.send_modify(|value| *value = value.wrapping_add(1));
+        self.heads
+            .send_modify(|value| *value = value.wrapping_add(1));
     }
     pub fn device_session(&self, device: &Device) -> Result<DeviceSession> {
         let mut connection = self.reader()?;

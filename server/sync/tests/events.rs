@@ -6,7 +6,11 @@ use risunest_sync_server::{
     store::{DeviceCredential, Store},
     workload::Workload,
 };
-use risunest_sync_wire::{canonical, transfer::{self, Frame}, RemoteHead};
+use risunest_sync_wire::{
+    canonical,
+    transfer::{self, Frame},
+    RemoteHead,
+};
 use std::{sync::Arc, time::Duration};
 
 struct Server {
@@ -139,7 +143,9 @@ async fn a_committed_head_reaches_a_held_stream_and_an_unknown_client_is_refused
     let opened = next_announcement(&mut buffer, &mut stream).await;
     assert_eq!(opened, server.head().await.head_id);
 
-    server.commit("r1:character:synthetic", b"synthetic body").await;
+    server
+        .commit("r1:character:synthetic", b"synthetic body")
+        .await;
     let announced = next_announcement(&mut buffer, &mut stream).await;
     let head = server.head().await;
     assert_eq!(announced, head.head_id);
@@ -162,9 +168,16 @@ async fn held_streams_occupy_no_admission_slot_and_leave_the_server_drainable() 
     // Four streams exceed the two concurrent requests one device is admitted,
     // yet ordinary requests still pass and maintenance still sees a drain.
     server.head().await;
-    let status = server.workload.status().unwrap();
-    assert_eq!(status.active_requests, 0);
-    assert!(status.drained);
+    assert_eq!(server.workload.status().unwrap().active_requests, 0);
+    // Idle background passes briefly hold a slot every 250 ms, so the drain is
+    // observed between them rather than at one instant.
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while !server.workload.status().unwrap().drained {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("held streams must leave the server drainable");
     drop(streams);
     server.task.abort();
 }

@@ -37,6 +37,9 @@ interface IOSGenerationDependencies {
   progress?(id: string, completed: number): Promise<unknown>;
   state(): Promise<IOSNativeState>;
   events: EventTarget;
+  monotonicProgress?: boolean;
+  unavailable?(): void;
+  expired?(): void;
 }
 const productionDependencies: IOSGenerationDependencies = {
   enabled: () => isTauriIOS,
@@ -47,6 +50,22 @@ const productionDependencies: IOSGenerationDependencies = {
   state: getIOSNativeState,
   events: window,
 };
+
+export async function beginIOSBackgroundTask(
+  kind: string, signal: AbortSignal | undefined, release: () => void,
+) {
+  const task = await beginIOSGeneration(signal, {
+    ...productionDependencies,
+    begin: () => invoke("plugin:ios-native|begin", { kind }),
+    progress: (id, completed) => invoke("plugin:ios-native|generation_progress", {
+      id, completed: Math.max(0, completed), total: completed < 0 ? 0 : 100,
+    }),
+    monotonicProgress: false,
+    unavailable: release,
+    expired: release,
+  });
+  return { ...task, progress: (percent: number | null) => task.progress(percent ?? -1) };
+}
 
 /** Retain the caller's cancellation and pair every native assertion with release. */
 export async function beginIOSGeneration(
@@ -64,10 +83,10 @@ export async function beginIOSGeneration(
   signal?.addEventListener("abort", abort, { once: true });
   if (signal?.aborted) abort();
   let id: string | null = null;
-  const expired = () =>
-    controller.abort(
-      new DOMException("iOS background execution expired", "AbortError"),
-    );
+  const expired = () => {
+    controller.abort(new DOMException("iOS background execution expired", "AbortError"));
+    deps.expired?.();
+  };
   const listener = (event: Event) => {
     const detail = (event as CustomEvent<{ event: string; id?: string }>)
       .detail;
@@ -92,13 +111,14 @@ export async function beginIOSGeneration(
   } catch {
     /* Foreground generation remains available when iOS rejects extra runtime. */
   }
+  if (!id) deps.unavailable?.();
   let disposed = false;
   let reported = 0;
   let pendingProgress = Promise.resolve();
   return {
     signal: controller.signal,
     progress(completed) {
-      if (!id || disposed || completed <= reported) return;
+      if (!id || disposed || (deps.monotonicProgress !== false ? completed <= reported : completed === reported)) return;
       reported = completed;
       const activeId = id;
       pendingProgress = pendingProgress

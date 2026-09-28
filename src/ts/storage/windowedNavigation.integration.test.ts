@@ -1,6 +1,7 @@
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { flushSync } from 'svelte'
+import { get } from 'svelte/store'
 
 vi.mock('../parser/parser.svelte', () => ({
     assetRegex: /$^/,
@@ -85,7 +86,392 @@ function makeLargeLegacyDatabase(): {
     }
 }
 
+function syntheticCharacter(id: string, history: Message[]): character {
+    return {
+        type: 'character',
+        chaId: id,
+        name: `Synthetic ${id}`,
+        image: '',
+        firstMessage: '',
+        desc: 'Synthetic description',
+        notes: '',
+        chats: [{ id: `${id}-chat`, name: 'Synthetic chat', note: '', localLore: [], message: history }],
+        chatFolders: [],
+        chatPage: 0,
+        viewScreen: 'none',
+        bias: [],
+        emotionImages: [],
+        globalLore: [],
+    } as unknown as character
+}
+
+function syntheticLibrary(type: 'character' | 'group'): Database {
+    const history: Message[] = [{ role: 'char', data: 'Synthetic existing history' }]
+    const characters: Database['characters'] = [syntheticCharacter('second-character', structuredClone(history))]
+    if (type === 'group') {
+        const member = syntheticCharacter('group-member', [])
+        characters.unshift({
+            ...syntheticCharacter('edited-owner', history.map((message) => ({ ...message, saying: member.chaId }))),
+            type: 'group',
+            characters: [member.chaId],
+            characterTalks: [1],
+            characterActive: [true],
+        } as unknown as Database['characters'][number], member)
+    } else {
+        characters.unshift(syntheticCharacter('edited-owner', history))
+    }
+    return { streamingDisplayOptimizationMode: 'balanced', characters } as unknown as Database
+}
+
+// A fresh module graph gives each boot its own production runtime, stores and coordinator.
+async function bootProductionApp(indexedDB: IDBFactory, seed?: Database) {
+    vi.resetModules()
+    Object.assign(globalThis, { indexedDB, IDBKeyRange })
+    const svelte = await import('svelte')
+    const stores = await import('../stores.svelte')
+    const databaseModule = await import('./database.svelte')
+    const runtimeModule = await import('./persistentDataRuntime.svelte')
+    const factory = await import('./persistentDataStoreFactory')
+    const { bootstrapPersistentDatabase } = await import('./persistentBootstrap')
+    const preparation = await import('./databasePreparation')
+    const catalog = await import('./workingSetCatalog')
+    const { workingSetResidency: residency } = await import('./workingSetResidency')
+    const characters = await import('../characters')
+    const globalApi = await import('../globalApi.svelte')
+    const generation = await import('../process/generationState')
+    const { createSelectedConversationOperations } = await import('../selectedConversationOperations')
+    const { saveCapturedChatMessage } = await import('../chatMessageUi')
+    const mutations = await import('../conversationMutations')
+    const { appendDefaultChatInput } = await import('../../lib/ChatScreens/defaultChatInput')
+    const { default: Harness } = await import('../../lib/SideBars/BoundCharacterEditorHarness.test.svelte')
+    const chatListRows = await import('../../lib/SideBars/sideChatListRows')
+
+    if (seed) {
+        const raw = factory.getRawPersistentDataStore()
+        await raw.open()
+        const { database } = await preparation.prepareDatabaseForBootstrap(seed)
+        await raw.replaceFromDatabase(database, 0)
+    }
+    // Mirrors bootstrap's local-only persistent working-set installation.
+    const runtime = runtimeModule.getPersistentDataRuntime()
+    const local = await bootstrapPersistentDatabase({
+        store: runtime.store,
+        prepareDatabase: preparation.prepareDatabaseForBootstrap,
+        prepareRoot: preparation.preparePersistentRootForWorkingSet,
+        projectScalableWorkingSet: (input) => catalog.projectCatalogWorkingSet(
+            input.root,
+            input.characters,
+            catalog.createCatalogPresetWorkingSet(input.presetCatalog, input.activePreset),
+        ),
+    })
+    runtimeModule.configurePersistentDataRuntime({
+        projectWorkingSet(database, selectedCharacterId, selectedConversationId, activeCharacterIds, forceScalableProjection) {
+            if (forceScalableProjection === false) return database
+            const projected = catalog.isCatalogPresetWorkingSet(database.botPresets)
+                ? database
+                : catalog.projectCompleteScalableWorkingSet(
+                    database, selectedCharacterId, runtime.revision, activeCharacterIds, selectedConversationId,
+                )
+            for (const character of projected.characters) {
+                if (catalog.isWorkingSetCharacterStub(character)) residency.markCharacterReleased(character.chaId)
+                else residency.reconcileConversationResidency(character)
+            }
+            return projected
+        },
+    })
+    residency.clear()
+    for (const character of local.database.characters) {
+        if (catalog.isWorkingSetCharacterStub(character)) residency.markCharacterReleased(character.chaId)
+    }
+    databaseModule.setDatabase(local.database)
+    await runtimeModule.initializeActiveWorkingSet(databaseModule.getDatabase())
+    stores.selectedCharID.set(-1)
+    await globalApi.saveDb()
+    return {
+        svelte, stores, runtime, characters, generation, mutations, residency, Harness, chatListRows,
+        getDatabase: databaseModule.getDatabase,
+        appendDefaultChatInput, saveCapturedChatMessage, createSelectedConversationOperations,
+    }
+}
+
+type ProductionApp = Awaited<ReturnType<typeof bootProductionApp>>
+
+function settleWithin<T>(promise: Promise<T>, label: string, trace: unknown[]): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined
+    return Promise.race([
+        promise,
+        new Promise<never>((_, reject) => {
+            timer = setTimeout(() => reject(new Error(`${label} did not settle: ${JSON.stringify(trace)}`)), 5000)
+        }),
+    ]).finally(() => clearTimeout(timer))
+}
+
+function selectedConversationOperations(app: ProductionApp) {
+    const { runtime, stores } = app
+    return app.createSelectedConversationOperations({
+        captureSelectedConversationTarget: () => runtime.captureSelectedConversationTarget(),
+        acquireCompleteConversation: (reason, target) => runtime.acquireCompleteConversation(reason, target),
+        captureCurrent: () => {
+            const character = stores.DBState.db.characters[get(stores.selectedCharID)]
+            const conversation = character?.chats[character.chatPage]
+            return character && conversation ? { character, conversation } : null
+        },
+        getCurrentSession: () => runtime.getActiveConversationSession(),
+        getCurrentViewportSource: () => runtime.getActiveConversationViewportSource(),
+    })
+}
+
+// DefaultChatScreen's send path up to the provider. The provider stand-in returns an
+// ordinary failed result, so no response is applied or acknowledged.
+async function sendUserTurnWithFailedProvider(app: ProductionApp, input: string): Promise<boolean | null> {
+    const { runtime, stores, generation, mutations } = app
+    if (get(generation.doingChat)) return null
+    return selectedConversationOperations(app).withCompleteSelectedConversation('send-message', async (context) => {
+        const requireTarget = () => {
+            const authority = context.requireCurrent()
+            return mutations.captureConversationMutationTarget(
+                authority.character, authority.conversation, authority.session,
+            )
+        }
+        const target = requireTarget()
+        const createMessage = (data: string): Message => ({ role: 'user', data, time: Date.now(), name: null })
+        if (target.character.type === 'character') {
+            const appended = await app.appendDefaultChatInput({
+                target,
+                recaptureTarget: requireTarget,
+                runInputTrigger: async () => null,
+                processInput: async () => input,
+                isTargetCurrent: (candidate) => {
+                    context.requireCurrent()
+                    const character = stores.DBState.db.characters[get(stores.selectedCharID)]
+                    return mutations.isConversationMutationTargetCurrent(
+                        candidate, character, character?.chats[character.chatPage], runtime.getActiveConversationSession(),
+                    )
+                },
+                createMessage,
+            })
+            context.requireCurrent()
+            if (!appended) return false
+        } else {
+            mutations.appendConversationMessage(target, createMessage(input))
+        }
+        await new Promise((resolve) => setTimeout(resolve, 10))
+        context.requireCurrent()
+        const reservation = generation.reserveGeneration()
+        if (!reservation) return false
+        let lease: Awaited<ReturnType<typeof runtime.acquireCompleteConversation>> | null = null
+        try {
+            const selection = runtime.captureSelectedConversationTarget()
+            if (selection) lease = await runtime.acquireCompleteConversation('generation', selection)
+            await Promise.resolve()
+            return false
+        } finally {
+            lease?.release()
+            reservation.release({ preserveBusy: false })
+            generation.doingChat.set(false)
+        }
+    })
+}
+
 describe('windowed navigation integration', () => {
+    it.each([
+        ['character', 'immediate'],
+        ['character', 'autosave'],
+        ['character', 'failed-request'],
+        ['character', 'failed-request-closed-editor'],
+        ['group', 'immediate'],
+        ['group', 'autosave'],
+        ['group', 'failed-request'],
+        ['group', 'failed-request-closed-editor'],
+    ] as const)('keeps %s edits from the bound editor through %s production navigation and reboot', async (type, timing) => {
+        const indexedDB = new IDBFactory()
+        const previousGlobals = { indexedDB: globalThis.indexedDB, IDBKeyRange: globalThis.IDBKeyRange }
+        const ownerId = 'edited-owner'
+        const conversationId = `${ownerId}-chat`
+        const typedName = '수정 🙂'
+        const typedDescription = 'Synthetic edited description'
+        const editedHistory = 'Synthetic edited history'
+        const userTurn = 'Synthetic user turn'
+        const trace: unknown[] = []
+        const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+        const target = document.createElement('div')
+        document.body.append(target)
+        let editor: ReturnType<ProductionApp['svelte']['mount']> | null = null
+        let app: ProductionApp | null = null
+        const reader = new IndexedDbPersistentDataStore('risuai-persistent-data', indexedDB, IDBKeyRange)
+        try {
+            app = await bootProductionApp(indexedDB, syntheticLibrary(type))
+            const { svelte, stores, runtime, characters } = app
+            const commit = runtime.store.commit.bind(runtime.store)
+            vi.spyOn(runtime.store, 'commit').mockImplementation(async (request) => {
+                const entry: Record<string, unknown> = {
+                    stage: 'commit',
+                    expected: request.expectedRevision,
+                    keys: Object.keys(request).filter((key) => key !== 'expectedRevision').sort(),
+                }
+                trace.push(entry)
+                try {
+                    const result = await commit(request)
+                    entry.revision = result.revision
+                    return result
+                } catch (error) {
+                    entry.error = error instanceof Error ? error.name : typeof error
+                    throw error
+                }
+            })
+            let dirtyMarks = 0
+            const markDirty = runtime.markPersistentDataDirty.bind(runtime)
+            vi.spyOn(runtime, 'markPersistentDataDirty').mockImplementation((bytes) => {
+                dirtyMarks++
+                markDirty(bytes)
+            })
+            const activate = runtime.activateCharacter.bind(runtime)
+            vi.spyOn(runtime, 'activateCharacter').mockImplementation(async (id, options) => {
+                const result = await activate(id, options)
+                trace.push({ stage: 'activate', id, result, revision: runtime.revision, dirtyMarks })
+                return result
+            })
+            const navigate = (id: string) => settleWithin(
+                characters.changeChar(stores.DBState.db.characters.findIndex((candidate) => candidate.chaId === id)),
+                `changeChar(${id})`,
+                trace,
+            )
+            const selected = () => stores.DBState.db.characters[get(stores.selectedCharID)]
+            const readEditor = () => ({
+                name: target.querySelector('input'),
+                description: target.querySelector('textarea'),
+            })
+
+            editor = svelte.mount(app.Harness, { target })
+            svelte.flushSync()
+            expect(stores.DBState.db).toBe(app.getDatabase())
+            expect(await navigate(ownerId), JSON.stringify(trace)).toBe(true)
+            const inputs = await vi.waitFor(() => {
+                const found = readEditor()
+                expect(found.name).not.toBeNull()
+                return found
+            })
+            const beforeEdit = dirtyMarks
+            inputs.name!.value = typedName
+            inputs.name!.dispatchEvent(new Event('input', { bubbles: true }))
+            if (inputs.description) {
+                inputs.description.value = typedDescription
+                inputs.description.dispatchEvent(new Event('input', { bubbles: true }))
+            }
+            await svelte.tick()
+            trace.push({
+                stage: 'edited',
+                selected: selected()?.chaId,
+                nameEqual: selected()?.name === typedName,
+                selectedTargetIsOwner: runtime.captureSelectedConversationTarget()?.characterId === ownerId,
+                dirtyMarksSinceEdit: dirtyMarks - beforeEdit,
+            })
+            expect(selected()?.name).toBe(typedName)
+            expect(dirtyMarks).toBeGreaterThan(beforeEdit)
+
+            const operations = selectedConversationOperations(app)
+            const acquired = await operations.acquireCompleteMessageTarget(0, 'edit-message')
+            expect(acquired).not.toBeNull()
+            try {
+                const context = {
+                    captureCurrent: () => {
+                        const character = selected()
+                        const conversation = character?.chats[character.chatPage]
+                        return character && conversation ? { character, conversation } : null
+                    },
+                    getCurrentSession: () => runtime.getActiveConversationSession(),
+                }
+                expect(app.saveCapturedChatMessage(acquired!.target, context, editedHistory).saved).toBe(true)
+            } finally {
+                acquired!.release()
+            }
+
+            if (timing === 'failed-request-closed-editor') {
+                await svelte.unmount(editor)
+                editor = null
+            }
+            if (timing.startsWith('failed-request')) {
+                expect(await settleWithin(sendUserTurnWithFailedProvider(app, userTurn), 'send', trace)).toBe(false)
+                expect(get(app.generation.doingChat)).toBe(false)
+                const session = runtime.getActiveConversationSession()
+                trace.push({
+                    stage: 'request-failed',
+                    mode: runtime.getSelectedConversationMode(),
+                    messages: session?.totalMessages,
+                    version: session?.version,
+                    persistedVersion: session?.persistedVersion,
+                })
+            }
+            await reader.open()
+            if (timing === 'autosave') {
+                await vi.waitFor(async () => {
+                    expect((await reader.readCharacter(ownerId))?.value.name).toBe(typedName)
+                    expect((await reader.readConversation(ownerId, conversationId))?.value.message[0].data)
+                        .toBe(editedHistory)
+                }, { timeout: 3000 })
+            }
+
+            expect(await navigate('second-character'), JSON.stringify(trace)).toBe(true)
+            expect(selected()?.chaId).toBe('second-character')
+            expect(await navigate(ownerId), JSON.stringify(trace)).toBe(true)
+            expect(selected()?.name).toBe(typedName)
+            if (editor) await vi.waitFor(() => expect(readEditor().name?.value).toBe(typedName))
+            const expectedMessages = [
+                editedHistory,
+                ...(timing.startsWith('failed-request') ? [userTurn] : []),
+            ]
+            if (editor) {
+                const session = runtime.getActiveConversationSession()
+                expect(session?.readRange(0, 8).messages.map((message) => message.data)).toEqual(expectedMessages)
+            }
+            // changeChar retries once after an observer invalidation; a second refusal is a lost click.
+            const activations = trace.filter((entry): entry is { stage: 'activate', id: string, result: boolean } =>
+                (entry as { stage?: string }).stage === 'activate')
+            activations.forEach((entry, index) => {
+                if (!entry.result) {
+                    expect(activations[index + 1], JSON.stringify(trace)).toMatchObject({ id: entry.id, result: true })
+                }
+            })
+            expect(consoleError.mock.calls.map((args) => args.map((value) =>
+                value instanceof Error ? `${value.name}: ${value.message}` : String(value).slice(0, 200))),
+            JSON.stringify(trace)).toEqual([])
+
+            const persistedCharacter = await reader.readCharacter(ownerId)
+            expect(persistedCharacter?.value.name).toBe(typedName)
+            if (type === 'character') expect(persistedCharacter?.value).toMatchObject({ desc: typedDescription })
+            expect((await reader.readConversation(ownerId, conversationId))?.value.message.map((message) => message.data))
+                .toEqual(expectedMessages)
+            expect((await reader.readRoot()).revision).toBe(runtime.revision)
+            if (editor) await svelte.unmount(editor)
+            editor = null
+
+            // Module reset cannot stop this instance's debounce timer as a process exit would,
+            // so run the production exit drain before another instance opens the same store.
+            await runtime.flushPendingData('exit')
+            expect((await reader.readRoot()).revision).toBe(runtime.revision)
+            const rebooted = await bootProductionApp(indexedDB)
+            app = rebooted
+            expect(await settleWithin(rebooted.characters.changeChar(
+                rebooted.stores.DBState.db.characters.findIndex((candidate) => candidate.chaId === ownerId),
+            ), 'reboot changeChar', trace)).toBe(true)
+            const reopened = rebooted.stores.DBState.db.characters[get(rebooted.stores.selectedCharID)]
+            expect(reopened?.name).toBe(typedName)
+            const lease = await rebooted.runtime.acquireCompleteConversation('reboot-check')
+            try {
+                expect(lease.session.readRange(0, 8).messages.map((message) => message.data)).toEqual(expectedMessages)
+            } finally {
+                lease.release()
+            }
+            await rebooted.runtime.flushPendingData('exit')
+            expect(consoleError.mock.calls.length, JSON.stringify(trace)).toBe(0)
+        } finally {
+            if (editor && app) await app.svelte.unmount(editor)
+            target.remove()
+            consoleError.mockRestore()
+            Object.assign(globalThis, previousGlobals)
+        }
+    })
+
     it.each(['immediate', 'autosave'])('preserves cold-selection editor changes and a user-only turn through %s navigation', async (timing) => {
         const indexedDB = new IDBFactory()
         const databaseName = `cold-selection-${timing}`
@@ -265,6 +651,280 @@ describe('windowed navigation integration', () => {
             ).toHaveLength(1)
         } finally {
             completeLease.release()
+        }
+    })
+})
+
+describe('selected chat list edits', () => {
+    it.each(['character', 'group'] as const)('adds, duplicates, reorders and removes %s chats beside the bound editor', async (type) => {
+        const indexedDB = new IDBFactory()
+        const previousGlobals = { indexedDB: globalThis.indexedDB, IDBKeyRange: globalThis.IDBKeyRange }
+        const ownerId = 'edited-owner'
+        const originalId = `${ownerId}-chat`
+        const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+        const target = document.createElement('div')
+        document.body.append(target)
+        let editor: ReturnType<ProductionApp['svelte']['mount']> | null = null
+        let app: ProductionApp | null = null
+        const reader = new IndexedDbPersistentDataStore('risuai-persistent-data', indexedDB, IDBKeyRange)
+        try {
+            app = await bootProductionApp(indexedDB, syntheticLibrary(type))
+            const { svelte, stores, runtime, characters, chatListRows } = app
+            const selected = () => stores.DBState.db.characters[get(stores.selectedCharID)]
+            const selectedChatId = () => selected().chats[selected().chatPage]?.id
+            const chatIds = () => selected().chats.map((chat) => chat.id)
+            editor = svelte.mount(app.Harness, { target })
+            svelte.flushSync()
+            expect(await characters.changeChar(
+                stores.DBState.db.characters.findIndex((candidate) => candidate.chaId === ownerId),
+            )).toBe(true)
+            await vi.waitFor(() => expect(target.querySelector('input')).not.toBeNull())
+
+            // Consecutive clicks land while the editor is still reacquiring the new selection.
+            expect(await characters.addNewChat(selected())).toBe(true)
+            const first = chatIds()[0]
+            expect(selectedChatId()).toBe(first)
+            expect(await characters.addNewChat(selected())).toBe(true)
+            const second = chatIds()[0]
+            expect(selectedChatId()).toBe(second)
+            expect(chatIds()).toEqual([second, first, originalId])
+
+            expect(await characters.duplicateChat(ownerId, originalId)).toBe(true)
+            const duplicate = chatIds()[0]
+            expect(selectedChatId()).toBe(duplicate)
+            expect(selected().chats[0].name).toBe('Synthetic chat (Copy)')
+
+            const reversed = [...chatIds()].reverse()
+            expect(await characters.editSelectedChatList(ownerId, 'reorder-chats', (character) => {
+                const chats = chatListRows.orderChatsByDroppedRows(
+                    character.chats,
+                    reversed.map((id) => ({ id, folderId: null })),
+                )
+                if (!chats) return false
+                character.chats = chats
+                return null
+            })).toBe(true)
+            expect(chatIds()).toEqual(reversed)
+            expect(selectedChatId()).toBe(duplicate)
+
+            expect(await characters.removeChat(selected(), duplicate)).toBe(true)
+            expect(chatIds()).not.toContain(duplicate)
+            expect(selectedChatId()).toBe(chatIds()[0])
+            expect(await characters.removeChat(selected(), second)).toBe(true)
+            expect(chatIds()).toEqual([originalId, first])
+            expect(selectedChatId()).toBe(originalId)
+
+            expect(runtime.pendingWorkingSetRefreshRevision).toBeNull()
+            expect(consoleError.mock.calls.map((args) => args.map((value) =>
+                value instanceof Error ? `${value.name}: ${value.message}` : String(value).slice(0, 200)))).toEqual([])
+
+            await svelte.unmount(editor)
+            editor = null
+            await runtime.flushPendingData('exit')
+            await reader.open()
+            expect((await reader.readRoot()).revision).toBe(runtime.revision)
+            const created = await reader.readConversation(ownerId, first)
+            expect(created?.value.name).toBe('New Chat 2')
+            expect(created?.value.message.map((message) => message.saying ?? null))
+                .toEqual(type === 'group' ? ['group-member'] : [])
+            expect(await reader.readConversation(ownerId, duplicate)).toBeNull()
+            expect(await reader.readConversation(ownerId, second)).toBeNull()
+
+            const rebooted = await bootProductionApp(indexedDB)
+            app = rebooted
+            expect(await rebooted.characters.changeChar(
+                rebooted.stores.DBState.db.characters.findIndex((candidate) => candidate.chaId === ownerId),
+            )).toBe(true)
+            const reopened = rebooted.stores.DBState.db.characters[get(rebooted.stores.selectedCharID)]
+            expect(reopened.chats.map((chat) => chat.id)).toEqual([originalId, first])
+            expect(reopened.chats[reopened.chatPage].id).toBe(originalId)
+            await rebooted.runtime.flushPendingData('exit')
+        } finally {
+            if (editor && app) await app.svelte.unmount(editor)
+            target.remove()
+            consoleError.mockRestore()
+            Object.assign(globalThis, previousGlobals)
+        }
+    })
+
+    it.each(['character', 'group'] as const)('edits the %s list around a windowed selection without loading the selected conversation', async (type) => {
+        const indexedDB = new IDBFactory()
+        const previousGlobals = { indexedDB: globalThis.indexedDB, IDBKeyRange: globalThis.IDBKeyRange }
+        const ownerId = 'edited-owner'
+        const selectedId = `${ownerId}-chat`
+        const otherId = `${ownerId}-other`
+        const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {})
+        const reader = new IndexedDbPersistentDataStore('risuai-persistent-data', indexedDB, IDBKeyRange)
+        const history = Array.from({ length: 300 }, (_, index) => ({
+            role: index % 2 === 0 ? 'user' : 'char',
+            data: `Synthetic windowed message ${index}`,
+            chatId: `synthetic-windowed-${index}`,
+            ...(type === 'group' && index % 2 === 1 ? { saying: 'group-member' } : {}),
+        })) as Message[]
+        const library = syntheticLibrary(type)
+        const owner = library.characters[0] as character
+        owner.chats[0].message = history
+        owner.chats.push({
+            id: otherId,
+            name: 'Other chat',
+            note: 'Other note',
+            localLore: [{ key: 'other', comment: 'Other lore', content: 'kept', mode: 'normal', insertorder: 100, alwaysActive: false, secondkey: '', selective: false }],
+            message: [{ role: 'user', data: 'Other history' }],
+        } as unknown as Chat)
+        owner.chatFolders = [{ id: 'folder-a', name: 'Folder A', folded: false }] as character['chatFolders']
+        let app: ProductionApp | null = null
+        try {
+            app = await bootProductionApp(indexedDB, library)
+            const { stores, runtime, characters, chatListRows } = app
+            const selected = () => stores.DBState.db.characters[get(stores.selectedCharID)] as character
+            const chatIds = () => selected().chats.map((chat) => chat.id)
+            expect(await characters.changeChar(
+                stores.DBState.db.characters.findIndex((candidate) => candidate.chaId === ownerId),
+            )).toBe(true)
+            expect(runtime.getSelectedConversationMode()).toBe('windowed')
+            expect(selected().chats[selected().chatPage].id).toBe(selectedId)
+            // Activation changes are saved separately from the list edits below.
+            await runtime.flushPendingData('activation')
+
+            const readConversation = vi.spyOn(runtime.store, 'readConversation')
+            const committed: string[][] = []
+            const commit = runtime.store.commit.bind(runtime.store)
+            vi.spyOn(runtime.store, 'commit').mockImplementation(async (request) => {
+                committed.push((request.conversations ?? []).map((mutation) =>
+                    `${mutation.type}:${mutation.type === 'reorder' ? mutation.conversationIds.join(',') : mutation.conversationId}`))
+                return commit(request)
+            })
+
+            // Moving the other chat into a folder only changes its folder on disk.
+            expect(await characters.editSelectedChatList(ownerId, 'reorder-chats', (character) => {
+                const chats = chatListRows.orderChatsByDroppedRows(character.chats, [
+                    { id: otherId, folderId: 'folder-a' },
+                    { id: selectedId, folderId: null },
+                ])
+                if (!chats) return false
+                character.chats = chats
+                return null
+            })).toBe(true)
+            expect(chatIds()).toEqual([otherId, selectedId])
+            expect(selected().chatPage).toBe(1)
+
+            const imported: Chat = {
+                id: `${ownerId}-imported`,
+                name: 'Imported chat',
+                note: 'Imported note',
+                localLore: [],
+                message: [{ role: 'user', data: 'Imported history' }],
+            }
+            expect(await characters.editSelectedChatList(ownerId, 'import-chat', (character) => {
+                character.chats.unshift(imported)
+                return null
+            })).toBe(true)
+            expect(chatIds()).toEqual([imported.id, otherId, selectedId])
+
+            expect(await characters.removeChat(selected(), otherId)).toBe(true)
+            expect(chatIds()).toEqual([imported.id, selectedId])
+            expect(selected().chats[selected().chatPage].id).toBe(selectedId)
+            expect(runtime.getSelectedConversationMode()).toBe('windowed')
+
+            expect(await characters.addNewChat(selected())).toBe(true)
+            const added = chatIds()[0]
+            expect(chatIds()).toEqual([added, imported.id, selectedId])
+            expect(selected().chats[selected().chatPage].id).toBe(added)
+
+            expect(readConversation.mock.calls.filter(([, id]) => id === selectedId)).toEqual([])
+            expect(committed.slice(0, 4)).toEqual([
+                [`replace-range:${otherId}`, `reorder:${otherId},${selectedId}`],
+                [`replace-range:${imported.id}`, `reorder:${imported.id},${otherId},${selectedId}`],
+                [`delete:${otherId}`],
+                [`replace-range:${added}`, `reorder:${added},${imported.id},${selectedId}`],
+            ])
+            expect(runtime.pendingWorkingSetRefreshRevision).toBeNull()
+            expect(consoleError.mock.calls.map((args) => args.map((value) =>
+                value instanceof Error ? `${value.name}: ${value.message}` : String(value).slice(0, 200)))).toEqual([])
+
+            await runtime.flushPendingData('exit')
+            await reader.open()
+            expect((await reader.readRoot()).revision).toBe(runtime.revision)
+            const order = await reader.queryConversations({ characterId: ownerId, order: 'configured', limit: 10 })
+            expect(order.items.map((item) => item.id)).toEqual([added, imported.id, selectedId])
+            expect((await reader.readConversation(ownerId, selectedId))?.value.message).toEqual(history)
+            expect((await reader.readConversation(ownerId, imported.id!))?.value).toMatchObject({
+                note: 'Imported note',
+                message: imported.message,
+            })
+            expect(await reader.readConversation(ownerId, otherId)).toBeNull()
+            expect((await reader.readConversation(ownerId, added))?.value.message
+                .map((message) => message.saying ?? null))
+                .toEqual(type === 'group' ? ['group-member'] : [])
+        } finally {
+            consoleError.mockRestore()
+            Object.assign(globalThis, previousGlobals)
+        }
+    })
+
+    it('keeps the saved body of a summarized chat when it moves into a folder', async () => {
+        const indexedDB = new IDBFactory()
+        const previousGlobals = { indexedDB: globalThis.indexedDB, IDBKeyRange: globalThis.IDBKeyRange }
+        const ownerId = 'edited-owner'
+        const selectedId = `${ownerId}-chat`
+        const otherId = `${ownerId}-other`
+        const reader = new IndexedDbPersistentDataStore('risuai-persistent-data', indexedDB, IDBKeyRange)
+        const library = syntheticLibrary('character')
+        const owner = library.characters[0] as character
+        const otherLore = [{ key: 'other', comment: 'Other lore', content: 'kept', mode: 'normal', insertorder: 100, alwaysActive: false, secondkey: '', selective: false }]
+        owner.chats.push({
+            id: otherId,
+            name: 'Other chat',
+            note: 'Other note',
+            localLore: otherLore,
+            message: [{ role: 'user', data: 'Other history' }],
+        } as unknown as Chat)
+        owner.chatFolders = [{ id: 'folder-a', name: 'Folder A', folded: false }] as character['chatFolders']
+        try {
+            const { stores, runtime, characters, chatListRows } = await bootProductionApp(indexedDB, library)
+            const selected = () => stores.DBState.db.characters[get(stores.selectedCharID)] as character
+            expect(await characters.changeChar(
+                stores.DBState.db.characters.findIndex((candidate) => candidate.chaId === ownerId),
+            )).toBe(true)
+            expect(runtime.getSelectedConversationMode()).toBe('windowed')
+            const other = selected().chats.find((chat) => chat.id === otherId)!
+            // The resident copy is a summary without the saved note, lore or messages.
+            expect(other).toMatchObject({ note: '', localLore: [], message: [] })
+            const readConversation = vi.spyOn(runtime.store, 'readConversation')
+
+            expect(await characters.editSelectedChatList(ownerId, 'reorder-chats', (character) => {
+                const chats = chatListRows.orderChatsByDroppedRows(character.chats, [
+                    { id: selectedId, folderId: null },
+                    { id: otherId, folderId: 'folder-a' },
+                ])
+                if (!chats) return false
+                character.chats = chats
+                return null
+            })).toBe(true)
+            await runtime.flushPendingData('exit')
+            expect(readConversation).not.toHaveBeenCalled()
+
+            await reader.open()
+            expect((await reader.readConversation(ownerId, otherId))?.value).toMatchObject({
+                folderId: 'folder-a',
+                note: 'Other note',
+                localLore: otherLore,
+                message: [{ role: 'user', data: 'Other history' }],
+            })
+
+            // The sidebar summary read after a restart shows the chat in its folder.
+            const rebooted = await bootProductionApp(indexedDB)
+            expect(await rebooted.characters.changeChar(
+                rebooted.stores.DBState.db.characters.findIndex((candidate) => candidate.chaId === ownerId),
+            )).toBe(true)
+            const reopened = rebooted.stores.DBState.db.characters[get(rebooted.stores.selectedCharID)] as character
+            expect(reopened.chats.map((chat) => [chat.id, chat.folderId ?? null])).toEqual([
+                [selectedId, null],
+                [otherId, 'folder-a'],
+            ])
+            await rebooted.runtime.flushPendingData('exit')
+        } finally {
+            Object.assign(globalThis, previousGlobals)
         }
     })
 })

@@ -53,6 +53,9 @@
     }
 
     export function updateViewportBinding() {}
+    export function hasActiveEditor() {
+        return chatMountProbe.activeEditors.has(instanceId)
+    }
     export function refreshMessageDisplay(state: ChatDisplayRefresh) {
         message = state.message
         parserProjection = state.parserProjection

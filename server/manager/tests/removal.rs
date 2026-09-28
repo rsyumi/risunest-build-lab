@@ -82,7 +82,9 @@ fn run_removal(fail_profile_cleanup: bool) {
     if fail_profile_cleanup {
         assert!(!result.status.success());
         assert!(String::from_utf8_lossy(&result.stderr).contains("removal-linked-path"));
-        for executable in [&manager, &server, &gui] { assert!(executable.exists()); }
+        for executable in [&manager, &server, &gui] {
+            assert!(executable.exists());
+        }
         assert!(install.join("risunest-sync-bundle.json").exists());
         assert!(root.join("risunest-sync-instance.json").exists());
         assert!(root.join("metadata.sqlite").exists());
