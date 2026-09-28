@@ -106,15 +106,26 @@ async fn run() -> Result<()> {
         ["installer", "finish", nonce] => update::finish_installer_guard(&root, nonce),
         #[cfg(not(windows))]
         ["removal-helper", parent, mode @ ("delete" | "preserve")] => {
-            risunest_sync_manager::removal::finish_after_exit(&root, &executable,
-                parent.parse().map_err(|_| "invalid-removal-parent")?, *mode == "delete").await
+            risunest_sync_manager::removal::finish_after_exit(
+                &root,
+                &executable,
+                parent.parse().map_err(|_| "invalid-removal-parent")?,
+                *mode == "delete",
+            )
+            .await
         }
         ["uninstall", "lock-held"] => {
             risunest_sync_manager::removal::cleanup_services(&root, &executable).await
         }
-        ["installer", "forget-removal"] => risunest_sync_manager::removal::forget_registration(&root, &executable),
-        ["installer", "delete-data"] => risunest_sync_manager::removal::delete_registered_data(&root, &executable),
-        ["uninstall", ..] => risunest_sync_manager::removal::cli(&root, &executable, &command[1..]).await,
+        ["installer", "forget-removal"] => {
+            risunest_sync_manager::removal::forget_registration(&root, &executable)
+        }
+        ["installer", "delete-data"] => {
+            risunest_sync_manager::removal::delete_registered_data(&root, &executable)
+        }
+        ["uninstall", ..] => {
+            risunest_sync_manager::removal::cli(&root, &executable, &command[1..]).await
+        }
         ["autostart", "status"] => {
             let status = platform::startup(&root, &executable, "status")?;
             println!(

@@ -15,9 +15,14 @@ use std::{
     collections::BTreeSet,
     io::{Read, Seek, SeekFrom},
 };
-// Include the envelope for one 4 MiB full frame.
-const FRAME_TARGET_BYTES: usize = 4 * 1024 * 1024 + 53;
+// The upload side aims at the same reply target the download side plans
+// against, so one constant describes both directions.
+const FRAME_TARGET_BYTES: usize = transfer::PREFERRED_BATCH_BYTES;
 const CHUNK: usize = transfer::UPLOAD_CHUNK_BYTES;
+/// One regrouping round answers a reply the server filled. A second covers a
+/// bin the peer still declined; past that the single-object path is the
+/// correct outcome, and the constant is what stops a rebinning loop.
+const REBIN_PASSES: usize = 2;
 #[path = "transfer_references.rs"]
 mod references;
 
@@ -75,6 +80,79 @@ impl<'a> Transfer<'a> {
         base_version: &risunest_sync_wire::RecordVersion,
     ) -> Result<Vec<String>> {
         self.download_record_inner(version, bases, base_version, true)
+    }
+    /// Fetch a whole page's record and descriptor identities in one request.
+    /// The per-record work that follows finds them cached and sends nothing,
+    /// so a page costs its own requests rather than one request per record.
+    pub(crate) fn prefetch_record_metadata(
+        &self,
+        records: &[(risunest_sync_wire::RecordVersion, Vec<String>)],
+    ) -> Result<()> {
+        let mut hashes = Vec::new();
+        let mut hints = std::collections::BTreeMap::new();
+        for (version, bases) in records {
+            let risunest_sync_wire::RecordVersion::Live {
+                object_hash,
+                descriptor_hash: Some(descriptor_hash),
+            } = version
+            else {
+                continue;
+            };
+            for digest in [object_hash, descriptor_hash] {
+                // Records sharing an identity belong in the request once. The
+                // first record's bases are kept; a base inventory is a delta
+                // hint, not part of the identity being requested.
+                if hints.insert(digest.clone(), bases.clone()).is_none() {
+                    hashes.push(digest.clone());
+                }
+            }
+        }
+        if hashes.is_empty() {
+            return Ok(());
+        }
+        self.download_with_hints(&hashes, &[], &hints)
+    }
+    /// Fetch the bodies a page's records declare, in the same batched shape.
+    /// The set comes from each record's already cached descriptor, so no
+    /// payload is retained for the page to collect it. A descriptor that does
+    /// not read or validate here is left to the per-record path, which reports
+    /// it; a prefetch never decides an outcome.
+    pub(crate) fn prefetch_record_dependencies(
+        &self,
+        records: &[(risunest_sync_wire::RecordVersion, Vec<String>)],
+    ) -> Result<()> {
+        use risunest_sync_wire::descriptor::RecordDescriptor;
+        self.ensure_active()?;
+        let mut hashes = Vec::new();
+        let mut hints = std::collections::BTreeMap::new();
+        for (version, bases) in records {
+            let risunest_sync_wire::RecordVersion::Live {
+                descriptor_hash: Some(descriptor_hash),
+                ..
+            } = version
+            else {
+                continue;
+            };
+            let Ok(bytes) = self.cache.read(descriptor_hash, MAX_METADATA_BYTES) else {
+                continue;
+            };
+            let Ok(descriptor) = canonical::decode::<RecordDescriptor>(&bytes, MAX_METADATA_BYTES)
+            else {
+                continue;
+            };
+            if descriptor.validate().is_err() {
+                continue;
+            }
+            for digest in descriptor.dependencies {
+                if hints.insert(digest.clone(), bases.clone()).is_none() {
+                    hashes.push(digest);
+                }
+            }
+        }
+        if hashes.is_empty() {
+            return Ok(());
+        }
+        self.download_with_hints(&hashes, &[], &hints)
     }
     fn download_record_inner(
         &self,
@@ -201,6 +279,14 @@ impl<'a> Transfer<'a> {
         }
     }
     fn store_download(&self, hash: &str, bytes: &[u8]) -> Result<()> {
+        if self.destination.is_none() {
+            // The derived cache owns where a body of this size belongs, and
+            // collects the small ones so a page of them lands together.
+            if self.cache.put(bytes)? != hash {
+                return Err(SyncError::new("transfer-target-mismatch", 502));
+            }
+            return Ok(());
+        }
         prepare_checked(
             self.destination(hash, bytes.len() as u64)?,
             &mut std::io::Cursor::new(bytes),
@@ -613,6 +699,112 @@ impl<'a> Transfer<'a> {
     pub fn download(&self, hashes: &[String], base_candidates: &[String]) -> Result<()> {
         self.download_with_hints(hashes, base_candidates, &std::collections::BTreeMap::new())
     }
+    /// One `objects/transfer` request. Frames the server answered in full are
+    /// stored; the identities it declined are returned with the size it
+    /// reported, so the caller can decide whether they still fit a reply.
+    fn transfer_batch(
+        &self,
+        targets: &[String],
+        base_candidates: &[String],
+        hints: &std::collections::BTreeMap<String, Vec<String>>,
+    ) -> Result<Vec<(String, u64)>> {
+        let mut requests = Vec::new();
+        for target in targets {
+            let candidates = hints.get(target).map_or(base_candidates, Vec::as_slice);
+            requests.push(serde_json::json!({"target":target,"bases":self.select_bases(target,None,candidates)?}));
+        }
+        let reply = self.client.request(
+            Method::POST,
+            "objects/transfer",
+            &[],
+            Some(canonical::encode(&requests)?),
+            &[],
+            risunest_sync_wire::transfer::MAX_BATCH_BYTES,
+        )?;
+        if reply.status != 200 {
+            return Err(response_error(reply));
+        }
+        // The encoded reply has no reader once its frames are owned, and
+        // holding both keeps two copies of a batch alive until the last
+        // body is stored.
+        let frames = transfer::decode(&reply.body)?;
+        drop(reply);
+        if frames.len() != targets.len() {
+            return Err(SyncError::new("transfer-count-mismatch", 502));
+        }
+        let mut declined = Vec::new();
+        // One reply's bodies become durable together.
+        let batch = self.cache.begin_batch()?;
+        for (target, frame) in targets.iter().zip(frames) {
+            self.ensure_active()?;
+            match frame {
+                Frame::Full(bytes) => {
+                    if hash(&bytes) != *target {
+                        return Err(SyncError::new("transfer-target-mismatch", 502));
+                    }
+                    self.store_download(target, &bytes)?;
+                    self.client.verified(bytes.len() as u64);
+                }
+                Frame::Delta(recipe) => {
+                    if recipe.target_hash != *target {
+                        return Err(SyncError::new("transfer-target-mismatch", 502));
+                    }
+                    let bases = recipe
+                        .bases
+                        .iter()
+                        .map(|b| self.cache.read(&b.hash, delta::MAX_TARGET_BYTES))
+                        .collect::<Result<Vec<_>>>()?;
+                    let bytes =
+                        recipe.apply(&bases.iter().map(Vec::as_slice).collect::<Vec<_>>())?;
+                    self.store_download(target, &bytes)?;
+                    self.client.verified(bytes.len() as u64);
+                }
+                Frame::FullRequired { hash, size } => {
+                    if hash != *target {
+                        return Err(SyncError::new("transfer-target-mismatch", 502));
+                    }
+                    declined.push((hash, size));
+                }
+            }
+        }
+        batch.commit()?;
+        Ok(declined)
+    }
+
+    /// Group declined identities into requests the server can answer inline.
+    /// A reply starts at the eight-byte batch header and each full frame adds
+    /// its body plus 45 bytes of framing, so a bin fits exactly when that sum
+    /// stays within the shared reply target.
+    fn inline_bins(declined: Vec<(String, u64)>) -> (Vec<Vec<String>>, Vec<(String, u64)>) {
+        let (mut bins, mut oversized) = (Vec::new(), Vec::new());
+        let (mut bin, mut used) = (Vec::new(), 8usize);
+        for (target, size) in declined {
+            // A body that cannot fit an empty reply is never answered inline,
+            // whatever the budget. Those keep the existing large-object path.
+            let Some(framed) = usize::try_from(size)
+                .ok()
+                .and_then(|size| size.checked_add(45))
+                .filter(|framed| 8 + framed <= transfer::PREFERRED_BATCH_BYTES)
+            else {
+                oversized.push((target, size));
+                continue;
+            };
+            if !bin.is_empty()
+                && (used + framed > transfer::PREFERRED_BATCH_BYTES
+                    || bin.len() == transfer::MAX_BATCH_OBJECTS)
+            {
+                bins.push(std::mem::take(&mut bin));
+                used = 8;
+            }
+            used += framed;
+            bin.push(target);
+        }
+        if !bin.is_empty() {
+            bins.push(bin);
+        }
+        (bins, oversized)
+    }
+
     fn download_with_hints(
         &self,
         hashes: &[String],
@@ -632,65 +824,40 @@ impl<'a> Transfer<'a> {
             }
         });
         loop {
-            let missing = absent.by_ref().take(1024).collect::<Result<Vec<_>>>()?;
+            let missing = absent
+                .by_ref()
+                .take(transfer::MAX_BATCH_OBJECTS)
+                .collect::<Result<Vec<_>>>()?;
             if missing.is_empty() {
                 break;
             }
-            let mut requests = Vec::new();
-            for target in &missing {
-                let candidates = hints.get(target).map_or(base_candidates, Vec::as_slice);
-                requests.push(serde_json::json!({"target":target,"bases":self.select_bases(target,None,candidates)?}));
-            }
-            let reply = self.client.request(
-                Method::POST,
-                "objects/transfer",
-                &[],
-                Some(canonical::encode(&requests)?),
-                &[],
-                risunest_sync_wire::transfer::MAX_BATCH_BYTES,
-            )?;
-            if reply.status != 200 {
-                return Err(response_error(reply));
-            }
-            let frames = transfer::decode(&reply.body)?;
-            if frames.len() != missing.len() {
-                return Err(SyncError::new("transfer-count-mismatch", 502));
-            }
-            for (target, frame) in missing.iter().zip(frames) {
-                self.ensure_active()?;
-                match frame {
-                    Frame::Full(bytes) => {
-                        if hash(&bytes) != *target {
-                            return Err(SyncError::new("transfer-target-mismatch", 502));
-                        }
-                        self.store_download(target, &bytes)?;
-                        self.client.verified(bytes.len() as u64);
-                    }
-                    Frame::Delta(recipe) => {
-                        if recipe.target_hash != *target {
-                            return Err(SyncError::new("transfer-target-mismatch", 502));
-                        }
-                        let bases = recipe
-                            .bases
-                            .iter()
-                            .map(|b| self.cache.read(&b.hash, delta::MAX_TARGET_BYTES))
-                            .collect::<Result<Vec<_>>>()?;
-                        let bytes =
-                            recipe.apply(&bases.iter().map(Vec::as_slice).collect::<Vec<_>>())?;
-                        self.store_download(target, &bytes)?;
-                        self.client.verified(bytes.len() as u64);
-                    }
-                    Frame::FullRequired { hash, size } => {
-                        if hash != *target {
-                            return Err(SyncError::new("transfer-target-mismatch", 502));
-                        }
-                        let candidates = hints.get(target).map_or(base_candidates, Vec::as_slice);
-                        if !self.download_delta(target, size, candidates)? {
-                            self.download_large(target, size)?;
-                        }
-                        self.client.verified(size);
-                    }
+            let mut pending = self.transfer_batch(&missing, base_candidates, hints)?;
+            // A filled reply declines the remaining identities even when they
+            // would fit one of their own. Re-request those as sized bins
+            // instead of falling through to one request per object. The pass
+            // limit is the loop guard: a peer that keeps declining a fitting
+            // object gets the single-object path rather than another round.
+            for _ in 0..REBIN_PASSES {
+                if pending.is_empty() {
+                    break;
                 }
+                let (bins, oversized) = Self::inline_bins(std::mem::take(&mut pending));
+                pending = oversized;
+                if bins.is_empty() {
+                    break;
+                }
+                for bin in bins {
+                    self.ensure_active()?;
+                    pending.extend(self.transfer_batch(&bin, base_candidates, hints)?);
+                }
+            }
+            for (target, size) in pending {
+                self.ensure_active()?;
+                let candidates = hints.get(&target).map_or(base_candidates, Vec::as_slice);
+                if !self.download_delta(&target, size, candidates)? {
+                    self.download_large(&target, size)?;
+                }
+                self.client.verified(size);
             }
         }
         self.ensure_active()
@@ -747,10 +914,10 @@ impl<'a> Transfer<'a> {
         let identities = candidates
             .iter()
             .zip(&sources)
-            .map(|(hash, file)| {
+            .map(|(hash, body)| {
                 Ok(Base {
                     hash: hash.clone(),
-                    size: file.metadata()?.len(),
+                    size: body.len()?,
                 })
             })
             .collect::<Result<Vec<_>>>()?;

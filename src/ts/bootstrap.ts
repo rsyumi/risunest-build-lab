@@ -12,7 +12,8 @@ import { changeFullscreen, sleep } from "./util"
 import { get } from "svelte/store";
 import { setDatabase, getDatabase, type Database } from "./storage/database.svelte";
 import { getDeviceSettings, loadDeviceSettings } from "./storage/deviceSettings";
-import { setNativeLogFileEnabled } from "./nativeLog";
+import { recordNativeLogError, setNativeLogFileEnabled } from "./nativeLog";
+import { registerRuntimeErrorHandlers } from "./runtimeErrors";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { MobileGUI, botMakerMode, selectedCharID, loadedStore, LoadingStatusState, bootFailure, type BootFailure } from "./stores.svelte";
 import { loadPlugins, loadPluginsAfterAuthoritativeRestore } from "./plugins/plugins.svelte";
@@ -143,6 +144,10 @@ import {
 } from './storage/syncExitProduction'
 import { getExternalStorageBridge } from './storage/sync/external/bridge'
 import { createServerSyncExitDrainAdapter } from './storage/sync/serverSyncProduction'
+import {
+    retainableReplacementFence,
+    type RetainableReplacementFence,
+} from './storage/retainableReplacementFence'
 
 const appWindow = isTauri ? getCurrentWebviewWindow() : null
 let disposeLifecycleCommitListeners: (() => void) | undefined
@@ -624,6 +629,7 @@ export async function loadData() {
             }
         }
         let heldExitRevision: number | undefined
+        let heldExitFence: RetainableReplacementFence | undefined
         let selectedExitDrain: SyncExitDrainAdapter | null = null
         const syncExitCoordinator = createSyncExitCoordinator({
             async acquireEditFence() {
@@ -631,8 +637,11 @@ export async function loadData() {
                     'normal-exit-fence',
                     { publishOfficial: false },
                 )
-                const fence = await runtime.acquireDestructiveReplacementFence(token)
+                const fence = retainableReplacementFence(
+                    await runtime.acquireDestructiveReplacementFence(token),
+                )
                 heldExitRevision = fence.revision
+                heldExitFence = fence
                 return fence
             },
             flushLocal: () => runtime.flushPendingDataLocally('normal-exit'),
@@ -667,7 +676,10 @@ export async function loadData() {
                     && selection.connectionId
                 ) {
                     selectionId = `server:${selection.connectionId}:${selection.selectionEpoch}`
-                    selectedExitDrain = createServerSyncExitDrainAdapter(selectionId)
+                    selectedExitDrain = createServerSyncExitDrainAdapter(
+                        selectionId,
+                        heldExitFence,
+                    )
                 } else if (
                     !selection.decisionRequired
                     && selection.kind === 'external'
@@ -681,7 +693,10 @@ export async function loadData() {
                         './storage/sync/external/production'
                     )
                     await installExternalStorageProduction()
-                    selectedExitDrain = getExternalStorageSyncExitDrainAdapter(capture)
+                    selectedExitDrain = getExternalStorageSyncExitDrainAdapter(
+                        capture,
+                        heldExitFence,
+                    )
                     if (!selectedExitDrain || selectedExitDrain.id !== selectionId) {
                         throw new Error('Selected external synchronization target is unavailable')
                     }
@@ -872,19 +887,13 @@ async function registerSw() {
 /**
  * Updates the error handling by adding custom handlers for errors and unhandled promise rejections.
  */
+let disposeRuntimeErrors: (() => void) | undefined
 function updateErrorHandling() {
-    const errorHandler = (event: ErrorEvent) => {
-        console.error(event.error);
-        if(!(event.error.target instanceof Worker)){
-            alertError(event.error);            
-        }
-    };
-    const rejectHandler = (event: PromiseRejectionEvent) => {
-        console.error(event.reason);
-        alertError(event.reason);
-    };
-    window.addEventListener('error', errorHandler);
-    window.addEventListener('unhandledrejection', rejectHandler);
+    disposeRuntimeErrors ??= registerRuntimeErrorHandlers(
+        window,
+        alertError,
+        isTauri ? recordNativeLogError : undefined,
+    )
 }
 
 /**

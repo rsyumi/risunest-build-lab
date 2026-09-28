@@ -79,6 +79,14 @@ describe('plugin data manager deletions', () => {
         expect(root.querySelectorAll('[data-plugin-data-row]')).toHaveLength(3)
     })
 
+    it('names both search fields for screen readers', async () => {
+        const root = await open()
+        const names = [...root.querySelectorAll<HTMLInputElement>('input[type="text"]')].map(
+            (input) => root.querySelector(`label[for="${input.id}"]`)?.textContent,
+        )
+        expect(names).toEqual([strings.searchKey, strings.searchValue])
+    })
+
     it('asks before deleting one value and does nothing when declined', async () => {
         const root = await open()
         alerts.alertConfirm.mockResolvedValue(false)

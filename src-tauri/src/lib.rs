@@ -53,6 +53,8 @@ mod trust_boundary;
 mod test_memory;
 #[cfg(windows)]
 mod windows_appearance;
+#[cfg(windows)]
+mod windows_webview;
 
 use base64::{engine::general_purpose, Engine as _};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
@@ -287,7 +289,9 @@ fn builder_with_main_window(
     }
     #[cfg(windows)]
     {
-        builder = builder.plugin(windows_appearance::init());
+        builder = builder
+            .plugin(windows_appearance::init())
+            .plugin(windows_webview::init());
     }
     #[cfg(target_os = "macos")]
     {
@@ -331,6 +335,17 @@ fn builder_with_main_window(
                             );
                         }
                     }
+                    if let Some(state) =
+                        webview.try_state::<server_sync::commands::ServerSyncCommandState>()
+                    {
+                        if let Err(error) = state.cancel() {
+                            crate::nlog!(
+                                "error",
+                                "failed to reset server sync renderer session: {}",
+                                error.code
+                            );
+                        }
+                    }
                     webview
                         .state::<android_commit_transport::AndroidCommitState>()
                         .reset();
@@ -366,6 +381,17 @@ fn builder_with_main_window(
                         crate::nlog!(
                             "error",
                             "failed to reset native media renderer session: {error}"
+                        );
+                    }
+                }
+                if let Some(state) =
+                    webview.try_state::<server_sync::commands::ServerSyncCommandState>()
+                {
+                    if let Err(error) = state.cancel() {
+                        crate::nlog!(
+                            "error",
+                            "failed to reset server sync renderer session: {}",
+                            error.code
                         );
                     }
                 }
@@ -407,6 +433,17 @@ fn builder_with_main_window(
                         crate::nlog!(
                             "error",
                             "failed to reset native media renderer session: {error}"
+                        );
+                    }
+                }
+                if let Some(state) =
+                    webview.try_state::<server_sync::commands::ServerSyncCommandState>()
+                {
+                    if let Err(error) = state.cancel() {
+                        crate::nlog!(
+                            "error",
+                            "failed to reset server sync renderer session: {}",
+                            error.code
                         );
                     }
                 }
@@ -461,6 +498,7 @@ fn builder_with_main_window(
                     .root
                     .set(app_data_dir.clone())
                     .map_err(|_| "external storage root is already configured".to_string())?;
+                external_storage::leftovers::remove_at_startup(&app_data_dir);
                 let agent_build = app
                     .config()
                     .plugins
@@ -508,6 +546,7 @@ fn builder_with_main_window(
                 }
                 app.state::<native_media::ipc::NativeMediaIpcState>()
                     .configure(app_data_dir.join("native-media-ipc"))?;
+                server_sync::residency::arm_anchor(&app_data_dir);
                 app.manage(native_media::streaming::MediaServerState::initialize(
                     app_data_dir.clone(),
                 ));

@@ -26,6 +26,9 @@ struct Trace {
     corrupt_retention: AtomicBool,
     retention_pages: AtomicU64,
     fail_retention_page: AtomicU64,
+    metadata_pages: AtomicU64,
+    fail_metadata_page: AtomicU64,
+    checkpoint_total_override: Mutex<Option<Value>>,
     fail_release_once: AtomicBool,
     expire_checkpoint: AtomicBool,
     released_before_marker: AtomicBool,
@@ -61,15 +64,26 @@ async fn observe(
         }
         if method == "DELETE" && path.starts_with("/checkpoints/") {
             let root = trace.root.lock().unwrap().clone().unwrap();
-            let complete = fs::read_dir(root.join("server-sync/backups")).ok().is_some_and(|entries|
-                entries.filter_map(std::result::Result::ok).any(|entry| entry.path().join("complete.json").is_file()));
-            if !complete { trace.released_before_marker.store(true, Ordering::SeqCst); }
+            let captures = fs::read_dir(root.join("server-sync/backups")).ok().map(|entries|
+                entries.filter_map(std::result::Result::ok).map(|entry| entry.path()).collect::<Vec<_>>()).unwrap_or_default();
+            let complete = captures.iter().any(|path| path.join("complete.json").is_file());
+            // A rejected checkpoint has never been adopted by a capture.
+            if !complete && captures.iter().any(|path| path.join("index.sqlite").is_file()) {
+                trace.released_before_marker.store(true, Ordering::SeqCst);
+            }
         }
         if method == "POST" && path == "/objects/retention" {
             let page = trace.retention_pages.fetch_add(1, Ordering::SeqCst) + 1;
             if trace.fail_retention_page.load(Ordering::SeqCst) == page {
                 return (axum::http::StatusCode::BAD_REQUEST,
                     axum::Json(json!({"error":"synthetic-retention-failure"}))).into_response();
+            }
+        }
+        if method == "POST" && path == "/objects/transfer" {
+            let page = trace.metadata_pages.fetch_add(1, Ordering::SeqCst) + 1;
+            if trace.fail_metadata_page.load(Ordering::SeqCst) == page {
+                return (axum::http::StatusCode::BAD_REQUEST,
+                    axum::Json(json!({"error":"synthetic-transfer-failure"}))).into_response();
             }
         }
         if method == "POST" && path == "/objects/retention/release"
@@ -82,6 +96,17 @@ async fn observe(
         }
     }
     let response = next.run(axum::extract::Request::from_parts(parts, Body::from(bytes))).await;
+    let total_override = trace.checkpoint_total_override.lock().unwrap().clone();
+    if armed && method == "GET" && path.starts_with("/checkpoints/") && response.status().is_success() {
+        if let Some(total) = total_override {
+            let (mut parts, body) = response.into_parts();
+            let bytes = to_bytes(body, 1024 * 1024).await.unwrap();
+            let mut page: Value = serde_json::from_slice(&bytes).unwrap();
+            page["totalRecords"] = total;
+            parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+            return axum::response::Response::from_parts(parts, Body::from(serde_json::to_vec(&page).unwrap()));
+        }
+    }
     if armed && method == "POST" && path == "/objects/retention"
         && trace.corrupt_retention.load(Ordering::SeqCst) && response.status().is_success() {
         let (mut parts, body) = response.into_parts();
@@ -158,7 +183,7 @@ impl Scenario {
         let cache = Cache::open(&self.local.repository_root().join("server-sync/reference-test-cache"))?;
         let transfer = Transfer::new(&client, &cache)?;
         let revision = self.local.revision()?;
-        let receipt = self.local.server_conflict_references(&cache, &transfer, &client, revision, head)?;
+        let receipt = self.local.server_conflict_references(&cache, &transfer, &client, revision, head, None)?;
         Ok((receipt, bytes.load(Ordering::SeqCst)))
     }
 
@@ -185,6 +210,70 @@ impl Scenario {
             .collect::<std::io::Result<Vec<_>>>().unwrap();
         assert_eq!(entries.len(), 1);
         entries[0].file_name().into_string().unwrap()
+    }
+}
+
+#[test]
+fn reference_capture_batches_metadata_across_checkpoint_pages_without_asset_downloads() {
+    use std::collections::BTreeSet;
+    let (fixture, trace) = measured_fixture();
+    let (_source_root, mut source) = prepared();
+    fixture.bind(&mut source);
+    let mut payloads = BTreeSet::new();
+    for number in 0..references::PAGE + 1 {
+        let mut bytes = vec![127; 1024];
+        bytes[..8].copy_from_slice(&(number as u64).to_le_bytes());
+        payloads.insert(put(&mut source, &format!("assets/batched-{number:04}.png"), &bytes).object_hash.unwrap());
+    }
+    assert_eq!(settle(&mut source).phase, "idle");
+    for fail_second_page in [false, true] {
+        trace.armed.store(false, Ordering::SeqCst);
+        let root = tempfile::tempdir().unwrap();
+        let mut local = PersistentStore::open(root.path()).unwrap();
+        fixture.bind(&mut local);
+        local.asset_residency_set_policy(AssetPolicy::Remote, || Ok(())).unwrap();
+        let client = ServerClient::new(local.server_config().unwrap().unwrap()).unwrap();
+        let cache = Cache::open(&root.path().join("server-sync/reference-test-cache")).unwrap();
+        let transfer = Transfer::new(&client, &cache).unwrap();
+        *trace.root.lock().unwrap() = Some(root.path().to_path_buf());
+        trace.requests.lock().unwrap().clear();
+        trace.metadata_pages.store(0, Ordering::SeqCst);
+        trace.fail_metadata_page.store(if fail_second_page { 2 } else { 0 }, Ordering::SeqCst);
+        trace.armed.store(true, Ordering::SeqCst);
+        let revision = local.revision().unwrap();
+        let head = fixture.server.head().unwrap();
+        let counter = crate::persistent_store::server_sync_engine::CycleItemCounter::default();
+        if fail_second_page {
+            let error = local.server_conflict_references(&cache, &transfer, &client, revision, &head, Some(&counter)).unwrap_err();
+            assert_eq!(error.code, "synthetic-transfer-failure");
+            assert_eq!(counter.activity.load(Ordering::Relaxed), 10);
+            assert_eq!(counter.processed.load(Ordering::Relaxed), references::PAGE as u64);
+            assert_eq!(counter.expected.load(Ordering::Relaxed), references::PAGE as u64 + 11);
+            let directory = fs::read_dir(root.path().join("server-sync/backups")).unwrap().next().unwrap().unwrap().path();
+            assert!(!directory.join("complete.json").exists());
+            let index = rusqlite::Connection::open(directory.join("index.sqlite")).unwrap();
+            let records: i64 = index.query_row("SELECT count(*) FROM records WHERE side='remote'", [], |r| r.get(0)).unwrap();
+            assert_eq!(records as usize, references::PAGE, "only the first page was committed");
+            assert!(!trace.requests.lock().unwrap().iter().any(|request| request.method == "DELETE"));
+        }
+        let receipt = local.server_conflict_references(&cache, &transfer, &client, revision, &head, None).unwrap();
+        let index = references::open(root.path(), &receipt.id, &|| Ok(())).unwrap();
+        let records = index.query_row("SELECT count(*) FROM records WHERE side='remote'", [], |r| r.get::<_, i64>(0)).unwrap() as usize;
+        assert!(records > references::PAGE);
+        let requests = trace.requests.lock().unwrap();
+        let transfers = requests.iter().filter(|request| request.path == "/objects/transfer").collect::<Vec<_>>();
+        assert_eq!(transfers.len(), records.div_ceil(references::PAGE) + usize::from(fail_second_page),
+            "retry must reuse cached pages; small metadata must transfer once per checkpoint page");
+        for request in transfers {
+            let targets = request.body.as_array().unwrap();
+            assert!(targets.len() <= references::PAGE * 2);
+            assert!(targets.iter().all(|target| !payloads.contains(target["target"].as_str().unwrap())));
+        }
+        assert_eq!(requests.iter().filter(|request| request.method == "POST" && request.path == "/checkpoints").count(), 1);
+        assert!(!requests.iter().any(|request| request.method == "GET" && request.path.starts_with("/objects/")));
+        assert!(!trace.released_before_marker.load(Ordering::SeqCst));
+        let cas = PayloadCas::new(root.path()).unwrap();
+        assert!(payloads.iter().all(|hash| cas.stat_object(hash).unwrap().is_none()));
     }
 }
 
@@ -511,13 +600,17 @@ fn wrong_retention_size_leaves_live_data_untouched_and_exact_retry_reuses_the_id
     let head = scenario.fixture.server.head().unwrap();
     let revision = scenario.local.revision().unwrap();
     scenario.trace.corrupt_retention.store(true, Ordering::SeqCst);
-    assert_eq!(scenario.capture(&head).unwrap_err().code, "invalid-retention-response");
+    for _ in 0..3 {
+        assert_eq!(scenario.capture(&head).unwrap_err().code, "invalid-retention-response");
+    }
     let id = scenario.index_id();
     assert!(references::inspect(scenario.local.repository_root(), &id).is_err());
     assert!(!DurableCasJob::open(scenario.local.repository_root(), &id).unwrap().is_released());
     assert_eq!(scenario.local.revision().unwrap(), revision);
     assert_eq!(scenario.fixture.server.head().unwrap(), head);
     assert!(!scenario.trace.requests.lock().unwrap().iter().any(|request| request.method == "DELETE"));
+    assert_eq!(scenario.trace.requests.lock().unwrap().iter().filter(|request|
+        request.method == "POST" && request.path == "/checkpoints").count(), 1);
     scenario.assert_no_payload_transfers();
     scenario.trace.corrupt_retention.store(false, Ordering::SeqCst);
     let (receipt, _) = scenario.capture(&head).unwrap();
@@ -533,10 +626,14 @@ fn changed_remote_head_is_not_recaptured_under_the_old_preview() {
     let revision = scenario.local.revision().unwrap();
     let head = scenario.fixture.server.head().unwrap();
     let older_head = scenario.older_head.clone();
-    assert_eq!(scenario.capture(&older_head).unwrap_err().code, "conflict-preview-stale");
+    for _ in 0..3 {
+        assert_eq!(scenario.capture(&older_head).unwrap_err().code, "conflict-preview-stale");
+    }
     assert_eq!(scenario.local.revision().unwrap(), revision);
     assert_eq!(scenario.fixture.server.head().unwrap(), head);
     assert!(!scenario.local.repository_root().join("server-sync/backups").exists());
+    assert_eq!(scenario.trace.requests.lock().unwrap().iter().filter(|request|
+        request.method == "DELETE" && request.path.starts_with("/checkpoints/")).count(), 3);
     scenario.assert_no_payload_transfers();
 }
 
@@ -558,6 +655,28 @@ fn expired_checkpoint_keeps_known_local_roots_without_restarting_the_remote_scan
     assert_eq!(requests.iter().filter(|request| request.method == "POST" && request.path == "/checkpoints").count(), 1);
     assert!(!requests.iter().any(|request| request.method == "DELETE"));
     drop(requests);
+    scenario.assert_no_payload_transfers();
+}
+
+#[test]
+fn retry_replaces_a_missing_checkpoint_without_losing_the_pending_capture() {
+    let mut scenario = Scenario::new();
+    let head = scenario.fixture.server.head().unwrap();
+    scenario.trace.expire_checkpoint.store(true, Ordering::SeqCst);
+    assert_eq!(scenario.capture(&head).unwrap_err().code, "checkpoint-expired");
+    let id = scenario.index_id();
+    let checkpoint: String = rusqlite::Connection::open(scenario.local.repository_root()
+        .join("server-sync/backups").join(&id).join("index.sqlite")).unwrap()
+        .query_row("SELECT checkpoint_id FROM capture_identity", [], |row| row.get(0)).unwrap();
+    let config = scenario.local.server_config().unwrap().unwrap();
+    let device = scenario.fixture.server.authenticate(&config.library_id, &config.token).unwrap();
+    scenario.fixture.server.release_checkpoint(&device, &checkpoint).unwrap();
+    scenario.trace.expire_checkpoint.store(false, Ordering::SeqCst);
+    let (receipt, _) = scenario.capture(&head).unwrap();
+    assert_eq!(receipt.id, id);
+    assert_eq!(scenario.trace.requests.lock().unwrap().iter().filter(|request|
+        request.method == "POST" && request.path == "/checkpoints").count(), 2);
+    assert!(!scenario.trace.released_before_marker.load(Ordering::SeqCst));
     scenario.assert_no_payload_transfers();
 }
 

@@ -170,7 +170,8 @@ export function sourceCheck({
     )
       throw new Error("server/version.json must define complete compatibility metadata.");
     const daemonSource = readFileSync(join(repo, "server/sync/src/lib.rs"), "utf8");
-    const protocol = /pub const PROTOCOL_ID:\s*&str\s*=\s*"([^"]+)"/.exec(daemonSource)?.[1];
+    const wireSource = readFileSync(join(repo, "crates/sync-wire/src/lib.rs"), "utf8");
+    const protocol = /pub const PROTOCOL_ID:\s*&str\s*=\s*"([^"]+)"/.exec(wireSource)?.[1];
     const store = /pub const STORE_FORMAT_ID:\s*&str\s*=\s*"([^"]+)"/.exec(daemonSource)?.[1];
     if (configured.protocolId !== protocol || configured.storeFormatId !== store)
       throw new Error("server/version.json compatibility does not match daemon constants.");

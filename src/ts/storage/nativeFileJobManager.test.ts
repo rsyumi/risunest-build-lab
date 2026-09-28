@@ -280,6 +280,13 @@ describe('renderer-lifetime native file job manager', () => {
                 },
             },
             {
+                error: { code: 'invalid-source', message: 'Android spool manifest is invalid' },
+                expected: {
+                    state: 'failed',
+                    error: { code: 'invalid-source', message: 'Android spool manifest is invalid', recoveryRequired: false },
+                },
+            },
+            {
                 error: new TypeError('boom'),
                 expected: {
                     state: 'failed',

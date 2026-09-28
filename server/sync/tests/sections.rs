@@ -195,6 +195,11 @@ fn checkpoints_carry_only_the_requested_sections() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::init(dir.path()).unwrap();
     let a = device(&store);
+    let empty = store.create_checkpoint(&a, &[Domain::Library]).unwrap();
+    let empty_page = store.checkpoint_page(&a, &empty.checkpoint_id, None, 128).unwrap();
+    assert_eq!(empty_page.total_records, Some(0.into()));
+    assert!(empty_page.records.is_empty() && empty_page.next.is_none());
+    store.release_checkpoint(&a, &empty.checkpoint_id).unwrap();
     store.put_object(&a, &hash(b"x"), b"x").unwrap();
     let head = store.head().unwrap();
     let mut set = section_changes(Domain::Hypa, "cache", b"x");
@@ -224,15 +229,19 @@ fn checkpoints_carry_only_the_requested_sections() {
         [Domain::Hypa, Domain::LocalPlugins]
     );
     assert!(page.next.is_none());
+    assert_eq!(page.total_records, Some(2.into()));
     let first = store
         .checkpoint_page(&a, &checkpoint.checkpoint_id, None, 1)
         .unwrap();
     let cursor = first.next.unwrap();
+    assert_eq!(first.total_records, Some(2.into()));
     assert_eq!(cursor.domain, Domain::Hypa);
     let second = store
         .checkpoint_page(&a, &checkpoint.checkpoint_id, Some(&cursor), 128)
         .unwrap();
     assert_eq!(second.records.len(), 1);
+    assert_eq!(second.total_records, None);
+    assert!(serde_json::to_value(&second).unwrap().get("totalRecords").is_none());
     assert_eq!(second.records[0].domain, Domain::LocalPlugins);
     assert_eq!(
         store.create_checkpoint(&a, &[]).err().unwrap().code,

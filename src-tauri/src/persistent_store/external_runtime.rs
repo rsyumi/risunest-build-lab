@@ -1,4 +1,6 @@
 //! Short authoritative operations called between native network stages.
+use std::collections::BTreeMap;
+
 use super::{
     external_storage_state as jobs, sync_selection, PersistentStore, StoreError, StoreResult,
 };
@@ -242,6 +244,24 @@ impl PersistentStore {
         )
         .transpose()
     }
+    /// What the snapshot behind this connection's base named under each key,
+    /// while the library still holds exactly that. The revision and identity
+    /// are checked here rather than by the caller, so a view that no longer
+    /// describes the library reads as absent instead of as empty.
+    pub(crate) fn external_base_records(
+        &self,
+        connection: &str,
+    ) -> StoreResult<Option<BTreeMap<String, String>>> {
+        let Some(base) = self.external_base(connection)? else {
+            return Ok(None);
+        };
+        let identity = self.external_identity()?;
+        if base.identity != identity {
+            return Ok(None);
+        }
+        jobs::base_records(&self.connection, connection, &base.snapshot_id)
+    }
+
     pub(crate) fn external_jobs(&self, connection: &str) -> StoreResult<Vec<ExternalJob>> {
         let mut query = self.connection.prepare("SELECT id,repository_id,capture_id,identity,role,strategy,expected_head,commit_id,phase FROM external_storage_jobs WHERE connection_id=?1 ORDER BY rowid DESC")?;
         let mut rows = query.query([connection])?;
@@ -366,10 +386,34 @@ impl PersistentStore {
         snapshot: &str,
         observation: &str,
     ) -> StoreResult<()> {
+        // The catalog is a separate file reached through this connection, so
+        // what was published is collected before the transaction opens.
+        let records = self.published_records(permit.job_id());
         let tx = self.connection.transaction()?;
-        jobs::confirm_publication(&tx, permit, commit, snapshot, observation)?;
+        jobs::confirm_publication(&tx, permit, commit, snapshot, observation, records.as_ref())?;
         tx.commit()?;
         Ok(())
+    }
+    /// What the retained capture named, or nothing when it can no longer be
+    /// read. A publication settled after a restart is the case that finds no
+    /// capture, and a confirmed remote commit must not be refused over it.
+    fn published_records(&self, job: &str) -> Option<std::collections::BTreeMap<String, String>> {
+        let capture: String = self
+            .connection
+            .query_row(
+                "SELECT capture_id FROM external_storage_jobs WHERE id=?1",
+                [job],
+                |row| row.get(0),
+            )
+            .ok()?;
+        let reopened = self.reopen_external_capture(&capture).ok()?;
+        let mut query = reopened
+            .catalog
+            .db
+            .prepare("SELECT key,hash FROM records")
+            .ok()?;
+        let rows = query.query_map([], |row| Ok((row.get(0)?, row.get(1)?))).ok()?;
+        rows.collect::<Result<_, _>>().ok()
     }
     pub(crate) fn external_cancel_prepared(&mut self, job: &str) -> StoreResult<()> {
         let tx = self.connection.transaction()?;
@@ -413,6 +457,7 @@ impl PersistentStore {
             "DELETE FROM external_storage_bases WHERE connection_id=?1",
             [connection],
         )?;
+        jobs::clear_base_records(&tx, connection)?;
         let selection = sync_selection::read(&tx)?;
         if selection.target == sync_selection::SyncTarget::External(connection.into()) {
             sync_selection::select(&tx, &selection.epoch, &sync_selection::SyncTarget::None)?;
@@ -506,6 +551,9 @@ impl PersistentStore {
         }
         tx.execute("UPDATE external_storage_bases SET snapshot_id=?2,commit_id=?3,head_observation=?4,identity=?5 WHERE connection_id=?1",
             params![connection,snapshot,commit,observation,serde_json::to_string(identity)?])?;
+        // This head was accepted because its content did not differ from the
+        // one already recorded, so the records behind it are the same records.
+        jobs::rebind_base_records(&tx, connection, snapshot).map(|_| ())?;
         tx.commit()?;
         Ok(())
     }

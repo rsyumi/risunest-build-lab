@@ -217,6 +217,7 @@ function makeWindowedHarness(input: {
     let selectedCharacterId = input.selectedCharacterId ?? null
     let storeRevision = 1
     let windowedAllowed = true
+    let operationActive = false
     const readConversation = vi.fn(async () => {
         throw new Error(
             'windowed activation performed a full conversation read',
@@ -331,6 +332,7 @@ function makeWindowedHarness(input: {
         advanceWindowedSelectedConversationRevision: vi.fn(() => true),
         markPersistentDataDirty: vi.fn(),
         recordActiveConversationMutation: vi.fn(),
+        recordWindowedChatListChange: vi.fn(() => true),
     }
     const publishCharacter = vi.fn((next: character | groupChat) => {
         const index = database.characters.findIndex(
@@ -399,7 +401,7 @@ function makeWindowedHarness(input: {
         captureActivationRollback,
         canActivateWorkingSet: () => true,
         canUseWindowedSelectedConversation: () => windowedAllowed,
-        isConversationOperationActive: () => false,
+        isConversationOperationActive: () => operationActive,
         shouldHydrateFullCharacter: () => false,
         canReleaseConversation: () => true,
         conversationViewportRowBudget: 32,
@@ -418,10 +420,85 @@ function makeWindowedHarness(input: {
         setWindowedAllowed(allowed: boolean) {
             windowedAllowed = allowed
         },
+        setOperationActive(active: boolean) {
+            operationActive = active
+        },
     }
 }
 
 describe('ActiveWorkingSet', () => {
+    async function activateWindowedChatList() {
+        const selected = makeChat('chat-a')
+        selected.message = [
+            { role: 'user', data: 'first', chatId: 'a' },
+            { role: 'char', data: 'second', chatId: 'b' },
+        ] as Message[]
+        const other = makeChat('chat-b')
+        other.message = [{ role: 'user', data: 'other', chatId: 'c' }] as Message[]
+        const harness = makeWindowedHarness({ characters: [makeCharacter('a', [selected, other])] })
+        await expect(harness.workingSet.activateCharacter('a')).resolves.toBe(true)
+        expect(harness.workingSet.selectedConversationMode).toBe('windowed')
+        const resident = harness.database.characters[0]
+        return {
+            harness,
+            resident,
+            shell: resident.chats[0],
+            target: harness.workingSet.captureSelectedConversationTarget()!,
+        }
+    }
+
+    it('applies a windowed chat-list edit around the selected shell object', async () => {
+        const { harness, resident, shell, target } = await activateWindowedChatList()
+        const added = makeChat('added')
+
+        expect(harness.workingSet.editWindowedChatList(target, (character) => {
+            character.chats.unshift(added)
+            character.chats.reverse()
+            return 'added'
+        })).toEqual({ kind: 'applied', nextId: 'added' })
+
+        expect(resident.chats.map((chat) => chat.id)).toEqual(['chat-b', 'chat-a', 'added'])
+        expect(resident.chats[1]).toBe(shell)
+        expect(resident.chatPage).toBe(1)
+        const [authority, before, after] =
+            harness.coordinator.recordWindowedChatListChange.mock.calls[0] as unknown as [
+                { conversationId: string }, character, character,
+            ]
+        expect(authority.conversationId).toBe('chat-a')
+        expect(before).toBe(resident)
+        expect(after.chats.map((chat) => chat.id)).toEqual(['chat-b', 'chat-a', 'added'])
+        expect(after.chatPage).toBe(1)
+        expect(harness.readConversation).not.toHaveBeenCalled()
+    })
+
+    it('leaves the working set untouched when a chat-list edit cannot be recorded', async () => {
+        const { harness, resident, target } = await activateWindowedChatList()
+        harness.coordinator.recordWindowedChatListChange.mockReturnValueOnce(false)
+        const chats = resident.chats
+
+        expect(harness.workingSet.editWindowedChatList(target, (character) => {
+            character.chats.unshift(makeChat('added'))
+            character.chats[1].folderId = 'folder'
+            return null
+        })).toEqual({ kind: 'unsupported' })
+
+        expect(resident.chats).toBe(chats)
+        expect(resident.chats.map((chat) => chat.id)).toEqual(['chat-a', 'chat-b'])
+        expect(resident.chats[0].folderId).toBeUndefined()
+        expect(resident.chatPage ?? 0).toBe(0)
+    })
+
+    it('leaves chat-list edits to the complete path while a conversation operation runs', async () => {
+        const { harness, target } = await activateWindowedChatList()
+        harness.setOperationActive(true)
+        const edit = vi.fn(() => null)
+
+        expect(harness.workingSet.editWindowedChatList(target, edit)).toEqual({ kind: 'unsupported' })
+
+        expect(edit).not.toHaveBeenCalled()
+        expect(harness.coordinator.recordWindowedChatListChange).not.toHaveBeenCalled()
+    })
+
     it('fences a tail controller after another controller makes a same-length edit', async () => {
         const full = makeChat('chat-a')
         full.message = [

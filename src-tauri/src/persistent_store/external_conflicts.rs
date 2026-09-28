@@ -2,7 +2,7 @@
 //! library database cannot discard a preserved source.
 use super::{sync_selection::CaptureIdentity, StoreError, StoreResult};
 use crate::external_storage::capture::{
-    registered_capture_roots, validate_capture_sources, DurableCaptureReference,
+    registered_capture_roots, validate_recovery_sources, DurableCaptureReference,
     RegisteredCaptureRoots,
 };
 use risunest_external_storage_format::snapshot::{ObjectRole, StoredObject};
@@ -373,11 +373,12 @@ pub(crate) fn external_conflicts_page(db: &Connection, after: Option<&ExternalCo
     Ok(ExternalConflictPage { conflicts, next })
 }
 
-/// Includes resolved conflicts because resolution changes display state only.
-pub(crate) fn registered_conflict_roots(db: &Connection, repository_root: &Path) -> StoreResult<RegisteredCaptureRoots> {
+/// Every conflict's local capture. Includes resolved conflicts because
+/// resolution changes display state only.
+pub(crate) fn conflict_capture_references(db: &Connection) -> StoreResult<Vec<DurableCaptureReference>> {
     let mut statement = db.prepare("SELECT local_identity,local_capture_id,local_catalog_path,local_catalog_hash FROM external_conflicts ORDER BY id")?;
     let mut rows = statement.query([])?;
-    let mut roots = RegisteredCaptureRoots::default();
+    let mut references = Vec::new();
     while let Some(row) = rows.next()? {
         let reference = DurableCaptureReference {
             identity: decode(&row.get::<_, String>(0)?, "External conflict local identity is invalid")?,
@@ -386,10 +387,20 @@ pub(crate) fn registered_conflict_roots(db: &Connection, repository_root: &Path)
             catalog_hash: row.get(3)?,
         };
         validate_capture(&reference)?;
+        references.push(reference);
+    }
+    Ok(references)
+}
+
+/// Includes resolved conflicts because resolution changes display state only.
+pub(crate) fn registered_conflict_roots(db: &Connection, repository_root: &Path) -> StoreResult<RegisteredCaptureRoots> {
+    let mut roots = RegisteredCaptureRoots::default();
+    for reference in conflict_capture_references(db)? {
         let registered = registered_capture_roots([&reference], repository_root)?;
         roots.assets.object_hashes.extend(registered.assets.object_hashes);
         roots.catalogs.extend(registered.catalogs);
         roots.logical_records.extend(registered.logical_records);
+        roots.content_objects.extend(registered.content_objects);
     }
     Ok(roots)
 }
@@ -398,7 +409,7 @@ pub(crate) fn conflict_source_descriptor(db: &Connection, repository_root: &Path
     let record = external_conflict(db, id)?.ok_or_else(|| invalid("External conflict does not exist"))?;
     match side {
         ConflictSide::Local => {
-            validate_capture_sources([&record.local], repository_root)?;
+            validate_recovery_sources([&record.local], repository_root, &crate::local_backup::NeverCancelled)?;
             Ok(ConflictSourceDescriptor::Local {
                 conflict_id: record.id,
                 repository_id: record.repository_id,
@@ -520,7 +531,7 @@ mod tests {
         let object_directory = external.join("objects");
         let mut catalog = crate::external_storage::capture::CaptureCatalog::create(
             &capture_directory,
-            &object_directory,
+            &external,
             None,
         )
         .unwrap();
@@ -558,7 +569,9 @@ mod tests {
         assert_eq!(restored.local.identity, identity);
         let roots = registered_conflict_roots(&reopened, root.path()).unwrap();
         assert_eq!(roots.catalogs.len(), 1);
-        assert_eq!(roots.logical_records.len(), 1);
+        // The capture's one record is small, so the content store holds it.
+        assert_eq!(roots.logical_records.len(), 0);
+        assert_eq!(roots.content_objects.len(), 1);
         assert!(conflict_source_descriptor(
             &reopened,
             root.path(),

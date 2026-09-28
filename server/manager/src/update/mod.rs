@@ -13,7 +13,8 @@ use std::{
 mod archive;
 mod transaction;
 pub use archive::{
-    extract_package, managed_bundle_version, validate_installed_marker, validate_removal_inventory, ExtractedBundle,
+    extract_package, managed_bundle_version, validate_installed_marker, validate_removal_inventory,
+    ExtractedBundle,
 };
 mod engine;
 pub use engine::{run, run_helper, run_recovery_helper, run_while_locked, RunMode, RunOutcome};

@@ -5,7 +5,7 @@ use super::{
 };
 use super::plugin_owner;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 pub(super) fn incremental_commit<T>(
     connection: &mut Connection,
@@ -208,6 +208,7 @@ fn reject_archived_targets(
         targets.push(match mutation {
             ConversationMutation::ReplaceRange { character_id, .. } => character_id,
             ConversationMutation::Delete { character_id, .. } => character_id,
+            ConversationMutation::Reorder { character_id, .. } => character_id,
         });
     }
     for character_id in targets {
@@ -1378,13 +1379,14 @@ pub(super) fn replace_commit_from_external(
     staging_id: &str,
     expected_revision: i64,
     job: &str,
+    records: &BTreeMap<String, String>,
 ) -> StoreResult<RevisionResult> {
     replace_commit_transaction(
         connection,
         staging_id,
         Some(expected_revision),
         None,
-        Some(job),
+        Some((job, records)),
     )
 }
 
@@ -1393,7 +1395,7 @@ fn replace_commit_transaction(
     staging_id: &str,
     expected_revision: Option<i64>,
     app_kv: Option<(&str, &Value)>,
-    external_job: Option<&str>,
+    external_job: Option<(&str, &BTreeMap<String, String>)>,
 ) -> StoreResult<RevisionResult> {
     if let Some((key, _)) = app_kv {
         super::validate_app_kv_key(key)?;
@@ -1413,7 +1415,7 @@ fn replace_commit_transaction(
         }
     }
 
-    if let Some(job) = external_job {
+    if let Some((job, _)) = external_job {
         super::external_storage_state::begin_receive_activation(&transaction, job)?;
     }
     let active = active_generation(&transaction)?;
@@ -1427,8 +1429,12 @@ fn replace_commit_transaction(
         super::sync_selection::replaced(&transaction)?;
     }
     set_active(&transaction, revision, &generation)?;
-    if let Some(job) = external_job {
-        super::external_storage_state::finish_receive_activation(&transaction, job)?;
+    if let Some((job, records)) = external_job {
+        super::external_storage_state::finish_receive_activation(
+            &transaction,
+            job,
+            super::external_storage_state::BaseRecords::Complete(records),
+        )?;
     }
     if let Some((key, value)) = serialized_app_kv {
         transaction.execute(
@@ -1995,6 +2001,42 @@ fn apply_conversation_mutation(
                 params![generation, character_id, conversation_id],
             )?;
             refresh_character_summary(transaction, generation, character_id)?;
+            Ok(())
+        }
+        ConversationMutation::Reorder {
+            character_id,
+            conversation_ids,
+        } => {
+            let existing = {
+                let mut statement = transaction.prepare(
+                    "SELECT conversation_id, configured_index FROM conversations
+                     WHERE generation = ?1 AND character_id = ?2",
+                )?;
+                let rows = statement.query_map(params![generation, character_id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })?;
+                rows.collect::<Result<HashMap<_, _>, _>>()?
+            };
+            let requested: HashSet<&str> = conversation_ids.iter().map(String::as_str).collect();
+            if requested.len() != conversation_ids.len()
+                || conversation_ids.len() != existing.len()
+                || conversation_ids.iter().any(|id| !existing.contains_key(id))
+            {
+                return Err(validation(format!(
+                    "Conversation order for {character_id} must list each conversation once"
+                )));
+            }
+            for (configured_index, conversation_id) in conversation_ids.iter().enumerate() {
+                let configured_index = configured_index as i64;
+                if existing[conversation_id] == configured_index {
+                    continue;
+                }
+                transaction.execute(
+                    "UPDATE conversations SET configured_index = ?4
+                     WHERE generation = ?1 AND character_id = ?2 AND conversation_id = ?3",
+                    params![generation, character_id, conversation_id, configured_index],
+                )?;
+            }
             Ok(())
         }
         ConversationMutation::ReplaceRange {

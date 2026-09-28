@@ -2,6 +2,7 @@
 //! are activated only in a new scratch PDS, then passed through the normal
 //! portable-backup writer and verifier.
 use super::{
+    content_store::ObjectSource,
     capture::{self, CaptureCatalog, DurableCaptureReference},
     contract::{Cancellation, ErrorKind, ProviderError, Result},
     snapshot_restore::{PreparedObject, PreparedRecord, PreparedRemoteSnapshot},
@@ -64,7 +65,12 @@ pub(crate) fn prepare_local_conflict_snapshot(
     if !bounded_identity(repository_id) {
         return Err(corrupt("conflict repository identity is invalid"));
     }
-    let roots = capture::validate_capture_sources([reference], repository_root).map_err(corrupt)?;
+    let roots = capture::validate_recovery_sources(
+        [reference],
+        repository_root,
+        &crate::local_backup::NeverCancelled,
+    )
+    .map_err(corrupt)?;
     let mut catalogs = roots.catalogs.into_iter();
     let catalog_path = catalogs
         .next()
@@ -77,10 +83,9 @@ pub(crate) fn prepare_local_conflict_snapshot(
         .join("external-storage")
         .canonicalize()
         .map_err(corrupt)?;
-    let object_directory = external_root.join("objects");
     let catalog = CaptureCatalog::reopen(
         &catalog_path,
-        &object_directory,
+        &external_root,
         &expected_hash,
         &reference.identity,
     )
@@ -105,7 +110,7 @@ pub(crate) fn prepare_local_conflict_snapshot(
         }
         records.push(PreparedRecord {
             key,
-            path: object_directory.join(&content_hash),
+            source: ObjectSource::Captured(content_hash.clone()),
             content_hash,
             byte_length: u64::try_from(bytes)
                 .map_err(|_| corrupt("conflict capture record length is invalid"))?,
@@ -130,7 +135,7 @@ pub(crate) fn prepare_local_conflict_snapshot(
             return Err(corrupt("conflict capture object hash is invalid"));
         }
         objects.push(PreparedObject {
-            path: object_directory.join(&content_hash),
+            source: ObjectSource::Captured(content_hash.clone()),
             content_hash,
             byte_length: u64::try_from(bytes)
                 .map_err(|_| corrupt("conflict capture object length is invalid"))?,
@@ -159,7 +164,7 @@ pub(crate) fn prepare_local_conflict_snapshot(
             .map_err(transient)?
             .ok_or_else(|| corrupt("conflict capture dependency is missing"))?;
         objects.push(PreparedObject {
-            path,
+            source: ObjectSource::File(path),
             content_hash,
             byte_length: u64::try_from(bytes)
                 .map_err(|_| corrupt("conflict capture dependency length is invalid"))?,
@@ -274,30 +279,38 @@ pub(crate) fn export_verified_snapshot_controlled(
         .tempdir_in(scratch_parent)
         .map_err(transient)?;
     let mut store = PersistentStore::open(&scratch.path().join("pds")).map_err(transient)?;
+    let probe = Probe(cancel);
     let application = ExternalSnapshotApplication {
         expected_revision: 0,
         staging_root: &snapshot.staging_root,
         scope_id: &library_fingerprint_domain(),
         fingerprint: &fingerprint,
+        probe: &probe,
     };
     let records = snapshot.records.into_iter().map(|value| {
         Ok(ExternalSnapshotRecord {
             key: value.key,
             content_hash: value.content_hash,
             byte_length: value.byte_length,
-            path: value.path,
+            source: value.source,
         })
     });
     let objects = snapshot.objects.into_iter().map(|value| {
         Ok(ExternalSnapshotObject {
             content_hash: value.content_hash,
             byte_length: value.byte_length,
-            path: value.path,
+            source: value.source,
         })
     });
     let prepared = store
         .prepare_external_snapshot_application(&application, records, objects)
-        .map_err(transient)?;
+        .map_err(|error| {
+            if cancel.check().is_err() {
+                ProviderError::new(ErrorKind::Cancelled)
+            } else {
+                transient(error)
+            }
+        })?;
     let revision = store
         .finish_prepared_replace(prepared)
         .map_err(transient)?
@@ -312,7 +325,7 @@ pub(crate) fn export_verified_snapshot_controlled(
         revision,
         &candidate,
         &archive_scratch,
-        &Probe(cancel),
+        &probe,
     )
     .map_err(transient)?;
     crate::persistent_store::export::destination::write_portable_destination_controlled(
@@ -468,7 +481,7 @@ mod tests {
                 key,
                 content_hash: encoded.hash,
                 byte_length: encoded.size,
-                path: record_path,
+                source: ObjectSource::File(record_path),
             }],
             objects: Vec::new(),
         };

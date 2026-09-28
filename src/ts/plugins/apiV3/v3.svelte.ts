@@ -1,5 +1,6 @@
 import { allowedDbKeys, applyPreparedPluginDatabaseUpdate, customProviderStore, getV2PluginAPIs, handlePluginInstallViaPlugin, pluginStorageStore, pluginV2, type PluginV2ProviderArgument, type PluginV2ProviderOptions, type RisuPlugin } from "../plugins.svelte";
 import { SandboxHost } from "./factory";
+import versionData from "../../../../version.json";
 import { getDatabase } from "src/ts/storage/database.svelte";
 import { isArchivedCharacter } from "src/ts/storage/workingSetCatalog";
 import { SafeLocalPluginStorage, SafeLocalStorage, tagWhitelist } from "../pluginSafeClass";
@@ -1362,6 +1363,10 @@ const makeRisuaiAPIV3 = (
         },
         getRuntimeInfo: () => {
             return {
+                app: {
+                    id: 'risunest',
+                    version: versionData.version,
+                },
                 apiVersion: "3.0",
                 platform: isTauri ? 'tauri' : 'web',
                 saveMethod:

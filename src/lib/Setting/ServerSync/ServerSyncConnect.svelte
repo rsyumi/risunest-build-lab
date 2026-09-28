@@ -145,6 +145,9 @@
               fullwidth
               bind:value={endpoint}
               placeholder={text.endpointPlaceholder}
+              autocomplete="url"
+              autocapitalize="none"
+              spellcheck={false}
               disabled={busy}
               className="disabled:opacity-50"
             /></label
@@ -154,6 +157,8 @@
               ><span>{text.libraryId}</span><TextInput
                 fullwidth
                 bind:value={libraryId}
+                autocapitalize="none"
+                spellcheck={false}
                 disabled={busy}
                 className="disabled:opacity-50"
               /></label
@@ -162,6 +167,8 @@
               ><span>{text.deviceId}</span><TextInput
                 fullwidth
                 bind:value={deviceId}
+                autocapitalize="none"
+                spellcheck={false}
                 disabled={busy}
                 className="disabled:opacity-50"
               /></label
@@ -172,6 +179,7 @@
               fullwidth
               hideText
               bind:value={token}
+              spellcheck={false}
               disabled={busy}
               className="disabled:opacity-50"
             /></label

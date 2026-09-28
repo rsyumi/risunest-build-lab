@@ -7,6 +7,7 @@
   import { modalNavigation } from "src/ts/ui/modalNavigation";
   import type { ServerConfig } from "src/ts/storage/sync/serverSync";
   import {
+    MAX_REGISTRATION_URI_BYTES,
     parseServerRegistration,
     RegistrationError,
   } from "src/ts/storage/sync/serverSyncRegistration";
@@ -122,6 +123,9 @@
         fullwidth
         hideText
         bind:value={code}
+        maxlength={MAX_REGISTRATION_URI_BYTES}
+        autocapitalize="none"
+        spellcheck={false}
         disabled={busy || scanning}
         className="font-mono text-sm"
       />

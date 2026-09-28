@@ -5,6 +5,53 @@ use risunest_sync_wire::{hash, validate_hash, RemoteHead, Sequence};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
+
+// Closing the last connection tears down the write-ahead log, and opens that
+// race the teardown fail with SQLITE_PROTOCOL. While armed, one idle
+// connection stays open so per-use connections are never the last one.
+struct Anchor {
+    root: PathBuf,
+    db: Option<Connection>,
+}
+
+static ANCHOR: Mutex<Option<Anchor>> = Mutex::new(None);
+
+fn anchor() -> MutexGuard<'static, Option<Anchor>> {
+    ANCHOR.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Keeps a connection to `root`'s store open after it next opens. Arming does
+/// not create the store.
+pub(crate) fn arm_anchor(root: &Path) {
+    *anchor() = Some(Anchor {
+        root: root.to_path_buf(),
+        db: None,
+    });
+}
+
+#[cfg(any(mobile, test))]
+pub(crate) fn release_anchor() {
+    anchor().take();
+}
+
+fn hold_anchor(root: &Path, path: &Path) {
+    let mut anchor = anchor();
+    let Some(anchor) = anchor.as_mut().filter(|anchor| anchor.root == root) else {
+        return;
+    };
+    if anchor.db.is_some() {
+        return;
+    }
+    // Only a connection that has read holds the shared lock that keeps the
+    // log alive. Failure leaves the next open to retry.
+    anchor.db = Connection::open(path)
+        .and_then(|db| {
+            db.query_row("PRAGMA user_version", [], |_| Ok(()))?;
+            Ok(db)
+        })
+        .ok();
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -62,7 +109,7 @@ impl Residency {
                 Err(error) => return Err(error.into()),
             }
         }
-        let mut db = Connection::open(path)?;
+        let mut db = Connection::open(&path)?;
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;")?;
         let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         if version == 0 {
@@ -80,6 +127,7 @@ impl Residency {
         } else if version != 1 {
             return Err(SyncError::new("incompatible-residency-store", 409));
         }
+        hold_anchor(root, &path);
         Ok(Self { db })
     }
     /// A fresh registration restores access to the same library's historical
@@ -272,6 +320,65 @@ impl Residency {
 #[cfg(test)]
 mod tests;
 
+/// Stands in for the Sync download in tests. A body a test serves for one
+/// repository still goes through custody and the checked promotion into its
+/// CAS; only the network transfer is skipped.
+#[cfg(test)]
+pub(crate) mod test_remote {
+    use std::{
+        collections::BTreeMap,
+        path::{Path, PathBuf},
+        sync::Mutex,
+    };
+
+    static SERVED: Mutex<BTreeMap<PathBuf, (BTreeMap<String, Vec<u8>>, usize)>> =
+        Mutex::new(BTreeMap::new());
+
+    pub(crate) fn serve(root: &Path, digest: &str, body: Vec<u8>) {
+        let root = std::fs::canonicalize(root).unwrap();
+        SERVED.lock().unwrap().entry(root).or_default().0.insert(digest.into(), body);
+    }
+
+    /// Records custody for these bodies, as a confirmed remote head does.
+    pub(crate) fn hold(root: &Path, bodies: &[(&str, u64)]) {
+        let config: super::StoredConfig = serde_json::from_value(serde_json::json!({
+            "endpoint":"http://127.0.0.1:9/", "libraryId":"library", "deviceId":"device",
+            "credentialId":"00000000-0000-4000-8000-000000000000"
+        }))
+        .unwrap();
+        let head = super::RemoteHead {
+            head_id: super::hash(b"head"),
+            ..super::RemoteHead::genesis("library".into(), "epoch".into()).unwrap()
+        };
+        let objects = bodies
+            .iter()
+            .map(|(digest, size)| super::RetainedObject {
+                hash: (*digest).into(),
+                size: (*size).into(),
+                retention_id: super::hash(digest.as_bytes()),
+            })
+            .collect::<Vec<_>>();
+        super::Residency::open(root)
+            .unwrap()
+            .confirm(&config, &head, &objects)
+            .unwrap();
+    }
+
+    /// How many bodies this repository fetched.
+    pub(crate) fn fetched(root: &Path) -> usize {
+        let root = std::fs::canonicalize(root).unwrap();
+        SERVED.lock().unwrap().get(&root).map_or(0, |(_, fetched)| *fetched)
+    }
+
+    pub(super) fn body(root: &Path, digest: &str) -> Option<Vec<u8>> {
+        let mut served = SERVED.lock().unwrap();
+        let (bodies, fetched) = served.get_mut(root)?;
+        let body = bodies.get(digest)?.clone();
+        *fetched += 1;
+        Some(body)
+    }
+}
+
 /// Byte consumers (exports, AI attachments, plugins) need verified bytes. The
 /// temporary transfer CAS is discarded after promotion, including chunk files.
 /// Display URLs never call this path.
@@ -316,6 +423,12 @@ pub(crate) fn open_or_hydrate_with_check(
     let Some(proof) = Residency::open(&root)?.object(digest, None)? else {
         return Ok(None);
     };
+    #[cfg(test)]
+    if let Some(body) = test_remote::body(&root, digest) {
+        let _guard = crate::asset_repository::coordinator::lock_repository_mutation()?;
+        super::transfer::prepare_checked(&cas, &mut body.as_slice(), digest, proof.size, check)?;
+        return Ok(cas.open_object(digest)?);
+    }
     // Byte consumers share one transfer budget. Each Transfer can already use
     // parallel chunks; unrelated attachments must not multiply those buffers.
     static TRANSFER_BUDGET: Mutex<()> = Mutex::new(());
@@ -330,12 +443,11 @@ pub(crate) fn open_or_hydrate_with_check(
     super::transfer::Transfer::new(&client, &cache)?
         .with_check(check)
         .download(&[digest.to_owned()], &[])?;
-    let mut file = cache
-        .cas
-        .open_object(digest)?
+    let mut body = cache
+        .open_derived(digest)?
         .ok_or_else(|| SyncError::new("hydration-incomplete", 502))?;
     let _guard = crate::asset_repository::coordinator::lock_repository_mutation()?;
-    super::transfer::prepare_checked(&cas, &mut file, digest, proof.size, check)?;
+    super::transfer::prepare_checked(&cas, &mut body, digest, proof.size, check)?;
     Ok(cas.open_object(digest)?)
 }
 

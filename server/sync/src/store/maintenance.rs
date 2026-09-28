@@ -88,6 +88,29 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+    /// A revoked device cannot authenticate again, so its acknowledgements and
+    /// receipts are unreadable once no commit job of its own is pending. The row
+    /// itself leaves only when nothing else still names it, which keeps custody
+    /// held for a replacement registration and work that is still finishing.
+    fn purge_revoked_devices(tx: &Connection) -> Result<()> {
+        tx.execute("DELETE FROM device_section_acks WHERE device IN (SELECT id FROM devices WHERE revoked=1)",[])?;
+        tx.execute("DELETE FROM receipts WHERE device IN (SELECT id FROM devices WHERE revoked=1 AND NOT EXISTS(SELECT 1 FROM commit_jobs WHERE device=devices.id))",[])?;
+        tx.execute(
+            "DELETE FROM devices WHERE revoked=1
+             AND NOT EXISTS(SELECT 1 FROM device_section_acks WHERE device=devices.id)
+             AND NOT EXISTS(SELECT 1 FROM object_leases WHERE device=devices.id)
+             AND NOT EXISTS(SELECT 1 FROM object_custody WHERE device=devices.id)
+             AND NOT EXISTS(SELECT 1 FROM read_pins WHERE device=devices.id)
+             AND NOT EXISTS(SELECT 1 FROM checkpoints WHERE device=devices.id)
+             AND NOT EXISTS(SELECT 1 FROM uploads WHERE device=devices.id)
+             AND NOT EXISTS(SELECT 1 FROM download_deltas WHERE device=devices.id)
+             AND NOT EXISTS(SELECT 1 FROM staged_changes WHERE device=devices.id)
+             AND NOT EXISTS(SELECT 1 FROM receipts WHERE device=devices.id)
+             AND NOT EXISTS(SELECT 1 FROM commit_jobs WHERE device=devices.id)",
+            [],
+        )?;
+        Ok(())
+    }
     /// Explicit maintenance uses every active device acknowledgement and read pin.
     /// Offline devices are never silently forgotten. Tombstones stay as identity
     /// fences; payloads and acknowledged journal bodies can be reclaimed.
@@ -99,7 +122,6 @@ impl Store {
         let mut db = self.db()?;
         let tx = db.transaction()?;
         let current = now()?;
-        tx.execute("DELETE FROM transfer_recipes WHERE expires<=?1", [current])?;
         tx.execute("DELETE FROM download_deltas WHERE state!='working' AND (expires<=?1 OR device IN (SELECT id FROM devices WHERE revoked=1))", [current])?;
         tx.execute("DELETE FROM upload_deltas WHERE upload IN (SELECT id FROM uploads WHERE state='complete')", [])?;
         tx.execute("DELETE FROM upload_delta_bases WHERE upload IN (SELECT id FROM uploads WHERE state='complete')", [])?;
@@ -110,6 +132,7 @@ impl Store {
         tx.execute("DELETE FROM checkpoints WHERE expires<=?1 OR device IN (SELECT id FROM devices WHERE revoked=1)",[current])?;
         tx.execute("DELETE FROM object_leases WHERE expires<=?1 OR device IN (SELECT id FROM devices WHERE revoked=1)",[current])?;
         tx.execute("DELETE FROM staged_changes WHERE (expires<=?1 OR device IN (SELECT id FROM devices WHERE revoked=1)) AND id NOT IN (SELECT stage FROM commit_jobs)",[current])?;
+        Self::purge_revoked_devices(&tx)?;
         let mut head = Self::read_head(&tx)?;
         let mut pinned = head.seq.clone();
         {
@@ -190,21 +213,57 @@ impl Store {
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             values
         };
-        let mut removed = 0;
+        let mut removed: u64 = 0;
+        let mut collected: Vec<String> = Vec::new();
         for digest in hashes {
             let exists: bool = db.query_row(
                 "SELECT EXISTS(SELECT 1 FROM objects WHERE hash=?1)",
                 [&digest],
                 |r| r.get(0),
             )?;
-            if !exists {
+            if exists {
+                db.execute("DELETE FROM object_trash WHERE hash=?1", [&digest])?;
+                continue;
+            }
+            // The row that said where the body lived is already gone, so the
+            // store that still holds it is the one that answers.
+            if risunest_small_object_store::size(&db, &digest)
+                .map_err(super::objects::body_error)?
+                .is_some()
+            {
+                // A file can survive under the same identity when an upload
+                // published one for a body the metadata files inline. The
+                // identity leaves both stores or neither.
                 match std::fs::remove_file(self.object_path(&digest)?) {
-                    Ok(()) => removed += 1,
+                    Ok(()) => (),
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
                     Err(_) => continue,
                 }
+                collected.push(digest);
+                continue;
+            }
+            match std::fs::remove_file(self.object_path(&digest)?) {
+                Ok(()) => removed += 1,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+                Err(_) => continue,
             }
             db.execute("DELETE FROM object_trash WHERE hash=?1", [&digest])?;
+        }
+        if !collected.is_empty() {
+            // Body and entry leave together, so an interrupted sweep never
+            // strands a body that nothing remembers.
+            let hashes = collected.iter().map(String::as_str).collect::<Vec<_>>();
+            let tx = db.transaction()?;
+            risunest_small_object_store::delete_batch(&tx, &hashes)
+                .map_err(super::objects::body_error)?;
+            for digest in &hashes {
+                tx.execute("DELETE FROM object_trash WHERE hash=?1", [digest])?;
+            }
+            tx.commit()?;
+            removed += collected.len() as u64;
+            // Return the freed pages rather than leaving the file at its high
+            // water mark. Incremental, so a sweep never rewrites the database.
+            db.execute_batch("PRAGMA incremental_vacuum;")?;
         }
         // A write-ahead log that never folds back grows without bound. Its three
         // result values travel with the maintenance outcome so a checkpoint the
@@ -227,7 +286,7 @@ impl Store {
         let mut db = self.db()?;
         let tx = db.transaction()?;
         let head = RemoteHead::genesis(Self::read_head(&tx)?.library_id, random_id()?)?;
-        tx.execute_batch("DELETE FROM changes; DELETE FROM commits; DELETE FROM receipts; DELETE FROM commit_jobs; DELETE FROM staged_changes; DELETE FROM read_pins; DELETE FROM checkpoints; DELETE FROM uploads; DELETE FROM download_deltas; DELETE FROM transfer_recipes; DELETE FROM object_leases; DELETE FROM scope_versions; DELETE FROM device_section_acks;")?;
+        tx.execute_batch("DELETE FROM changes; DELETE FROM commits; DELETE FROM receipts; DELETE FROM commit_jobs; DELETE FROM staged_changes; DELETE FROM read_pins; DELETE FROM checkpoints; DELETE FROM uploads; DELETE FROM download_deltas; DELETE FROM object_leases; DELETE FROM scope_versions; DELETE FROM device_section_acks;")?;
         tx.execute("UPDATE library SET head=?1", [json(&head)?])?;
         tx.commit()?;
         self.announce_head();

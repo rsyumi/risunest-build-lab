@@ -192,13 +192,48 @@ describe("status and error copy", () => {
 });
 
 describe("progress view", () => {
+  it("shows the checkpoint total for backup metadata before the next batch finishes", () => {
+    const view = serverSyncProgressView({ ...bound(), running: true, progress: "preparing",
+      cycleItems: { done: 0, total: 230, activity: "downloadingBackupMetadata", processed: 256, expected: 267 } }, text, 0);
+    expect(view.current).toBe(`${text.activity.downloadingBackupMetadata} · 256 / 267`);
+    expect(view.percent).toBe(96);
+    expect(view.counters.find((counter) => counter.key === "items")?.value).toBe("256 / 267");
+    expect(view.stages.find((stage) => stage.state === "active")?.stage).toBe("downloading");
+  });
+  it.each(["downloadingMetadata", "downloadingBackupMetadata", "downloading", "syncingSections"] as const)("shows %s counts independently of upload work", (activity) => {
+    const view = serverSyncProgressView({ ...bound(), running: true, progress: "preparing",
+      cycleItems: { done: 0, total: 200, activity, processed: 25, expected: 100 } }, text, 0);
+    expect(view.current).toBe(`${text.activity[activity]} · 25 / 100`);
+    expect(view.percent).toBe(25);
+    expect(view.stages.map((stage) => stage.stage)).toEqual([
+      "saving", "preparing", "downloading", "applying", "refreshing", "publishing",
+    ]);
+    expect(view.stages.find((stage) => stage.state === "active")?.stage).toBe("downloading");
+    expect(view.counters.find((counter) => counter.key === "items")?.value).toBe("25 / 100");
+    const unknown = serverSyncProgressView({ ...bound(), running: true, progress: "preparing",
+      cycleItems: { done: 200, total: 200, activity, processed: 25, expected: 0 } }, text, 0);
+    expect(unknown.current).toBe(`${text.activity[activity]} · 25`);
+    expect(unknown.percent).toBeNull();
+  });
+  it("keeps backup preparation in the receive stage and ignores stale activity after activation", () => {
+    const snapshot = { ...bound(), running: true, progress: "preparing" as const,
+      cycleItems: { done: 0, total: 230, activity: "preserving" as const, processed: 1200, expected: 0 } };
+    const view = serverSyncProgressView(snapshot, text, 0);
+    expect(view.current).toBe(`${text.activity.preserving} · 1,200`);
+    expect(view.percent).toBeNull();
+    expect(view.stages.find((stage) => stage.state === "active")?.stage).toBe("downloading");
+    for (const progress of ["applying", "refreshing", "publishing"] as const) {
+      const next = serverSyncProgressView({ ...snapshot, progress }, text, 0);
+      expect(next.stages.find((stage) => stage.state === "active")?.stage).toBe(progress);
+    }
+  });
   it("shows backend preparation counts and server waiting without claiming completion", () => {
     const snapshot = { ...bound(), running: true, progress: "preparing" as const,
-      attemptStartedAt: 0, phaseStartedAt: 10_000,
+      attemptStartedAt: 0,
       cycleItems: { done: 0, total: 0, activity: "preparing" as const, processed: 17, expected: 100 } };
     const view = serverSyncProgressView(snapshot, text, 15_000);
     expect(view.current).toBe(`${text.activity.preparing} · 17 / 100`);
-    expect(view.elapsed).toBe(`${text.elapsed} 00:05`);
+    expect(view.elapsed).toBe(`${text.elapsed} 00:15`);
     expect(view.percent).toBeNull();
     const waiting = serverSyncProgressView({ ...snapshot, progress: "publishing",
       cycleItems: { done: 100, total: 100, activity: "confirming", processed: 0, expected: 0 } }, text, 15_000);
@@ -239,6 +274,7 @@ describe("progress view", () => {
       "pending",
       "pending",
       "pending",
+      "pending",
     ]);
     expect(view.counters.map((counter) => counter.value)).toEqual([
       "-",
@@ -264,8 +300,9 @@ describe("progress view", () => {
     expect(view.percent).toBe(35);
     expect(view.current).toBe(`${text.progress.applying} · 1,240 / 3,512`);
     expect(view.stages[1]).toMatchObject({ state: "done", detail: "3,512 items" });
-    expect(view.stages[2]).toMatchObject({ state: "active", detail: "1,240 / 3,512" });
-    expect(view.stages[4]).toMatchObject({ state: "pending", detail: "" });
+    expect(view.stages[2]).toMatchObject({ stage: "downloading", state: "done" });
+    expect(view.stages[3]).toMatchObject({ state: "active", detail: "1,240 / 3,512" });
+    expect(view.stages[5]).toMatchObject({ state: "pending", detail: "" });
     expect(view.counters).toEqual([
       { key: "bytes", label: text.verifiedBytes, value: "13.0 MiB" },
       { key: "rate", label: text.transferRate, value: "1.8 MiB/s" },

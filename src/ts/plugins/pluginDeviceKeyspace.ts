@@ -240,7 +240,12 @@ export class PluginDeviceKeyspace {
         await this.#hydrate()
         const generation = this.#generation
         const sequence = ++this.#writeSequence
-        await this.#backend.write(this.#owner, [mutation])
+        try {
+            await this.#backend.write(this.#owner, [mutation])
+        } catch (error) {
+            this.invalidate()
+            throw error
+        }
         if (generation !== this.#generation || sequence !== this.#writeSequence) {
             // A newer hydration may have read before this write committed.
             this.invalidate()

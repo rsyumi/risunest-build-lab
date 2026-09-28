@@ -1,0 +1,99 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`preserves custom-template variables, whitespace and generation prompts 1`] = `
+"Synthetic Character|Synthetic User
+[1:system]Synthetic system
+[2:user]합성🐿️
+[3:assistant]Synthetic reply
+[4:user]Follow-up
+assistant:"
+`;
+
+exports[`preserves the exact alpaca prompt 1`] = `
+"Synthetic system
+
+### Instruction:
+  합성🐿️  
+
+### Response:
+Synthetic reply
+
+### Instruction:
+Follow-up
+
+### Response:
+"
+`;
+
+exports[`preserves the exact chatml prompt 1`] = `
+"<|im_start|>system
+Synthetic system<|im_end|>
+<|im_start|>user
+  합성🐿️  <|im_end|>
+<|im_start|>assistant
+Synthetic reply<|im_end|>
+<|im_start|>user
+Follow-up<|im_end|>
+<|im_start|>assistant
+"
+`;
+
+exports[`preserves the exact gemma prompt 1`] = `
+"<start_of_turn>user
+합성🐿️<end_of_turn>
+<start_of_turn>model
+Synthetic reply<end_of_turn>
+<start_of_turn>user
+Follow-up<end_of_turn>
+<start_of_turn>model
+"
+`;
+
+exports[`preserves the exact gpt2 prompt 1`] = `
+"<|im_start|>system
+Synthetic system<|im_end|>
+<|im_start|>user
+  합성🐿️  <|im_end|>
+<|im_start|>assistant
+Synthetic reply<|im_end|>
+<|im_start|>user
+Follow-up<|im_end|>
+<|im_start|>assistant
+"
+`;
+
+exports[`preserves the exact llama2 prompt 1`] = `
+"<|begin_of_text|>[INST] <<SYS>>
+Synthetic system
+<</SYS>>
+
+  합성🐿️ [/INST] Synthetic reply <|begin_of_text|>[INST] Follow-up [/INST]"
+`;
+
+exports[`preserves the exact llama3 prompt 1`] = `
+"<|begin_of_text|><|start_header_id|>system<|end_header_id|>
+
+Synthetic system<|eot_id|><|start_header_id|>user<|end_header_id|>
+
+합성🐿️<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+
+Synthetic reply<|eot_id|><|start_header_id|>user<|end_header_id|>
+
+Follow-up<|eot_id|><|start_header_id|>assistant<|end_header_id|>
+
+"
+`;
+
+exports[`preserves the exact mistral prompt 1`] = `
+" [INST] System: Synthetic system
+  합성🐿️   [/INST] Synthetic reply  [INST] Follow-up [/INST]"
+`;
+
+exports[`preserves the exact vicuna prompt 1`] = `
+"Synthetic system
+
+USER:   합성🐿️  
+ASSISTANT: Synthetic reply</s>
+USER: Follow-up
+ASSISTANT:"
+`;

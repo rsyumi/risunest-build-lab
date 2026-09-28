@@ -382,6 +382,25 @@ impl PayloadCas {
         self.existing_object_path(content_hash)
     }
 
+    /// Whether the object is held here at `expected_size` and its bytes hash
+    /// to its name. A missing object is not held. `cancelled` is asked before
+    /// every read; a cancelled check is an error, not an answer.
+    pub(crate) fn holds_exact_object(
+        &self,
+        content_hash: &str,
+        expected_size: u64,
+        cancelled: &dyn Fn() -> bool,
+    ) -> io::Result<bool> {
+        let Some(path) = self.existing_object_path(content_hash)? else {
+            return Ok(false);
+        };
+        let mut file = self.open_exact_owned_file(&path)?;
+        if file.metadata()?.len() != expected_size {
+            return Ok(false);
+        }
+        Ok(hash_open_file(&mut file, cancelled)? == content_hash)
+    }
+
     pub(crate) fn unlink_exact_object(
         &self,
         content_hash: &str,
@@ -438,7 +457,7 @@ impl PayloadCas {
                 "deletion tombstone size does not match the exact canonical object",
             ));
         }
-        let actual_hash = hash_open_file(&mut file)?;
+        let actual_hash = hash_open_file(&mut file, &|| false)?;
         if exact_file_identity(&file)? != identity {
             return exact_object_changed();
         }
@@ -605,7 +624,7 @@ impl PayloadCas {
         if file.metadata()?.len() != expected_size {
             return collision_or_corruption(physical_key);
         }
-        if hash_open_file(&mut file)? != expected_hash {
+        if hash_open_file(&mut file, &|| false)? != expected_hash {
             return collision_or_corruption(physical_key);
         }
         Ok(())
@@ -777,10 +796,13 @@ fn collision_or_corruption<T>(physical_key: &str) -> io::Result<T> {
     ))
 }
 
-fn hash_open_file(file: &mut File) -> io::Result<String> {
+fn hash_open_file(file: &mut File, cancelled: &dyn Fn() -> bool) -> io::Result<String> {
     let mut hasher = Sha256::new();
     let mut buffer = [0_u8; COPY_BUFFER_BYTES];
     loop {
+        if cancelled() {
+            return Err(io::Error::other("payload verification cancelled"));
+        }
         let read = file.read(&mut buffer)?;
         if read == 0 {
             break;
@@ -1249,5 +1271,30 @@ mod tests {
 
         assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
         assert_eq!(std::fs::read(object_path).unwrap(), replacement);
+    }
+
+    #[test]
+    fn exact_object_check_stops_between_reads_once_cancelled() {
+        let directory = tempfile::tempdir().expect("temporary repository");
+        let cas = PayloadCas::new(directory.path()).expect("open repository");
+        let bytes = vec![0x5a; super::COPY_BUFFER_BYTES * 4 + 9];
+        let prepared = cas.prepare_bytes(&bytes).unwrap();
+        let asked = std::cell::Cell::new(0);
+        // The third read is refused, after two chunks of five were hashed.
+        let cancelled = || {
+            asked.set(asked.get() + 1);
+            asked.get() >= 3
+        };
+        assert!(cas
+            .holds_exact_object(&prepared.content_hash, prepared.byte_size, &cancelled)
+            .is_err());
+        assert_eq!(asked.get(), 3);
+        assert_eq!(
+            std::fs::read(directory.path().join(&prepared.physical_key)).unwrap(),
+            bytes
+        );
+        assert!(cas
+            .holds_exact_object(&prepared.content_hash, prepared.byte_size, &|| false)
+            .unwrap());
     }
 }

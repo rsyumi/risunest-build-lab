@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "packageManager": "pnpm@10.34.1",
+  "packageManager": "pnpm@10.34.5",
   "engines": {
     "node": ">=22.12.0"
   },
@@ -19,11 +19,11 @@
     "format:check": "prettier --check ."
   },
   "devDependencies": {
-    "@cloudflare/vitest-plugin": "^1.1.0",
-    "@types/node": "^24.0.0",
-    "prettier": "3.9.6",
+    "@cloudflare/vitest-plugin": "^1.1.13",
+    "@types/node": "^24.13.6",
+    "prettier": "3.9.8",
     "typescript": "7.0.2",
     "vitest": "^4.1.0",
-    "wrangler": "^4.129.0"
+    "wrangler": "^4.135.0"
   }
 }

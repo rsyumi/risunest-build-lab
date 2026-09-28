@@ -153,7 +153,7 @@ describe('native official publication job publisher', () => {
             session: 'session-1',
             saveDate: '1700000000000',
             credential: { kind: 'risu-auth', token: 'legacy-token' },
-        }, { signal })
+        }, { signal, onStatus: expect.any(Function) })
         expect(events).toEqual(['reconcile', 'attempt'])
         expect(result?.databaseFingerprint).toBe('a'.repeat(64))
         expect(acknowledge).not.toHaveBeenCalled()
@@ -267,7 +267,7 @@ describe('native official publication job publisher', () => {
                 credential: { kind: 'risu-auth', token: 'fresh-token' },
             },
             { revision: 7, accountId: 'account-1' },
-            { signal: undefined },
+            { signal: undefined, onStatus: expect.any(Function) },
         )
         expect(cancelAttempt).not.toHaveBeenCalled()
         expect(result?.databaseFingerprint).toBe('a'.repeat(64))

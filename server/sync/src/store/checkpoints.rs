@@ -30,6 +30,9 @@ pub struct CheckpointPage {
     pub checkpoint: Checkpoint,
     pub records: Vec<CheckpointRecord>,
     pub next: Option<CheckpointCursor>,
+    /// The checkpoint's record count, included only on the first page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub total_records: Option<Sequence>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -204,6 +207,11 @@ impl Store {
         if expires <= now()? {
             return Err(Error::new("checkpoint-expired", 410));
         }
+        let total_records = if after.is_none() {
+            let count: i64 = db.query_row("SELECT count(*) FROM checkpoint_records WHERE checkpoint=?1",
+                [id], |r| r.get(0))?;
+            Some(Sequence::from(count as u64))
+        } else { None };
         let (after_domain, after_key) = match after {
             Some(cursor) => (cursor.domain.as_str(), cursor.key.as_str()),
             None => ("", ""),
@@ -240,6 +248,7 @@ impl Store {
             },
             records,
             next,
+            total_records,
         })
     }
     pub fn release_checkpoint(&self, device: &Device, id: &str) -> Result<()> {

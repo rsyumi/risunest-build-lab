@@ -33,6 +33,7 @@ export let appSubVer = ''
 
 export type StreamingDisplayOptimizationMode = 'off'|'balanced'|'strong'
 export type StreamingThoughtMode = 'recent' | 'collapsed' | 'off'
+export type ChatMessageOverflowScope = 'latest' | 'all'
 
 export function normalizeDatabaseDefaults(data:Database): Database {
     if(checkNullish(data.characters)){
@@ -711,6 +712,7 @@ export function normalizeDatabaseDefaults(data:Database): Database {
     data.streamingDisplayOptimizationMode ??= 'off'
     data.streamingThoughtMode ??= 'recent'
     data.streamingDeferDisplayProcessing ??= false
+    data.chatMessageOverflowScope ??= 'latest'
     data.echoMessage ??= "Echo Message"
     data.echoDelay ??= 0
     if(!isTauri){
@@ -1292,6 +1294,7 @@ export interface Database{
     streamingDisplayOptimizationMode?: StreamingDisplayOptimizationMode
     streamingThoughtMode?: StreamingThoughtMode
     streamingDeferDisplayProcessing?: boolean
+    chatMessageOverflowScope?: ChatMessageOverflowScope
     pluginDevelopMode?: boolean
     echoMessage?:string
     echoDelay?:number

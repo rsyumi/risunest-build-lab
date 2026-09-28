@@ -19,13 +19,12 @@
     import {defaultAutoSuggestPrompt} from "../../../ts/storage/defaultPrompts";
     import AuxModelSelectors from './Model/AuxModelSelectors.svelte'
 
-    let sorted = 0
     let warns: string[] = $state([])
     let tokens = $state(0)
     let extokens = $state(0)
     let draggedIndex = $state(-1)
     let dragOverIndex = $state(-1)
-    let openedItemIndices = $state(new Set<number>())
+    let openedItems = $state(new Set<PromptItem>())
     executeTokenize(DBState.db.promptTemplate)
   interface Props {
     onGoBack?: () => void;
@@ -55,23 +54,6 @@
     }))
   }
 
-  function getReorderedTemplate() {
-    if (draggedIndex === -1 || dragOverIndex === -1 || draggedIndex === dragOverIndex) {
-      return getDisplayTemplate()
-    }
-
-    const items = getDisplayTemplate()
-    const [movedItem] = items.splice(draggedIndex, 1)
-
-    const adjustedDropIndex = draggedIndex < dragOverIndex ? dragOverIndex - 1 : dragOverIndex
-    items.splice(adjustedDropIndex, 0, movedItem)
-
-    return items.map((item, displayIndex) => ({
-      ...item,
-      displayIndex
-    }))
-  }
-
   function handlePromptDrop() {
     if (draggedIndex === -1 || dragOverIndex === -1 || draggedIndex === dragOverIndex) {
       return
@@ -83,37 +65,22 @@
     const adjustedDropIndex = draggedIndex < dragOverIndex ? dragOverIndex - 1 : dragOverIndex
     templates.splice(adjustedDropIndex, 0, movedItem)
 
-    const newOpenedIndices = new Set<number>()
-    openedItemIndices.forEach((index) => {
-      if (index === draggedIndex) {
-        newOpenedIndices.add(adjustedDropIndex)
-      } else if (draggedIndex < adjustedDropIndex) {
-        if (index > draggedIndex && index <= adjustedDropIndex) {
-          newOpenedIndices.add(index - 1)
-        } else {
-          newOpenedIndices.add(index)
-        }
-      } else {
-        if (index >= adjustedDropIndex && index < draggedIndex) {
-          newOpenedIndices.add(index + 1)
-        } else {
-          newOpenedIndices.add(index)
-        }
-      }
-    })
-    openedItemIndices = newOpenedIndices
-
     DBState.db.promptTemplate = templates
     draggedIndex = -1
     dragOverIndex = -1
   }
 
+  $effect(() => {
+    const retained = [...openedItems].filter(item => DBState.db.promptTemplate.includes(item))
+    if (retained.length !== openedItems.size) openedItems = new Set(retained)
+  })
+
   const handleKeyDown = (e: KeyboardEvent) => {
     if (e.ctrlKey && e.altKey && e.key === 'o') {
-      if (openedItemIndices.size === DBState.db.promptTemplate.length) {
-        openedItemIndices = new Set<number>()
+      if (openedItems.size === DBState.db.promptTemplate.length) {
+        openedItems = new Set<PromptItem>()
       } else {
-        openedItemIndices = new Set(DBState.db.promptTemplate.map((_, i) => i))
+        openedItems = new Set(DBState.db.promptTemplate)
       }
     }
   }
@@ -162,15 +129,14 @@
         {#if DBState.db.promptTemplate.length === 0}
                 <div class="text-textcolor2">No Format</div>
         {/if}
-        {#key sorted}
-            {#each getReorderedTemplate() as { item: prompt, originalIndex, displayIndex }}
+            {#each getDisplayTemplate() as { item: prompt, originalIndex, displayIndex } (prompt)}
                 <PromptDataItem
                     bind:promptItem={DBState.db.promptTemplate[originalIndex]}
                     isDragging={draggedIndex === originalIndex}
-                    isOpened={openedItemIndices.has(originalIndex)}
+                    isOpened={openedItems.has(prompt)}
                     bind:draggedIndex
                     bind:dragOverIndex
-                    bind:openedItemIndices
+                    bind:openedItems
                     currentIndex={originalIndex}
                     displayIndex={displayIndex}
                     onDrop={handlePromptDrop}
@@ -178,18 +144,6 @@
                         let templates = DBState.db.promptTemplate
                         templates.splice(originalIndex, 1)
                         DBState.db.promptTemplate = templates
-
-                        const newOpenedIndices = new Set<number>()
-                        openedItemIndices.forEach((index) => {
-                            if (index === originalIndex) {
-                                return
-                            } else if (index > originalIndex) {
-                                newOpenedIndices.add(index - 1)
-                            } else {
-                                newOpenedIndices.add(index)
-                            }
-                        })
-                        openedItemIndices = newOpenedIndices
 
                         draggedIndex = -1
                         dragOverIndex = -1
@@ -203,18 +157,6 @@
                         templates[originalIndex] = templates[originalIndex + 1]
                         templates[originalIndex + 1] = temp
                         DBState.db.promptTemplate = templates
-
-                        const newOpenedIndices = new Set<number>()
-                        openedItemIndices.forEach((index) => {
-                            if (index === originalIndex) {
-                                newOpenedIndices.add(originalIndex + 1)
-                            } else if (index === originalIndex + 1) {
-                                newOpenedIndices.add(originalIndex)
-                            } else {
-                                newOpenedIndices.add(index)
-                            }
-                        })
-                        openedItemIndices = newOpenedIndices
                     }}
                     moveUp={() => {
                         if(originalIndex === 0){
@@ -225,21 +167,8 @@
                         templates[originalIndex] = templates[originalIndex - 1]
                         templates[originalIndex - 1] = temp
                         DBState.db.promptTemplate = templates
-
-                        const newOpenedIndices = new Set<number>()
-                        openedItemIndices.forEach((index) => {
-                            if (index === originalIndex) {
-                                newOpenedIndices.add(originalIndex - 1)
-                            } else if (index === originalIndex - 1) {
-                                newOpenedIndices.add(originalIndex)
-                            } else {
-                                newOpenedIndices.add(index)
-                            }
-                        })
-                        openedItemIndices = newOpenedIndices
                     }} />
             {/each}
-        {/key}
     </div>
 
     <button class="font-medium cursor-pointer hover:text-green-500" onclick={() => {

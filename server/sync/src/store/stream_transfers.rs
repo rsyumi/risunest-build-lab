@@ -228,10 +228,10 @@ impl Store {
         let result = (|| -> Result<Option<Vec<u8>>> {
             let request: TransferRequest =
                 canonical::decode(body.as_bytes(), risunest_sync_wire::MAX_METADATA_BYTES)?;
-            let mut target = self.open_object(&request.target)?.0;
+            let (mut target, target_size) = self.open_object(&request.target)?;
             let identity = Base {
                 hash: request.target,
-                size: target.metadata()?.len(),
+                size: target_size,
             };
             let mut bases = Vec::new();
             let mut identities = Vec::new();

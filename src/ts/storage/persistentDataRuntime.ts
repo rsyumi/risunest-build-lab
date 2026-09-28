@@ -8,6 +8,7 @@ import {
     type ConversationPublicationOptions,
     type CompleteConversationLease,
     type SelectedConversationTarget,
+    type WindowedChatListEditResult,
     type WindowedConversationMutationController,
 } from './activeWorkingSet.svelte'
 import type { ActiveConversationSession } from './activeConversationSession'
@@ -55,6 +56,7 @@ import {
     isWorkingSetCharacterStub,
     isCatalogPresetWorkingSet,
     patchWorkingSetCharacterDetail,
+    patchWorkingSetRoot,
     projectPinnedScalableWorkingSet,
     projectScalableWorkingSetAtRevision,
 } from './workingSetCatalog'
@@ -194,7 +196,7 @@ export function publishPersistentCharacterMutationToWorkingSet(
     selectedIndex: number,
     selectCharacterIndex: (index: number) => void,
 ): void {
-    Object.assign(database, state.root)
+    patchWorkingSetRoot(database, state.root)
     for (const detail of state.relatedCharacters ?? []) {
         const relatedIndex = database.characters.findIndex(
             (candidate) => candidate.chaId === detail.chaId,
@@ -380,6 +382,10 @@ export interface PersistentDataRuntime {
         chat: Chat,
         absoluteStartIndex: number,
     ): WindowedConversationMutationController | null
+    editWindowedChatList(
+        target: SelectedConversationTarget,
+        edit: (character: character | groupChat) => string | null | false,
+    ): WindowedChatListEditResult
     tryDemoteSelectedConversation(
         target?: SelectedConversationTarget | null,
     ): boolean
@@ -968,6 +974,8 @@ export function createPersistentDataRuntime(
                 chat,
                 absoluteStartIndex,
             ),
+        editWindowedChatList: (target, edit) =>
+            workingSet.editWindowedChatList(target, edit),
         tryDemoteSelectedConversation: (target) =>
             workingSet.tryDemoteSelectedConversation(target ?? undefined),
         refreshSelectedConversationAfterReplacement: (

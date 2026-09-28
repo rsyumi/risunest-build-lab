@@ -71,11 +71,6 @@
       <div class="mt-2 flex flex-wrap gap-x-3.5 gap-y-1 text-[13px] text-textcolor2 tabular-nums">
         <span>{text.local} {bytes(status.localBytes)}</span>
         <span>{text.remoteOnly} {bytes(status.remoteBytes)} ({status.remoteObjects.toLocaleString()})</span>
-        <span
-          >{status.remoteObjects === 0 && status.unavailableObjects === 0
-            ? text.offlineReady
-            : text.onlineNeeded}</span
-        >
       </div>
       {#if status.unavailableObjects > 0}<p role="alert" class="mt-1 text-sm text-danger-400">
           {text.unavailable}: {status.unavailableObjects.toLocaleString()}

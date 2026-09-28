@@ -83,7 +83,6 @@
             list().push({ name, values: currentValues(), promptPresetName })
             alertToast(language.togglePresetSaved(name))
         })
-    // The native file picker never resolves when it is cancelled, so this stays outside `guarded`.
     async function importPreset() {
         let file: Awaited<ReturnType<typeof selectSingleFile>>
         try {
@@ -114,6 +113,7 @@
         guarded(async () => {
             const preset = list()[index]
             if (!preset || !(await alertConfirm(language.overwriteTogglePresetConfirm(preset.name)))) return
+            if (!list().includes(preset)) return
             preset.values = currentValues()
             preset.promptPresetName = promptPresetName
             alertToast(language.togglePresetOverwritten(preset.name))
@@ -124,6 +124,7 @@
             if (!preset) return
             const name = (await alertInput(language.renameTogglePreset, [], preset.name))?.trim()
             if (!name || name === preset.name) return
+            if (!list().includes(preset)) return
             const previous = preset.name
             preset.name = name
             alertToast(language.togglePresetRenamed(previous, name))
@@ -147,7 +148,10 @@
             const presets = list()
             const preset = presets[index]
             if (!preset || !(await alertConfirm(language.deleteTogglePresetConfirm(preset.name)))) return
-            presets.splice(index, 1)
+            const current = list()
+            const currentIndex = current.indexOf(preset)
+            if (currentIndex < 0) return
+            current.splice(currentIndex, 1)
             openMenu = null
             alertToast(language.togglePresetDeleted(preset.name))
         })

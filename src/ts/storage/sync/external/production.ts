@@ -1,9 +1,14 @@
+import { hasMobileBackgroundTasks, subscribeMobileBackgroundTasks, runWithMobileBackgroundTask, measuredTaskPercent, type MobileBackgroundTask } from '../../../mobileBackgroundTask'
 import {
     acquireDestructiveReplacementFence,
     capturePersistentMutationToken,
     flushPendingDataLocally,
+    getPersistentDataRuntime,
     refreshActiveWorkingSetFromStore,
 } from '../../persistentDataRuntime.svelte'
+import { PersistentMutationFencedError } from '../../saveCoordinator'
+import type { PersistentDestructiveReplacementFence } from '../../persistentDataRuntime'
+import type { RetainableReplacementFence } from '../../retainableReplacementFence'
 import { subscribeLocalPersistentRevision } from '../../persistentRevisionEvents'
 import type { SyncExitDrainAdapter } from '../../syncExitCoordinator'
 import { hasPendingExternalApplication, runExternalApplication } from './applicationRecovery'
@@ -42,6 +47,8 @@ interface ProductionRuntime {
 
 let runtime: ProductionRuntime | undefined
 let installation: Promise<() => void> | undefined
+// A receive during an exit drain applies under the fence the exit holds.
+let exitDrainFence: RetainableReplacementFence | undefined
 
 function assertNoPendingApplication(): void {
     if (hasPendingExternalApplication()) {
@@ -69,8 +76,10 @@ function destinations(state: ExternalStorageState): ExternalScheduledDestination
 
 async function refreshForeground(current: ProductionRuntime): Promise<void> {
     const bridge = getExternalStorageBridge()
-    current.session = newSession('foreground')
-    await bridge.setExecutionSession(current.session)
+    if (!hasMobileBackgroundTasks()) {
+        current.session = newSession('foreground')
+        await bridge.setExecutionSession(current.session)
+    }
     const state = await bridge.getState()
     current.state = state
     current.controller.replaceState(state)
@@ -102,22 +111,38 @@ async function applyReceivedSync(
     ) {
         throw new Error('External sync receive readiness is incomplete')
     }
-    await flushPendingDataLocally('external-storage-sync-receive')
-    const token = await capturePersistentMutationToken(
-        'external-storage-sync-receive', { publishOfficial: false },
-    )
-    if (String(token.revision) !== job.result.expectedRevision) {
+    let fence: PersistentDestructiveReplacementFence
+    let expected: number
+    try {
+        if (exitDrainFence) {
+            fence = exitDrainFence.retain()
+            expected = getPersistentDataRuntime().revision
+        } else {
+            await flushPendingDataLocally('external-storage-sync-receive')
+            const token = await capturePersistentMutationToken(
+                'external-storage-sync-receive', { publishOfficial: false },
+            )
+            fence = await acquireDestructiveReplacementFence(token)
+            expected = token.revision
+        }
+    } catch (error) {
+        // An already-running foreground receive may meet the newly acquired exit fence.
+        if (!(error instanceof PersistentMutationFencedError) || !exitDrainFence) throw error
+        fence = exitDrainFence.retain()
+        expected = getPersistentDataRuntime().revision
+    }
+    if (String(expected) !== job.result.expectedRevision) {
+        fence.release()
         await getExternalStorageBridge().cancelJob(job.id)
         throw new Error('Local data changed while external sync receive was prepared')
     }
-    const fence = await acquireDestructiveReplacementFence(token)
     await runExternalApplication({
         jobId: job.id,
         fence,
         confirm: async () => {
             try {
                 const result = await getExternalStorageBridge().applyReceived(
-                    job.id, String(fence.revision) as DecimalString,
+                    job.id, String(expected) as DecimalString,
                 )
                 return { kind: 'committed', revision: parseExternalLocalRevision(result.receivedRevision) }
             } catch (error) {
@@ -241,6 +266,7 @@ export function installExternalStorageProduction(): Promise<() => void> {
             const hidden = document.visibilityState === 'hidden'
             current.lifecycle = current.lifecycle.then(async () => {
                 if (hidden) {
+                    if (hasMobileBackgroundTasks()) return
                     current.session = { kind: 'foreground', id: crypto.randomUUID() }
                     await bridge.setExecutionSession({ kind: 'hidden', id: current.session.id })
                     await scheduler.suspend(destination => {
@@ -251,6 +277,9 @@ export function installExternalStorageProduction(): Promise<() => void> {
                 } else await refreshForeground(current)
             }).catch(() => {})
         }
+        disposers.push(subscribeMobileBackgroundTasks(() => {
+            if (document.visibilityState === 'hidden' && !hasMobileBackgroundTasks()) onVisibility()
+        }))
         window.addEventListener('online', onOnline)
         window.addEventListener('offline', onOffline)
         document.addEventListener('visibilitychange', onVisibility)
@@ -296,16 +325,22 @@ export async function requestExternalStorageNow(
     connectionId: string,
     kind: 'sync' | 'backup' | 'cleanup',
 ): Promise<ExternalControllerResult> {
-    assertNoPendingApplication()
-    if (kind !== 'cleanup') await flushPendingDataLocally(kind === 'sync' ? 'external-sync-now' : 'external-backup-now')
-    const token = await capturePersistentMutationToken('external-storage-manual')
-    const current = runtime
-    if (!current) throw new Error('External storage production is not installed')
-    return current.scheduler.requestNow(
-        connectionId,
-        kind,
-        String(token.revision) as DecimalString,
-    )
+    return runWithMobileBackgroundTask(kind === 'cleanup' ? 'maintenance' : kind, async background => {
+        assertNoPendingApplication()
+        if (kind !== 'cleanup') await flushPendingDataLocally(kind === 'sync' ? 'external-sync-now' : 'external-backup-now')
+        const token = await capturePersistentMutationToken('external-storage-manual')
+        const current = runtime
+        if (!current) throw new Error('External storage production is not installed')
+        background.signal?.throwIfAborted()
+        const result = await current.scheduler.requestNow(
+            connectionId,
+            kind,
+            String(token.revision) as DecimalString,
+            background,
+        )
+        if (result.kind !== 'complete') await background.dispose(false)
+        return result
+    })
 }
 
 export async function requestExternalStorageDeleteHistory(
@@ -314,35 +349,38 @@ export async function requestExternalStorageDeleteHistory(
     confirmOtherDevice: boolean,
     confirmLastRetained: boolean,
 ): Promise<ExternalJobSummary> {
-    assertNoPendingApplication()
-    if (!item.pointId || !item.pointObservation || !item.deletable) {
-        throw new Error('The selected history item cannot be deleted')
-    }
-    const current = runtime
-    if (!current) throw new Error('External storage production is not installed')
-    let job = await getExternalStorageBridge().startJob({
-        connectionId,
-        kind: 'delete-history',
-        pointId: item.pointId,
-        pointObservation: item.pointObservation,
-        confirmOtherDevice,
-        confirmLastRetained,
-        reason: 'manual',
-        session: current.session.kind,
-        sessionId: current.session.id,
-    })
-    while (true) {
-        if (job.state === 'succeeded') break
-        if (['failed', 'cancelled', 'uncertain', 'conflict', 'waiting'].includes(job.state)) {
-            throw restoreFailure(job)
+    return runWithMobileBackgroundTask('maintenance', async (background) => {
+        assertNoPendingApplication()
+        if (!item.pointId || !item.pointObservation || !item.deletable) {
+            throw new Error('The selected history item cannot be deleted')
         }
-        await new Promise(resolve => setTimeout(resolve, 500))
-        job = await getExternalStorageBridge().getJob(job.id)
-    }
-    const state = await getExternalStorageBridge().getState()
-    current.state = state
-    current.controller.replaceState(state)
-    return job
+        const current = runtime
+        if (!current) throw new Error('External storage production is not installed')
+        let job = await getExternalStorageBridge().startJob({
+            connectionId,
+            kind: 'delete-history',
+            pointId: item.pointId,
+            pointObservation: item.pointObservation,
+            confirmOtherDevice,
+            confirmLastRetained,
+            reason: 'manual',
+            session: current.session.kind,
+            sessionId: current.session.id,
+        })
+        while (true) {
+            if (job.state === 'succeeded') break
+            if (['failed', 'cancelled', 'uncertain', 'conflict', 'waiting'].includes(job.state)) {
+                throw restoreFailure(job)
+            }
+            await new Promise(resolve => setTimeout(resolve, 500))
+            job = await readBackgroundJob(job.id, background)
+            background.progress(measuredTaskPercent(Number(job.completedBytes), Number(job.totalBytes)))
+        }
+        const state = await getExternalStorageBridge().getState()
+        current.state = state
+        current.controller.replaceState(state)
+        return job
+    })
 }
 
 /**
@@ -355,42 +393,51 @@ export async function requestExternalStorageResolveConflict(
     conflictId: string,
     choice: 'local' | 'remote',
 ): Promise<ExternalJobSummary> {
-    assertNoPendingApplication()
-    const current = runtime
-    if (!current) throw new Error('External storage production is not installed')
-    await flushPendingDataLocally('external-storage-resolve-conflict')
-    await current.scheduler.suspend(destination =>
-        destination.kind === 'sync' && destination.connectionId === connectionId)
-    try {
-        let job = await getExternalStorageBridge().startJob({
-            connectionId,
-            kind: 'resolve-conflict',
-            conflictId,
-            choice,
-            reason: 'manual',
-            session: current.session.kind,
-            sessionId: current.session.id,
-        })
-        while (true) {
-            if (job.state === 'waiting' && job.phase === 'remote-apply') {
-                await applyReceivedSync(current, job)
-                job = await getExternalStorageBridge().getJob(job.id)
-                continue
+    return runWithMobileBackgroundTask('sync', async (background) => {
+        assertNoPendingApplication()
+        const current = runtime
+        if (!current) throw new Error('External storage production is not installed')
+        await flushPendingDataLocally('external-storage-resolve-conflict')
+        await current.scheduler.suspend(destination =>
+            destination.kind === 'sync' && destination.connectionId === connectionId)
+        try {
+            let job = await getExternalStorageBridge().startJob({
+                connectionId,
+                kind: 'resolve-conflict',
+                conflictId,
+                choice,
+                reason: 'manual',
+                session: current.session.kind,
+                sessionId: current.session.id,
+            })
+            while (true) {
+                if (job.state === 'waiting' && job.phase === 'remote-apply') {
+                    await applyReceivedSync(current, job)
+                    job = await readBackgroundJob(job.id, background)
+                    background.progress(measuredTaskPercent(Number(job.completedBytes), Number(job.totalBytes)))
+                    continue
+                }
+                if (job.state === 'succeeded') break
+                if (['failed', 'cancelled', 'uncertain', 'conflict'].includes(job.state)) {
+                    throw restoreFailure(job)
+                }
+                await new Promise(resolve => setTimeout(resolve, job.state === 'waiting' ? 5_000 : 500))
+                job = await readBackgroundJob(job.id, background)
+                background.progress(measuredTaskPercent(Number(job.completedBytes), Number(job.totalBytes)))
             }
-            if (job.state === 'succeeded') break
-            if (['failed', 'cancelled', 'uncertain', 'conflict'].includes(job.state)) {
-                throw restoreFailure(job)
-            }
-            await new Promise(resolve => setTimeout(resolve, job.state === 'waiting' ? 5_000 : 500))
-            job = await getExternalStorageBridge().getJob(job.id)
+            const state = await getExternalStorageBridge().getState()
+            current.state = state
+            current.controller.replaceState(state)
+            return job
+        } finally {
+            current.scheduler.resume()
         }
-        const state = await getExternalStorageBridge().getState()
-        current.state = state
-        current.controller.replaceState(state)
-        return job
-    } finally {
-        current.scheduler.resume()
-    }
+    })
+}
+
+async function readBackgroundJob(id: string, background: MobileBackgroundTask): Promise<ExternalJobSummary> {
+    const bridge = getExternalStorageBridge()
+    return background.signal?.aborted ? bridge.cancelJob(id) : bridge.getJob(id)
 }
 
 function restoreFailure(job: ExternalJobSummary): Error {
@@ -404,78 +451,81 @@ export async function requestExternalStorageRestore(
     snapshotId: string,
     restoreAreas: ExternalRestoreArea[],
 ): Promise<ExternalJobSummary> {
-    assertNoPendingApplication()
-    const current = runtime
-    if (!current) throw new Error('External storage production is not installed')
-    let fence: Awaited<ReturnType<typeof acquireDestructiveReplacementFence>> | undefined
-    let handedOff = false
-    await current.scheduler.suspend(destination => destination.kind === 'sync')
-    try {
-        await flushPendingDataLocally('external-storage-restore')
-        const token = await capturePersistentMutationToken(
-            'external-storage-restore', { publishOfficial: false },
-        )
-        const areas = [...restoreAreas]
-        const nativeState = await getExternalStorageBridge().getState()
-        const previous = nativeState.jobs.find(job => job.kind === 'restore'
-            && job.connectionId === connectionId
-            && !['succeeded', 'failed', 'cancelled'].includes(job.state))
-        const targetRevision = String(token.revision) as DecimalString
-        if (previous && (previous.restoreRequest?.snapshotId !== snapshotId
-            || previous.restoreRequest.targetRevision !== targetRevision
-            || JSON.stringify(previous.restoreRequest.restoreAreas) !== JSON.stringify(areas))) {
-            throw new Error('The pending restore belongs to a different snapshot, scope, or local revision')
+    return runWithMobileBackgroundTask('restore', async (background) => {
+        assertNoPendingApplication()
+        const current = runtime
+        if (!current) throw new Error('External storage production is not installed')
+        let fence: Awaited<ReturnType<typeof acquireDestructiveReplacementFence>> | undefined
+        let handedOff = false
+        await current.scheduler.suspend(destination => destination.kind === 'sync')
+        try {
+            await flushPendingDataLocally('external-storage-restore')
+            const token = await capturePersistentMutationToken(
+                'external-storage-restore', { publishOfficial: false },
+            )
+            const areas = [...restoreAreas]
+            const nativeState = await getExternalStorageBridge().getState()
+            const previous = nativeState.jobs.find(job => job.kind === 'restore'
+                && job.connectionId === connectionId
+                && !['succeeded', 'failed', 'cancelled'].includes(job.state))
+            const targetRevision = String(token.revision) as DecimalString
+            if (previous && (previous.restoreRequest?.snapshotId !== snapshotId
+                || previous.restoreRequest.targetRevision !== targetRevision
+                || JSON.stringify(previous.restoreRequest.restoreAreas) !== JSON.stringify(areas))) {
+                throw new Error('The pending restore belongs to a different snapshot, scope, or local revision')
+            }
+            fence = await acquireDestructiveReplacementFence(token)
+            const jobId = previous?.id ?? crypto.randomUUID()
+            let completed: ExternalJobSummary | undefined
+            const operation = runExternalApplication({
+                jobId,
+                fence,
+                confirm: async () => {
+                    // Retrying this ID confirms or resumes the same native job, even
+                    // when the original start response was lost after it committed.
+                    let job = await getExternalStorageBridge().startJob({
+                        connectionId, kind: 'restore', snapshotId, restoreAreas: areas,
+                        targetRevision, reason: 'manual',
+                        session: current.session.kind, sessionId: current.session.id,
+                    }, jobId)
+                    while (true) {
+                        if (job.id !== jobId) throw new Error('External restore job identity changed')
+                        if (job.state === 'succeeded') {
+                            const received = job.result?.receivedRevision
+                            if (received === undefined) throw new Error('External restore has no commit receipt')
+                            completed = job
+                            return { kind: 'committed', revision: parseExternalLocalRevision(received) }
+                        }
+                        if (['failed', 'cancelled'].includes(job.state) && job.applicationStarted !== true) {
+                            return { kind: 'not-applied', error: restoreFailure(job) }
+                        }
+                        if (['failed', 'cancelled', 'uncertain', 'conflict'].includes(job.state)) {
+                            throw restoreFailure(job)
+                        }
+                        await new Promise(resolve => setTimeout(resolve, job.state === 'waiting' ? 5_000 : 500))
+                        job = await readBackgroundJob(jobId, background)
+                        background.progress(measuredTaskPercent(Number(job.completedBytes), Number(job.totalBytes)))
+                    }
+                },
+                refreshReleased: refreshActiveWorkingSetFromStore,
+                afterRefresh: async () => {
+                    await (await import('../../../plugins/plugins.svelte')).loadPluginsAfterAuthoritativeRestore()
+                    const state = await getExternalStorageBridge().getState()
+                    current.state = state
+                    current.controller.replaceState(state)
+                },
+                settled: () => current.scheduler.resume(),
+            })
+            handedOff = true
+            await operation
+            return completed!
+        } finally {
+            if (!handedOff) {
+                fence?.release()
+                current.scheduler.resume()
+            }
         }
-        fence = await acquireDestructiveReplacementFence(token)
-        const jobId = previous?.id ?? crypto.randomUUID()
-        let completed: ExternalJobSummary | undefined
-        const operation = runExternalApplication({
-            jobId,
-            fence,
-            confirm: async () => {
-                // Retrying this ID confirms or resumes the same native job, even
-                // when the original start response was lost after it committed.
-                let job = await getExternalStorageBridge().startJob({
-                    connectionId, kind: 'restore', snapshotId, restoreAreas: areas,
-                    targetRevision, reason: 'manual',
-                    session: current.session.kind, sessionId: current.session.id,
-                }, jobId)
-                while (true) {
-                    if (job.id !== jobId) throw new Error('External restore job identity changed')
-                    if (job.state === 'succeeded') {
-                        const received = job.result?.receivedRevision
-                        if (received === undefined) throw new Error('External restore has no commit receipt')
-                        completed = job
-                        return { kind: 'committed', revision: parseExternalLocalRevision(received) }
-                    }
-                    if (['failed', 'cancelled'].includes(job.state) && job.applicationStarted !== true) {
-                        return { kind: 'not-applied', error: restoreFailure(job) }
-                    }
-                    if (['failed', 'cancelled', 'uncertain', 'conflict'].includes(job.state)) {
-                        throw restoreFailure(job)
-                    }
-                    await new Promise(resolve => setTimeout(resolve, job.state === 'waiting' ? 5_000 : 500))
-                    job = await getExternalStorageBridge().getJob(jobId)
-                }
-            },
-            refreshReleased: refreshActiveWorkingSetFromStore,
-            afterRefresh: async () => {
-                await (await import('../../../plugins/plugins.svelte')).loadPluginsAfterAuthoritativeRestore()
-                const state = await getExternalStorageBridge().getState()
-                current.state = state
-                current.controller.replaceState(state)
-            },
-            settled: () => current.scheduler.resume(),
-        })
-        handedOff = true
-        await operation
-        return completed!
-    } finally {
-        if (!handedOff) {
-            fence?.release()
-            current.scheduler.resume()
-        }
-    }
+    })
 }
 
 export interface ExternalExitSelectionCapture {
@@ -491,6 +541,7 @@ export interface ExternalExitSelectionCapture {
 
 export function getExternalStorageSyncExitDrainAdapter(
     capture?: ExternalExitSelectionCapture,
+    fence?: RetainableReplacementFence,
 ): SyncExitDrainAdapter | null {
     const current = runtime
     if (!current) return null
@@ -516,12 +567,17 @@ export function getExternalStorageSyncExitDrainAdapter(
             drainSession = newSession('exitDrain')
             await current.lifecycle
             await bridge.setExecutionSession(drainSession)
-            return current.controller.drainToRevision(
-                connectionId,
-                target,
-                drainSession.id,
-                signal,
-            )
+            exitDrainFence = fence
+            try {
+                return await current.controller.drainToRevision(
+                    connectionId,
+                    target,
+                    drainSession.id,
+                    signal,
+                )
+            } finally {
+                if (exitDrainFence === fence) exitDrainFence = undefined
+            }
         },
         async cancel(reason) {
             try {

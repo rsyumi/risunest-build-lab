@@ -290,3 +290,85 @@ describe('the storage usage tab', () => {
         expect(days.value).toBe('30')
     })
 })
+
+describe('a running job', () => {
+    function job(counters?: 'prepared' | 'transferred') {
+        return {
+            id: 'job-1',
+            connectionId: 'connection-1',
+            kind: 'backup' as const,
+            state: 'running' as const,
+            phase: 'packing',
+            ...(counters ? { counters } : {}),
+            completedBytes: '400',
+            totalBytes: '800',
+            completedItems: '4',
+            totalItems: '8',
+            startedAtMs: '1',
+            updatedAtMs: '2',
+        }
+    }
+
+    async function show(counters?: 'prepared' | 'transferred'): Promise<string> {
+        state.getState.mockResolvedValue({
+            supported: true,
+            selection: { kind: 'none', selectionEpoch: '0', paused: false, decisionRequired: false },
+            connections: [connection(10, 30)],
+            jobs: [job(counters)],
+        })
+        state.getQuota.mockRejectedValue({ kind: 'transient', httpStatus: null, retryAtMs: null })
+        state.listHistory.mockResolvedValue({ items: [] })
+        target = document.createElement('div')
+        document.body.append(target)
+        component = mount(ExternalStorageSettings, { target })
+        await settle()
+        return target.textContent ?? ''
+    }
+
+    afterEach(() => {
+        if (component) unmount(component)
+        component = undefined
+        target.remove()
+        vi.clearAllMocks()
+    })
+
+    it('says whether the counted bytes are prepared or sent', async () => {
+        expect(await show('prepared')).toContain(`${strings.jobCounters.prepared} 400 B / 800 B`)
+        if (component) unmount(component)
+        component = undefined
+        target.remove()
+        expect(await show('transferred')).toContain(`${strings.jobCounters.transferred} 400 B / 800 B`)
+    })
+
+    it('leaves a job that counts neither unlabelled', async () => {
+        const shown = await show()
+        expect(shown).toContain('400 B / 800 B')
+        expect(shown).not.toContain(strings.jobCounters.prepared)
+        expect(shown).not.toContain(strings.jobCounters.transferred)
+    })
+
+    it('reports a check that could not finish on its root without a verified count', async () => {
+        state.getState.mockResolvedValue({
+            supported: true,
+            selection: { kind: 'none', selectionEpoch: '0', paused: false, decisionRequired: false },
+            connections: [connection(10, 30)],
+            jobs: [{
+                ...job(),
+                kind: 'check-repository' as const,
+                state: 'succeeded' as const,
+                phase: 'complete',
+                result: { stopReason: 'expired' },
+            }],
+        })
+        state.getQuota.mockRejectedValue({ kind: 'transient', httpStatus: null, retryAtMs: null })
+        state.listHistory.mockResolvedValue({ items: [] })
+        target = document.createElement('div')
+        document.body.append(target)
+        component = mount(ExternalStorageSettings, { target })
+        await settle()
+        const shown = target.textContent ?? ''
+        expect(shown).toContain(strings.checkExpired)
+        expect(shown).not.toContain(strings.completed)
+        expect(shown).not.toContain(strings.checkSummary.split('{0}')[0])
+    })
+})

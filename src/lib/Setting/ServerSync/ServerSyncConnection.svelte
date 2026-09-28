@@ -9,6 +9,7 @@
   import ServerSyncConnect from "./ServerSyncConnect.svelte";
   import ServerSyncRegistrationInput from "./ServerSyncRegistrationInput.svelte";
   import ServerSyncStorage from "./ServerSyncStorage.svelte";
+  import ServerSyncStages from "./ServerSyncStages.svelte";
   import { formatRisuNestStorageBytes as bytes } from "src/ts/storage/risuNestStorageDashboard";
   import { setAssetResidencyPolicy } from "src/ts/storage/sync/serverAssetResidency";
   import { serverSyncError } from "src/ts/storage/sync/serverSync";
@@ -87,7 +88,7 @@
   );
   const storageHelp = $derived(
     cacheUsage
-      ? `${text.management.cache} ${bytes(cacheUsage.totalBytes)} · ${text.management.reclaimable} ${bytes(cacheUsage.reclaimableBytes)}`
+      ? `${text.management.cache} ${bytes(cacheUsage.cacheBytes)} · ${text.management.reclaimable} ${bytes(cacheUsage.reclaimableBytes)}`
       : undefined,
   );
   $effect(() => {
@@ -258,6 +259,7 @@
             label={progress.current}
             fraction={progress.percent === null ? null : progress.percent / 100}
           />
+          <ServerSyncStages stages={progress.stages} />
         </div>
       {/if}
       {#if snapshot.running && snapshot.retryableFailure}

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createServerSyncFacade, type ServerCycle } from "./serverSync";
 import type { CommittedApplyOutcome } from '../persistentDataRuntime';
+import { retainableReplacementFence } from '../retainableReplacementFence';
 
 const head = {
   libraryId: "library",
@@ -91,6 +92,33 @@ function fixture(
   return { facade, native, runtime, fence, trace, progress };
 }
 describe("server sync activation boundary", () => {
+  it("forwards native backup metadata counts while preparation is still running", async () => {
+    vi.useFakeTimers();
+    const { runtime } = fixture();
+    const items = { done: 0, total: 230, activity: "downloadingBackupMetadata", processed: 1200, expected: 0 };
+    const onCycleItems = vi.fn();
+    let finish!: () => void;
+    const pending = new Promise<void>((resolve) => { finish = resolve; });
+    const native = vi.fn(async (command: string) => {
+      if (command === "server_sync_progress_counts") return items;
+      if (command === "server_sync_prepare") {
+        await pending;
+        return { kind: "report", result };
+      }
+      throw new Error(`Unexpected command: ${command}`);
+    });
+    const facade = createServerSyncFacade({ runtime, invoke: native as never, onCycleItems });
+    const cycle = facade.cycle();
+    try {
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(onCycleItems).toHaveBeenCalledWith(items);
+    } finally {
+      finish();
+      await cycle;
+      vi.useRealTimers();
+    }
+  });
+
   it('refreshes chat changes without restarting unrelated plugins', async () => {
     const { runtime, native, fence } = fixture();
     const original = native.getMockImplementation()!;
@@ -366,5 +394,125 @@ describe("server sync activation boundary", () => {
     ).toHaveLength(2);
     expect(fence.refreshCommittedWorkingSet).toHaveBeenCalledOnce();
     expect(fence.release).toHaveBeenCalledOnce();
+  });
+  it("claims the library only after library work outside the facade settles", async () => {
+    const { runtime, native, trace } = fixture();
+    const original = native.getMockImplementation()!;
+    native.mockImplementation(async (command) =>
+      command === "server_sync_status" ? ({ localRevision: 7 } as never) : original(command));
+    let settle!: () => void;
+    const awaitLibrary = vi.fn(() => new Promise<void>((resolve) => { settle = resolve; }));
+    const facade = createServerSyncFacade({ runtime, invoke: native as never, awaitLibrary });
+    const idle = () => new Promise((resolve) => setTimeout(resolve, 0));
+    const config = { endpoint: "http://localhost", libraryId: "library", deviceId: "device", token: "token" };
+    const claims = [
+      [() => facade.cycle(), "server_sync_prepare"],
+      [() => facade.bind(config), "server_sync_bind"],
+      [() => facade.unbind(), "server_sync_unbind"],
+      [() => facade.reconcile(), "server_sync_reconcile"],
+    ] as const;
+    for (const [claim, command] of claims) {
+      const pending = claim();
+      await idle();
+      expect(trace).not.toContain(command);
+      settle();
+      await pending;
+      expect(trace).toContain(command);
+    }
+    expect(awaitLibrary).toHaveBeenCalledTimes(claims.length);
+  });
+  it("stops a cycle cancelled while it waits for the library", async () => {
+    const { runtime, native, trace } = fixture();
+    let settle!: () => void;
+    const facade = createServerSyncFacade({
+      runtime,
+      invoke: native as never,
+      awaitLibrary: () => new Promise<void>((resolve) => { settle = resolve; }),
+    });
+    const cycle = facade.cycle();
+    await facade.cancel();
+    settle();
+    await expect(cycle).rejects.toMatchObject({ code: "cancelled" });
+    expect(trace).toEqual(["server_sync_cancel"]);
+    expect(runtime.flushPendingData).not.toHaveBeenCalled();
+  });
+});
+
+function heldFixture() {
+  const trace: string[] = [];
+  const physical = {
+    revision: 7,
+    refreshCommittedWorkingSet: vi.fn(async (revision: number): Promise<CommittedApplyOutcome> => {
+      trace.push("refresh");
+      return { kind: 'committed', revision, projection: 'applied' };
+    }),
+    release: vi.fn(() => {
+      trace.push("release");
+    }),
+  };
+  const fenced = async (): Promise<never> => {
+    throw new Error("synthetic fenced mutation");
+  };
+  const runtime = {
+    flushPendingData: vi.fn(fenced),
+    capturePersistentMutationToken: vi.fn(fenced),
+    acquireDestructiveReplacementFence: vi.fn(fenced),
+    refreshActiveWorkingSetFromStore: vi.fn(fenced),
+  };
+  const native = vi.fn(async (command: string): Promise<unknown> => {
+    trace.push(command);
+    if (command === "server_sync_prepare") return {
+      kind: "ready",
+      preparationId: "prepared",
+      localRevision: 7,
+      head,
+      appliedRecords: 1,
+    };
+    if (command === "server_sync_activate")
+      return { revision: 8, pluginsChanged: false, devicePluginsChanged: false };
+    if (command === "server_sync_publish") return result;
+    return undefined;
+  });
+  const progress: string[] = [];
+  const facade = createServerSyncFacade({
+    runtime,
+    invoke: native as never,
+    onProgress: (phase) => progress.push(phase),
+  });
+  return { facade, native, runtime, physical, trace, progress, exit: retainableReplacementFence(physical) };
+}
+describe("server sync under a held exit fence", () => {
+  it("applies and publishes without saving or fencing again", async () => {
+    const { facade, runtime, physical, trace, progress, exit } = heldFixture();
+    await expect(facade.cycle({}, exit)).resolves.toEqual(result);
+    expect(runtime.flushPendingData).not.toHaveBeenCalled();
+    expect(runtime.capturePersistentMutationToken).not.toHaveBeenCalled();
+    expect(runtime.acquireDestructiveReplacementFence).not.toHaveBeenCalled();
+    expect(trace).toEqual([
+      "server_sync_prepare",
+      "server_sync_activate",
+      "refresh",
+      "server_sync_publish",
+    ]);
+    expect(progress).toEqual(["preparing", "applying", "refreshing", "publishing"]);
+    expect(physical.refreshCommittedWorkingSet).toHaveBeenCalledWith(8, undefined);
+    exit.release();
+    expect(physical.release).toHaveBeenCalledOnce();
+  });
+  it("keeps the fence past the exit until a pending activation is confirmed", async () => {
+    const { facade, native, runtime, physical, exit } = heldFixture();
+    const original = native.getMockImplementation()!;
+    native.mockImplementationOnce(original).mockImplementationOnce(async () => {
+      throw { code: "synthetic-lost-reply" };
+    });
+    await expect(facade.cycle({}, exit)).rejects.toMatchObject({
+      code: "activation-confirmation-pending",
+    });
+    exit.release();
+    expect(physical.release).not.toHaveBeenCalled();
+    await expect(facade.cycle()).resolves.toEqual(result);
+    expect(physical.refreshCommittedWorkingSet).toHaveBeenCalledWith(8, undefined);
+    expect(physical.release).toHaveBeenCalledOnce();
+    expect(runtime.acquireDestructiveReplacementFence).not.toHaveBeenCalled();
   });
 });

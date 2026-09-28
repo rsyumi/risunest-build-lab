@@ -70,7 +70,17 @@ export interface WorkingSetCoordinator {
     ): boolean
     runSelectedConversationTransition?<T>(transition: () => T): T
     recordActiveConversationMutation?(event: ActiveConversationMutationEvent): void
+    recordWindowedChatListChange?(
+        authority: WindowedConversationPersistenceAuthority,
+        before: CompleteCharacter,
+        after: CompleteCharacter,
+    ): boolean
 }
+
+export type WindowedChatListEditResult =
+    | { kind: 'applied'; nextId: string | null }
+    | { kind: 'refused' }
+    | { kind: 'unsupported' }
 
 export interface CharacterActivationOptions {
     prepare?(): Promise<{ database: Database; reason: string } | null>
@@ -515,6 +525,104 @@ export class ActiveWorkingSet {
             },
             release() { released = true },
         }
+    }
+
+    /**
+     * Applies a chat-list edit while the selected conversation stays windowed. `edit`
+     * runs on a draft, so an 'unsupported' result leaves the working set untouched
+     * and the caller can repeat the edit on the complete path.
+     */
+    editWindowedChatList(
+        target: SelectedConversationTarget,
+        edit: (character: CompleteCharacter) => string | null | false,
+    ): WindowedChatListEditResult {
+        const state = this.selectedConversationState
+        const coordinator = this.dependencies.coordinator
+        if (
+            state?.kind !== 'windowed' ||
+            !this.matchesTarget(state, target) ||
+            this.promotionFlight !== null ||
+            // A running generation writes the selected chat's metadata from its own copy.
+            this.dependencies.isConversationOperationActive?.() === true ||
+            !coordinator.recordWindowedChatListChange
+        ) return { kind: 'unsupported' }
+        const resident = this.dependencies.getResidentCharacter?.(state.characterId)
+        if (
+            !resident ||
+            resident.chats.findIndex((conversation) => conversation === state.conversation) !==
+                (resident.chatPage ?? 0)
+        ) return { kind: 'unsupported' }
+
+        const bodies = new Map<string | undefined, { message: Message[]; length: number }>()
+        for (const conversation of resident.chats) {
+            if (conversation === state.conversation) continue
+            bodies.set(conversation.id, {
+                message: conversation.message,
+                length: conversation.message.length,
+            })
+        }
+        const draft = {
+            ...captureCharacterDetail(resident),
+            chats: resident.chats.map((conversation) => ({ ...conversation })),
+        } as CompleteCharacter
+        const nextId = edit(draft)
+        if (nextId === false) return { kind: 'refused' }
+        const selectedIndex = draft.chats.findIndex(
+            (conversation) => conversation.id === state.conversationId,
+        )
+        if (selectedIndex < 0 || Object.hasOwn(draft.chats[selectedIndex], 'message')) {
+            return { kind: 'unsupported' }
+        }
+        draft.chatPage = selectedIndex
+        for (const conversation of draft.chats) {
+            if (conversation.id === state.conversationId) continue
+            const body = bodies.get(conversation.id)
+            if (
+                body &&
+                (conversation.message !== body.message ||
+                    body.message.length !== body.length)
+            ) return { kind: 'unsupported' }
+        }
+        if (!coordinator.recordWindowedChatListChange(
+            { ...state.authority },
+            resident,
+            draft,
+        )) return { kind: 'unsupported' }
+
+        const originals = new Map(
+            resident.chats.map((conversation) => [conversation.id, conversation]),
+        )
+        const syncOwnProperties = (
+            target: Record<string, unknown>,
+            source: Record<string, unknown>,
+            excludedKey: string,
+        ) => {
+            for (const key of Object.keys(target)) {
+                if (key !== excludedKey && !Object.hasOwn(source, key)) delete target[key]
+            }
+            for (const key of Object.keys(source)) {
+                if (key !== excludedKey && !isEqual(target[key], source[key])) {
+                    target[key] = source[key]
+                }
+            }
+        }
+        syncOwnProperties(
+            resident as unknown as Record<string, unknown>,
+            draft as unknown as Record<string, unknown>,
+            'chats',
+        )
+        // Keep the existing chat objects, including the selected windowed shell.
+        resident.chats = draft.chats.map((conversation) => {
+            const original = originals.get(conversation.id)
+            if (!original) return conversation
+            syncOwnProperties(
+                original as unknown as Record<string, unknown>,
+                conversation as unknown as Record<string, unknown>,
+                'message',
+            )
+            return original
+        })
+        return { kind: 'applied', nextId }
     }
 
     tryDemoteSelectedConversation(target = this.captureSelectedConversationTarget()): boolean {

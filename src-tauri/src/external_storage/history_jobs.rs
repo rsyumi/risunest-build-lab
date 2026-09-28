@@ -68,6 +68,7 @@ async fn upload_prepared(
     connected: &ConnectedRepository,
     directory: &Path,
     record: &PinHistoryRecord,
+    budget: Option<super::journal::SpoolBudget>,
     cancel: &Cancellation,
 ) -> Result<(RemoteObject, TransferJournal)> {
     let snapshot: RemoteObject =
@@ -93,6 +94,9 @@ async fn upload_prepared(
             capture: record.identity.clone(),
         },
     )?;
+    if let Some(budget) = budget {
+        journal.set_spool_budget(budget);
+    }
     // A point names a bundle. Pinning a published state wraps its library
     // reference in one so the retained material stays complete on its own.
     let bundle = if snapshot.role == ObjectRole::BackupBundle {
@@ -210,8 +214,11 @@ pub(crate) async fn run_pin_history(
     if record.point_observation.is_some() {
         return result_value(&record);
     }
-    let directory = job_directory(&root(app)?, &job.request.connection_id, &job.id);
-    let (point, mut journal) = upload_prepared(connected, &directory, &record, cancel).await?;
+    let root = root(app)?;
+    let directory = job_directory(&root, &job.request.connection_id, &job.id);
+    let budget = super::runtime::spool_budget(&root, &job.id);
+    let (point, mut journal) =
+        upload_prepared(connected, &directory, &record, Some(budget), cancel).await?;
     let observation = serde_json::to_string(&point).map_err(|_| corrupt())?;
     native_store(app)?
         .external_finish_pin_history(&job.id, &observation)
@@ -417,6 +424,7 @@ mod tests {
                 &connected,
                 &directory.path().join("old"),
                 &old,
+                None,
                 &Cancellation::default(),
             )
             .await
@@ -434,6 +442,7 @@ mod tests {
                 &connected,
                 &directory.path().join("replacement"),
                 &replacement,
+                None,
                 &cancelled,
             )
             .await
@@ -459,6 +468,7 @@ mod tests {
                 &connected,
                 &directory.path().join("journal"),
                 &record,
+                None,
                 &cancelled,
             )
             .await
@@ -473,6 +483,7 @@ mod tests {
                 &connected,
                 &directory.path().join("journal"),
                 &reopened,
+                None,
                 &Cancellation::default(),
             )
             .await

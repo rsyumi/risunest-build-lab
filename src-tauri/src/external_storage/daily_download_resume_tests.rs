@@ -21,7 +21,6 @@ use risunest_external_storage_format::{
     snapshot as wire,
 };
 use std::{
-    fs::File,
     path::Path,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -246,8 +245,8 @@ fn captured(root: &Path, bytes: &[u8]) -> CapturedSnapshot {
         .join("external-storage")
         .join("captures")
         .join("capture-daily-resume");
-    let objects = root.join("external-storage").join("objects");
-    let mut catalog = CaptureCatalog::create(&directory, &objects, None).unwrap();
+    let external = root.join("external-storage");
+    let mut catalog = CaptureCatalog::create(&directory, &external, None).unwrap();
     let identity = CaptureIdentity {
         store_id: "device".into(),
         library_epoch: "library".into(),
@@ -322,70 +321,87 @@ fn used(path: &Path, now_ms: u64) -> u64 {
         .used
 }
 
-fn verified_pack_count(completed: &CompletedSnapshot, staging: &Path) -> usize {
-    completed
-        .referenced_objects
-        .iter()
-        .filter(|object| object.role == ObjectRole::Pack)
-        .filter(|object| {
-            staging
-                .join("downloads")
-                .join(format!("{}.cipher", object.ciphertext_sha256))
-                .is_file()
-                && staging
-                    .join("plaintext")
-                    .join(&object.plaintext_sha256)
-                    .is_file()
-        })
-        .count()
+/// Packs an interrupted download placed and will not read again.
+fn placed_packs(staging: &Path) -> usize {
+    std::fs::read_dir(staging.join("turnover")).map_or(0, |entries| entries.count())
+}
+
+/// One record spread over `PACKS` packs, published once.
+struct Published {
+    completed: CompletedSnapshot,
+    provider: Arc<FakeProvider>,
+    repository: RepositoryHandle,
+    root_key: [u8; 32],
+    source: Vec<u8>,
+}
+
+async fn published(temp: &Path) -> Published {
+    let repository_root = temp.join("repository");
+    let cache_root = temp.join("package-cache");
+    let transfer_root = temp.join("transfer");
+    let limits = PackageLimits {
+        max_stored_bytes: 8 * 1024,
+        sdk_overhead_bytes: 0,
+        target_plaintext_bytes: 8 * 1024,
+        maintenance: Default::default(),
+    };
+    let chunk_bytes = pack_plaintext_limit(limits) - ENTRY_OVERHEAD - 1;
+    let source = incompressible_bytes(chunk_bytes as usize * PACKS);
+    let capture = captured(&repository_root, &source);
+    let metadata = metadata(&capture);
+    let mut journal = journal(&transfer_root, &capture);
+    let provider = Arc::new(FakeProvider::new(true));
+    let repository = fake::repository();
+    let root_key = [7; 32];
+    let completed = packaging::package_and_upload(
+        capture,
+        Vec::new(),
+        &repository_root,
+        &cache_root,
+        metadata,
+        &root_key,
+        limits,
+        None,
+        &mut journal,
+        provider.as_ref(),
+        &repository,
+        &crate::external_storage::phase_progress::PhaseProgress::silent(),
+        &Cancellation::default(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        completed
+            .referenced_objects
+            .iter()
+            .filter(|object| object.role == ObjectRole::Pack)
+            .count(),
+        PACKS
+    );
+    Published {
+        completed,
+        provider,
+        repository,
+        root_key,
+        source,
+    }
 }
 
 #[test]
-fn daily_download_resume_preserves_verified_packs_and_durable_budget() {
+fn daily_download_resume_preserves_placed_packs_and_durable_budget() {
     runtime().block_on(async {
         let temp = tempfile::tempdir().unwrap();
-        let repository_root = temp.path().join("repository");
-        let cache_root = temp.path().join("package-cache");
-        let transfer_root = temp.path().join("transfer");
         let staging_root = temp.path().join("restore-stage");
         let quota_path = temp.path().join("quota.sqlite");
-        let limits = PackageLimits {
-            max_stored_bytes: 8 * 1024,
-            sdk_overhead_bytes: 0,
-            target_plaintext_bytes: 8 * 1024,
-        };
-        let chunk_bytes = pack_plaintext_limit(limits) - ENTRY_OVERHEAD - 1;
-        let source = incompressible_bytes(chunk_bytes as usize * PACKS);
+        let Published {
+            completed,
+            provider,
+            repository,
+            root_key,
+            source,
+        } = published(temp.path()).await;
         let source_hash = hex::encode(hash(&source));
-        let capture = captured(&repository_root, &source);
-        let metadata = metadata(&capture);
-        let mut journal = journal(&transfer_root, &capture);
-        let provider = Arc::new(FakeProvider::new(true));
-        let repository = fake::repository();
-        let root_key = [7; 32];
-        let completed = packaging::package_and_upload(
-            capture,
-            Vec::new(),
-            &repository_root,
-            &cache_root,
-            metadata,
-            &root_key,
-            limits,
-            &mut journal,
-            provider.as_ref(),
-            &repository,
-            &Cancellation::default(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            completed
-                .referenced_objects
-                .iter()
-                .filter(|object| object.role == ObjectRole::Pack)
-                .count(),
-            PACKS
-        );
+        snapshot_restore::reset_test_turnover(&staging_root);
 
         let first_cancel = Cancellation::default();
         let first_clock = Arc::new(FixedClock::at(1));
@@ -400,15 +416,17 @@ fn daily_download_resume_preserves_verified_packs_and_durable_budget() {
             &completed.reference,
             &staging_root,
             &root_key,
-            &first,
+            None,
+            snapshot_restore::SourceTrust::Downloaded, &first,
             &repository,
+            &crate::external_storage::phase_progress::PhaseProgress::silent(),
             &first_cancel,
         )
         .await
         .unwrap_err();
         assert_eq!(error.kind, ErrorKind::Cancelled);
         assert_eq!(first.pack_reads(), INTERRUPT_AFTER);
-        assert_eq!(verified_pack_count(&completed, &staging_root), 300);
+        assert_eq!(placed_packs(&staging_root), 300);
         assert_eq!(
             used(&quota_path, 1),
             300
@@ -426,15 +444,17 @@ fn daily_download_resume_preserves_verified_packs_and_durable_budget() {
             &completed.reference,
             &staging_root,
             &root_key,
-            &second,
+            None,
+            snapshot_restore::SourceTrust::Downloaded, &second,
             &repository,
+            &crate::external_storage::phase_progress::PhaseProgress::silent(),
             &second_cancel,
         )
         .await
         .unwrap_err();
         assert_eq!(error.kind, ErrorKind::DailyQuotaExhausted);
         assert_eq!(second.pack_reads(), 200);
-        assert_eq!(verified_pack_count(&completed, &staging_root), 500);
+        assert_eq!(placed_packs(&staging_root), 500);
         assert_eq!(
             used(&quota_path, 2),
             500
@@ -452,26 +472,98 @@ fn daily_download_resume_preserves_verified_packs_and_durable_budget() {
             &completed.reference,
             &staging_root,
             &root_key,
-            &third,
+            None,
+            snapshot_restore::SourceTrust::Downloaded, &third,
             &repository,
+            &crate::external_storage::phase_progress::PhaseProgress::silent(),
             &third_cancel,
         )
         .await
         .unwrap();
         assert_eq!(third.pack_reads(), 20);
-        assert_eq!(verified_pack_count(&completed, &staging_root), PACKS);
+        // Nothing is left to resume from, and no pack was ever held beside
+        // another one.
+        assert_eq!(placed_packs(&staging_root), 0);
+        assert!(!staging_root.join("assembly").exists());
+        assert_eq!(
+            snapshot_restore::take_test_turnover(&staging_root),
+            snapshot_restore::TestTurnover { ciphertexts: 1, plaintexts: 1 }
+        );
         assert_eq!(prepared.snapshot_id, "latest");
         assert_eq!(prepared.records.len(), 1);
         assert_eq!(prepared.records[0].content_hash, source_hash);
         assert_eq!(prepared.records[0].byte_length, source.len() as u64);
-        let mut restored = File::open(&prepared.records[0].path).unwrap();
+        let restored = prepared.record_body(0);
         assert_eq!(
-            hex::encode(hash_reader(&mut restored, source.len() as u64).unwrap()),
+            hex::encode(hash_reader(&mut restored.as_slice(), source.len() as u64).unwrap()),
             source_hash
         );
         assert_eq!(
             used(&quota_path, FIRST_RESET_MS),
             20
         );
+    });
+}
+
+async fn download(
+    publication: &Published,
+    staging_root: &Path,
+    provider: &dyn Provider,
+    cancel: &Cancellation,
+) -> Result<snapshot_restore::PreparedRemoteSnapshot> {
+    snapshot_restore::download_snapshot(
+        &publication.completed.reference,
+        staging_root,
+        &publication.root_key,
+        None,
+        snapshot_restore::SourceTrust::Downloaded,
+        provider,
+        &publication.repository,
+        &crate::external_storage::phase_progress::PhaseProgress::silent(),
+        cancel,
+    )
+    .await
+}
+
+/// An assembly file whose packs are all marked but whose bytes are not the
+/// entry any more fails the download, and takes the markers of exactly its
+/// packs with it, so the retry reads those packs again and succeeds.
+#[test]
+fn a_damaged_assembly_is_read_again_from_its_packs() {
+    runtime().block_on(async {
+        let temp = tempfile::tempdir().unwrap();
+        let staging_root = temp.path().join("restore-stage");
+        let publication = published(temp.path()).await;
+        let provider = publication.provider.clone();
+        let cancel = Cancellation::default();
+        let interrupted = QuotaProvider::new(
+            provider.clone(),
+            budget(&temp.path().join("quota.sqlite")),
+            Arc::new(FixedClock::at(1)),
+            Some(INTERRUPT_AFTER),
+            cancel.clone(),
+        );
+        let download = |provider, cancel| download(&publication, &staging_root, provider, cancel);
+        assert_eq!(download(&interrupted, &cancel).await.unwrap_err().kind, ErrorKind::Cancelled);
+        assert_eq!(placed_packs(&staging_root), INTERRUPT_AFTER as usize);
+        let assembly = std::fs::read_dir(staging_root.join("assembly")).unwrap()
+            .next().unwrap().unwrap().path();
+        let mut bytes = std::fs::read(&assembly).unwrap();
+        bytes[0] ^= 0xff;
+        std::fs::write(&assembly, &bytes).unwrap();
+
+        let cancel = Cancellation::default();
+        snapshot_restore::reset_test_read_counts(&staging_root);
+        assert_eq!(download(provider.as_ref(), &cancel).await.unwrap_err().kind, ErrorKind::Transient);
+        assert_eq!(snapshot_restore::take_test_read_counts(&staging_root).packs,
+            PACKS as u64 - INTERRUPT_AFTER);
+        assert_eq!(placed_packs(&staging_root), 0);
+        assert!(!assembly.exists());
+
+        snapshot_restore::reset_test_read_counts(&staging_root);
+        let prepared = download(provider.as_ref(), &cancel).await.unwrap();
+        assert_eq!(snapshot_restore::take_test_read_counts(&staging_root).packs, PACKS as u64);
+        assert_eq!(prepared.records[0].content_hash, hex::encode(hash(&publication.source)));
+        assert_eq!(prepared.record_body(0), publication.source);
     });
 }

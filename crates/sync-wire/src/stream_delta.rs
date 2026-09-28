@@ -54,7 +54,7 @@ pub fn verify<R: Read + Seek>(
         }
         digest.update(&buffer[..n]);
     }
-    if size != expected.size || format!("{:x}", digest.finalize()) != expected.hash {
+    if size != expected.size || hex::encode(digest.finalize()) != expected.hash {
         return Err(WireError("base-hash-mismatch"));
     }
     Ok(())
@@ -102,7 +102,7 @@ pub fn apply<R: Read + Seek, W: Write>(
             }
         }
     }
-    if format!("{:x}", digest.finalize()) != recipe.target_hash {
+    if hex::encode(digest.finalize()) != recipe.target_hash {
         return Err(WireError("target-hash-mismatch"));
     }
     Ok(())
@@ -186,7 +186,7 @@ pub fn create<R: Read + Seek>(
             position += n as u64;
         }
         if io(source.read(&mut buffer[..1]))? != 0
-            || format!("{:x}", digest.finalize()) != base.hash
+            || hex::encode(digest.finalize()) != base.hash
         {
             return Err(WireError("base-hash-mismatch"));
         }

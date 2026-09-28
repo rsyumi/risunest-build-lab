@@ -3,7 +3,7 @@
     import { DBState, selectedCharID } from 'src/ts/stores.svelte'
     import { language } from 'src/lang'
     import { alertConfirm, alertError, alertToast } from 'src/ts/alert'
-    import { captureChatBindingTarget, saveChatBinding, updateChatBinding } from 'src/ts/chatBindings.svelte'
+    import { captureChatBindingTarget, chatBindingBlockedByGeneration, saveChatBinding, updateChatBinding } from 'src/ts/chatBindings.svelte'
     import { countToggleChanges, snapshotToggleValues, type ToggleValues } from 'src/ts/toggleBindings'
     import TogglePresetPopup from './TogglePresetPopup.svelte'
     let presetsOpen = $state(false)
@@ -19,6 +19,7 @@
         Object.keys(chat?.GLGlobalVariables ?? {}).some((key) => key.startsWith('toggle_')),
     )
     async function write(values: ToggleValues | undefined, message: string) {
+        if (chatBindingBlockedByGeneration()) return
         const target = captureChatBindingTarget()
         if (!target || disabled) return
         try {
@@ -31,6 +32,7 @@
     }
     const bind = () => write(snapshotToggleValues(DBState.db.globalChatVariables), language.togglesBound)
     async function unbind() {
+        if (chatBindingBlockedByGeneration()) return
         if (!(await alertConfirm(language.unbindTogglesConfirm))) return
         await write(undefined, language.togglesUnbound)
     }
@@ -44,7 +46,7 @@
     <div class="flex gap-1 items-stretch">
         {#if bound}
             <button
-                class="{button} shrink-0 w-10 px-0 bg-primary-500 border-primary-500 text-white hover:bg-primary-600"
+                class="{button} shrink-0 w-10 px-0 bg-primary-500 border-primary-500 text-primary-foreground hover:bg-primary-600"
                 title={language.unbindToggles}
                 aria-pressed="true"
                 {disabled}

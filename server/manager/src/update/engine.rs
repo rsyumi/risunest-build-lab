@@ -1262,12 +1262,9 @@ pub async fn run_recovery_helper(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::client::tests::read_request;
     use fs2::FileExt;
-    use std::{
-        io::{Read, Write},
-        net::TcpListener,
-        sync::Arc,
-    };
+    use std::{io::Write, net::TcpListener, sync::Arc};
 
     #[tokio::test]
     async fn ready_helper_retries_a_transient_instance_lock_holder() {
@@ -1524,18 +1521,8 @@ mod tests {
             ];
             for response in responses {
                 let (mut stream, _) = listener.accept().unwrap();
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(5)))
-                    .unwrap();
-                let mut request = Vec::new();
-                while !request.windows(4).any(|part| part == b"\r\n\r\n") {
-                    let mut chunk = [0u8; 8192];
-                    let count = stream.read(&mut chunk).unwrap();
-                    assert!(count > 0 && request.len() + count <= 16384);
-                    request.extend_from_slice(&chunk[..count]);
-                }
-                let read = request.len();
-                assert!(String::from_utf8_lossy(&request[..read])
+                let request = read_request(&mut stream);
+                assert!(request
                     .to_ascii_lowercase()
                     .contains("authorization: bearer"));
                 if let Some(body) = response {
@@ -1578,18 +1565,7 @@ mod tests {
             let mut requests = Vec::new();
             for (code, body) in responses {
                 let (mut stream, _) = listener.accept().unwrap();
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(5)))
-                    .unwrap();
-                let mut request = Vec::new();
-                while !request.windows(4).any(|part| part == b"\r\n\r\n") {
-                    let mut chunk = [0u8; 8192];
-                    let count = stream.read(&mut chunk).unwrap();
-                    assert!(count > 0 && request.len() + count <= 16384);
-                    request.extend_from_slice(&chunk[..count]);
-                }
-                let read = request.len();
-                requests.push(String::from_utf8_lossy(&request[..read]).into_owned());
+                requests.push(read_request(&mut stream));
                 write!(
                     stream,
                     "HTTP/1.1 {code} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",

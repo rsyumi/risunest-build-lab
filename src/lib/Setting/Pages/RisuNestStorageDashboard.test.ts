@@ -125,9 +125,12 @@ describe('RisuNestStorageDashboard', () => {
             diskBytes: 4096,
         })
         server.getServerSyncCacheUsage.mockResolvedValue({
-            totalBytes: 1024,
+            totalBytes: 1024 + 2048,
+            cacheBytes: 1024,
             protectedBytes: 512,
             reclaimableBytes: 512,
+            ledgerBytes: 2048,
+            databaseBytes: 0,
             blockedReason: null,
         })
         backups.list.mockResolvedValue([
@@ -146,15 +149,18 @@ describe('RisuNestStorageDashboard', () => {
         return target
     }
 
-    it('renders the total with its six-part breakdown, count summary, and backup rows with complete server storage totals', async () => {
+    it('renders the total with its seven-part breakdown, count summary, and backup rows with complete server storage totals', async () => {
         const target = setup()
         await vi.waitFor(() =>
             expect(target.textContent).toContain('Total data'),
         )
 
-        expect(
-            target.querySelectorAll('[data-storage-legend] > li'),
-        ).toHaveLength(6)
+        const legend = [...target.querySelectorAll<HTMLElement>('[data-storage-legend] > li')]
+        expect(legend).toHaveLength(7)
+        const text = (label: string) =>
+            legend.find((item) => item.textContent?.includes(label))?.textContent?.replace(/\s+/g, ' ').trim()
+        expect(text(syncText.management.cache)).toBe('Temporary files 1.0 KiB')
+        expect(text(syncText.management.ledger)).toBe('Asset storage records 2.0 KiB')
         expect(target.textContent).toContain('5.0 MiB')
         expect(target.textContent).toContain('Database')
         expect(target.textContent).toContain(
@@ -396,7 +402,7 @@ describe('RisuNestStorageDashboard', () => {
         alerts.alertConfirm.mockResolvedValue(true)
         server.restoreServerSyncBackup.mockResolvedValue(undefined)
         server.deleteServerSyncBackup.mockResolvedValue({ localDeleted: true, cleanup: 'complete' })
-        server.cleanupServerSyncCache.mockResolvedValue({ totalBytes: 512, protectedBytes: 512, reclaimableBytes: 0, blockedReason: null })
+        server.cleanupServerSyncCache.mockResolvedValue({ totalBytes: 512, cacheBytes: 512, protectedBytes: 512, reclaimableBytes: 0, ledgerBytes: 0, databaseBytes: 0, blockedReason: null })
         await vi.waitFor(() => expect(button(target, syncText.restoreRemoteBackup)).toBeDefined())
 
         button(target, syncText.restoreRemoteBackup)!.click()

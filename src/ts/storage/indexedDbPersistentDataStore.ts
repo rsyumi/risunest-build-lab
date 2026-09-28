@@ -2374,6 +2374,10 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
         generation: string,
         mutation: ConversationMutation,
     ): Promise<void> {
+        if (mutation.type === 'reorder') {
+            await this.reorderConversations(transaction, generation, mutation)
+            return
+        }
         const key = this.conversationKey(generation, mutation.characterId, mutation.conversationId)
         if (mutation.type === 'delete') {
             transaction.objectStore('conversations').delete(key)
@@ -2791,6 +2795,44 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
             transaction.objectStore('messageOccurrences').index('byGenerationCharacter'),
             this.keyRangeFactory.only([generation, characterId]),
         )
+    }
+
+    private async reorderConversations(
+        transaction: IDBTransaction,
+        generation: string,
+        mutation: Extract<ConversationMutation, { type: 'reorder' }>,
+    ): Promise<void> {
+        const records = await requestResult(
+            transaction
+                .objectStore('conversations')
+                .index('byGenerationCharacterConfigured')
+                .getAll(this.keyRangeFactory.bound(
+                    [generation, mutation.characterId, 0],
+                    [generation, mutation.characterId, MAX_INDEX_VALUE],
+                )),
+        ) as Array<StoredRecord<StoredConversation>>
+        const byId = new Map(records.map((record) => [record.value.summary.id, record]))
+        if (
+            new Set(mutation.conversationIds).size !== mutation.conversationIds.length ||
+            mutation.conversationIds.length !== byId.size ||
+            mutation.conversationIds.some((id) => !byId.has(id))
+        ) {
+            throw new Error(
+                `Conversation order for ${mutation.characterId} must list each conversation once`,
+            )
+        }
+        mutation.conversationIds.forEach((id, configuredIndex) => {
+            const record = byId.get(id)!
+            if (record.value.summary.configuredIndex === configuredIndex) return
+            transaction.objectStore('conversations').put({
+                ...record,
+                configuredIndex,
+                value: {
+                    ...record.value,
+                    summary: { ...record.value.summary, configuredIndex },
+                },
+            })
+        })
     }
 
     private async conversationCount(

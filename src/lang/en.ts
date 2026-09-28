@@ -2169,8 +2169,6 @@ export const languageEnglish = {
                 remote: 'Load from the server when needed',
                 local: 'Files on this device',
                 remoteOnly: 'Files only on the server',
-                offlineReady: 'Every file is on this device, so it works without internet.',
-                onlineNeeded: 'Opening a file that is only on the server needs an internet connection.',
                 unavailable: 'Files on neither this device nor the server',
                 cleanupNote:
                     'Switching to loading from the server keeps the files already on this device. Clearing copies checks that a file is on the server before removing the copy here. Files a local snapshot needs stay on the server until that snapshot is deleted and cleanup runs. Attachments used for export or AI requests are downloaded again and can be cleared later.',
@@ -2189,6 +2187,8 @@ export const languageEnglish = {
                 protected: 'Still needed',
                 reclaimable: 'Can be cleared',
                 clean: 'Clear unneeded temporary files',
+                ledger: 'Asset storage records',
+                ledgerHelp: 'Needed for asset storage and never cleared.',
                 more: 'Older backups',
                 refresh: 'Refresh list',
                 blockedReasons: {
@@ -2250,10 +2250,11 @@ export const languageEnglish = {
             elapsed: 'Elapsed',
             count: '{0}',
             itemsCount: '{0} items',
-            activity: { enumerating: 'Counting items', preparing: 'Checking assets and preparing changes', downloading: 'Downloading', verifying: 'Checking items on the server', uploading: 'Uploading', confirming: 'Waiting for server confirmation' },
+            activity: { enumerating: 'Counting items', preparing: 'Preparing changes on this device', downloadingMetadata: 'Downloading library data, including characters and chats', downloadingBackupMetadata: 'Downloading library and asset information for conflict backups', downloading: 'Downloading and checking incoming data', preserving: 'Saving and checking conflict backups', syncingSections: 'Downloading and checking Hypa and plugin data', verifying: 'Checking items on the server', uploading: 'Uploading', confirming: 'Waiting for server confirmation' },
             progress: {
                 saving: 'Saving changes on this device',
                 preparing: 'Comparing changes on this device and the server',
+                downloading: 'Receiving server content',
                 applying: 'Applying received changes',
                 refreshing: 'Updating the screen',
                 publishing: 'Uploading this device’s changes',
@@ -2303,6 +2304,11 @@ export const languageEnglish = {
             profileLowSpec: 'Low-spec',
             profileHelp:
                 'Low-spec uses less memory, but scrolling long chats may be slightly slower.',
+            overflowScope: 'Chat message render isolation',
+            overflowScopeLatest: 'Latest message',
+            overflowScopeAll: 'All',
+            overflowScopeHelp:
+                'Choose whether UI elements that extend beyond a chat message (setting buttons, overlays, and so on) render only on the latest message or on every message. Choose All if a character you use does not display correctly. All may make scrolling long chats slightly slower.',
         },
         inlay: {
             animationPreserved: 'Animation conversion was skipped. The original was saved.',
@@ -2814,6 +2820,10 @@ export const languageEnglish = {
                 serverTag: 'Sync server',
                 syncingLead: 'Do not close the app until it finishes.',
                 pauseNote: 'If you stop, you can continue syncing later from the settings.',
+                pausedSummary: 'Sync is paused.',
+                pausedReason:
+                    'You can continue now, or start RisuNest and continue syncing later from the settings.',
+                resume: 'Continue',
                 errorSummary: 'Sync could not finish.',
                 errorReason:
                     'The data on this device is unchanged. Check your internet connection and try again.',

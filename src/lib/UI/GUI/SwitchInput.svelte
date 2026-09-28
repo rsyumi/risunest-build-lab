@@ -51,9 +51,9 @@
                 : 'bg-darkbutton'}"
         >
             <span
-                class="size-4 rounded-full bg-white shadow-xs transition-transform {check
-                    ? 'translate-x-4 rtl:-translate-x-4'
-                    : 'translate-x-0'}"
+                class="size-4 rounded-full shadow-xs transition-transform {check
+                    ? 'bg-primary-foreground translate-x-4 rtl:-translate-x-4'
+                    : 'bg-textcolor translate-x-0'}"
             ></span>
         </span>
     </label>

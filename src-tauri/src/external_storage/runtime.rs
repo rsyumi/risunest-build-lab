@@ -6,6 +6,7 @@ use super::{
     job_store::{DurableJob, JobCommandState, JobKind, JobStore, Session, StartJobRequest},
     leases,
     publication::{PublicationMode, PublicationPermit},
+    receive_artifacts::{settlement_pass, SettlementPass},
 };
 use crate::persistent_store::{
     self,
@@ -236,14 +237,25 @@ fn job_summary(root: &std::path::Path, mut job: DurableJob) -> Value {
                 .unwrap_or_else(|| vec!["library".into(), "referencedAssets".into()]),
         });
     }
+    if job.request.kind == JobKind::CheckRepository {
+        // The scope a paused check resumes on, which its result no longer
+        // carries once the job is settled.
+        job.summary["checkRequest"] = json!({"snapshotId": job.request.snapshot_id});
+    }
     if let Ok((done, total, items, count)) = super::journal::TransferJournal::progress(
         &job_directory(root, &job.request.connection_id, &job.id),
         &job.id,
     ) {
-        job.summary["completedBytes"] = json!(done.to_string());
-        job.summary["totalBytes"] = json!(total.to_string());
-        job.summary["completedItems"] = json!(items.to_string());
-        job.summary["totalItems"] = json!(count.to_string());
+        // An empty journal is a job that has registered nothing yet, and what
+        // it prepared is the only thing it knows. The first registration is
+        // what hands the counters over.
+        if count > 0 {
+            job.summary["counters"] = json!("transferred");
+            job.summary["completedBytes"] = json!(done.to_string());
+            job.summary["totalBytes"] = json!(total.to_string());
+            job.summary["completedItems"] = json!(items.to_string());
+            job.summary["totalItems"] = json!(count.to_string());
+        }
     }
     job.summary
 }
@@ -327,6 +339,15 @@ pub(crate) async fn external_storage_cancel_job(app: AppHandle, job_id: String) 
         job.summary["updatedAtMs"] = json!(now_ms().to_string());
         store.put(&job)?;
     }
+    super::runtime_restore::discard_finished_staging(&root(&app)?, &job);
+    let (pass_app, pass_claim) = (app.clone(), _claim.clone());
+    let connection = job.request.connection_id.clone();
+    let detached = tokio::task::spawn_blocking(move || {
+        super::receive_artifacts::detach_claimed(&pass_app, &pass_claim, &connection)
+    })
+    .await
+    .unwrap_or_default();
+    super::receive_artifacts::remove_detached_later(&app, detached);
     Ok(job.summary)
 }
 #[tauri::command]
@@ -399,6 +420,12 @@ pub(crate) async fn external_storage_start_job(
             let current = command_state.session.lock().map_err(local_error)?;
             require_session(&request, &current)?;
         }
+        // What was read before a settled job let go of the connection is stale.
+        if wait_for_settled_claim(&app, &pending.request.connection_id).await? {
+            pending = reconcile_job(&app, store.read(&pending.id)?)?;
+            let current = command_state.session.lock().map_err(local_error)?;
+            require_session(&request, &current)?;
+        }
         if pending.summary["state"] == "uncertain"
             && pending.summary["phase"] == "publication-unknown"
             && request.reason.as_deref() == Some("automatic")
@@ -450,6 +477,7 @@ pub(crate) async fn external_storage_start_job(
     // Section publication is not wired yet, so a backup captures the library
     // only and no device capture phase is scheduled.
     let device = false;
+    wait_for_settled_claim(&app, &request.connection_id).await?;
     let identity = native_store(&app)?
         .external_identity()
         .map_err(local_error)?;
@@ -508,6 +536,7 @@ fn same_requested_operation(existing: &StartJobRequest, incoming: &StartJobReque
             (existing.reason.as_deref() == Some("automatic"))
                 == (incoming.reason.as_deref() == Some("automatic"))
         }
+        JobKind::CheckRepository => existing.snapshot_id == incoming.snapshot_id,
         JobKind::Backup | JobKind::Cleanup => true,
     }
 }
@@ -527,6 +556,25 @@ pub(crate) async fn wait_for_job_release(app: &AppHandle, id: &str) -> Result<()
             return Err(ProviderError::new(ErrorKind::Transient));
         }
         tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+
+/// Waits while a job of `connection` that has already settled still holds its
+/// claim, as its receive bodies move aside, and returns whether it waited. A
+/// job still running is left to the caller's own checks.
+async fn wait_for_settled_claim(app: &AppHandle, connection: &str) -> Result<bool> {
+    let holder = app
+        .state::<JobCommandState>()
+        .active
+        .lock()
+        .map_err(local_error)?
+        .iter()
+        .find(|(_, (owned, _))| owned == connection)
+        .map(|(id, _)| id.clone());
+    let Some(holder) = holder else { return Ok(false) };
+    match JobStore::open(&root(app)?)?.read(&holder) {
+        Ok(job) if job.terminal() => wait_for_job_release(app, &holder).await.map(|()| true),
+        _ => Ok(false),
     }
 }
 
@@ -866,7 +914,7 @@ pub(crate) fn wake_job(app: AppHandle, id: String) -> Result<()> {
         };
         let confirmed = result.as_ref().ok().and_then(completed_revision);
         let cancelled = cancel.check().is_err();
-        let persisted = (|| -> Result<()> {
+        let settled = (|| -> Result<DurableJob> {
             let store = JobStore::open(&root(&app)?)?;
             let mut job = store.read(&id)?;
             match result {
@@ -978,14 +1026,32 @@ pub(crate) fn wake_job(app: AppHandle, id: String) -> Result<()> {
                 }
             }
             job.summary["updatedAtMs"] = json!(now_ms().to_string());
-            store.put(&job)?;
-            Ok(())
+            Ok(job)
         })();
-        let outcome_persisted = persisted.is_ok();
+        // The worker has returned. The claim keeps every job of this
+        // connection from starting while bodies move aside.
+        let pass = settled.as_ref().map_or(SettlementPass::Skip, settlement_pass);
+        let move_aside = || {
+            let (pass_app, pass_claim) = (app.clone(), claim.clone());
+            let connection = job.request.connection_id.clone();
+            tokio::task::spawn_blocking(move || {
+                super::receive_artifacts::detach_claimed(&pass_app, &pass_claim, &connection)
+            })
+        };
+        let mut detached = Vec::new();
+        if pass == SettlementPass::BeforeOutcome {
+            detached = move_aside().await.unwrap_or_default();
+        }
+        let outcome_persisted = settled
+            .and_then(|settled| JobStore::open(&root(&app)?)?.put(&settled))
+            .is_ok();
         if !outcome_persisted {
             crate::nlog!("error", "External job outcome could not be persisted");
+        } else if pass == SettlementPass::AfterOutcome {
+            detached = move_aside().await.unwrap_or_default();
         }
         drop(claim);
+        super::receive_artifacts::remove_detached_later(&app, detached);
         if outcome_persisted {
             let cleaned = (|| -> Result<()> {
                 let root = root(&app)?;
@@ -1002,6 +1068,11 @@ pub(crate) fn wake_job(app: AppHandle, id: String) -> Result<()> {
             })();
             if let Err(error) = cleaned {
                 crate::nlog!("error", "External terminal spool cleanup failed: {error}");
+            }
+            if let Ok(root) = root(&app) {
+                if let Ok(settled) = JobStore::open(&root).and_then(|store| store.read(&job.id)) {
+                    super::runtime_restore::discard_finished_staging(&root, &settled);
+                }
             }
         }
         if let Some(revision) = confirmed.filter(|_| !cancelled) {
@@ -1128,16 +1199,75 @@ impl crate::local_backup::CancellationProbe for CancelProbe {
         self.0.check().is_err()
     }
 }
+/// Where one connection keeps what it already knows about this repository.
+/// Shared by the job that publishes and the job that receives, so a receive
+/// teaches the next publication instead of only itself.
+pub(crate) fn package_cache_root(job_directory: &std::path::Path) -> Result<PathBuf> {
+    job_directory
+        .parent()
+        .and_then(|path| path.parent())
+        .map(|path| path.join("package-cache"))
+        .ok_or_else(|| ProviderError::new(ErrorKind::Corrupt))
+}
+
+pub(crate) fn connection_directory(root: &std::path::Path, connection: &str) -> PathBuf {
+    root.join("external-storage").join(hex::encode(
+        risunest_external_storage_format::content_identity::hash(connection.as_bytes()),
+    ))
+}
 pub(crate) fn job_directory(root: &std::path::Path, connection: &str, job: &str) -> PathBuf {
-    root.join("external-storage")
-        .join(hex::encode(
-            risunest_external_storage_format::content_identity::hash(connection.as_bytes()),
-        ))
+    connection_directory(root, connection)
         .join("jobs")
         .join(hex::encode(
             risunest_external_storage_format::content_identity::hash(job.as_bytes()),
         ))
 }
+/// The transfer spool as `job_id` sees it when it seals another object: every
+/// job that has not been swept, with the directory its spool lives in.
+pub(crate) fn spool_budget(root: &std::path::Path, job_id: &str) -> super::journal::SpoolBudget {
+    let root = root.to_path_buf();
+    super::journal::SpoolBudget::new(job_id.to_owned(), move || {
+        Ok(JobStore::open(&root)?
+            .list_retaining()?
+            .into_iter()
+            .map(|job| {
+                let directory = job_directory(&root, &job.request.connection_id, &job.id);
+                (job.id, directory)
+            })
+            .collect())
+    })
+}
+
+/// Sealed ciphertext the other unfinished jobs are holding. A job that would
+/// add to a budget somebody else already owns waits for it instead; nothing
+/// here removes what another job may still need.
+fn spool_budget_owner(
+    root: &std::path::Path,
+    store: &JobStore,
+    job: &DurableJob,
+) -> Result<Option<(String, u64)>> {
+    let mut total = 0u64;
+    let mut owner: Option<(String, u64)> = None;
+    for other in store.list_retaining()? {
+        if other.id == job.id {
+            continue;
+        }
+        let held = super::journal::held_spool_bytes(&job_directory(
+            root,
+            &other.request.connection_id,
+            &other.id,
+        ))?;
+        total = total.saturating_add(held);
+        if owner.as_ref().is_none_or(|(_, previous)| held > *previous) {
+            owner = Some((other.id.clone(), held));
+        }
+    }
+    if total < super::journal::TRANSFER_SPOOL_BUDGET {
+        return Ok(None);
+    }
+    Ok(owner)
+}
+
 async fn run_job(app: &AppHandle, id: &str, cancel: &Cancellation) -> Result<Value> {
     let store = JobStore::open(&root(app)?)?;
     let mut job = store.read(id)?;
@@ -1161,6 +1291,21 @@ async fn run_job(app: &AppHandle, id: &str, cancel: &Cancellation) -> Result<Val
                 .external_identity()
                 .map_err(local_error)?,
         )?;
+    }
+    // Work that seals ciphertext waits for the transfer spool the unfinished
+    // jobs are holding. A cleanup, a restore or a check is what frees it, so
+    // none of them are held back by it.
+    if matches!(
+        job.request.kind,
+        JobKind::Backup | JobKind::Sync | JobKind::ResolveConflict | JobKind::PinHistory
+    ) {
+        if let Some((owner, held)) = spool_budget_owner(&root(app)?, &store, &job)? {
+            crate::nlog!(
+                "warn",
+                "External job {id} waits for the transfer spool budget; job {owner} holds {held} bytes"
+            );
+            return Err(ProviderError::new(ErrorKind::Transient));
+        }
     }
     job.summary["state"] = json!("running");
     job.summary["phase"] = json!("opening");
@@ -1216,6 +1361,9 @@ async fn run_job(app: &AppHandle, id: &str, cancel: &Cancellation) -> Result<Val
             super::history_deletion::run_delete_history(app, &connected, &job, cancel).await
         }
         JobKind::Cleanup => run_cleanup(app, &connected, &job, cancel).await,
+        JobKind::CheckRepository => {
+            run_repository_check(app, &connected, &job, cancel).await
+        }
     }
 }
 
@@ -1333,6 +1481,151 @@ async fn run_cleanup(
     .await?;
     Ok(outcome.summary())
 }
+/// Proves the selected published state can still be read. The result is a
+/// summary rather than transfer progress: a check writes no transfer journal,
+/// so the four progress fields stay as this job records them.
+async fn run_repository_check(
+    app: &AppHandle,
+    connected: &ConnectedRepository,
+    job: &DurableJob,
+    cancel: &Cancellation,
+) -> Result<Value> {
+    let root = root(app)?;
+    let directory = job_directory(&root, &job.request.connection_id, &job.id);
+    let cache_root = package_cache_root(&directory)?;
+    let writer_id = native_store(app)?
+        .external_identity()
+        .map_err(local_error)?
+        .store_id;
+    let context = lease_context(&root, connected, &writer_id);
+    let _ = record_check_progress(&root, &job.id, "reading", None);
+    let progress = |items: u64, total_items: u64, bytes: u64, total_bytes: u64| {
+        let _ = record_check_progress(
+            &root,
+            &job.id,
+            "verifying",
+            Some((items, total_items, bytes, total_bytes)),
+        );
+    };
+    let mut evidence =
+        super::packaging::ObjectEvidence::open(&root, &job.request.connection_id)?;
+    super::repository_check::run_job(
+        &context,
+        connected,
+        &super::repository_check::CheckJob {
+            job_id: &job.id,
+            snapshot_id: job.request.snapshot_id.as_deref(),
+            directory: &directory,
+            cache_root: &cache_root,
+            policy: connected
+                .stored
+                .retention_policy
+                .unwrap_or(super::connection::RetentionPolicy::DEFAULT),
+            now_ms: now_ms(),
+        },
+        &mut evidence,
+        &progress,
+        cancel,
+    )
+    .await
+}
+
+/// What one phase has done against what it found to do, and which of the two
+/// readings the numbers are. Written where the work happens, because a summary
+/// is only assembled when the renderer asks for one.
+fn record_counters(
+    root: &std::path::Path,
+    job_id: &str,
+    counters: &str,
+    reading: super::phase_progress::PhaseCounters,
+) -> Result<()> {
+    let store = JobStore::open(root)?;
+    let mut job = store.read(job_id)?;
+    if job.terminal() {
+        return Err(ProviderError::new(ErrorKind::PreconditionFailed));
+    }
+    job.summary["counters"] = json!(counters);
+    job.summary["completedItems"] = json!(reading.items.to_string());
+    job.summary["totalItems"] = json!(reading.total_items.to_string());
+    job.summary["completedBytes"] = json!(reading.bytes.to_string());
+    job.summary["totalBytes"] = json!(reading.total_bytes.to_string());
+    job.summary["updatedAtMs"] = json!(now_ms().to_string());
+    store.put(&job)
+}
+
+fn job_phase_progress(
+    root: &std::path::Path,
+    job_id: &str,
+    counters: &'static str,
+) -> std::sync::Arc<super::phase_progress::PhaseProgress> {
+    let root = root.to_path_buf();
+    let job_id = job_id.to_owned();
+    super::phase_progress::PhaseProgress::new(move |reading| {
+        let _ = record_counters(&root, &job_id, counters, reading);
+    })
+}
+
+/// What a job is reading, compressing, packing or staging.
+pub(crate) fn preparation_progress(
+    root: &std::path::Path,
+    job_id: &str,
+) -> std::sync::Arc<super::phase_progress::PhaseProgress> {
+    job_phase_progress(root, job_id, "prepared")
+}
+
+/// What a job has moved to or from the repository and had confirmed.
+pub(crate) fn transfer_progress(
+    root: &std::path::Path,
+    job_id: &str,
+) -> std::sync::Arc<super::phase_progress::PhaseProgress> {
+    job_phase_progress(root, job_id, "transferred")
+}
+
+fn record_check_progress(
+    root: &std::path::Path,
+    job_id: &str,
+    phase: &str,
+    counters: Option<(u64, u64, u64, u64)>,
+) -> Result<()> {
+    let store = JobStore::open(root)?;
+    let mut job = store.read(job_id)?;
+    job.summary["phase"] = json!(phase);
+    if let Some((items, total_items, bytes, total_bytes)) = counters {
+        job.summary["completedItems"] = json!(items.to_string());
+        job.summary["totalItems"] = json!(total_items.to_string());
+        job.summary["completedBytes"] = json!(bytes.to_string());
+        job.summary["totalBytes"] = json!(total_bytes.to_string());
+    }
+    job.summary["updatedAtMs"] = json!(now_ms().to_string());
+    store.put(&job)
+}
+/// Whether a publication that is already required may also spend the optional
+/// maintenance portion. A drain has to finish instead, and a daily allowance
+/// with less headroom than the portion can spend is not spent on it.
+pub(crate) fn maintenance_allowed(
+    app: &AppHandle,
+    connected: &super::connection_commands::ConnectedRepository,
+    job: &DurableJob,
+) -> bool {
+    if job.request.session.as_deref() == Some("exitDrain")
+        || job.request.reason.as_deref() == Some("exitDrain")
+    {
+        return false;
+    }
+    let Ok(budget) = super::connection_commands::budget(app) else {
+        return false;
+    };
+    let Ok(usage) =
+        super::quota_profiles::connection_usage(&budget, &connected.stored.config, now_ms())
+    else {
+        return false;
+    };
+    usage.iter().all(|counter| {
+        counter.limit.saturating_sub(counter.used)
+            >= super::packaging::COALESCE_REQUEST_BUDGET
+    })
+}
+
 async fn run_backup(
     app: &AppHandle,
     connected: &super::connection_commands::ConnectedRepository,
@@ -1448,6 +1741,47 @@ async fn run_backup(
             capture: identity.clone(),
         },
     )?;
+    journal.set_spool_budget(spool_budget(&root, &job.id));
+    // A backup wraps the library the published state already covers, so that
+    // state names the graph this capture can reuse from. Selected and recorded
+    // before anything reuses it. A connection that has never published one has
+    // nothing to select.
+    let parent_graph = match super::control::read_head(
+        connected.provider.as_ref(),
+        &connected.handle,
+        &connected.stored.descriptor,
+        &connected.root_key,
+        None,
+        cancel,
+    )
+    .await?
+    {
+        Some(head) => {
+            let view =
+                super::control::read_snapshot_document(connected, &head.document.state, cancel)
+                    .await?;
+            let mut roots = vec![
+                (
+                    super::packaging::CatalogRoot::Records,
+                    view.library.record_catalog,
+                ),
+                (
+                    super::packaging::CatalogRoot::Assets,
+                    view.library.asset_catalog,
+                ),
+            ];
+            roots.extend(view.sections.into_iter().map(|(id, section)| {
+                (
+                    super::packaging::CatalogRoot::Section(id),
+                    section.entries_root,
+                )
+            }));
+            let graph = super::packaging::ParentGraph::new(roots, &connected.handle)?;
+            journal.record_parent(graph.stored())?;
+            Some(graph)
+        }
+        None => None,
+    };
     let metadata = SnapshotMetadata {
         snapshot_id: job.snapshot_id.clone(),
         repository_id: connected.stored.descriptor.repository_id.clone(),
@@ -1467,11 +1801,7 @@ async fn run_backup(
             remote_generation: None,
         },
     };
-    let cache = directory
-        .parent()
-        .and_then(|path| path.parent())
-        .ok_or_else(|| ProviderError::new(ErrorKind::Corrupt))?
-        .join("package-cache");
+    let cache = package_cache_root(&directory)?;
     let completed = super::packaging::package_and_upload(
         capture,
         sections,
@@ -1479,15 +1809,19 @@ async fn run_backup(
         &cache,
         metadata,
         &connected.root_key,
-        PackageLimits::from_capabilities(&connected.stored.capabilities)?,
+        PackageLimits::from_capabilities(&connected.stored.capabilities)?
+            .with_maintenance(maintenance_allowed(app, connected, job)),
+        parent_graph.as_ref(),
         &mut journal,
         connected.provider.as_ref(),
         &connected.handle,
+        &preparation_progress(&root, &job.id),
         cancel,
     )
     .await?;
     match super::packaging::verify_publication(
         &completed,
+        &root,
         &cache,
         &mut journal,
         &connected.root_key,
@@ -1558,7 +1892,16 @@ async fn run_backup(
         );
     }
     Ok(
-        json!({"snapshotId":completed.snapshot_id,"publishedRevision":identity.revision.to_string()}),
+        json!({
+            "snapshotId": completed.snapshot_id,
+            "publishedRevision": identity.revision.to_string(),
+            "maintenancePacks": completed.maintenance.packs.to_string(),
+            "maintenanceBytes": completed.maintenance.source_bytes.to_string(),
+            "maintenanceLeaves": completed.maintenance.leaves.to_string(),
+            "maintenanceRequiredLeaves": completed.maintenance.required_leaves.to_string(),
+            "sourceDownloadObjects": completed.hydration.objects.to_string(),
+            "sourceDownloadBytes": completed.hydration.bytes.to_string(),
+        }),
     )
 }
 #[tauri::command]
@@ -1649,6 +1992,156 @@ mod tests {
             selection_epoch: "selection".into(), revision: 1,
         })
     }
+
+    /// Invariant 23. A publication registers nothing for the longest part of
+    /// its own work, so an empty journal must not overwrite what preparation
+    /// counted. The first registration is what hands the counters over, and
+    /// the summary says which of the two the numbers are.
+    #[test]
+    fn a_summary_keeps_prepared_counters_until_the_journal_holds_a_transfer() {
+        use super::super::journal::{JobIdentity, TransferJournal};
+        let root = tempfile::tempdir().unwrap();
+        let store = JobStore::open(root.path()).unwrap();
+        let job = automatic_job();
+        store.put(&job).unwrap();
+        record_counters(
+            root.path(),
+            &job.id,
+            "prepared",
+            super::super::phase_progress::PhaseCounters {
+                items: 7,
+                total_items: 9,
+                bytes: 70,
+                total_bytes: 90,
+            },
+        )
+        .unwrap();
+        let prepared = job_summary(root.path(), store.read(&job.id).unwrap());
+        assert_eq!(prepared["counters"], "prepared");
+        assert_eq!(prepared["completedItems"], "7");
+        assert_eq!(prepared["totalItems"], "9");
+        assert_eq!(prepared["completedBytes"], "70");
+        assert_eq!(prepared["totalBytes"], "90");
+
+        let directory = job_directory(root.path(), &job.request.connection_id, &job.id);
+        let identity = JobIdentity {
+            job_id: job.id.clone(),
+            connection_id: job.request.connection_id.clone(),
+            repository_id: super::super::fake::repository().repository_id,
+            capture_id: "capture".into(),
+            capture: job.admission_identity.clone(),
+        };
+        let mut journal = TransferJournal::open(&directory, identity.clone()).unwrap();
+        let empty = job_summary(root.path(), store.read(&job.id).unwrap());
+        assert_eq!(empty["counters"], "prepared");
+        assert_eq!(empty["totalItems"], "9");
+
+        let bytes = b"synthetic sealed ciphertext";
+        let intent = super::super::contract::ObjectIntent {
+            repository_id: identity.repository_id.clone(),
+            job_id: job.id.clone(),
+            object_id: "pack".into(),
+            role: super::super::contract::ObjectRole::Pack,
+            byte_length: bytes.len() as u64,
+            sha256: risunest_sync_wire::hash(bytes),
+        };
+        std::fs::write(journal.spool_path("pack"), bytes).unwrap();
+        journal.register(&intent).unwrap();
+        // A retry re-registers what it already placed, and the object it names
+        // is the one that was already counted.
+        journal.register(&intent).unwrap();
+        drop(journal);
+        let transferred = job_summary(root.path(), store.read(&job.id).unwrap());
+        assert_eq!(transferred["counters"], "transferred");
+        assert_eq!(transferred["totalItems"], "1");
+        assert_eq!(transferred["completedItems"], "0");
+        assert_eq!(transferred["totalBytes"], bytes.len().to_string());
+        assert_eq!(transferred["completedBytes"], "0");
+    }
+
+    /// The budget is what other jobs are holding, so a job is never held back
+    /// by its own material and a job that ended still counts until a cleanup
+    /// releases it.
+    #[test]
+    fn a_producing_job_waits_for_the_spool_another_job_still_holds() {
+        let root = tempfile::tempdir().unwrap();
+        let store = JobStore::open(root.path()).unwrap();
+        let mut holder = automatic_job();
+        holder.request.connection_id = "holding-connection".into();
+        holder.summary["connectionId"] = json!("holding-connection");
+        store.put(&holder).unwrap();
+        let waiting = automatic_job();
+        store.put(&waiting).unwrap();
+        let directory = job_directory(root.path(), &holder.request.connection_id, &holder.id);
+        std::fs::create_dir_all(&directory).unwrap();
+        let held = std::fs::File::create(directory.join("held.spool")).unwrap();
+        held.set_len(super::super::journal::TRANSFER_SPOOL_BUDGET - 1).unwrap();
+        assert!(spool_budget_owner(root.path(), &store, &waiting).unwrap().is_none());
+        held.set_len(super::super::journal::TRANSFER_SPOOL_BUDGET).unwrap();
+        assert_eq!(
+            spool_budget_owner(root.path(), &store, &waiting).unwrap(),
+            Some((holder.id.clone(), super::super::journal::TRANSFER_SPOOL_BUDGET)),
+        );
+        assert!(spool_budget_owner(root.path(), &store, &holder).unwrap().is_none());
+        holder.summary["state"] = json!("failed");
+        store.put(&holder).unwrap();
+        assert!(spool_budget_owner(root.path(), &store, &waiting).unwrap().is_some());
+        holder.summary["state"] = json!("cancelled");
+        store.put(&holder).unwrap();
+        assert!(spool_budget_owner(root.path(), &store, &waiting).unwrap().is_none());
+    }
+    /// A13. The transfer spool is an app-wide budget, so what every unfinished
+    /// job holds counts together, whatever connection it belongs to and
+    /// whether it is working or waiting for its turn. A job's own spool is not
+    /// what holds it back, and a job stops counting when it is released rather
+    /// than when it stops.
+    #[test]
+    fn the_transfer_spool_budget_sums_what_every_unfinished_job_holds() {
+        use super::super::journal::TRANSFER_SPOOL_BUDGET;
+        let root = tempfile::tempdir().unwrap();
+        let store = JobStore::open(root.path()).unwrap();
+        let hold = |connection: &str, state: &str, bytes: u64| -> DurableJob {
+            let mut job = automatic_job();
+            job.request.connection_id = connection.into();
+            job.summary["connectionId"] = json!(connection);
+            job.summary["state"] = json!(state);
+            store.put(&job).unwrap();
+            if bytes > 0 {
+                let directory = job_directory(root.path(), connection, &job.id);
+                std::fs::create_dir_all(&directory).unwrap();
+                std::fs::File::create(directory.join("held.spool"))
+                    .unwrap()
+                    .set_len(bytes)
+                    .unwrap();
+            }
+            job
+        };
+        let requester = hold("connection-c", "queued", 0);
+        let smaller = hold("connection-a", "waiting", TRANSFER_SPOOL_BUDGET / 3);
+        assert!(spool_budget_owner(root.path(), &store, &requester).unwrap().is_none());
+
+        // Two connections together reach it, and the larger holder is the one
+        // the waiting job is told about.
+        let larger = hold("connection-b", "waiting", TRANSFER_SPOOL_BUDGET - TRANSFER_SPOOL_BUDGET / 3);
+        assert_eq!(
+            spool_budget_owner(root.path(), &store, &requester).unwrap(),
+            Some((larger.id.clone(), TRANSFER_SPOOL_BUDGET - TRANSFER_SPOOL_BUDGET / 3)),
+        );
+        // Without its own spool the smaller holder is under the budget, so it
+        // is never held back by what it is itself holding.
+        assert!(spool_budget_owner(root.path(), &store, &smaller).unwrap().is_none());
+
+        let mut released = larger.clone();
+        released.summary["state"] = json!("succeeded");
+        store.put(&released).unwrap();
+        assert!(spool_budget_owner(root.path(), &store, &requester).unwrap().is_none());
+
+        // A job that failed still owns its spool until a cleanup takes it.
+        released.summary["state"] = json!("failed");
+        store.put(&released).unwrap();
+        assert!(spool_budget_owner(root.path(), &store, &requester).unwrap().is_some());
+    }
+
     #[test]
     fn a_partial_restore_is_neither_a_failed_noop_nor_a_remote_publication() {
         let mut job = automatic_job();
@@ -1709,7 +2202,7 @@ mod tests {
         let stage = store.replace_begin().unwrap();
         store.replace_put_root(&stage.staging_id, &json!({"marker":"synthetic-remote"})).unwrap();
         let prepared = store.prepare_replace_commit(&stage.staging_id, Some(0)).unwrap();
-        store.finish_external_receive(prepared, &job.id).unwrap();
+        store.finish_external_receive(prepared, &job.id, &Default::default()).unwrap();
         job.request.kind = JobKind::ResolveConflict;
         for _ in 0..2 {
             let result = completed_job_result(&mut store, &job).unwrap().unwrap();

@@ -79,7 +79,8 @@
     let serverBackupCount = $derived(
         (view.serverBackups?.completeCount ?? 0) + (view.serverBackups?.incompleteCount ?? 0),
     )
-    // The bar partitions the total: media, database, and the three backup kinds.
+    // The bar partitions the total: media, database, the three backup kinds, and
+    // what sync keeps beside its backups.
     let segments = $derived(
         rollup && view.stats
             ? [
@@ -106,6 +107,12 @@
                       label: syncLabels.cache,
                       bytes: rollup.cacheBytes,
                       color: 'bg-neutral-500',
+                  },
+                  {
+                      id: 'ledger',
+                      label: syncLabels.ledger,
+                      bytes: rollup.ledgerBytes,
+                      color: 'bg-primary-500',
                   },
                   {
                       id: 'snapshots',

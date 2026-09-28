@@ -57,6 +57,15 @@ describe("shared connect part", () => {
       residency: "remote",
     });
   });
+  it("keeps manual entry fields free of capitalization and spell checking", async () => {
+    setup();
+    await tick();
+    const inputs = [...target.querySelectorAll<HTMLInputElement>("form.fields input")];
+    expect(inputs.map((input) => input.getAttribute("autocapitalize"))).toEqual(["none", "none", "none", null]);
+    expect(inputs.map((input) => input.getAttribute("spellcheck"))).toEqual(["false", "false", "false", "false"]);
+    expect(inputs.map((input) => input.getAttribute("autocomplete"))).toEqual(["url", "off", "off", "new-password"]);
+    expect(inputs[3].type).toBe("password");
+  });
   it("turns a manual entry into the same check and defaults to keeping files on this device", async () => {
     const onSubmit = setup();
     await tick();

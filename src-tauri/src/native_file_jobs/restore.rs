@@ -3676,6 +3676,7 @@ mod tests {
                 display_name: "backup.risudat".to_owned(),
                 bytes: Some(source_bytes),
                 total_bytes: Some(source_bytes),
+                import_destination: None,
             })
             .unwrap(),
         )

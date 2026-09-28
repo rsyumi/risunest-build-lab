@@ -20,7 +20,8 @@ import versionData from "../../version.json";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { MobileGUI, botMakerMode, selectedCharID, loadedStore, DBState, LoadingStatusState, selIdState, ReloadGUIPointer, bodyIntercepterStore } from "./stores.svelte";
 import { loadPlugins } from "./plugins/plugins.svelte";
-import { alertConfirm, alertError, alertMd, alertNormal, alertNormalWait, alertSelect, alertTOS, waitAlert } from "./alert";
+import { alertConfirm, alertError, alertMd, alertNormal, alertNormalWait, alertSelect, alertToast, alertTOS, waitAlert } from "./alert";
+import { doingChat } from "./process/generationState";
 import { hasher } from "./parser/parser.svelte";
 import { characterURLImport, hubURL, realmHubURL } from "./characterCards";
 import { defaultJailbreak, defaultMainPrompt, oldJailbreak, oldMainPrompt } from "./storage/defaultPrompts";
@@ -54,12 +55,14 @@ import { getRuntimePerformanceBudgets, subscribeRuntimePerformanceProfile } from
 import { checkCharOrder as repairDatabaseCharacterOrder } from "./storage/databasePreparation";
 import {
     activateConversation,
+    captureSelectedConversationTarget,
     configurePersistentDataRuntime,
     fencePersistentNavigation,
     markPersistentDataDirty,
     replacePersistentDatabase,
 } from "./storage/persistentDataRuntime.svelte";
 import * as persistentDataRuntime from "./storage/persistentDataRuntime.svelte";
+import { PersistentMutationFencedError } from "./storage/saveCoordinator";
 import {
     queryChatMessageTargetAt,
     queryChatMessageTargetById,
@@ -1700,6 +1703,18 @@ export async function changeChatTo(IdOrIndex: string | number): Promise<boolean>
         ? chats[IdOrIndex]?.id
         : IdOrIndex
     if(!chatId || !chats.some((chat) => chat.id === chatId)) return false
+    // Reactivating the open conversation would reload it and reset the chat view.
+    const selected = captureSelectedConversationTarget()
+    if(
+        selected?.characterId === characterId &&
+        selected.conversationId === chatId &&
+        chats[character.chatPage]?.id === chatId
+    ) return true
+    // The navigation fence would orphan the running response, so refuse first.
+    if(get(doingChat)){
+        alertToast(language.navigationBlockedWhileGenerating)
+        return false
+    }
 
     fencePersistentNavigation()
     const activity = beginNavigationActivity('conversation')
@@ -1715,6 +1730,10 @@ export async function changeChatTo(IdOrIndex: string | number): Promise<boolean>
             return false
         const activated = await activateConversation(chatId)
         return activity.isCurrent() ? activated : false
+    } catch (error) {
+        // A replacement or refresh holding storage refuses the switch like a stale click.
+        if (error instanceof PersistentMutationFencedError) return false
+        throw error
     } finally {
         activity.finish()
     }

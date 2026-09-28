@@ -538,10 +538,13 @@ mod tests {
     }
 }
 
-
 pub fn remove_startup(root: &Path, executable: &Path) -> Result<()> {
     #[cfg(windows)]
-    { startup(root, executable, "remove").map(|_| ()) }
+    {
+        startup(root, executable, "remove").map(|_| ())
+    }
     #[cfg(unix)]
-    { unix::remove_startup(root, executable) }
+    {
+        unix::remove_startup(root, executable)
+    }
 }

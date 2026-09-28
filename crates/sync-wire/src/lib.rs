@@ -29,7 +29,7 @@ impl std::fmt::Display for WireError {
 impl std::error::Error for WireError {}
 
 pub fn hash(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    hex::encode(Sha256::digest(bytes))
 }
 pub fn validate_hash(value: &str) -> Result<()> {
     if value.len() != 64

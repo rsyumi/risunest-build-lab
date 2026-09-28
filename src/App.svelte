@@ -49,6 +49,7 @@
     import SyncExitDialog from './lib/Others/SyncExitDialog.svelte';
     import PersistentWorkingSetRecovery from './lib/Others/PersistentWorkingSetRecovery.svelte';
     import { persistentWorkingSetInputBlocked } from './ts/storage/persistentDataRuntime.svelte';
+    import { restoreFocusAfterInputBlock } from './ts/ui/restoreFocusAfterInputBlock';
     import { exportOriginalData } from './ts/storage/rawRecoveryExport';
 
     import {
@@ -61,6 +62,8 @@
         DATA_HEALTH_SECTION_ID,
     } from './ts/storage/dataHealthNavigation'
     import { openRisuNestSettingsTab } from './ts/setting/risuNestSettingsTabs'
+
+    $effect(() => restoreFocusAfterInputBlock(persistentWorkingSetInputBlocked))
 
     $effect(() => {
         if (!isTauri || !$loadedStore) return

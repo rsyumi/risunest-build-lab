@@ -1,5 +1,5 @@
 <script lang="ts">
-    import { onMount } from 'svelte'
+    import { onMount, untrack } from 'svelte'
     import {
         ArrowRight,
         Check,
@@ -84,6 +84,7 @@
         externalStorageStrings,
     } from 'src/lib/Setting/ExternalStorage/strings'
     import ServerSyncConnect from 'src/lib/Setting/ServerSync/ServerSyncConnect.svelte'
+    import ServerSyncStages from 'src/lib/Setting/ServerSync/ServerSyncStages.svelte'
     import { DBState } from 'src/ts/stores.svelte'
 
     import {
@@ -104,7 +105,12 @@
     } from './externalStorageOnboardingFlow'
     import { onboardingHold } from './onboardingGate'
     import { observeOnboardingWeave } from './onboardingWeave'
-    import { serverSyncOnboardingOutcome } from './serverSyncOnboardingFlow'
+    import {
+        serverSyncOnboardingNext,
+        serverSyncOnboardingOpening,
+        serverSyncOnboardingOutcome,
+        serverSyncOnboardingResume,
+    } from './serverSyncOnboardingFlow'
 
     const UI_LANGUAGES = [
         { value: 'de', label: 'Deutsch' },
@@ -231,10 +237,30 @@
 
     $effect(() => {
         if (!hubStarted || hubConnecting || !hubOutcome) return
-        if (hubOutcome === 'complete' || hubOutcome === 'paused') {
+        if (serverSyncOnboardingNext(hubOutcome) === 'done') {
             resetHub()
             goTo('done')
         }
+    })
+
+    // Decided once, when the status first arrives, so going back to the first
+    // screen afterwards stays possible.
+    let openingDecided = false
+    $effect(() => {
+        if (openingDecided || !syncSnapshot?.status) return
+        openingDecided = true
+        const opening = serverSyncOnboardingOpening(untrack(() => flow.state), syncSnapshot)
+        if (opening) flow = goToOnboardingState(untrack(() => flow), opening)
+    })
+
+    // A device connected before the app started again continues here; its
+    // registration code would be refused.
+    $effect(() => {
+        if (flow.state !== 'sync-hub' || hubStarted) return
+        const resume = serverSyncOnboardingResume(syncSnapshot)
+        if (!resume) return
+        hubStarted = true
+        if (resume === 'retry') untrack(() => void retryHub())
     })
 
     // The native side owns the job; this reads its progress while it runs.
@@ -1125,7 +1151,7 @@
                                     <span class="dim">{hubView?.elapsed ?? ''}</span>
                                 </p>
                                 {#if hubView}
-                                    {@render stageList(hubView.stages)}
+                                    <ServerSyncStages stages={hubView.stages} />
                                     <dl
                                         class="counts"
                                         style:--cards={hubView.counters.length}
@@ -1177,6 +1203,25 @@
                                         {s.keepRemote}
                                     </button>
                                 </div>
+                            {:else if hubStarted && hubOutcome === 'paused'}
+                                <h1>{t.hub.title}</h1>
+                                {@render hubServerChip()}
+                                <p class="result cancelled" role="status">
+                                    {t.hub.pausedSummary}
+                                </p>
+                                <p class="reason">{t.hub.pausedReason}</p>
+                                <div class="actions">
+                                    <button
+                                        class="btn primary"
+                                        type="button"
+                                        onclick={() => void retryHub()}
+                                    >
+                                        {t.hub.resume}
+                                    </button>
+                                    <button class="btn ghost" type="button" onclick={finish}>
+                                        {t.done.start}
+                                    </button>
+                                </div>
                             {:else if hubStarted}
                                 <h1>{t.hub.title}</h1>
                                 {@render hubServerChip()}
@@ -1199,9 +1244,11 @@
                                     >
                                         {t.hub.retry}
                                     </button>
-                                    <button class="btn ghost" type="button" onclick={resetHub}>
-                                        {s.otherCode}
-                                    </button>
+                                    {#if !syncSnapshot?.status?.configured}
+                                        <button class="btn ghost" type="button" onclick={resetHub}>
+                                            {s.otherCode}
+                                        </button>
+                                    {/if}
                                     <button
                                         class="btn ghost"
                                         type="button"

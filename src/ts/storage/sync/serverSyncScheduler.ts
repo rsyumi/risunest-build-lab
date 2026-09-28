@@ -122,9 +122,9 @@ export function createServerSyncScheduler(
       poll = 60_000;
       schedule(0);
     },
-    suspend() {
+    suspend(preserveActive = false) {
       clear();
-      if (controller.snapshot().running) void controller.suspend();
+      if (!preserveActive && controller.snapshot().running) void controller.suspend();
     },
     stop() {
       stopped = true;

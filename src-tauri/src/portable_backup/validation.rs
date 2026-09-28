@@ -232,7 +232,18 @@ fn reread_object(cas: &PayloadCas, hash: &str, size: u64) -> std::result::Result
         return Ok(0);
     };
     let mut digest = sha2::Sha256::new();
-    let read = std::io::copy(&mut file, &mut digest).map_err(|error| error.to_string())?;
+    let mut read = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = match file.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error.to_string()),
+        };
+        digest.update(&buffer[..count]);
+        read += count as u64;
+    }
     if read != size {
         return Err("stored payload length differs from the registered size".to_owned());
     }

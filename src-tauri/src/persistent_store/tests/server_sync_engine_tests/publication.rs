@@ -11,6 +11,8 @@ const ACTIVITY_VERIFYING: u8 = 6;
 struct Traffic {
     missing: AtomicU64,
     pins: AtomicU64,
+    transfers: AtomicU64,
+    object_bodies: AtomicU64,
     frames: AtomicU64,
     page_puts: AtomicU64,
     /// Remaining page writes to answer as if an object they depend on were gone.
@@ -28,6 +30,8 @@ impl Traffic {
         for counter in [
             &self.missing,
             &self.pins,
+            &self.transfers,
+            &self.object_bodies,
             &self.frames,
             &self.page_puts,
             &self.missing_while_verifying,
@@ -102,13 +106,22 @@ impl Fixture {
                             "/objects/pins" => {
                                 traffic.pins.fetch_add(1, Ordering::Relaxed);
                             }
+                            "/objects/transfer" => {
+                                traffic.transfers.fetch_add(1, Ordering::Relaxed);
+                            }
                             "/uploads/frames" => {
                                 traffic.frames.fetch_add(1, Ordering::Relaxed);
                                 if now == ACTIVITY_UPLOADING {
                                     traffic.frames_while_uploading.fetch_add(1, Ordering::Relaxed);
                                 }
                             }
-                            _ => (),
+                            other => {
+                                if method == axum::http::Method::GET
+                                    && other.starts_with("/objects/")
+                                {
+                                    traffic.object_bodies.fetch_add(1, Ordering::Relaxed);
+                                }
+                            }
                         }
                         if method == axum::http::Method::POST
                             && path == "/commits"
@@ -507,5 +520,111 @@ fn an_applied_record_drops_the_projection_this_device_held_for_it() {
         if key != &wire {
             assert_eq!(applied.get(key), Some(revision), "{key} was re-projected");
         }
+    }
+}
+
+/// A09 at engine level. A receive gathers the page's record and descriptor
+/// identities into one request, so its cost follows the number of pages rather
+/// than the number of records.
+#[test]
+fn a_receive_page_costs_its_own_requests_not_one_per_record() {
+    const RECORDS: usize = 120;
+    let fixture = Fixture::new();
+    let (_source_dir, mut source) = prepared();
+    fixture.bind(&mut source);
+    assert_eq!(settle(&mut source).phase, "idle");
+    let destination_dir = tempfile::tempdir().unwrap();
+    let mut destination = PersistentStore::open(destination_dir.path()).unwrap();
+    fixture.bind(&mut destination);
+    assert_eq!(settle(&mut destination).phase, "idle");
+
+    for index in 0..RECORDS {
+        put(
+            &mut source,
+            &format!("assets/synthetic-page-{index:04}.png"),
+            &[(index % 251) as u8; 2048],
+        );
+    }
+    assert_eq!(settle(&mut source).phase, "idle");
+
+    fixture.traffic.reset();
+    assert_eq!(settle(&mut destination).phase, "idle");
+    let transfers = fixture.traffic.transfers.load(Ordering::Relaxed);
+    let bodies = fixture.traffic.object_bodies.load(Ordering::Relaxed);
+    eprintln!("receive of {RECORDS} records: {transfers} transfer requests, {bodies} body requests");
+    assert!(
+        transfers < RECORDS as u64 / 4,
+        "a page of {RECORDS} records must not cost a request per record, saw {transfers}"
+    );
+    assert_eq!(
+        bodies, 0,
+        "bodies that fit the reply target arrive in the batched reply"
+    );
+    for index in 0..RECORDS {
+        let key = format!("assets/synthetic-page-{index:04}.png");
+        assert!(
+            destination
+                .read_asset_alias("asset", &key, None)
+                .unwrap()
+                .is_some(),
+            "{key} did not arrive"
+        );
+    }
+}
+
+#[test]
+fn preparing_a_page_of_records_commits_per_page_not_per_record() {
+    const RECORDS: usize = 300;
+    let fixture = Fixture::new();
+    let (_source_dir, mut source) = prepared();
+    fixture.bind(&mut source);
+    assert_eq!(settle(&mut source).phase, "idle");
+    for index in 0..RECORDS {
+        put(
+            &mut source,
+            &format!("assets/synthetic-durable-{index:04}.png"),
+            &[(index % 251) as u8; 2048],
+        );
+    }
+
+    // Counted from outside the code under test: SQLite reports every
+    // transaction on this connection, and the database each statement wrote
+    // tells a durable one from scratch a cycle keeps in its temporary space.
+    let commits = Arc::new(AtomicU64::new(0));
+    let durable = Arc::new(AtomicBool::new(false));
+    let touched = Arc::clone(&durable);
+    source
+        .connection
+        .update_hook(Some(move |_action, database: &str, _table: &str, _row| {
+            if database == "main" {
+                touched.store(true, Ordering::Relaxed);
+            }
+        }));
+    let counted = Arc::clone(&commits);
+    let reached = Arc::clone(&durable);
+    source.connection.commit_hook(Some(move || {
+        if reached.swap(false, Ordering::Relaxed) {
+            counted.fetch_add(1, Ordering::Relaxed);
+        }
+        false
+    }));
+    assert_eq!(settle(&mut source).phase, "idle");
+    source.connection.commit_hook::<fn() -> bool>(None);
+    source
+        .connection
+        .update_hook::<fn(rusqlite::hooks::Action, &str, &str, i64)>(None);
+
+    let total = commits.load(Ordering::Relaxed);
+    eprintln!("publication of {RECORDS} records: {total} local commits");
+    assert!(
+        total < RECORDS as u64 / 8,
+        "a page of {RECORDS} records must cost transactions per page, not per record, saw {total}"
+    );
+    for index in 0..RECORDS {
+        let key = format!("assets/synthetic-durable-{index:04}.png");
+        assert!(
+            source.read_asset_alias("asset", &key, None).unwrap().is_some(),
+            "{key} did not survive publication"
+        );
     }
 }

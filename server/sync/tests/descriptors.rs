@@ -140,18 +140,41 @@ fn inline_dependencies_survive_lease_expiry_and_inline_relations_are_enforced() 
     let bytes = descriptor.bytes().unwrap();
     store.put_object(&device, &hash(&bytes), &bytes).unwrap();
     let mut change = ChangeSet {
-        changes: vec![RecordChange { domain: Domain::Library, key: "child".into(), before: RecordVersion::Absent,
-            after: RecordVersion::Live { object_hash: hash(body), descriptor_hash: Some(hash(&bytes)) } }],
-        read_fences: vec![], scope_fences: vec![],
+        changes: vec![RecordChange {
+            domain: Domain::Library,
+            key: "child".into(),
+            before: RecordVersion::Absent,
+            after: RecordVersion::Live {
+                object_hash: hash(body),
+                descriptor_hash: Some(hash(&bytes)),
+            },
+        }],
+        read_fences: vec![],
+        scope_fences: vec![],
     };
-    assert_eq!(store.stage_changes(&device, &change).err().unwrap().code, "missing-dependency");
+    assert_eq!(
+        store.stage_changes(&device, &change).err().unwrap().code,
+        "missing-dependency"
+    );
     store.put_object(&device, &hash(asset), asset).unwrap();
     let head = store.head().unwrap();
     let intent = stage(&store, &device, &head, 1, &change);
-    assert_eq!(store.commit(&device, &intent, &head.etag()).unwrap().error.as_deref(), Some("missing-related-record"));
-    change.changes.push(changes("parent", body).changes.remove(0));
+    assert_eq!(
+        store
+            .commit(&device, &intent, &head.etag())
+            .unwrap()
+            .error
+            .as_deref(),
+        Some("missing-related-record")
+    );
+    change
+        .changes
+        .push(changes("parent", body).changes.remove(0));
     let intent = stage(&store, &device, &head, 2, &change);
-    assert_eq!(store.commit(&device, &intent, &head.etag()).unwrap().status, TerminalStatus::Committed);
+    assert_eq!(
+        store.commit(&device, &intent, &head.etag()).unwrap().status,
+        TerminalStatus::Committed
+    );
     let db = rusqlite::Connection::open(dir.path().join("metadata.sqlite")).unwrap();
     db.execute("DELETE FROM object_leases", []).unwrap();
     store.maintain().unwrap();

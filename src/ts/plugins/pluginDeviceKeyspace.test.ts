@@ -156,6 +156,26 @@ describe('plugin device keyspace', () => {
         await expect(keyspace.getItem('string', 'key')).resolves.toBe('new')
     })
 
+    it.each(['set', 'delete', 'clear'] as const)('refreshes the cache after a committed %s loses its acknowledgement', async (operation) => {
+        const { backend } = recordingBackend([{ owner: 'a', space: 'string', key: 'key', value: 'old' }])
+        const write = backend.write.bind(backend)
+        const keyspace = new PluginDeviceKeyspace('a', backend)
+        await expect(keyspace.getItem('string', 'key')).resolves.toBe('old')
+        vi.spyOn(backend, 'write').mockImplementationOnce(async (owner, mutations) => {
+            await write(owner, mutations)
+            throw new Error('write acknowledgement lost')
+        })
+
+        const pending = operation === 'set'
+            ? keyspace.setItem('string', 'key', 'new')
+            : operation === 'delete'
+                ? keyspace.removeItem('string', 'key')
+                : keyspace.clear('string')
+        await expect(pending).rejects.toThrow('write acknowledgement lost')
+        await expect(keyspace.getItem('string', 'key')).resolves.toBe(operation === 'set' ? 'new' : null)
+        await expect(keyspace.keys('string')).resolves.toEqual(operation === 'set' ? ['key'] : [])
+    })
+
     it('keeps writes durable but drops a cache that grows beyond its byte budget', async () => {
         const { backend } = recordingBackend()
         const reads = vi.spyOn(backend, 'read')

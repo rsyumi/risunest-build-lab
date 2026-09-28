@@ -73,6 +73,11 @@ impl ActiveReaderRegistry {
         }
     }
 
+    /// A local capture is between writing its bodies and registering them.
+    pub(crate) fn asset_inventory_deferred(&self) -> bool {
+        self.deferred_asset_inventories.load(Ordering::SeqCst) > 0
+    }
+
     pub(crate) fn detached_asset_roots(&self) -> StoreResult<Vec<AssetRootSet>> {
         if self.deferred_asset_inventories.load(Ordering::SeqCst) > 0 {
             return Err(StoreError::Validation {

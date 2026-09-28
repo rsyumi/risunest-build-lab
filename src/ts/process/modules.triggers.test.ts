@@ -1,5 +1,6 @@
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { derived, get, proxy } from 'svelte/internal/client'
+import { get as getStore, writable } from 'svelte/store'
 import type { Database, triggerscript } from '../storage/database.svelte'
 
 vi.mock('src/lang', () => ({ language: {} }))
@@ -13,18 +14,29 @@ vi.mock('../globalApi.svelte', () => ({}))
 vi.mock('../util', () => ({ checkPersonaBinded: vi.fn() }))
 vi.mock('./lorebook.svelte', () => ({}))
 vi.mock('../rpack/rpack_js', () => ({}))
-vi.mock('../stores.svelte', () => ({}))
+vi.mock('../stores.svelte', () => ({
+    HideIconStore: writable(false),
+    moduleBackgroundEmbedding: writable(''),
+    ReloadGUIPointer: writable(0),
+}))
 vi.mock('../interchangeability', () => ({}))
 vi.mock('../characterCards', () => ({}))
 vi.mock('../storage/nativeModuleFileRoute', () => ({}))
 
-import { getDatabase } from '../storage/database.svelte'
-import { getModuleTriggers, type RisuModule } from './modules'
+import { getCurrentCharacter, getCurrentChat, getDatabase } from '../storage/database.svelte'
+import { checkPersonaBinded } from '../util'
+import { HideIconStore, moduleBackgroundEmbedding } from '../stores.svelte'
+import { getModules, getModuleToggles, getModuleTriggers, moduleUpdate, type RisuModule } from './modules'
+
+beforeEach(() => {
+    vi.mocked(getCurrentCharacter).mockReturnValue(undefined)
+    vi.mocked(getCurrentChat).mockReturnValue(undefined)
+    vi.mocked(checkPersonaBinded).mockReturnValue(null)
+})
 
 let fixtureId = 0
 
 function selectModules(modules: RisuModule[]) {
-    // Unique IDs keep each fixture independent of the enabled-module cache.
     const records = proxy(
         modules.map((module) => ({
             ...module,
@@ -117,5 +129,69 @@ describe('module trigger reads', () => {
             { comment: 'Third', lowLevelAccess: true },
         ])
         expect(records[1].trigger![0].lowLevelAccess).toBeUndefined()
+    })
+})
+
+describe('live module selection', () => {
+    it('allows the initial empty working set before database defaults are installed', () => {
+        vi.mocked(getDatabase).mockReturnValue({} as Database)
+        expect(getModules()).toEqual([])
+        expect(() => moduleUpdate()).not.toThrow()
+    })
+
+    it('observes replacement, deletion and namespace edits without changing enabled IDs', () => {
+        const db = proxy({
+            modules: [{ id: 'module', name: 'Original', description: '', namespace: 'shared', customModuleToggle: 'old=Old' }],
+            enabledModules: ['shared'],
+        })
+        vi.mocked(getDatabase).mockReturnValue(db as Database)
+        const toggles = derived(getModuleToggles)
+        expect(get(toggles)).toContain('old=Old')
+        db.modules[0] = { ...db.modules[0], customModuleToggle: 'new=New' }
+        expect(get(toggles)).toContain('new=New')
+        db.modules[0].namespace = 'other'
+        expect(get(toggles)).toBe('')
+        db.enabledModules = ['module']
+        expect(get(toggles)).toContain('new=New')
+        db.modules.splice(0, 1)
+        expect(get(toggles)).toBe('')
+    })
+
+    it('keeps different ID lists distinct even when their hyphen-joined strings match', () => {
+        const modules = ['a-b', 'c', 'a', 'b-c'].map(id => ({ id, name: id, description: '' }))
+        const db = { modules, enabledModules: ['a-b', 'c'] }
+        vi.mocked(getDatabase).mockReturnValue(db as Database)
+        expect(getModules().map(m => m.id)).toEqual(['a-b', 'c'])
+        db.enabledModules = ['a', 'b-c']
+        expect(getModules().map(m => m.id)).toEqual(['a', 'b-c'])
+    })
+
+    it('includes the bound persona module and switches same-ID embedded modules immediately', () => {
+        vi.mocked(getDatabase).mockReturnValue({ modules: [], enabledModules: [] } as unknown as Database)
+        const persona = { id: 'persona-a', name: 'A', icon: '', personaPrompt: '', embeddedModule: {
+            id: '$embedded', name: 'A module', description: '', customModuleToggle: 'a=A',
+        } }
+        vi.mocked(checkPersonaBinded).mockReturnValue(persona)
+        expect(getModuleToggles()).toContain('a=A')
+        vi.mocked(checkPersonaBinded).mockReturnValue({ ...persona, id: 'persona-b', embeddedModule: {
+            ...persona.embeddedModule, customModuleToggle: 'b=B',
+        } })
+        expect(getModuleToggles()).toContain('b=B')
+        expect(getModuleToggles()).not.toContain('a=A')
+        vi.mocked(checkPersonaBinded).mockReturnValue(null)
+        expect(getModules()).toEqual([])
+    })
+
+    it('clears module background and icon overrides when the module is disabled', () => {
+        const db = { modules: [{ id: 'background', name: 'Background', description: '',
+            backgroundEmbedding: '<p>Synthetic</p>', hideIcon: true }], enabledModules: ['background'] }
+        vi.mocked(getDatabase).mockReturnValue(db as Database)
+        moduleUpdate()
+        expect(getStore(moduleBackgroundEmbedding)).toContain('<p>Synthetic</p>')
+        expect(getStore(HideIconStore)).toBe(true)
+        db.enabledModules = []
+        moduleUpdate()
+        expect(getStore(moduleBackgroundEmbedding)).toBe('')
+        expect(getStore(HideIconStore)).toBeFalsy()
     })
 })

@@ -98,6 +98,8 @@ pub(super) struct FakeState {
     reconcile_attempts: Vec<String>,
     scripted_pages: Vec<(Collection, Result<ObjectPage>)>,
     inventory_upload_failure: Option<ErrorKind>,
+    upload_failure: Option<(usize, ErrorKind)>,
+    first_upload: Option<std::time::Instant>,
 }
 pub(crate) struct FakeProvider {
     pub(super) state: Mutex<FakeState>,
@@ -156,6 +158,11 @@ impl FakeProvider {
             .deletes
             .insert(object.to_owned(), fault);
     }
+    /// The body this repository holds, for the tests that damage one
+    /// without changing its size.
+    pub(crate) fn contents(&self, object: &str) -> Option<Vec<u8>> {
+        self.state.lock().unwrap().objects.get(object).map(|(bytes, _)| bytes.clone())
+    }
     pub(crate) fn holds(&self, object: &str) -> bool {
         self.state.lock().unwrap().objects.contains_key(object)
     }
@@ -191,11 +198,34 @@ impl FakeProvider {
     pub(crate) fn fail_inventory_upload(&self, kind: ErrorKind) {
         self.state.lock().unwrap().inventory_upload_failure = Some(kind);
     }
+    /// Refuses the upload that arrives in a given position, whatever it
+    /// carries, so a failure can be placed in the middle of a publication.
+    pub(crate) fn fail_upload_number(&self, attempt: usize, kind: ErrorKind) {
+        self.state.lock().unwrap().upload_failure = Some((attempt, kind));
+    }
+    /// When the first upload arrived, which is what time to first byte is
+    /// measured against.
+    pub(crate) fn first_upload(&self) -> Option<std::time::Instant> {
+        self.state.lock().unwrap().first_upload
+    }
+    /// Starts that measurement over, so one run of a loop is timed rather than
+    /// everything the provider has answered.
+    pub(crate) fn reset_first_upload(&self) {
+        self.state.lock().unwrap().first_upload = None;
+    }
     pub(crate) fn set_upload_locator(&self, object_id: &str, locator: &str) {
         self.state.lock().unwrap().upload_locators.insert(object_id.into(), locator.into());
     }
     pub(crate) fn uploaded_ids(&self) -> Vec<String> {
         self.state.lock().unwrap().upload_attempts.clone()
+    }
+    /// Every body read this provider answered, for the measurements that count
+    /// provider requests rather than stored objects.
+    pub(crate) fn read_count(&self) -> usize {
+        self.state.lock().unwrap().read_attempts.len()
+    }
+    pub(crate) fn upload_count(&self) -> usize {
+        self.state.lock().unwrap().upload_attempts.len()
     }
     pub(crate) fn listing_count(&self) -> usize {
         self.state.lock().unwrap().listings
@@ -373,7 +403,15 @@ impl Provider for FakeProvider {
             use tokio::io::AsyncReadExt;
             c.check()?;
             intent.validate(r)?;
-            self.state.lock().unwrap().upload_attempts.push(intent.object_id.clone());
+            {
+                let mut state = self.state.lock().unwrap();
+                state.upload_attempts.push(intent.object_id.clone());
+                state.first_upload.get_or_insert_with(std::time::Instant::now);
+                let attempts = state.upload_attempts.len();
+                if matches!(state.upload_failure, Some((at, _)) if at == attempts) {
+                    return Err(ProviderError::new(state.upload_failure.take().unwrap().1));
+                }
+            }
             if intent.role == ObjectRole::InventoryPage {
                 if let Some(kind) = self.state.lock().unwrap().inventory_upload_failure.take() {
                     return Err(ProviderError::new(kind));

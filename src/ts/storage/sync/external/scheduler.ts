@@ -1,3 +1,4 @@
+import type { MobileBackgroundTask } from '../../../mobileBackgroundTask'
 import type { DecimalString } from './types'
 import type {
     ExternalControllerRequest,
@@ -191,6 +192,7 @@ export function createExternalStorageScheduler(
             connectionId: string,
             kind: 'sync' | 'backup' | 'cleanup',
             value: DecimalString,
+            backgroundTask?: MobileBackgroundTask,
         ) {
             const target = parseRevision(value)
             const key = `${kind}:${connectionId}`
@@ -205,6 +207,7 @@ export function createExternalStorageScheduler(
                 targetRevision: target.toString() as DecimalString,
                 reason: 'manual',
                 session: dependencies.session(),
+                ...(backgroundTask ? { backgroundTask } : {}),
             }).finally(() => finished(connectionId))
         },
         resume(): void {

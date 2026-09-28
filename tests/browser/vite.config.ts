@@ -11,6 +11,14 @@ export default defineConfig(({ mode }) => {
             name: 'fixture-host-boundaries', enforce: 'pre',
             async resolveId(source, importer, options) {
                 source = source.replaceAll('\\', '/').replace(resolve(import.meta.dirname, '../../src').replaceAll('\\', '/') + '/', 'src/')
+                if (/\/src\/lib\/(SideBars\/(LoreBook\/|Scripts\/(Regex|TriggerV1))|Setting\/Pages\/PromptSettings|UI\/(PromptDataItem|GUI\/ListPager|Accordion))/.test(importer?.replaceAll('\\', '/') ?? '')) {
+                    if (/(^|\/)(stores\.svelte|util|alert|lang|database\.svelte|tokenizer|scripts|prompt|templateCheck)$/.test(source)) {
+                        return resolve(import.meta.dirname, 'dragDropAdapters.svelte.ts').replaceAll('\\', '/')
+                    }
+                    if (/(Help|TextAreaInput|ModelList|AuxModelSelectors)\.svelte$/.test(source)) {
+                        return resolve(import.meta.dirname, 'Empty.svelte').replaceAll('\\', '/')
+                    }
+                }
                 if (importer?.replaceAll('\\', '/').endsWith('/src/ts/plugins/apiV3/v3.svelte.ts') && adapters.has(source)) {
                     return resolve(import.meta.dirname, 'hostAdapters.ts').replaceAll('\\', '/')
                 }
@@ -22,6 +30,9 @@ export default defineConfig(({ mode }) => {
         }, svelte()],
         resolve: { alias: { src: resolve(import.meta.dirname, '../../src') } },
         server: { hmr: false, host: '127.0.0.1', port: 4187, strictPort: true, fs: { allow: [resolve(import.meta.dirname, '../..')] } },
-        build: { outDir: resolve(import.meta.dirname, '../../.tmp/test-results/browser/dist'), emptyOutDir: true },
+        build: {
+            outDir: resolve(import.meta.dirname, '../../.tmp/test-results/browser/dist'), emptyOutDir: true,
+            rollupOptions: { input: [resolve(import.meta.dirname, 'index.html'), resolve(import.meta.dirname, 'dragDrop.html')] },
+        },
     }
 })

@@ -6,6 +6,8 @@ use super::{
 use risunest_sync_server::{http, store::Store};
 use std::sync::Arc;
 mod network;
+mod observed;
+mod throughput;
 
 #[test]
 fn sparse_missing_targets_share_one_request_across_cached_inventory_pages() {

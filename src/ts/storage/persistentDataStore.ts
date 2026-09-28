@@ -434,6 +434,12 @@ export type ConversationMutation =
           characterId: string
           conversationId: string
       }
+    | {
+          /** Lists every conversation of the character in its new order. */
+          type: 'reorder'
+          characterId: string
+          conversationIds: string[]
+      }
 
 export type RootMutation =
     { type: 'set'; key: string; value: unknown } | { type: 'delete'; key: string }

@@ -127,8 +127,10 @@ fn corrupt_or_unregistered_object_is_never_served() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::init(dir.path()).unwrap();
     let a = device(&store);
-    let digest = hash(b"object");
-    store.put_object(&a, &digest, b"object").unwrap();
+    // Above the inline threshold, so this one is served from a file.
+    let body = vec![b'o'; 128 * 1024];
+    let digest = hash(&body);
+    store.put_object(&a, &digest, &body).unwrap();
     std::fs::write(
         dir.path().join("objects").join(&digest[..2]).join(&digest),
         b"broken",
@@ -136,6 +138,19 @@ fn corrupt_or_unregistered_object_is_never_served() {
     .unwrap();
     assert_eq!(
         store.get_object(&digest).unwrap_err().code,
+        "corrupt-object"
+    );
+    let inline = hash(b"object");
+    store.put_object(&a, &inline, b"object").unwrap();
+    rusqlite::Connection::open(dir.path().join("metadata.sqlite"))
+        .unwrap()
+        .execute(
+            "UPDATE small_objects SET body=?1 WHERE hash=?2",
+            (b"broken".as_slice(), &inline),
+        )
+        .unwrap();
+    assert_eq!(
+        store.get_object(&inline).unwrap_err().code,
         "corrupt-object"
     );
     let unregistered = hash(b"orphan");
@@ -157,7 +172,9 @@ fn failed_staging_write_never_registers_an_object_or_changes_the_head() {
     let staging = dir.path().join("staging");
     std::fs::remove_dir(&staging).unwrap();
     std::fs::write(&staging, b"synthetic unavailable storage").unwrap();
-    assert!(store.put_object(&a, &hash(b"x"), b"x").is_err());
-    assert!(store.object_size(&hash(b"x")).unwrap().is_none());
+    // The staging directory only carries bodies that become files.
+    let body = vec![b'x'; 128 * 1024];
+    assert!(store.put_object(&a, &hash(&body), &body).is_err());
+    assert!(store.object_size(&hash(&body)).unwrap().is_none());
     assert_eq!(store.head().unwrap(), head);
 }

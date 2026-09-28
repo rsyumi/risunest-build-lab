@@ -12,6 +12,7 @@ import {
     isCatalogPresetWorkingSet,
     isWorkingSetCharacterStub,
     patchWorkingSetCharacterDetail,
+    patchWorkingSetRoot,
     projectCatalogWorkingSet,
     projectCompleteScalableWorkingSet,
 } from './workingSetCatalog'
@@ -31,6 +32,25 @@ const summary: CharacterSummary = {
 }
 
 describe('working-set catalog', () => {
+    it('publishes changed and removed root fields without disturbing separately owned data', () => {
+        const database = {
+            username: 'Before', userNote: 'Removed',
+            promptTemplate: [{ type: 'plain', text: 'Before' }],
+            characters: [], botPresets: [], pluginCustomStorage: { synthetic: true }, pluginStorageMeta: {},
+        } as unknown as Database
+        const { characters, botPresets, pluginCustomStorage, pluginStorageMeta } = database
+        patchWorkingSetRoot(database, {
+            username: 'After', promptTemplate: [{ type: 'plain', text: 'After' }],
+        } as any)
+        expect(database.username).toBe('After')
+        expect(database.promptTemplate[0]).toMatchObject({ text: 'After' })
+        expect(Object.hasOwn(database, 'userNote')).toBe(false)
+        expect(database.characters).toBe(characters)
+        expect(database.botPresets).toBe(botPresets)
+        expect(database.pluginCustomStorage).toBe(pluginCustomStorage)
+        expect(database.pluginStorageMeta).toBe(pluginStorageMeta)
+    })
+
     it('marks an archived summary as archived residency and never as a catalog stub', () => {
         const stub = createCatalogCharacterStub({
             ...summary,
@@ -142,6 +162,34 @@ describe('working-set catalog', () => {
             creatorNotes: 'Updated note',
         })
         expect(getCatalogConversationCount(stub)).toBe(37)
+    })
+
+    it('keeps unchanged detail values when patching a resident character', () => {
+        const customscript = [{ comment: 'rule', in: 'a', out: 'b', type: 'editdisplay' }]
+        const emotionImages = [['happy', 'assets/happy.png']]
+        const resident = {
+            type: 'character',
+            chaId: 'char-a',
+            name: 'Alpha',
+            removedQuotes: false,
+            customscript,
+            emotionImages,
+            chats: [],
+        } as any
+
+        patchWorkingSetCharacterDetail(resident, {
+            type: 'character',
+            chaId: 'char-a',
+            name: 'Alpha',
+            removedQuotes: true,
+            customscript: structuredClone(customscript),
+            emotionImages: [['sad', 'assets/sad.png']],
+        } as any)
+
+        expect(resident.removedQuotes).toBe(true)
+        expect(resident.customscript).toBe(customscript)
+        expect(resident.emotionImages).not.toBe(emotionImages)
+        expect(resident.emotionImages).toEqual([['sad', 'assets/sad.png']])
     })
 
     it('creates unmarked group-generation detail while preserving catalog origin metadata', () => {

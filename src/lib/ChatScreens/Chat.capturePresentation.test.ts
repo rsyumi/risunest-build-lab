@@ -924,6 +924,83 @@ describe('Chat frozen capture presentation', () => {
         expect((mounted as { hasActiveEditor(): boolean }).hasActiveEditor()).toBe(false)
     })
 
+    test.each(['saved', 'refused'] as const)(
+        'keeps the draft when a long press closes the original editor and the save is %s',
+        async (outcome) => {
+            const harness = makeWindowedEditHarness()
+            if (outcome === 'refused') {
+                harness.acquireCompleteMessageTargetForIntent.mockResolvedValueOnce(null as never)
+            }
+            live.db = {
+                ...live.db,
+                theme: '',
+                characters: [harness.metadataCharacter],
+                translator: '',
+                useChatCopy: false,
+                enableBookmark: false,
+                clickToEdit: false,
+            }
+            mounted = mount(Chat, {
+                target,
+                props: {
+                    message: harness.message.data,
+                    name: 'Live Character',
+                    role: 'char',
+                    idx: 1,
+                    totalLength: 2,
+                    isLastMemory: false,
+                    viewportRow: {
+                        key: 'row-1' as ConversationViewportKey,
+                        absoluteIndex: 1,
+                        message: harness.message,
+                        sourceVersion: 3,
+                    },
+                    viewportSourceToken: 'source-a',
+                    selectedConversationOperations: harness.operations,
+                    captureViewportTarget: () => null,
+                },
+            })
+
+            const editButton = await vi.waitFor(() => {
+                const button = target.querySelector<HTMLButtonElement>('.button-icon-edit')
+                expect(button).not.toBeNull()
+                return button!
+            })
+            editButton.click()
+            const editor = await vi.waitFor(() => {
+                const textarea = target.querySelector<HTMLTextAreaElement>('.message-edit-area')
+                expect(textarea).not.toBeNull()
+                return textarea!
+            })
+            editor.value = 'Kept after long press'
+            editor.dispatchEvent(new Event('input', { bubbles: true }))
+
+            vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+            editor.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }))
+            await vi.advanceTimersByTimeAsync(500)
+            vi.useRealTimers()
+
+            await vi.waitFor(() => expect(
+                harness.acquireCompleteMessageTargetForIntent,
+            ).toHaveBeenCalledWith(expect.objectContaining({ rowKey: 'row-1' }), 'edit-message'))
+            const hasActiveEditor = () =>
+                (mounted as { hasActiveEditor(): boolean }).hasActiveEditor()
+            if (outcome === 'saved') {
+                await vi.waitFor(() => {
+                    expect(harness.completeConversation.message[1].data).toBe('Kept after long press')
+                    expect(hasActiveEditor()).toBe(false)
+                })
+                expect(target.querySelector('.message-edit-area')).toBeNull()
+            } else {
+                await tick()
+                expect(harness.completeConversation.message[1].data).toBe('Original viewport message')
+                expect(hasActiveEditor()).toBe(true)
+                expect(target.querySelector<HTMLTextAreaElement>('.message-edit-area')?.value)
+                    .toBe('Kept after long press')
+            }
+        },
+    )
+
     test.each(['cancel', 'unmount'] as const)('cleans up a pending partial edit scroll on %s', async (action) => {
         const harness = makeWindowedEditHarness()
         live.db = {

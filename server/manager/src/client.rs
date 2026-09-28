@@ -242,13 +242,48 @@ impl Client {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use serde_json::json;
     use std::{
         io::{Read, Write},
-        net::TcpListener,
+        net::{TcpListener, TcpStream},
     };
+
+    /// Reads one request through its declared body. Closing a socket that still
+    /// holds unread request bytes resets the connection, and the client can then
+    /// lose the response that was already written.
+    pub(crate) fn read_request(stream: &mut TcpStream) -> String {
+        stream
+            .set_read_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut read = |request: &mut Vec<u8>| {
+            let mut chunk = [0u8; 8192];
+            let count = stream.read(&mut chunk).unwrap();
+            assert!(count > 0 && request.len() + count <= 16384);
+            request.extend_from_slice(&chunk[..count]);
+        };
+        let header_end = loop {
+            if let Some(index) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                break index + 4;
+            }
+            read(&mut request);
+        };
+        let length = String::from_utf8_lossy(&request[..header_end])
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().unwrap())
+            })
+            .unwrap_or(0);
+        while request.len() < header_end + length {
+            read(&mut request);
+        }
+        assert_eq!(request.len(), header_end + length);
+        String::from_utf8(request).unwrap()
+    }
 
     #[tokio::test]
     async fn captured_locator_is_used_after_the_discovery_file_changes() {
@@ -264,17 +299,7 @@ mod tests {
                 ("POST /shutdown ", r#"{"stopping":true}"#),
             ] {
                 let (mut stream, _) = listener.accept().unwrap();
-                stream
-                    .set_read_timeout(Some(Duration::from_secs(5)))
-                    .unwrap();
-                let mut request = Vec::new();
-                while !request.windows(4).any(|part| part == b"\r\n\r\n") {
-                    let mut chunk = [0; 4096];
-                    let count = stream.read(&mut chunk).unwrap();
-                    assert!(count > 0 && request.len() + count <= 8192);
-                    request.extend_from_slice(&chunk[..count]);
-                }
-                let request = String::from_utf8_lossy(&request);
+                let request = read_request(&mut stream);
                 assert!(request.starts_with(method));
                 assert!(request
                     .to_ascii_lowercase()

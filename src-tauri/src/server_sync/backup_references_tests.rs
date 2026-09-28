@@ -296,6 +296,80 @@ fn resumption_requires_exact_revision_generation_and_remote_head() {
 }
 
 #[test]
+fn failed_capture_page_rolls_back_index_writes_but_keeps_pins_and_can_resume() {
+    let (root, _store, mut capture) = fixture();
+    let body = b"page metadata";
+    let body_hash = hash(body);
+    let id = capture.id.clone();
+    capture.write_page(|capture| {
+        capture.record(Side::Local, &root_key(), &RecordVersion::Absent, None)
+    }).unwrap();
+    assert_eq!(capture.write_page(|capture| {
+        let body_hash = capture.metadata(Side::Remote, body)?;
+        capture.record(Side::Remote, &root_key(), &live(), Some((&body_hash, body.len() as u64)))?;
+        Err(SyncError::new("cancelled", 409))
+    }).unwrap_err().code, "cancelled");
+    assert!(capture.db.is_autocommit());
+    assert!(capture.has_record(Side::Local, &root_key()).unwrap());
+    assert!(!capture.has_record(Side::Remote, &root_key()).unwrap());
+    let objects: i64 = capture.db.query_row("SELECT count(*) FROM objects", [], |r| r.get(0)).unwrap();
+    assert_eq!(objects, 0);
+    assert!(!capture.side_complete(Side::Remote).unwrap());
+    drop(capture);
+    assert!(!root.path().join("server-sync/backups").join(&id).join("complete.json").exists());
+    let pins = DurableCasJob::open(root.path(), &id).unwrap();
+    assert!(!pins.is_released());
+    assert!(pins.has_exact_pins(&[(body_hash, body.len() as u64, CasObjectRole::DirectObject)]));
+    drop(pins);
+    let mut resumed = Capture::resume(root.path(), &id, 0, "generation", &head()).unwrap();
+    resumed.write_page(|capture| {
+        let body_hash = capture.metadata(Side::Remote, body)?;
+        capture.record(Side::Remote, &root_key(), &live(), Some((&body_hash, body.len() as u64)))
+    }).unwrap();
+    drop(resumed);
+    let reopened = Capture::resume(root.path(), &id, 0, "generation", &head()).unwrap();
+    assert!(reopened.has_record(Side::Local, &root_key()).unwrap());
+    assert!(reopened.has_record(Side::Remote, &root_key()).unwrap());
+}
+
+#[test]
+fn interrupted_capture_page_recovers_its_journal_before_resuming() {
+    const CHILD_ROOT: &str = "RISUNEST_TEST_INTERRUPTED_CAPTURE_ROOT";
+    const CHILD_ID: &str = "RISUNEST_TEST_INTERRUPTED_CAPTURE_ID";
+    if let Some(root) = std::env::var_os(CHILD_ROOT) {
+        let root = PathBuf::from(root);
+        let id = std::env::var(CHILD_ID).unwrap();
+        let mut capture = Capture::resume(&root, &id, 0, "generation", &head()).unwrap();
+        capture.db.execute_batch("PRAGMA cache_size=1").unwrap();
+        capture.write_page(|capture| {
+            capture.metadata(Side::Remote, b"interrupted page")?;
+            capture.db.execute("UPDATE records SET version_json=?1", ["x".repeat(65536)])?;
+            std::process::exit(23);
+        }).unwrap();
+        unreachable!();
+    }
+    let (root, _store, mut capture) = fixture();
+    let id = capture.id.clone();
+    capture.write_page(|capture| capture.record(Side::Local, &root_key(), &RecordVersion::Absent, None)).unwrap();
+    drop(capture);
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .arg("--exact").arg(std::thread::current().name().unwrap())
+        .env(CHILD_ROOT, root.path()).env(CHILD_ID, &id).output().unwrap();
+    assert_eq!(child.status.code(), Some(23), "{}", String::from_utf8_lossy(&child.stderr));
+    let journal = root.path().join("server-sync/backups").join(&id).join("index.sqlite-journal");
+    assert!(std::fs::metadata(journal).unwrap().len() > 512);
+    let resumed = Capture::resume(root.path(), &id, 0, "generation", &head()).unwrap();
+    let mut records = Vec::new();
+    resumed.visit_records(|record| { records.push(record); Ok(()) }).unwrap();
+    assert_eq!(records.len(), 1);
+    assert_eq!(records[0].version, RecordVersion::Absent);
+    let objects: i64 = resumed.db.query_row("SELECT count(*) FROM objects", [], |r| r.get(0)).unwrap();
+    assert_eq!(objects, 0);
+    assert!(!resumed.side_complete(Side::Remote).unwrap());
+    assert!(!resumed.path.join("complete.json").exists());
+}
+
+#[test]
 fn resumed_rows_must_match_the_original_record_exactly() {
     let (root, _store, mut capture) = fixture();
     let body = capture.metadata(Side::Local, b"original").unwrap();

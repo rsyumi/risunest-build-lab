@@ -40,7 +40,8 @@ internal fun androidControlArgumentCount(method: String): Int? = when (method) {
   "saf.pickBackupSource", "saf.pickLegacyBackupSource", "saf.cancelExport",
   "saf.cancelSource", "saf.discardSource", "saf.markExportPublicationReady",
   "saf.acknowledgeExport" -> 1
-  "saf.pickContentSource" -> 2
+  "background.begin", "background.end" -> 1
+  "background.progress", "saf.pickContentSource" -> 2
   "saf.copyExport" -> 3
   "lifecycle.requestExit", "lifecycle.requestRestart", "lifecycle.onFrontendReady",
   "generation.begin", "generation.end", "generation.notificationsEnabled", "generation.requestNotifications",

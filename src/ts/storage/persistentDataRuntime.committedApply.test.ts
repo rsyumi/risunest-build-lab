@@ -337,6 +337,27 @@ describe('committed apply outcomes', () => {
         expect(store.replaceFromDatabase).not.toHaveBeenCalled()
     })
 
+    it('refreshes two committed revisions under one held fence', async () => {
+        const harness = await createHarness()
+        const { runtime } = harness
+        const token = await runtime.capturePersistentMutationToken('exit-fence', { publishOfficial: false })
+        const fence = await runtime.acquireDestructiveReplacementFence(token)
+
+        const first = harness.nativeCommit(replacement('First remote commit'))
+        await expect(fence.refreshCommittedWorkingSet(first)).resolves.toEqual({
+            kind: 'committed', revision: first, projection: 'applied',
+        })
+        const second = harness.nativeCommit(replacement('Second remote commit'))
+        await expect(fence.refreshCommittedWorkingSet(second)).resolves.toEqual({
+            kind: 'committed', revision: second, projection: 'applied',
+        })
+        expect(harness.database.username).toBe('Second remote commit')
+        expect(() => runtime.assertPersistentMutationAllowed()).toThrow(PersistentMutationFencedError)
+        fence.release()
+        expect(() => runtime.assertPersistentMutationAllowed()).not.toThrow()
+        expect(runtime.revision).toBe(second)
+    })
+
     it('keeps publication failure separate from the completed local replacement', async () => {
         const failure = new Error('official service unavailable')
         const publication = { publish: vi.fn(async () => { throw failure }), dispose: vi.fn() }

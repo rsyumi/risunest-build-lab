@@ -2,6 +2,7 @@
 //! mutations and recheck pending work and source leases immediately before use.
 use super::{backups, Result, SyncError};
 use crate::trust_boundary::{is_link_like, is_lower_hex_256, sync_directory};
+use risunest_small_object_store as small_object_store;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -40,9 +41,19 @@ pub(crate) struct BackupInventory {
 #[derive(Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CacheUsage {
+    /// `cache_bytes` plus `ledger_bytes`.
     pub total_bytes: u64,
+    /// What the per-connection caches occupy: body files and object databases.
+    pub cache_bytes: u64,
+    /// The part of `cache_bytes` a cleanup keeps.
     pub protected_bytes: u64,
+    /// The part of `cache_bytes` a cleanup removes, counted as body bytes.
     pub reclaimable_bytes: u64,
+    /// Files kept beside the caches, such as the asset residency ledger.
+    pub ledger_bytes: u64,
+    /// What the object databases and their write-ahead logs allocate on disk,
+    /// as part of `cache_bytes`.
+    pub database_bytes: u64,
     pub blocked_reason: Option<String>,
 }
 
@@ -294,7 +305,19 @@ pub(crate) fn cache_usage(
             continue;
         }
         let cache = entry.path();
+        let metadata = checked_metadata(&cache)?;
+        if metadata.is_file() {
+            // A file beside the per-connection caches, such as the asset
+            // residency ledger, is kept and has no object database.
+            usage.ledger_bytes += metadata.len();
+            continue;
+        }
         visit_files(&cache, &mut |file, bytes| {
+            if is_object_database(&cache, file) {
+                // An allocation, counted once below. The bodies a cleanup
+                // would delete from it are counted row by row.
+                return Ok(());
+            }
             let reclaimable = blocked.is_none()
                 && is_lower_hex_256(&name)
                 && cache_object_hash(&cache, file).is_some_and(|hash| {
@@ -304,16 +327,106 @@ pub(crate) fn cache_usage(
                 fs::remove_file(file)?;
                 return Ok(());
             }
-            usage.total_bytes += bytes;
+            usage.cache_bytes += bytes;
             if reclaimable {
                 usage.reclaimable_bytes += bytes;
-            } else {
-                usage.protected_bytes += bytes;
             }
             Ok(())
         })?;
+        sweep_object_database(
+            &cache.join(OBJECT_DATABASE),
+            blocked.is_none() && is_lower_hex_256(&name),
+            &mut |hash| active_cache != Some(name.as_str()) || !references.contains(hash),
+            clean,
+            &mut usage,
+        )?;
+        // Measured after the sweep, so a cleanup reports what it left behind.
+        let allocated = database_bytes(&cache)?;
+        usage.cache_bytes += allocated;
+        usage.database_bytes += allocated;
     }
+    usage.protected_bytes = usage.cache_bytes.saturating_sub(usage.reclaimable_bytes);
+    usage.total_bytes = usage.cache_bytes + usage.ledger_bytes;
     Ok(usage)
+}
+
+const OBJECT_DATABASE: &str = "objects.sqlite";
+const OBJECT_DATABASE_FILES: [&str; 3] =
+    ["objects.sqlite", "objects.sqlite-wal", "objects.sqlite-shm"];
+
+/// The derived cache's small-object database and the files SQLite keeps beside
+/// it. Their bytes are an allocation, never a reclaimable cached object.
+fn is_object_database(root: &Path, file: &Path) -> bool {
+    file.parent() == Some(root)
+        && file
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| OBJECT_DATABASE_FILES.contains(&name))
+}
+
+fn database_bytes(root: &Path) -> Result<u64> {
+    let mut total = 0u64;
+    for name in OBJECT_DATABASE_FILES {
+        match fs::symlink_metadata(root.join(name)) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e.into()),
+            Ok(metadata) if is_link_like(&metadata) || !metadata.is_file() => {
+                return Err(SyncError::new("invalid-management-path", 409))
+            }
+            Ok(metadata) => total += metadata.len(),
+        }
+    }
+    Ok(total)
+}
+
+/// Account for, and when cleaning remove, the small bodies this cache holds in
+/// its object database. Returns whether anything was removed.
+fn sweep_object_database(
+    path: &Path,
+    collectable: bool,
+    reclaimable: &mut impl FnMut(&str) -> bool,
+    clean: bool,
+    usage: &mut CacheUsage,
+) -> Result<bool> {
+    if !path.is_file() {
+        return Ok(false);
+    }
+    let mut db = rusqlite::Connection::open(path)?;
+    db.execute_batch("PRAGMA busy_timeout=5000;")?;
+    let mut after = String::new();
+    let mut removed = false;
+    loop {
+        let page = small_object_store::page(&db, &after, 1024)
+            .map_err(|_| SyncError::new("cache-store-unavailable", 503))?;
+        if page.is_empty() {
+            break;
+        }
+        after = page[page.len() - 1].0.clone();
+        let mut group = Vec::new();
+        for (hash, bytes) in &page {
+            if !collectable || !reclaimable(hash) {
+                continue;
+            }
+            if clean {
+                group.push(hash.as_str());
+            } else {
+                usage.reclaimable_bytes += bytes;
+            }
+        }
+        if !group.is_empty() {
+            let tx = db.transaction()?;
+            small_object_store::delete_batch(&tx, &group)
+                .map_err(|_| SyncError::new("cache-store-unavailable", 503))?;
+            tx.commit()?;
+            removed = true;
+        }
+    }
+    if removed {
+        // Return the freed pages to the filesystem without rewriting the whole
+        // database, then move the write-ahead log's copy of them out too.
+        db.execute_batch("PRAGMA incremental_vacuum; PRAGMA wal_checkpoint(TRUNCATE);")?;
+    }
+    Ok(removed)
 }
 
 #[cfg(test)]

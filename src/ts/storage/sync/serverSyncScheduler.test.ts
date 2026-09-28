@@ -295,3 +295,23 @@ describe("server sync scheduler", () => {
     f.scheduler.stop();
   });
 });
+
+it("stops scheduling on Home while preserving a protected in-flight cycle", async () => {
+  const f = fixture();
+  let finish!: () => void;
+  f.cycle.mockImplementationOnce(() => new Promise(resolve => { finish = () => resolve(f.result); }));
+  const suspend = vi.spyOn(f.controller, "suspend");
+  const running = f.controller.synchronize();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(f.cycle).toHaveBeenCalledOnce();
+  f.setAvailable(false);
+  f.scheduler.suspend(true);
+  expect(suspend).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(f.cycle).toHaveBeenCalledOnce();
+  finish();
+  await running;
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(f.cycle).toHaveBeenCalledOnce();
+  f.scheduler.stop();
+});

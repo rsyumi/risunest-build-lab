@@ -2017,6 +2017,10 @@ pub(crate) async fn external_storage_remove_connection(
         .remove(&SecretRef(stored.recovery_key_ref.clone()))
         .await?;
     store.remove(&connection_id)?;
+    // A directory that stays behind is removed at the next startup.
+    if let Err(error) = super::leftovers::remove_connection_directory(&root, &connection_id) {
+        crate::nlog!("warn", "Removed external connection files were kept: {error}");
+    }
     Ok(())
 }
 

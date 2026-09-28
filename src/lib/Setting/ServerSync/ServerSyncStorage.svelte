@@ -17,8 +17,8 @@
     type ServerSyncBackupSide,
     type ServerSyncCacheUsage,
   } from "src/ts/storage/sync/serverSyncProduction";
-  /** `backups` lists the conflict backups, `cache` the space they and the
-   * temporary files take. */
+  /** `backups` lists the conflict backups, `cache` the space they, the
+   * temporary files and the asset residency ledger take. */
   let {
     onChange,
     section,
@@ -181,7 +181,7 @@
   {/if}
   {#if cache && section === "cache"}
     <div class="grid gap-2 text-sm">
-      <p>{labels.cache}: {bytes(cache.totalBytes)}</p>
+      <p>{labels.cache}: {bytes(cache.cacheBytes)}</p>
       <p>
         {labels.protected}: {bytes(cache.protectedBytes)} · {labels.reclaimable}:
         {bytes(cache.reclaimableBytes)}
@@ -197,6 +197,8 @@
       {#if cache.blockedReason}<p class="text-[13px] text-textcolor2">
           {describeBlockedReason(cache.blockedReason)}
         </p>{/if}
+      <p>{labels.ledger}: {bytes(cache.ledgerBytes)}</p>
+      <p class="text-[13px] text-textcolor2">{labels.ledgerHelp}</p>
     </div>
   {/if}
 </section>

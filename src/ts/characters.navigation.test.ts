@@ -26,20 +26,30 @@ const mocks = vi.hoisted(() => ({
     readPersistentConversation: vi.fn(),
     replacePersistentCompleteCharacter: vi.fn(),
     reconcilePersistentActiveCharacterIds: vi.fn(),
+    captureSelectedConversationTarget: vi.fn((): any => null),
+    acquireCompleteConversation: vi.fn(),
+    flushPendingData: vi.fn(async (_reason: string) => {}),
+    getSelectedConversationMode: vi.fn((): 'complete' | 'windowed' | null => null),
+    editWindowedChatList: vi.fn(),
     alertConfirm: vi.fn(async () => true),
     alertSelect: vi.fn(async () => '0'),
     alertAddCharacter: vi.fn(async () => 'createfromScratch'),
     alertError: vi.fn(),
+    alertToast: vi.fn(),
     changeChatTo: vi.fn(async (_idOrIndex?: string | number) => true),
     downloadFile: vi.fn(),
     findCharacterbyId: vi.fn(),
     yieldToUi: vi.fn(async () => {}),
+    saveImage: vi.fn(async () => 'assets/synthetic.png'),
+    selectSingleFile: vi.fn(),
+    selectMultipleFile: vi.fn(),
 }))
 
 vi.mock('uuid', () => ({
     v4: () => `generated-${++mocks.nextId}`,
 }))
 vi.mock('./storage/database.svelte', () => ({
+    saveImage: mocks.saveImage,
     defaultSdDataFunc: () => ({}),
     getDatabase: (options?: { snapshot?: boolean }) => options?.snapshot
         ? structuredClone(mocks.database)
@@ -55,6 +65,7 @@ vi.mock('./alert', async () => {
         alertAddCharacter: mocks.alertAddCharacter,
         alertConfirm: mocks.alertConfirm,
         alertError: mocks.alertError,
+        alertToast: mocks.alertToast,
         alertNormal: vi.fn(),
         alertSelect: mocks.alertSelect,
         alertStore: writable({ type: 'none', msg: '' }),
@@ -67,8 +78,8 @@ vi.mock('./util', () => ({
     findCharacterbyId: mocks.findCharacterbyId,
     findCharacterIndexbyId: vi.fn(),
     getUserName: vi.fn(),
-    selectMultipleFile: vi.fn(),
-    selectSingleFile: vi.fn(),
+    selectMultipleFile: mocks.selectMultipleFile,
+    selectSingleFile: mocks.selectSingleFile,
 }))
 vi.mock('./media', () => ({ getImageType: vi.fn() }))
 vi.mock('./stores.svelte', async () => {
@@ -119,6 +130,11 @@ vi.mock('./storage/persistentDataRuntime.svelte', () => ({
     readPersistentConversation: mocks.readPersistentConversation,
     replacePersistentCompleteCharacter: mocks.replacePersistentCompleteCharacter,
     reconcilePersistentActiveCharacterIds: mocks.reconcilePersistentActiveCharacterIds,
+    captureSelectedConversationTarget: mocks.captureSelectedConversationTarget,
+    acquireCompleteConversation: mocks.acquireCompleteConversation,
+    flushPendingData: mocks.flushPendingData,
+    getSelectedConversationMode: mocks.getSelectedConversationMode,
+    editWindowedChatList: mocks.editWindowedChatList,
 }))
 
 import {
@@ -130,12 +146,17 @@ import {
     createNewCharacter,
     createNewGroup,
     duplicateChat,
+    editSelectedChatList,
     exportAllChats,
     exportChat,
     removeChar,
     removeChat,
+    selectCharImg,
+    addCharEmotion,
+    addingEmotion,
 } from './characters'
 import { createMetadataOnlySelectedConversation } from './storage/selectedConversationLifecycle'
+import { SelectedConversationPromotionStaleError } from './storage/activeWorkingSet.svelte'
 import { MobileGUIStack, OpenRealmStore, selectedCharID } from './stores.svelte'
 import { doingChat } from './process/index.svelte'
 import { createConversationSummaryStub } from './storage/conversationResidency'
@@ -153,6 +174,33 @@ function deferred<T>() {
 }
 
 describe('runtime chat identity', () => {
+    it.each(['portrait', 'emotion'] as const)('applies a pending %s import to its original character after reordering', async (kind) => {
+        const first = { type: 'character', chaId: 'first', image: 'assets/old.png', emotionImages: [], chats: [] }
+        const second = { type: 'character', chaId: 'second', image: '', emotionImages: [], chats: [] }
+        mocks.database.characters = [first, second]
+        const chosen = deferred<any>()
+        if (kind === 'portrait') mocks.selectSingleFile.mockReturnValueOnce(chosen.promise)
+        else mocks.selectMultipleFile.mockReturnValueOnce(chosen.promise)
+        const pending = kind === 'portrait' ? selectCharImg(0) : addCharEmotion(0)
+        mocks.database.characters.reverse()
+        const file = { name: 'synthetic.png', data: new Uint8Array([1]) }
+        chosen.resolve(kind === 'portrait' ? file : [file])
+        await pending
+        expect(second).toMatchObject({ image: '', emotionImages: [] })
+        if (kind === 'portrait') {
+            expect(first.image).toBe('assets/synthetic.png')
+            expect((first as any).ccAssets[0].uri).toBe('assets/old.png')
+        } else expect(first.emotionImages).toEqual([['synthetic', 'assets/synthetic.png']])
+    })
+
+    it('releases emotion import state after a failed asset save', async () => {
+        mocks.database.characters = [{ type: 'character', chaId: 'first', emotionImages: [], chats: [] }]
+        mocks.selectMultipleFile.mockResolvedValueOnce([{ name: 'synthetic.png', data: new Uint8Array([1]) }])
+        mocks.saveImage.mockRejectedValueOnce(new Error('Synthetic save failure'))
+        await expect(addCharEmotion(0)).rejects.toThrow('Synthetic save failure')
+        expect(get(addingEmotion)).toBe(false)
+    })
+
     beforeEach(() => {
         mocks.database.characters = []
         mocks.nextId = 0
@@ -253,6 +301,45 @@ describe('runtime chat identity', () => {
         paint.resolve()
         await expect(pending).resolves.toBe(true)
         expect(get(navigationActivity)).toBeNull()
+    })
+
+    it('keeps the open character without reloading it', async () => {
+        const character = createBlankChar()
+        mocks.database.characters.push(character)
+        selectedCharID.set(0)
+        mocks.captureSelectedConversationTarget.mockReturnValueOnce({
+            characterId: character.chaId,
+        })
+        const reseter = vi.fn()
+        doingChat.set(true)
+        try {
+            await expect(changeChar(0, { reseter })).resolves.toBe(true)
+        } finally {
+            doingChat.set(false)
+            selectedCharID.set(-1)
+        }
+
+        expect(reseter).toHaveBeenCalledOnce()
+        expect(mocks.fencePersistentNavigation).not.toHaveBeenCalled()
+        expect(mocks.activateCharacter).not.toHaveBeenCalled()
+        expect(get(navigationActivity)).toBeNull()
+    })
+
+    it('activates the selected index when another character is open', async () => {
+        const character = createBlankChar()
+        mocks.database.characters.push(character)
+        selectedCharID.set(0)
+        mocks.captureSelectedConversationTarget.mockReturnValueOnce({
+            characterId: 'another-character',
+        })
+        try {
+            await expect(changeChar(0)).resolves.toBe(true)
+        } finally {
+            selectedCharID.set(-1)
+        }
+
+        expect(mocks.fencePersistentNavigation).toHaveBeenCalledOnce()
+        expect(mocks.activateCharacter).toHaveBeenCalledOnce()
     })
 
     it('clears character navigation when the screen reset fails', async () => {
@@ -788,59 +875,246 @@ describe('chat list operations', () => {
         character.chatPage = 1
         return character
     }
+    const buildSelectedCharacter = () => {
+        const character = buildCharacter()
+        mocks.database.characters.push(character)
+        selectedCharID.set(mocks.database.characters.length - 1)
+        return character
+    }
+    // Mirrors activation moving the selected page to the requested chat.
+    const selectChat = async (id?: string | number) => {
+        const character = mocks.database.characters[get(selectedCharID)]
+        const index = character?.chats.findIndex((chat: any) => chat.id === id) ?? -1
+        if (index === -1) return false
+        character.chatPage = index
+        return true
+    }
 
     beforeEach(() => {
+        doingChat.set(false)
         mocks.database.characters = []
         mocks.nextId = 0
         selectedCharID.set(-1)
         vi.clearAllMocks()
         mocks.readPersistentConversation.mockReset()
         mocks.changeChatTo.mockReset()
-        mocks.changeChatTo.mockResolvedValue(true)
+        mocks.changeChatTo.mockImplementation(selectChat)
+        mocks.captureSelectedConversationTarget.mockReset()
+        mocks.captureSelectedConversationTarget.mockReturnValue(null)
+        mocks.acquireCompleteConversation.mockReset()
+        mocks.flushPendingData.mockReset()
+        mocks.getSelectedConversationMode.mockReset()
+        mocks.getSelectedConversationMode.mockReturnValue(null)
+        mocks.editWindowedChatList.mockReset()
+    })
+
+    it('refuses list edits during generation before promoting or changing the selected chat', async () => {
+        const character = buildSelectedCharacter()
+        mocks.captureSelectedConversationTarget.mockReturnValue({
+            characterId: character.chaId, conversationId: 'chat-b',
+        })
+        mocks.getSelectedConversationMode.mockReturnValue('windowed')
+        const edit = vi.fn(() => null)
+        doingChat.set(true)
+        try {
+            expect(await editSelectedChatList(character.chaId, 'reorder-chats', edit)).toBe(false)
+        } finally {
+            doingChat.set(false)
+        }
+        expect(edit).not.toHaveBeenCalled()
+        expect(mocks.flushPendingData).not.toHaveBeenCalled()
+        expect(mocks.editWindowedChatList).not.toHaveBeenCalled()
+        expect(mocks.acquireCompleteConversation).not.toHaveBeenCalled()
+        expect(character.chats.map(chat => chat.id)).toEqual(['chat-a', 'chat-b', 'chat-c'])
+    })
+
+    it('refuses the complete fallback when generation starts during the windowed flush', async () => {
+        const character = buildSelectedCharacter()
+        mocks.captureSelectedConversationTarget.mockReturnValue({
+            characterId: character.chaId, conversationId: 'chat-b',
+        })
+        mocks.getSelectedConversationMode.mockReturnValue('windowed')
+        mocks.flushPendingData.mockImplementation(async () => { doingChat.set(true) })
+        mocks.editWindowedChatList.mockReturnValue({ kind: 'unsupported' })
+        const edit = vi.fn(() => null)
+        try {
+            expect(await editSelectedChatList(character.chaId, 'reorder-chats', edit)).toBe(false)
+        } finally {
+            doingChat.set(false)
+        }
+        expect(edit).not.toHaveBeenCalled()
+        expect(mocks.acquireCompleteConversation).not.toHaveBeenCalled()
     })
 
     it('keeps the selected chat when another chat is removed', async () => {
-        const character = buildCharacter()
+        const character = buildSelectedCharacter()
 
-        const removed = await removeChat(character, 'chat-c')
+        const removed = await removeChat(character, 'chat-a')
 
         expect(removed).toBe(true)
-        expect(character.chats.map((chat: any) => chat.id)).toEqual(['chat-a', 'chat-b'])
-        expect(character.chatPage).toBe(1)
-        expect(mocks.changeChatTo).toHaveBeenCalledWith('chat-b')
+        expect(character.chats.map((chat: any) => chat.id)).toEqual(['chat-b', 'chat-c'])
+        expect(character.chatPage).toBe(0)
+        expect(mocks.changeChatTo).not.toHaveBeenCalled()
     })
 
-    it('moves to a surviving chat when the selected chat is removed', async () => {
-        const character = buildCharacter()
+    it('moves to a surviving chat before removing the selected chat', async () => {
+        const character = buildSelectedCharacter()
 
         await removeChat(character, 'chat-b')
 
+        expect(mocks.changeChatTo).toHaveBeenCalledWith('chat-a')
         expect(character.chats.map((chat: any) => chat.id)).toEqual(['chat-a', 'chat-c'])
         expect(character.chatPage).toBe(0)
-        expect(mocks.changeChatTo).toHaveBeenCalledWith('chat-a')
     })
 
-    it('repairs the chat page synchronously even when activation fails twice', async () => {
-        const character = buildCharacter()
+    it('keeps the selected chat when activation of the survivor fails twice', async () => {
+        const character = buildSelectedCharacter()
         character.chatPage = 2
         mocks.changeChatTo.mockResolvedValue(false)
 
-        await removeChat(character, 'chat-c')
+        expect(await removeChat(character, 'chat-c')).toBe(false)
 
-        expect(character.chats).toHaveLength(2)
-        expect(character.chatPage).toBeLessThan(character.chats.length)
-        expect(character.chats[character.chatPage]).toBeTruthy()
+        expect(character.chats.map((chat: any) => chat.id)).toEqual(['chat-a', 'chat-b', 'chat-c'])
+        expect(character.chatPage).toBe(2)
         expect(mocks.changeChatTo).toHaveBeenCalledTimes(2)
     })
 
-    it('retries activation once before settling for the repaired page', async () => {
-        const character = buildCharacter()
-        mocks.changeChatTo.mockResolvedValueOnce(false).mockResolvedValueOnce(true)
+    it('retries activation once before removing the selected chat', async () => {
+        const character = buildSelectedCharacter()
+        mocks.changeChatTo.mockResolvedValueOnce(false).mockImplementationOnce(selectChat)
 
-        await removeChat(character, 'chat-b')
+        expect(await removeChat(character, 'chat-b')).toBe(true)
 
         expect(mocks.changeChatTo).toHaveBeenCalledTimes(2)
         expect(mocks.changeChatTo).toHaveBeenNthCalledWith(2, 'chat-a')
+        expect(character.chats.map((chat: any) => chat.id)).toEqual(['chat-a', 'chat-c'])
+    })
+
+    it('holds the selected conversation complete while the chat list changes', async () => {
+        const character = buildSelectedCharacter()
+        const target = { characterId: character.chaId, conversationId: 'chat-b' }
+        const events: string[] = []
+        const release = vi.fn(() => events.push('release'))
+        mocks.captureSelectedConversationTarget.mockReturnValue(target)
+        mocks.acquireCompleteConversation.mockImplementation(async () => {
+            events.push('acquire')
+            return { release }
+        })
+        mocks.flushPendingData.mockImplementation(async () => {
+            events.push(`flush:${character.chats[character.chatPage].id}`)
+        })
+        mocks.changeChatTo.mockImplementation(async (id?: string | number) => {
+            events.push(`navigate:${id}`)
+            return selectChat(id)
+        })
+
+        expect(await addNewChat(character)).toBe(true)
+
+        expect(mocks.acquireCompleteConversation).toHaveBeenCalledWith('add-chat', target)
+        expect(events).toEqual(['acquire', 'flush:chat-b', `navigate:${character.chats[0].id}`, 'release'])
+        expect(character.chatPage).toBe(0)
+    })
+
+    it('edits a windowed selection without holding the conversation complete', async () => {
+        const character = buildSelectedCharacter()
+        const target = { characterId: character.chaId, conversationId: 'chat-b' }
+        const events: string[] = []
+        mocks.captureSelectedConversationTarget.mockReturnValue(target)
+        mocks.getSelectedConversationMode.mockReturnValue('windowed')
+        mocks.flushPendingData.mockImplementation(async () => {
+            events.push(`flush:${character.chats.length}`)
+        })
+        mocks.editWindowedChatList.mockImplementation((captured, edit) => {
+            events.push('edit')
+            expect(captured).toBe(target)
+            const nextId = edit(character)
+            return { kind: 'applied', nextId }
+        })
+        mocks.changeChatTo.mockImplementation(async (id?: string | number) => {
+            events.push(`navigate:${id}`)
+            return selectChat(id)
+        })
+
+        expect(await addNewChat(character)).toBe(true)
+
+        expect(mocks.acquireCompleteConversation).not.toHaveBeenCalled()
+        expect(events).toEqual(['flush:3', 'edit', 'flush:4', `navigate:${character.chats[0].id}`])
+        expect(mocks.flushPendingData).toHaveBeenCalledWith('add-chat')
+    })
+
+    it('does not save or navigate when the windowed edit is refused', async () => {
+        const character = buildSelectedCharacter()
+        mocks.captureSelectedConversationTarget.mockReturnValue({
+            characterId: character.chaId,
+            conversationId: 'chat-b',
+        })
+        mocks.getSelectedConversationMode.mockReturnValue('windowed')
+        mocks.editWindowedChatList.mockReturnValue({ kind: 'refused' })
+
+        expect(await addNewChat(character)).toBe(false)
+
+        expect(mocks.flushPendingData).toHaveBeenCalledTimes(1)
+        expect(mocks.acquireCompleteConversation).not.toHaveBeenCalled()
+        expect(mocks.changeChatTo).not.toHaveBeenCalled()
+    })
+
+    it('falls back to complete ownership when the windowed edit cannot be described', async () => {
+        const character = buildSelectedCharacter()
+        const target = { characterId: character.chaId, conversationId: 'chat-b' }
+        const release = vi.fn()
+        mocks.captureSelectedConversationTarget.mockReturnValue(target)
+        mocks.getSelectedConversationMode.mockReturnValue('windowed')
+        mocks.editWindowedChatList.mockReturnValue({ kind: 'unsupported' })
+        mocks.acquireCompleteConversation.mockResolvedValue({ release })
+
+        expect(await addNewChat(character)).toBe(true)
+
+        expect(mocks.acquireCompleteConversation).toHaveBeenCalledWith('add-chat', target)
+        expect(character.chats).toHaveLength(4)
+        expect(character.chats[character.chatPage].id).toBe(character.chats[0].id)
+        expect(release).toHaveBeenCalledTimes(1)
+    })
+
+    it('does not change the chat list when complete ownership is stale', async () => {
+        const character = buildSelectedCharacter()
+        mocks.captureSelectedConversationTarget.mockReturnValue({
+            characterId: character.chaId,
+            conversationId: 'chat-b',
+        })
+        mocks.acquireCompleteConversation.mockRejectedValue(new SelectedConversationPromotionStaleError())
+
+        expect(await addNewChat(character)).toBe(false)
+
+        expect(character.chats).toHaveLength(3)
+        expect(character.chatPage).toBe(1)
+        expect(mocks.changeChatTo).not.toHaveBeenCalled()
+    })
+
+    it('does not change the chat list while another character owns the selected conversation', async () => {
+        const character = buildSelectedCharacter()
+        mocks.captureSelectedConversationTarget.mockReturnValue({
+            characterId: 'previous-character',
+            conversationId: 'previous-chat',
+        })
+
+        expect(await addNewChat(character)).toBe(false)
+
+        expect(character.chats).toHaveLength(3)
+        expect(mocks.acquireCompleteConversation).not.toHaveBeenCalled()
+        expect(mocks.changeChatTo).not.toHaveBeenCalled()
+    })
+
+    it('keeps the selected page on the same chat when chats are inserted in front', async () => {
+        const character = buildSelectedCharacter()
+
+        expect(await editSelectedChatList(character.chaId, 'import-chat', (current) => {
+            current.chats.unshift({ message: [], note: '', name: 'Imported', localLore: [], id: 'imported' })
+            return null
+        })).toBe(true)
+
+        expect(character.chatPage).toBe(2)
+        expect(character.chats[character.chatPage].id).toBe('chat-b')
+        expect(mocks.changeChatTo).not.toHaveBeenCalled()
     })
 
     it('does nothing for an unknown chat id', async () => {
@@ -855,7 +1129,7 @@ describe('chat list operations', () => {
     })
 
     it('adds a new chat in front and activates it', async () => {
-        const character = buildCharacter()
+        const character = buildSelectedCharacter()
 
         const added = await addNewChat(character)
 
@@ -1020,7 +1294,7 @@ describe('chat list operations', () => {
     })
 
     it('seeds group chats with member first messages', async () => {
-        const character = buildCharacter() as any
+        const character = buildSelectedCharacter() as any
         character.type = 'group'
         character.characters = ['member-1']
         mocks.findCharacterbyId.mockReturnValue({ firstMessage: 'hello there' })

@@ -311,7 +311,7 @@ fn capture_fixture() -> (tempfile::TempDir, PersistentStore) {
 fn catalog(directory: &Path, id: &str) -> crate::external_storage::capture::CaptureCatalog {
     crate::external_storage::capture::CaptureCatalog::create(
         &directory.join("external-storage").join(id),
-        &directory.join("external-storage/objects"),
+        &directory.join("external-storage"),
         None,
     ).unwrap()
 }
@@ -328,7 +328,7 @@ fn content_capture_rechecks_the_floor_after_projecting_its_pinned_body() {
     assert!(prepared.project(&mut old, &Never).unwrap() > 1);
     let root_key = encode_logical_record_key(&LogicalRecordLocator::Root).unwrap();
     let root_hash: String = old.db.query_row("SELECT hash FROM records WHERE key=?1", [root_key], |row| row.get(0)).unwrap();
-    let bytes = fs::read(directory.path().join("external-storage/objects").join(root_hash)).unwrap();
+    let bytes = old.content().read_all(&root_hash).unwrap();
     let LogicalRecordEnvelope::Root { value, .. } = decode_logical_record(&bytes).unwrap() else { panic!("root record") };
     assert_eq!(value["synthetic"], json!(2));
     assert_eq!(prepared.register(&mut store, &old, &[1; 32], "logical-v1").unwrap_err().to_string(), "Content index rebuild required");

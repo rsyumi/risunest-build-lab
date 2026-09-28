@@ -1272,6 +1272,92 @@ fn conversation_insert_after_deletion_uses_the_visible_position() {
 }
 
 #[test]
+fn conversation_reorder_rewrites_configured_order_without_touching_messages() {
+    let (_directory, mut store, _) = open_fixture();
+    // The deletion leaves an order-key gap that the reorder normalizes.
+    let revision = commit(
+        &mut store,
+        1,
+        ConversationMutation::Delete {
+            character_id: "char-a".to_owned(),
+            conversation_id: "conv-long".to_owned(),
+        },
+    );
+    let revision = commit(
+        &mut store,
+        revision,
+        ConversationMutation::ReplaceRange {
+            character_id: "char-a".to_owned(),
+            conversation_id: "conv-appended".to_owned(),
+            start: 0,
+            delete_count: 0,
+            messages: vec![message("appended")],
+            conversation: Some(json!({"name": "Appended"})),
+            configured_index: None,
+        },
+    );
+    let revision = commit(
+        &mut store,
+        revision,
+        ConversationMutation::Reorder {
+            character_id: "char-a".to_owned(),
+            conversation_ids: vec!["conv-appended".to_owned(), "conv-short".to_owned()],
+        },
+    );
+    let configured = |store: &PersistentStore| {
+        store
+            .query_conversations(
+                &ConversationQuery {
+                    character_id: "char-a".to_owned(),
+                    order: QueryOrder::Configured,
+                    limit: 10,
+                    cursor: None,
+                },
+                None,
+            )
+            .unwrap()
+            .items
+            .iter()
+            .map(|item| (item.id.clone(), item.configured_index))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        configured(&store),
+        vec![("conv-appended".to_owned(), 0), ("conv-short".to_owned(), 1)]
+    );
+    assert_eq!(
+        store
+            .read_conversation("char-a", "conv-appended", None)
+            .unwrap()
+            .unwrap()
+            .value["message"],
+        json!([message("appended")])
+    );
+
+    for conversation_ids in [
+        vec!["conv-short".to_owned()],
+        vec!["conv-short".to_owned(), "conv-short".to_owned()],
+        vec!["conv-short".to_owned(), "conv-missing".to_owned()],
+    ] {
+        assert!(matches!(
+            store.commit(&WorkingSetCommit {
+                conversations: Some(vec![ConversationMutation::Reorder {
+                    character_id: "char-a".to_owned(),
+                    conversation_ids,
+                }]),
+                ..empty_working_set_commit(revision)
+            }),
+            Err(StoreError::Validation { .. })
+        ));
+    }
+    assert_eq!(store.revision().unwrap(), revision);
+    assert_eq!(
+        configured(&store),
+        vec![("conv-appended".to_owned(), 0), ("conv-short".to_owned(), 1)]
+    );
+}
+
+#[test]
 fn selected_character_replacement_is_atomic_and_preserves_catalog_order() {
     let (_directory, mut store, database) = open_fixture();
     let mut replacement = database["characters"][1].clone();

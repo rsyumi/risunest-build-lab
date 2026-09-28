@@ -1,3 +1,4 @@
+import { runWithMobileBackgroundTask } from '../mobileBackgroundTask'
 import { BaseDirectory, open, writeFile } from "@tauri-apps/plugin-fs";
 import localforage from "localforage";
 import { alertError, alertNormal, alertWait, alertMd, alertConfirm } from "../alert";
@@ -126,11 +127,11 @@ async function saveLocalBackupWithWebView(){
     if (!isTauri) await forageStorage.Init()
     const blobStore = await resolveBlobStore()
     alertWait("Saving local backup...")
-    return withFlushedRisuSaveExport(
+    return runWithMobileBackgroundTask('backup', () => withFlushedRisuSaveExport(
         getPersistentDataRuntime(),
         'local-backup',
         (pinned) => saveLocalBackupSnapshot(blobStore, pinned),
-    )
+    ))
 }
 
 async function saveLocalBackupSnapshot(blobStore: BlobStore, pinned: PinnedRisuSaveExport) {
@@ -266,11 +267,11 @@ export async function SavePartialLocalBackup(){
     }
 
     alertWait("Saving partial local backup...")
-    return withFlushedRisuSaveExport(
+    return runWithMobileBackgroundTask('backup', () => withFlushedRisuSaveExport(
         getPersistentDataRuntime(),
         'partial-local-backup',
         (pinned) => savePartialLocalBackupSnapshot(blobStore, pinned),
-    )
+    ))
 }
 
 async function savePartialLocalBackupSnapshot(blobStore: BlobStore, pinned: PinnedRisuSaveExport) {

@@ -1983,8 +1983,6 @@ export const languageKorean = {
                 remote: '필요할 때 서버에서 불러오기',
                 local: '이 기기에 있는 파일',
                 remoteOnly: '서버에만 있는 파일',
-                offlineReady: '모든 파일이 이 기기에 있어 인터넷 없이도 쓸 수 있습니다.',
-                onlineNeeded: '서버에만 있는 파일을 열 때는 인터넷 연결이 필요합니다.',
                 unavailable: '이 기기에도 서버에도 없는 파일',
                 cleanupNote:
                     '필요할 때 서버에서 불러오기로 바꿔도 이 기기에 있는 파일은 남습니다. 사본 정리는 파일이 서버에 올라간 것을 확인한 뒤 이 기기의 사본을 지웁니다. 로컬 스냅샷에 필요한 파일은 그 스냅샷을 지우고 정리할 때까지 서버에 남깁니다. 내보내기나 AI 요청에 쓴 첨부 파일은 다시 내려받으며, 나중에 다시 정리할 수 있습니다.',
@@ -2002,6 +2000,8 @@ export const languageKorean = {
                 protected: '아직 필요한 파일',
                 reclaimable: '정리 가능',
                 clean: '필요 없는 임시 파일 정리',
+                ledger: '에셋 보관 기록',
+                ledgerHelp: '에셋 보관 방식에 필요한 기록이며 정리되지 않습니다.',
                 more: '이전 백업',
                 refresh: '목록 새로고침',
                 blockedReasons: {
@@ -2063,10 +2063,11 @@ export const languageKorean = {
             elapsed: '경과',
             count: '{0}개',
             itemsCount: '{0}개 항목',
-            activity: { enumerating: '항목 확인 중', preparing: '자산 확인 및 변경 내용 준비 중', downloading: '다운로드 중', verifying: '서버에 있는 항목 확인 중', uploading: '업로드 중', confirming: '서버 확인 대기 중' },
+            activity: { enumerating: '항목 확인 중', preparing: '이 기기의 변경 내용 준비 중', downloadingMetadata: '캐릭터·채팅 등 라이브러리 데이터 다운로드 중', downloadingBackupMetadata: '충돌 백업용 라이브러리·에셋 정보 다운로드 중', downloading: '받을 데이터 다운로드 및 확인 중', preserving: '충돌 백업 저장 및 확인 중', syncingSections: '하이파·플러그인 데이터 다운로드 및 확인 중', verifying: '서버에 있는 항목 확인 중', uploading: '업로드 중', confirming: '서버 확인 대기 중' },
             progress: {
                 saving: '이 기기의 변경 저장 중',
                 preparing: '이 기기와 서버의 변경 내용 비교 중',
+                downloading: '서버 내용 받는 중',
                 applying: '받은 내용 적용 중',
                 refreshing: '화면에 반영하는 중',
                 publishing: '이 기기의 변경 서버에 올리는 중',
@@ -2116,6 +2117,11 @@ export const languageKorean = {
             profileLowSpec: '저사양',
             profileHelp:
                 '저사양은 메모리 사용량을 줄이는 대신 긴 대화에서 스크롤이 조금 느려질 수 있습니다.',
+            overflowScope: '채팅 메시지 렌더링 격리',
+            overflowScopeLatest: '최신 메시지',
+            overflowScopeAll: '전체',
+            overflowScopeHelp:
+                '채팅 메시지 영역을 벗어나는 UI 요소(설정 버튼, 오버레이 등)의 렌더링을 최신 메시지 1개에만 허용할지, 전체 메시지에서 허용할지 선택할 수 있습니다. 사용하는 캐릭터와 호환되지 않는 경우 전체를 선택해주세요. 전체는 긴 대화에서 스크롤이 조금 느려질 수 있습니다.',
         },
         inlay: {
             animationPreserved: '애니메이션 변환을 건너뛰고 원본으로 저장했습니다.',
@@ -2626,6 +2632,10 @@ export const languageKorean = {
                 serverTag: '동기화 서버',
                 syncingLead: '끝날 때까지 앱을 닫지 말아주세요.',
                 pauseNote: '멈춰도 나중에 설정에서 이어서 동기화할 수 있습니다.',
+                pausedSummary: '동기화를 일시 중지했습니다.',
+                pausedReason:
+                    '지금 이어서 할 수 있으며, RisuNest를 시작한 뒤 설정에서 이어서 동기화할 수도 있습니다.',
+                resume: '이어서 하기',
                 errorSummary: '동기화를 마치지 못했습니다.',
                 errorReason:
                     '이 기기의 데이터는 그대로입니다. 인터넷 연결을 확인하고 다시 시도해주세요.',

@@ -47,8 +47,11 @@ vi.mock("src/ts/storage/sync/serverSyncProduction", () => ({
   })),
   getServerSyncCacheUsage: vi.fn(async () => ({
     totalBytes: 0,
+    cacheBytes: 0,
     protectedBytes: 0,
     reclaimableBytes: 0,
+    ledgerBytes: 0,
+    databaseBytes: 0,
     blockedReason: null,
   })),
   cleanupServerSyncCache: vi.fn(),
@@ -137,6 +140,25 @@ afterEach(async () => {
   target.remove();
 });
 describe("settings server connection", () => {
+  it("separates comparison, receiving and application while naming backup metadata", async () => {
+    const snapshot = { ...bound(), running: true, progress: "preparing" as const,
+      cycleItems: { done: 0, total: 230, activity: "downloadingBackupMetadata" as const, processed: 1200, expected: 0 } };
+    state.controller.snapshot.mockReturnValue(snapshot);
+    component = mount(ServerSyncConnection, { target });
+    await tick();
+    expect(target.querySelector('[aria-current="step"]')?.textContent).toContain(text.progress.downloading);
+    expect(target.textContent).toContain(`${text.activity.downloadingBackupMetadata} · 1,200`);
+    const stages = [...target.querySelectorAll("ol li")].map((item) => item.textContent?.trim());
+    expect(stages.findIndex((label) => label?.includes(text.progress.preparing)))
+      .toBeLessThan(stages.findIndex((label) => label?.includes(text.progress.downloading)));
+    expect(stages.findIndex((label) => label?.includes(text.progress.downloading)))
+      .toBeLessThan(stages.findIndex((label) => label?.includes(text.progress.applying)));
+    state.emit({ ...snapshot, progress: "applying" });
+    await tick();
+    expect(target.querySelector('[aria-current="step"]')?.textContent).toContain(text.progress.applying);
+    expect(target.textContent).not.toContain(text.activity.downloadingBackupMetadata);
+  });
+
   it("clears an old action error when a new sync attempt starts", async () => {
     const snapshot = bound();
     state.controller.snapshot.mockReturnValue(snapshot);

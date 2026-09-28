@@ -1,17 +1,38 @@
+<script module lang="ts">
+    import type { loreBook as LoreBookEntry } from "src/ts/storage/database.svelte";
+
+    interface LoreDragSession {
+        group: string
+        book: LoreBookEntry
+        /** The folder row that owns the list the drag started in. */
+        folderRow: LoreBookEntry | null
+        flipped: boolean
+        /** Puts the dragged row back where its list rendered it. */
+        restore: () => void
+        /** Records the dragged row's position after its list renders a new page. */
+        reanchor: () => void
+    }
+
+    const pageSize = 60
+    const pageFlipDelayMs = 500
+    const pageFlipRepeatMs = 700
+    let dragSession = $state.raw<LoreDragSession | null>(null)
+    let revealRequest = $state.raw<{ group: string; book: LoreBookEntry } | null>(null)
+</script>
+
 <script lang="ts">
+    import { ChevronDownIcon, ChevronUpIcon } from '@lucide/svelte'
+    import { language } from "src/lang"
     import ListPager from "src/lib/UI/GUI/ListPager.svelte"
-    import { loreListWindow, loreDropIndex, groupLoreFolders } from "src/ts/gui/loreListWindow"
+    import { loreListWindow, loreDropIndex, groupLoreFolders, lorePageOf } from "src/ts/gui/loreListWindow"
     import { type loreBook } from "src/ts/storage/database.svelte";
     import { DBState } from 'src/ts/stores.svelte';
     import LoreBookData from "./LoreBookData.svelte";
     import { selectedCharID } from "src/ts/stores.svelte";
     import Sortable from 'sortablejs/modular/sortable.core.esm.js';
     import { onDestroy, onMount, tick } from "svelte";
-    import { sleep, sortableOptions } from "src/ts/util";
+    import { sortableOptions } from "src/ts/util";
     import { v4 } from "uuid";
-    import { alertError } from "src/ts/alert";
-
-    let reinitializeSortable = false;
 
     interface Props {
         globalMode?: boolean;
@@ -19,266 +40,99 @@
         lorePlus?: boolean;
         externalLoreBooks?: loreBook[];
         showFolder?: string
+        dragGroup?: string
     }
 
-    let { globalMode = false, submenu = 0, lorePlus = false, externalLoreBooks = null, showFolder = '' }: Props = $props();
+    let { globalMode = false, submenu = 0, lorePlus = false, externalLoreBooks = null, showFolder = '', dragGroup = 'a' + v4() }: Props = $props();
     let page = $state(0)
     const currentItems = $derived(externalLoreBooks ?? (globalMode
         ? DBState.db.loreBook[DBState.db.loreBookPage]?.data ?? []
         : submenu === 1
             ? DBState.db.characters[$selectedCharID]?.chats[DBState.db.characters[$selectedCharID].chatPage]?.localLore ?? []
             : DBState.db.characters[$selectedCharID]?.globalLore ?? []))
-    const windowed = $derived(loreListWindow(currentItems, showFolder, page))
+    const idgroup = $derived(dragGroup)
+    let pinEdge: 'start' | 'end' = $state('start')
+    const pinned = $derived(dragSession?.group === idgroup
+        ? [dragSession.book, dragSession.folderRow].filter(book => book !== null)
+        : [])
+    const windowed = $derived(loreListWindow(currentItems, showFolder, page, pageSize, pinned, pinEdge))
     const pageRows = $derived(windowed.rows)
+    const pageCount = $derived(Math.max(1, Math.ceil(windowed.total / pageSize)))
+    const currentPage = $derived(Math.min(page, pageCount - 1))
     let stb: Sortable = null
     let ele: HTMLDivElement = $state()
-    let sorted = $state(0)
-    let idgroup = 'a' + v4() //make should it starts with alphabetic character
-    
-    // DOM stabilization waiting function
-    const waitForDOMReady = async () => {
-        // 1. Wait for Svelte tick - component state update completion
-        await tick();
-        
-        // 2. Wait for next frame - DOM rendering completion
-        await new Promise(resolve => requestAnimationFrame(resolve));
-        
-        // 3. Element validity verification
-        if (!ele || !ele.isConnected) {
-            await new Promise(resolve => setTimeout(resolve, 50));
-            if (!ele || !ele.isConnected) {
-                throw new Error('Container element is not ready');
-            }
-        }
-        
-        // 4. Calculate expected number of child elements
-        const expectedElements = pageRows.length;
+    let originalNextSibling: Node | null = null
+    let ownSession: LoreDragSession | null = null
 
-        // 5. Wait until all child elements are rendered (max 200ms)
-        let attempts = 0;
-        const maxAttempts = 20;
-        while (ele.children.length < expectedElements && attempts < maxAttempts) {
-            await new Promise(resolve => setTimeout(resolve, 10));
-            attempts++;
-        }
-        
-        // 6. Final stabilization wait (short time)
-        await new Promise(resolve => setTimeout(resolve, 10));
-    }
-    
-    // SortableJS recreation function
-    const recreateStb = async () => {
-        try {
-            stb.destroy()
-        } catch (error) {
-            // Ignore destroy failure (may already be removed)
-        }
-
-        // Svelte reactivity trigger - force re-render {#key} block by changing sorted value
-        sorted += 1
-
-        // Wait for DOM stabilization (dynamic measurement)
-        try {
-            await waitForDOMReady();
-        } catch (error) {
-            console.warn('DOM stabilization failed:', error);
-            // Fallback to short fixed wait
-            await sleep(100);
-        }
-        
-        // Reactivate drag function only when lorebook detail is not open
-        // (drag should be disabled when detail is open)
-        if (openedDetails === 0) {
-            try {
-                createStb(); // Create new SortableJS instance
-            } catch (error) {
-                console.error('Failed to recreate sortable:', error);
-                // Retry
-                await sleep(50);
-                try {
-                    createStb();
-                } catch (retryError) {
-                    console.error('Retry failed:', retryError);
-                }
-            }
-        }
-    }
-    
     const createStb = () => {
         stb = Sortable.create(ele, {
             ...sortableOptions,
-            group: 'lorebook',        // Enable cross-container drag
-            swapThreshold: 0.9,      // More sensitive drag response
-            preventOnFilter: false, // Allow click events on filtered elements
-            animation: 150, // Animation
-            chosenClass: "risu-chosen-item", // Class for the item being dragged
-            ghostClass: "risu-ghost-item",  // Class for the drop placeholder
-
-            onEnd: async (evt) => {
-                
-                // Basic condition check
-                if (!evt.from || !evt.to) {
-                    alertError('Error: \'evt.from\' or \'evt.to\' is null');
-                    await recreateStb();
-                    return;
+            group: idgroup,
+            draggable: '> [data-risu-idx]',
+            swapThreshold: 0.9,
+            preventOnFilter: false,
+            animation: 150,
+            chosenClass: "risu-chosen-item",
+            ghostClass: "risu-ghost-item",
+            onMove: (event) => {
+                const moved = currentItems[Number(event.dragged.getAttribute('data-risu-idx'))]
+                if (moved?.mode === 'folder' && event.from !== event.to) return false
+                return sortableOptions.onMove(event)
+            },
+            onStart: (event) => {
+                originalNextSibling = event.item.nextSibling
+                revealRequest = null
+                const book = currentItems[Number(event.item.getAttribute('data-risu-idx'))]
+                if (!book) return
+                const { item, from } = event
+                ownSession = {
+                    group: idgroup,
+                    book,
+                    folderRow: showFolder
+                        ? currentItems.find(row => row.mode === 'folder' && row.key === showFolder) ?? null
+                        : null,
+                    flipped: false,
+                    restore: () => from.insertBefore(item, originalNextSibling),
+                    reanchor: () => { originalNextSibling = item.nextSibling },
                 }
-                
-                if (evt.oldIndex === undefined || evt.newIndex === undefined) {
-                    alertError('Error: oldIndex or newIndex is undefined');
-                    await recreateStb();
-                    return;
-                }
-                
-                // Cancel movement
-                if (evt.oldIndex === evt.newIndex && evt.from === evt.to) {
-                    await recreateStb();
-                    return;
-                }
-
-                // ===== Stage 1: Revert SortableJS DOM manipulation =====
-                // SortableJS automatically manipulates DOM upon drag completion,
-                // but Svelte uses data-driven rendering, so DOM manipulation must be invalidated
+                dragSession = ownSession
+            },
+            onEnd: (event) => {
+                const session = ownSession
+                ownSession = null
+                if (session && dragSession === session) dragSession = null
                 const indexOfRow = (node: Element | null): number | null => {
                     const value = node?.getAttribute('data-risu-idx')
                     return value === null || value === undefined ? null : Number(value)
                 }
-                const backingSource = indexOfRow(evt.item)
-                const backingNext = indexOfRow(evt.item.nextElementSibling)
-                const backingPrevious = indexOfRow(evt.item.previousElementSibling)
-                const originalParent = evt.from;    // Drag start container
-                const originalIndex = evt.oldIndex; // Drag start position
-                
-                // Invalidate DOM manipulation: return item to original position
-                // (so Svelte can render correctly after data change)
-                if (originalParent && evt.item.parentNode !== originalParent) {
-                    const referenceNode = originalParent.children[originalIndex];
-                    if (referenceNode) {
-                        // Insert before if another element exists at original position
-                        originalParent.insertBefore(evt.item, referenceNode);
-                    } else {
-                        // Append to end if original position was last
-                        originalParent.appendChild(evt.item);
-                    }
-                }
+                const source = indexOfRow(event.item)
+                const next = indexOfRow(event.item.nextElementSibling)
+                const previous = indexOfRow(event.item.previousElementSibling)
+                // Restore Svelte's DOM before changing either folder's keyed list.
+                event.from.insertBefore(event.item, originalNextSibling)
+                if (source === null) return
+                if (!session?.flipped && event.from === event.to && event.oldIndex === event.newIndex) return
 
-                // ===== Stage 2: Collect drag event information =====
-                // Identify source and target folders (using data-show-folder attribute)
-                const sourceFolder = evt.from.getAttribute('data-show-folder') || '';
-                const targetFolder = evt.to.getAttribute('data-show-folder') || '';
-                if (backingSource === null) { await recreateStb(); return }
-                const oldIndex = backingSource;
-                const newIndex = loreDropIndex(oldIndex, backingNext, backingPrevious, currentItems.length);
-                
-                // ===== Stage 3: Identify current data array =====
-                // Select the correct data array based on component props and state
-                let currentArray: loreBook[];
-                if (externalLoreBooks) {
-                    // Use externally passed lorebook array
-                    currentArray = externalLoreBooks;
-                } else if (submenu === 1) {
-                    // Use local chat lorebook
-                    currentArray = DBState.db.characters[$selectedCharID].chats[DBState.db.characters[$selectedCharID].chatPage].localLore;
-                } else if (globalMode) {
-                    // Use global lorebook
-                    currentArray = DBState.db.loreBook[DBState.db.loreBookPage].data;
-                } else {
-                    // Use character global lorebook (default)
-                    currentArray = DBState.db.characters[$selectedCharID].globalLore;
-                }
-
-                const sourceIdx = oldIndex; // Store SortableJS provided index
-                
-                let realSourceIdx = sourceIdx;
-
-                // Abort if invalid index (0 is valid index, so check !== undefined)
-                if (realSourceIdx === undefined || realSourceIdx === null || realSourceIdx < 0) return;
-                const movedItem = currentArray[realSourceIdx]; // Actual item to move
-                if (!movedItem) return;
-
-                // ===== Stage 4: Array reconstruction and data application (improved logic) =====
-
-                // 4-1. Create copies of item to move and array
-                const newArray = [...currentArray]; // Copy array
-                const updatedMovedItem = { ...movedItem }; // Copy item to move
-                let moveFolder = false;
-
-                // 4-2. Change folder property of copied item
-                if (sourceFolder !== targetFolder) {
-                    if (targetFolder) {
-                        updatedMovedItem.folder = targetFolder;
-
-                    } else {
-                        delete updatedMovedItem.folder;
-                    }
-                moveFolder = true;
-                }
-
-                // 4-3. Sort item to appropriate position
-                let finalNewIndex = newIndex; // Final insertion position
-
-
-                // 4-3-1. Move item in array using oldIndex and modified finalNewIndex
-                // First remove original item from array
-                
-                newArray.splice(realSourceIdx, 1);
-                
-                // SortableJS newIndex means final target position, so use without adjustment
-                let adjustedFinalIndex = finalNewIndex;
-                
-                // Only perform range check
-                if (adjustedFinalIndex > newArray.length) {
-                    adjustedFinalIndex = newArray.length;
-                }
-                
-                // For debugging: output drag and drop information
-                /*
-                alertError('=== Drag and Drop Debugging Info ===\n' +
-                          'finalNewIndex: ' + finalNewIndex + '\n' +
-                          'realSourceIdx: ' + realSourceIdx + '\n' +
-                          'newArray.length (제거 후): ' + newArray.length + '\n' +
-                          'adjustedFinalIndex: ' + adjustedFinalIndex + '\n' +
-                          'oldIndex < newIndex: ' + (moveFolder && oldIndex < newIndex));*/
-
-                // Insert updated item at new position
-                newArray.splice(adjustedFinalIndex, 0, updatedMovedItem);
-
-                // 4-3-2. Reorganize entire array according to folder structure
-                const sortedArray = groupLoreFolders(newArray);
-
-                // Assign final sorted array to newArray
-                newArray.splice(0, newArray.length, ...sortedArray);
-
-                // For debugging: output current array and new array
-                /*alertErrorWait('=== Drag and Drop Debugging Info ===\n' +
-                      'oldIndex: ' + oldIndex + ', newIndex: ' + newIndex + '\n' +
-                      'Original Array:\n' + JSON.stringify(currentArray, null, 2) + '\n\n' +
-                      'Final Sorted Array:\n' + JSON.stringify(newArray, null, 2));*/
-
-                // 4-4. Apply final changed array to appropriate data store
-                if (externalLoreBooks) {
-                    // Arrays passed as props must be modified internally to reflect in parent
-                    externalLoreBooks.splice(0, externalLoreBooks.length, ...newArray);
-                } else if (submenu === 1) {
-                    DBState.db.characters[$selectedCharID].chats[DBState.db.characters[$selectedCharID].chatPage].localLore = newArray;
-                } else if (globalMode) {
-                    DBState.db.loreBook[DBState.db.loreBookPage].data = newArray;
-                } else {
-                    DBState.db.characters[$selectedCharID].globalLore = newArray;
-                }
-                
-                // ===== Stage 5: Force UI synchronization and SortableJS reinitialization =====
-                // Remove existing SortableJS instance (prevent DOM inconsistency due to data change)
-                await recreateStb()
-
-            }
+                const moved = currentItems[source]
+                if (!moved) return
+                const targetFolder = event.to.getAttribute('data-show-folder') || ''
+                if (moved.mode === 'folder' && targetFolder) return
+                const destination = loreDropIndex(source, next, previous, currentItems.length)
+                if (targetFolder) moved.folder = targetFolder
+                else delete moved.folder
+                const reordered = [...currentItems]
+                reordered.splice(source, 1)
+                reordered.splice(destination, 0, moved)
+                currentItems.splice(0, currentItems.length, ...groupLoreFolders(reordered))
+                // A move across a page boundary can shift the row onto a neighbouring page.
+                revealRequest = { group: idgroup, book: moved }
+            },
         })
     }
 
-
     onMount(createStb)
 
-    let openedDetails = 0  // Count only lorebook details (for drag deactivation)
-    let openedRefs = $state(new Set()) // Track both folders + lorebooks (for UI state)
+    let openedRefs = $state(new Set<loreBook>())
     
     // Derived state to calculate number of open folders
     let openFolders = $derived(() => {
@@ -291,36 +145,101 @@
         return count
     })
     
-    const onOpen = (isDetail: boolean = true, bookRef?: any) => {
-        if (isDetail) {
-            // Disable drag only when lorebook detail opens
-            openedDetails += 1
-            if(stb){
-                try {
-                    stb.destroy()
-                } catch (error) {}
-            }
+    const onOpen = (isDetail: boolean = true, bookRef?: loreBook) => {
+        if (!bookRef || openedRefs.has(bookRef)) return
+        if (isDetail && stb) {
+            stb.destroy()
+            stb = null
+        }
+        openedRefs = new Set([...openedRefs, bookRef])
     }
-        if (bookRef) {
-            openedRefs.add(bookRef)
-            openedRefs = new Set(openedRefs) // Trigger reactivity
-        }
-    }
-    const onClose = (isDetail: boolean = true, bookRef?: any) => {
-        if (isDetail) {
-            // Consider reactivating drag only when lorebook detail closes
-            openedDetails -= 1
-            if(openedDetails === 0){
-                createStb()
-            }
-        }
-        if (bookRef) {
-            openedRefs.delete(bookRef)
-            openedRefs = new Set(openedRefs) // Trigger reactivity
-        }
+    const onClose = (isDetail: boolean = true, bookRef?: loreBook) => {
+        if (!openedRefs.has(bookRef)) return
+        openedRefs.delete(bookRef)
+        openedRefs = new Set(openedRefs)
+        if (isDetail && ![...openedRefs].some(book => book.mode !== 'folder')) createStb()
     }
 
+    $effect(() => {
+        for (const book of openedRefs) {
+            if (!pageRows.some(row => row.book === book)) onClose(book.mode !== 'folder', book)
+        }
+    })
+
+    const hasOpenDetail = $derived([...openedRefs].some(book => book.mode !== 'folder'))
+    const dragging = $derived(dragSession?.group === idgroup && !hasOpenDetail && pageCount > 1)
+    let previousZone: HTMLDivElement | undefined = $state()
+    let nextZone: HTMLDivElement | undefined = $state()
+    let hoveredZone: -1 | 0 | 1 = $state(0)
+    let flipTimer: ReturnType<typeof setTimeout> | undefined
+
+    async function flipPage(direction: -1 | 1) {
+        const session = dragSession
+        const target = currentPage + direction
+        if (session?.group !== idgroup || target < 0 || target >= pageCount) return
+        session.restore()
+        session.flipped = true
+        pinEdge = direction > 0 ? 'start' : 'end'
+        page = target
+        await tick()
+        if (dragSession === session) session.reanchor()
+    }
+
+    function zoneAt(x: number, y: number): -1 | 0 | 1 {
+        for (const [zone, direction] of [[previousZone, -1], [nextZone, 1]] as const) {
+            const rect = zone?.getBoundingClientRect()
+            if (rect && x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) return direction
+        }
+        return 0
+    }
+
+    function trackPointer(x: number, y: number) {
+        const zone = zoneAt(x, y)
+        if (zone === hoveredZone) return
+        hoveredZone = zone
+        clearTimeout(flipTimer)
+        if (zone === 0) return
+        const flip = () => {
+            void flipPage(zone)
+            flipTimer = setTimeout(flip, pageFlipRepeatMs)
+        }
+        flipTimer = setTimeout(flip, pageFlipDelayMs)
+    }
+
+    $effect(() => {
+        if (!dragging) return
+        // Native drags report drag events and touch drags report touch events. Sortable
+        // stops dragover over its rows, so listen before the event reaches them.
+        const onPointer = (event: DragEvent | PointerEvent) => trackPointer(event.clientX, event.clientY)
+        const onTouch = (event: TouchEvent) => {
+            const touch = event.touches[0]
+            if (touch) trackPointer(touch.clientX, touch.clientY)
+        }
+        document.addEventListener('dragenter', onPointer, true)
+        document.addEventListener('dragover', onPointer, true)
+        document.addEventListener('pointermove', onPointer, true)
+        document.addEventListener('touchmove', onTouch, { capture: true, passive: true })
+        return () => {
+            document.removeEventListener('dragenter', onPointer, true)
+            document.removeEventListener('dragover', onPointer, true)
+            document.removeEventListener('pointermove', onPointer, true)
+            document.removeEventListener('touchmove', onTouch, true)
+            clearTimeout(flipTimer)
+            hoveredZone = 0
+        }
+    })
+
+    $effect(() => {
+        const request = revealRequest
+        if (request?.group !== idgroup) return
+        const target = lorePageOf(currentItems, showFolder, request.book, pageSize)
+        if (target === null) return
+        page = target
+        revealRequest = null
+    })
+
     onDestroy(() => {
+        if (ownSession && dragSession === ownSession) dragSession = null
         if(stb){
             try {
                 stb.destroy()
@@ -329,8 +248,21 @@
     })
 </script>
 
-<ListPager bind:page total={windowed.total} disabled={openedRefs.size > 0} />
-{#key sorted}
+<div class="relative">
+    <ListPager bind:page total={windowed.total} disabled={openedRefs.size > 0} />
+    {#if dragging && currentPage > 0}
+        <div
+            bind:this={previousZone}
+            aria-hidden="true"
+            data-lore-page-zone="previous"
+            class="absolute inset-0 flex items-center justify-center gap-2 rounded-md border text-sm transition-colors {hoveredZone === -1 ? 'border-selected bg-selected text-textcolor' : 'border-dashed border-darkborderc bg-darkbg text-textcolor2'}"
+        >
+            <ChevronUpIcon size={16} />
+            <span>{language.risuNest.pager.previous}</span>
+            <span class="tabular-nums">{currentPage + 1} / {pageCount}</span>
+        </div>
+    {/if}
+</div>
     <div class="border-solid border-selected p-2 flex flex-col border-1 rounded-md" 
          bind:this={ele} 
          data-show-folder={showFolder || ''}>
@@ -350,12 +282,7 @@
                         openFolders={openFolders()}
                         isLastInContainer={book === lastVisibleItem}
                         onRemove={() => {
-                            if (openedRefs.has(book) && !book.folder) {
-                                onClose(true, book)
-                            }
-                            else if(openedRefs.has(book) && book.folder){
-                                onClose(false, book)
-                            }
+                            if (openedRefs.has(book)) onClose(book.mode !== 'folder', book)
                             
                             let lore = externalLoreBooks
                             
@@ -377,7 +304,9 @@
                                 lore.splice(i, 1)
                             }
                             
-                            externalLoreBooks = lore
+                            if (lore !== externalLoreBooks) {
+                                externalLoreBooks.splice(0, externalLoreBooks.length, ...lore)
+                            }
                         }} 
                         onOpen={(isDetail = true) => onOpen(isDetail, book)}
                         onClose={(isDetail = true) => onClose(isDetail, book)}
@@ -397,12 +326,7 @@
                         openFolders={openFolders()}
                         isLastInContainer={book === lastVisibleItem}
                         onRemove={() => {
-                            if (openedRefs.has(book) && !book.folder) {
-                                onClose(true, book)
-                            }
-                            else if(openedRefs.has(book) && book.folder){
-                                onClose(false, book)
-                            }
+                            if (openedRefs.has(book)) onClose(book.mode !== 'folder', book)
                             
                             let lore  = DBState.db.characters[$selectedCharID].globalLore
                             
@@ -444,12 +368,7 @@
                         openFolders={openFolders()}
                         isLastInContainer={book === lastVisibleItem}
                         onRemove={() => {
-                            if (openedRefs.has(book) && !book.folder) {
-                                onClose(true, book)
-                            }
-                            else if(openedRefs.has(book) && book.folder){
-                                onClose(false, book)
-                            }
+                            if (openedRefs.has(book)) onClose(book.mode !== 'folder', book)
                             
                             let lore  = DBState.db.characters[$selectedCharID].chats[DBState.db.characters[$selectedCharID].chatPage].localLore
                             
@@ -481,4 +400,15 @@
             {/if}
         {/if}
     </div>
-{/key}
+{#if dragging && currentPage + 1 < pageCount}
+    <div
+        bind:this={nextZone}
+        aria-hidden="true"
+        data-lore-page-zone="next"
+        class="mt-2 h-10 flex items-center justify-center gap-2 rounded-md border text-sm transition-colors {hoveredZone === 1 ? 'border-selected bg-selected text-textcolor' : 'border-dashed border-darkborderc bg-darkbg text-textcolor2'}"
+    >
+        <ChevronDownIcon size={16} />
+        <span>{language.risuNest.pager.next}</span>
+        <span class="tabular-nums">{currentPage + 1} / {pageCount}</span>
+    </div>
+{/if}

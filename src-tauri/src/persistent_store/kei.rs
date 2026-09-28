@@ -1373,8 +1373,9 @@ mod tests {
                 .write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                 .expect("write response");
             stream.flush().expect("flush response");
+            // The exchange ends here. The client's close runs on the caller's
+            // runtime, which stops polling once `upload` returns.
             stream.shutdown(Shutdown::Write).expect("finish response");
-            while stream.read(&mut buffer).expect("drain client close") > 0 {}
         });
         let prepared = store
             .prepare_kei_upload(

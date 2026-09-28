@@ -139,7 +139,7 @@ pub fn build(reader: &mut impl Read, mut save: impl FnMut(&[u8]) -> Result<()>) 
         }
         if next.len() == 1 {
             return Ok(Payload {
-                content_hash: format!("{:x}", whole.finalize()),
+                content_hash: hex::encode(whole.finalize()),
                 byte_length: total.into(),
                 root: next.remove(0).hash,
             });
@@ -211,7 +211,7 @@ pub fn restore(
             }
         }
     }
-    if written != expected || format!("{:x}", whole.finalize()) != payload.content_hash {
+    if written != expected || hex::encode(whole.finalize()) != payload.content_hash {
         return Err(WireError("target-hash-mismatch"));
     }
     Ok(())

@@ -1,3 +1,4 @@
+import isEqual from 'lodash/isEqual'
 import type { Chat, Database, character, groupChat } from './database.svelte'
 import {
     createConversationSummaryStub,
@@ -24,6 +25,19 @@ import { defineOwnEnumerableProperty } from './ownEnumerableProperty'
 import type { WorkingSetResidencyRegistry } from './workingSetResidency'
 
 type CompleteCharacter = character | groupChat
+
+export function patchWorkingSetRoot(target: Database, root: PersistentRoot): void {
+    const targetRecord = target as unknown as Record<string, unknown>
+    const rootRecord = root as unknown as Record<string, unknown>
+    for (const key of Object.keys(targetRecord)) {
+        if (key === 'characters' || key === 'botPresets' ||
+            key === 'pluginCustomStorage' || key === 'pluginStorageMeta') continue
+        if (!Object.hasOwn(rootRecord, key)) delete targetRecord[key]
+    }
+    for (const key of Object.keys(rootRecord)) {
+        if (!isEqual(targetRecord[key], rootRecord[key])) targetRecord[key] = rootRecord[key]
+    }
+}
 
 const PROFILE_CONVERSATION_PAGE_SIZE = 128
 
@@ -142,7 +156,10 @@ export function patchWorkingSetCharacterDetail(
     for (const key of Object.keys(targetRecord)) {
         if (key !== 'chats' && !Object.hasOwn(detailRecord, key)) delete targetRecord[key]
     }
-    Object.assign(targetRecord, detailRecord)
+    // Keep unchanged values so views holding them are not rebuilt.
+    for (const key of Object.keys(detailRecord)) {
+        if (!isEqual(targetRecord[key], detailRecord[key])) targetRecord[key] = detailRecord[key]
+    }
 }
 
 export function hydrateWorkingSetCharacterDetail(

@@ -87,6 +87,16 @@ test("stable tags publish automatically only from commits contained in main", ()
   assert.match(workflow, /git rev-parse "\$TAG\^\{commit\}"/);
 });
 
+test("every release run builds only a commit contained in main", () => {
+  const identity = workflow.slice(workflow.indexOf("      - id: identity"), workflow.indexOf("      - uses: pnpm/action-setup"));
+  const ancestor = identity.indexOf('git merge-base --is-ancestor "$source_commit" refs/remotes/origin/main');
+  assert.ok(ancestor > 0);
+  assert.ok(ancestor < identity.indexOf('if [[ "$GITHUB_EVENT_NAME" == "push" ]]'));
+  assert.match(identity, /elif tagged=\$\(git rev-parse -q --verify "refs\/tags\/\$TAG\^\{commit\}"\); then\n\s+test "\$tagged" = "\$source_commit"/);
+  assert.match(identity, /else\n\s+test "\$PUBLISH" != "true"\n\s+fi/);
+  assert.match(identity, /PUBLISH: \$\{\{ inputs\.publish \}\}/);
+});
+
 test("manual release runs default to a non-publishing main rehearsal", () => {
   const dispatch = workflow.slice(workflow.indexOf("  workflow_dispatch:"), workflow.indexOf("\npermissions:"));
   assert.match(dispatch, /source_ref:\n\s+description:[^\n]+\n\s+type: string\n\s+default: main/);

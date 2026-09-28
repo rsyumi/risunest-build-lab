@@ -85,7 +85,9 @@ fn safe_path(path: &Path) -> Result<()> {
     let mut current = PathBuf::new();
     for part in path.components() {
         current.push(part);
-        if matches!(part, Component::Prefix(_)) { continue; }
+        if matches!(part, Component::Prefix(_)) {
+            continue;
+        }
         match fs::symlink_metadata(&current) {
             Ok(meta) if linked(&meta) => return Err("removal-linked-path".into()),
             Ok(_) => (),
@@ -418,10 +420,16 @@ fn remove_data_files(root: &Path) -> Result<()> {
 pub fn forget_registration(root: &Path, server: &Path) -> Result<()> {
     let registry = registry()?;
     let path = record_path(&registry, root);
-    if !path.exists() { return Ok(()); }
+    if !path.exists() {
+        return Ok(());
+    }
     let record = read_record(&path)?;
-    if record.schema != 1 || record.data != root || record.server != server
-        || record.install != install_directory(server)? || record.instance != platform::instance_name(root) {
+    if record.schema != 1
+        || record.data != root
+        || record.server != server
+        || record.install != install_directory(server)?
+        || record.instance != platform::instance_name(root)
+    {
         return Err("removal-registration-invalid".into());
     }
     remove_file(&path)?;
@@ -491,13 +499,22 @@ pub async fn execute(root: &Path, server: &Path, delete_data: bool) -> Result<()
 fn clear_macos_profile(install: &Path) -> Result<()> {
     let gui = install.join("Contents/MacOS/risunest-sync-gui");
     safe_path(&gui)?;
-    if !gui.is_file() { return Err("removal-profile-gui-missing".into()); }
-    let mut child = platform::process(&gui).arg("--clear-removal-profile")
-        .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null()).spawn().map_err(|_| "removal-profile-launch-failed")?;
+    if !gui.is_file() {
+        return Err("removal-profile-gui-missing".into());
+    }
+    let mut child = platform::process(&gui)
+        .arg("--clear-removal-profile")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|_| "removal-profile-launch-failed")?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(90);
     loop {
-        match child.try_wait().map_err(|_| "removal-profile-wait-failed")? {
+        match child
+            .try_wait()
+            .map_err(|_| "removal-profile-wait-failed")?
+        {
             Some(status) if status.success() => return Ok(()),
             Some(_) => return Err("removal-profile-failed".into()),
             None if std::time::Instant::now() >= deadline => {
@@ -676,7 +693,11 @@ mod tests {
         let (_temp, root, _server, _registry) = fixture();
         let path = root.join("metadata.sqlite");
         fs::write(&path, "synthetic").unwrap();
-        let handle = fs::OpenOptions::new().read(true).share_mode(0).open(&path).unwrap();
+        let handle = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap();
         assert!(remove_data_files(&root).is_err());
         assert!(root.join(RECORD).exists());
         drop(handle);

@@ -2155,9 +2155,15 @@ interface RisuaiPluginAPI {
 
     /**
      * Gets runtime information about Risuai environment
-     * @returns Object containing apiVersion, platform, and saveMethod
+     * @returns Object containing app identity, apiVersion, platform, and saveMethod
      */
     getRuntimeInfo(): Promise<{
+        app: {
+            /** Stable application identifier ('risunest' for RisuNest). */
+            id: string;
+            /** Application version from version.json, without display decorations. */
+            version: string;
+        };
         apiVersion: string;
         platform: string;
         saveMethod: string;
