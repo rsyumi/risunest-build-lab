@@ -229,6 +229,31 @@ async function lifecycle() {
 async function startupAppearance(seed: boolean, theme: "light" | "dark") {
   await guard();
   check(Boolean(document.getElementById("preloading")), "appearance probe requires product HTML build");
+  const seedReadback = async () => {
+    const marker = localStorage.getItem("appearance-theme");
+    const metadata = {
+      expectedTheme: theme,
+      markerTheme: marker === "light" || marker === "dark" ? marker : null,
+      markerPresent: marker !== null, markerLength: marker?.length ?? 0,
+      originMatches: location.protocol === "tauri:" && location.hostname === "localhost",
+    };
+    try {
+      const opened = await invoke<{ revision: number }>("pds_open");
+      const root = await invoke<{ revision: number; value: {
+        colorScheme?: { type?: unknown }; didFirstSetup?: unknown;
+      } }>("pds_read_root");
+      const schemeType = root.value.colorScheme?.type;
+      return {
+        ...metadata, readSucceeded: true,
+        openedRevision: Number.isSafeInteger(opened.revision) ? opened.revision : null,
+        storedSchemeType: schemeType === "light" || schemeType === "dark" ? schemeType : null,
+        didFirstSetup: typeof root.value.didFirstSetup === "boolean" ? root.value.didFirstSetup : null,
+        readRevision: Number.isSafeInteger(root.revision) ? root.revision : null,
+      };
+    } catch {
+      return { ...metadata, readSucceeded: false, storeReadError: "unavailable" };
+    }
+  };
   if (seed) {
     const { defaultColorScheme } = await import("../../src/ts/gui/colorscheme");
     const colorScheme = theme === "dark" ? defaultColorScheme : {
@@ -237,7 +262,7 @@ async function startupAppearance(seed: boolean, theme: "light" | "dark") {
       darkBorderc: "#d1d5db", darkbutton: "#e5e7eb", type: "light",
     };
     const opened = await invoke<{ revision: number }>("pds_open");
-    await invoke("pds_commit", {
+    const committed = await invoke<{ revision: number }>("pds_commit", {
       commit: { expectedRevision: opened.revision, rootMutations: [
         { type: "set", key: "didFirstSetup", value: true },
         { type: "set", key: "colorScheme", value: colorScheme },
@@ -245,8 +270,14 @@ async function startupAppearance(seed: boolean, theme: "light" | "dark") {
     });
     localStorage.setItem("tos4", "true");
     localStorage.setItem("appearance-theme", theme);
-    return { seeded: true, theme };
+    return {
+      seeded: true, theme,
+      openedRevision: Number.isSafeInteger(opened.revision) ? opened.revision : null,
+      committedRevision: Number.isSafeInteger(committed.revision) ? committed.revision : null,
+      seedReadback: await seedReadback(),
+    };
   }
+  await report("appearance-app-readback", await seedReadback());
   check(localStorage.getItem("appearance-theme") === theme, "appearance theme seed mismatch");
   const preloaderBackground = getComputedStyle(document.getElementById("preloading")!).backgroundColor;
   const app = await import("../../src/main");

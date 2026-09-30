@@ -2,33 +2,51 @@
 #import <objc/runtime.h>
 
 static void (*requestProbe)(void);
+static void (*diagnosticProbe)(int);
 static BOOL pending;
 static unsigned replies;
+static unsigned beginDepth;
+static unsigned delegateDepth;
+
+enum ProbeDiagnostic { ProbeBeginEnter = 1, ProbeBeginReturn, ProbeDelegateEnter, ProbeDelegateLater };
 
 static NSApplicationTerminateReply probeShouldTerminate(id delegate, SEL selector, NSApplication *sender) {
+    delegateDepth++;
+    diagnosticProbe(ProbeDelegateEnter);
     if (!pending) {
         pending = YES;
         requestProbe();
     }
+    diagnosticProbe(ProbeDelegateLater);
+    delegateDepth--;
     return NSTerminateLater;
 }
 
-int risunest_probe_install(void (*callback)(void)) {
-    if (![NSThread isMainThread] || !NSApp.delegate || !callback) return 0;
+int risunest_probe_install(void (*callback)(void), void (*diagnostic)(int)) {
+    if (![NSThread isMainThread] || !NSApp.delegate || !callback || !diagnostic) return 0;
     Method method = class_getInstanceMethod(object_getClass(NSApp.delegate), @selector(applicationShouldTerminate:));
     if (!method) return 0;
     requestProbe = callback;
+    diagnosticProbe = diagnostic;
     method_setImplementation(method, (IMP)probeShouldTerminate);
     return 1;
 }
 
-void risunest_probe_begin(void) { [NSApp terminate:nil]; }
+void risunest_probe_begin(void) {
+    beginDepth++;
+    diagnosticProbe(ProbeBeginEnter);
+    [NSApp terminate:nil];
+    diagnosticProbe(ProbeBeginReturn);
+    beginDepth--;
+}
 
 int risunest_probe_modal_mode(void) {
     return [NSThread isMainThread] && [[NSRunLoop currentRunLoop].currentMode isEqualToString:NSModalPanelRunLoopMode];
 }
 
 unsigned risunest_probe_reply_count(void) { return replies; }
+unsigned risunest_probe_begin_depth(void) { return beginDepth; }
+unsigned risunest_probe_delegate_depth(void) { return delegateDepth; }
 
 int risunest_probe_reply(int approve) {
     if (![NSThread isMainThread] || !pending) return 0;

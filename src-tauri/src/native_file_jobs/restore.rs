@@ -2797,7 +2797,7 @@ mod tests {
     }
 
     fn cold_chat(key: &str) -> Value {
-        json!({"id":"chat-1", "message":[{"role":"char", "data":format!("\u{ef01}COLDSTORAGE\u{ef01}{key}")}]})
+        json!({"id":"chat-1", "name":"Chat", "message":[{"role":"char", "data":format!("\u{ef01}COLDSTORAGE\u{ef01}{key}")}]})
     }
 
     #[test]
@@ -2919,7 +2919,7 @@ mod tests {
         let (directory, mut sink) = fixture();
         let messages = (0..300).map(|index| json!({"role":"user","data":format!("synthetic-{index}")})).collect::<Vec<_>>();
         sink.cold_payloads = Some(std::collections::HashMap::from([write_cold_payload(directory.path(), "chat", &json!(messages))]));
-        let source = cold_block_source(directory.path(), &serde_json::to_vec(&json!({"chaId":"char-1","chats":[cold_chat("chat")]})).unwrap(), true);
+        let source = cold_block_source(directory.path(), &serde_json::to_vec(&json!({"chaId":"char-1","name":"Synthetic","chats":[cold_chat("chat")]})).unwrap(), true);
         let registry = Arc::new(JobRegistry::default());
         let job = registry.create(JobKind::RestoreBlockRisuSave).unwrap();
         sink.cancel_after_page = Some((registry, job.id()));
@@ -2943,7 +2943,7 @@ mod tests {
             let (directory, mut sink) = fixture();
             let messages = (0..count).map(|index| json!({"role":"user","data":format!("{index}"),"chatId":format!("m-{index}")})).collect::<Vec<_>>();
             sink.cold_payloads = Some(std::collections::HashMap::from([write_cold_payload(directory.path(), "chat", &json!(messages))]));
-            let source = cold_block_source(directory.path(), &serde_json::to_vec(&json!({"chaId":"char-1","chats":[cold_chat("chat")]})).unwrap(), true);
+            let source = cold_block_source(directory.path(), &serde_json::to_vec(&json!({"chaId":"char-1","name":"Synthetic","chats":[cold_chat("chat")]})).unwrap(), true);
             let job = JobRegistry::default().create(JobKind::RestoreBlockRisuSave).unwrap();
             restore_block_risu_save_path(&source, 1, &job, &sink).unwrap();
             let restored = sink.store.lock().unwrap().materialize(Some(2)).unwrap();
@@ -2961,7 +2961,7 @@ mod tests {
             {"role":"char", "data":"b".repeat(MESSAGE_PAGE_BYTES as usize / 2)},
         ]);
         sink.cold_payloads = Some(std::collections::HashMap::from([write_cold_payload(directory.path(), "chat", &messages)]));
-        let source = cold_block_source(directory.path(), &serde_json::to_vec(&json!({"chaId":"char-1","chats":[cold_chat("chat")]})).unwrap(), false);
+        let source = cold_block_source(directory.path(), &serde_json::to_vec(&json!({"chaId":"char-1","name":"Synthetic","chats":[cold_chat("chat")]})).unwrap(), false);
         let job = JobRegistry::default().create(JobKind::RestoreBlockRisuSave).unwrap();
         restore_block_risu_save_path(&source, 1, &job, &sink).unwrap();
         let restored = sink.store.lock().unwrap().materialize(Some(2)).unwrap();
@@ -3021,7 +3021,7 @@ mod tests {
     #[test]
     fn cold_streaming_expands_character_stub_in_embedded_block_backup() {
         let (directory, mut sink) = fixture();
-        let (_, payload) = write_cold_payload(directory.path(), "archived", &json!({"character":{"chaId":"char-1", "name":"Expanded in container", "chats":[{"id":"real-chat","message":[{"role":"user","data":"preserved"}]}]}}));
+        let (_, payload) = write_cold_payload(directory.path(), "archived", &json!({"character":{"chaId":"char-1", "name":"Expanded in container", "chats":[{"id":"real-chat","name":"Chat","message":[{"role":"user","data":"preserved"}]}]}}));
         let database = cold_block_source(directory.path(), br#"{"chaId":"char-1","chats":[{"id":"stub","message":[]}],"coldstorage":"archived"}"#, true);
         let archive = directory.path().join("backup.bin");
         let mut output = File::create(&archive).unwrap();
@@ -3074,11 +3074,11 @@ mod tests {
             let (directory, mut sink) = fixture();
             let payload = directory.path().join("duplicates.json");
             let header = "\u{ef01}COLDSTORAGE\u{ef01}payload";
-            let character = format!(r#"{{"chaId":"char-1","name":"Final","chats":[{{"id":"discarded","message":[]}}],"chats":[{{"id":"kept","message":[{{"role":"user","data":"discarded"}}],"message":[{{"role":"user","data":"{header}"}}]}}]}}"#);
+            let character = format!(r#"{{"chaId":"char-1","name":"Final","chats":[{{"id":"discarded","message":[]}}],"chats":[{{"id":"kept","name":"Chat","message":[{{"role":"user","data":"discarded"}}],"message":[{{"role":"user","data":"{header}"}}]}}]}}"#);
             let database_body;
             let final_messages = if empty { "[]" } else { r#"[{"role":"user","data":"kept"}]"# };
             if envelope {
-                let final_character = format!(r#"{{"chaId":"char-1","name":"Final","chats":[{{"id":"discarded","message":[]}}],"chats":[{{"id":"kept","message":[{{"role":"user","data":"discarded","time":9876}}],"message":{final_messages}}}]}}"#);
+                let final_character = format!(r#"{{"chaId":"char-1","name":"Final","chats":[{{"id":"discarded","message":[]}}],"chats":[{{"id":"kept","name":"Chat","message":[{{"role":"user","data":"discarded","time":9876}}],"message":{final_messages}}}]}}"#);
                 fs::write(&payload, format!(r#"{{"character":{{"chaId":"char-1","name":"Discarded","chats":[{{"id":"old","message":[]}}]}},"character":{final_character}}}"#)).unwrap();
                 database_body = br#"{"chaId":"char-1","chats":[],"coldstorage":"payload"}"#.to_vec();
             } else {
@@ -3105,7 +3105,7 @@ mod tests {
         for final_messages in ["[]", "null"] {
             let (directory, mut sink) = fixture();
             let header = "\u{ef01}COLDSTORAGE\u{ef01}missing-discarded-payload";
-            let character = format!(r#"{{"chaId":"char-1","chats":[{{"id":"kept","message":[{{"role":"user","data":"{header}","time":9876}}],"message":{final_messages}}}]}}"#);
+            let character = format!(r#"{{"chaId":"char-1","name":"Synthetic","chats":[{{"id":"kept","name":"Chat","message":[{{"role":"user","data":"{header}","time":9876}}],"message":{final_messages}}}]}}"#);
             let database = cold_block_source(directory.path(), character.as_bytes(), true);
             let archive = directory.path().join("reset.bin");
             let mut output = File::create(&archive).unwrap();
@@ -3224,7 +3224,7 @@ mod tests {
     fn official_cold_references_fail_before_activation() {
         for cold in [
             json!({"chaId":"char-1","name":"Stub","chats":[],"coldstorage":"missing-character"}),
-            json!({"chaId":"char-1","chats":[{"id":"chat-1","message":[{"role":"char","data":"\u{ef01}COLDSTORAGE\u{ef01}missing-chat"}]}]}),
+            json!({"chaId":"char-1","name":"Synthetic","chats":[{"id":"chat-1","name":"Chat","message":[{"role":"char","data":"\u{ef01}COLDSTORAGE\u{ef01}missing-chat"}]}]}),
         ] {
             let (directory, sink) = fixture();
             let mut blocks = valid_blocks();
@@ -3247,9 +3247,9 @@ mod tests {
         let (directory, sink) = fixture();
         let mut blocks = valid_blocks();
         blocks[6] = block(2, false, "char-1", &json!({
-            "chaId":"char-1","chats":[
-                {"message":[]},{"id":null,"message":[]},{"id":"","message":[]},
-                {"id":"existing","message":[]},{"id":"existing","message":[]}
+            "chaId":"char-1","name":"Synthetic","chats":[
+                {"name":"Chat","message":[]},{"id":null,"name":"Chat","message":[]},{"id":"","name":"Chat","message":[]},
+                {"id":"existing","name":"Chat","message":[]},{"id":"existing","name":"Chat","message":[]}
             ]
         }));
         let path = directory.path().join("ids.risudat");
