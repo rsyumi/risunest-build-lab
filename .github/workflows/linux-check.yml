@@ -10,7 +10,7 @@ on:
       scope:
         type: choice
         default: full
-        options: [full, packages, appearance-light, appearance-dark]
+        options: [full, packages, appearance-light, appearance-dark, appearance-codec]
 permissions:
   contents: read
 concurrency:
@@ -38,7 +38,7 @@ jobs:
           set -euo pipefail
           test "$GITHUB_REF" = refs/heads/main
           [[ "$SNAPSHOT_SHA" =~ ^[0-9a-f]{40}$ ]]
-          case "$CHECK_SCOPE" in full|packages|appearance-light|appearance-dark) ;; *) exit 1;; esac
+          case "$CHECK_SCOPE" in full|packages|appearance-light|appearance-dark|appearance-codec) ;; *) exit 1;; esac
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.sha }}

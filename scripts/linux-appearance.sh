@@ -1,6 +1,6 @@
 set -euo pipefail
 theme="${CHECK_SCOPE#appearance-}"
-case "$theme" in light|dark) ;; *) exit 1;; esac
+case "$theme" in light|dark) ;; codec) theme=light;; *) exit 1;; esac
 test "$GITHUB_ACTIONS" = true
 test -x "$HARNESS_BINARY"
 export DISPLAY=:91
@@ -34,6 +34,13 @@ for attempt in {1..50}; do
   kill -0 "$wm_pid"
   sleep 0.1
 done
+if [[ "$CHECK_SCOPE" == appearance-codec ]]; then
+  python3 benchmarks/linux/run.py --binary "$HARNESS_BINARY" \
+    --output artifacts/appearance-codec --phase appearance-app \
+    --app-theme light --system-theme light --capture-size 1280x900 \
+    --display-owner-pid "$xvfb_pid" --capture-codec-experiment
+  exit 0
+fi
 for app_theme in light dark; do
   output="artifacts/appearance-$theme-$app_theme"
   python3 benchmarks/linux/run.py --binary "$HARNESS_BINARY" --output "$output" \
