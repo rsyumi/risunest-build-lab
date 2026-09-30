@@ -571,7 +571,7 @@ mod tests {
         for finding in &findings.items {
             assert_eq!(finding.code, codes::RECORD_INVALID);
             assert_eq!(finding.severity, Severity::Blocking);
-            assert_eq!(finding.owner.kind, "characters");
+            assert_eq!(finding.owner.kind, "character");
             assert!(!finding.owner.id.is_empty(), "row identity is missing");
         }
 

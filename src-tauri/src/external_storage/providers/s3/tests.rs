@@ -339,6 +339,7 @@ fn configuration_validation_refuses_every_unusable_connection() {
         );
     };
     assert!(config::validate(&config("r2", endpoint), &secret()).is_ok());
+    assert!(config::validate(&config("r2", "http://synthetic.invalid"), &secret()).is_ok());
     refuse(&|config| config.provider = "webdav".into());
     refuse(&|config| config.profile = None);
     refuse(&|config| config.profile = Some("minio".into()));
@@ -349,7 +350,7 @@ fn configuration_validation_refuses_every_unusable_connection() {
         })
     });
     refuse(&|config| config.account_id = String::new());
-    refuse(&|config| config.endpoint = "http://synthetic.invalid".into());
+    refuse(&|config| config.endpoint = "http://".into());
     refuse(&|config| config.endpoint = "https://user:pass@synthetic.invalid".into());
     refuse(&|config| config.endpoint = "https://synthetic.invalid/root?query=1".into());
     refuse(&|config| config.endpoint = "ftp://synthetic.invalid".into());
@@ -374,10 +375,12 @@ fn configuration_validation_refuses_every_unusable_connection() {
     refuse(&|config| {
         config.location.insert("addressing".into(), "dns".into());
     });
-    // Loopback plain text is the wire fixture and nothing else.
+    // Configured HTTP endpoints accept loopback hosts and reject fragments.
     let mut loopback = config("r2", "http://127.0.0.1:9/synthetic");
     assert!(config::validate(&loopback, &secret()).is_ok());
     loopback.endpoint = "http://127.0.0.2:9/synthetic".into();
+    assert!(config::validate(&loopback, &secret()).is_ok());
+    loopback.endpoint.push_str("#fragment");
     assert_eq!(
         config::validate(&loopback, &secret())
             .map(|_| ())

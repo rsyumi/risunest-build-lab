@@ -2485,8 +2485,8 @@ mod tests {
             fs::read(&second.path).unwrap()
         );
         assert_eq!(
-            read_blocks(Path::new(&first.path))[0].value["account"]["token"],
-            "secret"
+            read_blocks(Path::new(&first.path))[0].value.get("account"),
+            None
         );
 
         let first_ownership = PathBuf::from(&first.path).with_extension("lease");
