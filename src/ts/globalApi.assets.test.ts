@@ -3,16 +3,21 @@ import { setRuntimePerformanceProfile } from './runtimePerformanceProfile'
 
 const state = vi.hoisted(() => ({
     isTauri: false,
+    isTauriIOS: false,
+    exportIOSFile: vi.fn(),
     isTauriMobile: false,
     blobStore: null as any,
     database: { characters: [] as any[] },
     activateConversation: vi.fn(async (_id: string) => true),
+    captureSelectedConversationTarget: vi.fn((): any => null),
     fencePersistentNavigation: vi.fn(),
     yieldToUi: vi.fn(async () => {}),
 }))
 
+vi.mock('./storage/iosFiles', () => ({ downloadIOSFile: vi.fn(), exportIOSFile: state.exportIOSFile }))
+vi.mock('./storage/nativePaths', () => ({ iosStagingPath: async () => '/synthetic/staging/owned', nativeDataPath: async () => '/synthetic/data' }))
 vi.mock('./platform', () => ({
-    isTauriIOS: false,
+    get isTauriIOS() { return state.isTauriIOS },
     get isTauri() {
         return state.isTauri
     },
@@ -24,6 +29,7 @@ vi.mock('./storage/platformBlobStore', () => ({
     configureBlobStoreStorageProvider: vi.fn(),
     readBlobForFacade: vi.fn(),
     resolveBlobStore: async () => state.blobStore,
+    subscribeNativeMediaEndpointChanges: vi.fn(() => vi.fn()),
 }))
 vi.mock('./storage/autoStorage', () => ({
     AutoStorage: class {
@@ -72,11 +78,13 @@ vi.mock('./alert', () => ({
     alertNormal: vi.fn(),
     alertNormalWait: vi.fn(),
     alertSelect: vi.fn(),
+    alertToast: vi.fn(),
     alertTOS: vi.fn(), alertRisuServiceTOS: vi.fn(),
     waitAlert: vi.fn(),
 }))
 vi.mock('./storage/persistentDataRuntime.svelte', () => ({
     activateConversation: state.activateConversation,
+    captureSelectedConversationTarget: state.captureSelectedConversationTarget,
     fencePersistentNavigation: state.fencePersistentNavigation,
     configurePersistentDataRuntime: vi.fn(),
     markPersistentDataDirty: vi.fn(),
@@ -137,6 +145,8 @@ import {
     TauriWriter,
 } from './globalApi.svelte'
 import { remove, writeFile } from '@tauri-apps/plugin-fs'
+import { alertToast } from './alert'
+import { doingChat } from './process/generationState'
 import { save } from '@tauri-apps/plugin-dialog'
 import { navigationActivity } from './ui/navigationActivity'
 import { get } from 'svelte/store'
@@ -167,12 +177,14 @@ function deferred<T>() {
 
 beforeEach(() => {
     vi.clearAllMocks()
+    state.isTauriIOS = false
     state.isTauri = false
     state.isTauriMobile = false
     state.database.characters.length = 0
     state.activateConversation.mockResolvedValue(true)
     state.yieldToUi.mockResolvedValue(undefined)
     setRuntimePerformanceProfile('normal')
+    state.isTauriIOS = false
     state.isTauri = false
     ;(forageStorage as any).isAccount = false
     vi.spyOn(console, 'error').mockImplementation(() => undefined)
@@ -191,6 +203,53 @@ describe('conversation navigation', () => {
 
         expect(state.fencePersistentNavigation).not.toHaveBeenCalled()
         expect(state.yieldToUi).not.toHaveBeenCalled()
+        expect(get(navigationActivity)).toBeNull()
+    })
+
+    test('keeps the open conversation without reloading it', async () => {
+        state.database.characters[0].chatPage = 1
+        state.captureSelectedConversationTarget.mockReturnValueOnce({
+            characterId: 'character-a',
+            conversationId: 'chat-b',
+        })
+        doingChat.set(true)
+        try {
+            await expect(changeChatTo('chat-b')).resolves.toBe(true)
+        } finally {
+            doingChat.set(false)
+        }
+
+        expect(state.fencePersistentNavigation).not.toHaveBeenCalled()
+        expect(state.yieldToUi).not.toHaveBeenCalled()
+        expect(state.activateConversation).not.toHaveBeenCalled()
+        expect(alertToast).not.toHaveBeenCalled()
+        expect(get(navigationActivity)).toBeNull()
+    })
+
+    test('activates the selected row when the open conversation differs', async () => {
+        state.database.characters[0].chatPage = 0
+        state.captureSelectedConversationTarget.mockReturnValueOnce({
+            characterId: 'character-a',
+            conversationId: 'chat-b',
+        })
+
+        await expect(changeChatTo('chat-b')).resolves.toBe(true)
+
+        expect(state.fencePersistentNavigation).toHaveBeenCalledOnce()
+        expect(state.activateConversation).toHaveBeenCalledWith('chat-b')
+    })
+
+    test('refuses a chat switch during generation without fencing the running response', async () => {
+        doingChat.set(true)
+        try {
+            await expect(changeChatTo('chat-b')).resolves.toBe(false)
+        } finally {
+            doingChat.set(false)
+        }
+
+        expect(state.fencePersistentNavigation).not.toHaveBeenCalled()
+        expect(state.activateConversation).not.toHaveBeenCalled()
+        expect(alertToast).toHaveBeenCalledOnce()
         expect(get(navigationActivity)).toBeNull()
     })
 
@@ -592,5 +651,64 @@ describe('LocalWriter streamed backup entries', () => {
             destinationError,
         )
         expect(cleaned).toBe(true)
+    })
+})
+
+describe('iOS LocalWriter completed-file publication', () => {
+    beforeEach(() => {
+        state.isTauri = true
+        state.isTauriIOS = true
+        state.exportIOSFile.mockReset().mockResolvedValue({ bytes: 3 })
+    })
+    test('streams to owned staging and publishes only after closing', async () => {
+        const writer = new LocalWriter()
+        await writer.init('Card', ['png'], '캐릭터.png')
+        await writer.write(Uint8Array.of(1, 2, 3))
+        expect(save).not.toHaveBeenCalled()
+        expect(state.exportIOSFile).not.toHaveBeenCalled()
+        await writer.close()
+        expect(writeFile).toHaveBeenLastCalledWith('/synthetic/staging/owned/export.bin', Uint8Array.of(1, 2, 3), { append: false })
+        expect(state.exportIOSFile).toHaveBeenCalledExactlyOnceWith({ sourcePath: '/synthetic/staging/owned/export.bin', suggestedName: '캐릭터.png' })
+        expect(remove).toHaveBeenCalledExactlyOnceWith('/synthetic/staging/owned', { recursive: true })
+        await writer.close()
+        expect(state.exportIOSFile).toHaveBeenCalledOnce()
+    })
+    test.each([new DOMException('cancelled', 'AbortError'), new Error('provider failed')])('cleans staging and propagates publication failure %s', async (error) => {
+        const writer = new LocalWriter()
+        await writer.init()
+        state.exportIOSFile.mockRejectedValueOnce(error)
+        await expect(writer.close()).rejects.toBe(error)
+        expect(remove).toHaveBeenCalledOnce()
+    })
+    test('cleans staging on abort without publishing buffered bytes', async () => {
+        const writer = new LocalWriter()
+        await writer.init()
+        await writer.write(Uint8Array.of(1))
+        await writer.abort()
+        expect(state.exportIOSFile).not.toHaveBeenCalled()
+        expect(remove).toHaveBeenCalledOnce()
+        await expect(writer.close()).rejects.toThrow('aborted')
+    })
+    test('retains staging while an open Files picker settles', async () => {
+        let settle!: () => void
+        state.exportIOSFile.mockImplementation(() => new Promise<void>(resolve => { settle = resolve }))
+        const writer = new LocalWriter()
+        await writer.init()
+        const closing = writer.close()
+        await vi.waitFor(() => expect(state.exportIOSFile).toHaveBeenCalledOnce())
+        const aborting = writer.abort()
+        expect(remove).not.toHaveBeenCalled()
+        settle()
+        await Promise.all([closing, aborting])
+        expect(remove).toHaveBeenCalledOnce()
+    })
+    test('does not publish after a failed final flush', async () => {
+        const writer = new LocalWriter()
+        await writer.init()
+        await writer.write(Uint8Array.of(1))
+        vi.mocked(writeFile).mockRejectedValueOnce(new Error('flush failed'))
+        await expect(writer.close()).rejects.toThrow('flush failed')
+        expect(state.exportIOSFile).not.toHaveBeenCalled()
+        expect(remove).toHaveBeenCalledOnce()
     })
 })

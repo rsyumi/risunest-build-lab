@@ -1,8 +1,14 @@
+import type { MobileBackgroundTask, MobileTaskKind } from '../../../mobileBackgroundTask'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { ExternalJobSummary, ExternalStorageState } from './types'
 import type { CommittedApplyOutcome } from '../../persistentDataRuntime'
 
 const mocks = vi.hoisted(() => ({
+    protected: false,
+    desktop: false,
+    protectScopes: false,
+    scopes: 0,
+    backgroundChanged: undefined as (() => void) | undefined,
     persistentRuntime: {},
     revision: 8,
     listener: undefined as ((revision: number) => void) | undefined,
@@ -34,6 +40,28 @@ const mocks = vi.hoisted(() => ({
     pendingContinuation: undefined as undefined | (() => void | Promise<void>),
     registerContinuation: vi.fn(),
 }))
+
+vi.mock('../../../mobileBackgroundTask', async original => {
+    const actual = await original<typeof import('../../../mobileBackgroundTask')>()
+    return {
+        ...actual,
+        hasMobileBackgroundTasks: () => mocks.protected || (mocks.protectScopes && mocks.scopes > 0),
+        runWithMobileBackgroundTask<T>(kind: MobileTaskKind, operation: (task: MobileBackgroundTask) => Promise<T>, signal?: AbortSignal) {
+            mocks.scopes++
+            return actual.runWithMobileBackgroundTask(kind, operation, signal).finally(() => {
+                mocks.scopes--
+                mocks.backgroundChanged?.()
+            })
+        },
+        subscribeMobileBackgroundTasks: (listener: () => void) => {
+            mocks.backgroundChanged = listener
+            return () => { mocks.backgroundChanged = undefined }
+        },
+    }
+})
+
+vi.mock('../../../platform', () => ({ isTauri: false, isTauriAndroid: false, isTauriIOS: false, get isTauriDesktop() { return mocks.desktop } }))
+vi.mock('../../deviceStateRestore', () => ({ flushDeviceStateBeforeRestore: vi.fn(), refreshDeviceStateAfterRestore: vi.fn() }))
 
 vi.mock('./bridge', () => ({
     getExternalStorageBridge: () => mocks.bridge,
@@ -109,7 +137,7 @@ const initialState: ExternalStorageState = {
             sdkOverheadBytes: 0,
             uploadAlignment: 1,
         },
-        status: 'ready',
+        status: 'ready', automaticBackupPaused: false,
     }],
     jobs: [],
 }
@@ -130,6 +158,115 @@ function succeeded(connectionId: string, revision: string): ExternalJobSummary {
 }
 
 describe('external storage production integration', () => {
+    it('supplies an explicit exit drain for a paused target while automatic destinations stay paused', async () => {
+        vi.useFakeTimers()
+        let dispose: (() => void) | undefined
+        try {
+            mocks.bridge.getState.mockResolvedValue({
+                ...initialState,
+                selection: { ...initialState.selection, paused: true },
+                connections: [
+                    ...initialState.connections,
+                    { ...initialState.connections[0], id: 'paused-backup', purpose: 'backup', automaticBackupPaused: true },
+                ],
+            })
+            const { installExternalStorageProduction, getExternalStorageSyncExitDrainAdapter } = await import('./production')
+            dispose = await installExternalStorageProduction()
+            expect(getExternalStorageSyncExitDrainAdapter()?.id).toBe('external:old-sync:old-epoch')
+            mocks.listener?.(9)
+            await vi.advanceTimersByTimeAsync(310_000)
+            expect(mocks.bridge.startJob).not.toHaveBeenCalled()
+        } finally {
+            dispose?.()
+            vi.useRealTimers()
+        }
+    })
+
+    it('keeps desktop work alive when the window becomes hidden', async () => {
+        mocks.desktop = true
+        const { installExternalStorageProduction } = await import('./production')
+        await installExternalStorageProduction()
+        mocks.bridge.setExecutionSession.mockClear()
+        const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden')
+        document.dispatchEvent(new Event('visibilitychange'))
+        await Promise.resolve()
+        await Promise.resolve()
+        expect(mocks.bridge.setExecutionSession).not.toHaveBeenCalled()
+        expect(mocks.bridge.cancelJob).not.toHaveBeenCalled()
+        visibility.mockRestore()
+    })
+
+    it.each([
+        ['pin-history', 'pinRequest', { snapshotId: 'snapshot-8' }],
+        ['delete-history', 'deleteRequest', { pointId: 'point-8', pointObservation: 'observation-8', confirmOtherDevice: true, confirmLastRetained: true }],
+        ['check-repository', 'checkRequest', { snapshotId: 'snapshot-8' }],
+    ] as const)('resumes %s with the exact retained request and job ID after recovery', async (kind, field, details) => {
+        const { installExternalStorageProduction, resumeExternalStorageJob } = await import('./production')
+        await installExternalStorageProduction()
+        const job: ExternalJobSummary = { ...succeeded('old-sync', '8'), id: 'retained-history', kind,
+            state: 'waiting', phase: 'paused', reason: 'manual', [field]: details }
+        await expect(resumeExternalStorageJob(job)).resolves.toMatchObject({ kind: 'complete' })
+        expect(mocks.bridge.startJob).toHaveBeenCalledWith(expect.objectContaining({
+            connectionId: 'old-sync', kind, reason: 'manual', ...details,
+        }), 'retained-history')
+        expect(mocks.flush).not.toHaveBeenCalled()
+    })
+
+    it('does not restart automatic sync on later edits while authorization is blocked', async () => {
+        vi.useFakeTimers()
+        try {
+            const { installExternalStorageProduction, requestExternalStorageNow } = await import('./production')
+            await installExternalStorageProduction()
+            mocks.bridge.startJob.mockResolvedValue({ ...succeeded('old-sync', '8'), state: 'waiting', phase: 'paused',
+                error: { code: 'reauthRequired', action: 'reauthenticate', retryable: false } })
+            await requestExternalStorageNow('old-sync', 'sync')
+            mocks.bridge.startJob.mockClear()
+            mocks.listener?.(9)
+            await vi.advanceTimersByTimeAsync(60_000)
+            expect(mocks.bridge.startJob).not.toHaveBeenCalled()
+        } finally { vi.useRealTimers() }
+    })
+
+    it('cancels a stopped restore before releasing its edit fence', async () => {
+        const { installExternalStorageProduction, requestExternalStorageRestore } = await import('./production')
+        await installExternalStorageProduction()
+        let stopped: ExternalJobSummary
+        mocks.bridge.startJob.mockImplementation(async (_request, id) => stopped = {
+            ...succeeded('old-sync', '8'), id, kind: 'restore', state: 'waiting', phase: 'paused',
+            error: { code: 'reauthRequired', message: 'Sign in required', action: 'reauthenticate', retryable: false },
+        })
+        mocks.bridge.cancelJob.mockImplementation(async () => {
+            expect(mocks.releaseFence).not.toHaveBeenCalled()
+            return { ...stopped, state: 'cancelled', applicationStarted: false }
+        })
+        await expect(requestExternalStorageRestore('old-sync', 'snapshot', ['library'])).rejects.toThrow('Sign in required')
+        expect(mocks.bridge.cancelJob).toHaveBeenCalledOnce()
+        expect(mocks.releaseFence).toHaveBeenCalledOnce()
+    })
+
+    it('retries a stopped restore with the identical admission request while retaining its fence', async () => {
+        const { installExternalStorageProduction, requestExternalStorageRestore } = await import('./production')
+        await installExternalStorageProduction()
+        vi.useFakeTimers()
+        try {
+            let starts = 0
+            mocks.bridge.startJob.mockImplementation(async (_request, id) => {
+                expect(mocks.releaseFence).not.toHaveBeenCalled()
+                return ++starts === 1 ? {
+                    ...succeeded('old-sync', '8'), id, kind: 'restore', state: 'waiting', phase: 'paused',
+                    error: { code: 'transient', message: 'Retry', action: 'retry', retryable: true },
+                } : { ...succeeded('old-sync', '8'), id, kind: 'restore', result: { receivedRevision: '9' } }
+            })
+            const operation = requestExternalStorageRestore('old-sync', 'snapshot', ['library'])
+            await vi.advanceTimersByTimeAsync(5_100)
+            await expect(operation).resolves.toMatchObject({ state: 'succeeded' })
+            const calls = mocks.bridge.startJob.mock.calls
+            expect(calls).toHaveLength(2)
+            expect(calls[1]).toEqual(calls[0])
+            expect(mocks.releaseFence).toHaveBeenCalledOnce()
+        } finally { vi.useRealTimers() }
+    })
+
     it('reports deferred history deletion without polling a stopped manual job forever', async () => {
         const { installExternalStorageProduction, requestExternalStorageDeleteHistory } = await import('./production')
         const dispose = await installExternalStorageProduction()
@@ -152,9 +289,24 @@ describe('external storage production integration', () => {
         dispose()
     })
 
-    beforeEach(() => {
+    beforeEach(async () => {
+        mocks.desktop = false
+        mocks.protected = false
+        mocks.protectScopes = false
+        mocks.scopes = 0
+        mocks.backgroundChanged = undefined
         vi.resetModules()
         vi.clearAllMocks()
+        const persistent = await import('../../persistentDataRuntime.svelte')
+        vi.mocked(persistent.capturePersistentMutationToken).mockReset().mockImplementation(async () => ({
+            revision: mocks.revision, mutationGeneration: 1,
+        }))
+        vi.mocked(persistent.acquireDestructiveReplacementFence).mockReset().mockImplementation(async () => ({
+            revision: mocks.revision,
+            refreshCommittedWorkingSet: mocks.refreshWorkingSet,
+            release: mocks.releaseFence,
+        }))
+        delete (mocks.persistentRuntime as { revision?: number }).revision
         mocks.releaseFence.mockReset()
         mocks.flush.mockReset().mockResolvedValue(undefined)
         mocks.reloadPlugins.mockReset().mockResolvedValue(undefined)
@@ -164,6 +316,7 @@ describe('external storage production integration', () => {
         mocks.refreshReleased.mockReset().mockImplementation(async revision => ({
             kind: 'committed', revision, projection: 'applied',
         }))
+        mocks.bridge.cancelJob.mockReset().mockImplementation(async id => ({ ...succeeded('old-sync', '8'), id, state: 'cancelled' }))
         mocks.bridge.getJob.mockReset()
         mocks.bridge.applyReceived.mockReset()
         mocks.pendingContinuation = undefined
@@ -183,7 +336,7 @@ describe('external storage production integration', () => {
         mocks.bridge.releaseConflictSource.mockResolvedValue(undefined)
         mocks.revision = 8
         mocks.bridge.getState.mockResolvedValue(initialState)
-        mocks.bridge.startJob.mockImplementation(async request =>
+        mocks.bridge.startJob.mockReset().mockImplementation(async request =>
             succeeded(request.connectionId, request.targetRevision ?? '0'))
     })
     afterEach(async () => {
@@ -192,7 +345,7 @@ describe('external storage production integration', () => {
         dispose()
     })
 
-    it('uses a fresh native exit capture instead of cached selection and drains paused sync', async () => {
+    it('uses a fresh native exit capture instead of cached selection and resumes only after exit fence release', async () => {
         const {
             getExternalStorageSyncExitDrainAdapter,
             installExternalStorageProduction,
@@ -201,7 +354,7 @@ describe('external storage production integration', () => {
         const adapter = getExternalStorageSyncExitDrainAdapter({
             selection: {
                 kind: 'external', id: 'new-sync', selectionEpoch: 'new-epoch',
-                paused: true, decisionRequired: false,
+                paused: false, decisionRequired: false,
             },
         })
         expect(adapter?.id).toBe('external:new-sync:new-epoch')
@@ -230,7 +383,7 @@ describe('external storage production integration', () => {
         const returning = getExternalStorageSyncExitDrainAdapter({
             selection: {
                 kind: 'external', id: 'new-sync', selectionEpoch: 'new-epoch',
-                paused: true, decisionRequired: false,
+                paused: false, decisionRequired: false,
             },
         })!
         await returning.drain({
@@ -240,9 +393,158 @@ describe('external storage production integration', () => {
             selectionId: 'external:new-sync:new-epoch',
         }, abort.signal)
         await returning.cancel('cancel-exit')
+        expect(mocks.bridge.setExecutionSession).toHaveBeenLastCalledWith(expect.objectContaining({ kind: 'exitDrain' }))
+        await returning.resumeAfterExitCancel?.()
         expect(mocks.bridge.setExecutionSession).toHaveBeenLastCalledWith(expect.objectContaining({
             kind: 'foreground',
         }))
+    })
+
+    it.each([
+        ['flush', 'complete'], ['capture', 'complete'], ['acquire', 'complete'],
+        ['flush', 'stale'], ['flush', 'failure'],
+    ] as const)(
+        'handles a foreground receive meeting the exit fence during %s (%s)', async (phase, outcome) => {
+        const { PersistentMutationFencedError } = await import('../../saveCoordinator')
+        const { retainableReplacementFence } = await import('../../retainableReplacementFence')
+        const persistent = await import('../../persistentDataRuntime.svelte')
+        const {
+            getExternalStorageSyncExitDrainAdapter,
+            installExternalStorageProduction,
+            requestExternalStorageNow,
+        } = await import('./production')
+        await installExternalStorageProduction()
+        const runtimeState = mocks.persistentRuntime as { revision?: number }
+        runtimeState.revision = 8
+        let rejectPreparation!: (error: Error) => void
+        const preparing = new Promise<never>((_resolve, reject) => { rejectPreparation = reject })
+        let entered = false
+        const blockPreparation = () => { entered = true; return preparing }
+        if (phase === 'flush') {
+            mocks.flush.mockImplementation(reason => reason === 'external-storage-sync-receive'
+                ? blockPreparation() : Promise.resolve())
+        } else if (phase === 'capture') {
+            vi.mocked(persistent.capturePersistentMutationToken).mockImplementationOnce(async () => ({
+                revision: 8, mutationGeneration: 1,
+            })).mockImplementationOnce(blockPreparation)
+        } else {
+            vi.mocked(persistent.acquireDestructiveReplacementFence).mockImplementationOnce(blockPreparation)
+        }
+        const physicalRelease = vi.fn()
+        const exitFence = retainableReplacementFence({
+            revision: 8,
+            refreshCommittedWorkingSet: mocks.refreshWorkingSet,
+            release: physicalRelease,
+        })
+        mocks.bridge.startJob
+            .mockResolvedValueOnce({
+                ...succeeded('old-sync', '0'), state: 'waiting', phase: 'remote-apply',
+                result: { receiveReady: true, snapshotId: 'remote', expectedRevision: outcome === 'stale' ? '7' : '8' },
+            })
+            .mockResolvedValueOnce(succeeded('old-sync', '9'))
+        mocks.bridge.applyReceived.mockResolvedValue({ snapshotId: 'remote', receivedRevision: '9' })
+        mocks.bridge.getJob.mockResolvedValue({
+            ...succeeded('old-sync', '0'), result: { snapshotId: 'remote', receivedRevision: '9' },
+        })
+        const foreground = requestExternalStorageNow('old-sync', 'sync')
+        await vi.waitFor(() => expect(entered).toBe(true))
+        const adapter = getExternalStorageSyncExitDrainAdapter(undefined, exitFence)!
+        const draining = adapter.drain({
+            revision: 8, libraryEpoch: 'library', selectionEpoch: 'old-epoch',
+            selectionId: adapter.id,
+        }, new AbortController().signal)
+        await vi.waitFor(() => expect(mocks.bridge.setExecutionSession).toHaveBeenCalledWith(
+            expect.objectContaining({ kind: 'exitDrain' }),
+        ))
+        rejectPreparation(outcome === 'failure' ? new Error('synthetic I/O failure') : new PersistentMutationFencedError())
+        if (outcome === 'complete') {
+            await expect(draining).resolves.toEqual({ kind: 'complete' })
+            await expect(foreground).resolves.toMatchObject({ kind: 'complete' })
+            expect(mocks.bridge.applyReceived).toHaveBeenCalledWith('job-old-sync', '8')
+            expect(mocks.refreshWorkingSet).toHaveBeenCalledWith(9, undefined)
+        } else {
+            const reason = outcome === 'stale'
+                ? 'Local data changed while external sync receive was prepared'
+                : 'synthetic I/O failure'
+            await expect(draining).resolves.toEqual({ kind: 'blocked', reason })
+            await expect(foreground).resolves.toMatchObject({ kind: 'blocked', reason })
+            expect(mocks.bridge.applyReceived).not.toHaveBeenCalled()
+            expect(mocks.refreshWorkingSet).not.toHaveBeenCalled()
+            if (outcome === 'stale') expect(mocks.bridge.cancelJob).toHaveBeenCalledWith('job-old-sync')
+            else expect(mocks.bridge.cancelJob).not.toHaveBeenCalled()
+        }
+        expect(physicalRelease).not.toHaveBeenCalled()
+        exitFence.release()
+        expect(physicalRelease).toHaveBeenCalledOnce()
+        delete runtimeState.revision
+    })
+
+    it('applies receives during an exit drain under the held exit fence', async () => {
+        const { retainableReplacementFence } = await import('../../retainableReplacementFence')
+        const persistent = await import('../../persistentDataRuntime.svelte')
+        const {
+            getExternalStorageSyncExitDrainAdapter,
+            installExternalStorageProduction,
+        } = await import('./production')
+        await installExternalStorageProduction()
+        vi.mocked(persistent.capturePersistentMutationToken).mockClear()
+        const runtimeState = mocks.persistentRuntime as { revision?: number }
+        runtimeState.revision = 12
+        mocks.flush.mockRejectedValue(new Error('synthetic fenced flush'))
+        mocks.refreshWorkingSet.mockImplementation(async revision => {
+            runtimeState.revision = revision
+            return { kind: 'committed', revision, projection: 'applied' }
+        })
+        const physicalRelease = vi.fn()
+        const exitFence = retainableReplacementFence({
+            revision: 12,
+            refreshCommittedWorkingSet: mocks.refreshWorkingSet,
+            release: physicalRelease,
+        })
+        const ready = (expectedRevision: `${number}`): ExternalJobSummary => ({
+            ...succeeded('old-sync', '0'),
+            id: `receive-${expectedRevision}`,
+            state: 'waiting',
+            phase: 'remote-apply',
+            result: { receiveReady: true, snapshotId: 'remote', expectedRevision },
+        })
+        mocks.bridge.startJob
+            .mockResolvedValueOnce(ready('12'))
+            .mockResolvedValueOnce(ready('13'))
+            .mockResolvedValueOnce(succeeded('old-sync', '14'))
+        mocks.bridge.applyReceived.mockImplementation(async (_id: string, expected: string) => ({
+            snapshotId: 'remote', receivedRevision: String(Number(expected) + 1),
+        }))
+        mocks.bridge.getJob.mockImplementation(async (id: string) => ({
+            ...succeeded('old-sync', '0'),
+            id,
+            result: { snapshotId: 'remote', receivedRevision: String(Number(id.slice(8)) + 1) },
+        }))
+        const adapter = getExternalStorageSyncExitDrainAdapter({
+            selection: {
+                kind: 'external', id: 'old-sync', selectionEpoch: 'old-epoch',
+                paused: false, decisionRequired: false,
+            },
+        }, exitFence)!
+
+        await expect(adapter.drain({
+            revision: 12,
+            libraryEpoch: 'library-epoch',
+            selectionEpoch: 'old-epoch',
+            selectionId: 'external:old-sync:old-epoch',
+        }, new AbortController().signal)).resolves.toEqual({ kind: 'complete' })
+        expect(mocks.flush).not.toHaveBeenCalled()
+        expect(persistent.capturePersistentMutationToken).not.toHaveBeenCalled()
+        expect(persistent.acquireDestructiveReplacementFence).not.toHaveBeenCalled()
+        expect(mocks.bridge.applyReceived.mock.calls).toEqual([
+            ['receive-12', '12'],
+            ['receive-13', '13'],
+        ])
+        expect(mocks.refreshWorkingSet.mock.calls.map(([revision]) => revision)).toEqual([13, 14])
+        expect(physicalRelease).not.toHaveBeenCalled()
+        exitFence.release()
+        expect(physicalRelease).toHaveBeenCalledOnce()
+        delete runtimeState.revision
     })
 
     it('flushes locally before fixing the manual goal revision', async () => {
@@ -256,6 +558,58 @@ describe('external storage production integration', () => {
         expect(mocks.bridge.startJob).toHaveBeenCalledWith(expect.objectContaining({
             targetRevision: '17', reason: 'manual',
         }))
+    })
+
+    it('protects manual synchronization while local saving is still pending', async () => {
+        let visibility: DocumentVisibilityState = 'visible'
+        const visible = vi.spyOn(document, 'visibilityState', 'get').mockImplementation(() => visibility)
+        let finish!: () => void
+        try {
+            const { installExternalStorageProduction, requestExternalStorageNow } = await import('./production')
+            await installExternalStorageProduction()
+            mocks.protectScopes = true
+            mocks.flush.mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve }))
+            const result = requestExternalStorageNow('old-sync', 'sync')
+            expect(mocks.scopes).toBe(1)
+            visibility = 'hidden'
+            document.dispatchEvent(new Event('visibilitychange'))
+            await Promise.resolve()
+            expect(mocks.bridge.setExecutionSession).toHaveBeenCalledTimes(1)
+            expect(mocks.bridge.startJob).not.toHaveBeenCalled()
+            finish()
+            await expect(result).resolves.toMatchObject({ kind: 'complete' })
+            expect(mocks.bridge.startJob).toHaveBeenCalledWith(expect.objectContaining({ session: 'foreground' }))
+            await vi.waitFor(() => expect(mocks.bridge.setExecutionSession.mock.lastCall?.[0].kind).toBe('hidden'))
+        } finally { visible.mockRestore() }
+    })
+
+    it('keeps the same protected execution session through Home and foreground return', async () => {
+        let visibility: DocumentVisibilityState = 'visible'
+        const visible = vi.spyOn(document, 'visibilityState', 'get').mockImplementation(() => visibility)
+        try {
+            const { installExternalStorageProduction } = await import('./production')
+            await installExternalStorageProduction()
+            const session = mocks.bridge.setExecutionSession.mock.calls[0][0]
+            mocks.protected = true
+            visibility = 'hidden'
+            document.dispatchEvent(new Event('visibilitychange'))
+            await Promise.resolve()
+            await Promise.resolve()
+            expect(mocks.bridge.setExecutionSession).toHaveBeenCalledExactlyOnceWith(session)
+            expect(mocks.bridge.cancelJob).not.toHaveBeenCalled()
+            visibility = 'visible'
+            document.dispatchEvent(new Event('visibilitychange'))
+            await vi.waitFor(() => expect(mocks.bridge.getState).toHaveBeenCalledTimes(2))
+            expect(mocks.bridge.setExecutionSession).toHaveBeenCalledExactlyOnceWith(session)
+            visibility = 'hidden'
+            document.dispatchEvent(new Event('visibilitychange'))
+            await Promise.resolve()
+            mocks.desktop = false
+        mocks.protected = false
+            mocks.backgroundChanged?.()
+            await vi.waitFor(() => expect(mocks.bridge.setExecutionSession).toHaveBeenCalledTimes(2))
+            expect(mocks.bridge.setExecutionSession.mock.lastCall?.[0].kind).toBe('hidden')
+        } finally { visible.mockRestore() }
     })
 
     it('serializes hidden invalidation before a new foreground inspection', async () => {

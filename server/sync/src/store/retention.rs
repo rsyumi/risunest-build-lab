@@ -149,14 +149,15 @@ impl Store {
             validate_hash(&object.hash)?;
             validate_hash(&object.retention_id)?;
             // A replacement registration can release its revoked predecessor's
-            // custody, but must still possess the exact local retention ID.
+            // custody, but must still possess the exact local retention ID. A
+            // predecessor that maintenance already removed held no custody.
             if object.device_id != device.id {
-                let revoked: bool = tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM devices WHERE id=?1 AND revoked=1)",
+                let active: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM devices WHERE id=?1 AND revoked=0)",
                     [&object.device_id],
                     |r| r.get(0),
                 )?;
-                if !revoked {
+                if active {
                     return Err(Error::new("retention-device-active", 409));
                 }
             }

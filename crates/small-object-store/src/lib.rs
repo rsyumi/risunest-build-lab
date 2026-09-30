@@ -92,7 +92,7 @@ impl std::io::Seek for Body {
 
 /// Lowercase hexadecimal SHA-256, the identity both owners already use.
 pub fn identity(bytes: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(bytes))
+    hex::encode(Sha256::digest(bytes))
 }
 
 fn check_identity(hash: &str) -> Result<()> {

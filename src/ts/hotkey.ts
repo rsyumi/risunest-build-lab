@@ -204,7 +204,7 @@ export function initHotkey(){
             if(doingAlert()){
                 alertToast('Alert Closed')
             }
-            if(get(settingsOpen)){
+            else if(get(settingsOpen)){
                 settingsOpen.set(false)
             }
             ev.preventDefault()

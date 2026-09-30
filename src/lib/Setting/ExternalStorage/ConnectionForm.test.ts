@@ -5,6 +5,7 @@ import { mount, tick, unmount } from 'svelte'
 const state = vi.hoisted(() => ({
     listProviders: vi.fn(),
     prepareConnection: vi.fn(),
+    prepareRenewal: vi.fn(),
     prepareConnectionSettingsImport: vi.fn(),
     commitConnection: vi.fn(),
     beginAuthorization: vi.fn(),
@@ -16,9 +17,10 @@ const state = vi.hoisted(() => ({
     openUrl: vi.fn(),
 }))
 
+const platformState = vi.hoisted(() => ({ android: true, ios: false }))
 vi.mock('src/ts/platform', () => ({
-    isTauriAndroid: true,
-    isTauriIOS: false,
+    get isTauriAndroid() { return platformState.android },
+    get isTauriIOS() { return platformState.ios },
 }))
 vi.mock('@tauri-apps/plugin-os', () => ({ type: () => 'android' }))
 vi.mock('@tauri-apps/plugin-opener', () => ({ openUrl: state.openUrl }))
@@ -26,6 +28,7 @@ vi.mock('src/ts/storage/sync/external/bridge', () => ({
     getExternalStorageBridge: () => ({
         listProviders: state.listProviders,
         prepareConnection: state.prepareConnection,
+        prepareRenewal: state.prepareRenewal,
         prepareConnectionSettingsImport: state.prepareConnectionSettingsImport,
         commitConnection: state.commitConnection,
         beginAuthorization: state.beginAuthorization,
@@ -153,6 +156,8 @@ async function beginGoogleAuthorization(): Promise<void> {
 }
 
 beforeEach(() => {
+    platformState.android = true
+    platformState.ios = false
     for (const mock of Object.values(state)) mock.mockReset()
     target = document.createElement('div')
     document.body.append(target)
@@ -807,5 +812,84 @@ describe('native failure messages', () => {
             )
         })
         expect(target.textContent).not.toContain(strings.unsupportedOperation)
+    })
+})
+
+describe('authorization completion ownership', () => {
+    it('can cancel an awaited completion and returns quietly to the prepared form', async () => {
+        const connected = vi.fn()
+        component = mount(ConnectionForm, { target, props: { strings, onconnected: connected, oncancel: vi.fn() } })
+        await beginGoogleAuthorization()
+        let rejectCompletion!: (reason: unknown) => void
+        state.completeAuthorization.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectCompletion = reject }))
+        button(strings.finishSignIn).click()
+        await settle()
+        expect(formFieldset().disabled).toBe(true)
+        const cancel = [...target.querySelectorAll('button')].find(control =>
+            control.textContent?.trim() === strings.cancel && !control.closest('fieldset'))!
+        expect(cancel).toBeDefined()
+        expect(cancel.disabled).toBe(false)
+        cancel.click()
+        await settle()
+        expect(state.cancelAuthorization).toHaveBeenCalledWith('authorization-1')
+        rejectCompletion({ kind: 'cancelled' })
+        await vi.waitFor(() => expect(formFieldset().disabled).toBe(false))
+        expect(state.cancelAuthorization).toHaveBeenCalledOnce()
+        expect(connected).not.toHaveBeenCalled()
+        expect(target.textContent).not.toContain(strings.interrupted)
+        expect(button(strings.signIn)).toBeDefined()
+    })
+
+    it('cancels a completion still in flight when the form is disposed', async () => {
+        component = mount(ConnectionForm, { target, props: { strings, onconnected: vi.fn(), oncancel: vi.fn() } })
+        await beginGoogleAuthorization()
+        let rejectCompletion!: (reason: unknown) => void
+        state.completeAuthorization.mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectCompletion = reject }))
+        button(strings.finishSignIn).click()
+        await settle()
+        await unmount(component!)
+        component = undefined
+        expect(state.cancelAuthorization).toHaveBeenCalledWith('authorization-1')
+        rejectCompletion({ kind: 'cancelled' })
+        await settle()
+    })
+})
+
+describe('authorization waiting copy and renewal', () => {
+    it.each([
+        ['desktop', 'google_drive'], ['desktop', 'onedrive'],
+        ['android', 'google_drive'], ['android', 'onedrive'],
+        ['ios', 'google_drive'], ['ios', 'onedrive'],
+    ] as const)('shows actionable waiting instructions on %s for %s', async (platform, provider) => {
+        platformState.android = platform === 'android'
+        platformState.ios = platform === 'ios'
+        component = mount(ConnectionForm, { target, props: { strings, onconnected: vi.fn(), oncancel: vi.fn() } })
+        await settle()
+        if (provider !== 'google_drive') await selectProvider(provider)
+        await beginGoogleAuthorization()
+        expect(target.textContent).toContain(platform === 'desktop' ? strings.authorizationWaiting : strings.authorizationWaitingMobile)
+        expect(target.textContent?.includes(strings.manualOAuthHelp)).toBe(platform === 'android' && provider === 'google_drive')
+    })
+
+    it('renews an existing connection without editing its provider configuration', async () => {
+        const connected = vi.fn()
+        const renewed = { id: 'existing', providerId: 'webdav', purpose: 'backup' } as import('src/ts/storage/sync/external/types').ExternalConnectionSummary
+        state.prepareRenewal.mockResolvedValue({ ...prepared, requiresOAuth: false })
+        state.commitConnection.mockResolvedValue({ connection: renewed })
+        component = mount(ConnectionForm, { target, props: { strings, renewalConnection: renewed, onconnected: connected, oncancel: vi.fn() } })
+        await settle()
+        expect(state.prepareRenewal).toHaveBeenCalledWith('existing')
+        expect(target.querySelector('select')).toBeNull()
+        labelControl<HTMLInputElement>(strings.confirmEndpoint).click()
+        await settle()
+        const password = target.querySelector<HTMLInputElement>('input[type="password"]')!
+        expect(password).toBeDefined()
+        typeInto(password, 'synthetic-renewed-password')
+        await settle()
+        button(strings.connect).click()
+        await settle()
+        expect(state.commitConnection).toHaveBeenCalledWith('preparation-1', { kind: 'webdav', password: 'synthetic-renewed-password' })
+        expect(connected).toHaveBeenCalledWith({ connection: renewed })
+        expect(state.prepareConnection).not.toHaveBeenCalled()
     })
 })

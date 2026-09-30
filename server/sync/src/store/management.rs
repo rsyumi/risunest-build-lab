@@ -11,6 +11,8 @@ pub struct ManagedDevice {
     pub revoked: bool,
     pub pending: bool,
     pub registration_request: Option<String>,
+    pub retained: u64,
+    pub pending_error: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -26,7 +28,7 @@ pub struct ManagementConnection {
 impl Store {
     pub fn managed_devices(&self) -> Result<Vec<ManagedDevice>> {
         let db = self.reader()?;
-        let mut query = db.prepare("SELECT id,name,revoked,EXISTS(SELECT 1 FROM commit_jobs WHERE device=devices.id),registration_request FROM devices ORDER BY rowid")?;
+        let mut query = db.prepare("SELECT id,name,revoked,EXISTS(SELECT 1 FROM commit_jobs WHERE device=devices.id),registration_request,(SELECT count(*) FROM object_custody WHERE device=devices.id),(SELECT j.error FROM upload_jobs j JOIN uploads u ON u.id=j.upload WHERE u.device=devices.id AND j.terminal=0 AND j.error IS NOT NULL LIMIT 1) FROM devices ORDER BY rowid")?;
         let rows = query.query_map([], |row| {
             Ok(ManagedDevice {
                 id: row.get(0)?,
@@ -34,9 +36,21 @@ impl Store {
                 revoked: row.get(2)?,
                 pending: row.get(3)?,
                 registration_request: row.get(4)?,
+                retained: row.get::<_, i64>(5)? as u64,
+                pending_error: row.get(6)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)
+    }
+    pub fn forget_revoked_device(&self, id: &str) -> Result<()> {
+        risunest_sync_wire::validate_id(id)?;
+        let mut db = self.db()?;
+        let tx = db.transaction()?;
+        let revoked: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM devices WHERE id=?1 AND revoked=1)", [id], |row| row.get(0))?;
+        if !revoked { return Err(Error::new("revoked-device-required", 409)); }
+        tx.execute("DELETE FROM object_custody WHERE device=?1", [id])?;
+        tx.commit()?;
+        Ok(())
     }
     pub fn management_connection(&self) -> Result<ManagementConnection> {
         let _gate = self

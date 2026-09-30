@@ -30,6 +30,7 @@ vi.mock('../plugins.svelte', () => {
         customProviderStore: {
             subscribe: (run: (value: unknown) => void) => { run([]); return () => undefined },
             set: vi.fn(),
+            update: vi.fn(),
         },
         getV2PluginAPIs: () => oldApis,
         handlePluginInstallViaPlugin: vi.fn(),
@@ -250,7 +251,7 @@ function __postToParent(message) {
             vi.spyOn(child, 'postMessage').mockImplementation((data) => {
                 child.dispatchEvent(new childRealm.MessageEvent('message', {
                     data: structuredClone(data),
-                    source: window,
+                    source: child.parent,
                 }))
             })
             const source = sourceValue.match(/<script nonce="[^"]+">([\s\S]*)<\/script>/)?.[1]

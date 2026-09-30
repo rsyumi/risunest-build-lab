@@ -202,6 +202,45 @@ describe('repairing from the model', () => {
         counts: { blocking: 0, degraded: 1, informational: 0 },
     })
 
+    it('keeps a committed repair visible when journal refresh fails', async () => {
+        const repaired = result({ revision: 4, counts: { blocking: 0, degraded: 12, informational: 3 } })
+        const listJournals = vi.fn().mockResolvedValueOnce([]).mockRejectedValueOnce(new Error('refresh'))
+        const { model } = harness({ getResult: vi.fn().mockResolvedValue(damaged), applyRepair: vi.fn().mockResolvedValue({ result: repaired }), listJournals })
+        await model.load()
+        await model.loadRepairs()
+        await expect(model.apply(false)).resolves.toBeUndefined()
+        expect(model.snapshot()).toMatchObject({ failure: 'refresh', result: repaired, applied: { remaining: 15 }, activity: null })
+    })
+    it.each(['committed', 'activation-committed-refresh-failed'])('does not offer to repeat a committed repair after %s', async code => {
+        const error = { code, revision: 4 }
+        const { deps, model } = harness({ getResult: vi.fn().mockResolvedValue(damaged), applyRepair: vi.fn().mockRejectedValue(error) })
+        await model.load(); await model.loadRepairs()
+        await expect(model.apply(false)).rejects.toBe(error)
+        expect(model.snapshot()).toMatchObject({ failure: 'refresh', result: null, selection: [], journals: [] })
+        await model.apply(false); await model.undo('previous')
+        expect(deps.applyRepair).toHaveBeenCalledOnce()
+        expect(deps.undoRepair).not.toHaveBeenCalled()
+    })
+    it('mutually excludes scanning and repair while preserving accepted results', async () => {
+        let finishScan!: (value: DataHealthResult) => void
+        let finishRepair!: (value: { result: DataHealthResult }) => void
+        const { deps, model } = harness({
+            getResult: vi.fn().mockResolvedValue(damaged),
+            scan: vi.fn(() => new Promise<DataHealthResult>(resolve => { finishScan = resolve })),
+            applyRepair: vi.fn(() => new Promise<Awaited<ReturnType<DataHealthDependencies['applyRepair']>>>(resolve => { finishRepair = resolve })),
+        })
+        await model.load(); await model.loadRepairs()
+        const scan = model.quickScan()
+        await model.apply(false); await model.undo('repair')
+        expect(deps.applyRepair).not.toHaveBeenCalled(); expect(deps.undoRepair).not.toHaveBeenCalled()
+        finishScan(damaged); await scan
+        const repair = model.apply(false)
+        await model.quickScan(); await model.deepScan(false)
+        expect(deps.scan).toHaveBeenCalledOnce(); expect(deps.deepScan).not.toHaveBeenCalled()
+        finishRepair({ result: result({ revision: 4 }) }); await repair
+        expect(model.snapshot().result?.revision).toBe(4)
+    })
+
     it('preselects the fixed choice and previews it', async () => {
         const { deps, model } = harness({
             getResult: vi.fn().mockResolvedValue(damaged),
@@ -209,7 +248,7 @@ describe('repairing from the model', () => {
         await model.load()
         await model.loadRepairs()
         expect(model.snapshot().selection).toEqual(['0:drop-reference'])
-        expect(deps.previewRepair).toHaveBeenCalledWith(['0:drop-reference'])
+        expect(deps.previewRepair).toHaveBeenCalledWith(['0:drop-reference'], damaged.scannedAt)
         expect(model.snapshot().preview?.answered).toBe(1)
     })
 
@@ -225,7 +264,7 @@ describe('repairing from the model', () => {
     })
 
     it('applies the selection and shows the diagnosis of the repaired library', async () => {
-        const repaired = result({ revision: 4 })
+        const repaired = result({ revision: 4, counts: { blocking: 0, degraded: 12, informational: 3 } })
         const applyRepair = vi.fn().mockResolvedValue({ result: repaired })
         const listJournals = vi.fn().mockResolvedValue([
             {
@@ -246,7 +285,7 @@ describe('repairing from the model', () => {
         await model.load()
         await model.loadRepairs()
         await model.apply(true)
-        expect(applyRepair).toHaveBeenCalledWith(['0:drop-reference'], true)
+        expect(applyRepair).toHaveBeenCalledWith(['0:drop-reference'], true, damaged.revision, damaged.scannedAt)
         expect(model.snapshot().result).toEqual(repaired)
         expect(model.snapshot().journals).toHaveLength(1)
         expect(model.snapshot().repairing).toBe(false)
@@ -263,7 +302,7 @@ describe('repairing from the model', () => {
         await model.load()
         await model.loadRepairs()
         await model.undo('repair-1')
-        expect(undoRepair).toHaveBeenCalledWith('repair-1')
+        expect(undoRepair).toHaveBeenCalledWith('repair-1', damaged.revision)
         expect(model.snapshot().skipped).toEqual(['characters:char-2'])
     })
 
@@ -296,7 +335,7 @@ describe('repairing from the model', () => {
         expect(model.snapshot().selection).toEqual([])
         await model.setAll(true)
         expect(model.snapshot().selection).toEqual(['0:drop-reference'])
-        expect(deps.previewRepair).toHaveBeenLastCalledWith(['0:drop-reference'])
+        expect(deps.previewRepair).toHaveBeenLastCalledWith(['0:drop-reference'], damaged.scannedAt)
         await model.setAll(false)
         expect(model.snapshot().selection).toEqual([])
         expect(model.snapshot().preview).toBeNull()

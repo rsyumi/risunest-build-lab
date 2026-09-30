@@ -3,6 +3,24 @@ import { pathToFileURL } from "node:url";
 
 const forbiddenMarkers = [
   "macos_bench_",
+  "risunest.synthetic-legacy-restore/v1",
+  "syntheticMeasurementResetId",
+  "ios_bench_peak_rss",
+  "legacy-restore-ready:",
+  "runLegacyRestoreMeasurement",
+  "synthetic-unicode-persistence-v1",
+  "runUnicodePersistenceProbe",
+  "verifyUnicodePersistenceProbe",
+  "runLeaseReleaseCheckpointSuite",
+  "lease-release-ipc",
+  "synthetic-lease-release-owner",
+  "__pluginReviewCountInvoke",
+  "__pluginReview",
+  "synthetic-plugin-review-v1",
+  "RisuNest synthetic plugin review",
+  "synthetic-native-boundary",
+  "synthetic-plugin-page-owner",
+  "io.github.rsyumi.risunest.pluginreview",
   "boundary_phase",
   "boundary_finish",
   "RISUNEST_BOUNDARY_",
@@ -11,6 +29,8 @@ const forbiddenMarkers = [
   "__RISUNEST_TOKENIZER_BENCHMARK__",
   "__streamingSmoke",
   "__startupMetrics",
+  "startupAppearance",
+  "RISUNEST_APPEARANCE_PROBE",
   "__startupRecord",
   "__startupObserveCall",
   "M0-stage:",
@@ -115,7 +135,10 @@ async function main() {
   // Removed legacy switches must not be able to turn a product build into a harness.
   process.env.VITE_TOKENIZER_BENCHMARK = "true";
   process.env.VITE_STREAMING_SMOKE = "true";
-  delete process.env.TAURI_ENV_PLATFORM;
+  process.env.RISUNEST_APPEARANCE_PROBE = "1";
+  const platform = process.argv[3];
+  if (platform) process.env.TAURI_ENV_PLATFORM = platform;
+  else delete process.env.TAURI_ENV_PLATFORM;
   delete process.env.TAURI_ENV_DEBUG;
   const result = await build({
     mode,
@@ -124,7 +147,7 @@ async function main() {
       write: false,
       copyPublicDir: false,
       reportCompressedSize: false,
-      ...(mode === "production" ? { sourcemap: true } : {}),
+      sourcemap: "hidden",
     },
   });
   const output = (Array.isArray(result) ? result : [result]).flatMap(

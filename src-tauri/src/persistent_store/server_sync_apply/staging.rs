@@ -13,7 +13,7 @@ impl ValidatedRecords {
         let file = tempfile::NamedTempFile::new()?;
         let db = rusqlite::Connection::open(file.path())?;
         db.execute_batch(
-            "PRAGMA journal_mode=OFF; PRAGMA cache_size=-1024; PRAGMA mmap_size=0;
+            "PRAGMA journal_mode=OFF; PRAGMA synchronous=OFF; PRAGMA cache_size=-1024; PRAGMA mmap_size=0;
             CREATE TABLE records(key TEXT PRIMARY KEY,priority INTEGER NOT NULL,body TEXT NOT NULL,digest TEXT NOT NULL);
             CREATE INDEX records_order ON records(priority,key);",
         )?;

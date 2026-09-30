@@ -45,7 +45,7 @@ fn quote_argument(value: &str) -> String {
 }
 
 pub(super) fn spawn_update_helper(root: &Path, command: &mut Command) -> Result<u32> {
-    const SPAWN: &str = r#"$ErrorActionPreference='Stop';$s=New-Object -ComObject 'Schedule.Service';$s.Connect();$f=$s.GetFolder('\');$d=$s.NewTask(0);$d.RegistrationInfo.Description='RisuNest update helper';$d.Principal.LogonType=3;$d.Principal.RunLevel=0;$d.Settings.Enabled=$true;$d.Settings.StartWhenAvailable=$true;$d.Settings.ExecutionTimeLimit='PT10M';$a=$d.Actions.Create(0);$a.Path=$env:RISUNEST_HELPER_PROGRAM;$a.Arguments=$env:RISUNEST_HELPER_ARGUMENTS;$r=$f.RegisterTaskDefinition($env:RISUNEST_HELPER_TASK,$d,6,$null,$null,3,$null);$run=$r.Run($null);for($i=0;$i-lt 100-and $run.EnginePID-eq 0;$i++){Start-Sleep -Milliseconds 20};$pidValue=$run.EnginePID;if($pidValue-eq 0){$f.DeleteTask($env:RISUNEST_HELPER_TASK,0);throw 'helper did not start'};[Console]::Out.Write($pidValue)"#;
+    const SPAWN: &str = r#"$ErrorActionPreference='Stop';$s=New-Object -ComObject 'Schedule.Service';$s.Connect();$f=$s.GetFolder('\');$d=$s.NewTask(0);$d.RegistrationInfo.Description='RisuNest update helper';$d.RegistrationInfo.Date=[DateTime]::UtcNow.ToString('o');$d.Principal.LogonType=3;$d.Principal.RunLevel=0;$d.Settings.Enabled=$true;$d.Settings.StartWhenAvailable=$true;$d.Settings.ExecutionTimeLimit=$env:RISUNEST_HELPER_LIMIT;$a=$d.Actions.Create(0);$a.Path=$env:RISUNEST_HELPER_PROGRAM;$a.Arguments=$env:RISUNEST_HELPER_ARGUMENTS;$r=$f.RegisterTaskDefinition($env:RISUNEST_HELPER_TASK,$d,6,$null,$null,3,$null);$run=$r.Run($null);for($i=0;$i-lt 100-and $run.EnginePID-eq 0;$i++){Start-Sleep -Milliseconds 20};$pidValue=$run.EnginePID;if($pidValue-eq 0){$f.DeleteTask($env:RISUNEST_HELPER_TASK,0);throw 'helper did not start'};[Console]::Out.Write($pidValue)"#;
     let task_name = format!(
         "{}-update-helper-{}",
         instance_name(root),
@@ -77,6 +77,7 @@ pub(super) fn spawn_update_helper(root: &Path, command: &mut Command) -> Result<
         ])
         .env("RISUNEST_HELPER_TASK", task_name)
         .env("RISUNEST_HELPER_PROGRAM", program)
+        .env("RISUNEST_HELPER_LIMIT", if command.get_args().any(|arg| arg == "--owner") { "PT0S" } else { "PT10M" })
         .env("RISUNEST_HELPER_ARGUMENTS", arguments)
         .stdin(Stdio::null())
         .output()
@@ -115,6 +116,17 @@ pub(super) fn finish_update_helper(root: &Path, task_name: &str) -> Result<()> {
     } else {
         Err("update-helper-task-cleanup-failed".into())
     }
+}
+
+pub(super) fn sweep_stale_update_helpers(root: &Path) -> Result<()> {
+    const SWEEP: &str = r#"$ErrorActionPreference='Stop';$s=New-Object -ComObject 'Schedule.Service';$s.Connect();$f=$s.GetFolder('\');foreach($t in @($f.GetTasks(1))){$n=$t.Name;if(!$n.StartsWith($env:RISUNEST_HELPER_PREFIX,[StringComparison]::Ordinal)){continue};$x=$n.Substring($env:RISUNEST_HELPER_PREFIX.Length);if($x -cnotmatch '^[0-9a-f]{64}$'){continue};if($t.Definition.RegistrationInfo.Description -ne $env:RISUNEST_HELPER_DESCRIPTION){continue};if($t.State -eq 4 -or $t.GetInstances(0).Count -ne 0){continue};$date=[DateTime]::MinValue;if(![DateTime]::TryParse($t.Definition.RegistrationInfo.Date,[ref]$date)){continue};if($date.ToUniversalTime() -gt [DateTime]::UtcNow.AddMinutes(-15)){continue};$f.DeleteTask($n,0)}"#;
+    let status = process("powershell.exe")
+        .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", SWEEP])
+        .env("RISUNEST_HELPER_PREFIX", helper_task_prefix(root))
+        .env("RISUNEST_HELPER_DESCRIPTION", HELPER_TASK_DESCRIPTION)
+        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
+        .status().map_err(|_| "update-helper-task-cleanup-failed")?;
+    if status.success() { Ok(()) } else { Err("update-helper-task-cleanup-failed".into()) }
 }
 
 pub(super) fn cleanup_update_helpers(root: &Path) -> Result<()> {
@@ -183,7 +195,7 @@ fn update_task_xml(root: &Path, manager: &Path, server: &Path) -> Result<String>
 <RegistrationInfo><Description>RisuNest user sync updater</Description></RegistrationInfo>
 <Triggers><LogonTrigger><Enabled>true</Enabled><Delay>PT1M</Delay><UserId>__CURRENT_SID__</UserId></LogonTrigger><CalendarTrigger><StartBoundary>2026-01-01T00:00:00</StartBoundary><Enabled>true</Enabled><ScheduleByDay><DaysInterval>1</DaysInterval></ScheduleByDay><Repetition><Interval>PT1H</Interval><Duration>P1D</Duration><StopAtDurationEnd>false</StopAtDurationEnd></Repetition></CalendarTrigger></Triggers>
 <Principals><Principal id="User"><UserId>__CURRENT_SID__</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
-<Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><StartWhenAvailable>true</StartWhenAvailable><RunOnlyIfNetworkAvailable>true</RunOnlyIfNetworkAvailable><AllowStartOnDemand>true</AllowStartOnDemand><Enabled>true</Enabled><Hidden>false</Hidden><ExecutionTimeLimit>PT30M</ExecutionTimeLimit></Settings>
+<Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries><StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><StartWhenAvailable>true</StartWhenAvailable><RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable><AllowStartOnDemand>true</AllowStartOnDemand><Enabled>true</Enabled><Hidden>false</Hidden><ExecutionTimeLimit>PT30M</ExecutionTimeLimit></Settings>
 <Actions Context="User"><Exec><Command>{program}</Command><Arguments>{arguments}</Arguments></Exec></Actions></Task>"#
     ))
 }
@@ -410,6 +422,7 @@ mod tests {
             "LeastPrivilege",
             "<Interval>PT1H</Interval>",
             "<ExecutionTimeLimit>PT30M</ExecutionTimeLimit>",
+            "<RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>",
             "update scheduled",
             "IgnoreNew",
         ] {

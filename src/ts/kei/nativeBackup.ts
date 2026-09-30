@@ -1,3 +1,4 @@
+import { runWithMobileBackgroundTask, measuredTaskPercent } from '../mobileBackgroundTask'
 import { invoke } from '@tauri-apps/api/core'
 
 import { isTauri } from '../platform'
@@ -86,98 +87,102 @@ export async function runNativeKeiBackupJob(
     if (!dependencies.isTauri()) return false
     if (options.signal?.aborted) throw abortError()
 
-    await request.runtime.flushPendingData('kei-auto-backup')
-    const revision = request.runtime.revision
-    const lease = await request.runtime.store.acquireRevision(revision)
-    if (!hasNativePersistentRevisionLease(lease)) {
-        await releasePersistentRevisionLease(lease)
-        return false
-    }
-
-    let started: { jobId: string } | undefined
-    let capabilityUnavailable = false
-    let startError: unknown
-    let releaseError: unknown
-    try {
-        started = await invokeJob(dependencies, 'native_file_job_start', {
-            request: {
-                kind: 'kei-backup-upload',
-                lease: lease[nativePersistentRevisionLease],
-                expectedRevision: revision,
-                url: request.url,
-                expectedAccountId: request.accountId,
-                token: request.token,
-            },
-        }) as { jobId: string }
-    }
-    catch (error) {
-        capabilityUnavailable = error instanceof NativeKeiBackupJobError
-            && error.code === 'capability-unavailable'
-        startError = error
-    }
-    finally {
-        try {
+    return runWithMobileBackgroundTask('backup', async background => {
+        options = { ...options, signal: background.signal }
+        await request.runtime.flushPendingData('kei-auto-backup')
+        const revision = request.runtime.revision
+        const lease = await request.runtime.store.acquireRevision(revision)
+        if (!hasNativePersistentRevisionLease(lease)) {
             await releasePersistentRevisionLease(lease)
-        } catch (error) {
-            releaseError = error
+            return false
         }
-    }
-    if (!started) {
-        if (releaseError !== undefined) {
-            if (startError !== undefined) {
-                console.error('Native KEI backup revision release failed after job start failed', releaseError)
-            } else {
-                throw releaseError
-            }
-        }
-        if (capabilityUnavailable) return false
-        throw startError
-    }
-    if (releaseError !== undefined) {
-        dependencies.warn?.('revision-release-failed')
-        console.error('Native KEI backup revision release failed after the job was accepted', releaseError)
-    }
 
-    let cancellationRequested = false
-    let terminal: NativeFileJobStatus | undefined
-    try {
-        while (!terminal) {
-            if (options.signal?.aborted && !cancellationRequested) {
-                cancellationRequested = true
-                await invokeJob(dependencies, 'native_file_job_cancel', {
+        let started: { jobId: string } | undefined
+        let capabilityUnavailable = false
+        let startError: unknown
+        let releaseError: unknown
+        try {
+            started = await invokeJob(dependencies, 'native_file_job_start', {
+                request: {
+                    kind: 'kei-backup-upload',
+                    lease: lease[nativePersistentRevisionLease],
+                    expectedRevision: revision,
+                    url: request.url,
+                    expectedAccountId: request.accountId,
+                    token: request.token,
+                },
+            }) as { jobId: string }
+        }
+        catch (error) {
+            capabilityUnavailable = error instanceof NativeKeiBackupJobError
+                && error.code === 'capability-unavailable'
+            startError = error
+        }
+        finally {
+            try {
+                await releasePersistentRevisionLease(lease)
+            } catch (error) {
+                releaseError = error
+            }
+        }
+        if (!started) {
+            if (releaseError !== undefined) {
+                if (startError !== undefined) {
+                    console.error('Native KEI backup revision release failed after job start failed', releaseError)
+                } else {
+                    throw releaseError
+                }
+            }
+            if (capabilityUnavailable) return false
+            throw startError
+        }
+        if (releaseError !== undefined) {
+            dependencies.warn?.('revision-release-failed')
+            console.error('Native KEI backup revision release failed after the job was accepted', releaseError)
+        }
+
+        let cancellationRequested = false
+        let terminal: NativeFileJobStatus | undefined
+        try {
+            while (!terminal) {
+                if (options.signal?.aborted && !cancellationRequested) {
+                    cancellationRequested = true
+                    await invokeJob(dependencies, 'native_file_job_cancel', {
+                        jobId: started.jobId,
+                    })
+                }
+                const status = await invokeJob(dependencies, 'native_file_job_status', {
                     jobId: started.jobId,
-                })
+                }) as NativeFileJobStatus
+                background.progress(measuredTaskPercent(status.progress.completedBytes, status.progress.totalBytes))
+                if (isTerminal(status)) {
+                    terminal = status
+                    break
+                }
+                await (dependencies.wait ?? productionDependencies.wait!)(
+                    options.pollIntervalMs ?? 100,
+                )
             }
-            const status = await invokeJob(dependencies, 'native_file_job_status', {
-                jobId: started.jobId,
-            }) as NativeFileJobStatus
-            if (isTerminal(status)) {
-                terminal = status
-                break
+
+            if (terminal.state === 'succeeded') {
+                for (const warningCode of terminal.result?.warningCodes ?? []) {
+                    dependencies.warn?.(warningCode)
+                }
+                return true
             }
-            await (dependencies.wait ?? productionDependencies.wait!)(
-                options.pollIntervalMs ?? 100,
+            if (terminal.state === 'cancelled') throw abortError()
+            throw new NativeKeiBackupJobError(
+                terminal.error?.code ?? 'kei-backup-failed',
+                terminal.error?.message ?? 'Native KEI backup failed',
             )
         }
-
-        if (terminal.state === 'succeeded') {
-            for (const warningCode of terminal.result?.warningCodes ?? []) {
-                dependencies.warn?.(warningCode)
+        finally {
+            try {
+                await invokeJob(dependencies, 'native_file_job_forget', { jobId: started.jobId })
             }
-            return true
+            catch {}
         }
-        if (terminal.state === 'cancelled') throw abortError()
-        throw new NativeKeiBackupJobError(
-            terminal.error?.code ?? 'kei-backup-failed',
-            terminal.error?.message ?? 'Native KEI backup failed',
-        )
-    }
-    finally {
-        try {
-            await invokeJob(dependencies, 'native_file_job_forget', { jobId: started.jobId })
-        }
-        catch {}
-    }
+    }, options.signal)
 }
 
 export async function tryNativeKeiBackup(

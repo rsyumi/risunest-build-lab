@@ -3,7 +3,7 @@ import type {
   LuaWorkerHostMessage,
   LuaWorkerRequest,
 } from './luaWorkerProtocol'
-import { createLuaWorkerPilotClient } from './luaWorkerPilotClient'
+import { createLuaWorkerPilotClient } from './luaWorkerPilotClient.testSupport'
 
 class CapturedModuleWorker {
   static instances: CapturedModuleWorker[] = []

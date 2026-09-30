@@ -165,7 +165,7 @@ impl Store {
         if bytes.len() as u64 != (size - offset).min(UPLOAD_CHUNK_BYTES) || hash(bytes) != digest {
             return Err(Error::new("chunk-mismatch", 400));
         }
-        let mut temp = tempfile::NamedTempFile::new_in(self.root.join("staging"))?;
+        let mut temp = self.staging_temp()?;
         temp.write_all(bytes)?;
         temp.as_file().sync_all()?;
         // Serialize only durable publication, never request-body IO or hashing.
@@ -226,7 +226,7 @@ impl Store {
             (digest, size)
         };
         let result = (|| {
-            let mut temp = tempfile::NamedTempFile::new_in(self.root.join("staging"))?;
+            let mut temp = self.staging_temp()?;
             let recipe: Option<Vec<u8>> = self
                 .reader()?
                 .query_row(
@@ -243,7 +243,7 @@ impl Store {
                     .map(|b| self.open_object(&b.hash).map(|v| v.0))
                     .collect::<Result<Vec<_>>>()?;
                 let mut checked = std::time::Instant::now() - std::time::Duration::from_secs(1);
-                risunest_sync_wire::stream_delta::apply(&recipe, &mut bases, &mut temp, || {
+                risunest_sync_wire::stream_delta::apply(&recipe, &mut bases, &mut *temp, || {
                     if checked.elapsed() >= std::time::Duration::from_millis(100) {
                         checked = std::time::Instant::now();
                         let db = self
@@ -281,13 +281,13 @@ impl Store {
                         temp.write_all(&buffer[..n])?;
                     }
                     if length != expected_size as u64
-                        || format!("{:x}", chunk.finalize()) != expected
+                        || hex::encode(chunk.finalize()) != expected
                     {
                         return Err(Error::new("corrupt-chunk", 503));
                     }
                     total += length;
                 }
-                if total != size || format!("{:x}", full.finalize()) != digest {
+                if total != size || hex::encode(full.finalize()) != digest {
                     return Err(Error::new("hash-mismatch", 400));
                 }
             }
@@ -356,7 +356,7 @@ impl Store {
             params![id, device.id],
         )?;
         tx.commit()?;
-        self.drain_staging_trash(&db)?;
+        self.drain_staging_trash(&db, Some(id))?;
         Ok(())
     }
     /// Bounded identity range, also used by resumable downloads of large objects.

@@ -1,6 +1,7 @@
 use std::io::Write;
 use tauri::Manager;
 mod network_probe;
+mod legacy_restore_memory;
 
 #[tauri::command]
 async fn ios_bench_network_probe() -> Result<serde_json::Value, &'static str> {
@@ -64,6 +65,7 @@ fn ios_bench_cloud_key() -> Result<String, &'static str> {
 fn benchmark_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
         ios_bench_phase,
+        legacy_restore_memory::ios_bench_peak_rss,
         ios_bench_report,
         ios_bench_stream_url,
         ios_bench_cloud_key,

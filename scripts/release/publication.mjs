@@ -53,7 +53,7 @@ async function recoverMissingLatest(github, release, entry, publicKey) {
 }
 
 export async function publishRelease({ github, productBytes, productSignature, publicKey,
-  expectedProduct, expectedTag, expectedCommit, bootstrap = false, publishedAt,
+  expectedProduct, expectedTag, expectedCommit, releaseId, bootstrap = false, publishedAt,
   signCatalog, verifyAssets }) {
   const product = validateProductRelease(verifiedJson(productBytes, productSignature, publicKey, PRODUCT_LIMIT));
   if (product.product !== expectedProduct || product.tag !== expectedTag || product.sourceCommit !== expectedCommit) {
@@ -61,8 +61,11 @@ export async function publishRelease({ github, productBytes, productSignature, p
   }
   const entry = { manifestUrl: releaseUrl(product.tag, "product-manifest.json"),
     manifestSha256: createHash("sha256").update(productBytes).digest("hex"), release: product };
-  const release = await github.getByTag(product.tag);
-  if (!release || release.prerelease || release.target_commitish !== product.sourceCommit) {
+  if (!Number.isSafeInteger(releaseId) || releaseId <= 0) throw new Error("publication-release-id-required");
+  const matchesIdentity = release => release?.id === releaseId && release.tag_name === product.tag
+    && !release.prerelease && release.target_commitish === product.sourceCommit;
+  const release = await github.getById(releaseId);
+  if (!matchesIdentity(release)) {
     throw new Error("publication-release-mismatch");
   }
   await github.assertTagCommit(product.tag, product.sourceCommit);
@@ -101,8 +104,8 @@ export async function publishRelease({ github, productBytes, productSignature, p
     ["manifest.json.sig", Buffer.from(catalogSignature)],
   ]) await github.uploadAsset(release, name, bytes);
 
-  const prepared = await github.getByTag(product.tag);
-  if (!prepared?.draft || prepared.target_commitish !== expectedCommit) throw new Error("draft-changed-before-publish");
+  const prepared = await github.getById(releaseId);
+  if (!prepared?.draft || !matchesIdentity(prepared)) throw new Error("draft-changed-before-publish");
   const remoteCatalog = await releaseCatalog(github, prepared, publicKey);
   if (!isDeepStrictEqual(remoteCatalog, catalog)) throw new Error("uploaded-catalog-mismatch");
   const remoteProduct = await github.downloadAsset(prepared, "product-manifest.json", PRODUCT_LIMIT);
@@ -111,13 +114,15 @@ export async function publishRelease({ github, productBytes, productSignature, p
   if (!remoteProduct.equals(productBytes)) throw new Error("uploaded-product-mismatch");
 
   await github.assertTagCommit(product.tag, product.sourceCommit);
+  const published = await github.getByTag(product.tag);
+  if (published && published.id !== releaseId) throw new Error("publication-release-mismatch");
   try { await github.publish(prepared.id); }
   catch (error) {
-    const observed = await github.getByTag(product.tag);
-    if (!observed || observed.draft) throw error;
+    const observed = await github.getById(releaseId);
+    if (!matchesIdentity(observed) || observed.draft) throw error;
   }
-  const observed = await github.getByTag(product.tag);
+  const observed = await github.getById(releaseId);
   const observedLatest = await github.getLatest();
-  if (observed?.draft !== false || observedLatest?.id !== release.id) throw new Error("publication-unconfirmed");
+  if (!matchesIdentity(observed) || observed.draft !== false || observedLatest?.id !== release.id) throw new Error("publication-unconfirmed");
   return { status: "published", releaseId: release.id };
 }

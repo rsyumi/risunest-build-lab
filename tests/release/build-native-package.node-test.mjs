@@ -92,7 +92,7 @@ test("raw packaging accepts native Windows ARM64 targets", () => {
     "--target", "aarch64-pc-windows-msvc",
     "--version", "1.2.3",
     "--output", output,
-  ], { cwd: new URL("../..", import.meta.url), encoding: "utf8" });
+  ], { cwd: new URL("../..", import.meta.url), encoding: "utf8", windowsHide: true });
   assert.equal(result.status, 0, result.stderr);
   const report = JSON.parse(result.stdout.trim());
   assert.equal(report.target, "aarch64-pc-windows-msvc");
@@ -242,7 +242,7 @@ test("committed iOS shell carries the configured custom URL scheme", () => {
     "-c",
     "import json, plistlib, sys; print(json.dumps(plistlib.load(open(sys.argv[1], 'rb'))['CFBundleURLTypes']))",
     plistPath,
-  ], { encoding: "utf8" });
+  ], { encoding: "utf8", windowsHide: true });
   assert.equal(parsed.status, 0, parsed.stderr);
   const config = JSON.parse(readFileSync(join(repository, "src-tauri/tauri.conf.json"), "utf8"));
   const expected = config.plugins["deep-link"].mobile

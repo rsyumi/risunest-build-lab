@@ -168,6 +168,7 @@ fn repository_bootstrap_opens_and_applies_a_real_snapshot_without_the_source_vau
                 retention_policy: None,
                 capabilities: Capabilities::default(),
                 created_at_ms: 1,
+                verified_at_ms: 1,
                 last_sync_at_ms: None,
                 last_backup_at_ms: None,
             };

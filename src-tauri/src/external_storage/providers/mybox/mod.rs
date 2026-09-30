@@ -99,7 +99,10 @@ impl Context {
     fn cached(&self, folder: &str, name: &str) -> Option<Option<Entry>> {
         let entries = self.entries.lock().ok()?;
         let listed = entries.get(folder)?;
-        listed.complete.then(|| listed.files.get(name).cloned())
+        match listed.files.get(name) {
+            Some(entry) => Some(Some(entry.clone())),
+            None => listed.complete.then_some(None),
+        }
     }
     fn store(&self, folder: &str, files: BTreeMap<String, Entry>) {
         if let Ok(mut entries) = self.entries.lock() {
@@ -390,6 +393,28 @@ impl Mybox {
         name: &str,
         cancel: &Cancellation,
     ) -> Result<Option<Entry>> {
+        let mut url = config::endpoint(&context.base,
+            &["drive", "folders", context.folder_id(folder)?, "resources"])?;
+        url.query_pairs_mut().append_pair("count", &PAGE_SIZE.to_string())
+            .append_pair("sort", "createdAt,desc");
+        let page: api::Listing = self.json(context, ProviderOperation::List, Method::GET,
+            url, None, &[200], cancel).await?;
+        let complete = page.cursor()?.is_none();
+        let mut files = BTreeMap::new();
+        for resource in page.resources.into_iter().filter(|resource| resource.kind == "file") {
+            if files.insert(resource.name, Entry { id: resource.resource_id, size: resource.size }).is_some() {
+                return Err(ProviderError::new(ErrorKind::Corrupt));
+            }
+        }
+        let found = files.get(name).cloned();
+        if complete {
+            context.store(folder, files);
+            return Ok(found);
+        }
+        if let Some(entry) = found {
+            context.record(folder, name, entry.clone());
+            return Ok(Some(entry));
+        }
         context.forget(folder);
         self.load(context, folder, cancel).await?;
         Ok(context.cached(folder, name).unwrap_or_default())
@@ -1167,7 +1192,10 @@ impl Provider for Mybox {
             let next_cursor = page.cursor()?.map(str::to_owned);
             let mut objects = Vec::new();
             for resource in page.resources {
-                if resource.kind != "file" || !config::valid_name(&resource.name) {
+                if resource.kind != "file" { continue; }
+                if crate::external_storage::contract::role_member_name(collection, &resource.name) == crate::external_storage::contract::RoleMemberName::Foreign { continue; }
+                if !config::valid_name(&resource.name) {
+                    if collection == Collection::Leases { return Err(ProviderError::new(ErrorKind::Corrupt)); }
                     continue;
                 }
                 context.record(

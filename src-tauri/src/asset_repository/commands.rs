@@ -500,19 +500,48 @@ pub(crate) async fn asset_cas_job_release(
             .jobs
             .lock()
             .map_err(|error| format!("CAS job session mutex poisoned: {error}"))?;
-        let release_result = recover_job(&mut jobs, &root, &session_id)?
-            .release(outcome)
-            .map_err(|error| error.to_string());
-        if jobs
-            .get(&session_id)
-            .is_some_and(DurableCasJob::is_released)
-        {
-            jobs.remove(&session_id);
-        }
-        release_result
+        release_job(&mut jobs, &root, &session_id, outcome)
     })
     .await
     .map_err(|error| format!("failed to join CAS job release operation: {error}"))?
+}
+
+fn release_job(
+    jobs: &mut HashMap<String, DurableCasJob>,
+    root: &std::path::Path,
+    session_id: &str,
+    outcome: CasReleaseOutcome,
+) -> Result<(), String> {
+    if !jobs.contains_key(session_id) {
+        match DurableCasJob::open(root, session_id) {
+            Ok(job) => { jobs.insert(session_id.to_owned(), job); }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    let result = recover_job(jobs, root, session_id)?
+        .release(outcome)
+        .map_err(|error| error.to_string());
+    if jobs.get(session_id).is_some_and(DurableCasJob::is_released) {
+        jobs.remove(session_id);
+    }
+    result
+}
+
+pub(crate) fn with_unsealed_content_session<T>(
+    app: &AppHandle,
+    session_id: &str,
+    operation: impl FnOnce(&DurableCasJob) -> Result<T, crate::native_file_jobs::NativeJobError>,
+) -> Result<T, crate::native_file_jobs::NativeJobError> {
+    use crate::native_file_jobs::NativeJobError;
+    let root = repository_root(app).map_err(|error| NativeJobError::new("store-error", error))?;
+    let state = app.state::<DurableCasJobState>();
+    let mut jobs = state.jobs.lock().map_err(|error| NativeJobError::new("store-error", error.to_string()))?;
+    let job = recover_job(&mut jobs, &root, session_id).map_err(|error| NativeJobError::new("invalid-input", error))?;
+    if job.kind() != CasJobKind::CardOrModuleContentImport || job.is_sealed() || job.is_released() || job.pin_count() != 0 {
+        return Err(NativeJobError::new("invalid-input", "Native content is not awaiting asset mapping"));
+    }
+    operation(job)
 }
 
 #[tauri::command(async)]
@@ -575,44 +604,27 @@ pub(crate) async fn asset_remote_stat_object(
 }
 
 #[tauri::command(async)]
-pub(crate) async fn asset_remote_read_object(
+pub(crate) async fn asset_remote_hydrate_object(
     app: AppHandle,
     content_hash: String,
-    start: Option<u64>,
-    end_exclusive: Option<u64>,
-) -> Result<Option<Vec<u8>>, String> {
+) -> Result<Option<u64>, String> {
     let root = repository_root(&app)?;
     tauri::async_runtime::spawn_blocking(move || {
-        use std::io::{Read, Seek, SeekFrom};
         let _operation = app
             .state::<PersistentStoreState>()
             .admit_renderer_operation()
             .map_err(|error| error.to_string())?;
-        if start.is_some() != end_exclusive.is_some()
-            || start
-                .zip(end_exclusive)
-                .is_some_and(|(start, end)| start > end)
-        {
-            return Err("invalid-asset-range".into());
-        }
-        let Some(mut file) = crate::server_sync::residency::open_or_hydrate(&root, &content_hash)
-            .map_err(|error| error.code)?
-        else {
-            return Ok(None);
-        };
-        let size = file.metadata().map_err(|error| error.to_string())?.len();
-        let from = start.unwrap_or(0).min(size);
-        let to = end_exclusive.unwrap_or(size).min(size);
-        file.seek(SeekFrom::Start(from))
-            .map_err(|error| error.to_string())?;
-        let mut bytes = Vec::new();
-        file.take(to - from)
-            .read_to_end(&mut bytes)
-            .map_err(|error| error.to_string())?;
-        Ok(Some(bytes))
+        hydrate_remote_object(&root, &content_hash)
     })
     .await
     .map_err(|_| "remote-read-unavailable".to_owned())?
+}
+
+fn hydrate_remote_object(root: &std::path::Path, content_hash: &str) -> Result<Option<u64>, String> {
+    crate::server_sync::residency::open_or_hydrate(root, content_hash)
+        .map_err(|error| error.code)?
+        .map(|file| file.metadata().map(|metadata| metadata.len()).map_err(|error| error.to_string()))
+        .transpose()
 }
 
 fn finalize_content_job(
@@ -746,15 +758,7 @@ pub(crate) async fn asset_cas_job_finalize_content(
     session_id: String,
     owner_manifest: Vec<u8>,
 ) -> Result<PreparedPayload, String> {
-    let content_assets = native_jobs
-        .content_asset_receipt(&session_id)
-        .map_err(|error| format!("{}: {}", error.code, error.message))?
-        .into_iter()
-        .map(|(object_hash, byte_size)| ContentDirectObject {
-            object_hash,
-            byte_size,
-        })
-        .collect::<Vec<_>>();
+    let native_jobs = NativeFileJobState::clone(&native_jobs);
     tauri::async_runtime::spawn_blocking(move || {
         let operation_guard = app
             .state::<PersistentStoreState>()
@@ -767,6 +771,15 @@ pub(crate) async fn asset_cas_job_finalize_content(
             .jobs
             .lock()
             .map_err(|error| format!("CAS job session mutex poisoned: {error}"))?;
+        let content_assets = native_jobs
+            .content_asset_receipt(&session_id)
+            .map_err(|error| format!("{}: {}", error.code, error.message))?
+            .into_iter()
+            .map(|(object_hash, byte_size)| ContentDirectObject {
+                object_hash,
+                byte_size,
+            })
+            .collect::<Vec<_>>();
         let job = recover_job(&mut jobs, &root, &session_id)?;
         persistent_store::commands::with_store_mut_admitted(
             app.state::<PersistentStoreState>(),
@@ -910,6 +923,38 @@ mod tests {
     use std::thread;
     use std::time::{Duration, Instant};
     use tempfile::TempDir;
+
+    #[test]
+    fn remote_hydration_returns_only_size_and_publishes_verified_cas_bytes() {
+        let directory = TempDir::new().unwrap();
+        let body = vec![73_u8; 200 * 1024];
+        let hash = hex::encode(<sha2::Sha256 as sha2::Digest>::digest(&body));
+        crate::server_sync::residency::test_remote::hold(directory.path(), &[(&hash, body.len() as u64)]);
+        crate::server_sync::residency::test_remote::serve(directory.path(), &hash, body.clone());
+        assert_eq!(hydrate_remote_object(directory.path(), &hash).unwrap(), Some(body.len() as u64));
+        assert_eq!(PayloadCas::new(directory.path()).unwrap().read_object(&hash).unwrap(), Some(body));
+    }
+
+    #[test]
+    fn release_retries_settle_both_unsealed_and_sealed_sessions_without_gc_blockers() {
+        for sealed in [false, true] {
+            let directory = TempDir::new().unwrap();
+            let mut store = PersistentStore::open(directory.path()).unwrap();
+            let cas = PayloadCas::new(directory.path()).unwrap();
+            let mut job = DurableCasJob::begin(directory.path(), "activation-failure",
+                CasJobKind::DirectAssetOrInlayWrite, 1).unwrap();
+            let object = job.prepare_bytes(&cas, b"synthetic activation", CasObjectRole::DirectObject).unwrap();
+            if sealed { job.seal(&mut store, 0).unwrap(); }
+            let mut jobs = HashMap::from([("activation-failure".to_owned(), job)]);
+            release_job(&mut jobs, directory.path(), "activation-failure", CasReleaseOutcome::Aborted).unwrap();
+            release_job(&mut jobs, directory.path(), "activation-failure", CasReleaseOutcome::Aborted).unwrap();
+            assert!(jobs.is_empty());
+            let roots = collect_durable_cas_job_roots(directory.path());
+            assert!(roots.blockers.is_empty());
+            assert!(roots.object_hashes.is_empty());
+            assert!(cas.stat_object(&object.content_hash).unwrap().is_some());
+        }
+    }
 
     fn owner_manifest() -> Vec<u8> {
         encode_owner_manifest(&[OwnerManifestEntry {

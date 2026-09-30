@@ -15,6 +15,59 @@ import org.w3c.dom.Element
 
 class GenerationForegroundServiceTest {
   @Test
+  fun `notification refresh failure preserves an admitted owner until end`() {
+    val registry = BackgroundTaskRegistry()
+    val lifecycle = GenerationForegroundLifecycle()
+    var stops = 0
+    val first = registry.begin("sync", { lifecycle.begin { true } }, {})!!
+    val second = registry.begin("backup", { lifecycle.begin { true } }, {}, { error("refresh") })!!
+    assertEquals(2, registry.snapshot().size)
+    assertTrue(registry.end(first) { lifecycle.end { stops++; true } })
+    assertEquals(0, stops)
+    assertTrue(registry.end(second) { lifecycle.end { stops++; true } })
+    assertEquals(1, stops)
+    assertTrue(registry.snapshot().isEmpty())
+  }
+
+  @Test
+  fun `background owners keep independent progress and cannot end a newer task`() {
+    val registry = BackgroundTaskRegistry()
+    val lifecycle = GenerationForegroundLifecycle()
+    var starts = 0
+    var stops = 0
+    val expired = mutableListOf<String>()
+    fun begin(kind: String) = registry.begin(kind, { lifecycle.begin { starts++; true } }, { expired.add(it) })!!
+    fun end(id: String) = registry.end(id) { lifecycle.end { stops++; true } }
+    val backup = begin("backup")
+    val sync = begin("sync")
+    assertEquals(1, starts)
+    assertTrue(registry.progress(backup, 42))
+    assertFalse(registry.progress(sync, 101))
+    assertEquals(listOf(BackgroundTaskStatus("backup", 42), BackgroundTaskStatus("sync")), registry.snapshot())
+    assertTrue(end(backup))
+    assertEquals(0, stops)
+    assertFalse(end(backup))
+    assertFalse(registry.progress(backup, 99))
+    assertTrue(end(sync))
+    assertEquals(1, stops)
+    val restore = begin("restore")
+    registry.clear(notify = true)
+    assertEquals(listOf(restore), expired)
+    assertFalse(end(restore))
+    assertTrue(registry.snapshot().isEmpty())
+  }
+
+  @Test
+  fun `failed background admission owns no task and unknown kinds cannot start`() {
+    val registry = BackgroundTaskRegistry()
+    var starts = 0
+    assertEquals(null, registry.begin("backup", { starts++; false }, {}))
+    assertEquals(null, registry.begin("unknown", { starts++; true }, {}))
+    assertEquals(1, starts)
+    assertTrue(registry.snapshot().isEmpty())
+  }
+
+  @Test
   fun `only first begin starts and only final end stops`() {
     val lifecycle = GenerationForegroundLifecycle()
     var starts = 0

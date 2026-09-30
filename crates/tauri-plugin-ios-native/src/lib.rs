@@ -4,7 +4,9 @@ use tauri::{
 };
 
 #[cfg(target_os = "ios")]
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
+#[cfg(any(target_os = "ios", test))]
+use serde::Deserialize;
 #[cfg(target_os = "ios")]
 use tauri::{plugin::PluginHandle, Manager};
 
@@ -44,11 +46,12 @@ impl<R: Runtime, T: Manager<R>> IosNativeExt<R> for T {
     }
 }
 
-#[cfg(target_os = "ios")]
+#[cfg(any(target_os = "ios", test))]
 #[derive(Debug, Eq, PartialEq)]
 pub enum WebAuthenticationOutcome {
     Callback(String),
     Cancelled,
+    Unavailable,
     Failed,
 }
 
@@ -61,12 +64,40 @@ struct WebAuthenticationRequest<'a> {
     prefers_ephemeral: bool,
 }
 
-#[cfg(target_os = "ios")]
+#[cfg(any(target_os = "ios", test))]
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct WebAuthenticationResponse {
     status: String,
     callback_url: Option<String>,
+}
+
+#[cfg(any(target_os = "ios", test))]
+impl WebAuthenticationResponse {
+    fn outcome(self) -> WebAuthenticationOutcome {
+        match self.status.as_str() {
+            "succeeded" => self.callback_url.filter(|url| !url.is_empty())
+                .map(WebAuthenticationOutcome::Callback).unwrap_or(WebAuthenticationOutcome::Failed),
+            "cancelled" => WebAuthenticationOutcome::Cancelled,
+            "busy" | "presentation-unavailable" => WebAuthenticationOutcome::Unavailable,
+            _ => WebAuthenticationOutcome::Failed,
+        }
+    }
+}
+
+#[cfg(test)]
+mod authentication_tests {
+    use super::*;
+
+    #[test]
+    fn presentation_outcomes_remain_distinct_from_session_failure() {
+        for status in ["busy", "presentation-unavailable"] {
+            assert_eq!(WebAuthenticationResponse { status: status.into(), callback_url: None }.outcome(), WebAuthenticationOutcome::Unavailable);
+        }
+        assert_eq!(WebAuthenticationResponse { status: "cancelled".into(), callback_url: None }.outcome(), WebAuthenticationOutcome::Cancelled);
+        assert_eq!(WebAuthenticationResponse { status: "failed".into(), callback_url: None }.outcome(), WebAuthenticationOutcome::Failed);
+        assert_eq!(WebAuthenticationResponse { status: "succeeded".into(), callback_url: Some("synthetic:/callback".into()) }.outcome(), WebAuthenticationOutcome::Callback("synthetic:/callback".into()));
+    }
 }
 
 #[cfg(target_os = "ios")]
@@ -131,17 +162,7 @@ impl<R: Runtime> IosNative<R> {
                 },
             )
             .await;
-        match response {
-            Ok(response) if response.status == "succeeded" => response
-                .callback_url
-                .filter(|url| !url.is_empty())
-                .map(WebAuthenticationOutcome::Callback)
-                .unwrap_or(WebAuthenticationOutcome::Failed),
-            Ok(response) if response.status == "cancelled" => {
-                WebAuthenticationOutcome::Cancelled
-            }
-            _ => WebAuthenticationOutcome::Failed,
-        }
+        response.map(WebAuthenticationResponse::outcome).unwrap_or(WebAuthenticationOutcome::Failed)
     }
 
     pub async fn cancel_authentication(&self) {

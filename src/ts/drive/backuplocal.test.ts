@@ -112,6 +112,8 @@ vi.mock('../process/coldstorage.svelte', () => ({
 vi.mock('src/ts/platform', () => ({
     isTauri: true,
     isTauriDesktop: true,
+    isTauriAndroid: false,
+    isTauriIOS: false,
 }))
 
 vi.mock('@tauri-apps/plugin-fs', () => ({
@@ -121,16 +123,10 @@ vi.mock('@tauri-apps/plugin-fs', () => ({
     writeFile: vi.fn(),
 }))
 
-vi.mock('@tauri-apps/plugin-process', () => ({ relaunch: vi.fn() }))
-vi.mock('./legacyLocalBackupFileRouteProduction.svelte', () => ({
-    exportLegacyLocalBackupFromSystemPicker: vi.fn(async () => {
-        throw { code: 'capability-unavailable' }
-    }),
-    // The real route falls back inside the shared operation; the mock hands the
-    // WebView importer the same context it would receive there.
-    importLegacyLocalBackupFromSystemPicker: vi.fn(async (
-        options?: { onNativeFallback?(context: unknown): Promise<unknown> },
-    ) => await options?.onNativeFallback?.(state.fallbackContext) ?? null),
+vi.mock('../desktopRelaunch', () => ({ relaunch: vi.fn() }))
+vi.mock('../storage/nativeFileJobManager', async (original) => ({
+    ...await original<object>(),
+    runSharedNativeFileOperation: vi.fn(async (_kind, _label, run) => run(state.fallbackContext)),
 }))
 vi.mock('../util', () => ({
     decryptBuffer: vi.fn(),
@@ -412,14 +408,13 @@ describe('local backup persistent snapshot', () => {
     })
 
     it('records the native failure code and reason for diagnostics without a second alert', async () => {
-        const { importLegacyLocalBackupFromSystemPicker } =
-            await import('./legacyLocalBackupFileRouteProduction.svelte')
+        const { runSharedNativeFileOperation } = await import('../storage/nativeFileJobManager')
         const { NativeFileJobError } = await import('../storage/nativeFileJobs')
         const { alertError } = await import('../alert')
         const { recordNativeLogError } = await import('../nativeLog')
         vi.mocked(recordNativeLogError).mockClear()
         vi.mocked(alertError).mockClear()
-        vi.mocked(importLegacyLocalBackupFromSystemPicker).mockRejectedValueOnce(
+        vi.mocked(runSharedNativeFileOperation).mockRejectedValueOnce(
             new NativeFileJobError('revision-conflict', 'The database changed during import'),
         )
         const { LoadLocalBackup } = await import('./backuplocal')
@@ -431,14 +426,13 @@ describe('local backup persistent snapshot', () => {
     })
 
     it('distinguishes an imported database from a failed screen refresh in diagnostics', async () => {
-        const { importLegacyLocalBackupFromSystemPicker } =
-            await import('./legacyLocalBackupFileRouteProduction.svelte')
+        const { runSharedNativeFileOperation } = await import('../storage/nativeFileJobManager')
         const { NativeFileJobActivationCommittedError } = await import('../storage/nativeFileJobs')
         const { alertError } = await import('../alert')
         const { recordNativeLogError } = await import('../nativeLog')
         vi.mocked(recordNativeLogError).mockClear()
         vi.mocked(alertError).mockClear()
-        vi.mocked(importLegacyLocalBackupFromSystemPicker).mockRejectedValueOnce(
+        vi.mocked(runSharedNativeFileOperation).mockRejectedValueOnce(
             new NativeFileJobActivationCommittedError(2, new Error('Synthetic refresh failed')),
         )
         const { LoadLocalBackup } = await import('./backuplocal')
@@ -454,13 +448,12 @@ describe('local backup persistent snapshot', () => {
     })
 
     it('stays silent for cancelled imports because the dialog already reported them', async () => {
-        const { importLegacyLocalBackupFromSystemPicker } =
-            await import('./legacyLocalBackupFileRouteProduction.svelte')
+        const { runSharedNativeFileOperation } = await import('../storage/nativeFileJobManager')
         const { alertError } = await import('../alert')
         const { recordNativeLogError } = await import('../nativeLog')
         vi.mocked(recordNativeLogError).mockClear()
         vi.mocked(alertError).mockClear()
-        vi.mocked(importLegacyLocalBackupFromSystemPicker).mockRejectedValueOnce(
+        vi.mocked(runSharedNativeFileOperation).mockRejectedValueOnce(
             new DOMException('cancelled', 'AbortError'),
         )
         const { LoadLocalBackup } = await import('./backuplocal')

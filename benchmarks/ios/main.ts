@@ -28,6 +28,40 @@ async function userStart(label: string) {
     document.getElementById("benchmark")!.append(button);
   });
 }
+async function resetLegacyMeasurementProfile() {
+  await guard();
+  const profile = await nativeDataPath();
+  const ownershipPath = await join(profile, "legacy-restore-profile-owner.json");
+  const owner = "io.github.rsyumi.risunest.ios.bench:legacy-restore-v1";
+  const opened = await invoke<{ revision: number; restoreFailure?: string }>("pds_open");
+  check(!opened.restoreFailure, "Fresh synthetic profile required after restore failure");
+  if (await exists(ownershipPath)) {
+    check(new TextDecoder().decode(await readFile(ownershipPath)) === owner, "Synthetic profile ownership mismatch");
+  } else {
+    check(opened.revision === 0, "Install a fresh isolated benchmark profile before memory measurement");
+    await mkdir(profile, { recursive: true });
+    await writeFile(ownershipPath, new TextEncoder().encode(owner));
+  }
+  const jobs = await invoke<unknown[]>("native_file_job_list");
+  check(jobs.length === 0, "Resolve retained synthetic jobs before resetting the measurement profile");
+  const resetId = crypto.randomUUID();
+  const { stagingId } = await invoke<{ stagingId: string }>("pds_replace_begin");
+  await invoke("pds_replace_put_root", { stagingId, root: { username: "Synthetic memory fixture", botPresetsId: 0,
+    pluginCustomStorage: {}, modules: [], loadouts: [], plugins: [], syntheticMeasurementResetId: resetId } });
+  await invoke("pds_replace_put_presets", { stagingId, presets: [] });
+  const committed = await invoke<{ revision: number }>("pds_replace_commit", { stagingId, expectedRevision: opened.revision });
+  const root = await invoke<{ value: { syntheticMeasurementResetId?: string } }>("pds_read_root");
+  check(root.value.syntheticMeasurementResetId === resetId, "Synthetic profile reset identity mismatch");
+  for (const trash of [false, true]) {
+    const page = await invoke<{ items: unknown[]; nextCursor?: string }>("pds_query_characters", {
+      query: { order: "configured", trash, limit: 1 },
+    });
+    check(page.items.length === 0 && !page.nextCursor, "Synthetic profile still contains characters");
+  }
+  const presets = await invoke<{ items: unknown[] }>("pds_query_presets");
+  check(presets.items.length === 0, "Synthetic profile still contains presets");
+  return { resetId, resetRevision: committed.revision, resetVerified: true };
+}
 async function oauthCallbackContract() {
   await userStart("Start OAuth callback");
   const callbackScheme = "risunestoauthtest";
@@ -67,7 +101,32 @@ async function main() {
     document.body.style.color = "var(--risu-theme-textcolor)";
   }
   await initializeIOSNative();
-  if (phase === "app" || phase === "app-restart") {
+  if (/^legacy-restore-(100|300|600)-(raw|gzip)$/.test(phase)) {
+    const [, size, encoding] = /^legacy-restore-(100|300|600)-(raw|gzip)$/.exec(phase)!;
+    const reset = await resetLegacyMeasurementProfile();
+    const { runLegacyRestoreMeasurement } = await import('../legacy-restore/run');
+    const result = await runLegacyRestoreMeasurement({
+      megabytes: Number(size) as 100 | 300 | 600,
+      encoding: encoding as 'raw' | 'gzip',
+      assertIsolatedHarness: guard,
+      report: async (event) => {
+        await report('legacy-restore', event);
+        document.getElementById('benchmark')!.textContent = 'legacy-restore-event:' + JSON.stringify(event);
+      },
+      sampleMemory: () => invoke('ios_bench_peak_rss'),
+      beforeRestore: async (prepared) => {
+        const ready = { ...prepared, ...reset };
+        await report('legacy-restore-ready', ready);
+        document.getElementById('benchmark')!.textContent = 'legacy-restore-ready:' + JSON.stringify(ready);
+        await userStart('Start synthetic restore');
+      },
+      afterRestore: async () => { await userStart('Verify synthetic restore'); },
+    });
+    document.getElementById('benchmark')!.textContent = 'legacy-restore-result:' + JSON.stringify(result);
+    check(result.phase === 'verified', 'Legacy restore did not verify');
+    await report('complete', { passed: true });
+    return;
+  } else if (phase === "app" || phase === "app-restart") {
     const { productApp } = await import("./productContracts");
     await report(phase, await productApp(phase === "app-restart"));
     await report("complete", { passed: true });

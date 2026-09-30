@@ -8,6 +8,16 @@ use std::sync::{
 static PANIC_HOOK_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 #[test]
+fn startup_failure_diagnostic_is_redacted_and_bounded_without_a_data_root() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("startup.log");
+    append_startup_diagnostic(&path, &format!("x-api-key: synthetic-secret\n{}", "detail ".repeat(1500)));
+    let log = fs::read_to_string(path).unwrap();
+    assert!(!log.contains("synthetic-secret"));
+    assert_eq!(log.chars().count(), 4097);
+}
+
+#[test]
 fn frontend_failures_reach_diagnostics_with_secrets_masked_and_bounded_text() {
     let state = NativeLogState::for_tests();
     state.record_frontend_error(&format!(

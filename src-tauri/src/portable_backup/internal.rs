@@ -23,7 +23,7 @@ pub(crate) fn create_verified_library_backup(
             .unwrap_or(i64::MAX),
     )?;
     let outcome = (|| {
-        let captured = capture_library(store, revision, scratch, &mut pins, false, probe)?;
+        let captured = capture_library(store, revision, scratch, &mut pins, false, probe, "synthetic-test-build")?;
         if captured.repair_required {
             return Err(Error::Invalid("internal backup requires a valid library"));
         }

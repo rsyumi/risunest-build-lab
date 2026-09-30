@@ -52,7 +52,7 @@ impl NetworkSettings {
     pub fn save(&self, root: &Path) -> Result<()> {
         self.validate()?;
         std::fs::create_dir_all(root)?;
-        let mut staged = tempfile::NamedTempFile::new_in(root)?;
+        let mut staged = tempfile::Builder::new().prefix(".risunest-tmp-").tempfile_in(root)?;
         staged.write_all(
             &serde_json::to_vec(self).map_err(|_| Error::new("invalid-network-settings", 400))?,
         )?;

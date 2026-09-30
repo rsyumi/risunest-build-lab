@@ -10,7 +10,13 @@ fn node_fixture(expression: &str) -> Vec<u8> {
     let script = format!(
         "import {{ productFixture, entryFixture, catalogFixture }} from 'file:///{fixture}'; process.stdout.write(JSON.stringify({expression}));"
     );
-    let output = Command::new("node")
+    let mut command = Command::new("node");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    let output = command
         .args(["--input-type=module", "--eval", &script])
         .output()
         .expect("Node is required by the repository test suite");

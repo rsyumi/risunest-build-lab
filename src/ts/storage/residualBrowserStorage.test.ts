@@ -8,7 +8,7 @@ import {
     installDeviceMarkers,
 } from './deviceMarkers'
 import type { NativeDeviceSettings } from './nativeDeviceSettings'
-import { flushDeviceSettings, loadDeviceSettings, updateDeviceSettings } from './deviceSettings'
+import { flushDeviceSettings, loadDeviceSettings, updateDeviceSettings, updateStartupExclusions } from './deviceSettings'
 import { reloadAppUpdateSettings, updateAppUpdateSettings } from '../update/settings'
 import {
     createNativePluginPermissionStore,
@@ -48,8 +48,6 @@ const NATIVE_RESIDUAL: Record<string, string> = {
 const WEB_ONLY: Record<string, string> = {
     'localStorage fallbackRisuToken': 'a native install holds the token in the vault',
     'localStorage dynamic src/ts/sionyw.ts': 'the insecure file fallback replaces native files',
-    'localStorage dynamic src/ts/storage/deviceBackup/scopes.ts':
-        'restores the keys it captured from the same storage',
     'indexedDB risunest': 'the browser data store and its migration',
     'indexedDB hypaVector': 'the browser embedding cache',
     'indexedDB plugin_permissions': 'the browser plugin consent store',
@@ -59,8 +57,6 @@ const WEB_ONLY: Record<string, string> = {
     'indexedDB risuaiSyncConflictBackup': 'the browser conflict backup store',
     'indexedDB dynamic src/ts/storage/indexedDbPersistentDataStore.ts':
         'the browser data store opens the name it was built with',
-    'indexedDB dynamic src/ts/storage/deviceBackup/indexedDb.ts':
-        'inspects the databases the browser already has',
 }
 
 const sourceRoot = join(process.cwd(), 'src')
@@ -186,7 +182,8 @@ describe('a native install after the flows that used to write to the browser', (
         const markers = await initializeDeviceMarkers(settings)
         loadDeviceSettings(markers)
 
-        updateDeviceSettings({ performanceProfile: 'low-spec', startupExclusions: ['plugins'] })
+        updateDeviceSettings({ performanceProfile: 'low-spec' })
+        updateStartupExclusions(['plugins'])
         await flushDeviceSettings()
         updateAppUpdateSettings({ autoUpdateCheck: false })
         await getDeviceMarkers().flush()
@@ -214,7 +211,7 @@ describe('a native install after the flows that used to write to the browser', (
 
         expect(localStorage.length).toBe(0)
         expect([...stored.keys()].sort()).toEqual([
-            'dosync', 'risuNestDeviceSettings', 'risuNestUpdateSettings',
+            'dosync', 'risuNestDeviceSettings', 'risuNestStartupExclusions', 'risuNestUpdateSettings',
         ])
         expect(written).toContain('pds_write_plugin_permission')
 

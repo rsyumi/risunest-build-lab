@@ -19,8 +19,6 @@ export default mergeConfig(sharedVitestConfig(), defineConfig({
         'src/**/test-fixtures/**',
         'src/**/*.testSupport.ts',
         'src/**/*.testUtils.ts',
-        'src/lib/ChatScreens/chatMountProbe.ts',
-        'src/ts/process/luaWorkerPilotClient.ts',
         'src/ts/realmEndpoints.blocked.ts',
       ],
       reporter: ['text-summary', 'json-summary', 'lcov', 'html'],

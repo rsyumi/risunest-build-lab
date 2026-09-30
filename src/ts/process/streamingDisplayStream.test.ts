@@ -160,3 +160,43 @@ describe('sendChat streaming response boundary', () => {
         expect(committed).toBe('previous')
     })
 })
+
+
+it.each(['off', 'balanced', 'strong'] as const)('keeps the exact last committed %s display on Stop or reader failure', async (mode) => {
+    for (const end of ['stop', 'failure'] as const) {
+        const abort = new AbortController()
+        const failure = new Error('synthetic reader failure')
+        let stored = 'previous'
+        let committed!: () => void
+        const firstCommit = new Promise<void>((resolve) => { committed = resolve })
+        const effects: string[] = []
+        const { reader } = readerFrom([
+            { done: false, value: { text: 'accepted' } },
+            async () => {
+                await firstCommit
+                if (end === 'failure') throw failure
+                abort.abort()
+                return { done: false, value: { text: 'late' } }
+            },
+        ])
+        const run = consumeStreamingDisplayStream({
+            mode, reader, abortSignal: abort.signal, isOwned: () => true,
+            getSnapshot: (value) => value.text,
+            processSemantic: async ({ value }, context) => {
+                if (!context.canCommit()) return
+                effects.push(value)
+                stored = `semantic:${value}`
+                committed()
+            },
+            processPreview: async ({ value }, context) => {
+                if (!context.canCommit()) return
+                stored = `preview:${value}`
+                committed()
+            },
+        })
+        if (end === 'failure') await expect(run).rejects.toBe(failure)
+        else await expect(run).resolves.toMatchObject({ completed: false })
+        expect(stored).toBe(mode === 'strong' ? 'preview:accepted' : 'semantic:accepted')
+        expect(effects).toEqual(mode === 'strong' ? [] : ['accepted'])
+    }
+})

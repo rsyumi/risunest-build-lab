@@ -37,6 +37,15 @@ describe('DeferredMarkdown', () => {
         vi.unstubAllGlobals()
     })
 
+    test('reports neutral content failure for a non-chat renderer', async () => {
+        vi.mocked(ParseMarkdown).mockRejectedValueOnce(new Error('synthetic render'))
+        const target = document.createElement('div'); document.body.append(target)
+        mounted = mount(DeferredMarkdown, { target, props: { data: 'Synthetic help text' } })
+        const { language } = await import('src/lang')
+        await vi.waitFor(() => expect(target.textContent).toContain(language.contentRenderFailed))
+        expect(target.textContent).not.toContain(language.chatDataLoadFailed)
+    })
+
     test('owns browser inlay attachment and revokes it on destruction', async () => {
         vi.stubGlobal('IntersectionObserver', undefined)
         inlayMocks.getInlayAssetBlob.mockResolvedValue({

@@ -14,6 +14,8 @@
     native,
     message,
     updatePhase,
+    updateReason,
+    type PlatformStatus,
     type Backend,
     type Status,
     type Environment,
@@ -25,6 +27,7 @@
   import Titlebar from "./Titlebar.svelte";
   import type { NetworkSettings } from "./api";
   import logo from "./logo.svg";
+  import { version } from "../package.json";
   let { backend = native }: { backend?: Backend } = $props();
   let page = $state("overview");
   let status = $state<Status | null>(null);
@@ -32,7 +35,7 @@
   let connected = $state(false);
   let busy = $state(false);
   let notice = $state("");
-  let dialog = $state<"register" | "issued" | "revoke" | "stop" | "leave" | "uninstall" | null>(null);
+  let dialog = $state<"register" | "issued" | "revoke" | "forget" | "stop" | "leave" | "uninstall" | null>(null);
   let deleteServerData = $state(false);
   let name = $state("");
   let selected = $state<Device | null>(null);
@@ -87,10 +90,22 @@
       if (sequence === refreshSequence) connected = false;
     }
   }
-  async function loadEnvironment() {
+  let environmentFlight: Promise<void> | null = null;
+  let platformFlight: Promise<void> | null = null;
+  let platformState: PlatformStatus = { startup: null, startupError: null, trayStartup: false, updateSchedule: null, updateScheduleError: null };
+  function loadEnvironment(): Promise<void> {
+    return environmentFlight ??= fetchEnvironment().finally(() => { environmentFlight = null; });
+  }
+  function loadPlatform(): Promise<void> {
+    return platformFlight ??= backend.platformStatus().then((next) => {
+      platformState = next;
+      if (environment) environment = { ...environment, ...next };
+    }).catch((error) => { notice = message(error); }).finally(() => { platformFlight = null; });
+  }
+  async function fetchEnvironment() {
     try {
       const next = await backend.environment();
-      environment = next;
+      environment = { ...next, ...platformState };
       if (
         next.updateSettings.policy === "automatic" &&
         next.updateStatus.phase === "deferred" &&
@@ -118,7 +133,7 @@
       return;
     }
     page = id;
-    if (id === "settings") void loadEnvironment();
+    if (id === "settings") void Promise.all([loadEnvironment(), loadPlatform()]);
   }
   function leavePage() {
     const next = pendingPage;
@@ -141,7 +156,7 @@
     } finally { busy = false; }
   }
   async function refreshAll() {
-    await Promise.all([refresh(), loadEnvironment()]);
+    await Promise.all([refresh(), loadEnvironment(), loadPlatform()]);
   }
   onMount(() => {
     let stopped = false;
@@ -153,7 +168,13 @@
     const environmentTimer = setInterval(() => void loadEnvironment(), 15000);
     void poll();
     void loadEnvironment();
+    void loadPlatform();
+    const onShow = () => { if (!document.hidden) void loadPlatform(); };
+    window.addEventListener("focus", onShow);
+    document.addEventListener("visibilitychange", onShow);
     return () => {
+      window.removeEventListener("focus", onShow);
+      document.removeEventListener("visibilitychange", onShow);
       stopped = true;
       clearTimeout(timer);
       clearInterval(environmentTimer);
@@ -271,7 +292,7 @@
     notice = "";
     try {
       await backend.startup(enabled ? "install" : "remove");
-      await loadEnvironment();
+      await Promise.all([loadEnvironment(), loadPlatform()]);
       notice = "자동 실행 설정을 변경했습니다.";
     } catch (error) {
       notice = message(error);
@@ -284,7 +305,7 @@
     notice = "";
     try {
       await backend.trayStartup(enabled);
-      await loadEnvironment();
+      await Promise.all([loadEnvironment(), loadPlatform()]);
     } catch (error) {
       notice = message(error);
     } finally {
@@ -296,7 +317,7 @@
     notice = "";
     try {
       await backend.updatePolicy(policy);
-      await loadEnvironment();
+      await Promise.all([loadEnvironment(), loadPlatform()]);
       notice = "업데이트 정책과 예약 확인 설정을 변경했습니다.";
     } catch (error) {
       notice = message(error);
@@ -312,7 +333,7 @@
       return "다른 관리 앱을 닫거나 설치 잠금이 해제된 뒤 다시 확인하세요.";
     if (reason === "server-busy")
       return "서버 작업이 끝난 뒤 업데이트를 다시 확인합니다.";
-    return `업데이트가 연기되었습니다${reason ? `: ${reason}` : "."}`;
+    return updateReason(reason ?? "");
   }
   async function checkUpdate(automatic = false) {
     if (busy || updating || dialog !== null || connectionDirty) {
@@ -357,6 +378,7 @@
 
 <div class="app-shell" class:mac={titlebar === "macos"}>
   {#if titlebar}<Titlebar platform={titlebar} />{/if}
+  {#if environment?.registrationError}<p class="warning" role="alert">{message(environment.registrationError)}</p>{/if}
   <div class="body">
   <aside>
     <div class="identity">
@@ -375,7 +397,7 @@
     <div class="sidebar-bottom">
       <span class:offline={!connected}
         >{connected ? "로컬 서버 연결됨" : "서버 연결 안 됨"}</span
-      ><small>RisuNest Sync · 0.1</small>
+      ><small>RisuNest Sync · {version}</small>
     </div>
   </aside>
   <main>
@@ -427,11 +449,12 @@
               <div>
                 <strong>{device.name || device.id.slice(0, 12)}</strong><small
                   >{device.id}</small
-                >{#if device.pending}<small>처리 중인 작업이 있습니다.</small
+                >{#if device.pendingError}<small>{message(device.pendingError)}</small>{/if}{#if device.pending}<small>처리 중인 작업이 있습니다.</small
                   >{/if}
               </div>
-              {#if device.revoked}<span class="pill neutral">해제됨</span
-                >{:else}<button
+              {#if device.revoked}<span class="pill neutral">해제됨</span>
+                {#if (device.retained ?? 0) > 0}<button class="danger text-button" disabled={!connected || busy} onclick={() => open("forget", device)}>보관 해제</button>{/if}
+                {:else}<button
                   class="danger text-button"
                   disabled={!connected || busy}
                   onclick={() => open("revoke", device)}>해제</button
@@ -481,7 +504,7 @@
               대상 버전: {environment.updateStatus.targetVersion}
             </p>{/if}
           {#if environment?.updateStatus.reason}<p class="warning">
-              마지막 결과: {environment.updateStatus.reason}
+              마지막 결과: {updateReason(environment.updateStatus.reason)} <code>{environment.updateStatus.reason}</code>
             </p>{/if}
           {#if environment?.updateScheduleError}<p class="warning">
               예약 업데이트 상태를 확인하지 못했습니다.
@@ -579,7 +602,7 @@
   {#if dialog === "uninstall"}
     <h2>RisuNest Sync를 제거하시겠습니까?</h2>
     <p>서버와 자동 실행을 중지하며, 연결된 기기의 동기화가 멈춥니다. 관리 앱이 종료됩니다.</p>
-    <label><input type="checkbox" bind:checked={deleteServerData} disabled={busy} /> 서버 데이터 삭제</label>
+    <label class="check"><input type="checkbox" bind:checked={deleteServerData} disabled={busy} /> 서버 데이터 삭제</label>
     <p>다른 기기의 데이터와 별도로 내보낸 백업은 유지됩니다.</p>
     <div class="dialog-actions">
       <button onclick={close} disabled={busy}>취소</button>
@@ -591,8 +614,9 @@
       }}>제거</button>
     </div>
   {:else if dialog === "leave"}
-    <p>저장하지 않은 변경사항이 있습니다. 정말로 이동하시겠습니까? 변경한 내용이 초기화됩니다.</p>
-    <div class="actions"><button onclick={leavePage}>네</button><button onclick={close}>아니오</button></div>
+    <h2>페이지를 이동하시겠습니까?</h2>
+    <p>적용하지 않은 변경사항은 초기화됩니다.</p>
+    <div class="actions"><button onclick={close}>취소</button><button onclick={leavePage}>이동</button></div>
   {:else if dialog === "register"}<h2>새 기기 등록</h2>
     <p>등록할 기기의 이름을 입력하세요.</p>
     <form
@@ -608,7 +632,7 @@
         required
         disabled={busy}
       />
-      {#if status?.localEndpoint}<label
+      {#if status?.localEndpoint}<label class="check"
           ><input type="checkbox" bind:checked={local} disabled={busy} /> 이 컴퓨터에서
           연결</label
         >{/if}
@@ -637,7 +661,7 @@
       <button onclick={() => copy(uri)}><Copy size={15} /> 링크 복사</button
       ><button class="primary" onclick={close}>완료</button>
     </div>
-  {:else if dialog === "revoke" && selected}<h2>이 기기를 해제할까요?</h2>
+  {:else if dialog === "revoke" && selected}<h2>이 기기를 해제하시겠습니까?</h2>
     <p>
       {selected.name || selected.id}의 접근 권한을 해제합니다. 다시 연결하려면
       새로 등록해야 합니다. 라이브러리의 대화와 파일은 삭제되지 않습니다.
@@ -651,7 +675,12 @@
         }}>해제</button
       >
     </div>
-  {:else if dialog === "stop"}<h2>서버를 중지할까요?</h2>
+  {:else if dialog === "forget" && selected}<h2>이 기기의 보관을 해제하시겠습니까?</h2>
+    <p>{selected.name || selected.id}에 보관하도록 맡긴 파일을 서버에서 더 이상 보호하지 않습니다. 다른 기기에 없는 파일은 삭제될 수 있습니다.</p>
+    <div class="dialog-actions"><button onclick={close} disabled={busy}>취소</button><button class="primary" disabled={busy || !connected} onclick={async () => {
+      if (await mutate(`devices/${selected!.id}/forget`)) close();
+    }}>보관 해제</button></div>
+  {:else if dialog === "stop"}<h2>서버를 중지하시겠습니까?</h2>
     <p>
       연결된 기기의 동기화가 멈춥니다. 저장된 데이터와 기기 등록 정보는
       유지됩니다.

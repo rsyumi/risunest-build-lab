@@ -1378,3 +1378,97 @@ fn asset_gc_delete_page_fails_closed_for_missing_or_corrupt_manifest_roots() {
         );
     }
 }
+
+#[test]
+fn resolved_aliases_allow_gc_but_unknown_references_and_plugins_report_blocked() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = PersistentStore::open(directory.path()).unwrap();
+    let cas = crate::asset_repository::PayloadCas::new(directory.path()).unwrap();
+    let portrait = cas.prepare_bytes(b"synthetic portrait").unwrap();
+    let orphan = cas.prepare_bytes(b"synthetic orphan").unwrap();
+    register_gc_candidate(&mut store, &portrait);
+    register_gc_candidate(&mut store, &orphan);
+    let generation = super::active_generation(&store.connection).unwrap();
+    store.connection.execute(
+        "INSERT INTO asset_aliases (generation, logical_key, object_hash, kind, size, mime, name, ext,
+            inlay_type, width, height, metadata)
+         VALUES (?1, 'assets/portrait.bin', ?2, 'asset', ?3, 'application/octet-stream', 'portrait', 'bin',
+            NULL, NULL, NULL, '{}')",
+        rusqlite::params![generation, portrait.content_hash, portrait.byte_size as i64],
+    ).unwrap();
+    store.connection.execute("UPDATE root SET value = ?1 WHERE generation = ?2",
+        rusqlite::params![r#"{"image":"assets/portrait.bin"}"#, generation]).unwrap();
+    let roots = super::snapshot::collect_asset_roots(&store.connection).unwrap();
+    assert!(roots.legacy_asset_keys.is_empty());
+    assert!(roots.object_hashes.contains(&portrait.content_hash));
+    let page = store.asset_gc_delete_page(16, None, 100, 10).unwrap();
+    assert_eq!(page.report.deleted_hashes, [orphan.content_hash]);
+    assert!(cas.stat_object(&portrait.content_hash).unwrap().is_some());
+
+    for plugin in [false, true] {
+        let held = cas.prepare_bytes(if plugin { b"plugin held" } else { b"unknown held" }).unwrap();
+        register_gc_candidate(&mut store, &held);
+        if plugin {
+            store.connection.execute("UPDATE root SET value = '{}'", []).unwrap();
+            store.connection.execute(
+                "INSERT INTO plugin_storage (generation, owner, storage_key, byte_size, ordinal, value)
+                 VALUES (?1, 'synthetic-plugin', 'opaque', 2, 0, '{}')", [&generation]).unwrap();
+        } else {
+            store.connection.execute("UPDATE root SET value = ?1 WHERE generation = ?2",
+                rusqlite::params![r#"{"image":"assets/unknown.bin"}"#, generation]).unwrap();
+        }
+        let preview = store.prepare_asset_gc_preview().unwrap();
+        let (page, details) = store.asset_gc_preview_page_detail(&preview, 16, None, 100, 10).unwrap();
+        assert!(!page.report.blockers.is_empty());
+        assert!(page.report.potential_delete_hashes.is_empty());
+        assert_eq!(page.report.potential_delete_bytes, 0);
+        assert!(details.iter().all(|candidate| candidate.state == "blocked"));
+        let executed = store.asset_gc_delete_page(16, None, 100, 10).unwrap();
+        assert!(executed.report.deleted_hashes.is_empty());
+        assert!(cas.stat_object(&held.content_hash).unwrap().is_some());
+    }
+}
+
+#[test]
+fn resolved_alias_in_another_generation_does_not_unblock_a_reference() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = PersistentStore::open(directory.path()).unwrap();
+    let cas = crate::asset_repository::PayloadCas::new(directory.path()).unwrap();
+    let object = cas.prepare_bytes(b"other generation asset").unwrap();
+    let generation = super::active_generation(&store.connection).unwrap();
+    store.connection.execute("UPDATE root SET value = ?1 WHERE generation = ?2",
+        rusqlite::params![r#"{"image":"assets/other.bin"}"#, generation]).unwrap();
+    store.connection.execute(
+        "INSERT INTO asset_aliases (generation, logical_key, object_hash, kind, size, mime, name, ext,
+            inlay_type, width, height, metadata)
+         VALUES ('other-generation', 'assets/other.bin', ?1, 'asset', ?2, 'application/octet-stream',
+            'other', 'bin', NULL, NULL, NULL, '{}')",
+        rusqlite::params![object.content_hash, object.byte_size as i64]).unwrap();
+    let roots = super::snapshot::collect_asset_roots(&store.connection).unwrap();
+    assert!(roots.legacy_asset_keys.contains("assets/other.bin"));
+    assert!(roots.object_hashes.contains(&object.content_hash));
+}
+
+#[test]
+fn command_marks_recheck_new_roots_between_gc_pages() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = PersistentStore::open(directory.path()).unwrap();
+    let cas = crate::asset_repository::PayloadCas::new(directory.path()).unwrap();
+    let mut objects = [cas.prepare_bytes(b"batch-first").unwrap(), cas.prepare_bytes(b"batch-last").unwrap()];
+    objects.sort_by(|left, right| left.content_hash.cmp(&right.content_hash));
+    for object in &objects { register_gc_candidate(&mut store, object); }
+    let marks = store.prepare_asset_gc_delete_marks().unwrap();
+    let first = store.asset_gc_delete_marked_page_with_hook(&marks, 1, None, 100, 10, |_| Ok(())).unwrap();
+    assert_eq!(first.report.deleted_hashes, [objects[0].content_hash.clone()]);
+    let generation = super::active_generation(&store.connection).unwrap();
+    store.connection.execute(
+        "INSERT INTO asset_aliases (generation, logical_key, object_hash, kind, size, mime, name, ext,
+            inlay_type, width, height, metadata)
+         VALUES (?1, 'assets/between-pages.bin', ?2, 'asset', ?3, 'application/octet-stream',
+            'between-pages', 'bin', NULL, NULL, NULL, '{}')",
+        rusqlite::params![generation, objects[1].content_hash, objects[1].byte_size as i64]).unwrap();
+    let last = store.asset_gc_delete_marked_page_with_hook(&marks, 1, first.next_cursor.as_deref(),
+        100, 10, |_| Ok(())).unwrap();
+    assert!(last.report.deleted_hashes.is_empty());
+    assert!(cas.stat_object(&objects[1].content_hash).unwrap().is_some());
+}

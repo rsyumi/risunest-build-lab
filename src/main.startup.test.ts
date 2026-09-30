@@ -35,7 +35,6 @@ const deviceSettings = {
   performanceProfile: "low-spec",
   androidKeepAliveDuringGeneration: false,
   nativeFileLogEnabled: true,
-  startupExclusions: [],
 };
 
 describe("application startup performance profile", () => {

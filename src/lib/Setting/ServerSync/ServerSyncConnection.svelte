@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from "svelte";
+  import { onMount, untrack } from "svelte";
   import { language } from "src/lang";
   import SettingGroup from "../RisuNest/SettingGroup.svelte";
   import SettingRow from "../RisuNest/SettingRow.svelte";
@@ -9,11 +9,14 @@
   import ServerSyncConnect from "./ServerSyncConnect.svelte";
   import ServerSyncRegistrationInput from "./ServerSyncRegistrationInput.svelte";
   import ServerSyncStorage from "./ServerSyncStorage.svelte";
+  import ServerSyncStages from "./ServerSyncStages.svelte";
   import { formatRisuNestStorageBytes as bytes } from "src/ts/storage/risuNestStorageDashboard";
-  import { setAssetResidencyPolicy } from "src/ts/storage/sync/serverAssetResidency";
+  import { canScanServerRegistration } from "src/ts/storage/sync/serverSyncQr";
+  import type { ServerSyncBackupInventory } from "src/ts/storage/sync/serverSyncProduction";
   import { serverSyncError } from "src/ts/storage/sync/serverSync";
   import {
     connectServerSync,
+    serverSyncWaiting,
     serverSyncErrorHelp,
     serverSyncPendingChanges,
     serverSyncProgressView,
@@ -43,6 +46,8 @@
   let pausing = $state(false);
   let disconnecting = $state(false);
   let actionError = $state("");
+  let actionRetryable = $state(true);
+  let residencyRunning = $state<"policy" | "evict" | null>(null);
   let connectOpen = $state(false);
   let connectStage = $state<"code" | "review">("code");
   let connectKey = $state(0);
@@ -58,7 +63,7 @@
   const text = $derived(language.risuNest.serverSync);
   const error = $derived(actionError || snapshot.error);
   const errorRetryable = $derived(
-    Boolean(actionError) || snapshot.errorRetryable !== false,
+    actionError ? actionRetryable : snapshot.errorRetryable !== false,
   );
   const refreshRequired = $derived(serverSyncRefreshRequired(error));
   const configured = $derived(Boolean(snapshot.status?.configured));
@@ -67,6 +72,7 @@
   );
   const busy = $derived(
     connecting ||
+      residencyRunning !== null ||
       pausing ||
       disconnecting ||
       snapshot.running ||
@@ -87,7 +93,7 @@
   );
   const storageHelp = $derived(
     cacheUsage
-      ? `${text.management.cache} ${bytes(cacheUsage.totalBytes)} · ${text.management.reclaimable} ${bytes(cacheUsage.reclaimableBytes)}`
+      ? `${text.management.cache} ${bytes(cacheUsage.cacheBytes)} · ${text.management.reclaimable} ${bytes(cacheUsage.reclaimableBytes)}`
       : undefined,
   );
   $effect(() => {
@@ -107,9 +113,9 @@
     }, 1000);
     return () => clearInterval(timer);
   });
+  const idle = $derived(!snapshot.running);
   $effect(() => {
-    // Row summaries follow every finished attempt.
-    if (!snapshot.running) void loadSummaries();
+    if (idle) untrack(() => { void loadSummaries(); });
   });
   onMount(() => {
     let attemptId = snapshot.attemptId;
@@ -121,32 +127,59 @@
     // Startup owns initialization; mounting a view must preserve its attempt.
     return unsubscribe;
   });
+  let summaryLoading = false;
+  let summaryAgain = false;
+  let summaryRevision = 0;
+  function summariesLoaded(inventory?: ServerSyncBackupInventory, usage?: ServerSyncCacheUsage): void {
+    summaryRevision++;
+    backupCount = inventory?.completeCount;
+    if (usage || !inventory) cacheUsage = usage;
+  }
   async function loadSummaries(): Promise<void> {
-    try {
-      const [inventory, usage] = await Promise.all([
-        getServerSyncBackupInventory(),
-        getServerSyncCacheUsage(),
-      ]);
-      backupCount = inventory.completeCount;
-      cacheUsage = usage;
-    } catch {
-      backupCount = undefined;
-      cacheUsage = undefined;
-    }
+    if (summaryLoading) { summaryAgain = true; return; }
+    summaryLoading = true;
+    do {
+      summaryAgain = false;
+      const revision = summaryRevision;
+      try {
+        const [inventory, usage] = await Promise.all([
+          getServerSyncBackupInventory(), getServerSyncCacheUsage(),
+        ]);
+        if (revision === summaryRevision) summariesLoaded(inventory, usage);
+      } catch {
+        // Keep the last successful summary while a refresh is unavailable.
+      }
+    } while (summaryAgain);
+    summaryLoading = false;
+  }
+  function showError(cause: unknown): void {
+    const failure = serverSyncError(cause);
+    actionError = failure.code;
+    actionRetryable = failure.retryable;
+  }
+  async function synchronize(options = {}): Promise<void> {
+    actionError = "";
+    try { await controller.synchronize(options); }
+    catch (cause) { showError(cause); }
+  }
+  async function retryStatus(): Promise<void> {
+    actionError = "";
+    try { await controller.ensureStatus(); }
+    catch (cause) { showError(cause); }
   }
   async function connect(request: ServerSyncConnectRequest): Promise<void> {
     if (busy) return;
     connecting = true;
     actionError = "";
     try {
-      await connectServerSync(controller, setAssetResidencyPolicy, request);
+      await connectServerSync(controller, request);
       // The credentials are bound now; drop the copy the check screen held.
       connectStage = "code";
       connectKey++;
       connectOpen = false;
       replacingOpen = false;
     } catch (cause) {
-      actionError = serverSyncError(cause).code;
+      showError(cause);
     } finally {
       connecting = false;
     }
@@ -159,7 +192,7 @@
       await controller.pause();
       await controller.waitForIdle();
     } catch (cause) {
-      actionError = serverSyncError(cause).code;
+      showError(cause);
     } finally {
       pausing = false;
     }
@@ -171,7 +204,7 @@
     try {
       await controller.unbind();
     } catch (cause) {
-      actionError = serverSyncError(cause).code;
+      showError(cause);
     } finally {
       disconnecting = false;
     }
@@ -183,14 +216,14 @@
       await controller.reconcile();
       await controller.synchronize();
     } catch (cause) {
-      actionError = serverSyncError(cause).code;
+      showError(cause);
     } finally {
       connecting = false;
     }
   }
   function resolve(resolution: "keep-local" | "keep-remote"): void {
     if (!conflict) return;
-    void controller.synchronize({
+    void synchronize({
       resolution,
       expectedRevision: conflict.localRevision,
       expectedHead: conflict.head,
@@ -258,6 +291,7 @@
             label={progress.current}
             fraction={progress.percent === null ? null : progress.percent / 100}
           />
+          <ServerSyncStages stages={progress.stages} />
         </div>
       {/if}
       {#if snapshot.running && snapshot.retryableFailure}
@@ -269,7 +303,7 @@
         <SettingButton
           busy={snapshot.running}
           disabled={busy || snapshot.status.registrationRequired}
-          onclick={() => void controller.synchronize()}
+          onclick={() => void synchronize()}
           >{refreshRequired ? text.refresh : text.syncNow}</SettingButton
         >
         {#if error === "epoch-reconciliation-required"}
@@ -282,7 +316,7 @@
         <SettingButton
           variant="secondary"
           busy={pausing}
-          disabled={connecting || snapshot.paused || refreshRequired}
+          disabled={(connecting && !snapshot.running) || residencyRunning !== null || snapshot.paused || refreshRequired}
           onclick={() => void pause()}>{text.pause}</SettingButton
         >
         <SettingButton
@@ -298,14 +332,16 @@
       {#if error === "epoch-reconciliation-required"}
         <p class="mt-2 text-sm text-textcolor2">{text.reconcileHelp}</p>
       {/if}
-      {#if error && error !== "cancelled" && !replacingOpen}
+      {#if serverSyncWaiting(error)}
+        <p class="mt-2 text-sm text-textcolor2" role="status">{text.waitingForLocal}</p>
+      {:else if error && error !== "cancelled" && !replacingOpen}
         <p class="mt-2 text-sm text-danger-400" role="alert">
           {serverSyncErrorHelp(error, text, errorRetryable)}
           <span class="text-textcolor2">({error})</span>
         </p>
       {/if}
     </div>
-    <ServerAssetResidency disabled={busy || refreshRequired} />
+    <ServerAssetResidency bind:running={residencyRunning} disabled={busy || refreshRequired} />
     <SettingRow label={text.reregister} help={text.reregisterHelp}>
       <SettingButton
         variant="secondary"
@@ -326,6 +362,7 @@
             available
             {busy}
             error={actionError}
+            errorRetryable={actionRetryable}
             initialNavigation={{
               endpoint: snapshot.status.endpoint ?? undefined,
               libraryId: snapshot.status.libraryId ?? undefined,
@@ -343,8 +380,12 @@
         />
       </div>
     {/if}
+  {:else if !snapshot.status}
+    <SettingRow label={text.statusUnknown} help={error ? serverSyncErrorHelp(error, text, errorRetryable) : undefined}>
+      <SettingButton disabled={busy} onclick={() => void retryStatus()}>{text.retryStatus}</SettingButton>
+    </SettingRow>
   {:else}
-    <SettingRow label={text.connectRow} help={text.connectRowHelp}>
+    <SettingRow label={text.connectRow} help={canScanServerRegistration ? text.connectRowHelpScan : text.connectRowHelp}>
       <SettingButton
         aria-expanded={connectOpen}
         onclick={() => {
@@ -359,6 +400,7 @@
           {initialNavigation}
           {busy}
           error={actionError}
+            errorRetryable={actionRetryable}
           onSubmit={(request) => void connect(request)}
         />
       {/key}
@@ -376,7 +418,7 @@
   </SettingRow>
   {#if backupsOpen}
     <div class="px-4">
-      <ServerSyncStorage section="backups" onChange={() => void loadSummaries()} />
+      <ServerSyncStorage section="backups" onLoaded={summariesLoaded} />
     </div>
   {/if}
   {#if snapshot.status?.configured}
@@ -392,7 +434,7 @@
     </SettingRow>
     {#if storageOpen}
       <div class="px-4">
-        <ServerSyncStorage section="cache" onChange={() => void loadSummaries()} />
+        <ServerSyncStorage section="cache" onLoaded={summariesLoaded} />
       </div>
     {/if}
   {/if}

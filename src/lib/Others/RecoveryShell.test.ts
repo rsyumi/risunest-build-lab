@@ -141,6 +141,21 @@ describe('RecoveryShell', () => {
         )
     })
 
+    it('retries the actual rejected store-open promise before enabling diagnosis', async () => {
+        core.invoke.mockRejectedValueOnce(new Error('synthetic open failure'))
+        const body = await setup()
+        const copy = languageEnglish.risuNest.dataHealth
+        expect(body.textContent).toContain(copy.openFailed)
+        expect(maintenance.getNativeDataHealthResult).not.toHaveBeenCalled()
+        const find = (text: string) => [...body.querySelectorAll('button')].find(button => button.textContent?.trim() === text)!
+        expect(find(copy.quickScan).disabled).toBe(true)
+        find(languageEnglish.retry).click()
+        await settle()
+        expect(core.invoke.mock.calls.filter(([command]) => command === 'pds_open')).toHaveLength(2)
+        expect(maintenance.getNativeDataHealthResult).toHaveBeenCalledOnce()
+        expect(find(copy.quickScan).disabled).toBe(false)
+        expect(body.textContent).not.toContain(copy.openFailed)
+    })
     it('uses the shared runtime-independent route for original data export', async () => {
         await decideBoot({
             begin: vi.fn().mockResolvedValue({ consecutiveFailures: 2 }),

@@ -1,5 +1,7 @@
 fn main() {
     if matches!(std::env::var("CARGO_CFG_TARGET_OS").as_deref(), Ok("macos") | Ok("ios")) {
+        println!("cargo:rerun-if-changed=src/apple_startup_log.c");
+        cc::Build::new().file("src/apple_startup_log.c").compile("risunest_startup_log");
         println!("cargo:rerun-if-changed=src/cleanup_webview.m");
         cc::Build::new().file("src/cleanup_webview.m").flag("-fobjc-arc")
             .flag("-fblocks").compile("risunest_cleanup_webview");

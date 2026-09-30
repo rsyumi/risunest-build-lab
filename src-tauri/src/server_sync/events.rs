@@ -288,3 +288,17 @@ pub(crate) fn server_sync_events_stop(app: AppHandle) {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+impl ServerSyncEventsState {
+    pub(crate) fn hold_test_listener(&self) -> Arc<tokio::sync::watch::Sender<bool>> {
+        let stop = Stop::new();
+        let flag = stop.0.clone();
+        *self.held.lock().unwrap() = Some(stop);
+        flag
+    }
+
+    pub(crate) fn has_test_listener(&self) -> bool {
+        self.held.lock().unwrap().is_some()
+    }
+}

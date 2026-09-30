@@ -81,3 +81,64 @@ test('a late host response cannot resume an unloaded plugin or affect its replac
     await expect.poll(() => page.evaluate(() => window.boundary.oldCallsFinished)).toBe(true)
     expect(await page.evaluate(() => window.boundary.state.writes)).toEqual([{ key: 'new-result', value: 'current-value' }])
 })
+
+test('the guest ignores sibling responses, callbacks, aborts and code execution', async ({ page }) => {
+    await page.goto('/')
+    await page.evaluate(() => window.boundary.load([
+        "window.addEventListener('message', event => { if (event.data?.forged) parent.postMessage({ fixture: 'forgery-observed' }, '*'); });",
+        "await risuai.addTTSPreprocessor(async signal => {",
+        "  await risuai.pluginStorage.setItem('callback-started', true);",
+        "  await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }));",
+        "  await risuai.pluginStorage.setItem('callback-aborted', true);",
+        "});",
+        "const value = await risuai.pluginStorage.getItem('held');",
+        "await risuai.pluginStorage.setItem('held-result', value);",
+    ].join('\n')))
+    await expect.poll(() => page.evaluate(() => !!window.boundary.state.releaseHeld)).toBe(true)
+    await page.evaluate(() => {
+        const messages = window.boundary.bridgeMessages
+        const callback = messages.find(message => message.method === 'addTTSPreprocessor').args[0].id
+        const held = messages.find(message => message.method === '_getPluginStorage' && message.args[0] === 'held').reqId
+        document.querySelector<HTMLIFrameElement>('iframe[data-risu-plugin-frame]')!.contentWindow!.postMessage({
+            type: 'INVOKE_CALLBACK', id: callback, reqId: 'parent-callback',
+            args: [{ __type: 'ABORT_SIGNAL_REF', abortId: 'parent-abort', aborted: false }],
+        }, '*')
+        window.boundary.forgeGuest([
+            { type: 'RESPONSE', reqId: held, result: 'forged', forged: true },
+            { type: 'INVOKE_CALLBACK', id: callback, reqId: 'forged-callback', args: [], forged: true },
+            { type: 'ABORT_SIGNAL', abortId: 'parent-abort', forged: true },
+            { type: 'EXECUTE_CODE', reqId: 'forged-exec', code: "window.forged = true", forged: true },
+        ])
+    })
+    await expect.poll(() => page.evaluate(() => window.boundary.events.filter((event: any) => event.fixture === 'forgery-observed').length)).toBe(4)
+    await expect.poll(() => page.evaluate(() => window.boundary.state.writes)).toEqual([{ key: 'callback-started', value: true }])
+    expect(await page.evaluate(() => window.boundary.bridgeMessages.filter(message => ['forged-callback', 'forged-exec'].includes(message.reqId)))).toEqual([])
+    await page.evaluate(() => {
+        window.boundary.releaseHeld()
+        document.querySelector<HTMLIFrameElement>('iframe[data-risu-plugin-frame]')!.contentWindow!.postMessage({ type: 'ABORT_SIGNAL', abortId: 'parent-abort' }, '*')
+    })
+    await expect.poll(() => page.evaluate(() => window.boundary.state.writes)).toEqual(expect.arrayContaining([
+        { key: 'held-result', value: 'late-old-value' }, { key: 'callback-aborted', value: true },
+    ]))
+})
+
+test('production CSP and opaque origin block network, string compilation and parent storage access', async ({ page }) => {
+    await page.goto('/')
+    await page.evaluate(() => window.boundary.load([
+        "const attempts = {",
+        " network: () => fetch('http://127.0.0.1:4187/'),",
+        " eval: () => eval('1'),",
+        " function: () => new Function('return 1')(),",
+        " parent: () => parent.document,",
+        " storage: () => localStorage.getItem('synthetic'),",
+        "};",
+        "for (const [key, attempt] of Object.entries(attempts)) {",
+        " let blocked = false; try { await attempt(); } catch { blocked = true; }",
+        " await risuai.pluginStorage.setItem(key, blocked);",
+        "}",
+    ].join('\n')))
+    await expect.poll(() => page.evaluate(() => window.boundary.state.writes)).toEqual([
+        { key: 'network', value: true }, { key: 'eval', value: true },
+        { key: 'function', value: true }, { key: 'parent', value: true }, { key: 'storage', value: true },
+    ])
+})

@@ -37,6 +37,7 @@ import { peekActiveConversationSession } from '../storage/persistentDataRuntime.
 import type { ActiveConversationSession } from '../storage/activeConversationSession';
 import { runSerializedUserTrigger } from './conversationUserTrigger';
 let luaFactory:LuaFactory
+let luaTimeoutErrorConstructor: typeof import('wasmoon').LuaTimeoutError | undefined
 let ScriptingSafeIds = new Set<string>()
 let ScriptingEditDisplayIds = new Set<string>()
 let ScriptingLowLevelIds = new Set<string>()
@@ -1304,6 +1305,7 @@ export async function runScripted(code:string, arg:{
         let res:any
         if(ScriptingEngineState.type === 'lua'){
             const luaEngine = ScriptingEngineState.engine
+            const listenerStartedAt = performance.now()
             try {
                 switch(mode){
                     case 'input':{
@@ -1357,7 +1359,16 @@ export async function runScripted(code:string, arg:{
                     ScriptingEngineState.stopSending = true
                 }
             } catch (error) {
-                console.error(error)
+                // Wasmoon wraps synchronous hook timeouts in a plain Error with this first line.
+                if ((luaTimeoutErrorConstructor && error instanceof luaTimeoutErrorConstructor) ||
+                    (error instanceof Error && error.message.split('\n', 1)[0] === 'Error: thread timeout exceeded')) {
+                    const diagnosticMode = ['input', 'output', 'start', 'onButtonClick', 'editRequest',
+                        'editDisplay', 'editInput', 'editOutput', 'manual'].includes(mode) ? mode : 'custom'
+                    console.error({ code: 'lua-listener-timeout', mode: diagnosticMode,
+                        elapsedMs: performance.now() - listenerStartedAt })
+                } else {
+                    console.error(error)
+                }
             }
         }
         if(ScriptingEngineState.type === 'py'){
@@ -1416,6 +1427,8 @@ export async function runScripted(code:string, arg:{
 }
 
 async function makeLuaFactory(){
+    const wasmoon = await import('wasmoon')
+    luaTimeoutErrorConstructor = wasmoon.LuaTimeoutError
     const _luaFactory = await createLuaFactory()
     async function mountFile(name:string){
         let code = ''
@@ -1708,6 +1721,7 @@ export async function runLuaEditTrigger<T extends string | OpenAIChat[]>(
     meta?: object,
     conversationOperation?: ConversationOperationContext,
     onConversationCommit?: ConversationCommitObserver,
+    signal?: AbortSignal,
 ): Promise<T> {
     switch (mode) {
         case 'editinput':
@@ -1762,6 +1776,7 @@ export async function runLuaEditTrigger<T extends string | OpenAIChat[]>(
                     meta,
                     undefined,
                     onConversationCommit,
+                    signal,
                 )
             })
         }
@@ -1773,6 +1788,7 @@ export async function runLuaEditTrigger<T extends string | OpenAIChat[]>(
         meta,
         conversationOperation,
         onConversationCommit,
+        signal,
     )
 }
 
@@ -1783,6 +1799,7 @@ async function runLuaEditTriggerBatch<T extends string | OpenAIChat[]>(
     meta?: object,
     conversationOperation?: ConversationOperationContext,
     onConversationCommit?: ConversationCommitObserver,
+    signal?: AbortSignal,
 ): Promise<T> {
     let ownedOperation: ReturnType<typeof createCurrentConversationOperation> = null
     let operationContext = conversationOperation
@@ -1804,6 +1821,7 @@ async function runLuaEditTriggerBatch<T extends string | OpenAIChat[]>(
         }
 
         for (let trigger of triggers) {
+            signal?.throwIfAborted()
             if (trigger?.effect?.[0]?.type === 'triggerlua') {
                 const runResult = await runScripted(trigger.effect[0].code, {
                     char: char,

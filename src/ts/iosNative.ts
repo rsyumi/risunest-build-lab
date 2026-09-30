@@ -1,6 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import { isTauriIOS } from "./platform";
 
+export class BackgroundExecutionExpiredError extends DOMException {
+  constructor() { super("Background execution expired", "AbortError"); }
+}
+export const isBackgroundExpiryReason = (reason: unknown): boolean =>
+  reason instanceof BackgroundExecutionExpiredError;
+
 export interface IOSNativeState {
   notifications: boolean;
   notificationStatus: number;
@@ -16,8 +22,9 @@ export interface IOSNativeState {
 export const getIOSNativeState = () =>
   invoke<IOSNativeState>("plugin:ios-native|state");
 /** A new main document cannot retain work owned by the previous renderer. */
+let initialization: Promise<void> | undefined;
 export async function initializeIOSNative(): Promise<void> {
-  if (isTauriIOS) await invoke("plugin:ios-native|reset_generation");
+  if (isTauriIOS) await (initialization ??= invoke<void>("plugin:ios-native|reset_generation"));
 }
 export const requestIOSNotifications = () =>
   invoke<{ granted: boolean }>("plugin:ios-native|request_notifications");
@@ -37,10 +44,16 @@ interface IOSGenerationDependencies {
   progress?(id: string, completed: number): Promise<unknown>;
   state(): Promise<IOSNativeState>;
   events: EventTarget;
+  monotonicProgress?: boolean;
+  unavailable?(): void;
+  expired?(): void;
 }
 const productionDependencies: IOSGenerationDependencies = {
   enabled: () => isTauriIOS,
-  begin: () => invoke("plugin:ios-native|begin"),
+  begin: async () => {
+    await initializeIOSNative();
+    return invoke("plugin:ios-native|begin", { continued: true });
+  },
   end: (id, success) => invoke("plugin:ios-native|end", { id, success }),
   progress: (id, completed) =>
     invoke("plugin:ios-native|generation_progress", { id, completed }),
@@ -48,26 +61,48 @@ const productionDependencies: IOSGenerationDependencies = {
   events: window,
 };
 
+export async function beginIOSBackgroundTask(
+  kind: string, signal: AbortSignal | undefined, release: () => void, userInitiated = false,
+) {
+  const task = await beginIOSGeneration(signal, {
+    ...productionDependencies,
+    begin: async () => {
+      await initializeIOSNative();
+      return invoke("plugin:ios-native|begin", { kind, continued: userInitiated });
+    },
+    progress: (id, completed) => invoke("plugin:ios-native|generation_progress", {
+      id, completed: Math.max(0, completed), total: completed < 0 ? 0 : 100,
+    }),
+    monotonicProgress: false,
+    unavailable: release,
+    expired: release,
+  });
+  return { ...task, progress: (percent: number | null) => task.progress(percent ?? -1) };
+}
+
 /** Retain the caller's cancellation and pair every native assertion with release. */
 export async function beginIOSGeneration(
   signal?: AbortSignal,
   deps: IOSGenerationDependencies = productionDependencies,
 ): Promise<{
   signal: AbortSignal | undefined;
+  expired(): boolean;
   progress(completed: number): void;
   dispose(success?: boolean): Promise<void>;
 }> {
   if (!deps.enabled())
-    return { signal, progress: () => {}, dispose: async () => {} };
+    return { signal, expired: () => false, progress: () => {}, dispose: async () => {} };
   const controller = new AbortController();
   const abort = () => controller.abort(signal?.reason);
   signal?.addEventListener("abort", abort, { once: true });
   if (signal?.aborted) abort();
   let id: string | null = null;
-  const expired = () =>
-    controller.abort(
-      new DOMException("iOS background execution expired", "AbortError"),
-    );
+  let didExpire = false;
+  const expired = () => {
+    didExpire = true;
+    controller.abort(new BackgroundExecutionExpiredError());
+    deps.expired?.();
+  };
   const listener = (event: Event) => {
     const detail = (event as CustomEvent<{ event: string; id?: string }>)
       .detail;
@@ -92,13 +127,15 @@ export async function beginIOSGeneration(
   } catch {
     /* Foreground generation remains available when iOS rejects extra runtime. */
   }
+  if (!id) deps.unavailable?.();
   let disposed = false;
   let reported = 0;
   let pendingProgress = Promise.resolve();
   return {
     signal: controller.signal,
+    expired: () => didExpire,
     progress(completed) {
-      if (!id || disposed || completed <= reported) return;
+      if (!id || disposed || (deps.monotonicProgress !== false ? completed <= reported : completed === reported)) return;
       reported = completed;
       const activeId = id;
       pendingProgress = pendingProgress
@@ -139,6 +176,11 @@ export function installIOSPersistenceLifecycle(
   const native = (event: Event) => {
     const detail = (event as CustomEvent<{ event: string; id?: string }>)
       .detail;
+    if (detail?.event === "active") {
+      void import("./storage/platformBlobStore").then(({ getNativeMediaEndpoint }) =>
+        getNativeMediaEndpoint.ensure()
+      ).catch(error => console.error("Native media recovery failed", error));
+    }
     if (detail?.event === "background") save(detail.id);
     else if (detail?.event === "expired" || detail?.event === "memory-warning")
       save();

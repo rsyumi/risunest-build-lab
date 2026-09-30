@@ -11,10 +11,12 @@
         preview,
         mode = 'recent',
         source = '',
+        onExpandedChange,
     }: {
         preview: StreamingThoughtPreview
         mode?: StreamingThoughtMode
         source?: string
+        onExpandedChange?: (expanded: boolean) => void
     } = $props()
     let expanded = $state(false)
 </script>
@@ -25,6 +27,7 @@
     <details
         class="x-risu-streaming-thought-preview"
         bind:open={expanded}
+        ontoggle={(event) => onExpandedChange?.(event.currentTarget.open)}
         data-streaming-thought-preview
     >
         <summary class="cursor-pointer">{language.cot}</summary>

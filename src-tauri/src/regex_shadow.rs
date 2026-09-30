@@ -419,7 +419,7 @@ fn check_control(
 
 #[cfg(test)]
 fn sha256_hex(value: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(value))
+    hex::encode(Sha256::digest(value))
 }
 
 #[cfg(test)]
@@ -1570,10 +1570,10 @@ mod tests {
             allowed_cases,
             unique_plans: compiled_plans.len(),
             mismatches,
-            plan_hash: format!("{:x}", plan_hash.finalize()),
-            input_hash: format!("{:x}", input_hash.finalize()),
-            authority_hash: format!("{:x}", authority_hash.finalize()),
-            rust_hash: format!("{:x}", rust_hash.finalize()),
+            plan_hash: hex::encode(plan_hash.finalize()),
+            input_hash: hex::encode(input_hash.finalize()),
+            authority_hash: hex::encode(authority_hash.finalize()),
+            rust_hash: hex::encode(rust_hash.finalize()),
             first_mismatch,
         };
         println!(
@@ -1612,7 +1612,7 @@ mod tests {
         }
 
         assert_eq!(
-            format!("{:x}", hash.finalize()),
+            hex::encode(hash.finalize()),
             "6fc3f4ec46d9a5806b576b005aac64beba109e174d0e3e143dcb3cd93e19e4f5",
         );
     }

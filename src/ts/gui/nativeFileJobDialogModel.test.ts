@@ -7,6 +7,7 @@ import type {
 } from '../storage/nativeFileJobManager'
 import {
     emptyNativeImportCounts,
+    resolveNativeFileJobStage,
     type NativeFileJobDetail,
     type NativeFileJobStage,
     type NativeFileJobStatus,
@@ -21,6 +22,14 @@ import {
 } from './nativeFileJobDialogModel'
 
 const copy = languageEnglish.risuNest.importDialog
+
+it('shows a cancellable wait without invented file progress before synchronization settles', () => {
+    const model = buildNativeFileJobDialogModel(running({ format: 'content', waitingForSync: true }), null, 1000)
+    expect(model.overallText).toBe(copy.waitingForSync)
+    expect(model.overallPercent).toBeNull()
+    expect(model.indeterminate).toBe(true)
+    expect(model.cancelEnabled).toBe(true)
+})
 
 function status(patch: Partial<NativeFileJobStatus> = {}): NativeFileJobStatus {
     return {
@@ -80,6 +89,61 @@ function stageIds(model: ReturnType<typeof buildNativeFileJobDialogModel>): stri
 }
 
 describe('nativeFileJobDialogModel', () => {
+    it.each([
+        ['invalid-destination', 'reasonDestination'],
+        ['destination-write-failed', 'reasonDestination'],
+        ['storage-full', 'reasonStorageFull'],
+        ['local-storage-full', 'reasonStorageFull'],
+        ['insufficient-storage', 'reasonStorageFull'],
+        ['compatibility-import-required', 'reasonCompatibilityImport'],
+        ['io-error', 'reasonIo'],
+        ['source-picker-failed', 'reasonIo'],
+        ['source-copy-failed', 'reasonIo'],
+        ['spool-write-failed', 'reasonIo'],
+        ['source-open-failed', 'reasonIo'],
+        ['source-read-failed', 'reasonIo'],
+        ['source-reselect-required', 'reasonReselectSource'],
+        ['unsupported-source', 'reasonUnsupportedFormat'],
+        ['publication-pending', 'reasonIncompletePublication'],
+        ['length-mismatch', 'reasonIncompletePublication'],
+        ['archive-output-failed', 'reasonIncompletePublication'],
+        ['cleanup-failed', 'reasonCleanup'],
+        ['capability-unavailable', 'reasonCapability'],
+        ['rescue-format-not-restorable', 'reasonRescueFormat'],
+        ['no-recovery-source', 'reasonNoRecoverySource'],
+        ['source-busy', 'reasonBusy'],
+        ['destination-required', 'reasonPlainJpeg'],
+        ['unsupported-without-destination', 'reasonPlainJpeg'],
+        ['discard-failed', 'reasonCleanup'],
+        ['generation-active', 'reasonBusy'],
+        ['library-operation-busy', 'reasonBusy'],
+        ['server-sync-busy', 'reasonBusy'],
+        ['resolve-pending-operation-first', 'reasonPendingOperation'],
+        ['server-status-unavailable', 'reasonServerStatus'],
+    ] as const)('presents actionable file failure %s while keeping diagnostics secondary', (code, key) => {
+        const model = buildNativeFileJobDialogModel(null, outcome({ state: 'failed', error: { code, message: 'synthetic detail', recoveryRequired: false } }), 0)
+        expect(model.terminal?.reason).toBe(copy[key])
+        expect(model.terminal?.details).toBe(`[${code}] synthetic detail`)
+    })
+
+    it.each(['revision-conflict', 'store-error'])('uses export wording for %s', code => {
+        expect(failureReason(code, 'export')).not.toBe(failureReason(code, 'import'))
+        expect(failureReason(code, 'export')).toMatch(/export/i)
+    })
+
+    it.each(['source-problems', 'source-preserved-repair-required', 'compatibility-losses',
+        'risuai-inlays-excluded', 'converted-inlay-extension', 'converted-inlay-sidecars',
+        'converted-inlay-provenance', 'inlay-ids-remapped', 'asset-paths-remapped',
+        'opaque-plugin-inlay-references-unverified', 'opaque-plugin-asset-references-unverified',
+        'inlay-codec-playback-unverified', 'asset-playback-unverified',
+        'android-saf-provider-not-atomic', 'android-saf-unavailable', 'post-refresh-followup-failed', 'unknown-future-code'])
+    ('never uses a warning identifier as primary text: %s', code => {
+        const model = buildNativeFileJobDialogModel(null, outcome({ warningCodes: [code] }), 0)
+        expect(model.warnings[0]).not.toContain(code)
+        expect(model.terminal?.details).toContain(`[${code}]`)
+        if (code !== 'unknown-future-code') expect(model.warnings[0]).not.toBe(copy.warningUnknown)
+    })
+
     it('is closed when nothing is running and nothing finished', () => {
         expect(buildNativeFileJobDialogModel(null, null, 0).open).toBe(false)
         expect(
@@ -568,7 +632,7 @@ describe('nativeFileJobDialogModel', () => {
             state: 'succeeded',
             summary: copy.resultSucceeded,
             reason: '',
-            details: '',
+            details: '[cleanup-failed]\n[mystery-code]',
             restarting: false,
         })
         expect(model.subtitle).toBe(copy.formatRisuAi)
@@ -867,7 +931,7 @@ describe('nativeFileJobDialogModel', () => {
             0,
         )
         expect(failed.terminal?.summary).toBe(copy.resultExportFailed)
-        expect(failed.terminal?.reason).toBe(copy.reasonStoreError)
+        expect(failed.terminal?.reason).toBe(copy.reasonExportStoreError)
         expect(failed.terminal?.summary).not.toContain('import')
     })
 
@@ -919,3 +983,57 @@ it('uses compact content progress and keeps cancellation available during metada
         true,
     )
 })
+
+it.each([false, true])('presents background interruption while retaining partial-write semantics: %s', partialWritesPossible => {
+    const model = buildNativeFileJobDialogModel(null, {
+        kind: 'export', format: 'library-backup', startedAt: 1, finishedAt: 2,
+        state: 'cancelled', observedStages: [], warningCodes: [], partialWritesPossible,
+        interruption: 'background-expired',
+    }, 3)
+    expect(model.terminal?.summary).toBe(partialWritesPossible ? copy.resultBackgroundExpiredPartial : copy.resultBackgroundExpired)
+})
+
+it.each([
+        ['queued', 'preparing-export'], ['reading-source', 'preparing-export'],
+        ['writing-export', 'writing-export'], ['uploading-database', 'publishing-destination'],
+        ['awaiting-publication-retry', 'publishing-destination'],
+        ['finalizing-publication', 'finalizing-export'], ['complete', 'finalizing-export'],
+    ] as const)('maps official publication phase %s to its visible %s stage', (phase, expected) => {
+        expect(resolveNativeFileJobStage(status({ kind: 'official-publication-upload', phase }))).toBe(expected)
+    })
+
+    it('shows official asset counts followed by database byte progress in the active upload stage', () => {
+        const assetStatus = status({
+            kind: 'official-publication-upload', phase: 'reading-source',
+            detail: detail('publishing-destination', { stageCompleted: 2, stageTotal: 5, stageUnit: 'items' }),
+        })
+        const assets = buildNativeFileJobDialogModel(running({
+            kind: 'export', format: 'library-backup', status: assetStatus,
+            observedStages: [resolveNativeFileJobStage(assetStatus)!],
+        }), null, 2_000)
+        expect(assets.title).toBe(languageEnglish.risuNest.backup.officialPublish)
+        expect(assets.stages.find(stage => stage.stage === 'publishing-destination')).toMatchObject({
+            state: 'active', detail: fillTemplate(copy.itemsOf, '2', '5'),
+        })
+        const uploadStatus = status({
+            kind: 'official-publication-upload', phase: 'uploading-database',
+            progress: { completedBytes: 1_024, totalBytes: 4_096, completedItems: 0 },
+        })
+        const upload = buildNativeFileJobDialogModel(running({
+            kind: 'export', format: 'library-backup', status: uploadStatus,
+            observedStages: ['publishing-destination', resolveNativeFileJobStage(uploadStatus)!],
+        }), null, 3_000)
+        expect(upload.overallPercent).toBe(25)
+        expect(upload.indeterminate).toBe(false)
+        expect(upload.stages.find(stage => stage.stage === 'publishing-destination')).toMatchObject({
+            state: 'active', detail: fillTemplate(copy.overall, formatBytes(1_024), formatBytes(4_096)),
+        })
+        expect(upload.cancelEnabled).toBe(true)
+    })
+
+    it('names a native account restore in the dialog', () => {
+        const model = buildNativeFileJobDialogModel(running({
+            format: 'library-backup', status: status({ kind: 'restore-official-account-snapshot' }),
+        }), null, 2_000)
+        expect(model.title).toBe(languageEnglish.risuNest.backup.officialRestore)
+    })

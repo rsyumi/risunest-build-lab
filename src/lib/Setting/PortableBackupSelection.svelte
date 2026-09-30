@@ -46,8 +46,13 @@
   let dialog: HTMLDialogElement;
   let finished = false;
   // A damaged archive cannot come in whole, but its undamaged records still can.
-  let library = $state(untrack(() => libraryIncluded && !repairRequired));
-  let partial = $state(untrack(() => repairRequired && Boolean(items)));
+  let libraryMode = $state<"off" | "all" | "selected">(untrack(() =>
+    !libraryIncluded ? "off" : repairRequired ? (items ? "selected" : "off") : "all",
+  ));
+  const partial = $derived(libraryMode === "selected");
+  let search = $state("");
+  let page = $state(0);
+  const pageSize = 100;
   let chosen = $state(
     untrack(() =>
       items
@@ -65,7 +70,9 @@
         : { characters: [], presets: [], plugins: [] },
     ),
   );
-  const groups = $derived(
+  const groups = $derived<ReadonlyArray<readonly [
+    keyof NativeArchiveInventory, NativeArchiveInventory[keyof NativeArchiveInventory], string,
+  ]>>(
     items
       ? ([
           ["characters", items.characters, text.itemCharacters],
@@ -74,6 +81,17 @@
         ] as const)
       : [],
   );
+  const chosenSets = $derived({
+    characters: new Set(chosen.characters), presets: new Set(chosen.presets), plugins: new Set(chosen.plugins),
+  });
+  const duplicateNames = $derived(new Set(groups.flatMap(([, entries]) => {
+    const seen = new Set<string>();
+    return entries.filter((entry) => { const duplicate = seen.has(entry.name); seen.add(entry.name); return duplicate; }).map((entry) => entry.name);
+  })));
+  const visibleGroups = $derived(groups.map(([kind, entries, label]) => ({
+    kind, label, entries: entries.filter((entry) => `${entry.name} ${entry.id}`.toLocaleLowerCase().includes(search.toLocaleLowerCase())),
+  })));
+  const pages = $derived(Math.max(1, ...visibleGroups.map((group) => Math.ceil(group.entries.length / pageSize))));
   const chosenCount = $derived(
     chosen.characters.length + chosen.presets.length + chosen.plugins.length,
   );
@@ -95,7 +113,7 @@
     untrack(() => choices.map((choice) => ({ ...choice }))),
   );
   const selectedCount = $derived(
-    Number(library || (partial && chosenCount > 0)) +
+    Number(libraryMode === "all" || (partial && chosenCount > 0)) +
       sections.filter((choice) => choice.selected).length,
   );
   const titleId = `portable-selection-${crypto.randomUUID()}`;
@@ -133,34 +151,27 @@
     class="flex max-h-[calc(100dvh-2rem)] flex-col"
     onsubmit={(event) => {
       event.preventDefault();
-      if (!selectedCount) return;
+      if (!selectedCount || (partial && !chosenCount)) return;
       const sectionIds = sections
         .filter((choice) => choice.included && choice.selected)
         .map((choice) => choice.sectionId);
       if (partial && chosenCount > 0) {
         // Everything the archive holds but this selection does not name is excluded on purpose,
         // so closure never pulls a damaged record back in behind the reader.
-        const named = new Set([
-          ...chosen.characters,
-          ...chosen.presets,
-          ...chosen.plugins,
-        ]);
-        const excluded = [
-          ...(items?.characters ?? []),
-          ...(items?.presets ?? []),
-          ...(items?.plugins ?? []),
-        ]
-          .map((entry) => entry.id)
-          .filter((id) => !named.has(id));
+        const excluded = {
+          characters: (items?.characters ?? []).filter((entry) => !chosenSets.characters.has(entry.id)).map((entry) => entry.id),
+          presets: (items?.presets ?? []).filter((entry) => !chosenSets.presets.has(entry.id)).map((entry) => entry.id),
+          plugins: (items?.plugins ?? []).filter((entry) => !chosenSets.plugins.has(entry.id)).map((entry) => JSON.parse(entry.id) as { owner: string; key: string }),
+        };
         finish({
           library: true,
           deviceSections: sectionIds,
-          items: { ...chosen, excluded },
+          items: { ...chosen, plugins: chosen.plugins.map((id) => JSON.parse(id) as { owner: string; key: string }), excluded },
         });
         return;
       }
       finish({
-        library: libraryIncluded && !repairRequired && library,
+        library: libraryMode === "all",
         deviceSections: sectionIds,
       });
     }}
@@ -201,12 +212,21 @@
           {text.damaged.replace("{0}", damagedCount.toLocaleString())}
         </p>
       {/if}
-      {#if items && groups.some((group) => group[1].length > 0)}
-        <div class="{boxedRowClass} mb-4">
-          <SettingToggle label={text.choosePart} showLabel bind:checked={partial} />
-        </div>
+      {#if libraryIncluded && (!repairRequired || items)}
+        <label class="{boxedRowClass} mb-4">
+          <span>{text.library}</span>
+          <select aria-label={text.library} bind:value={libraryMode} class="min-w-0 rounded border border-darkborderc bg-darkbutton p-2">
+            <option value="off">{mode === "export" ? text.excludeLibrary : text.skipLibrary}</option>
+            {#if !repairRequired}<option value="all">{text.wholeLibrary}</option>{/if}
+            {#if items}<option value="selected">{text.choosePart}</option>{/if}
+          </select>
+        </label>
+      {/if}
+      {#if items}
         {#if partial}
-          {#each groups as [kind, entries, label] (kind)}
+          <p class="mb-3 text-sm text-textcolor2">{firstRun ? text.choosePartFirstRunHelp : text.choosePartHelp}</p>
+          <input aria-label={text.searchItems} placeholder={text.searchItems} bind:value={search} oninput={() => page = 0} class="mb-3 w-full rounded border border-darkborderc bg-darkbutton p-2" />
+          {#each visibleGroups as {kind, entries, label} (kind)}
             {#if entries.length > 0}
               <fieldset data-portable-items={kind} class="mb-4 min-w-0">
                 <legend
@@ -217,12 +237,12 @@
                 <div
                   class="divide-y divide-darkborderc rounded-lg border border-darkborderc"
                 >
-                  {#each entries as entry (entry.id)}
+                  {#each entries.slice(page * pageSize, (page + 1) * pageSize) as entry (entry.id)}
                     <div class={rowClass}>
                       <SettingToggle
-                        label={entry.id}
+                        label={duplicateNames.has(entry.name) ? `${entry.name} (${entry.id})` : entry.name || entry.id}
                         showLabel
-                        checked={chosen[kind].includes(entry.id)}
+                        checked={chosenSets[kind].has(entry.id)}
                         onchange={() => toggleItem(kind, entry.id)}
                       />
                       {#if entry.damaged > 0}
@@ -239,18 +259,15 @@
               </fieldset>
             {/if}
           {/each}
-          <p class="mb-4 text-sm text-textcolor2">{text.choosePartHelp}</p>
+          {#if pages > 1}
+            <div class="mb-3 flex items-center justify-between gap-2">
+              <button type="button" disabled={page === 0} onclick={() => page--}>{text.previousItems}</button>
+              <span>{page + 1} / {pages}</span>
+              <button type="button" disabled={page + 1 >= pages} onclick={() => page++}>{text.nextItems}</button>
+            </div>
+          {/if}
+          <p class="mb-4 text-sm text-textcolor2">{text.danglingLinks}</p>
         {/if}
-      {/if}
-      {#if libraryIncluded}
-        <div class="{boxedRowClass} mb-4">
-          <SettingToggle
-            label={text.library}
-            showLabel
-            disabled={repairRequired}
-            bind:checked={library}
-          />
-        </div>
       {/if}
       {#if sections.some((choice) => choice.sectionId !== "local-settings")}
         <fieldset class="min-w-0">
@@ -290,7 +307,7 @@
       <SettingButton variant="secondary" onclick={() => finish(null)}>
         {text.cancel}
       </SettingButton>
-      <SettingButton type="submit" disabled={!selectedCount}>
+      <SettingButton type="submit" disabled={!selectedCount || (partial && !chosenCount)}>
         {text.continue}
       </SettingButton>
     </footer>

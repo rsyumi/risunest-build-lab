@@ -17,6 +17,13 @@
   "vars": {
     "MAX_RECORDS": 10000,
   },
+  "ratelimits": [
+    {
+      "name": "CREATION_LIMITER",
+      "namespace_id": "1001",
+      "simple": { "limit": 10, "period": 60 },
+    },
+  ],
   "d1_databases": [
     {
       "binding": "DB",

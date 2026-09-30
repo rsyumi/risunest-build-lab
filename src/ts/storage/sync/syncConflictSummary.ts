@@ -65,6 +65,18 @@ export async function summarizePinnedSyncConflict(
             continue
         }
         matchedIds.add(character.id)
+        const remoteChats = Array.isArray(other.chats) ? other.chats : []
+        const archived = character.archived
+        const count = archived?.conversationCount ?? character.conversationCount
+        if (character.name !== (other.name ?? "") || count !== remoteChats.length) {
+            changedNames.push(character.name.trim() || character.id)
+            continue
+        }
+        if (archived || count === 0) {
+            const signature = [character.name, count, archived?.messageCount ?? 0].join("\0")
+            if (signature !== contentSignature(other)) changedNames.push(character.name.trim() || character.id)
+            continue
+        }
         let conversationCount = 0
         let messageCount = 0
         let cursor: string | undefined

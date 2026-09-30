@@ -89,13 +89,22 @@ impl PersistentStore {
         .transpose()
     }
     /// Update only the address after an authenticated identity probe. Replica state is untouched.
+    pub(crate) fn server_repair_residency_access(&self) -> Result<()> {
+        if let Some(config) = self.server_stored_config()? {
+            if crate::server_sync::residency::Residency::exists(&self.repository_root) {
+                crate::server_sync::residency::Residency::open(&self.repository_root)?
+                    .replace_access_config(&config)?;
+            }
+        }
+        Ok(())
+    }
     pub(crate) fn server_cache_endpoint(
         &mut self,
         previous: &ServerConfig,
         verified: &ServerConfig,
     ) -> Result<()> {
         if previous.endpoint == verified.endpoint {
-            return Ok(());
+            return self.server_repair_residency_access();
         }
         verified.validate()?;
         if previous.library_id != verified.library_id
@@ -125,9 +134,8 @@ impl PersistentStore {
         {
             return Err(SyncError::new("server-config-changed", 409));
         }
-        if crate::server_sync::residency::Residency::exists(&self.repository_root) {
-            crate::server_sync::residency::Residency::open(&self.repository_root)?
-                .replace_access_config(&stored)?;
+        if let Err(error) = self.server_repair_residency_access() {
+            crate::nlog!("warn", "server sync residency repair pending: {}", error.code);
         }
         Ok(())
     }
@@ -173,7 +181,7 @@ impl PersistentStore {
     /// Disconnect keeps PDS and cached immutable bytes. An unresolved operation
     /// must first be reconciled with its receipt so it cannot be forgotten.
     pub(crate) fn server_unbind(&mut self) -> Result<()> {
-        if self.asset_residency_status()?.has_remote_or_missing() {
+        if self.asset_residency_status()?.has_remote() {
             return Err(SyncError::new("download-all-assets-before-unbind", 409));
         }
         let stored = self.server_stored_config()?;
@@ -352,10 +360,9 @@ impl PersistentStore {
             Ok(())
         })();
         if outcome.is_ok() && replacement.is_some() {
-            crate::server_sync::residency::Residency::open(&root)?
-                .replace_access_config(replacement.as_ref().unwrap())?;
-            if let Some(previous) = previous {
-                let _ = previous.remove(&root);
+            match self.server_repair_residency_access() {
+                Ok(()) => if let Some(previous) = previous { let _ = previous.remove(&root); },
+                Err(error) => crate::nlog!("warn", "server sync residency repair pending: {}", error.code),
             }
         } else if let Some(replacement) = replacement {
             let _ = replacement.remove(&root);

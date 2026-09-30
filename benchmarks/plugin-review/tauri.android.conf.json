@@ -1,0 +1,9 @@
+{
+  "identifier": "io.github.rsyumi.risunest.pluginreview",
+  "build": {
+    "beforeBuildCommand": "pnpm exec vite build --mode agent --config benchmarks/plugin-review/vite.config.ts",
+    "frontendDist": "../benchmarks/plugin-review/dist"
+  },
+  "bundle": { "active": false },
+  "app": { "windows": [{ "title": "RisuNest synthetic plugin review" }] }
+}

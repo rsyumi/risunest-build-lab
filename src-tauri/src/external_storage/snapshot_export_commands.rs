@@ -26,6 +26,31 @@ use tauri_plugin_fs::{FilePath, FsExt, OpenOptions};
 pub(crate) struct ExportSnapshotRequest {
     connection_id: String,
     snapshot_id: String,
+    export_id: String,
+}
+
+static EXPORTS: std::sync::LazyLock<std::sync::Mutex<std::collections::BTreeMap<String, Cancellation>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::BTreeMap::new()));
+struct ExportClaim(String);
+impl Drop for ExportClaim {
+    fn drop(&mut self) {
+        if let Ok(mut exports) = EXPORTS.lock() { exports.remove(&self.0); }
+    }
+}
+fn claim_export(id: &str) -> Result<(ExportClaim, Cancellation)> {
+    if uuid::Uuid::parse_str(id).ok().is_none_or(|parsed| parsed.to_string() != id) {
+        return Err(ProviderError::new(ErrorKind::PreconditionFailed));
+    }
+    let mut exports = EXPORTS.lock().map_err(runtime::local_error)?;
+    if !exports.is_empty() { return Err(ProviderError::new(ErrorKind::PreconditionFailed)); }
+    let cancel = Cancellation::default();
+    exports.insert(id.to_owned(), cancel.clone());
+    Ok((ExportClaim(id.to_owned()), cancel))
+}
+#[tauri::command]
+pub(crate) fn external_storage_cancel_export(export_id: String) -> Result<()> {
+    if let Some(cancel) = EXPORTS.lock().map_err(runtime::local_error)?.get(&export_id) { cancel.cancel(); }
+    Ok(())
 }
 
 #[derive(Serialize)]
@@ -249,7 +274,7 @@ async fn with_export_lease<T>(
     let lease_id = uuid::Uuid::new_v4().to_string();
     match leases::admit(context, &lease_id, LeaseKind::Work, cancel).await? {
         leases::Admission::Admitted(owner) => owner.run(context, cancel, body).await,
-        leases::Admission::Yield { .. } => Err(ProviderError::new(ErrorKind::Transient)),
+        leases::Admission::Yield { reason, .. } => Err(leases::yield_error(reason)),
         leases::Admission::UnsupportedProtection => Err(ProviderError::new(ErrorKind::Unsupported)),
     }
 }
@@ -270,6 +295,7 @@ fn publish_prepared_snapshot(
         &local_destination,
         &staging.join("export"),
         cancel,
+        &app.package_info().version.to_string(),
     )?;
     if path_destination.is_none() {
         publish_uri_destination(
@@ -415,12 +441,7 @@ pub(crate) async fn export_validated_conflict_source<Claim: Send>(
         });
     };
     let root = runtime::root(&app)?;
-    std::fs::create_dir_all(root.join("external-storage"))
-        .map_err(|_| ProviderError::new(ErrorKind::Transient))?;
-    let staging = tempfile::Builder::new()
-        .prefix("external-conflict-export-")
-        .tempdir_in(root.join("external-storage"))
-        .map_err(|_| ProviderError::new(ErrorKind::Transient))?;
+    let staging = super::leftovers::managed_scratch(&root, "external-conflict-export-")?;
     let cancel = Cancellation::default();
     let prepared =
         prepare_validated_conflict_source(&app, source, staging.path(), &cancel).await?;
@@ -431,13 +452,38 @@ pub(crate) async fn export_validated_conflict_source<Claim: Send>(
 }
 
 #[tauri::command(async)]
+pub(crate) async fn external_storage_export_retained_publication(app: AppHandle, job_id: String) -> Result<ExportSnapshotResponse> {
+    runtime::retained_publication(&app, &job_id)?;
+    let Some(selected) = selected_path(&app, &job_id) else {
+        return Ok(ExportSnapshotResponse { cancelled: true, destination: None, sha256: None });
+    };
+    let admission = app.state::<crate::native_file_jobs::NativeFileJobState>().admission.clone();
+    let _permit = admission.file(false).map_err(runtime::local_error)?;
+    let job = runtime::retained_publication(&app, &job_id)?;
+    let root = runtime::root(&app)?;
+    let capture = runtime::native_store(&app)?.reopen_external_capture(&job.capture_id).map_err(runtime::local_error)?;
+    let reference = capture.durable_reference(&root).map_err(runtime::local_error)?;
+    let prepared = snapshot_export::prepare_local_conflict_snapshot(&root, &job.repository_id, &reference)?;
+    let staging = super::leftovers::managed_scratch(&root, "retained-export-")?;
+    publish_prepared_snapshot(&app, selected, prepared, staging.path(), &Cancellation::default())
+}
+
+#[tauri::command(async)]
 pub(crate) async fn external_storage_export_snapshot(
     app: AppHandle,
     request: ExportSnapshotRequest,
+    progress: tauri::ipc::Channel<serde_json::Value>,
 ) -> Result<ExportSnapshotResponse> {
     if !valid_id(&request.connection_id) || !valid_id(&request.snapshot_id) {
         return Err(ProviderError::new(ErrorKind::Corrupt));
     }
+    let (_claim, cancel) = claim_export(&request.export_id)?;
+    let counters = super::phase_progress::PhaseProgress::new(move |value| {
+        let _ = progress.send(serde_json::json!({
+            "completedBytes": value.bytes.to_string(), "totalBytes": value.total_bytes.to_string(),
+            "completedItems": value.items.to_string(), "totalItems": value.total_items.to_string(),
+        }));
+    });
     let Some(selected) = selected_path(&app, &request.snapshot_id) else {
         return Ok(ExportSnapshotResponse {
             cancelled: true,
@@ -446,14 +492,9 @@ pub(crate) async fn external_storage_export_snapshot(
         });
     };
     let root = runtime::root(&app)?;
-    std::fs::create_dir_all(root.join("external-storage"))
-        .map_err(|_| ProviderError::new(ErrorKind::Transient))?;
-    let staging = tempfile::Builder::new()
-        .prefix("external-snapshot-download-")
-        .tempdir_in(root.join("external-storage"))
-        .map_err(|_| ProviderError::new(ErrorKind::Transient))?;
-    let cancel = Cancellation::default();
-    let connected = connection_commands::open_connected(&app, &request.connection_id).await?;
+    let staging = super::leftovers::managed_scratch(&root, "external-snapshot-download-")?;
+    cancel.check()?;
+    let connected = connection_commands::open_connected_with_cancel(&app, &request.connection_id, &cancel).await?;
     let known = match ConnectionStore::open(&root)?.discovery_snapshot(
         &request.connection_id,
         &request.snapshot_id,
@@ -510,9 +551,7 @@ pub(crate) async fn external_storage_export_snapshot(
                 snapshot_restore::SourceTrust::Downloaded,
                 connected.provider.as_ref(),
                 &connected.handle,
-                // An export is not a job in the external job store, so it has
-                // nothing to report counters to.
-                &crate::external_storage::phase_progress::PhaseProgress::silent(),
+                &counters,
                 &cancel,
             )
             .await?;
@@ -523,6 +562,8 @@ pub(crate) async fn external_storage_export_snapshot(
         },
     )
     .await?;
+    counters.flush();
+    cancel.check()?;
     publish_prepared_snapshot(&app, selected, prepared, staging.path(), &cancel)
 }
 
@@ -619,6 +660,22 @@ mod tests {
 
     /// GC29: the lease is confirmed in the repository before the command asks
     /// for any data, and it is gone once the command has finished.
+    #[test]
+    fn export_claim_cancellation_and_release_cover_picker_and_worker_lifetime() {
+        let id=uuid::Uuid::new_v4().to_string();
+        let (claim,cancel)=claim_export(&id).unwrap();
+        assert!(claim_export(&uuid::Uuid::new_v4().to_string()).is_err());
+        external_storage_cancel_export(uuid::Uuid::new_v4().to_string()).unwrap();
+        assert!(cancel.check().is_ok());
+        external_storage_cancel_export(id.clone()).unwrap();
+        assert_eq!(cancel.check().unwrap_err().kind,ErrorKind::Cancelled);
+        drop(claim);
+        let (next,cancel)=claim_export(&id).unwrap();
+        assert!(cancel.check().is_ok());
+        drop(next);
+        assert!(claim_export("invalid").is_err());
+    }
+
     #[test]
     fn an_export_holds_a_confirmed_lease_while_it_reads_and_gives_it_back() {
         let harness = Harness::new();

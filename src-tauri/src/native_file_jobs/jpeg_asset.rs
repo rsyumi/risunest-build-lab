@@ -343,7 +343,7 @@ fn import_jpeg_asset_with_before_commit(
                     replace_character: None,
                     add_character: None,
                     conversations: None,
-                    delete_character_id: None,
+                    delete_character_ids: None,
                     plugin_storage: None,
                     asset_owner_heads: owner_head.map(|head| vec![head]),
                 },
@@ -493,7 +493,7 @@ mod tests {
                 replace_character: None,
                 add_character: None,
                 conversations: None,
-                delete_character_id: None,
+                delete_character_ids: None,
                 plugin_storage: None,
                 asset_owner_heads: Some(vec![owner_head.clone()]),
             })
@@ -846,7 +846,7 @@ mod tests {
                         replace_character: None,
                         add_character: None,
                         conversations: None,
-                        delete_character_id: None,
+                        delete_character_ids: None,
                         plugin_storage: None,
                         asset_owner_heads: None,
                     })

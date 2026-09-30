@@ -522,6 +522,43 @@ describe('key-scoped plugin storage publication', () => {
         expect(storage.unrelated).toBe(unrelated)
         await coordinator.flushPendingData('already-persisted')
         expect(commit).toHaveBeenCalledOnce()
+        expect(coordinator.hasPendingPersistenceWork).toBe(false)
+    })
+
+    it('persists an unrelated raw nested edit made while a key commit is pending', async () => {
+        const storage = { target: 'before', unrelated: { count: 0 } }
+        const pending = deferred<{ revision: number }>()
+        const commit = vi.fn()
+            .mockImplementationOnce(() => pending.promise)
+            .mockImplementation(async ({ expectedRevision }) => ({
+                revision: expectedRevision + 1,
+            }))
+        const coordinator = new SaveCoordinator({
+            store: makeStore(commit),
+            captureRoot: () => ({}) as any,
+            capturePluginStorage: () => storage,
+            captureSelectedCharacter: () => null,
+            replaceDatabase: () => undefined,
+            publishPluginStorageMutations: (mutations) => apply(storage, mutations),
+        })
+        coordinator.initialize(1)
+        const writing = coordinator.mutatePersistentPluginStorage('tiny-key-write', [
+            { type: 'set', owner: UNOWNED_PLUGIN_OWNER, key: 'target', value: 'after' },
+        ])
+        await vi.waitFor(() => expect(commit).toHaveBeenCalledOnce())
+        storage.unrelated.count = 1
+        pending.resolve({ revision: 2 })
+        await writing
+
+        expect(storage.target).toBe('after')
+        expect(storage.unrelated).toEqual({ count: 1 })
+        expect(coordinator.hasPendingPersistenceWork).toBe(true)
+        await coordinator.flushPendingData('persist-unrelated-edit')
+        expect(commit).toHaveBeenCalledTimes(2)
+        expect(commit.mock.calls[1][0].pluginStorage).toEqual([
+            { type: 'set', owner: UNOWNED_PLUGIN_OWNER, key: 'unrelated', value: { count: 1 } },
+        ])
+        expect(coordinator.hasPendingPersistenceWork).toBe(false)
     })
 
     it.each(['set', 'clear'] as const)(

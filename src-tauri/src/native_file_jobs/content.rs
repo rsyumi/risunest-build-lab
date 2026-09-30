@@ -23,10 +23,9 @@ use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 #[cfg(test)]
 use std::fs::{self, OpenOptions};
-#[cfg(test)]
 use std::io::Write;
 use std::io::{self, Read, Seek, SeekFrom};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const COPY_BUFFER_BYTES: usize = 64 * 1024;
@@ -1193,6 +1192,218 @@ mod large_metadata_tests {
                 payload.payload.sha256,
                 hex::encode(Sha256::digest((index as u32).to_le_bytes()))
             );
+        }
+    }
+}
+
+
+pub(super) struct InlineAssetUpload {
+    file: Option<std::fs::File>,
+    directory: PathBuf,
+    jobs_root: PathBuf,
+    job_id: String,
+    name: String,
+    total_bytes: u64,
+    received: u64,
+}
+
+impl Drop for InlineAssetUpload {
+    fn drop(&mut self) {
+        drop(self.file.take());
+        let _ = super::cleanup_one_owned_directory(&self.jobs_root, &self.directory, &self.job_id);
+    }
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct InlineAssetStageResult {
+    received: u64,
+    asset: Option<PreparedContentAsset>,
+}
+
+impl super::NativeFileJobState {
+    pub(super) fn stage_inline_asset(
+        &self,
+        job_id: &str,
+        session: &DurableCasJob,
+        name: &str,
+        total_bytes: u64,
+        offset: u64,
+        data: &[u8],
+    ) -> Result<InlineAssetStageResult, NativeJobError> {
+        let _cleanup = self.admit_cleanup_operation()?;
+        let invalid = |message: &str| NativeJobError::new("invalid-input", message);
+        let store_error = |error: std::io::Error| NativeJobError::new("store-error", error.to_string());
+        let limits = PngCardLimits::default();
+        if session.kind() != CasJobKind::CardOrModuleContentImport || session.is_sealed()
+            || session.is_released() || session.pin_count() != 0
+        {
+            return Err(invalid("Native content is not awaiting asset mapping"));
+        }
+        let ext = if name.is_empty() { "png" } else { name.rsplit('.').next().unwrap_or("png") };
+        if ext.is_empty() || ext.len() > 32 || !ext.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"+_-".contains(&byte)) {
+            return Err(invalid("Inline asset extension is invalid"));
+        }
+        if data.len() > COPY_BUFFER_BYTES || total_bytes > limits.max_embedded_asset_bytes
+            || offset > total_bytes || data.len() as u64 > total_bytes - offset
+            || (data.is_empty() && total_bytes != 0) || name.len() > 4096
+        {
+            return Err(invalid("Inline asset chunk or size is invalid"));
+        }
+        let job = self.registry.lookup(job_id).map_err(|error| invalid(&error))?
+            .ok_or_else(|| invalid("Native content job is missing"))?;
+        let mut status = job.status.lock().map_err(|error| invalid(&error.to_string()))?;
+        if status.kind != super::JobKind::PrepareContentImport || status.state != super::JobState::Succeeded
+            || job.is_cancel_requested()
+        {
+            return Err(invalid("Native content is not awaiting asset mapping"));
+        }
+        let prepared = status.prepared_content.as_mut().ok_or_else(|| invalid("Native content receipt is missing"))?;
+        if prepared.format != PreparedContentFormat::PngCard || prepared.cas_session_id != job_id {
+            return Err(invalid("Inline asset staging requires prepared PNG content"));
+        }
+        let embedded = prepared.assets.iter().skip(usize::from(prepared.portrait_logical_id.is_some()));
+        let mut count = 0_usize;
+        let mut total = 0_u64;
+        for asset in embedded {
+            count += 1;
+            total = total.checked_add(asset.byte_size).ok_or_else(|| invalid("PNG embedded asset size overflow"))?;
+        }
+        if count >= limits.max_embedded_asset_count || total.checked_add(total_bytes)
+            .is_none_or(|total| total > limits.max_embedded_asset_total_bytes)
+        {
+            return Err(invalid("PNG embedded asset count or total exceeds its limit"));
+        }
+        let mut wait = job.wait_state.lock().map_err(|error| invalid(&error.to_string()))?;
+        let mut upload = match wait.inline_asset_upload.take() {
+            Some(upload) => upload,
+            None if offset == 0 => {
+                let jobs_root = self.root.join("jobs");
+                let directory = super::create_owned_directory(&jobs_root, job_id).map_err(|error| invalid(&error))?;
+                let mut upload = InlineAssetUpload { file: None, directory, jobs_root,
+                    job_id: job_id.to_owned(), name: name.to_owned(), total_bytes, received: 0 };
+                upload.file = Some(std::fs::OpenOptions::new().write(true).read(true).create_new(true)
+                    .open(upload.directory.join("inline-asset" )).map_err(store_error)?);
+                upload
+            }
+            None => return Err(invalid("Inline asset upload is missing")),
+        };
+        if upload.received != offset || upload.total_bytes != total_bytes || upload.name != name {
+            return Err(invalid("Inline asset upload does not match its chunk"));
+        }
+        let file = upload.file.as_mut().expect("inline upload owns its file");
+        file.write_all(data).map_err(store_error)?;
+        upload.received += data.len() as u64;
+        if upload.received != total_bytes {
+            let received = upload.received;
+            wait.inline_asset_upload = Some(upload);
+            return Ok(InlineAssetStageResult { received, asset: None });
+        }
+        file.sync_all().map_err(store_error)?;
+        file.seek(SeekFrom::Start(0)).map_err(store_error)?;
+        let repository_root = self.root.parent().ok_or_else(|| invalid("Native job repository is missing"))?;
+        let payload = PayloadCas::new(repository_root).map_err(store_error)?.prepare_reader(file).map_err(store_error)?;
+        let created_at_ms = SystemTime::now().duration_since(UNIX_EPOCH)
+            .map_err(|error| invalid(&error.to_string()))?.as_millis().min(i64::MAX as u128) as i64;
+        let _guard = crate::asset_repository::coordinator::lock_repository_mutation().map_err(store_error)?;
+        crate::persistent_store::register_asset_objects_at_root(repository_root,
+            &[crate::persistent_store::asset_object_catalog::AssetObjectRegistration {
+                object_hash: payload.content_hash.clone(), byte_size: payload.byte_size,
+            }], created_at_ms).map_err(|error| invalid(&error.to_string()))?;
+        let logical_id = format!("assets/{}.{}", payload.content_hash, ext);
+        let token = loop {
+            let token = format!("native-inline-{}", uuid::Uuid::new_v4());
+            if prepared.assets.iter().all(|asset| asset.token != token) { break token; }
+        };
+        let asset = PreparedContentAsset {
+            reference_key: token.clone(), token, position: None, logical_id,
+            object_hash: payload.content_hash.clone(), byte_size: payload.byte_size, mime: String::new(),
+            name: if name.is_empty() { format!("{}.{}", payload.content_hash, ext) } else { name.to_owned() },
+            ext: ext.to_owned(),
+        };
+        prepared.assets.push(asset.clone());
+        Ok(InlineAssetStageResult { received: total_bytes, asset: Some(asset) })
+    }
+}
+
+
+#[cfg(test)]
+mod inline_asset_tests {
+    use super::*;
+
+    fn fixture() -> (tempfile::TempDir, super::super::NativeFileJobState, String, DurableCasJob) {
+        let root = tempfile::tempdir().unwrap();
+        crate::persistent_store::PersistentStore::open(root.path()).unwrap();
+        let state = super::super::NativeFileJobState::initialize(root.path().join("native-file-jobs"));
+        let job = state.registry.create(super::super::JobKind::PrepareContentImport).unwrap();
+        let id = job.id();
+        let session = DurableCasJob::begin(root.path(), &id, CasJobKind::CardOrModuleContentImport, 1).unwrap();
+        job.start(JobPhase::ReadingSource).unwrap();
+        job.finish_content_job(Ok(PreparedContent {
+            format: PreparedContentFormat::PngCard, metadata: serde_json::json!({"chara":"synthetic"}),
+            assets: Vec::new(), cas_session_id: id.clone(), portrait_logical_id: None, module: None, owner_head: None,
+        }), Ok(())).unwrap();
+        (root, state, id, session)
+    }
+
+    #[test]
+    fn inline_asset_chunks_are_owned_bounded_and_part_of_the_native_receipt() {
+        let (root, state, id, session) = fixture();
+        let bytes = vec![41_u8; COPY_BUFFER_BYTES + 3];
+        let first = state.stage_inline_asset(&id, &session, "sample.wav", bytes.len() as u64, 0, &bytes[..COPY_BUFFER_BYTES]).unwrap();
+        assert_eq!(first.received, COPY_BUFFER_BYTES as u64);
+        assert!(first.asset.is_none());
+        assert!(state.root.join("jobs").join(&id).exists());
+        let final_chunk = state.stage_inline_asset(&id, &session, "sample.wav", bytes.len() as u64,
+            COPY_BUFFER_BYTES as u64, &bytes[COPY_BUFFER_BYTES..]).unwrap();
+        let asset = final_chunk.asset.unwrap();
+        assert_eq!(asset.ext, "wav");
+        assert_eq!(asset.byte_size, bytes.len() as u64);
+        assert_eq!(PayloadCas::new(root.path()).unwrap().read_object(&asset.object_hash).unwrap(), Some(bytes));
+        assert_eq!(state.content_asset_receipt(&id).unwrap(), [(asset.object_hash.clone(), asset.byte_size)]);
+        assert!(!state.root.join("jobs").join(&id).exists());
+        let store = crate::persistent_store::PersistentStore::open(root.path()).unwrap();
+        assert_eq!(store.query_asset_object_catalog(1, None).unwrap().items[0].object_hash, asset.object_hash);
+    }
+
+    #[test]
+    fn inline_asset_rejects_sealed_released_and_forgotten_jobs() {
+        let (root, state, id, mut session) = fixture();
+        let mut store = crate::persistent_store::PersistentStore::open(root.path()).unwrap();
+        session.seal(&mut store, 1).unwrap();
+        assert!(state.stage_inline_asset(&id, &session, "", 1, 0, &[1]).is_err());
+        session.release(CasReleaseOutcome::Aborted).unwrap();
+        assert!(state.stage_inline_asset(&id, &session, "", 1, 0, &[1]).is_err());
+        state.forget(&id).unwrap();
+        assert!(state.stage_inline_asset(&id, &session, "", 1, 0, &[1]).is_err());
+    }
+
+    #[test]
+    fn inline_asset_limits_and_cancel_cleanup_keep_no_staging_files() {
+        let (_root, state, id, session) = fixture();
+        let limits = PngCardLimits::default();
+        assert!(state.stage_inline_asset(&id, &session, "", limits.max_embedded_asset_bytes + 1, 0, &[1]).is_err());
+        assert!(state.stage_inline_asset(&id, &session, "", (COPY_BUFFER_BYTES + 1) as u64, 0, &vec![1; COPY_BUFFER_BYTES + 1]).is_err());
+        state.stage_inline_asset(&id, &session, "", 2, 0, &[1]).unwrap();
+        assert!(state.root.join("jobs").join(&id).exists());
+        state.forget(&id).unwrap();
+        assert!(!state.root.join("jobs").join(&id).exists());
+    }
+
+    #[test]
+    fn inline_asset_counts_existing_embedded_assets_against_all_limits() {
+        for count_limit in [false, true] {
+            let (_root, state, id, session) = fixture();
+            let job = state.registry.lookup(&id).unwrap().unwrap();
+            let limits = PngCardLimits::default();
+            let fake = PreparedContentAsset { reference_key: "synthetic".into(), token: "synthetic".into(),
+                position: None, logical_id: "assets/synthetic.png".into(), object_hash: "a".repeat(64),
+                byte_size: if count_limit { 0 } else { limits.max_embedded_asset_total_bytes },
+                mime: String::new(), name: "synthetic.png".into(), ext: "png".into() };
+            job.status.lock().unwrap().prepared_content.as_mut().unwrap().assets =
+                vec![fake; if count_limit { limits.max_embedded_asset_count } else { 1 }];
+            assert!(state.stage_inline_asset(&id, &session, "", 1, 0, &[1]).is_err());
+            assert!(!state.root.join("jobs").join(&id).exists());
         }
     }
 }

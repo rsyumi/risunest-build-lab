@@ -1,6 +1,6 @@
 import '../androidNativeControl'
 import { invoke } from '@tauri-apps/api/core'
-import { relaunch } from '@tauri-apps/plugin-process'
+import { relaunch } from '../desktopRelaunch'
 import { isTauriIOS, isTauriMobile } from '../platform'
 import type {
     DataHealthResult,
@@ -61,7 +61,7 @@ export interface NativeAssetGcCandidate {
     objectHash: string
     bytes: number
     createdAtMs: number
-    state: 'deletable' | 'recent' | 'held'
+    state: 'deletable' | 'recent' | 'held' | 'blocked'
     /** What is holding a kept file. Empty with `held` means the library still uses it. */
     holders: string[]
 }
@@ -143,23 +143,25 @@ export function planNativeDataHealthRepair(): Promise<RepairCandidate[]> {
     return invoke('pds_data_health_repair_plan')
 }
 
-export function previewNativeDataHealthRepair(selection: string[]): Promise<RepairPreview> {
-    return invoke('pds_data_health_repair_preview', { selection })
+export function previewNativeDataHealthRepair(selection: string[], expectedScannedAt: number): Promise<RepairPreview> {
+    return invoke('pds_data_health_repair_preview', { selection, expectedScannedAt })
 }
 
 export function applyNativeDataHealthRepair(
     selection: string[],
     snapshot: boolean,
+    expectedRevision: number,
+    expectedScannedAt: number,
 ): Promise<RepairApplied> {
-    return invoke('pds_data_health_repair_apply', { selection, snapshot })
+    return invoke('pds_data_health_repair_apply', { selection, snapshot, expectedRevision, expectedScannedAt })
 }
 
 export function listNativeDataHealthJournals(): Promise<RepairJournalSummary[]> {
     return invoke('pds_data_health_journals')
 }
 
-export function undoNativeDataHealthRepair(journalId: string): Promise<RepairUndone> {
-    return invoke('pds_data_health_undo', { journalId })
+export function undoNativeDataHealthRepair(journalId: string, expectedRevision: number): Promise<RepairUndone> {
+    return invoke('pds_data_health_undo', { journalId, expectedRevision })
 }
 
 export async function requestNativePersistentSnapshotRestore(id: string): Promise<void> {

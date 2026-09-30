@@ -42,6 +42,7 @@ struct PendingPreparation {
     bound_credential: Option<BoundCredential>,
     selected_folder_name: Option<String>,
     transferred: bool,
+    renewal: Option<String>,
 }
 
 #[derive(Clone)]
@@ -448,6 +449,7 @@ fn insert_preparation(
             bound_credential: None,
             selected_folder_name: None,
             transferred,
+            renewal: None,
         },
     );
     Ok(result)
@@ -634,6 +636,13 @@ async fn finish_oauth_connection(
         return Err(error.into());
     }
     pending.request.config.account_id = credential.account_id.clone();
+
+    if pending.renewal.is_some() {
+        let committed = commit_preparation(app, &preparation_id, &pending,
+            CredentialInput::Reference { reference: credential.reference, account_id: Some(credential.account_id) }, cancel).await;
+        if committed.is_err() { restore_preparation(state, preparation_id, pending); }
+        return committed.map(CompleteAuthorizationResult::Connected);
+    }
 
     let setup_result: Result<Option<CompleteAuthorizationResult>> = async {
         match pending.request.config.provider.as_str() {
@@ -871,6 +880,126 @@ pub(crate) fn external_storage_prepare_connection(
 ) -> Result<PreparedConnection> {
     let _cleanup_guard = state.admit()?;
     insert_preparation(&state, request, None, None, false)
+}
+
+#[tauri::command]
+pub(crate) fn external_storage_prepare_renewal(
+    app: AppHandle,
+    state: State<'_, ConnectionCommandState>,
+    connection_id: String,
+) -> Result<PreparedConnection> {
+    let _cleanup_guard = state.admit()?;
+    let stored = ConnectionStore::open(&connection_root(&app)?)?.read(&connection_id)?;
+    let preparation_id = uuid::Uuid::new_v4().to_string();
+    let expires_at_ms = now_ms().saturating_add(PREPARATION_LIFETIME_MS);
+    let prepared = PreparedConnection {
+        preparation_id: preparation_id.clone(), expires_at_ms: expires_at_ms.to_string(),
+        endpoint: endpoint_confirmation(&stored.config, true)?, capabilities: Some(stored.capabilities.clone()),
+        requires_o_auth: stored.config.oauth_profile.is_some(), requires_recovery_key: false,
+        requires_platform_o_auth_client: false, requires_folder_selection: false, oauth_project_hint: None,
+    };
+    let purpose = if stored.capture_policy.is_some() { ConnectionPurpose::Backup } else { ConnectionPurpose::Sync };
+    lock(&state.preparations)?.insert(preparation_id, PendingPreparation {
+        request: PrepareConnectionRequest { config: stored.config, mode: ConnectionOpenMode::Existing,
+            purpose, capture_policy: stored.capture_policy, recovery_key: None, acknowledgements: vec![] },
+        expires_at_ms, recovery_key: None, expected_repository_id: Some(stored.descriptor.repository_id),
+        imported_credential: None, bound_credential: None, selected_folder_name: None, transferred: false,
+        renewal: Some(connection_id),
+    });
+    Ok(prepared)
+}
+
+async fn renew_connection(
+    app: &AppHandle,
+    connection_id: &str,
+    credential: CredentialInput,
+    cancel: &Cancellation,
+) -> Result<ConnectionResult> {
+    let root = connection_root(app)?;
+    let stored = ConnectionStore::open(&root)?.read(connection_id)?;
+    let dependencies = connection::dependencies_for_config(&root, &stored.config)?;
+    let (replacement, account_id) = match credential {
+        CredentialInput::Bytes(secret) => (dependencies.vault.store(&secret.bytes).await?, secret.account_id),
+        CredentialInput::Reference { reference, account_id } => (reference, account_id),
+    };
+    let result = async {
+        require_renewal_account(&stored.config, account_id.as_deref())?;
+        let provider = connection::provider_for(&stored.config, dependencies.clone())?;
+        let (handle, capabilities) = provider.open_repository(&stored.config, &replacement,
+            super::contract::OpenMode::Existing, cancel).await?;
+        require_renewal_repository(&stored, &handle)?;
+        require_repository_strategy(&capabilities, stored.descriptor.publication_strategy)?;
+        let key = read_root_key(secrets::repository_key_vault(&root).as_ref(), &stored.root_key_ref).await?;
+        descriptor::read(&root, provider.as_ref(), &handle, &stored.descriptor_locator,
+            &stored.descriptor, &key, cancel).await?;
+        cancel.check()?;
+        ConnectionStore::open(&root)?.replace_credential(connection_id, &stored.credential_ref, &replacement.0)
+    }.await;
+    complete_credential_renewal(dependencies.vault.as_ref(), &SecretRef(stored.credential_ref), &replacement, result).await
+}
+
+async fn complete_credential_renewal(
+    vault: &dyn SecretVault,
+    previous: &SecretRef,
+    replacement: &SecretRef,
+    result: Result<StoredConnection>,
+) -> Result<ConnectionResult> {
+    match result {
+        Ok(connection) => {
+            let _ = vault.remove(previous).await;
+            Ok(ConnectionResult { connection: connection::summary(&connection), recovery: None })
+        }
+        Err(error) => { let _ = vault.remove(replacement).await; Err(error) }
+    }
+}
+
+fn require_renewal_account(config: &super::contract::ConnectionConfig, account: Option<&str>) -> Result<()> {
+    if config.oauth_profile.is_some() && account != Some(config.account_id.as_str()) {
+        return Err(ProviderError::new(ErrorKind::ReauthRequired));
+    }
+    Ok(())
+}
+
+fn require_renewal_repository(stored: &StoredConnection, handle: &RepositoryHandle) -> Result<()> {
+    if handle.repository_id != stored.provider_repository_id
+        || handle.connection_identity != stored.descriptor_locator.connection_identity {
+        return Err(ProviderError::new(ErrorKind::PreconditionFailed));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub(crate) async fn external_storage_unlock_connection(
+    app: AppHandle,
+    state: State<'_, ConnectionCommandState>,
+    connection_id: String,
+    recovery_key: String,
+) -> Result<()> {
+    let _cleanup_guard = state.admit()?;
+    let recovery_key = Zeroizing::new(recovery_key);
+    let root = connection_root(&app)?;
+    let stored = ConnectionStore::open(&root)?.read(&connection_id)?;
+    let dependencies = connection::dependencies_for_config(&root, &stored.config)?;
+    let provider = connection::provider_for(&stored.config, dependencies)?;
+    let cancel = Cancellation::default();
+    let (handle, _) = provider.open_repository(&stored.config, &SecretRef(stored.credential_ref.clone()),
+        super::contract::OpenMode::Existing, &cancel).await?;
+    require_renewal_repository(&stored, &handle)?;
+    let recovered = recovery::open_bootstrap(&root, provider.as_ref(), &handle, &recovery_key, &cancel).await?;
+    if recovered.metadata.descriptor != stored.descriptor
+        || recovered.metadata.descriptor_locator != stored.descriptor_locator {
+        return Err(ProviderError::new(ErrorKind::Corrupt));
+    }
+    descriptor::read(&root, provider.as_ref(), &handle, &stored.descriptor_locator,
+        &stored.descriptor, &recovered.key, &cancel).await?;
+    let vault = secrets::repository_key_vault(&root);
+    let replacement = vault.store(&SecretBytes(Zeroizing::new(recovered.key.to_vec()))).await?;
+    let adopted = ConnectionStore::open(&root).and_then(|mut store|
+        store.replace_repository_key(&connection_id, &stored.root_key_ref, &replacement.0));
+    match adopted {
+        Ok(_) => { let _ = vault.remove(&SecretRef(stored.root_key_ref)).await; Ok(()) }
+        Err(error) => { let _ = vault.remove(&replacement).await; Err(error) }
+    }
 }
 
 #[tauri::command]
@@ -1543,6 +1672,12 @@ async fn ensure_create_descriptor(
     Ok(locator)
 }
 
+fn occupied_location_error(creating: bool, error: ProviderError) -> ProviderError {
+    if creating && error.kind == ErrorKind::PreconditionFailed {
+        ProviderError { kind: ErrorKind::LocationOccupied, ..error }
+    } else { error }
+}
+
 async fn commit_preparation(
     app: &AppHandle,
     connection_id: &str,
@@ -1550,8 +1685,11 @@ async fn commit_preparation(
     credential: CredentialInput,
     cancel: &Cancellation,
 ) -> ConnectResult<ConnectionResult> {
+    if let Some(connection_id) = preparation.renewal.as_deref() {
+        return renew_connection(app, connection_id, credential, cancel).await.map_err(Into::into);
+    }
     let root = connection_root(app)?;
-    let dependencies = connection::dependencies(&root)?;
+    let dependencies = connection::dependencies_for_config(&root, &preparation.request.config)?;
     let provider_vault = dependencies.vault.clone();
     let key_vault = secrets::repository_key_vault(&root);
     let mut config = preparation.request.config.clone();
@@ -1620,7 +1758,12 @@ async fn commit_preparation(
             (pending, true)
         }
         Err(error) if error.kind == ErrorKind::NotFound => {
-            cancel.check()?;
+            if let Err(error) = cancel.check() {
+                if let CredentialInput::Reference { reference, .. } = &credential {
+                    let _ = provider_vault.remove(reference).await;
+                }
+                return Err(error.into());
+            }
             let (credential_ref, account_id) = match credential {
                 CredentialInput::Bytes(secret) => (
                     provider_vault.store(&secret.bytes).await?,
@@ -1777,9 +1920,10 @@ async fn commit_preparation(
     } else {
         super::contract::OpenMode::Existing
     };
+    let creating = matches!(open_mode, super::contract::OpenMode::Create);
     let (handle, capabilities) = provider
         .open_repository(&config, &credential_ref, open_mode, cancel)
-        .await?;
+        .await.map_err(|error| occupied_location_error(creating, error))?;
     if pending
         .provider_repository_id
         .as_ref()
@@ -1884,9 +2028,12 @@ async fn commit_preparation(
 }
 
 async fn read_root_key(vault: &dyn SecretVault, reference: &str) -> Result<Zeroizing<[u8; 32]>> {
-    let mut bytes = vault.read(&SecretRef(reference.into())).await?;
+    let mut bytes = vault.read(&SecretRef(reference.into())).await.map_err(|error| {
+        if error.kind == ErrorKind::ReauthRequired { ProviderError::new(ErrorKind::RepositoryKeyUnavailable) }
+        else { error }
+    })?;
     if bytes.0.len() != 32 {
-        return Err(ProviderError::new(ErrorKind::ReauthRequired));
+        return Err(ProviderError::new(ErrorKind::RepositoryKeyUnavailable));
     }
     let mut key = Zeroizing::new([0; 32]);
     key.copy_from_slice(&bytes.0);
@@ -1909,22 +2056,30 @@ pub(crate) async fn open_connected(
     app: &AppHandle,
     connection_id: &str,
 ) -> Result<ConnectedRepository> {
+    open_connected_with_cancel(app, connection_id, &Cancellation::default()).await
+}
+
+pub(crate) async fn open_connected_with_cancel(
+    app: &AppHandle,
+    connection_id: &str,
+    cancel: &Cancellation,
+) -> Result<ConnectedRepository> {
+    cancel.check()?;
     let root = connection_root(app)?;
     let mut stored = ConnectionStore::open(&root)?.read(connection_id)?;
-    let dependencies = connection::dependencies(&root)?;
+    let dependencies = connection::dependencies_for_config(&root, &stored.config)?;
     let root_key = read_root_key(
         secrets::repository_key_vault(&root).as_ref(),
         &stored.root_key_ref,
     )
     .await?;
     let provider = connection::provider_for(&stored.config, dependencies.clone())?;
-    let cancel = Cancellation::default();
     let (handle, capabilities) = provider
         .open_repository(
             &stored.config,
             &SecretRef(stored.credential_ref.clone()),
             super::contract::OpenMode::Existing,
-            &cancel,
+            cancel,
         )
         .await?;
     if handle.repository_id != stored.provider_repository_id {
@@ -1943,7 +2098,7 @@ pub(crate) async fn open_connected(
         &stored.descriptor_locator,
         &stored.descriptor,
         &root_key,
-        &cancel,
+        cancel,
     )
     .await?;
     Ok(ConnectedRepository {
@@ -2392,6 +2547,7 @@ mod tests {
             retention_policy: None,
             capabilities: super::super::fake::capabilities(false),
             created_at_ms: 1,
+            verified_at_ms: 1,
             last_sync_at_ms: None,
             last_backup_at_ms: None,
         };
@@ -2511,6 +2667,7 @@ mod tests {
             bound_credential: None,
             selected_folder_name: None,
             transferred: true,
+            renewal: None,
         };
 
         assert!(apply_recovery_platform_client(
@@ -2530,4 +2687,77 @@ mod tests {
             "123-current.apps.googleusercontent.com"
         );
     }
+    fn renewal_fixture() -> StoredConnection {
+        let handle = super::super::fake::repository();
+        StoredConnection {
+            id: "renewal".into(),
+            config: super::super::contract::ConnectionConfig {
+                provider: "webdav".into(), profile: None, endpoint: "https://synthetic.invalid".into(),
+                account_id: "account".into(), location: [("root".into(), "RisuNest".into())].into(), oauth_profile: None,
+            },
+            descriptor: Descriptor::new("repository".into(), None).unwrap(),
+            descriptor_locator: super::super::fake::locator(),
+            provider_repository_id: handle.repository_id,
+            credential_ref: "old".into(), root_key_ref: "root".into(), recovery_key_ref: "recovery".into(),
+            capabilities: super::super::fake::capabilities(false), created_at_ms: 1,
+            verified_at_ms: 1,
+            last_sync_at_ms: None, last_backup_at_ms: None, capture_policy: Some(CapturePolicy::default()),
+            retention_policy: None,
+        }
+    }
+
+    #[test]
+    fn failed_renewal_keeps_the_original_secret_and_success_removes_it() {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let vault = super::super::fake::MemoryVault::with("old", b"old-credential");
+            for kind in [ErrorKind::PreconditionFailed, ErrorKind::Cancelled] {
+                let replacement = vault.store(&SecretBytes(Zeroizing::new(b"replacement".to_vec()))).await.unwrap();
+                let failed = complete_credential_renewal(&vault, &SecretRef("old".into()), &replacement,
+                    Err(ProviderError::new(kind))).await;
+                assert_eq!(failed.err().unwrap().kind, kind);
+                assert_eq!(vault.contents("old").unwrap(), b"old-credential");
+                assert!(vault.contents(&replacement.0).is_none());
+            }
+            let replacement = vault.store(&SecretBytes(Zeroizing::new(b"replacement".to_vec()))).await.unwrap();
+            let mut updated = renewal_fixture();
+            updated.credential_ref = replacement.0.clone();
+            let success = complete_credential_renewal(&vault, &SecretRef("old".into()), &replacement, Ok(updated)).await.unwrap();
+            assert_eq!(success.connection.id, "renewal");
+            assert!(success.recovery.is_none());
+            assert!(vault.contents("old").is_none());
+            assert_eq!(vault.contents(&replacement.0).unwrap(), b"replacement");
+        });
+    }
+
+    #[test]
+    fn renewal_requires_the_same_oauth_account_and_repository_but_allows_key_rotation() {
+        let mut stored = renewal_fixture();
+        assert!(require_renewal_account(&stored.config, Some("rotated-key-fingerprint")).is_ok());
+        stored.config.oauth_profile = Some(super::super::contract::OAuthProfile {
+            project_id: "project".into(), platform_client_ids: Default::default(),
+        });
+        assert!(require_renewal_account(&stored.config, Some("account")).is_ok());
+        assert_eq!(require_renewal_account(&stored.config, Some("another-account")).unwrap_err().kind, ErrorKind::ReauthRequired);
+        let mut handle = super::super::fake::repository();
+        assert!(require_renewal_repository(&stored, &handle).is_ok());
+        handle.repository_id = "another-repository".into();
+        assert_eq!(require_renewal_repository(&stored, &handle).unwrap_err().kind, ErrorKind::PreconditionFailed);
+    }
+
+    #[test]
+    fn missing_repository_key_requires_unlocking_instead_of_provider_sign_in() {
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let vault = super::super::fake::MemoryVault::default();
+            assert_eq!(read_root_key(&vault, "missing").await.unwrap_err().kind, ErrorKind::RepositoryKeyUnavailable);
+        });
+    }
+
+    #[test]
+    fn only_initial_create_uses_the_occupied_location_explanation() {
+        let error = ProviderError::new(ErrorKind::PreconditionFailed);
+        assert_eq!(occupied_location_error(true, error.clone()).kind, ErrorKind::LocationOccupied);
+        assert_eq!(occupied_location_error(false, error).kind, ErrorKind::PreconditionFailed);
+        assert_eq!(occupied_location_error(true, ProviderError::new(ErrorKind::Corrupt)).kind, ErrorKind::Corrupt);
+    }
+
 }

@@ -167,6 +167,7 @@ export function keepFocusedInputVisible(node: HTMLElement, enabled: boolean) {
         scheduleUpdate()
     }
 
+    node.addEventListener('input', scheduleUpdate)
     node.addEventListener('focusin', scheduleUpdate)
     node.addEventListener('focusout', scheduleUpdate)
     viewport.addEventListener('resize', scheduleUpdate)
@@ -175,6 +176,7 @@ export function keepFocusedInputVisible(node: HTMLElement, enabled: boolean) {
 
     return {
         destroy() {
+            node.removeEventListener('input', scheduleUpdate)
             node.removeEventListener('focusin', scheduleUpdate)
             node.removeEventListener('focusout', scheduleUpdate)
             viewport.removeEventListener('resize', scheduleUpdate)

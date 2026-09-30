@@ -2,6 +2,8 @@ use super::*;
 use crate::persistent_store::plugin_owner::UNOWNED_OWNER;
 use crate::persistent_store::PluginStorageValue;
 
+const EMPTY_SCRIPT_HASH: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+
 fn store_with_rows(rows: &[(&str, &str, Value)]) -> (tempfile::TempDir, PersistentStore) {
     let directory = tempfile::tempdir().expect("create plugin owner directory");
     let mut store = PersistentStore::open(directory.path()).expect("open persistent store");
@@ -329,7 +331,11 @@ fn imported_store(
     store
         .replace_put_root(
             &staging.staging_id,
-            &json!({ "pluginCustomStorage": values, "pluginStorageMeta": meta }),
+            &json!({ "pluginCustomStorage": values, "pluginStorageMeta": meta,
+                "plugins": [
+                    { "name": "provider-manager", "script": "", "enabled": true, "version": "3.0" },
+                    { "name": "plugin-a", "script": "", "enabled": true, "version": "3.0" }
+                ] }),
         )
         .expect("stage imported plugin storage");
     store
@@ -386,7 +392,7 @@ fn an_import_offers_each_plugin_one_claim_window_that_never_reopens() {
     );
 
     let session = store
-        .begin_plugin_claim_session("provider-manager", "hash-one", "run-one")
+        .begin_plugin_claim_session("provider-manager", EMPTY_SCRIPT_HASH, "run-one")
         .expect("open claim session")
         .expect("a waiting import opens a window");
     assert_eq!(
@@ -394,7 +400,7 @@ fn an_import_offers_each_plugin_one_claim_window_that_never_reopens() {
             &mut store,
             &session,
             "provider-manager",
-            "hash-one",
+            EMPTY_SCRIPT_HASH,
             "run-one",
             "pm_store",
         ),
@@ -430,14 +436,14 @@ fn an_import_offers_each_plugin_one_claim_window_that_never_reopens() {
         &mut store,
         &session,
         "provider-manager",
-        "hash-one",
+        EMPTY_SCRIPT_HASH,
         "run-one",
         "other",
     )
     .is_none());
     // A later run of the same plugin gets no second window for this import.
     assert!(store
-        .begin_plugin_claim_session("provider-manager", "hash-one", "run-two")
+        .begin_plugin_claim_session("provider-manager", EMPTY_SCRIPT_HASH, "run-two")
         .expect("reopen attempt")
         .is_none());
     assert!(store
@@ -463,10 +469,10 @@ fn a_claim_refuses_a_key_the_plugin_already_holds_and_a_foreign_caller() {
         .expect("write the plugin's own value");
 
     let session = store
-        .begin_plugin_claim_session("plugin-a", "hash-one", "run-one")
+        .begin_plugin_claim_session("plugin-a", EMPTY_SCRIPT_HASH, "run-one")
         .expect("open claim session")
         .expect("a waiting import opens a window");
-    assert!(claim(&mut store, &session, "plugin-a", "hash-one", "run-one", "shared").is_none());
+    assert!(claim(&mut store, &session, "plugin-a", EMPTY_SCRIPT_HASH, "run-one", "shared").is_none());
     assert_eq!(
         store
             .read_plugin_storage("plugin-a", "shared", None)
@@ -482,9 +488,9 @@ fn a_claim_refuses_a_key_the_plugin_already_holds_and_a_foreign_caller() {
 
     // The window belongs to one plugin, one code and one run.
     for (owner, code_hash, runtime) in [
-        ("plugin-b", "hash-one", "run-one"),
+        ("plugin-b", EMPTY_SCRIPT_HASH, "run-one"),
         ("plugin-a", "hash-two", "run-one"),
-        ("plugin-a", "hash-one", "run-two"),
+        ("plugin-a", EMPTY_SCRIPT_HASH, "run-two"),
     ] {
         assert!(claim(&mut store, &session, owner, code_hash, runtime, "shared").is_none());
     }
@@ -505,7 +511,7 @@ fn a_later_full_replacement_keeps_the_import_a_waiting_value_arrived_in() {
         .expect("waiting item carries its import");
 
     let session = store
-        .begin_plugin_claim_session("plugin-a", "hash-one", "run-one")
+        .begin_plugin_claim_session("plugin-a", EMPTY_SCRIPT_HASH, "run-one")
         .expect("open claim session")
         .expect("a waiting import opens a window");
     store
@@ -535,7 +541,7 @@ fn a_later_full_replacement_keeps_the_import_a_waiting_value_arrived_in() {
         Some(batch)
     );
     assert!(store
-        .begin_plugin_claim_session("plugin-a", "hash-one", "run-three")
+        .begin_plugin_claim_session("plugin-a", EMPTY_SCRIPT_HASH, "run-three")
         .expect("reopen attempt after a replacement")
         .is_none());
 }
@@ -600,7 +606,7 @@ fn values_that_reached_the_store_outside_an_import_open_no_window() {
         .expect("write an unowned value outside an import");
 
     assert!(store
-        .begin_plugin_claim_session("plugin-a", "hash-one", "run-one")
+        .begin_plugin_claim_session("plugin-a", EMPTY_SCRIPT_HASH, "run-one")
         .expect("open claim session")
         .is_none());
 }
@@ -780,7 +786,7 @@ fn the_import_stage_assigns_staged_values_and_can_close_the_window_for_the_rest(
         .is_some());
     // Automatic assignment was refused, so nothing is offered afterwards.
     assert!(store
-        .begin_plugin_claim_session("yumi-translator", "hash-one", "run-one")
+        .begin_plugin_claim_session("yumi-translator", EMPTY_SCRIPT_HASH, "run-one")
         .expect("open a claim session")
         .is_none());
 }
@@ -794,7 +800,8 @@ fn leaving_automatic_assignment_on_offers_the_rest_to_the_first_plugin_that_asks
     store
         .replace_put_root(
             &staging.staging_id,
-            &json!({ "pluginCustomStorage": { "pm_store": "imported", "yt_glossary": "left" } }),
+            &json!({ "pluginCustomStorage": { "pm_store": "imported", "yt_glossary": "left" },
+                "plugins": [{ "name": "yumi-translator", "script": "", "enabled": true, "version": "3.0" }] }),
         )
         .expect("stage imported plugin storage");
     store
@@ -812,7 +819,7 @@ fn leaving_automatic_assignment_on_offers_the_rest_to_the_first_plugin_that_asks
         .expect("activate the import");
 
     let session = store
-        .begin_plugin_claim_session("yumi-translator", "hash-one", "run-one")
+        .begin_plugin_claim_session("yumi-translator", EMPTY_SCRIPT_HASH, "run-one")
         .expect("open a claim session")
         .expect("a waiting import opens a window");
     assert_eq!(
@@ -820,7 +827,7 @@ fn leaving_automatic_assignment_on_offers_the_rest_to_the_first_plugin_that_asks
             &mut store,
             &session,
             "yumi-translator",
-            "hash-one",
+            EMPTY_SCRIPT_HASH,
             "run-one",
             "yt_glossary",
         ),
@@ -831,9 +838,102 @@ fn leaving_automatic_assignment_on_offers_the_rest_to_the_first_plugin_that_asks
         &mut store,
         &session,
         "yumi-translator",
-        "hash-one",
+        EMPTY_SCRIPT_HASH,
         "run-one",
         "pm_store",
     )
     .is_none());
+}
+
+#[test]
+fn import_claims_exclude_later_owners_changed_scripts_and_closed_or_reopened_runtimes() {
+    let (directory, store) = imported_store(json!({"waiting": "synthetic"}), json!({}));
+    let hash = EMPTY_SCRIPT_HASH;
+    assert!(store.begin_plugin_claim_session("later-plugin", hash, "later").unwrap().is_none());
+    assert!(store.begin_plugin_claim_session("plugin-a", "changed-script-hash", "changed").unwrap().is_none());
+    assert!(store.begin_plugin_claim_session("plugin-a", hash, "initial").unwrap().is_some());
+    assert!(store.begin_plugin_claim_session("plugin-a", hash, "reload").unwrap().is_none());
+    store.close_plugin_claim_eligibility().unwrap();
+    assert!(store.begin_plugin_claim_session("provider-manager", hash, "after-close").unwrap().is_none());
+    drop(store);
+    let store = PersistentStore::open(directory.path()).unwrap();
+    assert!(store.begin_plugin_claim_session("provider-manager", hash, "after-reopen").unwrap().is_none());
+    assert!(store.read_plugin_storage(UNOWNED_OWNER, "waiting", None).unwrap().is_some());
+}
+
+#[test]
+fn opening_the_store_discards_unused_import_claim_eligibility() {
+    let (directory, store) = imported_store(json!({"waiting": "synthetic"}), json!({}));
+    drop(store);
+    let store = PersistentStore::open(directory.path()).unwrap();
+    assert!(store.begin_plugin_claim_session("plugin-a",
+        EMPTY_SCRIPT_HASH, "restart").unwrap().is_none());
+}
+
+#[test]
+fn plugin_value_pages_bound_bytes_isolate_owners_and_keep_the_lease_revision() {
+    use crate::persistent_store::PluginStorageValueQuery;
+    let (_directory, mut store) = store_with_rows(&[
+        ("owner-a", "zeta", json!("x".repeat(600_000))),
+        ("owner-b", "zeta", json!("private")),
+        ("owner-a", "alpha", json!("y".repeat(600_000))),
+        ("owner-a", "large", json!("z".repeat(1_100_000))),
+        ("owner-a", "last", json!(false)),
+    ]);
+    let revision = store.revision().unwrap();
+    let lease = store.acquire_revision(revision).unwrap().lease;
+    store.commit(&WorkingSetCommit {
+        plugin_storage: Some(vec![PluginStorageMutation::Set {
+            owner: "owner-a".to_owned(), key: "zeta".to_owned(), value: json!("new"),
+        }]), ..empty_working_set_commit(revision)
+    }).unwrap();
+    let mut query = PluginStorageValueQuery { owner: Some("owner-a".to_owned()), after_key: None, limit: Some(2) };
+    let mut keys = Vec::new();
+    let mut sizes = Vec::new();
+    loop {
+        let page = store.read_plugin_storage_page(&query, Some(&lease)).unwrap();
+        assert_eq!(page.revision, revision);
+        assert_eq!(page.items.len(), 1);
+        for item in page.items {
+            assert_eq!(item.owner, "owner-a");
+            sizes.push(serde_json::to_vec(&item.value).unwrap().len());
+            keys.push(item.key);
+        }
+        query.after_key = page.next_cursor;
+        if query.after_key.is_none() { break; }
+    }
+    assert_eq!(keys, vec!["zeta", "alpha", "large", "last"]);
+    assert_eq!(sizes, vec![600_002, 600_002, 1_100_002, 5]);
+    query.after_key = None;
+    assert_eq!(store.read_plugin_storage_page(&query, None).unwrap().items[0].value, json!("new"));
+    store.release_revision(&lease).unwrap();
+    assert!(matches!(store.read_plugin_storage_page(&query, Some(&lease)), Err(StoreError::SnapshotReleased)));
+    query.limit = Some(0);
+    assert!(store.read_plugin_storage_page(&query, None).is_err());
+}
+
+#[test]
+fn plugin_value_pages_return_two_thousand_values_in_eight_calls() {
+    use crate::persistent_store::PluginStorageValueQuery;
+    let keys: Vec<String> = (0..2000).map(|index| format!("key-{}", 2000 - index)).collect();
+    let rows: Vec<(&str, &str, Value)> = keys.iter().enumerate()
+        .map(|(index, key)| ("owner-a", key.as_str(), json!({ "index": index }))).collect();
+    let (_directory, store) = store_with_rows(&rows);
+    let mut query = PluginStorageValueQuery { owner: Some("owner-a".to_owned()), after_key: None, limit: None };
+    let mut items = Vec::new();
+    let mut calls = 0;
+    loop {
+        let page = store.read_plugin_storage_page(&query, None).unwrap();
+        calls += 1;
+        items.extend(page.items);
+        query.after_key = page.next_cursor;
+        if query.after_key.is_none() { break; }
+    }
+    assert_eq!(calls, 8);
+    assert_eq!(items.len(), 2000);
+    for (index, item) in items.iter().enumerate() {
+        assert_eq!(item.owner, "owner-a");
+        assert_eq!(item.key, keys[index]);
+        assert_eq!(item.value, json!({ "index": index }));
+    }
 }

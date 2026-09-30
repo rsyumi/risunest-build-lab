@@ -7,7 +7,9 @@ import WebKit
 import BackgroundTasks
 
 private struct EndArgs: Decodable { let id: String; let success: Bool? }
-private struct ProgressArgs: Decodable { let id: String; let completed: Int64 }
+private struct BeginArgs: Decodable { let kind: String?; let continued: Bool? }
+private struct ProgressArgs: Decodable { let id: String; let completed: Int64; let total: Int64? }
+private struct TaskProgress { let completed: Int64; let total: Int64 }
 private struct OpenedArgs: Decodable { let urls: [String] }
 private struct PathArgs: Decodable { let path: String }
 private struct DataRootArgs: Decodable { let dataRoot: String }
@@ -33,7 +35,7 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
     private var publicationId: String?
     private var continued: [String: BGTask] = [:]
     private var continuedPending: String?
-    private var progress: [String: Int64] = [:]
+    private var progress: [String: TaskProgress] = [:]
     private var continuedRegistered = false
     private var continuedErrorCode: Int?
     private var authenticationSession: ASWebAuthenticationSession?
@@ -53,8 +55,9 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
                       let task = task as? BGContinuedProcessingTask else { task.setTaskCompleted(success: false); return }
                 self.continuedPending = nil
                 self.continued[id] = task
-                task.progress.totalUnitCount = 3
-                task.progress.completedUnitCount = self.progress[id] ?? 0
+                let progress = self.progress[id] ?? TaskProgress(completed: 0, total: 0)
+                task.progress.totalUnitCount = progress.total
+                task.progress.completedUnitCount = progress.completed
                 task.expirationHandler = { [weak self] in
                     DispatchQueue.main.async {
                         guard let self = self, let current = self.continued.removeValue(forKey: id) else { return }
@@ -91,8 +94,8 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
     }
 
     private func emit(_ event: String, id: String = "") {
-        // Fixed native event names and UUIDs only. No document or conversation content.
-        webView?.evaluateJavaScript("window.dispatchEvent(new CustomEvent('risunest-ios-lifecycle',{detail:{event:'\(event)',id:'\(id)'}}))", completionHandler: nil)
+        guard let script = NativeFileState.lifecycleScript(event, id: id) else { return }
+        webView?.evaluateJavaScript(script, completionHandler: nil)
     }
 
     @objc func state(_ invoke: Invoke) {
@@ -113,14 +116,27 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
         }
     }
 
-    @objc func begin(_ invoke: Invoke) {
+    @objc func begin(_ invoke: Invoke) throws {
+        let args = try invoke.parseArgs(BeginArgs.self)
+        let kind = args.kind ?? "generation"
+        let korean = Locale.preferredLanguages.first?.hasPrefix("ko") == true
+        let labels = [
+            "generation": korean ? "응답 생성 중" : "Generating a response",
+            "backup": korean ? "백업 중" : "Backing up",
+            "restore": korean ? "복원 중" : "Restoring",
+            "sync": korean ? "동기화 중" : "Syncing",
+            "import": korean ? "가져오는 중" : "Importing",
+            "export": korean ? "내보내는 중" : "Exporting",
+            "maintenance": korean ? "정리 중" : "Cleaning up",
+        ]
+        guard let label = labels[kind] else { invoke.reject("Invalid background task kind"); return }
         DispatchQueue.main.async {
             let id = UUID().uuidString
             guard UIApplication.shared.applicationState == .active else {
                 invoke.resolve(["id": NSNull(), "mode": "unavailable"])
                 return
             }
-            let task = UIApplication.shared.beginBackgroundTask(withName: "RisuNest generation") { [weak self] in
+            let task = UIApplication.shared.beginBackgroundTask(withName: "RisuNest \(kind)") { [weak self] in
                 guard let self = self, let task = self.tasks.removeValue(forKey: id) else { return }
                 if self.continued[id] != nil {
                     UIApplication.shared.endBackgroundTask(task)
@@ -139,12 +155,13 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
                 return
             }
             self.tasks[id] = task
+            self.progress[id] = TaskProgress(completed: 0, total: kind == "generation" ? 3 : 0)
             self.continuedErrorCode = nil
             var mode = "limited"
             #if compiler(>=6.2)
-            if #available(iOS 26.0, *), self.continuedRegistered,
+            if #available(iOS 26.0, *), args.continued == true, self.continuedRegistered,
                self.continued.isEmpty, self.continuedPending == nil {
-                let request = BGContinuedProcessingTaskRequest(identifier: self.taskIdentifier, title: "RisuNest", subtitle: "Generating a response")
+                let request = BGContinuedProcessingTaskRequest(identifier: self.taskIdentifier, title: "RisuNest", subtitle: label)
                 request.strategy = .fail
                 self.continuedPending = id
                 do {
@@ -194,13 +211,17 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
 
     @objc func generationProgress(_ invoke: Invoke) throws {
         let args = try invoke.parseArgs(ProgressArgs.self)
-        guard (0...3).contains(args.completed) else { invoke.reject("Invalid generation progress"); return }
+        let total = args.total ?? 3
+        guard (0...100).contains(total), (0...total).contains(args.completed) else {
+            invoke.reject("Invalid background progress"); return
+        }
         DispatchQueue.main.async {
             if self.tasks[args.id] != nil || self.continued[args.id] != nil {
-                let completed = max(self.progress[args.id] ?? 0, args.completed)
-                self.progress[args.id] = completed
+                let completed = args.total == nil ? max(self.progress[args.id]?.completed ?? 0, args.completed) : args.completed
+                self.progress[args.id] = TaskProgress(completed: completed, total: total)
                 #if compiler(>=6.2)
                 if #available(iOS 26.0, *), let task = self.continued[args.id] as? BGContinuedProcessingTask {
+                    task.progress.totalUnitCount = total
                     task.progress.completedUnitCount = completed
                 }
                 #endif
@@ -359,6 +380,9 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
             if let error = copyError { throw error }
             let values = try destination.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
             guard values.isRegularFile == true else { throw CocoaError(.fileReadUnsupportedScheme) }
+            let handle = try FileHandle(forWritingTo: destination)
+            handle.synchronizeFile()
+            handle.closeFile()
             return ["cancelled": false, "path": destination.path, "name": url.lastPathComponent, "bytes": values.fileSize ?? 0]
         } catch {
             try? FileManager.default.removeItem(at: folder)
@@ -376,6 +400,9 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
                 do {
                     let staged = try self.stageFile(url)
                     entry = ["path": staged["path"] as! String]
+                    if let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+                        try? NativeFileState.removeStagedInboxSource(url, inbox: documents.appendingPathComponent("Inbox", isDirectory: true))
+                    }
                 } catch { entry = ["error": "The selected file could not be prepared for import"] }
                 DispatchQueue.main.async {
                     self.openedFiles.append(entry)
@@ -551,13 +578,7 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
         let args = try invoke.parseArgs(EndArgs.self)
         guard UUID(uuidString: args.id) != nil else { invoke.reject("Invalid publication identifier"); return }
         guard let staging = staging else { invoke.reject(rootUnavailable().localizedDescription); return }
-        let receipt = staging.appendingPathComponent("receipts/\(args.id).json")
-        guard FileManager.default.fileExists(atPath: receipt.path) else { invoke.resolve(); return }
-        guard let value = try JSONSerialization.jsonObject(with: Data(contentsOf: receipt)) as? [String: Any],
-              ["succeeded", "cancelled"].contains(value["state"] as? String ?? "") else {
-            invoke.reject("Publication has not completed"); return
-        }
-        try FileManager.default.removeItem(at: receipt)
+        try NativeFileState(staging: staging).acknowledge(args.id)
         invoke.resolve()
     }
 
@@ -565,11 +586,8 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
         let call = pickerCall
         pickerCall = nil
         if exporting, let id = publicationId, let staging = staging {
-            let receipt = staging.appendingPathComponent("receipts/\(id).json")
             do {
-                var terminal = result
-                terminal["state"] = result["cancelled"] as? Bool == true ? "cancelled" : "succeeded"
-                try JSONSerialization.data(withJSONObject: terminal).write(to: receipt, options: .atomic)
+                try NativeFileState(staging: staging).complete(id, result: result)
             } catch {
                 // Keep both the native handoff and pending receipt for explicit recovery.
                 publicationId = nil

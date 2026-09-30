@@ -46,7 +46,13 @@ fn node_catalog_and_product() -> (Vec<u8>, Vec<u8>) {
     let script = format!(
         "import {{ productFixture, entryFixture }} from 'file:///{fixture}'; const release=productFixture('app'); const entry=entryFixture('app'); process.stdout.write(JSON.stringify(release)+'\\n'+JSON.stringify({{schema:'risunest.release-catalog/v1',publishedAt:'2026-09-15T00:00:00Z',publicationTag:release.tag,products:{{app:entry,sync:null}}}}));"
     );
-    let output = Command::new("node")
+    let mut command = Command::new("node");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    let output = command
         .args(["--input-type=module", "--eval", &script])
         .output()
         .unwrap();
@@ -74,7 +80,13 @@ fn node_json(expression: &str) -> Vec<u8> {
     let script = format!(
         "import {{ productFixture }} from 'file:///{fixture}'; process.stdout.write(JSON.stringify({expression}));"
     );
-    let output = Command::new("node")
+    let mut command = Command::new("node");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    let output = command
         .args(["--input-type=module", "--eval", &script])
         .output()
         .unwrap();

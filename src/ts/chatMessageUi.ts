@@ -9,6 +9,7 @@ import type { ChatViewportJumpOptions } from './chatViewport'
 import type {
     CompleteConversationLease,
     SelectedConversationTarget,
+    WindowedConversationMutationController,
 } from './storage/activeWorkingSet.svelte'
 import { isSameSelectedConversationTarget } from './storage/activeWorkingSet.svelte'
 import type {
@@ -78,8 +79,15 @@ export type CapturedChatMessageTarget =
     | CapturedSessionChatMessageTarget
     | CapturedLegacyChatMessageTarget
     | CapturedPersistentChatMessageTarget
+    | (CapturedChatMessageTargetBase & {
+        kind: 'windowed'
+        session: null
+        locator: null
+        controller: WindowedConversationMutationController
+    })
 
 export interface ToggleBookmarkOptions {
+    mutationBlocked?(): boolean
     requestName(currentName: string): Promise<string>
     createMessageId(): string
     defaultName(message: Message): string
@@ -227,13 +235,21 @@ export async function queryChatMessageTargetsByIds(
     messageIds: readonly string[],
     occurrence: 'first' | 'last' = 'first',
 ): Promise<CapturedChatMessageTarget[]> {
+    return (await queryChatMessageTargetsByIdsWithStatus(context, messageIds, occurrence)).targets
+}
+
+export async function queryChatMessageTargetsByIdsWithStatus(
+    context: AnchoredChatMessageUiContext,
+    messageIds: readonly string[],
+    occurrence: 'first' | 'last' = 'first',
+): Promise<{ status: 'current' | 'stale'; targets: CapturedChatMessageTarget[] }> {
     const current = context.captureCurrent()
-    if (!current || messageIds.length === 0) return []
+    if (!current || messageIds.length === 0) return { status: 'current', targets: [] }
     if (!isMetadataOnlySelectedConversation(current.conversation)) {
-        return captureChatMessageTargetsByIds(context, messageIds, occurrence)
+        return { status: 'current', targets: captureChatMessageTargetsByIds(context, messageIds, occurrence) }
     }
     const selection = captureMatchingPersistentSelection(context, current)
-    if (!selection) return []
+    if (!selection) return { status: 'stale', targets: [] }
     const lease = await context.acquirePersistentRevision(selection.storeRevision)
     let results: CapturedChatMessageTarget[] = []
     let operationFailed = false
@@ -278,7 +294,7 @@ export async function queryChatMessageTargetsByIds(
             if (!operationFailed) throw error
         }
     }
-    return isPersistentQueryCurrent(context, current, selection) ? results : []
+    return isPersistentQueryCurrent(context, current, selection) ? { status: 'current', targets: results } : { status: 'stale', targets: [] }
 }
 
 export function resolveChatMessageTarget(
@@ -286,6 +302,11 @@ export function resolveChatMessageTarget(
     context: ChatMessageUiContext,
 ): CapturedChatMessageTarget | null {
     const current = context.captureCurrent()
+    if (target.kind === 'windowed') {
+        return current?.character === target.character && current.conversation === target.conversation && target.controller.isCurrent()
+            ? { ...target, message: target.controller.chat.message[0] }
+            : null
+    }
     if (target.kind === 'session') {
         if (!current) return null
         const currentSession = matchingSession(current, context.getCurrentSession())
@@ -378,6 +399,7 @@ export async function toggleCapturedBookmark(
     context: ChatMessageUiContext,
     options: ToggleBookmarkOptions,
 ): Promise<boolean> {
+    if (options.mutationBlocked?.()) return false
     const initial = resolveChatMessageTarget(target, context)
     if (!initial) return false
     const existingMessageId = initial.message.chatId
@@ -395,6 +417,7 @@ export async function toggleCapturedBookmark(
         initial.conversation.bookmarkNames?.[messageId] ?? '',
     )
     const name = requestedName?.trim() ? requestedName : options.defaultName(initial.message)
+    if (options.mutationBlocked?.()) return false
     if (initial.kind === 'persistent') {
         return mutatePersistentBookmark(initial, context, 'toggle-bookmark', (current) =>
             setCapturedBookmark(current, context, true, messageId, name),
@@ -495,6 +518,10 @@ function editCapturedMessage(
     const current = resolveChatMessageTarget(target, context)
     if (!current) return false
     const updated = update(current.message)
+    if (current.kind === 'windowed') {
+        const replacement = responseEditReplacement(current.controller.chat.message, 0, updated)
+        return current.controller.applyRange(0, 1, replacement, 'edit')
+    }
     const replacement = responseEditReplacement(current.conversation.message, current.absoluteIndex, updated)
     if (current.session) {
         if (replacement.length === 1) current.session.edit(current.locator, replacement[0])
@@ -522,6 +549,18 @@ function setCapturedBookmark(
     if (target.kind === 'persistent') return false
     const current = resolveChatMessageTarget(target, context)
     if (!current) return false
+    if (current.kind === 'windowed') {
+        const chat = current.controller.chat
+        const id = current.message.chatId ?? messageId
+        if (!id) return false
+        chat.bookmarks = [...(chat.bookmarks ?? []).filter((entry) => entry !== id)]
+        chat.bookmarkNames = { ...chat.bookmarkNames }
+        if (bookmarked) {
+            chat.bookmarks.push(id)
+            if (name !== undefined) chat.bookmarkNames[id] = name
+        } else delete chat.bookmarkNames[id]
+        return current.controller.applyRange(0, 1, [{ ...current.message, chatId: id }], 'edit')
+    }
     if (current.session) {
         current.session.setBookmark(current.locator, {
             bookmarked,

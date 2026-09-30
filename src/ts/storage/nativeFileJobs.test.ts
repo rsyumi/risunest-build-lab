@@ -1,4 +1,72 @@
 import { describe, expect, it, vi } from 'vitest'
+const deviceRestore = vi.hoisted(() => ({ flushDeviceStateBeforeRestore: vi.fn(async () => {}), refreshDeviceStateAfterRestore: vi.fn(async () => {}) }))
+vi.mock('./deviceStateRestore', () => deviceRestore)
+
+describe('local source preservation consent', () => {
+    it.each(['accept', 'refuse', 'cancel'] as const)('requires explicit %s before retrying damaged source export', async (decision) => {
+        const requests: Record<string, unknown>[] = []
+        const controller = new AbortController()
+        const confirm = vi.fn(async () => {
+            expect(requests).toHaveLength(1)
+            if (decision === 'cancel') controller.abort()
+            return decision !== 'refuse'
+        })
+        const result = { revision: 4, sourceBytes: 12, sourceSha256: 'a'.repeat(64), characterCount: 1, presetCount: 1, warningCodes: ['source-preserved-repair-required'] }
+        const operation = runNativeArchiveExport(
+            { ...restoreRuntime(4), flushPendingData: async () => {}, revision: 4 },
+            { type: 'desktopPath', path: 'C:\\synthetic\\recovery.risunest' },
+            { library: true, deviceSections: [] },
+            { signal: controller.signal, confirmSourcePreservation: confirm },
+            {
+                isTauri: () => true,
+                wait: async () => {},
+                invoke: async (command, args) => {
+                    if (command === 'native_file_job_start') { requests.push(args!.request as Record<string, unknown>); return { jobId: `synthetic-${requests.length}` } }
+                    if (command === 'native_file_job_status') return requests.length === 1
+                        ? { ...status('failed'), error: { code: 'source-preservation-confirmation-required', message: 'synthetic source requires preservation' } }
+                        : status('succeeded', result)
+                    if (command === 'native_file_job_forget') return true
+                    throw new Error(`Unexpected command: ${command}`)
+                },
+                copyToAndroidSaf: async () => { throw new Error('Desktop test must not use Android') },
+            },
+        )
+        if (decision === 'accept') {
+            await expect(operation).resolves.toEqual(result)
+            expect(requests).toHaveLength(2)
+            expect(requests[1].selection).toEqual({ library: true, deviceSections: [], allowSourcePreservation: true })
+        } else {
+            await expect(operation).rejects.toMatchObject({ name: 'AbortError' })
+            expect(requests).toHaveLength(1)
+        }
+        expect(confirm).toHaveBeenCalledOnce()
+        expect(requests[0].selection).toEqual({ library: true, deviceSections: [] })
+    })
+
+    it.each(['failed', 'cancelled'] as const)('keeps Android partial-file warnings on %s publication', async (state) => {
+        const failure = Object.assign(new Error('synthetic selected destination failure'), {
+            name: state === 'cancelled' ? 'AbortError' : 'Error',
+            warningCodes: ['android-saf-provider-not-atomic', 'partial-destination-may-remain'],
+        })
+        const operation = runNativeArchiveExport(
+            { ...restoreRuntime(4), flushPendingData: async () => {}, revision: 4 },
+            { type: 'androidSaf', suggestedName: 'synthetic.risunest' },
+            { library: true, deviceSections: [] }, {}, {
+                isTauri: () => true,
+                wait: async () => {},
+                invoke: async (command) => {
+                    if (command === 'native_file_job_start') return { jobId: 'synthetic' }
+                    if (command === 'native_file_job_status') return status('succeeded', { revision: 4, sourceBytes: 12, sourceSha256: 'a'.repeat(64), characterCount: 1, presetCount: 1, warningCodes: [], handoffPath: 'C:\\synthetic\\handoff.risunest' })
+                    if (command === 'native_portable_handoff_cleanup' || command === 'native_file_job_forget') return true
+                    throw new Error(`Unexpected command: ${command}`)
+                },
+                copyToAndroidSaf: async () => { throw failure },
+            },
+        )
+        await expect(operation).rejects.toBe(failure)
+        expect(failure.warningCodes).toContain('partial-destination-may-remain')
+    })
+})
 
 import {
     continueNativeOfficialPublication,
@@ -10,7 +78,6 @@ import {
     runNativeArchiveRestore,
     runNativeArchiveReferenceExport,
     runNativeBlockRisuSaveExport,
-    runNativeLegacyLocalBackupExport,
     runNativeRawRecoveryExport,
     runNativeCompatibleLocalBackupExport,
     runNativeLegacyLocalBackupRestore,
@@ -312,7 +379,7 @@ describe('native file jobs', () => {
         expect(JSON.stringify(calls[0])).not.toContain('expectedRevision')
     })
 
-    it.each(['none', 'ack', 'open'] as const)(
+    it.each(['none', 'ack', 'open', 'cache'] as const)(
         'acknowledges and reopens a committed portable device session before refresh (failure: %s)',
         async (failure) => {
             const calls: string[] = []
@@ -321,6 +388,9 @@ describe('native file jobs', () => {
             let storeOpen = false
             let failAck = failure === 'ack'
             let failOpen = failure === 'open'
+            if (failure === 'cache') deviceRestore.refreshDeviceStateAfterRestore.mockRejectedValueOnce(new Error('device cache unavailable'))
+            const initialFlushCalls = deviceRestore.flushDeviceStateBeforeRestore.mock.calls.length
+            const initialRefreshCalls = deviceRestore.refreshDeviceStateAfterRestore.mock.calls.length
             const refresh = vi.fn(async () => {
                 if (!storeOpen) throw new Error('persistent store has not been opened')
                 events.push('working-set-refresh')
@@ -431,7 +501,9 @@ describe('native file jobs', () => {
                 expect(calls.filter(command => command === 'native_device_backup_recovery_complete'))
                     .toHaveLength(failure === 'ack' ? 2 : 1)
                 expect(calls.filter(command => command === 'pds_open'))
-                    .toHaveLength(failure === 'open' ? 2 : 1)
+                    .toHaveLength(failure === 'open' || failure === 'cache' ? 2 : 1)
+                expect(deviceRestore.flushDeviceStateBeforeRestore.mock.calls.length).toBe(initialFlushCalls + 1)
+                expect(deviceRestore.refreshDeviceStateAfterRestore.mock.calls.length).toBe(initialRefreshCalls + (failure === 'cache' ? 2 : 1))
             } else {
                 await expect(running).resolves.toEqual(committed)
                 expect(refresh).toHaveBeenCalledOnce()
@@ -449,7 +521,7 @@ describe('native file jobs', () => {
                         'persistent-store-open',
                         'working-set-refresh',
                     ]
-                    : failure === 'open'
+                    : failure === 'open' || failure === 'cache'
                       ? [
                             'library-hold',
                             'device-ack',
@@ -1318,7 +1390,7 @@ describe('native file jobs', () => {
         expect(commands).not.toContain('native_file_job_finalize')
     })
 
-    it('maps a legacy compatibility result without taking the replacement fence', async () => {
+    it.each(['compatibility-required', 'cold-expansion-required'])('maps %s without taking the replacement fence', async (code) => {
         const acquire = vi.fn()
 
         const result = await runNativeOfficialAccountSnapshotRestore(
@@ -1340,7 +1412,7 @@ describe('native file jobs', () => {
                             state: 'failed',
                             phase: 'complete',
                             error: {
-                                code: 'compatibility-required',
+                                code,
                                 message: 'Legacy snapshot requires preparation',
                             },
                         }
@@ -1532,15 +1604,16 @@ describe('native file jobs', () => {
         },
     )
 
-    it('exports a legacy local backup using only a destination path and revision over IPC', async () => {
+    it('exports a RisuAI compatible backup using only a destination path and revision over IPC', async () => {
         const calls: Array<[string, Record<string, unknown> | undefined]> = []
-        const result = await runNativeLegacyLocalBackupExport(
+        const result = await runNativeCompatibleLocalBackupExport(
             {
                 revision: 21,
                 flushPendingData: async (reason) => {
                     calls.push([`flush:${reason}`, undefined])
                 },
             },
+            'risuai',
             { type: 'desktopPath', path: 'C:\\chosen\\backup.bin' },
             {},
             {
@@ -1552,7 +1625,7 @@ describe('native file jobs', () => {
                     if (command === 'native_file_job_status') {
                         return {
                             jobId: 'legacy-export',
-                            kind: 'export-legacy-local-backup',
+                            kind: 'export-compatible-local-backup',
                             state: 'succeeded',
                             phase: 'complete',
                             progress: {
@@ -1579,14 +1652,15 @@ describe('native file jobs', () => {
 
         expect(result.sourceBytes).toBe(4096)
         expect(calls).toEqual([
-            ['flush:native-legacy-local-backup-export', undefined],
+            ['flush:native-compatible-local-backup-export', undefined],
             [
                 'native_file_job_start',
                 {
                     request: {
-                        kind: 'export-legacy-local-backup',
+                        kind: 'export-compatible-local-backup',
                         destination: 'C:\\chosen\\backup.bin',
                         expectedRevision: 21,
+                    target: 'risuai',
                     },
                 },
             ],
@@ -1596,15 +1670,16 @@ describe('native file jobs', () => {
         expect(JSON.stringify(calls)).not.toContain('Uint8Array')
     })
 
-    it('publishes a native legacy backup handoff through Android SAF without archive bytes over IPC', async () => {
+    it('publishes a native compatible backup handoff through Android SAF without archive bytes over IPC', async () => {
         const calls: Array<[string, Record<string, unknown> | undefined]> = []
         const copyToAndroidSaf = vi.fn(async () => ({
             bytes: 4096,
             warningCodes: [],
         }))
 
-        const result = await runNativeLegacyLocalBackupExport(
+        const result = await runNativeCompatibleLocalBackupExport(
             { revision: 21, flushPendingData: async () => undefined },
+            'risuai',
             { type: 'androidSaf', suggestedName: 'risu-backup.bin' },
             {},
             {
@@ -1616,7 +1691,7 @@ describe('native file jobs', () => {
                     if (command === 'native_file_job_status') {
                         return {
                             jobId: 'legacy-export',
-                            kind: 'export-legacy-local-backup',
+                            kind: 'export-compatible-local-backup',
                             state: 'succeeded',
                             phase: 'complete',
                             progress: {
@@ -1656,23 +1731,25 @@ describe('native file jobs', () => {
             'native_file_job_start',
             {
                 request: {
-                    kind: 'export-legacy-local-backup',
+                    kind: 'export-compatible-local-backup',
                     expectedRevision: 21,
+                    target: 'risuai',
                 },
             },
         ])
         expect(JSON.stringify(calls)).not.toContain('Uint8Array')
     })
 
-    it('keeps unavailable legacy backup capability as a structured native error', async () => {
+    it('keeps unavailable compatible backup capability as a structured native error', async () => {
         const calls: string[] = []
 
         await expect(
-            runNativeLegacyLocalBackupExport(
+            runNativeCompatibleLocalBackupExport(
                 {
                     revision: 5,
                     flushPendingData: async () => undefined,
                 },
+                'risuai',
                 {
                     type: 'desktopPath',
                     path: 'C:\\chosen\\backup.bin',
@@ -1860,7 +1937,7 @@ describe('native file jobs', () => {
         const calls: Array<[string, Record<string, unknown> | undefined]> = []
         const terminal: NativeFileJobStatus = {
             jobId: 'lossless-export',
-            kind: 'export-legacy-local-backup',
+            kind: 'export-compatible-local-backup',
             state: 'succeeded',
             phase: 'complete',
             progress: {
@@ -1879,13 +1956,14 @@ describe('native file jobs', () => {
             },
         }
 
-        const result = await runNativeLegacyLocalBackupExport(
+        const result = await runNativeCompatibleLocalBackupExport(
             {
                 revision: 22,
                 flushPendingData: async (reason) => {
                     calls.push([`flush:${reason}`, undefined])
                 },
             },
+            'risuai',
             { type: 'desktopPath', path: 'C:\\chosen\\backup.bin' },
             {},
             {
@@ -1905,14 +1983,15 @@ describe('native file jobs', () => {
 
         expect(result).toEqual(terminal.result)
         expect(calls).toEqual([
-            ['flush:native-legacy-local-backup-export', undefined],
+            ['flush:native-compatible-local-backup-export', undefined],
             [
                 'native_file_job_start',
                 {
                     request: {
-                        kind: 'export-legacy-local-backup',
+                        kind: 'export-compatible-local-backup',
                         destination: 'C:\\chosen\\backup.bin',
                         expectedRevision: 22,
+                        target: 'risuai',
                     },
                 },
             ],
@@ -1929,7 +2008,7 @@ describe('native file jobs', () => {
             'C:\\app\\native-file-jobs\\handoffs\\risu-backup-123e4567-e89b-42d3-a456-426614174002.bin'
         const terminal: NativeFileJobStatus = {
             jobId: 'lossless-export',
-            kind: 'export-legacy-local-backup',
+            kind: 'export-compatible-local-backup',
             state: 'succeeded',
             phase: 'complete',
             progress: {
@@ -1947,8 +2026,9 @@ describe('native file jobs', () => {
             },
         }
 
-        const result = await runNativeLegacyLocalBackupExport(
+        const result = await runNativeCompatibleLocalBackupExport(
             { revision: 22, flushPendingData: async () => undefined },
+            'risuai',
             { type: 'androidSaf', suggestedName: 'backup.bin' },
             { onStatus: (status) => observedStatuses.push(status) },
             {
@@ -1991,7 +2071,7 @@ describe('native file jobs', () => {
             progress: { completedBytes: 2048, totalBytes: 4096 },
         })
         expect(events).toEqual([
-            'native_file_job_start:{"request":{"kind":"export-legacy-local-backup","expectedRevision":22}}',
+            'native_file_job_start:{"request":{"kind":"export-compatible-local-backup","expectedRevision":22,"target":"risuai"}}',
             'native_file_job_status:{"jobId":"lossless-export"}',
             `saf:${handoffPath}:backup.bin`,
             `native_legacy_backup_handoff_cleanup:{"path":"${handoffPath.replaceAll('\\', '\\\\')}"}`,
@@ -2005,7 +2085,7 @@ describe('native file jobs', () => {
             'C:\\app\\native-file-jobs\\handoffs\\risu-backup-123e4567-e89b-42d3-a456-426614174003.bin'
         const terminal: NativeFileJobStatus = {
             jobId: 'lossless-export',
-            kind: 'export-legacy-local-backup',
+            kind: 'export-compatible-local-backup',
             state: 'succeeded',
             phase: 'complete',
             progress: { completedBytes: 4096, completedItems: 1 },
@@ -2021,8 +2101,9 @@ describe('native file jobs', () => {
         }
 
         await expect(
-            runNativeLegacyLocalBackupExport(
+            runNativeCompatibleLocalBackupExport(
                 { revision: 22, flushPendingData: async () => undefined },
+                'risuai',
                 { type: 'androidSaf', suggestedName: 'backup.bin' },
                 {},
                 {
@@ -2109,18 +2190,18 @@ describe('native file jobs', () => {
 
     it.each([
         {
-            label: 'legacy backup',
-            run: runNativeLegacyLocalBackupExport,
-            kind: 'export-legacy-local-backup' as const,
+            label: 'compatible backup',
+            run: runNativeCompatibleLocalBackupExport,
+            kind: 'export-compatible-local-backup' as const,
             cleanupCommand: 'native_legacy_backup_handoff_cleanup',
             suggestedName: 'backup.bin',
             handoffPath:
                 'C:\\app\\native-file-jobs\\handoffs\\risu-backup-123e4567-e89b-42d3-a456-426614174005.bin',
         },
         {
-            label: 'legacy backup',
-            run: runNativeLegacyLocalBackupExport,
-            kind: 'export-legacy-local-backup' as const,
+            label: 'compatible backup',
+            run: runNativeCompatibleLocalBackupExport,
+            kind: 'export-compatible-local-backup' as const,
             cleanupCommand: 'native_legacy_backup_handoff_cleanup',
             suggestedName: 'risu-backup.bin',
             handoffPath:
@@ -2149,6 +2230,7 @@ describe('native file jobs', () => {
 
             const result = await run(
                 { revision: 22, flushPendingData: async () => undefined },
+                'risuai',
                 { type: 'androidSaf', suggestedName },
                 {},
                 {
@@ -2744,7 +2826,7 @@ describe('native file jobs', () => {
         expect(commands.filter(command => command === 'native_file_job_finalize')).toHaveLength(1)
     })
 
-    it('acknowledges a committed native job when plugin reload fails after fence release', async () => {
+    it('reports a warning and acknowledges the committed job when plugin reload fails after successful refresh', async () => {
         let statusCount = 0
         const commands: string[] = []
         const committed = {
@@ -2777,7 +2859,7 @@ describe('native file jobs', () => {
                 },
                 wait: async () => undefined,
             },
-        )).rejects.toBeInstanceOf(NativeFileJobActivationCommittedError)
+        )).resolves.toEqual({ ...committed, warningCodes: ['post-refresh-followup-failed'] })
 
         expect(commands.filter(command => command === 'native_file_job_finalize')).toHaveLength(1)
         expect(commands.filter(command => command === 'native_file_job_forget')).toHaveLength(1)
@@ -4420,4 +4502,26 @@ it('cancels staged restore and waits for terminal settlement when the fresh prec
         'native_file_job_status',
         'native_file_job_forget',
     ])
+})
+
+it('cancels an incomplete legacy restore before acquiring the replacement fence', async () => {
+    const commands: string[] = []
+    const preview = { unavailableColdKeys: ['missing'], characterNames: ['Synthetic'], invalidInlays: ['inlay_aa.risuinlay'] }
+    const states = [{ ...status('waitingForInput'), phase: 'awaiting-activation', incompleteRestorePreview: preview }, status('cancelled')]
+    const acquire = vi.fn()
+    const confirmIncompleteRestore = vi.fn(async () => false)
+    await expect(runNativeLegacyLocalBackupRestore(
+        restoreRuntime(17, { acquire }), { type: 'desktopPath', path: 'synthetic.bin' },
+        { confirmIncompleteRestore },
+        { isTauri: () => true, wait: async () => undefined, invoke: async (command) => {
+            commands.push(command)
+            if (command === 'native_file_job_start') return { jobId: 'job-1' }
+            if (command === 'native_file_job_status') return states.shift()
+            return true
+        } },
+    )).rejects.toMatchObject({ name: 'AbortError' })
+    expect(confirmIncompleteRestore).toHaveBeenCalledWith(preview)
+    expect(acquire).not.toHaveBeenCalled()
+    expect(commands).toContain('native_file_job_cancel')
+    expect(commands).not.toContain('native_file_job_finalize')
 })

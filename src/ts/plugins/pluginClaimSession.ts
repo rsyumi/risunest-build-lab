@@ -118,3 +118,7 @@ export async function beginPluginClaimSession(plugin: {
         close,
     }
 }
+
+export async function closePluginClaimEligibility(): Promise<void> {
+    if (isTauri) await invoke('pds_close_plugin_claim_eligibility')
+}

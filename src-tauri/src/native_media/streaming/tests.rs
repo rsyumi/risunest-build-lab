@@ -239,3 +239,51 @@ fn cleanup_media_waits_for_owned_transfers_and_revokes_the_previous_capability()
     state.reopen_after_cleanup(root.path().to_owned()).unwrap();
     assert_ne!(state.0.lock().unwrap().as_ref().unwrap().base_url, previous);
 }
+
+#[test]
+fn foreground_recovery_preserves_healthy_and_rebound_urls_and_respects_cleanup() {
+    let root = TempDir::new().unwrap();
+    let state = MediaServerState::initialize(root.path().to_path_buf());
+    std::thread::sleep(Duration::from_millis(30));
+    let before = state.0.lock().unwrap().as_ref().unwrap().base_url.clone();
+    assert_eq!(state.ensure().unwrap(), before);
+    state.0.lock().unwrap().as_ref().unwrap().task.abort();
+    std::thread::sleep(Duration::from_millis(30));
+    assert_eq!(state.ensure().unwrap(), before);
+    std::thread::sleep(Duration::from_millis(30));
+    assert!(state.0.lock().unwrap().as_ref().unwrap().healthy());
+    state.begin_cleanup().unwrap();
+    assert_eq!(state.ensure().unwrap_err(), "cleanup-pending");
+}
+
+#[test]
+fn foreground_recovery_changes_url_when_old_port_is_occupied() {
+    let root = TempDir::new().unwrap();
+    let state = MediaServerState::initialize(root.path().to_path_buf());
+    let (before, address) = {
+        let guard = state.0.lock().unwrap();
+        let server = guard.as_ref().unwrap();
+        server.task.abort();
+        (server.base_url.clone(), server.files.authority.clone())
+    };
+    std::thread::sleep(Duration::from_millis(30));
+    let occupied = std::net::TcpListener::bind(address).unwrap();
+    let after = state.ensure().unwrap();
+    assert_ne!(after, before);
+    std::thread::sleep(Duration::from_millis(30));
+    assert!(state.0.lock().unwrap().as_ref().unwrap().healthy());
+    drop(occupied);
+}
+
+#[test]
+fn foreground_recovery_does_not_replace_a_listener_with_active_transfers() {
+    let root = TempDir::new().unwrap();
+    let state = MediaServerState::initialize(root.path().to_path_buf());
+    let slots = state.0.lock().unwrap().as_ref().unwrap().slots.clone();
+    let transfer = slots.try_acquire_owned().unwrap();
+    state.0.lock().unwrap().as_ref().unwrap().task.abort();
+    std::thread::sleep(Duration::from_millis(30));
+    assert_eq!(state.ensure().unwrap_err(), "native-media-busy");
+    drop(transfer);
+    assert!(state.ensure().is_ok());
+}

@@ -1,4 +1,5 @@
 import { Buffer } from 'buffer'
+import type { PreparedCardContentAssetDescriptor } from './nativeFileJobs'
 
 export interface PreparedNativePngCardMetadata {
     chara?: string
@@ -9,6 +10,8 @@ export interface PreparedNativePngCardDecodeDependencies {
     hash(bytes: Uint8Array): Promise<string>
     decrypt(bytes: Uint8Array, password: string): Promise<Uint8Array | ArrayBuffer>
     requestPassword(): Promise<string | null>
+    onOversizedInlineAsset?(): void
+    stageInlineAsset?(bytes: Uint8Array, name: string): Promise<PreparedCardContentAssetDescriptor>
 }
 
 export type DecodedPreparedNativePngCard = Record<string, unknown>
@@ -87,50 +90,63 @@ function normalizeV2CharacterVersion(card: DecodedPreparedNativePngCard): void {
     }
 }
 
-function assertNoInlinePayloads(card: DecodedPreparedNativePngCard): void {
+async function stageInlinePayloads(
+    card: DecodedPreparedNativePngCard,
+    dependencies: PreparedNativePngCardDecodeDependencies,
+): Promise<void> {
     const data = card.data
     if (typeof data !== 'object' || data === null || Array.isArray(data)) return
     const cardData = data as Record<string, unknown>
-
-    if (card.spec === 'chara_card_v3' && Array.isArray(cardData.assets)) {
-        for (const value of cardData.assets) {
-            if (
-                typeof value === 'object'
-                && value !== null
-                && !Array.isArray(value)
-                && typeof (value as Record<string, unknown>).uri === 'string'
-                && ((value as Record<string, unknown>).uri as string).startsWith('data:')
-            ) {
-                throw new UnsupportedPreparedNativeCharacterCardError(
-                    'Prepared native PNG cannot activate an inline data URI payload',
-                )
-            }
+    const stage = async (encoded: string, name = '') => {
+        if (!dependencies.stageInlineAsset) {
+            throw new InvalidPreparedNativePngCardError('Native PNG inline asset staging is unavailable')
         }
+        const asset = await dependencies.stageInlineAsset(Buffer.from(encoded, 'base64'), name)
+        return `__asset:${asset.token}`
+    }
+    if (card.spec === 'chara_card_v3' && Array.isArray(cardData.assets)) {
+        const retained: unknown[] = []
+        for (const value of cardData.assets) {
+            if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+                const asset = value as Record<string, unknown>
+                if (typeof asset.uri === 'string' && asset.uri.startsWith('data:')) {
+                    const encoded = asset.uri.split(',')[1]
+                    if (encoded === undefined) {
+                        throw new InvalidPreparedNativePngCardError('PNG data URI has no payload')
+                    }
+                    if (encoded.length >= 50 * 1024 * 1024) {
+                        dependencies.onOversizedInlineAsset?.()
+                        continue
+                    }
+                    asset.uri = await stage(encoded)
+                }
+            }
+            retained.push(value)
+        }
+        cardData.assets = retained
         return
     }
-
     if (card.spec !== 'chara_card_v2') return
     const extensions = cardData.extensions
     if (typeof extensions !== 'object' || extensions === null || Array.isArray(extensions)) return
     const risuai = (extensions as Record<string, unknown>).risuai
     if (typeof risuai !== 'object' || risuai === null || Array.isArray(risuai)) return
     const risu = risuai as Record<string, unknown>
-    const references: unknown[] = []
     for (const field of ['emotions', 'additionalAssets'] as const) {
         const tuples = risu[field]
         if (!Array.isArray(tuples)) continue
         for (const tuple of tuples) {
-            if (Array.isArray(tuple)) references.push(tuple[1])
+            if (Array.isArray(tuple) && typeof tuple[1] === 'string' && !tuple[1].startsWith('__asset:')) {
+                tuple[1] = await stage(tuple[1], field === 'additionalAssets' && typeof tuple[2] === 'string' ? tuple[2] : '')
+            }
         }
     }
     const vits = risu.vits
     if (typeof vits === 'object' && vits !== null && !Array.isArray(vits)) {
-        references.push(...Object.values(vits))
-    }
-    if (references.some((reference) => typeof reference === 'string' && !reference.startsWith('__asset:'))) {
-        throw new UnsupportedPreparedNativeCharacterCardError(
-            'Prepared native PNG cannot activate an inline v2 base64 payload',
-        )
+        const values = vits as Record<string, unknown>
+        for (const [key, value] of Object.entries(values)) {
+            if (typeof value === 'string' && !value.startsWith('__asset:')) values[key] = await stage(value)
+        }
     }
 }
 
@@ -185,6 +201,6 @@ export async function decodePreparedNativePngCardMetadata(
         )
     if (!card) return null
     normalizeV2CharacterVersion(card)
-    assertNoInlinePayloads(card)
+    await stageInlinePayloads(card, dependencies)
     return card
 }

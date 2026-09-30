@@ -50,8 +50,10 @@ const serverBackups = {
 }
 const cacheUsage = (totalBytes: number) => ({
     totalBytes,
+    cacheBytes: totalBytes,
     protectedBytes: 0,
     reclaimableBytes: totalBytes,
+    ledgerBytes: 0,
     databaseBytes: 0,
     blockedReason: null,
 })
@@ -93,6 +95,20 @@ describe('RisuNest storage dashboard view model', () => {
         expect(rollup.counts).toEqual({ characters: 3, trashedCharacters: 1, conversations: 4, messages: 5 })
         expect(formatRisuNestStorageBytes(1024 * 1024)).toBe('1.0 MiB')
         expect(formatRisuNestStorageBytes(1024 * 1024 * 1024)).toBe('1.0 GiB')
+    })
+
+    it('keeps the asset storage records apart from the temporary files but in the total', () => {
+        const rollup = storageDashboardRollup(stats, [], [], null, {
+            ...cacheUsage(3072),
+            totalBytes: 3072 + 1024,
+            ledgerBytes: 1024,
+        })
+
+        expect(rollup.cacheBytes).toBe(3072)
+        expect(rollup.ledgerBytes).toBe(1024)
+        expect(rollup.cards.find((card) => card.id === 'total')?.bytes).toBe(
+            stats.databaseBytes + stats.assetObjects.bytes + stats.snapshotBytes + 3072 + 1024,
+        )
     })
 
     it('loads complete backup and cache totals, and retries failures', async () => {

@@ -43,6 +43,12 @@ const status: Status = {
 };
 const backend: Backend = {
   status: async () => structuredClone(status),
+  platformStatus: async () => ({
+    startup: { registered: true, enabled: true, actionMatches: true },
+    startupError: null, trayStartup: false,
+    updateSchedule: { registered: false, enabled: false, actionMatches: true },
+    updateScheduleError: null,
+  }),
   environment: async () => ({
     network: { schema: 1, address: "127.0.0.1", port: 14319 },
     platform: "windows",

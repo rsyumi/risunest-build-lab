@@ -146,7 +146,7 @@ describe('ChatScreenshotCaptureSurface', () => {
             { ...renderContext(), characterImageSource: 'pending.png' },
             new AbortController().signal,
         )
-        const rejection = expect(pending).rejects.toThrow('timed out')
+        const rejection = expect(pending).rejects.toMatchObject({ name: 'ScreenshotPreparationError', reason: 'readiness' })
         await vi.advanceTimersByTimeAsync(10_000)
         await rejection
         vi.useRealTimers()

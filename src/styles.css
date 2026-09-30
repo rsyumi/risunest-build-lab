@@ -541,7 +541,7 @@ select optgroup {
   display: block;
 }
 
-.chat-message-container.is-settled-history {
+.chat-history-isolated .chat-message-container.is-settled-history {
   content-visibility: auto;
   contain-intrinsic-size: auto 16rem;
 }

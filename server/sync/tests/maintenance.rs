@@ -98,6 +98,7 @@ fn offline_ack_keeps_tombstones_history_and_staged_objects_and_epoch_rotates() {
     let b = device(&store);
     store.put_object(&a, &hash(b"x"), b"x").unwrap();
     let h = store.head().unwrap();
+    store.acknowledge(&b, &h.epoch, &acks(&h.seq)).unwrap();
     let mut c = changes("k", b"x");
     let intent = stage(&store, &a, &h, 1, &c);
     let h = store.commit(&a, &intent, &h.etag()).unwrap().head;
@@ -212,4 +213,37 @@ fn collection_removes_a_stray_file_under_an_inline_identity() {
     assert_eq!(store.maintain().unwrap().objects_removed, 1);
     assert!(!path.exists());
     assert_eq!(inline_bodies(dir.path()), 0);
+}
+
+#[test]
+fn a_revoked_device_leaves_the_device_list_once_nothing_it_holds_remains() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::init(dir.path()).unwrap();
+    let kept = device(&store);
+    let idle = device(&store);
+    let busy = device(&store);
+    store.put_object(&idle, &hash(b"done"), b"done").unwrap();
+    store.put_object(&busy, &hash(b"pending"), b"pending").unwrap();
+    let h = store.head().unwrap();
+    let intent = stage(&store, &idle, &h, 1, &changes("done", b"done"));
+    let h = store.commit(&idle, &intent, &h.etag()).unwrap().head;
+    store.acknowledge(&idle, &h.epoch, &acks(&h.seq)).unwrap();
+    let intent = stage(&store, &busy, &h, 1, &changes("pending", b"pending"));
+    store.submit_commit(&busy, &intent, &h.etag()).unwrap();
+    store.revoke_device(&idle.id).unwrap();
+    store.revoke_device(&busy.id).unwrap();
+    let listed = |store: &Store| {
+        store
+            .managed_devices()
+            .unwrap()
+            .into_iter()
+            .map(|d| d.id)
+            .collect::<Vec<_>>()
+    };
+    store.maintain().unwrap();
+    assert_eq!(listed(&store), [kept.id.clone(), busy.id.clone()]);
+    assert!(store.run_pending_commit().unwrap());
+    store.maintain().unwrap();
+    assert_eq!(listed(&store), [kept.id.clone()]);
+    assert_eq!(store.head().unwrap().seq, h.seq);
 }

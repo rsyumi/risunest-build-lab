@@ -1,6 +1,62 @@
 import XCTest
 
 final class NativeUITests: XCTestCase {
+    private func legacyRestoreMemory(_ megabytes: Int, _ encoding: String) throws {
+        continueAfterFailure = false
+        let app = XCUIApplication(bundleIdentifier: "io.github.rsyumi.risunest.ios.bench")
+        let options = XCTMeasureOptions()
+        options.iterationCount = 1
+        options.invocationOptions = [.manuallyStart, .manuallyStop]
+        var invocations = 0
+        var readyIdentities = Set<String>()
+        measure(metrics: [XCTMemoryMetric(application: app)], options: options) {
+            invocations += 1
+            app.terminate()
+            app.launchEnvironment["RISUNEST_IOS_PHASE"] = "legacy-restore-\(megabytes)-\(encoding)"
+            app.launch()
+            let start = app.webViews.buttons["Start synthetic restore"]
+            XCTAssertTrue(start.waitForExistence(timeout: 1200), "Fresh synthetic fixture preparation failed")
+            let ready = app.webViews.staticTexts.containing(NSPredicate(format: "label BEGINSWITH %@", "legacy-restore-ready:")).firstMatch
+            let readyEvidence = ready.label
+            XCTAssertTrue(readyEvidence.contains("\"resetVerified\":true"))
+            XCTAssertTrue(readyIdentities.insert(readyEvidence).inserted, "Each invocation requires a distinct reset and fixture")
+            let preparation = XCTAttachment(string: readyEvidence)
+            preparation.name = "legacy-restore-prepared-\(megabytes)-\(encoding)-\(invocations)"
+            preparation.lifetime = .keepAlways
+            add(preparation)
+            startMeasuring()
+            start.tap()
+            let verify = app.webViews.buttons["Verify synthetic restore"]
+            let restored = verify.waitForExistence(timeout: 1200)
+            stopMeasuring()
+            let terminal = app.webViews.staticTexts.containing(NSPredicate(format: "label BEGINSWITH %@", "legacy-restore-event:")).firstMatch
+            let terminalEvidence = terminal.exists ? terminal.label : "legacy-restore-incomplete:appState=\(app.state.rawValue)"
+            let restore = XCTAttachment(string: terminalEvidence)
+            restore.name = "legacy-restore-native-rss-\(megabytes)-\(encoding)-\(invocations)"
+            restore.lifetime = .keepAlways
+            add(restore)
+            XCTAssertTrue(restored, "Collect native events and OS termination evidence before classifying a missing result as a memory kill")
+            verify.tap()
+            let result = app.webViews.staticTexts.containing(NSPredicate(format: "label BEGINSWITH %@", "legacy-restore-result:")).firstMatch
+            XCTAssertTrue(result.waitForExistence(timeout: 1200), "Synthetic readback verification failed")
+            let evidence = result.label
+            let attachment = XCTAttachment(string: evidence)
+            attachment.name = "legacy-restore-verified-\(megabytes)-\(encoding)-\(invocations)"
+            attachment.lifetime = .keepAlways
+            add(attachment)
+            XCTAssertTrue(evidence.contains("\"phase\":\"verified\""))
+            app.terminate()
+        }
+        XCTAssertEqual(invocations, 2, "One discarded warmup and one measured restore are required")
+        XCTAssertEqual(readyIdentities.count, 2)
+    }
+    func testLegacyRestore100Raw() throws { try legacyRestoreMemory(100, "raw") }
+    func testLegacyRestore100Gzip() throws { try legacyRestoreMemory(100, "gzip") }
+    func testLegacyRestore300Raw() throws { try legacyRestoreMemory(300, "raw") }
+    func testLegacyRestore300Gzip() throws { try legacyRestoreMemory(300, "gzip") }
+    func testLegacyRestore600Raw() throws { try legacyRestoreMemory(600, "raw") }
+    func testLegacyRestore600Gzip() throws { try legacyRestoreMemory(600, "gzip") }
+
     private func attachScreenshot(_ app: XCUIApplication, name: String) {
         let attachment = XCTAttachment(screenshot: app.screenshot())
         attachment.name = name

@@ -5,7 +5,7 @@ use crate::{
     asset_repository::{object_physical_key, PayloadCas},
     server_sync::{
         client::ServerClient,
-        residency::{open_or_hydrate_with_check, AssetPolicy, Residency},
+        residency::{AssetPolicy, Residency},
         Result, SyncError,
     },
 };
@@ -30,6 +30,9 @@ impl ResidencyStatus {
     pub(crate) fn has_remote_or_missing(&self) -> bool {
         self.remote_objects > 0 || self.unavailable_objects > 0
     }
+    pub(crate) fn has_remote(&self) -> bool {
+        self.remote_objects > 0
+    }
 }
 
 impl PersistentStore {
@@ -37,15 +40,34 @@ impl PersistentStore {
         &self,
         check: impl Fn() -> Result<()>,
     ) -> Result<()> {
+        self.hydrate_registered_remote_assets_cancelled(None, check)
+    }
+    pub(crate) fn hydrate_registered_remote_assets_cancelled(
+        &self,
+        cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        check: impl Fn() -> Result<()>,
+    ) -> Result<()> {
+        self.hydrate_registered_remote_assets_observed(cancellation, check, || {})
+    }
+    pub(crate) fn hydrate_registered_remote_assets_observed(
+        &self,
+        cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        check: impl Fn() -> Result<()>,
+        on_object_done: impl Fn(),
+    ) -> Result<()> {
         if !Residency::exists(&self.repository_root) {
             return Ok(());
         }
         let residency = Residency::open(&self.repository_root)?;
-        let hydrate = |hash: &str| -> Result<()> {
+        let mut hydration = crate::server_sync::residency::HydrationSession::new(&self.repository_root, cancellation)?;
+        let mut hydrate = |hashes: &[String]| -> Result<()> {
             check()?;
-            if residency.object(hash, None)?.is_some() {
-                open_or_hydrate_with_check(&self.repository_root, hash, &check)?
-                    .ok_or_else(|| SyncError::new("required-asset-unavailable", 409))?;
+            let mut registered = Vec::new();
+            for hash in hashes {
+                if residency.object(hash, None)?.is_some() { registered.push(hash.clone()); }
+            }
+            if !hydration.hydrate_many_observed(&registered, &check, &on_object_done)?.is_empty() {
+                return Err(SyncError::new("required-asset-unavailable", 409));
             }
             Ok(())
         };
@@ -55,9 +77,7 @@ impl PersistentStore {
             // Custody records outlive physical GC. Preserve catalog files even
             // without references, but do not revive deleted catalog entries.
             let page = self.query_asset_object_catalog(128, cursor.as_deref())?;
-            for object in page.items {
-                hydrate(&object.object_hash)?;
-            }
+            hydrate(&page.items.into_iter().map(|object| object.object_hash).collect::<Vec<_>>())?;
             cursor = page.next_cursor;
             if cursor.is_none() {
                 break;
@@ -75,7 +95,7 @@ impl PersistentStore {
             manifests.extend(root.manifest_hashes);
         }
         for manifest in manifests {
-            hydrate(&manifest)?;
+            hydrate(std::slice::from_ref(&manifest))?;
             // Missing or damaged local files remain for the backup's existing
             // preservation path. Only verified manifests supply dependencies.
             if let Some(bytes) = cas.read_object(&manifest)? {
@@ -92,16 +112,15 @@ impl PersistentStore {
                 }
             }
         }
-        for hash in historical {
-            hydrate(&hash)?;
-        }
+        hydrate(&historical.into_iter().collect::<Vec<_>>())?;
         check()
     }
     fn residency_inventory(&self, guarded: bool) -> Result<Inventory> {
         let cas = PayloadCas::new(&self.repository_root)?;
-        let roots = self.collect_labelled_asset_gc_roots(guarded, false)?;
         let mut referenced = BTreeSet::new();
+        let roots = self.collect_asset_gc_roots_with_backup_references(guarded, false, Some(&mut referenced))?;
         let mut local = BTreeSet::new();
+        let mut manifests = BTreeSet::new();
         let mut release_blocked = false;
         for (label, root) in roots {
             release_blocked |= root.retain_all_objects || !root.blockers.is_empty();
@@ -109,11 +128,16 @@ impl PersistentStore {
                 local.extend(root.object_hashes.iter().cloned());
                 local.extend(root.manifest_hashes.iter().cloned());
             }
-            referenced.extend(root.object_hashes);
+            if label == "server-conflict" {
+                local.extend(root.object_hashes);
+            } else {
+                referenced.extend(root.object_hashes);
+            }
             referenced.extend(root.manifest_hashes.iter().cloned());
+            manifests.extend(root.manifest_hashes.iter().cloned());
             local.extend(root.manifest_hashes);
         }
-        for hash in &local {
+        for hash in &manifests {
             let bytes = cas
                 .read_object(hash)?
                 .ok_or_else(|| SyncError::new("local-manifest-missing", 409))?;
@@ -144,13 +168,6 @@ impl PersistentStore {
             )?
             .object_hashes,
         );
-        crate::server_sync::backups::references::visit_roots(&self.repository_root, |object| {
-            referenced.insert(object.hash.clone());
-            if object.metadata || object.local_required {
-                local.insert(object.hash);
-            }
-            Ok(())
-        })?;
         let jobs = if guarded {
             crate::asset_repository::job_pins::collect_durable_cas_job_roots_already_guarded(
                 &self.repository_root,
@@ -198,6 +215,14 @@ impl PersistentStore {
         policy: AssetPolicy,
         check: impl Fn() -> Result<()>,
     ) -> Result<ResidencyStatus> {
+        self.asset_residency_set_policy_cancelled(policy, None, check)
+    }
+    pub(crate) fn asset_residency_set_policy_cancelled(
+        &self,
+        policy: AssetPolicy,
+        cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        check: impl Fn() -> Result<()>,
+    ) -> Result<ResidencyStatus> {
         check()?;
         if policy == AssetPolicy::Remote && self.server_stored_config()?.is_none() {
             return Err(SyncError::new("server-not-bound", 409));
@@ -205,11 +230,10 @@ impl PersistentStore {
         self.device_store()?.set_asset_residency_policy(policy)?;
         if policy == AssetPolicy::Full {
             let inventory = self.residency_inventory(false)?;
-            for hash in inventory.referenced {
-                check()?;
-                if open_or_hydrate_with_check(&self.repository_root, &hash, &check)?.is_none() {
-                    return Err(SyncError::new("required-asset-unavailable", 409));
-                }
+            let mut hydration = crate::server_sync::residency::HydrationSession::new(&self.repository_root, cancellation)?;
+            let unavailable = hydration.hydrate_many(&inventory.referenced.into_iter().collect::<Vec<_>>(), &check)?;
+            if !unavailable.is_empty() {
+                return Err(SyncError::new("required-asset-unavailable", 409));
             }
         }
         let status = self.asset_residency_status()?;
@@ -218,6 +242,13 @@ impl PersistentStore {
     }
     pub(crate) fn asset_residency_evict(
         &self,
+        check: impl Fn() -> Result<()>,
+    ) -> Result<ResidencyStatus> {
+        self.asset_residency_evict_cancelled(None, check)
+    }
+    pub(crate) fn asset_residency_evict_cancelled(
+        &self,
+        cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
         check: impl Fn() -> Result<()>,
     ) -> Result<ResidencyStatus> {
         check()?;
@@ -231,7 +262,7 @@ impl PersistentStore {
         let mut config = self
             .server_stored_config()?
             .ok_or_else(|| SyncError::new("server-not-bound", 409))?;
-        let client = ServerClient::new(config.resolve(&self.repository_root)?)?;
+        let client = ServerClient::with_cancellation(config.resolve(&self.repository_root)?, cancellation.clone())?;
         let head = client.resolve_identity(false)?;
         check()?;
         config.endpoint = client.config().endpoint.clone();
@@ -243,6 +274,9 @@ impl PersistentStore {
             .collect::<Vec<_>>();
         let cas = PayloadCas::new(&self.repository_root)?;
         let mut evicted = 0;
+        let mut retained = std::collections::BTreeMap::new();
+        let directory = tempfile::Builder::new().prefix("asset-offload-").tempdir_in(&self.repository_root)?;
+        let cache = crate::server_sync::cache::Cache::open(directory.path())?.with_library(&self.repository_root)?;
         for page in candidates.chunks(128) {
             check()?;
             let mut objects = std::collections::BTreeMap::new();
@@ -276,11 +310,6 @@ impl PersistentStore {
                     .get(&hash)
                     .ok_or_else(|| SyncError::new("invalid-missing-response", 502))?;
                 // A snapshot-only object may never have been published.
-                let directory = tempfile::Builder::new()
-                    .prefix("asset-offload-")
-                    .tempdir_in(&self.repository_root)?;
-                let cache = crate::server_sync::cache::Cache::open(directory.path())?
-                    .with_library(&self.repository_root)?;
                 if cache.stat_object(&hash)? != Some(size) {
                     return Err(SyncError::new("asset-changed", 409));
                 }
@@ -299,6 +328,9 @@ impl PersistentStore {
                     .map(|(hash, size)| (hash.clone(), Some(*size)))
                     .collect::<Vec<_>>(),
             )?;
+            retained.extend(objects);
+        }
+        if !retained.is_empty() {
             check()?;
             let _guard = crate::asset_repository::coordinator::lock_repository_mutation()?;
             let fresh = self.residency_inventory(true)?;
@@ -308,7 +340,7 @@ impl PersistentStore {
                     .join(risunest_sync_wire::hash(
                         format!("{}:{}", config.library_id, config.device_id).as_bytes(),
                     ));
-            for (hash, size) in objects {
+            for (hash, size) in retained {
                 check()?;
                 if fresh.local.contains(&hash) {
                     continue;
@@ -329,7 +361,7 @@ impl PersistentStore {
                 }
             }
         }
-        self.asset_residency_release_unused(&check)?;
+        self.asset_residency_release_unused_cancelled(cancellation, &check)?;
         let mut status = self.asset_residency_status()?;
         check()?;
         status.evicted_bytes = evicted;
@@ -339,8 +371,21 @@ impl PersistentStore {
         &self,
         check: impl Fn() -> Result<()>,
     ) -> Result<()> {
+        self.asset_residency_release_unused_cancelled(None, check)
+    }
+    pub(crate) fn asset_residency_release_unused_cancelled(
+        &self,
+        cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+        check: impl Fn() -> Result<()>,
+    ) -> Result<()> {
         let mut residency = Residency::open(&self.repository_root)?;
         let cas = PayloadCas::new(&self.repository_root)?;
+        // Custody the library still uses is kept without asking the server.
+        // What remains is decided again under the mutation lock below.
+        let used = self.residency_inventory(false)?;
+        if used.release_blocked {
+            return Ok(());
+        }
         let mut after = String::new();
         loop {
             let page = residency.page(&after)?;
@@ -351,6 +396,9 @@ impl PersistentStore {
             for (cursor, hash, _) in page {
                 check()?;
                 after = cursor.clone();
+                if used.referenced.contains(&hash) || used.local.contains(&hash) {
+                    continue;
+                }
                 let context = cursor
                     .split_once('/')
                     .ok_or_else(|| SyncError::new("invalid-custody-cursor", 409))?
@@ -369,7 +417,7 @@ impl PersistentStore {
                 let Some(proof) = proof else {
                     continue;
                 };
-                let client = ServerClient::new(proof.config.resolve(&self.repository_root)?)?;
+                let client = ServerClient::with_cancellation(proof.config.resolve(&self.repository_root)?, cancellation.clone())?;
                 let head = client.resolve_identity(false)?;
                 check()?;
                 let objects = {
@@ -410,5 +458,26 @@ impl PersistentStore {
             }
         }
         check()
+    }
+}
+
+#[cfg(test)]
+impl PersistentStore {
+    pub(crate) fn residency_inventory_classification_test(
+        &self,
+        guarded: bool,
+    ) -> Result<(BTreeSet<String>, BTreeSet<String>, bool)> {
+        let inventory = self.residency_inventory(guarded)?;
+        Ok((inventory.referenced, inventory.local, inventory.release_blocked))
+    }
+    pub(crate) fn residency_backup_classification_test(
+        &self,
+        guarded: bool,
+    ) -> Result<(BTreeSet<String>, BTreeSet<String>)> {
+        let mut referenced = BTreeSet::new();
+        let roots = self.collect_asset_gc_roots_with_backup_references(guarded, false, Some(&mut referenced))?;
+        let local = roots.into_iter().filter(|(label, _)| *label == "server-conflict")
+            .flat_map(|(_, roots)| roots.object_hashes).collect();
+        Ok((referenced, local))
     }
 }

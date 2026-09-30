@@ -782,35 +782,32 @@ export async function loadLoreBookV3PromptFromCompatibilitySnapshot(){
 }
 
 export async function importLoreBook(mode:'global'|'local'|'sglobal'){
-    const selectedID = get(selectedCharID)
-    const page = mode === 'sglobal' ? -1 : DBState.db.characters[selectedID].chatPage
-    let lore = 
-        mode === 'global' ? DBState.db.characters[selectedID].globalLore : 
-        DBState.db.characters[selectedID].chats[page].localLore
-    const lorebook = (await selectSingleFile(['json', 'lorebook'])).data
-    if(!lorebook){
-        return
-    }
- 
-
+    const character = DBState.db.characters[get(selectedCharID)]
+    const characterId = character?.chaId
+    const conversationId = mode === 'local' ? character?.chats[character.chatPage]?.id : undefined
+    if (!characterId || (mode !== 'global' && !conversationId)) return
+    const file = await selectSingleFile(['json', 'lorebook'])
+    if (!file?.data) return
 
     try {
-        const importedlore = JSON.parse(Buffer.from(lorebook).toString('utf-8'))
-        if(importedlore.type === 'risu' && importedlore.data){
-            const datas:loreBook[] = importedlore.data
-            for(const data of datas){
-                lore.push(data)
-            }
-        }
-        else if(importedlore.entries){
-            const entries:{[key:string]:CCLorebook} = importedlore.entries
-            lore.push(...convertExternalLorebook(entries))
-        }
-        if(mode === 'global'){
-            DBState.db.characters[selectedID].globalLore = lore
-        }
-        else{
-            DBState.db.characters[selectedID].chats[page].localLore = lore
+        const imported = JSON.parse(Buffer.from(file.data).toString('utf-8'))
+        const entries: loreBook[] = imported.type === 'risu' && Array.isArray(imported.data)
+            ? imported.data
+            : imported.entries ? convertExternalLorebook(imported.entries) : []
+        if (!entries.length) return
+        if (mode === 'global') {
+            const { mutatePersistentCharacterDetail } = await import('../storage/persistentDataRuntime.svelte')
+            await mutatePersistentCharacterDetail(characterId, 'import-character-lore', ({ character }) => {
+                character.globalLore.push(...entries)
+            })
+        } else {
+            const { editSelectedChatList } = await import('../characters')
+            await editSelectedChatList(characterId, 'import-chat-lore', (character) => {
+                const chat = character.chats.find(chat => chat.id === conversationId)
+                if (!chat) return false
+                chat.localLore.push(...entries)
+                return null
+            })
         }
     } catch (error) {
         alertError(error)

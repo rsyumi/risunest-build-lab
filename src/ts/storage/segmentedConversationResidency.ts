@@ -16,26 +16,11 @@ export interface SegmentedConversationResidencyOptions {
     measureMessage(message: Message): number
 }
 
-export interface SegmentedConversationRangeInput {
-    revision: DataRevision
-    startIndex: number
-    totalMessages: number
-    messages: readonly Message[]
-}
-
 export interface ConversationResidentInterval {
     startIndex: number
     endIndex: number
     byteSize: number
     messages: Message[]
-}
-
-export interface ConversationMissingPersistentRange {
-    revision: DataRevision
-    currentStartIndex: number
-    currentEndIndex: number
-    persistentStartIndex: number
-    persistentEndIndex: number
 }
 
 export interface ConversationRangePin {
@@ -80,13 +65,6 @@ interface PinRecord extends RangeRecord {
 
 interface DirtyRecord extends ConversationDirtyMutation, RangeRecord {
     messageByteSizes: number[]
-}
-
-interface StreamingOverlay {
-    absoluteIndex: number
-    message: Message
-    byteSize: number
-    sessionVersion: number
 }
 
 interface PersistentSequenceSpan {
@@ -223,7 +201,6 @@ export class SegmentedConversationResidency {
     private readonly dirtyRecords: DirtyRecord[] = []
     private readonly pendingSaveAttempts = new Set<object>()
     private readonly measureMessage: (message: Message) => number
-    private streamingOverlay: StreamingOverlay | null = null
     private accessClock = 0
     private currentSessionVersion = 0
     private acknowledgedVersion = 0
@@ -285,8 +262,7 @@ export class SegmentedConversationResidency {
             version !== this.currentSessionVersion + 1 ||
             messages.length !== this.messageCount ||
             this.dirtyRecords.length > 0 ||
-            this.pendingSaveAttempts.size > 0 ||
-            this.streamingOverlay !== null
+            this.pendingSaveAttempts.size > 0
         )
             return false
         const entries = [...this.entries].map(([index, entry]) => {
@@ -314,9 +290,6 @@ export class SegmentedConversationResidency {
             dirty.messages.forEach((message, index) => {
                 add(message, dirty.messageByteSizes[index])
             })
-        }
-        if (this.streamingOverlay) {
-            add(this.streamingOverlay.message, this.streamingOverlay.byteSize)
         }
         return bytes
     }
@@ -359,44 +332,6 @@ export class SegmentedConversationResidency {
         this.pins.clear()
         this.dirtyRecords.splice(0)
         this.pendingSaveAttempts.clear()
-        this.streamingOverlay = null
-    }
-
-    storeRange(input: SegmentedConversationRangeInput): void {
-        if (input.revision !== this.baseRevision) {
-            throw new Error(
-                `Conversation range revision ${input.revision} does not match ${this.baseRevision}`,
-            )
-        }
-        if (input.totalMessages !== this.baseMessageCount) {
-            throw new Error(
-                `Conversation range total ${input.totalMessages} does not match ${this.baseMessageCount}`,
-            )
-        }
-        validateIndex(input.startIndex, 'Conversation range startIndex')
-        if (input.startIndex + input.messages.length > this.baseMessageCount) {
-            throw new RangeError('Conversation range exceeds the persisted message count')
-        }
-        const prepared = input.messages.map((inputMessage) => {
-            const message = safeStructuredClone(inputMessage)
-            return { message, byteSize: this.measure(message) }
-        })
-        for (let offset = 0; offset < prepared.length; offset++) {
-            const persistentIndex = input.startIndex + offset
-            const absoluteIndex = this.currentIndexForPersistent(persistentIndex)
-            if (
-                absoluteIndex === undefined ||
-                this.isDirtyIndex(absoluteIndex) ||
-                this.streamingOverlay?.absoluteIndex === absoluteIndex
-            ) {
-                continue
-            }
-            this.entries.set(absoluteIndex, {
-                ...prepared[offset],
-                lastAccess: this.tick(),
-            })
-        }
-        this.evictToBudget()
     }
 
     readRange(startIndex: number, limit: number): Message[] | null {
@@ -413,43 +348,6 @@ export class SegmentedConversationResidency {
             messages.push(safeStructuredClone(message))
         }
         return messages
-    }
-
-    missingPersistentRanges(
-        startIndex: number,
-        limit: number,
-    ): ConversationMissingPersistentRange[] {
-        validateIndex(startIndex, 'Conversation range startIndex')
-        validateLimit(limit)
-        const start = Math.min(startIndex, this.messageCount)
-        const end = Math.min(this.messageCount, start + limit)
-        const missing: ConversationMissingPersistentRange[] = []
-        for (let absoluteIndex = start; absoluteIndex < end; absoluteIndex++) {
-            if (this.messageAt(absoluteIndex)) continue
-            const persistentIndex = this.persistentIndexAtCurrent(absoluteIndex)
-            if (persistentIndex === undefined) {
-                throw new Error(
-                    `Conversation local message ${absoluteIndex} is missing from residency`,
-                )
-            }
-            const current = missing.at(-1)
-            if (
-                current?.currentEndIndex === absoluteIndex &&
-                current.persistentEndIndex === persistentIndex
-            ) {
-                current.currentEndIndex += 1
-                current.persistentEndIndex += 1
-            } else {
-                missing.push({
-                    revision: this.baseRevision,
-                    currentStartIndex: absoluteIndex,
-                    currentEndIndex: absoluteIndex + 1,
-                    persistentStartIndex: persistentIndex,
-                    persistentEndIndex: persistentIndex + 1,
-                })
-            }
-        }
-        return missing
     }
 
     pinRange(
@@ -486,7 +384,6 @@ export class SegmentedConversationResidency {
         }
         if (reason === 'dirty') count += this.dirtyRecords.length
         if (reason === 'pending-save') count += this.pendingSaveAttempts.size
-        if (reason === 'streaming' && this.streamingOverlay) count += 1
         return count
     }
 
@@ -503,13 +400,6 @@ export class SegmentedConversationResidency {
         if (input.deleteCount > this.messageCount - input.start) {
             throw new RangeError('Conversation replace-range deleteCount exceeds the current message count')
         }
-        if (
-            this.streamingOverlay &&
-            input.start <= this.streamingOverlay.absoluteIndex
-        ) {
-            throw new Error('Conversation replace-range cannot shift an active streaming overlay')
-        }
-
         const replacement = safeStructuredClone([...input.messages])
         const replacementByteSizes = replacement.map((message) => this.measure(message))
         const removedEnd = input.start + input.deleteCount
@@ -644,45 +534,10 @@ export class SegmentedConversationResidency {
         return true
     }
 
-    setStreamingOverlay(
-        absoluteIndex: number,
-        message: Message,
-        sessionVersion: number,
-    ): void {
-        validateIndex(absoluteIndex, 'Conversation streaming index')
-        validateIndex(sessionVersion, 'Conversation streaming session version')
-        if (absoluteIndex >= this.messageCount) {
-            throw new RangeError('Conversation streaming index does not exist')
-        }
-        if (sessionVersion < this.currentSessionVersion) {
-            throw new RangeError('Conversation streaming overlay is stale')
-        }
-        const cloned = safeStructuredClone(message)
-        const byteSize = this.measure(cloned)
-        this.streamingOverlay = {
-            absoluteIndex,
-            message: cloned,
-            byteSize,
-            sessionVersion,
-        }
-        this.evictToBudget()
-    }
-
-    clearStreamingOverlay(sessionVersion: number): void {
-        validateIndex(sessionVersion, 'Conversation streaming session version')
-        if (!this.streamingOverlay) return
-        if (this.streamingOverlay.sessionVersion !== sessionVersion) {
-            throw new RangeError('Conversation streaming overlay version does not match')
-        }
-        this.streamingOverlay = null
-        this.evictToBudget()
-    }
-
     evictToBudget(): number {
         if (
             this.dirtyRecords.length > 0 ||
-            this.pendingSaveAttempts.size > 0 ||
-            this.streamingOverlay !== null
+            this.pendingSaveAttempts.size > 0
         ) return 0
         if (this.residentBytes <= this.maxResidentBytes) return 0
         const candidates = [...this.entries.entries()]
@@ -697,7 +552,6 @@ export class SegmentedConversationResidency {
     }
 
     private isProtected(absoluteIndex: number): boolean {
-        if (this.streamingOverlay?.absoluteIndex === absoluteIndex) return true
         if (this.isDirtyIndex(absoluteIndex)) return true
         for (const pin of this.pins) {
             if (absoluteIndex >= pin.startIndex && absoluteIndex < pin.endIndex) return true
@@ -713,50 +567,15 @@ export class SegmentedConversationResidency {
 
     private residentIndices(): number[] {
         const indices = new Set(this.entries.keys())
-        if (this.streamingOverlay) indices.add(this.streamingOverlay.absoluteIndex)
         return [...indices].sort((left, right) => left - right)
     }
 
     private messageAt(absoluteIndex: number): Message | undefined {
-        if (this.streamingOverlay?.absoluteIndex === absoluteIndex) {
-            return this.streamingOverlay.message
-        }
         return this.entries.get(absoluteIndex)?.message
     }
 
     private byteSizeAt(absoluteIndex: number): number {
-        if (this.streamingOverlay?.absoluteIndex === absoluteIndex) {
-            return this.streamingOverlay.byteSize
-        }
         return this.entries.get(absoluteIndex)?.byteSize ?? 0
-    }
-
-    private persistentIndexAtCurrent(absoluteIndex: number): number | undefined {
-        let currentStartIndex = 0
-        for (const span of this.sequenceSpans) {
-            const currentEndIndex = currentStartIndex + span.length
-            if (absoluteIndex < currentEndIndex) {
-                if (span.kind === 'local') return undefined
-                return span.persistentStartIndex + absoluteIndex - currentStartIndex
-            }
-            currentStartIndex = currentEndIndex
-        }
-        return undefined
-    }
-
-    private currentIndexForPersistent(persistentIndex: number): number | undefined {
-        let currentStartIndex = 0
-        for (const span of this.sequenceSpans) {
-            if (
-                span.kind === 'persistent' &&
-                persistentIndex >= span.persistentStartIndex &&
-                persistentIndex < span.persistentStartIndex + span.length
-            ) {
-                return currentStartIndex + persistentIndex - span.persistentStartIndex
-            }
-            currentStartIndex += span.length
-        }
-        return undefined
     }
 
     private measure(message: Message): number {

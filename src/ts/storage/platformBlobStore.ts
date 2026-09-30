@@ -34,23 +34,44 @@ export function createTauriNativeMediaUrl(
 
 export function createNativeMediaEndpointProvider(
     invokeCommand: (command: string) => Promise<unknown> = invoke,
-): () => Promise<string> {
+    onChanged: () => void = () => {},
+): (() => Promise<string>) & { ensure(): Promise<boolean> } {
     let pending: Promise<string> | undefined
-    return () =>
-        (pending ??= invokeCommand('native_media_base_url')
-            .then((value) => {
-                if (typeof value !== 'string')
-                    throw new TypeError('Invalid native media endpoint')
-                createTauriNativeMediaUrl('assets/validation', value)
-                return value
-            })
-            .catch((error) => {
-                pending = undefined
-                throw error
-            }))
+    let current: string | undefined
+    let recovery: Promise<boolean> | undefined
+    const read = async (command: string): Promise<string> => {
+        const value = await invokeCommand(command)
+        if (typeof value !== 'string') throw new TypeError('Invalid native media endpoint')
+        createTauriNativeMediaUrl('assets/validation', value)
+        return value
+    }
+    const get = () => pending ??= read('native_media_base_url').then(value => {
+        current = value
+        return value
+    }).catch(error => { pending = undefined; throw error })
+    return Object.assign(get, {
+        ensure: () => recovery ??= (async () => {
+            await pending?.catch(() => {})
+            const value = await read('native_media_ensure')
+            const changed = current !== undefined && current !== value
+            current = value
+            pending = Promise.resolve(value)
+            if (changed) onChanged()
+            return changed
+        })().finally(() => { recovery = undefined }),
+    })
 }
 
-export const getNativeMediaEndpoint = createNativeMediaEndpointProvider()
+const nativeMediaEndpointListeners = new Set<() => void>()
+export function subscribeNativeMediaEndpointChanges(listener: () => void): () => void {
+    nativeMediaEndpointListeners.add(listener)
+    return () => { nativeMediaEndpointListeners.delete(listener) }
+}
+export const getNativeMediaEndpoint = createNativeMediaEndpointProvider(invoke, () => {
+    for (const listener of nativeMediaEndpointListeners) {
+        try { listener() } catch (error) { console.error('Native media refresh failed', error) }
+    }
+})
 
 export function createTauriCasObjectUrl(
     input: { contentHash: string; mime: string; size: number },
@@ -83,6 +104,25 @@ export function createBackedBlobStore(backend: BlobKeyValueBackend): BlobStore {
 
 export function createGatedBlobStore(store: BlobStore, gate: StorageMutationGate): BlobStore {
     const gated: BlobStore = {
+        async captureConditionalWrite(key) {
+            const original = await gate.runKeyedWrite(key, async () => ({ metadata: await store.stat(key), bytes: await store.read(key) }))
+            if (!original.metadata || !original.bytes) return null
+            let used = false
+            return async (data, metadata, sourceBytes) => {
+                if (used) throw new Error('Conditional blob writer already used')
+                used = true
+                if (sourceBytes.length !== original.bytes!.length || sourceBytes.some((byte, index) => byte !== original.bytes![index])) return null
+                const ownedData = data.slice()
+                return gate.runKeyedWrite(key, async () => {
+                    const current = await store.stat(key)
+                    const bytes = await store.read(key)
+                    if (!current || JSON.stringify(current) !== JSON.stringify(original.metadata)
+                        || !bytes || bytes.length !== original.bytes!.length
+                        || bytes.some((byte, index) => byte !== original.bytes![index])) return null
+                    return store.put(key, ownedData, metadata)
+                })
+            }
+        },
         async put(key, data, metadata) {
             const ownedData = data.slice()
             const ownedMetadata = { ...metadata }

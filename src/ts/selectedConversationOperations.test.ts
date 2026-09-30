@@ -409,6 +409,29 @@ describe('selected conversation complete-operation gateway', () => {
         expect(harness.defaultLease.release).toHaveBeenCalledOnce()
     })
 
+    it('keeps the original draft evidence after a row refresh changes its text', async () => {
+        const harness = makeHarness()
+        const input = { absoluteIndex: 1, sourceToken: 'persistent-source', sourceVersion: 3, rowKey: 'persistent-source|3|1' as ConversationViewportKey, message: { role: 'char' as const, data: 'one' } }
+        const intent = harness.operations.captureMessageEditIntent(input)!
+        const changed = { ...input, message: { role: 'char' as const, data: 'external' } }
+        harness.setViewportRow({ key: changed.rowKey, absoluteIndex: 1, message: changed.message, sourceVersion: 3 })
+        expect(harness.operations.rebindMessageEditIntent(intent, changed)).toBe(intent)
+        harness.current.session.edit(harness.current.session.locate(1), changed.message)
+        await expect(harness.operations.acquireCompleteMessageTargetForIntent(intent, 'save')).resolves.toBeNull()
+        expect(harness.current.conversation.message[1].data).toBe('external')
+    })
+
+    it('rebinds unchanged draft evidence after an insertion shifts its address', () => {
+        const harness = makeHarness()
+        const input = { absoluteIndex: 1, sourceToken: 'persistent-source', sourceVersion: 3, rowKey: 'persistent-source|3|1' as ConversationViewportKey, message: { role: 'char' as const, data: 'one' } }
+        const intent = harness.operations.captureMessageEditIntent(input)!
+        const row = { key: 'shifted' as ConversationViewportKey, absoluteIndex: 2, message: input.message, sourceVersion: 4 }
+        harness.setViewportSnapshot({ sourceToken: 'persistent-source', version: 4, storeRevision: 7, totalMessages: 4, keyAt: () => row.key, indexOfKey: () => 2, rowAt: () => row })
+        const rebound = harness.operations.rebindMessageEditIntent(intent, { ...input, absoluteIndex: 2, rowKey: row.key, sourceVersion: 4 })
+        expect(rebound.absoluteIndex).toBe(2)
+        expect(rebound.messageEvidence).toBe(intent.messageEvidence)
+    })
+
     it('does not retarget an edit intent after the selected conversation changes', async () => {
         const original = makeSelection('character-a', 'conversation-a', 1, 7)
         const harness = makeHarness({ selection: original })

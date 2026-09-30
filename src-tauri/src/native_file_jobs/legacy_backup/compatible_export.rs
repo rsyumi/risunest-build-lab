@@ -396,7 +396,11 @@ fn write_database(
     // writing array headers so Pocket group removal cannot disagree with count.
     let mut ids = Vec::new();
     let mut groups = HashSet::new();
-    let mut statement=connection.prepare("SELECT character_id,detail FROM characters WHERE generation=?1 ORDER BY configured_index ASC").map_err(sql)?;
+    let archived = count(connection,
+        "SELECT count(*) FROM characters WHERE generation=?1 AND archived_object IS NOT NULL",
+        &[generation])?;
+    projector.losses.add("archived-characters", archived);
+    let mut statement=connection.prepare("SELECT character_id,detail FROM characters WHERE generation=?1 AND archived_object IS NULL ORDER BY configured_index ASC").map_err(sql)?;
     let mut rows = statement.query([generation]).map_err(sql)?;
     while let Some(row) = rows.next().map_err(sql)? {
         check_cancelled(cancel).map_err(local_backup_error)?;
@@ -559,6 +563,10 @@ fn write_database(
         "SELECT count(*) FROM plugin_storage WHERE generation=?1 AND storage_key NOT IN (SELECT storage_key FROM plugin_storage WHERE generation=?1 GROUP BY storage_key HAVING count(*)>1)",
         &[generation],
     )?;
+    let colliding_values = count(connection,
+        "SELECT count(*) FROM plugin_storage WHERE generation=?1 AND storage_key IN (SELECT storage_key FROM plugin_storage WHERE generation=?1 GROUP BY storage_key HAVING count(*)>1)",
+        &[generation])?;
+    projector.losses.add("colliding-plugin-values", colliding_values);
     map_header(&mut writer, storage_count)?;
     let mut statement=connection.prepare("SELECT storage_key,value FROM plugin_storage WHERE generation=?1 AND storage_key NOT IN (SELECT storage_key FROM plugin_storage WHERE generation=?1 GROUP BY storage_key HAVING count(*)>1) ORDER BY CASE WHEN storage_key NOT GLOB '*[^0-9]*' AND storage_key != '' AND CAST(CAST(storage_key AS INTEGER) AS TEXT)=storage_key AND CAST(storage_key AS INTEGER)<4294967295 THEN 0 ELSE 1 END, CASE WHEN storage_key NOT GLOB '*[^0-9]*' AND storage_key != '' AND CAST(CAST(storage_key AS INTEGER) AS TEXT)=storage_key AND CAST(storage_key AS INTEGER)<4294967295 THEN CAST(storage_key AS INTEGER) END, ordinal ASC").map_err(sql)?;
     let mut rows = statement.query([generation]).map_err(sql)?;
@@ -1046,6 +1054,10 @@ mod tests {
                 .unwrap();
             let message = json!({"role":"char","data":"현재 한국어 {{inlay::synthetic}}","chatId":"message","unknownMessage":true,"responseVariants":{"groupId":"message","selectedId":"selected","candidates":[{"id":"other","messages":[{"role":"char","data":"alternative"}]},{"id":"complex","messages":[{"role":"char","data":"one"},{"role":"char","data":"two"}]},{"id":"selected","messages":[{"role":"char","data":"stale selected"}]}]}});
             store.replace_add_characters(&staging,&[json!({"chaId":"synthetic","type":"character","name":"Synthetic","additionalAssets":[["Synthetic owner image","assets/prior-owner.png","png"]],"chats":[{"id":"chat","name":"Chat","message":[message,{"role":"user","data":"followup"}],"savedToggleValues":{"test":"1"},"unknownChat":true}]}),json!({"chaId":"group","type":"group","name":"Synthetic Group","characters":["synthetic"],"chats":[]})]).unwrap();
+            store.replace_add_characters(&staging, &[
+                json!({"chaId":"archived-one","type":"character","name":"Archived","chats":[]}),
+                json!({"chaId":"archived-group","type":"group","name":"Archived group","characters":[],"chats":[]}),
+            ]).unwrap();
             store
                 .replace_put_asset_owner_heads(
                     &staging,
@@ -1059,6 +1071,10 @@ mod tests {
                 )
                 .unwrap();
             let revision = store.replace_commit(&staging, Some(0)).unwrap().revision;
+            store.archive_character("archived-one", revision, 10).unwrap();
+            store.archive_character("archived-group", store.revision().unwrap(), 11).unwrap();
+            let revision = store.revision().unwrap();
+
             // A key two plugins both hold cannot go out without handing one of
             // them the other's value, so neither side is written.
             let revision = store
@@ -1072,7 +1088,7 @@ mod tests {
                     replace_character: None,
                     add_character: None,
                     conversations: None,
-                    delete_character_id: None,
+                    delete_character_ids: None,
                     plugin_storage: Some(vec![
                         crate::persistent_store::PluginStorageMutation::Set {
                             owner: "plugin-a".to_owned(),
@@ -1101,7 +1117,7 @@ mod tests {
             std::fs::create_dir(&handoff).unwrap();
             let output = directory.path().join("export.bin");
             let job = JobRegistry::default()
-                .create(JobKind::ExportLegacyLocalBackup)
+                .create(JobKind::ExportCompatibleLocalBackup)
                 .unwrap();
             export_compatible_local_backup(
                 target,
@@ -1115,6 +1131,13 @@ mod tests {
             .unwrap();
             let report = job.status().compatibility_report.unwrap();
             assert_eq!(report.target, target);
+            for (code, count) in [("archived-characters", 2), ("colliding-plugin-values", 2)] {
+                assert_eq!(report.excluded.iter().find(|item| item.code == code).unwrap().items,
+                    count.to_string());
+            }
+            assert_eq!(report.preserved.iter().find(|item| item.code == "characters").unwrap().items,
+                if target == CompatibilityTarget::PocketRisu { "1" } else { "2" });
+
             let code = if target == CompatibilityTarget::PocketRisu {
                 "converted-swipes"
             } else {

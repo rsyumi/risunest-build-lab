@@ -32,6 +32,7 @@ struct Context {
     executable: PathBuf,
     client: Client,
     updates: UpdateCoordination,
+    registration_error: Option<String>,
 }
 
 struct UpdateCoordination {
@@ -147,6 +148,7 @@ fn arm_exit_watchdog(delay: Duration, exit: impl FnOnce() + Send + 'static) -> s
 }
 #[tauri::command]
 async fn manager_status(app: tauri::AppHandle, ctx: State<'_, Context>) -> Result<Value> {
+    if let Some(error) = &ctx.registration_error { return Err(error.clone()); }
     let result = ctx.client.status().await;
     if let Some(tray) = app.tray_by_id("manager-tray") {
         let _ = tray.set_tooltip(Some(if result.is_ok() {
@@ -159,10 +161,12 @@ async fn manager_status(app: tauri::AppHandle, ctx: State<'_, Context>) -> Resul
 }
 #[tauri::command]
 async fn manager_mutate(ctx: State<'_, Context>, path: String, body: Value) -> Result<Value> {
+    if let Some(error) = &ctx.registration_error { return Err(error.clone()); }
     ctx.client.mutate(&path, body).await
 }
 #[tauri::command]
 async fn manager_start(ctx: State<'_, Context>) -> Result<()> {
+    if let Some(error) = &ctx.registration_error { return Err(error.clone()); }
     if ctx.client.status().await.is_ok() {
         return Ok(());
     }
@@ -175,34 +179,44 @@ async fn manager_start(ctx: State<'_, Context>) -> Result<()> {
         if ctx.client.status().await.is_ok() {
             return Ok(());
         }
+        if let Some(error) = platform::startup_error(&ctx.root) { return Err(error); }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
-    Err(std::fs::read_to_string(ctx.root.join("startup-error.txt"))
-        .unwrap_or_else(|_| "server-not-ready".into()))
+    Err(platform::startup_error(&ctx.root).unwrap_or_else(|| "server-not-ready".into()))
 }
 #[tauri::command]
 async fn manager_environment(ctx: State<'_, Context>) -> Result<Value> {
     let root = ctx.root.clone();
     let executable = ctx.executable.clone();
-    tauri::async_runtime::spawn_blocking(move||{
-        let startup=platform::startup(&root,&executable,"status");
-        let (startup,error)=match startup{Ok(s)=>(Some(s),None),Err(e)=>(None,Some(e))};
-        let cloudflared=executable.with_file_name(if cfg!(windows){"cloudflared.exe"}else{"cloudflared"});
-        let update_settings=risunest_sync_manager::update::load_settings(&root)?;
-        let update_status=risunest_sync_manager::update::load_status(&root)?;
-        let (update_schedule,update_schedule_error)=match platform::manager_executable(){
-            Ok(manager)=>reconcile_schedule_environment(
-                update_settings.policy,
-                || platform::update_schedule(&root,&manager,&executable,update_settings.policy,"status"),
-                || risunest_sync_manager::update::reconcile_schedule(&root,&manager,&executable),
-            ),
-            Err(error)=>(None,Some(error)),
-        };
-        Ok(json!({"network":risunest_sync_server::config::NetworkSettings::load(&root).map_err(|e| e.code.to_owned())?,"platform":std::env::consts::OS,"dataDir":path_text(&root),"cloudflared":path_text(&cloudflared),"startup":startup,"startupError":error,"trayStartup":gui_startup::setting(&root,None)?,"updateSettings":update_settings,"updateStatus":update_status,"updateSchedule":update_schedule,"updateScheduleError":update_schedule_error}))
-    }).await.map_err(|_|"environment-unavailable")?
+    let registration_error = ctx.registration_error.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let cloudflared = executable.with_file_name(if cfg!(windows) { "cloudflared.exe" } else { "cloudflared" });
+        Ok(json!({"network":risunest_sync_server::config::NetworkSettings::load(&root).map_err(|e| e.code.to_owned())?,
+            "platform":std::env::consts::OS,"dataDir":path_text(&root),"cloudflared":path_text(&cloudflared),
+            "updateSettings":update::load_settings(&root)?,"updateStatus":update::load_status(&root)?,
+            "registrationError":registration_error}))
+    }).await.map_err(|_| "environment-unavailable")?
 }
 #[tauri::command]
+async fn manager_platform_status(ctx: State<'_, Context>) -> Result<Value> {
+    if let Some(error) = &ctx.registration_error { return Err(error.clone()); }
+    let root = ctx.root.clone();
+    let executable = ctx.executable.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (startup, error) = match platform::startup(&root, &executable, "status") {
+            Ok(value) => (Some(value), None), Err(error) => (None, Some(error)),
+        };
+        let policy = update::load_settings(&root)?.policy;
+        let (schedule, schedule_error) = match platform::manager_executable().and_then(|manager| platform::update_schedule(&root, &manager, &executable, policy, "status")) {
+            Ok(value) => (Some(value), None), Err(error) => (None, Some(error)),
+        };
+        Ok(json!({"startup":startup,"startupError":error,"trayStartup":gui_startup::setting(&root,None)?,"updateSchedule":schedule,"updateScheduleError":schedule_error}))
+    }).await.map_err(|_| "environment-unavailable")?
+}
+
+#[tauri::command]
 async fn manager_network(ctx: State<'_, Context>, settings: Value) -> Result<()> {
+    if let Some(error) = &ctx.registration_error { return Err(error.clone()); }
     let settings: risunest_sync_server::config::NetworkSettings =
         serde_json::from_value(settings).map_err(|_| "invalid-network-settings")?;
     let root = ctx.root.clone();
@@ -222,6 +236,7 @@ async fn manager_startup(
     ctx: State<'_, Context>,
     action: String,
 ) -> Result<platform::StartupStatus> {
+    if let Some(error) = &ctx.registration_error { return Err(error.clone()); }
     if !["install", "remove"].contains(&action.as_str()) {
         return Err("invalid-startup-action".into());
     }
@@ -241,6 +256,7 @@ async fn manager_startup(
 }
 #[tauri::command]
 async fn manager_update_policy(ctx: State<'_, Context>, policy: String) -> Result<Value> {
+    if let Some(error) = &ctx.registration_error { return Err(error.clone()); }
     let root = ctx.root.clone();
     let server = ctx.executable.clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -258,6 +274,7 @@ async fn manager_update_check(
     ctx: State<'_, Context>,
     automatic: bool,
 ) -> Result<Value> {
+    if let Some(error) = &ctx.registration_error { return Err(error.clone()); }
     let lock = ctx.updates.begin(&ctx.root)?;
     let mode = if automatic {
         let settings = match update::load_settings(&ctx.root) {
@@ -276,12 +293,17 @@ async fn manager_update_check(
     } else {
         update::RunMode::Manual
     };
+    if let Err(error) = update::prepare_gui_relaunch(&ctx.root, &ctx.executable, automatic) {
+        ctx.updates.restore(&ctx.root, lock)?;
+        return Err(error);
+    }
     let outcome =
         risunest_sync_manager::update::run_while_locked(&ctx.root, &ctx.executable, mode, &lock)
             .await;
     let outcome = match outcome {
         Ok(outcome) => outcome,
         Err(error) => {
+            let _ = update::cancel_gui_relaunch(&ctx.root);
             ctx.updates.restore(&ctx.root, lock)?;
             return Err(error);
         }
@@ -302,6 +324,7 @@ async fn manager_update_check(
             app.exit(0);
         });
     } else {
+        update::cancel_gui_relaunch(&ctx.root)?;
         ctx.updates.restore(&ctx.root, lock)?;
     }
     let value = serde_json::to_value(&outcome).map_err(|_| "update-status-unavailable")?;
@@ -309,6 +332,7 @@ async fn manager_update_check(
 }
 #[tauri::command]
 async fn manager_tray_startup(ctx: State<'_, Context>, enabled: bool) -> Result<()> {
+    if let Some(error) = &ctx.registration_error { return Err(error.clone()); }
     let root = ctx.root.clone();
     tauri::async_runtime::spawn_blocking(move || {
         gui_startup::setting(&root, Some(enabled)).map(|_| ())
@@ -339,6 +363,7 @@ fn manager_qr(uri: String) -> Result<String> {
 
 #[tauri::command]
 async fn manager_uninstall(app: tauri::AppHandle, ctx: State<'_, Context>, delete_data: bool) -> Result<()> {
+    if let Some(error) = &ctx.registration_error { return Err(error.clone()); }
     let preview = risunest_sync_manager::removal::plan(&ctx.root, &ctx.executable, delete_data)?;
     if !preview.blockers.is_empty() { return Err(preview.blockers.join(", ")); }
     let lock = ctx.updates.begin(&ctx.root)?;
@@ -373,9 +398,38 @@ pub fn run() {
     }
     assert!(root.is_absolute(), "absolute data directory required");
     let executable = platform::server_executable().expect("server path unavailable");
-    risunest_sync_manager::removal::register(&root, &executable).expect("installation registration unavailable");
+    let registration_error = match platform::resolve_manager_root(&root) {
+        Ok(resolved) => {
+            root = resolved;
+            risunest_sync_manager::removal::register(&root, &executable).err()
+        }
+        Err(error) => Some(error),
+    };
+    if registration_error.is_none() {
+        if let Ok(manager) = platform::manager_executable() {
+            if let Ok(_lock) = update::try_lock(&root) {
+                if !root.join("manager-update/transaction.json").exists() {
+                    if platform::startup(&root, &executable, "status").is_ok_and(|state| state.registered && !state.action_matches) {
+                        let _ = platform::startup(&root, &executable, "install");
+                    }
+                    if let Ok(settings) = update::load_settings(&root) {
+                        let _ = reconcile_schedule_environment(settings.policy,
+                            || platform::update_schedule(&root, &manager, &executable, settings.policy, "status"),
+                            || update::reconcile_schedule_while_locked(&root, &manager, &executable));
+                    }
+                    if gui_startup::setting(&root, None).unwrap_or(false) {
+                        let _ = gui_startup::setting(&root, Some(true));
+                    }
+                }
+            }
+        }
+    }
     let client = Client::new(root.clone()).expect("management client unavailable");
-    let updates = UpdateCoordination::new(&root).expect("update activity unavailable");
+    let updates = if registration_error.is_some() {
+        UpdateCoordination { activity: Mutex::new(None), handoff_lock: Mutex::new(None) }
+    } else {
+        UpdateCoordination::new(&root).expect("update activity unavailable")
+    };
     let mut tauri_context = tauri::generate_context!();
     let main_window = if let Some(data_directory) =
         platform::webview_data_dir().expect("WebView data directory unavailable")
@@ -406,6 +460,7 @@ pub fn run() {
             executable,
             client,
             updates,
+            registration_error,
         })
         .invoke_handler(tauri::generate_handler![
             manager_uninstall,
@@ -413,6 +468,7 @@ pub fn run() {
             manager_mutate,
             manager_start,
             manager_environment,
+            manager_platform_status,
             manager_network,
             manager_startup,
             manager_update_policy,

@@ -476,24 +476,28 @@ impl Drop for ActiveOperation {
     }
 }
 
-struct HandleOperation(Arc<AtomicBool>);
+struct HandleOperation {
+    started: Arc<AtomicBool>,
+    cancelled: Arc<AtomicBool>,
+}
 
 impl HandleOperation {
     fn enter(handle: &UpdateHandle) -> Result<Self, String> {
-        Self::enter_flag(&handle.started)
+        Self::enter_flags(&handle.started, &handle.cancelled)
     }
 
-    fn enter_flag(started: &Arc<AtomicBool>) -> Result<Self, String> {
+    fn enter_flags(started: &Arc<AtomicBool>, cancelled: &Arc<AtomicBool>) -> Result<Self, String> {
         started
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .map_err(|_| "this update handle is already running".to_owned())?;
-        Ok(Self(started.clone()))
+        Ok(Self { started: started.clone(), cancelled: cancelled.clone() })
     }
 }
 
 impl Drop for HandleOperation {
     fn drop(&mut self) {
-        self.0.store(false, Ordering::Release);
+        self.cancelled.store(false, Ordering::Release);
+        self.started.store(false, Ordering::Release);
     }
 }
 
@@ -546,10 +550,26 @@ mod tests {
     #[test]
     fn handle_guard_rejects_a_second_installer_for_the_same_handle() {
         let started = Arc::new(AtomicBool::new(false));
-        let first = HandleOperation::enter_flag(&started).unwrap();
-        assert!(HandleOperation::enter_flag(&started).is_err());
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let first = HandleOperation::enter_flags(&started, &cancelled).unwrap();
+        assert!(HandleOperation::enter_flags(&started, &cancelled).is_err());
         drop(first);
-        assert!(HandleOperation::enter_flag(&started).is_ok());
+        assert!(HandleOperation::enter_flags(&started, &cancelled).is_ok());
+    }
+
+    #[test]
+    fn settled_handle_attempt_clears_cancellation_before_retry() {
+        let started = Arc::new(AtomicBool::new(false));
+        let cancelled = Arc::new(AtomicBool::new(true));
+        let operation = HandleOperation::enter_flags(&started, &cancelled).unwrap();
+        assert!(cancelled.load(Ordering::Acquire));
+        drop(operation);
+        assert!(!cancelled.load(Ordering::Acquire));
+        let retry = HandleOperation::enter_flags(&started, &cancelled).unwrap();
+        assert!(!cancelled.load(Ordering::Acquire));
+        cancelled.store(true, Ordering::Release);
+        drop(retry);
+        assert!(!cancelled.load(Ordering::Acquire));
     }
 
     #[cfg(desktop)]

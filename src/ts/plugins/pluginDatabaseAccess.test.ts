@@ -92,6 +92,8 @@ function createHarness() {
     const materializedDatabases: Database[] = []
     const pinnedDatabases: Database[] = []
     const pinnedCharacterQueries: unknown[] = []
+    const messageWindowReads: unknown[] = []
+    const fullConversationReads: string[] = []
     const archivedCharacterIds = new Set<string>()
     const releasedLeases: Array<ReturnType<typeof vi.fn>> = []
     const authoritativeSnapshots: Array<{
@@ -186,6 +188,7 @@ function createHarness() {
                 }
             },
             readConversation: async (characterId: string, conversationId: string) => {
+                fullConversationReads.push(conversationId)
                 const chat = characters
                     .find((value) => value.chaId === characterId)
                     ?.chats.find((value) => value.id === conversationId)
@@ -199,6 +202,7 @@ function createHarness() {
                 return { revision, value: { characterId, conversationId, conversation, totalMessages: message.length } }
             },
             readConversationWindow: async ({ characterId, conversationId, startIndex, limit }) => {
+                messageWindowReads.push({ startIndex, limit })
                 const chat = characters.find((value) => value.chaId === characterId)
                     ?.chats.find((value) => value.id === conversationId)
                 if (!chat) return null
@@ -208,6 +212,15 @@ function createHarness() {
                     messages: chat.message.slice(startIndex, startIndex + limit),
                     totalMessages: chat.message.length,
                 } }
+            },
+            readPluginStorageValues: async ({ owner, afterKey, limit = 256 }) => {
+                const keys = Object.keys(pluginStorage)
+                const start = afterKey ? afterKey.ordinal + 1 : 0
+                const end = Math.min(start + limit, keys.length)
+                return { revision,
+                    items: owner !== undefined && owner !== PLUGIN_ACCESS_OWNER ? [] : keys.slice(start, end).map((key) => ({ owner: PLUGIN_ACCESS_OWNER, key, value: pluginStorage[key] })),
+                    nextCursor: end < keys.length ? { owner: PLUGIN_ACCESS_OWNER, key: keys[end - 1], ordinal: end - 1 } : null,
+                }
             },
             queryPluginStorage: async () => ({
                 revision,
@@ -334,6 +347,8 @@ function createHarness() {
         invalidatePluginStorage,
         pinnedDatabases,
         pinnedCharacterQueries,
+        messageWindowReads,
+        fullConversationReads,
         releasedLeases,
         replacePersistentDatabase,
         replacePersistentCompleteCharacter,
@@ -469,6 +484,7 @@ describe('plugin database access', () => {
             liveConversation: liveSelected,
         })
 
+        expect(harness.fullConversationReads).toEqual(['active-chat-a'])
         expect(projected.char.name).toBe('Live owner detail')
         expect(projected.char.chats[0].message).toEqual(durable.chats[0].message)
         expect(projected.char.chats[1]).toEqual(dirtyResident)
@@ -572,6 +588,39 @@ describe('plugin database access', () => {
             'active-b',
         ])
         expect(harness.snapshot).not.toHaveBeenCalled()
+        expect(harness.releasedLeases[0]).toHaveBeenCalledOnce()
+    })
+
+    it('preserves current plugin records when an approved update reaches a newer database snapshot', () => {
+        const current = { name: 'installed', script: 'newer', version: '3.0', enabled: true, realArg: { marker: 'newer' } }
+        const added = { name: 'approved', script: 'approved', version: '3.0', enabled: true, realArg: {} }
+        const candidate = { plugins: [current], pluginCustomStorage: {} } as unknown as Database
+        applyPluginDatabaseUpdate(candidate, { plugins: [added] }, ['plugins'], PLUGIN_ACCESS_OWNER)
+        expect(candidate.plugins).toEqual([current, added])
+        applyPluginDatabaseUpdate(candidate, { plugins: [] }, ['plugins'], PLUGIN_ACCESS_OWNER)
+        expect(candidate.plugins).toEqual([current, added])
+    })
+
+    it('pages 1000 messages without changing streamed order or values', async () => {
+        const harness = createHarness()
+        const character = makeCharacter('active')
+        character.chats = [character.chats[0]]
+        character.chats[0].message = Array.from({ length: 1000 }, (_, index) => ({ role: 'user' as const, data: String(index) }))
+        harness.pinnedDatabases.push(makeFullObjectDatabase([character]))
+        const stream = await harness.access.getDatabaseSnapshotStream(['characters'], ['characters'])
+        const messages = []
+        for await (const chunk of stream as any) if (chunk.type === 'message') messages.push(chunk.value)
+        expect(messages).toEqual(character.chats[0].message)
+        expect(harness.messageWindowReads).toHaveLength(8)
+        expect(harness.messageWindowReads).toEqual(Array.from({ length: 8 }, (_, index) => ({ startIndex: index * 128, limit: 128 })))
+        expect(harness.releasedLeases[0]).toHaveBeenCalledOnce()
+    })
+
+    it('releases a database snapshot cancelled before consuming any chunk', async () => {
+        const harness = createHarness()
+        harness.pinnedDatabases.push(makeFullObjectDatabase([makeCharacter('active')]))
+        const stream = await harness.access.getDatabaseSnapshotStream(['characters'], ['characters'])
+        await stream.cancel()
         expect(harness.releasedLeases[0]).toHaveBeenCalledOnce()
     })
 

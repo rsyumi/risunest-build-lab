@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { presentFileOperationError } from "src/ts/storage/fileOperationErrorPresentation";
     import { language } from "src/lang";
     import { hubURL } from "src/ts/characterCards";
     import { getDeviceMarkers } from "src/ts/storage/deviceMarkers";
@@ -6,7 +7,7 @@
 
     import { DBState } from "src/ts/stores.svelte";
     import Check from "src/lib/UI/GUI/CheckInput.svelte";
-    import { alertConfirm, alertError, alertNormal } from "src/ts/alert";
+    import { alertConfirm, alertError, alertNormal, openRisuAccountLogin } from "src/ts/alert";
     import { forageStorage } from "src/ts/globalApi.svelte";
     import { isTauri } from "src/ts/platform";
     import { openDataHealthScreen } from "src/ts/storage/dataHealthNavigation";
@@ -22,7 +23,7 @@
     import Button from "src/lib/UI/GUI/Button.svelte";
     import { exportAsDataset } from "src/ts/storage/exportAsDataset";
     import { loginToSionyw, testSionywLogin } from "src/ts/sionyw";
-    import { getNativeOfficialAccountFlow } from "src/ts/storage/sync/nativeOfficialAccountFlow";
+    import { NativeAccountLoginError, getNativeOfficialAccountFlow } from "src/ts/storage/sync/nativeOfficialAccountFlow";
     import {
         isExpectedHubMessage,
         resolveExpectedOfficialAccountMessageUrl,
@@ -72,64 +73,6 @@
         }
     }
 
-    function showRisuSaveError(error: unknown): void {
-        const code =
-            error && typeof error === "object" && "code" in error
-                ? error.code
-                : undefined;
-        if (error instanceof NativeFileOperationBusyError) {
-            alertError(language.risuNest.backup.fileBusy);
-            return;
-        }
-        const blocked =
-            code === "generation-active"
-                ? language.risuNest.backup.generationBusy
-                : code === "server-sync-busy" ||
-                    code === "library-operation-busy"
-                  ? language.risuNest.backup.syncBusy
-                  : code === "resolve-pending-operation-first" ||
-                      code === "server-status-unavailable"
-                    ? language.risuNest.backup.syncUnconfirmed
-                    : undefined;
-        if (blocked) {
-            alertError(blocked);
-            return;
-        }
-        const partialDestinationMayRemain = hasPartialDestinationWarning(error);
-        if (error instanceof DOMException && error.name === "AbortError") {
-            alertPartialDestinationWarning(
-                error,
-                language.screenshotPartialDestinationMayRemain,
-                alertError,
-            );
-            return;
-        }
-        if (error instanceof NativeFileJobActivationCommittedError) {
-            alertError(language.risuSaveImportCommittedRefreshFailed);
-            return;
-        }
-        if (
-            error instanceof NativeFileJobError &&
-            error.code === "revision-conflict"
-        ) {
-            alertError(language.risuSaveRevisionConflict);
-            return;
-        }
-        if (
-            error instanceof NativeFileJobError &&
-            error.code === "source-preserved-repair-required"
-        ) {
-            void offerDataHealth(
-                language.risuNest.backup.sourceRepairRequired,
-            );
-            return;
-        }
-        alertError(
-            partialDestinationMayRemain
-                ? `${language.risuNest.backup.actionFailed} ${language.screenshotPartialDestinationMayRemain}`
-                : language.risuNest.backup.actionFailed,
-        );
-    }
     // A failure the data check can explain offers it, instead of ending at the message.
     async function offerDataHealth(message: string): Promise<void> {
         if (!isTauri) {
@@ -144,14 +87,10 @@
             openDataHealthScreen();
     }
 
-    // Exports run behind the shared progress dialog, which reports how they ended.
-    function showExportError(error: unknown): void {
-        if (!nativeFileOperationOutcomeShown("export")) showRisuSaveError(error);
-    }
-
     async function runLocalBackupOperation(
         kind: "import" | "export",
     ): Promise<void> {
+        const callStartedAt = Date.now();
         if (kind === "export") dismissNativeFileOperationOutcome();
         try {
             const result = isTauri
@@ -177,14 +116,14 @@
                     : message,
             );
         } catch (error) {
-            if (kind === "export") showExportError(error);
-            else showRisuSaveError(error);
+            presentFileOperationError(kind, error, callStartedAt);
         }
     }
 
     async function runCompatibleExport(
         target: NativeCompatibilityTarget,
     ): Promise<void> {
+        const callStartedAt = Date.now();
         dismissNativeFileOperationOutcome();
         try {
             const result =
@@ -206,7 +145,7 @@
                     : message,
             );
         } catch (error) {
-            showExportError(error);
+            presentFileOperationError("export", error, callStartedAt);
         }
     }
 
@@ -239,8 +178,8 @@
                     );
                     if (!account) return;
                     DBState.db.account = account;
-                } catch {
-                    alertError(language.risuNest.backup.actionFailed);
+                } catch (error) {
+                    alertError(error instanceof NativeAccountLoginError && !error.rolledBack ? language.risuNest.account.loginRollbackFailed : language.risuNest.account.loginFailed);
                     return;
                 }
             } else {
@@ -271,6 +210,7 @@
     <Button
         disabled={risuSaveOperation !== null}
         onclick={async () => {
+            const callStartedAt = Date.now();
             dismissNativeFileOperationOutcome();
             try {
                 const result = await exportRisuSaveFromSystemPicker();
@@ -279,7 +219,7 @@
                 dismissNativeFileOperationOutcome();
                 alertNormal(formatRisuSaveExportResult(result));
             } catch (error) {
-                showExportError(error);
+                presentFileOperationError("export", error, callStartedAt);
             }
         }}
         className="mt-2"
@@ -359,7 +299,7 @@
                                     getNativeOfficialAccountFlow().logout(),
                                 );
                             } catch {
-                                alertError(language.risuNest.backup.actionFailed);
+                                alertError(language.risuNest.account.logoutFailed);
                                 return;
                             }
                         } else if (
@@ -440,10 +380,10 @@
         <span>{language.notLoggedIn}</span>
         <button
             class="bg-selected p-2 rounded-md mt-2 hover:bg-blue-500 transition-colors"
-            onclick={() => {
+            onclick={() => void openRisuAccountLogin(() => {
                 openIframeURL = hubURL + "/hub/login";
                 openIframe = true;
-            }}
+            })}
         >
             Login
         </button>

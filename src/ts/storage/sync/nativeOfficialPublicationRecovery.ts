@@ -1,7 +1,13 @@
+import { runSharedNativeFileOperation } from '../nativeFileJobManager'
+import { invoke } from '@tauri-apps/api/core'
+import { runWithMobileBackgroundTask, measuredTaskPercent } from '../../mobileBackgroundTask'
 import type { AccountStorage } from '../accountStorage'
 import { listNativeOfficialPublicationJobs } from '../nativeFileJobRecovery'
 import {
     resumeNativeOfficialPublication,
+    isTerminalJob,
+    type NativeFileJobStatus,
+    type NativeFileJobOptions,
     type NativeOfficialPublicationReceipt,
 } from '../nativeFileJobs'
 import type {
@@ -15,11 +21,13 @@ export interface NativeOfficialPublicationRecoveryDependencies {
     adapter: Pick<OfficialAccountSnapshotAdapter, 'adoptPublishedRevision'>
     flushMetadata(): Promise<void>
     listJobIds?(): Promise<string[]>
-    resumeJob?(jobId: string): Promise<NativeOfficialPublicationReceipt | null>
+    statusJob?(jobId: string): Promise<NativeFileJobStatus>
+    resumeJob?(jobId: string, options?: NativeFileJobOptions): Promise<NativeOfficialPublicationReceipt | null>
 }
 
 export interface NativeOfficialPublicationRecovery {
-    reconcile(): Promise<void>
+    reconcile(present?: boolean): Promise<void>
+    reconcileSettled(): Promise<void>
     hasPending(): boolean
     takeRecoveredPublication(
         accountId: string,
@@ -34,14 +42,21 @@ export function createNativeOfficialPublicationRecovery(
     const pending = new Set(initialJobIds)
     const listJobIds = dependencies.listJobIds ?? listNativeOfficialPublicationJobs
     const resumeJob = dependencies.resumeJob ?? resumeNativeOfficialPublication
+    const statusJob = dependencies.statusJob ?? ((jobId: string) => invoke<NativeFileJobStatus>('native_file_job_status', { jobId }))
     const recoveredPublications = new Map<string, OfficialRecoveredPublication>()
     let inFlight: Promise<void> | null = null
     const recoveredKey = (accountId: string, revision: number) => `${accountId}\0${revision}`
 
-    const reconcileOnce = async () => {
+    const reconcileOnce = async (settledOnly: boolean, options?: NativeFileJobOptions) => {
         for (const jobId of await listJobIds()) pending.add(jobId)
         for (const jobId of [...pending]) {
-            const receipt = await resumeJob(jobId)
+            if (settledOnly) {
+                const status = await statusJob(jobId)
+                const awaitingRetry = status.state === 'waitingForInput'
+                    && status.phase === 'awaiting-publication-retry'
+                if (!isTerminalJob(status) && !awaitingRetry) continue
+            }
+            const receipt = await resumeJob(jobId, options)
             if (!receipt) {
                 pending.delete(jobId)
                 continue
@@ -96,11 +111,25 @@ export function createNativeOfficialPublicationRecovery(
     }
 
     return {
-        reconcile() {
+        reconcile(present = false) {
             if (inFlight) return inFlight
-            inFlight = reconcileOnce().finally(() => {
+            const operation = present && pending.size > 0
+                ? runSharedNativeFileOperation('export', 'official-publication-recovery', context =>
+                    reconcileOnce(false, { signal: context.signal, onStatus: context.onStatus }),
+                    { presentation: 'dialog', format: 'library-backup', userInitiated: false },
+                )
+                : runWithMobileBackgroundTask('sync', task => reconcileOnce(false, {
+                    signal: task.signal,
+                    onStatus: status => task.progress(measuredTaskPercent(status.progress.completedBytes, status.progress.totalBytes)),
+                }))
+            inFlight = operation.finally(() => {
                 inFlight = null
             })
+            return inFlight
+        },
+        async reconcileSettled() {
+            if (inFlight) return
+            inFlight = reconcileOnce(true).finally(() => { inFlight = null })
             return inFlight
         },
         hasPending: () => pending.size > 0,

@@ -1069,6 +1069,7 @@ async fn chunk_upload_delta_download_checkpoint_and_durable_job_over_tcp() {
         serde_json::json!(["library"])
     );
     assert_eq!(page["records"][0]["domain"], "library");
+    assert!(page["totalRecords"].as_str().unwrap().parse::<u64>().unwrap() > 1);
     assert_eq!(page["next"]["domain"], "library");
     assert!(page["next"]["key"].is_string());
 }

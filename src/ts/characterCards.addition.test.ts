@@ -159,6 +159,11 @@ import {
     mapPreparedNativeCharacterCard,
     type CharacterCardV2Risu,
 } from './characterCards'
+import {
+    dismissNativeFileOperationOutcome,
+    nativeFileOperationOutcome,
+    type NativeFileOperationOutcome,
+} from './storage/nativeFileJobManager'
 
 describe('character card additions', () => {
     beforeEach(() => {
@@ -274,7 +279,16 @@ describe('character card additions', () => {
             .mockRejectedValueOnce(error)
             .mockResolvedValueOnce({ kind: 'imported', mode: 'native', value: 'last-card' })
 
-        await expect(importCharacter()).resolves.toBe('last-card')
+        dismissNativeFileOperationOutcome()
+        const failures: NativeFileOperationOutcome[] = []
+        const unsubscribe = nativeFileOperationOutcome.subscribe(outcome => {
+            if (outcome?.state === 'failed') failures.push(outcome)
+        })
+        try {
+            await expect(importCharacter()).resolves.toBe('last-card')
+        } finally {
+            unsubscribe()
+        }
 
         expect(mocks.importDesktopNativeCharacterPath).toHaveBeenCalledTimes(3)
         expect(mocks.importDesktopNativeCharacterPath).toHaveBeenNthCalledWith(
@@ -282,7 +296,14 @@ describe('character card additions', () => {
             'C:\\chosen\\last.charx',
             expect.any(Object),
         )
-        expect(mocks.alertError).toHaveBeenCalledWith(error)
+        expect(failures).toEqual([expect.objectContaining({
+            kind: 'import',
+            format: 'content',
+            state: 'failed',
+            source: { name: 'broken.charx' },
+            error: { code: 'import-error', message: error.message, recoveryRequired: false },
+        })])
+        expect(mocks.alertError).not.toHaveBeenCalled()
     })
 
     it('keeps the JavaScript card fallback for mixed-case JSON filenames', async () => {

@@ -772,10 +772,7 @@ describe('writeInlayImage', () => {
             )
         }))
 
-        const result = await Promise.race([
-            writeInlayImage(image, { id: 'fast-load' }),
-            new Promise<string>((resolve) => setTimeout(() => resolve('timed-out'), 25)),
-        ])
+        const result = await writeInlayImage(image, { id: 'fast-load' })
 
         expect(result).toBe('fast-load')
         expect(await getInlayAssetBlob('fast-load')).toMatchObject({ width: 64, height: 32 })

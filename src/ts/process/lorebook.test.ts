@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, test, vi } from 'vitest'
+import { get, writable } from 'svelte/store'
 
 vi.mock('../parser/chatVar.svelte', () => ({
     getChatVar: vi.fn(),
@@ -7,12 +8,7 @@ vi.mock('../parser/chatVar.svelte', () => ({
 
 vi.mock('../stores.svelte', () => ({
     DBState: { db: {} },
-    selectedCharID: {
-        subscribe: (run: (value: number) => void) => {
-            run(0)
-            return () => undefined
-        },
-    },
+    selectedCharID: writable(0),
 }))
 
 vi.mock('../tokenizer', () => ({
@@ -33,15 +29,54 @@ vi.mock('../alert', () => ({ alertError: vi.fn(), alertNormal: vi.fn() }))
 vi.mock('../../lang', () => ({ language: { successExport: 'exported' } }))
 vi.mock('../globalApi.svelte', () => ({ downloadFile: vi.fn(), saveAsset: vi.fn() }))
 vi.mock('./modules', () => ({ getModuleLorebooks: vi.fn(() => []) }))
+vi.mock('../storage/persistentDataRuntime.svelte', async (importOriginal) => ({
+    ...await importOriginal<typeof import('../storage/persistentDataRuntime.svelte')>(),
+    mutatePersistentCharacterDetail: vi.fn(async (id, _reason, mutate) => {
+        const character = DBState.db.characters.find(character => character.chaId === id)
+        if (!character) return false
+        mutate({ character })
+        return true
+    }),
+}))
+vi.mock('../characters', async (importOriginal) => ({
+    ...await importOriginal<typeof import('../characters')>(),
+    editSelectedChatList: vi.fn(async (id, _reason, edit) => {
+        const character = DBState.db.characters[get(selectedCharID)]
+        return character?.chaId === id ? edit(character) !== false : false
+    }),
+}))
 
-import { DBState } from '../stores.svelte'
+import { DBState, selectedCharID } from '../stores.svelte'
 import type { Chat } from '../storage/database.svelte'
 import { ActiveConversationSession } from '../storage/activeConversationSession'
 import {
     beginPinnedConversationHistoryOperation,
     createCompatibilityConversationHistorySnapshot,
 } from '../storage/conversationHistoryOperation'
-import { loadLoreBookV3Prompt } from './lorebook.svelte'
+import { importLoreBook, loadLoreBookV3Prompt } from './lorebook.svelte'
+import { selectSingleFile } from '../util'
+
+test.each(['global', 'local'] as const)('imports %s lore into the original ID after list replacement and reorder', async (mode) => {
+    selectedCharID.set(0)
+    const fixture = (id: string) => ({ type: 'character', chaId: id, globalLore: [], chatPage: 0,
+        chats: [{ id: 'original-chat', localLore: [], message: [] }, { id: 'other-chat', localLore: [], message: [] }] })
+    DBState.db = { characters: [fixture('First'), fixture('Second')] } as any
+    let choose!: (file: any) => void
+    vi.mocked(selectSingleFile).mockReturnValueOnce(new Promise(resolve => { choose = resolve }))
+    const pending = importLoreBook(mode)
+    DBState.db.characters = DBState.db.characters.map(character => structuredClone(character)).reverse()
+    DBState.db.characters[1].chats.reverse()
+    DBState.db.characters[1].chatPage = 1
+    selectedCharID.set(1)
+    choose({ name: 'synthetic.json', data: new TextEncoder().encode(JSON.stringify({ type: 'risu', data: [{ key: 'Synthetic' }] })) })
+    await pending
+    const original = DBState.db.characters[1]
+    const lore = mode === 'global' ? original.globalLore : original.chats.find(chat => chat.id === 'original-chat')!.localLore
+    expect(lore).toEqual([{ key: 'Synthetic' }])
+    expect(DBState.db.characters[0].globalLore).toEqual([])
+    expect(DBState.db.characters[0].chats.every(chat => chat.localLore.length === 0)).toBe(true)
+    selectedCharID.set(0)
+})
 
 type Lore = {
     key: string

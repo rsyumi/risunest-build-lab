@@ -1,3 +1,4 @@
+import { runUnicodePersistenceProbe, verifyUnicodePersistenceProbe } from "../unicodePersistenceProbe";
 import { invoke } from "@tauri-apps/api/core";
 import { getIdentifier } from "@tauri-apps/api/app";
 import { platform } from "@tauri-apps/plugin-os";
@@ -173,10 +174,13 @@ async function persistence() {
       }
     }
   }
+  const unicode = await runUnicodePersistenceProbe(revision);
+  revision = unicode.revision;
   const final = await readMessage();
   return {
     passed: true,
     samples,
+    unicode,
     revision,
     finalHash: await digest(final.value.message[0].data),
   };
@@ -184,8 +188,10 @@ async function persistence() {
 async function reload() {
   await guard();
   await invoke("pds_open");
+  const unicode = await verifyUnicodePersistenceProbe();
   const final = await readMessage();
   return {
+    unicode,
     revision: final.revision,
     finalHash: await digest(final.value.message[0].data),
   };

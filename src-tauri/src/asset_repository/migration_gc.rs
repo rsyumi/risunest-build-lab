@@ -295,6 +295,10 @@ fn sweep_asset_candidates_with_local(
             potential_delete_hashes.push(candidate.object_hash);
         }
     }
+    if !marks.blockers.is_empty() {
+        potential_delete_hashes.clear();
+        potential_delete_bytes = 0;
+    }
     grace_retained_hashes.sort();
     potential_delete_hashes.sort();
     Ok(AssetGcDryRunReport {

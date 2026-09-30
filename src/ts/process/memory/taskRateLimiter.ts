@@ -63,11 +63,21 @@ export class TaskRateLimiter {
   }
 
   public async executeBatch<TData>(
-    tasks: Array<() => Promise<TData>>
+    tasks: Array<() => Promise<TData>>,
+    signal?: AbortSignal,
   ): Promise<BatchResult<TData>> {
-    const taskResults = await Promise.all(
-      tasks.map((task) => this.executeTask(task))
-    );
+    signal?.throwIfAborted();
+    const abortQueued = () => this.cancelPendingTasks("Task canceled by caller");
+    signal?.addEventListener('abort', abortQueued, { once: true });
+    let taskResults: TaskResult<TData>[];
+    try {
+      taskResults = await Promise.all(tasks.map((task) => this.executeTask(async () => {
+        signal?.throwIfAborted();
+        return task();
+      })));
+    } finally {
+      signal?.removeEventListener('abort', abortQueued);
+    }
     const successCount = taskResults.filter((r) => r.success).length;
     const failureCount = taskResults.length - successCount;
 

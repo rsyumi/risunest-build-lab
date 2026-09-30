@@ -41,3 +41,51 @@ export function indexSideChatListRows(
 
     return { folders: indexedFolders, ungrouped }
 }
+
+export type DroppedChatRow = {
+    id: string
+    /** A folder id moves the chat into it, null takes it out, undefined keeps it. */
+    folderId?: string | null
+}
+
+/**
+ * Rebuilds the chat list from rows read at drop time. Returns null when the rows
+ * no longer describe exactly the current chats.
+ */
+export function orderChatsByDroppedRows(
+    chats: Chat[],
+    rows: DroppedChatRow[],
+): Chat[] | null {
+    const byId = new Map(chats.map((chat) => [chat.id, chat]))
+    if (byId.size !== chats.length || rows.length !== chats.length) return null
+    const ordered: Chat[] = []
+    for (const row of rows) {
+        const chat = byId.get(row.id)
+        if (!chat) return null
+        byId.delete(row.id)
+        ordered.push(chat)
+    }
+    rows.forEach((row, index) => {
+        const chat = ordered[index]
+        if (typeof row.folderId === 'string') chat.folderId = row.folderId
+        else if (row.folderId === null && chat.folderId != null) chat.folderId = null
+    })
+    return ordered
+}
+
+/** Reorders folders by id. Returns null when the ids no longer match. */
+export function orderFoldersByDroppedIds(
+    folders: ChatFolder[],
+    ids: string[],
+): ChatFolder[] | null {
+    const byId = new Map(folders.map((folder) => [folder.id, folder]))
+    if (byId.size !== folders.length || ids.length !== folders.length) return null
+    const ordered: ChatFolder[] = []
+    for (const id of ids) {
+        const folder = byId.get(id)
+        if (!folder) return null
+        byId.delete(id)
+        ordered.push(folder)
+    }
+    return ordered
+}

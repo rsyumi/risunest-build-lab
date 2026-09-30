@@ -44,6 +44,7 @@
     "deep-link:default",
     "barcode-scanner:allow-scan",
     "barcode-scanner:allow-cancel",
+    "barcode-scanner:allow-open-app-settings",
     "barcode-scanner:allow-check-permissions",
     "barcode-scanner:allow-request-permissions",
     "ios-native:allow-state",

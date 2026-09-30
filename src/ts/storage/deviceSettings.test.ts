@@ -17,7 +17,6 @@ const defaults = {
     performanceProfile: 'normal',
     androidKeepAliveDuringGeneration: true,
     nativeFileLogEnabled: true,
-    startupExclusions: [],
 }
 
 describe('device settings', () => {
@@ -109,14 +108,12 @@ describe('device settings', () => {
 
         const updated = deviceSettings.updateDeviceSettings({
             nativeFileLogEnabled: false,
-            startupExclusions: [],
         })
 
         expect(updated).toEqual({
             ...defaults,
             performanceProfile: 'low-spec',
             nativeFileLogEnabled: false,
-            startupExclusions: [],
         })
         expect(getItem).toHaveBeenCalledOnce()
         expect(setProfile).toHaveBeenCalledOnce()
@@ -161,7 +158,6 @@ describe('device settings', () => {
         expect(() =>
             deviceSettings.updateDeviceSettings({
                 nativeFileLogEnabled: false,
-                startupExclusions: [],
             }),
         ).not.toThrow()
         expect(deviceSettings.getDeviceSettings().nativeFileLogEnabled).toBe(
@@ -177,7 +173,6 @@ describe('device settings', () => {
             performanceProfile: 'low-spec',
             androidKeepAliveDuringGeneration: true,
             nativeFileLogEnabled: false,
-            startupExclusions: [],
         })
 
         expect(getDeviceSettings()).toEqual({
@@ -185,7 +180,6 @@ describe('device settings', () => {
             performanceProfile: 'low-spec',
             androidKeepAliveDuringGeneration: true,
             nativeFileLogEnabled: false,
-            startupExclusions: [],
         })
         expect(JSON.parse(localStorage.getItem('risuNestDeviceSettings') ?? '')).toEqual(getDeviceSettings())
     })
@@ -197,13 +191,11 @@ describe('device settings', () => {
         updateDeviceSettings({
             schema: 'not-a-device-settings-schema',
             nativeFileLogEnabled: false,
-            startupExclusions: [],
         } as never)
 
         expect(getDeviceSettings()).toEqual({
             ...defaults,
             nativeFileLogEnabled: false,
-            startupExclusions: [],
         })
     })
 
@@ -267,4 +259,31 @@ describe('device settings', () => {
 
         expect(getRuntimePerformanceProfile()).toBe('low-spec')
     })
+    it('refreshes restored profile and listeners before another setting update', async () => {
+        const device = await loadDeviceSettings()
+        device.getDeviceSettings()
+        const listener = vi.fn()
+        device.subscribeDeviceSettings(listener)
+        localStorage.setItem('risuNestDeviceSettings', JSON.stringify({ ...defaults, performanceProfile: 'low-spec' }))
+        expect(device.reloadDeviceSettings().performanceProfile).toBe('low-spec')
+        expect(listener).toHaveBeenCalledWith(expect.objectContaining({ performanceProfile: 'low-spec' }))
+        const runtime = await import('../runtimePerformanceProfile')
+        expect(runtime.getRuntimePerformanceProfile()).toBe('low-spec')
+        device.updateDeviceSettings({ nativeFileLogEnabled: false })
+        expect(JSON.parse(localStorage.getItem('risuNestDeviceSettings')!).performanceProfile).toBe('low-spec')
+    })
+
 })
+
+    it('keeps startup exclusions outside transferable settings and retains them when settings are replaced', async () => {
+        const device = await loadDeviceSettings()
+        device.updateStartupExclusions(['plugins'])
+        device.updateDeviceSettings({ performanceProfile: 'low-spec' })
+        await device.flushDeviceSettings()
+        expect(JSON.parse(localStorage.getItem('risuNestDeviceSettings')!)).not.toHaveProperty('startupExclusions')
+        expect(JSON.parse(localStorage.getItem('risuNestStartupExclusions')!)).toEqual(['plugins'])
+        localStorage.setItem('risuNestDeviceSettings', JSON.stringify(defaults))
+        const reloaded = await loadDeviceSettings()
+        expect(reloaded.getStartupExclusions()).toEqual(['plugins'])
+        expect(reloaded.getDeviceSettings().performanceProfile).toBe('normal')
+    })

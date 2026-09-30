@@ -498,7 +498,10 @@ impl ServerClient {
                         && response_code(&reply).as_deref() == Some("server-updating");
                     if maintenance {
                         self.report_retryable_failure(Some("server-updating"));
-                        self.retry_budget.wait(reply.retry_after, elapsed)?;
+                        self.retry_budget.wait(
+                            reply.retry_after,
+                            (self.retry_budget.clock)().saturating_duration_since(attempted),
+                        )?;
                         continue;
                     }
                     return Ok(RequestAttempt::Response(reply));
@@ -565,7 +568,10 @@ impl ServerClient {
                             let _ = self.resolve_identity(false);
                         }
                         recovering = true;
-                        self.retry_budget.wait(reply.retry_after, elapsed)?;
+                        self.retry_budget.wait(
+                            reply.retry_after,
+                            (self.retry_budget.clock)().saturating_duration_since(attempted),
+                        )?;
                         continue;
                     }
                     if recovering {
@@ -853,6 +859,7 @@ mod progress_tests {
         assert_eq!(sanitize_retryable_failure(None), None);
     }
 }
+#[track_caller]
 pub(crate) fn response_error(reply: Reply) -> SyncError {
     let value: Option<serde_json::Value> = serde_json::from_slice(&reply.body).ok();
     let code = value
@@ -1173,6 +1180,49 @@ mod tests {
         assert_eq!(reply.status, 503);
         assert_eq!(*client.retry_budget.spent.lock().unwrap(), Duration::ZERO);
         task.join().unwrap();
+    }
+
+    #[test]
+    fn transient_identity_resolution_consumes_the_remaining_retry_budget_before_replay() {
+        for status in [502, 503, 504] {
+            let current = Arc::new(Mutex::new(Instant::now()));
+            let clock = current.clone();
+            let sleeper = current.clone();
+            let budget = Arc::new(RetryBudget::with_driver(
+                None,
+                Arc::new(move || *clock.lock().unwrap()),
+                Arc::new(move |duration| *sleeper.lock().unwrap() += duration),
+            ));
+            let identity_duration = Duration::from_secs(30);
+            budget.charge(RETRY_BUDGET - identity_duration).unwrap();
+            let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+            let endpoint = format!("http://{}", server.server_addr());
+            let identity_clock = current.clone();
+            let task = std::thread::spawn(move || {
+                let request = server.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+                assert_eq!(request.method(), &tiny_http::Method::Get);
+                assert_eq!(request.url(), "/head");
+                request.respond(tiny_http::Response::empty(status)).unwrap();
+                let request = server.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+                assert_eq!(request.method(), &tiny_http::Method::Get);
+                assert_eq!(request.url(), "/session");
+                *identity_clock.lock().unwrap() += identity_duration;
+                request.respond(tiny_http::Response::empty(503)).unwrap();
+                assert!(server.recv_timeout(Duration::from_millis(100)).unwrap().is_none());
+            });
+            let client = ServerClient::with_retry_budget(config(&endpoint), None, budget.clone())
+                .unwrap();
+            let attempted = *current.lock().unwrap();
+            let error = client
+                .request(Method::GET, "head", &[], None, &[], MAX_METADATA_BYTES)
+                .err()
+                .expect("identity resolution must exhaust the budget before replay");
+            assert_eq!((error.code.as_str(), error.status), ("sync-retry-budget-exhausted", 503));
+            assert!(error.retryable);
+            assert_eq!(current.lock().unwrap().duration_since(attempted), identity_duration);
+            assert_eq!(budget.remaining().unwrap(), identity_duration);
+            task.join().unwrap();
+        }
     }
 
     fn virtual_admission() -> (Arc<AdmissionRetry>, Arc<Mutex<Duration>>) {

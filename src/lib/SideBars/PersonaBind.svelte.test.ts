@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
     bind: vi.fn(async () => {}),
     save: vi.fn(async () => {}),
     list: vi.fn(),
+    blocked: vi.fn(() => false),
 }))
 vi.mock('src/lang', () => ({ language: languageEnglish }))
 vi.mock('src/ts/stores.svelte', () => {
@@ -23,6 +24,7 @@ vi.mock('src/ts/chatBindings.svelte', () => ({
     }),
     bindPersona: mocks.bind,
     saveChatBinding: mocks.save,
+    chatBindingBlockedByGeneration: mocks.blocked,
 }))
 vi.mock('../Setting/listedPersona.svelte', () => ({
     default: (anchor: unknown, props: Record<string, unknown>) => mocks.list(props),
@@ -72,4 +74,19 @@ it('opens the persona list in binding mode and persists the selection', async ()
     await props.onSelect(0)
     expect(mocks.bind).toHaveBeenCalledWith(chat(), 0)
     expect(mocks.save).toHaveBeenCalledTimes(1)
+})
+
+it('does not open or apply a persona binding while a response is generating', async () => {
+    mocks.blocked.mockReturnValueOnce(true)
+    button().click()
+    await tick()
+    expect(mocks.list).not.toHaveBeenCalled()
+
+    button().click()
+    await tick()
+    const props = mocks.list.mock.calls[0][0] as { onSelect: (index: number) => Promise<void> }
+    mocks.blocked.mockReturnValueOnce(true)
+    await props.onSelect(0)
+    expect(mocks.bind).not.toHaveBeenCalled()
+    expect(mocks.save).not.toHaveBeenCalled()
 })

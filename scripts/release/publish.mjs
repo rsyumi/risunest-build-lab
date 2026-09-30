@@ -84,13 +84,11 @@ async function main() {
   if (!values.product || !values["product-manifest"] || !values.assets || !process.env.RISUNEST_UPDATE_PUBLIC_KEY) {
     throw new Error("publication-inputs-required");
   }
-  if (values["draft-id"]) {
-    const release = await github.getByTag(values.tag);
-    if (String(release?.id) !== values["draft-id"]) throw new Error("draft-id-mismatch");
-  }
+  const releaseId = Number(values["draft-id"]);
+  if (!Number.isSafeInteger(releaseId) || releaseId <= 0) throw new Error("draft-id-required");
   const bytes = await readFile(values["product-manifest"]);
   const signature = await readFile(`${values["product-manifest"]}.sig`, "utf8");
-  const result = await publishRelease({ github, productBytes: bytes, productSignature: signature,
+  const result = await publishRelease({ github, releaseId, productBytes: bytes, productSignature: signature,
     publicKey: process.env.RISUNEST_UPDATE_PUBLIC_KEY, expectedProduct: values.product,
     expectedTag: values.tag, expectedCommit: values["source-commit"], bootstrap: values.bootstrap,
     publishedAt: values["published-at"] ?? new Date().toISOString(), signCatalog,

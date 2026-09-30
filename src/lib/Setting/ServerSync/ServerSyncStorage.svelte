@@ -17,12 +17,12 @@
     type ServerSyncBackupSide,
     type ServerSyncCacheUsage,
   } from "src/ts/storage/sync/serverSyncProduction";
-  /** `backups` lists the conflict backups, `cache` the space they and the
-   * temporary files take. */
+  /** `backups` lists the conflict backups, `cache` the space they, the
+   * temporary files and the asset residency ledger take. */
   let {
-    onChange,
+    onLoaded,
     section,
-  }: { onChange?: () => void; section: "backups" | "cache" } = $props();
+  }: { onLoaded?: (inventory?: ServerSyncBackupInventory, cache?: ServerSyncCacheUsage) => void; section: "backups" | "cache" } = $props();
   let inventory = $state<ServerSyncBackupInventory>();
   let cache = $state<ServerSyncCacheUsage>();
   let pending = $state("");
@@ -37,10 +37,11 @@
     const cursor = older ? (inventory?.next ?? undefined) : undefined;
     const [next, usage] = await Promise.all([
       getServerSyncBackupInventory(cursor),
-      getServerSyncCacheUsage(),
+      section === "cache" && !older ? getServerSyncCacheUsage() : Promise.resolve(undefined),
     ]);
     inventory = next;
-    cache = usage;
+    if (usage) cache = usage;
+    onLoaded?.(next, usage);
   }
   async function action(
     run: () => Promise<unknown>,
@@ -58,10 +59,10 @@
       if (changed) {
         inventory = undefined;
         cache = undefined;
+        onLoaded?.();
       }
     } finally {
       pending = "";
-      if (changed) onChange?.();
     }
   }
   async function remove(id: string): Promise<void> {
@@ -181,7 +182,7 @@
   {/if}
   {#if cache && section === "cache"}
     <div class="grid gap-2 text-sm">
-      <p>{labels.cache}: {bytes(cache.totalBytes)}</p>
+      <p>{labels.cache}: {bytes(cache.cacheBytes)}</p>
       <p>
         {labels.protected}: {bytes(cache.protectedBytes)} · {labels.reclaimable}:
         {bytes(cache.reclaimableBytes)}
@@ -197,6 +198,8 @@
       {#if cache.blockedReason}<p class="text-[13px] text-textcolor2">
           {describeBlockedReason(cache.blockedReason)}
         </p>{/if}
+      <p>{labels.ledger}: {bytes(cache.ledgerBytes)}</p>
+      <p class="text-[13px] text-textcolor2">{labels.ledgerHelp}</p>
     </div>
   {/if}
 </section>

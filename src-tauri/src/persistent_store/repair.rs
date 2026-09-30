@@ -657,7 +657,7 @@ impl PersistentStore {
         // The gate that refuses a damaged backup judges the staged result before it is activated.
         self.validate_staged(staging)?;
 
-        let committed = self.replace_commit(staging, Some(expected_revision))?;
+        let committed = self.activate_repaired_records(staging, expected_revision, &records)?;
         Ok((
             committed.clone(),
             Journal {
@@ -729,12 +729,39 @@ impl PersistentStore {
                 None => delete_row(&transaction, table, staging, &change.identity)?,
             }
         }
+        let records = record_changes(&transaction, &active, staging)?;
         transaction.commit()?;
         // An undo restores a state the store already held, which the backup gate may well have
         // refused: that is why it was repaired. The activation contract inside the commit is the
         // gate here, so a repair stays reversible.
-        let committed = self.replace_commit(staging, Some(expected_revision))?;
+        let committed = self.activate_repaired_records(staging, expected_revision, &records)?;
         Ok((committed, skipped))
+    }
+
+    fn activate_repaired_records(
+        &mut self,
+        staging: &str,
+        expected_revision: i64,
+        records: &[RecordChange],
+    ) -> StoreResult<RevisionResult> {
+        self.prepare_replace_commit(staging, Some(expected_revision))?;
+        super::commit::incremental_commit(
+            &mut self.connection,
+            expected_revision,
+            |_, _| Ok(()),
+            |transaction, active, ()| {
+                for change in records {
+                    let table = TABLES.iter().find(|table| table.name == change.table)
+                        .ok_or_else(|| validation("unknown repair record table"))?;
+                    match &change.after {
+                        Some(row) => write_row(transaction, table, active, row)?,
+                        None => delete_row(transaction, table, active, &change.identity)?,
+                    }
+                }
+                super::commit::delete_generation(transaction, staging)?;
+                Ok(())
+            },
+        )
     }
 }
 

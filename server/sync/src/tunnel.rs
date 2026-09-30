@@ -65,15 +65,15 @@ async fn read_lines(reader: impl AsyncRead + Unpin, tx: mpsc::Sender<Vec<u8>>) {
     loop {
         // read_until alone could allocate an unbounded malicious child line.
         let mut line = Vec::new();
+        let mut oversized = false;
         loop {
             let available = match reader.fill_buf().await {
                 Ok(v) => v,
                 Err(_) => return,
             };
             if available.is_empty() {
-                if !line.is_empty() {
-                    let _ = tx.send(line).await;
-                }
+                if oversized { let _ = tx.send(b"[oversized tunnel output discarded]".to_vec()).await; }
+                else if !line.is_empty() { let _ = tx.send(line).await; }
                 return;
             }
             let used = available
@@ -81,15 +81,17 @@ async fn read_lines(reader: impl AsyncRead + Unpin, tx: mpsc::Sender<Vec<u8>>) {
                 .position(|v| *v == b'\n')
                 .map_or(available.len(), |i| i + 1);
             if line.len() + used > 8192 {
-                return;
+                oversized = true;
+                line.clear();
             }
             let done = available[used - 1] == b'\n';
-            line.extend_from_slice(&available[..used]);
+            if !oversized { line.extend_from_slice(&available[..used]); }
             reader.consume(used);
             if done {
                 break;
             }
         }
+        if oversized { line = b"[oversized tunnel output discarded]".to_vec(); }
         if tx.send(line).await.is_err() {
             return;
         }
@@ -103,7 +105,9 @@ pub async fn supervise(
     status: watch::Sender<TunnelStatus>,
     mut stop: watch::Receiver<bool>,
 ) {
-    let executable = match store.managed_cloudflared() {
+    let reading = store.clone();
+    let executable = match tokio::task::spawn_blocking(move || reading.managed_cloudflared()).await
+        .unwrap_or_else(|_| Err(Error::new("connection-state-unavailable", 503))) {
         Ok(Some(path)) => path,
         Ok(None) => {
             status.send_replace(TunnelStatus {
@@ -133,7 +137,8 @@ pub async fn supervise(
             value.phase = "starting";
             value.endpoint = None;
         });
-        let outcome = run_child(&executable, &store, origin, &changed, &status, stop.clone()).await;
+        let mut connected_at = None;
+        let outcome = run_child(&executable, &store, origin, &changed, &status, stop.clone(), &mut connected_at).await;
         if *stop.borrow() {
             status.send_replace(TunnelStatus {
                 phase: "stopped",
@@ -149,10 +154,15 @@ pub async fn supervise(
             value.endpoint = None;
             value.error = Some(error);
         });
-        failures = failures.saturating_add(1);
-        let delay = Duration::from_secs((1u64 << failures.min(6)).min(60));
+        let delay = restart_delay(&mut failures, connected_at.map(|at: tokio::time::Instant| at.elapsed()));
         tokio::select! { _ = stop.changed() => return, _ = tokio::time::sleep(delay) => () }
     }
+}
+
+fn restart_delay(failures: &mut u32, connected: Option<Duration>) -> Duration {
+    if connected.is_some_and(|duration| duration >= Duration::from_secs(600)) { *failures = 0; }
+    *failures = failures.saturating_add(1);
+    Duration::from_secs((1u64 << (*failures).min(6)).min(60))
 }
 
 fn append_log(status: &watch::Sender<TunnelStatus>, line: &str) {
@@ -172,11 +182,12 @@ fn append_log(status: &watch::Sender<TunnelStatus>, line: &str) {
 
 async fn run_child(
     executable: &std::path::Path,
-    store: &Store,
+    store: &Arc<Store>,
     origin: SocketAddr,
     changed: &Notify,
     status: &watch::Sender<TunnelStatus>,
     mut stop: watch::Receiver<bool>,
+    connected_at: &mut Option<tokio::time::Instant>,
 ) -> Result<()> {
     let mut command = Command::new(executable);
     command
@@ -236,8 +247,12 @@ async fn run_child(
                     append_log(status, &String::from_utf8_lossy(&line));
                     if let Some(endpoint) = readiness.observe(&line) {
                     if !ready {
-                        if let Err(error) = store.observe_tunnel_endpoint(&endpoint) { break Err(error); }
+                        let writing = store.clone();
+                        let address = endpoint.clone();
+                        if let Err(error) = tokio::task::spawn_blocking(move || writing.observe_tunnel_endpoint(&address)).await
+                            .unwrap_or_else(|_| Err(Error::new("connection-state-unavailable", 503))) { break Err(error); }
                         ready = true;
+                        *connected_at = Some(tokio::time::Instant::now());
                         status.send_modify(|value| {
                             value.phase = "connected";
                             value.endpoint = Some(endpoint);
@@ -322,10 +337,25 @@ mod tests {
         let bytes = vec![b'x'; 8193];
         let (tx, mut rx) = mpsc::channel(1);
         read_lines(bytes.as_slice(), tx).await;
-        assert!(rx.recv().await.is_none());
+        assert_eq!(rx.recv().await.unwrap(), b"[oversized tunnel output discarded]");
+        let mut oversized = vec![b'x'; 16384];
+        oversized.extend_from_slice(b"\nreadable after oversized line\n");
+        let (tx, mut rx) = mpsc::channel(2);
+        read_lines(oversized.as_slice(), tx).await;
+        assert_eq!(rx.recv().await.unwrap(), b"[oversized tunnel output discarded]");
+        assert_eq!(rx.recv().await.unwrap(), b"readable after oversized line\n");
         let (tx, mut rx) = mpsc::channel(1);
         read_lines(&b"final error without newline"[..], tx).await;
         assert_eq!(rx.recv().await.unwrap(), b"final error without newline");
+    }
+
+    #[test]
+    fn backoff_resets_only_after_ten_connected_minutes() {
+        let mut failures = 20;
+        assert_eq!(restart_delay(&mut failures, None), Duration::from_secs(60));
+        assert_eq!(restart_delay(&mut failures, Some(Duration::from_secs(599))), Duration::from_secs(60));
+        assert_eq!(restart_delay(&mut failures, Some(Duration::from_secs(600))), Duration::from_secs(2));
+        assert_eq!(failures, 1);
     }
 
     #[test]

@@ -9,6 +9,8 @@ export interface AndroidControlMessagePort {
 interface AndroidLifecycleControl {
     onFlushComplete?(token: string): void
     onFlushHold?(token: string): void
+    exitListenerReady?(ready: boolean): void
+    acknowledgeOpenedFile?(path: string): void
     requestExit?(): void
     requestRestart?(): void
 }
@@ -19,6 +21,7 @@ declare global {
         RisuNestSafControl?: AndroidControlMessagePort
         RisuLifecycleBridge?: AndroidLifecycleControl
         RisuSafBridge?: AndroidSafJavascriptBridge
+        RisuCompletionNotifications?: { enabled(): Promise<boolean>; notify(body: string): Promise<boolean> }
     }
 }
 
@@ -74,6 +77,8 @@ function installAndroidNativeControl(): void {
     window.RisuLifecycleBridge = {
         onFlushComplete: (token) => control.notify('lifecycle.onFlushComplete', token),
         onFlushHold: (token) => control.notify('lifecycle.onFlushHold', token),
+        exitListenerReady: (ready) => control.notify('lifecycle.exitListenerReady', String(ready)),
+        acknowledgeOpenedFile: (path) => control.notify('lifecycle.acknowledgeOpenedFile', path),
         requestExit: () => control.notify('lifecycle.requestExit'),
         requestRestart: () => control.notify('lifecycle.requestRestart'),
     }
@@ -86,6 +91,15 @@ function installAndroidNativeControl(): void {
         webViewVersion: () => control.request<string>('generation.webViewVersion'),
     }
     window.RisuGenerationKeepAlive = generation
+    window.RisuCompletionNotifications = {
+        enabled: () => control.request<boolean>('notification.enabled'),
+        notify: body => control.request<boolean>('notification.completion', body.slice(0, 4096)),
+    }
+    window.RisuBackgroundTasks = {
+        begin: kind => control.request<string | null>('background.begin', kind),
+        progress: (id, percent) => control.request('background.progress', id, String(percent)),
+        end: id => control.request('background.end', id),
+    }
     if (!window.RisuNestSafControl) {
         control.notify('lifecycle.onFrontendReady')
         return

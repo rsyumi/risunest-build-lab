@@ -164,10 +164,11 @@ fn cache_cleanup_keeps_referenced_objects_metadata_and_local_cas() {
     // allocation are reported as their own bytes, not as the pages holding them.
     let in_database = ((unused.len() + 1) * small(0).len()) as u64;
     assert!(usage.database_bytes >= in_database);
-    assert_eq!(
-        usage.total_bytes,
-        usage.protected_bytes + usage.reclaimable_bytes - in_database + usage.database_bytes
-    );
+    assert!(usage.cache_bytes >= usage.database_bytes + (2 * large(0).len()) as u64);
+    // Still needed and clearable split the temporary files between them.
+    assert_eq!(usage.protected_bytes + usage.reclaimable_bytes, usage.cache_bytes);
+    assert_eq!(usage.ledger_bytes, 0);
+    assert_eq!(usage.total_bytes, usage.cache_bytes);
     assert!(cache_usage(
         root.path(),
         Some(&identity),
@@ -182,6 +183,8 @@ fn cache_cleanup_keeps_referenced_objects_metadata_and_local_cas() {
     drop(cache);
     let cleaned = cache_usage(root.path(), Some(&identity), &hashes, None, true).unwrap();
     assert_eq!(cleaned.reclaimable_bytes, 0);
+    assert_eq!(cleaned.protected_bytes, cleaned.cache_bytes);
+    assert_eq!(cleaned.total_bytes, cleaned.cache_bytes);
     let cache = open();
     for hash in unused.iter().chain([&unused_file]) {
         assert!(cache.stat_derived(hash).unwrap().is_none());
@@ -191,6 +194,55 @@ fn cache_cleanup_keeps_referenced_objects_metadata_and_local_cas() {
     assert!(cleaned.database_bytes < usage.database_bytes);
     assert!(live.open_object(&local.content_hash).unwrap().is_some());
     assert!(directory.join("transfers.sqlite").exists());
+}
+
+#[test]
+fn cache_usage_counts_files_beside_the_caches_without_opening_them_as_caches() {
+    let root = tempfile::tempdir().unwrap();
+    let server = root.path().join("server-sync");
+    let identity = "a".repeat(64);
+    let cache = super::super::cache::Cache::open(&server.join(&identity)).unwrap();
+    cache
+        .put(&vec![7; super::super::cache::SMALL_OBJECT_BYTES + 1])
+        .unwrap();
+    drop(cache);
+    let usage = || cache_usage(root.path(), Some(&identity), &BTreeSet::new(), None, false);
+    let without = usage().unwrap();
+    // The asset residency ledger is a file beside the per-connection caches.
+    let ledger = server.join("asset-residency.sqlite");
+    fs::write(&ledger, b"ledger").unwrap();
+    let with = usage().unwrap();
+    assert_eq!(with.total_bytes, without.total_bytes + 6);
+    assert_eq!(with.ledger_bytes, 6);
+    assert_eq!(with.total_bytes, with.cache_bytes + with.ledger_bytes);
+    assert_eq!(with.cache_bytes, without.cache_bytes);
+    assert_eq!(with.protected_bytes, without.protected_bytes);
+    assert_eq!(with.reclaimable_bytes, without.reclaimable_bytes);
+    assert_eq!(with.database_bytes, without.database_bytes);
+    let cleaned = cache_usage(root.path(), Some(&identity), &BTreeSet::new(), None, true).unwrap();
+    assert_eq!(cleaned.ledger_bytes, 6);
+    assert_eq!(fs::read(&ledger).unwrap(), b"ledger");
+}
+
+#[test]
+fn chunk_cleanup_removes_only_spools_without_resumable_transfer_rows() {
+    let root = tempfile::tempdir().unwrap();
+    let identity = "a".repeat(64);
+    let cache = root.path().join("server-sync").join(&identity);
+    super::super::cache::Cache::open(&cache).unwrap();
+    let pending = "b".repeat(64);
+    let completed = "c".repeat(64);
+    for hash in [&pending, &completed] {
+        fs::create_dir_all(cache.join("staging").join(hash)).unwrap();
+        fs::write(cache.join("staging").join(hash).join("0"), b"synthetic chunk").unwrap();
+    }
+    let db = rusqlite::Connection::open(cache.join("transfers.sqlite")).unwrap();
+    db.execute_batch("CREATE TABLE chunks(target TEXT,part INTEGER,hash TEXT,size INTEGER)").unwrap();
+    db.execute("INSERT INTO chunks VALUES(?1,0,?2,15)", rusqlite::params![pending, "d".repeat(64)]).unwrap();
+    drop(db);
+    cache_usage(root.path(), Some(&identity), &BTreeSet::new(), None, true).unwrap();
+    assert!(cache.join("staging").join(&pending).join("0").is_file());
+    assert!(!cache.join("staging").join(&completed).join("0").exists());
 }
 
 #[test]

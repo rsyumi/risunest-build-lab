@@ -1,3 +1,5 @@
+import { failureReason } from '../gui/nativeFileJobDialogModel'
+import { fileOperationErrorWasPresented } from './fileOperationErrorPresentation'
 import { Mutex } from '../mutex'
 import { language } from 'src/lang'
 
@@ -39,8 +41,8 @@ let disposeSpoolListener: (() => void) | undefined
 export interface AndroidOpenedSpoolDispatchDependencies {
     enqueueRestore(batch: AndroidSpoolBatch): Promise<void>
     importCharacter(source: AndroidSpoolReady): Promise<NativeAndroidCharacterSpoolResult<string>>
-    reportCharacterError(source: AndroidSpoolReady, error: unknown): void
-    reportDestinationRequired(source: AndroidSpoolReady): void
+    reportCharacterError(source: AndroidSpoolReady, error: unknown, startedAt: number): void
+    reportDestinationRequired(source: AndroidSpoolReady, startedAt: number): void
 }
 
 
@@ -57,14 +59,15 @@ export async function dispatchAndroidOpenedSpoolBatch(
     for (const source of characterSources) {
         if (handledCharacterTokens?.has(source.token)) continue
         handledCharacterTokens?.add(source.token)
+        const startedAt = Date.now()
         try {
             const result = await dependencies.importCharacter(source)
             if (result.kind === 'destination-required') {
-                dependencies.reportDestinationRequired(source)
+                dependencies.reportDestinationRequired(source, startedAt)
             }
         }
         catch (error) {
-            dependencies.reportCharacterError(source, error)
+            dependencies.reportCharacterError(source, error, startedAt)
         }
     }
 }
@@ -130,11 +133,12 @@ export async function importAndroidOpenedPreparedContent(
         : { kind: 'imported', value: result }
 }
 
-async function importAndroidCharacterSpool(
+export async function importAndroidCharacterSpool(
     source: AndroidSpoolReady,
 ): Promise<NativeAndroidCharacterSpoolResult<string>> {
     const replayDestination = source.importDestination
-        ?? (/\.lorebook$/i.test(source.displayName) ? 'module' : null)
+        ?? (/\.lorebook$/i.test(source.displayName) ? 'module'
+            : /\.json$/i.test(source.displayName) ? 'auto' : null)
     if (replayDestination) {
         const { importReplayedAndroidContentSpool } = await import(
             './androidContentPicker'
@@ -209,7 +213,8 @@ async function importAndroidCharacterSpool(
     })
 }
 
-function showRestoreError(error: unknown): void {
+export function showAndroidFileError(error: unknown, startedAt = Infinity): void {
+    if (fileOperationErrorWasPresented('import', startedAt)) return
     if (error instanceof DOMException && error.name === 'AbortError') return
     if (error instanceof NativeFileJobActivationCommittedError) {
         alertError(language.risuSaveImportCommittedRefreshFailed)
@@ -219,19 +224,22 @@ function showRestoreError(error: unknown): void {
         alertError(language.risuSaveRevisionConflict)
         return
     }
-    alertError(error instanceof Error ? error.message : String(error))
+    const code = error && typeof error === 'object' && 'code' in error && typeof error.code === 'string'
+        ? error.code : ''
+    alertError(failureReason(code))
 }
 
 function showSpoolFailure(failure: AndroidSpoolFailure): void {
-    alertError(`${failure.displayName}: ${failure.code}`)
+    alertError(`${failure.displayName}: ${failureReason(failure.code)}`)
 }
 
 function showUnsupportedSpool(source: AndroidSpoolReady): void {
-    alertError(`${source.displayName}: unsupported-format`)
+    alertError(`${source.displayName}: ${failureReason('unsupported-format')}`)
 }
 
-function showDestinationRequired(source: AndroidSpoolReady): void {
-    alertError(`${source.displayName}: destination-required`)
+export function showDestinationRequired(source: AndroidSpoolReady, startedAt: number): void {
+    if (fileOperationErrorWasPresented('import', startedAt)) return
+    alertError(`${source.displayName}: ${failureReason('destination-required')}`)
 }
 
 /** The common restore entry owns confirmation, the shared operation, and source cleanup. */
@@ -262,7 +270,7 @@ export function registerAndroidRisuSaveRoute(): void {
                 alertError(language.screenshotPartialDestinationMayRemain)
             }
         },
-        (error) => alertError(error instanceof Error ? error.message : String(error)),
+        (error) => showAndroidFileError(error),
         {
             getStatus: getAndroidSafExportStatus,
             acknowledge: acknowledgeAndroidSafExport,
@@ -275,18 +283,25 @@ export function registerAndroidRisuSaveRoute(): void {
         confirmRestore: async () => true,
         discard: async (source) => {
             if (!await discardAndroidSafSource(source.token)) {
-                alertError(`${source.displayName}: discard-failed`)
+                alertError(`${source.displayName}: ${failureReason('discard-failed')}`)
             }
         },
-        restore: restoreAndroidOpenedBackupSource,
+        restore: async (input) => {
+            const startedAt = Date.now()
+            try {
+                await restoreAndroidOpenedBackupSource(input)
+            } catch (error) {
+                showAndroidFileError(error, startedAt)
+            }
+        },
         unsupported: showUnsupportedSpool,
         failed: showSpoolFailure,
-        onError: (_source, error) => showRestoreError(error),
+        onError: (_source, error) => showAndroidFileError(error),
     })
     const dispatcher = createAndroidOpenedSpoolDispatcher({
         enqueueRestore: route.enqueue,
         importCharacter: importAndroidCharacterSpool,
-        reportCharacterError: (_source, error) => showRestoreError(error),
+        reportCharacterError: (_source, error, startedAt) => showAndroidFileError(error, startedAt),
         reportDestinationRequired: showDestinationRequired,
     })
     disposeSpoolListener = listenAndroidSpoolBatches((batch) => {

@@ -244,3 +244,56 @@ describe('native official publication recovery', () => {
         expect(recovery.hasPending()).toBe(false)
     })
 })
+
+it('leaves running publications for background recovery and serializes adoption once', async () => {
+    let finish!: (receipt: NativeOfficialPublicationReceipt) => void
+    let acknowledged = false
+    const acknowledge = vi.fn(async () => { acknowledged = true })
+    const resumeJob = vi.fn(() => new Promise<NativeOfficialPublicationReceipt>(resolve => { finish = resolve }))
+    const adopt = vi.fn(async () => {})
+    const recovery = createNativeOfficialPublicationRecovery(['publication-1'], {
+        activeAccountId: () => 'account-1',
+        account: { adoptRecoveredOfficialWrite: () => ({ completeReload: async () => {} }) },
+        adapter: { adoptPublishedRevision: adopt }, flushMetadata: async () => {},
+        listJobIds: async () => acknowledged ? [] : ['publication-1'],
+        statusJob: async () => ({ jobId: 'publication-1', kind: 'official-publication-upload', state: 'running', phase: 'uploading-database', progress: { completedBytes: 1, completedItems: 0 } }),
+        resumeJob,
+    })
+    await recovery.reconcileSettled()
+    expect(resumeJob).not.toHaveBeenCalled()
+    expect(recovery.hasPending()).toBe(true)
+    const background = recovery.reconcile()
+    const publication = recovery.reconcile()
+    expect(publication).toBe(background)
+    await vi.waitFor(() => expect(resumeJob).toHaveBeenCalledOnce())
+    finish(writtenReceipt(acknowledge))
+    await publication
+    expect(adopt).toHaveBeenCalledOnce()
+    expect(acknowledge).toHaveBeenCalledOnce()
+    expect(recovery.hasPending()).toBe(false)
+})
+
+it('presents a recovered running job and routes user cancellation to its native poll', async () => {
+    const { get } = await import('svelte/store')
+    const { nativeFileOperation, cancelActiveNativeFileOperation } = await import('../nativeFileJobManager')
+    let polled = false
+    const recovery = createNativeOfficialPublicationRecovery(['publication-1'], {
+        activeAccountId: () => 'account-1',
+        account: { adoptRecoveredOfficialWrite: () => ({ completeReload: async () => {} }) },
+        adapter: { adoptPublishedRevision: async () => {} }, flushMetadata: async () => {},
+        listJobIds: async () => [],
+        resumeJob: async (_id, options) => {
+            polled = true
+            options?.onStatus?.({ jobId: 'publication-1', kind: 'official-publication-upload', state: 'running', phase: 'uploading-database', progress: { completedBytes: 50, totalBytes: 100, completedItems: 1 } })
+            await new Promise<void>(resolve => options?.signal?.addEventListener('abort', () => resolve(), { once: true }))
+            return null
+        },
+    })
+    const pending = recovery.reconcile(true)
+    await vi.waitFor(() => expect(polled).toBe(true))
+    expect(get(nativeFileOperation)).toMatchObject({ presentation: 'dialog', status: { progress: { completedBytes: 50 } } })
+    cancelActiveNativeFileOperation()
+    await pending
+    expect(get(nativeFileOperation)).toBeNull()
+    expect(recovery.hasPending()).toBe(false)
+})

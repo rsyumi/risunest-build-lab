@@ -33,7 +33,11 @@ pub struct RemovalPlan {
 }
 
 fn registry() -> Result<PathBuf> {
-    Ok(platform::default_data_dir()?
+    registry_for_default(&platform::default_data_dir()?)
+}
+
+fn registry_for_default(default: &Path) -> Result<PathBuf> {
+    platform::resolve_manager_root(&default
         .parent()
         .ok_or("removal-registry-unavailable")?
         .join(".risunest-sync-instances"))
@@ -108,6 +112,29 @@ fn safe_tree(path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn safe_profile_tree(path: &Path) -> Result<()> {
+    safe_path(path)?;
+    if path.file_name().is_some_and(|name| ["metadata.sqlite", "owner.lock", RECORD].iter().any(|reserved| name == *reserved)) {
+        return Err("removal-unowned-profile-files".into());
+    }
+    if path.is_dir() {
+        for entry in fs::read_dir(path).map_err(|_| "removal-path-unavailable")? {
+            safe_profile_tree(&entry.map_err(|_| "removal-path-unavailable")?.path())?;
+        }
+    }
+    Ok(())
+}
+
+fn remove_profiles(profiles: &[PathBuf]) -> Result<()> {
+    for profile in profiles { safe_profile_tree(profile)?; }
+    for profile in profiles {
+        if profile.exists() {
+            fs::remove_dir_all(profile).map_err(|_| "removal-profile-failed")?;
+        }
+    }
+    Ok(())
+}
+
 fn safe_data_tree(root: &Path) -> Result<()> {
     safe_tree(root)?;
     if !root.exists() {
@@ -131,6 +158,7 @@ fn safe_data_tree(root: &Path) -> Result<()> {
         ]
         .iter()
         .any(|allowed| name == *allowed)
+            && !name.to_str().is_some_and(|name| name.starts_with(".risunest-tmp-"))
         {
             return Err("removal-unowned-data-files".into());
         }
@@ -172,11 +200,31 @@ pub fn register(root: &Path, server: &Path) -> Result<()> {
     if !marker(&install).exists() {
         return Ok(());
     }
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        if install.components().any(|part| part.as_os_str() == "AppTranslocation") {
+            return Err("removal-installation-not-writable".into());
+        }
+        let path = std::ffi::CString::new(install.as_os_str().as_bytes()).map_err(|_| "removal-path-invalid")?;
+        let mut info = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+        if unsafe { libc::statvfs(path.as_ptr(), info.as_mut_ptr()) } != 0 {
+            return Err("removal-path-unavailable".into());
+        }
+        if unsafe { info.assume_init() }.f_flag & libc::ST_RDONLY as libc::c_ulong != 0 {
+            return Err("removal-installation-not-writable".into());
+        }
+    }
     update::managed_bundle_version(&install)?;
-    register_at(&registry()?, root, server, &install)
+    register_at_with(&registry()?, root, server, &install, || platform::reconcile_relocated_registration(root, server))
 }
 
+#[cfg(test)]
 fn register_at(registry: &Path, root: &Path, server: &Path, install: &Path) -> Result<()> {
+    register_at_with(registry, root, server, install, || Ok(()))
+}
+
+fn register_at_with(registry: &Path, root: &Path, server: &Path, install: &Path, reconcile: impl FnOnce() -> Result<()>) -> Result<()> {
     for path in [registry, root, server, install] {
         safe_path(path)?;
     }
@@ -193,14 +241,29 @@ fn register_at(registry: &Path, root: &Path, server: &Path, install: &Path) -> R
             .is_ok_and(|value| value == "true"),
     };
     let local = root.join(RECORD);
+    let mut relocation_lock = None;
     if local.exists() {
         let mut previous = read_record(&local)?;
         record.linger_changed |= previous.linger_changed;
         previous.linger_changed = record.linger_changed;
         if previous != record {
-            return Err("removal-registration-conflict".into());
+            let old_install = previous.install.clone();
+            previous.install = record.install.clone();
+            previous.server = record.server.clone();
+            if previous != record || marker(&old_install).exists() {
+                return Err("removal-registration-conflict".into());
+            }
+            relocation_lock = Some(update::try_lock(root)?);
+            if root.join("manager-update/transaction.json").exists() {
+                return Err("update-recovery-required".into());
+            }
+            if lifecycle::owner_active(root)? {
+                return Err("removal-process-still-running".into());
+            }
         }
     }
+    let _relocation_lock = relocation_lock;
+    if _relocation_lock.is_some() { reconcile()?; }
     update::write_json(&local, &record, "removal-registration-write-failed")?;
     update::write_json(
         &record_path(registry, root),
@@ -317,6 +380,8 @@ fn plan_at(registry: &Path, root: &Path, server: &Path, delete_data: bool) -> Re
 }
 
 pub async fn cleanup_services(root: &Path, server: &Path) -> Result<()> {
+    #[cfg(windows)]
+    if let Err(error) = platform::sweep_stale_update_helpers(root) { eprintln!("{error}"); }
     if root.join("manager-update/transaction.json").exists() {
         return Err("update-recovery-required".into());
     }
@@ -381,15 +446,10 @@ pub fn delete_registered_data(root: &Path, server: &Path) -> Result<()> {
     }
     safe_data_tree(root)?;
     if !shared_profile {
-        let profiles = platform::webview_data_dir()?
+        let profiles: Vec<_> = platform::webview_data_dir()?
             .into_iter()
-            .chain(platform::identifier_directories()?);
-        for profile in profiles {
-            safe_tree(&profile)?;
-            if profile.exists() {
-                fs::remove_dir_all(&profile).map_err(|_| "removal-profile-failed")?;
-            }
-        }
+            .chain(platform::identifier_directories()?).collect();
+        remove_profiles(&profiles)?;
     }
     platform::cleanup_update_helpers(root)?;
     remove_data_files(root)?;
@@ -431,6 +491,11 @@ pub fn forget_registration(root: &Path, server: &Path) -> Result<()> {
         || record.instance != platform::instance_name(root)
     {
         return Err("removal-registration-invalid".into());
+    }
+    let local = root.join(RECORD);
+    if local.exists() {
+        if read_record(&local)? != record { return Err("removal-registration-conflict".into()); }
+        remove_file(&local)?;
     }
     remove_file(&path)?;
     let _ = fs::remove_dir(registry);
@@ -488,8 +553,7 @@ pub async fn execute(root: &Path, server: &Path, delete_data: bool) -> Result<()
         for file in [&manager, &inventory] {
             remove_file(file)?;
         }
-        remove_file(&record_path(&registry()?, root))?;
-        let _ = fs::remove_dir(registry()?);
+        forget_registration(root, server)?;
         remove_empty_directories(&plan.install)?;
         Ok(())
     }
@@ -596,6 +660,42 @@ pub async fn cli(root: &Path, server: &Path, arguments: &[String]) -> Result<()>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn relocation_reconciles_under_lock_before_publishing_either_record() {
+        let (_temp, root, server, registry) = fixture();
+        let prior = read_record(&root.join(RECORD)).unwrap();
+        fs::remove_file(marker(server.parent().unwrap())).unwrap();
+        let install = server.parent().unwrap().with_file_name("moved");
+        fs::create_dir(&install).unwrap();
+        let moved_server = install.join("server");
+        let check = || {
+            assert_eq!(read_record(&root.join(RECORD)).unwrap(), prior);
+            assert_eq!(read_record(&record_path(&registry, &root)).unwrap(), prior);
+            assert_eq!(update::try_lock(&root).unwrap_err(), "update-already-running");
+        };
+        assert_eq!(register_at_with(&registry, &root, &moved_server, &install, || {
+            check();
+            Err("synthetic-reconcile-failure".into())
+        }).unwrap_err(), "synthetic-reconcile-failure");
+        assert_eq!(read_record(&root.join(RECORD)).unwrap(), prior);
+        assert_eq!(read_record(&record_path(&registry, &root)).unwrap(), prior);
+        register_at_with(&registry, &root, &moved_server, &install, || { check(); Ok(()) }).unwrap();
+        assert_eq!(read_record(&root.join(RECORD)).unwrap().server, moved_server);
+        assert_eq!(read_record(&record_path(&registry, &root)).unwrap().server, moved_server);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn instance_registry_resolves_a_linked_home_ancestor_without_creating_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("actual-home");
+        fs::create_dir(&home).unwrap();
+        let alias = temp.path().join("home");
+        std::os::unix::fs::symlink(&home, &alias).unwrap();
+        let registry = registry_for_default(&alias.join(".local/share/risunest-sync")).unwrap();
+        assert_eq!(registry, home.canonicalize().unwrap().join(".local/share/.risunest-sync-instances"));
+        assert!(!home.join(".local").exists());
+    }
     fn fixture() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
         let temp = tempfile::tempdir().unwrap();
         let base = temp.path().canonicalize().unwrap();
@@ -612,6 +712,61 @@ mod tests {
         register_at(&registry, &root, &server, &install).unwrap();
         (temp, root, server, registry)
     }
+    #[test]
+    fn profiles_are_all_validated_before_any_are_removed() {
+        let temp = tempfile::tempdir().unwrap();
+        let plain = temp.path().join("plain");
+        let raw = temp.path().join("identifier");
+        fs::create_dir_all(&plain).unwrap();
+        fs::create_dir_all(&raw).unwrap();
+        fs::write(plain.join("cache"), b"profile").unwrap();
+        fs::write(raw.join("metadata.sqlite"), b"synthetic raw store").unwrap();
+        assert_eq!(remove_profiles(&[plain.clone(), raw.clone()]).unwrap_err(), "removal-unowned-profile-files");
+        assert!(plain.join("cache").exists());
+        assert!(raw.join("metadata.sqlite").exists());
+        fs::remove_file(raw.join("metadata.sqlite")).unwrap();
+        remove_profiles(&[plain.clone(), raw.clone()]).unwrap();
+        assert!(!plain.exists() && !raw.exists());
+    }
+
+    #[test]
+    fn relocation_requires_the_old_bundle_to_be_gone_and_updates_both_records() {
+        let (_temp, root, server, registry) = fixture();
+        let old_install = server.parent().unwrap();
+        let install = old_install.with_file_name("moved");
+        fs::create_dir(&install).unwrap();
+        let moved_server = install.join("server");
+        fs::write(&moved_server, b"synthetic").unwrap();
+        assert_eq!(register_at(&registry, &root, &moved_server, &install).unwrap_err(), "removal-registration-conflict");
+        assert_eq!(read_record(&root.join(RECORD)).unwrap().server, server);
+        fs::remove_file(marker(old_install)).unwrap();
+        register_at(&registry, &root, &moved_server, &install).unwrap();
+        let local = read_record(&root.join(RECORD)).unwrap();
+        assert_eq!(local.server, moved_server);
+        assert_eq!(local, read_record(&record_path(&registry, &root)).unwrap());
+    }
+
+    #[test]
+    fn relocation_cannot_cross_a_pending_transaction() {
+        let (_temp, root, server, registry) = fixture();
+        fs::remove_file(marker(server.parent().unwrap())).unwrap();
+        fs::create_dir_all(root.join("manager-update")).unwrap();
+        fs::write(root.join("manager-update/transaction.json"), b"{}").unwrap();
+        let install = server.parent().unwrap().with_file_name("moved");
+        fs::create_dir(&install).unwrap();
+        assert_eq!(register_at(&registry, &root, &install.join("server"), &install).unwrap_err(), "update-recovery-required");
+        assert_eq!(read_record(&root.join(RECORD)).unwrap().server, server);
+    }
+
+    #[test]
+    fn owned_crash_temporary_files_do_not_block_data_removal() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join(".risunest-tmp-synthetic"), b"partial").unwrap();
+        safe_data_tree(temp.path()).unwrap();
+        fs::write(temp.path().join(".tmp-unowned"), b"user").unwrap();
+        assert_eq!(safe_data_tree(temp.path()).unwrap_err(), "removal-unowned-data-files");
+    }
+
     #[test]
     fn preview_preserves_data_and_does_not_create_update_state() {
         let (_temp, root, server, registry) = fixture();

@@ -15,7 +15,7 @@ fn large_finalization_reservation_survives_restart_and_completes_exactly_once() 
     for _ in 0..chunks {
         whole.update(&chunk);
     }
-    let digest = format!("{:x}", whole.finalize());
+    let digest = hex::encode(whole.finalize());
     let id = store
         .begin_upload(
             &a,

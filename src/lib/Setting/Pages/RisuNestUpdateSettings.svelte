@@ -22,6 +22,7 @@
         skippedVersion: '',
         lastCheckedAt: 0,
     })
+    let environmentFailed = $state(false)
     let settingsError = $state('')
     const text = $derived(language.risuNest.update)
 
@@ -35,7 +36,7 @@
         if (!$appUpdateState.environment) {
             void nativeUpdate.environment().then(environment => {
                 appUpdateState.update(state => ({ ...state, environment }))
-            })
+            }).catch(() => { environmentFailed = true })
         }
         return unsubscribe
     })
@@ -69,10 +70,10 @@
             onchange={setAutomatic} />
     </SettingRow>
     <SettingRow label={text.currentVersion}>
-        <span class="text-sm">{$appUpdateState.environment?.currentVersion ?? language.loading}</span>
+        <span class="text-sm">{$appUpdateState.environment?.currentVersion ?? (environmentFailed ? text.environmentFailed : language.loading)}</span>
     </SettingRow>
     <SettingRow label={text.installMethod}>
-        <span class="text-sm">{text.strategies[$appUpdateState.environment?.installStrategy ?? 'disabled']}</span>
+        <span class="text-sm">{$appUpdateState.environment ? text.strategies[$appUpdateState.environment.installStrategy] : environmentFailed ? text.environmentFailed : language.loading}</span>
     </SettingRow>
     <SettingRow label={text.lastChecked}>
         <span class="text-sm">{checkedAt(settings.lastCheckedAt)}</span>

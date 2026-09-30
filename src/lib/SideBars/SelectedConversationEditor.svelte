@@ -7,6 +7,7 @@
     import { isMetadataOnlySelectedConversation } from 'src/ts/storage/selectedConversationLifecycle'
     import { isCatalogCharacterStub } from 'src/ts/storage/workingSetCatalog'
     import { isConversationSummaryStub } from 'src/ts/storage/conversationResidency'
+    import { doingChat } from 'src/ts/process/generationState'
     import LoadingIndicator from '../UI/GUI/LoadingIndicator.svelte'
 
     let {
@@ -17,8 +18,34 @@
     let sourceVersion = $state(0)
     let ready = $state(false)
     let failed = $state(false)
+    // Mounted children of the same character stay in place, inert, while the
+    // next conversation is promoted, so a chat switch keeps their UI state.
+    let retained = $state(false)
+    let mountedCharacterId: string | undefined
     const runtime = getPersistentDataRuntime()
     let currentLease: CompleteConversationLease | undefined
+
+    // Saves may republish the same selection as new objects; only a change of
+    // identity or residency needs a new lease.
+    const selectionKey = $derived.by(() => {
+        if (!active) return null
+        const character = DBState.db.characters[$selectedCharID]
+        if (!character) return null
+        const conversation = character.chats[character.chatPage]
+        return JSON.stringify([
+            character.chaId,
+            isCatalogCharacterStub(character),
+            conversation?.id,
+            !!conversation && isConversationSummaryStub(conversation),
+            !!conversation && isMetadataOnlySelectedConversation(conversation),
+        ])
+    })
+    const waitingForGeneration = $derived.by(() => {
+        if (!active || !$doingChat) return false
+        const character = DBState.db.characters[$selectedCharID]
+        const conversation = character?.chats[character.chatPage]
+        return !!conversation && isMetadataOnlySelectedConversation(conversation)
+    })
 
     onMount(() =>
         runtime.subscribeActiveConversationViewportSource(() => {
@@ -37,53 +64,64 @@
     // Mount them only after complete ownership has been adopted by the coordinator.
     $effect(() => {
         sourceVersion
-        const enabled = active
-        const character = enabled
-            ? DBState.db.characters[$selectedCharID]
-            : null
-        const conversationId = character?.chats[character.chatPage]?.id
-        ready = false
-        failed = false
+        selectionKey
+        const waiting = waitingForGeneration
         let disposed = false
         let lease: CompleteConversationLease | undefined
-        if (character) {
-            untrack(() => {
-                const target = runtime.captureSelectedConversationTarget()
-                if (!target) {
-                    // Nonpersistent playgrounds and complete upstream working sets
-                    // have no selected session. Never expose a partial shell here.
-                    const conversation = character.chats[character.chatPage]
-                    ready =
-                        !isCatalogCharacterStub(character) &&
+        untrack(() => {
+            const character = active
+                ? DBState.db.characters[$selectedCharID]
+                : null
+            const conversationId = character?.chats[character.chatPage]?.id
+            retained =
+                (ready || retained) &&
+                !!character &&
+                !isCatalogCharacterStub(character) &&
+                character.chaId === mountedCharacterId
+            ready = false
+            failed = false
+            if (!character || waiting) return
+            const settle = (complete: boolean) => {
+                ready = complete
+                failed = !complete
+                retained = false
+                if (complete) mountedCharacterId = character.chaId
+            }
+            const target = runtime.captureSelectedConversationTarget()
+            if (!target) {
+                // Nonpersistent playgrounds and complete upstream working sets
+                // have no selected session. Never expose a partial shell here.
+                const conversation = character.chats[character.chatPage]
+                settle(
+                    !isCatalogCharacterStub(character) &&
                         !!conversation &&
                         !isConversationSummaryStub(conversation) &&
-                        !isMetadataOnlySelectedConversation(conversation)
-                    failed = !ready
-                    return
-                }
-                if (
-                    target.characterId !== character.chaId ||
-                    target.conversationId !== conversationId
-                ) {
-                    failed = true
-                    return
-                }
-                void runtime
-                    .acquireCompleteConversation('bound-editor', target)
-                    .then((acquired) => {
-                        if (disposed) {
-                            acquired.release()
-                            return
-                        }
-                        lease = acquired
-                        currentLease = acquired
-                        ready = true
-                    })
-                    .catch(() => {
-                        if (!disposed) failed = true
-                    })
-            })
-        }
+                        !isMetadataOnlySelectedConversation(conversation),
+                )
+                return
+            }
+            if (
+                target.characterId !== character.chaId ||
+                target.conversationId !== conversationId
+            ) {
+                settle(false)
+                return
+            }
+            void runtime
+                .acquireCompleteConversation('bound-editor', target)
+                .then((acquired) => {
+                    if (disposed) {
+                        acquired.release()
+                        return
+                    }
+                    lease = acquired
+                    currentLease = acquired
+                    settle(true)
+                })
+                .catch(() => {
+                    if (!disposed) settle(false)
+                })
+        })
         return () => {
             disposed = true
             if (currentLease === lease) currentLease = undefined
@@ -93,8 +131,10 @@
 </script>
 
 {#if active}
-    {#if ready}
-        {@render children()}
+    {#if ready || retained}
+        <div class="contents" inert={!ready} aria-busy={!ready}>
+            {@render children()}
+        </div>
     {:else}
         <!-- Overlay mounts pass `close` and get no backdrop from the parent. -->
         <div
@@ -114,6 +154,8 @@
                         >{language.hypaV3Modal.retry}</button
                     >
                 </div>
+            {:else if waitingForGeneration}
+                <span>{language.navigationBlockedWhileGenerating}</span>
             {:else}
                 <LoadingIndicator label={language.loadingChatData} compact />
             {/if}

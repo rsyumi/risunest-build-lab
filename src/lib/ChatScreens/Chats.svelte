@@ -46,6 +46,7 @@
     import { yieldToMainThread } from 'src/ts/ui/yieldToUi'
     import LoadingIndicator from 'src/lib/UI/GUI/LoadingIndicator.svelte'
     import { language } from 'src/lang'
+    import { alertNormal } from 'src/ts/alert'
     import cloneDeep from 'lodash/cloneDeep'
     import isEqual from 'lodash/isEqual'
 
@@ -103,8 +104,9 @@
         hasStreamingPreview?: () => boolean
         refreshMessageDisplay?: (state: ChatDisplayRefresh) => void
         hasActiveEditor?: () => boolean
+        takeEditorDraft?: () => string | null
         refreshParserProjection?: (projection?: BoundedLiveChatParserProjection) => void
-        refreshConversationStartParser?: () => void
+        refreshConversationStartParser?: (totalMessages?: number) => void
         updateConversationStartPresentation?: (state: { resolvedImage: string }) => void
         updateStreamingDisplay?: (state: {
             isOptimizedStreamingMessage: boolean
@@ -132,6 +134,7 @@
     let measuredHeightClock = 0
     let keyLookupScans = 0
     let pinReasons = new Map<string, Set<ChatViewportPinReason>>()
+    let blurredEditorPins = new Set<string>()
     let playingMedia = new Map<string, Set<EventTarget>>()
     let sourcePins = new Map<string, ConversationSourcePin>()
     let sourceLoads = new Map<string, AbortController>()
@@ -176,6 +179,7 @@
     let initialRowsLoading = $state(false)
     let initialRowsLoadFailed = $state(false)
     let parserProjectionLoadFailed = $state(false)
+    let historyRowsLoadFailed = $state(false)
     let initialLatestFollow = false
     let initialLatestMessageCount: number | null = null
     let sourceHandoffRuntimeKeys = new Set<string>()
@@ -188,6 +192,8 @@
     let pendingSourceHandoffAnchor: ChatViewportAnchor | null = null
     let pendingMissingRowsAnchor: ChatViewportAnchor | null = null
     let renderedConversationIdentity: string | null = null
+    let renderedOwnerId: string | null = null
+    let renderedConversationId: string | null = null
     let viewportAnchor: ChatViewportAnchor | null = null
     let viewportResult: ChatViewportResult | null = null
     let identitySequence: ChatRenderIdentitySequence | null = null
@@ -385,12 +391,14 @@
         measuredHeightClock = 0
         keyLookupScans = 0
         pinReasons = new Map()
+        blurredEditorPins = new Set()
         playingMedia = new Map()
         sourceHandoffRuntimeKeys = new Set()
         hasMountedUsableRow = false
         initialRowsLoading = false
         initialRowsLoadFailed = false
         parserProjectionLoadFailed = false
+        historyRowsLoadFailed = false
         viewportAnchor = null
         pendingMissingRowsAnchor = null
         viewportResult = null
@@ -557,7 +565,7 @@
     ): void {
         const source = activeViewportSource
         if (!source || !sourceSnapshot) return
-        if (initialRowsLoadFailed && !hasMountedUsableRow) return
+        if (historyRowsLoadFailed || (initialRowsLoadFailed && !hasMountedUsableRow)) return
         const startOffset = hasConversationStart() ? 1 : 0
         const missing = result.rows.flatMap((row) => {
             if (row.kind !== 'message' || row.index < startOffset) return []
@@ -586,8 +594,11 @@
                     || source !== activeViewportSource
                     || currentSnapshot?.sourceToken !== sourceSnapshot.sourceToken
                     || currentSnapshot.version !== sourceSnapshot.version
-                    || hasMountedUsableRow
                 ) return
+                if (hasMountedUsableRow) {
+                    historyRowsLoadFailed = true
+                    return
+                }
                 initialRowsLoading = false
                 initialRowsLoadFailed = true
             }).finally(() => {
@@ -599,6 +610,7 @@
     function retryInitialSourceRows(): void {
         if (!activeViewportSource) return
         initialRowsLoadFailed = false
+        historyRowsLoadFailed = false
         initialRowsLoading = !hasMountedUsableRow && currentMessageCount() > 0
         for (const [key, state] of rowParserProjections) {
             if (state.failed) releaseRowParserProjection(key)
@@ -694,7 +706,10 @@
         lastMountedSourceTailKey = null
         pendingSourceWasAtBottom = handoffWasAtBottom
         pendingSourceHandoffAnchor = handoffAnchor
-        if (!preserveHandoff) activeScope = null
+        if (!preserveHandoff) {
+            activeScope = null
+            historyRowsLoadFailed = false
+        }
         if (source) {
             sourceUnsubscribe = source.subscribe(() => {
                 queueMicrotask(() => {
@@ -787,9 +802,20 @@
         const scope = currentChatScope()
         const conversationIdentity = currentConversationHandoffIdentity()
         if (activeScope !== scope) {
+            if (renderedOwnerId === currentCharacter.chaId && renderedConversationId &&
+                !currentCharacter.chats.some((chat) => chat.id === renderedConversationId)) {
+                const drafts = [...mountInstances.values()].flatMap((instance) => {
+                    if (!instance.hasActiveEditor?.()) return []
+                    const draft = instance.takeEditorDraft?.()
+                    return draft === null || draft === undefined ? [] : [draft]
+                })
+                if (drafts.length) alertNormal(`${language.chatDraftConversationRemoved}\n\n${drafts.join('\n\n')}`)
+            }
             resetViewport(scope, renderedConversationIdentity !== conversationIdentity)
         }
         renderedConversationIdentity = conversationIdentity
+        renderedOwnerId = currentCharacter.chaId
+        renderedConversationId = currentCharacter.chats[currentCharacter.chatPage]?.id ?? null
         const reloadPointerMap = get(ReloadChatPointer)
         const sourceSnapshot = currentSourceSnapshot()
         const jump = currentPendingJump()
@@ -824,6 +850,7 @@
                       pendingMissingRowsAnchor ??
                       viewportAnchor ??
                       captureDomAnchor())
+        releaseClosedEditorPins()
         const currentChat = currentCharacter.chats?.[currentCharacter.chatPage]
         const budget = getRuntimePerformanceBudgets().chatMountedMessageBudget
         const result = buildChatViewport({
@@ -1008,12 +1035,21 @@
                 ) &&
                 typeof mountInstances.get(key)?.refreshMessageDisplay === 'function'
 
-            const preserveMountedRuntime =
-                (sourceHandoff || parserProjectionState?.preserveMountedRuntime === true) &&
+            // An open editor holds an unsaved draft, so any remount waits until it
+            // closes. Source-backed rows receive their current address below.
+            const deferRemountForEditor =
+                requiresRemount &&
+                !refreshMountedDisplay &&
+                (viewportRow !== undefined || previousSignature?.index === index) &&
                 mountInstances.has(key) &&
-                (activeStreamingMessage ||
-                    hasFocusedEditor(key) ||
-                    pinReasons.get(key)?.has('playing-media') === true)
+                hasActiveEditor(key)
+            const preserveMountedRuntime =
+                deferRemountForEditor ||
+                ((sourceHandoff || parserProjectionState?.preserveMountedRuntime === true) &&
+                    mountInstances.has(key) &&
+                    (activeStreamingMessage ||
+                        hasFocusedEditor(key) ||
+                        pinReasons.get(key)?.has('playing-media') === true))
             if (requiresRemount && !preserveMountedRuntime) {
                 const source = activeViewportSource
                 const sourceToken = sourceSnapshot?.sourceToken
@@ -1158,7 +1194,7 @@
                 pendingRowMounts.delete(key)
                 clearQueuedRowHeight(element)
                 const instance = mountInstances.get(key)
-                if (sourceHandoff && viewportRow && activeViewportSource && sourceSnapshot) {
+                if ((sourceHandoff || preserveMountedRuntime) && viewportRow && activeViewportSource && sourceSnapshot) {
                     const source = activeViewportSource
                     instance?.updateViewportBinding?.({
                         viewportRow,
@@ -1194,6 +1230,19 @@
                         }),
                     )
                     renderSignatures.set(key, renderSignature)
+                    parserProjectionState.needsRemount = false
+                }
+                if (deferRemountForEditor && parserProjectionState?.needsRemount) {
+                    // The replacement projection aborted the retained lease. Keep the
+                    // previous signature so the row still remounts after the editor closes.
+                    untrack(() =>
+                        instance?.refreshMessageDisplay?.({
+                            message: message.data,
+                            totalMessages,
+                            parserProjection,
+                            parserAbortSignal: parserProjectionState.controller.signal,
+                        }),
+                    )
                     parserProjectionState.needsRemount = false
                 }
             }
@@ -1468,11 +1517,12 @@
         if (previousSignature && previousSignature !== signature && mountInstances.has(key)) {
             const previousInputs = JSON.parse(previousSignature)
             const nextInputs = JSON.parse(signature)
-            // Recheck history admission on reload without discarding the greeting.
+            // Recheck history admission on reload or a new message count without discarding the greeting.
+            previousInputs[9] = nextInputs[9]
             previousInputs[11] = nextInputs[11]
             if (JSON.stringify(previousInputs) === signature) {
                 element.dataset.chatConversationStartSignature = signature
-                untrack(() => mountInstances.get(key)?.refreshConversationStartParser?.())
+                untrack(() => mountInstances.get(key)?.refreshConversationStartParser?.(totalMessages))
                 return
             }
         }
@@ -1533,6 +1583,7 @@
         playingMedia.delete(key)
         // A remount can remove the focused control before focusout runs. Mirror
         // its released UI pin to the source even when no later input arrives.
+        blurredEditorPins.delete(key)
         if (pinReasons.delete(key)) queueProjectionReconcile()
         for (const target of media ?? []) {
             if (!(target instanceof HTMLMediaElement)) continue
@@ -1731,9 +1782,13 @@
         return target.closest<HTMLElement>('[data-chat-render-key]')?.dataset.chatRenderKey ?? null
     }
 
+    function hasActiveEditor(key: string): boolean {
+        return untrack(() => mountInstances.get(key)?.hasActiveEditor?.()) === true
+    }
+
     function hasFocusedEditor(key: string): boolean {
+        if (hasActiveEditor(key)) return true
         if (!pinReasons.get(key)?.has('editor')) return false
-        if (untrack(() => mountInstances.get(key)?.hasActiveEditor?.())) return true
         const focused = document.activeElement
         if (
             !(focused instanceof HTMLElement) ||
@@ -1767,7 +1822,9 @@
         // All focused controls keep their row resident. Only an actual editor
         // may postpone a changed message; a bot button must display its result.
         const key = rowKeyFromEvent(event)
-        if (key) addPin(key, 'editor')
+        if (!key) return
+        blurredEditorPins.delete(key)
+        addPin(key, 'editor')
     }
 
     function handleFocusOut(event: FocusEvent): void {
@@ -1777,8 +1834,26 @@
         if (event.relatedTarget instanceof Node && row?.contains(event.relatedTarget)) return
         queueMicrotask(() => {
             if (row && document.activeElement instanceof Node && row.contains(document.activeElement)) return
+            // An open editor keeps its row when focus leaves it, for example when an
+            // input fence makes the page inert, so its draft survives source handoffs.
+            if (hasActiveEditor(key)) {
+                blurredEditorPins.add(key)
+                return
+            }
             removePin(key, 'editor')
         })
+    }
+
+    function releaseClosedEditorPins(): void {
+        for (const key of blurredEditorPins) {
+            if (hasActiveEditor(key)) continue
+            blurredEditorPins.delete(key)
+            const row = mountedElements.get(key)
+            if (row && document.activeElement instanceof Node && row.contains(document.activeElement)) continue
+            const reasons = pinReasons.get(key)
+            if (!reasons?.delete('editor')) continue
+            if (reasons.size === 0) pinReasons.delete(key)
+        }
     }
 
     function handleMediaPlay(event: Event): void {
@@ -2001,7 +2076,21 @@
         if (!visibleGap) return
         const start = Number(visibleGap.dataset.chatGapStart)
         const end = Number(visibleGap.dataset.chatGapEnd)
-        const target = movingOlder ? end - 1 : start
+        const gapRect = visibleGap.getBoundingClientRect()
+        const distance = Math.max(0, Math.min(gapRect.height,
+            movingOlder ? gapRect.bottom - containerRect.top : containerRect.bottom - gapRect.top,
+        ))
+        let target = movingOlder ? end - 1 : start
+        let traversed = 0
+        let height = measuredHeightIndices.get(target) ?? ESTIMATED_MESSAGE_HEIGHT
+        while (traversed + height < distance && (movingOlder ? target > start : target < end - 1)) {
+            traversed += height
+            target += movingOlder ? -1 : 1
+            height = measuredHeightIndices.get(target) ?? ESTIMATED_MESSAGE_HEIGHT
+        }
+        const relativeOffset = movingOlder
+            ? gapRect.bottom - traversed - height - containerRect.top
+            : gapRect.top + traversed - containerRect.top
         const keySource = viewportKeySource(currentChatScope())
         if (!Number.isInteger(target) || target < 0 || target >= keySource.length)
             return
@@ -2010,7 +2099,7 @@
         viewportAnchor = {
             key,
             indexHint: target,
-            relativeOffset: viewportAnchor?.relativeOffset ?? 0,
+            relativeOffset,
         }
         reconcileViewport({ jumpTarget: target })
     }
@@ -2020,6 +2109,10 @@
         const element = mountedElements.get(key)
         if (!element) return false
         return element.getBoundingClientRect().top <= scrollContainer.getBoundingClientRect().bottom + 100
+    }
+
+    export function isAtBottom(): boolean {
+        return checkIfAtBottom()
     }
 
     function checkIfAtBottom(): boolean {
@@ -2327,6 +2420,7 @@
         measuredHeightIndexByKey.clear()
         measuredHeightRecency.clear()
         pinReasons.clear()
+        blurredEditorPins.clear()
         playingMedia.clear()
         sourceHandoffRuntimeKeys.clear()
         imageResolutionGeneration += 1
@@ -2358,7 +2452,7 @@
             <LoadingIndicator label={language.loadingChatData} />
         {/if}
     </div>
-{:else if parserProjectionLoadFailed}
+{:else if parserProjectionLoadFailed || historyRowsLoadFailed}
     <div
         class="absolute bottom-2 left-2 right-2 z-10 flex items-center justify-center gap-3 rounded-lg border border-borderc bg-bgcolor p-3 text-center"
         data-chat-load-error
@@ -2374,4 +2468,8 @@
         </button>
     </div>
 {/if}
-<div class="flex flex-col-reverse" bind:this={chatBody}></div>
+<div
+    class="flex flex-col-reverse"
+    class:chat-history-isolated={(DBState.db.chatMessageOverflowScope ?? 'latest') !== 'all'}
+    bind:this={chatBody}
+></div>

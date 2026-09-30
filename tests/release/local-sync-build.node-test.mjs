@@ -1,13 +1,15 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import {
   buildLocalSyncDistribution,
+  formatLocalSyncDistribution,
   localCargoTargetDirectory,
   localSyncTarget,
+  parseLocalSyncArguments,
   validateLocalSyncEnvironment,
 } from "../../server/manager/install/local-build.mjs";
 
@@ -60,7 +62,7 @@ test("local Sync target mapping selects the release platform and architecture", 
   assert.throws(() => localSyncTarget("wasm32-unknown-unknown"), /Unsupported local Sync target/);
 });
 
-test("local Sync builds require only resolved Cargo output and a native host", () => {
+test("local Sync builds require resolved Cargo output, update public key and a native host", () => {
   const target = "x86_64-pc-windows-msvc";
   assert.throws(
     () => validateLocalSyncEnvironment({ target, hostTarget: target, env: {} }),
@@ -70,7 +72,7 @@ test("local Sync builds require only resolved Cargo output and a native host", (
     validateLocalSyncEnvironment({
       target,
       hostTarget: target,
-      env: { CARGO_TARGET_DIR: "C:/target" },
+      env: { CARGO_TARGET_DIR: "C:/target", RISUNEST_UPDATE_PUBLIC_KEY: "synthetic-public-key" },
     }).registryUrl,
     "https://registry.rsyumi.workers.dev/",
   );
@@ -80,6 +82,7 @@ test("local Sync builds require only resolved Cargo output and a native host", (
       hostTarget: "aarch64-apple-darwin",
       env: {
         CARGO_TARGET_DIR: "C:/target",
+      RISUNEST_UPDATE_PUBLIC_KEY: "synthetic-public-key",
         RISUNEST_DEFAULT_REGISTRY_URL: "https://registry.example.com",
       },
     }),
@@ -90,6 +93,7 @@ test("local Sync builds require only resolved Cargo output and a native host", (
     hostTarget: target,
     env: {
       CARGO_TARGET_DIR: "C:/target",
+      RISUNEST_UPDATE_PUBLIC_KEY: "synthetic-public-key",
       RISUNEST_DEFAULT_REGISTRY_URL: "https://registry.example.com",
     },
   }).registryUrl, "https://registry.example.com/");
@@ -108,7 +112,7 @@ test("local Sync orchestration reuses build and package stages and gathers every
   const result = await buildLocalSyncDistribution({
     target: "x86_64-pc-windows-msvc",
     outputRoot: root,
-    env: {},
+    env: { RISUNEST_UPDATE_PUBLIC_KEY: "synthetic-local-key" },
     hostTarget: "x86_64-pc-windows-msvc",
     publishedAt: "2026-09-20T00:00:00Z",
   }, {
@@ -131,6 +135,7 @@ test("local Sync orchestration reuses build and package stages and gathers every
       return { executableSha256: "b".repeat(64) };
     },
     buildNativeSuite(input) {
+      assert.equal(process.env.RISUNEST_UPDATE_PUBLIC_KEY, "synthetic-local-key");
       calls.push(["build", input.target]);
       return { target: input.target, daemon: join(root, "daemon.exe") };
     },
@@ -139,6 +144,7 @@ test("local Sync orchestration reuses build and package stages and gathers every
       return raw;
     },
     packageNativeSuite(input) {
+      assert.equal(process.env.RISUNEST_UPDATE_PUBLIC_KEY, "synthetic-local-key");
       calls.push(["package", input.cloudflaredSha256]);
       return {
         assets: [
@@ -157,6 +163,8 @@ test("local Sync orchestration reuses build and package stages and gathers every
   ]);
   for (const artifact of result.artifacts) assert.ok(readFileSync(artifact.path).length > 0);
   assert.equal(result.output, output);
+  assert.equal(result.updatesEnabled, true);
+  assert.equal(JSON.parse(readFileSync(join(output, "local-artifacts.json"), "utf8")).updatesEnabled, true);
 });
 
 test("root package scripts build complete local Sync distributions", () => {
@@ -174,4 +182,115 @@ test("root package scripts build complete local Sync distributions", () => {
     scripts["sync:macos:build"],
     "node server/manager/install/local-build.mjs --target aarch64-apple-darwin",
   );
+});
+
+test("missing local update key fails before preflight, output reset or downloads", async () => {
+  for (const key of [undefined, '', '   ']) {
+    const calls = [];
+    await assert.rejects(buildLocalSyncDistribution({ target: 'x86_64-pc-windows-msvc',
+      hostTarget: 'x86_64-pc-windows-msvc', env: { RISUNEST_UPDATE_PUBLIC_KEY: key } }, {
+      cargoTargetDirectory: () => 'C:/target', preflight: () => calls.push('preflight'),
+      resetDirectory: () => calls.push('reset'), fetchCloudflared: () => calls.push('download'),
+    }), /RISUNEST_UPDATE_PUBLIC_KEY/);
+    assert.deepEqual(calls, []);
+  }
+});
+
+test("local Sync CLI requires an explicit development opt-out and reports its update behavior", () => {
+  const target = "x86_64-pc-windows-msvc";
+  assert.deepEqual(parseLocalSyncArguments(["--target", target]), { target, withoutUpdates: false });
+  assert.deepEqual(parseLocalSyncArguments(["--target", target, "--without-updates"]), { target, withoutUpdates: true });
+  assert.throws(() => parseLocalSyncArguments(["--without-updates"]), /--target is required/);
+  assert.throws(() => parseLocalSyncArguments(["--target", target, "--without-update"]), /Unknown option/);
+  const result = { output: "synthetic-output", artifacts: [{ path: "synthetic-package.zip" }] };
+  assert.equal(formatLocalSyncDistribution({ ...result, updatesEnabled: false }),
+    "Local Sync distribution created in synthetic-output\nUpdates are disabled for this development package. Update checks report update-not-configured.\nsynthetic-package.zip\n");
+  assert.equal(formatLocalSyncDistribution({ ...result, updatesEnabled: true }),
+    "Local Sync distribution created in synthetic-output\nsynthetic-package.zip\n");
+});
+
+for (const target of ["x86_64-pc-windows-msvc", "x86_64-unknown-linux-gnu", "aarch64-apple-darwin"]) {
+  test(`explicit keyless local Sync validation remains scoped to ${target}`, () => {
+    for (const key of [undefined, "", "synthetic-ignored-key"]) {
+      const config = validateLocalSyncEnvironment({ target, hostTarget: target, withoutUpdates: true,
+        env: { CARGO_TARGET_DIR: "C:/target", RISUNEST_UPDATE_PUBLIC_KEY: key } });
+      assert.equal(config.publicKey, "");
+      assert.equal(config.updatesEnabled, false);
+    }
+    assert.equal(validateLocalSyncEnvironment({ target, hostTarget: target,
+      env: { CARGO_TARGET_DIR: "C:/target", RISUNEST_UPDATE_PUBLIC_KEY: "synthetic-update-key" } }).updatesEnabled, true);
+  });
+
+  test(`keyless ${target} orchestration suppresses inherited keys for build and packaging`, async (t) => {
+    const root = mkdtempSync(join(tmpdir(), "risunest-local-keyless-"));
+    t.after(() => rmSync(root, { recursive: true, force: true }));
+    const archive = join(root, "synthetic-package.zip");
+    writeFileSync(archive, "synthetic-package");
+    const calls = [];
+    const previous = process.env.RISUNEST_UPDATE_PUBLIC_KEY;
+    try {
+      process.env.RISUNEST_UPDATE_PUBLIC_KEY = "synthetic-parent-key";
+      const result = await buildLocalSyncDistribution({ target, hostTarget: target, withoutUpdates: true,
+        outputRoot: root, env: { RISUNEST_UPDATE_PUBLIC_KEY: "synthetic-input-key" } }, {
+        cargoTargetDirectory: () => join(root, "cargo"), preflight: config => assert.equal(config.publicKey, ""),
+        resetDirectory() {}, sourceCommit: () => "a".repeat(40),
+        sourceCheck: () => ({ version: "1.0.0", compatibility: {}, vendorInput: {} }),
+        fetchCloudflared: async () => ({ executableSha256: "b".repeat(64) }),
+        buildNativeSuite(input) {
+          assert.equal(process.env.RISUNEST_UPDATE_PUBLIC_KEY, "");
+          calls.push("build");
+          return { target: input.target, daemon: "synthetic-daemon" };
+        },
+        packageRaw() { assert.equal(process.env.RISUNEST_UPDATE_PUBLIC_KEY, ""); calls.push("raw"); return archive; },
+        packageNativeSuite() {
+          assert.equal(process.env.RISUNEST_UPDATE_PUBLIC_KEY, "");
+          calls.push("package");
+          return { assets: [{ download: { variant: "raw", format: "zip" }, path: archive }] };
+        },
+      });
+      assert.deepEqual(calls, ["build", "raw", "package"]);
+      assert.equal(result.updatesEnabled, false);
+      assert.equal(JSON.parse(readFileSync(join(root, "output/local-artifacts.json"), "utf8")).updatesEnabled, false);
+      assert.equal(process.env.RISUNEST_UPDATE_PUBLIC_KEY, "synthetic-parent-key");
+    } finally {
+      if (previous === undefined) delete process.env.RISUNEST_UPDATE_PUBLIC_KEY;
+      else process.env.RISUNEST_UPDATE_PUBLIC_KEY = previous;
+    }
+  });
+}
+
+test("keyless native failure restores the outer synthetic update key", async () => {
+  const previous = process.env.RISUNEST_UPDATE_PUBLIC_KEY;
+  const failure = new Error("synthetic-keyless-native-failure");
+  try {
+    process.env.RISUNEST_UPDATE_PUBLIC_KEY = "synthetic-parent-key";
+    await assert.rejects(buildLocalSyncDistribution({ target: "x86_64-pc-windows-msvc", hostTarget: "x86_64-pc-windows-msvc",
+      withoutUpdates: true, env: { RISUNEST_UPDATE_PUBLIC_KEY: "synthetic-input-key" } }, {
+      cargoTargetDirectory: () => "C:/target", preflight() {}, resetDirectory() {}, sourceCommit: () => "a".repeat(40),
+      sourceCheck: () => ({ version: "1.0.0" }), fetchCloudflared: async () => ({}),
+      buildNativeSuite() { assert.equal(process.env.RISUNEST_UPDATE_PUBLIC_KEY, ""); throw failure; },
+    }), error => error === failure);
+    assert.equal(process.env.RISUNEST_UPDATE_PUBLIC_KEY, "synthetic-parent-key");
+  } finally {
+    if (previous === undefined) delete process.env.RISUNEST_UPDATE_PUBLIC_KEY;
+    else process.env.RISUNEST_UPDATE_PUBLIC_KEY = previous;
+  }
+});
+
+test("local build restores the previous update key after native failure", async () => {
+  const previous = process.env.RISUNEST_UPDATE_PUBLIC_KEY;
+  const failure = new Error('synthetic-native-failure');
+  try {
+    process.env.RISUNEST_UPDATE_PUBLIC_KEY = 'outer-key';
+    await assert.rejects(buildLocalSyncDistribution({ target: 'x86_64-pc-windows-msvc', hostTarget: 'x86_64-pc-windows-msvc',
+      env: { RISUNEST_UPDATE_PUBLIC_KEY: 'inner-key' } }, {
+      cargoTargetDirectory: () => 'C:/target', preflight() {}, resetDirectory() {}, sourceCommit: () => 'a'.repeat(40),
+      sourceCheck: () => ({ version: '1.0.0' }), fetchCloudflared: async () => ({}),
+      buildNativeSuite() { assert.equal(process.env.RISUNEST_UPDATE_PUBLIC_KEY, 'inner-key'); throw failure; },
+    }), error => error === failure);
+    assert.equal(process.env.RISUNEST_UPDATE_PUBLIC_KEY, 'outer-key');
+  } finally {
+    if (previous === undefined) delete process.env.RISUNEST_UPDATE_PUBLIC_KEY;
+    else process.env.RISUNEST_UPDATE_PUBLIC_KEY = previous;
+  }
 });

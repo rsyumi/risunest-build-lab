@@ -134,6 +134,17 @@ label > select,
 label > .copy-field {
   margin-top: 8px;
 }
+label.check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+label.check > input {
+  margin: 0;
+}
+form > label.check {
+  margin-top: 12px;
+}
 
 /* Window shell: the sidebar and content pane sit as tinted layers over the native material. */
 .app-shell {

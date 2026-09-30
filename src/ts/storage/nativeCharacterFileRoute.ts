@@ -1,3 +1,4 @@
+import type { NativeFileJobOptions } from './nativeFileJobs'
 import {
     NativeFileJobError,
     type NativeFileJobSource,
@@ -25,7 +26,7 @@ export interface NativeCharacterFileRouteDependencies<T> {
     nativeImport(input: {
         source: NativeFileJobSource
         displayName: string
-    }): Promise<NativeCharacterImportResult<T>>
+    }, options?: NativeFileJobOptions): Promise<NativeCharacterImportResult<T>>
     legacyImport(input: { name: string; data: Uint8Array }): Promise<T | null>
 }
 

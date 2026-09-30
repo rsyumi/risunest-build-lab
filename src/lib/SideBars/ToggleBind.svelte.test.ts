@@ -11,6 +11,8 @@ const mocks = vi.hoisted(() => ({
     error: vi.fn(),
     save: vi.fn(async () => {}),
     popup: vi.fn(),
+    blocked: vi.fn(() => false),
+    current: true,
 }))
 vi.mock('src/lang', () => ({ language: languageEnglish }))
 vi.mock('src/ts/stores.svelte', () => {
@@ -25,10 +27,11 @@ vi.mock('src/ts/alert', () => ({
 vi.mock('src/ts/chatBindings.svelte', () => ({
     captureChatBindingTarget: () => ({
         conversation: DBState.db.characters[0].chats[0],
-        isCurrent: () => true,
+        isCurrent: () => mocks.current,
     }),
     updateChatBinding: (conversation: object, patch: object) => Object.assign(conversation, patch),
     saveChatBinding: mocks.save,
+    chatBindingBlockedByGeneration: mocks.blocked,
 }))
 vi.mock('./TogglePresetPopup.svelte', () => ({
     default: (anchor: unknown, props: { close: () => void }) => mocks.popup(props),
@@ -40,6 +43,7 @@ const button = (title: string) =>
     document.querySelector<HTMLButtonElement>(`button[title="${title}"]`)
 
 beforeEach(async () => {
+    mocks.current = true;
     DBState.db = {
         characters: [{ chatPage: 0, chats: [{ id: 'chat' }] }],
         globalChatVariables: { toggle_a: '1', toggle_b: '0' },
@@ -75,6 +79,15 @@ it('binds the current toggle values, counts later changes and saves them', async
     expect(chat().savedToggleValues).toEqual({ toggle_a: '1', toggle_b: '1', toggle_c: 'x' })
     await tick()
     expect(button(languageEnglish.saveToggleChanges)!.disabled).toBe(true)
+})
+
+it('leaves the binding unchanged while a response is generating', async () => {
+    mocks.blocked.mockReturnValueOnce(true)
+    button(languageEnglish.bindToggles)!.click()
+    await tick()
+    expect(chat().savedToggleValues).toBeUndefined()
+    expect(mocks.save).not.toHaveBeenCalled()
+    expect(mocks.toast).not.toHaveBeenCalled()
 })
 
 it('unbinds only after confirmation and keeps the binding when declined', async () => {
@@ -124,4 +137,22 @@ it('mentions chat local overrides only when the chat pins toggle variables local
     chat().GLGlobalVariables = { toggle_a: '1' }
     await tick()
     expect(document.body.textContent).toContain(languageEnglish.localTogglePriority)
+})
+
+it('does not unbind a newly selected conversation after deferred confirmation', async () => {
+    chat().savedToggleValues = { toggle_a: 'original' }
+    const original = chat()
+    let confirm!: (value: boolean) => void
+    mocks.confirm.mockReturnValueOnce(new Promise(resolve => { confirm = resolve }))
+    await tick()
+    button(languageEnglish.unbindToggles)!.click()
+    await tick()
+    mocks.current = false
+    DBState.db.characters[0].chats[0] = { id: 'new', savedToggleValues: { toggle_a: 'new' } } as any
+    confirm(true)
+    await tick(); await Promise.resolve()
+    expect(original.savedToggleValues).toEqual({ toggle_a: 'original' })
+    expect(chat().savedToggleValues).toEqual({ toggle_a: 'new' })
+    expect(mocks.save).not.toHaveBeenCalled()
+    expect(mocks.toast).not.toHaveBeenCalled()
 })

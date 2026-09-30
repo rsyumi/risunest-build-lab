@@ -33,7 +33,7 @@ export function prepareAndroidGenerated(target) {
   const git = spawnSync(
     'git',
     ['rev-parse', '--path-format=absolute', '--git-common-dir'],
-    { cwd: root, encoding: 'utf8' },
+    { cwd: root, encoding: 'utf8', windowsHide: true },
   )
   if (git.error || git.status !== 0) throw git.error ?? new Error(git.stderr)
   const common = resolve(root, git.stdout.trim())

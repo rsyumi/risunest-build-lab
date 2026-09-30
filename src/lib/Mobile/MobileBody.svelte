@@ -14,11 +14,18 @@
     import { DBState } from 'src/ts/stores.svelte';
     import LoadingIndicator from '../UI/GUI/LoadingIndicator.svelte';
     import { navigationActivity } from '../../ts/ui/navigationActivity';
+    import { backNavigationLayer } from '../../ts/ui/modalNavigation';
+    import LazyScreenError from '../UI/LazyScreenError.svelte';
 
     let settingsPromise: Promise<typeof import('../Setting/Settings.svelte')> | undefined
+    let settingsRetry = $state(0)
     let chatScreenVisible = $derived($MobileSideBar === 0 && $selectedCharID !== -1)
 
-    const loadSettings = () => settingsPromise ??= import('../Setting/Settings.svelte')
+    const loadSettings = (_retry: number) => settingsPromise ??= import('../Setting/Settings.svelte')
+
+    $effect(() => {
+        if ($MobileGUIStack !== 2) settingsPromise = undefined
+    })
 </script>
 
 {#if $MobileSideBar > 0 && !$isLite}
@@ -43,11 +50,9 @@
 <div class="w-full flex-1 overflow-y-auto bg-bgcolor relative" aria-busy={$navigationActivity !== null && !chatScreenVisible}>
     <div class="w-full h-full">
     {#if $MobileSideBar > 0}
-        <div class="w-full flex flex-col p-2 mt-2 h-full">
+        <div class="w-full flex flex-col p-2 mt-2 h-full" use:backNavigationLayer={{ close: () => { $MobileSideBar = 0 } }}>
             {#if $MobileSideBar === 1}
-                <SelectedConversationEditor>
-                    <SideChatList bind:chara={DBState.db.characters[$selectedCharID]} />
-                </SelectedConversationEditor>
+                <SideChatList bind:chara={DBState.db.characters[$selectedCharID]} />
             {:else if $MobileSideBar === 2}
                 <SelectedConversationEditor>
                     <CharConfig />
@@ -63,7 +68,7 @@
     {:else if $MobileGUIStack === 1}
         <MobileCharacters />
     {:else if $MobileGUIStack === 2}
-        {#await loadSettings()}
+        {#await loadSettings(settingsRetry)}
             <div class="w-full h-full flex items-center justify-center text-textcolor">
                 <LoadingIndicator label={language.loading} />
             </div>
@@ -71,10 +76,7 @@
             {@const Settings = module.default}
             <Settings />
         {:catch}
-            <div class="w-full h-full flex flex-col gap-3 items-center justify-center text-textcolor" role="alert">
-                <span>{language.error}</span>
-                <button class="bg-darkbutton border border-darkborderc rounded-md px-4 py-2 hover:bg-selected" onclick={() => {settingsPromise = undefined; $MobileGUIStack = 1}}>{language.cancel}</button>
-            </div>
+            <LazyScreenError message={language.risuNest.lazy.settings} onRetry={() => { settingsPromise = undefined; settingsRetry += 1 }} backLabel={language.goback} onBack={() => { settingsPromise = undefined; $MobileGUIStack = 1 }} />
         {/await}
     {/if}
     </div>

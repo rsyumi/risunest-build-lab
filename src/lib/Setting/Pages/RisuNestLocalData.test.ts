@@ -11,6 +11,8 @@ const remotes = vi.hoisted(() => ({ readLocalDataRemoteState: vi.fn() }))
 
 vi.mock('src/ts/storage/localDataSections', () => sections)
 vi.mock('src/ts/storage/localDataRemotes', () => remotes)
+vi.mock('src/ts/platform', () => ({ isTauri: false }))
+vi.mock('src/ts/alert', () => ({ alertConfirm: vi.fn(), alertError: vi.fn() }))
 vi.mock('src/lang', async () => ({
     language: (await import('src/lang/en')).languageEnglish,
 }))
@@ -162,4 +164,21 @@ describe('RisuNestLocalData', () => {
 
         expect(toggle('hypa').checked).toBe(true)
     })
+})
+
+it('restores confirmed values after a write and reload fail, then retries', async () => {
+    component = mount(RisuNestLocalData, { target })
+    await settle()
+    sections.setLocalDataParticipating.mockRejectedValueOnce(new Error('synthetic write'))
+    sections.readLocalDataParticipation.mockRejectedValueOnce(new Error('synthetic reload'))
+    toggle('local-plugins').click()
+    await settle()
+    dialogButton(strings.enableConfirm).click()
+    await settle()
+    expect(toggle('local-plugins').checked).toBe(false)
+    expect(toggle('local-plugins').disabled).toBe(true)
+    expect(target.textContent).toContain(strings.applyFailed)
+    ;[...target.querySelectorAll('button')].find(button => button.textContent?.trim() === languageEnglish.retry)!.click()
+    await settle()
+    expect(toggle('local-plugins').disabled).toBe(false)
 })

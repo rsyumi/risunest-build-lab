@@ -1,9 +1,9 @@
 use super::{
-    checkpoint_after_detached_release, compare_plugin_storage_keys, RevisionReadLease, StoreError,
+    checkpoint_after_detached_release, RevisionReadLease, StoreError,
     StoreResult,
 };
 use crate::native_file_jobs::{
-    JobControl, JobPhase, JobProgress, JobResultSummary, NativeJobError,
+    ExportExclusions, JobControl, JobPhase, JobProgress, JobResultSummary, NativeJobError,
 };
 use futures::future::{select, Either};
 use reqwest::header::{CONTENT_LENGTH, CONTENT_TYPE};
@@ -89,9 +89,8 @@ pub(crate) struct PreparedKeiUpload {
     reader: Option<RevisionReadLease>,
     revision: i64,
     url: Url,
-    expected_account_id: String,
     token: String,
-    account_validated: bool,
+    account: Value,
 }
 
 pub(super) struct KeiPayloadFile {
@@ -100,6 +99,7 @@ pub(super) struct KeiPayloadFile {
     sha256: String,
     character_count: u64,
     preset_count: u64,
+    exclusions: ExportExclusions,
     armed: bool,
 }
 
@@ -134,6 +134,7 @@ pub(super) fn prepare_upload(
     url: &str,
     expected_account_id: &str,
     token: &str,
+    account: &Value,
 ) -> Result<PreparedKeiUpload, (StoreError, RevisionReadLease)> {
     prepare_upload_inner(
         snapshots_dir,
@@ -143,7 +144,7 @@ pub(super) fn prepare_upload(
         url,
         expected_account_id,
         token,
-        true,
+        account,
     )
 }
 
@@ -155,6 +156,7 @@ pub(super) fn prepare_job_upload(
     url: &str,
     expected_account_id: &str,
     token: &str,
+    account: &Value,
 ) -> Result<PreparedKeiUpload, (StoreError, RevisionReadLease)> {
     prepare_upload_inner(
         snapshots_dir,
@@ -164,7 +166,7 @@ pub(super) fn prepare_job_upload(
         url,
         expected_account_id,
         token,
-        false,
+        account,
     )
 }
 
@@ -176,7 +178,7 @@ fn prepare_upload_inner(
     url: &str,
     expected_account_id: &str,
     token: &str,
-    validate_root: bool,
+    account: &Value,
 ) -> Result<PreparedKeiUpload, (StoreError, RevisionReadLease)> {
     let result = (|| -> StoreResult<(PathBuf, PathBuf, Url)> {
         if !lease.starts_with("snapshot-") {
@@ -192,20 +194,7 @@ fn prepare_upload_inner(
                 });
             }
         }
-        if validate_root {
-            let root: String = reader
-                .connection
-                .query_row(
-                    "SELECT value FROM root WHERE generation = ?1",
-                    [&reader.target.generation],
-                    |row| row.get(0),
-                )
-                .optional()?
-                .ok_or_else(|| StoreError::Validation {
-                    message: "Pinned generation has no persistent root".to_owned(),
-                })?;
-            validate_account(&root, expected_account_id, token)?;
-        }
+        validate_account_value(account, expected_account_id, token)?;
         let url = Url::parse(url).map_err(|_| StoreError::Validation {
             message: "KEI backup URL is invalid".to_owned(),
         })?;
@@ -231,9 +220,8 @@ fn prepare_upload_inner(
             revision: reader.target.revision,
             reader: Some(reader),
             url,
-            expected_account_id: expected_account_id.to_owned(),
             token: token.to_owned(),
-            account_validated: validate_root,
+            account: account.clone(),
         }),
         Err(error) => Err((error, reader)),
     }
@@ -267,27 +255,11 @@ pub(super) fn sweep_abandoned(snapshots_dir: &Path) {
     }
 }
 
-fn validate_account(root: &str, expected_account_id: &str, token: &str) -> StoreResult<()> {
-    let root: Value = serde_json::from_str(root)?;
-    validate_account_value(&root, expected_account_id, token)
-}
-
-fn validate_account_value(root: &Value, expected_account_id: &str, token: &str) -> StoreResult<()> {
-    let account = root
-        .get("account")
-        .and_then(Value::as_object)
-        .ok_or_else(|| StoreError::Validation {
-            message: "Pinned KEI account is unavailable".to_owned(),
-        })?;
-    if account.get("kei").and_then(Value::as_bool) != Some(true)
-        || account.get("id").and_then(Value::as_str) != Some(expected_account_id)
-        || account.get("token").and_then(Value::as_str) != Some(token)
-    {
-        return Err(StoreError::Validation {
+fn validate_account_value(account: &Value, expected_account_id: &str, token: &str) -> StoreResult<()> {
+    crate::account_credential::validate_account(account, expected_account_id, token, true)
+        .map_err(|_| StoreError::Validation {
             message: "KEI account changed before the pinned backup".to_owned(),
-        });
-    }
-    Ok(())
+        })
 }
 
 impl PreparedKeiUpload {
@@ -305,8 +277,15 @@ impl PreparedKeiUpload {
     ) -> StoreResult<KeiPayloadFile> {
         fs::create_dir_all(&self.output_directory)?;
         let reader = self.reader.as_ref().ok_or(StoreError::SnapshotReleased)?;
-        let character_count =
-            record_count(&reader.connection, "characters", &reader.target.generation)?;
+        let character_count = super::export::character_ids(
+            &reader.connection, &reader.target.generation)?.len() as u64;
+        let exclusions = ExportExclusions {
+            archived_characters: super::archive::archived_character_ids(
+                &reader.connection, &reader.target.generation)?.len() as u64,
+            colliding_plugin_values: super::export::flattened_plugin_storage(
+                &reader.connection, &reader.target.generation)?.collisions.iter()
+                .map(|(_, owners)| owners.len() as u64).sum(),
+        };
         let preset_count =
             record_count(&reader.connection, "bot_presets", &reader.target.generation)?;
         let path = self
@@ -325,7 +304,7 @@ impl PreparedKeiUpload {
             &reader.connection,
             &reader.target.generation,
             &self.token,
-            (!self.account_validated).then_some(self.expected_account_id.as_str()),
+            &self.account,
             &mut writer,
         )?;
         let (bytes, sha256) = writer.finish();
@@ -344,6 +323,7 @@ impl PreparedKeiUpload {
             sha256,
             character_count,
             preset_count,
+            exclusions,
             armed: true,
         })
     }
@@ -466,7 +446,7 @@ pub(crate) fn run_job(
                     "KEI backup cancelled during upload",
                 )?;
                 Ok(JobResultSummary {
-                    export_exclusions: None,
+                    export_exclusions: Some(payload.exclusions.clone()),
                     revision,
                     source_bytes: payload.bytes,
                     source_sha256: payload.sha256.clone(),
@@ -758,8 +738,9 @@ fn store_error(error: StoreError) -> NativeJobError {
         StoreError::RevisionConflict { .. } => {
             NativeJobError::new("revision-conflict", error.to_string())
         }
-        StoreError::SnapshotReleased => NativeJobError::new("store-error", error.to_string()),
-        StoreError::Validation { .. } => NativeJobError::new("invalid-input", error.to_string()),
+        StoreError::Committed { .. } | StoreError::RawBodyUnavailable | StoreError::CommitBusy
+        | StoreError::SnapshotReleased => NativeJobError::new("store-error", error.to_string()),
+        StoreError::CommitDecode { .. } | StoreError::Validation { .. } => NativeJobError::new("invalid-input", error.to_string()),
         StoreError::Store { .. } => NativeJobError::new("transport-failed", error.to_string()),
     }
 }
@@ -827,13 +808,13 @@ fn write_payload(
     connection: &Connection,
     generation: &str,
     token: &str,
-    expected_account_id: Option<&str>,
+    account: &Value,
     writer: &mut impl Write,
 ) -> StoreResult<()> {
     writer.write_all(b"{\"token\":")?;
     serde_json::to_writer(&mut *writer, token)?;
     writer.write_all(b",\"database\":")?;
-    write_database(connection, generation, expected_account_id, token, writer)?;
+    write_database(connection, generation, account, writer)?;
     writer.write_all(b"}")?;
     Ok(())
 }
@@ -859,8 +840,7 @@ impl DatabaseField<'_> {
 fn write_database(
     connection: &Connection,
     generation: &str,
-    expected_account_id: Option<&str>,
-    token: &str,
+    account: &Value,
     writer: &mut impl Write,
 ) -> StoreResult<()> {
     let root_json: String = connection
@@ -873,11 +853,12 @@ fn write_database(
         .ok_or_else(|| StoreError::Validation {
             message: "Pinned generation has no persistent root".to_owned(),
         })?;
-    let root: Value = serde_json::from_str(&root_json)?;
+    let mut root: Value = serde_json::from_str(&root_json)?;
     drop(root_json);
-    if let Some(expected_account_id) = expected_account_id {
-        validate_account_value(&root, expected_account_id, token)?;
-    }
+    let root_object = root.as_object_mut().ok_or_else(|| StoreError::Validation {
+        message: "Persistent root must be an object".to_owned(),
+    })?;
+    root_object.insert("account".to_owned(), account.clone());
     let root = root.as_object().ok_or_else(|| StoreError::Validation {
         message: "Persistent root must be an object".to_owned(),
     })?;
@@ -945,7 +926,7 @@ fn write_characters(
 ) -> StoreResult<()> {
     let mut statement = connection.prepare(
         "SELECT character_id, detail FROM characters
-         WHERE generation = ?1 ORDER BY configured_index ASC",
+         WHERE generation = ?1 AND archived_object IS NULL ORDER BY configured_index ASC",
     )?;
     let mut rows = statement.query([generation])?;
     writer.write_all(b"[")?;
@@ -1101,29 +1082,16 @@ fn write_plugin_storage(
     generation: &str,
     writer: &mut impl Write,
 ) -> StoreResult<()> {
-    let mut statement = connection
-        .prepare("SELECT storage_key, ordinal FROM plugin_storage WHERE generation = ?1")?;
-    let mut entries = statement
-        .query_map([generation], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-        })?
-        .collect::<Result<Vec<_>, _>>()?;
-    entries.sort_by(|(left, left_ordinal), (right, right_ordinal)| {
-        compare_plugin_storage_keys(left, *left_ordinal, right, *right_ordinal)
-    });
+    let entries = super::export::flattened_plugin_storage(connection, generation)?;
     writer.write_all(b"{")?;
-    for (index, (key, _)) in entries.into_iter().enumerate() {
+    for (index, row) in entries.rows.iter().enumerate() {
         if index > 0 {
             writer.write_all(b",")?;
         }
-        serde_json::to_writer(&mut *writer, &key)?;
+        serde_json::to_writer(&mut *writer, &row.key)?;
         writer.write_all(b":")?;
-        let value: String = connection.query_row(
-            "SELECT value FROM plugin_storage WHERE generation = ?1 AND storage_key = ?2",
-            params![generation, key],
-            |row| row.get(0),
-        )?;
-        write_stored_value(writer, &value)?;
+        let value = super::export::read_plugin_storage_value(connection, generation, row)?;
+        write_canonical_value(writer, &value)?;
     }
     writer.write_all(b"}")?;
     Ok(())
@@ -1136,13 +1104,17 @@ fn write_stored_value(writer: &mut impl Write, serialized: &str) -> StoreResult<
 
 #[cfg(test)]
 mod tests {
+    fn synthetic_account() -> serde_json::Value {
+        serde_json::json!({"id":"account-1", "token":"secret-token", "kei":true, "data":{}})
+    }
     use super::{
         await_upload_with_job_control, run_job, set_job_phase, set_job_progress,
-        write_canonical_value, CancellableWriter, ControlledUploadError,
+        write_canonical_value, write_characters, write_plugin_storage, CancellableWriter, ControlledUploadError,
     };
     use crate::native_file_jobs::{JobKind, JobPhase, JobProgress, JobRegistry};
     use crate::persistent_store::{AssetAlias, PersistentStore, WorkingSetCommit};
-    use serde_json::json;
+    use rusqlite::params;
+    use serde_json::{json, Value};
     use std::cell::Cell;
     use std::fs;
     use std::io::{Read, Write};
@@ -1152,6 +1124,39 @@ mod tests {
     use std::time::Duration;
 
     const EXPECTED_PAYLOAD: &str = "{\"token\":\"secret-token\",\"database\":{\"account\":{\"data\":{},\"id\":\"account-1\",\"kei\":true,\"token\":\"secret-token\"},\"botPresets\":[{\"a\":1,\"name\":\"preset\",\"z\":2}],\"characters\":[{\"a\":1,\"chaId\":\"char-1\",\"chats\":[{\"id\":\"chat-1\",\"message\":[{\"chatId\":\"message-1\",\"data\":\"hello\",\"role\":\"user\"}],\"name\":\"Chat\",\"note\":\"\"}],\"name\":\"Char\",\"type\":\"character\",\"z\":2}],\"pluginCustomStorage\":{\"2\":\"index\",\"beta\":{\"a\":1,\"z\":2},\"alpha\":\"first\"},\"z\":{\"2\":\"two\",\"10\":\"ten\",\"a\":\"line\\n\",\"b\":2}}}";
+
+    #[test]
+    fn kei_projection_excludes_archived_shells_and_every_colliding_owner() {
+        let (_directory, mut store, lease) = open_store_with_fixture();
+        store.release_revision(&lease).unwrap();
+        let staging = store.replace_begin().unwrap().staging_id;
+        store.replace_put_root(&staging, &json!({})).unwrap();
+        store.replace_put_presets(&staging, &[]).unwrap();
+        store.replace_add_characters(&staging, &[
+            json!({"chaId":"live","type":"character","name":"Live","chats":[]}),
+            json!({"chaId":"archived","type":"character","name":"Archived","chats":[]}),
+        ]).unwrap();
+        let revision = store.replace_commit(&staging, None).unwrap().revision;
+        store.archive_character("archived", revision, 1).unwrap();
+        let generation = store.read_view(None).unwrap().1.generation;
+        for (owner, key, value) in [("a", "shared", "left"), ("b", "shared", "right"), ("a", "unique", "kept")] {
+            let serialized = serde_json::to_string(value).unwrap();
+            store.connection.execute("INSERT INTO plugin_storage(generation,owner,storage_key,value,byte_size,ordinal,assigned_at) VALUES (?1,?2,?3,?4,?5,0,NULL)",
+                params![generation, owner, key, serialized, serialized.len() as i64]).unwrap();
+        }
+        let mut characters = Vec::new();
+        write_characters(&store.connection, &generation, &mut characters).unwrap();
+        let characters: Value = serde_json::from_slice(&characters).unwrap();
+        assert_eq!(characters.as_array().unwrap().len(), 1);
+        assert_eq!(characters[0]["chaId"], "live");
+        let mut storage = Vec::new();
+        write_plugin_storage(&store.connection, &generation, &mut storage).unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&storage).unwrap(), json!({"unique":"kept"}));
+        let lease = store.acquire_revision(store.revision().unwrap()).unwrap().lease;
+        let exported = store.export_risu_save(&lease, true).unwrap();
+        assert_eq!(exported.excluded_archived_character_count, 1);
+        assert_eq!(exported.excluded_colliding_plugin_value_count, 2);
+    }
 
     #[test]
     fn cancellation_writer_stops_write_all_without_retrying_into_output() {
@@ -1291,6 +1296,7 @@ mod tests {
                 "http://127.0.0.1/autobackup/save",
                 "account-1",
                 "secret-token",
+                &synthetic_account(),
             )
             .expect("prepare upload");
 
@@ -1313,6 +1319,7 @@ mod tests {
                 "http://127.0.0.1/autobackup/save",
                 "account-1",
                 "secret-token",
+                &synthetic_account(),
             )
             .expect("prepare transferred reader");
 
@@ -1383,6 +1390,7 @@ mod tests {
                 &format!("http://{address}/autobackup/save"),
                 "account-1",
                 "secret-token",
+                &synthetic_account(),
             )
             .expect("prepare upload");
         let output_directory = prepared.output_directory.clone();
@@ -1421,6 +1429,7 @@ mod tests {
                 &format!("http://{address}/autobackup/save"),
                 "account-1",
                 "secret-token",
+                &synthetic_account(),
             )
             .expect("prepare upload");
         let output_directory = prepared.output_directory.clone();
@@ -1449,7 +1458,7 @@ mod tests {
     fn later_commits_do_not_change_the_pinned_payload() {
         let (_directory, mut store, lease) = open_store_with_fixture();
         let mut root = store.read_root(None).expect("read current root").value;
-        root["account"]["token"] = json!("new-token");
+        root["username"] = json!("new-token");
         root["z"] = json!({ "changed": true });
         store
             .commit(&WorkingSetCommit {
@@ -1462,7 +1471,7 @@ mod tests {
                 replace_character: None,
                 add_character: None,
                 conversations: None,
-                delete_character_id: None,
+                delete_character_ids: None,
                 asset_owner_heads: None,
                 plugin_storage: None,
             })
@@ -1474,11 +1483,13 @@ mod tests {
                 "http://127.0.0.1/autobackup/save",
                 "account-1",
                 "secret-token",
+                &synthetic_account(),
             )
             .expect("prepare pinned upload");
         let payload = prepared.create_payload().expect("create pinned payload");
         let body = fs::read_to_string(&payload.path).expect("read pinned payload");
 
+        assert_eq!(body, EXPECTED_PAYLOAD);
         assert!(body.contains("\"token\":\"secret-token\""));
         assert!(!body.contains("new-token"));
         assert!(!body.contains("\"changed\":true"));
@@ -1494,6 +1505,7 @@ mod tests {
                 "http://127.0.0.1/autobackup/save",
                 "another-account",
                 "secret-token",
+                &synthetic_account(),
             )
             .err()
             .expect("reject account mismatch");
@@ -1505,36 +1517,58 @@ mod tests {
     }
 
     #[test]
-    fn native_job_defers_root_validation_until_off_mutex_serialization() {
+    fn native_job_rejects_vault_identity_mismatch_before_transferring_the_reader() {
         let (_directory, mut store, source_lease) = open_store_with_fixture();
+        let error = store.prepare_kei_job_upload(
+            &source_lease, 1, "http://127.0.0.1:9/autobackup/save",
+            "another-account", "secret-token", &synthetic_account(),
+        ).err().expect("reject a mismatched vault credential");
+        assert_eq!(error.to_string(), "KEI account changed before the pinned backup");
+        assert!(store.revision_leases.contains_key(&source_lease));
+    }
 
-        let prepared = store
-            .prepare_kei_job_upload(
-                &source_lease,
-                1,
-                "http://127.0.0.1:9/autobackup/save",
-                "another-account",
-                "secret-token",
-            )
-            .expect("transfer reader without parsing the root");
-        let output_directory = prepared.output_directory.clone();
+    #[test]
+    fn native_job_rejects_invalid_vault_tokens_and_kei_status_without_consuming_the_lease() {
+        let (_directory, mut store, source_lease) = open_store_with_fixture();
+        for account in [
+            json!({"id":"account-1", "token":"foreign-token", "kei":true}),
+            json!({"id":"account-1", "token":"secret-token", "kei":false}),
+            json!({"id":"account-1", "kei":true}),
+            Value::Null,
+        ] {
+            let error = store.prepare_kei_job_upload(
+                &source_lease, 1, "http://127.0.0.1:9/autobackup/save",
+                "account-1", "secret-token", &account,
+            ).err().expect("reject an invalid vault credential");
+            assert_eq!(error.to_string(), "KEI account changed before the pinned backup");
+            assert!(store.revision_leases.contains_key(&source_lease));
+        }
+    }
 
-        let error = prepared
-            .create_payload()
-            .err()
-            .expect("reject account mismatch during serialization");
+    #[test]
+    fn kei_payload_uses_only_the_explicit_vault_account_and_leaves_stored_accounts_inert() {
+        let (_directory, store, _source_lease) = open_store_with_fixture();
+        let generation = store.read_view(None).unwrap().1.generation;
+        let serialized: String = store.connection.query_row(
+            "SELECT value FROM root WHERE generation = ?1", [&generation], |row| row.get(0),
+        ).unwrap();
+        let mut root: Value = serde_json::from_str(&serialized).unwrap();
+        root["account"] = json!({"id":"foreign-account", "token":"inert-stored-token"});
+        let serialized = serde_json::to_string(&root).unwrap();
+        store.connection.execute(
+            "UPDATE root SET value = ?1 WHERE generation = ?2", params![serialized, generation],
+        ).unwrap();
 
-        assert_eq!(
-            error.to_string(),
-            "KEI account changed before the pinned backup"
-        );
-        assert!(
-            !output_directory.exists()
-                || fs::read_dir(output_directory)
-                    .expect("read upload directory")
-                    .next()
-                    .is_none()
-        );
+        let mut payload = Vec::new();
+        super::write_payload(&store.connection, &generation, "secret-token", &synthetic_account(), &mut payload).unwrap();
+        let payload: Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(payload["database"]["account"], synthetic_account());
+        assert_eq!(payload["token"], "secret-token");
+        assert!(!payload.to_string().contains("inert-stored-token"));
+        let persisted: String = store.connection.query_row(
+            "SELECT value FROM root WHERE generation = ?1", [&generation], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(persisted, serialized);
     }
 
     #[test]
@@ -1584,6 +1618,7 @@ mod tests {
                 &format!("http://{address}/autobackup/save"),
                 "account-1",
                 "secret-token",
+                &synthetic_account(),
             )
             .expect("prepare job upload");
         store
@@ -1602,7 +1637,7 @@ mod tests {
                 replace_character: None,
                 add_character: None,
                 conversations: None,
-                delete_character_id: None,
+                delete_character_ids: None,
                 asset_owner_heads: None,
                 plugin_storage: None,
             })
@@ -1651,6 +1686,7 @@ mod tests {
                 "http://127.0.0.1:9/autobackup/save",
                 "account-1",
                 "secret-token",
+                &synthetic_account(),
             )
             .expect("prepare job upload");
         let output_directory = prepared.output_directory.clone();
@@ -1685,6 +1721,7 @@ mod tests {
                 "http://127.0.0.1/autobackup/save",
                 "account-1",
                 "secret-token",
+                &synthetic_account(),
             )
             .expect("prepare upload");
         let output_directory = prepared.output_directory.clone();
@@ -1816,7 +1853,7 @@ mod tests {
         let secret = "do-not-log-this-query-secret";
         let url = format!("http://{address}/autobackup/save?api_key={secret}");
         let prepared = store
-            .prepare_kei_job_upload(&source_lease, 1, &url, "account-1", "secret-token")
+            .prepare_kei_job_upload(&source_lease, 1, &url, "account-1", "secret-token", &synthetic_account())
             .expect("prepare job upload");
         store
             .release_revision(&source_lease)

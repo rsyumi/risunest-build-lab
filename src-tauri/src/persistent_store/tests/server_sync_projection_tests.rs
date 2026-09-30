@@ -3,6 +3,18 @@ use super::*;
 use crate::asset_repository::PayloadCas;
 
 #[test]
+fn a_stored_account_cannot_change_published_root_content() {
+    let (directory, store, _) = open_fixture();
+    let cas = PayloadCas::new(directory.path()).unwrap();
+    let generation = active_generation(&store.connection).unwrap();
+    let key = ServerDirtyKey { kind: "root".into(), key1: "".into(), key2: "".into(), revision: 1 };
+    let before = projection::project(&store.connection, &cas, &generation, &key).unwrap();
+    store.connection.execute("UPDATE root SET value=json_set(value,'$.account',json('{\"token\":\"synthetic\"}'))", []).unwrap();
+    let after = projection::project(&store.connection, &cas, &generation, &key).unwrap();
+    assert_eq!(serde_json::to_vec(&before).unwrap(), serde_json::to_vec(&after).unwrap());
+}
+
+#[test]
 fn server_projection_preserves_all_families_and_removes_only_local_activity() {
     let (directory, mut store, database) = open_fixture();
     let cas = PayloadCas::new(directory.path()).unwrap();

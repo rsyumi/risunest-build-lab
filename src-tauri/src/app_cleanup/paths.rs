@@ -42,10 +42,7 @@ impl Paths {
     pub fn from_app(app: &tauri::AppHandle) -> Result<Self> {
         let manifest =
             crate::app_paths::manifest(app).map_err(|_| "cleanup-path-unavailable".to_owned())?;
-        let paths = Self::from_manifest(&manifest);
-        #[cfg(mobile)]
-        paths.validate()?;
-        Ok(paths)
+        Ok(Self::from_manifest(&manifest))
     }
 
     pub fn from_manifest(paths: &AppPaths) -> Self {

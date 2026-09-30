@@ -243,3 +243,24 @@ it('serializes synthesis before disposing a replaced speech model', async () => 
     expect(first.dispose).toHaveBeenCalledTimes(1)
     for (const audio of AudioContextFixture.instances) audio.source.onended!()
 })
+
+
+it('discards an aborted local inference and starts no later embedding batch', async () => {
+    const { setRuntimePerformanceProfile } = await import('../runtimePerformanceProfile')
+    setRuntimePerformanceProfile('low-spec')
+    try {
+        const pending = deferred<{ data: Float32Array }>()
+        const instance = model(null)
+        instance.mockReturnValueOnce(pending.promise)
+        harness.pipeline.mockResolvedValue(instance)
+        const { runEmbedding } = await import('./transformers')
+        const controller = new AbortController()
+        const run = runEmbedding(Array.from({ length: 19 }, (_, i) => String(i)), undefined, 'wasm', controller.signal)
+        const outcome = run.catch((error) => error)
+        await vi.waitFor(() => expect(instance).toHaveBeenCalledTimes(1))
+        controller.abort()
+        pending.resolve({ data: new Float32Array(16) })
+        expect(await outcome).toMatchObject({ name: 'AbortError' })
+        expect(instance).toHaveBeenCalledTimes(1)
+    } finally { setRuntimePerformanceProfile('normal') }
+})

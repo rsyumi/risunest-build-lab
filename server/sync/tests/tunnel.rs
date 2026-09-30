@@ -19,6 +19,8 @@ fn main() {
     std::thread::sleep(Duration::from_millis(250));
     println!("{{\"message\":\"Registered tunnel connection\"}}");
     if first { std::thread::sleep(Duration::from_millis(250)); return; }
+    println!("{}", "x".repeat(16384));
+    println!("synthetic after oversized output");
     loop { std::thread::sleep(Duration::from_secs(1)); }
 }
 "#).unwrap();
@@ -27,7 +29,13 @@ fn main() {
     } else {
         "synthetic"
     });
-    let output = std::process::Command::new("rustc")
+    let mut command = std::process::Command::new("rustc");
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    let output = command
         .arg(&source)
         .arg("-o")
         .arg(&binary)
@@ -55,7 +63,7 @@ async fn managed_child_restarts_and_shutdown_owns_its_lifetime() {
         })
         .unwrap();
     let runtime =
-        ConnectionRuntime::start(store.clone(), "127.0.0.1:4319".parse().unwrap()).unwrap();
+        ConnectionRuntime::start(store.clone(), "127.0.0.1:4319".parse().unwrap(), true).unwrap();
     let mut view = runtime.tunnel.clone();
     let mut saw_retry_diagnostic = false;
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -91,6 +99,7 @@ async fn managed_child_restarts_and_shutdown_owns_its_lifetime() {
     drop(view);
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(runtime.tunnel.borrow().phase, "connected");
+    assert!(runtime.tunnel.borrow().logs.iter().any(|line| line.contains("synthetic after oversized output")));
     runtime.shutdown().await;
     let pids = std::fs::read_to_string(binaries.path().join("pids")).unwrap();
     assert_eq!(pids.lines().count(), 2);
@@ -121,7 +130,7 @@ async fn fixed_endpoint_mode_does_not_start_a_tunnel() {
             registry_url: None,
         })
         .unwrap();
-    let runtime = ConnectionRuntime::start(store, "127.0.0.1:4319".parse().unwrap()).unwrap();
+    let runtime = ConnectionRuntime::start(store, "127.0.0.1:4319".parse().unwrap(), false).unwrap();
     let mut view = runtime.tunnel.clone();
     tokio::time::timeout(Duration::from_secs(2), view.changed())
         .await

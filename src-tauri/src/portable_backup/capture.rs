@@ -20,16 +20,17 @@ pub(crate) fn capture_library(
     pins: &mut DurableCasJob,
     preservation: bool,
     probe: &dyn CancellationProbe,
+    source_build: &str,
 ) -> Result<CapturedLibrary> {
     check(probe)?;
     store
-        .hydrate_registered_remote_assets(|| {
+        .hydrate_registered_remote_assets_observed(probe.cancellation_flag(), || {
             if probe.is_cancelled() {
                 Err(crate::server_sync::SyncError::new("cancelled", 409))
             } else {
                 Ok(())
             }
-        })
+        }, || probe.backup_item_processed())
         .map_err(|error| {
             if error.code == "cancelled" {
                 Error::Cancelled
@@ -41,7 +42,7 @@ pub(crate) fn capture_library(
         })?;
     let lease = store.acquire_revision(revision)?.lease;
     let outcome = (|| {
-        let mut catalog = Catalog::create(job_directory, env!("CARGO_PKG_VERSION"), revision)?;
+        let mut catalog = Catalog::create(job_directory, source_build, revision)?;
         let generation = store.portable_source_generation(&lease)?;
         catalog.db.execute(
             "INSERT INTO backup_info VALUES('sourceGeneration',?1)",

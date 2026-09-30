@@ -89,7 +89,7 @@ pub(super) fn apply_root_mutations(
         };
         if matches!(
             key.as_str(),
-            "characters" | "botPresets" | "pluginCustomStorage" | "pluginStorageMeta"
+            "characters" | "botPresets" | "pluginCustomStorage" | "pluginStorageMeta" | "account"
         ) {
             return Err(validation("Invalid persistent root mutation key"));
         }
@@ -117,6 +117,9 @@ pub(super) fn commit(
         connection,
         input.expected_revision,
         |transaction, active| {
+            if input.root.as_ref().is_some_and(|root| root.get("account").is_some()) {
+                return Err(validation("Account credentials are device-local"));
+            }
             if let Some(character) = &input.replace_character {
                 validate_character(character, "Selected character replacement")?;
             }
@@ -135,9 +138,16 @@ pub(super) fn commit(
                     transaction,
                     active,
                     details,
-                    input.delete_character_id.as_deref(),
+                    input.delete_character_ids.as_deref().unwrap_or_default(),
                 )?;
             }
+            if let Some(ids) = &input.delete_character_ids {
+                let unique: HashSet<_> = ids.iter().collect();
+                if ids.len() > 128 || unique.len() != ids.len() || ids.iter().any(String::is_empty) {
+                    return Err(validation("Character deletion requires at most 128 unique nonempty IDs"));
+                }
+            }
+            validate_changed_owner_shapes(transaction, active, input)?;
             reject_archived_targets(transaction, active, input)?;
             validate_owner_heads_for_commit(input)?;
             retained_commit_owner_heads(transaction, active, input)
@@ -149,7 +159,7 @@ pub(super) fn commit(
             if let Some(presets) = &input.replace_presets {
                 replace_presets(transaction, generation, presets)?;
             }
-            if let Some(character_id) = &input.delete_character_id {
+            for character_id in input.delete_character_ids.as_deref().unwrap_or_default() {
                 delete_character(transaction, generation, character_id)?;
             }
             if let Some(character) = &input.character {
@@ -208,15 +218,49 @@ fn reject_archived_targets(
         targets.push(match mutation {
             ConversationMutation::ReplaceRange { character_id, .. } => character_id,
             ConversationMutation::Delete { character_id, .. } => character_id,
+            ConversationMutation::Reorder { character_id, .. } => character_id,
         });
     }
     for character_id in targets {
-        if Some(character_id) == input.delete_character_id.as_deref() {
+        if input.delete_character_ids.as_deref().unwrap_or_default().iter().any(|id| id == character_id) {
             continue;
         }
         if super::archive::is_archived(transaction, generation, character_id)? {
             return Err(super::archive::archived_error(character_id));
         }
+    }
+    Ok(())
+}
+
+fn validate_changed_owner_shapes(connection: &Connection, generation: &str, input: &WorkingSetCommit) -> StoreResult<()> {
+    let validate = |next: &Value, previous: &Value, character_id: Option<&str>| -> StoreResult<()> {
+        let old_parents = super::record_projection::owner_parents(previous, character_id);
+        for (owner, parent, property) in super::record_projection::owner_parents(next, character_id) {
+            let value = parent.get(property);
+            let old = old_parents.iter().find(|(old_owner, _, _)| old_owner == &owner)
+                .and_then(|(_, parent, _)| parent.get(property));
+            if value == old { continue; }
+            if let Some(value) = value {
+                let values = value.as_array().ok_or_else(|| validation(format!(
+                    "{} {property} must be an array", character_id.unwrap_or("root"),
+                )))?;
+                super::record_projection::owner_tuple_shape(values, character_id.is_none())
+                    .map_err(|_| validation(format!("{} {property} contains an invalid owner tuple", character_id.unwrap_or("root"))))?;
+            }
+        }
+        Ok(())
+    };
+    if let Some(root) = &input.root {
+        validate(root, &replacement_root(connection, generation)?, None)?;
+    }
+    for character in input.character.iter().chain(input.character_details.iter().flatten())
+        .chain(input.replace_character.iter()).chain(input.add_character.iter()) {
+        let id = required_string(character, "chaId", "Character mutation")?;
+        let old: Option<String> = connection.query_row(
+            "SELECT detail FROM characters WHERE generation=?1 AND character_id=?2", params![generation, id], |row| row.get(0),
+        ).optional()?;
+        let old = old.map(|value| serde_json::from_str(&value)).transpose()?.unwrap_or(Value::Null);
+        validate(character, &old, Some(id))?;
     }
     Ok(())
 }
@@ -334,7 +378,7 @@ fn retained_commit_owner_heads(
         let original_owner = head.owner.clone();
         match &head.owner {
             AssetOwnerLocator::CharacterAdditionalAssets { character_id } => {
-                if input.delete_character_id.as_ref() == Some(character_id) {
+                if input.delete_character_ids.as_deref().unwrap_or_default().contains(character_id) {
                     continue;
                 }
             }
@@ -452,7 +496,7 @@ fn replace_changed_owner_heads(
             character_ids.insert(character_id.to_owned());
         }
     }
-    if let Some(character_id) = &input.delete_character_id {
+    for character_id in input.delete_character_ids.as_deref().unwrap_or_default() {
         character_ids.insert(character_id.clone());
     }
     for character_id in character_ids {
@@ -1420,6 +1464,7 @@ fn replace_commit_transaction(
     let active = active_generation(&transaction)?;
     let revision = actual_revision + 1;
     let generation = format!("revision-{revision}");
+    super::plugin_claim_eligibility::capture(&transaction, staging_id)?;
     delete_generation(&transaction, &active)?;
     move_generation(&transaction, staging_id, &generation)?;
     super::server_sync_outbox::full_replacement(&transaction)?;
@@ -1476,6 +1521,7 @@ pub(super) fn replace_abort(connection: &mut Connection, staging_id: &str) -> St
 
 fn put_root(transaction: &Transaction<'_>, generation: &str, root: &Value) -> StoreResult<()> {
     let mut root = object(root, "Persistent root")?.clone();
+    root.shift_remove("account");
     root.shift_remove("characters");
     root.shift_remove("botPresets");
     root.shift_remove("pluginCustomStorage");
@@ -1702,12 +1748,12 @@ fn validate_character_details(
     transaction: &Transaction<'_>,
     generation: &str,
     details: &[Value],
-    delete_character_id: Option<&str>,
+    delete_character_ids: &[String],
 ) -> StoreResult<()> {
     let mut character_ids = std::collections::HashSet::new();
     for detail in details {
         let character_id = required_string(detail, "chaId", "Batch character detail mutation")?;
-        if Some(character_id) == delete_character_id || !character_ids.insert(character_id) {
+        if delete_character_ids.iter().any(|id| id == character_id) || !character_ids.insert(character_id) {
             return Err(validation(
                 "Batch character detail mutation requires unique retained character IDs",
             ));
@@ -2000,6 +2046,42 @@ fn apply_conversation_mutation(
                 params![generation, character_id, conversation_id],
             )?;
             refresh_character_summary(transaction, generation, character_id)?;
+            Ok(())
+        }
+        ConversationMutation::Reorder {
+            character_id,
+            conversation_ids,
+        } => {
+            let existing = {
+                let mut statement = transaction.prepare(
+                    "SELECT conversation_id, configured_index FROM conversations
+                     WHERE generation = ?1 AND character_id = ?2",
+                )?;
+                let rows = statement.query_map(params![generation, character_id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })?;
+                rows.collect::<Result<HashMap<_, _>, _>>()?
+            };
+            let requested: HashSet<&str> = conversation_ids.iter().map(String::as_str).collect();
+            if requested.len() != conversation_ids.len()
+                || conversation_ids.len() != existing.len()
+                || conversation_ids.iter().any(|id| !existing.contains_key(id))
+            {
+                return Err(validation(format!(
+                    "Conversation order for {character_id} must list each conversation once"
+                )));
+            }
+            for (configured_index, conversation_id) in conversation_ids.iter().enumerate() {
+                let configured_index = configured_index as i64;
+                if existing[conversation_id] == configured_index {
+                    continue;
+                }
+                transaction.execute(
+                    "UPDATE conversations SET configured_index = ?4
+                     WHERE generation = ?1 AND character_id = ?2 AND conversation_id = ?3",
+                    params![generation, character_id, conversation_id, configured_index],
+                )?;
+            }
             Ok(())
         }
         ConversationMutation::ReplaceRange {

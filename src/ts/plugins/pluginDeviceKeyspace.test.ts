@@ -9,6 +9,12 @@ import {
     type PluginDeviceMutation,
     type PluginDeviceSpace,
 } from './pluginDeviceKeyspace'
+import { SafeLocalPluginStorage } from './pluginSafeClass'
+import { deletePluginDataItems, type PluginDataItem } from './pluginDataInventory'
+import { pluginDeviceStorage } from './pluginDeviceStorage'
+
+vi.mock('./plugins.svelte', () => ({ pluginStorageStore: { invalidate: vi.fn(), forOwner: vi.fn() } }))
+vi.mock('../storage/persistentDataStoreFactory', () => ({ getPersistentDataStore: vi.fn() }))
 
 vi.mock('./pluginDeviceStorage', () => {
     const values = new Map<string, unknown>()
@@ -94,6 +100,65 @@ describe('plugin device keyspace', () => {
         invalidatePluginDeviceKeyspaces()
     })
 
+    it('deletes device values through inventory and refreshes held and reacquired wrappers', async () => {
+        const owner = 'inventory-delete'
+        const held = getPluginDeviceKeyspace(owner)
+        await held.setItem('json', 'json-value', '{"ok":true}')
+        await held.setItem('string', 'string-value', 'text')
+        const rows: PluginDataItem[] = (['json', 'string'] as const).map(space => ({
+            owner, space, key: `${space}-value`, valueType: space, byteSize: 12, automatic: false,
+        }))
+        await deletePluginDataItems(rows, 'device')
+        for (const wrapper of [held, getPluginDeviceKeyspace(owner)]) {
+            await expect(wrapper.getItem('json', 'json-value')).resolves.toBeNull()
+            await expect(wrapper.getItem('string', 'string-value')).resolves.toBeNull()
+            await expect(wrapper.keys('json')).resolves.toEqual([])
+            await expect(wrapper.keys('string')).resolves.toEqual([])
+        }
+    })
+
+    it('retains durable values after a failed inventory deletion', async () => {
+        const owner = 'inventory-failure'
+        const held = getPluginDeviceKeyspace(owner)
+        await held.setItem('json', 'kept', '42')
+        const failure = vi.spyOn(pluginDeviceStorage, 'removeItem').mockRejectedValueOnce(new Error('disk failure'))
+        await expect(deletePluginDataItems([{ owner, space: 'json', key: 'kept', valueType: 'json', byteSize: 2, automatic: false }], 'device')).rejects.toThrow('disk failure')
+        await expect(held.getItem('json', 'kept')).resolves.toBe('42')
+        await expect(held.keys('json')).resolves.toEqual(['kept'])
+        failure.mockRestore()
+    })
+
+    it('rejects a mixed or mismatched deletion batch before any backend mutation', async () => {
+        const owner = 'inventory-scope'
+        const held = getPluginDeviceKeyspace(owner)
+        await held.setItem('string', 'kept', 'text')
+        const row: PluginDataItem = { owner, space: 'string', key: 'kept', valueType: 'string', byteSize: 4, automatic: false }
+        await expect(deletePluginDataItems([row], 'library')).rejects.toThrow('scope changed')
+        await expect(deletePluginDataItems([row, { ...row, space: undefined }], 'device')).rejects.toThrow('scope changed')
+        await expect(held.getItem('string', 'kept')).resolves.toBe('text')
+    })
+
+    it('round-trips JSON representations and rejects unsupported values before writing', async () => {
+        const storage = new SafeLocalPluginStorage('json-contract')
+        const values = [{ a: 1 }, [1, null], null, 42, 'text', new Date('2020-01-01T00:00:00Z'), new Uint8Array([1, 2])]
+        for (const value of values) {
+            await storage.setItem('value', value)
+            await expect(storage.getItem('value')).resolves.toEqual(JSON.parse(JSON.stringify(value)))
+        }
+        await storage.setItem('value', 'kept')
+        const cycle: { self?: unknown } = {}; cycle.self = cycle
+        const write = vi.spyOn(pluginDeviceStorage, 'setItem')
+        for (const value of [undefined, () => {}, Symbol('unsupported'), cycle, 1n]) {
+            await expect(storage.setItem('value', value)).rejects.toBeInstanceOf(TypeError)
+            await expect(storage.getItem('value')).resolves.toBe('kept')
+        }
+        expect(write).not.toHaveBeenCalled()
+        invalidatePluginDeviceKeyspaces('json-contract')
+        await expect(storage.getItem('value')).resolves.toBe('kept')
+        await expect(storage.keys()).resolves.toEqual(['value'])
+        write.mockRestore()
+    })
+
     it('invalidates an already-held shared wrapper', async () => {
         const backend = createBrowserPluginDeviceBackend()
         const keyspace = getPluginDeviceKeyspace('shared-wrapper')
@@ -154,6 +219,26 @@ describe('plugin device keyspace', () => {
         finish()
         await older
         await expect(keyspace.getItem('string', 'key')).resolves.toBe('new')
+    })
+
+    it.each(['set', 'delete', 'clear'] as const)('refreshes the cache after a committed %s loses its acknowledgement', async (operation) => {
+        const { backend } = recordingBackend([{ owner: 'a', space: 'string', key: 'key', value: 'old' }])
+        const write = backend.write.bind(backend)
+        const keyspace = new PluginDeviceKeyspace('a', backend)
+        await expect(keyspace.getItem('string', 'key')).resolves.toBe('old')
+        vi.spyOn(backend, 'write').mockImplementationOnce(async (owner, mutations) => {
+            await write(owner, mutations)
+            throw new Error('write acknowledgement lost')
+        })
+
+        const pending = operation === 'set'
+            ? keyspace.setItem('string', 'key', 'new')
+            : operation === 'delete'
+                ? keyspace.removeItem('string', 'key')
+                : keyspace.clear('string')
+        await expect(pending).rejects.toThrow('write acknowledgement lost')
+        await expect(keyspace.getItem('string', 'key')).resolves.toBe(operation === 'set' ? 'new' : null)
+        await expect(keyspace.keys('string')).resolves.toEqual(operation === 'set' ? ['key'] : [])
     })
 
     it('keeps writes durable but drops a cache that grows beyond its byte budget', async () => {

@@ -100,6 +100,9 @@ describe('SaveCoordinator', () => {
                 captureSelectedConversationAuthority: () => authority,
                 replaceDatabase: () => undefined,
                 onConversationMutationPersisted: onPersisted,
+                onWindowedSelectedConversationRevision: (revision) => {
+                    if (authority) authority = { ...authority, storeRevision: revision }
+                },
             })
             coordinator.initialize(2, database)
             expect(coordinator.adoptWindowedSelectedConversation(
@@ -126,6 +129,30 @@ describe('SaveCoordinator', () => {
                 sessionToken,
             }
         }
+
+        it('retires flushed windowed ownership before deselection so root saves remain available', async () => {
+            const harness = makeWindowedHarness()
+            await harness.coordinator.flushPendingDataLocally('leave-windowed')
+            harness.coordinator.retireWindowedSelectedConversation()
+            harness.replaceAuthority(null)
+            harness.replaceSelected(null as any)
+            harness.database.username = 'Changed after Home'
+            harness.coordinator.markPersistentDataDirty(0)
+            await harness.coordinator.flushPendingDataLocally('save-after-Home')
+            expect(harness.commit).toHaveBeenCalledOnce()
+            expect(harness.commit.mock.calls[0][0]).toMatchObject({ rootMutations: [
+                { type: 'set', key: 'username', value: 'Changed after Home' },
+            ] })
+        })
+
+        it('does not retire windowed ownership while a zero-byte edit remains pending', async () => {
+            const harness = makeWindowedHarness()
+            harness.database.username = 'Pending root edit'
+            harness.coordinator.markPersistentDataDirty(0)
+            expect(() => harness.coordinator.retireWindowedSelectedConversation()).toThrow('pending persistence')
+            await harness.coordinator.flushPendingDataLocally('complete-before-leaving')
+            expect(() => harness.coordinator.retireWindowedSelectedConversation()).not.toThrow()
+        })
 
         function recordWindowedMutation(
             coordinator: SaveCoordinator,
@@ -1009,6 +1036,97 @@ describe('SaveCoordinator', () => {
             )).toBe(true)
             await harness.coordinator.flushPendingData('advanced-windowed-baseline')
             expect(harness.commit).not.toHaveBeenCalled()
+        })
+
+        function recordAddedChat(harness: ReturnType<typeof makeWindowedHarness>) {
+            const before = harness.selected()
+            const added = {
+                id: 'added',
+                name: 'Added',
+                note: 'added note',
+                localLore: [],
+                message: [{ role: 'user', data: 'added message' }],
+            } as unknown as Chat
+            const draft = {
+                type: 'character',
+                chaId: 'char-a',
+                name: 'Alpha',
+                chatPage: 1,
+                chats: [added, { id: 'two', name: 'Two', localLore: [], note: '' }],
+            } as unknown as character
+            const recorded = harness.coordinator.recordWindowedChatListChange(
+                harness.authority()! as WindowedConversationPersistenceAuthority,
+                before,
+                draft,
+            )
+            // Mirrors the working set keeping the selected shell object in place.
+            harness.replaceSelected({
+                ...draft,
+                chats: [added, harness.projectedConversation],
+            } as unknown as character)
+            return { recorded, added }
+        }
+
+        it('commits a recorded chat-list edit without reading the selected conversation', async () => {
+            const harness = makeWindowedHarness()
+            const { recorded } = recordAddedChat(harness)
+            expect(recorded).toBe(true)
+            expect(harness.coordinator.hasPendingPersistenceWork).toBe(true)
+
+            await harness.coordinator.flushPendingData('chat-list')
+
+            expect(harness.readConversationWindow).not.toHaveBeenCalled()
+            expect(harness.commit).toHaveBeenCalledTimes(1)
+            const request = harness.commit.mock.calls[0][0]
+            expect(request).not.toHaveProperty('replaceCharacter')
+            expect(request.character).toEqual({
+                type: 'character',
+                chaId: 'char-a',
+                name: 'Alpha',
+                chatPage: 1,
+            })
+            expect(request.conversations).toEqual([
+                {
+                    type: 'replace-range',
+                    characterId: 'char-a',
+                    conversationId: 'added',
+                    start: 0,
+                    deleteCount: 0,
+                    messages: [{ role: 'user', data: 'added message' }],
+                    conversation: { id: 'added', name: 'Added', note: 'added note', localLore: [] },
+                    configuredIndex: 1,
+                },
+                { type: 'reorder', characterId: 'char-a', conversationIds: ['added', 'two'] },
+            ])
+            expect(harness.coordinator.hasPendingPersistenceWork).toBe(false)
+        })
+
+        it('still refuses a selected change the recorded chat-list edit does not explain', async () => {
+            const harness = makeWindowedHarness()
+            expect(recordAddedChat(harness).recorded).toBe(true)
+            harness.replaceSelected({
+                ...harness.selected(),
+                name: 'Unrecorded rename',
+            } as character)
+
+            await expect(harness.coordinator.flushPendingData('chat-list')).rejects.toThrow(
+                /compatibility/i,
+            )
+            expect(harness.commit).not.toHaveBeenCalled()
+        })
+
+        it('does not record a chat-list edit over unsaved conversation evidence', () => {
+            const harness = makeWindowedHarness()
+            recordWindowedMutation(harness.coordinator, {
+                sessionToken: harness.sessionToken,
+                previousVersion: 0,
+                sessionVersion: 1,
+                start: 10_000,
+                deleteCount: 0,
+                messages: [{ role: 'user', data: 'unsaved' }],
+            })
+
+            expect(recordAddedChat(harness).recorded).toBe(false)
         })
     })
 })

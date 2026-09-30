@@ -18,6 +18,7 @@ export interface ChatViewportJumpOptions {
 }
 
 export interface ChatViewportHandle {
+    isAtBottom(): boolean
     jumpTo(index: number, options?: ChatViewportJumpOptions): Promise<boolean>
     jumpToLatestMessage(): Promise<void>
     scrollToLatestMessage(): Promise<void>

@@ -202,7 +202,13 @@ mod tests {
         let script = format!(
             "import {{ productFixture, entryFixture }} from 'file:///{fixture}'; const release=productFixture('sync','{version}'); const app=entryFixture('app'); const sync={{manifestUrl:release.downloads[0].url.replace(/[^/]+$/, 'product-manifest.json'),manifestSha256:'',release}}; const product=Buffer.from(JSON.stringify(release)); const crypto=await import('node:crypto'); sync.manifestSha256=crypto.createHash('sha256').update(product).digest('hex'); const catalog={{schema:'risunest.release-catalog/v1',publishedAt:'2026-09-15T00:00:00Z',publicationTag:release.tag,products:{{app,sync}}}}; process.stdout.write(product.toString()+'\\n'+JSON.stringify(catalog));"
         );
-        let output = Command::new("node")
+        let mut command = Command::new("node");
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x08000000);
+        }
+        let output = command
             .args(["--input-type=module", "--eval", &script])
             .output()
             .unwrap();

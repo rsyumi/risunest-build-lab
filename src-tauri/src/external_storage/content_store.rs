@@ -204,8 +204,7 @@ impl ContentStore {
                 return Err(invalid("Not enough free space to save captured content"))
             }
         }
-        let group = std::mem::take(&mut self.staged);
-        self.staged_bytes = 0;
+        let group = &self.staged;
         let tx = self.db.transaction()?;
         small_object_store::insert_batch(
             &tx,
@@ -213,9 +212,14 @@ impl ContentStore {
                 .iter()
                 .map(|(digest, bytes)| (digest.as_str(), bytes.as_slice()))
                 .collect::<Vec<_>>(),
-        )
-        .map_err(|_| invalid("Existing capture object differs"))?;
+        ).map_err(|error| match error {
+            small_object_store::StoreError::Database(error) => StoreError::from(error),
+            small_object_store::StoreError::Corrupt => invalid("Existing capture object differs"),
+            other => invalid(&other.to_string()),
+        })?;
         tx.commit()?;
+        self.staged.clear();
+        self.staged_bytes = 0;
         // Between groups, never inside one. A reader on another connection can
         // leave the log where it is; this group is already durable, and what
         // the checkpoint leaves decides whether the next one is admitted.
@@ -282,6 +286,7 @@ impl ContentStore {
     /// The whole body, for callers that need it in memory anyway.
     pub(crate) fn read_all(&self, digest: &str) -> Result<Vec<u8>> {
         use std::io::Read as _;
+
         let mut body = self.open_body(digest)?;
         let mut bytes = Vec::new();
         body.read_to_end(&mut bytes)?;
@@ -421,6 +426,43 @@ impl ContentStore {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn failed_content_transactions_retain_the_staged_group_for_retry() {
+        for failure in ["begin", "insert", "commit"] {
+            let root = tempfile::tempdir().unwrap();
+            let mut store = ContentStore::open(root.path()).unwrap();
+            let bytes = body(17, 128);
+            let hash = digest(&bytes);
+            store.put(&hash, &bytes).unwrap();
+            match failure {
+                "begin" => store.db.execute_batch("BEGIN IMMEDIATE").unwrap(),
+                "insert" => store.db.execute_batch(
+                    "CREATE TEMP TRIGGER deny_content BEFORE INSERT ON small_objects
+                     BEGIN SELECT RAISE(ABORT,'synthetic write failure'); END;",
+                ).unwrap(),
+                _ => store.db.execute_batch(
+                    "PRAGMA foreign_keys=ON;
+                     CREATE TABLE parent(id INTEGER PRIMARY KEY);
+                     CREATE TABLE child(id INTEGER REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED);
+                     CREATE TEMP TRIGGER deny_commit AFTER INSERT ON small_objects
+                     BEGIN INSERT INTO child VALUES(1); END;",
+                ).unwrap(),
+            }
+            let error = store.commit().expect_err(failure);
+            assert!(!error.to_string().contains("Existing capture object differs"));
+            assert_eq!(store.staged.get(&hash), Some(&bytes));
+            assert_eq!(store.staged_bytes, bytes.len());
+            match failure {
+                "begin" => store.db.execute_batch("ROLLBACK").unwrap(),
+                "insert" => store.db.execute_batch("DROP TRIGGER deny_content").unwrap(),
+                _ => store.db.execute_batch("DROP TRIGGER deny_commit").unwrap(),
+            }
+            store.commit().unwrap();
+            assert!(store.staged.is_empty());
+            assert_eq!(store.stat(&hash).unwrap(), Some(bytes.len() as u64));
+        }
+    }
+
     use super::*;
     use std::io::Read as _;
 

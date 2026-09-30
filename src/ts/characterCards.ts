@@ -1,3 +1,4 @@
+import { assertModuleMCPImportAllowed } from './process/mcp/moduleImport'
 import { runContentImport } from './storage/contentImportOperation'
 import { writable, type Writable } from 'svelte/store'
 import { alertCardExport, alertConfirm, alertError, alertInput, alertMd, alertNormal, alertRisuServiceTOS, alertStore, alertWait } from "./alert"
@@ -22,11 +23,12 @@ import { open } from "@tauri-apps/plugin-dialog"
 import { REALM_HUB_URL, REALM_NIGHTLY_HUB_URL, REALM_SITE_URL } from "./realmEndpoints"
 import { registerOpenedFileListeners } from "./openedFiles"
 import { type DeviceMarkerStorage } from './storage/deviceMarkers'
-import { importDesktopNativeCharacterPath } from './storage/nativeCharacterFileRoute'
+import { importDesktopNativeCharacterPathInOperation } from './storage/nativeCharacterImportOperation'
 import type { NativeFileJobOptions, NativeFileJobSource } from './storage/nativeFileJobs'
 import {
     decodePreparedNativePngCardMetadata,
     type PreparedNativePngCardMetadata,
+    type PreparedNativePngCardDecodeDependencies,
 } from './storage/nativePngCardAdapter'
 import { exportNativeCharacterCharxFromPicker } from './storage/nativeCharacterCharxExportRoute'
 import { exportNativeCharacterCardFromPicker } from './storage/nativeCharacterCardExportRoute'
@@ -120,7 +122,7 @@ export async function importCharacter() {
             const importErrors: Array<string | Error> = []
             for (const path of paths) {
                 try {
-                    const result = await importDesktopNativeCharacterPath(path, {
+                    const result = await importDesktopNativeCharacterPathInOperation(path, {
                         readDesktopPath: readFile,
                         nativeEnabled: () => nativeCharacterContentImportEnabled,
                         nativeImport: importPreparedNativeCharacterContent,
@@ -139,11 +141,7 @@ export async function importCharacter() {
                         checkCharOrder()
                         lastImportedCharacterId = result.value
                     }
-                    if (result.kind === 'destination-required') {
-                        alertError(
-                            'This JPEG is not a character card. Choose an asset destination to import it.',
-                        )
-                    }
+
                 } catch (error) {
                     importErrors.push(error instanceof Error ? error : String(error))
                 }
@@ -630,6 +628,8 @@ export async function characterURLImport() {
         const importData = JSON.parse(
             Buffer.from(decodeURIComponent(data), 'base64').toString('utf-8'),
         )
+        try { assertModuleMCPImportAllowed(importData) }
+        catch (error) { alertError(error); return false }
         importData.id = v4()
 
         if (importData.lowLevelAccess) {
@@ -726,31 +726,35 @@ export async function characterURLImport() {
                 displayName: path.split(/[\\/]/).at(-1)!,
             })
         } else {
-            await importDesktopNativeCharacterPath(path, {
+            let legacyFailed = false
+            const outcome = await importDesktopNativeCharacterPathInOperation(path, {
                 readDesktopPath: readFile,
                 nativeEnabled: () => nativeCharacterContentImportEnabled,
                 nativeImport: importPreparedNativeCharacterContent,
                 legacyImport: async ({ name, data }) => {
-                    await importFile(name, data)
-                    return null
+                    const index = await importCharacterProcess({ name, data })
+                    if (typeof index !== 'number' || index < 0) { legacyFailed = true; return null }
+                    return getDatabase().characters[index]?.chaId ?? null
                 },
             })
+            if (legacyFailed || outcome.kind === 'failed') return 'failed'
         }
         return true
     })
 
-    async function importFile(name: string, data: Uint8Array) {
+    async function importFile(name: string, data: Uint8Array): Promise<void | 'failed'> {
         if (
             name.endsWith('.charx') ||
             name.endsWith('.jpg') ||
             name.endsWith('.jpeg') ||
-            name.endsWith('.png')
+            name.endsWith('.png') ||
+            name.endsWith('.json')
         ) {
-            await importCharacterProcess({
+            const result = await importCharacterProcess({
                 name: name,
                 data: data,
             })
-            return
+            return typeof result === 'number' && result >= 0 ? undefined : 'failed'
         }
         if (name.endsWith('.risupreset') || name.endsWith('.risup')) {
             await importPreset({
@@ -985,8 +989,11 @@ export interface PreparedNativeCharacterCardInput {
 
 export async function decodePreparedNativePngCharacterCard(
     metadata: PreparedNativePngCardMetadata,
+    stageInlineAsset?: PreparedNativePngCardDecodeDependencies['stageInlineAsset'],
 ): Promise<PreparedNativeCharacterCardMetadata | null> {
     return await decodePreparedNativePngCardMetadata(metadata, {
+        stageInlineAsset,
+        onOversizedInlineAsset: () => alertError('Data URI too large'),
         hash: hasher,
         decrypt: async (bytes, password) => new Uint8Array(await decryptBuffer(bytes, password)),
         requestPassword: async () => (await alertInput(language.inputCardPassword)) || null,

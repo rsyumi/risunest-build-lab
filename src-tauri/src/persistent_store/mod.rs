@@ -18,6 +18,7 @@ pub(crate) mod external_storage_state;
 pub(crate) mod kei;
 pub(crate) mod owner_projection;
 pub(crate) mod plugin_owner;
+mod plugin_claim_eligibility;
 pub(crate) mod portable;
 pub(crate) mod portable_validation;
 mod preservation;
@@ -110,6 +111,10 @@ pub(crate) enum StoreError {
         actual: i64,
     },
     SnapshotReleased,
+    RawBodyUnavailable,
+    CommitBusy,
+    CommitDecode { message: String },
+    Committed { revision: i64, message: String },
     Validation {
         message: String,
     },
@@ -131,7 +136,9 @@ impl std::fmt::Display for StoreError {
             Self::SnapshotReleased => {
                 formatter.write_str("persistent revision snapshot has been released")
             }
-            Self::Validation { message } | Self::Store { message } => formatter.write_str(message),
+            Self::RawBodyUnavailable => formatter.write_str("raw commit body unavailable"),
+            Self::CommitBusy => formatter.write_str("previous commit is still finishing"),
+            Self::Committed { message, .. } | Self::CommitDecode { message } | Self::Validation { message } | Self::Store { message } => formatter.write_str(message),
         }
     }
 }
@@ -247,6 +254,30 @@ pub(crate) struct PluginStorageSummary {
     pub(crate) owner: String,
     pub(crate) key: String,
     pub(crate) byte_size: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PluginStorageValueCursor {
+    pub(crate) owner: String,
+    pub(crate) key: String,
+    pub(crate) ordinal: i64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PluginStorageValueQuery {
+    pub(crate) owner: Option<String>,
+    pub(crate) after_key: Option<PluginStorageValueCursor>,
+    pub(crate) limit: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PluginStorageValuePage {
+    pub(crate) items: Vec<PluginStorageValue>,
+    pub(crate) next_cursor: Option<PluginStorageValueCursor>,
+    pub(crate) revision: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -691,6 +722,11 @@ pub(crate) enum ConversationMutation {
         character_id: String,
         conversation_id: String,
     },
+    /// Lists every conversation of the character in its new order.
+    Reorder {
+        character_id: String,
+        conversation_ids: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -735,7 +771,7 @@ pub(crate) struct WorkingSetCommit {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) conversations: Option<Vec<ConversationMutation>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) delete_character_id: Option<String>,
+    pub(crate) delete_character_ids: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) plugin_storage: Option<Vec<PluginStorageMutation>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1051,6 +1087,7 @@ impl PreparedRisuSaveExport {
     pub(crate) fn create_attached_export(
         &self,
         omit_account: bool,
+        account: Option<&Value>,
     ) -> StoreResult<export::ExportedRisuSave> {
         let reader = self.reader()?;
         export::create(
@@ -1059,6 +1096,7 @@ impl PreparedRisuSaveExport {
             &reader.target,
             &self.lease,
             omit_account,
+            account,
         )
     }
 
@@ -1072,6 +1110,7 @@ impl PreparedOfficialPublication {
     pub(crate) fn create_payload(
         mut self,
         expected_account_id: &str,
+        account: &Value,
         replacements: &HashMap<String, String>,
         is_cancelled: impl Fn() -> bool,
         on_progress: impl FnMut(u64, u64, u64),
@@ -1083,6 +1122,7 @@ impl PreparedOfficialPublication {
             &reader.target,
             &self.lease,
             expected_account_id,
+            account,
             replacements,
             &is_cancelled,
             on_progress,
@@ -1270,6 +1310,7 @@ impl PersistentStore {
         let database_path = persistent_dir.join(DATABASE_FILE);
         let mut connection = Connection::open(&database_path)?;
         schema::initialize(&mut connection)?;
+        plugin_claim_eligibility::close(&connection)?;
         recover_asset_object_deletions(&mut connection, app_data_dir)?;
 
         let transaction = connection.transaction()?;
@@ -1294,7 +1335,7 @@ impl PersistentStore {
 
         let active_readers = Arc::new(snapshot::ActiveReaderRegistry::default());
         let device_store = open_device_store(&persistent_dir);
-        Ok(Self {
+        let store = Self {
             revision_leases: HashMap::new(),
             active_readers,
             connection,
@@ -1303,7 +1344,11 @@ impl PersistentStore {
             snapshots_dir,
             pending_restore_failure,
             device_store,
-        })
+        };
+        if let Err(error) = store.server_repair_residency_access() {
+            crate::nlog!("warn", "server sync residency repair pending: {}", error.code);
+        }
+        Ok(store)
     }
 
     // Reports a user-requested snapshot restore that was skipped during this
@@ -1450,6 +1495,15 @@ impl PersistentStore {
         query::query_plugin_storage(connection, &target)
     }
 
+    pub(crate) fn read_plugin_storage_page(
+        &self,
+        input: &PluginStorageValueQuery,
+        lease: Option<&str>,
+    ) -> StoreResult<PluginStorageValuePage> {
+        let (connection, target) = self.read_view(lease)?;
+        query::read_plugin_storage_page(connection, &target, input)
+    }
+
     pub(crate) fn list_plugin_storage(
         &self,
         lease: Option<&str>,
@@ -1470,6 +1524,9 @@ impl PersistentStore {
         let Some(batch) = commit::pending_plugin_import_batch(&self.connection)? else {
             return Ok(None);
         };
+        if !plugin_claim_eligibility::consume(&self.connection, &batch, owner, code_hash)? {
+            return Ok(None);
+        }
         self.device_store()?.open_plugin_claim_session(
             &batch,
             owner,
@@ -1511,6 +1568,10 @@ impl PersistentStore {
             expected_revision,
         )?;
         Ok(ClaimedPluginValue { value, revision })
+    }
+
+    pub(crate) fn close_plugin_claim_eligibility(&self) -> StoreResult<()> {
+        plugin_claim_eligibility::close(&self.connection)
     }
 
     pub(crate) fn close_plugin_claim_session(&self, session_id: &str) -> StoreResult<()> {
@@ -2040,6 +2101,7 @@ impl PersistentStore {
             &target,
             lease,
             omit_account,
+            None,
         )
     }
 
@@ -2249,6 +2311,7 @@ impl PersistentStore {
         url: &str,
         expected_account_id: &str,
         token: &str,
+        account: &Value,
     ) -> StoreResult<kei::PreparedKeiUpload> {
         let reader = self
             .revision_leases
@@ -2261,6 +2324,7 @@ impl PersistentStore {
             url,
             expected_account_id,
             token,
+            account,
         ) {
             Ok(prepared) => Ok(prepared),
             Err((error, reader)) => {
@@ -2278,6 +2342,7 @@ impl PersistentStore {
         url: &str,
         expected_account_id: &str,
         token: &str,
+        account: &Value,
     ) -> StoreResult<kei::PreparedKeiUpload> {
         let reader = self
             .revision_leases
@@ -2291,6 +2356,7 @@ impl PersistentStore {
             url,
             expected_account_id,
             token,
+            account,
         ) {
             Ok(prepared) => Ok(prepared),
             Err((error, reader)) => {
@@ -2507,6 +2573,7 @@ impl PersistentStore {
             .into_iter()
             .map(|(object_hash, bytes, created_at_ms)| {
                 let state = match object_hash.as_str() {
+                    _ if !report.blockers.is_empty() => "blocked",
                     hash if deletable.contains(hash) => "deletable",
                     hash if recent.contains(hash) => "recent",
                     _ => "held",
@@ -2858,6 +2925,15 @@ impl PersistentStore {
         repository_guard_held: bool,
         read_only: bool,
     ) -> StoreResult<Vec<(&'static str, crate::asset_repository::migration_gc::AssetRootSet)>> {
+        self.collect_asset_gc_roots_with_backup_references(repository_guard_held, read_only, None)
+    }
+
+    fn collect_asset_gc_roots_with_backup_references(
+        &self,
+        repository_guard_held: bool,
+        read_only: bool,
+        mut backup_references: Option<&mut std::collections::BTreeSet<String>>,
+    ) -> StoreResult<Vec<(&'static str, crate::asset_repository::migration_gc::AssetRootSet)>> {
         use crate::asset_repository::job_pins::{
             collect_durable_cas_job_roots, collect_durable_cas_job_roots_already_guarded,
             collect_durable_cas_job_roots_read_only,
@@ -2897,7 +2973,7 @@ impl PersistentStore {
             )?
             .assets,
         ));
-        if self.server_config().map_err(|e| StoreError::Store { message: e.code })?.is_some() {
+        if self.server_stored_config().map_err(|e| StoreError::Store { message: e.code })?.is_some() {
             let cache = self.server_cache().map_err(|e| StoreError::Store { message: e.code })?;
             let mut set = crate::asset_repository::migration_gc::AssetRootSet::default();
             let native = crate::asset_repository::PayloadCas::new(&self.repository_root)?;
@@ -2911,6 +2987,9 @@ impl PersistentStore {
         crate::server_sync::backups::references::visit_roots(
             &self.repository_root,
             |object| {
+                if let Some(references) = backup_references.as_deref_mut() {
+                    references.insert(object.hash.clone());
+                }
                 if object.metadata || object.local_required {
                     server_conflicts.object_hashes.insert(object.hash);
                 }

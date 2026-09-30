@@ -1,8 +1,9 @@
+import { approveLocalMCP } from './stdioApproval';
 import { getCurrentChat, getDatabase } from "src/ts/storage/database.svelte";
 import { MCPClient, type JsonRPC, type MCPTool, type RPCToolCallContent } from "./mcplib";
 import { DBState } from "src/ts/stores.svelte";
 import { getModuleMcps } from "../modules";
-import { alertConfirm, alertError, alertInput, alertNormal } from "src/ts/alert";
+import { alertError, alertInput, alertNormal } from "src/ts/alert";
 import { language } from 'src/lang';
 import { v4 } from "uuid";
 import type { MCPClientLike } from "./internalmcp";
@@ -102,8 +103,10 @@ export async function initializeMCPs(additionalMCPs?:string[]) {
                         const env: Record<string, string> = MCPData.env || {};
 
                         if(!isTauriDesktop){
-                            throw new Error('stdio MCPs are only supported in Local Version');
+                            throw new Error(language.mcpDesktopOnly);
                         }
+
+                        if (!await approveLocalMCP(MCPData)) continue;
 
                         const { Command } = await import('@tauri-apps/plugin-shell');
                         const listeners = new Set<(message: JsonRPC) => void | Promise<void>>();
@@ -311,11 +314,9 @@ export async function importMCPModule(){
             const config = JSON.parse(x.slice('stdio:'.length));
             if (!config.url && config.command && config.args) {
                 if (!isTauriDesktop) {
-                    throw new Error('stdio MCPs are only supported in Local Version');
+                    throw new Error(language.mcpDesktopOnly);
                 }
-                const confirmed = await alertConfirm(
-                    language.mcpStdioRegisterConfirm + '\n\n' + JSON.stringify(config, null, 2)
-                );
+                const confirmed = await approveLocalMCP(config);
                 if (!confirmed) return;
             }
         }

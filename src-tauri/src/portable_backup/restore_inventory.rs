@@ -32,13 +32,24 @@ impl RestoreInventory {
             .tempdir_in(owned)?;
         let db = Connection::open(directory.path().join("inventory.sqlite"))?;
         db.execute_batch("PRAGMA cache_size=-16384; PRAGMA temp_store=FILE; CREATE TABLE live_objects (hash TEXT PRIMARY KEY, owner INTEGER NOT NULL); BEGIN IMMEDIATE;")?;
-        let mut statement=archive.db.prepare("SELECT DISTINCT lower(hex(object_hash)),kind='owner' FROM files WHERE kind IN ('asset','inlay','owner') AND state='present'")?;
+        let mut statement=archive.db.prepare("SELECT object_hash,0 FROM asset_aliases WHERE object_hash IS NOT NULL UNION SELECT manifest_hash,1 FROM asset_owner_heads WHERE present=1")?;
         let mut rows = statement.query([])?;
         while let Some(row) = rows.next()? {
             check(probe)?;
             let hash: String = row.get(0)?;
             let owner: bool = row.get(1)?;
             db.execute("INSERT INTO live_objects VALUES(?1,?2) ON CONFLICT(hash) DO UPDATE SET owner=max(owner,excluded.owner)",params![hash,owner])?;
+        }
+        let mut statement = archive.db.prepare("SELECT archived_object FROM characters WHERE archived_object IS NOT NULL")?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            check(probe)?;
+            let archived: crate::persistent_store::archive::ArchivedObject =
+                serde_json::from_str(&row.get::<_, String>(0)?)?;
+            for hash in archived.object_roots() {
+                archive.open_object(hash)?;
+                db.execute("INSERT OR IGNORE INTO live_objects VALUES(?1,0)", [hash])?;
+            }
         }
         let mut statement=archive.db.prepare("SELECT DISTINCT manifest_hash FROM asset_owner_heads WHERE present=1 ORDER BY manifest_hash")?;
         let mut rows = statement.query([])?;

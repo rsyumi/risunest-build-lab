@@ -11,6 +11,7 @@ use risunest_sync_connect::media::{MediaObject, REFRESH_PATH};
 use std::{io, net::Ipv4Addr, path::PathBuf, sync::Arc, time::Duration};
 use tokio::io::AsyncReadExt;
 use tokio::sync::Semaphore;
+use tauri::Manager;
 
 const CHUNK_BYTES: usize = 64 * 1024;
 const MAX_TRANSFERS: usize = 8;
@@ -25,6 +26,7 @@ struct Files {
 }
 
 pub(crate) struct MediaServer {
+    files: Files,
     slots: Arc<Semaphore>,
     base_url: String,
     task: tauri::async_runtime::JoinHandle<()>,
@@ -51,6 +53,35 @@ impl MediaServerState {
         Ok(true)
     }
 
+    fn ensure(&self) -> Result<String, String> {
+        let mut state = self.0.lock().map_err(|_| "native-media-unavailable")?;
+        let server = state.as_mut().map_err(|error| error.clone())?;
+        if server.slots.is_closed() { return Err("cleanup-pending".into()); }
+        if server.healthy() { return Ok(server.base_url.clone()); }
+        if server.slots.available_permits() != MAX_TRANSFERS { return Err("native-media-busy".into()); }
+        server.task.abort();
+        let address = server.files.authority.parse::<std::net::SocketAddr>().map_err(|_| "native-media-unavailable")?;
+        let mut listener = std::net::TcpListener::bind(address);
+        for _ in 0..5 {
+            if listener.is_ok() { break; }
+            std::thread::sleep(Duration::from_millis(10));
+            listener = std::net::TcpListener::bind(address);
+        }
+        let listener = listener.or_else(|_| std::net::TcpListener::bind((Ipv4Addr::LOCALHOST, 0)))
+            .map_err(|_| "native-media-unavailable")?;
+        let mut files = server.files.clone();
+        let authority = listener.local_addr().map_err(|_| "native-media-unavailable")?.to_string();
+        if authority != files.authority {
+            files.remote = Arc::new(MediaProvider::new(files.root.clone(), format!("http://{authority}"))
+                .map_err(|_| "native-media-unavailable")?);
+            files.authority = authority;
+        }
+        let replacement = MediaServer::from_listener(listener, files).map_err(|_| "native-media-unavailable")?;
+        let base_url = replacement.base_url.clone();
+        *server = replacement;
+        Ok(base_url)
+    }
+
     pub(crate) fn reopen_after_cleanup(&self, root: PathBuf) -> Result<(), String> {
         let server = MediaServer::start(root).map_err(|_| "cleanup-media-unavailable")?;
         *self.0.lock().map_err(|_| "cleanup-media-busy")? = Ok(server);
@@ -74,6 +105,18 @@ impl Drop for MediaServer {
 }
 
 impl MediaServer {
+    fn healthy(&self) -> bool {
+        use std::io::{Read, Write};
+        let Ok(address) = self.files.authority.parse() else { return false; };
+        let Ok(mut stream) = std::net::TcpStream::connect_timeout(&address, Duration::from_millis(250)) else { return false; };
+        if stream.set_read_timeout(Some(Duration::from_millis(250))).is_err()
+            || stream.set_write_timeout(Some(Duration::from_millis(250))).is_err() { return false; }
+        let request = format!("GET {}health HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n", self.files.prefix, self.files.authority);
+        if stream.write_all(request.as_bytes()).is_err() { return false; }
+        let mut status = [0u8; 12];
+        stream.read_exact(&mut status).is_ok() && &status == b"HTTP/1.1 204"
+    }
+
     #[cfg(test)]
     pub(crate) fn test_base_url(&self) -> &str {
         &self.base_url
@@ -83,7 +126,6 @@ impl MediaServer {
         listener.set_nonblocking(true)?;
         let authority = listener.local_addr()?.to_string();
         let prefix = format!("/{}/", uuid::Uuid::new_v4().simple());
-        let base_url = format!("http://{authority}{prefix}");
         let remote = Arc::new(
             MediaProvider::new(root.clone(), format!("http://{authority}"))
                 .map_err(|_| io::Error::other("media capability unavailable"))?,
@@ -95,14 +137,21 @@ impl MediaServer {
             slots: Arc::new(Semaphore::new(MAX_TRANSFERS)),
             remote,
         };
+        Self::from_listener(listener, state)
+    }
+
+    fn from_listener(listener: std::net::TcpListener, state: Files) -> io::Result<Self> {
+        listener.set_nonblocking(true)?;
+        let base_url = format!("http://{}{}", state.authority, state.prefix);
         let slots = state.slots.clone();
+        let files = state.clone();
         let task = tauri::async_runtime::spawn(async move {
             let Ok(listener) = tokio::net::TcpListener::from_std(listener) else {
                 return;
             };
             let _ = axum::serve(listener, Router::new().fallback(serve).with_state(state)).await;
         });
-        Ok(Self { base_url, task, slots })
+        Ok(Self { base_url, task, slots, files })
     }
 }
 
@@ -116,6 +165,12 @@ pub(crate) fn native_media_base_url(
         .as_ref()
         .map(|server| server.base_url.clone())
         .map_err(Clone::clone)
+}
+
+#[tauri::command]
+pub(crate) async fn native_media_ensure(app: tauri::AppHandle) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || app.state::<MediaServerState>().ensure())
+        .await.map_err(|_| "native-media-unavailable".to_owned())?
 }
 
 fn empty(status: StatusCode) -> Response<Body> {
@@ -144,6 +199,9 @@ async fn serve(State(state): State<Files>, request: Request<Body>) -> Response<B
         .path_and_query()
         .map(|p| p.as_str())
         .unwrap_or("");
+    if path == format!("{}health", state.prefix) {
+        return empty(if state.slots.is_closed() { StatusCode::SERVICE_UNAVAILABLE } else { StatusCode::NO_CONTENT });
+    }
     if path.len() > 16384 {
         return empty(StatusCode::NOT_FOUND);
     }

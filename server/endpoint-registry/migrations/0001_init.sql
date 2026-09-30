@@ -1,6 +1,7 @@
 CREATE TABLE endpoints (
   uuid TEXT PRIMARY KEY NOT NULL,
-  envelope TEXT NOT NULL,
+  envelope TEXT,
+  writer TEXT NOT NULL,
   updated_at INTEGER NOT NULL
 ) STRICT;
 

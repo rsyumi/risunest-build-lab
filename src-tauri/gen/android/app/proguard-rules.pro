@@ -28,4 +28,5 @@
     public static native void initialize();
     public static byte[] seal(java.lang.String, byte[]);
     public static byte[] open(java.lang.String, byte[]);
+    public static void removeKeys();
 }

@@ -106,7 +106,13 @@ pub(crate) struct SetupFolderPage {
     pub next_cursor: Option<String>,
 }
 
+struct CachedToken {
+    access: zeroize::Zeroizing<String>,
+    expires_at_ms: u64,
+}
+
 struct Context {
+    token: tokio::sync::Mutex<Option<CachedToken>>,
     settings: Settings,
     secret: SecretRef,
     /// Root folder item resolved at open time. For an app folder connection this
@@ -212,6 +218,7 @@ impl OneDrive {
         let settings = config::validate(&bound)?;
         let account = AccountKey::new(config::PROVIDER_ID, &settings.endpoint, account_id)?;
         Ok(Context {
+            token: tokio::sync::Mutex::new(None),
             settings,
             secret: secret.clone(),
             root_item_id: root_item_id.to_owned(),
@@ -265,7 +272,7 @@ impl OneDrive {
             &context.account,
             Some(token.as_str()),
         );
-        let mut response = self.send(request, cancel).await?;
+        let mut response = self.send_authenticated_read(&context, request, cancel).await?;
         graph::require(&response, &[200], self.now()).map_err(|error| match error.kind {
             ErrorKind::NotFound | ErrorKind::Unauthorized => {
                 ProviderError::new(ErrorKind::FolderInaccessible)
@@ -288,7 +295,7 @@ impl OneDrive {
                 &context.account,
                 Some(token.as_str()),
             );
-            let mut response = self.send(request, cancel).await?;
+            let mut response = self.send_authenticated_read(&context, request, cancel).await?;
             graph::require(&response, &[200], self.now()).map_err(|error| match error.kind {
                 ErrorKind::NotFound | ErrorKind::Unauthorized => {
                     ProviderError::new(ErrorKind::FolderInaccessible)
@@ -322,7 +329,7 @@ impl OneDrive {
             &context.account,
             Some(token.as_str()),
         );
-        let mut response = self.send(request, cancel).await?;
+        let mut response = self.send_authenticated_read(&context, request, cancel).await?;
         graph::require(&response, &[200], self.now()).map_err(|error| match error.kind {
             ErrorKind::NotFound | ErrorKind::Unauthorized => {
                 ProviderError::new(ErrorKind::FolderInaccessible)
@@ -351,7 +358,7 @@ impl OneDrive {
             &context.account,
             Some(token.as_str()),
         );
-        let mut response = self.send(request, cancel).await?;
+        let mut response = self.send_authenticated_read(&context, request, cancel).await?;
         graph::require(&response, &[200], self.now()).map_err(|error| match error.kind {
             ErrorKind::NotFound | ErrorKind::Unauthorized => {
                 ProviderError::new(ErrorKind::FolderInaccessible)
@@ -476,7 +483,7 @@ impl OneDrive {
                 &context.account,
                 Some(token),
             );
-            let mut response = self.send(request, cancel).await?;
+            let mut response = self.send_authenticated_read(&context, request, cancel).await?;
             graph::require(&response, &[200], self.now())?;
             let page: graph::ChildrenPage = graph::json(&mut response, cancel).await?;
             items.extend(page.value);
@@ -575,12 +582,32 @@ impl OneDrive {
         context: &Context,
         cancel: &Cancellation,
     ) -> Result<zeroize::Zeroizing<String>> {
+        self.cached_token(context, None, cancel).await
+    }
+
+    async fn cached_token(
+        &self,
+        context: &Context,
+        rejected: Option<&str>,
+        cancel: &Cancellation,
+    ) -> Result<zeroize::Zeroizing<String>> {
+        let mut cache = context.token.lock().await;
+        cancel.check()?;
+        if let Some(cached) = cache.as_ref() {
+            if cached.expires_at_ms > self.now().saturating_add(60_000)
+                && rejected.is_none_or(|rejected| rejected != cached.access.as_str()) {
+                return Ok(cached.access.clone());
+            }
+        }
         let stored = {
             let bytes = self.deps.vault.read(&context.secret).await?;
             tokens::decode(bytes.0.as_slice())?
         };
-        if let Some(token) = stored.usable_access_token(self.now()) {
-            return Ok(token);
+        if rejected.is_none() {
+            if let Some(token) = stored.usable_access_token(self.now()) {
+                *cache = Some(CachedToken { access: token.clone(), expires_at_ms: stored.expires_at_ms.unwrap_or(0) });
+                return Ok(token);
+            }
         }
         let form = tokens::refresh_form(&context.settings, &stored.refresh_token);
         let request = tokens::token_request(&context.settings, form, context.account.clone())?;
@@ -599,9 +626,33 @@ impl OneDrive {
             .vault
             .replace(&context.secret, &tokens::encode(&refreshed)?)
             .await?;
-        refreshed
-            .access_token
-            .ok_or_else(|| ProviderError::new(ErrorKind::ReauthRequired))
+        let token = refreshed.access_token.ok_or_else(|| ProviderError::new(ErrorKind::ReauthRequired))?;
+        *cache = Some(CachedToken { access: token.clone(), expires_at_ms: refreshed.expires_at_ms.unwrap_or(0) });
+        Ok(token)
+    }
+
+    async fn send_authenticated_read(
+        &self,
+        context: &Context,
+        request: HttpRequest,
+        cancel: &Cancellation,
+    ) -> Result<HttpResponse> {
+        if request.body.is_some() { return Err(corrupt()); }
+        let mut retry = HttpRequest {
+            method: request.method.clone(), url: request.url.clone(), headers: request.headers.clone(),
+            body: None, content_length: request.content_length, operation: request.operation,
+            account: request.account.clone(), api_request: request.api_request,
+            mybox_charge: request.mybox_charge.clone(), control: request.control,
+        };
+        let rejected = request.headers.get("authorization").cloned();
+        let response = self.send(request, cancel).await?;
+        if response.status != 401 { return Ok(response); }
+        let Some(rejected) = rejected.as_deref().and_then(|value| value.strip_prefix("Bearer ")) else {
+            return Ok(response);
+        };
+        let token = self.cached_token(context, Some(rejected), cancel).await?;
+        retry.headers.insert("authorization".into(), format!("Bearer {}", token.as_str()));
+        self.send(retry, cancel).await
     }
 
     /// Redeems an authorization code and stores the first token document. The
@@ -700,7 +751,7 @@ impl OneDrive {
             &context.account,
             Some(token.as_str()),
         );
-        let mut response = self.send(request, cancel).await?;
+        let mut response = self.send_authenticated_read(&context, request, cancel).await?;
         if matches!(response.status, 404 | 410) {
             return Ok(None);
         }
@@ -939,6 +990,7 @@ impl Provider for OneDrive {
                 &settings.account_id,
             )?;
             let context = Context {
+                token: tokio::sync::Mutex::new(None),
                 settings,
                 secret: secret.clone(),
                 root_item_id: String::new(),
@@ -952,7 +1004,7 @@ impl Provider for OneDrive {
                 &context.account,
                 Some(token.as_str()),
             );
-            let mut response = self.send(request, cancel).await?;
+            let mut response = self.send_authenticated_read(&context, request, cancel).await?;
             graph::require(&response, &[200], self.now())?;
             let root: graph::Item = graph::json(&mut response, cancel).await?;
             if root.folder.is_none() {
@@ -982,7 +1034,7 @@ impl Provider for OneDrive {
                         &context.account,
                         Some(token.as_str()),
                     );
-                    let mut response = self.send(request, cancel).await?;
+                    let mut response = self.send_authenticated_read(&context, request, cancel).await?;
                     if matches!(response.status, 404 | 410) {
                         return Err(common::error(ErrorKind::NotFound, response.status));
                     }
@@ -1046,7 +1098,7 @@ impl Provider for OneDrive {
                     .headers
                     .insert("if-none-match".to_owned(), version.0.clone());
             }
-            let first = self.send(request, cancel).await?;
+            let first = self.send_authenticated_read(&context, request, cancel).await?;
             if first.status == 304 {
                 return Ok(ReadReceipt::NotModified(
                     unchanged.cloned().ok_or_else(corrupt)?,
@@ -1226,7 +1278,7 @@ impl Provider for OneDrive {
                 &context.account,
                 Some(token.as_str()),
             );
-            let response = self.send(request, cancel).await?;
+            let response = self.send_authenticated_read(&context, request, cancel).await?;
             match response.status {
                 200 | 204 | 404 => Ok(()),
                 status => Err(graph::classify(status, &response.headers, self.now())),
@@ -1266,7 +1318,7 @@ impl Provider for OneDrive {
                 &context.account,
                 Some(token.as_str()),
             );
-            let mut response = self.send(request, cancel).await?;
+            let mut response = self.send_authenticated_read(&context, request, cancel).await?;
             graph::require(&response, &[200], self.now())?;
             let page: graph::ChildrenPage = graph::json(&mut response, cancel).await?;
             let mut objects = Vec::new();
@@ -1279,8 +1331,10 @@ impl Provider for OneDrive {
                 if item.file.is_none() {
                     continue;
                 }
+                if crate::external_storage::contract::role_member_name(collection, name) == crate::external_storage::contract::RoleMemberName::Foreign { continue; }
                 let path = format!("{folder}/{name}");
                 if config::validate_relative_path(&path).is_err() {
+                    if collection == Collection::Leases { return Err(ProviderError::new(ErrorKind::Corrupt)); }
                     continue;
                 }
                 objects.push(ObjectReceipt {

@@ -492,7 +492,7 @@ function getModuleById(id:string){
 function getModuleByIds(ids:string[]){
     const db = getDatabase()
     const idSet = new Set(ids)
-    const modules = db.modules.filter(m => 
+    const modules = (db.modules ?? []).filter(m =>
         idSet.has(m.id) || (m.namespace && idSet.has(m.namespace))
     )
     return deduplicateModuleById(modules)
@@ -511,8 +511,6 @@ function deduplicateModuleById(modules:RisuModule[]){
     return newModules
 }
 
-let lastModules = ''
-let lastModuleData:RisuModule[] = []
 export function getModules(){
     const currentChat = getCurrentChat()
     const character = getCurrentCharacter()
@@ -525,25 +523,17 @@ export function getModules(){
     if(character && character.modules){
         ids = ids.concat(character.modules)
     }
-    if(persona && persona.embeddedModule){
-        ids = ids.concat([persona.embeddedModule?.id])
-    }
     if(db.moduleIntergration){
         const intList = db.moduleIntergration.split(',').map((s) => s.trim())
         ids = ids.concat(intList)
     }
-    const idsJoined = ids.join('-')
-    if(lastModules === idsJoined){
-        return lastModuleData
+    const modules = getModuleByIds(ids)
+    if (persona?.embeddedModule) {
+        modules.push(persona.embeddedModule)
     }
-
-    let modules:RisuModule[] = getModuleByIds(ids)
-    lastModules = idsJoined
-    lastModuleData = modules
-    return modules
+    return deduplicateModuleById(modules)
 
 }
-
 
 export function getModuleLorebooks() {
     const modules = getModules()
@@ -675,7 +665,7 @@ export function moduleUpdate(){
 
     const m = getModules()
 
-    const ids = m.map((m) => m.id).join('-')
+    const ids = JSON.stringify(m.map((m) => m.id))
     
     let moduleHideIcon = false
     let backgroundEmbedding = ''
@@ -692,18 +682,11 @@ export function moduleUpdate(){
         }
     })
 
-    if(backgroundEmbedding){
-        moduleBackgroundEmbedding.set(backgroundEmbedding)
-    }
+    moduleBackgroundEmbedding.set(backgroundEmbedding)
     HideIconStore.set(getCurrentCharacter()?.hideChatIcon || moduleHideIcon)
 
     if(lastModuleIds !== ids){
         ReloadGUIPointer.set(get(ReloadGUIPointer) + 1)
         lastModuleIds = ids
     }
-}
-
-export function refreshModules(){
-    lastModules = ''
-    lastModuleData = []
 }

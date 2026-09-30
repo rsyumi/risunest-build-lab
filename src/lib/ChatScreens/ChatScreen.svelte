@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { backNavigationLayer } from 'src/ts/ui/modalNavigation';
     import { getCustomBackground, getEmotion } from "../../ts/util";
     
     import { DBState } from 'src/ts/stores.svelte';
@@ -92,7 +93,7 @@
         </div>
     {/if}
     {#if openChatList}
-        <div class="absolute inset-0 z-40">
+        <div class="absolute inset-0 z-40" use:backNavigationLayer={{ close: () => { openChatList = false } }}>
             <SelectedConversationEditor
                 close={() => {
                     openChatList = false;
@@ -106,7 +107,7 @@
             </SelectedConversationEditor>
         </div>
     {:else if openModuleList}
-        <div class="absolute inset-0 z-40">
+        <div class="absolute inset-0 z-40" use:backNavigationLayer={{ close: () => { openModuleList = false } }}>
             <SelectedConversationEditor
                 close={() => {
                     openModuleList = false;

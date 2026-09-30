@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import test from "node:test";
 import { runInNewContext } from "node:vm";
 
@@ -198,6 +198,7 @@ test("remote actions inside the release signing boundary use verified commit SHA
     ["actions/setup-node#v6", "249970729cb0ef3589644e2896645e5dc5ba9c38"],
     ["actions/setup-java#v5", "b6effb05e454b25005698d916606bdc6ffcbf961"],
     ["actions/setup-python#v6", "ece7cb06caefa5fff74198d8649806c4678c61a1"],
+    ["actions/cache/save#v5", "caa296126883cff596d87d8935842f9db880ef25"],
     ["actions/cache/restore#v5", "caa296126883cff596d87d8935842f9db880ef25"],
     ["actions/download-artifact#v4", "d3f86a106a0bac45b974a628896c90dbdf5c8093"],
     ["actions/upload-artifact#v4", "ea165f8d65b6e75b540449e92b4886f43607fa02"],
@@ -205,7 +206,7 @@ test("remote actions inside the release signing boundary use verified commit SHA
     ["dtolnay/rust-toolchain#1.97.1", "4716b85f2fac3e324e64fa2810f6b5c3905760a5"],
     ["android-actions/setup-android#v3", "9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407"],
   ]);
-  for (const contents of [workflow, referenceAction]) {
+  for (const contents of [workflow, referenceAction, cacheWorkflow]) {
     const remoteUses = [...contents.matchAll(/^\s*-?\s*uses:\s+([^\s#]+)(?:\s+#\s*(\S+))?/gm)]
       .filter(match => !match[1].startsWith("./"));
     assert(remoteUses.length > 0);
@@ -227,10 +228,10 @@ test("release caches retain downloads without unpacked dependency trees", () => 
     assert.match(contents, /~\/.cargo\/git\/db/);
   }
   assert.match(cacheWorkflow, /release-cargo-1\.97\.1-/);
-  const savedPaths = [...cacheWorkflow.matchAll(/uses: actions\/cache\/save@v5\s+with:\s+path: ([\s\S]*?)\s+key:/g)]
+  const savedPaths = [...cacheWorkflow.matchAll(/uses: actions\/cache\/save@[a-f0-9]{40} # v5\s+with:\s+path: ([\s\S]*?)\s+key:/g)]
     .map((match) => match[1])
     .join("\n");
-  assert.equal((cacheWorkflow.match(/uses: actions\/cache\/save@v5/g) ?? []).length, 2);
+  assert.equal((cacheWorkflow.match(/uses: actions\/cache\/save@[a-f0-9]{40}/g) ?? []).length, 2);
   assert.doesNotMatch(savedPaths, /src-tauri\/target|node_modules/);
 });
 
@@ -347,4 +348,93 @@ test("Windows release gates run every detached update helper lifecycle test exac
   ]) assert.match(workflow, new RegExp(`'${name}'`));
   assert.match(workflow, /--test update_helper \$test -- --ignored --exact --nocapture/);
   assert.match(workflow, /test result: ok\\\. 1 passed; 0 failed; 0 ignored;/);
+});
+
+function assertPnpmSetup(contents) {
+  for (const job of contents.split(/^  [\w-]+:\s*$/m)) {
+    for (const match of job.matchAll(/uses: pnpm\/action-setup@[^\n]+([\s\S]*?)(?=\n      -|$)/g)) {
+      assert.doesNotMatch(match[1], /\bversion:/, "pnpm setup must use packageManager");
+      assert.match(job.slice(0, match.index), /uses: actions\/checkout@/, "checkout must precede pnpm setup");
+    }
+  }
+}
+
+test("all workflow pnpm setups use the checked-out packageManager", () => {
+  for (const name of readdirSync(new URL("../../.github/workflows/", import.meta.url))) {
+    if (/\.ya?ml$/.test(name)) assertPnpmSetup(readFileSync(new URL(`../../.github/workflows/${name}`, import.meta.url), "utf8"));
+  }
+  assert.throws(() => assertPnpmSetup("      - uses: actions/checkout@v4\n      - uses: pnpm/action-setup@v5\n        with: { version: 1 }"), /packageManager/);
+  assert.throws(() => assertPnpmSetup("      - uses: pnpm/action-setup@v5"), /checkout/);
+  const manager = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url))).packageManager;
+  for (const path of ["server/manager/gui/package.json", "server/endpoint-registry/package.json"]) {
+    const value = JSON.parse(readFileSync(new URL(`../../${path}`, import.meta.url))).packageManager;
+    assert.equal(value, manager);
+  }
+});
+
+test("Linux app native release tests retain all targets in the maintained credential environment", () => {
+  const native = workflow.slice(workflow.indexOf("\n  app-native-tests:"), workflow.indexOf("\n  app-android-tests:"));
+  assert.match(native, /gnome-keyring dbus-x11/);
+  const primaryRuns = [...native.matchAll(/^\s+run: ((?:dbus-run-session -- bash scripts\/linux-native-tests.sh|cargo test --manifest-path src-tauri\/Cargo.toml) --release[^\n]*)$/gm)]
+    .map((match) => match[1]);
+  assert.deepEqual(primaryRuns, [
+    'dbus-run-session -- bash scripts/linux-native-tests.sh --release --target ${{ matrix.target }}',
+    'cargo test --manifest-path src-tauri/Cargo.toml --release --locked --target ${{ matrix.target }}',
+  ]);
+  for (const run of primaryRuns) assert.doesNotMatch(run, /(?:^|\s)--lib(?:\s|$)/);
+  assert.match(native, /if: runner.os == 'Linux'\n\s+run: dbus-run-session -- bash scripts\/linux-native-tests.sh --release --target/);
+  assert.match(native, /if: runner.os != 'Linux'\n\s+run: cargo test --manifest-path src-tauri\/Cargo.toml --release --locked --target/);
+  const packageRuns = [...native.matchAll(/^\s+(?:- )?run: ([^\n]* --package [^\n]*)$/gm)]
+    .map((match) => match[1]);
+  assert.deepEqual(packageRuns, [
+    'cargo test --manifest-path src-tauri/Cargo.toml --package tauri-plugin-updater --release --locked --target ${{ matrix.target }} --lib',
+    'dbus-run-session -- bash scripts/linux-native-tests.sh --package tauri-plugin-window-state --release --target ${{ matrix.target }} --lib',
+    'cargo test --manifest-path src-tauri/Cargo.toml --package tauri-plugin-window-state --release --locked --target ${{ matrix.target }} --lib',
+    'dbus-run-session -- cargo test --manifest-path crates/wry/Cargo.toml --package wry --release --locked --target ${{ matrix.target }} --lib',
+    'cargo test --manifest-path crates/wry/Cargo.toml --package wry --release --locked --target ${{ matrix.target }} --lib',
+  ]);
+});
+
+test("signing jobs never restore dependency caches written by other workflows", () => {
+  for (const job of workflow.split(/^  [\w-]+:\s*$/m)) {
+    if (/secrets\.(?:TAURI_PRIVATE_KEY|ANDROID_KEYSTORE_)/.test(job) && job.includes('steps:'))
+      assert.doesNotMatch(job, /uses: actions\/cache\/restore@/);
+  }
+});
+
+test("release tooling inventories all independently installed test owners before tests", () => {
+  const tooling = workflow.slice(workflow.indexOf('  release-tooling-tests:'), workflow.indexOf('  app-web-tests:'));
+  for (const directory of ['server/manager/gui', 'server/endpoint-registry']) {
+    const install = tooling.indexOf(`pnpm --dir ${directory} --ignore-workspace install --frozen-lockfile`);
+    assert(install >= 0 && install < tooling.indexOf('pnpm check:test-inventory'));
+  }
+  assert(tooling.indexOf('pnpm check:test-inventory') < tooling.indexOf('pnpm test:node'));
+  for (const command of ['pnpm test:node', 'pnpm test --project harness', 'pnpm test --project app --project app-extended',
+    'pnpm test:browser:agent', 'pnpm --dir server/manager/gui --ignore-workspace test',
+    'pnpm --dir server/endpoint-registry --ignore-workspace test']) assert(workflow.includes(command), command);
+});
+
+test("ordinary main changes schedule existing shared, native and Android verification", () => {
+  for (const name of ['pr-check', 'native-check', 'android-check']) {
+    const source = readFileSync(new URL(`../../.github/workflows/${name}.yml`, import.meta.url), 'utf8');
+    assert.match(source, /push:\s+branches: \[ ?["']?main["']? ?\]/);
+    if (name !== 'pr-check') assert.match(source, /paths:[\s\S]*src-tauri\/\*\*/);
+  }
+  const native = readFileSync(new URL('../../.github/workflows/native-check.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+  const primaryRuns = [...native.matchAll(/^\s+- run: (dbus-run-session -- bash scripts\/linux-native-tests.sh --release[^\n]*)$/gm)]
+    .map((match) => match[1]);
+  assert.deepEqual(primaryRuns, ['dbus-run-session -- bash scripts/linux-native-tests.sh --release']);
+  for (const run of primaryRuns) assert.doesNotMatch(run, /(?:^|\s)--lib(?:\s|$)/);
+  const packageRuns = [...native.matchAll(/^\s+- run: ([^\n]* --package [^\n]*)$/gm)]
+    .map((match) => match[1]);
+  assert.deepEqual(packageRuns, [
+    'dbus-run-session -- bash scripts/linux-native-tests.sh --package tauri-plugin-window-state --release --lib',
+    'dbus-run-session -- cargo test --manifest-path crates/wry/Cargo.toml --package wry --release --locked --lib',
+  ]);
+});
+
+test("Windows packaging executes the required app uninstall harness after bundling", () => {
+  const desktop = workflow.slice(workflow.indexOf('  app-desktop:'), workflow.indexOf('  app-android:'));
+  assert(desktop.indexOf('app-nsis-uninstall.node-test.mjs') > desktop.indexOf('Bundle app desktop assets'));
+  assert.match(desktop, /RISUNEST_REQUIRE_NSIS: "1"/);
 });

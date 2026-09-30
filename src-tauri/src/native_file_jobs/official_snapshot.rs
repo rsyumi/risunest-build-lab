@@ -1,4 +1,4 @@
-use super::{restore, JobControl, JobPhase, JobResultSummary, NativeJobError, OpenedJobSource};
+use super::{restore, JobControl, JobPhase, JobProgress, JobResultSummary, NativeJobError, OpenedJobSource};
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File, OpenOptions};
@@ -51,12 +51,19 @@ pub(crate) fn restore_official_snapshot(
         ));
     };
     require_native_prepared_format(&mut source)?;
+    let downloaded_bytes = source.total_bytes;
     restore::restore_started_risu_save(
         source,
         expected_revision,
         job,
         sink,
-        restore::RestoreProgressScale::default(),
+        restore::RestoreProgressScale {
+            base_bytes: downloaded_bytes,
+            total_bytes: Some(downloaded_bytes * 2),
+            spool_directory: Some(owned_directory.to_path_buf()),
+            reject_cold_references: true,
+            ..Default::default()
+        },
     )
 }
 
@@ -78,14 +85,43 @@ async fn download_snapshot(
     owned_directory: &Path,
     job: &JobControl,
 ) -> Result<DownloadOutcome, NativeJobError> {
-    download_snapshot_with_idle_timeout(request, owned_directory, job, NETWORK_IDLE_TIMEOUT).await
+    for retries in 0..=2 {
+        let mut retry_after = Duration::from_secs(1 << retries);
+        let outcome = download_snapshot_attempt(request, owned_directory, job, NETWORK_IDLE_TIMEOUT, NETWORK_IDLE_TIMEOUT, &mut retry_after).await;
+        match outcome {
+            Err(error) if retries < 2 && matches!(error.code.as_str(), "network-error" | "http-retryable") => {
+                match fs::remove_file(owned_directory.join(SNAPSHOT_PART_FILE)) {
+                    Ok(()) => {},
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+                    Err(error) => return Err(store_error(error)),
+                }
+                super::publication::wait_for_retry(job, retry_after).await?;
+            }
+            outcome => return outcome,
+        }
+    }
+    unreachable!()
 }
 
+#[cfg(test)]
 async fn download_snapshot_with_idle_timeout(
     request: &OfficialSnapshotRestoreRequest,
     owned_directory: &Path,
     job: &JobControl,
-    idle_timeout: Duration,
+    response_timeout: Duration,
+    body_idle_timeout: Duration,
+) -> Result<DownloadOutcome, NativeJobError> {
+    let mut elapsed = Duration::ZERO;
+    download_snapshot_attempt(request, owned_directory, job, response_timeout, body_idle_timeout, &mut elapsed).await
+}
+
+async fn download_snapshot_attempt(
+    request: &OfficialSnapshotRestoreRequest,
+    owned_directory: &Path,
+    job: &JobControl,
+    response_timeout: Duration,
+    body_idle_timeout: Duration,
+    retry_after: &mut Duration,
 ) -> Result<DownloadOutcome, NativeJobError> {
     let endpoint = snapshot_endpoint(&request.base_url)?;
     let client = reqwest::Client::builder()
@@ -101,7 +137,7 @@ async fn download_snapshot_with_idle_timeout(
             .header("x-risu-save-date", "0")
             .send(),
         job,
-        idle_timeout,
+        response_timeout,
         "Official account snapshot request was cancelled",
     )
     .await?;
@@ -110,7 +146,7 @@ async fn download_snapshot_with_idle_timeout(
         return Ok(DownloadOutcome::Missing);
     }
     if status == 303 {
-        let bytes = bounded_response_bytes(response, job, idle_timeout).await?;
+        let bytes = bounded_response_bytes(response, job, body_idle_timeout).await?;
         let value = serde_json::from_slice::<serde_json::Value>(&bytes).map_err(|_| {
             NativeJobError::new(
                 "invalid-response",
@@ -141,9 +177,13 @@ async fn download_snapshot_with_idle_timeout(
             "Official account authorization failed",
         ));
     }
+    if matches!(status, 429 | 502 | 503 | 504) {
+        *retry_after = super::publication::retry_delay(response.headers(), 0);
+        return Err(NativeJobError::new("http-retryable", format!("Official account snapshot download returned {status}")));
+    }
     if !(200..300).contains(&status) {
         let message =
-            String::from_utf8_lossy(&bounded_response_bytes(response, job, idle_timeout).await?)
+            String::from_utf8_lossy(&bounded_response_bytes(response, job, body_idle_timeout).await?)
                 .into_owned();
         return Err(NativeJobError::new(
             "http-status",
@@ -174,11 +214,13 @@ async fn download_snapshot_with_idle_timeout(
         .map_err(store_error)?;
     let mut response = response;
     let mut written = 0u64;
+    let mut reported = 0u64;
+    let mut last_report = std::time::Instant::now();
     loop {
         let chunk = await_network_operation(
             response.chunk(),
             job,
-            idle_timeout,
+            body_idle_timeout,
             "Official account snapshot download was cancelled",
         )
         .await?;
@@ -192,7 +234,15 @@ async fn download_snapshot_with_idle_timeout(
                 "Official account snapshot exceeds the native restore limit",
             ));
         }
+        if declared_length.is_some_and(|length| written > length) {
+            return Err(NativeJobError::new("invalid-response", "Official account snapshot exceeds its response metadata"));
+        }
         output.write_all(&chunk).map_err(store_error)?;
+        if written - reported >= 256 * 1024 || last_report.elapsed() >= Duration::from_millis(100) {
+            report_download_progress(job, written, declared_length)?;
+            reported = written;
+            last_report = std::time::Instant::now();
+        }
     }
     output.flush().map_err(store_error)?;
     output.sync_all().map_err(store_error)?;
@@ -204,11 +254,22 @@ async fn download_snapshot_with_idle_timeout(
             "Official account snapshot length differs from its response metadata",
         ));
     }
+    report_download_progress(job, written, Some(written))?;
     let file = File::open(&destination).map_err(store_error)?;
     Ok(DownloadOutcome::File(OpenedJobSource {
         file,
         total_bytes: written,
     }))
+}
+
+fn report_download_progress(job: &JobControl, written: u64, length: Option<u64>) -> Result<(), NativeJobError> {
+    let previous = job.status().progress;
+    job.set_progress(JobProgress {
+        completed_bytes: written.max(previous.completed_bytes),
+        total_bytes: previous.total_bytes.or(length.map(|length| length * 2)),
+        completed_items: 0,
+        total_items: None,
+    }).map_err(job_state_error)
 }
 
 fn snapshot_endpoint(base_url: &str) -> Result<String, NativeJobError> {
@@ -364,9 +425,10 @@ mod tests {
 
     fn stalled_server(
         response_prefix: Vec<u8>,
+        header_delay: Duration,
     ) -> (
         String,
-        mpsc::Receiver<()>,
+        mpsc::Receiver<Instant>,
         mpsc::Sender<()>,
         thread::JoinHandle<()>,
     ) {
@@ -382,7 +444,16 @@ mod tests {
             let mut request = Vec::new();
             let mut buffer = [0u8; 4096];
             loop {
-                let read = stream.read(&mut buffer).unwrap();
+                let read = match stream.read(&mut buffer) {
+                    Ok(read) => read,
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::ConnectionReset
+                                | std::io::ErrorKind::ConnectionAborted
+                        ) => return,
+                    Err(error) => panic!("fixture request read failed: {error}"),
+                };
                 if read == 0 {
                     return;
                 }
@@ -391,10 +462,20 @@ mod tests {
                     break;
                 }
             }
-            stream.write_all(&response_prefix).unwrap();
-            stream.flush().unwrap();
-            ready_tx.send(()).unwrap();
-            let _ = stop_rx.recv_timeout(Duration::from_secs(5));
+            thread::sleep(header_delay);
+            if let Err(error) = stream.write_all(&response_prefix).and_then(|_| stream.flush()) {
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::BrokenPipe
+                        | std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                ) {
+                    return;
+                }
+                panic!("fixture response write failed: {error}");
+            }
+            let _ = ready_tx.send(Instant::now());
+            let _ = stop_rx.recv_timeout(Duration::from_secs(30));
         });
         (format!("http://{address}"), ready_rx, stop_tx, handle)
     }
@@ -453,7 +534,8 @@ mod tests {
 
     #[test]
     fn cancellation_interrupts_a_response_stalled_before_headers() {
-        let (base_url, request_received, stop_server, server) = stalled_server(Vec::new());
+        let (base_url, request_received, stop_server, server) =
+            stalled_server(Vec::new(), Duration::ZERO);
         let directory = TempDir::new().unwrap();
         let job = job();
         let cancelling_job = std::sync::Arc::clone(&job);
@@ -488,7 +570,7 @@ mod tests {
     fn cancellation_interrupts_a_response_stalled_between_body_chunks() {
         let response =
             b"HTTP/1.1 200 OK\r\nContent-Length: 16\r\nConnection: close\r\n\r\npartial".to_vec();
-        let (base_url, body_started, stop_server, server) = stalled_server(response);
+        let (base_url, body_started, stop_server, server) = stalled_server(response, Duration::ZERO);
         let directory = TempDir::new().unwrap();
         let job = job();
         let cancelling_job = std::sync::Arc::clone(&job);
@@ -519,60 +601,82 @@ mod tests {
     fn idle_timeout_ends_a_stalled_snapshot_body() {
         let response =
             b"HTTP/1.1 200 OK\r\nContent-Length: 16\r\nConnection: close\r\n\r\npartial".to_vec();
-        let (base_url, _body_started, stop_server, server) = stalled_server(response);
+        let (base_url, body_started, stop_server, server) =
+            stalled_server(response, Duration::from_millis(300));
         let directory = TempDir::new().unwrap();
         let job = job();
 
         let result = tauri::async_runtime::block_on(async {
             tokio::time::timeout(
-                Duration::from_secs(2),
+                Duration::from_secs(15),
                 download_snapshot_with_idle_timeout(
                     &request(base_url),
                     directory.path(),
                     &job,
+                    Duration::from_secs(10),
                     Duration::from_millis(100),
                 ),
             )
             .await
         });
 
+        let completed = Instant::now();
+        let body_ready = body_started.recv_timeout(Duration::from_secs(10));
         let _ = stop_server.send(());
         server.join().unwrap();
+        assert!(
+            body_ready.expect("fixture must send headers and partial body") <= completed,
+            "body startup must precede the idle failure"
+        );
         let error = match result.expect("stalled body must respect its idle timeout") {
             Err(error) => error,
             Ok(_) => panic!("stalled body must fail"),
         };
         assert_eq!(error.code, "network-error");
+        assert_eq!(error.message, network_idle_timeout().message);
+        assert_eq!(
+            fs::read(directory.path().join(SNAPSHOT_PART_FILE)).unwrap(),
+            b"partial"
+        );
     }
 
     #[test]
     fn idle_timeout_ends_a_stalled_error_response_body() {
         let response = b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 16\r\nConnection: close\r\n\r\npartial"
             .to_vec();
-        let (base_url, _body_started, stop_server, server) = stalled_server(response);
+        let (base_url, body_started, stop_server, server) =
+            stalled_server(response, Duration::from_millis(300));
         let directory = TempDir::new().unwrap();
         let job = job();
 
         let result = tauri::async_runtime::block_on(async {
             tokio::time::timeout(
-                Duration::from_secs(2),
+                Duration::from_secs(15),
                 download_snapshot_with_idle_timeout(
                     &request(base_url),
                     directory.path(),
                     &job,
+                    Duration::from_secs(10),
                     Duration::from_millis(100),
                 ),
             )
             .await
         });
 
+        let completed = Instant::now();
+        let body_ready = body_started.recv_timeout(Duration::from_secs(10));
         let _ = stop_server.send(());
         server.join().unwrap();
+        assert!(
+            body_ready.expect("fixture must send headers and partial body") <= completed,
+            "body startup must precede the idle failure"
+        );
         let error = match result.expect("stalled error body must respect its idle timeout") {
             Err(error) => error,
             Ok(_) => panic!("stalled error body must fail"),
         };
         assert_eq!(error.code, "network-error");
+        assert_eq!(error.message, network_idle_timeout().message);
     }
 
     #[test]
@@ -595,6 +699,7 @@ mod tests {
                     &request(base_url),
                     directory.path(),
                     &job,
+                    Duration::from_secs(10),
                     Duration::from_millis(500),
                 ),
             )
@@ -609,6 +714,64 @@ mod tests {
         let mut bytes = Vec::new();
         source.file.read_to_end(&mut bytes).unwrap();
         assert_eq!(bytes, b"abc");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn chunked_download_reports_known_or_unknown_total_before_staging() {
+        for declared in [false, true] {
+            let metadata = if declared { "Content-Length: 6\r\n" } else { "" };
+            let (base_url, server) = scripted_server(vec![
+                (Duration::ZERO, format!("HTTP/1.1 200 OK\r\n{metadata}Connection: close\r\n\r\n").into_bytes()),
+                (Duration::from_millis(150), b"abc".to_vec()),
+                (Duration::from_millis(150), b"def".to_vec()),
+            ]);
+            let directory = TempDir::new().unwrap();
+            let job = job();
+            let (outcome, observations) = tauri::async_runtime::block_on(async {
+                let request = request(base_url);
+                let download = download_snapshot(&request, directory.path(), &job);
+                let observe = async {
+                    let mut observations = Vec::new();
+                    for _ in 0..45 {
+                        observations.push(job.status().progress);
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    observations
+                };
+                tokio::join!(download, observe)
+            });
+            assert!(matches!(outcome.unwrap(), DownloadOutcome::File(_)));
+            assert!(observations.iter().any(|progress| progress.completed_bytes == 3 && progress.total_bytes == if declared { Some(12) } else { None }));
+            assert_eq!(job.status().progress.completed_bytes, 6);
+            assert_eq!(job.status().progress.total_bytes, Some(12));
+            assert!(observations.windows(2).all(|pair| pair[0].completed_bytes <= pair[1].completed_bytes));
+            assert!(observations.iter().all(|progress| progress.total_bytes.is_none_or(|total| progress.completed_bytes <= total)));
+            server.join().unwrap();
+        }
+    }
+
+    #[test]
+    fn snapshot_transient_status_retries_are_bounded_and_keep_exact_bytes() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            for status in [429, 503, 200] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0u8; 4096];
+                stream.read(&mut request).unwrap();
+                let body = if status == 200 { "abc" } else { "" };
+                write!(stream, "HTTP/1.1 {status} Response\r\nRetry-After: 0\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+        });
+        let directory = TempDir::new().unwrap();
+        let job = job();
+        let outcome = tauri::async_runtime::block_on(download_snapshot(&request(format!("http://{address}")), directory.path(), &job)).unwrap();
+        let DownloadOutcome::File(mut source) = outcome else { panic!("snapshot required") };
+        let mut bytes = Vec::new();
+        source.file.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"abc");
+        assert_eq!(job.status().progress.total_bytes, Some(6));
         server.join().unwrap();
     }
 

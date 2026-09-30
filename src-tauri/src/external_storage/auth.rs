@@ -77,6 +77,16 @@ impl PendingAuthorization {
             authorize,
         ))
     }
+    pub fn matches_state(&self, callback: &url::Url) -> bool {
+        let mut base = callback.clone();
+        base.set_query(None);
+        let mut states = callback.query_pairs().filter(|(name, _)| name == "state");
+        base == self.policy.redirect_url
+            && callback.fragment().is_none()
+            && states.next().is_some_and(|(_, value)| value == *self.state.secret())
+            && states.next().is_none()
+    }
+
     pub fn finish(self, callback: &url::Url) -> Result<AuthorizationCode> {
         let mut base = callback.clone();
         base.set_query(None);

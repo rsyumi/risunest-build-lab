@@ -10,6 +10,37 @@ fn state(root: &Path) -> DeviceBackupState {
 }
 
 #[test]
+fn large_device_row_reads_are_exact_bounded_and_validate_offsets() {
+    let root = tempfile::tempdir().unwrap();
+    let coordinator = state(root.path());
+    let id = coordinator.create_native_portable_session(
+        "large-row", false, &["local-plugins".to_owned()], 0, None).unwrap();
+    coordinator.section_begin(&id, Spool::Source, "local-plugins", r#"{"present":true}"#).unwrap();
+    let payload = serde_json::to_vec(&"x".repeat(8 * 1024 * 1024)).unwrap();
+    coordinator.blob_begin(&id, Spool::Source, "large-row").unwrap();
+    for (index, chunk) in payload.chunks(MAX_CHUNK_BYTES).enumerate() {
+        coordinator.blob_append(&id, Spool::Source, "large-row",
+            (index * MAX_CHUNK_BYTES) as u64, chunk).unwrap();
+    }
+    let blob = coordinator.blob_finish(&id, Spool::Source, "large-row").unwrap();
+    coordinator.row_append_from_blob(&id, Spool::Source, "local-plugins", 0, &blob.sha256).unwrap();
+    let mut recovered = Vec::new();
+    while recovered.len() < payload.len() {
+        let chunk = coordinator.row_read_bytes(&id, Spool::Source, "local-plugins", 0,
+            recovered.len() as u64, MAX_CHUNK_BYTES - 3).unwrap();
+        assert!(!chunk.is_empty());
+        recovered.extend(chunk);
+    }
+    assert_eq!(recovered, payload);
+    assert!(coordinator.row_read_bytes(&id, Spool::Source, "local-plugins", 0,
+        payload.len() as u64, MAX_CHUNK_BYTES).unwrap().is_empty());
+    assert!(coordinator.row_read_bytes(&id, Spool::Source, "local-plugins", 0,
+        payload.len() as u64 + 1, 1).is_err());
+    assert!(coordinator.row_read_bytes(&id, Spool::Source, "local-plugins", 0,
+        0, MAX_CHUNK_BYTES + 1).is_err());
+}
+
+#[test]
 fn native_catalog_validation_rejects_unknown_noncanonical_and_corrupt_entries() {
     struct Never;
     impl crate::local_backup::CancellationProbe for Never {

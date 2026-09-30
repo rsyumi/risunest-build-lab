@@ -86,7 +86,10 @@
         }
     }
 
-    export function refreshConversationStartParser(): void {
+    export function refreshConversationStartParser(
+        nextTotalMessages = totalMessages,
+    ): void {
+        totalMessages = nextTotalMessages
         void prepareParser()
     }
 

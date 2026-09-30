@@ -432,7 +432,7 @@ describe('persistent production runtime', () => {
         expect(exported.pluginCustomStorage).toEqual(storage)
     })
 
-    it('captures root and the selected character without traversing inactive characters', () => {
+    it('production capture helpers do not traverse inactive characters', () => {
         const database = makeDatabase()
         const inactive = structuredClone(database.characters[0])
         Object.defineProperty(inactive, 'chats', {

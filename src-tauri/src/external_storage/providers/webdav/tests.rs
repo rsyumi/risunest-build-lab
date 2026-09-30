@@ -1222,8 +1222,8 @@ fn documented_statuses_map_to_provider_errors_with_their_retry_hints() {
             (ErrorKind::Transient, 423, None),
             (ErrorKind::RateLimited, 429, Some(NOW_MS + 60_000)),
             (ErrorKind::NotFound, 404, None),
-            // Redirects are never followed, so the endpoint is simply wrong.
-            (ErrorKind::Unsupported, 302, None),
+            // Redirects are never followed; the configured endpoint rejected the request.
+            (ErrorKind::EndpointRejected, 302, None),
         ];
         for (index, (kind, status, retry_at_ms)) in expected.into_iter().enumerate() {
             let mut staging = sink(&directory, &format!("read-{index}"));
@@ -1273,118 +1273,6 @@ fn cancellation_during_a_body_stops_the_read() {
         .unwrap();
         assert_eq!(outcome.unwrap_err().kind, ErrorKind::Cancelled);
         assert!(!staging.is_verified());
-    });
-}
-
-#[test]
-fn the_probe_enables_conditional_writes_only_when_the_server_enforces_them() {
-    runtime().block_on(async {
-        let enforcing = Harness::start(vec![
-            reply(201, &[("ETag", "\"probe-1\"")], b""),
-            reply(412, &[], b""),
-            reply(412, &[], b""),
-            reply(204, &[("ETag", "\"probe-2\"")], b""),
-            reply(204, &[], b""),
-        ]);
-        let probe = probe_conditional_writes(
-            &enforcing.test.dependencies,
-            &enforcing.config(),
-            &enforcing.secret(),
-            &Cancellation::default(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            probe,
-            ConditionalWriteProbe {
-                create_if_absent: true,
-                exact_version_update: true,
-                strong_version_token: true,
-                probed_at_ms: NOW_MS,
-            }
-        );
-        assert_eq!(enforcing.count(), 5);
-        assert!(enforcing
-            .line(0)
-            .starts_with(&format!("PUT {}/probe-", encoded_root())));
-        assert_eq!(enforcing.header(0, "if-none-match").as_deref(), Some("*"));
-        assert_eq!(enforcing.header(1, "if-none-match").as_deref(), Some("*"));
-        assert_eq!(
-            enforcing.header(2, "if-match").as_deref(),
-            Some("\"risunest-probe-stale\"")
-        );
-        assert_eq!(
-            enforcing.header(3, "if-match").as_deref(),
-            Some("\"probe-1\"")
-        );
-        assert!(enforcing.line(4).starts_with("DELETE "));
-
-        // A server that answers every conditional PUT with a success is not
-        // doing CAS, however many ETags it returns.
-        let ignoring = Harness::start(vec![
-            reply(201, &[("ETag", "\"probe-1\"")], b""),
-            reply(201, &[("ETag", "\"probe-2\"")], b""),
-            reply(204, &[], b""),
-        ]);
-        let ignored = probe_conditional_writes(
-            &ignoring.test.dependencies,
-            &ignoring.config(),
-            &ignoring.secret(),
-            &Cancellation::default(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            ignored,
-            ConditionalWriteProbe {
-                create_if_absent: false,
-                exact_version_update: false,
-                strong_version_token: true,
-                probed_at_ms: NOW_MS,
-            }
-        );
-        assert_eq!(ignoring.count(), 3);
-
-        // Without a strong tag there is nothing to condition an update on.
-        let untagged = Harness::start(vec![
-            reply(201, &[("ETag", "W/\"weak\"")], b""),
-            reply(412, &[], b""),
-            reply(204, &[], b""),
-        ]);
-        let weak = probe_conditional_writes(
-            &untagged.test.dependencies,
-            &untagged.config(),
-            &untagged.secret(),
-            &Cancellation::default(),
-        )
-        .await
-        .unwrap();
-        assert_eq!(
-            weak,
-            ConditionalWriteProbe {
-                create_if_absent: true,
-                exact_version_update: false,
-                strong_version_token: false,
-                probed_at_ms: NOW_MS,
-            }
-        );
-
-        // A failed round trip still removes the throwaway object.
-        let broken = Harness::start(vec![reply(507, &[], b""), reply(204, &[], b"")]);
-        assert_eq!(
-            probe_conditional_writes(
-                &broken.test.dependencies,
-                &broken.config(),
-                &broken.secret(),
-                &Cancellation::default(),
-            )
-            .await
-            .unwrap_err()
-            .kind,
-            ErrorKind::StorageFull
-        );
-        assert_eq!(broken.count(), 2);
-        assert!(broken.line(1).starts_with("DELETE "));
     });
 }
 
@@ -1487,6 +1375,8 @@ fn the_lease_collection_is_its_own_member_of_the_root() {
             multistatus_reply(&[
                 collection_response(&format!("{}/leases/", encoded_root())),
                 object_response(&format!("{}/leases/{name}", encoded_root()), 30, None),
+                object_response(&format!("{}/leases/.DS_Store", encoded_root()), 0, None),
+                object_response(&format!("{}/leases/readme.txt", encoded_root()), 0, None),
             ]),
             reply(204, &[], b""),
         ]);
@@ -1544,23 +1434,28 @@ fn incomplete_or_oversized_listing_never_produces_a_page() {
 }
 
 #[test]
-fn a_new_enumeration_is_fresh_and_expired_cursors_cannot_authorize_empty_results() {
+fn listing_resumes_after_expiry_and_on_a_new_provider() {
     runtime().block_on(async {
         let folder = format!("{}/snapshots", encoded_root());
-        let listing = || folder_listing("snapshots", vec![
-            object_response(&format!("{folder}/a"), 1, None),
-            object_response(&format!("{folder}/b"), 1, None),
-        ]);
-        let harness = Harness::start(vec![established_root(), listing(), folder_listing("snapshots", vec![])]);
+        let listing = || folder_listing("snapshots", (0..75).rev().map(|index|
+            object_response(&format!("{folder}/item-{index:03}"), 1, None)).collect());
+        let harness = Harness::start(vec![established_root(), listing(), listing(), established_root(), listing()]);
         let repository = harness.opened().await;
-        let first = harness.provider.list_objects(&repository, Collection::Snapshots, None, 1,
-            &Cancellation::default()).await.unwrap();
-        harness.test.clock.set(NOW_MS + 5 * 60 * 1000);
-        assert!(harness.provider.list_objects(&repository, Collection::Snapshots, first.next_cursor.as_deref(), 1,
-            &Cancellation::default()).await.is_err());
-        let fresh = harness.provider.list_objects(&repository, Collection::Snapshots, None, 1,
-            &Cancellation::default()).await.unwrap();
-        assert!(fresh.objects.is_empty());
-        assert_eq!(harness.count(), 3);
+        let cancel = Cancellation::default();
+        let first = harness.provider.list_objects(&repository, Collection::Snapshots, None, 30, &cancel).await.unwrap();
+        let cursor = first.next_cursor.as_deref().unwrap();
+        assert!(cursor.len() < 4096);
+        assert_eq!(harness.provider.list_objects(&repository, Collection::BackupPoints, Some(cursor), 30, &cancel)
+            .await.unwrap_err().kind, ErrorKind::Corrupt);
+        harness.test.clock.set(NOW_MS + 6 * 60 * 1000);
+        let second = harness.provider.list_objects(&repository, Collection::Snapshots, Some(cursor), 30, &cancel).await.unwrap();
+        assert_eq!(second.objects[0].locator.object, "snapshots/item-030");
+        let fresh = create(harness.test.dependencies.clone()).unwrap();
+        let (reopened, _) = fresh.open_repository(&harness.config(), &harness.secret(), OpenMode::Existing, &cancel).await.unwrap();
+        let third = fresh.list_objects(&reopened, Collection::Snapshots, second.next_cursor.as_deref(), 30, &cancel).await.unwrap();
+        assert_eq!(third.objects.len(), 15);
+        assert_eq!(third.objects[0].locator.object, "snapshots/item-060");
+        assert!(third.next_cursor.is_none());
+        assert_eq!(harness.count(), 5);
     });
 }

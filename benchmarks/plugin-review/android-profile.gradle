@@ -1,0 +1,11 @@
+// Verification APK identity only; Kotlin namespace and JNI stay unchanged.
+gradle.beforeProject { app ->
+    if (app.path != ':app') return
+    app.plugins.withId('com.android.application') {
+        app.androidComponents.finalizeDsl { android ->
+            android.defaultConfig.applicationId = 'io.github.rsyumi.risunest.pluginreview'
+            android.defaultConfig.versionNameSuffix = '-plugin-review'
+        }
+        app.layout.buildDirectory.set(new File(app.rootDir, '../../../benchmarks/plugin-review/.local/android-build'))
+    }
+}

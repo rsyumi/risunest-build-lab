@@ -152,7 +152,7 @@ fn native_portable_scale_acceptance() {
         .unwrap();
     let start = Instant::now();
     let exported = measure("export", &job, || {
-        export_portable(None, revision, &jobs, &handoffs, store, &job, None)
+        export_portable(None, revision, &jobs, &handoffs, store, &job, None, "9.8.7-synthetic")
     })
     .unwrap();
     let export_ms = start.elapsed().as_millis();

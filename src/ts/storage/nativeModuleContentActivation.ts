@@ -59,6 +59,7 @@ export async function activatePreparedNativeModuleContent(
             prepared,
             undefined,
             signal,
+            lifecycle,
         )
         if (!character) return null
         const module = convertCharacterToModule(character)

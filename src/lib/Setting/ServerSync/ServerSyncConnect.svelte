@@ -28,6 +28,7 @@
     busy = false,
     replacing = false,
     error = "",
+    errorRetryable = true,
     tone = "settings",
     onSubmit,
   }: {
@@ -39,6 +40,7 @@
     replacing?: boolean;
     /** The parent's last connection error code. */
     error?: string;
+    errorRetryable?: boolean;
     tone?: "settings" | "onboarding";
     onSubmit: (request: ServerSyncConnectRequest) => void;
   } = $props();
@@ -62,6 +64,13 @@
     deviceId = "";
     token = "";
     manualOpen = Boolean(endpoint || libraryId);
+  });
+  $effect(() => {
+    if (stage !== "review" || busy || !available) return;
+    return serverRegistrationInbox.changed.subscribe(() => {
+      const next = serverRegistrationInbox.take();
+      if (next) accept(next);
+    });
   });
   const residencyOptions = $derived([
     { value: "full" as const, label: text.residency.full },
@@ -249,7 +258,7 @@
   {/if}
   {#if error && error !== "cancelled"}
     <p class="text-sm text-danger-400" role="alert">
-      {serverSyncErrorHelp(error, text)} <span class="text-textcolor2">({error})</span>
+      {serverSyncErrorHelp(error, text, errorRetryable)} <span class="text-textcolor2">({error})</span>
     </p>
   {/if}
 </div>

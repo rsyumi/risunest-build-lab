@@ -62,6 +62,8 @@ fn admission_fixture() -> (Fixture, Arc<Admission>) {
                     state.accesses.fetch_add(1, Ordering::SeqCst);
                     let injected = *state.inject.lock().unwrap();
                     if let Some((status, body)) = injected {
+                        axum::body::to_bytes(request.into_body(), risunest_sync_wire::MAX_METADATA_BYTES)
+                            .await.expect("injected media request body");
                         return axum::response::Response::builder()
                             .status(status)
                             .body(axum::body::Body::from(body))
@@ -237,7 +239,8 @@ fn eight_mime_variants_all_receive_grants_after_contended_admission() {
     }
     assert_eq!(urls.len(), 8);
     assert!(state.refusals.load(Ordering::SeqCst) >= 1);
-    assert_eq!(state.accesses.load(Ordering::SeqCst), 8);
+    assert!((1..=2).contains(&state.accesses.load(Ordering::SeqCst)));
+    assert_eq!(state.sessions.load(Ordering::SeqCst), 2);
     finish(held);
 }
 
@@ -245,8 +248,9 @@ fn eight_mime_variants_all_receive_grants_after_contended_admission() {
 /// concurrent lookups racing that teardown fail. The provider keeps it open.
 #[test]
 fn media_lookups_keep_the_residency_log_open_between_requests() {
-    let (fixture, _state) = admission_fixture();
+    let (fixture, state) = admission_fixture();
     let remote = Remote::new(&fixture);
+    state.reset();
     let log = format!(
         "{}-wal",
         crate::server_sync::residency::Residency::path(remote._store.repository_root()).display()
@@ -254,6 +258,8 @@ fn media_lookups_keep_the_residency_log_open_between_requests() {
     assert!(!std::path::Path::new(&log).exists());
     remote.provider.url(&remote.object("image/png"), false).unwrap();
     remote.provider.url(&remote.object("image/webp"), false).unwrap();
+    assert_eq!(state.sessions.load(Ordering::SeqCst), 1);
+    assert_eq!(state.accesses.load(Ordering::SeqCst), 2);
     assert!(std::path::Path::new(&log).is_file());
 }
 
@@ -330,4 +336,70 @@ fn an_unrecognized_or_permanent_media_access_refusal_is_not_replayed() {
     *state.inject.lock().unwrap() = None;
     remote.provider.url(&object, false).unwrap();
     assert_eq!(state.accesses.load(Ordering::SeqCst), 4);
+}
+
+#[test]
+fn injected_refusal_drains_a_fragmented_post_before_closing() {
+    use std::io::{Read, Write};
+    let (fixture, state) = admission_fixture();
+    *state.inject.lock().unwrap() = Some((403, r#"{"error":"forbidden"}"#));
+    for _ in 0..3 {
+        let address = fixture.endpoint.strip_prefix("http://").unwrap();
+        let mut stream = std::net::TcpStream::connect(address).unwrap();
+        stream.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
+        write!(stream, "POST /media/access HTTP/1.1\r\nHost: {address}\r\nContent-Length: 2\r\nConnection: close\r\n\r\n").unwrap();
+        stream.flush().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        stream.write_all(b"{}").unwrap();
+        let mut response = String::new();
+        stream.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 403"));
+        assert!(response.contains(r#"{"error":"forbidden"}"#));
+    }
+    assert_eq!(state.accesses.load(Ordering::SeqCst), 3);
+}
+
+#[test]
+fn hydration_groups_reuse_one_identity_per_custody_and_skip_local_objects() {
+    use crate::server_sync::credentials::StoredConfig;
+    use crate::server_sync::residency::{HydrationSession, RetainedObject};
+    let (first, first_state) = admission_fixture();
+    let (second, second_state) = admission_fixture();
+    let (_root, mut local) = prepared();
+    let (_other_root, mut other) = prepared();
+    first.bind(&mut local);
+    second.bind(&mut other);
+    let mut hashes = Vec::new();
+    let mut second_hashes = Vec::new();
+    for index in 0..65 {
+        hashes.push(put(&mut local, &format!("assets/first-{index}.png"), format!("first synthetic {index}").as_bytes()).object_hash.unwrap());
+        second_hashes.push(put(&mut other, &format!("assets/second-{index}.png"), format!("second synthetic {index}").as_bytes()).object_hash.unwrap());
+    }
+    for store in [&local, &other] {
+        store.asset_residency_set_policy(AssetPolicy::Remote, || Ok(())).unwrap();
+        store.asset_residency_evict(|| Ok(())).unwrap();
+    }
+    let config = StoredConfig::persist(local.repository_root(), &other.server_config().unwrap().unwrap()).unwrap();
+    let remote_ledger = Residency::open(other.repository_root()).unwrap();
+    let mut local_ledger = Residency::open(local.repository_root()).unwrap();
+    let retained = second_hashes.iter().map(|hash| {
+        let proof = remote_ledger.object(hash, None).unwrap().unwrap();
+        RetainedObject { hash: hash.clone(), size: proof.size.into(), retention_id: proof.retention_id }
+    }).collect::<Vec<_>>();
+    local_ledger.confirm(&config, &second.server.head().unwrap(), &retained).unwrap();
+    hashes.extend(second_hashes);
+    first_state.reset();
+    second_state.reset();
+    let mut hydration = HydrationSession::new(local.repository_root(), None).unwrap();
+    assert!(hydration.hydrate_many(&hashes, &|| Ok(())).unwrap().is_empty());
+    assert_eq!(first_state.sessions.load(Ordering::SeqCst), 1);
+    assert_eq!(second_state.sessions.load(Ordering::SeqCst), 1);
+    assert!(hydration.hydrate_many(&hashes, &|| Ok(())).unwrap().is_empty());
+    assert_eq!(first_state.sessions.load(Ordering::SeqCst), 1);
+    assert_eq!(second_state.sessions.load(Ordering::SeqCst), 1);
+    let caches = || std::fs::read_dir(local.repository_root()).unwrap().filter(|entry|
+        entry.as_ref().unwrap().file_name().to_string_lossy().starts_with("asset-hydration-")).count();
+    assert_eq!(caches(), 1);
+    drop(hydration);
+    assert_eq!(caches(), 0);
 }

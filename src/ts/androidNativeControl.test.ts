@@ -17,6 +17,7 @@ afterEach(() => {
     delete window.RisuNestSafControl
     delete window.RisuLifecycleBridge
     delete window.RisuGenerationKeepAlive
+    delete window.RisuCompletionNotifications
     delete window.RisuSafBridge
 })
 
@@ -33,6 +34,19 @@ describe('scoped Android control transport', () => {
         if (safEnabled) window.RisuNestSafControl = { postMessage: vi.fn() }
         await import('./androidNativeControl')
         expect(ready).toHaveBeenCalledOnce()
+    })
+
+    it('bounds completion notification content before crossing the native transport', async () => {
+        vi.resetModules()
+        const sent: { id?: string; method: string; args: string[] }[] = []
+        const port: AndroidControlMessagePort = { postMessage: text => sent.push(JSON.parse(text)) }
+        window.RisuNestControl = port
+        await import('./androidNativeControl')
+        const delivered = window.RisuCompletionNotifications!.notify('a'.repeat(100_000))
+        const message = sent.find(item => item.method === 'notification.completion')!
+        expect(message.args).toEqual(['a'.repeat(4096)])
+        port.onmessage?.({ data: JSON.stringify({ id: message.id, result: true }) })
+        await expect(delivered).resolves.toBe(true)
     })
 
     it('matches delayed responses without treating promises as successful booleans', async () => {

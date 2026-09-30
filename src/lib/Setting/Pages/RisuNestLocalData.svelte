@@ -1,4 +1,8 @@
 <script lang="ts">
+    import { invoke } from '@tauri-apps/api/core'
+    import { isTauri } from 'src/ts/platform'
+    import { alertConfirm, alertError } from 'src/ts/alert'
+    import { formatRisuNestStorageBytes } from 'src/ts/storage/risuNestStorageDashboard'
     import { onMount } from 'svelte'
     import { language } from 'src/lang'
     import SettingGroup from '../RisuNest/SettingGroup.svelte'
@@ -15,6 +19,24 @@
         type LocalDataRemoteState,
     } from 'src/ts/storage/localDataRemotes'
 
+    let hypaUsage = $state<{ count: number; bytes: number } | null>(null)
+    let clearingHypa = $state(false)
+    async function loadHypaUsage() {
+        if (!isTauri) return
+        try { hypaUsage = await invoke('pds_hypa_embedding_usage') } catch { hypaUsage = null }
+    }
+    async function clearHypa() {
+        if (clearingHypa) return
+        clearingHypa = true
+        try {
+            if (!await alertConfirm(strings.hypaClearConfirm)) return
+            await invoke('pds_clear_hypa_embeddings')
+            await loadHypaUsage()
+        }
+        catch { alertError(strings.hypaClearFailed) }
+        finally { clearingHypa = false }
+    }
+
     const strings = language.risuNest.localData
     const rows: { section: LocalDataSection; label: string; help: string }[] = [
         { section: 'hypa', label: strings.hypaTitle, help: strings.hypaDescription },
@@ -22,6 +44,8 @@
     ]
 
     let chosen = $state<Record<LocalDataSection, boolean>>({ hypa: false, 'local-plugins': false })
+    let confirmed: Record<LocalDataSection, boolean> = { hypa: false, 'local-plugins': false }
+    let failure = $state<'load' | 'apply' | null>(null)
     let loaded = $state(false)
     let remotes = $state<LocalDataRemoteState>('unknown')
     /** The section waiting for the user to confirm turning it on. */
@@ -30,7 +54,8 @@
 
     onMount(() => {
         void load()
-        void readLocalDataRemoteState().then((state) => { remotes = state })
+        void loadHypaUsage()
+        void readLocalDataRemoteState().then((state) => { remotes = state }).catch(() => {})
     })
 
     async function load(): Promise<void> {
@@ -38,8 +63,12 @@
             for (const row of await readLocalDataParticipation()) {
                 chosen[row.section] = row.participating
             }
+            confirmed = { ...chosen }
+            failure = null
             loaded = true
         } catch {
+            chosen = { ...confirmed }
+            failure = failure ?? "load"
             loaded = false
         }
     }
@@ -62,8 +91,13 @@
         try {
             await setLocalDataParticipating(section, participating)
             chosen[section] = participating
+            confirmed = { ...chosen }
+            failure = null
         } catch {
+            chosen = { ...confirmed }
+            failure = "apply"
             await load()
+            failure = "apply"
         } finally {
             busy = false
         }
@@ -78,6 +112,14 @@
 <SettingGroup id="risunest-local-data" title={strings.title} description={strings.description}>
     {#if remotes === 'none'}
         <p class="px-4 py-3 text-[13px] leading-normal text-textcolor2">{strings.notConnected}</p>
+    {/if}
+    {#if hypaUsage}
+        <SettingRow label={strings.hypaCache} help={strings.hypaUsage.replace('{count}', hypaUsage.count.toLocaleString()).replace('{size}', formatRisuNestStorageBytes(hypaUsage.bytes))}>
+            <SettingButton busy={clearingHypa} disabled={hypaUsage.count === 0} onclick={clearHypa}>{language.remove}</SettingButton>
+        </SettingRow>
+    {/if}
+    {#if failure}
+        <div class="px-4 py-3" role="alert"><p>{failure === "load" ? strings.loadFailed : strings.applyFailed}</p><SettingButton onclick={() => { failure = null; void load() }}>{language.retry}</SettingButton></div>
     {/if}
     {#each rows as row (row.section)}
         <SettingRow label={row.label} help={row.help} labelFor={`local-data-${row.section}`}>
