@@ -381,14 +381,14 @@
     {
       "path": "benchmarks/macos/native/src/termination_probe.m",
       "mode": "100644",
-      "bytes": 1221,
-      "sha256": "b06e193972faedb61a75acbfd2419462519a1c7c28d89d0075c13dcf14d3f97b"
+      "bytes": 1873,
+      "sha256": "2b84a9de00edf3f4f38a68594f2c988898268b42c7a77113a1eb113e34af586b"
     },
     {
       "path": "benchmarks/macos/native/src/termination_probe.rs",
       "mode": "100644",
-      "bytes": 5329,
-      "sha256": "0c621b09bbbefc579ccc59097f4fa67d1c61e9fd3f9ce1a7548937b5e24a9275"
+      "bytes": 6582,
+      "sha256": "9fc1186808812c17fda30ff9b4cde28dc9bace753f1ea79451a73cb34ed562f1"
     },
     {
       "path": "benchmarks/macos/prepare.mjs",
