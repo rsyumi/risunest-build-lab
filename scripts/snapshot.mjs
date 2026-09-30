@@ -25,7 +25,7 @@ export function git(repo, args, options = {}) {
       repo,
       ...args,
     ],
-    { maxBuffer: 512 * 1024 * 1024, ...options },
+    { maxBuffer: 512 * 1024 * 1024, windowsHide: true, ...options },
   );
 }
 export function validPath(name) {
@@ -106,6 +106,7 @@ export function exclusion(name) {
   if (
     !roots.includes(parts[0]) &&
     !files.includes(name) &&
+    !/^patches\/[^/]+\.patch$/.test(name) &&
     !/^(?:LICENSE|COPYING|NOTICE|COPYRIGHT)(?:\.|$)/i.test(name)
   )
     return "outside-build-inputs";

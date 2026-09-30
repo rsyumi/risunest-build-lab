@@ -132,6 +132,8 @@ test("excludes credentials and real-data-shaped inputs while retaining binary bu
     "src/private.key",
     "AGENTS.md",
     ".codex/config.toml",
+    "patches/script.mjs",
+    "patches/nested/package.patch",
   ])
     assert(exclusion(file), file);
   for (const file of [
@@ -140,6 +142,8 @@ test("excludes credentials and real-data-shaped inputs while retaining binary bu
     "src/etc/docs/docs_text.cbs",
     "crates/lib/LICENSE",
     ".env.agent",
+    "patches/playwright-core@1.63.0.patch",
+    "patches/playwright@1.63.0.patch",
   ])
     assert.equal(exclusion(file), null, file);
 });
@@ -193,7 +197,7 @@ test("snapshot commits retain lane history without changing the shared checkout 
         lab,
         f.destination,
         "macos",
-      ]).toString(),
+      ], { windowsHide: true }).toString(),
     );
   const first = run(),
     second = run();
