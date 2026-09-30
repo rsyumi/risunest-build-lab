@@ -28,13 +28,17 @@ pub fn resolve_data_root(path: &std::path::Path) -> Result<std::path::PathBuf> {
             };
             #[cfg(not(windows))]
             let linked = meta.file_type().is_symlink();
-            if linked { return Err(Error::new("unsafe-storage-path", 400)); }
+            if linked {
+                return Err(Error::new("unsafe-storage-path", 400));
+            }
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
         Err(error) => return Err(error.into()),
     }
     let parent = path.parent().ok_or(Error::new("invalid-data-dir", 400))?;
-    let name = path.file_name().ok_or(Error::new("invalid-data-dir", 400))?;
+    let name = path
+        .file_name()
+        .ok_or(Error::new("invalid-data-dir", 400))?;
     Ok(std::fs::canonicalize(parent)?.join(name))
 }
 

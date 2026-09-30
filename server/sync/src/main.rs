@@ -18,12 +18,21 @@ async fn main() {
         if let Some(error) = error.downcast_ref::<risunest_sync_server::Error>() {
             let args = std::env::args().skip(1).collect::<Vec<_>>();
             if args.first().is_some_and(|command| command == "serve") {
-                if let Some(path) = args.windows(2).find(|pair| pair[0] == "--data-dir").map(|pair| PathBuf::from(&pair[1])) {
+                if let Some(path) = args
+                    .windows(2)
+                    .find(|pair| pair[0] == "--data-dir")
+                    .map(|pair| PathBuf::from(&pair[1]))
+                {
                     if let Ok(root) = risunest_sync_server::resolve_data_root(&path) {
                         if root.is_dir() {
                             use std::io::Write;
-                            if let Ok(mut staged) = tempfile::Builder::new().prefix(".risunest-tmp-").tempfile_in(&root) {
-                                if staged.write_all(error.code.as_bytes()).is_ok() && staged.as_file().sync_all().is_ok() {
+                            if let Ok(mut staged) = tempfile::Builder::new()
+                                .prefix(".risunest-tmp-")
+                                .tempfile_in(&root)
+                            {
+                                if staged.write_all(error.code.as_bytes()).is_ok()
+                                    && staged.as_file().sync_all().is_ok()
+                                {
                                     let _ = staged.persist(root.join("startup-error.txt"));
                                 }
                             }
@@ -264,12 +273,15 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
             let mut stopped = management.shutdown_receiver();
             let stopping = store.clone();
             let (stream_stop, stream_stopped) = tokio::sync::watch::channel(false);
-            let result = axum::serve(listener, http::router_with_shutdown(store, workload, stream_stopped))
-                .with_graceful_shutdown(async move {
-                    tokio::select! { _ = shutdown => (), _ = stopped.changed() => () }
-                    stream_stop.send_replace(true);
-                })
-                .await;
+            let result = axum::serve(
+                listener,
+                http::router_with_shutdown(store, workload, stream_stopped),
+            )
+            .with_graceful_shutdown(async move {
+                tokio::select! { _ = shutdown => (), _ = stopped.changed() => () }
+                stream_stop.send_replace(true);
+            })
+            .await;
             management.close().await;
             // A clean stop folds the write-ahead log back, so the next start does
             // not rebuild its index over frames nothing needs.

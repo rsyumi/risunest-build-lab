@@ -7,7 +7,7 @@ struct Probe { attempt: u32, pending: bool, user_event_modal: bool }
 
 unsafe extern "C" {
     fn risunest_probe_install(callback: extern "C" fn(), diagnostic: extern "C" fn(i32)) -> i32;
-    fn risunest_probe_begin();
+    fn risunest_probe_queue_begin() -> i32;
     fn risunest_probe_modal_mode() -> i32;
     fn risunest_probe_reply_count() -> u32;
     fn risunest_probe_begin_depth() -> u32;
@@ -109,7 +109,14 @@ pub(crate) fn macos_bench_modal_begin(app: tauri::AppHandle) -> Result<(), Strin
                 return;
             }
         }
-        unsafe { risunest_probe_begin(); }
+        let pending = STATE.lock().unwrap().pending;
+        if pending {
+            failed(&handle, "A native termination probe is already pending");
+            return;
+        }
+        if unsafe { risunest_probe_queue_begin() } != 1 {
+            failed(&handle, "Unable to queue native termination probe");
+        }
     }).map_err(|error| error.to_string())
 }
 

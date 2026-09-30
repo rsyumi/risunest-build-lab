@@ -41,7 +41,9 @@ fn cold_backup_restores_exact_objects_under_a_new_epoch_and_rejects_corruption()
     assert_eq!(restored.get_object(&digest).unwrap(), bytes);
     assert_eq!(restored.get_object(&published_digest).unwrap(), published);
     let new_body = vec![b'n'; 128 * 1024];
-    restored.put_object(&device, &hash(&new_body), &new_body).unwrap();
+    restored
+        .put_object(&device, &hash(&new_body), &new_body)
+        .unwrap();
     assert_eq!(restored.get_object(&hash(&new_body)).unwrap(), new_body);
     // The incremental setting travels with the metadata copy, so collection on
     // a restored store can still return the pages it frees.
@@ -93,11 +95,18 @@ fn backup_rejects_equal_length_inline_corruption_before_completion_marker() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::init(&dir.path().join("store")).unwrap();
     let device = common::device(&store);
-    store.put_object(&device, &hash(b"healthy"), b"healthy").unwrap();
-    rusqlite::Connection::open(store.data_path().join("metadata.sqlite")).unwrap()
-        .execute("UPDATE small_objects SET body=?1", [b"corrupt".as_slice()]).unwrap();
+    store
+        .put_object(&device, &hash(b"healthy"), b"healthy")
+        .unwrap();
+    rusqlite::Connection::open(store.data_path().join("metadata.sqlite"))
+        .unwrap()
+        .execute("UPDATE small_objects SET body=?1", [b"corrupt".as_slice()])
+        .unwrap();
     let backup = dir.path().join("backup");
-    assert_eq!(store.backup(&backup).err().unwrap().code, "corrupt-backup-object");
+    assert_eq!(
+        store.backup(&backup).err().unwrap().code,
+        "corrupt-backup-object"
+    );
     assert!(!backup.join("backup.json").exists());
 }
 
@@ -108,12 +117,20 @@ fn failed_restore_after_staging_does_not_publish_a_destination() {
     let backup = dir.path().join("backup");
     let mut manifest = store.backup(&backup).unwrap();
     manifest.objects = 1.into();
-    std::fs::write(backup.join("backup.json"), risunest_sync_wire::canonical::encode(&manifest).unwrap()).unwrap();
+    std::fs::write(
+        backup.join("backup.json"),
+        risunest_sync_wire::canonical::encode(&manifest).unwrap(),
+    )
+    .unwrap();
     let destination = dir.path().join("restored");
     assert!(Store::restore_backup(&backup, &destination).is_err());
     assert!(!destination.exists());
     manifest.objects = 0.into();
-    std::fs::write(backup.join("backup.json"), risunest_sync_wire::canonical::encode(&manifest).unwrap()).unwrap();
+    std::fs::write(
+        backup.join("backup.json"),
+        risunest_sync_wire::canonical::encode(&manifest).unwrap(),
+    )
+    .unwrap();
     assert!(Store::restore_backup(&backup, &destination).is_ok());
 }
 
@@ -125,19 +142,37 @@ fn restore_failure_after_metadata_copy_never_exposes_the_old_epoch() {
     let mut manifest = store.backup(&backup).unwrap();
     let metadata = backup.join("metadata.sqlite");
     let db = rusqlite::Connection::open(&metadata).unwrap();
-    db.execute_batch("CREATE TABLE synthetic_incompatible(value TEXT); PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+    db.execute_batch(
+        "CREATE TABLE synthetic_incompatible(value TEXT); PRAGMA wal_checkpoint(TRUNCATE);",
+    )
+    .unwrap();
     drop(db);
     manifest.metadata_hash = hash(&std::fs::read(&metadata).unwrap());
-    std::fs::write(backup.join("backup.json"), risunest_sync_wire::canonical::encode(&manifest).unwrap()).unwrap();
+    std::fs::write(
+        backup.join("backup.json"),
+        risunest_sync_wire::canonical::encode(&manifest).unwrap(),
+    )
+    .unwrap();
     let destination = dir.path().join("restored");
-    assert_eq!(Store::restore_backup(&backup, &destination).err().unwrap().code, "incompatible-store");
+    assert_eq!(
+        Store::restore_backup(&backup, &destination)
+            .err()
+            .unwrap()
+            .code,
+        "incompatible-store"
+    );
     assert!(!destination.exists());
     assert!(Store::open(&destination).is_err());
     let db = rusqlite::Connection::open(&metadata).unwrap();
-    db.execute_batch("DROP TABLE synthetic_incompatible; PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+    db.execute_batch("DROP TABLE synthetic_incompatible; PRAGMA wal_checkpoint(TRUNCATE);")
+        .unwrap();
     drop(db);
     manifest.metadata_hash = hash(&std::fs::read(&metadata).unwrap());
-    std::fs::write(backup.join("backup.json"), risunest_sync_wire::canonical::encode(&manifest).unwrap()).unwrap();
+    std::fs::write(
+        backup.join("backup.json"),
+        risunest_sync_wire::canonical::encode(&manifest).unwrap(),
+    )
+    .unwrap();
     let restored = Store::restore_backup(&backup, &destination).unwrap();
     assert_ne!(restored.head().unwrap().epoch, manifest.head.epoch);
 }

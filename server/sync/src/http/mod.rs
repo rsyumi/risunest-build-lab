@@ -53,7 +53,11 @@ pub fn router(store: Arc<Store>) -> Router {
 }
 
 pub fn router_with_workload(store: Arc<Store>, workload: Workload) -> Router {
-    router_with_shutdown(store, workload, tokio::sync::watch::Sender::new(false).subscribe())
+    router_with_shutdown(
+        store,
+        workload,
+        tokio::sync::watch::Sender::new(false).subscribe(),
+    )
 }
 
 async fn drain_trash_backlog(
@@ -63,25 +67,41 @@ async fn drain_trash_backlog(
 ) {
     loop {
         tokio::time::sleep(Duration::from_millis(250)).await;
-        if alive.strong_count() == 0 { break; }
+        if alive.strong_count() == 0 {
+            break;
+        }
         let Some(store) = store.upgrade() else { break };
-        let Ok(mut work) = workload.begin(WorkKind::Background) else { break };
+        let Ok(mut work) = workload.begin(WorkKind::Background) else {
+            break;
+        };
         let pass = blocking(move || {
             let pass = store.drain_trash();
             work.set_performed_work(matches!(&pass, Ok(value) if value.removed > 0));
             pass
-        }).await;
+        })
+        .await;
         match pass {
             Ok(pass) => {
-                if pass.failed > 0 { eprintln!("sync trash failed={} backlog={}", pass.failed, pass.backlog); }
-                if pass.selected < 1024 || pass.removed == 0 || pass.backlog == 0 { break; }
-            },
-            Err(error) => { eprintln!("sync trash failed: {}", error.code); break; }
+                if pass.failed > 0 {
+                    eprintln!("sync trash failed={} backlog={}", pass.failed, pass.backlog);
+                }
+                if pass.selected < 1024 || pass.removed == 0 || pass.backlog == 0 {
+                    break;
+                }
+            }
+            Err(error) => {
+                eprintln!("sync trash failed: {}", error.code);
+                break;
+            }
         }
     }
 }
 
-pub fn router_with_shutdown(store: Arc<Store>, workload: Workload, shutdown: tokio::sync::watch::Receiver<bool>) -> Router {
+pub fn router_with_shutdown(
+    store: Arc<Store>,
+    workload: Workload,
+    shutdown: tokio::sync::watch::Receiver<bool>,
+) -> Router {
     let lifetime = Arc::new(());
     let maintenance_alive = Arc::downgrade(&lifetime);
     let maintenance_store = Arc::downgrade(&store);
@@ -102,19 +122,35 @@ pub fn router_with_shutdown(store: Arc<Store>, workload: Workload, shutdown: tok
                 let result = store.maintain();
                 work.set_performed_work(matches!(&result, Ok(value) if value.objects_removed > 0));
                 result
-            }).await;
+            })
+            .await;
             let continue_trash = match result {
-                Err(error) => { eprintln!("sync maintenance failed: {}", error.code); false },
+                Err(error) => {
+                    eprintln!("sync maintenance failed: {}", error.code);
+                    false
+                }
                 Ok(result) => {
                     if result.wal_checkpoint.incomplete() {
                         eprintln!("sync maintenance wal checkpoint incomplete: busy={} log={} checkpointed={}", result.wal_checkpoint.busy, result.wal_checkpoint.log_frames, result.wal_checkpoint.checkpointed_frames);
                     }
-                    if result.trash_failed > 0 { eprintln!("sync trash failed={} backlog={}", result.trash_failed, result.trash_backlog); }
+                    if result.trash_failed > 0 {
+                        eprintln!(
+                            "sync trash failed={} backlog={}",
+                            result.trash_failed, result.trash_backlog
+                        );
+                    }
                     result.trash_backlog > 0
                 }
             };
-            if !continue_trash { continue; }
-            drain_trash_backlog(&maintenance_store, &maintenance_alive, &maintenance_workload).await;
+            if !continue_trash {
+                continue;
+            }
+            drain_trash_backlog(
+                &maintenance_store,
+                &maintenance_alive,
+                &maintenance_workload,
+            )
+            .await;
         }
     });
     let uploads_alive = Arc::downgrade(&lifetime);
@@ -444,10 +480,11 @@ async fn events(State(app): State<App>, headers: HeaderMap) -> Result<Response> 
             loop {
                 // A stream outlives the drain a maintenance owner waits for, so
                 // it closes as soon as admission does.
-                if *app.shutdown.borrow() || !app
-                    .workload
-                    .status()
-                    .is_ok_and(|status| status.state == "open")
+                if *app.shutdown.borrow()
+                    || !app
+                        .workload
+                        .status()
+                        .is_ok_and(|status| status.state == "open")
                 {
                     return None;
                 }
@@ -562,7 +599,9 @@ async fn missing(State(app): State<App>, body: Bytes) -> Result<Response> {
                 Some(size) if candidate.size != size.into() => {
                     return Err(Error::new("object-size-mismatch", 409))
                 }
-                Some(_) if !app.store.object_presence(&candidate.hash)? => absent.push(candidate.hash),
+                Some(_) if !app.store.object_presence(&candidate.hash)? => {
+                    absent.push(candidate.hash)
+                }
                 _ => (),
             }
         }
@@ -1306,13 +1345,18 @@ mod tests {
         let store = Arc::new(crate::store::Store::init(dir.path()).unwrap());
         let alive = Arc::new(());
         let workload = crate::workload::Workload::with_clock(
-            std::time::Duration::ZERO, std::time::Duration::from_secs(45),
+            std::time::Duration::ZERO,
+            std::time::Duration::from_secs(45),
             Arc::new(std::time::Instant::now),
         );
         let db = rusqlite::Connection::open(dir.path().join("metadata.sqlite")).unwrap();
         db.execute_batch("BEGIN").unwrap();
         for index in 0..2049 {
-            db.execute("INSERT INTO object_trash(hash) VALUES(?1)", [format!("{index:064x}")]).unwrap();
+            db.execute(
+                "INSERT INTO object_trash(hash) VALUES(?1)",
+                [format!("{index:064x}")],
+            )
+            .unwrap();
         }
         db.execute_batch("COMMIT").unwrap();
         let weak_store = Arc::downgrade(&store);
@@ -1327,17 +1371,27 @@ mod tests {
         // Observe the first bounded batch and acquire maintenance during its yield.
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
-                let remaining: i64 = db.query_row("SELECT count(*) FROM object_trash", [], |row| row.get(0)).unwrap();
-                if remaining == 1025 && workload.status().unwrap().drained { break; }
+                let remaining: i64 = db
+                    .query_row("SELECT count(*) FROM object_trash", [], |row| row.get(0))
+                    .unwrap();
+                if remaining == 1025 && workload.status().unwrap().drained {
+                    break;
+                }
                 tokio::select! {
                     _ = &mut pending => panic!("cleanup finished before the maintenance window"),
                     _ = tokio::time::sleep(std::time::Duration::from_millis(1)) => (),
                 }
             }
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         let (token, _) = workload.acquire().unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(2), &mut pending).await.unwrap();
-        let remaining: i64 = db.query_row("SELECT count(*) FROM object_trash", [], |row| row.get(0)).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), &mut pending)
+            .await
+            .unwrap();
+        let remaining: i64 = db
+            .query_row("SELECT count(*) FROM object_trash", [], |row| row.get(0))
+            .unwrap();
         assert_eq!(remaining, 1025);
         assert!(workload.status().unwrap().drained);
         workload.release(&token).unwrap();
@@ -1353,21 +1407,35 @@ mod tests {
         db.execute_batch("BEGIN").unwrap();
         for index in 0..1024 {
             let hash = format!("{index:064x}");
-            std::fs::create_dir_all(dir.path().join("objects").join(&hash[..2]).join(&hash)).unwrap();
-            db.execute("INSERT INTO object_trash(hash) VALUES(?1)", [&hash]).unwrap();
+            std::fs::create_dir_all(dir.path().join("objects").join(&hash[..2]).join(&hash))
+                .unwrap();
+            db.execute("INSERT INTO object_trash(hash) VALUES(?1)", [&hash])
+                .unwrap();
         }
         let sentinel_hash = format!("{:064x}", 1024);
-        let sentinel = dir.path().join("objects").join(&sentinel_hash[..2]).join(&sentinel_hash);
+        let sentinel = dir
+            .path()
+            .join("objects")
+            .join(&sentinel_hash[..2])
+            .join(&sentinel_hash);
         std::fs::write(&sentinel, b"synthetic trash").unwrap();
-        db.execute("INSERT INTO object_trash(hash) VALUES(?1)", [&sentinel_hash]).unwrap();
+        db.execute(
+            "INSERT INTO object_trash(hash) VALUES(?1)",
+            [&sentinel_hash],
+        )
+        .unwrap();
         db.execute_batch("COMMIT").unwrap();
-        tokio::time::timeout(std::time::Duration::from_secs(5),
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
             super::drain_trash_backlog(&Arc::downgrade(&store), &Arc::downgrade(&alive), &workload),
-        ).await.expect("an undeletable full batch must not spin");
-        let remaining: i64 = db.query_row("SELECT count(*) FROM object_trash", [], |row| row.get(0)).unwrap();
+        )
+        .await
+        .expect("an undeletable full batch must not spin");
+        let remaining: i64 = db
+            .query_row("SELECT count(*) FROM object_trash", [], |row| row.get(0))
+            .unwrap();
         assert_eq!(remaining, 1025);
         assert!(sentinel.is_file());
         assert!(workload.status().unwrap().drained);
     }
-
 }

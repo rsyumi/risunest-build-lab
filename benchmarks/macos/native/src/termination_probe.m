@@ -1,4 +1,5 @@
 #import <AppKit/AppKit.h>
+#import <CoreFoundation/CoreFoundation.h>
 #import <objc/runtime.h>
 
 static void (*requestProbe)(void);
@@ -38,6 +39,17 @@ void risunest_probe_begin(void) {
     [NSApp terminate:nil];
     diagnosticProbe(ProbeBeginReturn);
     beginDepth--;
+}
+
+int risunest_probe_queue_begin(void) {
+    if (![NSThread isMainThread] || pending) return 0;
+    CFRunLoopRef loop = CFRunLoopGetMain();
+    // Native termination must start outside Tao's event callback.
+    CFRunLoopPerformBlock(loop, kCFRunLoopCommonModes, ^{
+        risunest_probe_begin();
+    });
+    CFRunLoopWakeUp(loop);
+    return 1;
 }
 
 int risunest_probe_modal_mode(void) {

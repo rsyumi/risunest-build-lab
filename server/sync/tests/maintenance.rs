@@ -223,7 +223,9 @@ fn a_revoked_device_leaves_the_device_list_once_nothing_it_holds_remains() {
     let idle = device(&store);
     let busy = device(&store);
     store.put_object(&idle, &hash(b"done"), b"done").unwrap();
-    store.put_object(&busy, &hash(b"pending"), b"pending").unwrap();
+    store
+        .put_object(&busy, &hash(b"pending"), b"pending")
+        .unwrap();
     let h = store.head().unwrap();
     let intent = stage(&store, &idle, &h, 1, &changes("done", b"done"));
     let h = store.commit(&idle, &intent, &h.etag()).unwrap().head;

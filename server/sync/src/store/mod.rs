@@ -64,14 +64,20 @@ struct StagingTemp<'a> {
 }
 impl std::ops::Deref for StagingTemp<'_> {
     type Target = tempfile::NamedTempFile;
-    fn deref(&self) -> &Self::Target { &self.file }
+    fn deref(&self) -> &Self::Target {
+        &self.file
+    }
 }
 impl std::ops::DerefMut for StagingTemp<'_> {
-    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.file }
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.file
+    }
 }
 impl Drop for StagingTemp<'_> {
     fn drop(&mut self) {
-        if let Ok(mut paths) = self.store.temporary_paths.lock() { paths.remove(self.file.path()); }
+        if let Ok(mut paths) = self.store.temporary_paths.lock() {
+            paths.remove(self.file.path());
+        }
     }
 }
 
@@ -145,8 +151,13 @@ pub(super) fn domain_filter(domains: &[Domain]) -> String {
 
 impl Store {
     fn staging_temp(&self) -> Result<StagingTemp<'_>> {
-        let mut paths = self.temporary_paths.lock().map_err(|_| Error::new("storage-unavailable", 503))?;
-        let file = tempfile::Builder::new().prefix(".risunest-tmp-").tempfile_in(self.root.join("staging"))?;
+        let mut paths = self
+            .temporary_paths
+            .lock()
+            .map_err(|_| Error::new("storage-unavailable", 503))?;
+        let file = tempfile::Builder::new()
+            .prefix(".risunest-tmp-")
+            .tempfile_in(self.root.join("staging"))?;
         paths.insert(file.path().to_owned());
         Ok(StagingTemp { file, store: self })
     }
@@ -213,14 +224,28 @@ impl Store {
             let mut changed = false;
             for entry in entries.take(4096) {
                 let entry = entry?;
-                if !entry.file_name().to_string_lossy().starts_with(".risunest-tmp-") { continue; }
+                if !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".risunest-tmp-")
+                {
+                    continue;
+                }
                 let meta = entry.metadata()?;
-                if meta.is_file() && (directory != &root || meta.modified()?.elapsed().is_ok_and(|age| age.as_secs() >= 3600)) {
+                if meta.is_file()
+                    && (directory != &root
+                        || meta
+                            .modified()?
+                            .elapsed()
+                            .is_ok_and(|age| age.as_secs() >= 3600))
+                {
                     fs::remove_file(entry.path())?;
                     changed = true;
                 }
             }
-            if changed { objects::sync_directory(directory)?; }
+            if changed {
+                objects::sync_directory(directory)?;
+            }
         }
         let db_path = root.join("metadata.sqlite");
         if create && db_path.exists() {
@@ -233,9 +258,13 @@ impl Store {
             for name in ["objects", "staging"] {
                 fs::create_dir_all(root.join(name))?;
             }
-            let staged = tempfile::Builder::new().prefix(".risunest-tmp-").tempfile_in(root.join("staging"))?;
+            let staged = tempfile::Builder::new()
+                .prefix(".risunest-tmp-")
+                .tempfile_in(root.join("staging"))?;
             let mut db = Connection::open(staged.path())?;
-            db.execute_batch("PRAGMA auto_vacuum=INCREMENTAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")?;
+            db.execute_batch(
+                "PRAGMA auto_vacuum=INCREMENTAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;",
+            )?;
             let tx = db.transaction()?;
             tx.execute_batch(schema::SCHEMA)?;
             risunest_small_object_store::initialize(&tx)
@@ -249,7 +278,9 @@ impl Store {
             tx.commit()?;
             drop(db);
             staged.as_file().sync_all()?;
-            staged.persist_noclobber(&db_path).map_err(|_| Error::new("initialization-publication-failed", 503))?;
+            staged
+                .persist_noclobber(&db_path)
+                .map_err(|_| Error::new("initialization-publication-failed", 503))?;
             objects::sync_directory(&root)?;
         }
         let db = Connection::open(&db_path)?;

@@ -46,8 +46,14 @@ impl Store {
         risunest_sync_wire::validate_id(id)?;
         let mut db = self.db()?;
         let tx = db.transaction()?;
-        let revoked: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM devices WHERE id=?1 AND revoked=1)", [id], |row| row.get(0))?;
-        if !revoked { return Err(Error::new("revoked-device-required", 409)); }
+        let revoked: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM devices WHERE id=?1 AND revoked=1)",
+            [id],
+            |row| row.get(0),
+        )?;
+        if !revoked {
+            return Err(Error::new("revoked-device-required", 409));
+        }
         tx.execute("DELETE FROM object_custody WHERE device=?1", [id])?;
         tx.commit()?;
         Ok(())

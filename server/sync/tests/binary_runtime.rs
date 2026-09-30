@@ -142,9 +142,16 @@ async fn standalone_daemon_sigterm_releases_the_owner_and_reopens_exact_head() {
     let credential = store.add_device().unwrap();
     drop(store);
     let mut daemon = Daemon::start(directory.path());
-    let mut stream = Client::builder().no_proxy().build().unwrap()
-        .get(format!("{}/events", daemon.endpoint)).bearer_auth(&credential.token)
-        .header("x-risu-library", &credential.library_id).send().await.unwrap();
+    let mut stream = Client::builder()
+        .no_proxy()
+        .build()
+        .unwrap()
+        .get(format!("{}/events", daemon.endpoint))
+        .bearer_auth(&credential.token)
+        .header("x-risu-library", &credential.library_id)
+        .send()
+        .await
+        .unwrap();
     assert!(stream.chunk().await.unwrap().is_some());
     // Only the child created by this test is signalled. No process enumeration.
     let status = Command::new("/bin/kill")
@@ -152,7 +159,11 @@ async fn standalone_daemon_sigterm_releases_the_owner_and_reopens_exact_head() {
         .status()
         .unwrap();
     assert!(status.success());
-    assert!(tokio::time::timeout(Duration::from_secs(2), stream.chunk()).await.unwrap().unwrap().is_none());
+    assert!(tokio::time::timeout(Duration::from_secs(2), stream.chunk())
+        .await
+        .unwrap()
+        .unwrap()
+        .is_none());
     let start = std::time::Instant::now();
     loop {
         if let Some(status) = daemon.child.try_wait().unwrap() {
@@ -585,27 +596,63 @@ async fn management_shutdown_ends_held_stream_and_releases_daemon_owner() {
     drop(store);
     let mut daemon = Daemon::start(directory.path());
     let client = Client::builder().no_proxy().build().unwrap();
-    let mut stream = client.get(format!("{}/events", daemon.endpoint)).bearer_auth(&credential.token)
-        .header("x-risu-library", &credential.library_id).send().await.unwrap();
+    let mut stream = client
+        .get(format!("{}/events", daemon.endpoint))
+        .bearer_auth(&credential.token)
+        .header("x-risu-library", &credential.library_id)
+        .send()
+        .await
+        .unwrap();
     assert!(stream.chunk().await.unwrap().is_some());
     let discovery = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
-            if let Ok(value) = risunest_sync_server::management::discovery::Discovery::load(directory.path()) { break value; }
+            if let Ok(value) =
+                risunest_sync_server::management::discovery::Discovery::load(directory.path())
+            {
+                break value;
+            }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     let endpoint = format!("http://{}", discovery.address);
-    let status: serde_json::Value = client.get(format!("{endpoint}/status")).bearer_auth(&discovery.token)
-        .send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
-    client.post(format!("{endpoint}/shutdown")).bearer_auth(&discovery.token)
-        .json(&serde_json::json!({"revision":status["revision"]})).send().await.unwrap().error_for_status().unwrap();
-    assert!(tokio::time::timeout(Duration::from_secs(2), stream.chunk()).await.unwrap().unwrap().is_none());
+    let status: serde_json::Value = client
+        .get(format!("{endpoint}/status"))
+        .bearer_auth(&discovery.token)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    client
+        .post(format!("{endpoint}/shutdown"))
+        .bearer_auth(&discovery.token)
+        .json(&serde_json::json!({"revision":status["revision"]}))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    assert!(tokio::time::timeout(Duration::from_secs(2), stream.chunk())
+        .await
+        .unwrap()
+        .unwrap()
+        .is_none());
     tokio::time::timeout(Duration::from_secs(2), async {
         loop {
-            if let Some(status) = daemon.child.try_wait().unwrap() { assert!(status.success()); break; }
+            if let Some(status) = daemon.child.try_wait().unwrap() {
+                assert!(status.success());
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-    }).await.unwrap();
+    })
+    .await
+    .unwrap();
     assert!(!directory.path().join("management-session").exists());
     assert!(risunest_sync_server::store::Store::open(directory.path()).is_ok());
 }
