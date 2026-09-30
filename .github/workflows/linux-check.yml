@@ -10,7 +10,7 @@ on:
       scope:
         type: choice
         default: full
-        options: [full, packages]
+        options: [full, packages, appearance-light, appearance-dark]
 permissions:
   contents: read
 concurrency:
@@ -38,7 +38,7 @@ jobs:
           set -euo pipefail
           test "$GITHUB_REF" = refs/heads/main
           [[ "$SNAPSHOT_SHA" =~ ^[0-9a-f]{40}$ ]]
-          case "$CHECK_SCOPE" in full|packages) ;; *) exit 1;; esac
+          case "$CHECK_SCOPE" in full|packages|appearance-light|appearance-dark) ;; *) exit 1;; esac
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.sha }}
@@ -71,6 +71,9 @@ jobs:
             libssl-dev libdbus-1-dev libayatana-appindicator3-dev librsvg2-dev patchelf \
             desktop-file-utils shared-mime-info libfuse2t64 dbus-x11 gnome-keyring \
             xdg-utils webkit2gtk-driver xvfb
+          if [[ "$CHECK_SCOPE" == appearance-* ]]; then
+            sudo apt-get install -y ffmpeg openbox x11-utils gsettings-desktop-schemas
+          fi
       - name: Record environment and cache identity
         id: environment
         run: |
@@ -145,9 +148,12 @@ jobs:
           print('Packaged product carries the product identifier and no harness entry')
           PY
       - name: Build isolated WebKitGTK harness
-        if: inputs.scope == 'full'
+        if: inputs.scope != 'packages'
         run: |
           set -euo pipefail
+          if [[ "$CHECK_SCOPE" == appearance-* ]]; then
+            export RISUNEST_APPEARANCE_PROBE=1
+          fi
           pnpm tauri build --ci --target x86_64-unknown-linux-gnu --no-bundle \
             --config benchmarks/linux/tauri.conf.json -- --locked 2>&1 | tee artifacts/harness-native.log
           release="$CARGO_TARGET_DIR/x86_64-unknown-linux-gnu/release"
@@ -169,6 +175,10 @@ jobs:
               --binary "$HARNESS_BINARY" --output artifacts/webkitgtk --phase "$phase" 2>&1 | tee -a artifacts/webkitgtk.log
           done
           node benchmarks/linux/summarize.mjs artifacts/webkitgtk 2>&1 | tee artifacts/webkitgtk-summary.txt
+          node ../control/scripts/verify-unicode-results.mjs linux artifacts/webkitgtk
+      - name: Capture owned desktop startup appearance
+        if: startsWith(inputs.scope, 'appearance-')
+        run: dbus-run-session -- bash ../control/scripts/linux-appearance.sh 2>&1 | tee artifacts/appearance.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:

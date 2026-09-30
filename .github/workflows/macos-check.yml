@@ -14,7 +14,7 @@ on:
       scope:
         type: choice
         default: full
-        options: [full, streaming]
+        options: [full, streaming, termination-probe, appearance-light, appearance-dark]
 permissions:
   contents: read
 concurrency:
@@ -44,7 +44,7 @@ jobs:
           test "$GITHUB_REF" = refs/heads/main
           [[ "$SNAPSHOT_SHA" =~ ^[0-9a-f]{40}$ ]]
           case "$RUNNER_LABEL" in macos-15|macos-14|macos-15-intel|macos-26) ;; *) exit 1;; esac
-          case "$CHECK_SCOPE" in full|streaming) ;; *) exit 1;; esac
+          case "$CHECK_SCOPE" in full|streaming|termination-probe|appearance-light|appearance-dark) ;; *) exit 1;; esac
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.sha }}
@@ -150,9 +150,12 @@ jobs:
       - name: Build isolated Mac WKWebView harness
         run: |
           set -euo pipefail
-          if [[ "$CHECK_SCOPE" == streaming ]]; then
+          if [[ "$CHECK_SCOPE" != full ]]; then
             mkdir -p dist
             printf '<!doctype html><title>compile placeholder</title>\n' > dist/index.html
+          fi
+          if [[ "$CHECK_SCOPE" == appearance-* ]]; then
+            export RISUNEST_APPEARANCE_PROBE=1
           fi
           pnpm exec vite build --mode agent --config benchmarks/macos/vite.config.ts 2>&1 | tee artifacts/harness-frontend.log
           node benchmarks/macos/prepare.mjs
@@ -174,7 +177,26 @@ jobs:
           if [[ "$CHECK_SCOPE" == streaming ]]; then
             export RISUNEST_MACOS_PHASES=streaming
           fi
-          python3 benchmarks/macos/run.py --app "$app" --artifacts artifacts/wkwebview 2>&1 | tee artifacts/wkwebview.log
+          if [[ "$CHECK_SCOPE" == termination-probe ]]; then
+            export RISUNEST_MACOS_PHASES=termination-probe
+          fi
+          if [[ "$CHECK_SCOPE" == appearance-* ]]; then
+            theme="${CHECK_SCOPE#appearance-}"
+            dark=false
+            [[ "$theme" != dark ]] || dark=true
+            osascript -e "tell application \"System Events\" to tell appearance preferences to set dark mode to $dark"
+            if ! command -v ffmpeg >/dev/null; then brew install ffmpeg; fi
+            command -v ffprobe
+            ffmpeg -f avfoundation -list_devices true -i "" > artifacts/capture-devices.txt 2>&1 || true
+            capture_input="$(python3 -c 'import pathlib,re; text=pathlib.Path("artifacts/capture-devices.txt").read_text(); screens=re.findall(r"Capture screen [0-9]+",text); assert screens,"No enumerated screen"; print(screens[0]+":none")')"
+            python3 benchmarks/macos/run.py --app "$app" --artifacts artifacts/appearance \
+              --appearance --system-theme "$theme" --capture-input "$capture_input" 2>&1 | tee artifacts/appearance.log
+          else
+            python3 benchmarks/macos/run.py --app "$app" --artifacts artifacts/wkwebview 2>&1 | tee artifacts/wkwebview.log
+          fi
+          if [[ "$CHECK_SCOPE" == full ]]; then
+            node ../control/scripts/verify-unicode-results.mjs macos artifacts/wkwebview
+          fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:
