@@ -9,7 +9,7 @@ struct NativeFileState {
     let staging: URL
 
     func receiptURL(_ id: String) throws -> URL {
-        guard UUID(uuidString: id) != nil else { throw CocoaError(.validationMissingMandatoryProperty) }
+        guard UUID(uuidString: id) != nil else { throw CocoaError(.fileReadInvalidFileName) }
         return staging.appendingPathComponent("receipts/\(id).json")
     }
 

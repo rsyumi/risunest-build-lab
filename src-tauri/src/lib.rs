@@ -31,7 +31,7 @@ mod native_media;
 mod native_tokenizer;
 #[cfg(desktop)]
 mod opened_files;
-#[cfg(any(windows, target_os = "linux", target_os = "ios", target_os = "macos"))]
+#[cfg(any(windows, target_os = "linux", target_os = "ios", target_os = "macos", target_os = "android"))]
 mod persistent_commit_raw;
 #[cfg(windows)]
 mod persistent_commit_transport;
