@@ -101,6 +101,23 @@ async function main() {
     document.body.style.color = "var(--risu-theme-textcolor)";
   }
   await initializeIOSNative();
+  const generationReloadKey = "ios-synthetic-generation-reload";
+  const obsoleteId = sessionStorage.getItem(generationReloadKey);
+  if (phase === "contracts" && obsoleteId !== null) {
+    check(
+      (await getIOSNativeState()).activeTasks.length === 0,
+      "new main document releases obsolete generation",
+    );
+    await invoke("plugin:ios-native|end", { id: obsoleteId, success: false });
+    check(
+      (await getIOSNativeState()).activeTasks.length === 0,
+      "obsolete generation cleanup remains harmless after reload",
+    );
+    sessionStorage.removeItem(generationReloadKey);
+    await report("generation-reload", { passed: true });
+    await report("complete", { passed: true });
+    return;
+  }
   if (/^legacy-restore-(100|300|600)-(raw|gzip)$/.test(phase)) {
     const [, size, encoding] = /^legacy-restore-(100|300|600)-(raw|gzip)$/.exec(phase)!;
     const reset = await resetLegacyMeasurementProfile();
@@ -247,14 +264,18 @@ async function main() {
       passed: true,
       state: await getIOSNativeState(),
     });
-    const obsolete = await beginIOSGeneration();
+    await beginIOSGeneration();
+    const obsoleteTasks = (await getIOSNativeState()).activeTasks;
+    check(obsoleteTasks.length === 1, "obsolete generation assertion acquired");
     await initializeIOSNative();
+    const retainedTasks = (await getIOSNativeState()).activeTasks;
     check(
-      (await getIOSNativeState()).activeTasks.length === 0,
-      "new main document releases obsolete generation",
+      retainedTasks.length === 1 && retainedTasks[0] === obsoleteTasks[0],
+      "same main document retains active generation",
     );
-    await obsolete.dispose();
-    await report("complete", { passed: true });
+    sessionStorage.setItem(generationReloadKey, obsoleteTasks[0]);
+    location.reload();
+    return;
   } else if (phase === "reload") {
     await report("reload", await reload());
     await report("complete", { passed: true });

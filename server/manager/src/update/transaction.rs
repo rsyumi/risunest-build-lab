@@ -1175,15 +1175,30 @@ mod tests {
         let backup = temp.path().join(".risunest-sync-update-backup");
         file(&install.join("server"), "old");
         file(&staged.join("server"), "new");
-        let mut transaction = InstallTransaction::new("1.0.0".into(), "2.0.0".into(),
-            TransactionKind::Files, install.clone(), staged, backup, vec![PathBuf::from("server")], false).unwrap();
+        let mut transaction = InstallTransaction::new(
+            "1.0.0".into(),
+            "2.0.0".into(),
+            TransactionKind::Files,
+            install.clone(),
+            staged,
+            backup,
+            vec![PathBuf::from("server")],
+            false,
+        )
+        .unwrap();
         transaction.save(&root).unwrap();
         transaction.apply(&root).unwrap();
         transaction.set_prior_startup_enabled(false);
         transaction.mark_restarting(&root).unwrap();
-        assert_eq!(recover_transaction(&root, &install).unwrap(), Some(RecoveryOutcome::RolledBack {
-            was_running: false, source_version: "1.0.0".into(), target_version: "2.0.0".into(), prior_startup_enabled: Some(false),
-        }));
+        assert_eq!(
+            recover_transaction(&root, &install).unwrap(),
+            Some(RecoveryOutcome::RolledBack {
+                was_running: false,
+                source_version: "1.0.0".into(),
+                target_version: "2.0.0".into(),
+                prior_startup_enabled: Some(false),
+            })
+        );
         assert_eq!(fs::read_to_string(install.join("server")).unwrap(), "old");
     }
 

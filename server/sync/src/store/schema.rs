@@ -63,11 +63,18 @@ PRAGMA user_version=1;
 "#;
 
 pub fn verify(db: &rusqlite::Connection) -> crate::Result<()> {
-    fn structure(db: &rusqlite::Connection) -> rusqlite::Result<Vec<(String, String, String, String)>> {
+    fn structure(
+        db: &rusqlite::Connection,
+    ) -> rusqlite::Result<Vec<(String, String, String, String)>> {
         let mut query = db.prepare("SELECT type,name,tbl_name,COALESCE(sql,'') FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name")?;
         let rows = query.query_map([], |row| {
             let sql: String = row.get(3)?;
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, sql.split_whitespace().collect::<Vec<_>>().join(" ")))
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                sql.split_whitespace().collect::<Vec<_>>().join(" "),
+            ))
         })?;
         rows.collect()
     }

@@ -1,6 +1,12 @@
 use crate::{store::Store, Error, Result};
 use serde::Serialize;
-use std::{sync::{Arc, atomic::{AtomicU64, Ordering}}, time::Duration};
+use std::{
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc,
+    },
+    time::Duration,
+};
 use tokio::sync::{watch, Notify};
 
 #[derive(Clone, Debug, Serialize)]
@@ -27,7 +33,11 @@ impl Publisher {
             phase: "waiting",
             error: None,
         });
-        Ok(Self { http, status, retry_after: AtomicU64::new(0) })
+        Ok(Self {
+            http,
+            status,
+            retry_after: AtomicU64::new(0),
+        })
     }
     pub fn subscribe(&self) -> watch::Receiver<PublicationStatus> {
         self.status.subscribe()
@@ -37,7 +47,9 @@ impl Publisher {
         let planning = store.clone();
         let (publication, status) = tokio::task::spawn_blocking(move || {
             Ok::<_, Error>((planning.plan_publication()?, planning.connection_status()?))
-        }).await.map_err(|_| Error::new("connection-state-unavailable", 503))??;
+        })
+        .await
+        .map_err(|_| Error::new("connection-state-unavailable", 503))??;
         let Some(publication) = publication else {
             self.status.send_replace(PublicationStatus {
                 phase: status.publication,
@@ -61,16 +73,30 @@ impl Publisher {
             .map_err(|_| Error::new("directory-unreachable", 503))?;
         if response.status() != reqwest::StatusCode::NO_CONTENT {
             let status = response.status().as_u16();
-            let floor = response.headers().get("retry-after").and_then(|value| value.to_str().ok())
-                .and_then(|value| value.parse::<u64>().ok()).unwrap_or(0).min(3600);
+            let floor = response
+                .headers()
+                .get("retry-after")
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(0)
+                .min(3600);
             self.retry_after.store(floor, Ordering::Relaxed);
             let mut body = Vec::new();
             while let Ok(Some(chunk)) = response.chunk().await {
-                if body.len() + chunk.len() > 256 { body.clear(); break; }
+                if body.len() + chunk.len() > 256 {
+                    body.clear();
+                    break;
+                }
                 body.extend_from_slice(&chunk);
             }
             let error = serde_json::from_slice::<serde_json::Value>(&body).ok();
-            let code = if status == 503 && error.as_ref().and_then(|value| value.get("error")).and_then(|value| value.as_str()) == Some("registry-full") {
+            let code = if status == 503
+                && error
+                    .as_ref()
+                    .and_then(|value| value.get("error"))
+                    .and_then(|value| value.as_str())
+                    == Some("registry-full")
+            {
                 "directory-full"
             } else {
                 match status {
@@ -84,7 +110,8 @@ impl Publisher {
         }
         let confirming = store.clone();
         tokio::task::spawn_blocking(move || confirming.confirm_publication(&publication))
-            .await.map_err(|_| Error::new("connection-state-unavailable", 503))??;
+            .await
+            .map_err(|_| Error::new("connection-state-unavailable", 503))??;
         self.status.send_replace(PublicationStatus {
             phase: "published",
             error: None,
@@ -128,7 +155,11 @@ impl Publisher {
                         error: Some(error.code),
                     });
                     failures = failures.saturating_add(1);
-                    let delay = Duration::from_secs((1u64 << failures.min(6)).min(60).max(self.retry_after.load(Ordering::Relaxed)));
+                    let delay = Duration::from_secs(
+                        (1u64 << failures.min(6))
+                            .min(60)
+                            .max(self.retry_after.load(Ordering::Relaxed)),
+                    );
                     tokio::select! { _ = changed.notified() => (), _ = tokio::time::sleep(delay) => (), _ = stop.changed() => return }
                 }
             }

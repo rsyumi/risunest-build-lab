@@ -350,7 +350,9 @@ impl Store {
     }
     pub fn object_presence(&self, digest: &str) -> Result<bool> {
         let db = self.reader()?;
-        let Some((size, inline)) = placement(&db, digest)? else { return Ok(false); };
+        let Some((size, inline)) = placement(&db, digest)? else {
+            return Ok(false);
+        };
         if inline {
             return Ok(small_object_store::size(&db, digest).map_err(body_error)? == Some(size));
         }
@@ -766,7 +768,11 @@ mod tests {
                 .unwrap(),
             0
         );
-        store.db().unwrap().execute_batch("DROP TRIGGER synthetic_batch_failure").unwrap();
+        store
+            .db()
+            .unwrap()
+            .execute_batch("DROP TRIGGER synthetic_batch_failure")
+            .unwrap();
         drop(store);
         let store = Store::open(directory.path()).unwrap();
         for _ in 0..2 {

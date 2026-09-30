@@ -193,7 +193,10 @@ impl Store {
         Ok(Some(Publication {
             directory,
             envelope: state.pending.as_ref().unwrap().envelope.clone(),
-            writer: state.writer.clone().ok_or(Error::new("invalid-connection-state", 409))?,
+            writer: state
+                .writer
+                .clone()
+                .ok_or(Error::new("invalid-connection-state", 409))?,
         }))
     }
     pub fn confirm_publication(&self, sent: &Publication) -> Result<()> {
@@ -359,16 +362,31 @@ mod renewal_tests {
         let store = Store::init(root.path()).unwrap();
         let executable = root.path().join("synthetic-cloudflared");
         fs::write(&executable, b"synthetic").unwrap();
-        store.configure_connection(ConnectionOptions {
-            endpoint: None, cloudflared: Some(executable), registry_url: None,
-        }).unwrap();
+        store
+            .configure_connection(ConnectionOptions {
+                endpoint: None,
+                cloudflared: Some(executable),
+                registry_url: None,
+            })
+            .unwrap();
         for connected in [false, true] {
-            if connected { store.observe_tunnel_endpoint("https://synthetic.trycloudflare.com").unwrap(); }
-            assert_eq!(store.issue_named_registration("device", &"a".repeat(64), None).unwrap_err().code,
-                "managed-registration-needs-directory");
+            if connected {
+                store
+                    .observe_tunnel_endpoint("https://synthetic.trycloudflare.com")
+                    .unwrap();
+            }
+            assert_eq!(
+                store
+                    .issue_named_registration("device", &"a".repeat(64), None)
+                    .unwrap_err()
+                    .code,
+                "managed-registration-needs-directory"
+            );
             assert!(store.managed_devices().unwrap().is_empty());
         }
-        let uri = store.issue_named_registration("local", &"b".repeat(64), Some("http://127.0.0.1:8080")).unwrap();
+        let uri = store
+            .issue_named_registration("local", &"b".repeat(64), Some("http://127.0.0.1:8080"))
+            .unwrap();
         assert!(Registration::parse_uri(&uri).unwrap().directory.is_none());
         assert_eq!(store.managed_devices().unwrap().len(), 1);
     }
@@ -377,10 +395,13 @@ mod renewal_tests {
     fn writer_secret_is_stable_private_and_absent_from_registration_and_status() {
         let root = tempfile::tempdir().unwrap();
         let store = Store::init(root.path()).unwrap();
-        store.configure_connection(ConnectionOptions {
-            endpoint: Some("https://sync.example".into()), cloudflared: None,
-            registry_url: Some("https://registry.example".into()),
-        }).unwrap();
+        store
+            .configure_connection(ConnectionOptions {
+                endpoint: Some("https://sync.example".into()),
+                cloudflared: None,
+                registry_url: Some("https://registry.example".into()),
+            })
+            .unwrap();
         let publication = store.plan_publication().unwrap().unwrap();
         let writer = publication.writer.clone();
         assert_eq!(writer.len(), 64);
@@ -391,17 +412,26 @@ mod renewal_tests {
         assert!(!uri.contains(&writer));
         assert!(!json.contains(&writer));
         assert!(!json.contains("writer"));
-        assert!(!serde_json::to_string(&store.connection_status().unwrap()).unwrap().contains(&writer));
+        assert!(!serde_json::to_string(&store.connection_status().unwrap())
+            .unwrap()
+            .contains(&writer));
         drop(store);
         let store = Store::open(root.path()).unwrap();
         assert_eq!(store.plan_publication().unwrap().unwrap().writer, writer);
-        store.configure_connection(ConnectionOptions {
-            endpoint: Some("https://sync.example".into()), cloudflared: None, registry_url: None,
-        }).unwrap();
-        store.configure_connection(ConnectionOptions {
-            endpoint: Some("https://sync.example".into()), cloudflared: None,
-            registry_url: Some("https://registry.example".into()),
-        }).unwrap();
+        store
+            .configure_connection(ConnectionOptions {
+                endpoint: Some("https://sync.example".into()),
+                cloudflared: None,
+                registry_url: None,
+            })
+            .unwrap();
+        store
+            .configure_connection(ConnectionOptions {
+                endpoint: Some("https://sync.example".into()),
+                cloudflared: None,
+                registry_url: Some("https://registry.example".into()),
+            })
+            .unwrap();
         assert_eq!(store.plan_publication().unwrap().unwrap().writer, writer);
     }
 
@@ -413,14 +443,23 @@ mod renewal_tests {
         let store = Store::init(root.path()).unwrap();
         let path = root.path().join("connection-state");
         for endpoint in ["https://first.example", "https://second.example"] {
-            store.configure_connection(ConnectionOptions {
-                endpoint: Some(endpoint.into()), cloudflared: None,
-                registry_url: Some("https://registry.example".into()),
-            }).unwrap();
-            assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+            store
+                .configure_connection(ConnectionOptions {
+                    endpoint: Some(endpoint.into()),
+                    cloudflared: None,
+                    registry_url: Some("https://registry.example".into()),
+                })
+                .unwrap();
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
         }
         fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
-        assert_eq!(store.connection_status().err().unwrap().code, "private-connection-state-required");
+        assert_eq!(
+            store.connection_status().err().unwrap().code,
+            "private-connection-state-required"
+        );
     }
 
     #[test]

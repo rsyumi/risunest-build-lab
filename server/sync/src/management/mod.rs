@@ -387,7 +387,11 @@ async fn configure(
     let result = blocking(move || store.configure_connection(options)).await;
     let reading = ctx.store.clone();
     let managed = blocking(move || Ok(reading.managed_cloudflared()?.is_some())).await?;
-    rt.connection = Some(ConnectionRuntime::start(ctx.store.clone(), ctx.origin, managed)?);
+    rt.connection = Some(ConnectionRuntime::start(
+        ctx.store.clone(),
+        ctx.origin,
+        managed,
+    )?);
     result?;
     drop(rt);
     status(State(ctx)).await
@@ -469,14 +473,21 @@ async fn tunnel(
     let mut rt = ctx.runtime.lock().await;
     check(&ctx, &mut rt, &input)?;
     let reading = ctx.store.clone();
-    if blocking(move || reading.managed_cloudflared()).await?.is_none() {
+    if blocking(move || reading.managed_cloudflared())
+        .await?
+        .is_none()
+    {
         return Err(Error::new("managed-tunnel-not-configured", 409));
     }
     if let Some(runtime) = rt.connection.take() {
         runtime.shutdown().await;
     }
     if action != "stop" {
-        rt.connection = Some(ConnectionRuntime::start(ctx.store.clone(), ctx.origin, true)?);
+        rt.connection = Some(ConnectionRuntime::start(
+            ctx.store.clone(),
+            ctx.origin,
+            true,
+        )?);
     }
     drop(rt);
     status(State(ctx)).await

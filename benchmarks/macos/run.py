@@ -34,9 +34,11 @@ def memory_sample(pid):
     return {'time': time.time(), 'appTree': own, 'systemWebKit': webkit}
 
 
-def start_appearance_capture(directory, label, platform, capture_input, capture_size=None, display_owner_pid=None, experiment_codec=None):
+def start_appearance_capture(directory, label, platform, capture_input, capture_size=None, display_owner_pid=None, experiment_codec=None, bgra_experiment=False):
     if experiment_codec is not None and (platform != 'macos' or experiment_codec not in {'ffv1', 'copy'}):
         raise RuntimeError('Paired capture experiment supports only Mac ffv1 and copy controls')
+    if bgra_experiment and (platform != 'macos' or experiment_codec != 'copy'):
+        raise RuntimeError('BGRA capture experiment supports only Mac stream-copy')
     if not shutil.which('ffmpeg') or not shutil.which('ffprobe'):
         raise RuntimeError('Appearance capture requires ffmpeg and ffprobe')
     if platform == 'macos':
@@ -44,7 +46,8 @@ def start_appearance_capture(directory, label, platform, capture_input, capture_
             raise RuntimeError('Mac whole-display capture is restricted to the fresh hosted CI desktop')
         if not re.fullmatch(r'Capture screen [0-9]+:none', capture_input or ''):
             raise RuntimeError('Select an enumerated Capture screen device without audio')
-        source = ['-f', 'avfoundation', '-framerate', '60', '-i', capture_input]
+        pixel_format = ['-pixel_format', 'bgr0'] if bgra_experiment else []
+        source = ['-f', 'avfoundation', '-framerate', '60', *pixel_format, '-i', capture_input]
         desktop = {'kind': 'hosted macOS desktop'}
     else:
         display = os.environ.get('DISPLAY', '')
@@ -180,6 +183,7 @@ def main():
     parser.add_argument('--artifacts', type=Path, required=True)
     parser.add_argument('--appearance', action='store_true')
     parser.add_argument('--capture-codec-experiment', action='store_true')
+    parser.add_argument('--capture-bgra-experiment', action='store_true')
     parser.add_argument('--capture-input')
     parser.add_argument('--system-theme', choices=['light', 'dark'])
     args = parser.parse_args()
@@ -187,6 +191,10 @@ def main():
         parser.error('Select appearance capture or the paired codec experiment')
     if args.capture_codec_experiment and args.system_theme != 'light':
         parser.error('Paired capture experiment requires --system-theme light')
+    if args.capture_bgra_experiment and (args.appearance or args.capture_codec_experiment):
+        parser.error('Select BGRA capture experiment without other capture modes')
+    if args.capture_bgra_experiment and args.system_theme != 'light':
+        parser.error('BGRA capture experiment requires --system-theme light')
     app = args.app.resolve(strict=True)
     identifier = subprocess.check_output(['/usr/libexec/PlistBuddy', '-c', 'Print :CFBundleIdentifier', str(app / 'Contents/Info.plist')], text=True).strip()
     if identifier != 'io.github.rsyumi.risunest.macos.bench':
@@ -196,7 +204,7 @@ def main():
         raise RuntimeError('Harness requires a fresh CI user profile; refusing existing data')
     artifacts = args.artifacts.resolve()
     artifacts.mkdir(parents=True, exist_ok=True)
-    if args.appearance or args.capture_codec_experiment:
+    if args.appearance or args.capture_codec_experiment or args.capture_bgra_experiment:
         if any(artifacts.iterdir()):
             raise RuntimeError('Appearance capture requires an empty artifact directory')
         if not args.system_theme:
@@ -204,18 +212,20 @@ def main():
         dark = subprocess.check_output(['osascript', '-e', 'tell application "System Events" to tell appearance preferences to get dark mode'], text=True).strip() == 'true'
         if dark != (args.system_theme == 'dark'):
             raise RuntimeError('Observed macOS appearance does not match requested system theme')
-        if args.capture_codec_experiment:
+        if args.capture_codec_experiment or args.capture_bgra_experiment:
             observations = []
-            for codec in ['ffv1', 'copy']:
-                directory = artifacts / codec
+            for codec in (['copy'] if args.capture_bgra_experiment else ['ffv1', 'copy']):
+                directory = artifacts / ('copy-bgr0' if args.capture_bgra_experiment else codec)
                 directory.mkdir()
                 label = 'appearance-app-light'
                 outcome = {'codec': codec, 'captureSeconds': 6, 'runtimePassed': False, 'capturePassed': False}
+                if args.capture_bgra_experiment:
+                    outcome['requestedInputPixelFormat'] = 'bgr0'
                 capture = None
                 try:
                     run_phase(app, 'appearance-seed-light', directory, [])
                     capture = start_appearance_capture(directory, label, 'macos', args.capture_input,
-                                                       experiment_codec=codec)
+                                                       experiment_codec=codec, bgra_experiment=args.capture_bgra_experiment)
                 except Exception as error:
                     outcome['preparationError'] = {'type': type(error).__name__, 'message': str(error)}
                 if capture is not None:
@@ -239,16 +249,25 @@ def main():
                             outcome['capture'] = json.loads(metadata.read_text())
                 log = directory / f'{label}-capture.log'
                 if log.exists():
-                    statistics = re.search(r'bench: utime=([\d.]+)s stime=([\d.]+)s rtime=([\d.]+)s', log.read_text())
+                    text = log.read_text()
+                    if args.capture_bgra_experiment:
+                        outcome['inputFormatConfirmed'] = bool(re.search(r'Video: rawvideo .*?, bgr0,', text))
+                    statistics = re.search(r'bench: utime=([\d.]+)s stime=([\d.]+)s rtime=([\d.]+)s', text)
                     if statistics:
                         outcome['benchmarkSeconds'] = dict(zip(['user', 'system', 'elapsed'], map(float, statistics.groups())))
+                if args.capture_bgra_experiment and not outcome.get('inputFormatConfirmed'):
+                    outcome['capturePassed'] = False
+                    outcome['inputFormatError'] = 'Requested bgr0 input was not confirmed'
                 observations.append(outcome)
-            (artifacts / 'capture-codec-experiment.json').write_text(json.dumps({
+            report_name = 'capture-bgra-experiment' if args.capture_bgra_experiment else 'capture-codec-experiment'
+            (artifacts / f'{report_name}.json').write_text(json.dumps({
                 'diagnosticOnly': True, 'systemTheme': 'light', 'appTheme': 'light',
                 'observations': observations}, indent=2))
-            print(json.dumps({'captureCodecExperiment': observations}), flush=True)
+            report_key = 'captureBgraExperiment' if args.capture_bgra_experiment else 'captureCodecExperiment'
+            print(json.dumps({report_key: observations}), flush=True)
             if not all(item['runtimePassed'] and item['capturePassed'] for item in observations):
-                raise RuntimeError('Paired capture experiment failed one or more controls')
+                raise RuntimeError('BGRA capture experiment failed' if args.capture_bgra_experiment else
+                                   'Paired capture experiment failed one or more controls')
             return
         observations = []
         for theme in ['light', 'dark']:
