@@ -27,7 +27,7 @@ for attempt in {1..50}; do
   sleep 0.1
 done
 xdpyinfo > artifacts/appearance-display.txt
-openbox --config "$RUNNER_TEMP/appearance-openbox.xml" > artifacts/appearance-openbox.log 2>&1 &
+openbox --config-file "$RUNNER_TEMP/appearance-openbox.xml" > artifacts/appearance-openbox.log 2>&1 &
 wm_pid=$!
 for attempt in {1..50}; do
   if xprop -root _NET_SUPPORTING_WM_CHECK | grep -Eq '0x[1-9a-fA-F][0-9a-fA-F]*'; then break; fi
