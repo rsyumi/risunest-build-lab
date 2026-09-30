@@ -21,6 +21,7 @@ import { appendLastPath } from "src/ts/util";
 import { isMobile } from "src/ts/platform";
 
 export interface HypaProcessorV2Options {
+  signal?: AbortSignal;
   model?: HypaModel;
   customEmbeddingUrl?: string;
   oaiKey?: string;
@@ -231,7 +232,7 @@ export class HypaProcessorV2<TMetadata> {
         group.map((item) => item.content)
       );
 
-      const results = await ctxProvider.embedDocumentGroups(groups);
+      const results = await ctxProvider.embedDocumentGroups(groups, this.options.signal);
 
       for (let i = 0; i < groupEntries.length; i++) {
         const [, group] = groupEntries[i];
@@ -257,6 +258,7 @@ export class HypaProcessorV2<TMetadata> {
     } else if (this.isLocalModel()) {
       // Local model: Sequential processing
       for (let i = 0; i < chunks.length; i++) {
+        this.options.signal?.throwIfAborted();
         // Progress callback
         this.progressCallback?.(chunks.length - i - 1);
 
@@ -300,7 +302,7 @@ export class HypaProcessorV2<TMetadata> {
 
       const batchResult = await this.options.rateLimiter.executeBatch<
         EmbeddingVector[]
-      >(embeddingTasks);
+      >(embeddingTasks, this.options.signal);
       const errors: Error[] = [];
 
       const chunksSavePromises = batchResult.results.map(async (result, i) => {
@@ -475,13 +477,15 @@ export class HypaProcessorV2<TMetadata> {
     const results: Float32Array[] = await runEmbedding(
       contents,
       localModels.models[this.options.model],
-      localModels.gpuModels.includes(this.options.model) ? "webgpu" : "wasm"
+      localModels.gpuModels.includes(this.options.model) ? "webgpu" : "wasm",
+      this.options.signal
     );
 
     return results;
   }
 
   private async getAPIEmbeds(contents: string[]): Promise<EmbeddingVector[]> {
+    this.options.signal?.throwIfAborted();
     const db = getDatabase();
     let response = null;
 
@@ -495,6 +499,7 @@ export class HypaProcessorV2<TMetadata> {
         : appendLastPath(this.options.customEmbeddingUrl, "embeddings");
 
       const fetchArgs = {
+        abortSignal: this.options.signal,
         headers: {
           ...(db.hypaCustomSettings?.key?.trim()
             ? { Authorization: "Bearer " + db.hypaCustomSettings.key.trim() }
@@ -519,6 +524,7 @@ export class HypaProcessorV2<TMetadata> {
       };
 
       const fetchArgs = {
+        abortSignal: this.options.signal,
         headers: {
           Authorization:
             "Bearer " +
@@ -536,11 +542,12 @@ export class HypaProcessorV2<TMetadata> {
       );
     } else if (isContextModel(this.options.model)) {
       const provider = getContextProvider(this.options.model);
-      return await provider.embedQueries(contents);
+      return await provider.embedQueries(contents, this.options.signal);
     } else {
       throw new Error(`Unsupported model: ${this.options.model}`);
     }
 
+    this.options.signal?.throwIfAborted();
     if (!response.ok || !response.data.data) {
       throw new Error(JSON.stringify(response.data));
     }

@@ -7,6 +7,31 @@ import {
 } from './persistentDataStore'
 import { safeStructuredClone } from '../polyfill'
 
+export class PresetListChangedError extends Error {
+    constructor() { super('Preset list changed'); this.name = 'PresetListChangedError' }
+}
+
+export interface PresetListSnapshot {
+    names: readonly string[]
+    presets: readonly Pick<botPreset, 'name'>[]
+}
+
+export type PresetListExpectation = readonly string[] | PresetListSnapshot
+
+export function capturePresetNames(presets: readonly Pick<botPreset, 'name'>[]): PresetListSnapshot {
+    return { names: presets.map(preset => preset.name), presets: [...presets] }
+}
+
+function presetNames(expected: PresetListExpectation): readonly string[] {
+    return 'names' in expected ? expected.names : expected
+}
+
+export function assertPresetNames(presets: readonly Pick<botPreset, 'name'>[], expected: PresetListExpectation): void {
+    const names = presetNames(expected)
+    if (presets.length !== names.length || presets.some((preset, index) => preset.name !== names[index]
+        || ('presets' in expected && preset !== expected.presets[index]))) throw new PresetListChangedError()
+}
+
 export interface PresetWorkingSetMutationState {
     root: PersistentRoot
     presets: botPreset[]
@@ -23,13 +48,13 @@ export interface PresetWorkingSetControllerDependencies {
 }
 
 export interface PresetWorkingSetController {
-    saveCurrentPreset(): Promise<void>
-    changeToPreset(id?: number, saveCurrent?: boolean): Promise<void>
+    saveCurrentPreset(expectedNames?: PresetListExpectation): Promise<void>
+    changeToPreset(id?: number, saveCurrent?: boolean, expectedNames?: PresetListExpectation): Promise<void>
     addPreset(preset: botPreset, activate?: boolean): Promise<number>
-    copyPreset(id: number): Promise<number>
-    removePreset(id: number): Promise<void>
-    movePreset(fromIndex: number, toIndex: number): Promise<void>
-    renamePreset(id: number, name: string): Promise<void>
+    copyPreset(id: number, expectedNames?: PresetListExpectation): Promise<number>
+    removePreset(id: number, expectedNames?: PresetListExpectation): Promise<void>
+    movePreset(fromIndex: number, toIndex: number, expectedNames?: PresetListExpectation): Promise<void>
+    renamePreset(id: number, name: string, expectedNames?: PresetListExpectation): Promise<void>
     updateActivePresetImage(image: string): Promise<void>
 }
 
@@ -91,12 +116,19 @@ export function createPresetWorkingSetController(
     }
 
     return {
-        saveCurrentPreset: () => dependencies.mutatePersistentPresets(
+        saveCurrentPreset: (expectedNames) => dependencies.mutatePersistentPresets(
             'save-current-preset',
-            saveActive,
+            (state) => {
+                if (expectedNames) assertPresetNames(dependencies.getDatabase().botPresets, expectedNames)
+                saveActive(state)
+            },
         ),
-        changeToPreset(id = 0, saveCurrent = true) {
+        changeToPreset(id = 0, saveCurrent = true, expectedNames = capturePresetNames(dependencies.getDatabase().botPresets)) {
+            const before = capturePresetNames(dependencies.getDatabase().botPresets)
             return dependencies.mutatePersistentPresets('change-preset', (state) => {
+                assertPresetNames(dependencies.getDatabase().botPresets, before)
+                assertPresetNames(dependencies.getDatabase().botPresets, expectedNames)
+                assertPresetNames(state.presets, presetNames(expectedNames))
                 if (saveCurrent) saveActive(state)
                 select(state, id)
             })
@@ -111,9 +143,13 @@ export function createPresetWorkingSetController(
             })
             return addedIndex
         },
-        async copyPreset(id) {
+        async copyPreset(id, expectedNames = capturePresetNames(dependencies.getDatabase().botPresets)) {
+            const before = capturePresetNames(dependencies.getDatabase().botPresets)
             let addedIndex = -1
             await dependencies.mutatePersistentPresets('copy-preset', (state) => {
+                assertPresetNames(dependencies.getDatabase().botPresets, before)
+                assertPresetNames(dependencies.getDatabase().botPresets, expectedNames)
+                assertPresetNames(state.presets, presetNames(expectedNames))
                 saveActive(state)
                 assertPresetIndex(state.presets, id)
                 const copied = clonePreset(state.presets[id])
@@ -123,8 +159,12 @@ export function createPresetWorkingSetController(
             })
             return addedIndex
         },
-        removePreset(id) {
+        removePreset(id, expectedNames = capturePresetNames(dependencies.getDatabase().botPresets)) {
+            const before = capturePresetNames(dependencies.getDatabase().botPresets)
             return dependencies.mutatePersistentPresets('remove-preset', (state) => {
+                assertPresetNames(dependencies.getDatabase().botPresets, before)
+                assertPresetNames(dependencies.getDatabase().botPresets, expectedNames)
+                assertPresetNames(state.presets, presetNames(expectedNames))
                 if (state.presets.length <= 1) {
                     throw new Error('There must be at least one preset')
                 }
@@ -134,8 +174,12 @@ export function createPresetWorkingSetController(
                 select(state, 0)
             })
         },
-        movePreset(fromIndex, toIndex) {
+        movePreset(fromIndex, toIndex, expectedNames = capturePresetNames(dependencies.getDatabase().botPresets)) {
+            const before = capturePresetNames(dependencies.getDatabase().botPresets)
             return dependencies.mutatePersistentPresets('move-preset', (state) => {
+                assertPresetNames(dependencies.getDatabase().botPresets, before)
+                assertPresetNames(dependencies.getDatabase().botPresets, expectedNames)
+                assertPresetNames(state.presets, presetNames(expectedNames))
                 saveActive(state)
                 assertPresetIndex(state.presets, fromIndex)
                 if (!Number.isInteger(toIndex) || toIndex < 0 || toIndex > state.presets.length) {
@@ -153,8 +197,12 @@ export function createPresetWorkingSetController(
                 }
             })
         },
-        renamePreset(id, name) {
+        renamePreset(id, name, expectedNames = capturePresetNames(dependencies.getDatabase().botPresets)) {
+            const before = capturePresetNames(dependencies.getDatabase().botPresets)
             return dependencies.mutatePersistentPresets('rename-preset', (state) => {
+                assertPresetNames(dependencies.getDatabase().botPresets, before)
+                assertPresetNames(dependencies.getDatabase().botPresets, expectedNames)
+                assertPresetNames(state.presets, presetNames(expectedNames))
                 saveActive(state)
                 assertPresetIndex(state.presets, id)
                 state.presets[id].name = name

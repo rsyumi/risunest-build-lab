@@ -66,7 +66,9 @@ impl Management {
             token: discovery::request_id()?,
         };
         let (stop, _) = watch::channel(false);
-        let runtime = ConnectionRuntime::start(store.clone(), origin)?;
+        let reading = store.clone();
+        let managed = blocking(move || Ok(reading.managed_cloudflared()?.is_some())).await?;
+        let runtime = ConnectionRuntime::start(store.clone(), origin, managed)?;
         let context = Arc::new(Context {
             store,
             origin,
@@ -92,6 +94,7 @@ impl Management {
             .route("/connection", post(configure))
             .route("/devices", post(issue))
             .route("/devices/{id}/revoke", post(revoke))
+            .route("/devices/{id}/forget", post(forget))
             .route("/tunnel/{action}", post(tunnel))
             .route("/registry/repost", post(repost))
             .route("/shutdown", post(shutdown))
@@ -382,7 +385,9 @@ async fn configure(
     }
     let store = ctx.store.clone();
     let result = blocking(move || store.configure_connection(options)).await;
-    rt.connection = Some(ConnectionRuntime::start(ctx.store.clone(), ctx.origin)?);
+    let reading = ctx.store.clone();
+    let managed = blocking(move || Ok(reading.managed_cloudflared()?.is_some())).await?;
+    rt.connection = Some(ConnectionRuntime::start(ctx.store.clone(), ctx.origin, managed)?);
     result?;
     drop(rt);
     status(State(ctx)).await
@@ -401,7 +406,11 @@ async fn issue(
                 .ok_or(Error::new("local-endpoint-unavailable", 409))?,
         ),
         RegistrationTarget::Configured => {
-            let state = ctx.store.connection_status()?;
+            let store = ctx.store.clone();
+            let state = blocking(move || store.connection_status()).await?;
+            if state.mode == "managed" && !state.directory_enabled {
+                return Err(Error::new("managed-registration-needs-directory", 409));
+            }
             if state.mode == "managed"
                 && rt
                     .connection
@@ -435,6 +444,19 @@ async fn revoke(
     drop(rt);
     status(State(ctx)).await
 }
+async fn forget(
+    State(ctx): State<Arc<Context>>,
+    Path(id): Path<String>,
+    Json(input): Json<Mutation>,
+) -> Result<Json<Value>> {
+    let _work = ctx.workload.begin(WorkKind::Request)?;
+    let mut rt = ctx.runtime.lock().await;
+    check(&ctx, &mut rt, &input)?;
+    let store = ctx.store.clone();
+    blocking(move || store.forget_revoked_device(&id)).await?;
+    drop(rt);
+    status(State(ctx)).await
+}
 async fn tunnel(
     State(ctx): State<Arc<Context>>,
     Path(action): Path<String>,
@@ -446,14 +468,15 @@ async fn tunnel(
     }
     let mut rt = ctx.runtime.lock().await;
     check(&ctx, &mut rt, &input)?;
-    if ctx.store.managed_cloudflared()?.is_none() {
+    let reading = ctx.store.clone();
+    if blocking(move || reading.managed_cloudflared()).await?.is_none() {
         return Err(Error::new("managed-tunnel-not-configured", 409));
     }
     if let Some(runtime) = rt.connection.take() {
         runtime.shutdown().await;
     }
     if action != "stop" {
-        rt.connection = Some(ConnectionRuntime::start(ctx.store.clone(), ctx.origin)?);
+        rt.connection = Some(ConnectionRuntime::start(ctx.store.clone(), ctx.origin, true)?);
     }
     drop(rt);
     status(State(ctx)).await

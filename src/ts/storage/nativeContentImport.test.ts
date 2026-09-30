@@ -29,6 +29,14 @@ const preparedContent: PreparedNativeContent = {
     }],
 }
 
+const preparedPngContent: PreparedNativeContent = {
+    casSessionId: 'content-1', format: 'png-card', metadata: { chara: 'synthetic' },
+    portraitLogicalId: `assets/${'ab'.repeat(32)}.png`,
+    assets: [{ referenceKey: 'native-png-portrait', token: 'native-png-portrait',
+        logicalId: `assets/${'ab'.repeat(32)}.png`, objectHash: 'ab'.repeat(32),
+        byteSize: 12, mime: 'image/png', name: `${'ab'.repeat(32)}.png`, ext: 'png' }],
+}
+
 const preparedRisumContent = {
     casSessionId: 'content-1',
     format: 'risu-module',
@@ -91,6 +99,57 @@ function nativeDependencies(
 }
 
 describe('native prepared content import', () => {
+    it('stages inline assets in bounded chunks and blocks writes after finalization', async () => {
+        const staged = { referenceKey: 'inline-1', token: 'inline-1', logicalId: `assets/${'cd'.repeat(32)}.png`,
+            objectHash: 'cd'.repeat(32), byteSize: 64 * 1024 + 3, mime: '', name: 'inline.png', ext: 'png' }
+        const chunks: number[] = []
+        const receipt = await prepareNativeContentImport({ type: 'androidSpool', token: 'synthetic-token' }, 'card.png', {},
+            nativeDependencies(async (command, args) => {
+                if (command === 'native_file_job_start') return { jobId: 'content-1' }
+                if (command === 'native_file_job_status') return contentStatus('succeeded', 'complete', structuredClone(preparedPngContent))
+                if (command === 'native_file_job_stage_inline_asset') {
+                    const size = (args?.data as number[]).length
+                    chunks.push(size)
+                    const received = Number(args?.offset) + size
+                    return { received, asset: received === staged.byteSize ? staged : null }
+                }
+                if (command === 'asset_cas_job_finalize_content') return {
+                    contentHash: 'ef'.repeat(32), byteSize: 1, physicalKey: `assets/objects/ef/${'ef'.repeat(31)}`, deduplicated: false,
+                }
+                if (command === 'asset_cas_job_release' || command === 'native_file_job_forget') return null
+                throw new Error(`Unexpected command: ${command}`)
+            }))
+        await expect(receipt.stageInlineAsset!(new Uint8Array(staged.byteSize), '')).resolves.toEqual(staged)
+        expect(chunks).toEqual([64 * 1024, 3])
+        expect(receipt.content.assets.at(-1)).toEqual(staged)
+        await receipt.prepareOwnerManifestAndSeal(Uint8Array.of(0))
+        await expect(receipt.stageInlineAsset!(Uint8Array.of(1), '')).rejects.toThrow('not awaiting asset mapping')
+        await receipt.confirmActivated()
+    })
+
+    it('cancels between inline chunks before releasing native ownership', async () => {
+        let finishChunk!: (value: unknown) => void
+        const calls: string[] = []
+        const receipt = await prepareNativeContentImport({ type: 'desktopPath', path: 'synthetic.png' }, 'card.png', {},
+            nativeDependencies(async (command) => {
+                calls.push(command)
+                if (command === 'native_file_job_start') return { jobId: 'content-1' }
+                if (command === 'native_file_job_status') return contentStatus('succeeded', 'complete', structuredClone(preparedPngContent))
+                if (command === 'native_file_job_stage_inline_asset') return new Promise((resolve) => { finishChunk = resolve })
+                if (command === 'asset_cas_job_release' || command === 'native_file_job_forget') return null
+                throw new Error(`Unexpected command: ${command}`)
+            }))
+        const staging = receipt.stageInlineAsset!(new Uint8Array(128 * 1024), '')
+        const cancellation = receipt.cancel()
+        expect(calls).not.toContain('asset_cas_job_release')
+        finishChunk({ received: 64 * 1024, asset: null })
+        await expect(staging).rejects.toMatchObject({ name: 'AbortError' })
+        await cancellation
+        expect(calls.filter((name) => name === 'native_file_job_stage_inline_asset')).toHaveLength(1)
+        expect(calls.slice(-2)).toEqual(['asset_cas_job_release', 'native_file_job_forget'])
+        await expect(receipt.stageInlineAsset!(Uint8Array.of(1), '')).rejects.toThrow('not awaiting asset mapping')
+    })
+
     it('accepts an occurrence-based RISUM receipt and seals it using only the job id', async () => {
         const calls: Array<[string, Record<string, unknown> | undefined]> = []
         const receipt = await prepareNativeContentImport(

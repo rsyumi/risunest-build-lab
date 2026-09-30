@@ -21,7 +21,7 @@ use crate::server_sync::residency::RemotePayloadAccess;
 use flate2::{read::GzDecoder, write::GzEncoder, Compression};
 use serde::de::{IgnoredAny, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Value};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::fs::File;
@@ -206,6 +206,8 @@ impl<'a> LegacyRestoreProgress<'a> {
     fn restore_scale(&self) -> restore::RestoreProgressScale {
         let state = self.state.borrow();
         restore::RestoreProgressScale {
+            spool_directory: None,
+            reject_cold_references: false,
             base_bytes: state.read_bytes.saturating_add(state.prepared_bytes),
             total_bytes: Some(self.budget()),
             fixed_items: Some((state.counts.entries_read, state.counts.entries_total)),
@@ -340,496 +342,6 @@ pub(crate) fn restore_legacy_local_backup(
     }
 }
 
-pub(crate) fn export_legacy_local_backup(
-    destination_path: Option<&std::path::Path>,
-    expected_revision: i64,
-    owned_directory: &std::path::Path,
-    handoff_directory: &std::path::Path,
-    mut store: PersistentStore,
-    job: &JobControl,
-) -> Result<JobResultSummary, NativeJobError> {
-    job.start(JobPhase::WritingExport)
-        .map_err(job_state_error)?;
-    let cancellation = JobCancellation(job);
-    let repository_root = store.repository_root().to_path_buf();
-    let cas = PayloadCas::new(&repository_root).map_err(io_job_error)?;
-    let mut prepared = store
-        .prepare_risu_save_export(expected_revision)
-        .map_err(store_job_error)?;
-    let reader = prepared.take_reader().map_err(store_job_error)?;
-    let mut durable = None;
-    let mut database_path = None;
-    let outcome = (|| {
-        let inventory = export::pinned_legacy_backup_inventory(&reader.connection, &reader.target)
-            .map_err(store_job_error)?;
-        if inventory.revision != expected_revision {
-            return Err(NativeJobError::new(
-                "revision-conflict",
-                "legacy backup payload inventory does not match the requested revision",
-            ));
-        }
-        durable = Some(
-            DurableCasJob::begin(
-                &repository_root,
-                &job.id(),
-                CasJobKind::OfficialPublicationOrExportPreparation,
-                now_millis(),
-            )
-            .map_err(io_job_error)?,
-        );
-        let pins = durable
-            .as_mut()
-            .expect("durable CAS job was just initialized");
-        let owner_manifest_hashes = inventory
-            .owner_heads
-            .iter()
-            .filter(|head| head.present)
-            .filter_map(|head| head.manifest_hash.as_deref())
-            .collect::<HashSet<_>>();
-        for (hash, size) in inventory
-            .assets
-            .iter()
-            .map(|alias| (&alias.object_hash, alias.size))
-        {
-            let hash = hash.as_deref().ok_or_else(|| {
-                NativeJobError::new(
-                    "invalid-source",
-                    "legacy backup alias is missing its object hash",
-                )
-            })?;
-            let role = if owner_manifest_hashes.contains(hash) {
-                CasObjectRole::OwnerManifest
-            } else {
-                CasObjectRole::DirectObject
-            };
-            cas.open_available_object(hash).map_err(io_job_error)?;
-            pins.pin_existing(&cas, hash, size as u64, role)
-                .map_err(io_job_error)?;
-        }
-        let owner_projection = prepare_owner_export_projection(
-            &cas,
-            &inventory.assets,
-            &inventory.owner_heads,
-            &owner_manifest_hashes,
-            pins,
-            &cancellation,
-        )?;
-        pins.seal(&mut store, now_millis()).map_err(io_job_error)?;
-
-        let database = export::create_legacy_backup_controlled(
-            &reader.connection,
-            &prepared.snapshots_dir,
-            &reader.target,
-            &prepared.lease,
-            owner_projection.replacement_keys,
-            || job.is_cancel_requested(),
-            |completed_bytes, completed_items, total_items| {
-                let _ = job.set_progress(JobProgress {
-                    completed_bytes,
-                    total_bytes: None,
-                    completed_items,
-                    total_items: Some(total_items),
-                });
-            },
-        )
-        .map_err(store_job_error)?;
-        database_path = Some(std::path::PathBuf::from(&database.path));
-        let mut entries =
-            materialize_export_entries(owned_directory, &cas, &inventory.assets, &cancellation)?;
-        entries.extend(materialize_owner_export_entries(
-            &cas,
-            &owner_projection.payloads,
-            &cancellation,
-        )?);
-        entries.push(LegacyBackupWriteEntry {
-            logical_name: DATABASE_ENTRY.to_owned(),
-            source: LegacyBackupWriteSource::File(database.path.clone().into()),
-        });
-        let archive_path = owned_directory.join(ARCHIVE_FILE);
-        let mut archive = std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&archive_path)
-            .map_err(io_job_error)?;
-        let report = write_legacy_local_backup_v1(&mut archive, &entries, &cancellation)
-            .map_err(local_backup_error)?;
-        if !report.is_complete() {
-            return Err(NativeJobError::new(
-                "invalid-source",
-                "legacy backup inventory contains missing payloads",
-            ));
-        }
-        archive.sync_all().map_err(io_job_error)?;
-        job.set_phase(JobPhase::PublishingDestination)
-            .map_err(job_state_error)?;
-        let handoff_path;
-        let (destination_root, destination_path, is_handoff) = match destination_path {
-            Some(destination_path) => {
-                let destination_root = destination_path.parent().ok_or_else(|| {
-                    NativeJobError::new(
-                        "invalid-destination",
-                        "legacy backup destination has no parent",
-                    )
-                })?;
-                (destination_root, destination_path, false)
-            }
-            None => {
-                handoff_path =
-                    handoff_directory.join(format!("risu-backup-{}.bin", Uuid::new_v4()));
-                (handoff_directory, handoff_path.as_path(), true)
-            }
-        };
-        let phase_error = RefCell::new(None);
-        let published = destination::write_legacy_backup_destination_controlled(
-            owned_directory,
-            &archive_path,
-            destination_root,
-            destination_path,
-            || job.is_cancel_requested() || phase_error.borrow().is_some(),
-            |progress| {
-                let _ = job.set_progress(JobProgress {
-                    completed_bytes: report.archive_bytes.saturating_add(progress.copied_bytes),
-                    total_bytes: Some(report.archive_bytes.saturating_mul(2)),
-                    completed_items: report.written_entries,
-                    total_items: Some(report.written_entries),
-                });
-            },
-            || {
-                job.set_phase(JobPhase::FinalizingExport).map_err(|error| {
-                    *phase_error.borrow_mut() = Some(error);
-                    destination::DestinationWriteError::Cancelled
-                })
-            },
-        )
-        .map_err(|error| destination_job_error(error, phase_error.into_inner()))?;
-        Ok(JobResultSummary {
-            export_exclusions: None,
-            revision: expected_revision,
-            source_bytes: published.bytes,
-            source_sha256: published.sha256,
-            character_count: database.character_count,
-            preset_count: database.preset_count,
-            warning_codes: Vec::new(),
-            handoff_path: is_handoff.then(|| destination_path.to_string_lossy().into_owned()),
-            publication: None,
-        })
-    })();
-    let release_reader = prepared.release(reader).map_err(store_job_error);
-    let cleanup_database = database_path
-        .as_deref()
-        .map(|path| prepared.cleanup_file(path).map_err(store_job_error))
-        .unwrap_or(Ok(()));
-    let durable_release = durable
-        .as_mut()
-        .map(|durable| {
-            durable
-                .release(if outcome.is_ok() {
-                    CasReleaseOutcome::Committed
-                } else {
-                    CasReleaseOutcome::Aborted
-                })
-                .map_err(io_job_error)
-        })
-        .unwrap_or(Ok(()));
-    match (outcome, release_reader, cleanup_database, durable_release) {
-        (Ok(result), Ok(()), Ok(()), Ok(())) => Ok(result),
-        (Ok(mut result), _, _, _) => {
-            result.warning_codes.push("cleanup-failed".to_owned());
-            Ok(result)
-        }
-        (Err(error), Ok(()), Ok(()), Ok(())) => Err(error),
-        (Err(error), _, _, _) => Err(NativeJobError::new(
-            "cleanup-failed",
-            format!("{}; legacy backup cleanup failed", error.message),
-        )),
-    }
-}
-
-fn materialize_export_entries(
-    owned_directory: &std::path::Path,
-    cas: &PayloadCas,
-    assets: &[AssetAlias],
-    cancellation: &dyn CancellationProbe,
-) -> Result<Vec<LegacyBackupWriteEntry>, NativeJobError> {
-    let mut entries = Vec::with_capacity(assets.len() + 1);
-    let mut names = HashSet::new();
-    for (index, alias) in assets.iter().enumerate() {
-        check_cancelled(cancellation).map_err(local_backup_error)?;
-        let hash = alias.object_hash.as_deref().ok_or_else(|| {
-            NativeJobError::new("invalid-source", "legacy backup asset has no object hash")
-        })?;
-        let object_path = cas
-            .object_path(hash)
-            .map_err(io_job_error)?
-            .ok_or_else(|| {
-                NativeJobError::new("invalid-source", "legacy backup asset object is missing")
-            })?;
-        let (name, source) = if alias.kind == "inlay" {
-            let name = format!("inlay_{}.risuinlay", hex::encode(alias.key.as_bytes()));
-            let path = owned_directory.join(format!("inlay-{index}.entry"));
-            write_inlay_entry(&path, alias, &object_path, cancellation)?;
-            (name, path)
-        } else {
-            (legacy_asset_entry_name(&alias.key)?, object_path)
-        };
-        if !names.insert(name.clone()) {
-            return Err(NativeJobError::new(
-                "invalid-source",
-                format!("legacy backup has duplicate entry name: {name}"),
-            ));
-        }
-        entries.push(LegacyBackupWriteEntry {
-            logical_name: name,
-            source: LegacyBackupWriteSource::File(source),
-        });
-    }
-    Ok(entries)
-}
-
-struct LegacyOwnerExportProjection {
-    replacement_keys: HashMap<AssetOwnerLocator, Vec<String>>,
-    payloads: Vec<(String, String)>,
-}
-
-fn prepare_owner_export_projection(
-    cas: &PayloadCas,
-    assets: &[AssetAlias],
-    owner_heads: &[AssetOwnerHead],
-    owner_manifest_hashes: &HashSet<&str>,
-    pins: &mut DurableCasJob,
-    cancellation: &dyn CancellationProbe,
-) -> Result<LegacyOwnerExportProjection, NativeJobError> {
-    let mut manifests = Vec::new();
-    for head in owner_heads.iter().filter(|head| head.present) {
-        check_cancelled(cancellation).map_err(local_backup_error)?;
-        let hash = head.manifest_hash.as_deref().ok_or_else(|| {
-            NativeJobError::new(
-                "invalid-source",
-                "legacy backup owner head is missing its manifest hash",
-            )
-        })?;
-        let size = cas
-            .stat_available_object(hash)
-            .map_err(io_job_error)?
-            .ok_or_else(|| {
-                NativeJobError::new("invalid-source", "legacy backup owner manifest is missing")
-            })?;
-        if size > MAX_OWNER_MANIFEST_BYTES {
-            return Err(NativeJobError::new(
-                "invalid-source",
-                "legacy backup owner manifest exceeds the decode limit",
-            ));
-        }
-        pins.pin_existing(cas, hash, size, CasObjectRole::OwnerManifest)
-            .map_err(io_job_error)?;
-        manifests.push((head, hash.to_owned(), size));
-    }
-
-    let mut used_keys = assets
-        .iter()
-        .map(|alias| alias.key.clone())
-        .collect::<HashSet<_>>();
-    let mut replacement_keys = HashMap::with_capacity(manifests.len());
-    let mut payloads = Vec::new();
-    let mut payload_keys = HashMap::<(String, String), String>::new();
-    for (head, manifest_hash, manifest_size) in manifests {
-        check_cancelled(cancellation).map_err(local_backup_error)?;
-        let entries = read_owner_manifest(cas, &manifest_hash, manifest_size, cancellation)?;
-        if entries.len() as i64 != head.entry_count {
-            return Err(NativeJobError::new(
-                "invalid-source",
-                "legacy backup owner manifest entry count mismatch",
-            ));
-        }
-        let mut keys = Vec::with_capacity(entries.len());
-        for entry in entries {
-            check_cancelled(cancellation).map_err(local_backup_error)?;
-            let extension = safe_owner_extension(&entry.tuple[2]);
-            let key = if let Some(payload_hash) = entry.payload_hash {
-                let payload_hash = hex::encode(payload_hash);
-                let identity = (payload_hash.clone(), extension.clone());
-                if let Some(key) = payload_keys.get(&identity) {
-                    key.clone()
-                } else {
-                    let size = cas
-                        .stat_available_object(&payload_hash)
-                        .map_err(io_job_error)?
-                        .ok_or_else(|| {
-                            NativeJobError::new(
-                                "invalid-source",
-                                "legacy backup owner payload is missing",
-                            )
-                        })?;
-                    let role = if owner_manifest_hashes.contains(payload_hash.as_str()) {
-                        CasObjectRole::OwnerManifest
-                    } else {
-                        CasObjectRole::DirectObject
-                    };
-                    pins.pin_existing(cas, &payload_hash, size, role)
-                        .map_err(io_job_error)?;
-                    let key = fresh_owner_asset_key(&extension, &mut used_keys);
-                    payloads.push((key.clone(), payload_hash));
-                    payload_keys.insert(identity, key.clone());
-                    key
-                }
-            } else {
-                fresh_owner_asset_key(&extension, &mut used_keys)
-            };
-            keys.push(key);
-        }
-        replacement_keys.insert(head.owner.clone(), keys);
-    }
-    Ok(LegacyOwnerExportProjection {
-        replacement_keys,
-        payloads,
-    })
-}
-
-fn read_owner_manifest(
-    cas: &PayloadCas,
-    hash: &str,
-    expected_size: u64,
-    cancellation: &dyn CancellationProbe,
-) -> Result<Vec<owner_manifest_codec::OwnerManifestEntry>, NativeJobError> {
-    check_cancelled(cancellation).map_err(local_backup_error)?;
-    let file = cas
-        .open_available_object(hash)
-        .map_err(io_job_error)?
-        .ok_or_else(|| {
-            NativeJobError::new("invalid-source", "legacy backup owner manifest is missing")
-        })?;
-    let mut bytes = Vec::with_capacity(expected_size as usize);
-    CancellationReader::new(file, cancellation)
-        .take(MAX_OWNER_MANIFEST_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| local_backup_error(cancellation_io(error, cancellation)))?;
-    if bytes.len() as u64 != expected_size || bytes.len() as u64 > MAX_OWNER_MANIFEST_BYTES {
-        return Err(NativeJobError::new(
-            "invalid-source",
-            "legacy backup owner manifest changed while being read",
-        ));
-    }
-    if owner_manifest_codec::owner_manifest_identity(&bytes) != hash {
-        return Err(NativeJobError::new(
-            "invalid-source",
-            "legacy backup owner manifest content hash mismatch",
-        ));
-    }
-    owner_manifest_codec::decode_owner_manifest(&bytes).map_err(|error| {
-        NativeJobError::new(
-            "invalid-source",
-            format!("legacy backup owner manifest is invalid: {error}"),
-        )
-    })
-}
-
-fn fresh_owner_asset_key(extension: &str, used_keys: &mut HashSet<String>) -> String {
-    let extension = safe_owner_extension(extension);
-    loop {
-        let key = format!("assets/owner-{}.{}", Uuid::new_v4(), extension);
-        if used_keys.insert(key.clone()) {
-            return key;
-        }
-    }
-}
-
-fn safe_owner_extension(extension: &str) -> String {
-    if !extension.is_empty()
-        && extension.len() <= 16
-        && extension.bytes().all(|byte| byte.is_ascii_alphanumeric())
-    {
-        extension.to_ascii_lowercase()
-    } else {
-        "bin".to_owned()
-    }
-}
-
-fn materialize_owner_export_entries(
-    cas: &PayloadCas,
-    payloads: &[(String, String)],
-    cancellation: &dyn CancellationProbe,
-) -> Result<Vec<LegacyBackupWriteEntry>, NativeJobError> {
-    payloads
-        .iter()
-        .map(|(key, hash)| {
-            check_cancelled(cancellation).map_err(local_backup_error)?;
-            let source = cas
-                .object_path(hash)
-                .map_err(io_job_error)?
-                .ok_or_else(|| {
-                    NativeJobError::new("invalid-source", "legacy backup owner payload is missing")
-                })?;
-            Ok(LegacyBackupWriteEntry {
-                logical_name: legacy_asset_entry_name(key)?,
-                source: LegacyBackupWriteSource::File(source),
-            })
-        })
-        .collect()
-}
-
-fn legacy_asset_entry_name(key: &str) -> Result<String, NativeJobError> {
-    key.strip_prefix("assets/")
-        .filter(|name| !name.is_empty())
-        .map(str::to_owned)
-        .ok_or_else(|| {
-            NativeJobError::new(
-                "invalid-source",
-                "legacy backup asset key is outside the assets namespace",
-            )
-        })
-}
-
-fn write_inlay_entry(
-    path: &std::path::Path,
-    alias: &AssetAlias,
-    object_path: &std::path::Path,
-    cancellation: &dyn CancellationProbe,
-) -> Result<(), NativeJobError> {
-    let mut metadata = alias.metadata.as_object().cloned().unwrap_or_default();
-    metadata.insert("key".to_owned(), Value::String(alias.key.clone()));
-    metadata.insert("kind".to_owned(), Value::String("inlay".to_owned()));
-    metadata.insert("size".to_owned(), Value::from(alias.size));
-    metadata.insert("mime".to_owned(), Value::String(alias.mime.clone()));
-    metadata.insert("name".to_owned(), Value::String(alias.name.clone()));
-    metadata.insert("ext".to_owned(), Value::String(alias.ext.clone()));
-    if let Some(value) = &alias.inlay_type {
-        metadata.insert("inlayType".to_owned(), Value::String(value.clone()));
-    }
-    if let Some(value) = alias.width {
-        metadata.insert("width".to_owned(), Value::from(value));
-    }
-    if let Some(value) = alias.height {
-        metadata.insert("height".to_owned(), Value::from(value));
-    }
-    let header = serde_json::to_vec(&metadata)
-        .map_err(|error| NativeJobError::new("store-error", error.to_string()))?;
-    if header.len() > MAX_METADATA_BYTES as usize {
-        return Err(NativeJobError::new(
-            "invalid-input",
-            "legacy backup Inlay metadata exceeds the importer limit",
-        ));
-    }
-    let header_length = u32::try_from(header.len()).map_err(|_| {
-        NativeJobError::new("store-error", "legacy backup Inlay metadata is too large")
-    })?;
-    let mut output = std::fs::OpenOptions::new()
-        .create_new(true)
-        .write(true)
-        .open(path)
-        .map_err(io_job_error)?;
-    output
-        .write_all(&header_length.to_le_bytes())
-        .map_err(io_job_error)?;
-    output.write_all(&header).map_err(io_job_error)?;
-    let source = File::open(object_path).map_err(io_job_error)?;
-    io::copy(
-        &mut CancellationReader::new(source, cancellation),
-        &mut output,
-    )
-    .map_err(|error| local_backup_error(cancellation_io(error, cancellation)))?;
-    output.sync_all().map_err(io_job_error)
-}
-
 struct LegacyDatabaseRestore<'a> {
     app: AppHandle,
     cas: &'a PayloadCas,
@@ -879,6 +391,7 @@ impl StrictLocalBackupDatabaseRestore for LegacyDatabaseRestore<'_> {
             app: self.app.clone(),
             payloads,
             durable: Mutex::new(durable),
+            incomplete: Mutex::new(super::IncompleteRestorePreview::default()),
         };
         let result = restore::restore_started_risu_save(
             OpenedJobSource {
@@ -888,7 +401,10 @@ impl StrictLocalBackupDatabaseRestore for LegacyDatabaseRestore<'_> {
             self.expected_revision,
             self.job,
             &sink,
-            self.progress.restore_scale(),
+            restore::RestoreProgressScale {
+                spool_directory: path.parent().map(std::path::Path::to_path_buf),
+                ..self.progress.restore_scale()
+            },
         );
         match result {
             Ok(summary) => {
@@ -907,6 +423,7 @@ struct LegacyReplacementSink {
     app: AppHandle,
     payloads: PreparedLegacyRestorePayloads,
     durable: Mutex<DurableCasJob>,
+    incomplete: Mutex<super::IncompleteRestorePreview>,
 }
 
 impl restore::ReplacementSink for LegacyReplacementSink {
@@ -930,13 +447,64 @@ impl restore::ReplacementSink for LegacyReplacementSink {
     }
 
     fn add_characters(&self, staging_id: &str, characters: &[Value]) -> StoreResult<()> {
-        let expanded =
-            cold_expansion::expand_cold_payloads(characters, &self.payloads.cold_payloads)
+        for character in characters {
+            let mut unavailable = Vec::new();
+            let expanded = cold_expansion::expand_cold_payloads(std::slice::from_ref(character), &self.payloads.cold_payloads, &mut unavailable)
                 .map_err(|message| crate::persistent_store::StoreError::Store { message })?;
-        let characters = expanded.as_deref().unwrap_or(characters);
+            if !unavailable.is_empty() {
+                let mut preview = self.incomplete.lock().map_err(|error| crate::persistent_store::StoreError::Store { message: error.to_string() })?;
+                preview.unavailable_cold_keys.extend(unavailable);
+                if let Some(name) = character.get("name").and_then(Value::as_str) { preview.character_names.push(name.to_owned()); }
+            }
+            let characters = expanded.as_deref().unwrap_or(std::slice::from_ref(character));
+            crate::persistent_store::commands::with_store_mut(self.app.state(), |store| {
+                store.replace_add_characters(staging_id, characters)
+            })?;
+        }
+        Ok(())
+    }
+
+    fn supports_incremental_characters(&self) -> bool { true }
+
+    fn expands_cold_payloads(&self) -> bool { true }
+
+    fn cold_payload_path(&self, key: &str) -> Option<std::path::PathBuf> {
+        self.payloads.cold_payloads.get(key).cloned()
+    }
+
+    fn unavailable_cold_payload(&self, key: &str, character_name: &str) -> StoreResult<()> {
+        let mut preview = self.incomplete.lock().map_err(|error| crate::persistent_store::StoreError::Store { message: error.to_string() })?;
+        preview.unavailable_cold_keys.push(key.to_owned());
+        if !character_name.is_empty() { preview.character_names.push(character_name.to_owned()); }
+        Ok(())
+    }
+
+    fn put_character_detail(&self, staging_id: &str, detail: &Value, conversation_count: i64) -> StoreResult<()> {
         crate::persistent_store::commands::with_store_mut(self.app.state(), |store| {
-            store.replace_add_characters(staging_id, characters)
+            store.replace_put_character_detail(staging_id, detail, conversation_count)
         })
+    }
+
+    fn put_conversation_row(&self, staging_id: &str, character_id: &str, configured_index: i64, detail: &Value, recent_at: i64, message_count: i64) -> StoreResult<()> {
+        crate::persistent_store::commands::with_store_mut(self.app.state(), |store| {
+            store.replace_put_conversation_row(staging_id, character_id, configured_index, detail, recent_at, message_count)
+        })
+    }
+
+    fn add_conversation_messages(&self, staging_id: &str, character_id: &str, conversation_id: &str, start: i64, messages: &[Value]) -> StoreResult<()> {
+        crate::persistent_store::commands::with_store_mut(self.app.state(), |store| {
+            store.replace_add_conversation_messages(staging_id, character_id, conversation_id, start, messages)
+        })
+    }
+
+    fn incomplete_restore_preview(&self) -> StoreResult<super::IncompleteRestorePreview> {
+        let mut preview = self.incomplete.lock().map_err(|error| crate::persistent_store::StoreError::Store { message: error.to_string() })?.clone();
+        preview.unavailable_cold_keys.sort();
+        preview.unavailable_cold_keys.dedup();
+        preview.character_names.sort();
+        preview.character_names.dedup();
+        preview.invalid_inlays = self.payloads.invalid_inlays.clone();
+        Ok(preview)
     }
 
     fn staged_plugin_preview(
@@ -1001,6 +569,7 @@ impl Drop for LegacyReplacementSink {
 
 fn local_backup_error(error: LocalBackupError) -> NativeJobError {
     let code = match error.code {
+        LocalBackupErrorCode::CompatibilityImportRequired => "compatibility-import-required",
         LocalBackupErrorCode::UnsupportedEncryption | LocalBackupErrorCode::UnsupportedFormat => {
             "unsupported-format"
         }
@@ -1061,6 +630,7 @@ fn now_millis() -> i64 {
 
 pub(crate) struct PreparedLegacyRestorePayloads {
     pub(crate) asset_aliases: Vec<AssetAlias>,
+    pub(crate) invalid_inlays: Vec<String>,
     /// Upstream cold payload key to the staged file that holds its body.
     pub(crate) cold_payloads: HashMap<String, std::path::PathBuf>,
 }
@@ -1103,6 +673,7 @@ pub(crate) fn prepare_legacy_restore_payloads_observed(
     preflight_legacy_restore_entries(entries)?;
     let pocket_metadata = pocket_risu::index_metadata(entries, cancellation)?;
     let mut asset_aliases = Vec::new();
+    let mut invalid_inlays = Vec::new();
     let mut cold_payloads = HashMap::new();
     let mut asset_keys = HashSet::new();
     observer.begin(
@@ -1149,7 +720,15 @@ pub(crate) fn prepare_legacy_restore_payloads_observed(
                 ));
             }
         } else if let Some(encoded_key) = inlay_key_hex(&entry.logical_name) {
-            let alias = prepare_inlay(entry, encoded_key, cas, durable, cancellation, observer)?;
+            let alias = match prepare_inlay(entry, encoded_key, cas, durable, cancellation, observer) {
+                Ok(alias) => alias,
+                Err(error) if error.code == LocalBackupErrorCode::DatabaseRestore => {
+                    invalid_inlays.push(entry.logical_name.clone());
+                    observer.item_done();
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             if !asset_keys.insert((alias.kind.clone(), alias.key.clone())) {
                 return Err(invalid("legacy backup contains a duplicate Inlay key"));
             }
@@ -1165,6 +744,7 @@ pub(crate) fn prepare_legacy_restore_payloads_observed(
     }
     check_cancelled(cancellation)?;
     Ok(PreparedLegacyRestorePayloads {
+        invalid_inlays,
         asset_aliases,
         cold_payloads,
     })
@@ -1195,7 +775,7 @@ fn reject_account_encryption(entries: &[StagedLocalBackupEntry]) -> Result<(), L
         .map_err(|_| invalid("legacy backup encryption metadata is invalid"))?;
     if metadata.get("type").and_then(Value::as_str) == Some("account") {
         return Err(LocalBackupError::new(
-            LocalBackupErrorCode::UnsupportedEncryption,
+            LocalBackupErrorCode::CompatibilityImportRequired,
             "account-encrypted legacy backup requires the compatibility importer",
         ));
     }
@@ -1253,6 +833,7 @@ fn prepare_inlay(
     )
     .map_err(|_| invalid("invalid Inlay entry key"))?;
     let mut file = open_staged(entry)?;
+    if entry.byte_length < 4 { return Err(invalid("legacy backup Inlay metadata length is invalid")); }
     let mut length = [0_u8; 4];
     file.read_exact(&mut length).map_err(LocalBackupError::io)?;
     let header_length = u32::from_le_bytes(length);
@@ -1328,23 +909,39 @@ fn prepare_inlay(
     })
 }
 
-/// Validates a staged upstream cold payload without materializing it. The body is
-/// spliced into the record that references it when characters are staged.
+/// Validates a staged upstream cold payload without materializing its full body.
+/// The body is spliced into its referencing record when characters are staged.
 fn prepare_cold(
     entry: &StagedLocalBackupEntry,
     cancellation: &dyn CancellationProbe,
     observer: &dyn LegacyPrepareObserver,
 ) -> Result<std::path::PathBuf, LocalBackupError> {
+    prepare_cold_with_limit(entry, cancellation, observer, restore::RestoreLimits::default().max_decoded_block_bytes)
+}
+
+fn prepare_cold_with_limit(
+    entry: &StagedLocalBackupEntry,
+    cancellation: &dyn CancellationProbe,
+    observer: &dyn LegacyPrepareObserver,
+    max_decoded_bytes: u64,
+) -> Result<std::path::PathBuf, LocalBackupError> {
     let file = open_staged(entry)?;
+    if entry.byte_length > max_decoded_bytes || file.metadata().map_err(LocalBackupError::io)?.len() > max_decoded_bytes {
+        return Err(invalid("decoded block limit exceeded for cold payload"));
+    }
     let source = CancellationReader::observed(file, cancellation, observer);
-    let mut deserializer = serde_json::Deserializer::from_reader(BufReader::new(source));
-    if !serde::de::Deserializer::deserialize_any(&mut deserializer, ColdRootVisitor).map_err(
-        |_| {
+    let record_bytes = Cell::new(Some(0));
+    let source = restore::RecordLimitReader { inner: BufReader::new(source), bytes: &record_bytes };
+    let mut deserializer = serde_json::Deserializer::from_reader(source);
+    if !serde::de::Deserializer::deserialize_any(&mut deserializer, ColdRootVisitor(&record_bytes)).map_err(
+        |error| {
             if cancellation.is_cancelled() {
                 LocalBackupError::new(
                     LocalBackupErrorCode::Cancelled,
                     "legacy backup job was cancelled",
                 )
+            } else if error.to_string().contains("restore record limit exceeded") {
+                invalid("legacy backup cold payload exceeds the record limit")
             } else {
                 invalid("legacy backup cold payload is invalid")
             }
@@ -1365,9 +962,9 @@ fn prepare_cold(
         .ok_or_else(|| invalid("legacy backup cold payload is not staged"))
 }
 
-struct ColdRootVisitor;
+struct ColdRootVisitor<'a>(&'a Cell<Option<u64>>);
 
-impl<'de> Visitor<'de> for ColdRootVisitor {
+impl<'de> Visitor<'de> for ColdRootVisitor<'_> {
     type Value = bool;
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1378,7 +975,8 @@ impl<'de> Visitor<'de> for ColdRootVisitor {
     where
         A: SeqAccess<'de>,
     {
-        while let Some(mut value) = sequence.next_element::<Value>()? {
+        self.0.set(None);
+        while let Some(mut value) = sequence.next_element_seed(restore::BoundedValueSeed(self.0))? {
             super::restore::pocket_features::message(&mut value, "cold")
                 .map_err(serde::de::Error::custom)?;
         }
@@ -1389,18 +987,19 @@ impl<'de> Visitor<'de> for ColdRootVisitor {
     where
         A: MapAccess<'de>,
     {
+        self.0.set(None);
         let mut compatible = false;
-        while let Some(key) = map.next_key::<String>()? {
+        while let Some(key) = map.next_key_seed(restore::BoundedStringSeed(self.0))? {
             compatible |= matches!(key.as_str(), "character" | "message");
             match key.as_str() {
                 "message" => {
-                    map.next_value_seed(ColdFeatureSeed("messages"))?;
+                    map.next_value_seed(ColdFeatureSeed("messages", self.0))?;
                 }
                 "character" => {
-                    map.next_value_seed(ColdFeatureSeed("character"))?;
+                    map.next_value_seed(ColdFeatureSeed("character", self.0))?;
                 }
                 "savedToggleValues" | "bindedPersona" => {
-                    let value = map.next_value::<Value>()?;
+                    let value = map.next_value_seed(restore::BoundedValueSeed(self.0))?;
                     let mut chat = serde_json::json!({key: value});
                     super::restore::pocket_features::chat(&mut chat, "cold")
                         .map_err(serde::de::Error::custom)?;
@@ -1415,43 +1014,49 @@ impl<'de> Visitor<'de> for ColdRootVisitor {
 }
 
 // Validate feature fields while retaining the bounded streaming cold-payload path.
-struct ColdFeatureSeed(&'static str);
-impl<'de> serde::de::DeserializeSeed<'de> for ColdFeatureSeed {
+struct ColdFeatureSeed<'a>(&'static str, &'a Cell<Option<u64>>);
+impl<'de> serde::de::DeserializeSeed<'de> for ColdFeatureSeed<'_> {
     type Value = ();
     fn deserialize<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<(), D::Error> {
-        deserializer.deserialize_any(self)
+        let record_bytes = self.1;
+        record_bytes.set(Some(0));
+        let result = deserializer.deserialize_any(self);
+        record_bytes.set(None);
+        result
     }
 }
-impl<'de> Visitor<'de> for ColdFeatureSeed {
+impl<'de> Visitor<'de> for ColdFeatureSeed<'_> {
     type Value = ();
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("a cold feature container")
     }
     fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<(), A::Error> {
+        self.1.set(None);
         if self.0 == "messages" {
-            while let Some(mut value) = sequence.next_element::<Value>()? {
+            while let Some(mut value) = sequence.next_element_seed(restore::BoundedValueSeed(self.1))? {
                 super::restore::pocket_features::message(&mut value, "cold")
                     .map_err(serde::de::Error::custom)?;
             }
         } else {
             while sequence
-                .next_element_seed(ColdFeatureSeed("chat"))?
+                .next_element_seed(ColdFeatureSeed("chat", self.1))?
                 .is_some()
             {}
         }
         Ok(())
     }
     fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
-        while let Some(key) = map.next_key::<String>()? {
+        self.1.set(None);
+        while let Some(key) = map.next_key_seed(restore::BoundedStringSeed(self.1))? {
             match key.as_str() {
                 "chats" if self.0 == "character" => {
-                    map.next_value_seed(ColdFeatureSeed("chats"))?;
+                    map.next_value_seed(ColdFeatureSeed("chats", self.1))?;
                 }
                 "message" if self.0 == "chat" => {
-                    map.next_value_seed(ColdFeatureSeed("messages"))?;
+                    map.next_value_seed(ColdFeatureSeed("messages", self.1))?;
                 }
                 "savedToggleValues" | "bindedPersona" if self.0 == "chat" => {
-                    let value = map.next_value::<Value>()?;
+                    let value = map.next_value_seed(restore::BoundedValueSeed(self.1))?;
                     let mut chat = serde_json::json!({key: value});
                     super::restore::pocket_features::chat(&mut chat, "cold")
                         .map_err(serde::de::Error::custom)?;
@@ -1523,7 +1128,8 @@ fn string_field(object: &Map<String, Value>, field: &str) -> Result<String, Loca
 }
 
 fn inlay_key_hex(name: &str) -> Option<&str> {
-    name.strip_prefix("inlay_")?.strip_suffix(".risuinlay")
+    let key = name.strip_prefix("inlay_")?.strip_suffix(".risuinlay")?;
+    (!key.is_empty() && key.len() % 2 == 0 && key.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))).then_some(key)
 }
 
 fn cold_key(name: &str) -> Option<String> {
@@ -1569,7 +1175,7 @@ fn invalid(message: impl Into<String>) -> LocalBackupError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::asset_repository::{owner_manifest_codec, PayloadCas};
+    use crate::asset_repository::PayloadCas;
     use crate::import_export_jobs::{parse_json_card, JobStaging};
     use crate::local_backup::{
         parse_legacy_local_backup_v1, NeverCancelled, PayloadTarget, StagedLocalBackupEntry,
@@ -1579,7 +1185,6 @@ mod tests {
     use crate::native_file_jobs::{
         character_json_export::export_character_json, JobKind, JobRegistry, JobState,
     };
-    use crate::persistent_store::{AssetOwnerHead, AssetOwnerLocator};
     use sha2::{Digest, Sha256};
     use std::fs;
     use std::io::Cursor;
@@ -1613,6 +1218,51 @@ mod tests {
         bytes.extend_from_slice(&(data.len() as u32).to_le_bytes());
         bytes.extend_from_slice(data);
         bytes
+    }
+
+    #[test]
+    fn cold_preparation_bounds_values_keys_and_scalar_dispatch_before_reading_the_whole_record() {
+        struct ObservedBytes(Cell<u64>);
+        impl LegacyPrepareObserver for ObservedBytes {
+            fn item_bytes(&self, bytes: u64) { self.0.set(self.0.get() + bytes); }
+        }
+        for (prefix, suffix) in [
+            (br#"[{"role":"user","data":""#.as_slice(), b"\"}]".as_slice()),
+            (br#"{"character":{"chats":[{"message":[{"data":""#.as_slice(), b"\"}]}]}}".as_slice()),
+            (br#"{"savedToggleValues":{"toggle_large":""#.as_slice(), b"\"},\"message\":[]}".as_slice()),
+            (br#"{"character":""#.as_slice(), b"\",\"message\":[]}".as_slice()),
+            (br#"{""#.as_slice(), b"\":0,\"message\":[]}".as_slice()),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("cold.json");
+            let mut output = File::create(&path).unwrap();
+            output.write_all(prefix).unwrap();
+            for _ in 0..144 { output.write_all(&[b'x';64*1024]).unwrap(); }
+            output.write_all(suffix).unwrap();
+            drop(output);
+            let entry = StagedLocalBackupEntry { logical_name:"coldstorage/large.json".to_owned(), byte_length:fs::metadata(&path).unwrap().len(), sha256:String::new(), staged_path:Some(path) };
+            let observed = ObservedBytes(Cell::new(0));
+            let error = prepare_cold(&entry, &NeverCancelled, &observed).unwrap_err();
+            assert!(error.message.contains("cold payload exceeds the record limit"), "{error:?}");
+            assert!(observed.0.get() <= 8 * 1024 * 1024 + 64 * 1024);
+            assert!(observed.0.get() < entry.byte_length);
+        }
+    }
+
+    #[test]
+    fn cold_preparation_checks_decoded_file_size_before_any_parse() {
+        struct UnexpectedRead;
+        impl LegacyPrepareObserver for UnexpectedRead {
+            fn item_bytes(&self, _: u64) { panic!("oversized cold file was read"); }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("cold.json");
+        fs::write(&path, br#"{"message":[]}"#).unwrap();
+        for (byte_length, limit) in [(0, 8), (1024, 8), (1024, 64)] {
+            let entry = StagedLocalBackupEntry { logical_name:"coldstorage/large.json".to_owned(), byte_length, sha256:String::new(), staged_path:Some(path.clone()) };
+            let error = prepare_cold_with_limit(&entry, &NeverCancelled, &UnexpectedRead, limit).unwrap_err();
+            assert!(error.message.contains("decoded block limit exceeded"));
+        }
     }
 
     #[test]
@@ -1659,42 +1309,6 @@ mod tests {
                 .collect::<Result<_, crate::local_backup::LocalBackupError>>()?;
             Ok(())
         }
-    }
-
-    fn decode_risu_save_blocks(bytes: &[u8]) -> Vec<(u8, String, Value)> {
-        assert!(bytes.starts_with(b"RISUSAVE\0"));
-        let mut cursor = &bytes[b"RISUSAVE\0".len()..];
-        let mut blocks = Vec::new();
-        while !cursor.is_empty() {
-            let block_type = cursor[0];
-            let compression = cursor[1];
-            let name_length = cursor[2] as usize;
-            cursor = &cursor[3..];
-            let name = std::str::from_utf8(&cursor[..name_length])
-                .unwrap()
-                .to_owned();
-            cursor = &cursor[name_length..];
-            let payload_length = u32::from_le_bytes(cursor[..4].try_into().unwrap()) as usize;
-            cursor = &cursor[4..];
-            let encoded = &cursor[..payload_length];
-            cursor = &cursor[payload_length..];
-            let decoded = match compression {
-                0 => encoded.to_vec(),
-                1 => {
-                    let mut decoded = Vec::new();
-                    GzDecoder::new(encoded).read_to_end(&mut decoded).unwrap();
-                    decoded
-                }
-                value => panic!("unexpected RisuSave compression {value}"),
-            };
-            let value = if decoded.is_empty() {
-                Value::Null
-            } else {
-                serde_json::from_slice(&decoded).unwrap()
-            };
-            blocks.push((block_type, name, value));
-        }
-        blocks
     }
 
     #[test]
@@ -1796,286 +1410,7 @@ mod tests {
         assert_eq!(progress.restore_scale().base_bytes, 200);
     }
 
-    #[test]
-    fn legacy_backup_export_preserves_owner_only_asset_occurrence_payloads() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut store = PersistentStore::open(directory.path()).unwrap();
-        let cas = PayloadCas::new(directory.path()).unwrap();
-        let first = cas.prepare_bytes(b"first-occurrence").unwrap();
-        let second = cas.prepare_bytes(b"second-owner-only-occurrence").unwrap();
-        let alias = AssetAlias {
-            key: "assets/shared.bin".to_owned(),
-            object_hash: Some(first.content_hash.clone()),
-            kind: "asset".to_owned(),
-            size: first.byte_size as i64,
-            mime: "application/octet-stream".to_owned(),
-            name: "shared.bin".to_owned(),
-            ext: "bin".to_owned(),
-            inlay_type: None,
-            width: None,
-            height: None,
-            metadata: serde_json::json!({}),
-        };
-        let manifest = cas
-            .prepare_bytes(
-                &owner_manifest_codec::encode_owner_manifest(&[
-                    owner_manifest_codec::OwnerManifestEntry {
-                        tuple: ["first".to_owned(), alias.key.clone(), "BIN".to_owned()],
-                        payload_hash: Some(
-                            hex::decode(&first.content_hash)
-                                .unwrap()
-                                .try_into()
-                                .unwrap(),
-                        ),
-                    },
-                    owner_manifest_codec::OwnerManifestEntry {
-                        tuple: ["second".to_owned(), alias.key.clone(), "bIn".to_owned()],
-                        payload_hash: Some(
-                            hex::decode(&second.content_hash)
-                                .unwrap()
-                                .try_into()
-                                .unwrap(),
-                        ),
-                    },
-                    owner_manifest_codec::OwnerManifestEntry {
-                        tuple: ["missing".to_owned(), alias.key.clone(), "BIN".to_owned()],
-                        payload_hash: None,
-                    },
-                ])
-                .unwrap(),
-            )
-            .unwrap();
-        let root_manifest = cas
-            .prepare_bytes(
-                &owner_manifest_codec::encode_owner_manifest(&[
-                    owner_manifest_codec::OwnerManifestEntry {
-                        tuple: ["module".to_owned(), alias.key.clone(), "BIN".to_owned()],
-                        payload_hash: Some(
-                            hex::decode(&second.content_hash)
-                                .unwrap()
-                                .try_into()
-                                .unwrap(),
-                        ),
-                    },
-                ])
-                .unwrap(),
-            )
-            .unwrap();
-        let persona_manifest = cas
-            .prepare_bytes(
-                &owner_manifest_codec::encode_owner_manifest(&[
-                    owner_manifest_codec::OwnerManifestEntry {
-                        tuple: ["persona".to_owned(), alias.key.clone(), "BIN".to_owned()],
-                        payload_hash: Some(
-                            hex::decode(&first.content_hash)
-                                .unwrap()
-                                .try_into()
-                                .unwrap(),
-                        ),
-                    },
-                ])
-                .unwrap(),
-            )
-            .unwrap();
-        let character = serde_json::json!({
-            "type": "character",
-            "chaId": "legacy-owner-character",
-            "name": "Legacy Owner Character",
-            "additionalAssets": [
-                ["first", alias.key.clone(), "BIN"],
-                ["second", alias.key.clone(), "bIn"],
-                ["missing", alias.key.clone(), "BIN"]
-            ],
-            "chats": []
-        });
-        let staging = store.replace_begin().unwrap().staging_id;
-        store
-            .replace_put_root(
-                &staging,
-                &serde_json::json!({
-                    "loadouts": [],
-                    "plugins": [],
-                    "modules": [{
-                        "assets": [["module", alias.key.clone(), "BIN", {"tail": 1}]]
-                    }],
-                    "personas": [{
-                        "embeddedModule": {
-                            "assets": [["persona", alias.key.clone(), "BIN", "tuple-tail"]]
-                        }
-                    }]
-                }),
-            )
-            .unwrap();
-        store.replace_put_presets(&staging, &[]).unwrap();
-        store
-            .replace_add_characters(&staging, &[character])
-            .unwrap();
-        store
-            .replace_put_asset_aliases(&staging, std::slice::from_ref(&alias))
-            .unwrap();
-        store
-            .replace_put_asset_owner_heads(
-                &staging,
-                &[
-                    AssetOwnerHead::present(
-                        AssetOwnerLocator::CharacterAdditionalAssets {
-                            character_id: "legacy-owner-character".to_owned(),
-                        },
-                        manifest.content_hash,
-                        3,
-                    ),
-                    AssetOwnerHead::present(
-                        AssetOwnerLocator::RootModuleAssets { index: 0 },
-                        root_manifest.content_hash,
-                        1,
-                    ),
-                    AssetOwnerHead::present(
-                        AssetOwnerLocator::PersonaEmbeddedModuleAssets { index: 0 },
-                        persona_manifest.content_hash,
-                        1,
-                    ),
-                ],
-            )
-            .unwrap();
-        let revision = store.replace_commit(&staging, Some(0)).unwrap().revision;
-        let owned = directory.path().join("export-owned");
-        let handoff = directory.path().join("handoff");
-        let parsed = directory.path().join("parsed");
-        fs::create_dir(&owned).unwrap();
-        fs::create_dir(&handoff).unwrap();
-        fs::create_dir(&parsed).unwrap();
-        let destination = directory.path().join("owner-backup.bin");
-        let job = JobRegistry::default()
-            .create(JobKind::ExportLegacyLocalBackup)
-            .unwrap();
 
-        let result =
-            export_legacy_local_backup(Some(&destination), revision, &owned, &handoff, store, &job)
-                .unwrap();
-
-        assert_eq!(result.revision, revision);
-        let mut capture = ArchiveCapture::default();
-        parse_legacy_local_backup_v1(
-            &mut fs::File::open(&destination).unwrap(),
-            &parsed,
-            PayloadTarget::JobStaging,
-            &mut capture,
-            &NeverCancelled,
-        )
-        .unwrap();
-        let archived_payloads = capture
-            .entries
-            .iter()
-            .filter(|(name, _)| name != DATABASE_ENTRY)
-            .map(|(_, bytes)| bytes.as_slice())
-            .collect::<Vec<_>>();
-        assert!(archived_payloads.contains(&b"first-occurrence".as_slice()));
-        assert!(archived_payloads.contains(&b"second-owner-only-occurrence".as_slice()));
-        assert_eq!(
-            archived_payloads
-                .iter()
-                .filter(|bytes| **bytes == b"second-owner-only-occurrence")
-                .count(),
-            1
-        );
-        let database = capture
-            .entries
-            .iter()
-            .find(|(name, _)| name == DATABASE_ENTRY)
-            .unwrap();
-        let blocks = decode_risu_save_blocks(&database.1);
-        let character = &blocks
-            .iter()
-            .find(|(block_type, name, _)| *block_type == 2 && name == "legacy-owner-character")
-            .unwrap()
-            .2;
-        let tuples = character["additionalAssets"].as_array().unwrap();
-        assert_eq!(tuples[0][0], "first");
-        assert_eq!(tuples[0][2], "BIN");
-        assert_eq!(tuples[1][0], "second");
-        assert_eq!(tuples[1][2], "bIn");
-        assert_eq!(tuples[2][0], "missing");
-        assert_eq!(tuples[2][2], "BIN");
-        let archived_for_key = |key: &str| {
-            capture.entries.iter().find(|(name, _)| {
-                key.strip_prefix("assets/")
-                    .is_some_and(|relative| relative == name)
-            })
-        };
-        let first_key = tuples[0][1].as_str().unwrap();
-        let second_key = tuples[1][1].as_str().unwrap();
-        let missing_key = tuples[2][1].as_str().unwrap();
-        assert_ne!(first_key, alias.key);
-        assert_ne!(second_key, alias.key);
-        assert_ne!(missing_key, alias.key);
-        assert_eq!(archived_for_key(first_key).unwrap().1, b"first-occurrence");
-        assert_eq!(
-            archived_for_key(second_key).unwrap().1,
-            b"second-owner-only-occurrence"
-        );
-        assert!(archived_for_key(missing_key).is_none());
-        let modules = &blocks
-            .iter()
-            .find(|(block_type, name, _)| *block_type == 5 && name == "modules")
-            .unwrap()
-            .2;
-        let module_tuple = &modules[0]["assets"][0];
-        assert_eq!(module_tuple[0], "module");
-        assert_eq!(module_tuple[2], "BIN");
-        assert_eq!(module_tuple[3], serde_json::json!({"tail": 1}));
-        assert_eq!(
-            archived_for_key(module_tuple[1].as_str().unwrap())
-                .unwrap()
-                .1,
-            b"second-owner-only-occurrence"
-        );
-        let root = &blocks
-            .iter()
-            .find(|(block_type, name, _)| *block_type == 1 && name == "root")
-            .unwrap()
-            .2;
-        let persona_tuple = &root["personas"][0]["embeddedModule"]["assets"][0];
-        assert_eq!(persona_tuple[0], "persona");
-        assert_eq!(persona_tuple[2], "BIN");
-        assert_eq!(persona_tuple[3], "tuple-tail");
-        assert_eq!(persona_tuple[1], tuples[0][1]);
-        assert_eq!(
-            archived_for_key(persona_tuple[1].as_str().unwrap())
-                .unwrap()
-                .1,
-            b"first-occurrence"
-        );
-    }
-
-    #[test]
-    fn legacy_backup_export_reads_ordinary_inventory_from_the_detached_snapshot() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut store = PersistentStore::open(directory.path()).unwrap();
-        let staging = store.replace_begin().unwrap().staging_id;
-        store
-            .replace_put_root(
-                &staging,
-                &serde_json::json!({"modules": [], "loadouts": [], "plugins": []}),
-            )
-            .unwrap();
-        store.replace_put_presets(&staging, &[]).unwrap();
-        let revision = store.replace_commit(&staging, Some(0)).unwrap().revision;
-        let owned = directory.path().join("ordinary-owned");
-        let handoff = directory.path().join("ordinary-handoff");
-        fs::create_dir(&owned).unwrap();
-        fs::create_dir(&handoff).unwrap();
-        let destination = directory.path().join("ordinary.bin");
-        let job = JobRegistry::default()
-            .create(JobKind::ExportLegacyLocalBackup)
-            .unwrap();
-
-        let result =
-            export_legacy_local_backup(Some(&destination), revision, &owned, &handoff, store, &job)
-                .unwrap();
-
-        assert_eq!(result.revision, revision);
-        assert!(fs::metadata(destination).unwrap().len() > 0);
-    }
 
     #[test]
     fn prepares_asset_inlay_and_cold_payloads_without_mutating_live_aliases() {
@@ -2331,7 +1666,7 @@ mod tests {
 
         assert_eq!(
             error.code,
-            crate::local_backup::LocalBackupErrorCode::UnsupportedEncryption
+            crate::local_backup::LocalBackupErrorCode::CompatibilityImportRequired
         );
         assert_eq!(
             fs::read_dir(directory.path().join("assets/objects"))
@@ -2421,15 +1756,5 @@ mod tests {
         planner.durable.release(CasReleaseOutcome::Aborted).unwrap();
     }
 
-    #[test]
-    fn preserves_nested_asset_paths_in_legacy_archive_names() {
-        assert_eq!(
-            legacy_asset_entry_name("assets/foo/bar.png").unwrap(),
-            "foo/bar.png"
-        );
-        assert_eq!(
-            legacy_asset_entry_name("foo/bar.png").unwrap_err().code,
-            "invalid-source"
-        );
-    }
+
 }

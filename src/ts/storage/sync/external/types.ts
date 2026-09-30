@@ -138,6 +138,7 @@ export interface ExternalConnectionError {
         | 'retry'
         | 'reauthenticate'
         | 'unlock-key'
+        | 'check-endpoint'
         | 'resolve-conflict'
         | 'free-space'
         | 'wait'
@@ -157,6 +158,7 @@ export interface ExternalConnectionSummary {
     retentionPolicy: ExternalRetentionPolicy
     capabilities: ExternalCapabilities
     status: 'ready' | 'paused' | 'reauth-required' | 'key-locked' | 'error'
+    automaticBackupPaused: boolean
     lastVerifiedAtMs?: DecimalString
     lastSyncAtMs?: DecimalString
     lastBackupAtMs?: DecimalString
@@ -185,6 +187,7 @@ export type ExternalJobKind =
     | 'delete-history'
     | 'cleanup'
     | 'resolve-conflict'
+    | 'check-repository'
 
 /** The areas beside the library that a backup can carry. */
 export type ExternalRestoreSection = 'hypa' | 'local-plugins' | 'local-settings'
@@ -214,10 +217,22 @@ export interface StartExternalJobRequest {
 export interface ExternalJobSummary {
     id: string
     applicationStarted?: boolean
+    reason?: 'automatic' | 'manual' | 'exitDrain'
+    targetRevision?: DecimalString
     restoreRequest?: {
         snapshotId: string
         targetRevision: DecimalString
         restoreAreas: ExternalRestoreArea[]
+    }
+    pinRequest?: { snapshotId: string }
+    deleteRequest?: {
+        pointId: string
+        pointObservation: string
+        confirmOtherDevice: boolean
+        confirmLastRetained: boolean
+    }
+    checkRequest?: {
+        snapshotId?: string
     }
     connectionId: string
     kind: ExternalJobKind
@@ -231,6 +246,8 @@ export interface ExternalJobSummary {
         | 'uncertain'
         | 'conflict'
     phase: string
+    /** Which work the four counters below measure. */
+    counters?: 'prepared' | 'transferred'
     completedBytes: DecimalString
     totalBytes?: DecimalString
     completedItems: DecimalString
@@ -248,7 +265,12 @@ export interface ExternalJobSummary {
         expectedRevision?: DecimalString
         deletedObjects?: DecimalString
         deletedBytes?: DecimalString
+        verifiedObjects?: DecimalString
+        verifiedBytes?: DecimalString
+        damagedObjects?: DecimalString
         stopReason?: string
+        reason?: string
+        decisionRequired?: boolean
     }
 }
 
@@ -262,11 +284,12 @@ export interface ExternalStorageState {
     selection: LibrarySyncSelection
     connections: ExternalConnectionSummary[]
     jobs: ExternalJobSummary[]
+    retainedPublications?: Array<{ id: string; connectionId: string; repositoryId: string; revision: DecimalString }>
 }
 
 export interface ExternalHistoryItem {
     id: string
-    snapshotId?: string
+    snapshotId: string
     pointId?: string
     pointObservation?: string
     deletable?: boolean
@@ -401,4 +424,11 @@ export interface ExternalProviderDescriptor {
     authorizationAvailable: boolean
     strategies: ExternalPublicationStrategy[]
     profiles: string[]
+}
+
+export interface ExternalSnapshotExportProgress {
+    completedBytes: DecimalString
+    totalBytes?: DecimalString
+    completedItems: DecimalString
+    totalItems?: DecimalString
 }

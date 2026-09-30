@@ -16,6 +16,7 @@ pub(crate) enum JobKind {
     DeleteHistory,
     ResolveConflict,
     Cleanup,
+    CheckRepository,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -53,6 +54,15 @@ impl StartJobRequest {
                 || self.confirm_other_device.is_some()
                 || self.confirm_last_retained.is_some()
                 || self.conflict_id.is_some()
+                || self.choice.is_some()
+                || self.restore_areas.is_some()
+                || self.target_revision.is_some())
+        {
+            return Err(ProviderError::new(ErrorKind::Corrupt));
+        }
+        // A check names at most the published state it reads.
+        if self.kind == JobKind::CheckRepository
+            && (self.conflict_id.is_some()
                 || self.choice.is_some()
                 || self.restore_areas.is_some()
                 || self.target_revision.is_some())
@@ -127,6 +137,15 @@ pub(crate) struct DurableJob {
     pub snapshot_id: String,
     pub admission_identity: CaptureIdentity,
     pub receive_staging_id: Option<String>,
+    /// Set before the job writes a downloaded remote body under its directory
+    /// and cleared only once those bodies are gone.
+    pub receive_artifacts: Option<ReceiveArtifacts>,
+    pub spool_released: bool,
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ReceiveArtifacts {
+    Held,
 }
 impl DurableJob {
     pub fn new(
@@ -147,6 +166,8 @@ impl DurableJob {
             snapshot_id: uuid::Uuid::new_v4().to_string(),
             admission_identity,
             receive_staging_id: None,
+            receive_artifacts: None,
+            spool_released: false,
         }
     }
     pub fn with_restore_id(mut self, id: String) -> Result<Self> {
@@ -171,6 +192,27 @@ fn failure(_: impl std::fmt::Display) -> ProviderError {
 }
 pub(crate) struct JobStore(Connection);
 const STATE_TERMINAL_LIMIT: i64 = 32;
+const MAINTENANCE_PAGE: i64 = 128;
+const RELEASED_PAGE_SQL: &str =
+    "SELECT rowid,connection_id FROM external_requests
+     WHERE json_extract(value,'$.spoolReleased')=1
+       AND json_extract(value,'$.summary.state') IN ('succeeded','failed','cancelled')
+       AND rowid>?1 ORDER BY rowid LIMIT ?2";
+const TERMINAL_SPOOL_PAGE_SQL: &str =
+    "SELECT rowid,value FROM external_requests
+     WHERE json_extract(value,'$.spoolReleased')=0
+       AND json_extract(value,'$.summary.state') IN ('succeeded','failed','cancelled')
+       AND rowid>?1 ORDER BY rowid LIMIT ?2";
+const FINISHED_RESTORE_PAGE_SQL: &str =
+    "SELECT rowid,value FROM external_requests
+     WHERE json_extract(value,'$.request.kind')='restore'
+       AND json_extract(value,'$.summary.state') IN ('succeeded','failed','cancelled')
+       AND rowid>?1 ORDER BY rowid LIMIT ?2";
+const RECEIVE_ARTIFACT_PAGE_SQL: &str =
+    "SELECT rowid,value FROM external_requests
+     WHERE connection_id=?1 AND rowid>?2
+       AND json_extract(value,'$.receiveArtifacts')='held'
+     ORDER BY rowid LIMIT ?3";
 impl JobStore {
     pub fn open(root: &Path) -> Result<Self> {
         std::fs::create_dir_all(root).map_err(failure)?;
@@ -188,7 +230,35 @@ impl JobStore {
              CREATE INDEX IF NOT EXISTS external_requests_pending
              ON external_requests(connection_id)
              WHERE COALESCE(json_extract(value,'$.summary.state'),'')
-                 NOT IN ('succeeded','failed','cancelled');",
+                 NOT IN ('succeeded','failed','cancelled');
+             CREATE INDEX IF NOT EXISTS external_requests_receive_artifacts
+             ON external_requests(connection_id)
+             WHERE json_extract(value,'$.receiveArtifacts')='held';
+             CREATE INDEX IF NOT EXISTS external_requests_spool_owners
+             ON external_requests(connection_id)
+             WHERE json_extract(value,'$.spoolReleased')=0
+                 AND COALESCE(json_extract(value,'$.summary.state'),'') NOT IN ('succeeded','cancelled');
+             CREATE INDEX IF NOT EXISTS external_requests_terminal
+             ON external_requests(connection_id)
+             WHERE json_extract(value,'$.summary.state') IN ('succeeded','failed','cancelled');
+             CREATE INDEX IF NOT EXISTS external_requests_released
+             ON external_requests(json_extract(value,'$.spoolReleased'))
+             WHERE json_extract(value,'$.summary.state') IN ('succeeded','failed','cancelled');
+             CREATE INDEX IF NOT EXISTS external_requests_finished_kind
+             ON external_requests(json_extract(value,'$.request.kind'))
+             WHERE json_extract(value,'$.summary.state') IN ('succeeded','failed','cancelled');
+             CREATE TABLE IF NOT EXISTS external_spool_cleanup(
+                 singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                 after_rowid INTEGER NOT NULL CHECK(after_rowid>=0)
+             );
+             CREATE TABLE IF NOT EXISTS external_history_cleanup(
+                 singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                 after_rowid INTEGER NOT NULL CHECK(after_rowid>=0)
+             );
+             CREATE TABLE IF NOT EXISTS external_receive_cleanup(
+                 connection_id TEXT PRIMARY KEY,
+                 after_rowid INTEGER NOT NULL CHECK(after_rowid>=0)
+             );",
         )
         .map_err(failure)?;
         Ok(Self(db))
@@ -285,6 +355,166 @@ impl JobStore {
             .collect()
     }
 
+
+    /// Jobs whose transfer material may still be on disk. A job that ended in
+    /// failure keeps its sealed ciphertext until a cleanup can release it.
+    pub fn list_retaining(&self) -> Result<Vec<DurableJob>> {
+        let mut statement = self
+            .0
+            .prepare(
+                "SELECT value FROM external_requests
+                 WHERE json_extract(value,'$.spoolReleased')=0
+                    AND COALESCE(json_extract(value,'$.summary.state'),'')
+                    NOT IN ('succeeded','cancelled')",
+            )
+            .map_err(failure)?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(failure)?;
+        rows.map(|row| Self::decode(row.map_err(failure)?))
+            .collect()
+    }
+    pub fn release_spool(&self, id: &str) -> Result<()> {
+        self.0.execute("UPDATE external_requests SET value=json_set(value,'$.spoolReleased',json('true')) WHERE id=?1", [id]).map_err(failure)?;
+        Ok(())
+    }
+
+    /// Checks one indexed history page per pass. The cursor advances past
+    /// retained recovery owners, so a long-lived owner cannot stall pruning.
+    pub fn prune_released(&self) -> Result<()> {
+        let tx = self.0.unchecked_transaction().map_err(failure)?;
+        let after = tx.query_row(
+            "SELECT after_rowid FROM external_history_cleanup WHERE singleton=1",
+            [], |row| row.get::<_, i64>(0),
+        ).optional().map_err(failure)?.unwrap_or(0);
+        let rows = {
+            let mut query = tx.prepare(RELEASED_PAGE_SQL).map_err(failure)?;
+            let rows = query.query_map(rusqlite::params![after, MAINTENANCE_PAGE], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            }).map_err(failure)?;
+            rows.collect::<std::result::Result<Vec<_>, _>>().map_err(failure)?
+        };
+        for (rowid, connection) in &rows {
+            tx.execute(
+                "DELETE FROM external_requests
+                 WHERE rowid=?1
+                   AND json_extract(value,'$.spoolReleased')=1
+                   AND json_extract(value,'$.summary.state') IN ('succeeded','failed','cancelled')
+                   AND json_extract(value,'$.receiveArtifacts') IS NULL
+                   AND json_extract(value,'$.receiveStagingId') IS NULL
+                   AND json_extract(value,'$.summary.result.conflictId') IS NULL
+                   AND rowid<COALESCE((SELECT rowid FROM external_requests
+                       WHERE connection_id=?2
+                         AND json_extract(value,'$.summary.state') IN ('succeeded','failed','cancelled')
+                       ORDER BY rowid DESC LIMIT 1 OFFSET ?3),0)",
+                rusqlite::params![rowid, connection, STATE_TERMINAL_LIMIT - 1],
+            ).map_err(failure)?;
+        }
+        let next = if rows.len() == MAINTENANCE_PAGE as usize {
+            rows.last().map(|(rowid, _)| *rowid).unwrap_or(0)
+        } else { 0 };
+        tx.execute(
+            "INSERT INTO external_history_cleanup(singleton,after_rowid) VALUES(1,?1)
+             ON CONFLICT(singleton) DO UPDATE SET after_rowid=excluded.after_rowid",
+            [next],
+        ).map_err(failure)?;
+        tx.commit().map_err(failure)
+    }
+
+    pub fn terminal_spool_page(&self) -> Result<Vec<(i64, DurableJob)>> {
+        let after = self.0.query_row(
+            "SELECT after_rowid FROM external_spool_cleanup WHERE singleton=1",
+            [], |row| row.get::<_, i64>(0),
+        ).optional().map_err(failure)?.unwrap_or(0);
+        let mut query = self.0.prepare(TERMINAL_SPOOL_PAGE_SQL).map_err(failure)?;
+        let rows = query.query_map(rusqlite::params![after, MAINTENANCE_PAGE], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        }).map_err(failure)?;
+        rows.map(|row| {
+            let (cursor, encoded) = row.map_err(failure)?;
+            Ok((cursor, Self::decode(encoded)?))
+        }).collect()
+    }
+
+    pub fn advance_terminal_spool_page(&self, page: &[(i64, DurableJob)]) -> Result<()> {
+        let next = if page.len() == MAINTENANCE_PAGE as usize {
+            page.last().map(|(rowid, _)| *rowid).unwrap_or(0)
+        } else { 0 };
+        self.0.execute(
+            "INSERT INTO external_spool_cleanup(singleton,after_rowid) VALUES(1,?1)
+             ON CONFLICT(singleton) DO UPDATE SET after_rowid=excluded.after_rowid",
+            [next],
+        ).map_err(failure)?;
+        Ok(())
+    }
+
+    pub fn finished_restore_page(&self, after: i64) -> Result<Vec<(i64, DurableJob)>> {
+        let mut query = self.0.prepare(FINISHED_RESTORE_PAGE_SQL).map_err(failure)?;
+        let rows = query.query_map(rusqlite::params![after, MAINTENANCE_PAGE], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        }).map_err(failure)?;
+        rows.map(|row| {
+            let (cursor, encoded) = row.map_err(failure)?;
+            Ok((cursor, Self::decode(encoded)?))
+        }).collect()
+    }
+
+    /// Resuming the scan after restart also advances past long-lived owners.
+    pub fn receive_cleanup_after(&self, connection_id: &str) -> Result<i64> {
+        Ok(self.0.query_row(
+            "SELECT after_rowid FROM external_receive_cleanup WHERE connection_id=?1",
+            [connection_id], |row| row.get(0),
+        ).optional().map_err(failure)?.unwrap_or(0))
+    }
+    pub fn set_receive_cleanup_after(&self, connection_id: &str, after: i64) -> Result<()> {
+        if after == 0 {
+            self.0.execute(
+                "DELETE FROM external_receive_cleanup WHERE connection_id=?1",
+                [connection_id],
+            ).map_err(failure)?;
+        } else {
+            self.0.execute(
+                "INSERT INTO external_receive_cleanup(connection_id,after_rowid) VALUES(?1,?2)
+                 ON CONFLICT(connection_id) DO UPDATE SET after_rowid=excluded.after_rowid",
+                rusqlite::params![connection_id, after],
+            ).map_err(failure)?;
+        }
+        Ok(())
+    }
+    /// One indexed page of jobs that may still hold downloaded remote bodies.
+    pub fn list_holding_receive_artifacts(
+        &self,
+        connection_id: &str,
+        after: i64,
+        limit: usize,
+    ) -> Result<Vec<(i64, DurableJob)>> {
+        let mut statement = self
+            .0
+            .prepare(RECEIVE_ARTIFACT_PAGE_SQL)
+            .map_err(failure)?;
+        let rows = statement
+            .query_map(rusqlite::params![connection_id, after, limit as i64], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(failure)?;
+        rows.map(|row| {
+            let (cursor, value) = row.map_err(failure)?;
+            Ok((cursor, Self::decode(value)?))
+        })
+        .collect()
+    }
+    /// Forgets a job's receive hold without rewriting anything else in its row,
+    /// so a summary settled meanwhile stays as written.
+    pub fn release_receive_artifacts(&self, id: &str) -> Result<()> {
+        self.0
+            .execute(
+                "UPDATE external_requests SET value=json_set(value,'$.receiveArtifacts',NULL)
+                 WHERE id=?1 AND json_extract(value,'$.receiveArtifacts')='held'",
+                [id],
+            )
+            .map_err(failure)?;
+        Ok(())
+    }
     /// Every live job plus a bounded recent terminal history for renderer state.
     pub fn list_for_state(&self) -> Result<Vec<DurableJob>> {
         let mut result = self.list_pending()?;
@@ -324,6 +554,18 @@ impl JobClaim {
         }
         Ok(())
     }
+    /// Whether this claim is the one excluding every other job on `connection`
+    /// in this runtime instance.
+    pub(super) fn require_connection(&self, state: &JobCommandState, connection: &str) -> Result<()> {
+        if !Arc::ptr_eq(&self._owner.active, &state.active) {
+            return Err(ProviderError::new(ErrorKind::PreconditionFailed));
+        }
+        let active = state.active.lock().map_err(failure)?;
+        if active.get(&self._owner.id).is_none_or(|(owned, _)| owned != connection) {
+            return Err(ProviderError::new(ErrorKind::PreconditionFailed));
+        }
+        Ok(())
+    }
 }
 
 struct JobClaimOwner {
@@ -354,6 +596,7 @@ pub(crate) struct JobCommandState {
     pub session: Mutex<Session>,
     pub automatic_targets: Mutex<HashMap<String, AutomaticTarget>>,
     pub prepared_receives: Mutex<HashMap<String, super::sync_engine::PreparedReceive>>,
+    blocking_tasks: Mutex<HashMap<String, Vec<tokio::sync::oneshot::Receiver<()>>>>,
 }
 pub(crate) struct BackgroundWorker(Arc<std::sync::atomic::AtomicUsize>);
 impl Drop for BackgroundWorker {
@@ -361,6 +604,17 @@ impl Drop for BackgroundWorker {
 }
 
 impl JobCommandState {
+    pub(crate) fn track_blocking(&self, job: &str) -> Result<tokio::sync::oneshot::Sender<()>> {
+        let (send, receive) = tokio::sync::oneshot::channel();
+        self.blocking_tasks.lock().map_err(failure)?.entry(job.to_owned()).or_default().push(receive);
+        Ok(send)
+    }
+    pub(crate) async fn settle_blocking(&self, job: &str) -> Result<()> {
+        let pending = self.blocking_tasks.lock().map_err(failure)?.remove(job).unwrap_or_default();
+        for task in pending { let _ = task.await; }
+        Ok(())
+    }
+
     pub(crate) fn track_worker(&self) -> BackgroundWorker {
         self.background_workers.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         BackgroundWorker(self.background_workers.clone())
@@ -753,6 +1007,50 @@ mod tests {
     }
 
     #[test]
+    fn receive_artifact_pages_use_the_connection_index_and_resume_after_reopening() {
+        let root = tempfile::tempdir().unwrap();
+        let db = JobStore::open(root.path()).unwrap();
+        let mut ids = Vec::new();
+        for index in 0..24 {
+            let mut job = DurableJob::new(request(), false, 1, identity());
+            job.summary["state"] = json!("succeeded");
+            if index % 2 == 0 {
+                job.receive_artifacts = Some(ReceiveArtifacts::Held);
+                ids.push(job.id.clone());
+            }
+            db.put(&job).unwrap();
+        }
+        let first = db.list_holding_receive_artifacts("synthetic", 0, 8).unwrap();
+        assert_eq!(first.iter().map(|(_, job)| &job.id).collect::<Vec<_>>(),
+            ids[..8].iter().collect::<Vec<_>>());
+        let after = first.last().unwrap().0;
+        let second = db.list_holding_receive_artifacts("synthetic", after, 8).unwrap();
+        assert_eq!(second.iter().map(|(_, job)| &job.id).collect::<Vec<_>>(),
+            ids[8..].iter().collect::<Vec<_>>());
+        assert!(db.list_holding_receive_artifacts("another", 0, 8).unwrap().is_empty());
+        let detail: Vec<String> = db.0
+            .prepare(&format!("EXPLAIN QUERY PLAN {RECEIVE_ARTIFACT_PAGE_SQL}"))
+            .unwrap()
+            .query_map(rusqlite::params!["synthetic", after, 8], |row| row.get(3))
+            .unwrap().map(|row| row.unwrap()).collect();
+        assert!(detail.iter().any(|step| step.contains("external_requests_receive_artifacts")),
+            "receive page must use its partial index: {detail:?}");
+        assert!(!detail.iter().any(|step| step.contains("USE TEMP B-TREE")),
+            "receive page must not sort the entire history: {detail:?}");
+
+        db.set_receive_cleanup_after("synthetic", after).unwrap();
+        drop(db);
+        let reopened = JobStore::open(root.path()).unwrap();
+        assert_eq!(reopened.receive_cleanup_after("synthetic").unwrap(), after);
+        assert_eq!(reopened.receive_cleanup_after("another").unwrap(), 0);
+        reopened.set_receive_cleanup_after("synthetic", 0).unwrap();
+        assert_eq!(reopened.receive_cleanup_after("synthetic").unwrap(), 0);
+        assert_eq!(reopened.0.query_row(
+            "SELECT count(*) FROM external_receive_cleanup", [], |row| row.get::<_, i64>(0),
+        ).unwrap(), 0);
+    }
+
+    #[test]
     fn pending_lookup_uses_the_partial_index() {
         let root = tempfile::tempdir().unwrap();
         let db = JobStore::open(root.path()).unwrap();
@@ -774,4 +1072,175 @@ mod tests {
             "query plan did not use pending index: {detail:?}"
         );
     }
+    #[test]
+    fn terminal_maintenance_pages_use_indexes_and_skip_unrelated_history() {
+        let root = tempfile::tempdir().unwrap();
+        let store = JobStore::open(root.path()).unwrap();
+        let mut wanted = Vec::new();
+        for n in 0..260 {
+            let mut other = DurableJob::new(request(), false, n, identity());
+            other.summary["state"] = json!("succeeded");
+            other.spool_released = true;
+            store.put(&other).unwrap();
+            let mut restore = other.clone();
+            restore.id = uuid::Uuid::new_v4().to_string();
+            restore.request.kind = JobKind::Restore;
+            restore.request.snapshot_id = Some("snapshot".into());
+            restore.request.target_revision = Some("1".into());
+            wanted.push(restore.id.clone());
+            store.put(&restore).unwrap();
+        }
+        let mut actual = Vec::new();
+        let mut after = 0;
+        loop {
+            let page = store.finished_restore_page(after).unwrap();
+            assert!(page.len() <= MAINTENANCE_PAGE as usize);
+            if page.is_empty() { break; }
+            for (cursor, job) in page {
+                assert!(cursor > after);
+                after = cursor;
+                actual.push(job.id);
+            }
+        }
+        assert_eq!(actual, wanted);
+        for (sql, index) in [
+            (FINISHED_RESTORE_PAGE_SQL, "external_requests_finished_kind"),
+            (RELEASED_PAGE_SQL, "external_requests_released"),
+        ] {
+            let details = store.0.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap()
+                .query_map(rusqlite::params![0, MAINTENANCE_PAGE], |row| row.get::<_, String>(3))
+                .unwrap().map(|row| row.unwrap()).collect::<Vec<_>>();
+            assert!(details.iter().any(|step| step.contains(index)), "{details:?}");
+            assert!(!details.iter().any(|step| step.contains("USE TEMP B-TREE")), "{details:?}");
+        }
+    }
+
+    #[test]
+    fn terminal_spool_cursor_survives_restart_and_passes_retained_owners() {
+        let root = tempfile::tempdir().unwrap();
+        let jobs = JobStore::open(root.path()).unwrap();
+        let mut ids = Vec::new();
+        for n in 0..260 {
+            let mut job = DurableJob::new(request(), false, n, identity());
+            job.summary["state"] = json!("failed");
+            ids.push(job.id.clone());
+            jobs.put(&job).unwrap();
+        }
+        let page = jobs.terminal_spool_page().unwrap();
+        assert_eq!(page.len(), MAINTENANCE_PAGE as usize);
+        jobs.advance_terminal_spool_page(&page).unwrap();
+        drop(jobs);
+        let jobs = JobStore::open(root.path()).unwrap();
+        let page = jobs.terminal_spool_page().unwrap();
+        assert_eq!(page[0].1.id, ids[128]);
+        assert_eq!(page.len(), MAINTENANCE_PAGE as usize);
+        for (_, job) in &page { jobs.release_spool(&job.id).unwrap(); }
+        jobs.advance_terminal_spool_page(&page).unwrap();
+        let page = jobs.terminal_spool_page().unwrap();
+        assert_eq!(page.len(), 4);
+        jobs.advance_terminal_spool_page(&page).unwrap();
+        assert_eq!(jobs.terminal_spool_page().unwrap()[0].1.id, ids[0]);
+        let details = jobs.0.prepare(&format!("EXPLAIN QUERY PLAN {TERMINAL_SPOOL_PAGE_SQL}"))
+            .unwrap().query_map(rusqlite::params![0, MAINTENANCE_PAGE], |row| row.get::<_, String>(3))
+            .unwrap().map(|row| row.unwrap()).collect::<Vec<_>>();
+        assert!(details.iter().any(|step| step.contains("external_requests_released")), "{details:?}");
+        assert!(!details.iter().any(|step| step.contains("USE TEMP B-TREE")), "{details:?}");
+    }
+
+    #[test]
+    fn pruning_keeps_recovery_owners_and_recent_history_per_connection() {
+        let root = tempfile::tempdir().unwrap();
+        let store = JobStore::open(root.path()).unwrap();
+        let mut protected = Vec::new();
+        for kind in 0..3 {
+            let mut job = DurableJob::new(request(), false, 1, identity());
+            job.summary["state"] = json!("failed");
+            job.spool_released = true;
+            match kind {
+                0 => job.receive_artifacts = Some(ReceiveArtifacts::Held),
+                1 => job.receive_staging_id = Some("staging-synthetic".into()),
+                _ => job.summary["result"] = json!({"conflictId":"conflict"}),
+            }
+            protected.push(job.id.clone());
+            store.put(&job).unwrap();
+        }
+        for connection in ["synthetic", "second"] {
+            for n in 0..40 {
+                let mut request = request();
+                request.connection_id = connection.into();
+                let mut job = DurableJob::new(request, false, n, identity());
+                job.summary["state"] = json!("succeeded");
+                job.spool_released = true;
+                store.put(&job).unwrap();
+            }
+        }
+        store.prune_released().unwrap();
+        for id in protected { assert!(store.read(&id).is_ok()); }
+        let remaining = store.list().unwrap();
+        assert_eq!(remaining.iter().filter(|job| job.request.connection_id == "synthetic").count(), 35);
+        assert_eq!(remaining.iter().filter(|job| job.request.connection_id == "second").count(), 32);
+        let details = store.0.prepare(
+            "EXPLAIN QUERY PLAN SELECT rowid FROM external_requests
+             WHERE connection_id=?1
+               AND json_extract(value,'$.summary.state') IN ('succeeded','failed','cancelled')
+             ORDER BY rowid DESC LIMIT 1 OFFSET ?2",
+        ).unwrap().query_map(rusqlite::params!["synthetic", STATE_TERMINAL_LIMIT - 1],
+            |row| row.get::<_, String>(3),
+        ).unwrap().map(|row| row.unwrap()).collect::<Vec<_>>();
+        assert!(details.iter().any(|step| step.contains("external_requests_terminal")), "{details:?}");
+        assert!(!details.iter().any(|step| step.contains("USE TEMP B-TREE")), "{details:?}");
+    }
+
+    #[test]
+    fn released_history_pruning_preserves_live_material_and_recent_retry_ids() {
+        let root = tempfile::tempdir().unwrap();
+        let store = JobStore::open(root.path()).unwrap();
+        let mut held = DurableJob::new(request(), false, 1, identity());
+        held.summary["state"] = json!("failed");
+        store.put(&held).unwrap();
+        let mut latest = String::new();
+        for n in 0..1000 {
+            let mut job = DurableJob::new(request(), false, n, identity());
+            job.summary["state"] = json!("failed");
+            job.spool_released = true;
+            latest = job.id.clone();
+            store.put(&job).unwrap();
+        }
+        store.prune_released().unwrap();
+        assert_eq!(store.list().unwrap().len(), 1001 - MAINTENANCE_PAGE as usize);
+        for _ in 0..8 { store.prune_released().unwrap(); }
+        assert_eq!(store.list().unwrap().len(), STATE_TERMINAL_LIMIT as usize + 1);
+        assert_eq!(store.list_retaining().unwrap().iter().map(|job| job.id.clone()).collect::<Vec<_>>(), vec![held.id.clone()]);
+        assert!(store.read(&latest).unwrap().terminal());
+        store.release_spool(&held.id).unwrap();
+        store.prune_released().unwrap();
+        assert_eq!(store.list().unwrap().len(), STATE_TERMINAL_LIMIT as usize);
+        assert!(store.list_retaining().unwrap().is_empty());
+    }
+    #[test]
+    fn publication_unknown_excludes_a_second_pending_operation() {
+        let root = tempfile::tempdir().unwrap();
+        let store = JobStore::open(root.path()).unwrap();
+        let mut unknown = DurableJob::new(request(), false, 1, identity());
+        unknown.summary["state"] = json!("uncertain");
+        unknown.summary["phase"] = json!("publication-unknown");
+        store.put(&unknown).unwrap();
+        let next = DurableJob::new(request(), false, 2, identity());
+        assert_eq!(store.put(&next).unwrap_err().kind, ErrorKind::PreconditionFailed);
+        assert!(!store.insert_new(&next).unwrap());
+        assert_eq!(store.list_pending().unwrap().len(), 1);
+    }
+    #[test]
+    fn blocking_capture_remains_joined_until_its_owner_releases() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let state = JobCommandState::default();
+            let owner = state.track_blocking("capture").unwrap();
+            let wait = state.settle_blocking("capture");
+            tokio::pin!(wait);
+            assert!(tokio::time::timeout(std::time::Duration::from_millis(10), &mut wait).await.is_err());
+            drop(owner);
+            wait.await.unwrap();
+        });
+    }
+
 }

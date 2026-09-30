@@ -73,6 +73,11 @@ impl ActiveReaderRegistry {
         }
     }
 
+    /// A local capture is between writing its bodies and registering them.
+    pub(crate) fn asset_inventory_deferred(&self) -> bool {
+        self.deferred_asset_inventories.load(Ordering::SeqCst) > 0
+    }
+
     pub(crate) fn detached_asset_roots(&self) -> StoreResult<Vec<AssetRootSet>> {
         if self.deferred_asset_inventories.load(Ordering::SeqCst) > 0 {
             return Err(StoreError::Validation {
@@ -153,11 +158,33 @@ pub(super) fn apply_pending_restore(
     {
         return Ok(None);
     }
+    let attempt_path = snapshots_dir.join("restore-attempt");
+    let mut attempt_started = false;
     let result = (|| -> StoreResult<()> {
         let mut archive = Archive::open(snapshots_dir)?;
         let Some(id) = archive.pending_restore()? else {
             return Ok(());
         };
+        let token = archive.pending_restore_token()?
+            .ok_or_else(|| validation("snapshot restore request has no identity"))?;
+        let database_path = persistent_dir.join(DATABASE_FILE);
+        if database_path.is_file() {
+            let connection = Connection::open(&database_path)?;
+            let applied: Option<String> = connection.query_row(
+                "SELECT value FROM meta WHERE key='appliedRestoreRequest'", [], |row| row.get(0),
+            ).optional()?;
+            if applied.as_deref() == Some(&token) {
+                archive.clear_pending_restore(&id)?;
+                remove_file_if_exists(&attempt_path)?;
+                return Ok(());
+            }
+        }
+        if attempt_path.exists() {
+            return Err(validation("snapshot restore was interrupted; select the snapshot again to retry"));
+        }
+        let attempt = fs::OpenOptions::new().write(true).create_new(true).open(&attempt_path)?;
+        attempt.sync_all()?;
+        attempt_started = true;
         let reconstructed = archive.scratch()?;
         let metadata = archive.restore(&id, &reconstructed.path)?;
         validate_restore_database(&reconstructed.path)?;
@@ -166,9 +193,15 @@ pub(super) fn apply_pending_restore(
             return Err(validation("restored snapshot revision mismatch"));
         }
         drop(connection);
-        let database_path = persistent_dir.join(DATABASE_FILE);
         let candidate = prepare_restore_candidate(persistent_dir, &reconstructed.path)?;
         let replacement = (|| -> StoreResult<()> {
+            let connection = Connection::open(&candidate)?;
+            connection.execute(
+                "INSERT INTO meta(key,value) VALUES('appliedRestoreRequest',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                [&token],
+            )?;
+            checkpoint(&connection, CheckpointMode::Truncate)?;
+            drop(connection);
             if database_path.is_file() {
                 let connection = Connection::open(&database_path)?;
                 create_in_archive(&connection, &mut archive, "pre-restore")?;
@@ -185,6 +218,11 @@ pub(super) fn apply_pending_restore(
         archive.clear_pending_restore(&id)?;
         Ok(())
     })();
+    if attempt_started {
+        if let Err(error) = remove_file_if_exists(&attempt_path) {
+            crate::nlog!("warn", "snapshot restore attempt cleanup failed: {error}");
+        }
+    }
     match result {
         Ok(()) => Ok(None),
         Err(error) => {
@@ -210,7 +248,10 @@ fn prepare_restore_candidate(persistent_dir: &Path, target: &Path) -> StoreResul
         super::server_sync_outbox::restored_copy(&transaction)?;
         super::sync_selection::restored_copy(&transaction)?;
         transaction.commit()?;
-        let _ = super::query::materialize(&connection, None)?;
+        let generation = active_generation(&connection)?;
+        let reader = open_generation_reader(&candidate, &generation)?;
+        super::portable_validation::validate_records(&reader, &crate::local_backup::NeverCancelled)?;
+        drop(reader);
         let integrity: String =
             connection.query_row("PRAGMA integrity_check", [], |row| row.get(0))?;
         if integrity != "ok" {
@@ -450,9 +491,27 @@ fn create_in_archive(
     reason: &str,
 ) -> StoreResult<SnapshotCreated> {
     let started = Instant::now();
+    let (scratch, current_bytes) = capture_scratch(connection, archive)?;
+    archive_scratch(archive, scratch, current_bytes, reason, started)
+}
+
+pub(super) fn capture_scratch(
+    connection: &Connection,
+    archive: &Archive,
+) -> StoreResult<(super::snapshot_archive::Scratch, u64)> {
     let current_bytes = logical_database_bytes(connection)?;
     let scratch = archive.scratch()?;
     connection.execute("VACUUM INTO ?1", [scratch.path.to_string_lossy().as_ref()])?;
+    Ok((scratch, current_bytes))
+}
+
+pub(super) fn archive_scratch(
+    archive: &mut Archive,
+    scratch: super::snapshot_archive::Scratch,
+    current_bytes: u64,
+    reason: &str,
+    started: Instant,
+) -> StoreResult<SnapshotCreated> {
     let captured = Connection::open(&scratch.path)?;
     let revision = current_revision(&captured)?;
     let roots = collect_asset_roots(&captured)?;
@@ -534,6 +593,30 @@ fn collect_asset_roots_scoped(
     generation: Option<&str>,
 ) -> StoreResult<AssetRootSet> {
     let mut roots = AssetRootSet::default();
+    if generation.is_none() {
+        let query = ["root", "bot_presets", "characters", "conversations", "messages",
+            "plugin_storage", "asset_aliases", "asset_owner_heads"]
+            .map(|table| format!("SELECT generation FROM {table}"))
+            .join(" UNION ");
+        let mut statement = connection.prepare(&query)?;
+        let generations = statement.query_map([], |row| row.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        for generation in generations {
+            let scoped = collect_asset_roots_scoped(connection, Some(&generation))?;
+            roots.manifest_hashes.extend(scoped.manifest_hashes);
+            roots.object_hashes.extend(scoped.object_hashes);
+            roots.legacy_asset_keys.extend(scoped.legacy_asset_keys);
+            roots.inlay_ids.extend(scoped.inlay_ids);
+            roots.cold_keys.extend(scoped.cold_keys);
+            roots.blockers.extend(scoped.blockers);
+            roots.retain_all_objects |= scoped.retain_all_objects;
+        }
+        if table_exists(connection, "server_sync_objects")? {
+            scan_optional_hash_column(connection, "SELECT hash FROM server_sync_objects", [],
+                HashTarget::Object, &mut roots)?;
+        }
+        return Ok(roots);
+    }
     let scope_params: Vec<&dyn rusqlite::ToSql> = generation
         .as_ref()
         .map(|generation| vec![generation as &dyn rusqlite::ToSql])
@@ -610,6 +693,22 @@ fn collect_asset_roots_scoped(
             format!("SELECT image FROM {table} WHERE image IS NOT NULL")
         };
         scan_text_column(connection, &query, scope_params, &mut roots)?;
+    }
+    let mut aliases = connection.prepare(
+        "SELECT logical_key, kind FROM asset_aliases
+         WHERE generation = ?1 AND object_hash IS NOT NULL",
+    )?;
+    let mut rows = aliases.query(scope_params)?;
+    while let Some(row) = rows.next()? {
+        match (scanned_text(row, 0)?, scanned_text(row, 1)?) {
+            (ScannedText::Text(key), ScannedText::Text(kind)) if kind == "asset" => {
+                roots.legacy_asset_keys.remove(&key);
+            }
+            (ScannedText::Text(key), ScannedText::Text(kind)) if kind == "inlay" => {
+                roots.inlay_ids.remove(&key);
+            }
+            _ => retain_unscannable_record(&mut roots),
+        }
     }
     let plugin_rows: i64 = connection.query_row(
         if scoped {
@@ -1085,12 +1184,34 @@ fn replace_database(database_path: &Path, target: &Path) -> StoreResult<()> {
     if previous.exists() {
         fs::remove_file(&previous)?;
     }
-    fs::rename(database_path, &previous)
-        .map_err(|error| path_error("preserve current database", &previous, error))?;
+    let mut sidecars = Vec::new();
+    for suffix in ["-wal", "-shm"] {
+        let source = PathBuf::from(format!("{}{suffix}", database_path.display()));
+        if !source.exists() { continue; }
+        let destination = PathBuf::from(format!("{}{suffix}", previous.display()));
+        let moved = remove_file_if_exists(&destination)
+            .and_then(|()| fs::rename(&source, &destination).map_err(StoreError::from));
+        if let Err(error) = moved {
+            for (source, destination) in sidecars.iter().rev() {
+                fs::rename(destination, source)?;
+            }
+            return Err(error);
+        }
+        sidecars.push((source, destination));
+    }
+    if let Err(error) = fs::rename(database_path, &previous) {
+        for (source, destination) in sidecars.iter().rev() {
+            fs::rename(destination, source)?;
+        }
+        return Err(path_error("preserve current database", &previous, error));
+    }
     if let Err(error) = fs::rename(&next, database_path) {
         fs::rename(&previous, database_path).map_err(|rollback| {
             path_error("roll back current database", database_path, rollback)
         })?;
+        for (source, destination) in sidecars.iter().rev() {
+            fs::rename(destination, source)?;
+        }
         remove_file_if_exists(&next)?;
         return Err(path_error(
             "activate restore candidate",
@@ -1098,9 +1219,9 @@ fn replace_database(database_path: &Path, target: &Path) -> StoreResult<()> {
             error,
         ));
     }
-    remove_database_files(&previous)?;
-    remove_file_if_exists(&PathBuf::from(format!("{}-wal", database_path.display())))?;
-    remove_file_if_exists(&PathBuf::from(format!("{}-shm", database_path.display())))?;
+    if let Err(error) = remove_database_files(&previous) {
+        crate::nlog!("warn", "activated snapshot previous-file cleanup failed: {error}");
+    }
     Ok(())
 }
 

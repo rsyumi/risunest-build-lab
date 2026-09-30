@@ -1,7 +1,9 @@
+import { isBackgroundExpiryReason } from '../iosNative'
+import { measuredTaskPercent, runWithMobileBackgroundTask } from '../mobileBackgroundTask'
 import { Mutex } from '../mutex'
 import { get, writable } from 'svelte/store'
 import { doingChat } from '../process/generationState'
-import { reserveLibraryFileOperation } from './libraryFileOperation'
+import { reserveLibraryFileOperation, waitForLibraryFileOperation } from './libraryFileOperation'
 
 import {
     NativeFileJobActivationCommittedError,
@@ -41,6 +43,7 @@ export interface NativeFileOperationState {
     blocking: boolean
     cancelRequested: boolean
     partialWritesPossible: boolean
+    waitingForSync?: boolean
 }
 
 export type NativeFileOperationOutcomeState = 'succeeded' | 'failed' | 'cancelled'
@@ -65,6 +68,7 @@ export interface NativeFileOperationOutcome {
     error?: NativeFileOperationError
     warningCodes: string[]
     partialWritesPossible: boolean
+    interruption?: 'background-expired'
 }
 
 export interface SharedNativeFileOperationContext {
@@ -76,6 +80,7 @@ export interface SharedNativeFileOperationContext {
 }
 
 export interface SharedNativeFileOperationOptions {
+    userInitiated?: boolean
     presentation?: NativeFileOperationPresentation
     format?: NativeFileOperationFormat
 }
@@ -130,7 +135,11 @@ function outcomeError(kind: NativeFileOperationKind, error: unknown): NativeFile
             recoveryRequired: true,
         }
     }
-    if (error instanceof NativeFileJobError) {
+    if (
+        error !== null && typeof error === 'object' &&
+        'code' in error && typeof error.code === 'string' &&
+        'message' in error && typeof error.message === 'string'
+    ) {
         return { code: error.code, message: error.message, recoveryRequired: false }
     }
     return {
@@ -160,7 +169,10 @@ function outcomeFromSettlement(
     if ('error' in settlement) {
         const warningCodes = mergeWarningCodes(statusWarnings, stringWarningCodes(settlement.error))
         if (isAbortError(settlement.error)) {
-            return { ...base, state: 'cancelled', warningCodes }
+            return {
+                ...base, state: 'cancelled', warningCodes,
+                ...(isBackgroundExpiryReason(settlement.error) ? { interruption: 'background-expired' as const } : {}),
+            }
         }
         return {
             ...base,
@@ -169,6 +181,8 @@ function outcomeFromSettlement(
             warningCodes,
         }
     }
+    if (settlement.value && typeof settlement.value === 'object' && 'kind' in settlement.value
+        && ['missing', 'unchanged', 'kept-local'].includes(String(settlement.value.kind))) return null
     // A null or undefined result means the user backed out of the picker
     // before any work started, so there is nothing to summarize.
     if (settlement.value === null || settlement.value === undefined) return null
@@ -218,10 +232,7 @@ export function runSharedNativeFileOperation<T>(
             ),
         )
     }
-    const releaseAdmission =
-        options.format === 'library-backup'
-            ? reserveLibraryFileOperation()
-            : () => {}
+    const releaseAdmission = reserveLibraryFileOperation()
 
     const controller = new AbortController()
     const presentation = options.presentation ?? 'inline'
@@ -267,7 +278,24 @@ export function runSharedNativeFileOperation<T>(
         setPartialWritesPossible: (value) => updateActiveState({ partialWritesPossible: value }),
     }
     try {
-        operation(context).then(
+        const taskKind = options.format === 'library-backup' || options.format === 'risu-save'
+            ? (kind === 'export' ? 'backup' : 'restore') : kind
+        runWithMobileBackgroundTask(taskKind, async task => {
+            const waiting = waitForLibraryFileOperation(task.signal ?? context.signal)
+            if (waiting) {
+                updateActiveState({ waitingForSync: true })
+                await waiting
+                updateActiveState({ waitingForSync: false })
+            }
+            return operation({
+            ...context,
+            signal: task.signal ?? context.signal,
+            onStatus: status => {
+                recordStatus(status)
+                task.progress(measuredTaskPercent(status.progress.completedBytes, status.progress.totalBytes))
+            },
+            })
+        }, controller.signal, options.userInitiated ?? true).then(
             value => { settle({ value }); resolveOperation(value) },
             error => { settle({ error }); rejectOperation(error) },
         )

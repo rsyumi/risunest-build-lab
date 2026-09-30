@@ -8,6 +8,7 @@ mod jobs;
 pub use jobs::CommitSubmission;
 mod checkpoints;
 mod descriptors;
+mod descriptors_index;
 mod journal;
 mod maintenance;
 mod media;
@@ -15,6 +16,7 @@ pub use media::MediaResponse;
 mod retention;
 pub use retention::{ObjectIdentity, RetainedObject, RetentionPage, RetentionRelease};
 mod objects;
+pub use objects::Body;
 mod schema;
 mod scopes;
 mod staged;
@@ -48,9 +50,29 @@ pub struct Store {
     upload_job_gate: Mutex<()>,
     download_job_gate: Mutex<()>,
     connection_gate: Mutex<()>,
+    trash_cursors: Mutex<(i64, i64)>,
+    orphan_cursor: Mutex<maintenance::OrphanScan>,
+    temporary_paths: Mutex<BTreeSet<PathBuf>>,
     media_signer: risunest_sync_connect::media::MediaSigner,
     heads: tokio::sync::watch::Sender<u64>,
     _owner: File,
+}
+
+struct StagingTemp<'a> {
+    file: tempfile::NamedTempFile,
+    store: &'a Store,
+}
+impl std::ops::Deref for StagingTemp<'_> {
+    type Target = tempfile::NamedTempFile;
+    fn deref(&self) -> &Self::Target { &self.file }
+}
+impl std::ops::DerefMut for StagingTemp<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.file }
+}
+impl Drop for StagingTemp<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut paths) = self.store.temporary_paths.lock() { paths.remove(self.file.path()); }
+    }
 }
 
 /// Tokens are emitted once by the administration CLI, never by a sync route.
@@ -122,6 +144,12 @@ pub(super) fn domain_filter(domains: &[Domain]) -> String {
 }
 
 impl Store {
+    fn staging_temp(&self) -> Result<StagingTemp<'_>> {
+        let mut paths = self.temporary_paths.lock().map_err(|_| Error::new("storage-unavailable", 503))?;
+        let file = tempfile::Builder::new().prefix(".risunest-tmp-").tempfile_in(self.root.join("staging"))?;
+        paths.insert(file.path().to_owned());
+        Ok(StagingTemp { file, store: self })
+    }
     pub fn durable_work(&self) -> Result<DurableWork> {
         let db = self.reader()?;
         let count = |table: &str| -> Result<u64> {
@@ -149,11 +177,13 @@ impl Store {
         if !root.is_absolute() {
             return Err(Error::new("absolute-data-dir-required", 400));
         }
-        objects::check_path(root)?;
         if create {
-            fs::create_dir_all(root)?;
+            fs::create_dir_all(root.parent().ok_or(Error::new("invalid-data-dir", 400))?)?;
         }
-        let root = fs::canonicalize(root)?;
+        let root = crate::resolve_data_root(root)?;
+        if create {
+            fs::create_dir_all(&root)?;
+        }
         for name in [
             "owner.lock",
             "metadata.sqlite",
@@ -173,6 +203,25 @@ impl Store {
         owner
             .try_lock()
             .map_err(|_| Error::new("data-dir-busy", 409))?;
+        // No publisher from this daemon exists while the owner is opening.
+        for directory in [&root, &root.join("staging")] {
+            let entries = match fs::read_dir(directory) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            let mut changed = false;
+            for entry in entries.take(4096) {
+                let entry = entry?;
+                if !entry.file_name().to_string_lossy().starts_with(".risunest-tmp-") { continue; }
+                let meta = entry.metadata()?;
+                if meta.is_file() && (directory != &root || meta.modified()?.elapsed().is_ok_and(|age| age.as_secs() >= 3600)) {
+                    fs::remove_file(entry.path())?;
+                    changed = true;
+                }
+            }
+            if changed { objects::sync_directory(directory)?; }
+        }
         let db_path = root.join("metadata.sqlite");
         if create && db_path.exists() {
             return Err(Error::new("already-initialized", 409));
@@ -180,14 +229,17 @@ impl Store {
         if !create && !db_path.is_file() {
             return Err(Error::new("not-initialized", 404));
         }
-        let mut db = Connection::open(db_path)?;
-        db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA journal_size_limit=67108864;")?;
         if create {
             for name in ["objects", "staging"] {
                 fs::create_dir_all(root.join(name))?;
             }
+            let staged = tempfile::Builder::new().prefix(".risunest-tmp-").tempfile_in(root.join("staging"))?;
+            let mut db = Connection::open(staged.path())?;
+            db.execute_batch("PRAGMA auto_vacuum=INCREMENTAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;")?;
             let tx = db.transaction()?;
             tx.execute_batch(schema::SCHEMA)?;
+            risunest_small_object_store::initialize(&tx)
+                .map_err(|_| Error::new("metadata-storage", 503))?;
             let head = RemoteHead::genesis(random_id()?, random_id()?)?;
             tx.execute("INSERT INTO library VALUES(1,?1)", [json(&head)?])?;
             tx.execute(
@@ -195,13 +247,18 @@ impl Store {
                 [risunest_sync_connect::media::generate_key()?.as_slice()],
             )?;
             tx.commit()?;
+            drop(db);
+            staged.as_file().sync_all()?;
+            staged.persist_noclobber(&db_path).map_err(|_| Error::new("initialization-publication-failed", 503))?;
             objects::sync_directory(&root)?;
-        } else {
-            let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-            if version != schema::VERSION {
-                return Err(Error::new("incompatible-store", 409));
-            }
         }
+        let db = Connection::open(&db_path)?;
+        let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        if version != schema::VERSION {
+            return Err(Error::new("incompatible-store", 409));
+        }
+        schema::verify(&db)?;
+        db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000; PRAGMA journal_size_limit=67108864;")?;
         db.execute(
             "UPDATE uploads SET state=CASE WHEN id IN (SELECT upload FROM upload_jobs) THEN 'queued' ELSE 'open' END WHERE state='finalizing'",
             [],
@@ -228,6 +285,9 @@ impl Store {
             upload_job_gate: Mutex::new(()),
             download_job_gate: Mutex::new(()),
             connection_gate: Mutex::new(()),
+            trash_cursors: Mutex::new((0, 0)),
+            orphan_cursor: Mutex::new(maintenance::OrphanScan::default()),
+            temporary_paths: Mutex::new(BTreeSet::new()),
             media_signer,
             heads: tokio::sync::watch::Sender::new(0),
             _owner: owner,
@@ -251,13 +311,19 @@ impl Store {
     pub fn head(&self) -> Result<RemoteHead> {
         Self::read_head(&*self.reader()?)
     }
+    pub fn device_head(&self, device: &Device) -> Result<RemoteHead> {
+        let db = self.reader()?;
+        Self::require_device(&db, device)?;
+        Self::read_head(&db)
+    }
     /// Observes announcements that the head may have moved. A reader still
     /// confirms the head itself: an announcement is never the state.
     pub fn head_announcements(&self) -> tokio::sync::watch::Receiver<u64> {
         self.heads.subscribe()
     }
     pub(super) fn announce_head(&self) {
-        self.heads.send_modify(|value| *value = value.wrapping_add(1));
+        self.heads
+            .send_modify(|value| *value = value.wrapping_add(1));
     }
     pub fn device_session(&self, device: &Device) -> Result<DeviceSession> {
         let mut connection = self.reader()?;
@@ -339,6 +405,7 @@ impl Store {
         {
             return Err(Error::new("device-not-found", 404));
         }
+        self.announce_head();
         Ok(())
     }
     pub fn authenticate(&self, library: &str, token: &str) -> Result<Device> {

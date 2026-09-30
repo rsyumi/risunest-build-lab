@@ -5,15 +5,18 @@
         type StreamingThoughtPreview,
     } from '../../ts/parser/streamingThoughtPreview'
     import type { StreamingThoughtMode } from '../../ts/storage/database.svelte'
+    import IncrementalPlainText from './IncrementalPlainText.svelte'
 
     let {
         preview,
         mode = 'recent',
         source = '',
+        onExpandedChange,
     }: {
         preview: StreamingThoughtPreview
         mode?: StreamingThoughtMode
         source?: string
+        onExpandedChange?: (expanded: boolean) => void
     } = $props()
     let expanded = $state(false)
 </script>
@@ -24,14 +27,15 @@
     <details
         class="x-risu-streaming-thought-preview"
         bind:open={expanded}
+        ontoggle={(event) => onExpandedChange?.(event.currentTarget.open)}
         data-streaming-thought-preview
     >
         <summary class="cursor-pointer">{language.cot}</summary>
         {#if expanded}
-            <span class="whitespace-pre-wrap"
-                >{getStreamingThoughtPreview(source, true)?.full ??
-                    preview.recent}</span
-            >
+            <IncrementalPlainText
+                text={getStreamingThoughtPreview(source, true)?.full ??
+                    preview.recent}
+            />
         {/if}
     </details>
 {:else}

@@ -35,6 +35,7 @@
     import SliderInput from "../UI/GUI/SliderInput.svelte";
     import Toggles from "./Toggles.svelte";
     import { convertCharacterToModule } from "src/ts/interchangeability";
+    import { mutatePersistentCharacterDetail } from "src/ts/storage/persistentDataRuntime.svelte";
 
     let iconRemoveMode = $state(false)
     let viewSubMenu = $state(0)
@@ -93,20 +94,21 @@
         })
     });
 
-    $effect.pre(() => {
-        if(DBState.db.characters[$selectedCharID].type ==='character' && DBState.db.useAdditionalAssetsPreview){
-            if((DBState.db.characters[$selectedCharID] as character).additionalAssets){
-                for(let i = 0; i < (DBState.db.characters[$selectedCharID] as character).additionalAssets.length; i++){
-                    if((DBState.db.characters[$selectedCharID] as character).additionalAssets[i].length > 2 && (DBState.db.characters[$selectedCharID] as character).additionalAssets[i][2]) {
-                        assetFileExtensions[i] = (DBState.db.characters[$selectedCharID] as character).additionalAssets[i][2]
-                    } else
-                        assetFileExtensions[i] = (DBState.db.characters[$selectedCharID] as character).additionalAssets[i][1].split('.').pop()
-                    getFileSrc((DBState.db.characters[$selectedCharID] as character).additionalAssets[i][1]).then((filePath) => {
-                        assetFilePath[i] = filePath
-                    })
-                }
+    $effect(() => {
+        let active = true
+        assetFilePath = []
+        const extensions: string[] = []
+        const character = DBState.db.characters[$selectedCharID]
+        if ($CharConfigSubMenu === 1 && character.type === 'character' && DBState.db.useAdditionalAssetsPreview) {
+            for (const [i, asset] of (character.additionalAssets ?? []).entries()) {
+                extensions[i] = asset[2] || asset[1].split('.').pop()
+                void getFileSrc(asset[1]).then(path => {
+                    if (active) assetFilePath[i] = path
+                }).catch(() => {})
             }
         }
+        assetFileExtensions = extensions
+        return () => { active = false }
     });
 
     $effect.pre(() => {
@@ -598,20 +600,23 @@
                         <th class="font-medium">{language.value}</th>
                         <th class="font-medium cursor-pointer w-10">
                             <button class="hover:text-green-500" onclick={async () => {
+                                const characterId = DBState.db.characters[$selectedCharID].chaId
                                 if(DBState.db.characters[$selectedCharID].type === 'character'){
                                     const da = await selectMultipleFile(['png', 'webp', 'mp4', 'mp3', 'gif', 'jpeg', 'jpg', 'ttf', 'otf', 'css', 'webm', 'woff', 'woff2', 'svg', 'avif'])
-                                    DBState.db.characters[$selectedCharID].additionalAssets = DBState.db.characters[$selectedCharID].additionalAssets ?? []
-                                    if(!da){
+                                    if(!da?.length){
                                         return
                                     }
+                                    const assets: [string, string, string][] = []
                                     for(const f of da){
                                         const img = f.data
                                         const name = f.name
                                         const extension = name.split('.').pop().toLowerCase()
                                         const imgp = await saveAsset(img,'', extension)
-                                        DBState.db.characters[$selectedCharID].additionalAssets.push([name, imgp, extension])
-                                        DBState.db.characters[$selectedCharID].additionalAssets = DBState.db.characters[$selectedCharID].additionalAssets
+                                        assets.push([name, imgp, extension])
                                     }
+                                    await mutatePersistentCharacterDetail(characterId, 'add-character-assets', ({ character }) => {
+                                        if (character.type === 'character') (character.additionalAssets ??= []).push(...assets)
+                                    })
                                 }
                             }}>
                                 <PlusIcon />
@@ -708,7 +713,11 @@
                 exportRegex(DBState.db.characters[$selectedCharID].customscript)
             }}><DownloadIcon /></button>
             <button class="font-medium cursor-pointer hover:text-green-500" onclick={async () => {
-                DBState.db.characters[$selectedCharID].customscript = await importRegex(DBState.db.characters[$selectedCharID].customscript)
+                const characterId = DBState.db.characters[$selectedCharID].chaId
+                const scripts = await importRegex()
+                if (scripts.length) await mutatePersistentCharacterDetail(characterId, 'import-character-regex', ({ character }) => {
+                    character.customscript.push(...scripts)
+                })
             }}><HardDriveUploadIcon /></button>
         </div>
 
@@ -921,10 +930,11 @@
                 <span class="text-textcolor">No Model</span>
             {/if}
             <Button onclick={async () => {
+                const characterId = DBState.db.characters[$selectedCharID].chaId
                 const model = await registerOnnxModel()
-                if(model && DBState.db.characters[$selectedCharID].type === 'character'){
-                    DBState.db.characters[$selectedCharID].vits = model
-                }
+                if (model) await mutatePersistentCharacterDetail(characterId, 'select-character-voice-model', ({ character }) => {
+                    if (character.type === 'character') character.vits = model
+                })
             }}>{language.selectModel}</Button>
         {:else if DBState.db.characters[$selectedCharID].ttsMode === 'gptsovits'}
             <span class="text-textcolor">Volume</span>
@@ -945,6 +955,7 @@
 
             <span class="text-textcolor">Reference Audio Data (3~10s audio file)</span>
             <Button onclick={async () => {
+                const characterId = DBState.db.characters[$selectedCharID].chaId
                 const audio = await selectSingleFile([
                     'wav',
                     'ogg',
@@ -955,10 +966,11 @@
                     return null
                 }
                 const saveId = await saveAsset(audio.data)
-                DBState.db.characters[$selectedCharID].gptSoVitsConfig.ref_audio_data = {
-                    fileName: audio.name,
-                    assetId: saveId
-                }
+                await mutatePersistentCharacterDetail(characterId, 'select-character-voice-reference', ({ character }) => {
+                    if (character.type === 'character' && character.gptSoVitsConfig) {
+                        character.gptSoVitsConfig.ref_audio_data = { fileName: audio.name, assetId: saveId }
+                    }
+                })
 
             }}
             className="h-10">

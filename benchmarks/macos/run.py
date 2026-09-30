@@ -2,6 +2,9 @@
 import argparse
 import json
 import os
+import re
+import shutil
+import sys
 from pathlib import Path
 import subprocess
 import tempfile
@@ -29,6 +32,90 @@ def memory_sample(pid):
     own = [{'pid': p, 'rssKiB': rss} for p, _, rss, _ in rows if p in selected]
     webkit = [{'pid': p, 'rssKiB': rss} for p, _, rss, name in rows if 'WebKit' in name]
     return {'time': time.time(), 'appTree': own, 'systemWebKit': webkit}
+
+
+def start_appearance_capture(directory, label, platform, capture_input, capture_size=None, display_owner_pid=None):
+    if not shutil.which('ffmpeg') or not shutil.which('ffprobe'):
+        raise RuntimeError('Appearance capture requires ffmpeg and ffprobe')
+    if platform == 'macos':
+        if os.environ.get('GITHUB_ACTIONS') != 'true':
+            raise RuntimeError('Mac whole-display capture is restricted to the fresh hosted CI desktop')
+        if not re.fullmatch(r'Capture screen [0-9]+:none', capture_input or ''):
+            raise RuntimeError('Select an enumerated Capture screen device without audio')
+        source = ['-f', 'avfoundation', '-framerate', '60', '-i', capture_input]
+        desktop = {'kind': 'hosted macOS desktop'}
+    else:
+        display = os.environ.get('DISPLAY', '')
+        if not display or capture_input != display or not display_owner_pid:
+            raise RuntimeError('Linux capture needs DISPLAY and its owned Xvfb PID')
+        process_root = Path('/proc') / str(display_owner_pid)
+        command = (process_root / 'cmdline').read_bytes().split(b'\0')
+        if (process_root.stat().st_uid != os.getuid() or not command
+                or Path(os.fsdecode(command[0])).name != 'Xvfb'
+                or display.split('.')[0].encode() not in command):
+            raise RuntimeError('Capture display is not the owned synthetic Xvfb process')
+        wm = subprocess.check_output(['xprop', '-root', '_NET_SUPPORTING_WM_CHECK'], text=True)
+        match = re.search(r'0x[0-9a-fA-F]+', wm)
+        if not match or int(match.group(), 16) == 0:
+            raise RuntimeError('A named window manager is required for title-bar observations')
+        wm_name = subprocess.check_output(['xprop', '-id', match.group(), '_NET_WM_NAME'], text=True).strip()
+        if ' = ' not in wm_name:
+            raise RuntimeError('Window manager name unavailable')
+        if not re.fullmatch(r'[1-9][0-9]*x[1-9][0-9]*', capture_size or ''):
+            raise RuntimeError('Explicit capture size required')
+        source = ['-f', 'x11grab', '-framerate', '60', '-video_size', capture_size, '-i', display]
+        desktop = {'kind': 'owned Xvfb/X11', 'windowManager': wm_name, 'gtkTheme': os.environ.get('GTK_THEME')}
+    video = directory / f'{label}.mkv'
+    progress = directory / f'{label}-capture-progress.txt'
+    if video.exists() or progress.exists():
+        raise RuntimeError('Refusing to overwrite appearance capture')
+    log = (directory / f'{label}-capture.log').open('w')
+    started = time.monotonic()
+    process = subprocess.Popen(['ffmpeg', '-hide_banner', '-loglevel', 'warning', '-n', *source,
+        '-an', '-c:v', 'ffv1', '-fps_mode', 'passthrough', '-progress', str(progress), str(video)],
+        stdin=subprocess.PIPE, stdout=log, stderr=subprocess.STDOUT)
+    try:
+        deadline = started + 20
+        while time.monotonic() < deadline:
+            if process.poll() is not None:
+                raise RuntimeError('Screen capture exited before application launch')
+            frames = re.findall(r'^frame=(\d+)$', progress.read_text() if progress.exists() else '', re.M)
+            if frames and int(frames[-1]) >= 2:
+                return {'process': process, 'log': log, 'video': video, 'started': started,
+                        'launchOffsetSeconds': time.monotonic() - started, 'desktop': desktop}
+            time.sleep(0.05)
+        raise RuntimeError('No prelaunch frames received from screen capture')
+    except BaseException:
+        process.terminate()
+        process.wait(timeout=10)
+        log.close()
+        raise
+
+
+def finish_appearance_capture(capture):
+    process = capture['process']
+    try:
+        process.communicate(b'q\n', timeout=15)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+        raise RuntimeError('Screen capture did not stop')
+    finally:
+        capture['log'].close()
+    if process.returncode != 0:
+        raise RuntimeError('Screen capture failed')
+    probe = json.loads(subprocess.check_output(['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+        '-show_frames', '-show_entries', 'frame=best_effort_timestamp_time', '-of', 'json', str(capture['video'])], text=True))
+    times = [float(frame['best_effort_timestamp_time']) for frame in probe['frames']]
+    gaps = [end - start for start, end in zip(times, times[1:])]
+    result = {'requestedFps': 60, 'frames': len(times), 'maximumFrameGapSeconds': max(gaps, default=None),
+              'launchOffsetSeconds': capture['launchOffsetSeconds'], 'desktop': capture['desktop'],
+              'visualReview': 'required', 'contentBackgroundPass': None, 'titlebarPass': None,
+              'scope': 'cold process launch, filesystem caches not reset'}
+    capture['video'].with_suffix('.json').write_text(json.dumps(result, indent=2))
+    if len(times) < 60 or not gaps or max(gaps) > 0.04:
+        raise RuntimeError('Capture cadence insufficient to assess a one-frame startup flash')
+    return result
 
 
 def run_phase(app, phase, artifacts, fixtures):
@@ -64,7 +151,7 @@ def run_phase(app, phase, artifacts, fixtures):
             if process.returncode != 0:
                 raise RuntimeError(f'{phase}: app exited {process.returncode}')
             result = records(report)
-            required = {'contracts': {'persistence', 'regex', 'tokenizer', 'reload', 'closed', 'reopened', 'finder', 'quit-cancelled', 'quit-saved'}, 'restart': {'restart'}, 'app': {'app'}, 'app-restart': {'app-restart'}, 'streaming': {'streaming'}}[phase]
+            required = {phase: {phase}}[phase] if phase.startswith('appearance-') else {'termination-probe': {'termination-probe-cancel', 'termination-probe-reload', 'termination-probe-approved'}, 'contracts': {'persistence', 'regex', 'tokenizer', 'reload', 'closed', 'reopened', 'finder', 'quit-cancelled', 'quit-saved'}, 'restart': {'restart'}, 'app': {'app'}, 'app-restart': {'app-restart'}, 'streaming': {'streaming'}}[phase]
             stages = {entry['stage'] for entry in result}
             if not required <= stages or 'failure' in stages:
                 raise RuntimeError(f'{phase}: incomplete results {stages}')
@@ -84,6 +171,9 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--app', type=Path, required=True)
     parser.add_argument('--artifacts', type=Path, required=True)
+    parser.add_argument('--appearance', action='store_true')
+    parser.add_argument('--capture-input')
+    parser.add_argument('--system-theme', choices=['light', 'dark'])
     args = parser.parse_args()
     app = args.app.resolve(strict=True)
     identifier = subprocess.check_output(['/usr/libexec/PlistBuddy', '-c', 'Print :CFBundleIdentifier', str(app / 'Contents/Info.plist')], text=True).strip()
@@ -94,13 +184,35 @@ def main():
         raise RuntimeError('Harness requires a fresh CI user profile; refusing existing data')
     artifacts = args.artifacts.resolve()
     artifacts.mkdir(parents=True, exist_ok=True)
+    if args.appearance:
+        if any(artifacts.iterdir()):
+            raise RuntimeError('Appearance capture requires an empty artifact directory')
+        if not args.system_theme:
+            raise RuntimeError('Record the selected system theme explicitly')
+        dark = subprocess.check_output(['osascript', '-e', 'tell application "System Events" to tell appearance preferences to get dark mode'], text=True).strip() == 'true'
+        if dark != (args.system_theme == 'dark'):
+            raise RuntimeError('Observed macOS appearance does not match requested system theme')
+        observations = []
+        for theme in ['light', 'dark']:
+            run_phase(app, f'appearance-seed-{theme}', artifacts, [])
+            label = f'appearance-app-{theme}'
+            capture = start_appearance_capture(artifacts, label, 'macos', args.capture_input)
+            try:
+                observation = run_phase(app, label, artifacts, [])
+            finally:
+                capture_result = finish_appearance_capture(capture)
+            observations.append({'appTheme': theme, 'systemTheme': args.system_theme,
+                                 'runtime': observation, 'capture': capture_result})
+        (artifacts / 'appearance-result.json').write_text(json.dumps({'visualReview': 'required', 'observations': observations}, indent=2))
+        print('Appearance captures complete; content background and title bar require separate visual review', flush=True)
+        return
     fixture_root = Path(tempfile.mkdtemp(prefix='risunest-macos-', dir='/private/tmp'))
     fixtures = [fixture_root / 'synthetic 한글 # %.risup', fixture_root / 'synthetic-two.risum']
     for fixture in fixtures:
         fixture.write_text('synthetic file association fixture')
     configured_phases = os.environ.get('RISUNEST_MACOS_PHASES')
     phases = configured_phases.split(',') if configured_phases else ['contracts', 'restart', 'app', 'app-restart', 'streaming']
-    allowed_phases = {'contracts', 'restart', 'app', 'app-restart', 'streaming'}
+    allowed_phases = {'termination-probe', 'contracts', 'restart', 'app', 'app-restart', 'streaming'}
     if not phases or any(phase not in allowed_phases for phase in phases):
         raise RuntimeError('invalid RISUNEST_MACOS_PHASES')
     results = {phase: run_phase(app, phase, artifacts, fixtures) for phase in phases}

@@ -22,6 +22,24 @@ function harness(options: { fail?: string; badAck?: boolean } = {}) {
 }
 
 describe('Android bounded commit transport', () => {
+    it('waits only for pre-transfer finishing-busy responses', async () => {
+        vi.useFakeTimers()
+        try {
+            const h = harness()
+            let opens = 0
+            const invoke = vi.fn(async (command: string, args: any) => {
+                if (command === 'pds_commit_android_open' && opens++ < 2) throw { code: 'commit-busy' }
+                return h.invoke(command, args)
+            })
+            const result = sendAndroidCommit(new TextEncoder().encode('synthetic'), invoke as any, null)
+            await vi.runAllTimersAsync()
+            await expect(result).resolves.toEqual({ revision: 3 })
+            expect(opens).toBe(3)
+            expect(invoke.mock.calls.filter(([command]) => command === 'pds_commit_android_finish')).toHaveLength(1)
+        } finally {
+            vi.useRealTimers()
+        }
+    })
     function binaryHarness(
         options: {
             badAck?: boolean

@@ -1,10 +1,11 @@
+import { boundedGenerationFallbackReason } from './boundedGenerationAdmission'
 import { get, writable } from "svelte/store";
 import { type character, type groupChat, type MessageGenerationInfo, type Chat, type MessagePresetInfo, changeToPreset, setCurrentChat, type Message } from "../storage/database.svelte";
 import { DBState } from '../stores.svelte';
 import { CharEmotion, selectedCharID } from "../stores.svelte";
 import { ChatTokenizer, tokenize, tokenizeNum } from "../tokenizer";
 import { language } from "../../lang";
-import { alertError, alertToast } from "../alert";
+import { alertError, alertToast, alertNormal } from "../alert";
 import { parseChatML } from "../parser/chatML";
 import { loadLoreBookV3Prompt } from "./lorebook.svelte";
 import { findCharacterbyId, getAuthorNoteDefaultText, getPersonaPrompt, getUserName, isLastCharPunctuation, trimUntilPunctuation, parseToggleSyntax, prebuiltAssetCommand } from "../util";
@@ -85,8 +86,8 @@ import {
     type WindowedConversationMutationController,
 } from '../storage/activeWorkingSet.svelte'
 import { beginAndroidGenerationKeepAlive, endAndroidGenerationKeepAlive } from '../androidGenerationKeepAlive'
-import { beginIOSGeneration, notifyIOSGenerationComplete } from "../iosNative";
-import { isTauriIOS } from "../platform";
+import { beginIOSGeneration, notifyIOSGenerationComplete, isBackgroundExpiryReason } from "../iosNative";
+import { isTauriIOS, isTauriAndroid } from "../platform";
 import { classifyChatParserHistory } from '../chatParserHistory'
 
 export { doingChat } from './generationState'
@@ -184,7 +185,9 @@ export async function notifyGenerationCompletion(result: string): Promise<void> 
         try {
             if (isTauriIOS) {
               await notifyIOSGenerationComplete();
-            } else if ((await Notification.requestPermission()) === "granted") {
+            } else if (isTauriAndroid) {
+              await window.RisuCompletionNotifications?.notify(result);
+            } else if (typeof Notification !== "undefined" && Notification.permission === "granted") {
               const notification = new Notification("RisuNest", {
                 body: result,
               });
@@ -200,6 +203,68 @@ interface GenerationConversationResources {
     preparation: SummaryAwareGenerationPreparation | null
     windowedController: WindowedConversationMutationController | null
     unbindWindowedController: (() => void) | null
+}
+
+export function getSelectedBoundedGenerationFallbackReason(): string | null {
+    const owner = DBState.db.characters[get(selectedCharID)]
+    const conversation = owner?.chats[owner.chatPage]
+    const hypaSettings = owner?.type !== 'group' && owner?.supaMemory
+        && DBState.db.hypaV3 && !DBState.db.hypav2 && !DBState.db.hanuraiEnable
+        ? getCurrentHypaV3Preset().settings : null
+    const authority = hypaSettings ? captureSelectedConversationAuthority() : null
+    const hasObservableHistoryTokenizer = () => DBState.db.googleClaudeTokenizing
+        || (DBState.db.aiModel === 'custom'
+            && pluginV2.providerOptions?.get(DBState.db.currentPluginProvider)?.tokenizer === 'custom')
+    const scripts = owner?.type !== 'group' && hypaSettings
+        ? [
+            ...(DBState.db.presetRegex ?? []),
+            ...(owner.customscript ?? []),
+            ...getModuleRegexScripts(),
+        ]
+        : []
+    const parserHistory = owner?.type !== 'group' && conversation && hypaSettings
+        ? classifyChatParserHistory({
+            source: [
+                DBState.db.mainPrompt,
+                DBState.db.additionalPrompt,
+                DBState.db.globalNote,
+                DBState.db.jailbreak,
+                DBState.db.promptTemplate,
+                owner.systemPrompt,
+                owner.desc,
+                owner.personality,
+                owner.scenario,
+                owner.replaceGlobalNote,
+                owner.exampleMessage,
+                owner.postHistoryInstructions,
+                DBState.db.groupTemplate,
+                DBState.db.promptSettings,
+                owner.firstMessage,
+                owner.alternateGreetings,
+                conversation,
+                getPersonaPrompt(),
+            ],
+            indirections: DBState.db.globalChatVariables,
+        })
+        : null
+    return boundedGenerationFallbackReason({
+        selected: !!owner && !!conversation,
+        group: owner?.type === 'group',
+        hypaEnabled: !!hypaSettings,
+        windowed: !!authority,
+        observableTokenizer: !!hasObservableHistoryTokenizer(),
+        experimental: !!hypaSettings?.useExperimentalImpl,
+        editprocess: (pluginV2.editprocess?.size ?? 0) > 0,
+        editoutput: (pluginV2.editoutput?.size ?? 0) > 0,
+        chatOutput: pluginV2.chatOutput.size > 0,
+        triggers: (owner?.type !== 'group' && (owner?.triggerscript?.length ?? 0) > 0) || getModuleTriggers().length > 0,
+        historyRegex: scripts.some(script => script.type === 'editprocess' || script.type === 'editoutput'),
+        lorebooks: (owner?.type !== 'group' && (owner?.globalLore?.length ?? 0) > 0) || (conversation?.localLore?.length ?? 0) > 0 || getModuleLorebooks().length > 0,
+        additionalText: owner?.type !== 'group' && !!owner?.additionalText,
+        inlayView: owner?.type !== 'group' && !!owner?.inlayViewScreen,
+        dynamicHistory: parserHistory?.requiresFullHistory !== false,
+        explicitHistory: (parserHistory?.absoluteMessageIndices.length ?? 0) > 0,
+    })
 }
 
 export async function sendChat(chatProcessIndex = -1,arg:{
@@ -294,6 +359,10 @@ export async function sendChat(chatProcessIndex = -1,arg:{
         generationReturned = true
         return lifecycle.isTargetCurrent() && result
     } catch (error) {
+        if (iosGeneration?.signal?.aborted || arg.signal?.aborted) {
+            generationReturned = true
+            return false
+        }
         if (!arg.preview && (error instanceof PersistentMutationFencedError || !lifecycle.isTargetCurrent())) {
             generationReturned = true
             return false
@@ -324,6 +393,9 @@ export async function sendChat(chatProcessIndex = -1,arg:{
           .catch((error) =>
             console.error("iOS generation cleanup failed", error),
           );
+        if (isBackgroundExpiryReason(iosGeneration?.signal?.reason) && !arg.signal?.aborted) {
+            alertNormal(language.generationInterruptedInBackground)
+        }
         ownedReservation?.release({
             preserveBusy: enteredGeneration && !generationReturned,
         })
@@ -448,6 +520,7 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
             }
             const session = getActiveConversationSession()
             const applied = applyGenerationErrorResponse({
+                windowedController: boundedChat ? conversationResources.windowedController : null,
                 session,
                 getCurrentSession: getActiveConversationSession,
                 characterId: charRoom.chaId,
@@ -517,75 +590,7 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
             ? getCurrentHypaV3Preset().settings
             : null
         const authority = hypaSettings ? captureSelectedConversationAuthority() : null
-        const scripts = owner?.type !== 'group' && hypaSettings
-            ? [
-                ...(DBState.db.presetRegex ?? []),
-                ...(owner.customscript ?? []),
-                ...getModuleRegexScripts(),
-            ]
-            : []
-        const parserHistory = owner?.type !== 'group' && conversation && hypaSettings
-            ? classifyChatParserHistory({
-                source: [
-                    DBState.db.mainPrompt,
-                    DBState.db.additionalPrompt,
-                    DBState.db.globalNote,
-                    DBState.db.jailbreak,
-                    DBState.db.promptTemplate,
-                    owner.systemPrompt,
-                    owner.desc,
-                    owner.personality,
-                    owner.scenario,
-                    owner.replaceGlobalNote,
-                    owner.exampleMessage,
-                    owner.postHistoryInstructions,
-                    DBState.db.groupTemplate,
-                    DBState.db.promptSettings,
-                    owner.firstMessage,
-                    owner.alternateGreetings,
-                    conversation,
-                    getPersonaPrompt(),
-                ],
-                indirections: DBState.db.globalChatVariables,
-            })
-            : null
-        const boundedFallbackReason = !owner || !conversation
-            ? 'selected-conversation-unavailable'
-            : owner.type === 'group'
-                ? 'group-conversation'
-                : !hypaSettings
-                    ? 'standard-hypa-v3-disabled'
-                    : !authority
-                        ? 'selected-conversation-not-windowed'
-                        : hasObservableHistoryTokenizer()
-                            ? 'custom-or-remote-tokenizer'
-                            : hypaSettings.useExperimentalImpl
-                            ? 'experimental-hypa-v3'
-                            : (pluginV2.editprocess?.size ?? 0) > 0
-                                ? 'plugin-editprocess'
-                                : (pluginV2.editoutput?.size ?? 0) > 0
-                                    ? 'plugin-editoutput'
-                                    : pluginV2.chatOutput.size > 0
-                                    ? 'plugin-chat-output'
-                                    : owner.triggerscript.length > 0 || getModuleTriggers().length > 0
-                                        ? 'generation-trigger'
-                                        : scripts.some((script) =>
-                                            script.type === 'editprocess'
-                                            || script.type === 'editoutput')
-                                            ? 'history-regex'
-                                            : (owner.globalLore?.length ?? 0) > 0
-                                                || (conversation.localLore?.length ?? 0) > 0
-                                                || getModuleLorebooks().length > 0
-                                                ? 'old-history-lorebook-consumer'
-                                                : owner.additionalText
-                                                    ? 'additional-text-consumer'
-                                                    : owner.inlayViewScreen
-                                                        ? 'inlay-view-consumer'
-                                                        : parserHistory?.requiresFullHistory !== false
-                                                            ? 'dynamic-history-indirection'
-                                                            : parserHistory.absoluteMessageIndices.length > 0
-                                                                ? 'explicit-history-reference'
-                                                                : null
+        const boundedFallbackReason = getSelectedBoundedGenerationFallbackReason()
         const boundedAdmission = boundedFallbackReason === null
         if (boundedAdmission) {
             const navigationGeneration = getPersistentNavigationGeneration()
@@ -1593,6 +1598,7 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
             console.log("Current chat's hypaV2 Data: ", currentChat.hypaV2Data)
             const sp = await hypaMemoryV2(chats, currentTokens, maxContextTokens, currentChat, nowChatroom, tokenizer)
             if(sp.error){
+                if (abortSignal.aborted) return false
                 console.log(sp)
                 throwError(sp.error)
                 return false
@@ -1619,6 +1625,7 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
                     effectiveMessageMemos: summaryAwareHistoryPlan.effectiveMessageMemos,
                     historyStartIndex: preparedHistoryStartIndex,
                 } : undefined,
+                abortSignal,
             )
             if(sp.error){
                 // Save new summary
@@ -1632,6 +1639,7 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
                         DBState.db.characters[selectedChar].chats[selectedChat].hypaV3Data = currentChat.hypaV3Data
                     }
                 }
+                if (abortSignal.aborted) return false
                 console.log(sp)
                 throwError(sp.error)
                 return false
@@ -1647,6 +1655,7 @@ conversationResources: GenerationConversationResources):Promise<boolean> {
                 DBState.db.characters[selectedChar].chats[selectedChat].hypaV3Data = currentChat.hypaV3Data
                 currentChat = DBState.db.characters[selectedChar].chats[selectedChat];
             }
+            if (abortSignal.aborted) return false
             console.log("[Expected to be updated] chat's HypaV3Data: ", currentChat.hypaV3Data)
         }
         else{

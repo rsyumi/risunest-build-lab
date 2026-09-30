@@ -184,3 +184,50 @@ fn revocation_and_restored_epoch_do_not_silently_discard_snapshot_custody() {
     assert!(store.object_size(&digest).unwrap().is_some());
     assert!(store.retained_objects(&device, &restored, None).is_err());
 }
+
+#[test]
+fn a_revoked_predecessor_stays_listed_until_its_custody_is_released() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::init(root.path()).unwrap();
+    let predecessor = Device {
+        id: store.add_device().unwrap().device_id,
+    };
+    let successor = Device {
+        id: store.add_device().unwrap().device_id,
+    };
+    let identity = object(b"synthetic resident payload");
+    store
+        .put_object(&predecessor, &identity.hash, b"synthetic resident payload")
+        .unwrap();
+    let epoch = store.head().unwrap().epoch;
+    let retained = store
+        .retain_objects(&predecessor, &epoch, &[identity])
+        .unwrap()
+        .remove(0);
+    store.revoke_device(&predecessor.id).unwrap();
+    store.maintain().unwrap();
+    let listed = |store: &Store| {
+        store
+            .managed_devices()
+            .unwrap()
+            .iter()
+            .any(|d| d.id == predecessor.id)
+    };
+    assert!(listed(&store));
+    assert!(store.object_size(&retained.hash).unwrap().is_some());
+    let release = RetentionRelease {
+        device_id: predecessor.id.clone(),
+        hash: retained.hash.clone(),
+        retention_id: retained.retention_id,
+    };
+    store
+        .release_retained_objects(&successor, &epoch, std::slice::from_ref(&release))
+        .unwrap();
+    store.maintain().unwrap();
+    assert!(!listed(&store));
+    assert!(store.object_size(&retained.hash).unwrap().is_none());
+    // A release retried after the predecessor was removed is already satisfied.
+    store
+        .release_retained_objects(&successor, &epoch, &[release])
+        .unwrap();
+}

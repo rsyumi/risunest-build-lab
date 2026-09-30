@@ -8,8 +8,11 @@ const state = vi.hoisted(() => ({
     navigation: 0,
     bindings: [] as { characterId: string; conversationId: string; patch: unknown }[],
     bindingGate: null as Promise<void> | null,
+    toast: vi.fn(),
 }))
 vi.mock('./stores.svelte', () => ({ DBState: state, selectedCharID: writable(0) }))
+vi.mock('./alert', () => ({ alertToast: state.toast }))
+vi.mock('src/lang', () => ({ language: { navigationBlockedWhileGenerating: 'wait' } }))
 vi.mock('./storage/persistentDataRuntime.svelte', () => ({
     getActiveConversationSession: () => null,
     getPersistentNavigationGeneration: () => state.navigation,
@@ -28,8 +31,13 @@ vi.mock('./storage/persistentDataRuntime.svelte', () => ({
         },
     }),
 }))
-import { bindPersona, captureChatBindingTarget, updateChatBinding } from './chatBindings.svelte'
+import { bindPersona, captureChatBindingTarget, chatBindingBlockedByGeneration, conversationMutationBlockedByGeneration, updateChatBinding } from './chatBindings.svelte'
+import { doingChat } from './process/generationState'
+import { activeRerollConversations } from './durableReroll'
 beforeEach(() => {
+    doingChat.set(false)
+    activeRerollConversations.set([])
+    state.toast.mockClear()
     state.navigation = 0
     state.bindings = []
     state.bindingGate = null
@@ -55,6 +63,17 @@ beforeEach(() => {
             },
         ],
     }
+})
+it('blocks row mutations for generation and the matching reroll until ownership ends', () => {
+    activeRerollConversations.set(['chat'])
+    expect(conversationMutationBlockedByGeneration('chat')).toBe(true)
+    expect(conversationMutationBlockedByGeneration('other')).toBe(false)
+    activeRerollConversations.set([])
+    doingChat.set(true)
+    expect(conversationMutationBlockedByGeneration('chat')).toBe(true)
+    doingChat.set(false)
+    expect(conversationMutationBlockedByGeneration('chat')).toBe(false)
+    expect(state.toast).toHaveBeenCalledTimes(2)
 })
 it('commits persona and toggle metadata through the coordinator without reading message bodies or changing the global persona', async () => {
     const target = captureChatBindingTarget()!
@@ -139,4 +158,17 @@ it('retains an imported persona ID and assigns a missing local ID only once', as
     await bindPersona(chat, 1)
     expect(chat.bindedPersona).toBe(id)
     expect(state.db.personas[0].id).toBe('global')
+})
+
+it('blocks binding edits with a notice only while a response is generating', () => {
+    state.toast.mockClear()
+    expect(chatBindingBlockedByGeneration()).toBe(false)
+    expect(state.toast).not.toHaveBeenCalled()
+    doingChat.set(true)
+    try {
+        expect(chatBindingBlockedByGeneration()).toBe(true)
+    } finally {
+        doingChat.set(false)
+    }
+    expect(state.toast).toHaveBeenCalledWith('wait')
 })

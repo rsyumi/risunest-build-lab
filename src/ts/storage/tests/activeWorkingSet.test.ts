@@ -93,6 +93,7 @@ function makeLease(input: {
             }),
         readConversationMetadata: vi.fn(async () => null),
         readConversationWindow: vi.fn(),
+        readPluginStorageValues: vi.fn(async () => ({ revision, items: [], nextCursor: null })),
         queryPluginStorage: vi.fn(async () => ({ revision, items: [] })),
         readPluginStorage: vi.fn(async () => null),
         readAssetAlias: vi.fn(async () => null),
@@ -117,6 +118,7 @@ function makeHarness(
         mutationGeneration: 0,
         initialize: vi.fn(),
         flushPendingData: vi.fn(() => Promise.resolve()),
+        retireWindowedSelectedConversation: vi.fn(),
         replacePersistentDatabase: vi.fn(async () => ({
             kind: 'committed', revision: 1, projection: 'applied',
         } as const)),
@@ -217,6 +219,7 @@ function makeWindowedHarness(input: {
     let selectedCharacterId = input.selectedCharacterId ?? null
     let storeRevision = 1
     let windowedAllowed = true
+    let operationActive = false
     const readConversation = vi.fn(async () => {
         throw new Error(
             'windowed activation performed a full conversation read',
@@ -313,6 +316,7 @@ function makeWindowedHarness(input: {
             },
         ),
     } as unknown as PersistentDataStore
+    store.acquireRevision = vi.fn(async () => ({ ...store, revision: storeRevision, release: vi.fn() }) as unknown as PersistentRevisionLease)
     let workingSet!: ActiveWorkingSet
     const coordinator = {
         revision: 1,
@@ -331,6 +335,7 @@ function makeWindowedHarness(input: {
         advanceWindowedSelectedConversationRevision: vi.fn(() => true),
         markPersistentDataDirty: vi.fn(),
         recordActiveConversationMutation: vi.fn(),
+        recordWindowedChatListChange: vi.fn(() => true),
     }
     const publishCharacter = vi.fn((next: character | groupChat) => {
         const index = database.characters.findIndex(
@@ -399,7 +404,7 @@ function makeWindowedHarness(input: {
         captureActivationRollback,
         canActivateWorkingSet: () => true,
         canUseWindowedSelectedConversation: () => windowedAllowed,
-        isConversationOperationActive: () => false,
+        isConversationOperationActive: () => operationActive,
         shouldHydrateFullCharacter: () => false,
         canReleaseConversation: () => true,
         conversationViewportRowBudget: 32,
@@ -418,10 +423,109 @@ function makeWindowedHarness(input: {
         setWindowedAllowed(allowed: boolean) {
             windowedAllowed = allowed
         },
+        setOperationActive(active: boolean) {
+            operationActive = active
+        },
     }
 }
 
 describe('ActiveWorkingSet', () => {
+    async function activateWindowedChatList() {
+        const selected = makeChat('chat-a')
+        selected.message = [
+            { role: 'user', data: 'first', chatId: 'a' },
+            { role: 'char', data: 'second', chatId: 'b' },
+        ] as Message[]
+        const other = makeChat('chat-b')
+        other.message = [{ role: 'user', data: 'other', chatId: 'c' }] as Message[]
+        const harness = makeWindowedHarness({ characters: [makeCharacter('a', [selected, other])] })
+        await expect(harness.workingSet.activateCharacter('a')).resolves.toBe(true)
+        expect(harness.workingSet.selectedConversationMode).toBe('windowed')
+        const resident = harness.database.characters[0]
+        return {
+            harness,
+            resident,
+            shell: resident.chats[0],
+            target: harness.workingSet.captureSelectedConversationTarget()!,
+        }
+    }
+
+    it('applies a windowed chat-list edit around the selected shell object', async () => {
+        const { harness, resident, shell, target } = await activateWindowedChatList()
+        const added = makeChat('added')
+
+        expect(harness.workingSet.editWindowedChatList(target, (character) => {
+            character.chats.unshift(added)
+            character.chats.reverse()
+            return 'added'
+        })).toEqual({ kind: 'applied', nextId: 'added' })
+
+        expect(resident.chats.map((chat) => chat.id)).toEqual(['chat-b', 'chat-a', 'added'])
+        expect(resident.chats[1]).toBe(shell)
+        expect(resident.chatPage).toBe(1)
+        const [authority, before, after] =
+            harness.coordinator.recordWindowedChatListChange.mock.calls[0] as unknown as [
+                { conversationId: string }, character, character,
+            ]
+        expect(authority.conversationId).toBe('chat-a')
+        expect(before).toBe(resident)
+        expect(after.chats.map((chat) => chat.id)).toEqual(['chat-b', 'chat-a', 'added'])
+        expect(after.chatPage).toBe(1)
+        expect(harness.readConversation).not.toHaveBeenCalled()
+    })
+
+    it('leaves the working set untouched when a chat-list edit cannot be recorded', async () => {
+        const { harness, resident, target } = await activateWindowedChatList()
+        harness.coordinator.recordWindowedChatListChange.mockReturnValueOnce(false)
+        const chats = resident.chats
+
+        expect(harness.workingSet.editWindowedChatList(target, (character) => {
+            character.chats.unshift(makeChat('added'))
+            character.chats[1].folderId = 'folder'
+            return null
+        })).toEqual({ kind: 'unsupported' })
+
+        expect(resident.chats).toBe(chats)
+        expect(resident.chats.map((chat) => chat.id)).toEqual(['chat-a', 'chat-b'])
+        expect(resident.chats[0].folderId).toBeUndefined()
+        expect(resident.chatPage ?? 0).toBe(0)
+    })
+
+    it('leaves chat-list edits to the complete path while a conversation operation runs', async () => {
+        const { harness, target } = await activateWindowedChatList()
+        harness.setOperationActive(true)
+        const edit = vi.fn(() => null)
+
+        expect(harness.workingSet.editWindowedChatList(target, edit)).toEqual({ kind: 'unsupported' })
+
+        expect(edit).not.toHaveBeenCalled()
+        expect(harness.coordinator.recordWindowedChatListChange).not.toHaveBeenCalled()
+    })
+
+    it('edits a middle row with bounded reads and unchanged viewport ownership', async () => {
+        const full = makeChat('chat-a')
+        full.message = Array.from({ length: 5000 }, (_, index) => ({ role: 'user', data: 'x'.repeat(4096), chatId: String(index) })) as Message[]
+        const harness = makeWindowedHarness({ characters: [makeCharacter('a', [full])] })
+        await harness.workingSet.activateCharacter('a')
+        const source = harness.workingSet.activeConversationViewportSource
+        const target = harness.workingSet.captureSelectedConversationTarget()!
+        const controller = await harness.workingSet.captureWindowedMessageMutation(target, 123, full.message[123])
+        expect(controller).not.toBeNull()
+        expect(controller!.applyRange(0, 1, [{ ...full.message[123], data: 'edited' }], 'edit')).toBe(true)
+        expect(harness.workingSet.activeConversationViewportSource).toBe(source)
+        expect(harness.readConversation).not.toHaveBeenCalled()
+        expect(harness.coordinator.recordActiveConversationMutation).toHaveBeenCalledWith(expect.objectContaining({ mutations: [{ start: 123, deleteCount: 1, messages: [{ ...full.message[123], data: 'edited' }], sessionVersion: 1 }] }))
+        expect(controller!.applyRange(0, 0, [full.message[123]], 'append')).toBe(false)
+        controller!.release()
+    })
+
+    it('refuses a middle-row editor whose original evidence changed', async () => {
+        const { harness, target } = await activateWindowedChatList()
+        await expect(harness.workingSet.captureWindowedMessageMutation(target, 0, { role: 'user', data: 'stale', chatId: 'a' })).resolves.toBeNull()
+        expect(harness.coordinator.recordActiveConversationMutation).not.toHaveBeenCalled()
+        expect(harness.readConversation).not.toHaveBeenCalled()
+    })
+
     it('fences a tail controller after another controller makes a same-length edit', async () => {
         const full = makeChat('chat-a')
         full.message = [
@@ -989,6 +1093,9 @@ describe('ActiveWorkingSet', () => {
             'deactivate-working-set',
         )
         expect(harness.coordinator.flushPendingData.mock.invocationCallOrder[0]).toBeLessThan(
+            harness.coordinator.retireWindowedSelectedConversation.mock.invocationCallOrder[0],
+        )
+        expect(harness.coordinator.retireWindowedSelectedConversation.mock.invocationCallOrder[0]).toBeLessThan(
             harness.releaseInactiveCharacter.mock.invocationCallOrder[0],
         )
         expect([...harness.workingSet.activeCharacterIds]).toEqual([])
@@ -1003,6 +1110,7 @@ describe('ActiveWorkingSet', () => {
         await expect(harness.workingSet.deactivate()).rejects.toThrow('flush failed')
 
         expect(harness.releaseInactiveCharacter).not.toHaveBeenCalled()
+        expect(harness.coordinator.retireWindowedSelectedConversation).not.toHaveBeenCalled()
         expect([...harness.workingSet.activeCharacterIds]).toEqual(['char-a'])
     })
 

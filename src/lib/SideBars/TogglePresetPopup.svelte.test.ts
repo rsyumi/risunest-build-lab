@@ -15,9 +15,10 @@ const mocks = vi.hoisted(() => ({
     close: vi.fn(),
 }))
 vi.mock('src/lang', () => ({ language: languageEnglish }))
-vi.mock('src/ts/stores.svelte', () => {
+vi.mock('src/ts/stores.svelte', async () => {
+    const { writable } = await import('svelte/store')
     const DBState = $state({ db: {} })
-    return { DBState }
+    return { DBState, alertStore: writable({ type: 'none', msg: '' }) }
 })
 vi.mock('src/ts/alert', () => ({
     alertConfirm: mocks.confirm,
@@ -60,6 +61,18 @@ afterEach(async () => {
     await unmount(instance)
     document.body.replaceChildren()
     vi.clearAllMocks()
+})
+
+it('deletes the confirmed preset after its position changes', async () => {
+    let confirm!: (value: boolean) => void
+    mocks.confirm.mockReturnValueOnce(new Promise(resolve => { confirm = resolve }))
+    await openActions(0)
+    byText(languageEnglish.deleteTogglePreset).click()
+    presets().reverse()
+    await tick()
+    confirm(true)
+    await vi.waitFor(() => expect(presets()).toHaveLength(1))
+    expect(presets()[0].name).toBe('Two')
 })
 
 it('lists presets of the active prompt preset, shows all on request and applies after confirmation', async () => {
@@ -168,10 +181,10 @@ it('saves, overwrites and clears the new chat default and toggles binding off', 
     await tick()
     DBState.db.globalChatVariables.toggle_a = '0'
     mocks.select.mockResolvedValueOnce('0')
-    byText(languageEnglish.defaultTogglesSaved).click()
+    byText(languageEnglish.defaultTogglesManage).click()
     await vi.waitFor(() => expect(DBState.db.defaultToggleValues?.toggle_a).toBe('0'))
     mocks.select.mockResolvedValueOnce('1')
-    byText(languageEnglish.defaultTogglesSaved).click()
+    byText(languageEnglish.defaultTogglesManage).click()
     await vi.waitFor(() => expect(DBState.db.defaultToggleValues).toBeUndefined())
     expect(mocks.toast).toHaveBeenLastCalledWith(languageEnglish.defaultTogglesCleared)
     await tick()
@@ -195,4 +208,21 @@ it('ignores backdrop and Escape while a nested alert is open', async () => {
     await tick()
     backdrop.click()
     expect(mocks.close).toHaveBeenCalledTimes(1)
+})
+
+it.each(['success', 'cancel', 'failure'] as const)('reports a delayed preset export only after %s', async outcome => {
+    let finish!: (value: boolean) => void
+    let fail!: (error: Error) => void
+    mocks.download.mockReturnValueOnce(new Promise((resolve, reject) => { finish = resolve; fail = reject }))
+    await openActions(0)
+    byText(languageEnglish.exportTogglePreset).click()
+    await tick()
+    expect(mocks.toast).not.toHaveBeenCalled()
+    if (outcome === 'failure') fail(new Error('synthetic write'))
+    else finish(outcome === 'success')
+    await tick(); await Promise.resolve()
+    if (outcome === 'success') expect(mocks.toast).toHaveBeenCalledWith(languageEnglish.togglePresetExported('One'))
+    else expect(mocks.toast).not.toHaveBeenCalled()
+    if (outcome === 'failure') expect(mocks.error).toHaveBeenCalledWith(languageEnglish.togglePresetExportError)
+    else expect(mocks.error).not.toHaveBeenCalled()
 })

@@ -84,6 +84,11 @@ fn provider_error(error: crate::external_storage::contract::ProviderError) -> Na
         | ErrorKind::FolderInaccessible
         | ErrorKind::FolderNotRepository => "source-unavailable",
         ErrorKind::FolderUnsupportedLocation => "capability-unavailable",
+        ErrorKind::LocalStorageFull => "storage-full",
+        ErrorKind::LocalPermissionDenied => "source-unavailable",
+        ErrorKind::DeviceVaultUnavailable | ErrorKind::RepositoryKeyUnavailable => "source-unavailable",
+        ErrorKind::EndpointRejected | ErrorKind::ClockSkew | ErrorKind::RepositoryBusy => "source-unavailable",
+        ErrorKind::LocationOccupied => "invalid-source",
     };
     NativeJobError::new(code, "Conflict source operation failed")
 }
@@ -134,6 +139,14 @@ fn prepare_external_source(
     })
     .map_err(provider_error)?;
     Ok(prepared.into_parts())
+}
+
+struct JobProbe<'a>(&'a JobControl);
+
+impl crate::local_backup::CancellationProbe for JobProbe<'_> {
+    fn is_cancelled(&self) -> bool {
+        self.0.is_cancel_requested()
+    }
 }
 
 fn finish_reference_restore(
@@ -230,25 +243,32 @@ pub(crate) fn restore_reference_source(
                 staging_root: &snapshot.staging_root,
                 scope_id: &scope,
                 fingerprint: &fingerprint,
+                probe: &JobProbe(job),
             };
             let records = snapshot.records.into_iter().map(|record| {
                 Ok(crate::persistent_store::external_apply::ExternalSnapshotRecord {
                     key: record.key,
                     content_hash: record.content_hash,
                     byte_length: record.byte_length,
-                    path: record.path,
+                    source: record.source,
                 })
             });
             let objects = snapshot.objects.into_iter().map(|object| {
                 Ok(crate::persistent_store::external_apply::ExternalSnapshotObject {
                     content_hash: object.content_hash,
                     byte_length: object.byte_length,
-                    path: object.path,
+                    source: object.source,
                 })
             });
             let prepared = store
                 .prepare_external_snapshot_application(&application, records, objects)
-                .map_err(super::native_store_error)?;
+                .map_err(|error| {
+                    if job.is_cancel_requested() {
+                        NativeJobError::new("cancelled", "Native file job was cancelled")
+                    } else {
+                        super::native_store_error(error)
+                    }
+                })?;
             let outcome = finish_reference_restore(
                 &mut store,
                 prepared,
@@ -353,6 +373,7 @@ pub(crate) fn export_reference_source(
                     &destination,
                     &staging,
                     &cancellation,
+                    &app.package_info().version.to_string(),
                     || {
                         job.commit_export_publication().map_err(|message| {
                             if job.is_cancel_requested() {
@@ -421,7 +442,8 @@ pub(crate) fn export_reference_source(
                 handoffs,
                 store,
                 job,
-                None,
+                Some((app, &super::portable::PortableSelection::default())),
+                &app.package_info().version.to_string(),
             )?;
             drop(scratch);
             drop(guard);

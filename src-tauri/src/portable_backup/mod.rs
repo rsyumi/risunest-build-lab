@@ -1,6 +1,7 @@
 //! Portable ZIP64/SQLite archive primitives. File jobs own capture, publication and activation.
 mod capture;
 mod catalog;
+#[cfg(test)]
 mod internal;
 mod inventory;
 mod reader;
@@ -10,6 +11,7 @@ mod writer;
 
 pub(crate) use capture::{capture_library, CapturedLibrary};
 pub(crate) use catalog::Catalog;
+#[cfg(test)]
 pub(crate) use internal::create_verified_library_backup;
 pub(crate) use reader::VerifiedArchive;
 pub(crate) use validation::{
@@ -20,7 +22,7 @@ pub(crate) use restore_inventory::{PreservationReport, RestoreInventory};
 mod selection;
 pub(crate) use selection::{
     close as close_selection, inventory as archive_inventory, ArchiveInventory, ArchiveSelection,
-    ClosedSelection,
+    ClosedSelection, PluginKey,
 };
 
 use crate::local_backup::CancellationProbe;
@@ -63,7 +65,15 @@ impl std::fmt::Display for Error {
         }
     }
 }
-impl std::error::Error for Error {}
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Io(error) => Some(error), Self::Sql(error) => Some(error),
+            Self::Zip(error) => Some(error), Self::Json(error) => Some(error),
+            Self::Store(error) => Some(error), _ => None,
+        }
+    }
+}
 impl From<io::Error> for Error {
     fn from(e: io::Error) -> Self {
         Self::Io(e)
@@ -174,8 +184,10 @@ pub(crate) fn copy_hash(
         output.write_all(&buffer[..size])?;
         hash.update(&buffer[..size]);
         remaining -= size as u64;
+        probe.backup_bytes_processed(size as u64);
     }
     check(probe)?;
+    probe.backup_item_processed();
     Ok(hex::encode(hash.finalize()))
 }
 

@@ -23,7 +23,7 @@ export function createMutationGatedPersistentDataStore(
     store: PersistentDataStore,
     gate: StorageMutationGate,
 ): PersistentDataStore {
-    return {
+    const gated = {
         open: () => store.open(),
         readRoot: () => store.readRoot(),
         queryPresets: () => store.queryPresets(),
@@ -45,12 +45,13 @@ export function createMutationGatedPersistentDataStore(
         queryPluginStorage: () => store.queryPluginStorage(),
         readPluginStorage: (owner: string, key: string) => store.readPluginStorage(owner, key),
         listPluginStorage: () => store.listPluginStorage(),
-        ...(store.commitWorkingSetChangeCursor === undefined
-            ? {}
-            : {
-                commitWorkingSetChangeCursor: (revision: DataRevision) =>
-                    store.commitWorkingSetChangeCursor!(revision),
-            }),
+        readPluginStorageValues: (query) => store.readPluginStorageValues(query),
+        readConversationMessageMetadataWindow: store.readConversationMessageMetadataWindow
+            ? (input) => store.readConversationMessageMetadataWindow!(input)
+            : undefined,
+        commitWorkingSetChangeCursor: store.commitWorkingSetChangeCursor
+            ? (revision: DataRevision) => store.commitWorkingSetChangeCursor!(revision)
+            : undefined,
         readAssetAlias: (identity: AssetAliasIdentity) => store.readAssetAlias(identity),
         readAssetAliasesByKeys: (kind: AssetAliasKind, keys: string[]) =>
             store.readAssetAliasesByKeys(kind, keys),
@@ -77,5 +78,6 @@ export function createMutationGatedPersistentDataStore(
         materializeDatabase: (revision?: DataRevision) => store.materializeDatabase(revision),
         acquireRevision: (revision: DataRevision): Promise<PersistentRevisionLease> =>
             store.acquireRevision(revision),
-    }
+    } satisfies { [K in keyof PersistentDataStore]-?: PersistentDataStore[K] | undefined }
+    return gated
 }

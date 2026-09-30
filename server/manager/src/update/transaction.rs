@@ -65,7 +65,7 @@ pub enum RecoveryOutcome {
         was_running: bool,
         source_version: String,
         target_version: String,
-        installer_startup_enabled: Option<bool>,
+        prior_startup_enabled: Option<bool>,
     },
 }
 
@@ -82,7 +82,7 @@ pub struct InstallTransaction {
     pub backup_path: PathBuf,
     pub file_states: Vec<FileTransaction>,
     pub was_running: bool,
-    installer_startup_enabled: Option<bool>,
+    prior_startup_enabled: Option<bool>,
     directory_install_identity: Option<DirectoryIdentity>,
     directory_staged_identity: Option<DirectoryIdentity>,
 }
@@ -399,7 +399,7 @@ impl InstallTransaction {
                 }))
                 .collect(),
             was_running,
-            installer_startup_enabled: None,
+            prior_startup_enabled: None,
             directory_install_identity: None,
             directory_staged_identity: None,
         })
@@ -463,12 +463,12 @@ impl InstallTransaction {
         write_json(&state_path(root), self, "update-transaction-write-failed")
     }
 
-    pub(super) fn set_installer_startup_enabled(&mut self, enabled: bool) {
-        self.installer_startup_enabled = Some(enabled);
+    pub(super) fn set_prior_startup_enabled(&mut self, enabled: bool) {
+        self.prior_startup_enabled = Some(enabled);
     }
 
-    pub(super) fn installer_startup_enabled(&self) -> Option<bool> {
-        self.installer_startup_enabled
+    pub(super) fn prior_startup_enabled(&self) -> Option<bool> {
+        self.prior_startup_enabled
     }
 
     pub fn preflight_writable(&self) -> Result<()> {
@@ -751,7 +751,7 @@ pub fn recover_transaction(
     let was_running = transaction.was_running;
     let source_version = transaction.source_version.clone();
     let target_version = transaction.target_version.clone();
-    let installer_startup_enabled = transaction.installer_startup_enabled;
+    let prior_startup_enabled = transaction.prior_startup_enabled;
     let outcome = match transaction.phase {
         TransactionPhase::Completed => {
             transaction.complete(root)?;
@@ -761,7 +761,7 @@ pub fn recover_transaction(
             was_running,
             source_version,
             target_version,
-            installer_startup_enabled,
+            prior_startup_enabled,
         },
         _ => {
             transaction.rollback(root)?;
@@ -769,7 +769,7 @@ pub fn recover_transaction(
                 was_running,
                 source_version,
                 target_version,
-                installer_startup_enabled,
+                prior_startup_enabled,
             }));
         }
     };
@@ -1152,7 +1152,7 @@ mod tests {
             true,
         )
         .unwrap();
-        transaction.set_installer_startup_enabled(false);
+        transaction.set_prior_startup_enabled(false);
         transaction.save(&root).unwrap();
         assert_eq!(
             recover_transaction(&root, &install).unwrap(),
@@ -1160,9 +1160,30 @@ mod tests {
                 was_running: true,
                 source_version: "1.0.0".into(),
                 target_version: "2.0.0".into(),
-                installer_startup_enabled: Some(false),
+                prior_startup_enabled: Some(false),
             })
         );
+        assert_eq!(fs::read_to_string(install.join("server")).unwrap(), "old");
+    }
+
+    #[test]
+    fn restarting_health_check_recovers_the_prior_disabled_startup_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("data");
+        let install = temp.path().join("install");
+        let staged = temp.path().join(".risunest-sync-update-stage");
+        let backup = temp.path().join(".risunest-sync-update-backup");
+        file(&install.join("server"), "old");
+        file(&staged.join("server"), "new");
+        let mut transaction = InstallTransaction::new("1.0.0".into(), "2.0.0".into(),
+            TransactionKind::Files, install.clone(), staged, backup, vec![PathBuf::from("server")], false).unwrap();
+        transaction.save(&root).unwrap();
+        transaction.apply(&root).unwrap();
+        transaction.set_prior_startup_enabled(false);
+        transaction.mark_restarting(&root).unwrap();
+        assert_eq!(recover_transaction(&root, &install).unwrap(), Some(RecoveryOutcome::RolledBack {
+            was_running: false, source_version: "1.0.0".into(), target_version: "2.0.0".into(), prior_startup_enabled: Some(false),
+        }));
         assert_eq!(fs::read_to_string(install.join("server")).unwrap(), "old");
     }
 
@@ -1194,7 +1215,7 @@ mod tests {
                 was_running: true,
                 source_version: "1.0.0".into(),
                 target_version: "2.0.0".into(),
-                installer_startup_enabled: None,
+                prior_startup_enabled: None,
             })
         );
         assert_eq!(

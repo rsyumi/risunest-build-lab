@@ -10,7 +10,7 @@ describe('summary-aware bounded generation memory evidence', () => {
         const totalMessages = 50_000
         const suffixMessages = 32
         const boundary = totalMessages - suffixMessages
-        const bodyReads: number[] = []
+        const transferredBodyIndices: number[] = []
         const lease = {
             revision: 1,
             async readConversationMessageMetadataWindow(input: any) {
@@ -39,22 +39,25 @@ describe('summary-aware bounded generation memory evidence', () => {
             },
             async readConversationWindow(input: any) {
                 await new Promise<void>((resolve) => setImmediate(resolve))
-                bodyReads.push(input.startIndex)
+                const endIndex = Math.min(totalMessages, input.startIndex + input.limit)
+                const indices = Array.from({ length: endIndex - input.startIndex },
+                    (_, offset) => input.startIndex + offset)
+                transferredBodyIndices.push(...indices)
                 return {
                     revision: 1,
                     value: {
                         characterId: input.characterId,
                         conversationId: input.conversationId,
                         startIndex: input.startIndex,
-                        endIndex: input.startIndex + 1,
+                        endIndex,
                         totalMessages,
-                        hasMoreBefore: true,
-                        hasMoreAfter: input.startIndex + 1 < totalMessages,
-                        messages: [{
-                            chatId: `message-${input.startIndex}`,
-                            role: input.startIndex % 2 ? 'char' : 'user',
+                        hasMoreBefore: input.startIndex > 0,
+                        hasMoreAfter: endIndex < totalMessages,
+                        messages: indices.map((index) => ({
+                            chatId: `message-${index}`,
+                            role: index % 2 ? 'char' : 'user',
                             data: 'x'.repeat(2 * 1024),
-                        }],
+                        })),
                     },
                 }
             },
@@ -100,8 +103,11 @@ describe('summary-aware bounded generation memory evidence', () => {
         if (result.route !== 'summary-aware') return
         const retainedHeapUsedBytes = process.memoryUsage().heapUsed
         peakHeapUsedBytes = Math.max(peakHeapUsedBytes, retainedHeapUsedBytes)
-        expect(bodyReads).toHaveLength(suffixMessages)
-        expect(bodyReads[0]).toBe(boundary)
+        expect(transferredBodyIndices).toEqual(Array.from({ length: suffixMessages },
+            (_, offset) => boundary + offset))
+        expect(result.preparation.metrics.bodyRows).toBe(suffixMessages)
+        expect(result.preparation.chat.message.map((message) => message.chatId))
+            .toEqual(transferredBodyIndices.map((index) => `message-${index}`))
         process.stdout.write('BOUNDED_GENERATION_MEMORY ' + JSON.stringify({
             totalMessages,
             summarizedMessages: boundary,

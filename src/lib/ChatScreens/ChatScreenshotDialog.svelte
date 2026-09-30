@@ -8,6 +8,7 @@
         validateScreenshotRange,
     } from 'src/ts/chatScreenshotRange'
     import NumberInput from '../UI/GUI/NumberInput.svelte'
+    import { modalNavigation } from 'src/ts/ui/modalNavigation'
 
     interface Props {
         totalTurns: number
@@ -74,18 +75,6 @@
         onCancel()
     }
 
-    function handleKeydown(event: KeyboardEvent) {
-        // The global hotkey handler already calls preventDefault on Escape from
-        // its own document listener, so defaultPrevented cannot gate this.
-        if (event.key !== 'Escape') return
-        event.preventDefault()
-        if (running) {
-            cancelCapture()
-            return
-        }
-        onClose()
-    }
-
     $effect(() => {
         if (!running) {
             cancellationRequested = false
@@ -98,8 +87,6 @@
 
 </script>
 
-<svelte:window onkeydown={handleKeydown} />
-
 <!-- Work dialog layer: alerts and pickers stack above it on the shared modal layer. -->
 <div class="fixed inset-0 z-[1000] flex items-center justify-center bg-black/50 p-4" role="presentation">
     <div
@@ -107,6 +94,7 @@
         role="dialog"
         aria-modal="true"
         aria-labelledby="chat-screenshot-title"
+        use:modalNavigation={{ close: () => running ? cancelCapture() : onClose() }}
     >
         <div class="flex items-center justify-between gap-4">
             <h2 id="chat-screenshot-title" class="text-lg font-semibold">{language.screenshot}</h2>

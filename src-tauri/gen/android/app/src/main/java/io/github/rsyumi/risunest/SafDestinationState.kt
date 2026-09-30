@@ -287,13 +287,8 @@ internal fun acknowledgeSafDestinationExport(
   return clear(requestId)
 }
 
-internal fun interruptedSafDestinationWarnings(deletePartial: () -> Boolean): List<String> {
-  val warnings = mutableListOf("android-saf-provider-not-atomic")
-  if (!runCatching(deletePartial).getOrDefault(false)) {
-    warnings.add("partial-destination-may-remain")
-  }
-  return warnings
-}
+internal fun interruptedSafDestinationWarnings(): List<String> =
+  listOf("android-saf-provider-not-atomic", "partial-destination-may-remain")
 
 private data class NullableString(val value: String?)
 private data class NullableLong(val value: Long?)
@@ -321,8 +316,33 @@ private fun isValidRecord(record: SafDestinationRecord): Boolean {
 }
 
 // Shared with SafFileBridge.kt's spool manifest parsing.
-internal fun stringField(json: String, name: String): String? =
-  Regex("\\\"$name\\\":\\\"([^\\\"]*)\\\"").find(json)?.groupValues?.get(1)
+internal fun stringField(json: String, name: String): String? {
+  val literal = Regex("\\\"$name\\\":\\\"((?:[^\\\"\\\\]|\\\\.)*)\\\"")
+    .find(json)?.groupValues?.get(1) ?: return null
+  val result = StringBuilder()
+  var index = 0
+  while (index < literal.length) {
+    val char = literal[index++]
+    if (char != '\\') { result.append(char); continue }
+    if (index == literal.length) return null
+    when (val escape = literal[index++]) {
+      '"', '\\', '/' -> result.append(escape)
+      'b' -> result.append('\b')
+      'f' -> result.append('\u000c')
+      'n' -> result.append('\n')
+      'r' -> result.append('\r')
+      't' -> result.append('\t')
+      'u' -> {
+        if (index + 4 > literal.length) return null
+        val code = literal.substring(index, index + 4).toIntOrNull(16) ?: return null
+        result.append(code.toChar())
+        index += 4
+      }
+      else -> return null
+    }
+  }
+  return result.toString()
+}
 
 private fun nullableStringField(json: String, name: String): NullableString? {
   val match = Regex("\\\"$name\\\":(null|\\\"([^\\\"]*)\\\")").find(json) ?: return null

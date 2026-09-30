@@ -209,3 +209,33 @@ describe('Hypa V3 prepared history parity', () => {
         expect(prepared.memory).toEqual(complete.memory)
     })
 })
+
+
+it('keeps completed summaries and stops subsequent requests when a deferred summary is aborted', async () => {
+    const { requestChatData } = await import('../request/request')
+    const preset = createHypaV3Preset('Cancellation', {
+        summarizationModel: 'subModel', memoryTokensRatio: 0.2,
+        extraSummarizationRatio: 0, maxChatsPerSummary: 2,
+        recentMemoryRatio: 1, similarMemoryRatio: 0, queryChatCount: 1,
+        preserveOrphanedMemory: false,
+    })
+    setDatabaseLite({ maxResponse: 128, hypaModel: 'MiniLM', hypaV3PresetId: 0, hypaV3Presets: [preset] } as never)
+    const chats = Array.from({ length: 10 }, (_, i) => ({ role: i % 2 ? 'assistant' : 'user', content: 'x'.repeat(80), memo: `m${i}` })) as any[]
+    const room = { id: 'cancel-chat', name: 'Cancel', message: [] } as unknown as Chat
+    const owner = { type: 'character', chaId: 'owner', name: 'Owner' } as character
+    const abort = new AbortController()
+    let finish!: (value: any) => void
+    vi.mocked(requestChatData).mockClear()
+    vi.mocked(requestChatData).mockResolvedValueOnce({ type: 'success', result: 'Completed summary' })
+        .mockImplementationOnce(async () => new Promise(resolve => { finish = resolve }))
+    const pending = hypaMemoryV3(chats, tokenTotal(chats), 300, room, owner, tokenizer([]), undefined, abort.signal)
+    await vi.waitFor(() => expect(requestChatData).toHaveBeenCalledTimes(2))
+    expect(vi.mocked(requestChatData).mock.calls.every(call => call[2] === abort.signal)).toBe(true)
+    abort.abort()
+    finish({ type: 'success', result: 'Cancelled summary' })
+    const result = await pending
+    expect(result.error).toContain('Summarization failed')
+    expect(result.memory?.summaries.map(summary => summary.text)).toEqual(['Completed summary'])
+    expect(requestChatData).toHaveBeenCalledTimes(2)
+    expect(room.hypaV3Data).toBeUndefined()
+})

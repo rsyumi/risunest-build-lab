@@ -372,6 +372,7 @@ beforeEach(() => {
     harness.setChatToIndex.mockImplementation(async (chat: any) => structuredClone(chat))
 
     class TestNotification {
+        static permission: NotificationPermission = 'granted'
         static requestPermission = harness.notificationRequest
         onclick: (() => void) | null = null
         constructor(title: string, options?: NotificationOptions) {

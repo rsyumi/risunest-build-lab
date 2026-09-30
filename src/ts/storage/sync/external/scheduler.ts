@@ -1,3 +1,5 @@
+import { externalErrorKind } from './connection'
+import type { MobileBackgroundTask } from '../../../mobileBackgroundTask'
 import type { DecimalString } from './types'
 import type {
     ExternalControllerRequest,
@@ -48,6 +50,8 @@ export function createExternalStorageScheduler(
     const pending = new Map<string, PendingRevision>()
     let timer: unknown
     let stopped = false
+    let suspended = false
+    const refusals = new Map<string, number>()
     const now = dependencies.now ?? Date.now
     const setTimer = dependencies.setTimer
         ?? ((callback: () => void, delay: number): unknown => globalThis.setTimeout(callback, delay))
@@ -74,7 +78,7 @@ export function createExternalStorageScheduler(
         `${destination.kind}:${destination.connectionId}`
     const scheduleNext = (): void => {
         clear()
-        if (stopped || !dependencies.available()) return
+        if (stopped || suspended || !dependencies.available()) return
         const next = Math.min(...[...pending.values()].map(item => item.dueAt),
             dependencies.maintenance ? maintenanceAt : Number.POSITIVE_INFINITY)
         if (!Number.isFinite(next)) return
@@ -123,7 +127,7 @@ export function createExternalStorageScheduler(
     }
     function runDue(): void {
         clear()
-        if (stopped || !dependencies.available()) return
+        if (stopped || suspended || !dependencies.available()) return
         const currentTime = now()
         const destinations = new Map(
             dependencies.destinations().map(destination => [destinationKey(destination), destination]),
@@ -145,7 +149,20 @@ export function createExternalStorageScheduler(
             }
             started(destination.connectionId)
             void controller.request(request).then((result) => {
-                if (result.kind !== 'blocked' || result.error?.retryable === false) return
+                if (result.kind !== 'blocked') {
+                    refusals.delete(key)
+                    return
+                }
+                if (result.error?.retryable === false) return
+                const causeKind = externalErrorKind('cause' in result ? result.cause : undefined) ?? result.reason
+                if (!result.error && ['endpointRejected', 'unauthorized', 'reauthRequired',
+                    'repositoryKeyUnavailable', 'deviceVaultUnavailable', 'clockSkew', 'storageFull',
+                    'localStorageFull', 'localPermissionDenied', 'unsupported', 'corrupt', 'notFound'].includes(causeKind)) return
+                if (!result.error && result.reason === 'preconditionFailed') {
+                    const count = (refusals.get(key) ?? 0) + 1
+                    refusals.set(key, count)
+                    if (count >= 3) return
+                }
                 if (
                     result.error?.retryable
                     && result.error.retryAtMs !== undefined
@@ -166,7 +183,7 @@ export function createExternalStorageScheduler(
         }
         if (dependencies.maintenance && currentTime >= maintenanceAt) {
             maintenanceAt = currentTime + 60_000
-            for (const candidate of dependencies.maintenance()) {
+            for (const candidate of dependencies.maintenance?.() ?? []) {
                 const last = Math.max(lastCleanup.get(candidate.connectionId) ?? -Infinity,
                     candidate.lastAttemptAt ?? -Infinity)
                 if (currentTime - last < cleanupInterval || inFlight.has(candidate.connectionId)
@@ -184,6 +201,7 @@ export function createExternalStorageScheduler(
     return {
         durableRevision(value: DecimalString, cause: ExternalRevisionCause = 'edit'): void {
             const target = parseRevision(value)
+            refusals.clear()
             for (const destination of dependencies.destinations()) merge(destination, target, cause)
             scheduleNext()
         },
@@ -191,6 +209,7 @@ export function createExternalStorageScheduler(
             connectionId: string,
             kind: 'sync' | 'backup' | 'cleanup',
             value: DecimalString,
+            backgroundTask?: MobileBackgroundTask,
         ) {
             const target = parseRevision(value)
             const key = `${kind}:${connectionId}`
@@ -205,14 +224,17 @@ export function createExternalStorageScheduler(
                 targetRevision: target.toString() as DecimalString,
                 reason: 'manual',
                 session: dependencies.session(),
+                ...(backgroundTask ? { backgroundTask } : {}),
             }).finally(() => finished(connectionId))
         },
         resume(): void {
+            suspended = false
             scheduleNext()
         },
         async suspend(
             cancel: (destination: ExternalScheduledDestination) => boolean = () => true,
         ): Promise<void> {
+            suspended = true
             clear()
             await Promise.all(
                 dependencies.destinations().filter(cancel).map(destination =>

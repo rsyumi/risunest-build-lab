@@ -9,6 +9,8 @@ const m = vi.hoisted(() => ({
     portable: vi.fn(),
     block: vi.fn(),
     legacy: vi.fn(),
+    fallback: vi.fn(),
+    status: vi.fn(),
     export: vi.fn(),
     discard: vi.fn(),
     beginReplacement: vi.fn(),
@@ -21,6 +23,7 @@ const m = vi.hoisted(() => ({
     controller: new AbortController(),
     runtime: { revision: 4 },
 }))
+vi.mock('../drive/backuplocal', () => ({ importLegacyBackupWithWebView: m.fallback }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke: m.invoke }))
 vi.mock('@tauri-apps/plugin-dialog', () => ({ open: m.open, save: m.save }))
 vi.mock('../platform', () => ({
@@ -85,9 +88,10 @@ describe('common backup file production route', () => {
         m.manager.mockImplementation(async (_kind, _label, run) =>
             run({
                 signal: m.controller.signal,
-                onStatus: vi.fn(),
+                onStatus: m.status,
                 setBlocking: vi.fn(),
                 setSource: vi.fn(),
+                setPartialWritesPossible: vi.fn(),
             }),
         )
         m.invoke.mockResolvedValue('portable')
@@ -141,6 +145,44 @@ describe('common backup file production route', () => {
             expect(m.resume).not.toHaveBeenCalled()
         },
     )
+    it.each([false, true])('reselects recognized compatibility input inside the same operation (first run %s)', async (firstRun) => {
+        const { NativeFileJobError } = await import('./nativeFileJobs')
+        m.invoke.mockResolvedValue('local-backup')
+        m.legacy.mockRejectedValue(new NativeFileJobError('compatibility-import-required', 'Recognized upstream form'))
+        m.fallback.mockImplementation(async (context, lifecycle) => {
+            expect(context.signal.aborted).toBe(false)
+            expect(m.beginReplacement).not.toHaveBeenCalled()
+            await lifecycle.beforeActivation()
+            expect(m.confirmReplacement).toHaveBeenCalledOnce()
+            lifecycle.onCommitted()
+            return { warningCodes: [] }
+        })
+        await expect(restoreBackupFromNativeSource({ type: 'androidSpool', token: 'synthetic' }, { firstRun })).resolves.toEqual({ warningCodes: [] })
+        expect(m.manager).toHaveBeenCalledOnce()
+        expect(m.fallback).toHaveBeenCalledOnce()
+        expect(m.status).toHaveBeenCalledWith(expect.objectContaining({ detail: expect.objectContaining({ stage: 'awaiting-reselect' }) }))
+        expect(m.hold).toHaveBeenCalledOnce()
+        expect(m.releaseReplacement).toHaveBeenCalledOnce()
+        expect(m.discard).toHaveBeenCalledWith('synthetic')
+    })
+    it.each(['unsupported-format', 'corrupt-input'])('does not reselect for %s input', async (code) => {
+        const { NativeFileJobError } = await import('./nativeFileJobs')
+        m.invoke.mockResolvedValue('local-backup')
+        m.legacy.mockRejectedValue(new NativeFileJobError(code, 'Invalid synthetic input'))
+        await expect(restoreBackupFromNativeSource({ type: 'desktopPath', path: 'garbage.bin' })).rejects.toMatchObject({ code })
+        expect(m.fallback).not.toHaveBeenCalled()
+        expect(m.beginReplacement).not.toHaveBeenCalled()
+    })
+    it('keeps a cancelled compatibility reselect silent without beginning replacement', async () => {
+        const { NativeFileJobError } = await import('./nativeFileJobs')
+        m.invoke.mockResolvedValue('local-backup')
+        m.legacy.mockRejectedValue(new NativeFileJobError('compatibility-import-required', 'Recognized upstream form'))
+        m.fallback.mockResolvedValue(null)
+        await expect(restoreBackupFromNativeSource({ type: 'desktopPath', path: 'synthetic.bin' })).resolves.toBeNull()
+        expect(m.beginReplacement).not.toHaveBeenCalled()
+        expect(m.hold).not.toHaveBeenCalled()
+    })
+
     it('declined foreign replacement discards the unclaimed Android source', async () => {
         m.invoke.mockResolvedValue('local-backup')
         m.confirm.mockResolvedValue(false)
@@ -246,6 +288,14 @@ describe('common backup file production route', () => {
         expect(m.save.mock.calls[0][0].filters[0].extensions).toEqual([
             'risunest',
         ])
+    })
+    it('provides the account warning only when native source preservation requests confirmation', async () => {
+        await exportPortableBackupFromSystemPicker()
+        expect(m.confirm).not.toHaveBeenCalled()
+        const { language } = await import('src/lang')
+        m.confirm.mockResolvedValue(false)
+        await expect(m.export.mock.calls[0][3].confirmSourcePreservation()).resolves.toBe(false)
+        expect(m.confirm).toHaveBeenCalledExactlyOnceWith(language.risuNest.backup.sourcePreservationConfirm)
     })
     it('a cancelled section chooser never starts or picks a destination', async () => {
         m.chooseExport.mockResolvedValue(null)

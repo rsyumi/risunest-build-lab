@@ -1,3 +1,4 @@
+import { isConversationStreaming } from './streamingConversationRegistry'
 import type { Database, character, groupChat } from './database.svelte'
 import { isConversationSummaryStub } from './conversationResidency'
 import {
@@ -34,7 +35,7 @@ export class WorkingSetResidencyRegistry {
         const pinnedId = nextConversationId ?? this.selectedConversationIds.get(character.chaId)
         if (pinnedId === conversationId) return false
         const conversation = character.chats.find((candidate) => candidate.id === conversationId)
-        return Boolean(conversation && !conversation.isStreaming)
+        return Boolean(conversation && !conversation.isStreaming && !isConversationStreaming(conversation.id))
     }
 
     pinSelectedConversation(characterId: string, conversationId: string): void {
@@ -80,7 +81,7 @@ export class WorkingSetResidencyRegistry {
             character &&
             (isCatalogCharacterStub(character) || (
                 this.evictionAllowed &&
-                !character.chats.some((chat) => chat.isStreaming)
+                !character.chats.some((chat) => chat.isStreaming || isConversationStreaming(chat.id))
             )),
         )
     }

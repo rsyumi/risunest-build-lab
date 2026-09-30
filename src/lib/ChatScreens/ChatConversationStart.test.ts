@@ -12,7 +12,7 @@ vi.mock('./CreatorQuote.svelte', async () => ({
 }))
 
 import ChatConversationStart from './ChatConversationStart.svelte'
-import { chatMountProbe, resetChatMountProbe } from './chatMountProbe'
+import { chatMountProbe, resetChatMountProbe } from './chatMountProbe.testSupport'
 
 function metadataOnlyCharacter(): character {
     const conversation = { id: 'chat-id', fmIndex: -1 } as character['chats'][number]
@@ -68,6 +68,34 @@ describe('ChatConversationStart', () => {
         })
 
         expect(target.querySelector('.italic')).not.toBeNull()
+    })
+
+    test('applies a new message count on refresh without remounting the greeting', async () => {
+        const acquire = vi.fn(async (_request: { totalMessages: number }) => null)
+        mounted = mount(ChatConversationStart, {
+            target,
+            props: {
+                currentCharacter: metadataOnlyCharacter(),
+                resolvedImage: '',
+                showAiWarning: true,
+                totalMessages: 0,
+                onReroll: () => {},
+                unReroll: () => {},
+                onRemoveCreatorQuote: () => {},
+                acquireConversationStartParserLease: acquire,
+            },
+        })
+        await vi.waitFor(() => expect(chatMountProbe.mounts).toHaveLength(1))
+        const greeting = target.querySelector('[data-chat-probe]')
+        ;(
+            mounted as { refreshConversationStartParser(totalMessages?: number): void }
+        ).refreshConversationStartParser(1)
+        await vi.waitFor(() => expect(acquire).toHaveBeenCalledTimes(2))
+        await Promise.resolve()
+        expect(acquire.mock.calls[1][0].totalMessages).toBe(1)
+        expect(target.querySelector('.italic')).toBeNull()
+        expect(target.querySelector('[data-chat-probe]')).toBe(greeting)
+        expect(chatMountProbe.unmounts).toHaveLength(0)
     })
 
     test('keeps the greeting mounted while a reload prepares its replacement parser lease', async () => {

@@ -6,6 +6,8 @@ import type {
     AssetOwnerHead,
     CharacterDetail,
     PersistentDataStore,
+    PluginStorageValue,
+    PluginStorageValueCursor,
 } from '../persistentDataStore'
 import { RevisionConflictError, SnapshotReleasedError } from '../persistentDataStore'
 import { fixtureDatabase } from './persistentDataFixtures'
@@ -25,6 +27,48 @@ function assetOwnerCharacterDetails(database: Database): CharacterDetail[] {
 
 export function persistentDataStoreContract(createHarness: () => Promise<PersistentDataStoreHarness>): void {
     describe('PersistentDataStore contract', () => {
+        it('pages owner values with stable revisions, insertion order and byte bounds', async () => {
+            const { store } = await createHarness()
+            const empty = await store.replaceFromDatabase({ ...structuredClone(fixtureDatabase), pluginCustomStorage: {} })
+            const values: PluginStorageValue[] = [
+                { owner: 'a', key: 'zeta', value: 'x'.repeat(600_000) },
+                { owner: 'b', key: 'zeta', value: 'private' },
+                { owner: 'a', key: 'alpha', value: 'y'.repeat(600_000) },
+                { owner: 'a', key: '__proto__', value: 'z'.repeat(1_100_000) },
+                { owner: 'a', key: '0', value: false },
+            ]
+            const written = await store.commit({ expectedRevision: empty.revision,
+                pluginStorage: values.map((row) => ({ type: 'set', ...row })) })
+            const lease = await store.acquireRevision(written.revision)
+            await store.commit({ expectedRevision: written.revision,
+                pluginStorage: [{ type: 'set', owner: 'a', key: 'zeta', value: 'changed' }] })
+            const pages = []
+            let afterKey: PluginStorageValueCursor | undefined
+            do {
+                const page = await lease.readPluginStorageValues({ owner: 'a', afterKey, limit: 2 })
+                expect(page.revision).toBe(written.revision)
+                pages.push(page)
+                afterKey = page.nextCursor ?? undefined
+            } while (afterKey)
+            expect(pages.map((page) => page.items.length)).toEqual([1, 1, 1, 1])
+            expect(pages.flatMap((page) => page.items)).toEqual(values.filter((row) => row.owner === 'a'))
+            expect((await store.readPluginStorageValues({ owner: 'a', limit: 1 })).items[0].value).toBe('changed')
+            expect((await lease.readPluginStorageValues({ owner: 'missing' })).items).toEqual([])
+            const all: PluginStorageValue[] = []
+            afterKey = undefined
+            do {
+                const page = await lease.readPluginStorageValues({ afterKey, limit: 2 })
+                expect(page.revision).toBe(written.revision)
+                all.push(...page.items)
+                afterKey = page.nextCursor ?? undefined
+            } while (afterKey)
+            expect(all).toEqual([...values.filter((row) => row.owner === 'a'), values[1]])
+            await expect(lease.readPluginStorageValues({ limit: 0 })).rejects.toThrow()
+            await expect(lease.readPluginStorageValues({ owner: 'b', afterKey: pages[0].nextCursor! })).rejects.toThrow()
+            await lease.release()
+            await expect(lease.readPluginStorageValues({})).rejects.toBeInstanceOf(SnapshotReleasedError)
+        })
+
         it('applies root deltas atomically and preserves leased roots', async () => {
             const { store, reopen } = await createHarness()
             const imported = await store.replaceFromDatabase(structuredClone(fixtureDatabase))
@@ -1674,7 +1718,7 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
             const committed = await store.commit({
                 expectedRevision: imported.revision,
                 root: { ...root, username: 'Committed after lease' },
-                deleteCharacterId: 'char-b',
+                deleteCharacterIds: ['char-b'],
                 conversations: [
                     {
                         type: 'replace-range',
@@ -2175,7 +2219,7 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
             const imported = await store.replaceFromDatabase(fixtureDatabase)
 
             await expect(
-                store.commit({ expectedRevision: imported.revision - 1, deleteCharacterId: 'char-a' }),
+                store.commit({ expectedRevision: imported.revision - 1, deleteCharacterIds: ['char-a'] }),
             ).rejects.toBeInstanceOf(RevisionConflictError)
             expect((await store.readCharacter('char-a'))?.revision).toBe(imported.revision)
         })
@@ -2233,7 +2277,7 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
                     ...root,
                     characterOrder: root.characterOrder.filter((id) => id !== 'char-a'),
                 },
-                deleteCharacterId: 'char-a',
+                deleteCharacterIds: ['char-a'],
                 characterDetails: [active, trash],
             })
 
@@ -2307,19 +2351,19 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
                 const detail = (await store.readCharacter('char-b'))!.value
                 const invalidDetail = structuredClone(detail)
                 let characterDetails = [invalidDetail]
-                let deleteCharacterId: string | undefined
+                let deleteCharacterIds: string[] | undefined
                 if (invalidCase === 'empty') invalidDetail.chaId = ''
                 if (invalidCase === 'duplicate') {
                     characterDetails = [invalidDetail, structuredClone(invalidDetail)]
                 }
-                if (invalidCase === 'deleted') deleteCharacterId = 'char-b'
+                if (invalidCase === 'deleted') deleteCharacterIds = ['char-b']
                 if (invalidCase === 'missing') invalidDetail.chaId = 'missing-character'
 
                 await expect(store.commit({
                     expectedRevision: imported.revision,
                     root: { ...(await store.readRoot()).value, username: 'Must not persist' },
                     characterDetails,
-                    deleteCharacterId,
+                    deleteCharacterIds,
                 })).rejects.toThrow()
 
                 expect((await store.readRoot()).revision).toBe(imported.revision)
@@ -2436,6 +2480,48 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
             })
         })
 
+        it('reorders every conversation of a character without touching their messages', async () => {
+            const { store } = await createHarness()
+            const imported = await store.replaceFromDatabase(fixtureDatabase)
+            const before = await store.materializeDatabase()
+
+            const committed = await store.commit({
+                expectedRevision: imported.revision,
+                conversations: [{
+                    type: 'reorder',
+                    characterId: 'char-a',
+                    conversationIds: ['conv-short', 'conv-long'],
+                }],
+            })
+
+            const summaries = (await store.queryConversations({
+                characterId: 'char-a',
+                order: 'configured',
+                limit: 10,
+            })).items
+            expect(summaries.map(({ id, configuredIndex }) => ({ id, configuredIndex }))).toEqual([
+                { id: 'conv-short', configuredIndex: 0 },
+                { id: 'conv-long', configuredIndex: 1 },
+            ])
+            const materialized = await store.materializeDatabase()
+            expect(materialized.characters[1].chats).toEqual([
+                before.characters[1].chats[1],
+                before.characters[1].chats[0],
+            ])
+
+            for (const conversationIds of [
+                ['conv-short'],
+                ['conv-short', 'conv-short'],
+                ['conv-short', 'conv-missing'],
+            ]) {
+                await expect(store.commit({
+                    expectedRevision: committed.revision,
+                    conversations: [{ type: 'reorder', characterId: 'char-a', conversationIds }],
+                })).rejects.toThrow(/each conversation once/)
+            }
+            expect((await store.readRoot()).revision).toBe(committed.revision)
+        })
+
         it('rejects an explicit conversation insertion when the target ID already exists', async () => {
             const { store } = await createHarness()
             const imported = await store.replaceFromDatabase(fixtureDatabase)
@@ -2527,7 +2613,7 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
             const imported = await store.replaceFromDatabase(fixtureDatabase)
             const afterDelete = await store.commit({
                 expectedRevision: imported.revision,
-                deleteCharacterId: 'char-a',
+                deleteCharacterIds: ['char-a'],
             })
             const replacement = structuredClone(fixtureDatabase.characters[1])
             replacement.chaId = 'char-new'
@@ -2663,7 +2749,7 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
             await expect(store.commit({
                 expectedRevision: imported.revision,
                 root: { ...rootBefore.value, username: 'Must roll back' },
-                deleteCharacterId: 'char-a',
+                deleteCharacterIds: ['char-a'],
                 characterDetails: [
                     updatedGroup,
                     {

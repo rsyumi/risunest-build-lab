@@ -39,6 +39,7 @@ let target: HTMLDivElement | undefined
 async function openImportStage(
     initialAssignments: { owner: string; keys: string[] }[],
     pluginNames = ['provider-manager', 'yumi-translator'],
+    values = staged,
 ): Promise<{ owner: string; keys: string[] }[][]> {
     const published: { owner: string; keys: string[] }[][] = []
     target = document.createElement('div')
@@ -47,7 +48,7 @@ async function openImportStage(
         target,
         props: {
             place: 'import',
-            staged,
+            staged: values,
             pluginNames,
             initialAssignments,
             onselectionchange: (assignments) => {
@@ -72,6 +73,30 @@ afterEach(async () => {
 })
 
 describe('plugin data manager import stage', () => {
+    it('keeps all eight individual assignments reachable when grouping changes', async () => {
+        const keys = ['pm_1', 'pm_2', 'pm_3', 'pm_4', 'pm_5', 'pm_6', 'single', 'other']
+        const values = keys.map(key => ({ ...staged[0], key }))
+        const published = await openImportStage([], undefined, values)
+        expect(target!.querySelectorAll('[data-plugin-data-assignment]')).toHaveLength(8)
+        const row = target!.querySelector('[data-plugin-data-assignment="pm_6"]')!
+        row.querySelector<HTMLInputElement>('input')!.click()
+        const owner = row.querySelector('select')!
+        owner.value = 'yumi-translator'
+        owner.dispatchEvent(new Event('change', { bubbles: true }))
+        await tick()
+        const grouping = target!.querySelector<HTMLInputElement>('input[type="checkbox"]')!
+        grouping.click()
+        await tick()
+        expect(target!.querySelectorAll('[data-plugin-data-group]')).toHaveLength(0)
+        expect(target!.querySelectorAll('[data-plugin-data-assignment]')).toHaveLength(8)
+        expect(published.at(-1)).toEqual([{ owner: 'yumi-translator', keys: ['pm_6'] }])
+        grouping.click()
+        await tick()
+        expect(target!.querySelectorAll('[data-plugin-data-assignment]')).toHaveLength(8)
+        expect(target!.querySelector<HTMLSelectElement>('[data-plugin-data-assignment="pm_6"] select')!.value).toBe('yumi-translator')
+        expect(published.at(-1)).toEqual([{ owner: 'yumi-translator', keys: ['pm_6'] }])
+    })
+
     it('opens on the answers a cancelled import kept', async () => {
         const published = await openImportStage([
             { owner: 'provider-manager', keys: ['pm_store', 'pm_keys'] },

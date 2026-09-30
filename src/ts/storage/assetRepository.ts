@@ -269,8 +269,12 @@ export interface CompleteAssetRepositoryBlobStoreOptions {
     listPageSize?: number
 }
 
+export class ConditionalAssetWriteConflictError extends Error {
+    constructor() { super('Asset source changed before conditional publication'); this.name = 'ConditionalAssetWriteConflictError' }
+}
+
 export interface PreparedCompleteAssetWrite {
-    activate(): Promise<BlobMetadata>
+    activate(expectedAlias?: AssetAlias): Promise<BlobMetadata>
     abort(): Promise<void>
 }
 
@@ -378,25 +382,55 @@ export function createCompleteTypedAssetRepository(
             }
             const alias = { ...pendingAlias, objectHash: prepared.contentHash } as AssetAlias
             validateAssetAlias(alias)
-            let state: 'prepared' | 'activating' | 'activated' | 'aborted' = 'prepared'
+            const releaseSession = async (outcome: DurableAssetWriteReleaseOutcome) => {
+                try {
+                    await session?.release(outcome)
+                } catch {
+                    await session?.release(outcome)
+                }
+            }
+            let state: 'prepared' | 'activating' | 'activated' | 'aborted' | 'failed' = 'prepared'
             return {
-                async activate() {
+                async activate(expectedAlias?: AssetAlias) {
                     if (state !== 'prepared') {
                         throw new Error(`Prepared asset write is already ${state}`)
                     }
                     state = 'activating'
-                    await session?.seal()
-                    for (;;) {
-                        const { revision } = await options.store.readRoot()
-                        try {
-                            await options.store.commitAssetAlias(alias, revision)
-                            break
-                        } catch (error) {
-                            if (!(error instanceof RevisionConflictError)) throw error
+                    let committed = false
+                    try {
+                        await session?.seal()
+                        for (let attempt = 0; attempt < 8; attempt++) {
+                            const { revision } = await options.store.readRoot()
+                            if (expectedAlias) {
+                                const current = await options.store.readAssetAlias(identity)
+                                if (!current || JSON.stringify(current.value) !== JSON.stringify(expectedAlias)) {
+                                    throw new ConditionalAssetWriteConflictError()
+                                }
+                            }
+                            try {
+                                await options.store.commitAssetAlias(alias, revision)
+                                committed = true
+                                break
+                            } catch (error) {
+                                if (!(error instanceof RevisionConflictError) || attempt === 7) throw error
+                            }
                         }
+                    } catch (error) {
+                        state = 'failed'
+                        try {
+                            await releaseSession('aborted')
+                        } catch (releaseError) {
+                            throw new AggregateError(
+                                [error, releaseError],
+                                `Asset activation and durable CAS session cleanup failed for ${identity.key}`,
+                            )
+                        }
+                        throw error
                     }
-                    await session?.release('committed')
-                    state = 'activated'
+                    if (committed) {
+                        state = 'activated'
+                        await releaseSession('committed')
+                    }
                     return aliasBlobMetadata(alias)
                 },
                 async abort() {
@@ -455,8 +489,8 @@ export function createCompleteTypedAssetRepository(
         const prepared = await preparePublish(identity, encoded.data, metadata)
         return {
             ...prepared,
-            async activate() {
-                const result = await prepared.activate()
+            async activate(expectedAlias?: AssetAlias) {
+                const result = await prepared.activate(expectedAlias)
                 return { ...result, ...(preservationReason ? { preservationReason } : {}) }
             },
         }

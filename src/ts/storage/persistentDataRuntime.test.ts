@@ -1,4 +1,6 @@
 import { UNOWNED_PLUGIN_OWNER } from '../plugins/pluginOwner'
+import { runNativeDataHealthRepair } from './nativeDataHealthRepair'
+import { subscribeLocalPersistentRevision } from './persistentRevisionEvents'
 import { describe, expect, it, vi } from 'vitest'
 import type { Database } from './database.svelte'
 import {
@@ -209,6 +211,18 @@ function makeDatabaseLease(database: Database, revision: number): PersistentRevi
         }),
         readConversationMetadata: vi.fn(async () => null),
         readConversationWindow: vi.fn(async () => null),
+        readPluginStorageValues: vi.fn(async ({ owner, afterKey, limit = 256 }) => {
+            const records = Object.keys(pluginCustomStorage).map((key, ordinal) => ({
+                owner: UNOWNED_PLUGIN_OWNER, key, ordinal,
+            })).filter((item) => (!owner || owner === item.owner) && item.ordinal > (afterKey?.ordinal ?? -1))
+            const selected = records.slice(0, limit)
+            const last = selected.at(-1)
+            return {
+                revision,
+                items: selected.map(({ owner, key }) => ({ owner, key, value: structuredClone(pluginCustomStorage[key]) })),
+                nextCursor: records.length > limit && last ? last : null,
+            }
+        }),
         queryPluginStorage: vi.fn(async () => ({
             revision,
             items: Object.keys(pluginCustomStorage).map((key) => ({
@@ -285,6 +299,67 @@ function createFenceRuntimeHarness(
         set username(value: string) { database.username = value },
     }
 }
+
+describe('native data health repair coordination', () => {
+    it.each(['repair', 'undo'])('refreshes the loaded root after %s and saves a later edit at the new revision', async () => {
+        const repaired = makeConversationDatabase('Corrected root')
+        const harness = createFenceRuntimeHarness(makeConversationDatabase('Broken root'), repaired)
+        await harness.runtime.initializeActiveWorkingSet(harness.database)
+        const mutate = vi.fn(async (revision: number) => {
+            expect(revision).toBe(1)
+            expect(() => harness.runtime.assertPersistentMutationAllowed()).toThrow()
+            return { revision: 2 }
+        })
+        const notified = vi.fn()
+        const unsubscribe = subscribeLocalPersistentRevision(notified)
+        try {
+            await runNativeDataHealthRepair(1, mutate, harness.runtime)
+        } finally {
+            unsubscribe()
+        }
+        expect(notified).toHaveBeenCalledExactlyOnceWith(2, 'edit')
+        expect(harness.database.username).toBe('Corrected root')
+        expect(harness.runtime.revision).toBe(2)
+        harness.username = 'Later edit'
+        harness.runtime.markPersistentDataDirty(1)
+        await harness.runtime.flushPendingDataLocally('after-repair')
+        expect(harness.store.commit).toHaveBeenLastCalledWith(expect.objectContaining({ expectedRevision: 2 }))
+    })
+
+    it('flushes pending edits and rejects a diagnosis that became stale before native mutation', async () => {
+        const harness = createFenceRuntimeHarness(makeConversationDatabase('Initial'))
+        await harness.runtime.initializeActiveWorkingSet(harness.database)
+        harness.username = 'Pending edit'
+        harness.runtime.markPersistentDataDirty(1)
+        const mutate = vi.fn()
+        await expect(runNativeDataHealthRepair(1, mutate, harness.runtime)).rejects.toBeInstanceOf(RevisionConflictError)
+        expect(mutate).not.toHaveBeenCalled()
+        expect(harness.runtime.revision).toBe(2)
+        expect(() => harness.runtime.assertPersistentMutationAllowed()).not.toThrow()
+    })
+
+    it('keeps the committed repair read-only when projection fails', async () => {
+        const harness = createFenceRuntimeHarness(makeConversationDatabase('Initial'))
+        await harness.runtime.initializeActiveWorkingSet(harness.database)
+        vi.mocked(harness.store.acquireRevision).mockRejectedValueOnce(new Error('projection failed'))
+        await expect(runNativeDataHealthRepair(1, async () => ({ revision: 2 }), harness.runtime))
+            .rejects.toMatchObject({ committedRevision: 2, code: 'activation-committed-refresh-failed' })
+        expect(() => harness.runtime.assertPersistentMutationAllowed()).toThrow()
+        expect(harness.database.username).toBe('Initial')
+    })
+
+    it('does not replay a native repair whose journal or diagnosis failed after commit', async () => {
+        const harness = createFenceRuntimeHarness(makeConversationDatabase('Initial'))
+        await harness.runtime.initializeActiveWorkingSet(harness.database)
+        const mutate = vi.fn(async () => { throw { code: 'committed', revision: 2, message: 'diagnosis failed' } })
+        await expect(runNativeDataHealthRepair(1, mutate, harness.runtime))
+            .rejects.toMatchObject({ committedRevision: 2, recoveryRequired: true })
+        expect(mutate).toHaveBeenCalledExactlyOnceWith(1)
+        expect(harness.runtime.revision).toBe(2)
+        expect(() => harness.runtime.assertPersistentMutationAllowed()).toThrow()
+        expect(harness.database.username).toBe('Initial')
+    })
+})
 
 describe('persistent preset capture', () => {
     it('returns null for a selected-only scalable preset working set', () => {

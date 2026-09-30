@@ -83,16 +83,18 @@ function rustHost() {
   return host;
 }
 
-export function validateLocalSyncEnvironment({ target, hostTarget = rustHost(), env = process.env }) {
+export function validateLocalSyncEnvironment({ target, hostTarget = rustHost(), env = process.env, withoutUpdates = false }) {
   const config = localSyncTarget(target);
   if (!env.CARGO_TARGET_DIR)
     throw new Error("Set CARGO_TARGET_DIR to the repository shared target directory.");
   if (hostTarget !== target)
     throw new Error(`Local Sync distributions must be built on their native host target (${target}); current host is ${hostTarget}.`);
+  const publicKey = withoutUpdates ? "" : env.RISUNEST_UPDATE_PUBLIC_KEY?.trim();
+  if (!publicKey && !withoutUpdates) throw new Error("RISUNEST_UPDATE_PUBLIC_KEY is required for local Sync distributions. Use --without-updates for a development package that reports update-not-configured.");
   const registry = new URL(env.RISUNEST_DEFAULT_REGISTRY_URL || defaultRegistryUrl);
   if (registry.protocol !== "https:" || registry.username || registry.password || registry.search || registry.hash)
     throw new Error("RISUNEST_DEFAULT_REGISTRY_URL must be an HTTPS base URL without credentials, query, or fragment.");
-  return { ...config, cargoTargetDir: resolve(repository, env.CARGO_TARGET_DIR), registryUrl: registry.href };
+  return { ...config, cargoTargetDir: resolve(repository, env.CARGO_TARGET_DIR), registryUrl: registry.href, publicKey, updatesEnabled: !withoutUpdates };
 }
 
 function command(name, args = ["--version"]) {
@@ -237,9 +239,11 @@ export async function buildLocalSyncDistribution(options, dependencies = runtime
   const previousVendorInput = process.env.RISUNEST_CLOUDFLARED_INPUT;
   const previousRegistry = process.env.RISUNEST_DEFAULT_REGISTRY_URL;
   const previousCargoTarget = process.env.CARGO_TARGET_DIR;
+  const previousPublicKey = process.env.RISUNEST_UPDATE_PUBLIC_KEY;
   process.env.RISUNEST_CLOUDFLARED_INPUT = join(vendorDirectory, "vendor.json");
   process.env.RISUNEST_DEFAULT_REGISTRY_URL = config.registryUrl;
   process.env.CARGO_TARGET_DIR = config.cargoTargetDir;
+  process.env.RISUNEST_UPDATE_PUBLIC_KEY = config.publicKey;
   try {
     const nativeBuild = dependencies.buildNativeSuite({
       target: config.target,
@@ -265,6 +269,7 @@ export async function buildLocalSyncDistribution(options, dependencies = runtime
       target: config.target,
       version: releaseInput.version,
       output: resolve(output),
+      updatesEnabled: config.updatesEnabled,
       artifacts,
     };
     writeFileSync(join(output, "local-artifacts.json"), `${JSON.stringify(result, null, 2)}\n`);
@@ -276,15 +281,26 @@ export async function buildLocalSyncDistribution(options, dependencies = runtime
     else process.env.RISUNEST_DEFAULT_REGISTRY_URL = previousRegistry;
     if (previousCargoTarget === undefined) delete process.env.CARGO_TARGET_DIR;
     else process.env.CARGO_TARGET_DIR = previousCargoTarget;
+    if (previousPublicKey === undefined) delete process.env.RISUNEST_UPDATE_PUBLIC_KEY;
+    else process.env.RISUNEST_UPDATE_PUBLIC_KEY = previousPublicKey;
   }
 }
 
-async function main() {
-  const { values } = parseArgs({ options: { target: { type: "string" } } });
+export function parseLocalSyncArguments(args) {
+  const { values } = parseArgs({ args, options: { target: { type: "string" }, "without-updates": { type: "boolean", default: false } } });
   if (!values.target) throw new Error("--target is required.");
-  const result = await buildLocalSyncDistribution({ target: values.target });
-  process.stdout.write(`Local Sync distribution created in ${result.output}\n`);
-  for (const artifact of result.artifacts) process.stdout.write(`${artifact.path}\n`);
+  return { target: values.target, withoutUpdates: values["without-updates"] };
+}
+
+export function formatLocalSyncDistribution(result) {
+  const lines = [`Local Sync distribution created in ${result.output}`];
+  if (!result.updatesEnabled) lines.push("Updates are disabled for this development package. Update checks report update-not-configured.");
+  return `${[...lines, ...result.artifacts.map(artifact => artifact.path)].join("\n")}\n`;
+}
+
+async function main() {
+  const result = await buildLocalSyncDistribution(parseLocalSyncArguments(process.argv.slice(2)));
+  process.stdout.write(formatLocalSyncDistribution(result));
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

@@ -68,9 +68,11 @@ test('rethrows a shared factory failure to concurrent callers and retries later'
     }
     const first = runScripted('', arg)
     const concurrent = runScripted('', arg)
+    const failedResultsPromise = Promise.allSettled([first, concurrent])
+    await vi.waitFor(() => expect(runtimeState.createLuaFactory).toHaveBeenCalledTimes(1))
     rejectFactory(failure)
 
-    const failedResults = await Promise.allSettled([first, concurrent])
+    const failedResults = await failedResultsPromise
     expect(failedResults).toEqual([
         { status: 'rejected', reason: failure },
         { status: 'rejected', reason: failure },

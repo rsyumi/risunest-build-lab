@@ -38,7 +38,7 @@ pub(super) fn classify(name: &str) -> Result<Option<Entry<'_>>, LocalBackupError
                 .filter(|(id, ext)| !id.is_empty() && !ext.is_empty())
             else {
                 return Err(LocalBackupError::new(
-                    LocalBackupErrorCode::UnsupportedFormat,
+                    LocalBackupErrorCode::CompatibilityImportRequired,
                     "PocketRisu legacy JSON Inlays require the compatibility importer",
                 ));
             };

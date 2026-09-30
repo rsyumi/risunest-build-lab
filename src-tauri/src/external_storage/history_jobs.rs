@@ -21,6 +21,10 @@ fn corrupt() -> ProviderError {
     ProviderError::new(ErrorKind::Corrupt)
 }
 
+fn checked_pin_revision(document: &super::control::SnapshotView) -> Result<u64> {
+    document.revision.parse().map_err(|_| corrupt())
+}
+
 fn result_value(record: &PinHistoryRecord) -> Result<Value> {
     let observation = record.point_observation.as_deref().ok_or_else(corrupt)?;
     let point: RemoteObject = serde_json::from_str(observation).map_err(|_| corrupt())?;
@@ -68,6 +72,7 @@ async fn upload_prepared(
     connected: &ConnectedRepository,
     directory: &Path,
     record: &PinHistoryRecord,
+    budget: Option<super::journal::SpoolBudget>,
     cancel: &Cancellation,
 ) -> Result<(RemoteObject, TransferJournal)> {
     let snapshot: RemoteObject =
@@ -93,6 +98,9 @@ async fn upload_prepared(
             capture: record.identity.clone(),
         },
     )?;
+    if let Some(budget) = budget {
+        journal.set_spool_budget(budget);
+    }
     // A point names a bundle. Pinning a published state wraps its library
     // reference in one so the retained material stays complete on its own.
     let bundle = if snapshot.role == ObjectRole::BackupBundle {
@@ -195,7 +203,7 @@ pub(crate) async fn run_pin_history(
                     snapshot_id,
                     snapshot_reference: &snapshot_reference,
                     point_id: &job.id,
-                    logical_revision: document.revision.parse().unwrap_or_default(),
+                    logical_revision: checked_pin_revision(&document)?,
                     created_at_ms,
                     identity: &job.admission_identity,
                 })
@@ -210,8 +218,11 @@ pub(crate) async fn run_pin_history(
     if record.point_observation.is_some() {
         return result_value(&record);
     }
-    let directory = job_directory(&root(app)?, &job.request.connection_id, &job.id);
-    let (point, mut journal) = upload_prepared(connected, &directory, &record, cancel).await?;
+    let root = root(app)?;
+    let directory = job_directory(&root, &job.request.connection_id, &job.id);
+    let budget = super::runtime::spool_budget(&root, &job.id);
+    let (point, mut journal) =
+        upload_prepared(connected, &directory, &record, Some(budget), cancel).await?;
     let observation = serde_json::to_string(&point).map_err(|_| corrupt())?;
     native_store(app)?
         .external_finish_pin_history(&job.id, &observation)
@@ -250,6 +261,42 @@ mod tests {
         snapshot as wire,
     };
     use std::{collections::BTreeMap, sync::Arc};
+
+
+    #[test]
+    fn authenticated_remote_sequence_overflow_is_rejected_at_pin_boundary() {
+        let repository = fake::repository();
+        let mut catalog = snapshot();
+        catalog.role = ObjectRole::Catalog;
+        catalog.object_id = "catalog-fixture".into();
+        catalog.receipt.byte_length = wire::envelope_length(&wire::PublicObjectHeader::new(
+            catalog.repository_id.clone(), catalog.object_id.clone(), wire::ObjectRole::Catalog,
+            catalog.plaintext_length).unwrap()).unwrap();
+        let root = catalog.stored(&repository).unwrap();
+        let library = wire::LibrarySnapshotRef {
+            record_catalog: root.clone(), asset_catalog: root,
+            content_fingerprint: [1;32],
+        };
+        for (generation, expected) in [(u64::MAX.to_string(), Some(u64::MAX)),
+            ("18446744073709551616".into(), None)] {
+            let document = wire::SyncStateDocument::new("state".into(), descriptor().repository_id.clone(),
+                "library".into(), "epoch".into(), generation.try_into().unwrap(), None,
+                "writer".into(), 1_000, library.clone(), BTreeMap::new()).unwrap();
+            let plain = document.encode(wire::MAX_METADATA_BYTES).unwrap();
+            let header = wire::PublicObjectHeader::new(descriptor().repository_id.clone(), "state".into(),
+                wire::ObjectRole::SyncState, plain.len() as u64).unwrap();
+            let mut sealed = Vec::new();
+            wire::seal_envelope(&mut plain.as_slice(), &mut sealed, &[7;32], &header).unwrap();
+            let mut authenticated = Vec::new();
+            wire::open_envelope(&mut sealed.as_slice(), &mut authenticated, &[7;32], wire::MAX_METADATA_BYTES as u64).unwrap();
+            let view = super::super::control::SnapshotView::read(&authenticated, wire::ObjectRole::SyncState,
+                &descriptor().repository_id).unwrap();
+            match expected {
+                Some(value) => assert_eq!(checked_pin_revision(&view).unwrap(), value),
+                None => assert_eq!(checked_pin_revision(&view).unwrap_err().kind, ErrorKind::Corrupt),
+            }
+        }
+    }
 
     fn descriptor() -> Descriptor {
         Descriptor::new("descriptor-repository".into(), Some(Strategy::Cas),
@@ -355,6 +402,7 @@ mod tests {
                 retention_policy: None,
                 capabilities: fake::capabilities(true),
                 created_at_ms: 1_000,
+                verified_at_ms: 1,
                 last_sync_at_ms: None,
                 last_backup_at_ms: None,
             },
@@ -381,7 +429,7 @@ mod tests {
                 replace_character: None,
                 add_character: None,
                 conversations: None,
-                delete_character_id: None,
+                delete_character_ids: None,
                 plugin_storage: None,
                 asset_owner_heads: None,
             })
@@ -417,6 +465,7 @@ mod tests {
                 &connected,
                 &directory.path().join("old"),
                 &old,
+                None,
                 &Cancellation::default(),
             )
             .await
@@ -434,6 +483,7 @@ mod tests {
                 &connected,
                 &directory.path().join("replacement"),
                 &replacement,
+                None,
                 &cancelled,
             )
             .await
@@ -459,6 +509,7 @@ mod tests {
                 &connected,
                 &directory.path().join("journal"),
                 &record,
+                None,
                 &cancelled,
             )
             .await
@@ -473,6 +524,7 @@ mod tests {
                 &connected,
                 &directory.path().join("journal"),
                 &reopened,
+                None,
                 &Cancellation::default(),
             )
             .await

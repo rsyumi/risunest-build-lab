@@ -164,9 +164,6 @@
             if (shouldRemove) {
                 const secondConfirm = await alertConfirm(language.removeConfirm + (value.comment || 'Unnamed Folder'));
                 if (secondConfirm) {
-                    if (!open) {
-                        onClose();
-                    }
                     deactivateLocally(value);
                     onRemove();
                 }
@@ -182,9 +179,6 @@
         <button class="valuer" onclick={async () => {
             const d = await alertConfirm(language.removeConfirm + getParentLoreName(value))
             if(d){
-                if(!open){
-                    onClose()
-                }
                 onRemove()
             }
         }}>
@@ -199,7 +193,7 @@
             <TextInput size="sm" bind:value={value.comment}/>
 
             <div class="mt-4">
-                <LoreBookList externalLoreBooks={externalLoreBooks} showFolder={value.key} />
+                <LoreBookList externalLoreBooks={externalLoreBooks} showFolder={value.key} dragGroup={idgroup} />
             </div>
             
             <div class="mt-2 flex gap-1">

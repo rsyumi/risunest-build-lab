@@ -58,7 +58,11 @@ export class SafeLocalPluginStorage {
         }
     }
     async setItem<T>(key: string, value: T): Promise<void> {
-        await getPluginDeviceKeyspace(this.#owner).setItem('json', key, JSON.stringify(value));
+        const serialized = JSON.stringify(value);
+        if (typeof serialized !== 'string') {
+            throw new TypeError('getLocalPluginStorage values must be JSON-serializable');
+        }
+        await getPluginDeviceKeyspace(this.#owner).setItem('json', key, serialized);
     }
     async removeItem(key: string): Promise<void> {
         await getPluginDeviceKeyspace(this.#owner).removeItem('json', key);

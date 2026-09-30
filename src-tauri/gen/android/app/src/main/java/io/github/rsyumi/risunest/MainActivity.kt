@@ -1,5 +1,6 @@
 package io.github.rsyumi.risunest
 
+import android.app.AlertDialog
 import android.content.ComponentCallbacks2
 import android.content.Context
 import android.content.ContentResolver
@@ -33,6 +34,7 @@ import java.security.MessageDigest
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -250,15 +252,10 @@ private data class OpenedFileSource(
   val totalBytes: Long?,
 )
 
-internal class RestoredIntentConsumptionMarker(
-  private val isConsumed: () -> Boolean,
-  private val markConsumed: () -> Unit,
-) {
-  fun claim(): Boolean {
-    if (isConsumed()) return false
-    markConsumed()
-    return true
-  }
+internal class OpenedFileClaimRegistry {
+  private val pending = mutableSetOf<String>()
+  fun claim(id: String, consumed: Boolean): Boolean = !consumed && pending.add(id)
+  fun release(id: String) { pending.remove(id) }
 }
 
 internal fun openedFileIntentFingerprint(action: String?, uris: List<String>): String {
@@ -311,9 +308,13 @@ internal class LifecycleFlushDispatcher(
 internal class ExitFlushGate {
   private var pendingToken: String? = null
 
-  fun begin(token: String) {
+  fun begin(token: String): Boolean {
+    if (pendingToken != null) return false
     pendingToken = token
+    return true
   }
+
+  fun isPending(token: String): Boolean = pendingToken == token
 
   fun cancel(token: String) {
     if (pendingToken == token) {
@@ -424,7 +425,10 @@ internal fun cleanupLegacyOpenedFiles(
   val cutoff = nowMillis - staleAfterMillis
   return runCatching { directory.listFiles().orEmpty().toList() }.getOrDefault(emptyList())
     .filter {
-      it.isFile && it.lastModified() <= cutoff && runCatching(it::delete).getOrDefault(false)
+      val pending = if (it.name.endsWith(".pending")) {
+        File(it.absolutePath.removeSuffix(".pending")).isFile
+      } else File("${it.absolutePath}.pending").isFile
+      !pending && it.isFile && it.lastModified() <= cutoff && runCatching(it::delete).getOrDefault(false)
     }
     .map(File::getName)
     .sorted()
@@ -506,6 +510,14 @@ internal class GenerationKeepAliveOwner {
 private val postNotificationsRequestedInProcess = AtomicBoolean(false)
 
 class MainActivity : TauriActivity(), RendererRecoveryHost {
+  @androidx.annotation.Keep
+  private external fun cancelIncompleteBoot()
+
+  private fun finishForUserExit() {
+    runCatching { cancelIncompleteBoot() }.onFailure { Log.e(TAG, "Boot cancellation failed", it) }
+    finishAndRemoveTask()
+  }
+
   private val webviewCleanup = AndroidWebviewCleanup()
 
   @androidx.annotation.Keep
@@ -528,6 +540,8 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
   private val safCommands = SafBridge()
   private val lifecycleFlushDispatcher = LifecycleFlushDispatcher(::dispatchLifecycleFlush)
   private val exitFlushGate = ExitFlushGate()
+  private var exitListenerReady = false
+  private var exitWaitDialog: AlertDialog? = null
   private val rendererRecoveryCoordinator = RendererRecoveryCoordinator(::logRendererRecoveryFailure)
   private val rendererRestartGate by lazy {
     RendererRestartGate(
@@ -547,15 +561,17 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
   private val safDestinationCancellations = ConcurrentHashMap<String, AtomicBoolean>()
   private val safProgressThrottle = SafProgressThrottle()
   private val deliveredSpoolTokens = ConcurrentHashMap.newKeySet<String>()
+  private val deliveredLegacyPaths = mutableSetOf<String>()
   private var pendingSafDestination: PendingSafDestination? = null
   private var pendingLegacyBackupSource: PendingLegacyBackupSource? = null
   private val safPickerSlot = SafDestinationSlot()
   private val safDestinationStateLock = Any()
   private var consumedOpenedFileFingerprint: String? = null
+  private val claimedOpenedFileFingerprints = OpenedFileClaimRegistry()
   private var pendingBackupSource: PendingBackupSource? = null
   private val safDestinationStateStore by lazy {
     SafDestinationStateStore(
-      File(dataDir, "native-file-jobs/android-saf-destination.json"),
+      File(filesDir, "native-file-jobs/android-saf-destination.json"),
       AndroidSafAtomicPublisher,
     )
   }
@@ -574,11 +590,12 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
     ActivityResultContracts.OpenDocument(),
     ::onLegacyBackupSourceSelected,
   )
+  private var notificationPermissionResult: CompletableDeferred<Boolean>? = null
   private val postNotificationsPermissionLauncher = registerForActivityResult(
     ActivityResultContracts.RequestPermission(),
   ) {
-    // Generation keep-alive checks notification
-    // availability on each begin and declines to start until it is granted.
+    notificationPermissionResult?.complete(CompletionNotifications.enabled(this))
+    notificationPermissionResult = null
     dispatchNotificationStateRefresh()
   }
   private val rendererRecoveryMarker by lazy {
@@ -683,6 +700,10 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
     frontendReady.cancel()
     frontendReady = AndroidFrontendReady()
     lifecycleWebView = webView
+    exitListenerReady = false
+    deliveredLegacyPaths.clear()
+    exitWaitDialog?.dismiss()
+    exitWaitDialog = null
     commitBridge?.close()
     commitBridge = AndroidCommitBridge.attach(webView)
     controlBridge?.close()
@@ -799,6 +820,10 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
   }
 
   override fun onDestroy() {
+    exitWaitDialog?.dismiss()
+    exitWaitDialog = null
+    notificationPermissionResult?.cancel()
+    notificationPermissionResult = null
     frontendReady.cancel()
     rendererRestartGate.close()
     commitBridge?.close()
@@ -841,11 +866,11 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
   private fun requestExitFlushThenFinish() {
     val webView = lifecycleWebView
     if (webView == null) {
-      finishAndRemoveTask()
+      finishForUserExit()
       return
     }
     val token = "exit-${++exitFlushSequence}"
-    exitFlushGate.begin(token)
+    if (!exitFlushGate.begin(token)) return
     webView.evaluateJavascript(
       "window.dispatchEvent(new CustomEvent('$NATIVE_LIFECYCLE_EVENT'," +
         "{detail:{reason:'$EXIT_REASON',ackToken:'$token'}}));",
@@ -854,15 +879,45 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
     mainHandler.postDelayed({ finishForExitFlush(token) }, EXIT_FLUSH_TIMEOUT_MILLIS)
   }
 
-  private fun finishForExitFlush(token: String) {
-    if (exitFlushGate.shouldFinish(token)) {
-      finishAndRemoveTask()
+  private fun finishForExitFlush(token: String, acknowledged: Boolean = false) {
+    if (!exitFlushGate.isPending(token)) return
+    if (exitListenerReady && !acknowledged) {
+      if (exitWaitDialog != null) return
+      exitWaitDialog = AlertDialog.Builder(this)
+        .setTitle(R.string.exit_still_saving)
+        .setMessage(R.string.exit_without_saving_warning)
+        .setCancelable(false)
+        .setNegativeButton(R.string.exit_wait) { _, _ ->
+          exitWaitDialog = null
+          mainHandler.postDelayed({ finishForExitFlush(token) }, EXIT_FLUSH_TIMEOUT_MILLIS)
+        }
+        .setPositiveButton(R.string.exit_now) { _, _ ->
+          exitWaitDialog = null
+          if (exitFlushGate.shouldFinish(token)) finishForUserExit()
+        }
+        .show()
+      return
     }
+    exitWaitDialog?.dismiss()
+    exitWaitDialog = null
+    if (exitFlushGate.shouldFinish(token)) finishForUserExit()
   }
 
   private fun onFrontendReady() {
     val webView = lifecycleWebView ?: return
     if (!frontendReady.markReady()) return
+    safScope.launch {
+      val paths = withContext(Dispatchers.IO) {
+        File(cacheDir, "opened_files").listFiles().orEmpty()
+          .filter { it.name.endsWith(".pending") && it.isFile }
+          .map { File(it.parentFile, it.name.removeSuffix(".pending")) }
+          .filter { it.isFile }.map { it.absolutePath }
+      }
+      if (lifecycleWebView === webView) deliverLegacyOpenedFiles(webView, paths)
+    }
+    // Asked at startup so sync and backups started later, onboarding included,
+    // keep their progress notification while the app is in the background.
+    requestPostNotificationsForForegroundService()
     if (BuildConfig.ENABLE_EXPERIMENTAL_SAF_FILE_JOBS) {
       replayReadySpools(webView)
       replaySafDestinationResult(webView)
@@ -875,14 +930,25 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
     }
     return when (method) {
       "lifecycle.onFrontendReady" -> onFrontendReady()
+      "lifecycle.acknowledgeOpenedFile" -> withContext(Dispatchers.IO) { acknowledgeLegacyOpenedFile(args[0]) }
+      "lifecycle.exitListenerReady" -> { exitListenerReady = args[0] == "true" }
       "lifecycle.onFlushComplete" -> lifecycleCommands.onFlushComplete(args[0])
       "lifecycle.onFlushHold" -> lifecycleCommands.onFlushHold(args[0])
       "lifecycle.requestExit" -> lifecycleCommands.requestExit()
       "lifecycle.requestRestart" -> lifecycleCommands.requestRestart()
+      "background.begin" -> GenerationForegroundService.beginTask(this, args[0]) { id ->
+        lifecycleWebView?.evaluateJavascript(
+          "window.dispatchEvent(new CustomEvent('risunest-background-expired',{detail:'$id'}));", null,
+        )
+      }
+      "background.progress" -> GenerationForegroundService.taskProgress(args[0], args[1].toInt())
+      "background.end" -> GenerationForegroundService.endTask(this, args[0])
       "generation.begin" -> generationCommands.begin()
       "generation.end" -> generationCommands.end()
       "generation.notificationsEnabled" -> generationCommands.notificationsEnabled()
-      "generation.requestNotifications" -> requestPostNotificationsForForegroundService()
+      "generation.requestNotifications" -> requestCompletionNotifications()
+      "notification.enabled" -> CompletionNotifications.enabled(this)
+      "notification.completion" -> CompletionNotifications.post(this, args[0])
       "generation.openNotificationSettings" -> generationCommands.openNotificationSettings()
       "generation.webViewVersion" -> generationCommands.webViewVersion()
       "saf.pickBackupSource" -> safCommands.pickBackupSource(args[0])
@@ -908,16 +974,22 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
   private inner class LifecycleFlushBridge {
     fun onFlushComplete(token: String?) {
       token ?: return
-      mainHandler.post { finishForExitFlush(token) }
+      mainHandler.post { finishForExitFlush(token, acknowledged = true) }
     }
 
     fun onFlushHold(token: String?) {
       token ?: return
-      mainHandler.post { exitFlushGate.cancel(token) }
+      mainHandler.post {
+        if (exitFlushGate.isPending(token)) {
+          exitFlushGate.cancel(token)
+          exitWaitDialog?.dismiss()
+          exitWaitDialog = null
+        }
+      }
     }
 
     fun requestExit() {
-      mainHandler.post { finishAndRemoveTask() }
+      mainHandler.post { finishForUserExit() }
     }
 
     fun requestRestart() {
@@ -961,6 +1033,21 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
   // Android 13+ can hide foreground-service notifications unless POST_NOTIFICATIONS
   // is granted. Request it once per process. Generation keep-alive
   // declines to start until notifications and its channel are available.
+  private suspend fun requestCompletionNotifications(): Boolean {
+    if (CompletionNotifications.enabled(this)) return true
+    if (Build.VERSION.SDK_INT < 33) return false
+    notificationPermissionResult?.let { return it.await() }
+    val result = CompletableDeferred<Boolean>()
+    notificationPermissionResult = result
+    try {
+      postNotificationsPermissionLauncher.launch(android.Manifest.permission.POST_NOTIFICATIONS)
+    } catch (error: Exception) {
+      result.complete(false)
+      notificationPermissionResult = null
+    }
+    return result.await()
+  }
+
   private fun requestPostNotificationsForForegroundService() {
     requestPostNotificationsIfNeeded(
       gate = postNotificationsGate,
@@ -970,10 +1057,16 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
       },
       postToMain = { block -> mainHandler.post { block() } },
       launchRequest = {
-        runCatching {
-          postNotificationsPermissionLauncher.launch(
-            android.Manifest.permission.POST_NOTIFICATIONS,
-          )
+        if (notificationPermissionResult == null) {
+          notificationPermissionResult = CompletableDeferred()
+          runCatching {
+            postNotificationsPermissionLauncher.launch(
+              android.Manifest.permission.POST_NOTIFICATIONS,
+            )
+          }.onFailure {
+            notificationPermissionResult?.complete(false)
+            notificationPermissionResult = null
+          }
         }
       },
     )
@@ -1109,7 +1202,7 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
         var sourceKind = SafDestinationSourceKind.RISU_SAVE
         try {
           val source = withContext(Dispatchers.IO) {
-            resolveManagedExportSource(dataDir, sourcePath)
+            resolveManagedExportSource(filesDir, sourcePath)
           } ?: throw SafDestinationException(
             "invalid-source",
             emptyList(),
@@ -1249,10 +1342,10 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
       requestId,
       ::loadSafDestinationState,
       { record ->
-        requiresRisuSavePublicationProof(dataDir, record.exportId, record.sourceKind)
+        requiresRisuSavePublicationProof(filesDir, record.exportId, record.sourceKind)
       },
       { record ->
-        prepareManagedExportAcknowledgement(dataDir, record.exportId, record.sourceKind)
+        prepareManagedExportAcknowledgement(filesDir, record.exportId, record.sourceKind)
       },
       ::clearSafDestinationState,
     )
@@ -1481,9 +1574,7 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
       val terminalRecord = try {
         val source = pending.source ?: throw SafDestinationException(
           "invalid-source",
-          interruptedSafDestinationWarnings {
-            contentResolver.delete(destinationUri, null, null) > 0
-          },
+          interruptedSafDestinationWarnings(),
           "Android SAF export source did not survive process recreation",
         )
         val result = copySafDestinationOnIo(
@@ -1492,8 +1583,8 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
             contentResolver.openOutputStream(destinationUri, "wt")
               ?: throw IOException("Android SAF provider did not open the destination")
           },
-          deletePartial = { contentResolver.delete(destinationUri, null, null) > 0 },
-          createdDocument = true,
+          deletePartial = { false },
+          createdDocument = false,
           isCancelled = { pending.cancellation.get() || !copyContext.isActive },
           onProgress = { copiedBytes ->
             dispatchSafProgress(
@@ -1535,9 +1626,7 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
         terminalMessage = "Android SAF destination copy failed"
         val warnings = if (destinationUri.scheme == ContentResolver.SCHEME_CONTENT) {
           withContext(Dispatchers.IO) {
-            interruptedSafDestinationWarnings {
-              contentResolver.delete(destinationUri, null, null) > 0
-            }
+            interruptedSafDestinationWarnings()
           }
         } else {
           emptyList()
@@ -1557,7 +1646,6 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
       val (publishedRecord, publishedMessage) = finalizeSafDestination(
         terminalRecord,
         terminalMessage,
-        destinationUri,
       )
       safPickerSlot.release()
       dispatchSafDestination(publishedRecord, publishedMessage)
@@ -1581,15 +1669,12 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
   private suspend fun cleanupUnclaimedSafDestinationOnIo(uri: Uri?): List<String> =
     withContext(Dispatchers.IO) {
       if (uri == null || uri.scheme != ContentResolver.SCHEME_CONTENT) return@withContext emptyList()
-      interruptedSafDestinationWarnings {
-        contentResolver.delete(uri, null, null) > 0
-      }
+      interruptedSafDestinationWarnings()
     }
 
   private suspend fun finalizeSafDestination(
     record: SafDestinationRecord,
     message: String?,
-    destinationUri: Uri?,
   ): Pair<SafDestinationRecord, String?> {
     if (persistTerminalIfPossible(record)) return record to message
     if (record.phase != SafDestinationPhase.SUCCEEDED) return record to message
@@ -1601,11 +1686,7 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
       ) to message
     }
     val cleanupWarnings = withContext(Dispatchers.IO) {
-      interruptedSafDestinationWarnings {
-        destinationUri != null &&
-          destinationUri.scheme == ContentResolver.SCHEME_CONTENT &&
-          contentResolver.delete(destinationUri, null, null) > 0
-      }
+      interruptedSafDestinationWarnings()
     }
     val failed = destinationTerminalRecord(
       requestId = record.requestId,
@@ -1745,7 +1826,7 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
       requestId = record.requestId,
       exportId = record.exportId,
       sourceKind = record.sourceKind,
-      source = resolveManagedExportById(dataDir, record.exportId),
+      source = resolveManagedExportById(filesDir, record.exportId),
       cancellation = cancellation,
     )
   }
@@ -1762,13 +1843,8 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
         safPickerSlot.acquireRestored()
         safScope.launch {
           try {
-            val destinationUri = record.destinationUri?.let(Uri::parse)
             val warnings = withContext(Dispatchers.IO) {
-              interruptedSafDestinationWarnings {
-                destinationUri != null &&
-                  destinationUri.scheme == ContentResolver.SCHEME_CONTENT &&
-                  contentResolver.delete(destinationUri, null, null) > 0
-              }
+              interruptedSafDestinationWarnings()
             }
             val wasCancelling = record.phase == SafDestinationPhase.CANCELLING
             val terminal = destinationTerminalRecord(
@@ -1907,13 +1983,13 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
         val (nativeJobSources, legacySources) = openedSources.partition { source ->
           shouldUseNativeFileJobSpool(source.displayName)
         }
-        stageLegacyOpenedFiles(webView, legacySources.map { it.uri }, ready)
-        if (nativeJobSources.isEmpty()) return@launch
+        val legacyFiles = withContext(Dispatchers.IO) { copyLegacyOpenedFiles(legacySources.map { it.uri }, openedIntent?.action) }
         val store = safSpoolStore()
         val sources = withContext(Dispatchers.IO) {
           store.cleanupStale()
           nativeJobSources.map { source ->
-            contentResolverSource(source.uri, source.displayName, source.totalBytes)
+            contentResolverSource(source.uri, source.displayName, source.totalBytes,
+              openedFileIntentFingerprint(openedIntent?.action, listOf(source.uri.toString())))
           }
         }
         val copyContext = currentCoroutineContext()
@@ -1933,14 +2009,21 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
             )
           },
         )
+        if (batch.failures.isEmpty() && legacyFiles.size == legacySources.size) {
+          markOpenedIntentStaged(openedIntent, uris)
+        } else {
+          Toast.makeText(this@MainActivity, R.string.opened_file_prepare_failed, Toast.LENGTH_LONG).show()
+        }
         ready.await()
         if (!copyContext.isActive || lifecycleWebView !== webView) return@launch
+        if (legacyFiles.isNotEmpty()) deliverLegacyOpenedFiles(webView, legacyFiles)
         val newlyReady = batch.ready.filter { deliveredSpoolTokens.add(it.token) }
         webView.evaluateJavascript(
           androidSpoolBatchScript(requestId, batch.copy(ready = newlyReady)),
           null,
         )
       } finally {
+        releaseOpenedIntentClaim(openedIntent, uris)
         safSourceCancellations.remove(requestId, cancellation)
         safProgressThrottle.clear(requestId)
       }
@@ -1965,7 +2048,7 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
   }
 
   private fun safSpoolStore() = SafSpoolStore(
-    root = File(dataDir, "native-file-jobs/sources"),
+    root = File(filesDir, "native-file-jobs/sources"),
     atomicPublisher = AndroidSafAtomicPublisher,
   )
 
@@ -1977,17 +2060,22 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
       openedIntent.action,
       uris.map(Uri::toString),
     )
-    val marker = RestoredIntentConsumptionMarker(
-      isConsumed = {
-        openedIntent.getBooleanExtra(OPENED_FILE_INTENT_CONSUMED, false) ||
-          consumedOpenedFileFingerprint == fingerprint
-      },
-      markConsumed = {
-        openedIntent.putExtra(OPENED_FILE_INTENT_CONSUMED, true)
-        consumedOpenedFileFingerprint = fingerprint
-      },
-    )
-    return if (marker.claim()) uris else emptyList()
+    if (!claimedOpenedFileFingerprints.claim(fingerprint,
+      openedIntent.getBooleanExtra(OPENED_FILE_INTENT_CONSUMED, false) ||
+        consumedOpenedFileFingerprint == fingerprint)) return emptyList()
+    return uris
+  }
+
+  private fun markOpenedIntentStaged(openedIntent: Intent?, uris: List<Uri>) {
+    openedIntent ?: return
+    val fingerprint = openedFileIntentFingerprint(openedIntent.action, uris.map(Uri::toString))
+    openedIntent.putExtra(OPENED_FILE_INTENT_CONSUMED, true)
+    consumedOpenedFileFingerprint = fingerprint
+    claimedOpenedFileFingerprints.release(fingerprint)
+  }
+
+  private fun releaseOpenedIntentClaim(openedIntent: Intent?, uris: List<Uri>) {
+    claimedOpenedFileFingerprints.release(openedFileIntentFingerprint(openedIntent?.action, uris.map(Uri::toString)))
   }
 
   private fun dispatchSafProgress(
@@ -2020,19 +2108,49 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
     webView: WebView,
     uris: List<Uri>,
     ready: AndroidFrontendReady = frontendReady,
+    openedIntent: Intent? = intent,
   ) {
     if (uris.isEmpty()) return
     safScope.launch {
-      val openedFiles = withContext(Dispatchers.IO) { copyLegacyOpenedFiles(uris) }
-      if (openedFiles.isEmpty()) return@launch
-      ready.await()
-      if (lifecycleWebView === webView) {
-        webView.evaluateJavascript(openedFilesEventScript(openedFiles), null)
+      try {
+        val openedFiles = withContext(Dispatchers.IO) {
+          copyLegacyOpenedFiles(uris, openedIntent?.action)
+        }
+        if (openedFiles.size == uris.size) markOpenedIntentStaged(openedIntent, uris)
+        else Toast.makeText(this@MainActivity, R.string.opened_file_prepare_failed, Toast.LENGTH_LONG).show()
+        if (openedFiles.isEmpty()) return@launch
+        ready.await()
+        if (lifecycleWebView === webView) deliverLegacyOpenedFiles(webView, openedFiles)
+      } finally {
+        releaseOpenedIntentClaim(openedIntent, uris)
       }
     }
   }
 
-  private fun copyLegacyOpenedFiles(uris: List<Uri>): List<String> {
+  private fun deliverLegacyOpenedFiles(webView: WebView, paths: List<String>) {
+    val fresh = paths.filter { deliveredLegacyPaths.add(it) }
+    if (fresh.isEmpty()) return
+    webView.evaluateJavascript(openedFilesEventScript(fresh), null)
+  }
+
+  private fun acknowledgeLegacyOpenedFile(path: String) {
+    val directory = File(cacheDir, "opened_files").canonicalFile
+    val source = File(path)
+    if (source.parentFile?.canonicalFile != directory || source.canonicalFile.parentFile != directory) return
+    if (File("${source.absolutePath}.pending").delete()) {
+      mainHandler.post { deliveredLegacyPaths.remove(source.absolutePath) }
+    }
+  }
+
+  private fun markLegacyFileReady(file: File) {
+    val marker = File("${file.absolutePath}.pending")
+    if (marker.isFile) return
+    val temporary = File("${marker.absolutePath}.tmp")
+    temporary.outputStream().use { it.fd.sync() }
+    AndroidSafAtomicPublisher.publish(temporary, marker)
+  }
+
+  private fun copyLegacyOpenedFiles(uris: List<Uri>, action: String?): List<String> {
     if (uris.isEmpty()) return emptyList()
     val directory = File(cacheDir, "opened_files")
     directory.mkdirs()
@@ -2041,11 +2159,19 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
     return uris.mapIndexedNotNull { index, uri ->
       var target: File? = null
       try {
-        val openedTarget = File(directory, "${UUID.randomUUID()}-$index-${resolveLegacyDisplayName(uri)}")
-        target = openedTarget
+        val sourceId = openedFileIntentFingerprint(action, listOf(uri.toString()))
+        val openedTarget = File(directory, "$sourceId-$index-${resolveLegacyDisplayName(uri)}")
+        if (openedTarget.isFile && File("${openedTarget.absolutePath}.pending").isFile) {
+          markLegacyFileReady(openedTarget)
+          return@mapIndexedNotNull openedTarget.absolutePath
+        }
+        val partial = File(directory, "${openedTarget.name}.partial")
+        target = partial
         contentResolver.openInputStream(uri)?.use { input ->
-          openedTarget.outputStream().use { output -> input.copyTo(output) }
+          partial.outputStream().use { output -> input.copyTo(output); output.fd.sync() }
         } ?: return@mapIndexedNotNull null
+        AndroidSafAtomicPublisher.publish(partial, openedTarget)
+        markLegacyFileReady(openedTarget)
         openedTarget.absolutePath
       } catch (error: Exception) {
         target?.delete()
@@ -2127,8 +2253,10 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
     uri: Uri,
     displayName: String,
     totalBytes: Long?,
+    operationId: String? = null,
   ): SafInputSource {
     return object : SafInputSource {
+      override val operationId = operationId
       override val displayName = displayName
       override val totalBytes = totalBytes
 

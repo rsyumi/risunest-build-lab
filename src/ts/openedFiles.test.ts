@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const mocks = vi.hoisted(() => ({
     ios: false,
+    android: false,
     readFile: vi.fn(async (_path: string) => new Uint8Array([1])),
     invoke: vi.fn<(command: string, args?: unknown) => Promise<unknown>>(async () => []),
     listen: vi.fn(async (_event: string, _handler: (payload: unknown) => void) => () => {}),
@@ -20,8 +21,8 @@ vi.mock('@tauri-apps/api/event', () => ({
 vi.mock('./alert', () => ({ alertError: mocks.alertError }))
 vi.mock('src/ts/platform', () => ({
     isTauri: true,
-    isTauriAndroid: false,
-    get isTauriDesktop() { return !mocks.ios },
+    get isTauriAndroid() { return mocks.android },
+    get isTauriDesktop() { return !mocks.ios && !mocks.android },
     get isTauriIOS() { return mocks.ios },
 }))
 
@@ -49,6 +50,8 @@ async function flush() {
 describe('opened file delivery', () => {
     beforeEach(async () => {
         mocks.ios = false
+        mocks.android = false
+        delete window.RisuLifecycleBridge
         vi.resetModules()
         api = await import('./openedFiles')
         ;({ consumeOpenedFiles, registerOpenedFileListeners, OPENED_FILES_EVENT, OPENED_FILES_TAKE_COMMAND } = api)
@@ -97,6 +100,39 @@ describe('opened file delivery', () => {
         expect(mocks.invoke.mock.calls.filter(([command]) => command.endsWith('discard_file'))
             .map(([, args]) => args)).toEqual(order.map(path => ({ path })))
         expect(mocks.alertError).toHaveBeenCalledOnce()
+    })
+
+    it('acknowledges an Android queued file only after its importer completes', async () => {
+        mocks.android = true
+        const acknowledgeOpenedFile = vi.fn(async () => {})
+        window.RisuLifecycleBridge = { acknowledgeOpenedFile }
+        let complete!: () => void
+        const importFile = vi.fn(() => new Promise<void>(resolve => { complete = resolve }))
+        ;(window as Window & { tauriOpenedFiles?: string[] }).tauriOpenedFiles = ['/cache/opened_files/card.charx']
+        registerOpenedFileListeners(importFile)
+        await flush()
+        expect(importFile).toHaveBeenCalledOnce()
+        expect(acknowledgeOpenedFile).not.toHaveBeenCalled()
+        complete()
+        await flush()
+        expect(acknowledgeOpenedFile).toHaveBeenCalledWith('/cache/opened_files/card.charx')
+    })
+
+    it('retains failed Android deliveries and acknowledges completed native imports', async () => {
+        mocks.android = true
+        const acknowledgeOpenedFile = vi.fn(async () => {})
+        window.RisuLifecycleBridge = { acknowledgeOpenedFile }
+        const importFile = vi.fn(async (path: string): Promise<void | 'failed'> => {
+            if (path === 'reported.charx') return 'failed'
+            throw new Error('synthetic import failure')
+        })
+        const importPath = vi.fn(async (path: string): Promise<boolean | 'failed'> =>
+            path === 'failed.charx' ? 'failed' : path === 'complete.charx')
+        registerOpenedFileListeners(importFile, importPath)
+        await consumeOpenedFiles(['failed.charx', 'legacy.charx', 'reported.charx', 'complete.charx'])
+        expect(mocks.readFile.mock.calls.map(([path]) => path)).toEqual(['legacy.charx', 'reported.charx'])
+        expect(mocks.alertError).toHaveBeenCalledOnce()
+        expect(acknowledgeOpenedFile).toHaveBeenCalledExactlyOnceWith('complete.charx')
     })
 
     it('reads and imports every file in order', async () => {

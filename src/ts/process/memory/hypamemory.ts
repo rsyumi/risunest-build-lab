@@ -49,6 +49,7 @@ export const localModels = {
 }
 
 export class HypaProcesser{
+    signal?: AbortSignal
     oaikey:string
     vectors:memoryVector[]
     model:HypaModel
@@ -72,9 +73,11 @@ export class HypaProcesser{
         const embeddings: VectorArray[] = [];
     
         for (let i = 0; i < subPrompts.length; i += 1) {
+          this.signal?.throwIfAborted()
           const input = subPrompts[i];
     
           const data = await this.getEmbeds(input, 'document')
+          this.signal?.throwIfAborted()
     
           embeddings.push(...data);
         }
@@ -84,19 +87,20 @@ export class HypaProcesser{
     
     
     async getEmbeds(input:string[]|string, inputType:'query'|'document' = 'query'):Promise<VectorArray[]> {
+        this.signal?.throwIfAborted()
         if(isContextModel(this.model)){
             const provider = getContextProvider(this.model)
             const inputs:string[] = Array.isArray(input) ? input : [input]
             if(inputType === 'query'){
-                return await provider.embedQueries(inputs)
+                return await provider.embedQueries(inputs, this.signal)
             }
             const groups = inputs.map(s => [s])
-            const results = await provider.embedDocumentGroups(groups)
+            const results = await provider.embedDocumentGroups(groups, this.signal)
             return results.map(group => group[0])
         }
         if(Object.keys(localModels.models).includes(this.model)){
             const inputs:string[] = Array.isArray(input) ? input : [input]
-            let results:Float32Array[] = await runEmbedding(inputs, localModels.models[this.model], localModels.gpuModels.includes(this.model) ? 'webgpu' : 'wasm')
+            let results:Float32Array[] = await runEmbedding(inputs, localModels.models[this.model], localModels.gpuModels.includes(this.model) ? 'webgpu' : 'wasm', this.signal)
             return results
         }
         let gf = null;
@@ -109,6 +113,7 @@ export class HypaProcesser{
 
             const db = getDatabase()
             const fetchArgs = {
+                abortSignal: this.signal,
                 headers: {
                     ...(db.hypaCustomSettings?.key?.trim() ? {"Authorization": "Bearer " + db.hypaCustomSettings.key.trim()} : {})
                 },
@@ -129,6 +134,7 @@ export class HypaProcesser{
             }
 
             gf = await globalFetch("https://api.openai.com/v1/embeddings", {
+                abortSignal: this.signal,
                 headers: {
                     "Authorization": "Bearer " + (this.oaikey?.trim() || db.supaMemoryKey?.trim())
                 },
@@ -138,6 +144,7 @@ export class HypaProcesser{
                 }
             })
         }
+        this.signal?.throwIfAborted()
         const data = gf.data
     
     

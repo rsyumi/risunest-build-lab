@@ -76,6 +76,7 @@ pub(super) async fn prepare(app: &AppHandle) -> Result<(), String> {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    crate::server_sync::residency::release_anchor();
     if state
         .maintenance
         .lock()
@@ -137,6 +138,7 @@ pub(super) fn rebuild(app: &AppHandle) -> Result<(), String> {
         .reopen_after_cleanup()?;
     app.state::<crate::native_media::ipc::NativeMediaIpcState>()
         .configure(state.paths.data.join("native-media-ipc"))?;
+    crate::server_sync::residency::arm_anchor(&state.paths.data);
     if let Some(media) = app.try_state::<crate::native_media::streaming::MediaServerState>() {
         media.reopen_after_cleanup(state.paths.data.clone())?;
     } else {

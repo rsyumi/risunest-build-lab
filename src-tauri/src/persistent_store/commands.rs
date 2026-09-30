@@ -269,6 +269,13 @@ impl Default for PersistentStoreState {
     }
 }
 
+#[cfg(test)]
+impl PersistentStoreState {
+    pub(crate) fn with_test_store(store: PersistentStore) -> Self {
+        Self { store: Mutex::new(Some(store)), ..Self::default() }
+    }
+}
+
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PersistentStoreOpenResult {
@@ -421,7 +428,9 @@ pub(crate) fn pds_open(
 ) -> Result<PersistentStoreOpenResult, StoreError> {
     let operation_guard = state.admit_renderer_operation()?;
     let app_data_dir = crate::app_paths::data_root(&app).map_err(|message| StoreError::Store { message })?;
-    open_renderer_persistent_store_admitted(&state, &operation_guard, &app_data_dir)
+    let opened = open_renderer_persistent_store_admitted(&state, &operation_guard, &app_data_dir)?;
+    crate::external_storage::receive_artifacts::reclaim_settled_later(&app);
+    Ok(opened)
 }
 
 #[cfg(test)]
@@ -636,6 +645,15 @@ pub(crate) fn pds_query_plugin_storage(
     lease: Option<String>,
 ) -> Result<PluginStorageCatalog, StoreError> {
     with_store(state, |store| store.query_plugin_storage(lease.as_deref()))
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_read_plugin_storage_page(
+    state: State<'_, PersistentStoreState>,
+    query: super::PluginStorageValueQuery,
+    lease: Option<String>,
+) -> Result<super::PluginStorageValuePage, StoreError> {
+    with_store(state, |store| store.read_plugin_storage_page(&query, lease.as_deref()))
 }
 
 #[tauri::command(async)]
@@ -914,15 +932,18 @@ pub(crate) fn pds_release_revision(
 
 #[tauri::command(async)]
 pub(crate) fn pds_export_risu_save(
+    app: AppHandle,
     state: State<'_, PersistentStoreState>,
     lease: String,
     omit_account: bool,
 ) -> Result<ExportedRisuSave, StoreError> {
+    let account = crate::account_credential::export_account(&app, omit_account)
+        .map_err(|message| StoreError::Validation { message })?;
     let operation_guard = state.admit_renderer_operation()?;
     let prepared = with_store_mutex_mut_admitted(&state, &operation_guard, |store| {
         store.detach_risu_save_export(&lease)
     })?;
-    let outcome = prepared.create_attached_export(omit_account);
+    let outcome = prepared.create_attached_export(omit_account, account.as_ref());
     let reattach = with_store_mutex_mut_admitted(&state, &operation_guard, |store| {
         store.reattach_risu_save_export(prepared)
     });
@@ -966,15 +987,19 @@ pub(crate) async fn official_publication_upload_file(
 #[cfg(feature = "native-kei-upload-pilot")]
 #[tauri::command(async)]
 pub(crate) async fn pds_kei_backup_upload(
+    app: AppHandle,
     state: State<'_, PersistentStoreState>,
     lease: String,
     url: String,
     expected_account_id: String,
     token: String,
 ) -> Result<KeiUploadResult, StoreError> {
+    let account = crate::account_credential::export_account(&app, false)
+        .map_err(|message| StoreError::Validation { message })?
+        .ok_or_else(|| StoreError::Validation { message: "KEI account credential is unavailable".to_owned() })?;
     let operation = state.admit_renderer_operation()?;
     let prepared = with_store_mutex_mut_admitted(&state, &operation, |store| {
-        store.prepare_kei_upload(&lease, &url, &expected_account_id, &token)
+        store.prepare_kei_upload(&lease, &url, &expected_account_id, &token, &account)
     })?;
     // Keep admission with the native task even if its invoking renderer goes
     // away while serialization or detached-reader checkpointing is running.
@@ -1009,13 +1034,29 @@ pub(crate) fn pds_snapshot_create(
             .map_err(|error| StoreError::Store {
                 message: format!("persistent snapshot mutex poisoned: {error}"),
             })?;
-    let store = state.store.lock().map_err(|error| StoreError::Store {
-        message: format!("persistent store mutex poisoned: {error}"),
-    })?;
-    let store = store.as_ref().ok_or_else(|| StoreError::Validation {
-        message: "persistent store has not been opened".to_owned(),
-    })?;
-    let result = store.snapshot_create(&reason);
+    let started = std::time::Instant::now();
+    let (mut archive, scratch, current_bytes, inventory) = {
+        let store = state.store.lock().map_err(|error| StoreError::Store {
+            message: format!("persistent store mutex poisoned: {error}"),
+        })?;
+        let store = store.as_ref().ok_or_else(|| StoreError::Validation {
+            message: "persistent store has not been opened".to_owned(),
+        })?;
+        let archive = super::snapshot_archive::Archive::open(&store.snapshots_dir)?;
+        let inventory = store.active_readers.defer_asset_inventory();
+        let (scratch, current_bytes) =
+            super::snapshot::capture_scratch(&store.connection, &archive)?;
+        (archive, scratch, current_bytes, inventory)
+    };
+    let result = super::snapshot::archive_scratch(
+        &mut archive,
+        scratch,
+        current_bytes,
+        &reason,
+        started,
+    );
+    drop(inventory);
+    drop(archive);
     drop(snapshot_operation);
     result
 }
@@ -1206,7 +1247,7 @@ fn pds_asset_gc_execute_page(
     now: i64,
 ) -> StoreResult<crate::asset_repository::migration_gc::AssetGcDryRunPage> {
     with_store_mutex_mut_admitted(state, operation_guard, |store| {
-        store.asset_gc_delete_marked_page_with_hook(marks, 128, cursor, now, 7 * 24 * 60 * 60 * 1_000, |_| Ok(()))
+        store.asset_gc_delete_marked_page_with_hook(marks, 1024, cursor, now, 7 * 24 * 60 * 60 * 1_000, |_| Ok(()))
     })
 }
 
@@ -1285,6 +1326,13 @@ pub(crate) fn pds_claim_plugin_storage_value(
             expected_revision,
         )
     })
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_close_plugin_claim_eligibility(
+    state: State<'_, PersistentStoreState>,
+) -> Result<(), StoreError> {
+    with_store(state, |store| store.close_plugin_claim_eligibility())
 }
 
 #[tauri::command(async)]
@@ -1554,6 +1602,7 @@ pub(crate) fn pds_set_section_participating(
 #[cfg(test)]
 mod tests {
     mod asset_gc_performance;
+    mod snapshot_lock;
 
     use super::*;
     use serde_json::json;
@@ -2241,7 +2290,7 @@ mod tests {
         let directory = tempdir().expect("create execute command directory");
         let mut store = PersistentStore::open(directory.path()).expect("open persistent store");
         let cas = crate::asset_repository::PayloadCas::new(directory.path()).expect("open CAS");
-        let total = 129;
+        let total = 3_000;
         let mut prepared = Vec::new();
         for index in 0..total {
             let payload = cas
@@ -2263,7 +2312,7 @@ mod tests {
         super::super::ASSET_GC_ROOT_COLLECTIONS.with(|count| count.set((0, 0)));
         let result = pds_asset_gc_execute_all(&state, &operation_guard).expect("execute complete cleanup");
         super::super::ASSET_GC_ROOT_COLLECTIONS.with(|count| {
-            assert_eq!(count.get(), (1, 2), "one preliminary scan and one final check per deleting page");
+            assert_eq!(count.get(), (1, 3), "one preliminary scan and one final check per deleting page");
         });
         assert!(state.store.try_lock().is_ok());
         drop(operation_guard);

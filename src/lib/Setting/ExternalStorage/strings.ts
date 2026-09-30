@@ -1,3 +1,5 @@
+import { externalErrorKind } from 'src/ts/storage/sync/external/connection'
+export { externalErrorKind } from 'src/ts/storage/sync/external/connection'
 import type {
     ExternalConnectionSummary,
     ExternalProviderId,
@@ -52,6 +54,8 @@ const english = {
     openConnectionSettingsFile: 'Open settings file', scanConnectionSettings: 'Scan settings QR',
     connectionSettingsPayload: 'Settings file or QR contents', connectionSettingsPayloadPlaceholder: 'Open the settings file or scan its QR code', importConnectionSettings: 'Import settings',
     manualConnectionHelp: 'To connect without a settings file, enter the provider details and recovery key.',
+    retainedPublications: 'Unconfirmed uploads', retainedPublication: 'Local revision {0}',
+    removeRetained: 'Remove local copy', removeRetainedConfirm: 'Remove this retained local copy? The upload result cannot be confirmed.',
     noConnections: 'No external storage is connected. Press Connect storage to connect WebDAV, an S3-compatible bucket, Google Drive, OneDrive, NAVER MYBOX, GitHub or GitLab.',
     activeSync: 'Sync repository', makeSyncTarget: 'Sync with this repository',
     runBackup: 'Back up now', runSync: 'Sync now', history: 'History', quota: 'Storage usage', recovery: 'Recovery key', remove: 'Disconnect',
@@ -84,18 +88,26 @@ const english = {
     iosOAuthClientId: 'iOS OAuth client ID',
     webOAuthClientId: 'Web OAuth client ID', oauthCallbackUrl: 'Sign-in completion address (HTTPS)', oauthClientSecret: 'Client secret',
     manualOAuthCallback: 'Sign-in completion page address (if the app does not return by itself)', manualOAuthHelp: 'If the app does not reopen by itself, paste the complete address of the sign-in completion page.',
-    authorizationWaiting: 'Finish signing in in the browser and the app returns. If it does not, paste the complete address of the sign-in completion page.',
+    authorizationWaiting: 'Finish signing in in the browser, then press Finish sign-in.',
+    authorizationWaitingMobile: 'After signing in in the browser, you will return to the app.',
     callbackRejected: 'That address does not belong to this sign-in attempt. Check it and paste the complete address again.',
     oauthErrorCode: 'OAuth error code: {0}',
     oauthErrorDescription: 'OAuth error description: {0}',
     recoveryNotice: 'Save this recovery key now. It stays fixed for this repository and cannot be shown or replaced later. If it is lost, create and verify a new repository before deleting this one.',
+    publicationDecision: 'The result of this publication could not be confirmed. Automatic publication has stopped. Pause automatic sync or select another sync target. Removing this connection keeps the local recovery copy and does not undo remote changes.',
+    selectionDecision: 'Confirm a sync connection before continuing. Select another sync target, or remove this connection and connect again. Local data is kept.',
+    cancelled: 'Cancelled', retryAt: 'Try again after {0}.', automaticSync: 'Automatic sync', automaticBackup: 'Automatic backup', renew: 'Sign in again', unlock: 'Unlock',
     completed: 'Completed', failed: 'Failed', queued: 'Queued', running: 'Working…', waiting: 'Waiting', uncertain: 'Could not confirm that the repository was updated. Run the same action again to check.',
     loadMore: 'Show older history', statusReady: 'Connected', statusPaused: 'Paused', statusReauth: 'Sign-in required', statusLocked: 'Recovery key required', statusError: 'Needs attention',
-    usedByService: 'Used on the service', unknownUsage: 'Unknown', unknownUsageHelp: 'This service does not report it.', uploadedLowerBound: 'Uploaded from this device', latestReachable: 'Size of the latest backup', atLeast: '{0} or more', files: '{0} files or more',
+    usedByService: 'Used on the service', unknownUsage: 'Unknown', unknownUsageHelp: 'This service does not report it.', uploadedLowerBound: 'Known repository data', latestReachable: 'Size of the latest backup', atLeast: '{0} or more', files: '{0} files or more',
     cleanup: 'Clean up now', retentionCount: 'Backups to keep', retentionDays: 'Keep for', retentionDaysUnit: 'days', lastCleanup: 'Last cleanup', cleanupNever: 'Not cleaned up yet',
     retentionHelp: 'An automatic backup made on this device is removed only once it is past both the number to keep and the length to keep. Kept items and conflict records are never removed.',
     retentionOtherDevices: 'Backups made on other devices are left alone. Retention settings do not set a maximum repository size.',
     providerCapacityHelp: 'File versions, trash and unfinished uploads may continue to use space on the service. Remove them through the service when needed.',
+    check: 'Check', checkRepository: 'Check now',
+    checkSummary: 'Verified {0} files ({1}).',
+    checkDamaged: 'Could not read {0} of them, so it cannot be used to restore.',
+    checkExpired: 'The repository changed while this check was stopped, so it cannot finish. Check again.',
     cleanupSummary: 'Removed {0} files ({1}).',
     cleanupPartial: 'Some files are left for the next cleanup.',
     cleanupDeferred: 'Cleanup is waiting for another storage task to finish.',
@@ -110,15 +122,25 @@ const english = {
     credentialsRejected: 'The service did not accept this sign-in or key. Check what you entered and try again.',
     connectionAlreadyAdded: 'This storage is already connected.',
     repositoryNotFound: 'Could not find the repository. Check the folder, bucket and address.',
-    stateChanged: 'The repository changed while this was running. Refresh and try again.',
+    stateChanged: 'Data changed while this was running. Try again.',
     requestBudget: 'The service request limit was reached. Try again later.',
     objectTooLarge: 'A file is larger than this service allows.',
     corrupted: 'The stored data did not pass verification. Choose another backup or connect the repository again.',
     unsupportedOperation: 'This repository cannot do that.',
     interrupted: 'This stopped before it finished. Try again.',
+    endpointRejected: 'The server address was rejected. Check the address.',
+    deviceVaultUnavailable: 'Unlock this device or its keyring, then try again.',
+    clockSkew: 'Correct this device’s date and time, then try again.',
+    folderTooLarge: 'This folder contains too many entries. Select another folder.',
+    repositoryBusy: 'Another storage operation is running. Try again after it finishes.',
+    locationOccupied: 'This location is already in use. Select another location.',
+    authorizationTimedOut: 'Sign-in timed out. Sign in again.',
+    localStorageFull: 'This device is out of space. Free space and try again.',
+    localPermissionDenied: 'The app cannot access a local file. Check its permissions and try again.',
     errorGeneric: 'Could not complete this. Try again.',
-    jobKinds: { cleanup: 'Cleanup', backup: 'Backup', sync: 'Sync', restore: 'Restore', 'pin-history': 'Keep', 'delete-history': 'Delete backup', 'resolve-conflict': 'Resolve conflict' },
-    jobActive: { cleanup: 'Cleaning up', backup: 'Backing up', sync: 'Syncing', restore: 'Restoring', 'pin-history': 'Keeping', 'delete-history': 'Deleting backup', 'resolve-conflict': 'Resolving conflict' },
+    jobKinds: { cleanup: 'Cleanup', backup: 'Backup', sync: 'Sync', restore: 'Restore', 'pin-history': 'Keep', 'delete-history': 'Delete backup', 'resolve-conflict': 'Resolve conflict', 'check-repository': 'Check' },
+    jobActive: { cleanup: 'Cleaning up', backup: 'Backing up', sync: 'Syncing', restore: 'Restoring', 'pin-history': 'Keeping', 'delete-history': 'Deleting backup', 'resolve-conflict': 'Resolving conflict', 'check-repository': 'Checking' },
+    jobCounters: { prepared: 'Prepared', transferred: 'Transferred' },
     historyKinds: { snapshot: 'Sync', 'backup-point': 'Backup', conflict: 'Conflict backup', 'recovery-candidate': 'Recovery candidate' },
     endpointWarnings: {
         'github-dedicated-repository': 'Use a separate private repository. This connection is backup only.',
@@ -209,6 +231,8 @@ const korean: typeof english = {
     openConnectionSettingsFile: '설정 파일 열기', scanConnectionSettings: '설정 QR 스캔',
     connectionSettingsPayload: '설정 파일 또는 QR 내용', connectionSettingsPayloadPlaceholder: '설정 파일을 열거나 QR 코드를 스캔하세요', importConnectionSettings: '설정 가져오기',
     manualConnectionHelp: '설정 파일 없이 연결하려면 서비스 연결 정보와 복구 키를 입력하세요.',
+    retainedPublications: '확인되지 않은 업로드', retainedPublication: '로컬 리비전 {0}',
+    removeRetained: '로컬 복사본 삭제', removeRetainedConfirm: '보존된 로컬 복사본을 삭제하시겠습니까? 업로드 결과를 확인할 수 없습니다.',
     noConnections: '연결된 외부 저장소가 없습니다. 저장소 연결을 눌러 WebDAV, S3 호환 저장소, Google Drive, OneDrive, 네이버 MYBOX, GitHub, GitLab 중 하나를 연결하세요.',
     activeSync: '동기화 중인 저장소', makeSyncTarget: '이 저장소로 동기화',
     runBackup: '지금 백업', runSync: '지금 동기화', history: '이력', quota: '저장소 용량', recovery: '복구 키', remove: '연결 해제',
@@ -241,18 +265,26 @@ const korean: typeof english = {
     iosOAuthClientId: 'iOS OAuth 클라이언트 ID',
     webOAuthClientId: '웹 OAuth 클라이언트 ID', oauthCallbackUrl: '로그인 완료 주소 (HTTPS)', oauthClientSecret: '클라이언트 보안 비밀',
     manualOAuthCallback: '로그인 완료 페이지 주소 (자동으로 돌아오지 않을 때)', manualOAuthHelp: '앱이 자동으로 다시 열리지 않으면 로그인 완료 페이지의 주소를 통째로 붙여넣으세요.',
-    authorizationWaiting: '브라우저에서 로그인을 마치면 앱으로 돌아옵니다. 자동으로 돌아오지 않으면 로그인 완료 페이지의 주소를 통째로 붙여넣으세요.',
+    authorizationWaiting: '브라우저에서 로그인을 마친 뒤 로그인 완료를 누르세요.',
+    authorizationWaitingMobile: '브라우저에서 로그인을 마치면 앱으로 돌아옵니다.',
     callbackRejected: '이 주소는 현재 로그인 시도의 것이 아닙니다. 확인한 뒤 주소를 통째로 다시 붙여넣으세요.',
     oauthErrorCode: 'OAuth 오류 코드: {0}',
     oauthErrorDescription: 'OAuth 오류 설명: {0}',
     recoveryNotice: '이 복구 키를 지금 안전한 곳에 보관하세요. 저장소에서 계속 같은 키를 사용하며, 나중에 다시 표시하거나 교체할 수 없습니다. 키를 잃은 경우 새 저장소에 백업하고 검증한 뒤 기존 저장소를 삭제하세요.',
+    publicationDecision: '저장소 반영 결과를 확인하지 못했으며, 자동 반영이 중지되었습니다. 자동 동기화를 중지하거나 동기화 대상을 변경할 수 있습니다. 연결을 해제하면 로컬 복구 자료가 보존되며, 원격 변경 사항은 취소되지 않습니다.',
+    selectionDecision: '계속하려면 동기화 연결을 다시 확인하세요. 다른 동기화 대상을 선택하거나 연결을 해제한 후 다시 연결할 수 있으며, 로컬 데이터는 보존됩니다.',
+    cancelled: '취소됨', retryAt: '{0} 이후 다시 시도하세요.', automaticSync: '자동 동기화', automaticBackup: '자동 백업', renew: '다시 로그인', unlock: '잠금 해제',
     completed: '완료', failed: '실패', queued: '대기열에 추가됨', running: '처리 중…', waiting: '대기 중', uncertain: '저장소에 반영됐는지 확인하지 못했습니다. 다시 확인하려면 같은 작업을 다시 실행하세요.',
     loadMore: '이전 이력 더 보기', statusReady: '연결됨', statusPaused: '일시 중지됨', statusReauth: '다시 로그인 필요', statusLocked: '복구 키 필요', statusError: '확인 필요',
-    usedByService: '서비스에서 쓰는 용량', unknownUsage: '알 수 없음', unknownUsageHelp: '이 서비스는 알려주지 않습니다.', uploadedLowerBound: '이 기기에서 올린 데이터', latestReachable: '최신 백업 하나의 크기', atLeast: '{0} 이상', files: '파일 {0}개 이상',
+    usedByService: '서비스에서 쓰는 용량', unknownUsage: '알 수 없음', unknownUsageHelp: '이 서비스는 알려주지 않습니다.', uploadedLowerBound: '확인한 저장소 데이터', latestReachable: '최신 백업 하나의 크기', atLeast: '{0} 이상', files: '파일 {0}개 이상',
     cleanup: '지금 정리', retentionCount: '보관 개수', retentionDays: '보관 기간', retentionDaysUnit: '일', lastCleanup: '마지막 정리', cleanupNever: '아직 정리하지 않았습니다',
     retentionHelp: '이 기기에서 만든 자동 백업은 보관 개수와 보관 기간을 모두 넘긴 경우에만 지웁니다. 「지우지 않고 보관」한 항목과 충돌 기록은 지우지 않습니다.',
     retentionOtherDevices: '다른 기기에서 만든 백업은 이 기기가 삭제하지 않으며, 보관 설정으로 저장소의 최대 용량을 제한하지 않습니다.',
     providerCapacityHelp: '서비스의 파일 버전, 휴지통, 완료되지 않은 업로드가 용량을 계속 차지할 수 있습니다. 필요한 경우 서비스에서 정리해주세요.',
+    check: '검증', checkRepository: '지금 검증',
+    checkSummary: '{0}개를 검증했습니다 ({1}).',
+    checkDamaged: '이 중 {0}개를 읽지 못했으며, 복원에 쓸 수 없습니다.',
+    checkExpired: '검증이 멈춘 사이에 저장소가 바뀌어 이 검증을 마칠 수 없습니다. 다시 검증하세요.',
     cleanupSummary: '{0}개를 지웠습니다 ({1}).',
     cleanupPartial: '남은 파일은 다음 정리에서 지웁니다.',
     cleanupDeferred: '다른 저장소 작업이 완료되기를 기다리고 있습니다.',
@@ -267,15 +299,25 @@ const korean: typeof english = {
     credentialsRejected: '서비스가 이 로그인이나 키를 받아들이지 않았습니다. 입력한 내용을 확인하고 다시 시도하세요.',
     connectionAlreadyAdded: '이 저장소는 이미 연결되어 있습니다.',
     repositoryNotFound: '저장소를 찾지 못했습니다. 폴더·버킷과 주소를 확인하세요.',
-    stateChanged: '작업하는 사이에 저장소가 바뀌었습니다. 새로 고침한 뒤 다시 시도하세요.',
+    stateChanged: '작업하는 사이에 데이터가 바뀌었습니다. 다시 실행하세요.',
     requestBudget: '서비스의 요청 한도에 걸렸습니다. 잠시 뒤 다시 시도하세요.',
     objectTooLarge: '이 서비스가 허용하는 크기보다 큰 파일이 있습니다.',
     corrupted: '저장된 데이터가 검증을 통과하지 못했습니다. 다른 백업을 고르거나 저장소를 다시 연결하세요.',
     unsupportedOperation: '이 저장소에서는 할 수 없는 작업입니다.',
     interrupted: '끝나기 전에 멈췄습니다. 다시 시도하세요.',
+    endpointRejected: '서버 주소를 사용할 수 없습니다. 주소를 확인하세요.',
+    deviceVaultUnavailable: '기기 또는 키링의 잠금을 해제한 뒤 다시 시도하세요.',
+    clockSkew: '기기의 날짜와 시간을 확인한 뒤 다시 시도하세요.',
+    folderTooLarge: '폴더에 항목이 너무 많습니다. 다른 폴더를 선택하세요.',
+    repositoryBusy: '다른 저장소 작업이 진행 중입니다. 완료된 뒤 다시 시도하세요.',
+    locationOccupied: '이미 사용 중인 위치입니다. 다른 위치를 선택하세요.',
+    authorizationTimedOut: '로그인 시간이 초과되었습니다. 다시 로그인하세요.',
+    localStorageFull: '기기 공간이 부족합니다. 공간을 확보한 뒤 다시 시도하세요.',
+    localPermissionDenied: '로컬 파일에 접근할 수 없습니다. 권한을 확인한 뒤 다시 시도하세요.',
     errorGeneric: '작업을 마치지 못했습니다. 다시 시도하세요.',
-    jobKinds: { cleanup: '정리', backup: '백업', sync: '동기화', restore: '복원', 'pin-history': '보관', 'delete-history': '백업 삭제', 'resolve-conflict': '충돌 해결' },
-    jobActive: { cleanup: '정리 중', backup: '백업 중', sync: '동기화 중', restore: '복원 중', 'pin-history': '보관 중', 'delete-history': '백업 삭제 중', 'resolve-conflict': '충돌 해결 중' },
+    jobKinds: { cleanup: '정리', backup: '백업', sync: '동기화', restore: '복원', 'pin-history': '보관', 'delete-history': '백업 삭제', 'resolve-conflict': '충돌 해결', 'check-repository': '검증' },
+    jobActive: { cleanup: '정리 중', backup: '백업 중', sync: '동기화 중', restore: '복원 중', 'pin-history': '보관 중', 'delete-history': '백업 삭제 중', 'resolve-conflict': '충돌 해결 중', 'check-repository': '검증 중' },
+    jobCounters: { prepared: '준비', transferred: '전송' },
     historyKinds: { snapshot: '동기화', 'backup-point': '백업', conflict: '충돌 백업', 'recovery-candidate': '복구 후보' },
     endpointWarnings: {
         'github-dedicated-repository': '백업 전용 비공개 저장소를 따로 쓰세요. 이 연결은 백업만 합니다.',
@@ -351,14 +393,6 @@ export function externalEndpointWarning(strings: ExternalStorageStrings, code: s
     return (strings.endpointWarnings as Record<string, string>)[code] ?? code
 }
 
-/** Native failure kind of a rejected command (`kind`) or of a job error DTO (`code`). */
-export function externalErrorKind(value: unknown): string | undefined {
-    if (typeof value !== 'object' || value === null) return undefined
-    const carrier = value as { kind?: unknown; code?: unknown }
-    const kind = typeof carrier.kind === 'string' ? carrier.kind : carrier.code
-    return typeof kind === 'string' ? kind : undefined
-}
-
 const folderErrorKinds = ['folderInaccessible', 'folderNotRepository', 'folderUnsupportedLocation'] as const
 
 /** Whether a native failure concerns the selected folder rather than the connection as a whole. */
@@ -388,6 +422,17 @@ export function externalErrorMessage(
         ? strings.oauthErrorDescription.replace('{0}', oauthErrorDescription)
         : ''
     switch (kind) {
+        case 'endpointRejected': return strings.endpointRejected
+        case 'repositoryKeyUnavailable': return strings.unlockKey
+        case 'deviceVaultUnavailable': return strings.deviceVaultUnavailable
+        case 'clockSkew': return strings.clockSkew
+        case 'folderTooLarge': return strings.folderTooLarge
+        case 'repositoryBusy': return strings.repositoryBusy
+        case 'locationOccupied': return strings.locationOccupied
+        case 'authorizationTimedOut': return strings.authorizationTimedOut
+        case 'localStorageFull': return strings.localStorageFull
+        case 'localPermissionDenied': return strings.localPermissionDenied
+        case 'authorizationUnavailable': return strings.authorizationUnavailable
         case 'folderNameConflict': return strings.folderNameConflict
         case 'folderCreateFailed': return strings.folderCreateFailed
         case 'folderInaccessible': return strings.folderInaccessible

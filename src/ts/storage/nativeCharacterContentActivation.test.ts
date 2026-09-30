@@ -1,3 +1,5 @@
+import { Buffer } from 'buffer'
+import { decodePreparedNativePngCardMetadata } from './nativePngCardAdapter'
 import { describe, expect, it, vi } from 'vitest'
 
 vi.mock('../characterCards', () => ({
@@ -289,6 +291,47 @@ describe('prepared native character content activation', () => {
         expect(JSON.stringify(options?.assetAliases)).not.toMatch(/inlay|webp|resize/i)
     })
 
+    it.each(['emotions', 'vits', 'v3'])('adds staged %s PNG assets before mapping and alias activation', async (kind) => {
+        const inlineCard = kind === 'v3'
+            ? { spec: 'chara_card_v3', spec_version: '3.0', data: { name: 'Inline', extensions: {},
+                assets: [{ type: 'icon', name: 'main', uri: 'data:image/png;base64,AQI=' }] } }
+            : { spec: 'chara_card_v2', spec_version: '2.0', data: { name: 'Inline', extensions: { risuai: kind === 'vits'
+                ? { vits: { model: 'AQI=' } } : { emotions: [['happy', 'AQI=']] } } } }
+        const prepared: PreparedNativeContent = {
+            casSessionId: 'content-1', format: 'png-card',
+            metadata: { chara: Buffer.from(JSON.stringify(inlineCard)).toString('base64') }, assets: [],
+        }
+        const staged = { token: 'inline-1', referenceKey: 'inline-1', logicalId: `assets/${firstHash}.png`,
+            objectHash: firstHash, byteSize: 2, mime: '', name: `${firstHash}.png`, ext: 'png' }
+        const events: string[] = []
+        const stageInlineAsset = vi.fn(async (bytes: Uint8Array) => {
+            expect(bytes).toEqual(Buffer.from('AQI=', 'base64'))
+            events.push('stage')
+            prepared.assets.push(staged)
+            return staged
+        })
+        const mapped = { ...mappedCharacter(), additionalAssets: [] } as character
+        const deps = dependencies({
+            decodePng: (metadata, stage) => decodePreparedNativePngCardMetadata(metadata, {
+                hash: async () => '', decrypt: async (value) => value, requestPassword: async () => null,
+                stageInlineAsset: stage,
+            }) as any,
+            map: vi.fn(async (input) => {
+                events.push('map')
+                expect(input.assets).toEqual([{ token: staged.token, logicalId: staged.logicalId }])
+                expect(JSON.stringify(input.card)).toContain('__asset:inline-1')
+                return mapped
+            }),
+            upsert: vi.fn(async (_id, _reason, _change, options) => {
+                events.push('activate')
+                expect(options?.assetAliases).toEqual([expect.objectContaining({ objectHash: firstHash, size: 2 })])
+                return true
+            }),
+        })
+        await activatePreparedNativeCharacterContent(prepared, lifecycle({ stageInlineAsset }), deps)
+        expect(events).toEqual(['stage', 'map', 'activate'])
+    })
+
     it('decodes and activates PNG metadata using only logical portrait and chunk aliases', async () => {
         const portraitHash = '33'.repeat(32)
         const chunkHash = '44'.repeat(32)
@@ -343,7 +386,7 @@ describe('prepared native character content activation', () => {
 
         await activatePreparedNativeCharacterContent(pngContent, session, deps)
 
-        expect(deps.decodePng).toHaveBeenCalledWith(pngContent.metadata)
+        expect(deps.decodePng).toHaveBeenCalledWith(pngContent.metadata, undefined)
         expect(deps.map).toHaveBeenCalledWith({
             card: decodedCard,
             assets: [

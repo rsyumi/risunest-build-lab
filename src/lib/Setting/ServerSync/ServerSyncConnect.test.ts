@@ -2,6 +2,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { mount, tick, unmount } from "svelte";
 vi.mock("src/ts/platform", () => ({ isTauriAndroid: false, isTauriIOS: false }));
+vi.mock("src/ts/stores.svelte", async () => ({
+  alertStore: (await import("svelte/store")).writable({ type: "none", msg: "" }),
+}));
 vi.mock("src/lang", async () => ({
   language: (await import("src/lang/en")).languageEnglish,
 }));
@@ -32,6 +35,24 @@ const button = (label: string) =>
   )!;
 
 describe("shared connect part", () => {
+  it("replaces a reviewed registration with a second delivered code and clears both on Another code", async () => {
+    setup(); await tick();
+    serverRegistrationInbox.stage(vector.uri); await tick();
+    expect(target.querySelector('dl.review')).not.toBeNull();
+    const second = { ...vector.registration, deviceId: 'second-device' };
+    serverRegistrationInbox.stage(`risunestlocal://sync-server/register#${btoa(JSON.stringify(second)).replaceAll('+', '-').replaceAll('/', '_').replaceAll('=', '')}`);
+    await tick();
+    expect(target.querySelector('dl.review')?.textContent).toContain('second-device');
+    expect(target.textContent).not.toContain(second.token);
+    button(text.otherCode).click(); await tick();
+    expect(serverRegistrationInbox.take()).toBeUndefined();
+    expect([...target.querySelectorAll('input')].every((input) => !input.value)).toBe(true);
+  });
+  it("keeps a delivered registration pending while the reviewed connection is busy", async () => {
+    setup({ stage: 'review', busy: true }); await tick();
+    serverRegistrationInbox.stage(vector.uri); await tick();
+    expect(serverRegistrationInbox.take()).toEqual(vector.registration);
+  });
   it("shows the check for a read code and reports the chosen asset policy with it", async () => {
     const onSubmit = setup();
     await tick();
@@ -56,6 +77,15 @@ describe("shared connect part", () => {
       config: { ...vector.registration, endpoint: "https://sync.example/base/" },
       residency: "remote",
     });
+  });
+  it("keeps manual entry fields free of capitalization and spell checking", async () => {
+    setup();
+    await tick();
+    const inputs = [...target.querySelectorAll<HTMLInputElement>("form.fields input")];
+    expect(inputs.map((input) => input.getAttribute("autocapitalize"))).toEqual(["none", "none", "none", null]);
+    expect(inputs.map((input) => input.getAttribute("spellcheck"))).toEqual(["false", "false", "false", "false"]);
+    expect(inputs.map((input) => input.getAttribute("autocomplete"))).toEqual(["url", "off", "off", "new-password"]);
+    expect(inputs[3].type).toBe("password");
   });
   it("turns a manual entry into the same check and defaults to keeping files on this device", async () => {
     const onSubmit = setup();

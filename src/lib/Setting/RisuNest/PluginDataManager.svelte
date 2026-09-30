@@ -13,10 +13,10 @@
         filterPluginDataItems,
         groupPluginDataByPrefix,
         listPluginDataItems,
-        pluginDataAssignmentPrefill,
         pluginDataItemId,
         pluginDataOwnerBuckets,
         readPluginDataValue,
+        searchPluginDataValues,
         totalPluginDataBytes,
         type PluginAssignCollision,
         type PluginDataAssignmentChoice,
@@ -66,6 +66,11 @@
     /** Whether this device takes the plugin section into synchronization. */
     let deviceSynced = $state(false)
     let items: PluginDataItem[] = $state([])
+    let itemsScope: PluginDataScope = $state('library')
+    let loadGeneration = 0
+    let searchGeneration = 0
+    let searchLoading = $state(false)
+    let searchFailed = $state(false)
     let loading = $state(false)
     let busy = $state(false)
     let ownerFilter: string | null = $state(null)
@@ -75,7 +80,7 @@
     let groupByPrefix = $state(true)
     let values = $state(new Map<string, string>())
     let selected = $state(new Set<string>())
-    let groupOwners = $state(new Map<string, string>())
+    let itemOwners = $state(new Map<string, string>())
     let openItem: PluginDataItem | null = $state(null)
     let openValue = $state('')
     let confirming: {
@@ -133,31 +138,53 @@
     }
 
     async function load(): Promise<void> {
-        if (loading) return
+        const generation = ++loadGeneration
+        const requested = scope
+        searchGeneration += 1
+        items = []
+        selected = new Set()
+        values = new Map()
+        openItem = null
         loading = true
         try {
-            items = await listPluginDataItems(scope)
-            values = new Map()
-            selected = new Set()
+            const loaded = await listPluginDataItems(requested)
+            if (generation !== loadGeneration) return
+            itemsScope = requested
+            items = loaded
         } finally {
-            loading = false
+            if (generation === loadGeneration) loading = false
         }
     }
 
-    async function loadValuesForSearch(): Promise<void> {
-        if (valueQuery.trim().length === 0) return
-        const pending = filterPluginDataItems(
-            items,
-            { owner: ownerFilter, automaticOnly, key: keyQuery, value: '' },
-            values,
-        ).filter((item) => !values.has(pluginDataItemId(item)))
-        if (pending.length === 0) return
-        const loaded = new Map(values)
-        for (const item of pending) {
-            loaded.set(pluginDataItemId(item), (await readPluginDataValue(item)) ?? '')
+    $effect(() => {
+        const query = valueQuery.trim()
+        const eligible = filterPluginDataItems(items,
+            { owner: ownerFilter, automaticOnly, key: keyQuery, value: '' }, new Map())
+        const generation = ++searchGeneration
+        values = new Map()
+        searchFailed = false
+        const needsValues = query.length > 0 && eligible.length > 0
+        searchLoading = needsValues
+        if (!needsValues) return
+        const timer = setTimeout(() => {
+            void (async () => {
+                try {
+                    const matches = await searchPluginDataValues(eligible, query,
+                        () => generation !== searchGeneration)
+                    if (generation !== searchGeneration) return
+                    values = new Map([...matches].map((id) => [id, query]))
+                } catch {
+                    if (generation === searchGeneration) searchFailed = true
+                } finally {
+                    if (generation === searchGeneration) searchLoading = false
+                }
+            })()
+        }, 250)
+        return () => {
+            clearTimeout(timer)
+            searchGeneration += 1
         }
-        values = loaded
-    }
+    })
 
     /** The choice lives on the same settings page, so it is read again here. */
     async function loadParticipation(): Promise<void> {
@@ -176,8 +203,9 @@
         scope = next
         ownerFilter = null
         automaticOnly = false
-        if (next === 'device') await loadParticipation()
-        await load()
+        const listing = load()
+        if (next === 'device') void loadParticipation()
+        await listing
     }
 
     function chooseOwner(owner: string | null): void {
@@ -231,29 +259,41 @@
                   .replace('{2}', formatRisuNestStorageBytes(group.byteSize))
     }
 
-    function setGroupOwner(prefix: string | null, owner: string): void {
-        const next = new Map(groupOwners)
-        if (owner.length === 0) next.delete(groupKey(prefix))
-        else next.set(groupKey(prefix), owner)
-        groupOwners = next
+    function groupOwner(groupItems: readonly PluginDataItem[]): string {
+        const owner = itemOwners.get(pluginDataItemId(groupItems[0])) ?? ''
+        return groupItems.every((item) => (itemOwners.get(pluginDataItemId(item)) ?? '') === owner) ? owner : ''
+    }
+
+    function setItemOwners(groupItems: readonly PluginDataItem[], owner: string): void {
+        const next = new Map(itemOwners)
+        for (const item of groupItems) {
+            if (owner.length === 0) next.delete(pluginDataItemId(item))
+            else next.set(pluginDataItemId(item), owner)
+        }
+        itemOwners = next
         publishSelection()
     }
 
     function publishSelection(): void {
         if (!onselectionchange) return
-        const assignments: { owner: string; items: PluginDataItem[] }[] = []
-        for (const group of groups) {
-            const owner = groupOwners.get(groupKey(group.prefix))
-            if (!owner) continue
-            const chosen = group.items.filter((item) => selected.has(pluginDataItemId(item)))
-            if (chosen.length > 0) assignments.push({ owner, items: chosen })
+        const assignments = new Map<string, PluginDataItem[]>()
+        for (const item of items) {
+            const id = pluginDataItemId(item)
+            const owner = itemOwners.get(id)
+            if (!owner || !selected.has(id)) continue
+            const chosen = assignments.get(owner) ?? []
+            chosen.push(item)
+            assignments.set(owner, chosen)
         }
-        onselectionchange(assignments)
+        onselectionchange([...assignments].map(([owner, items]) => ({ owner, items })))
     }
 
     async function open(item: PluginDataItem): Promise<void> {
         openItem = item
-        openValue = (await readPluginDataValue(item)) ?? ''
+        openValue = ''
+        const generation = loadGeneration
+        const value = (await readPluginDataValue(item)) ?? ''
+        if (generation === loadGeneration && openItem === item) openValue = value
     }
 
     /**
@@ -289,11 +329,15 @@
         targets: readonly PluginDataItem[],
         bulk: 'all' | 'visible' | null = null,
     ): Promise<void> {
-        if (targets.length === 0 || busy) return
+        if (targets.length === 0 || busy || loading || itemsScope !== scope) return
+        const expectedScope = itemsScope
+        const generation = loadGeneration
         if (!(await confirmRemoval(targets, bulk))) return
+        if (generation !== loadGeneration || expectedScope !== scope || busy) return
         busy = true
         try {
-            await deletePluginDataItems(targets)
+            await deletePluginDataItems(targets, expectedScope)
+            if (targets.some((item) => installedPlugins.includes(item.owner))) reloadPrompt = true
         } finally {
             busy = false
         }
@@ -360,15 +404,16 @@
     /** Opens on the answers an import kept, so they are confirmed, not redone. */
     function applyInitialAssignments(): void {
         if (!staged || !initialAssignments?.length) return
-        const prefill = pluginDataAssignmentPrefill(
-            items,
-            initialAssignments,
-            installedPlugins,
-        )
-        selected = new Set(prefill.selectedIds)
-        groupOwners = new Map(
-            prefill.groupOwners.map((group) => [groupKey(group.prefix), group.owner]),
-        )
+        const owners = new Map<string, string>()
+        for (const assignment of initialAssignments) {
+            if (!installedPlugins.includes(assignment.owner)) continue
+            for (const item of items) {
+                const id = pluginDataItemId(item)
+                if (assignment.keys.includes(item.key) && !owners.has(id)) owners.set(id, assignment.owner)
+            }
+        }
+        selected = new Set(owners.keys())
+        itemOwners = owners
         publishSelection()
     }
 
@@ -379,6 +424,24 @@
         applyInitialAssignments()
     })
 </script>
+
+{#snippet assignmentRow(item: PluginDataItem)}
+    {@const id = pluginDataItemId(item)}
+    <div class="flex flex-wrap items-center gap-2 px-3 py-1.5" data-plugin-data-assignment={item.key}>
+        <SettingToggle label={item.key} showLabel checked={selected.has(id)} onchange={() => toggle(item)} />
+        {#if installedPlugins.length > 0}
+            <SelectInput size="sm" ariaLabel={strings.choosePlugin} value={itemOwners.get(id) ?? ''} onchange={(event) => setItemOwners([item], event.currentTarget.value)}>
+                <option value="">{strings.choosePlugin}</option>
+                {#each installedPlugins as name (name)}
+                    <option value={name}>{name}</option>
+                {/each}
+            </SelectInput>
+            {#if place === 'settings'}
+                <SettingButton disabled={!selected.has(id) || !itemOwners.get(id) || loading} busy={busy} onclick={() => startAssign(itemOwners.get(id) ?? '', [item], null)}>{strings.assignSelected}</SettingButton>
+            {/if}
+        {/if}
+    </div>
+{/snippet}
 
 {#snippet ownerChips()}
     <div class="flex flex-wrap items-center gap-1.5">
@@ -429,7 +492,7 @@
             </div>
             <div class="min-w-0 flex-1">
                 <label class="sr-only" for={searchIds.value}>{strings.searchValue}</label>
-                <TextInput id={searchIds.value} size="sm" fullwidth bind:value={valueQuery} onchange={loadValuesForSearch} placeholder={strings.searchValue} />
+                <TextInput id={searchIds.value} size="sm" fullwidth bind:value={valueQuery} placeholder={strings.searchValue} />
             </div>
         </div>
         {@render ownerChips()}
@@ -462,7 +525,7 @@
 
     {#if unknownSelected || place === 'import'}
         <div class="flex flex-wrap items-center justify-between gap-2">
-            <SettingToggle bind:checked={groupByPrefix} label={strings.groupByPrefix} showLabel />
+            <SettingToggle checked={groupByPrefix} onchange={(checked) => { groupByPrefix = checked; publishSelection() }} label={strings.groupByPrefix} showLabel />
             {#if place === 'settings'}
                 <div class="flex gap-2">
                     <SettingButton variant="secondary" disabled={selectedItems.length === 0} busy={busy} onclick={() => remove(selectedItems)}>{strings.deleteSelected}</SettingButton>
@@ -492,8 +555,8 @@
                                 size="sm"
                                 className="w-full"
                                 ariaLabel={strings.choosePlugin}
-                                value={groupOwners.get(groupKey(group.prefix)) ?? ''}
-                                onchange={(event) => setGroupOwner(group.prefix, event.currentTarget.value)}
+                                value={groupOwner(group.items)}
+                                onchange={(event) => setItemOwners(group.items, event.currentTarget.value)}
                             >
                                 <option value="">{strings.choosePlugin}</option>
                                 {#each installedPlugins as name (name)}
@@ -503,29 +566,25 @@
                         </div>
                         {#if place === 'settings'}
                             <SettingButton
-                                disabled={chosen.length === 0 || !groupOwners.get(groupKey(group.prefix))}
+                                disabled={chosen.length === 0 || !groupOwner(group.items) || loading}
                                 busy={busy}
-                                onclick={() => startAssign(groupOwners.get(groupKey(group.prefix)) ?? '', chosen, group.prefix)}
+                                onclick={() => startAssign(groupOwner(group.items), chosen, group.prefix)}
                             >{strings.assignSelected}</SettingButton>
                         {/if}
                     {/if}
                 </div>
                 <div class="flex flex-wrap gap-x-3 gap-y-1 border-t border-darkborderc/55 px-3 py-1.5 font-mono text-xs text-textcolor2">
-                    {#each group.items.slice(0, 4) as item (pluginDataItemId(item))}
-                        {@const picked = selected.has(pluginDataItemId(item))}
-                        <button
-                            type="button"
-                            aria-pressed={picked}
-                            class="rounded-sm px-1 transition-colors duration-200 {picked ? 'bg-darkborderc text-textcolor' : 'hover:text-textcolor'}"
-                            onclick={() => toggle(item)}
-                        >{item.key}</button>
+                    {#each group.items as item (pluginDataItemId(item))}
+                        {@render assignmentRow(item)}
                     {/each}
-                    {#if group.items.length > 4}
-                        <span>{strings.andMore.replace('{0}', String(group.items.length - 4))}</span>
-                    {/if}
                 </div>
             </div>
         {/each}
+        {#if !groupByPrefix}
+            {#each visible as item (pluginDataItemId(item))}
+                {@render assignmentRow(item)}
+            {/each}
+        {/if}
     {/if}
 
     {#if place === 'settings'}
@@ -547,11 +606,13 @@
                 <SettingButton variant="secondary" busy={loading} onclick={load}>{strings.refresh}</SettingButton>
             </div>
         </div>
-        {#if loading && items.length === 0}
+        {#if loading || searchLoading}
             <p class="py-8 text-center text-sm text-textcolor2" role="status" aria-live="polite">{language.loading}</p>
+        {:else if searchFailed}
+            <p class="py-8 text-center text-sm text-textcolor2" role="alert">{language.error}</p>
         {:else if visible.length === 0}
             <p class="py-8 text-center text-sm text-textcolor2">{strings.empty}</p>
-        {:else}
+        {:else if !unknownSelected}
             <ul data-plugin-data-list class="max-h-[clamp(24rem,65dvh,52rem)] divide-y divide-darkborderc/55 overflow-y-auto rounded-md border border-darkborderc">
                 {#each visible as item (pluginDataItemId(item))}
                     <!-- The key keeps the first line; the facts wrap under it on a narrow panel. -->

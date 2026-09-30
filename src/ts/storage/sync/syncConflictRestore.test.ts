@@ -17,6 +17,16 @@ const mocks = vi.hoisted(() => ({
     flushPendingData: vi.fn(),
     capturePersistentMutationToken: vi.fn(),
     runtime: { store: {}, revision: 7, flushPendingData: vi.fn() },
+    native: { enabled: false },
+    beginReplacement: vi.fn(),
+    confirmReplacement: vi.fn(),
+    release: vi.fn(),
+    hold: vi.fn(),
+}))
+vi.mock('../../platform', () => ({ get isTauri() { return mocks.native.enabled } }))
+vi.mock('./serverSyncProduction', () => ({
+    getServerSyncController: () => ({ beginReplacement: mocks.beginReplacement, confirmReplacement: mocks.confirmReplacement }),
+    holdServerSyncAfterRestore: mocks.hold,
 }))
 
 vi.mock('src/lang', () => ({
@@ -28,6 +38,8 @@ vi.mock('src/lang', () => ({
         syncConflictBackups: 'backups',
         syncConflictNoBackups: 'no backups',
         syncConflictRestoreConfirm: 'restore database only?',
+        syncConflictBackupUnreadable: 'unreadable backup',
+        risuNest: { backup: { actionFailed: 'restore failed' } },
     },
 }))
 vi.mock('../../alert', () => ({
@@ -59,6 +71,12 @@ vi.mock('./syncConflictBackup', () => ({
 describe('openSyncConflictBackups', () => {
     beforeEach(() => {
         vi.resetModules()
+        mocks.native.enabled = false
+        mocks.beginReplacement.mockReset().mockResolvedValue(mocks.release)
+        mocks.confirmReplacement.mockReset().mockResolvedValue(undefined)
+        mocks.release.mockReset()
+        mocks.hold.mockReset()
+        mocks.replacePersistentDatabase.mockReset().mockResolvedValue({ status: 'applied', revision: 8 })
         const entry = {
             id: 'backup',
             createdAt: 1,
@@ -113,5 +131,41 @@ describe('openSyncConflictBackups', () => {
             },
         )
         expect(mocks.installLocalBackup).toHaveBeenCalledOnce()
+        expect(mocks.beginReplacement).not.toHaveBeenCalled()
+        expect(mocks.hold).not.toHaveBeenCalled()
+    })
+
+    it.each(['missing', 'decode', 'shape'])('localizes an unreadable %s backup without beginning replacement', async (failure) => {
+        if (failure === 'missing') mocks.backupStore.read.mockResolvedValue(undefined)
+        if (failure === 'decode') mocks.decodeRisuSave.mockRejectedValue(new Error('bad payload'))
+        if (failure === 'shape') mocks.decodeRisuSave.mockResolvedValue({})
+        await (await import('./syncConflictRestore')).openSyncConflictBackups()
+        expect(mocks.alertError).toHaveBeenCalledWith('unreadable backup')
+        expect(mocks.installLocalBackup).not.toHaveBeenCalled()
+    })
+
+    it.each(['applied', 'refresh-required'])('holds native sync immediately after a committed %s replacement', async (status) => {
+        mocks.native.enabled = true
+        mocks.replacePersistentDatabase.mockResolvedValue({ status, revision: 8 })
+        const followup = vi.fn()
+        mocks.installLocalBackup.mockImplementation(async (database, dependencies) => {
+            await dependencies.replaceDatabase(database, 'local-backup')
+            followup()
+        })
+        await (await import('./syncConflictRestore')).openSyncConflictBackups()
+        const order = [mocks.beginReplacement, mocks.confirmReplacement, mocks.flushPendingData, mocks.replacePersistentDatabase, mocks.hold, followup, mocks.release]
+            .map((mock) => mock.mock.invocationCallOrder[0])
+        expect(order).toEqual([...order].sort((a, b) => a - b))
+        expect(mocks.hold).toHaveBeenCalledOnce()
+    })
+
+    it.each(['confirm', 'replace'])('releases admission without installing a hold after %s refuses', async (failure) => {
+        mocks.native.enabled = true
+        if (failure === 'confirm') mocks.confirmReplacement.mockRejectedValue({ code: 'resolve-pending-operation-first' })
+        else mocks.replacePersistentDatabase.mockRejectedValue(new Error('failed'))
+        await (await import('./syncConflictRestore')).openSyncConflictBackups()
+        expect(mocks.hold).not.toHaveBeenCalled()
+        expect(mocks.release).toHaveBeenCalledOnce()
+        expect(mocks.alertError).toHaveBeenCalledWith('restore failed')
     })
 })

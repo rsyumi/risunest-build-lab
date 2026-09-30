@@ -69,6 +69,12 @@ pub(crate) struct ArchivedObject {
     pub(crate) asset_hashes: Vec<String>,
 }
 
+impl ArchivedObject {
+    pub(crate) fn object_roots(&self) -> impl Iterator<Item = &str> {
+        std::iter::once(self.object_hash.as_str()).chain(self.asset_hashes.iter().map(String::as_str))
+    }
+}
+
 /// What the confirmation dialog needs before anything is written.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

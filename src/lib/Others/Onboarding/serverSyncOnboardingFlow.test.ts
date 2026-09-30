@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest'
 
 import type { ServerSyncSnapshot } from 'src/ts/storage/sync/serverSyncController'
-import { serverSyncOnboardingOutcome } from './serverSyncOnboardingFlow'
+import {
+    serverSyncOnboardingNext,
+    serverSyncOnboardingOpening,
+    serverSyncOnboardingOutcome,
+    serverSyncOnboardingResume,
+    createServerSyncOnboardingContinuation,
+} from './serverSyncOnboardingFlow'
 
 const head = {
     libraryId: 'library',
@@ -64,14 +70,14 @@ describe('sync server onboarding outcome', () => {
         expect(serverSyncOnboardingOutcome(finished('idle'))).toBe('complete')
         const stale = finished('idle')
         stale.status!.dirtyRecords = 1
-        expect(serverSyncOnboardingOutcome(stale)).toBe('error')
+        expect(serverSyncOnboardingOutcome(stale)).toBe('continuing')
     })
 
     it('offers the conflict choice when the first comparison found one', () => {
         expect(serverSyncOnboardingOutcome(finished('conflict'))).toBe('conflict')
     })
 
-    it('treats a stop the reader asked for as done, not as a failure', () => {
+    it('treats a stop the reader asked for as paused, not as a failure', () => {
         expect(
             serverSyncOnboardingOutcome({
                 ...finished('idle'),
@@ -82,10 +88,74 @@ describe('sync server onboarding outcome', () => {
         ).toBe('paused')
     })
 
+    it('leaves the sync screen only for a completed attempt', () => {
+        expect(serverSyncOnboardingNext('complete')).toBe('done')
+        // A paused attempt stays on the screen so it can be continued there.
+        for (const outcome of ['syncing', 'paused', 'conflict', 'pending', 'continuing', 'error', undefined] as const)
+            expect(serverSyncOnboardingNext(outcome)).toBeUndefined()
+    })
+
     it('separates an unfinished server job from a failure', () => {
         expect(serverSyncOnboardingOutcome(finished('pending'))).toBe('pending')
         expect(
             serverSyncOnboardingOutcome({ ...finished('pending'), error: 'server-unreachable' }),
         ).toBe('error')
+    })
+    it('bounds unchanging tails to two follow-ups and continues when the tail shrinks', () => {
+        const next = createServerSyncOnboardingContinuation()
+        const snapshot = finished('idle')
+        snapshot.status!.dirtyRecords = 5
+        expect(next(snapshot)).toBe(true)
+        expect(next(snapshot)).toBe(false)
+        snapshot.attemptId = 2
+        expect(next(snapshot)).toBe(true)
+        snapshot.attemptId = 3
+        expect(next(snapshot)).toBe(false)
+        snapshot.attemptId = 4
+        snapshot.status!.dirtyRecords = 4
+        expect(next(snapshot)).toBe(true)
+    })
+    it('shows registration errors even if a prior pause was retained', () => {
+        expect(serverSyncOnboardingOutcome({ ...finished('idle'), paused: true, error: 'unauthorized' })).toBe('error')
+    })
+})
+
+describe('sync server onboarding on a connected device', () => {
+    it('continues the connection instead of asking for a code again', () => {
+        expect(serverSyncOnboardingResume({ ...finished('pending'), running: true })).toBe('show')
+        // A held library waits for the settings to continue it.
+        expect(serverSyncOnboardingResume({ ...finished('pending'), paused: true })).toBe('show')
+        expect(serverSyncOnboardingResume({ ...finished('pending'), result: undefined })).toBe('retry')
+        expect(
+            serverSyncOnboardingResume({ ...finished('idle'), error: 'library-operation-busy' }),
+        ).toBe('retry')
+    })
+
+    it('asks for a code while the device is not connected', () => {
+        expect(serverSyncOnboardingResume(undefined)).toBeUndefined()
+        expect(serverSyncOnboardingResume({ running: false, paused: false, error: '' })).toBeUndefined()
+        const disconnected = finished('idle')
+        expect(
+            serverSyncOnboardingResume({
+                ...disconnected,
+                status: { ...disconnected.status!, configured: false },
+            }),
+        ).toBeUndefined()
+    })
+
+    it('opens on the sync screen only from the first screen of a connected device', () => {
+        const running = { ...finished('pending'), running: true }
+        expect(serverSyncOnboardingOpening('home', running)).toBe('sync-hub')
+        expect(serverSyncOnboardingOpening('home', finished('idle'))).toBe('sync-hub')
+        expect(serverSyncOnboardingOpening('import', running)).toBeUndefined()
+        expect(serverSyncOnboardingOpening('sync-hub', running)).toBeUndefined()
+        expect(serverSyncOnboardingOpening('home', undefined)).toBeUndefined()
+        const disconnected = finished('idle')
+        expect(
+            serverSyncOnboardingOpening('home', {
+                ...disconnected,
+                status: { ...disconnected.status!, configured: false },
+            }),
+        ).toBeUndefined()
     })
 })

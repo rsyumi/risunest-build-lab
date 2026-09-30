@@ -36,6 +36,7 @@ import {
     isMetadataOnlySelectedConversation,
 } from './selectedConversationLifecycle'
 import { removeGroupMemberReferences } from './groupMembership'
+import { isConversationStreaming } from './streamingConversationRegistry'
 
 type CompleteCharacter = character | groupChat
 
@@ -47,8 +48,9 @@ class MissingCharacterError extends Error {}
 export interface WorkingSetCoordinator {
     readonly revision: DataRevision
     readonly mutationGeneration: number
-    initialize(revision: DataRevision, database: Database): void
+    initialize(revision: DataRevision, database?: Database): void
     flushPendingData(reason: string): Promise<void>
+    retireWindowedSelectedConversation?(): void
     replacePersistentDatabase(database: Database, reason: string): Promise<CommittedApplyOutcome>
     adoptHydratedCharacter(
         revision: DataRevision,
@@ -70,7 +72,17 @@ export interface WorkingSetCoordinator {
     ): boolean
     runSelectedConversationTransition?<T>(transition: () => T): T
     recordActiveConversationMutation?(event: ActiveConversationMutationEvent): void
+    recordWindowedChatListChange?(
+        authority: WindowedConversationPersistenceAuthority,
+        before: CompleteCharacter,
+        after: CompleteCharacter,
+    ): boolean
 }
+
+export type WindowedChatListEditResult =
+    | { kind: 'applied'; nextId: string | null }
+    | { kind: 'refused' }
+    | { kind: 'unsupported' }
 
 export interface CharacterActivationOptions {
     prepare?(): Promise<{ database: Database; reason: string } | null>
@@ -387,6 +399,7 @@ export class ActiveWorkingSet {
         target: SelectedConversationTarget,
         chat: Chat,
         absoluteStartIndex: number,
+        countPreserving = false,
     ): WindowedConversationMutationController | null {
         const initialState = this.selectedConversationState
         if (
@@ -394,7 +407,9 @@ export class ActiveWorkingSet {
             || !this.matchesTarget(initialState, target)
             || !Number.isSafeInteger(absoluteStartIndex)
             || absoluteStartIndex < 0
-            || absoluteStartIndex + chat.message.length !== initialState.authority.totalMessages
+            || (countPreserving
+                ? absoluteStartIndex + chat.message.length > initialState.authority.totalMessages
+                : absoluteStartIndex + chat.message.length !== initialState.authority.totalMessages)
         ) return null
         let released = false
         let expectedSessionVersion = initialState.authority.sessionVersion
@@ -407,7 +422,9 @@ export class ActiveWorkingSet {
                 && state.conversationId === initialState.conversationId
                 && state.authority.sessionToken === initialState.authority.sessionToken
                 && state.authority.sessionVersion === expectedSessionVersion
-                && state.authority.totalMessages === absoluteStartIndex + chat.message.length
+                && (countPreserving
+                    ? state.authority.totalMessages === initialState.authority.totalMessages
+                    : state.authority.totalMessages === absoluteStartIndex + chat.message.length)
                 ? state
                 : null
         }
@@ -447,6 +464,7 @@ export class ActiveWorkingSet {
                     || !Number.isSafeInteger(deleteCount)
                     || deleteCount < 0
                     || localStart + deleteCount > chat.message.length
+                    || (countPreserving && deleteCount !== messages.length)
                 ) return false
                 const replacedMessages = chat.message.slice(localStart, localStart + deleteCount)
                 const shellSnapshot = safeStructuredClone(
@@ -517,6 +535,152 @@ export class ActiveWorkingSet {
         }
     }
 
+    async captureWindowedMessageMutation(
+        target: SelectedConversationTarget,
+        absoluteIndex: number,
+        evidence: Readonly<Message>,
+    ): Promise<WindowedConversationMutationController | null> {
+        const state = this.selectedConversationState
+        if (state?.kind !== 'windowed' || !this.matchesTarget(state, target) ||
+            state.authority.sessionVersion !== state.authority.persistedSessionVersion ||
+            !Number.isSafeInteger(absoluteIndex) || absoluteIndex < 0 || absoluteIndex >= state.authority.totalMessages) return null
+        const version = state.authority.sessionVersion
+        const lease = await this.dependencies.store.acquireRevision(target.storeRevision)
+        try {
+            const row = await lease.readConversationWindow({
+                characterId: target.characterId, conversationId: target.conversationId, startIndex: absoluteIndex, limit: 1,
+            })
+            if (!row || row.revision !== target.storeRevision || row.value.characterId !== target.characterId ||
+                row.value.conversationId !== target.conversationId || row.value.totalMessages !== state.authority.totalMessages ||
+                row.value.startIndex !== absoluteIndex || row.value.endIndex !== absoluteIndex + 1 ||
+                row.value.messages.length !== 1 || !isEqual(row.value.messages[0], evidence)) return null
+            // A later response carrier can own this row; keep its multi-row edit on the complete path.
+            let cursor = absoluteIndex
+            let stopped = false
+            while (cursor < state.authority.totalMessages && !stopped) {
+                const page = await lease.readConversationWindow({
+                    characterId: target.characterId, conversationId: target.conversationId, startIndex: cursor, limit: 64,
+                })
+                if (!page || page.revision !== target.storeRevision || page.value.characterId !== target.characterId ||
+                    page.value.conversationId !== target.conversationId || page.value.totalMessages !== state.authority.totalMessages ||
+                    page.value.startIndex !== cursor || page.value.messages.length === 0 || page.value.messages.length > 64 ||
+                    page.value.endIndex !== cursor + page.value.messages.length || page.value.endIndex > state.authority.totalMessages) return null
+                for (let index = 0; index < page.value.messages.length; index++) {
+                    const message = page.value.messages[index]
+                    const end = cursor + index
+                    if (end > absoluteIndex && message.role === 'user' && !message.isComment) { stopped = true; break }
+                    const variants = message.responseVariants
+                    const selected = variants?.candidates.find((candidate) => candidate.id === variants.selectedId)
+                    if (selected && absoluteIndex >= end - selected.messages.length + 1 && end !== absoluteIndex) return null
+                }
+                cursor += page.value.messages.length
+            }
+            if (this.selectedConversationState !== state || !this.matchesTarget(state, target) || state.authority.sessionVersion !== version) return null
+            const chat = { ...cloneConversationMetadata(state.conversation), message: safeStructuredClone(row.value.messages) } as Chat
+            return this.captureWindowedConversationMutationController(target, chat, absoluteIndex, true)
+        } finally {
+            await lease.release()
+        }
+    }
+
+    /**
+     * Applies a chat-list edit while the selected conversation stays windowed. `edit`
+     * runs on a draft, so an 'unsupported' result leaves the working set untouched
+     * and the caller can repeat the edit on the complete path.
+     */
+    editWindowedChatList(
+        target: SelectedConversationTarget,
+        edit: (character: CompleteCharacter) => string | null | false,
+    ): WindowedChatListEditResult {
+        const state = this.selectedConversationState
+        const coordinator = this.dependencies.coordinator
+        if (
+            state?.kind !== 'windowed' ||
+            !this.matchesTarget(state, target) ||
+            this.promotionFlight !== null ||
+            // A running generation writes the selected chat's metadata from its own copy.
+            this.dependencies.isConversationOperationActive?.() === true ||
+            !coordinator.recordWindowedChatListChange
+        ) return { kind: 'unsupported' }
+        const resident = this.dependencies.getResidentCharacter?.(state.characterId)
+        if (
+            !resident ||
+            resident.chats.findIndex((conversation) => conversation === state.conversation) !==
+                (resident.chatPage ?? 0)
+        ) return { kind: 'unsupported' }
+
+        const bodies = new Map<string | undefined, { message: Message[]; length: number }>()
+        for (const conversation of resident.chats) {
+            if (conversation === state.conversation) continue
+            bodies.set(conversation.id, {
+                message: conversation.message,
+                length: conversation.message.length,
+            })
+        }
+        const draft = {
+            ...captureCharacterDetail(resident),
+            chats: resident.chats.map((conversation) => ({ ...conversation })),
+        } as CompleteCharacter
+        const nextId = edit(draft)
+        if (nextId === false) return { kind: 'refused' }
+        const selectedIndex = draft.chats.findIndex(
+            (conversation) => conversation.id === state.conversationId,
+        )
+        if (selectedIndex < 0 || Object.hasOwn(draft.chats[selectedIndex], 'message')) {
+            return { kind: 'unsupported' }
+        }
+        draft.chatPage = selectedIndex
+        for (const conversation of draft.chats) {
+            if (conversation.id === state.conversationId) continue
+            const body = bodies.get(conversation.id)
+            if (
+                body &&
+                (conversation.message !== body.message ||
+                    body.message.length !== body.length)
+            ) return { kind: 'unsupported' }
+        }
+        if (!coordinator.recordWindowedChatListChange(
+            { ...state.authority },
+            resident,
+            draft,
+        )) return { kind: 'unsupported' }
+
+        const originals = new Map(
+            resident.chats.map((conversation) => [conversation.id, conversation]),
+        )
+        const syncOwnProperties = (
+            target: Record<string, unknown>,
+            source: Record<string, unknown>,
+            excludedKey: string,
+        ) => {
+            for (const key of Object.keys(target)) {
+                if (key !== excludedKey && !Object.hasOwn(source, key)) delete target[key]
+            }
+            for (const key of Object.keys(source)) {
+                if (key !== excludedKey && !isEqual(target[key], source[key])) {
+                    target[key] = source[key]
+                }
+            }
+        }
+        syncOwnProperties(
+            resident as unknown as Record<string, unknown>,
+            draft as unknown as Record<string, unknown>,
+            'chats',
+        )
+        // Keep the existing chat objects, including the selected windowed shell.
+        resident.chats = draft.chats.map((conversation) => {
+            const original = originals.get(conversation.id)
+            if (!original) return conversation
+            syncOwnProperties(
+                original as unknown as Record<string, unknown>,
+                conversation as unknown as Record<string, unknown>,
+                'message',
+            )
+            return original
+        })
+        return { kind: 'applied', nextId }
+    }
+
     tryDemoteSelectedConversation(target = this.captureSelectedConversationTarget()): boolean {
         const state = this.selectedConversationState
         const transition = this.dependencies.coordinator.runSelectedConversationTransition
@@ -535,6 +699,7 @@ export class ActiveWorkingSet {
             state.session.isTransactionActive ||
             state.session.activePinReasons.some((reason) => reason !== 'viewport') ||
             state.conversation.isStreaming === true
+            || isConversationStreaming(state.conversationId)
         ) return false
 
         const resident = this.dependencies.getResidentCharacter?.(state.characterId)
@@ -899,6 +1064,7 @@ export class ActiveWorkingSet {
         if ([...activeIds].some(
             (id) => this.dependencies.canDeactivateCharacter?.(id) === false,
         )) return false
+        this.dependencies.coordinator.retireWindowedSelectedConversation?.()
         this.activeIds = new Set()
         this.clearActiveConversationSession()
         for (const id of activeIds) this.dependencies.releaseInactiveCharacter?.(id)
@@ -911,14 +1077,45 @@ export class ActiveWorkingSet {
         this.installCommittedWorkingSet(database, root.revision)
     }
 
-    installCommittedWorkingSet(database: Database, revision: DataRevision): void {
-        this.dependencies.coordinator.initialize(revision, database)
+    installCommittedWorkingSet(database: Database, revision: DataRevision, metadata?: PersistentConversationMetadata): void {
         const selectedId = this.dependencies.getSelectedCharacterId()
         this.activeIds = selectedId ? new Set([selectedId]) : new Set()
         const selected = selectedId
             ? database.characters.find((character) => character.chaId === selectedId)
             : undefined
         const conversation = selected?.chats[selected.chatPage ?? 0]
+        if (selected && conversation && isMetadataOnlySelectedConversation(conversation)) {
+            if (!metadata || metadata.characterId !== selected.chaId || metadata.conversationId !== conversation.id) {
+                throw new Error('Windowed installation requires current conversation metadata')
+            }
+            const authority: WindowedConversationPersistenceAuthority = {
+                kind: 'windowed', characterId: selected.chaId, conversationId: metadata.conversationId,
+                sessionToken: createConversationSessionToken(), storeRevision: revision,
+                persistedSessionVersion: 0, sessionVersion: 0, totalMessages: metadata.totalMessages,
+            }
+            const viewportSource = new PersistentConversationViewportSource({
+                reader: this.dependencies.store, characterId: selected.chaId,
+                conversationId: metadata.conversationId, revision, totalMessages: metadata.totalMessages,
+                rowBudget: this.dependencies.conversationViewportRowBudget ?? 64,
+            })
+            this.clearActiveConversationSession()
+            this.selectedConversationState = {
+                kind: 'windowed', stateToken: Symbol('committed windowed selected conversation'),
+                navigationGeneration: this.navigationGeneration, characterId: selected.chaId,
+                conversationId: metadata.conversationId, conversation, authority, viewportSource,
+                summary: createConversationSummaryFromMetadata(selected.chaId, metadata.conversation,
+                    selected.chatPage ?? 0, metadata.totalMessages, conversation.lastDate ?? 0),
+            }
+            try {
+                this.dependencies.coordinator.initialize(revision)
+            } catch (error) {
+                this.clearActiveConversationSession()
+                throw error
+            }
+            this.notifyActiveConversationViewportSource()
+            return
+        }
+        this.dependencies.coordinator.initialize(revision, database)
         if (selected && conversation) {
             this.publishActiveConversationSession(selected.chaId, conversation, revision)
         } else this.clearActiveConversationSession()

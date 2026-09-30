@@ -10,6 +10,7 @@ import {
     createNativeOfficialAccountFlow,
     nativeOfficialAccountKeys,
 } from './nativeOfficialAccountFlow'
+import { NativeFileJobActivationCommittedError } from '../nativeFileJobs'
 
 function createHarness(loggedIn = false, useNativeRestore = false) {
     const events: string[] = []
@@ -49,7 +50,10 @@ function createHarness(loggedIn = false, useNativeRestore = false) {
         kind: 'activated',
         revision: 8,
     }))
+    const completeRestoreAssets = vi.fn(async () => {})
+    const clearRestoreAssets = vi.fn(async () => {})
     const flow = createNativeOfficialAccountFlow({
+        completeRestoreAssets, clearRestoreAssets,
         credentialVault: vault,
         adapter,
         initialCredential: loggedIn ? {
@@ -68,6 +72,7 @@ function createHarness(loggedIn = false, useNativeRestore = false) {
         ...(useNativeRestore ? { nativeRestore } : {}),
     })
     return {
+        completeRestoreAssets, clearRestoreAssets,
         adapter,
         clearLegacyFallback,
         clearMetadata,
@@ -192,7 +197,7 @@ describe('explicit native official account flow', () => {
             id: 'account-2',
             token: 'other-token',
             data: {},
-        })).rejects.toThrow('route failed')
+        })).rejects.toMatchObject({ rolledBack: true, cause: new Error('route failed') })
 
         expect(harness.flow.getToken()).toBe('legacy-token')
         expect(harness.vault.stored).toEqual(previous)
@@ -237,7 +242,9 @@ describe('explicit native official account flow', () => {
             throw new Error('restart failed')
         })
 
-        await expect(harness.flow.restore()).rejects.toThrow('metadata flush failed')
+        await expect(harness.flow.restore()).rejects.toMatchObject({
+            committedRevision: 8, cause: new Error('metadata flush failed'),
+        })
 
         expect(harness.events).toEqual([
             'flush',
@@ -274,7 +281,7 @@ describe('explicit native official account flow', () => {
             id: 'account-1',
             token: 'legacy-token',
             data: {},
-        })
+        }, {})
         expect(harness.adapter.pull).not.toHaveBeenCalled()
         expect(harness.events).toEqual(['flush', 'metadata:flush', 'restart'])
     })
@@ -332,7 +339,7 @@ describe('explicit native official account flow', () => {
 
         await harness.flow.publish(signal)
 
-        expect(harness.adapter.pin).toHaveBeenCalledWith(7)
+        expect(harness.adapter.pin).toHaveBeenCalledWith(7, { signal, onProgress: undefined, onStatus: undefined, userInitiated: true })
         expect(harness.publication.publish).toHaveBeenCalledWith(signal)
         expect(harness.events).toEqual(['flush', 'publish', 'dispose', 'metadata:flush'])
 
@@ -474,4 +481,61 @@ describe('explicit native official account flow', () => {
         expect(backend.has(nativeOfficialAccountKeys.association)).toBe(false)
         expect(backend.has(nativeOfficialAccountKeys.assetLedger)).toBe(false)
     })
+    it('reports rollback failure without claiming the previous vault state survived', async () => {
+        const harness = createHarness(true)
+        harness.vault.write.mockRejectedValue(new Error('vault offline'))
+        await expect(harness.flow.login({ id: 'account-2', token: 'new', data: {} }))
+            .rejects.toMatchObject({ name: 'NativeAccountLoginError', rolledBack: false })
+    })
+
+    it('propagates cancellation and progress to native restore and compatibility pull', async () => {
+        const harness = createHarness(true, true)
+        const controller = new AbortController()
+        const options = { signal: controller.signal, onStatus: vi.fn(), onBlockingChange: vi.fn() }
+        harness.nativeRestore.mockResolvedValueOnce({ kind: 'compatibility-fallback' })
+        await harness.flow.restore(options)
+        expect(harness.nativeRestore).toHaveBeenCalledWith(expect.anything(), options)
+        expect(harness.adapter.pull).toHaveBeenCalledWith(controller.signal)
+        controller.abort()
+        await expect(harness.flow.restore(options)).rejects.toMatchObject({ name: 'AbortError' })
+        expect(harness.nativeRestore).toHaveBeenCalledOnce()
+    })
+
+    it('identifies a restart failure as committed activation', async () => {
+        const harness = createHarness(true, true)
+        harness.restart.mockRejectedValueOnce(new Error('restart failed'))
+        await expect(harness.flow.restore()).rejects.toBeInstanceOf(NativeFileJobActivationCommittedError)
+    })
+
+    it('persists metadata and restarts even when post-activation asset recovery fails', async () => {
+        const harness = createHarness(true, true)
+        harness.completeRestoreAssets.mockRejectedValueOnce(new Error('asset offline'))
+        const blocking = vi.fn()
+        await expect(harness.flow.restore({ onBlockingChange: blocking })).rejects.toMatchObject({
+            committedRevision: 8, cause: new Error('asset offline'),
+        })
+        expect(harness.flushMetadata).toHaveBeenCalledOnce()
+        expect(harness.restart).toHaveBeenCalledOnce()
+        expect(blocking.mock.calls).toEqual([[true], [false]])
+        expect(harness.clearRestoreAssets).not.toHaveBeenCalled()
+    })
+
+    it('clears the asset resume intent after pre-activation failure', async () => {
+        const harness = createHarness(true, true)
+        harness.nativeRestore.mockRejectedValueOnce(new Error('offline'))
+        await expect(harness.flow.restore()).rejects.toThrow('offline')
+        expect(harness.clearRestoreAssets).toHaveBeenCalledOnce()
+        expect(harness.completeRestoreAssets).not.toHaveBeenCalled()
+        expect(harness.restart).not.toHaveBeenCalled()
+    })
+
+    it('exposes only the current authenticated account identity through login and logout', async () => {
+        const harness = createHarness()
+        expect(harness.flow.getAccountId()).toBeNull()
+        await harness.flow.login({ id: 'vault-account', token: 'synthetic', data: {} })
+        expect(harness.flow.getAccountId()).toBe('vault-account')
+        await harness.flow.logout()
+        expect(harness.flow.getAccountId()).toBeNull()
+    })
+
 })

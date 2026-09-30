@@ -72,16 +72,19 @@ const button = (label: string) =>
 function show(section: "backups" | "cache"): void {
   component = mount(ServerSyncStorage, {
     target,
-    props: { onChange: changed, section },
+    props: { onLoaded: changed, section },
   });
 }
 beforeEach(() => {
   vi.resetAllMocks();
   native.getServerSyncBackupInventory.mockResolvedValue(inventory());
   native.getServerSyncCacheUsage.mockResolvedValue({
-    totalBytes: 2048,
+    totalBytes: 2048 + 3072,
+    cacheBytes: 2048,
     protectedBytes: 1024,
     reclaimableBytes: 1024,
+    ledgerBytes: 3072,
+    databaseBytes: 0,
     blockedReason: null,
   });
   confirm.mockResolvedValue(true);
@@ -99,6 +102,13 @@ afterEach(async () => {
   target.remove();
 });
 describe("shared local server storage management", () => {
+  it('loads only backup inventory for the backup list and publishes it to the parent', async () => {
+    show('backups');
+    await vi.waitFor(() => expect(changed).toHaveBeenCalledOnce());
+    expect(native.getServerSyncBackupInventory).toHaveBeenCalledOnce();
+    expect(native.getServerSyncCacheUsage).not.toHaveBeenCalled();
+    expect(changed).toHaveBeenCalledWith(expect.objectContaining({ completeCount: 105 }), undefined);
+  });
   it("displays whole-inventory totals separately from the current page and fetches older rows by cursor", async () => {
     show("cache");
     await vi.waitFor(() => expect(target.textContent).toContain("(105)"));
@@ -127,7 +137,7 @@ describe("shared local server storage management", () => {
     );
     expect(native.deleteServerSyncBackup).not.toHaveBeenCalled();
     button(languageEnglish.remove).click();
-    await vi.waitFor(() => expect(changed).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(changed).toHaveBeenCalledTimes(2));
     expect(native.deleteServerSyncBackup).toHaveBeenCalledExactlyOnceWith(
       "synthetic-id",
     );
@@ -175,6 +185,14 @@ describe("shared local server storage management", () => {
       ),
     );
   });
+  it("shows the asset storage records apart from the temporary files", async () => {
+    show("cache");
+    await vi.waitFor(() => expect(target.textContent).toContain(labels.ledger));
+    expect(target.textContent).toContain(`${labels.cache}: 2.0 KiB`);
+    expect(target.textContent).toContain(`${labels.ledger}: 3.0 KiB`);
+    expect(target.textContent).toContain(labels.ledgerHelp);
+    expect(target.textContent).not.toContain("5.0 KiB");
+  });
   it("rechecks listing after refresh and disables deletion, restoration and cache cleanup when native reports protection", async () => {
     show("backups");
     await vi.waitFor(() => expect(button(languageEnglish.remove)).toBeDefined());
@@ -187,8 +205,11 @@ describe("shared local server storage management", () => {
     native.getServerSyncBackupInventory.mockResolvedValue(blocked);
     native.getServerSyncCacheUsage.mockResolvedValue({
       totalBytes: 2048,
+      cacheBytes: 2048,
       protectedBytes: 2048,
       reclaimableBytes: 0,
+      ledgerBytes: 0,
+      databaseBytes: 0,
       blockedReason: "resolve-pending-operation-first",
     });
     button(labels.refresh).click();
@@ -214,7 +235,7 @@ describe("shared local server storage management", () => {
       new Error("synthetic private path and secret"),
     );
     button(labels.clean).click();
-    await vi.waitFor(() => expect(changed).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(changed).toHaveBeenCalledTimes(2));
     expect(confirm).toHaveBeenCalledWith(labels.cleanConfirm);
     expect(target.querySelector("dl")).toBeNull();
     expect(target.textContent).toContain(

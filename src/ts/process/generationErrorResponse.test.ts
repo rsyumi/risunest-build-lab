@@ -154,3 +154,24 @@ describe('generation error response', () => {
         expect(appended.conversation.message.at(-1)?.chatId).toBe('error-1')
     })
 })
+
+
+it.each(['char', 'user'] as const)('publishes a bounded %s tail error only through its controller', (role) => {
+    const conversation = chat([message(role, 'original', 'tail')])
+    const applyRange = vi.fn(() => true)
+    const controller = { chat: conversation, isCurrent: () => true, applyRange } as any
+    const options = { session: null, windowedController: controller, getCurrentSession: () => null,
+        characterId: 'character-1', chat: conversation, getCurrentChat: () => conversation,
+        suffix: ':error', appendMessage: message('char', 'error', 'error') }
+    expect(applyGenerationErrorResponse(options)).toBe(true)
+    expect(applyRange).toHaveBeenCalledWith(role === 'char' ? 0 : 1, role === 'char' ? 1 : 0,
+        [role === 'char' ? message(role, 'original:error', 'tail') : options.appendMessage], role === 'char' ? 'edit' : 'append')
+    expect(conversation.message[0].data).toBe('original')
+    applyRange.mockReturnValue(false)
+    expect(applyGenerationErrorResponse(options)).toBe(false)
+    controller.isCurrent = () => false
+    applyRange.mockClear()
+    expect(applyGenerationErrorResponse(options)).toBe(false)
+    expect(applyRange).not.toHaveBeenCalled()
+    expect(conversation.message).toEqual([message(role, 'original', 'tail')])
+})

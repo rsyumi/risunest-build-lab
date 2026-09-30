@@ -117,6 +117,81 @@ impl RetryBudget {
     }
 }
 
+const ADMISSION_RETRIES: u32 = 2;
+const ADMISSION_BACKOFF: Duration = Duration::from_secs(2);
+const ADMISSION_BASE_DELAY: Duration = Duration::from_millis(250);
+
+/// A short retry for a foreground request the server refused before admitting
+/// it. It is shared by every request of one foreground operation and is
+/// separate from the Sync job budget, which also bounds per-request timeouts.
+pub(crate) struct AdmissionRetry {
+    used: std::sync::Mutex<(u32, Duration)>,
+    clock: Clock,
+    sleep: Sleeper,
+}
+
+impl AdmissionRetry {
+    pub(crate) fn new() -> Self {
+        Self::with_driver(Arc::new(Instant::now), Arc::new(std::thread::sleep))
+    }
+
+    pub(crate) fn with_driver(clock: Clock, sleep: Sleeper) -> Self {
+        Self {
+            used: std::sync::Mutex::new((0, Duration::ZERO)),
+            clock,
+            sleep,
+        }
+    }
+
+    /// A server-directed delay that does not fit the remaining backoff ends the
+    /// operation instead of retrying early.
+    fn reserve(&self, retry_after: Option<Duration>) -> Result<Duration> {
+        let mut used = self
+            .used
+            .lock()
+            .map_err(|_| SyncError::new("admission-unavailable", 503))?;
+        let (retries, spent) = *used;
+        let remaining = ADMISSION_BACKOFF.saturating_sub(spent);
+        if retries >= ADMISSION_RETRIES || remaining.is_zero() {
+            return Err(SyncError::new("admission-unavailable", 503));
+        }
+        let backoff = jitter(ADMISSION_BASE_DELAY * (1 << retries), retries).min(remaining);
+        let delay = match retry_after {
+            Some(requested) if requested > remaining => {
+                return Err(SyncError::new("admission-unavailable", 503))
+            }
+            Some(requested) => requested.max(backoff),
+            None => backoff,
+        };
+        *used = (retries + 1, spent + delay);
+        Ok(delay)
+    }
+
+    fn wait(&self, retry_after: Option<Duration>, active: impl Fn() -> Result<()>) -> Result<()> {
+        active()?;
+        let deadline = (self.clock)() + self.reserve(retry_after)?;
+        loop {
+            active()?;
+            let remaining = deadline.saturating_duration_since((self.clock)());
+            if remaining.is_zero() {
+                return Ok(());
+            }
+            (self.sleep)(remaining.min(Duration::from_millis(100)));
+        }
+    }
+}
+
+/// Only the refusals the server returns before a request is admitted. Any
+/// other 429, including an unparsed proxy body, reached or may have reached
+/// the handler.
+pub(crate) fn admission_refused(reply: &Reply) -> bool {
+    reply.status == 429
+        && matches!(
+            response_code(reply).as_deref(),
+            Some("device-busy" | "server-busy")
+        )
+}
+
 fn jitter(delay: Duration, attempt: u32) -> Duration {
     if delay.is_zero() {
         return delay;
@@ -139,6 +214,7 @@ pub(crate) struct ServerClient {
     config: RwLock<ServerConfig>,
     cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     retry_budget: Arc<RetryBudget>,
+    admission: Option<Arc<AdmissionRetry>>,
     pub(crate) verified_bytes: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
     pub(crate) retryable_failure: Option<std::sync::Arc<std::sync::Mutex<Option<String>>>>,
     /// The cycle's activity slot. The transfer layer raises it while object
@@ -257,6 +333,7 @@ impl ServerClient {
         let mut candidate = Self::with_cancellation(config, self.cancelled.clone())?;
         candidate.http = self.http.clone();
         candidate.retry_budget = self.retry_budget.clone();
+        candidate.admission = self.admission.clone();
         candidate.verified_bytes = self.verified_bytes.clone();
         candidate.retryable_failure = self.retryable_failure.clone();
         candidate.activity = self.activity.clone();
@@ -333,10 +410,16 @@ impl ServerClient {
             config: RwLock::new(config),
             cancelled,
             retry_budget,
+            admission: None,
             verified_bytes: None,
             retryable_failure: None,
             activity: None,
         })
+    }
+    /// Lets this client repeat a request the server refused before admission.
+    pub(crate) fn with_admission_retry(mut self, admission: Arc<AdmissionRetry>) -> Self {
+        self.admission = Some(admission);
+        self
     }
     pub(crate) fn retry_budget(&self) -> Arc<RetryBudget> {
         self.retry_budget.clone()
@@ -415,7 +498,10 @@ impl ServerClient {
                         && response_code(&reply).as_deref() == Some("server-updating");
                     if maintenance {
                         self.report_retryable_failure(Some("server-updating"));
-                        self.retry_budget.wait(reply.retry_after, elapsed)?;
+                        self.retry_budget.wait(
+                            reply.retry_after,
+                            (self.retry_budget.clock)().saturating_duration_since(attempted),
+                        )?;
                         continue;
                     }
                     return Ok(RequestAttempt::Response(reply));
@@ -462,6 +548,12 @@ impl ServerClient {
                 Ok(mut reply) => {
                     let elapsed = (self.retry_budget.clock)().saturating_duration_since(attempted);
                     reply.attempt_duration = elapsed;
+                    if let Some(admission) = &self.admission {
+                        if admission_refused(&reply) {
+                            admission.wait(reply.retry_after, || self.ensure_active())?;
+                            continue;
+                        }
+                    }
                     let code = response_code(&reply);
                     let maintenance =
                         reply.status == 503 && code.as_deref() == Some("server-updating");
@@ -476,7 +568,10 @@ impl ServerClient {
                             let _ = self.resolve_identity(false);
                         }
                         recovering = true;
-                        self.retry_budget.wait(reply.retry_after, elapsed)?;
+                        self.retry_budget.wait(
+                            reply.retry_after,
+                            (self.retry_budget.clock)().saturating_duration_since(attempted),
+                        )?;
                         continue;
                     }
                     if recovering {
@@ -764,6 +859,7 @@ mod progress_tests {
         assert_eq!(sanitize_retryable_failure(None), None);
     }
 }
+#[track_caller]
 pub(crate) fn response_error(reply: Reply) -> SyncError {
     let value: Option<serde_json::Value> = serde_json::from_slice(&reply.body).ok();
     let code = value
@@ -1084,6 +1180,260 @@ mod tests {
         assert_eq!(reply.status, 503);
         assert_eq!(*client.retry_budget.spent.lock().unwrap(), Duration::ZERO);
         task.join().unwrap();
+    }
+
+    #[test]
+    fn transient_identity_resolution_consumes_the_remaining_retry_budget_before_replay() {
+        for status in [502, 503, 504] {
+            let current = Arc::new(Mutex::new(Instant::now()));
+            let clock = current.clone();
+            let sleeper = current.clone();
+            let budget = Arc::new(RetryBudget::with_driver(
+                None,
+                Arc::new(move || *clock.lock().unwrap()),
+                Arc::new(move |duration| *sleeper.lock().unwrap() += duration),
+            ));
+            let identity_duration = Duration::from_secs(30);
+            budget.charge(RETRY_BUDGET - identity_duration).unwrap();
+            let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+            let endpoint = format!("http://{}", server.server_addr());
+            let identity_clock = current.clone();
+            let task = std::thread::spawn(move || {
+                let request = server.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+                assert_eq!(request.method(), &tiny_http::Method::Get);
+                assert_eq!(request.url(), "/head");
+                request.respond(tiny_http::Response::empty(status)).unwrap();
+                let request = server.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+                assert_eq!(request.method(), &tiny_http::Method::Get);
+                assert_eq!(request.url(), "/session");
+                *identity_clock.lock().unwrap() += identity_duration;
+                request.respond(tiny_http::Response::empty(503)).unwrap();
+                assert!(server.recv_timeout(Duration::from_millis(100)).unwrap().is_none());
+            });
+            let client = ServerClient::with_retry_budget(config(&endpoint), None, budget.clone())
+                .unwrap();
+            let attempted = *current.lock().unwrap();
+            let error = client
+                .request(Method::GET, "head", &[], None, &[], MAX_METADATA_BYTES)
+                .err()
+                .expect("identity resolution must exhaust the budget before replay");
+            assert_eq!((error.code.as_str(), error.status), ("sync-retry-budget-exhausted", 503));
+            assert!(error.retryable);
+            assert_eq!(current.lock().unwrap().duration_since(attempted), identity_duration);
+            assert_eq!(budget.remaining().unwrap(), identity_duration);
+            task.join().unwrap();
+        }
+    }
+
+    fn virtual_admission() -> (Arc<AdmissionRetry>, Arc<Mutex<Duration>>) {
+        let start = Instant::now();
+        let slept = Arc::new(Mutex::new(Duration::ZERO));
+        let clock = slept.clone();
+        let sleeper = slept.clone();
+        (
+            Arc::new(AdmissionRetry::with_driver(
+                Arc::new(move || start + *clock.lock().unwrap()),
+                Arc::new(move |duration| *sleeper.lock().unwrap() += duration),
+            )),
+            slept,
+        )
+    }
+
+    fn reply(status: u16, body: &str) -> Reply {
+        Reply {
+            status,
+            body: body.as_bytes().to_vec(),
+            content_range: None,
+            retry_after: None,
+            attempt_duration: Duration::ZERO,
+        }
+    }
+
+    #[test]
+    fn only_a_pre_admission_refusal_is_classified_for_admission_retry() {
+        assert!(admission_refused(&reply(429, r#"{"error":"device-busy"}"#)));
+        assert!(admission_refused(&reply(429, r#"{"error":"server-busy"}"#)));
+        for (status, body) in [
+            (429, r#"{"error":"pin-quota"}"#),
+            (429, r#"{"error":"staging-quota"}"#),
+            (429, r#"{"error":"media-busy"}"#),
+            (429, r#"{"error":"transfer-memory-busy"}"#),
+            (429, "Too Many Requests"),
+            (429, ""),
+            (503, r#"{"error":"device-busy"}"#),
+            (502, r#"{"error":"invalid-media-access"}"#),
+            (403, r#"{"error":"forbidden"}"#),
+        ] {
+            assert!(!admission_refused(&reply(status, body)), "{status} {body}");
+        }
+    }
+
+    #[test]
+    fn admission_backoff_allows_three_attempts_within_two_seconds() {
+        let (admission, slept) = virtual_admission();
+        let first = admission.reserve(None).unwrap();
+        let second = admission.reserve(None).unwrap();
+        assert!(first >= ADMISSION_BASE_DELAY && first <= ADMISSION_BASE_DELAY * 6 / 5);
+        assert!(second >= ADMISSION_BASE_DELAY * 2 && second <= ADMISSION_BASE_DELAY * 12 / 5);
+        let exhausted = admission.reserve(None).unwrap_err();
+        assert_eq!(
+            (exhausted.code.as_str(), exhausted.status),
+            ("admission-unavailable", 503)
+        );
+        assert!(exhausted.retryable);
+        assert_eq!(*slept.lock().unwrap(), Duration::ZERO);
+
+        let (admission, _) = virtual_admission();
+        let directed = Some(Duration::from_secs(1));
+        assert_eq!(admission.reserve(directed).unwrap(), Duration::from_secs(1));
+        assert_eq!(admission.reserve(directed).unwrap(), Duration::from_secs(1));
+        assert_eq!(
+            admission.reserve(None).unwrap_err().code,
+            "admission-unavailable"
+        );
+    }
+
+    #[test]
+    fn a_server_directed_delay_beyond_the_admission_budget_is_not_shortened() {
+        let (admission, slept) = virtual_admission();
+        let error = admission
+            .wait(Some(Duration::from_secs(3)), || Ok(()))
+            .unwrap_err();
+        assert_eq!(error.code, "admission-unavailable");
+        assert_eq!(*slept.lock().unwrap(), Duration::ZERO);
+
+        let (admission, slept) = virtual_admission();
+        admission
+            .wait(Some(Duration::from_millis(1500)), || Ok(()))
+            .unwrap();
+        assert_eq!(*slept.lock().unwrap(), Duration::from_millis(1500));
+        let error = admission
+            .wait(Some(Duration::from_secs(1)), || Ok(()))
+            .unwrap_err();
+        assert_eq!(error.code, "admission-unavailable");
+        assert_eq!(*slept.lock().unwrap(), Duration::from_millis(1500));
+    }
+
+    #[test]
+    fn a_caller_cancellation_ends_the_admission_wait() {
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flag = cancelled.clone();
+        let admission = AdmissionRetry::with_driver(
+            Arc::new(Instant::now),
+            Arc::new(move |_| flag.store(true, std::sync::atomic::Ordering::SeqCst)),
+        );
+        let client =
+            ServerClient::with_cancellation(config("http://127.0.0.1:1"), Some(cancelled.clone()))
+                .unwrap();
+        let error = admission
+            .wait(Some(Duration::from_secs(1)), || client.ensure_active())
+            .unwrap_err();
+        assert_eq!(error.code, "cancelled");
+        assert!(cancelled.load(std::sync::atomic::Ordering::SeqCst));
+    }
+
+    fn respond_in_order(
+        responses: Vec<(u16, &'static str)>,
+    ) -> (String, std::thread::JoinHandle<usize>) {
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", server.server_addr());
+        let task = std::thread::spawn(move || {
+            let mut seen = 0;
+            for (status, body) in responses {
+                let mut request = server.recv().unwrap();
+                seen += 1;
+                std::io::copy(request.as_reader(), &mut std::io::sink()).unwrap();
+                request
+                    .respond(
+                        tiny_http::Response::from_string(body)
+                            .with_status_code(status)
+                            .with_header(
+                                tiny_http::Header::from_bytes("Retry-After", "1").unwrap(),
+                            ),
+                    )
+                    .unwrap();
+            }
+            if server
+                .recv_timeout(Duration::from_millis(100))
+                .unwrap()
+                .is_some()
+            {
+                seen += 1;
+            }
+            seen
+        });
+        (endpoint, task)
+    }
+
+    #[test]
+    fn an_admission_refusal_repeats_an_unreplayable_request_once_admitted() {
+        let (endpoint, task) = respond_in_order(vec![
+            (429, r#"{"error":"device-busy"}"#),
+            (200, r#"{"granted":true}"#),
+        ]);
+        let (admission, slept) = virtual_admission();
+        let client = ServerClient::new(config(&endpoint))
+            .unwrap()
+            .with_admission_retry(admission);
+        let reply = client
+            .request(
+                Method::POST,
+                "media/access",
+                &[],
+                Some(b"{}".to_vec()),
+                &[],
+                MAX_METADATA_BYTES,
+            )
+            .unwrap();
+        assert_eq!(reply.status, 200);
+        assert_eq!(*slept.lock().unwrap(), Duration::from_secs(1));
+        assert_eq!(task.join().unwrap(), 2);
+    }
+
+    #[test]
+    fn an_unrecognized_or_permanent_refusal_is_not_replayed() {
+        for (status, body) in [
+            (429, r#"{"error":"pin-quota"}"#),
+            (429, "Too Many Requests"),
+            (403, r#"{"error":"forbidden"}"#),
+        ] {
+            let (endpoint, task) = respond_in_order(vec![(status, body)]);
+            let (admission, slept) = virtual_admission();
+            let client = ServerClient::new(config(&endpoint))
+                .unwrap()
+                .with_admission_retry(admission);
+            let reply = client
+                .request(
+                    Method::POST,
+                    "media/access",
+                    &[],
+                    Some(b"{}".to_vec()),
+                    &[],
+                    MAX_METADATA_BYTES,
+                )
+                .unwrap();
+            assert_eq!(reply.status, status);
+            assert_eq!(*slept.lock().unwrap(), Duration::ZERO);
+            assert_eq!(task.join().unwrap(), 1, "{status} {body}");
+        }
+    }
+
+    #[test]
+    fn a_client_without_the_admission_policy_returns_the_refusal() {
+        let (endpoint, task) = respond_in_order(vec![(429, r#"{"error":"device-busy"}"#)]);
+        let reply = ServerClient::new(config(&endpoint))
+            .unwrap()
+            .request(
+                Method::POST,
+                "media/access",
+                &[],
+                Some(b"{}".to_vec()),
+                &[],
+                MAX_METADATA_BYTES,
+            )
+            .unwrap();
+        assert_eq!(reply.status, 429);
+        assert_eq!(task.join().unwrap(), 1);
     }
 }
 

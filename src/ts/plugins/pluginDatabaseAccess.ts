@@ -1,3 +1,6 @@
+import type { PluginStorageValueCursor } from "../storage/persistentDataStore"
+import { reconcilePluginListUpdate } from "./pluginListUpdate"
+import type { RisuPlugin } from "./plugins.svelte"
 import type { Chat, Database } from '../storage/database.svelte'
 import type { CommittedApplyOutcome } from '../storage/persistentDataRuntime'
 import type {
@@ -269,6 +272,19 @@ export type PluginDatabaseSnapshotChunk =
     | { type: 'conversationStart'; key: 'characters'; value: unknown }
     | { type: 'message'; key: 'characters'; value: unknown }
 
+async function* streamPinnedPluginValues(reader: PersistentRevisionLease, owner: string): AsyncGenerator<PluginStorageValue> {
+    let afterKey: PluginStorageValueCursor | undefined
+    do {
+        const page = await reader.readPluginStorageValues({ owner, afterKey })
+        assertPinnedRevision(reader.revision, page.revision, 'Plugin storage values')
+        for (const item of page.items) {
+            if (item.owner !== owner) throw new Error('Plugin storage page contains a foreign owner')
+            yield item
+        }
+        afterKey = page.nextCursor ?? undefined
+    } while (afterKey !== undefined)
+}
+
 async function* streamPinnedConversation(
     reader: PersistentRevisionLease,
     characterId: string,
@@ -278,17 +294,19 @@ async function* streamPinnedConversation(
     if (!metadata) throw new Error(`Missing conversation ${conversationId}`)
     assertPinnedRevision(reader.revision, metadata.revision, 'Conversation metadata')
     yield { type: 'conversationStart', key: 'characters', value: metadata.value.conversation }
-    for (let startIndex = 0; startIndex < metadata.value.totalMessages; startIndex++) {
+    for (let startIndex = 0; startIndex < metadata.value.totalMessages; startIndex += PLUGIN_MESSAGE_QUERY_MAX_LIMIT) {
         const page = await reader.readConversationWindow({
-            characterId, conversationId, startIndex, limit: 1,
+            characterId, conversationId, startIndex, limit: PLUGIN_MESSAGE_QUERY_MAX_LIMIT,
         })
         if (!page) throw new Error(`Missing conversation ${conversationId}`)
         assertPinnedRevision(reader.revision, page.revision, 'Conversation messages')
-        if (page.value.startIndex !== startIndex || page.value.messages.length !== 1
+        if (page.value.startIndex !== startIndex || page.value.messages.length !== Math.min(PLUGIN_MESSAGE_QUERY_MAX_LIMIT, metadata.value.totalMessages - startIndex)
             || page.value.totalMessages !== metadata.value.totalMessages) {
             throw new Error('Incomplete plugin snapshot message page')
         }
-        yield { type: 'message', key: 'characters', value: page.value.messages[0] }
+        for (const message of page.value.messages) {
+            yield { type: 'message', key: 'characters', value: message }
+        }
     }
 }
 
@@ -527,6 +545,12 @@ export function validatePluginDatabaseUpdate(
         throw new TypeError('Plugin database update must be a plain record')
     }
     validateSafeKeys(database)
+    if (Object.prototype.hasOwnProperty.call(database, 'plugins')) {
+        if (!Array.isArray(database.plugins) || database.plugins.some((plugin) =>
+            !isPlainRecord(plugin) || typeof plugin.name !== 'string' || typeof plugin.script !== 'string')) {
+            throw new TypeError('plugins must be an array of plugin records')
+        }
+    }
     if (Object.prototype.hasOwnProperty.call(database, 'pluginCustomStorage')) {
         if (!isPlainRecord(database.pluginCustomStorage)) {
             throw new TypeError('pluginCustomStorage must be a plain record')
@@ -631,7 +655,10 @@ export function applyPluginDatabaseUpdate(
     }
 
     for (const key of Object.keys(update).filter((key) => allowedKeySet.has(key)).sort()) {
-        if (key !== 'pluginCustomStorage') mutableCandidate[key] = update[key]
+        if (key === 'plugins') {
+            const reconciled = reconcilePluginListUpdate(candidate.plugins ?? [], update.plugins as RisuPlugin[])
+            candidate.plugins = [...reconciled.installed, ...reconciled.additions]
+        } else if (key !== 'pluginCustomStorage') mutableCandidate[key] = update[key]
     }
     const updatedKeys = new Set<string>()
     for (const key of Object.keys(update).filter((key) => !allowedKeySet.has(key)).sort()) {
@@ -1153,6 +1180,8 @@ export function createPluginDatabaseAccess(
             await dependencies.flushPendingData('plugin-full-database-snapshot')
             await openStore()
             const reader = await acquireCurrentRevisionReader()
+            let releasePromise: Promise<void> | undefined
+            const release = () => releasePromise ??= releasePersistentRevisionLease(reader)
             const iterator = (async function* (): AsyncGenerator<PluginDatabaseSnapshotChunk> {
                 let failed = false
                 try {
@@ -1184,34 +1213,8 @@ export function createPluginDatabaseAccess(
                         }
                         if (key === 'pluginCustomStorage') {
                             yield { type: 'recordStart', key }
-                            const catalog = await reader.queryPluginStorage()
-                            assertPinnedRevision(
-                                reader.revision,
-                                catalog.revision,
-                                'Plugin storage catalog',
-                            )
-                            for (const summary of catalog.items) {
-                                if (summary.owner !== dependencies.owner) continue
-                                const value = await reader.readPluginStorage(
-                                    dependencies.owner,
-                                    summary.key,
-                                )
-                                if (!value) {
-                                    throw new Error(
-                                        `Missing plugin storage value for ${summary.key}`,
-                                    )
-                                }
-                                assertPinnedRevision(
-                                    reader.revision,
-                                    value.revision,
-                                    `Plugin storage value ${summary.key}`,
-                                )
-                                yield {
-                                    type: 'recordSet',
-                                    key,
-                                    entryKey: summary.key,
-                                    value: value.value,
-                                }
+                            for await (const item of streamPinnedPluginValues(reader, dependencies.owner)) {
+                                yield { type: 'recordSet', key, entryKey: item.key, value: item.value }
                             }
                             continue
                         }
@@ -1226,7 +1229,7 @@ export function createPluginDatabaseAccess(
                     throw error
                 } finally {
                     try {
-                        await releasePersistentRevisionLease(reader)
+                        await release()
                     } catch (error) {
                         if (!failed) throw error
                     }
@@ -1243,7 +1246,11 @@ export function createPluginDatabaseAccess(
                     }
                 },
                 async cancel() {
-                    await iterator.return(undefined)
+                    try {
+                        await iterator.return(undefined)
+                    } finally {
+                        await release()
+                    }
                 },
             })
         },
@@ -1318,34 +1325,9 @@ export function createPluginDatabaseAccess(
                         continue
                     }
                     if (key === 'pluginCustomStorage') {
-                        const catalog = await reader.queryPluginStorage()
-                        assertPinnedRevision(
-                            reader.revision,
-                            catalog.revision,
-                            'Plugin storage catalog',
-                        )
                         const storage: Record<string, unknown> = {}
-                        for (const summary of catalog.items) {
-                            if (summary.owner !== dependencies.owner) continue
-                            const value = await reader.readPluginStorage(
-                                dependencies.owner,
-                                summary.key,
-                            )
-                            if (!value) {
-                                throw new Error(
-                                    `Missing plugin storage value for ${summary.key}`,
-                                )
-                            }
-                            assertPinnedRevision(
-                                reader.revision,
-                                value.revision,
-                                `Plugin storage value ${summary.key}`,
-                            )
-                            defineOwnEnumerableProperty(
-                                storage,
-                                summary.key,
-                                dependencies.snapshot(value.value),
-                            )
+                        for await (const item of streamPinnedPluginValues(reader, dependencies.owner)) {
+                            defineOwnEnumerableProperty(storage, item.key, dependencies.snapshot(item.value))
                         }
                         result[key] = storage
                         continue
@@ -1365,6 +1347,14 @@ export function createPluginDatabaseAccess(
                 throw new Error(SYNCHRONOUS_CHARACTER_SET_ERROR)
             }
             const prepared = dependencies.snapshot(database)
+            if (Object.prototype.hasOwnProperty.call(prepared, 'plugins')) {
+                const reconciled = reconcilePluginListUpdate(
+                    dependencies.getCompatibilityDatabase().plugins,
+                    prepared.plugins as RisuPlugin[],
+                )
+                if (reconciled.additions.length) console.warn('setDatabaseLite: install plugins with setDatabase instead')
+                delete prepared.plugins
+            }
             const compatibilityUpdate = compatibilityOnlyUpdate(prepared, allowedKeys)
             if (Object.keys(compatibilityUpdate).length > 0) {
                 dependencies.applyCompatibilityDatabaseLite(compatibilityUpdate)
@@ -1467,8 +1457,9 @@ export function createProductionPluginChatOutputProjector(
             async () => (await persistentStore.readRoot()).revision,
         )
         return withPersistentRevisionLease(lease, async (reader) => {
-            const durable = await readPinnedCompleteCharacter(reader, input.characterId)
-            if (!durable) throw new Error(`Missing listener character ${input.characterId}`)
+            const detail = await reader.readCharacter(input.characterId)
+            if (!detail) throw new Error(`Missing listener character ${input.characterId}`)
+            assertPinnedRevision(reader.revision, detail.revision, 'Listener character')
 
             const liveCompleteChats = new Map(
                 input.liveCharacter.chats
@@ -1477,13 +1468,28 @@ export function createProductionPluginChatOutputProjector(
             )
             liveCompleteChats.set(input.conversationId, snapshot(input.liveConversation))
 
+            const chats: Chat[] = []
+            let cursor: string | undefined
+            do {
+                const page = await reader.queryConversations({ characterId: input.characterId, order: 'configured', limit: 100, cursor })
+                assertPinnedRevision(reader.revision, page.revision, 'Listener conversations')
+                for (const summary of page.items) {
+                    const live = liveCompleteChats.get(summary.id)
+                    if (live) chats.push(live)
+                    else {
+                        const conversation = await reader.readConversation(input.characterId, summary.id)
+                        if (!conversation) throw new Error(`Missing listener conversation ${summary.id}`)
+                        assertPinnedRevision(reader.revision, conversation.revision, 'Listener conversation')
+                        chats.push(conversation.value as Chat)
+                    }
+                }
+                cursor = page.nextCursor
+            } while (cursor !== undefined)
             const { chats: _liveChats, ...liveDetail } = snapshot(input.liveCharacter)
             const char = {
-                ...durable,
+                ...detail.value,
                 ...liveDetail,
-                chats: durable.chats.map(
-                    (chat) => liveCompleteChats.get(chat.id!) ?? chat,
-                ),
+                chats,
             } as PluginCompleteCharacter
             const chat = char.chats.find(
                 (candidate) => candidate.id === input.conversationId,

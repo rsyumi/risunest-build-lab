@@ -136,6 +136,7 @@ export async function hypaMemoryV3(
     char: character | groupChat,
     tokenizer: ChatTokenizer,
     preparedHistory?: HypaV3PreparedHistory,
+    signal?: AbortSignal,
 ): Promise<HypaV3Result> {
     const settings = getCurrentHypaV3Preset().settings;
 
@@ -150,7 +151,8 @@ export async function hypaMemoryV3(
                 maxContextTokens,
                 room,
                 char,
-                tokenizer
+                tokenizer,
+                signal,
             );
         }
 
@@ -162,6 +164,7 @@ export async function hypaMemoryV3(
             char,
             tokenizer,
             preparedHistory,
+            signal,
         );
     } catch (error) {
         if (error instanceof Error) {
@@ -195,7 +198,8 @@ async function hypaMemoryV3MainExp(
     maxContextTokens: number,
     room: Chat,
     char: character | groupChat,
-    tokenizer: ChatTokenizer
+    tokenizer: ChatTokenizer,
+    signal?: AbortSignal,
 ): Promise<HypaV3Result> {
     const db = getDatabase();
     const settings = getCurrentHypaV3Preset().settings;
@@ -418,7 +422,7 @@ async function hypaMemoryV3MainExp(
         };
 
         const summarizationTasks = toSummarizeArray.map(
-            (item) => () => summarize(item)
+            (item) => () => summarize(item, false, signal)
         );
 
         // Start of performance measurement: summarize
@@ -429,7 +433,7 @@ async function hypaMemoryV3MainExp(
         const summarizeStartTime = performance.now();
 
         const batchResult = await rateLimiter.executeBatch<string>(
-            summarizationTasks
+            summarizationTasks, signal,
         );
 
         const summarizeEndTime = performance.now();
@@ -643,6 +647,7 @@ async function hypaMemoryV3MainExp(
 
         // Initialize embedding processor
         const processor = new HypaProcessorV2<Summary>({
+            signal,
             rateLimiter: new TaskRateLimiter({
                 tasksPerMinute: settings.embeddingRequestsPerMinute,
                 maxConcurrentTasks: settings.embeddingMaxConcurrent,
@@ -976,6 +981,7 @@ async function hypaMemoryV3Main(
     char: character | groupChat,
     tokenizer: ChatTokenizer,
     preparedHistory?: HypaV3PreparedHistory,
+    signal?: AbortSignal,
 ): Promise<HypaV3Result> {
     const db = getDatabase();
     const settings = getCurrentHypaV3Preset().settings;
@@ -1176,7 +1182,7 @@ async function hypaMemoryV3Main(
             );
 
             try {
-                const summarizeResult = await summarize(toSummarize);
+                const summarizeResult = await summarize(toSummarize, false, signal);
 
                 data.summaries.push({
                     text: summarizeResult,
@@ -1375,6 +1381,7 @@ async function hypaMemoryV3Main(
         // Initialize embedding processor
         const processor = new HypaProcesserEx(db.hypaModel);
         processor.oaikey = db.supaMemoryKey;
+        processor.signal = signal;
 
         // Add summaryChunks to processor for similarity search
         try {
@@ -1409,7 +1416,7 @@ async function hypaMemoryV3Main(
                 );
 
                 try {
-                    const summarizeResult = await summarize(recentChats);
+                    const summarizeResult = await summarize(recentChats, false, signal);
 
                     queries.push(summarizeResult);
                 } catch (error) {
@@ -1713,7 +1720,8 @@ function sanitizeSummaryContent(content: string): string {
     return content.replace(inlayTokenRegex, "[Image]");
 }
 
-export async function summarize(oaiMessages: OpenAIChat[], isResummarize: boolean = false): Promise<string> {
+export async function summarize(oaiMessages: OpenAIChat[], isResummarize: boolean = false, signal?: AbortSignal): Promise<string> {
+    signal?.throwIfAborted();
     const db = getDatabase();
     const settings = getCurrentHypaV3Preset().settings;
 
@@ -1751,9 +1759,11 @@ export async function summarize(oaiMessages: OpenAIChat[], isResummarize: boolea
                 useStreaming: false,
                 noMultiGen: true,
             },
-            "memory"
+            "memory",
+            signal,
         );
 
+        signal?.throwIfAborted();
         if (response.type === "streaming" || response.type === "multiline") {
             throw new Error("Unexpected response type");
         }
@@ -1792,6 +1802,7 @@ export async function summarize(oaiMessages: OpenAIChat[], isResummarize: boolea
         },
     });
 
+    signal?.throwIfAborted();
     if (!content || content.trim().length === 0) {
         throw new Error("Empty summary returned");
     }
@@ -1960,6 +1971,7 @@ export class HypaProcesserEx extends HypaProcesser {
     summaryChunkVectors: SummaryChunkVector[] = [];
 
     async addSummaryChunks(chunks: SummaryChunk[]): Promise<void> {
+        this.signal?.throwIfAborted();
         if (isContextModel(this.model)) {
             await this.addSummaryChunksContextual(chunks);
             return;
@@ -2013,13 +2025,13 @@ export class HypaProcesserEx extends HypaProcesser {
         const cached = consistentEmbeddings(await cache.read(keysOf.flat()));
 
         const groupsToEmbed: number[] = [];
-        const cachedVectors = new Map<string, memoryVector>();
+        const cachedVectors = new Map<SummaryChunk, memoryVector>();
 
         for (let i = 0; i < groups.length; i++) {
             const hits = keysOf[i].map(key => cached.get(key));
             if (hits.every(Boolean)) {
                 for (let j = 0; j < groups[i].length; j++) {
-                    cachedVectors.set(groups[i][j].text, {
+                    cachedVectors.set(groups[i][j], {
                         content: groups[i][j].text,
                         embedding: hits[j].vector,
                     });
@@ -2032,9 +2044,11 @@ export class HypaProcesserEx extends HypaProcesser {
         const pendingWrites: HypaEmbeddingEntry[] = [];
         const embedGroups = async (indexes: number[]): Promise<number> => {
             if (indexes.length === 0) return 0;
+            this.signal?.throwIfAborted();
             const results = await provider.embedDocumentGroups(
-                indexes.map(index => groupTextsOf[index])
+                indexes.map(index => groupTextsOf[index]), this.signal
             );
+            this.signal?.throwIfAborted();
             let dimensions = 0;
             for (let i = 0; i < indexes.length; i++) {
                 const group = groups[indexes[i]];
@@ -2043,7 +2057,7 @@ export class HypaProcesserEx extends HypaProcesser {
                     const chunk = group[j];
                     const embedding = embeddings[j];
                     dimensions ||= embedding.length;
-                    cachedVectors.set(chunk.text, { content: chunk.text, embedding });
+                    cachedVectors.set(chunk, { content: chunk.text, embedding });
                     pendingWrites.push(
                         this.cacheEntry('hypa-v3-group', keysOf[indexes[i]][j], embedding)
                     );
@@ -2067,7 +2081,7 @@ export class HypaProcesserEx extends HypaProcesser {
         }
 
         for (const chunk of chunks) {
-            const vector = cachedVectors.get(chunk.text);
+            const vector = cachedVectors.get(chunk);
             if (!vector) {
                 throw new Error(
                     `Failed to create vector for summary chunk:\n${chunk.text}`

@@ -682,6 +682,8 @@ impl Update {
         mut on_chunk: C,
         on_download_finish: D,
     ) -> Result<Vec<u8>> {
+        #[cfg(target_os = "macos")]
+        preflight_app_replacement(&self.extract_path)?;
         // set our headers
         let mut headers = self.headers.clone();
         if !headers.contains_key(ACCEPT) {
@@ -1229,17 +1231,20 @@ impl Update {
 }
 
 #[cfg(any(target_os = "macos", test))]
-fn app_replacement_error(context: &str, error: std::io::Error) -> Error {
-    if error.kind() == std::io::ErrorKind::PermissionDenied {
-        Error::Io(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            format!(
-                "{context}: the installed app was left unchanged; move it to a writable location or reinstall it manually ({error})"
-            ),
-        ))
+fn app_replacement_error(_context: &str, error: std::io::Error) -> Error {
+    if error.kind() == std::io::ErrorKind::PermissionDenied || error.raw_os_error() == Some(30) {
+        Error::InstallLocationNotWritable
     } else {
         Error::Io(error)
     }
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn preflight_app_replacement(current_app: &Path) -> Result<()> {
+    let parent = current_app.parent().ok_or(Error::FailedToDetermineExtractPath)?;
+    let probe = tempfile::Builder::new().prefix(".tauri_update_probe").tempdir_in(parent)
+        .map_err(|error| app_replacement_error("failed to probe app installation", error))?;
+    probe.close().map_err(|error| app_replacement_error("failed to remove installation probe", error))
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -1671,6 +1676,26 @@ mod tests {
     const CURRENT: &str = "timestamp:1700000000\tfile:app_1.2.3_x64.msi.zip\tversion:1.2.3";
     // signatures produced before the CLI started embedding the version
     const LEGACY: &str = "timestamp:1600000000\tfile:app_1.0.0_x64.msi.zip";
+
+    #[test]
+    fn unwritable_installations_have_an_actionable_code_without_replacing_the_bundle() {
+        let root = tempfile::tempdir().unwrap();
+        let current = root.path().join("RisuNest.app");
+        std::fs::create_dir(&current).unwrap();
+        std::fs::write(current.join("version"), b"installed").unwrap();
+        super::preflight_app_replacement(&current).unwrap();
+        assert_eq!(std::fs::read_dir(root.path()).unwrap().count(), 1);
+        for read_only in [false, true] {
+            let failure = || if read_only { std::io::Error::from_raw_os_error(30) }
+                else { std::io::Error::from(std::io::ErrorKind::PermissionDenied) };
+            let result = replace_app_bundle_with(&current, &root.path().join("updated"), |_, _| {
+                Err(failure())
+            });
+            assert!(matches!(result, Err(Error::InstallLocationNotWritable)));
+            assert_eq!(std::fs::read(current.join("version")).unwrap(), b"installed");
+        }
+        assert!(matches!(super::app_replacement_error("fixture", std::io::Error::from(std::io::ErrorKind::NotFound)), Error::Io(_)));
+    }
 
     #[test]
     fn shell_execute_result_requires_a_value_above_error_range() {

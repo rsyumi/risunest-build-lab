@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { mergeExternalHistoryItems } from 'src/ts/storage/sync/external/connection'
 import type {
     ExternalConflictSummary,
@@ -6,6 +6,7 @@ import type {
     ExternalHistoryItem,
 } from 'src/ts/storage/sync/external/types'
 import {
+    abandonExternalOnboardingSelection,
     externalOnboardingAction,
     externalOnboardingConflictStep,
     externalOnboardingRestorable,
@@ -27,6 +28,7 @@ function item(
 ): ExternalHistoryItem {
     return {
         id,
+        snapshotId: id,
         kind: 'recovery-candidate',
         createdAtMs: createdAtMs as ExternalHistoryItem['createdAtMs'],
         logicalRevision: '1' as ExternalHistoryItem['logicalRevision'],
@@ -98,6 +100,16 @@ describe('external storage onboarding backups', () => {
             .toEqual(['newest', 'middle', 'older'])
     })
 
+    it('preserves the restore snapshot identity when a retained point suppresses its recovery candidate', () => {
+        const merged = mergeExternalHistoryItems([], [
+            item('point-id', '2', { snapshotId: 'snapshot-id', kind: 'backup-point' }),
+            item('snapshot-id', '1', { snapshotId: 'snapshot-id', kind: 'recovery-candidate' }),
+        ])
+        const restored = externalOnboardingRestorable(merged)
+        expect(restored).toHaveLength(1)
+        expect(restored[0]).toMatchObject({ id: 'point-id', snapshotId: 'snapshot-id' })
+    })
+
     it('leaves out entries a restore cannot read back', () => {
         const merged = mergeExternalHistoryItems([], [
             item('partial', '3000', { complete: false }),
@@ -126,5 +138,48 @@ describe('external storage onboarding first synchronization', () => {
         })).toBe('conflict')
         expect(externalOnboardingSyncOutcome({ kind: 'blocked', reason: 'transient' })).toBe('error')
         expect(externalOnboardingSyncOutcome({ kind: 'cancelled' })).toBe('error')
+    })
+})
+
+describe('onboarding selection ownership', () => {
+    const owner = { connectionId: 'connection-1', selectionEpoch: 'epoch-1' }
+    function bridge(jobState = 'failed') {
+        const job = { id: 'job', connectionId: owner.connectionId, state: jobState }
+        return {
+            getState: vi.fn().mockResolvedValue({ selection: { kind: 'external', ...owner }, jobs: [job] }),
+            cancelJob: vi.fn().mockResolvedValue({ ...job, state: 'cancelled' }),
+            getJob: vi.fn(), setSyncTarget: vi.fn(),
+        }
+    }
+    it('clears only the selection made by this onboarding attempt after stopping owned work', async () => {
+        const native = bridge('waiting')
+        await abandonExternalOnboardingSelection(owner, native)
+        expect(native.cancelJob).toHaveBeenCalledWith('job')
+        expect(native.setSyncTarget).toHaveBeenCalledWith(null, 'epoch-1')
+    })
+    it('preserves a stopped conflict record while releasing the attempt selection', async () => {
+        const native = bridge('waiting')
+        native.cancelJob.mockResolvedValue({ id: 'job', connectionId: owner.connectionId,
+            state: 'waiting', phase: 'conflict-preservation-paused' })
+        await abandonExternalOnboardingSelection(owner, native)
+        expect(native.getJob).not.toHaveBeenCalled()
+        expect(native.setSyncTarget).toHaveBeenCalledWith(null, owner.selectionEpoch)
+    })
+    it('keeps an uncertain publication and blocks navigation', async () => {
+        const native = bridge('uncertain')
+        await expect(abandonExternalOnboardingSelection(owner, native)).rejects.toMatchObject({ kind: 'preconditionFailed' })
+        expect(native.cancelJob).not.toHaveBeenCalled()
+        expect(native.setSyncTarget).not.toHaveBeenCalled()
+    })
+    it('does not clear a replacement selection made outside the attempt', async () => {
+        const native = bridge()
+        native.getState.mockResolvedValue({ selection: { kind: 'external', ...owner, selectionEpoch: 'new-epoch' }, jobs: [] })
+        await abandonExternalOnboardingSelection(owner, native)
+        expect(native.setSyncTarget).not.toHaveBeenCalled()
+    })
+    it('keeps navigation blocked if native admission refuses clearing the target', async () => {
+        const native = bridge()
+        native.setSyncTarget.mockRejectedValue({ kind: 'preconditionFailed' })
+        await expect(abandonExternalOnboardingSelection(owner, native)).rejects.toMatchObject({ kind: 'preconditionFailed' })
     })
 })

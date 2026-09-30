@@ -44,8 +44,15 @@ describe('RisuNest settings theme and layout conventions', () => {
         for (const source of [dataHealthSource, pluginDataSource, portableSource, assignDialogSource]) {
             expect(source).toContain('SettingToggle')
             expect(source).not.toContain('<Check ')
+        }
+        for (const source of [dataHealthSource, pluginDataSource, assignDialogSource]) {
             expect(source).not.toMatch(/<input\b/)
         }
+        const portableInputs = portableSource.match(/<input\b[^>]*>/g) ?? []
+        expect(portableInputs).toHaveLength(1)
+        expect(portableInputs[0]).toContain('aria-label={text.searchItems}')
+        expect(portableInputs[0]).toContain('bind:value={search}')
+        expect(portableInputs[0]).not.toMatch(/\btype\s*=/)
         for (const source of [updateSource, appImageSource, portableSource]) {
             expect(source).toContain('SettingButton')
             expect(source).not.toMatch(/import Button from/)

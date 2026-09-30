@@ -58,7 +58,9 @@ export const getModuleLorebooks = unrelated
 export const getPersistentNavigationGeneration = unrelated
 export const getPersistentStorageAuthorityEpoch = unrelated
 export const handlePluginInstallViaPlugin = unrelated
-export const hasher = unrelated
+export const hasher = async (data: Uint8Array) =>
+    [...new Uint8Array(await crypto.subtle.digest('SHA-256', data as BufferSource))]
+        .map(byte => byte.toString(16).padStart(2, '0')).join('')
 export const invalidateActiveConversationSession = unrelated
 export const isArchivedCharacter = unrelated
 export const linkPluginQueryAbortSignals = unrelated

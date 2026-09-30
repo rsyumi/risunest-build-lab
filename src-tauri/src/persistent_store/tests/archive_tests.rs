@@ -559,7 +559,7 @@ fn an_archived_character_rejects_every_mutation_except_deleting_it() {
     ));
 
     let mut delete_commit = empty_working_set_commit(revision);
-    delete_commit.delete_character_id = Some("middle-archived".to_owned());
+    delete_commit.delete_character_ids = Some(vec!["middle-archived".to_owned()]);
     store
         .commit(&delete_commit)
         .expect("deleting an archived character stays allowed");

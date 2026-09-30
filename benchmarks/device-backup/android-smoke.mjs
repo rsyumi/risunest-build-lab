@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { measureLegacyRestore } from "../legacy-restore/android-measure.mjs";
 import { execFile, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
@@ -31,7 +32,7 @@ const args = Object.fromEntries(
 );
 for (const name of Object.keys(args))
   assert.ok(
-    ["adb", "apk", "output", "health", "peer", "exchange"].includes(name),
+    ["adb", "apk", "output", "health", "peer", "exchange", "legacy-mb", "legacy-encoding"].includes(name),
     "Unsupported runner option",
   );
 const adb = args.adb;
@@ -458,6 +459,14 @@ async function main() {
     "Synthetic harness state does not match the requested run",
   );
   assert.ok(!state.failure, "Synthetic bootstrap failed before start");
+  if (args['legacy-mb'] || args['legacy-encoding']) {
+    const measurement = await measureLegacyRestore({ args, client, run, pid, packageName, output,
+      apkSha256: sha256, environment });
+    completed = measurement.success;
+    console.log(JSON.stringify(measurement));
+    if (!completed) process.exitCode = 1;
+    return;
+  }
   const startedAt = Date.now();
   const peer = peerPath ? await startPeerRestore() : null;
   if (!peer)

@@ -411,7 +411,11 @@ pub fn validate_installed_marker(install: &Path, expected_version: &str) -> Resu
     validate_removal_inventory(install, expected_version, false)
 }
 
-pub fn validate_removal_inventory(install: &Path, expected_version: &str, allow_missing: bool) -> Result<Vec<PathBuf>> {
+pub fn validate_removal_inventory(
+    install: &Path,
+    expected_version: &str,
+    allow_missing: bool,
+) -> Result<Vec<PathBuf>> {
     let marker = if cfg!(target_os = "macos") {
         install.join("Contents/Resources").join(INVENTORY_FILE)
     } else {

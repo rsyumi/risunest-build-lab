@@ -20,8 +20,11 @@ import {
     normalizeChatLoadPages,
 } from '../chatLoadPages';
 import {
+    assertPresetNames,
+    capturePresetNames,
     createPresetWorkingSetController,
     readPersistentPresetBodies,
+    type PresetListExpectation,
 } from './presetWorkingSetOperations';
 import { normalizeInlayEncodeOptions } from './blobStore';
 
@@ -33,6 +36,7 @@ export let appSubVer = ''
 
 export type StreamingDisplayOptimizationMode = 'off'|'balanced'|'strong'
 export type StreamingThoughtMode = 'recent' | 'collapsed' | 'off'
+export type ChatMessageOverflowScope = 'latest' | 'all'
 
 export function normalizeDatabaseDefaults(data:Database): Database {
     if(checkNullish(data.characters)){
@@ -711,6 +715,7 @@ export function normalizeDatabaseDefaults(data:Database): Database {
     data.streamingDisplayOptimizationMode ??= 'off'
     data.streamingThoughtMode ??= 'recent'
     data.streamingDeferDisplayProcessing ??= false
+    data.chatMessageOverflowScope ??= 'latest'
     data.echoMessage ??= "Echo Message"
     data.echoDelay ??= 0
     if(!isTauri){
@@ -1292,6 +1297,7 @@ export interface Database{
     streamingDisplayOptimizationMode?: StreamingDisplayOptimizationMode
     streamingThoughtMode?: StreamingThoughtMode
     streamingDeferDisplayProcessing?: boolean
+    chatMessageOverflowScope?: ChatMessageOverflowScope
     pluginDevelopMode?: boolean
     echoMessage?:string
     echoDelay?:number
@@ -2188,32 +2194,32 @@ const presetWorkingSetController = createPresetWorkingSetController({
     },
 })
 
-export function saveCurrentPreset(): Promise<void> {
-    return presetWorkingSetController.saveCurrentPreset()
+export function saveCurrentPreset(expectedNames?: PresetListExpectation): Promise<void> {
+    return presetWorkingSetController.saveCurrentPreset(expectedNames)
 }
 
-export function copyPreset(id: number): Promise<number> {
-    return presetWorkingSetController.copyPreset(id)
+export function copyPreset(id: number, expectedNames?: PresetListExpectation): Promise<number> {
+    return presetWorkingSetController.copyPreset(id, expectedNames)
 }
 
-export function changeToPreset(id = 0, savecurrent = true): Promise<void> {
-    return presetWorkingSetController.changeToPreset(id, savecurrent)
+export function changeToPreset(id = 0, savecurrent = true, expectedNames?: PresetListExpectation): Promise<void> {
+    return presetWorkingSetController.changeToPreset(id, savecurrent, expectedNames)
 }
 
 export function addPreset(preset: botPreset, activate = false): Promise<number> {
     return presetWorkingSetController.addPreset(preset, activate)
 }
 
-export function removePreset(id: number): Promise<void> {
-    return presetWorkingSetController.removePreset(id)
+export function removePreset(id: number, expectedNames?: PresetListExpectation): Promise<void> {
+    return presetWorkingSetController.removePreset(id, expectedNames)
 }
 
-export function movePreset(fromIndex: number, toIndex: number): Promise<void> {
-    return presetWorkingSetController.movePreset(fromIndex, toIndex)
+export function movePreset(fromIndex: number, toIndex: number, expectedNames?: PresetListExpectation): Promise<void> {
+    return presetWorkingSetController.movePreset(fromIndex, toIndex, expectedNames)
 }
 
-export function renamePreset(id: number, name: string): Promise<void> {
-    return presetWorkingSetController.renamePreset(id, name)
+export function renamePreset(id: number, name: string, expectedNames?: PresetListExpectation): Promise<void> {
+    return presetWorkingSetController.renamePreset(id, name, expectedNames)
 }
 
 export function updateActivePresetImage(image: string): Promise<void> {
@@ -2354,9 +2360,10 @@ import { defaultHotkeys, type Hotkey } from '../defaulthotkeys';
 import type { OpenAIChat } from '../process/index.svelte';
 import type { Loadout } from '../loadout';
 
-export async function downloadPreset(id:number, type:'json'|'risupreset'|'return' = 'json'){
+export async function downloadPreset(id:number, type:'json'|'risupreset'|'return' = 'json', expectedNames: PresetListExpectation = capturePresetNames(DBState.db.botPresets)){
     const { downloadFile } = await import('../globalApi.svelte')
-    const pres = await readPresetBody(id)
+    assertPresetNames(DBState.db.botPresets, expectedNames)
+    const pres = (await readPresetBodies([id], expectedNames))[0]
     pres.openAIKey = ''
     pres.forceReplaceUrl = ''
     pres.forceReplaceUrl2 = ''
@@ -2365,7 +2372,7 @@ export async function downloadPreset(id:number, type:'json'|'risupreset'|'return
     pres.textgenWebUIBlockingURL=  ''
 
     if(type === 'json'){
-        downloadFile(pres.name + "_preset.json", Buffer.from(JSON.stringify(pres, null, 2)))
+        if (!(await downloadFile(pres.name + "_preset.json", Buffer.from(JSON.stringify(pres, null, 2))))) return { data: pres, buf: null }
     }
     else if(type === 'risupreset' || type === 'return'){
         const buf = fflate.compressSync(encodeMsgpack({
@@ -2380,7 +2387,7 @@ export async function downloadPreset(id:number, type:'json'|'risupreset'|'return
         const buf2 = await encodeRPack(buf)
 
         if(type === 'risupreset'){
-            downloadFile(pres.name + "_preset.risup", buf2)
+            if (!(await downloadFile(pres.name + "_preset.risup", buf2))) return { data: pres, buf: null }
         }
         else{
             return {
@@ -2404,11 +2411,15 @@ export async function readPresetBody(id: number): Promise<botPreset> {
     return (await readPresetBodies([id]))[0]
 }
 
-export async function readPresetBodies(ids: readonly number[]): Promise<botPreset[]> {
-    await saveCurrentPreset()
+export async function readPresetBodies(ids: readonly number[], expectedNames: PresetListExpectation = capturePresetNames(DBState.db.botPresets)): Promise<botPreset[]> {
+    assertPresetNames(DBState.db.botPresets, expectedNames)
+    await saveCurrentPreset(capturePresetNames(DBState.db.botPresets))
+    const afterSave = capturePresetNames(DBState.db.botPresets)
     const { getPersistentDataRuntime } = await import('./persistentDataRuntime.svelte')
     const runtime = getPersistentDataRuntime()
-    return readPersistentPresetBodies(runtime.store, runtime.revision, ids)
+    const result = await readPersistentPresetBodies(runtime.store, runtime.revision, ids)
+    assertPresetNames(DBState.db.botPresets, afterSave)
+    return result
 }
 
 

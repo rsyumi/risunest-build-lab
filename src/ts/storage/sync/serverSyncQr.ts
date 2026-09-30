@@ -1,3 +1,6 @@
+import { isTauriAndroid, isTauriIOS } from "src/ts/platform";
+export const canScanServerRegistration = isTauriAndroid || isTauriIOS;
+export { openAppSettings as openServerRegistrationSettings } from "@tauri-apps/plugin-barcode-scanner";
 import {
   cancel,
   checkPermissions,
@@ -27,6 +30,7 @@ export function createServerQrScanner(
       const work = async () => {
         let permission: string = await api.checkPermissions();
         if (session.stopped) throw new RegistrationError("qr-scan-cancelled");
+        if (permission === "denied") throw new RegistrationError("qr-camera-permission-blocked");
         if (permission === "prompt" || permission === "prompt-with-rationale")
           permission = await api.requestPermissions();
         if (session.stopped) throw new RegistrationError("qr-scan-cancelled");

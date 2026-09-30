@@ -5,7 +5,6 @@ import {
     SegmentedConversationResidency,
     type ConversationDirtyMutation,
     type ConversationPersistenceAttempt,
-    type ConversationRangePin,
     type ConversationResidentInterval,
 } from './segmentedConversationResidency'
 
@@ -163,8 +162,8 @@ export interface ActiveConversationSessionOptions {
     conversationId: string
     conversation: Chat | null
     storeRevision: DataRevision
-    maxResidentBytes?: number
     measureMessage?(message: Message): number
+    // Receives detached event data; observers must never mutate live session state.
     onMutation?(event: ActiveConversationMutationEvent): void
     onPinReleased?(): void
 }
@@ -1070,7 +1069,6 @@ export class ActiveConversationSession {
     private readonly onMutation?: (event: ActiveConversationMutationEvent) => void
     private readonly onPinReleased?: () => void
     private readonly residency: SegmentedConversationResidency
-    private readonly residentReadsEnabled: boolean
     private readonly pins = new Map<ActiveConversationPinReason, number>()
     private readonly residencyRangePins = new Map<ActiveConversationPinReason, number>()
     private readonly subscribers = new Set<(
@@ -1097,11 +1095,10 @@ export class ActiveConversationSession {
         this.currentStoreRevision = options.storeRevision
         this.onMutation = options.onMutation
         this.onPinReleased = options.onPinReleased
-        this.residentReadsEnabled = options.maxResidentBytes !== undefined
         this.residency = new SegmentedConversationResidency({
             revision: options.storeRevision,
             totalMessages: options.conversation.message.length,
-            maxResidentBytes: options.maxResidentBytes ?? 0,
+            maxResidentBytes: 0,
             measureMessage: options.measureMessage ?? estimateMessageBytes,
         })
     }
@@ -1413,7 +1410,6 @@ export class ActiveConversationSession {
             startIndex,
             limit,
         )
-        this.populateResidentRange(window.startIndex, window.endIndex)
         return window
     }
 
@@ -1425,8 +1421,6 @@ export class ActiveConversationSession {
         validateIndex(startIndexExclusive, 'Backward scan startIndex')
         validateCount(limit)
         const start = Math.min(this.totalMessages, startIndexExclusive)
-        const rangeStart = Math.max(0, start - limit)
-        this.populateResidentRange(rangeStart, start)
         const entries: BackwardConversationEntry[] = []
         for (let absoluteIndex = start - 1; absoluteIndex >= 0 && entries.length < limit; absoluteIndex--) {
             entries.push({
@@ -1455,9 +1449,6 @@ export class ActiveConversationSession {
             const previousLocatorRegistry = this.locatorRegistry
             const nextLocatorRegistry = previousLocatorRegistry.fork()
             const previousMessages = this.conversation.message
-            const rollbackMessages = this.onMutation
-                ? captureMessageRollback(previousMessages)
-                : null
             const absoluteIndex = previousMessages.length
             previousMessages.push(safeStructuredClone(message))
             this.sessionVersion += 1
@@ -1471,8 +1462,7 @@ export class ActiveConversationSession {
                 }])
                 previousLocatorRegistry.clear()
             } catch (error) {
-                if (rollbackMessages) restoreMessageRollback(previousMessages, rollbackMessages)
-                else previousMessages.pop()
+                previousMessages.pop()
                 this.conversation.message = previousMessages
                 this.sessionVersion = previousVersion
                 nextLocatorRegistry.clear()
@@ -1501,9 +1491,6 @@ export class ActiveConversationSession {
             const previousLocatorRegistry = this.locatorRegistry
             const nextLocatorRegistry = previousLocatorRegistry.fork()
             const previousMessages = this.conversation.message
-            const rollbackMessages = this.onMutation
-                ? captureMessageRollback(previousMessages)
-                : null
             const previousMessage = previousMessages[locator.absoluteIndex]
             previousMessages[locator.absoluteIndex] = safeStructuredClone(message)
             this.sessionVersion += 1
@@ -1517,8 +1504,7 @@ export class ActiveConversationSession {
                 }])
                 previousLocatorRegistry.clear()
             } catch (error) {
-                if (rollbackMessages) restoreMessageRollback(previousMessages, rollbackMessages)
-                else previousMessages[locator.absoluteIndex] = previousMessage
+                previousMessages[locator.absoluteIndex] = previousMessage
                 this.conversation.message = previousMessages
                 this.sessionVersion = previousVersion
                 nextLocatorRegistry.clear()
@@ -2072,7 +2058,6 @@ export class ActiveConversationSession {
         this.assertActive()
         const pin = this.acquirePin('compatibility')
         try {
-            this.populateAllResidentMessages()
             return new ActiveConversationCompatibilitySnapshot(
                 safeStructuredClone(this.conversation.message),
                 () => pin.release(),
@@ -2097,55 +2082,6 @@ export class ActiveConversationSession {
         this.residencyRangePins.clear()
         this.locatorRegistry.clear()
         this.conversation = null as unknown as Chat
-    }
-
-    private populateResidentRange(startIndex: number, endIndex: number): void {
-        if (
-            this.compatibilityFallback ||
-            !this.residentReadsEnabled ||
-            endIndex <= startIndex
-        ) return
-        let pin: ConversationRangePin
-        try {
-            pin = this.residency.pinRange(startIndex, endIndex, 'background')
-        } catch (error) {
-            this.activateCompatibilityFallback(this.conversation.message.length, { error })
-            return
-        }
-        try {
-            const missing = this.residency.missingPersistentRanges(
-                startIndex,
-                endIndex - startIndex,
-            )
-            for (const range of missing) {
-                this.residency.storeRange({
-                    revision: range.revision,
-                    startIndex: range.persistentStartIndex,
-                    totalMessages: this.residency.persistentTotalMessages,
-                    messages: this.conversation.message.slice(
-                        range.currentStartIndex,
-                        range.currentEndIndex,
-                    ),
-                })
-            }
-        } catch (error) {
-            this.activateCompatibilityFallback(this.conversation.message.length, { error })
-        } finally {
-            pin.release()
-        }
-    }
-
-    private populateAllResidentMessages(): void {
-        for (
-            let startIndex = 0;
-            startIndex < this.totalMessages;
-            startIndex += CONVERSATION_RANGE_MAX_LIMIT
-        ) {
-            this.populateResidentRange(
-                startIndex,
-                Math.min(this.totalMessages, startIndex + CONVERSATION_RANGE_MAX_LIMIT),
-            )
-        }
     }
 
     private assertActive(): void {

@@ -6,7 +6,20 @@
     <string name="webview_provider_missing">Android System WebView is unavailable. Install or enable it before using the app.</string>
     <string name="webview_provider_outdated">Android System WebView %1$s is too old for this app. Update it to version %2$d or newer.</string>
     <string name="webview_provider_unknown_version">The version of Android System WebView provider %1$s could not be determined. Update it before using the app.</string>
-    <string name="generation_notification_channel">Generating response</string>
+    <string name="generation_notification_channel">Background tasks</string>
     <string name="generation_notification_title">Generating response</string>
     <string name="generation_notification_text">Receiving an AI response.</string>
+    <string name="background_notification_title">Background tasks</string>
+    <string name="background_backup">Backing up</string>
+    <string name="background_restore">Restoring</string>
+    <string name="background_sync">Syncing</string>
+    <string name="background_import">Importing</string>
+    <string name="background_export">Exporting</string>
+    <string name="background_maintenance">Cleaning up</string>
+    <string name="exit_still_saving">Saving is still in progress</string>
+    <string name="exit_without_saving_warning">Exiting now may lose unsaved changes.</string>
+    <string name="exit_wait">Wait</string>
+    <string name="exit_now">Exit</string>
+    <string name="completion_notification_channel">Response completion</string>
+    <string name="opened_file_prepare_failed">The selected file could not be prepared for import. Open it again to retry.</string>
 </resources>

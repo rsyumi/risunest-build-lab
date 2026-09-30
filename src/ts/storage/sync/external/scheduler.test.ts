@@ -232,4 +232,28 @@ describe('external storage scheduler', () => {
         expect(request).toHaveBeenCalledOnce()
         expect(scheduler.pendingRevision('sync-1', 'sync')).toBeUndefined()
     })
+    it('does not automatically retry a native action-required start rejection', async () => {
+        const request = vi.fn(async () => ({ kind: 'blocked' as const, reason: 'endpointRejected', cause: { kind: 'endpointRejected' } }))
+        const scheduler = createExternalStorageScheduler({ request, cancel: vi.fn() } as unknown as ExternalStorageController, {
+            available: () => true, destinations: () => [{ connectionId: 'sync', kind: 'sync' }],
+            session: () => ({ kind: 'foreground', id: 'session' }),
+        })
+        scheduler.durableRevision('7')
+        await vi.advanceTimersByTimeAsync(300_000)
+        expect(request).toHaveBeenCalledOnce()
+        scheduler.stop()
+    })
+
+    it('does not restart from durable revision events while suspended', async () => {
+        const { scheduler, request } = harness()
+        await scheduler.suspend()
+        scheduler.durableRevision('7')
+        await vi.advanceTimersByTimeAsync(60_000)
+        expect(request).not.toHaveBeenCalled()
+        scheduler.resume()
+        await vi.advanceTimersByTimeAsync(0)
+        expect(request).toHaveBeenCalledOnce()
+        scheduler.stop()
+    })
+
 })

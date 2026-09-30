@@ -116,16 +116,24 @@ impl Transfer<'_> {
                 &current
                     .iter()
                     .map(|(h, _, _)| h.clone())
+                    .filter(|hash| !seen.contains(hash))
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
                     .collect::<Vec<_>>(),
                 &[],
                 &hints,
             )?;
             let current_len = current.len();
             for (position, (digest, bases, depth)) in current.into_iter().enumerate() {
-                if !seen.insert(digest.clone())
-                    || depth >= MAX_TREE_DEPTH
-                    || seen.len() > MAX_DESCRIPTOR_REFERENCES
-                {
+                // A page two roots both reach is the shared subtree a receiver
+                // skips, which is what the hint walk on the upload side
+                // already does with its own pages. Ending that branch is also
+                // what stops a page naming one of its ancestors from being
+                // followed round again.
+                if !seen.insert(digest.clone()) {
+                    continue;
+                }
+                if depth >= MAX_TREE_DEPTH || seen.len() > MAX_DESCRIPTOR_REFERENCES {
                     return Err(SyncError::new("invalid-descriptor-tree", 409));
                 }
                 let page: ReferencePage = canonical::decode(

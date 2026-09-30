@@ -9,17 +9,16 @@ CREATE TABLE devices (
  name TEXT NOT NULL DEFAULT '', registration_request TEXT UNIQUE
 );
 CREATE TABLE device_section_acks(device TEXT NOT NULL REFERENCES devices(id),domain TEXT NOT NULL,ack TEXT NOT NULL,PRIMARY KEY(device,domain));
-CREATE TABLE objects (hash TEXT PRIMARY KEY, size INTEGER NOT NULL CHECK(size>=0));
+CREATE TABLE objects (hash TEXT PRIMARY KEY, size INTEGER NOT NULL CHECK(size>=0), storage TEXT NOT NULL CHECK(storage IN ('file','inline')));
 CREATE TABLE object_leases(device TEXT NOT NULL REFERENCES devices(id),hash TEXT NOT NULL REFERENCES objects(hash),expires INTEGER NOT NULL,PRIMARY KEY(device,hash));
 CREATE TABLE object_custody(device TEXT NOT NULL REFERENCES devices(id),hash TEXT NOT NULL REFERENCES objects(hash),retention_id TEXT NOT NULL,PRIMARY KEY(device,hash));
 CREATE TABLE object_trash(hash TEXT PRIMARY KEY);
-CREATE TABLE transfer_recipes(id TEXT PRIMARY KEY,body BLOB NOT NULL,expires INTEGER NOT NULL);
 CREATE TABLE read_pins(id TEXT PRIMARY KEY,device TEXT NOT NULL REFERENCES devices(id),after_seq TEXT NOT NULL,through TEXT NOT NULL,domains TEXT NOT NULL,expires INTEGER NOT NULL);
 CREATE TABLE checkpoints(id TEXT PRIMARY KEY,device TEXT NOT NULL REFERENCES devices(id),head TEXT NOT NULL,domains TEXT NOT NULL,expires INTEGER NOT NULL);
 CREATE TABLE checkpoint_records(checkpoint TEXT NOT NULL REFERENCES checkpoints(id) ON DELETE CASCADE,domain TEXT NOT NULL,key TEXT NOT NULL,version TEXT NOT NULL,PRIMARY KEY(checkpoint,domain,key));
 CREATE TABLE uploads (id TEXT PRIMARY KEY,device TEXT NOT NULL REFERENCES devices(id),hash TEXT NOT NULL,size INTEGER NOT NULL,expires INTEGER NOT NULL,state TEXT NOT NULL DEFAULT 'open');
 CREATE INDEX uploads_device ON uploads(device);
-CREATE TABLE upload_jobs(upload TEXT PRIMARY KEY REFERENCES uploads(id) ON DELETE CASCADE,retry_after INTEGER NOT NULL DEFAULT 0,terminal INTEGER NOT NULL DEFAULT 0,error TEXT);
+CREATE TABLE upload_jobs(upload TEXT PRIMARY KEY REFERENCES uploads(id) ON DELETE CASCADE,retry_after INTEGER NOT NULL DEFAULT 0,terminal INTEGER NOT NULL DEFAULT 0,error TEXT,attempts INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE upload_deltas(upload TEXT PRIMARY KEY REFERENCES uploads(id) ON DELETE CASCADE,body BLOB NOT NULL);
 CREATE TABLE upload_delta_bases(upload TEXT NOT NULL REFERENCES uploads(id) ON DELETE CASCADE,hash TEXT NOT NULL,PRIMARY KEY(upload,hash));
 CREATE TABLE download_deltas(id TEXT PRIMARY KEY,device TEXT NOT NULL REFERENCES devices(id),request TEXT NOT NULL,expires INTEGER NOT NULL,state TEXT NOT NULL DEFAULT 'queued',body BLOB,error TEXT);
@@ -62,3 +61,22 @@ CREATE INDEX changes_cursor ON changes(length(seq),seq,ordinal);
 CREATE INDEX changes_section_cursor ON changes(domain,length(seq),seq,ordinal);
 PRAGMA user_version=1;
 "#;
+
+pub fn verify(db: &rusqlite::Connection) -> crate::Result<()> {
+    fn structure(db: &rusqlite::Connection) -> rusqlite::Result<Vec<(String, String, String, String)>> {
+        let mut query = db.prepare("SELECT type,name,tbl_name,COALESCE(sql,'') FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name")?;
+        let rows = query.query_map([], |row| {
+            let sql: String = row.get(3)?;
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, sql.split_whitespace().collect::<Vec<_>>().join(" ")))
+        })?;
+        rows.collect()
+    }
+    let reference = rusqlite::Connection::open_in_memory()?;
+    reference.execute_batch(SCHEMA)?;
+    risunest_small_object_store::initialize(&reference)
+        .map_err(|_| crate::Error::new("metadata-storage", 503))?;
+    if structure(db)? != structure(&reference)? {
+        return Err(crate::Error::new("incompatible-store", 409));
+    }
+    Ok(())
+}

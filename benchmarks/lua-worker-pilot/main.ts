@@ -2,7 +2,7 @@ import type { LuaWorkerHarnessClient } from '../../src/ts/process/luaWorkerHarne
 import {
   createLuaWorkerPilotClient,
   type LuaWorkerPilotClientOptions,
-} from '../../src/ts/process/luaWorkerPilotClient'
+} from '../../src/ts/process/luaWorkerPilotClient.testSupport'
 import type {
   LuaWorkerBoundedContext,
   LuaWorkerInvocation,

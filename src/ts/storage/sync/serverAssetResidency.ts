@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { beginMobileBackgroundTask } from "../../mobileBackgroundTask";
 
 export type AssetResidencyPolicy = "full" | "remote";
 export interface AssetResidencyStatus {
@@ -31,8 +32,27 @@ async function command(
 }
 export const getAssetResidencyStatus = () =>
   command("server_sync_asset_status");
+async function protectedCommand(name: string, args?: Record<string, unknown>) {
+  const task = await beginMobileBackgroundTask("sync");
+  let cancellation: Promise<void> | undefined;
+  const cancel = () => {
+    cancellation ??= cancelAssetResidencyOperation().catch(() => {});
+  };
+  task.signal?.addEventListener("abort", cancel, { once: true });
+  try {
+    if (task.signal?.aborted) throw task.signal.reason;
+    task.progress(null);
+    return await command(name, args);
+  } finally {
+    task.signal?.removeEventListener("abort", cancel);
+    await cancellation;
+    await task.dispose();
+  }
+}
 export const setAssetResidencyPolicy = (policy: AssetResidencyPolicy) =>
-  command("server_sync_asset_policy", { policy });
-export const evictLocalAssets = () => command("server_sync_asset_evict");
+  policy === "full"
+    ? protectedCommand("server_sync_asset_policy", { policy })
+    : command("server_sync_asset_policy", { policy });
+export const evictLocalAssets = () => protectedCommand("server_sync_asset_evict");
 export const cancelAssetResidencyOperation = () =>
   invoke<void>("server_sync_cancel");

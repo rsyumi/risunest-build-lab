@@ -10,11 +10,9 @@ import {
     type PresetSummary,
 } from './persistentDataStore'
 import { canonicalJson } from './saveCoordinator'
-import { removeCharacterIdFromOrder } from './characterOrderMutation'
 import { yieldToMainThread } from '../ui/yieldToUi'
 
 const BOOTSTRAP_CATALOG_PAGE_SIZE = 200
-const TRASH_EXPIRY_MS = 3 * 24 * 60 * 60 * 1000
 const NEW_DATABASE_SEED: Partial<Database> = {
     streamingDisplayOptimizationMode: 'balanced',
 }
@@ -182,28 +180,9 @@ async function projectScalableRevision(
     root: PersistentRoot,
     revision: DataRevision,
 ): Promise<{ database: Database; revision: DataRevision }> {
-    let currentRoot = root
-    let currentRevision = revision
-    let characters = await queryAllCharacterSummaries(dependencies.store, currentRevision)
-    const expiryCutoff = (dependencies.now?.() ?? Date.now()) - TRASH_EXPIRY_MS
-    const expiredIds = characters
-        .filter((summary) => summary.trashTime !== undefined && summary.trashTime < expiryCutoff)
-        .map((summary) => summary.id)
-    for (const characterId of expiredIds) {
-        const nextRoot = structuredClone(currentRoot)
-        removeCharacterIdFromOrder(nextRoot, characterId)
-        const commit = {
-            expectedRevision: currentRevision,
-            deleteCharacterId: characterId,
-        } as Parameters<PersistentDataStore['commit']>[0]
-        if (canonicalJson(nextRoot) !== canonicalJson(currentRoot)) commit.root = nextRoot
-        const result = await dependencies.store.commit(commit)
-        currentRoot = nextRoot
-        currentRevision = result.revision
-    }
-    if (expiredIds.length > 0) {
-        characters = await queryAllCharacterSummaries(dependencies.store, currentRevision)
-    }
+    const currentRoot = root
+    const currentRevision = revision
+    const characters = await queryAllCharacterSummaries(dependencies.store, revision)
     const presets = await readSelectedPreset(
         dependencies.store,
         currentRevision,

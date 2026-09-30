@@ -78,6 +78,9 @@
     let lastCharArg:string|simpleCharacterArgument = null
     let lastChatId = -10
     let renderRoot = $state<HTMLElement | undefined>(undefined)
+    let thoughtOpenStates: boolean[] = []
+    let previewThoughtOpen: boolean | undefined
+
     let destroyed = false
 
     interface ChatBodyParseJob {
@@ -599,9 +602,10 @@
             const previousDisplay = displayedParseJob
             const openThoughts = Array.from(
                 renderRoot?.querySelectorAll<HTMLDetailsElement>(
-                    'details[data-risu-streaming-thought]',
+                    'details[data-risu-thought]',
                 ) ?? [],
             ).map((element) => element.open)
+            if (openThoughts.length) thoughtOpenStates = openThoughts
 
             const retainMarkup =
                 html === displayedHtml && previousDisplay?.settledNotified
@@ -622,14 +626,17 @@
                 return
             }
             lastRenderedRevision = job.requestedRevision
-            renderRoot
-                ?.querySelectorAll<HTMLDetailsElement>(
-                    'details[data-risu-streaming-thought]',
-                )
-                .forEach((element, index) => {
-                    if (openThoughts[index]) element.open = true
-                })
-
+            const settledThoughts = renderRoot?.querySelectorAll<HTMLDetailsElement>(
+                'details[data-risu-thought]',
+            )
+            settledThoughts?.forEach((element, index) => {
+                const open = previewThoughtOpen !== undefined && index === settledThoughts.length - 1
+                    ? previewThoughtOpen
+                    : thoughtOpenStates[index]
+                if (open !== undefined) element.open = open
+            })
+            thoughtOpenStates = Array.from(settledThoughts ?? [], (element) => element.open)
+            previewThoughtOpen = undefined
             let releaseObjectUrls = () => {}
             if (retainMarkup) {
                 releaseObjectUrls = job.releaseObjectUrls
@@ -707,7 +714,7 @@
 
 {#if displayedPreview}
     {#if displayedPreview.thought}
-        <StreamingThoughtPreviewView preview={displayedPreview.thought} mode={displayedPreview.mode} source={displayedPreview.source} />
+        <StreamingThoughtPreviewView preview={displayedPreview.thought} mode={displayedPreview.mode} source={displayedPreview.source} onExpandedChange={(open) => { previewThoughtOpen = open }} />
     {:else}
         <span class="whitespace-pre-wrap">{displayedPreview.source}</span>
     {/if}

@@ -11,8 +11,7 @@
 //!   `https://<account>.r2.cloudflarestorage.com`, Backblaze B2
 //!   `https://s3.<region>.backblazeb2.com`, Hugging Face Storage Buckets
 //!   `https://s3.hf.co/<namespace>`, where the single path segment is required.
-//!   Plain `http` is accepted only for `127.0.0.1`, which is the loopback wire
-//!   fixture; the product transport refuses any other plain-text endpoint.
+//!   Plain `http` is accepted when explicitly configured by the user.
 //! - `account_id` is the access key ID, or whatever account identity the
 //!   service shares its request quota by. It keys the durable budget and is not
 //!   part of the repository identity, so a second device may use its own key
@@ -57,3 +56,9 @@ pub(crate) fn create(dependencies: Dependencies) -> Result<Arc<dyn Provider>> {
 
 #[cfg(test)]
 mod tests;
+
+/// Uses the same validated addressing rule as signed requests.
+pub(crate) fn configured_origin(config: &crate::external_storage::contract::ConnectionConfig) -> Result<url::Url> {
+    let context = config::validate(config, &crate::external_storage::contract::SecretRef(String::new()))?;
+    context.url(config::Target::Bucket, &[])
+}

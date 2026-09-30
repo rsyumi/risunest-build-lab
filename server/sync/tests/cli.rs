@@ -1,7 +1,13 @@
 use std::process::{Command, Output};
 
 fn cli(dir: &std::path::Path, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_risunest-sync-server"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_risunest-sync-server"));
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    command
         .args(args)
         .arg("--data-dir")
         .arg(dir)
@@ -71,8 +77,14 @@ async fn saved_wildcard_listener_is_used_and_management_remains_local() {
             let _ = self.0.wait();
         }
     }
+    let mut command = Command::new(env!("CARGO_BIN_EXE_risunest-sync-server"));
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
     let _child = Child(
-        Command::new(env!("CARGO_BIN_EXE_risunest-sync-server"))
+        command
             .args(["serve", "--data-dir"])
             .arg(dir.path())
             .stdout(std::process::Stdio::null())

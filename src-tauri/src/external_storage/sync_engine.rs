@@ -9,7 +9,9 @@ use super::{
     control::{self, HeadDocument, ObservedHead, PublicationResult},
     job_store::{DurableJob, JobKind, JobStore},
     journal::{JobIdentity, TransferJournal},
-    packaging::{CompletedSnapshot, PackageLimits, SnapshotMetadata, SnapshotPurpose},
+    packaging::{
+        CatalogRoot, CompletedSnapshot, PackageLimits, SnapshotMetadata, SnapshotPurpose,
+    },
     publication::HeadObservation,
 };
 use crate::persistent_store::{
@@ -22,8 +24,10 @@ use crate::persistent_store::{
     sync_selection::CaptureIdentity,
     PersistentStore, PreparedReplaceCommit,
 };
+use std::collections::BTreeMap;
+
 use risunest_external_storage_format::{
-    format::{library_fingerprint_domain, Descriptor},
+    format::{fingerprint, library_fingerprint_domain, Descriptor},
     section::SectionKind,
 };
 use risunest_sync_wire::head::Sequence;
@@ -39,9 +43,35 @@ pub(crate) struct PreparedReceive {
     snapshot_id: String,
     expected: CaptureIdentity,
     authenticated_head: String,
-    commit: PreparedReplaceCommit,
+    apply: PreparedApply,
+    /// What the snapshot names under each logical key, checked against the
+    /// catalog's own fingerprint before either branch is prepared.
+    records: std::collections::BTreeMap<String, String>,
     participation: ReceiveParticipation,
     sections: Vec<super::sections::PreparedSectionInput>,
+}
+
+/// How the receive will reach the library.
+enum PreparedApply {
+    /// The whole library was rebuilt in an inactive generation, which is what a
+    /// receive too large to hold the active database open has to do.
+    Replace(PreparedReplaceCommit),
+    /// Only what the snapshot moved reaches the generation already in use.
+    Difference(PreparedDifference),
+}
+
+struct PreparedDifference {
+    expected_revision: i64,
+    prepared: crate::persistent_store::external_apply::PreparedExternalDifference,
+}
+
+impl PreparedApply {
+    fn staging_id(&self) -> Option<&str> {
+        match self {
+            Self::Replace(commit) => Some(commit.external_staging_id()),
+            Self::Difference(_) => None,
+        }
+    }
 }
 impl PreparedReceive {
     fn ready_result(&self) -> Value {
@@ -61,7 +91,7 @@ pub(crate) fn discard_receive_preparation(app: &AppHandle, id: &str) -> Result<(
     let prepared = state.prepared_receives.lock().map_err(local_error)?.remove(id);
     let jobs = JobStore::open(&super::runtime::root(app)?)?;
     let mut job = jobs.read(id)?;
-    let staging_id = prepared.as_ref().map(|entry| entry.commit.external_staging_id())
+    let staging_id = prepared.as_ref().and_then(|entry| entry.apply.staging_id())
         .or(job.receive_staging_id.as_deref());
     if let Some(staging_id) = staging_id {
         pds(app)?.replace_abort(staging_id).map_err(local_error)?;
@@ -136,6 +166,51 @@ fn prepare_receive_sections(
     }).collect()
 }
 
+/// Past this, a receive stops being the normal one-message case and holds the
+/// active database longer than a user would sit through, so it is staged in
+/// bounded batches and activated instead. Measured on a library of 20,000
+/// characters, the in-place hold is about 7 ms for one changed record and
+/// 74 ms for 1,000, about 7.5 us per message row written or deleted (247 ms
+/// for 32,768), and about 1 ms per body confirmed (`PRESENCE_CHECK_WORK` rows
+/// each). A work unit is one row, so 65,536 units and 1,024 records bound the
+/// hold near 0.6 s. The byte figures bound what preparation reads and keeps
+/// in memory until the apply.
+const RECEIVE_DIFFERENCE_BUDGET: super::receive_difference::DifferenceBudget =
+    super::receive_difference::DifferenceBudget {
+        records: 1024,
+        bytes: 16 * 1024 * 1024,
+        dependent_bytes: 32 * 1024 * 1024,
+        work: 65_536,
+    };
+
+/// What the incoming snapshot moves against what the library already holds,
+/// when the base still describes it and the move is small enough to apply in
+/// place. `None` is the answer whenever there is any doubt about either.
+fn receive_difference_plan(
+    store: &PersistentStore,
+    connection: &str,
+    downloaded: &super::snapshot_restore::PreparedRemoteSnapshot,
+    budget: super::receive_difference::DifferenceBudget,
+) -> Result<Option<super::receive_difference::ReceiveDifference>> {
+    use super::receive_difference::{difference, LocalRecord, RemoteRecord};
+    let Some(view) = store.external_base_records(connection).map_err(local_error)? else {
+        return Ok(None);
+    };
+    let computed = difference(
+        downloaded.records.iter().map(|record| RemoteRecord {
+            key: record.key.clone(),
+            content_hash: record.content_hash.clone(),
+            byte_length: record.byte_length,
+        }),
+        view.into_iter()
+            .map(|(key, content_hash)| LocalRecord { key, content_hash }),
+    )?;
+    Ok(computed
+        .within(budget)
+        .then_some(computed))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn prepare_receive_input(
     store: &mut PersistentStore,
     job: &DurableJob,
@@ -144,8 +219,49 @@ fn prepare_receive_input(
     downloaded: super::snapshot_restore::PreparedRemoteSnapshot,
     sections: Vec<super::sections::CapturedSection>,
     participation: ReceiveParticipation,
+    prepared: &super::phase_progress::PhaseProgress,
     cancel: &Cancellation,
-) -> Result<PreparedReceive> {
+) -> Result<Preparation> {
+    prepare_receive_within(store, job, expected, authenticated_head, downloaded, sections,
+        participation, prepared, cancel, RECEIVE_DIFFERENCE_BUDGET)
+}
+
+fn unfetched(source: &super::content_store::ObjectSource) -> bool {
+    matches!(source, super::content_store::ObjectSource::Unchanged)
+}
+
+/// What preparing a downloaded receive produced.
+enum Preparation {
+    Ready(PreparedReceive),
+    /// The download left the records its base already holds unfetched, and
+    /// the receive turned out to need them. Nothing was staged; a download
+    /// that fetches every record has to come first.
+    NeedsRecords,
+}
+
+#[cfg(test)]
+impl Preparation {
+    fn ready(self) -> PreparedReceive {
+        match self {
+            Preparation::Ready(prepared) => prepared,
+            Preparation::NeedsRecords => panic!("the receive needs records it did not fetch"),
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_receive_within(
+    store: &mut PersistentStore,
+    job: &DurableJob,
+    expected: CaptureIdentity,
+    authenticated_head: String,
+    downloaded: super::snapshot_restore::PreparedRemoteSnapshot,
+    sections: Vec<super::sections::CapturedSection>,
+    participation: ReceiveParticipation,
+    prepared: &super::phase_progress::PhaseProgress,
+    cancel: &Cancellation,
+    budget: super::receive_difference::DifferenceBudget,
+) -> Result<Preparation> {
     require_exact_receive_identity(&expected, &store.external_identity().map_err(local_error)?)?;
     store.external_validate_receive(&job.id, &job.request.connection_id, &expected, &authenticated_head)
         .map_err(|_| ProviderError::new(ErrorKind::PreconditionFailed))?;
@@ -159,6 +275,74 @@ fn prepare_receive_input(
     if sections.iter().any(|section| !wanted.contains(section.kind.id())) {
         return Err(corrupt("received section is not participating"));
     }
+    let scope_id = library_fingerprint_domain();
+    let expected_fingerprint: [u8; 32] = hex::decode(&downloaded.library_fingerprint)
+        .ok().and_then(|value| value.try_into().ok())
+        .ok_or_else(|| corrupt("invalid received fingerprint"))?;
+    let probe = super::runtime::CancelProbe(cancel.clone());
+    // A store helper stopped by the probe reports a validation failure; the
+    // job reports it as the cancellation it was.
+    let stopped = |error: ProviderError| {
+        if cancel.check().is_err() { ProviderError::new(ErrorKind::Cancelled) } else { error }
+    };
+    let mut hashes = BTreeMap::new();
+    let mut record_map = BTreeMap::new();
+    for record in &downloaded.records {
+        let hash: [u8; 32] = hex::decode(&record.content_hash)
+            .ok().and_then(|value| value.try_into().ok())
+            .ok_or_else(|| corrupt("invalid received record hash"))?;
+        if hashes.insert(record.key.clone(), hash).is_some() {
+            return Err(corrupt("received snapshot names a record twice"));
+        }
+        record_map.insert(record.key.clone(), record.content_hash.clone());
+    }
+    // A difference is only as good as the catalog it is taken against, and a
+    // complete stage would not have accepted this one either.
+    if fingerprint(&scope_id, &hashes) != expected_fingerprint {
+        return Err(corrupt("received snapshot differs from its catalog fingerprint"));
+    }
+    cancel.check()?;
+    let difference = receive_difference_plan(store, &job.request.connection_id, &downloaded, budget)?;
+    // A few small keys can stand for a great deal: a conversation's pages, an
+    // owner's manifest, a character's whole history. What they bring is
+    // measured from the catalog before any of it is staged or read.
+    let decoded = match difference {
+        Some(difference) => {
+            let arriving: std::collections::BTreeSet<&str> = difference.added.iter()
+                .chain(difference.changed.iter()).map(String::as_str).collect();
+            let records: Vec<ExternalSnapshotRecord> = downloaded.records.iter()
+                .filter(|record| arriving.contains(record.key.as_str()))
+                .map(|record| ExternalSnapshotRecord {
+                    key: record.key.clone(), content_hash: record.content_hash.clone(),
+                    byte_length: record.byte_length, source: record.source.clone(),
+                })
+                .collect();
+            // A record the download left unfetched cannot arrive in place.
+            if records.iter().any(|record| unfetched(&record.source)) {
+                None
+            } else {
+                let catalog: BTreeMap<String, u64> = downloaded.objects.iter()
+                    .map(|object| (object.content_hash.clone(), object.byte_length))
+                    .collect();
+                let decoded = store
+                    .decode_external_snapshot_difference(
+                        &downloaded.staging_root, &records, &difference.removed, &catalog, &probe,
+                    )
+                    .map_err(|error| stopped(receive_validation_error(error)))?;
+                budget
+                    .admits_dependents(decoded.cost.bytes, decoded.cost.work)
+                    .then_some((difference, records, decoded))
+            }
+        }
+        None => None,
+    };
+    // A replacement stages every record, including the ones the download
+    // skipped because a difference would not have needed them.
+    if decoded.is_none()
+        && downloaded.records.iter().any(|record| unfetched(&record.source))
+    {
+        return Ok(Preparation::NeedsRecords);
+    }
     let sections = prepare_receive_sections(
         &job.request.connection_id,
         &expected.library_epoch,
@@ -166,30 +350,83 @@ fn prepare_receive_input(
         sections,
         cancel,
     )?;
-    let scope_id = library_fingerprint_domain();
-    let fingerprint = hex::decode(&downloaded.library_fingerprint)
-        .ok().and_then(|value| value.try_into().ok())
-        .ok_or_else(|| corrupt("invalid received fingerprint"))?;
-    let application = ExternalSnapshotApplication {
-        expected_revision: expected.revision,
-        staging_root: &downloaded.staging_root,
-        scope_id: &scope_id,
-        fingerprint: &fingerprint,
+    let apply = match decoded {
+        Some((difference, records, decoded)) => {
+            let object_items = downloaded.objects.len() as u64;
+            let object_bytes: u64 =
+                downloaded.objects.iter().map(|object| object.byte_length).sum();
+            // What the receive moves: every body it has to stage, and the
+            // record rows the apply will write or drop. A body the library
+            // already holds is confirmed rather than written, which is why a
+            // difference plans so much less than a replacement.
+            prepared.plan(
+                object_items + records.len() as u64 + difference.removed.len() as u64,
+                object_bytes + records.iter().map(|record| record.byte_length).sum::<u64>(),
+            );
+            for record in &records {
+                prepared.completed(record.byte_length);
+            }
+            for _ in &difference.removed {
+                prepared.completed(0);
+            }
+            let objects = downloaded.objects.into_iter().map(|object| {
+                prepared.completed(object.byte_length);
+                Ok(ExternalSnapshotObject {
+                    content_hash: object.content_hash, byte_length: object.byte_length,
+                    source: object.source,
+                })
+            });
+            let object_sizes = store
+                .stage_external_snapshot_objects(&downloaded.staging_root, objects, &probe)
+                .map_err(|error| stopped(local_error(error)))?;
+            PreparedApply::Difference(PreparedDifference {
+                expected_revision: expected.revision,
+                prepared: store
+                    .prepare_external_snapshot_difference(decoded, object_sizes, &probe)
+                    .map_err(|error| stopped(receive_validation_error(error)))?,
+            })
+        }
+        None => {
+            let application = ExternalSnapshotApplication {
+                expected_revision: expected.revision,
+                staging_root: &downloaded.staging_root,
+                scope_id: &scope_id,
+                fingerprint: &expected_fingerprint,
+                probe: &probe,
+            };
+            // A replacement stages every record as well, which is the whole
+            // reason it costs what it does.
+            prepared.plan(
+                (downloaded.records.len() + downloaded.objects.len()) as u64,
+                downloaded.records.iter().map(|record| record.byte_length).sum::<u64>()
+                    + downloaded.objects.iter().map(|object| object.byte_length).sum::<u64>(),
+            );
+            let records = downloaded.records.into_iter().map(|record| {
+                prepared.completed(record.byte_length);
+                Ok(ExternalSnapshotRecord {
+                    key: record.key, content_hash: record.content_hash,
+                    byte_length: record.byte_length, source: record.source,
+                })
+            });
+            let objects = downloaded.objects.into_iter().map(|object| {
+                prepared.completed(object.byte_length);
+                Ok(ExternalSnapshotObject {
+                    content_hash: object.content_hash, byte_length: object.byte_length,
+                    source: object.source,
+                })
+            });
+            PreparedApply::Replace(
+                store.prepare_external_snapshot_application(&application, records, objects)
+                    .map_err(|error| stopped(local_error(error)))?,
+            )
+        }
     };
-    let records = downloaded.records.into_iter().map(|record| Ok(ExternalSnapshotRecord {
-        key: record.key, content_hash: record.content_hash,
-        byte_length: record.byte_length, path: record.path,
-    }));
-    let objects = downloaded.objects.into_iter().map(|object| Ok(ExternalSnapshotObject {
-        content_hash: object.content_hash, byte_length: object.byte_length, path: object.path,
-    }));
-    let commit = store.prepare_external_snapshot_application(&application, records, objects)
-        .map_err(local_error)?;
-    Ok(PreparedReceive {
+    prepared.flush();
+    Ok(Preparation::Ready(PreparedReceive {
         job_id: job.id.clone(), connection_id: job.request.connection_id.clone(),
-        snapshot_id: downloaded.snapshot_id, expected, authenticated_head, commit,
-        participation, sections,
-    })
+        snapshot_id: downloaded.snapshot_id, expected, authenticated_head, apply,
+        records: record_map, participation, sections,
+    }))
 }
 
 fn receive_validation_error(error: crate::persistent_store::StoreError) -> ProviderError {
@@ -206,22 +443,40 @@ fn activate_prepared_receive(
     prepared: &PreparedReceive,
     current: &CaptureIdentity,
 ) -> Result<i64> {
-    let staging_id = prepared.commit.external_staging_id();
     let result = (|| {
         require_exact_receive_identity(&prepared.expected, current)?;
         store.external_validate_receive(&prepared.job_id, &prepared.connection_id,
             &prepared.expected, &prepared.authenticated_head)
             .map_err(receive_validation_error)?;
         require_receive_participation(store, &prepared.participation)?;
-        // This only revalidates the existing SQL stage; it neither downloads
-        // nor materializes the library and never rebases the expected revision.
-        let commit = store.prepare_replace_commit(staging_id, Some(prepared.expected.revision))
-            .map_err(receive_validation_error)?;
-        for section in &prepared.sections {
-            super::sections::apply_prepared_section(store, section)?;
+        match &prepared.apply {
+            PreparedApply::Replace(commit) => {
+                // This only revalidates the existing SQL stage; it neither
+                // downloads nor materializes the library and never rebases the
+                // expected revision.
+                let commit = store
+                    .prepare_replace_commit(commit.external_staging_id(),
+                        Some(prepared.expected.revision))
+                    .map_err(receive_validation_error)?;
+                for section in &prepared.sections {
+                    super::sections::apply_prepared_section(store, section)?;
+                }
+                store.finish_external_receive(commit, &prepared.job_id, &prepared.records)
+                    .map(|result| result.revision).map_err(local_error)
+            }
+            PreparedApply::Difference(difference) => {
+                for section in &prepared.sections {
+                    super::sections::apply_prepared_section(store, section)?;
+                }
+                store.apply_external_snapshot_difference(
+                    difference.expected_revision,
+                    &difference.prepared,
+                    &prepared.job_id,
+                )
+                .map(|result| result.revision)
+                .map_err(receive_validation_error)
+            }
         }
-        store.finish_external_receive(commit, &prepared.job_id)
-            .map(|result| result.revision).map_err(local_error)
     })();
     if let Err(error) = &result {
         if let Some(completed) = store.external_receive_completion(&prepared.job_id, &prepared.connection_id)
@@ -229,10 +484,14 @@ fn activate_prepared_receive(
         {
             return Ok(completed.revision);
         }
-        if matches!(error.kind, ErrorKind::PreconditionFailed | ErrorKind::Corrupt)
-            && store.replace_abort(staging_id).is_err()
-        {
-            crate::nlog!("error", "Rejected external receive stage could not be removed");
+        if matches!(error.kind, ErrorKind::PreconditionFailed | ErrorKind::Corrupt) {
+            // A difference leaves nothing inactive behind, so there is nothing
+            // to remove and its records stay ready for the next attempt.
+            if prepared.apply.staging_id().is_some_and(|staging_id| {
+                store.replace_abort(staging_id).is_err()
+            }) {
+                crate::nlog!("error", "Rejected external receive stage could not be removed");
+            }
         }
     }
     result
@@ -558,12 +817,33 @@ async fn package_capture(
             capture: identity.clone(),
         },
     )?;
+    journal.set_spool_budget(super::runtime::spool_budget(&root, &job.id));
     // Step 4 of the publication contract needs the latest state, not just the
     // head: the new state inherits its sections and continues its commit order.
     let parent = match expected {
         Some(head) => Some(
             control::read_snapshot_document(connected, &head.document.state, cancel).await?,
         ),
+        None => None,
+    };
+    // Selected and recorded before anything reuses it, so a cleanup that finds
+    // this job stopped still protects the graph it is reading from.
+    let parent_graph = match &parent {
+        Some(view) => {
+            let mut roots = vec![
+                (CatalogRoot::Records, view.library.record_catalog.clone()),
+                (CatalogRoot::Assets, view.library.asset_catalog.clone()),
+            ];
+            roots.extend(view.sections.iter().map(|(id, section)| {
+                (
+                    CatalogRoot::Section(id.clone()),
+                    section.entries_root.clone(),
+                )
+            }));
+            let graph = super::packaging::ParentGraph::new(roots, &connected.handle)?;
+            journal.record_parent(graph.stored())?;
+            Some(graph)
+        }
         None => None,
     };
     let generation = match &parent {
@@ -620,11 +900,7 @@ async fn package_capture(
             parent_sections: parent.map(|view| view.sections).unwrap_or_default(),
         },
     };
-    let cache = directory
-        .parent()
-        .and_then(|path| path.parent())
-        .ok_or_else(|| corrupt("invalid external job directory"))?
-        .join("package-cache");
+    let cache = super::runtime::package_cache_root(&directory)?;
     let completed = super::snapshot::package_and_upload(
         capture,
         sections,
@@ -632,15 +908,19 @@ async fn package_capture(
         &cache,
         metadata,
         &connected.root_key,
-        PackageLimits::from_capabilities(&connected.stored.capabilities)?,
+        PackageLimits::from_capabilities(&connected.stored.capabilities)?
+            .with_maintenance(super::runtime::maintenance_allowed(app, connected, job)),
+        parent_graph.as_ref(),
         &mut journal,
         connected.provider.as_ref(),
         &connected.handle,
+        &super::runtime::preparation_progress(&root, &job.id),
         cancel,
     )
     .await?;
     match super::packaging::verify_publication(
         &completed,
+        &root,
         &cache,
         &mut journal,
         &connected.root_key,
@@ -671,9 +951,15 @@ async fn receive_remote(
         remote.document.state.object_id.trim_start_matches("snapshot-"),
         &remote.document.state,
     );
-    let _admission = app.state::<crate::native_file_jobs::NativeFileJobState>()
-        .admission.file(false).map_err(local_error)?;
-    let (observation, participation) = {
+    // A download runs for as long as the provider takes, and nothing local
+    // may be held for that. The library is admitted for the reads and writes
+    // around it and released over the transfer itself.
+    let admission = app
+        .state::<crate::native_file_jobs::NativeFileJobState>()
+        .admission
+        .clone();
+    let (observation, participation, base_records) = {
+        let _admission = admission.file(false).map_err(local_error)?;
         let mut store = pds(app)?;
         require_exact_receive_identity(expected, &store.external_identity().map_err(local_error)?)?;
         super::runtime::require_admitted_library(job, expected)?;
@@ -706,43 +992,85 @@ async fn receive_remote(
         }
         store.external_validate_receive(&job.id, &job.request.connection_id, expected, &observation)
             .map_err(|_| ProviderError::new(ErrorKind::PreconditionFailed))?;
-        (observation, receive_participation(&mut store)?)
+        let participation = receive_participation(&mut store)?;
+        // What a difference is taken against. A record it names under the
+        // identity the snapshot names is one the library already holds.
+        let base_records = store.external_base_records(&job.request.connection_id)
+            .map_err(local_error)?;
+        drop(store);
+        // A process restart loses the native commit handle. Only this worker
+        // may revalidate the downloaded files and build another inactive
+        // generation.
+        discard_receive_preparation(app, &job.id)?;
+        (observation, participation, base_records)
     };
-    // A process restart loses the native commit handle. Only this worker may
-    // revalidate the downloaded files and build another inactive generation.
-    discard_receive_preparation(app, &job.id)?;
     let root = super::runtime::root(app)?;
-    let staging = super::runtime::job_directory(&root, &job.request.connection_id, &job.id).join("receive");
-    let downloaded = super::snapshot_restore::download_snapshot(
-        &remote.document.state, &staging, &connected.root_key,
-        connected.provider.as_ref(), &connected.handle, cancel,
-    ).await?;
-    cancel.check()?;
-    let sections = super::snapshot_restore::download_sections(
-        &remote.document.state, &wanted_receive_sections(&participation), &staging,
-        &connected.root_key, connected.provider.as_ref(), &connected.handle, cancel,
-    ).await?;
-    let worker_app = app.clone();
-    let worker_job = job.clone();
-    let worker_identity = expected.clone();
-    let worker_head = observation;
-    let worker_cancel = cancel.clone();
-    let prepared = tokio::task::spawn_blocking(move || {
-        worker_cancel.check()?;
-        super::runtime::read_job_session(&worker_app, &worker_job.id)?;
-        prepare_receive_input(&mut pds(&worker_app)?, &worker_job, worker_identity,
-            worker_head, downloaded, sections, participation, &worker_cancel)
-    }).await.map_err(local_error)??;
+    let directory = super::runtime::job_directory(&root, &job.request.connection_id, &job.id);
+    let staging = directory.join("receive");
+    super::receive_artifacts::hold(&root, &job.id)?;
+    // What this receive reads is what the next publication would select as its
+    // parent, so keep it rather than reading the same catalogs again.
+    let cache = super::runtime::package_cache_root(&directory)?;
+    // A body the library already holds under the identity this snapshot names
+    // is the same body, so a normal receive does not fetch it again.
+    let transferred = super::runtime::transfer_progress(&root, &job.id);
+    let mut trust = match base_records.as_ref() {
+        Some(records) => super::snapshot_restore::SourceTrust::AdmittedLibraryAt {
+            root: &root, records, within: RECEIVE_DIFFERENCE_BUDGET,
+        },
+        None => super::snapshot_restore::SourceTrust::AdmittedLibrary(&root),
+    };
+    let prepared = loop {
+        let downloaded = super::snapshot_restore::download_snapshot(
+            &remote.document.state, &staging, &connected.root_key, Some(&cache), trust,
+            connected.provider.as_ref(), &connected.handle, &transferred, cancel,
+        ).await?;
+        cancel.check()?;
+        let sections = super::snapshot_restore::download_sections(
+            &remote.document.state, &wanted_receive_sections(&participation), &staging,
+            &connected.root_key, Some(&cache), connected.provider.as_ref(), &connected.handle,
+            &transferred, cancel,
+        ).await?;
+        transferred.flush();
+        let worker_app = app.clone();
+        let worker_job = job.clone();
+        let worker_identity = expected.clone();
+        let worker_head = observation.clone();
+        let worker_participation = participation.clone();
+        let worker_cancel = cancel.clone();
+        let worker_staging = super::runtime::preparation_progress(&root, &job.id);
+        let worker_admission = admission.clone();
+        let preparation = tokio::task::spawn_blocking(move || {
+            worker_cancel.check()?;
+            let _admission = worker_admission.file(false).map_err(local_error)?;
+            super::runtime::read_job_session(&worker_app, &worker_job.id)?;
+            prepare_receive_input(&mut pds(&worker_app)?, &worker_job, worker_identity,
+                worker_head, downloaded, sections, worker_participation, &worker_staging,
+                &worker_cancel)
+        }).await.map_err(local_error)??;
+        match preparation {
+            Preparation::Ready(prepared) => break prepared,
+            // Only a difference too heavy to apply in place gets here: the
+            // records it skipped are fetched now, next to the ones it has.
+            Preparation::NeedsRecords
+                if matches!(trust, super::snapshot_restore::SourceTrust::AdmittedLibraryAt { .. }) =>
+            {
+                trust = super::snapshot_restore::SourceTrust::AdmittedLibrary(&root);
+            }
+            Preparation::NeedsRecords => return Err(corrupt("received records are still unfetched")),
+        }
+    };
     let recorded = (|| {
         let jobs = JobStore::open(&root)?;
         let mut durable = jobs.read(&job.id)?;
-        durable.receive_staging_id = Some(prepared.commit.external_staging_id().to_owned());
+        durable.receive_staging_id = prepared.apply.staging_id().map(str::to_owned);
         jobs.put(&durable)
     })();
     if let Err(error) = recorded {
-        if pds(app).and_then(|mut store| store.replace_abort(prepared.commit.external_staging_id())
-            .map_err(local_error)).is_err()
-        {
+        if prepared.apply.staging_id().is_some_and(|staging_id| {
+            pds(app).and_then(|mut store| store.replace_abort(staging_id).map_err(local_error))
+                .is_err()
+        }) {
             crate::nlog!("error", "Unrecorded external receive stage could not be removed");
         }
         return Err(error);
@@ -755,6 +1083,7 @@ async fn receive_remote(
         require_received_head(&prepared.authenticated_head,
             current.as_ref().map(|head| &head.observation))?;
         {
+            let _admission = admission.file(false).map_err(local_error)?;
             let mut store = pds(app)?;
             require_exact_receive_identity(&prepared.expected, &store.external_identity().map_err(local_error)?)?;
             store.external_validate_receive(&job.id, &job.request.connection_id,
@@ -781,7 +1110,12 @@ async fn receive_remote(
         Ok(result)
     }.await;
     if checked.is_err() {
-        if discard_receive_preparation(app, &job.id).is_err() {
+        let discarded = admission.file(false).map_err(local_error).and_then(|permit| {
+            let outcome = discard_receive_preparation(app, &job.id);
+            drop(permit);
+            outcome
+        });
+        if discarded.is_err() {
             crate::nlog!("error", "External receive preparation could not be discarded");
         }
     }
@@ -903,22 +1237,29 @@ async fn rejoin_sections(
     {
         return Ok(());
     }
-    let staging = super::runtime::job_directory(
+    let directory = super::runtime::job_directory(
         &super::runtime::root(app)?,
         &job.request.connection_id,
         &job.id,
-    )
-    .join("rejoin");
+    );
+    let staging = directory.join("rejoin");
+    super::receive_artifacts::hold(&super::runtime::root(app)?, &job.id)?;
+    let cache = super::runtime::package_cache_root(&directory)?;
+    let transferred =
+        super::runtime::transfer_progress(&super::runtime::root(app)?, &job.id);
     let received = super::snapshot_restore::download_sections(
         &remote.document.state,
         &wanted,
         &staging,
         &connected.root_key,
+        Some(&cache),
         connected.provider.as_ref(),
         &connected.handle,
+        &transferred,
         cancel,
     )
     .await?;
+    transferred.flush();
     let mut store = pds(app)?;
     for prepared in &received {
         super::sections::apply_received_section(
@@ -1030,7 +1371,7 @@ fn apply_received(app: &AppHandle, request: &ApplyReceivedRequest) -> Result<Val
     drop(permit);
     let retained = state.prepared_receives.lock().map_err(local_error)?;
     job.receive_staging_id = retained.get(&job.id)
-        .map(|prepared| prepared.commit.external_staging_id().to_owned());
+        .and_then(|prepared| prepared.apply.staging_id().map(str::to_owned));
     let ready_result = retained.get(&job.id).map(PreparedReceive::ready_result);
     drop(retained);
     let (snapshot_id, revision) = match outcome {
@@ -1086,6 +1427,12 @@ fn apply_received(app: &AppHandle, request: &ApplyReceivedRequest) -> Result<Val
     }
     // Terminal leases are reconciled by the next repository worker. Activation
     // neither opens credentials nor starts a provider request, even for cleanup.
+    // The consumed handle and the permit are released; the claim still keeps
+    // every other job of the connection from starting while bodies move aside.
+    let detached =
+        super::receive_artifacts::detach_claimed(app, &claim, &job.request.connection_id);
+    drop(claim);
+    super::receive_artifacts::remove_detached_later(app, detached);
     Ok(result)
 }
 
@@ -1253,6 +1600,7 @@ async fn preserve_conflict(
         .durable_reference(&super::runtime::root(app)?)
         .map_err(local_error)?;
     let record = conflict_record_from_remote(connected, job, local, &remote, cancel).await?;
+    complete_local_conflict(app, &record, cancel).await?;
     let record = preserve_local_conflict(app, job, record)?;
     ensure_conflict_point(app, connected, job, record, false, protection, cancel).await
 }
@@ -1282,6 +1630,32 @@ async fn conflict_record_from_remote(
         },
         remote_point: None,
         resolved: false,
+    })
+}
+
+/// The conflict's local side is what the user recovers from, so every payload
+/// its capture names is held locally before the capture is kept for it.
+async fn complete_local_conflict(
+    app: &AppHandle,
+    record: &ExternalConflictRecord,
+    cancel: &Cancellation,
+) -> Result<()> {
+    let app = app.clone();
+    let capture_id = record.local.capture_id.clone();
+    let probe = super::runtime::CancelProbe(cancel.clone());
+    tokio::task::spawn_blocking(move || {
+        pds(&app)?
+            .complete_external_capture(&capture_id, &probe)
+            .map_err(local_error)
+    })
+    .await
+    .map_err(local_error)?
+    .map_err(|error| {
+        if cancel.check().is_err() {
+            ProviderError::new(ErrorKind::Cancelled)
+        } else {
+            error
+        }
     })
 }
 
@@ -1346,7 +1720,7 @@ fn conflict_journal(
 ) -> Result<TransferJournal> {
     let root = super::runtime::root(app)?;
     let directory = super::runtime::job_directory(&root, &job.request.connection_id, &job.id);
-    TransferJournal::open(
+    let mut journal = TransferJournal::open(
         &directory,
         JobIdentity {
             job_id: job.id.clone(),
@@ -1355,7 +1729,9 @@ fn conflict_journal(
             capture_id: record.local.capture_id.clone(),
             capture: record.local.identity.clone(),
         },
-    )
+    )?;
+    journal.set_spool_budget(super::runtime::spool_budget(&root, &job.id));
+    Ok(journal)
 }
 
 async fn resume_conflict_preservation(
@@ -1666,9 +2042,16 @@ async fn run_resolve_conflict(
                 &job.request.connection_id,
                 super::connection_store::CompletionKind::Sync,
             );
-            Ok(
-                json!({"snapshotId":completed.snapshot_id,"publishedRevision":stored.local.identity.revision.to_string()}),
-            )
+            Ok(json!({
+                "snapshotId": completed.snapshot_id,
+                "publishedRevision": stored.local.identity.revision.to_string(),
+                "maintenancePacks": completed.maintenance.packs.to_string(),
+                "maintenanceBytes": completed.maintenance.source_bytes.to_string(),
+                "maintenanceLeaves": completed.maintenance.leaves.to_string(),
+                "maintenanceRequiredLeaves": completed.maintenance.required_leaves.to_string(),
+                "sourceDownloadObjects": completed.hydration.objects.to_string(),
+                "sourceDownloadBytes": completed.hydration.bytes.to_string(),
+            }))
         }
         PublicationResult::Conflict(_) => {
             pds(app)?
@@ -1970,6 +2353,7 @@ pub(crate) async fn run_sync(
                         cancel,
                     )
                     .await?;
+                    complete_local_conflict(app, &record, cancel).await?;
                     let record = preserve_local_conflict(app, job, record)?;
                     drop(journal);
                     ensure_conflict_point(app, connected, job, record, false, protection, cancel).await
@@ -2118,16 +2502,19 @@ pub(crate) async fn external_storage_delete_conflict(
         .map_err(|error| {
             crate::native_file_jobs::NativeJobError::new("store-error", error.to_string())
         })?;
-        if store.cleanup_deleted_conflict_capture(&record.local).is_err() {
-            crate::nlog!(
+        match store.cleanup_deleted_conflict_capture(&record.local) {
+            Ok(true) => store.collect_released_external_content(),
+            Ok(false) => {}
+            Err(_) => crate::nlog!(
                 "warn",
                 "Deleted external conflict capture could not be cleaned immediately"
-            );
+            ),
         }
         record
     };
     drop(mutation);
     drop(state);
+    release_deleted_conflict_bodies(&app, &record.id).await;
     if !delete_remote_point || record.remote_point.is_none() {
         return Ok(json!({"localDeleted":true,"remotePoint":"left-remote"}));
     }
@@ -2153,6 +2540,26 @@ pub(crate) async fn external_storage_delete_conflict(
     Ok(json!({"localDeleted":true,"remotePoint":remote_point}))
 }
 
+/// The deleted conflict no longer holds its job's downloaded bodies. While
+/// another job holds the connection, that job's settlement runs the pass.
+async fn release_deleted_conflict_bodies(app: &AppHandle, job_id: &str) {
+    let Ok(job) =
+        super::runtime::root(app).and_then(|root| JobStore::open(&root)?.read(job_id))
+    else {
+        return;
+    };
+    let Ok((_, claim)) = app.state::<super::job_store::JobCommandState>().claim(&job) else {
+        return;
+    };
+    let (pass_app, connection) = (app.clone(), job.request.connection_id);
+    let detached = tokio::task::spawn_blocking(move || {
+        super::receive_artifacts::detach_claimed(&pass_app, &claim, &connection)
+    })
+    .await
+    .unwrap_or_default();
+    super::receive_artifacts::remove_detached_later(app, detached);
+}
+
 #[tauri::command]
 pub(crate) async fn external_storage_recheck_conflict(
     app: AppHandle,
@@ -2166,9 +2573,15 @@ pub(crate) async fn external_storage_recheck_conflict(
     let record = conflict_record(&app, &id)?
         .ok_or_else(|| ProviderError::new(ErrorKind::NotFound))?;
     let local_available =
-        super::capture::validate_capture_sources([&record.local], &root).is_ok();
+        super::capture::validate_recovery_sources(
+            [&record.local], &root, &crate::local_backup::NeverCancelled,
+        ).is_ok();
     Ok(conflict_summary(&record, local_available, true))
 }
+
+#[cfg(test)]
+#[path = "receive_artifact_tests.rs"]
+mod receive_artifact_tests;
 
 #[cfg(test)]
 mod receive_tests {
@@ -2185,7 +2598,7 @@ mod receive_tests {
     };
     use std::{collections::BTreeMap, fs};
 
-    fn bind(store: &mut PersistentStore, snapshot: &str) -> DurableJob {
+    pub(super) fn bind(store: &mut PersistentStore, snapshot: &str) -> DurableJob {
         let identity = store.external_identity().unwrap();
         let request = serde_json::from_value(json!({
             "connectionId":"connection", "kind":"sync", "reason":"automatic",
@@ -2200,7 +2613,7 @@ mod receive_tests {
         job
     }
 
-    fn fixture() -> (tempfile::TempDir, PersistentStore, DurableJob, super::super::snapshot_restore::PreparedRemoteSnapshot) {
+    pub(super) fn fixture() -> (tempfile::TempDir, PersistentStore, DurableJob, super::super::snapshot_restore::PreparedRemoteSnapshot) {
         let directory = tempfile::tempdir().unwrap();
         let mut store = PersistentStore::open(directory.path()).unwrap();
         let epoch = store.external_selection().unwrap().epoch;
@@ -2222,7 +2635,8 @@ mod receive_tests {
             fingerprint: library_fingerprint.clone(), library_fingerprint, logical_revision: 7,
             staging_root: staging, captured_by_device: None, objects: vec![],
             records: vec![super::super::snapshot_restore::PreparedRecord {
-                key, content_hash: record.hash, byte_length: record.size, path,
+                key, content_hash: record.hash, byte_length: record.size,
+                source: super::super::content_store::ObjectSource::File(path),
             }],
         };
         (directory, store, job, downloaded)
@@ -2247,7 +2661,7 @@ mod receive_tests {
             content_fingerprint: fingerprint(&kind.fingerprint_domain(), &BTreeMap::from([(key.clone(), hash(&entry))])),
             sources: vec![super::super::sections::SectionSource {
                 kind: CatalogEntryKind::SectionEntry, key, content_sha256,
-                byte_length: entry.len() as u64, path,
+                byte_length: entry.len() as u64, path, offset: None,
             }],
         }
     }
@@ -2280,24 +2694,905 @@ mod receive_tests {
         }
     }
 
-    fn prepare(store: &mut PersistentStore, job: &DurableJob,
+    pub(super) fn prepare(store: &mut PersistentStore, job: &DurableJob,
         downloaded: super::super::snapshot_restore::PreparedRemoteSnapshot) -> PreparedReceive
+    {
+        prepare_counted(store, job, downloaded, &crate::external_storage::phase_progress::PhaseProgress::silent())
+    }
+
+    fn prepare_counted(store: &mut PersistentStore, job: &DurableJob,
+        downloaded: super::super::snapshot_restore::PreparedRemoteSnapshot,
+        prepared: &crate::external_storage::phase_progress::PhaseProgress) -> PreparedReceive
     {
         let participation = receive_participation(store).unwrap();
         let section = plugin_section(&downloaded.staging_root);
         prepare_receive_input(store, job, job.admission_identity.clone(), "authenticated-head".into(),
-            downloaded, vec![section], participation, &Cancellation::default()).unwrap()
+            downloaded, vec![section], participation, prepared, &Cancellation::default()).unwrap().ready()
     }
 
-    fn local_edit(store: &mut PersistentStore, revision: i64) {
+    pub(super) fn local_edit(store: &mut PersistentStore, revision: i64) {
         let commit = serde_json::from_value(json!({
             "expectedRevision": revision, "root": {"marker":"newer-local"}
         })).unwrap();
         store.commit(&commit).unwrap();
     }
 
+
+    fn staged_record(
+        staging: &std::path::Path,
+        locator: LogicalRecordLocator,
+        envelope: LogicalRecordEnvelope,
+    ) -> (super::super::snapshot_restore::PreparedRecord, [u8; 32]) {
+        let key = encode_logical_record_key(&locator).unwrap();
+        let record = encode_logical_record(&envelope).unwrap();
+        let path = staging.join(&record.hash);
+        fs::write(&path, &record.bytes).unwrap();
+        let digest = hex::decode(&record.hash).unwrap().try_into().unwrap();
+        (
+            super::super::snapshot_restore::PreparedRecord {
+                key,
+                content_hash: record.hash,
+                byte_length: record.size,
+                source: super::super::content_store::ObjectSource::File(path),
+            },
+            digest,
+        )
+    }
+
+    fn root_at(staging: &std::path::Path, marker: &str)
+        -> (super::super::snapshot_restore::PreparedRecord, [u8; 32])
+    {
+        staged_record(staging, LogicalRecordLocator::Root, LogicalRecordEnvelope::Root {
+            value: json!({"marker": marker}), owner_heads: vec![],
+        })
+    }
+
+    fn character_at(staging: &std::path::Path, id: &str, index: u64)
+        -> (super::super::snapshot_restore::PreparedRecord, [u8; 32])
+    {
+        staged_record(
+            staging,
+            LogicalRecordLocator::Character { character_id: id.into() },
+            LogicalRecordEnvelope::Character {
+                configured_index: index,
+                detail: json!({"chaId":id,"name":id,"chatPage":0,"lastInteraction":0}),
+                owner_heads: vec![crate::logical_records::LogicalOwnerHead::absent(
+                    crate::logical_records::LogicalOwnerLocator::CharacterAdditional {
+                        character_id: id.into(),
+                    },
+                )],
+            },
+        )
+    }
+
+    fn preset_at(staging: &std::path::Path, id: &str)
+        -> (super::super::snapshot_restore::PreparedRecord, [u8; 32])
+    {
+        staged_record(
+            staging,
+            LogicalRecordLocator::Preset { preset_id: id.into() },
+            LogicalRecordEnvelope::Preset { configured_index: 0, value: json!({"name": id}) },
+        )
+    }
+
+    fn conversation_at(staging: &std::path::Path, character: &str, id: &str, recent_at: i64)
+        -> (super::super::snapshot_restore::PreparedRecord, [u8; 32])
+    {
+        staged_record(
+            staging,
+            LogicalRecordLocator::Conversation {
+                character_id: character.into(), conversation_id: id.into(),
+            },
+            LogicalRecordEnvelope::Conversation {
+                configured_index: 0, recent_at,
+                detail: json!({"id": id, "name": id}), message_page_hashes: vec![],
+            },
+        )
+    }
+
+    fn staged_snapshot(
+        staging: &std::path::Path,
+        id: &str,
+        records: Vec<(super::super::snapshot_restore::PreparedRecord, [u8; 32])>,
+    ) -> super::super::snapshot_restore::PreparedRemoteSnapshot {
+        let hashes: BTreeMap<String, [u8; 32]> = records
+            .iter()
+            .map(|(record, digest)| (record.key.clone(), *digest))
+            .collect();
+        let library_fingerprint =
+            hex::encode(fingerprint(&library_fingerprint_domain(), &hashes));
+        super::super::snapshot_restore::PreparedRemoteSnapshot {
+            snapshot_id: id.into(), repository_id: "repository".into(),
+            fingerprint: library_fingerprint.clone(), library_fingerprint, logical_revision: 7,
+            staging_root: staging.to_path_buf(), captured_by_device: None, objects: vec![],
+            records: records.into_iter().map(|(record, _)| record).collect(),
+        }
+    }
+
+    /// A library that has already received one snapshot, so the next one has a
+    /// view to be compared against.
+    fn received_library() -> (tempfile::TempDir, PersistentStore, std::path::PathBuf) {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = PersistentStore::open(directory.path()).unwrap();
+        let epoch = store.external_selection().unwrap().epoch;
+        store.external_select(&epoch, &crate::persistent_store::sync_selection::SyncTarget::External("connection".into())).unwrap();
+        store.device_store_mut().unwrap().set_section_participating(PdsSection::LocalPlugins, true).unwrap();
+        let staging = directory.path().join("received");
+        fs::create_dir(&staging).unwrap();
+        let job = bind(&mut store, "first");
+        let first = first_snapshot(&staging, "first");
+        let prepared = prepare(&mut store, &job, first);
+        let identity = job.admission_identity.clone();
+        activate_prepared_receive(&mut store, &prepared, &identity).unwrap();
+        (directory, store, staging)
+    }
+
+    fn first_snapshot(staging: &std::path::Path, id: &str)
+        -> super::super::snapshot_restore::PreparedRemoteSnapshot
+    {
+        staged_snapshot(staging, id, vec![
+            root_at(staging, "remote"),
+            character_at(staging, "kept", 0),
+            character_at(staging, "dropped", 1),
+            conversation_at(staging, "kept", "chat", 10),
+            // The removed character takes this with it, without the snapshot
+            // having to name it.
+            conversation_at(staging, "dropped", "gone", 5),
+            preset_at(staging, "preset"),
+        ])
+    }
+
+    fn second_snapshot(staging: &std::path::Path)
+        -> super::super::snapshot_restore::PreparedRemoteSnapshot
+    {
+        // A conversation whose character arrives in the same difference, ahead
+        // of that character, because catalog order is not an apply order.
+        staged_snapshot(staging, "second", vec![
+            conversation_at(staging, "added", "fresh", 30),
+            root_at(staging, "moved"),
+            character_at(staging, "kept", 0),
+            character_at(staging, "added", 2),
+            conversation_at(staging, "kept", "chat", 20),
+            preset_at(staging, "preset"),
+        ])
+    }
+
+    fn touched_keys(store: &PersistentStore, revision: i64) -> Vec<(String, String, String)> {
+        let mut query = store.library_rows().prepare(
+            "SELECT kind,key1,key2 FROM content_changes WHERE revision=?1 ORDER BY kind,key1,key2",
+        ).unwrap();
+        let rows = query.query_map([revision], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?))).unwrap();
+        rows.map(|row| row.unwrap()).collect()
+    }
+
+
+    /// A23 and §10.4's no-op. A snapshot that moves nothing has nothing to
+    /// stage, so the staging phase says nothing rather than replacing what the
+    /// download reported with a pair of zeroes.
+    #[test]
+    fn c_a_receive_with_nothing_to_move_leaves_the_reading_before_it() {
+        use crate::external_storage::phase_progress::PhaseProgress;
+        let (_directory, mut store, staging) = received_library();
+        let revision = store.revision().unwrap();
+        let job = bind(&mut store, "again");
+        let readings = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let collected = std::sync::Arc::clone(&readings);
+        let progress = PhaseProgress::new(move |reading| collected.lock().unwrap().push(reading));
+        let prepared = prepare_counted(&mut store, &job, first_snapshot(&staging, "again"), &progress);
+        assert!(matches!(prepared.apply, PreparedApply::Difference(_)));
+        assert!(readings.lock().unwrap().is_empty());
+        assert_eq!(progress.read().total_items, 0);
+
+        // It is still a receive, so it still commits what the snapshot names.
+        let identity = job.admission_identity.clone();
+        assert_eq!(
+            activate_prepared_receive(&mut store, &prepared, &identity).unwrap(),
+            revision + 1,
+        );
+    }
+
+    /// A23. A receive counts the staging it does, which is the part of a
+    /// receive that costs. A replacement stages every record the snapshot
+    /// names as well as every body; a difference stages the bodies and leaves
+    /// the record rows it is not moving alone, so the same snapshot plans
+    /// fewer items for it.
+    #[test]
+    fn c_a_receive_counts_what_it_stages_and_a_difference_stages_less() {
+        use crate::external_storage::phase_progress::PhaseProgress;
+        let (_directory, mut store, staging) = received_library();
+        let job = bind(&mut store, "second");
+        let identity = job.admission_identity.clone();
+        let prepared = prepare(&mut store, &job, second_snapshot(&staging));
+        activate_prepared_receive(&mut store, &prepared, &identity).unwrap();
+
+        // One conversation moved and everything else stayed where it was.
+        let third = |staging: &std::path::Path| staged_snapshot(staging, "third", vec![
+            conversation_at(staging, "added", "fresh", 30),
+            root_at(staging, "moved"),
+            character_at(staging, "kept", 0),
+            character_at(staging, "added", 2),
+            conversation_at(staging, "kept", "chat", 21),
+            preset_at(staging, "preset"),
+        ]);
+        let job = bind(&mut store, "third");
+        let readings = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let collected = std::sync::Arc::clone(&readings);
+        let progress = PhaseProgress::new(move |reading| collected.lock().unwrap().push(reading));
+        let prepared = prepare_counted(&mut store, &job, third(&staging), &progress);
+        assert!(matches!(prepared.apply, PreparedApply::Difference(_)));
+        let difference = progress.read();
+        assert_eq!(difference.total_items, 1);
+        assert_eq!(difference.items, difference.total_items);
+        assert_eq!(difference.bytes, difference.total_bytes);
+        // The phase ends on a written reading rather than on whichever tick
+        // the report interval last allowed through.
+        assert_eq!(readings.lock().unwrap().last().copied().unwrap(), difference);
+
+        // The same snapshot arriving at a library with nothing to compare it
+        // against is a replacement, and a replacement stages every record.
+        let other = tempfile::tempdir().unwrap();
+        let mut fresh = PersistentStore::open(other.path()).unwrap();
+        let epoch = fresh.external_selection().unwrap().epoch;
+        fresh.external_select(
+            &epoch,
+            &crate::persistent_store::sync_selection::SyncTarget::External("connection".into()),
+        ).unwrap();
+        fresh.device_store_mut().unwrap()
+            .set_section_participating(PdsSection::LocalPlugins, true).unwrap();
+        let fresh_job = bind(&mut fresh, "third");
+        let replacement = PhaseProgress::silent();
+        let replaced = prepare_counted(&mut fresh, &fresh_job, third(&staging), &replacement);
+        assert!(matches!(replaced.apply, PreparedApply::Replace(_)));
+        let reading = replacement.read();
+        assert_eq!(reading.total_items, 6);
+        assert_eq!(reading.items, reading.total_items);
+    }
+
+    /// A17. What the snapshot moved is what the library records as touched,
+    /// and the generation the records live in does not change, so every row
+    /// the snapshot left alone is the row it already was.
+    #[test]
+    fn c_a_normal_receive_touches_only_what_the_snapshot_moved() {
+        let (_directory, mut store, staging) = received_library();
+        let generation = store.external_active_generation().unwrap();
+        let job = bind(&mut store, "second");
+        let prepared = prepare(&mut store, &job, second_snapshot(&staging));
+        assert!(matches!(prepared.apply, PreparedApply::Difference(_)));
+        let identity = job.admission_identity.clone();
+        let revision = activate_prepared_receive(&mut store, &prepared, &identity).unwrap();
+        assert_eq!(store.external_active_generation().unwrap(), generation);
+        // The character the snapshot left alone is still stamped, because its
+        // conversation moved and recounting its conversations writes its row.
+        // Its own record was neither read nor rewritten.
+        assert_eq!(touched_keys(&store, revision), vec![
+            ("character".to_owned(), "added".to_owned(), String::new()),
+            ("character".to_owned(), "dropped".to_owned(), String::new()),
+            ("character".to_owned(), "kept".to_owned(), String::new()),
+            ("conversation".to_owned(), "added".to_owned(), "fresh".to_owned()),
+            ("conversation".to_owned(), "dropped".to_owned(), "gone".to_owned()),
+            ("conversation".to_owned(), "kept".to_owned(), "chat".to_owned()),
+            ("owner".to_owned(), "character-additional-assets".to_owned(), "added".to_owned()),
+            ("owner".to_owned(), "character-additional-assets".to_owned(), "dropped".to_owned()),
+            ("root".to_owned(), String::new(), String::new()),
+        ]);
+    }
+
+    /// The difference is what reaches the library, so a record the snapshot
+    /// changed arrives, one it added appears, one it stopped naming goes, and
+    /// one it left alone stays.
+    #[test]
+    fn c_a_normal_receive_applies_exactly_the_difference() {
+        let (_directory, mut store, staging) = received_library();
+        let job = bind(&mut store, "second");
+        let prepared = prepare(&mut store, &job, second_snapshot(&staging));
+        let identity = job.admission_identity.clone();
+        activate_prepared_receive(&mut store, &prepared, &identity).unwrap();
+        let generation = store.external_active_generation().unwrap();
+        let characters: Vec<String> = {
+            let mut query = store.library_rows().prepare(
+                "SELECT character_id FROM characters WHERE generation=?1 ORDER BY character_id",
+            ).unwrap();
+            let rows = query.query_map([&generation], |row| row.get(0)).unwrap();
+            rows.map(|row| row.unwrap()).collect()
+        };
+        assert_eq!(characters, ["added", "kept"]);
+        let marker: String = store.library_rows().query_row(
+            "SELECT json_extract(value,'$.marker') FROM root WHERE generation=?1",
+            [&generation], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(marker, "moved");
+        assert_eq!(
+            store.external_base("connection").unwrap().unwrap().snapshot_id,
+            "second"
+        );
+        // The map is written key by key rather than rewritten, so this is what
+        // says the keys it wrote are exactly the ones that moved.
+        let named: std::collections::BTreeMap<String, String> = second_snapshot(&staging)
+            .records
+            .into_iter()
+            .map(|record| (record.key, record.content_hash))
+            .collect();
+        assert_eq!(store.external_base_records("connection").unwrap(), Some(named));
+    }
+
+    /// A16. The library moved under the prepared receive, so the difference it
+    /// measured is no longer the difference, and the edit stays.
+    #[test]
+    fn c_a_local_edit_under_a_prepared_difference_keeps_the_edit() {
+        let (_directory, mut store, staging) = received_library();
+        let job = bind(&mut store, "second");
+        let prepared = prepare(&mut store, &job, second_snapshot(&staging));
+        let identity = job.admission_identity.clone();
+        let revision = store.revision().unwrap();
+        local_edit(&mut store, revision);
+        let error = activate_prepared_receive(&mut store, &prepared, &identity).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::PreconditionFailed);
+        let generation = store.external_active_generation().unwrap();
+        let marker: String = store.library_rows().query_row(
+            "SELECT json_extract(value,'$.marker') FROM root WHERE generation=?1",
+            [&generation], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(marker, "newer-local");
+        assert_eq!(
+            store.external_base("connection").unwrap().unwrap().snapshot_id,
+            "first"
+        );
+    }
+
+    /// A snapshot downloaded against a base, with the records that base
+    /// already holds left unfetched.
+    fn withheld(store: &PersistentStore, mut snapshot: super::super::snapshot_restore::PreparedRemoteSnapshot,
+        also: &[&str]) -> super::super::snapshot_restore::PreparedRemoteSnapshot
+    {
+        let base = store.external_base_records("connection").unwrap().unwrap();
+        for record in &mut snapshot.records {
+            if base.get(&record.key) == Some(&record.content_hash)
+                || also.iter().any(|key| record.key.contains(key))
+            {
+                record.source = super::super::content_store::ObjectSource::Unchanged;
+            }
+        }
+        snapshot
+    }
+
+    fn preparation_within(store: &mut PersistentStore, job: &DurableJob,
+        downloaded: super::super::snapshot_restore::PreparedRemoteSnapshot,
+        budget: super::super::receive_difference::DifferenceBudget) -> Preparation
+    {
+        let participation = receive_participation(store).unwrap();
+        let section = plugin_section(&downloaded.staging_root);
+        prepare_receive_within(store, job, job.admission_identity.clone(), "authenticated-head".into(),
+            downloaded, vec![section], participation,
+            &crate::external_storage::phase_progress::PhaseProgress::silent(),
+            &Cancellation::default(), budget).unwrap()
+    }
+
+    /// R04. Records the base already holds are never fetched for a difference,
+    /// which applies without them. Every route that would need one of them
+    /// (too many records, too much dependent work, or a record that moved
+    /// after the download chose what to skip) hands the receive back before
+    /// staging anything, and the full download then lands the same library.
+    #[test]
+    fn c_a_receive_without_its_unchanged_records_applies_or_asks_for_them() {
+        let (_directory, mut store, staging) = received_library();
+        let revision = store.revision().unwrap();
+        let job = bind(&mut store, "second");
+        let skipped = withheld(&store, second_snapshot(&staging), &[]);
+        assert_eq!(skipped.records.iter()
+            .filter(|record| unfetched(&record.source)).count(), 2);
+        let refusing = [
+            ("records", super::super::receive_difference::DifferenceBudget {
+                records: 0, ..RECEIVE_DIFFERENCE_BUDGET
+            }, &[][..]),
+            ("dependents", budget(0, 0), &[][..]),
+            ("moved", RECEIVE_DIFFERENCE_BUDGET, &["root"][..]),
+        ];
+        for (case, within, also) in refusing {
+            let snapshot = withheld(&store, second_snapshot(&staging), also);
+            assert!(matches!(preparation_within(&mut store, &job, snapshot, within),
+                Preparation::NeedsRecords), "{case}");
+            assert_eq!(store.revision().unwrap(), revision, "{case}");
+            assert_eq!(store.external_job(&job.id).unwrap().unwrap().phase, "ready", "{case}");
+        }
+        let replaced = prepare_within(&mut store, &job, second_snapshot(&staging),
+            super::super::receive_difference::DifferenceBudget { records: 0, ..RECEIVE_DIFFERENCE_BUDGET });
+        assert!(matches!(replaced.apply, PreparedApply::Replace(_)));
+        let identity = job.admission_identity.clone();
+        activate_prepared_receive(&mut store, &replaced, &identity).unwrap();
+
+        let (_other, mut differing, other_staging) = received_library();
+        let job = bind(&mut differing, "second");
+        let snapshot = withheld(&differing, second_snapshot(&other_staging), &[]);
+        let prepared = prepare_within(&mut differing, &job, snapshot, RECEIVE_DIFFERENCE_BUDGET);
+        assert!(matches!(prepared.apply, PreparedApply::Difference(_)));
+        let identity = job.admission_identity.clone();
+        activate_prepared_receive(&mut differing, &prepared, &identity).unwrap();
+        assert_eq!(differing.materialize(None).unwrap(), store.materialize(None).unwrap());
+    }
+
+    /// A18. A record that cannot be applied fails the whole transaction, so the
+    /// revision, the base and the job's completion are all still the old ones.
+    #[test]
+    fn c_a_refused_record_leaves_the_revision_base_and_job_where_they_were() {
+        let (_directory, mut store, staging) = received_library();
+        let before = store.revision().unwrap();
+        let job = bind(&mut store, "second");
+        let second = second_snapshot(&staging);
+        // The same length and a hash the catalog names, with other bytes behind
+        // it, so only reading the record can tell.
+        let poisoned = second.records.iter().find(|record| record.key.contains("root")).unwrap();
+        let super::super::content_store::ObjectSource::File(path) = &poisoned.source else {
+            unreachable!("staged record is a file")
+        };
+        let mut bytes = fs::read(path).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0xff;
+        fs::write(path, &bytes).unwrap();
+        // Every record is read before the apply, so the refusal comes from
+        // preparing and nothing is left for the apply to attempt.
+        let participation = receive_participation(&mut store).unwrap();
+        let section = plugin_section(&second.staging_root);
+        assert!(prepare_receive_input(&mut store, &job, job.admission_identity.clone(),
+            "authenticated-head".into(), second, vec![section], participation,
+            &crate::external_storage::phase_progress::PhaseProgress::silent(),
+            &Cancellation::default()).is_err());
+        assert_eq!(store.revision().unwrap(), before);
+        assert_eq!(
+            store.external_base("connection").unwrap().unwrap().snapshot_id,
+            "first"
+        );
+        assert_eq!(store.external_job(&job.id).unwrap().unwrap().phase, "ready");
+    }
+
+
+    fn staged_object(staging: &std::path::Path, bytes: &[u8])
+        -> super::super::snapshot_restore::PreparedObject
+    {
+        let digest = hex::encode(hash(bytes));
+        let path = staging.join(format!("object-{digest}"));
+        fs::write(&path, bytes).unwrap();
+        super::super::snapshot_restore::PreparedObject {
+            content_hash: digest, byte_length: bytes.len() as u64,
+            source: super::super::content_store::ObjectSource::File(path),
+        }
+    }
+
+    fn synthetic_messages(conversation: &str, count: usize) -> Vec<Value> {
+        (0..count).map(|index| json!({
+            "chatId": format!("{conversation}-{index}"), "role": "user",
+            "data": format!("{conversation} message {index}"),
+        })).collect()
+    }
+
+    /// A conversation whose messages arrive as full pages, with the page
+    /// objects the snapshot carries for it.
+    fn paged_conversation_at(staging: &std::path::Path, character: &str, id: &str, messages: usize)
+        -> ((super::super::snapshot_restore::PreparedRecord, [u8; 32]),
+            Vec<super::super::snapshot_restore::PreparedObject>)
+    {
+        let mut pages = Vec::new();
+        let mut objects = Vec::new();
+        for chunk in synthetic_messages(id, messages).chunks(crate::logical_records::LOGICAL_MESSAGE_PAGE_SIZE) {
+            let page = crate::logical_records::encode_message_page(chunk).unwrap();
+            objects.push(staged_object(staging, &page.bytes));
+            pages.push(page.hash);
+        }
+        let record = staged_record(
+            staging,
+            LogicalRecordLocator::Conversation {
+                character_id: character.into(), conversation_id: id.into(),
+            },
+            LogicalRecordEnvelope::Conversation {
+                configured_index: 0, recent_at: 1,
+                detail: json!({"id": id, "name": id}), message_page_hashes: pages,
+            },
+        );
+        (record, objects)
+    }
+
+    /// A root whose module assets are an owner manifest of `entries` entries.
+    fn owned_root_at(staging: &std::path::Path, entries: usize)
+        -> ((super::super::snapshot_restore::PreparedRecord, [u8; 32]),
+            Vec<super::super::snapshot_restore::PreparedObject>)
+    {
+        use crate::asset_repository::owner_manifest_codec::{encode_owner_manifest, OwnerManifestEntry};
+        let payloads: Vec<_> = (0..entries)
+            .map(|index| staged_object(staging, format!("synthetic module asset {index}").as_bytes()))
+            .collect();
+        let manifest = encode_owner_manifest(&payloads.iter().enumerate().map(|(index, payload)| OwnerManifestEntry {
+            tuple: ["asset".into(), format!("asset-{index}.bin"), "binary".into()],
+            payload_hash: Some(hex::decode(&payload.content_hash).unwrap().try_into().unwrap()),
+        }).collect::<Vec<_>>()).unwrap();
+        let manifest = staged_object(staging, &manifest);
+        let record = staged_record(staging, LogicalRecordLocator::Root, LogicalRecordEnvelope::Root {
+            value: json!({"marker": "remote", "modules": [{"name": "module"}]}),
+            owner_heads: vec![crate::logical_records::LogicalOwnerHead::present(
+                crate::logical_records::LogicalOwnerLocator::RootModule { index: 0 },
+                manifest.content_hash.clone(), entries as u64, 1,
+            ).unwrap()],
+        });
+        (record, std::iter::once(manifest).chain(payloads).collect())
+    }
+
+    /// How a library changes between the snapshot it received and the next.
+    #[derive(Clone, Copy, Debug)]
+    enum Moved {
+        /// "kept/chat" gains this many messages.
+        Conversation(usize),
+        /// The root's module assets become a manifest of this many entries.
+        Owner(usize),
+        /// "dropped" and its conversation leave the library.
+        Removal,
+    }
+
+    /// The first snapshot a library received: "dropped" carries `history`
+    /// messages in its one conversation.
+    fn library_snapshot(staging: &std::path::Path, id: &str, history: usize, moved: Option<Moved>)
+        -> super::super::snapshot_restore::PreparedRemoteSnapshot
+    {
+        let (root, mut objects) = match moved {
+            Some(Moved::Owner(entries)) => owned_root_at(staging, entries),
+            _ => (root_at(staging, "remote"), Vec::new()),
+        };
+        let chat = match moved {
+            Some(Moved::Conversation(messages)) => {
+                let (record, pages) = paged_conversation_at(staging, "kept", "chat", messages);
+                objects.extend(pages);
+                record
+            }
+            _ => conversation_at(staging, "kept", "chat", 10),
+        };
+        let mut records = vec![root, character_at(staging, "kept", 0), chat, preset_at(staging, "preset")];
+        if !matches!(moved, Some(Moved::Removal)) {
+            let (gone, pages) = paged_conversation_at(staging, "dropped", "gone", history);
+            objects.extend(pages);
+            records.push(character_at(staging, "dropped", 1));
+            records.push(gone);
+        }
+        let mut snapshot = staged_snapshot(staging, id, records);
+        snapshot.objects = objects;
+        snapshot
+    }
+
+    fn library_with_history(history: usize) -> (tempfile::TempDir, PersistentStore, std::path::PathBuf) {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = PersistentStore::open(directory.path()).unwrap();
+        let epoch = store.external_selection().unwrap().epoch;
+        store.external_select(&epoch, &crate::persistent_store::sync_selection::SyncTarget::External("connection".into())).unwrap();
+        store.device_store_mut().unwrap().set_section_participating(PdsSection::LocalPlugins, true).unwrap();
+        let staging = directory.path().join("received");
+        fs::create_dir(&staging).unwrap();
+        let job = bind(&mut store, "first");
+        let prepared = prepare(&mut store, &job, library_snapshot(&staging, "first", history, None));
+        let identity = job.admission_identity.clone();
+        activate_prepared_receive(&mut store, &prepared, &identity).unwrap();
+        (directory, store, staging)
+    }
+
+    fn budget(dependent_bytes: u64, work: u64) -> super::super::receive_difference::DifferenceBudget {
+        super::super::receive_difference::DifferenceBudget {
+            records: RECEIVE_DIFFERENCE_BUDGET.records, bytes: RECEIVE_DIFFERENCE_BUDGET.bytes,
+            dependent_bytes, work,
+        }
+    }
+
+    fn prepare_within(store: &mut PersistentStore, job: &DurableJob,
+        downloaded: super::super::snapshot_restore::PreparedRemoteSnapshot,
+        budget: super::super::receive_difference::DifferenceBudget) -> PreparedReceive
+    {
+        let participation = receive_participation(store).unwrap();
+        let section = plugin_section(&downloaded.staging_root);
+        prepare_receive_within(store, job, job.admission_identity.clone(), "authenticated-head".into(),
+            downloaded, vec![section], participation,
+            &crate::external_storage::phase_progress::PhaseProgress::silent(),
+            &Cancellation::default(), budget).unwrap().ready()
+    }
+
+    fn remove_from_cas(directory: &std::path::Path, hashes: &[String]) {
+        let cas = crate::asset_repository::PayloadCas::new(directory).unwrap();
+        for hash in hashes {
+            fs::remove_file(cas.object_path(hash).unwrap().unwrap()).unwrap();
+        }
+    }
+
+    fn character<'a>(library: &'a Value, id: &str) -> Option<&'a Value> {
+        library["characters"].as_array().unwrap().iter().find(|character| character["chaId"] == id)
+    }
+
+    /// R05. Everything the rows are made from is read before the apply takes
+    /// the writer, so the apply succeeds with the record files, the message
+    /// pages and the manifest all gone from where they were read.
+    #[test]
+    fn c_a_difference_reads_every_body_before_it_takes_the_writer() {
+        for moved in [Moved::Conversation(300), Moved::Owner(3)] {
+            let (directory, mut store, staging) = library_with_history(0);
+            let job = bind(&mut store, "second");
+            let snapshot = library_snapshot(&staging, "second", 0, Some(moved));
+            let read: Vec<String> = match moved {
+                // Pages are consumed by the apply; the manifest stays named by
+                // the owner head, so only its staged file goes.
+                Moved::Conversation(_) => snapshot.objects.iter()
+                    .map(|object| object.content_hash.clone()).collect(),
+                _ => Vec::new(),
+            };
+            let prepared = prepare(&mut store, &job, snapshot);
+            assert!(matches!(prepared.apply, PreparedApply::Difference(_)), "{moved:?}");
+            for entry in fs::read_dir(&staging).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_file() {
+                    fs::remove_file(path).unwrap();
+                }
+            }
+            remove_from_cas(directory.path(), &read);
+            let identity = job.admission_identity.clone();
+            activate_prepared_receive(&mut store, &prepared, &identity).unwrap();
+            let library = store.materialize(None).unwrap();
+            match moved {
+                Moved::Conversation(count) => {
+                    let chat = &character(&library, "kept").unwrap()["chats"][0];
+                    assert_eq!(chat["message"], Value::Array(synthetic_messages("chat", count)));
+                }
+                Moved::Owner(entries) => {
+                    let assets = library["modules"][0]["assets"].as_array().unwrap();
+                    assert_eq!(assets.len(), entries);
+                    assert_eq!(assets[2], json!(["asset", "asset-2.bin", "binary"]));
+                }
+                Moved::Removal => unreachable!(),
+            }
+        }
+        // The pages really are read: without them the receive cannot be prepared.
+        let (_directory, mut store, staging) = library_with_history(0);
+        let job = bind(&mut store, "second");
+        let snapshot = library_snapshot(&staging, "second", 0, Some(Moved::Conversation(300)));
+        for object in &snapshot.objects {
+            let super::super::content_store::ObjectSource::File(path) = &object.source else {
+                unreachable!("staged object is a file")
+            };
+            fs::remove_file(path).unwrap();
+        }
+        let participation = receive_participation(&mut store).unwrap();
+        let section = plugin_section(&snapshot.staging_root);
+        assert!(prepare_receive_input(&mut store, &job, job.admission_identity.clone(),
+            "authenticated-head".into(), snapshot, vec![section], participation,
+            &crate::external_storage::phase_progress::PhaseProgress::silent(),
+            &Cancellation::default()).is_err());
+    }
+
+    /// R05. The route counts what a few keys bring with them: a conversation's
+    /// pages at 128 rows each, a manifest's length and the bodies it names,
+    /// and the rows a removal deletes from this library. One unit under the exact figure
+    /// stages the whole snapshot instead, and either route lands the same
+    /// library.
+    #[test]
+    fn c_dependent_work_decides_the_route_and_both_routes_land_the_same_library() {
+        let manifest_length = {
+            let staging = tempfile::tempdir().unwrap();
+            owned_root_at(staging.path(), 3).1[0].byte_length
+        };
+        let page_length = |messages: usize| {
+            let staging = tempfile::tempdir().unwrap();
+            paged_conversation_at(staging.path(), "kept", "chat", messages).1
+                .iter().map(|object| object.byte_length).sum::<u64>()
+        };
+        let unbounded = u64::MAX;
+        // (history of "dropped", what moves, dependent bytes, work)
+        let cases = [
+            // One changed record and three full pages.
+            (0, Moved::Conversation(384), page_length(384), 1 + 3 * 128),
+            // One changed record, and the manifest and its three payloads
+            // confirmed as the rows are written.
+            (0, Moved::Owner(3), manifest_length,
+                1 + 4 * crate::persistent_store::external_apply::PRESENCE_CHECK_WORK),
+            // Two removed keys, and the 300 messages and one conversation the
+            // character takes with it.
+            (300, Moved::Removal, 0, 2 + 300 + 1),
+            // The same removal against a library that holds no history.
+            (0, Moved::Removal, 0, 2 + 1),
+        ];
+        for (history, moved, bytes, work) in cases {
+            let mut landed = Vec::new();
+            for (limit, in_place) in [
+                (budget(bytes, work), true),
+                (budget(bytes, work - 1), false),
+                (budget(bytes.saturating_sub(1), unbounded), bytes == 0),
+            ] {
+                let (_directory, mut store, staging) = library_with_history(history);
+                let job = bind(&mut store, "second");
+                let snapshot = library_snapshot(&staging, "second", history, Some(moved));
+                let prepared = prepare_within(&mut store, &job, snapshot, limit);
+                assert_eq!(matches!(prepared.apply, PreparedApply::Difference(_)), in_place,
+                    "{moved:?} with history {history} under {limit:?}");
+                let identity = job.admission_identity.clone();
+                activate_prepared_receive(&mut store, &prepared, &identity).unwrap();
+                landed.push(store.materialize(None).unwrap());
+            }
+            assert!(landed.windows(2).all(|pair| pair[0] == pair[1]), "{moved:?}");
+            let library = &landed[0];
+            match moved {
+                Moved::Conversation(count) => assert_eq!(
+                    character(library, "kept").unwrap()["chats"][0]["message"],
+                    Value::Array(synthetic_messages("chat", count))),
+                Moved::Owner(entries) => assert_eq!(
+                    library["modules"][0]["assets"].as_array().unwrap().len(), entries),
+                Moved::Removal => assert!(character(library, "dropped").is_none()),
+            }
+        }
+    }
+
+    /// R05. A body the rows go on naming is confirmed when they are written,
+    /// not only when it was read: a manifest gone after preparing stops the
+    /// apply and leaves the library where it was.
+    #[test]
+    fn c_a_manifest_lost_after_preparing_stops_the_apply() {
+        let (directory, mut store, staging) = library_with_history(0);
+        let before = store.revision().unwrap();
+        let held = store.materialize(None).unwrap();
+        let job = bind(&mut store, "second");
+        let snapshot = library_snapshot(&staging, "second", 0, Some(Moved::Owner(3)));
+        let manifest = snapshot.objects[0].content_hash.clone();
+        let prepared = prepare(&mut store, &job, snapshot);
+        assert!(matches!(prepared.apply, PreparedApply::Difference(_)));
+        remove_from_cas(directory.path(), &[manifest]);
+        let identity = job.admission_identity.clone();
+        assert!(activate_prepared_receive(&mut store, &prepared, &identity).is_err());
+        assert_eq!(store.revision().unwrap(), before);
+        assert_eq!(store.materialize(None).unwrap(), held);
+    }
+
+    /// What the budget bounds is how long a receive holds the active database.
+    /// Run with `--ignored --nocapture` to read the arithmetic behind the
+    /// constant: the incremental hold grows with the difference, the replace
+    /// path's hold grows with the library.
+    #[test]
+    #[ignore = "measurement"]
+    fn measures_what_a_receive_holds_the_active_database_for() {
+        const LIBRARY: usize = 20_000;
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = PersistentStore::open(directory.path()).unwrap();
+        let epoch = store.external_selection().unwrap().epoch;
+        store.external_select(&epoch, &crate::persistent_store::sync_selection::SyncTarget::External("connection".into())).unwrap();
+        store.device_store_mut().unwrap().set_section_participating(PdsSection::LocalPlugins, true).unwrap();
+        let staging = directory.path().join("received");
+        fs::create_dir(&staging).unwrap();
+
+        let library = |revision: usize, changed: usize| {
+            let mut records = vec![root_at(&staging, "remote")];
+            for index in 0..LIBRARY {
+                let id = format!("character-{index:06}");
+                records.push(character_at(&staging, &id, index as u64));
+                let moved = if index < changed { revision as i64 } else { 0 };
+                records.push(conversation_at(&staging, &id, "chat", moved));
+            }
+            records
+        };
+
+        let job = bind(&mut store, "first");
+        let first = staged_snapshot(&staging, "first", library(0, 0));
+        let batches = std::rc::Rc::new(std::cell::RefCell::new((0usize, std::time::Duration::ZERO)));
+        let seen = batches.clone();
+        crate::persistent_store::external_apply::after_stage_batch(Some(Box::new(move |written, held| {
+            let mut seen = seen.borrow_mut();
+            *seen = (written, seen.1.max(held));
+        })));
+        let started = std::time::Instant::now();
+        let prepared = prepare(&mut store, &job, first);
+        let staged_ms = started.elapsed().as_millis();
+        crate::persistent_store::external_apply::after_stage_batch(None);
+        let (stage_batches, longest_batch) = *batches.borrow();
+        assert!(matches!(prepared.apply, PreparedApply::Replace(_)));
+        let identity = job.admission_identity.clone();
+        let started = std::time::Instant::now();
+        activate_prepared_receive(&mut store, &prepared, &identity).unwrap();
+        let replace_hold_ms = started.elapsed().as_millis();
+
+        let mut holds = Vec::new();
+        for (revision, changed) in [(1usize, 1usize), (2, 10), (3, 100), (4, 1000)] {
+            assert!(changed <= RECEIVE_DIFFERENCE_BUDGET.records);
+            let job = bind(&mut store, &format!("snapshot-{revision}"));
+            let snapshot = staged_snapshot(&staging, &format!("snapshot-{revision}"), library(revision, changed));
+            let started = std::time::Instant::now();
+            let prepared = prepare(&mut store, &job, snapshot);
+            let prepare_ms = started.elapsed().as_millis();
+            assert!(matches!(prepared.apply, PreparedApply::Difference(_)),
+                "{changed} changed records must stay inside the budget");
+            let identity = job.admission_identity.clone();
+            let started = std::time::Instant::now();
+            activate_prepared_receive(&mut store, &prepared, &identity).unwrap();
+            holds.push((changed, prepare_ms, started.elapsed().as_millis()));
+        }
+        println!("library={LIBRARY} records={} staged_ms={staged_ms} stage_batches={stage_batches} longest_batch_ms={} replace_hold_ms={replace_hold_ms}",
+            LIBRARY * 2 + 1, longest_batch.as_millis());
+        for (changed, prepare_ms, hold_ms) in holds {
+            println!("changed={changed} prepare_ms={prepare_ms} incremental_hold_ms={hold_ms}");
+        }
+
+        // What a few keys bring with them, applied in place whatever the
+        // budget would say: one conversation's pages, one character's whole
+        // history leaving, one root's owner manifest.
+        type WithObjects = ((super::super::snapshot_restore::PreparedRecord, [u8; 32]),
+            Vec<super::super::snapshot_restore::PreparedObject>);
+        let conversation = |index: usize| format!("character-{index:06}");
+        let mut paged: BTreeMap<usize, WithObjects> = BTreeMap::new();
+        let snapshot_of = |id: &str, paged: &BTreeMap<usize, WithObjects>, removed: Option<usize>,
+            root: Option<WithObjects>| {
+            let mut records = library(4, 1000);
+            let mut objects = Vec::new();
+            for (index, (record, pages)) in paged {
+                records[2 + index * 2] = record.clone();
+                objects.extend(pages.iter().cloned());
+            }
+            if let Some(index) = removed {
+                records.drain(1 + index * 2..3 + index * 2);
+            }
+            if let Some((record, owner)) = root {
+                records[0] = record;
+                objects.extend(owner);
+            }
+            // Conversations that share messages share pages, and a catalog
+            // names each object once.
+            let mut seen = std::collections::BTreeSet::new();
+            objects.retain(|object: &super::super::snapshot_restore::PreparedObject|
+                seen.insert(object.content_hash.clone()));
+            let mut snapshot = staged_snapshot(&staging, id, records);
+            snapshot.objects = objects;
+            snapshot
+        };
+        let unbounded = budget(u64::MAX, u64::MAX);
+        let mut dependents = Vec::new();
+        let mut apply = |store: &mut PersistentStore, name: String, snapshot| {
+            let job = bind(store, &name);
+            let started = std::time::Instant::now();
+            let prepared = prepare_within(store, &job, snapshot, unbounded);
+            let prepare_ms = started.elapsed().as_millis();
+            assert!(matches!(prepared.apply, PreparedApply::Difference(_)));
+            let identity = job.admission_identity.clone();
+            let started = std::time::Instant::now();
+            activate_prepared_receive(store, &prepared, &identity).unwrap();
+            dependents.push((name, prepare_ms, started.elapsed().as_millis()));
+        };
+        for (index, pages) in [(0usize, 16usize), (1, 64), (2, 256)] {
+            paged.insert(index, paged_conversation_at(&staging, &conversation(index), "chat",
+                pages * crate::logical_records::LOGICAL_MESSAGE_PAGE_SIZE));
+            let name = format!("pages={pages}");
+            let snapshot = snapshot_of(&name, &paged, None, None);
+            apply(&mut store, name, snapshot);
+        }
+        let name = format!("removed_messages={}", 256 * 128);
+        let snapshot = snapshot_of(&name, &paged, Some(2), None);
+        apply(&mut store, name, snapshot);
+        paged.remove(&2);
+        for entries in [1_000usize, 10_000] {
+            let name = format!("owner_entries={entries}");
+            let snapshot = snapshot_of(&name, &paged, Some(2), Some(owned_root_at(&staging, entries)));
+            apply(&mut store, name, snapshot);
+        }
+        for (name, prepare_ms, hold_ms) in dependents {
+            println!("{name} prepare_ms={prepare_ms} incremental_hold_ms={hold_ms}");
+        }
+    }
+
     fn rows(store: &mut PersistentStore) -> Vec<crate::persistent_store::device_store::sections::SectionRow> {
         store.device_store_mut().unwrap().read_section_rows(PdsSection::LocalPlugins).unwrap()
+    }
+
+    /// An object the repository already holds is registered where it is. The
+    /// staging directory never had it, so preparing it cannot have read it out
+    /// of one.
+    #[test]
+    fn a_library_object_is_registered_without_being_staged() {
+        let (directory, mut store, job, mut downloaded) = fixture();
+        let cas = crate::asset_repository::PayloadCas::new(directory.path()).unwrap();
+        let held = cas.prepare_bytes(b"asset").unwrap();
+        downloaded.objects.push(super::super::snapshot_restore::PreparedObject {
+            content_hash: held.content_hash.clone(),
+            byte_length: held.byte_size,
+            source: super::super::content_store::ObjectSource::Library(held.content_hash.clone()),
+        });
+        let prepared = prepare(&mut store, &job, downloaded);
+        assert_eq!(store.materialize_staging(prepared.apply.staging_id().unwrap())
+            .unwrap()["marker"], "remote");
+        let path = cas.object_path(&held.content_hash).unwrap().unwrap();
+        assert_eq!(fs::read(path).unwrap(), b"asset");
     }
 
     #[test]
@@ -2305,7 +3600,7 @@ mod receive_tests {
         let (_directory, mut store, job, downloaded) = fixture();
         let source = downloaded.staging_root.clone();
         let prepared = prepare(&mut store, &job, downloaded);
-        let stage = prepared.commit.external_staging_id().to_owned();
+        let stage = prepared.apply.staging_id().unwrap().to_owned();
         assert_eq!(store.revision().unwrap(), 0);
         assert!(rows(&mut store).is_empty());
         assert_eq!(store.materialize_staging(&stage).unwrap()["marker"], "remote");
@@ -2337,7 +3632,7 @@ mod receive_tests {
         assert_eq!(received_revision, 1);
         assert_eq!(
             super::super::snapshot_restore::take_test_read_counts(&source),
-            (0, 0)
+            Default::default()
         );
         assert_eq!(store.materialize(None).unwrap()["marker"], "remote");
         assert_eq!(rows(&mut store).len(), 1);
@@ -2349,7 +3644,7 @@ mod receive_tests {
         let (directory, mut store, job, downloaded) = fixture();
         let source = downloaded.staging_root.clone();
         let prepared = prepare(&mut store, &job, downloaded);
-        let stage = prepared.commit.external_staging_id().to_owned();
+        let stage = prepared.apply.staging_id().unwrap().to_owned();
         fs::remove_dir_all(&source).unwrap();
         let injector = rusqlite::Connection::open(directory.path().join("persistent").join(crate::persistent_store::DATABASE_FILE)).unwrap();
         injector.execute_batch("CREATE TRIGGER synthetic_receive_failure BEFORE INSERT ON external_storage_bases BEGIN SELECT RAISE(ABORT,'synthetic'); END").unwrap();
@@ -2370,7 +3665,7 @@ mod receive_tests {
             else { first_rows = Some(partial); }
             let retained = state.prepared_receives.lock().unwrap();
             assert_eq!(retained.len(), 1);
-            assert_eq!(retained[&job.id].commit.external_staging_id(), stage);
+            assert_eq!(retained[&job.id].apply.staging_id().unwrap(), stage);
             assert_eq!(retained[&job.id].expected, job.admission_identity);
             assert_eq!(retained[&job.id].snapshot_id, "snapshot");
         }
@@ -2391,7 +3686,7 @@ mod receive_tests {
     fn retry_after_a_failed_receive_still_rejects_a_changed_library() {
         let (directory, mut store, job, downloaded) = fixture();
         let prepared = prepare(&mut store, &job, downloaded);
-        let stage = prepared.commit.external_staging_id().to_owned();
+        let stage = prepared.apply.staging_id().unwrap().to_owned();
         let injector = rusqlite::Connection::open(directory.path().join("persistent").join(crate::persistent_store::DATABASE_FILE)).unwrap();
         injector.execute_batch("CREATE TRIGGER synthetic_receive_failure BEFORE INSERT ON external_storage_bases BEGIN SELECT RAISE(ABORT,'synthetic'); END").unwrap();
         let state = super::super::job_store::JobCommandState::default();
@@ -2441,7 +3736,7 @@ mod receive_tests {
     fn failed_auxiliary_summary_write_does_not_erase_or_repeat_a_committed_receive() {
         let (directory, mut store, mut job, downloaded) = fixture();
         let prepared = prepare(&mut store, &job, downloaded);
-        job.receive_staging_id = Some(prepared.commit.external_staging_id().to_owned());
+        job.receive_staging_id = Some(prepared.apply.staging_id().unwrap().to_owned());
         let cache = JobStore::open(directory.path()).unwrap();
         cache.put(&job).unwrap();
         let injector = rusqlite::Connection::open(directory.path().join("external-jobs.sqlite")).unwrap();
@@ -2512,12 +3807,112 @@ mod receive_tests {
         assert!(state.claim(&job).is_ok());
     }
 
+    fn staged_generations(directory: &std::path::Path) -> i64 {
+        rusqlite::Connection::open_with_flags(
+            directory.join("persistent").join(crate::persistent_store::DATABASE_FILE),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap()
+        .query_row(
+            "SELECT (SELECT count(*) FROM root WHERE generation LIKE 'staging-%')
+                  + (SELECT count(*) FROM characters WHERE generation LIKE 'staging-%')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    /// A receive cancelled between the batches of its stage stops there,
+    /// reports a cancellation rather than a rejected snapshot, removes its
+    /// stage and leaves the job preparing, so the only next step is to
+    /// prepare the same download again.
+    #[test]
+    fn cancellation_during_receive_staging_leaves_one_resumable_preparation() {
+        let (directory, mut store, job, downloaded) = fixture();
+        let staging = downloaded.staging_root.clone();
+        let mut records = vec![root_at(&staging, "remote")];
+        for index in 0..600 {
+            let id = format!("character-{index:04}");
+            records.push(character_at(&staging, &id, index as u64));
+            records.push(conversation_at(&staging, &id, "chat", 0));
+        }
+        let downloaded = staged_snapshot(&staging, "snapshot", records);
+        let held = store.materialize(None).unwrap();
+        let phase = store.external_job(&job.id).unwrap().unwrap().phase;
+        let cancel = Cancellation::default();
+        let trigger = cancel.clone();
+        let batches = std::rc::Rc::new(std::cell::Cell::new(0));
+        let seen = batches.clone();
+        crate::persistent_store::external_apply::after_stage_batch(Some(Box::new(move |written, _| {
+            seen.set(written);
+            trigger.cancel();
+        })));
+        let participation = receive_participation(&mut store).unwrap();
+        let section = plugin_section(&staging);
+        let outcome = prepare_receive_input(&mut store, &job, job.admission_identity.clone(),
+            "authenticated-head".into(), downloaded.clone(), vec![section], participation,
+            &crate::external_storage::phase_progress::PhaseProgress::silent(), &cancel);
+        crate::persistent_store::external_apply::after_stage_batch(None);
+        assert_eq!(outcome.err().unwrap().kind, ErrorKind::Cancelled);
+        assert_eq!(batches.get(), 1);
+        assert_eq!(staged_generations(directory.path()), 0);
+        assert_eq!(store.revision().unwrap(), 0);
+        assert_eq!(store.materialize(None).unwrap(), held);
+        assert_eq!(store.external_job(&job.id).unwrap().unwrap().phase, phase);
+        assert!(store.external_receive_completion(&job.id, "connection").unwrap().is_none());
+
+        let prepared = prepare(&mut store, &job, downloaded);
+        activate_prepared_receive(&mut store, &prepared, &job.admission_identity).unwrap();
+        assert_eq!(completed_receive_result(&store, &job, 0).unwrap().unwrap()["receivedRevision"], "1");
+        assert_eq!(store.materialize(None).unwrap()["characters"].as_array().unwrap().len(), 600);
+    }
+
+    /// Cancelled before its apply, a receive keeps its handle and the library;
+    /// cancelled as its apply commits, it keeps the completed outcome and has
+    /// nothing left that could be applied a second time.
+    #[test]
+    fn cancellation_around_activation_never_repeats_or_loses_the_apply() {
+        let (_directory, mut store, job, downloaded) = fixture();
+        let prepared = prepare(&mut store, &job, downloaded);
+        let stage = prepared.apply.staging_id().unwrap().to_owned();
+        let held = store.materialize(None).unwrap();
+        let state = super::super::job_store::JobCommandState::default();
+        state.prepared_receives.lock().unwrap().insert(job.id.clone(), prepared);
+        let current = store.external_identity().unwrap();
+
+        let (cancel, claim) = state.claim(&job).unwrap();
+        cancel.cancel();
+        assert_eq!(commit_prepared_receive(&mut store, &state, &claim, &job, 0, &current)
+            .unwrap_err().kind, ErrorKind::Cancelled);
+        assert_eq!(state.prepared_receives.lock().unwrap().len(), 1);
+        assert_eq!(store.revision().unwrap(), 0);
+        assert_eq!(store.materialize(None).unwrap(), held);
+        drop(claim);
+
+        let (cancel, claim) = state.claim(&job).unwrap();
+        let (_, revision) =
+            commit_prepared_receive(&mut store, &state, &claim, &job, 0, &current).unwrap();
+        cancel.cancel();
+        assert_eq!(revision, 1);
+        let applied = store.materialize(None).unwrap();
+        assert_eq!(applied["marker"], "remote");
+        assert!(state.prepared_receives.lock().unwrap().is_empty());
+        assert!(commit_prepared_receive(&mut store, &state, &claim, &job, 0, &current).is_err());
+        // What a cancellation discards afterwards is the stage the apply
+        // consumed, which no longer names any of the library.
+        store.replace_abort(&stage).unwrap();
+        drop(claim);
+        assert_eq!(completed_receive_result(&store, &job, 0).unwrap().unwrap()["receivedRevision"], "1");
+        assert_eq!(store.revision().unwrap(), 1);
+        assert_eq!(store.materialize(None).unwrap(), applied);
+    }
+
     #[test]
     fn each_identity_component_is_checked_before_device_rows_or_library_activation() {
         for field in ["store", "library", "generation", "selection", "revision"] {
             let (_directory, mut store, job, downloaded) = fixture();
             let prepared = prepare(&mut store, &job, downloaded);
-            let stage = prepared.commit.external_staging_id().to_owned();
+            let stage = prepared.apply.staging_id().unwrap().to_owned();
             let mut current = job.admission_identity.clone();
             match field {
                 "store" => current.store_id.push('x'),
@@ -2545,6 +3940,7 @@ mod receive_tests {
                 let section = plugin_section(&downloaded.staging_root);
                 assert!(prepare_receive_input(&mut store, &job, job.admission_identity.clone(),
                     "authenticated-head".into(), downloaded, vec![section], participation,
+                    &crate::external_storage::phase_progress::PhaseProgress::silent(),
                     &Cancellation::default()).is_err());
             } else {
                 let prepared = prepare(&mut store, &job, downloaded);
@@ -2595,11 +3991,12 @@ mod receive_tests {
                 "section" => fs::write(&section.sources[0].path, b"corrupt").unwrap(),
                 "snapshot" => downloaded.snapshot_id = "other-snapshot".into(),
                 "repository" => downloaded.repository_id = "other-repository".into(),
-                "record" => fs::write(&downloaded.records[0].path, b"corrupt").unwrap(),
+                "record" => fs::write(downloaded.records[0].source.file().unwrap(), b"corrupt").unwrap(),
                 _ => unreachable!(),
             }
             assert!(prepare_receive_input(&mut store, &job, job.admission_identity.clone(),
                 "authenticated-head".into(), downloaded, vec![section], participation,
+                &crate::external_storage::phase_progress::PhaseProgress::silent(),
                 &Cancellation::default()).is_err(), "{case}");
             assert_eq!(store.revision().unwrap(), 0, "{case}");
             assert!(rows(&mut store).is_empty(), "{case}");
@@ -2616,7 +4013,7 @@ mod receive_tests {
         let first = rows(&mut store);
         assert_eq!(first.len(), 1);
         assert_eq!(store.revision().unwrap(), 0);
-        store.replace_abort(prepared.commit.external_staging_id()).unwrap();
+        store.replace_abort(prepared.apply.staging_id().unwrap()).unwrap();
         drop(prepared);
         drop(store);
         let mut store = PersistentStore::open(directory.path()).unwrap();

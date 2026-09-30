@@ -149,6 +149,28 @@ describe('summarizeSyncConflict', () => {
         })
         expect(readCharacter).not.toHaveBeenCalled()
         expect(readConversation).not.toHaveBeenCalled()
+        expect(reader.queryConversations).toHaveBeenCalledTimes(2)
+    })
+
+    it('uses archived counts and skips conversation reads for known differences and empty characters', async () => {
+        const summaries = [
+            { id: 'archived', name: 'Archived', conversationCount: 0, archived: { conversationCount: 1, messageCount: 2 } },
+            { id: 'empty', name: 'Empty', conversationCount: 0 },
+            { id: 'renamed', name: 'Before', conversationCount: 1 },
+            { id: 'count', name: 'Count', conversationCount: 2 },
+        ]
+        const reader = { revision: 3,
+            queryCharacters: vi.fn(async ({ trash }) => ({ revision: 3, items: trash ? [] : summaries })),
+            queryConversations: vi.fn(),
+        } as unknown as PersistentRevisionReader
+        const remote = makeDatabase([
+            { chaId: 'archived', name: 'Archived', chats: [{ message: [1, 2] }] },
+            { chaId: 'empty', name: 'Empty', chats: [] },
+            { chaId: 'renamed', name: 'After', chats: [{ message: [] }] },
+            { chaId: 'count', name: 'Count', chats: [{ message: [] }] },
+        ])
+        expect((await summarizePinnedSyncConflict(reader, remote)).changedNames).toEqual(['Before', 'Count'])
+        expect(reader.queryConversations).not.toHaveBeenCalled()
     })
 })
 

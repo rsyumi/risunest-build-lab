@@ -18,6 +18,7 @@
     import { getGlobalChatVar, isLocallyHandledGlobalChatVar, removeLocallyHandledGlobalChatVar, setGlobalChatVar } from "src/ts/parser/chatVar.svelte";
     import { toggleValueChanged } from 'src/ts/toggleBindings'
     import { PinIcon } from "@lucide/svelte";
+    import { doingChat } from 'src/ts/process/generationState'
 
     interface Props {
         chara?: character|groupChat
@@ -117,11 +118,16 @@
         }
         return value
     }
+    const localEditBlocked = (key: string) => $doingChat && (
+        getCurrentChat()?.useLocallySetGlobalVariables
+        || getCurrentChat()?.GLGlobalVariables?.[key] !== undefined
+    )
 </script>
 
 {#snippet localToggle(toggle: sidebarToggle)}
     {#if isLocallyHandledGlobalChatVar(`toggle_${toggle.key}`)}
         <button
+            disabled={$doingChat}
             onclick={() => {
                 removeLocallyHandledGlobalChatVar(`toggle_${toggle.key}`)
             }}
@@ -147,7 +153,7 @@
                 </Accordion>
             </div>
         {:else if toggle.type === 'select'}
-            <div class="w-full flex gap-2 mt-2 items-center justify-between min-h-10 rounded-md px-1 transition-colors {dirtyClass(toggle.key)}">
+            <div inert={localEditBlocked(`toggle_${toggle.key}`)} class="w-full flex gap-2 mt-2 items-center justify-between min-h-10 rounded-md px-1 transition-colors {dirtyClass(toggle.key)}">
                 <span class="min-w-0 break-words">{@render getToggleDisplayName(toggle)}</span>
                 <SelectInput
                     className="w-32 shrink-0"
@@ -166,6 +172,7 @@
                 <span class="min-w-0 break-words">{@render getToggleDisplayName(toggle)}</span>
                 <TextInput
                     className="w-32 shrink-0"
+                    disabled={localEditBlocked(`toggle_${toggle.key}`)}
                     value={getGlobalChatVarNH(`toggle_${toggle.key}`)}
                     onchange={(e) => {
                         setGlobalChatVar(`toggle_${toggle.key}`, e.currentTarget.value)
@@ -173,7 +180,7 @@
                 />
             </div>
         {:else if toggle.type === 'textarea'}
-            <div class="w-full flex gap-2 mt-2 items-start justify-between min-h-10 rounded-md px-1 transition-colors {dirtyClass(toggle.key)}">
+            <div inert={localEditBlocked(`toggle_${toggle.key}`)} class="w-full flex gap-2 mt-2 items-start justify-between min-h-10 rounded-md px-1 transition-colors {dirtyClass(toggle.key)}">
                 <span class="min-w-0 break-words mt-1.5">{@render getToggleDisplayName(toggle)}</span>
                 <TextAreaInput
                     className="w-32 shrink-0"
@@ -206,6 +213,7 @@
         {:else}
             <SwitchInput
                 className={switchRow}
+                disabled={localEditBlocked(`toggle_${toggle.key}`)}
                 check={getGlobalChatVarNH(`toggle_${toggle.key}`) === '1'}
                 name={toggle.value}
                 highlight={isToggleDirty(toggle.key)}
@@ -272,6 +280,7 @@
         <SwitchInput
             className={switchRow}
             check={getCurrentChat()?.useLocallySetGlobalVariables}
+            disabled={$doingChat}
             name={language.localToggles}
             onChange={(checked) => {
                 const chatIndx = DBState.db.characters[$selectedCharID].chatPage

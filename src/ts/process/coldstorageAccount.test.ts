@@ -1,4 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { compressSync } from 'fflate'
+import * as transport from './coldstorage.svelte'
 
 const mocks = vi.hoisted(() => ({
     fetchProtectedResource: vi.fn(),
@@ -24,16 +26,14 @@ beforeEach(() => {
 
 describe('official account cold storage read', () => {
     it('reads the exact remote key and decompresses a successful payload', async () => {
-        const { compressSync } = await import('fflate')
         const value = { character: { chaId: 'synthetic-character' } }
         const signal = new AbortController().signal
         mocks.fetchProtectedResource.mockResolvedValueOnce(new Response(
             compressSync(new TextEncoder().encode(JSON.stringify(value))).buffer as ArrayBuffer,
             { status: 200 },
         ))
-        const { getAccountColdStorageItem } = await import('./coldstorage.svelte')
 
-        await expect(getAccountColdStorageItem('cold-a', signal)).resolves.toEqual(value)
+        await expect(transport.getAccountColdStorageItem('cold-a', signal)).resolves.toEqual(value)
         expect(mocks.fetchProtectedResource).toHaveBeenCalledWith('/hub/account/coldstorage', {
             method: 'GET',
             headers: { 'x-risu-key': 'cold-a' },
@@ -47,22 +47,19 @@ describe('official account cold storage read', () => {
             new ReadableStream({ cancel }),
             { status: 404 },
         ))
-        const { getAccountColdStorageItem } = await import('./coldstorage.svelte')
 
-        await expect(getAccountColdStorageItem('cold-missing')).resolves.toBeNull()
+        await expect(transport.getAccountColdStorageItem('cold-missing')).resolves.toBeNull()
         expect(cancel).toHaveBeenCalledOnce()
     })
 
     it('preserves read AbortError identity', async () => {
         const readAbort = new DOMException('read cancelled', 'AbortError')
-        const { getAccountColdStorageItem } = await import('./coldstorage.svelte')
 
         mocks.fetchProtectedResource.mockRejectedValueOnce(readAbort)
-        await expect(getAccountColdStorageItem('cold-read-abort')).rejects.toBe(readAbort)
+        await expect(transport.getAccountColdStorageItem('cold-read-abort')).rejects.toBe(readAbort)
     })
 
     it('never issues a cold storage write request', async () => {
-        const transport = await import('./coldstorage.svelte')
 
         expect(Object.keys(transport).filter((name) => /^set/.test(name))).toEqual([])
     })

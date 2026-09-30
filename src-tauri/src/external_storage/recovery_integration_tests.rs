@@ -76,7 +76,7 @@ fn repository_bootstrap_opens_and_applies_a_real_snapshot_without_the_source_vau
                 .join("external-storage")
                 .join("captures")
                 .join("recovery-capture");
-            let capture_objects = source.path().join("external-storage").join("objects");
+            let capture_external = source.path().join("external-storage");
             let identity = CaptureIdentity {
                 store_id: "source-device".into(),
                 library_epoch: "synthetic-library".into(),
@@ -85,7 +85,7 @@ fn repository_bootstrap_opens_and_applies_a_real_snapshot_without_the_source_vau
                 revision: 1,
             };
             let mut catalog =
-                CaptureCatalog::create(&capture_directory, &capture_objects, None).unwrap();
+                CaptureCatalog::create(&capture_directory, &capture_external, None).unwrap();
             catalog.begin(&identity, None).unwrap();
             catalog.record(&root_key_name, &root_record.bytes).unwrap();
             catalog
@@ -136,10 +136,13 @@ fn repository_bootstrap_opens_and_applies_a_real_snapshot_without_the_source_vau
                     max_stored_bytes: 128 * 1024,
                     sdk_overhead_bytes: 0,
                     target_plaintext_bytes: 128 * 1024,
+                    maintenance: Default::default(),
                 },
+                None,
                 &mut journal,
                 &provider,
                 &repository,
+                &crate::external_storage::phase_progress::PhaseProgress::silent(),
                 &cancel,
             )
             .await
@@ -165,6 +168,7 @@ fn repository_bootstrap_opens_and_applies_a_real_snapshot_without_the_source_vau
                 retention_policy: None,
                 capabilities: Capabilities::default(),
                 created_at_ms: 1,
+                verified_at_ms: 1,
                 last_sync_at_ms: None,
                 last_backup_at_ms: None,
             };
@@ -247,8 +251,10 @@ fn repository_bootstrap_opens_and_applies_a_real_snapshot_without_the_source_vau
                 &completed.reference,
                 &destination.path().join("download"),
                 &destination_key,
-                &provider,
+                None,
+                snapshot_restore::SourceTrust::Downloaded, &provider,
                 &repository,
+                &crate::external_storage::phase_progress::PhaseProgress::silent(),
                 &cancel,
             )
             .await
@@ -271,14 +277,14 @@ fn repository_bootstrap_opens_and_applies_a_real_snapshot_without_the_source_vau
                     key: record.key.clone(),
                     content_hash: record.content_hash.clone(),
                     byte_length: record.byte_length,
-                    path: record.path.clone(),
+                    source: record.source.clone(),
                 })
             });
             let objects = prepared.objects.iter().map(|object| {
                 Ok(ExternalSnapshotObject {
                     content_hash: object.content_hash.clone(),
                     byte_length: object.byte_length,
-                    path: object.path.clone(),
+                    source: object.source.clone(),
                 })
             });
             let application = ExternalSnapshotApplication {
@@ -286,6 +292,7 @@ fn repository_bootstrap_opens_and_applies_a_real_snapshot_without_the_source_vau
                 staging_root: &prepared.staging_root,
                 scope_id: &library_fingerprint_domain(),
                 fingerprint: &library_fingerprint,
+                probe: &crate::local_backup::NeverCancelled,
             };
             let replacement = destination_store
                 .prepare_external_snapshot_application(&application, records, objects)

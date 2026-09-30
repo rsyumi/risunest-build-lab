@@ -4,6 +4,7 @@
     import { isCompositionKey } from 'src/ts/hotkeyModifier';
     import { DBState } from 'src/ts/stores.svelte';
     import { language } from 'src/lang';
+    import { modalNavigation } from 'src/ts/ui/modalNavigation';
     import { 
         findAllOriginalRangesFromHtml,
         findAllOriginalRangesFromText,
@@ -21,6 +22,7 @@
         dragEditEnabled?: boolean;
         translatedView?: boolean;
         getTranslationEditContext?: () => Promise<{ key: string; data: string } | null>;
+        onSave?: (detail: { newData: string; sourceData: string; target: PartialEditTarget; translationKey?: string }) => Promise<boolean>;
     }
 
     let {
@@ -31,6 +33,7 @@
         dragEditEnabled = false,
         translatedView = false,
         getTranslationEditContext,
+        onSave,
     }: Props = $props();
 
     type PartialEditTarget = 'original' | 'translation';
@@ -50,6 +53,11 @@
 
     let isEditing = $state(false);
     let editText = $state('');
+    let saving = $state(false);
+
+    export function takeEditorDraft(): string | null {
+        return isEditing ? editText : null;
+    }
     let textareaRef: HTMLTextAreaElement | null = $state(null);
     let focusTimer: ReturnType<typeof setTimeout> | undefined;
     let scrollTimer: ReturnType<typeof setTimeout> | undefined;
@@ -396,17 +404,25 @@
     }
 
     // Save edited text
-    function handleSave() {
-        if (!matchingState.selectedRange) return;
+    async function handleSave() {
+        if (!matchingState.selectedRange || saving) return;
 
         const newData = replaceRange(matchingState.sourceData, matchingState.selectedRange, editText);
-        dispatch('save', {
+        const detail = {
             newData,
+            sourceData: matchingState.sourceData,
             target: matchingState.sourceType,
             translationKey: matchingState.translationKey ?? undefined,
-        });
-
-        closeEdit();
+        };
+        saving = true;
+        try {
+            if (onSave) {
+                if (!await onSave(detail)) return;
+            } else dispatch('save', detail);
+            closeEdit();
+        } finally {
+            saving = false;
+        }
     }
 
     // Cancel editing
@@ -435,18 +451,27 @@
     }
 
     // Confirm deletion
-    function handleConfirmDelete() {
-        if (!matchingState.selectedRange) return;
+    async function handleConfirmDelete() {
+        if (!matchingState.selectedRange || saving) return;
 
         let newData = replaceRange(matchingState.sourceData, matchingState.selectedRange, '');
         newData = newData.replace(/\n{3,}/g, '\n\n').trim();
 
-        dispatch('save', {
+        const detail = {
             newData,
+            sourceData: matchingState.sourceData,
             target: matchingState.sourceType,
             translationKey: matchingState.translationKey ?? undefined,
-        });
-        closeDeleteConfirm();
+        };
+        saving = true;
+        try {
+            if (onSave) {
+                if (!await onSave(detail)) return;
+            } else dispatch('save', detail);
+            closeDeleteConfirm();
+        } finally {
+            saving = false;
+        }
     }
 
     // Cancel deletion
@@ -465,9 +490,7 @@
         // While an IME is composing, Escape and Enter belong to the composition,
         // not to this editor; acting on them discards the pending edit.
         if (isCompositionKey(e)) return;
-        if (e.key === 'Escape') {
-            handleCancel();
-        } else if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
             handleSave();
         }
     }
@@ -702,7 +725,7 @@
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <!-- svelte-ignore a11y_click_events_have_key_events -->
     <div class="partial-edit-overlay" onclick={(e) => { if (e.target === e.currentTarget) cancelMatchSelection(); }}>
-        <div class="partial-match-selection-modal">
+        <div class="partial-match-selection-modal" use:modalNavigation={{ close: cancelMatchSelection }}>
             <div class="match-selection-header">
                 <span class="match-selection-title">{title}</span>
                 <span class="match-count">{matches.length} {language.partialEdit.matchesFound}</span>
@@ -750,7 +773,7 @@
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <!-- svelte-ignore a11y_click_events_have_key_events -->
     <div class="partial-edit-overlay" onclick={(e) => { if (e.target === e.currentTarget) showMatchFailedModal = false; }}>
-        <div class="partial-match-failed-modal">
+        <div class="partial-match-failed-modal" use:modalNavigation={{ close: () => { showMatchFailedModal = false } }}>
             <div class="partial-match-failed-header">
                 <span class="partial-match-failed-title">{language.partialEdit.matchFailedTitle}</span>
             </div>
@@ -774,7 +797,7 @@
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <!-- svelte-ignore a11y_click_events_have_key_events -->
     <div class="partial-edit-overlay" onclick={(e) => { if (e.target === e.currentTarget) handleCancelDelete(); }}>
-        <div class="partial-delete-modal">
+        <div class="partial-delete-modal" use:modalNavigation={{ close: handleCancelDelete }}>
             <div class="partial-delete-header">
                 <span class="partial-delete-title">{language.partialEdit.deleteModalTitle}</span>
                 <div class="partial-match-meta">
@@ -824,7 +847,7 @@
     <!-- svelte-ignore a11y_no_static_element_interactions -->
     <!-- svelte-ignore a11y_click_events_have_key_events -->
     <div class="partial-edit-overlay" onclick={(e) => { if (e.target === e.currentTarget) handleCancel(); }}>
-        <div class="partial-edit-modal">
+        <div class="partial-edit-modal" use:modalNavigation={{ close: handleCancel }}>
             <div class="partial-edit-header">
                 <span class="partial-edit-title">{language.partialEdit.editModalTitle}</span>
                 <div class="partial-match-meta">

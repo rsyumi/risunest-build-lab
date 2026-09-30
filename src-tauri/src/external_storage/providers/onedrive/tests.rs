@@ -1419,7 +1419,7 @@ fn listing_pages_with_a_skip_token_and_bounds_the_limit() {
                 &format!(
                     "{{\"value\":[{},{},{{\"id\":\"f\",\"name\":\"stray\",\"folder\":{{}}}},{{\"id\":\"b\",\"name\":\"bad:name\",\"size\":1,\"file\":{{}}}}],\"@odata.nextLink\":\"{endpoint}/drives/drive-1/items/{ROOT_ITEM}:/snapshots:/children?$top=2&$skiptoken=PAGE2\"}}",
                     file_item("snap-a", 10, "etag-a"),
-                    file_item("snap-b", 20, "etag-b")
+                    format!("{},{}", file_item("snap-b", 20, "etag-b"), file_item(".DS_Store", 0, "noise"))
                 ),
             ),
             exchange(200, &format!("{{\"value\":[{}]}}", file_item("snap-c", 30, "etag-c"))),
@@ -2035,5 +2035,69 @@ fn deleting_addresses_one_member_path_and_refuses_the_head_and_descriptors() {
             line(&records[2])
         );
         drop(records);
+    });
+}
+
+#[test]
+fn access_tokens_are_cached_and_expiry_refresh_is_single_flight() {
+    runtime().block_on(async {
+        use crate::external_storage::auth::SecretVault;
+        let server = WireServer::start(vec![json(200,
+            r#"{"access_token":"fresh-access","refresh_token":"fresh-refresh","expires_in":3600,"token_type":"Bearer"}"#)]);
+        let test = harness(NOW_MS);
+        let provider = OneDrive::new(test.dependencies.clone());
+        let context = provider.setup_context(&config_for(&server, "personal"), &secret(), "account-1", "drive-1", "root").unwrap();
+        assert_eq!(provider.access_token(&context, &Cancellation::default()).await.unwrap().as_str(), "synthetic-access");
+        test.vault.remove(&secret()).await.unwrap();
+        for _ in 0..50 {
+            assert_eq!(provider.access_token(&context, &Cancellation::default()).await.unwrap().as_str(), "synthetic-access");
+        }
+        let reference = test.vault.store(&crate::external_storage::auth::SecretBytes(zeroize::Zeroizing::new(token_document()))).await.unwrap();
+        let context = Context { secret: reference, ..context };
+        test.clock.set(NOW_MS + 3_600_000);
+        let cancel = Cancellation::default();
+        let (first, second) = tokio::join!(provider.access_token(&context, &cancel), provider.access_token(&context, &cancel));
+        assert_eq!(first.unwrap().as_str(), "fresh-access");
+        assert_eq!(second.unwrap().as_str(), "fresh-access");
+        assert_eq!(server.requests.lock().unwrap().len(), 1);
+    });
+}
+
+#[test]
+fn authenticated_listing_refreshes_once_after_401() {
+    runtime().block_on(async {
+        for status in [200, 401] {
+            let server = WireServer::start(vec![
+                json(401, "{}"),
+                json(200, r#"{"access_token":"fresh-access","expires_in":3600,"token_type":"Bearer"}"#),
+                json(status, r#"{"value":[]}"#),
+            ]);
+            let provider = OneDrive::new(harness(NOW_MS).dependencies);
+            let context = provider.setup_context(&config_for(&server, "personal"), &secret(), "account-1", "drive-1", "root").unwrap();
+            let token = provider.access_token(&context, &Cancellation::default()).await.unwrap();
+            let request = provider.request(reqwest::Method::GET, graph::signed_in_drive_url(&context.settings).unwrap(),
+                ProviderOperation::List, &context.account, Some(&token));
+            let response = provider.send_authenticated_read(&context, request, &Cancellation::default()).await.unwrap();
+            assert_eq!(response.status, status);
+            let requests = server.requests.lock().unwrap();
+            assert_eq!(requests.len(), 3);
+            assert!(head(&requests[2]).contains("authorization: bearer fresh-access"));
+        }
+    });
+}
+
+#[test]
+fn a_preauthorized_request_never_receives_an_account_token_after_401() {
+    runtime().block_on(async {
+        let server = WireServer::start(vec![json(401, "{}")]);
+        let provider = OneDrive::new(harness(NOW_MS).dependencies);
+        let context = provider.setup_context(&config_for(&server, "personal"), &secret(), "account-1", "drive-1", "root").unwrap();
+        let request = provider.request(reqwest::Method::GET, graph::signed_in_drive_url(&context.settings).unwrap(),
+            ProviderOperation::ReconcileUpload, &context.account, None);
+        let response = provider.send_authenticated_read(&context, request, &Cancellation::default()).await.unwrap();
+        assert_eq!(response.status, 401);
+        let requests = server.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(!head(&requests[0]).contains("authorization:"));
     });
 }

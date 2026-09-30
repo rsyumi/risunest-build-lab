@@ -13,7 +13,7 @@ use risunest_external_storage_format::{
     format::fingerprint,
     section::{
         InlineOrObject, SectionEntry, SectionEntryVersion, SectionKind, SectionValue,
-        MAX_SECTION_ENTRY_BYTES,
+        MAX_SECTION_ENTRY_BYTES, MAX_SECTION_OBJECT_BYTES,
     },
     snapshot as wire,
 };
@@ -21,16 +21,16 @@ use risunest_sync_wire::head::Sequence;
 use rusqlite::{params, Connection, OpenFlags};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    fs::{self, OpenOptions},
-    io::{Read, Write},
+    fs,
+    io::{Read, Write, Seek, SeekFrom},
     path::{Path, PathBuf},
 };
 
 fn corrupt(_: impl std::fmt::Display) -> ProviderError {
     ProviderError::new(ErrorKind::Corrupt)
 }
-fn transient(_: impl std::fmt::Display) -> ProviderError {
-    ProviderError::new(ErrorKind::Transient)
+fn transient(error: impl std::fmt::Display + 'static) -> ProviderError {
+    super::packaging::transient(error)
 }
 
 /// One file the packager will carry. Section bytes live in the job spool
@@ -42,6 +42,7 @@ pub(crate) struct SectionSource {
     pub content_sha256: String,
     pub byte_length: u64,
     pub path: PathBuf,
+    pub offset: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -74,30 +75,58 @@ pub(crate) fn section_of(kind: SectionKind) -> Option<Section> {
     }
 }
 
-fn write_spool_object(spool: &Path, bytes: &[u8]) -> Result<(String, PathBuf)> {
-    let digest = hex::encode(hash(bytes));
-    let path = spool.join(&digest);
-    if path.exists() {
-        let metadata = fs::symlink_metadata(&path).map_err(transient)?;
-        if metadata.is_file()
-            && !crate::trust_boundary::is_link_like(&metadata)
-            && metadata.len() == bytes.len() as u64
-        {
-            return Ok((digest, path));
-        }
-        fs::remove_file(&path).map_err(transient)?;
+struct SectionBodySpool {
+    staging: tempfile::NamedTempFile,
+    path: PathBuf,
+    length: u64,
+    offsets: BTreeMap<String, u64>,
+    digest: sha2::Sha256,
+}
+
+impl SectionBodySpool {
+    fn new(spool: &Path) -> Result<Self> {
+        Ok(Self {
+            staging: tempfile::NamedTempFile::new_in(spool).map_err(transient)?,
+            path: spool.join(format!("section-bodies-{}", uuid::Uuid::new_v4())),
+            length: 0,
+            offsets: BTreeMap::new(),
+            digest: <sha2::Sha256 as sha2::Digest>::new(),
+        })
     }
-    let staging = spool.join(format!(".section-{}.partial", uuid::Uuid::new_v4()));
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&staging)
-        .map_err(transient)?;
-    file.write_all(bytes).map_err(transient)?;
-    file.sync_all().map_err(transient)?;
-    drop(file);
-    fs::rename(&staging, &path).map_err(transient)?;
-    Ok((digest, path))
+    fn push(&mut self, bytes: &[u8]) -> Result<(String, PathBuf, Option<u64>)> {
+        if bytes.len() > MAX_SECTION_OBJECT_BYTES { return Err(corrupt("section object limit")); }
+        let digest = hex::encode(hash(bytes));
+        let offset = match self.offsets.get(&digest) {
+            Some(offset) => *offset,
+            None => {
+                let offset = self.length;
+                self.staging.write_all(bytes).map_err(transient)?;
+                sha2::Digest::update(&mut self.digest, bytes);
+                self.length = self.length.checked_add(bytes.len() as u64)
+                    .ok_or_else(|| corrupt("section spool length overflow"))?;
+                self.offsets.insert(digest.clone(), offset);
+                offset
+            }
+        };
+        Ok((digest, self.path.clone(), Some(offset)))
+    }
+    fn finish(self) -> Result<PathBuf> {
+        let digest = hex::encode(sha2::Digest::finalize(self.digest));
+        let path = self.path.parent().unwrap().join(format!("section-bodies-{digest}"));
+        if path.exists() {
+            let mut file = crate::trust_boundary::open_regular_source(&path).map_err(transient)?;
+            if file.metadata().map_err(transient)?.len() != self.length
+                || hex::encode(risunest_external_storage_format::content_identity::hash_reader(&mut file, self.length)
+                    .map_err(super::packaging::format_error)?) != digest {
+                return Err(corrupt("section spool body differs"));
+            }
+            return Ok(path);
+        }
+        self.staging.as_file().sync_all().map_err(transient)?;
+        self.staging.persist(&path).map_err(|error| transient(error.error))?;
+        crate::trust_boundary::sync_directory(path.parent().unwrap()).map_err(transient)?;
+        Ok(path)
+    }
 }
 
 fn captured_section_fingerprint(
@@ -169,35 +198,37 @@ pub(crate) fn capture_section(
         return Err(corrupt("section spool is a link"));
     }
     let mut sources = Vec::new();
+    let mut bodies = SectionBodySpool::new(spool)?;
     for row in rows {
         cancel.check()?;
         let entry = row.to_entry(kind, versioned).map_err(corrupt)?;
         let key = entry.key.clone();
         if let (SectionValueRow::Hypa { vector, .. }, SectionValue::Hypa(value)) = (&row.value, &entry.value) {
             if matches!(value.vector, InlineOrObject::Object(_)) {
-                let (digest, path) = write_spool_object(spool, vector)?;
+                let (digest, path, offset) = bodies.push(vector)?;
                 sources.push(SectionSource {
                     kind: wire::CatalogEntryKind::SectionObject,
                     key: format!("object/{digest}"), content_sha256: digest,
-                    byte_length: vector.len() as u64, path,
+                    byte_length: vector.len() as u64, path, offset,
                 });
             }
         }
         let bytes = entry.encode().map_err(corrupt)?;
-        let (digest, path) = write_spool_object(spool, &bytes)?;
+        let (digest, path, offset) = bodies.push(&bytes)?;
         sources.push(SectionSource {
             kind: wire::CatalogEntryKind::SectionEntry,
             key,
             content_sha256: digest,
             byte_length: bytes.len() as u64,
-            path,
+            path, offset,
         });
     }
     sources.sort_by(|a, b| (a.kind as u8, &a.key).cmp(&(b.kind as u8, &b.key)));
     sources.dedup_by(|a, b| {
         a.kind == wire::CatalogEntryKind::SectionObject && a.kind == b.kind && a.key == b.key
     });
-    crate::trust_boundary::sync_directory(spool).map_err(transient)?;
+    let body_path = bodies.finish()?;
+    for source in &mut sources { source.path = body_path.clone(); }
     let content_fingerprint = captured_section_fingerprint(kind, &sources)?;
     Ok(CapturedSection {
         kind,
@@ -224,22 +255,23 @@ fn capture_prepared_section(
     }
     let kind = prepared.kind();
     let mut sources = Vec::new();
+    let mut bodies = SectionBodySpool::new(spool)?;
     prepared.visit_entries_mapped(|entry, object| {
         cancel.check()?;
         if let Some(bytes) = object {
-            let (digest, path) = write_spool_object(spool, bytes)?;
+            let (digest, path, offset) = bodies.push(bytes)?;
             sources.push(SectionSource {
                 kind: wire::CatalogEntryKind::SectionObject,
                 key: format!("object/{digest}"), content_sha256: digest,
-                byte_length: bytes.len() as u64, path,
+                byte_length: bytes.len() as u64, path, offset,
             });
         }
         let bytes = entry.encode().map_err(corrupt)?;
-        let (digest, path) = write_spool_object(spool, &bytes)?;
+        let (digest, path, offset) = bodies.push(&bytes)?;
         sources.push(SectionSource {
             kind: wire::CatalogEntryKind::SectionEntry,
             key: entry.key.clone(), content_sha256: digest,
-            byte_length: bytes.len() as u64, path,
+            byte_length: bytes.len() as u64, path, offset,
         });
         Ok(())
     }, preparation_error)?;
@@ -247,7 +279,8 @@ fn capture_prepared_section(
     sources.dedup_by(|a, b| {
         a.kind == wire::CatalogEntryKind::SectionObject && a.kind == b.kind && a.key == b.key
     });
-    crate::trust_boundary::sync_directory(spool).map_err(transient)?;
+    let body_path = bodies.finish()?;
+    for source in &mut sources { source.path = body_path.clone(); }
     let content_fingerprint = captured_section_fingerprint(kind, &sources)?;
     Ok(CapturedSection {
         kind, generation, gc_floor, max_write_clock,
@@ -304,6 +337,7 @@ struct StateSectionCapture {
     cursor: Option<SectionCursor>,
     sources: Vec<SectionSource>,
     publication_rows: u64,
+    bodies: SectionBodySpool,
     publication: Option<Connection>,
     publication_stage: tempfile::NamedTempFile,
     publication_path: PathBuf,
@@ -379,7 +413,7 @@ impl StateSectionCapture {
             marker: TombstonePublication { generation, at_ms }, reference, cursor,
             sources: Vec::new(), publication_rows: 0,
             publication: Some(publication), publication_stage,
-            publication_path, spool,
+            publication_path, bodies: SectionBodySpool::new(&spool)?, spool,
         })
     }
 
@@ -429,19 +463,19 @@ impl StateSectionCapture {
         let entry = row.to_entry(self.kind, true).map_err(corrupt)?;
         if let (SectionValueRow::Hypa { vector, .. }, SectionValue::Hypa(value)) = (&row.value, &entry.value) {
             if matches!(value.vector, InlineOrObject::Object(_)) {
-                let (digest, path) = write_spool_object(&self.spool, vector)?;
+                let (digest, path, offset) = self.bodies.push(vector)?;
                 self.sources.push(SectionSource {
                     kind: wire::CatalogEntryKind::SectionObject,
                     key: format!("object/{digest}"), content_sha256: digest,
-                    byte_length: vector.len() as u64, path,
+                    byte_length: vector.len() as u64, path, offset,
                 });
             }
         }
         let bytes = entry.encode().map_err(corrupt)?;
-        let (digest, path) = write_spool_object(&self.spool, &bytes)?;
+        let (digest, path, offset) = self.bodies.push(&bytes)?;
         self.sources.push(SectionSource {
             kind: wire::CatalogEntryKind::SectionEntry,
-            key: entry.key, content_sha256: digest, byte_length: bytes.len() as u64, path,
+            key: entry.key, content_sha256: digest, byte_length: bytes.len() as u64, path, offset,
         });
         let stamped_marker = stamped.then(|| self.marker.clone());
         self.insert_evidence(&row, 0, stamped, stamped_marker.as_ref())
@@ -467,6 +501,8 @@ impl StateSectionCapture {
                 self.max_write_clock.as_str(), content_fingerprint.as_slice(),
                 evidence_fingerprint.as_slice(), row_count],
         ).map_err(transient)?;
+        let body_path = self.bodies.finish()?;
+        for source in &mut self.sources { source.path = body_path.clone(); }
         publication.execute_batch("COMMIT;").map_err(transient)?;
         drop(publication);
         self.publication_stage.as_file().sync_all().map_err(transient)?;
@@ -820,29 +856,56 @@ pub(crate) struct PreparedSectionInput {
     rows: PreparedSectionRows,
 }
 
-fn read_source_bytes(source: &SectionSource, cancel: &Cancellation) -> Result<Vec<u8>> {
+fn open_source_range(source: &SectionSource, cancel: &Cancellation) -> Result<std::io::Take<fs::File>> {
     cancel.check()?;
-    if source.byte_length > i64::MAX as u64
+    if source.byte_length > MAX_SECTION_OBJECT_BYTES as u64
         || (source.kind == wire::CatalogEntryKind::SectionEntry
             && source.byte_length > MAX_SECTION_ENTRY_BYTES as u64) {
         return Err(corrupt("section source exceeds its codec limit"));
     }
     let metadata = fs::symlink_metadata(&source.path).map_err(transient)?;
     if !metadata.is_file() || crate::trust_boundary::is_link_like(&metadata)
-        || metadata.len() != source.byte_length {
+        || source.offset.map_or(metadata.len() != source.byte_length, |offset| offset.checked_add(source.byte_length).is_none_or(|end| end > metadata.len())) {
         return Err(corrupt("section source is not the declared file"));
     }
-    let file = crate::trust_boundary::open_regular_source(&source.path).map_err(transient)?;
-    if file.metadata().map_err(transient)?.len() != source.byte_length {
+    let mut file = crate::trust_boundary::open_regular_source(&source.path).map_err(transient)?;
+    let length = file.metadata().map_err(transient)?.len();
+    if source.offset.map_or(length != source.byte_length, |offset| offset.checked_add(source.byte_length).is_none_or(|end| end > length)) {
         return Err(corrupt("section source length changed"));
     }
+    if let Some(offset) = source.offset { file.seek(SeekFrom::Start(offset)).map_err(transient)?; }
+    Ok(file.take(source.byte_length))
+}
+
+fn read_source_bytes(source: &SectionSource, cancel: &Cancellation) -> Result<Vec<u8>> {
+    let mut input = open_source_range(source, cancel)?;
     let mut bytes = Vec::new();
-    file.take(source.byte_length + 1).read_to_end(&mut bytes).map_err(transient)?;
-    cancel.check()?;
-    if bytes.len() as u64 != source.byte_length {
-        return Err(corrupt("section source length changed"));
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        cancel.check()?;
+        let count = input.read(&mut buffer).map_err(transient)?;
+        if count == 0 { break; }
+        bytes.extend_from_slice(&buffer[..count]);
     }
+    if bytes.len() as u64 != source.byte_length { return Err(corrupt("section source length changed")); }
     Ok(bytes)
+}
+
+fn source_digest(source: &SectionSource, cancel: &Cancellation) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    let mut input = open_source_range(source, cancel)?;
+    let mut digest = Sha256::new();
+    let mut length = 0;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        cancel.check()?;
+        let count = input.read(&mut buffer).map_err(transient)?;
+        if count == 0 { break; }
+        length += count as u64;
+        digest.update(&buffer[..count]);
+    }
+    if length != source.byte_length { return Err(corrupt("section source length changed")); }
+    Ok(hex::encode(digest.finalize()))
 }
 
 fn prepare_section_source_rows(
@@ -914,7 +977,7 @@ fn prepare_section_source_rows(
     // Extra catalog objects are not installed, but corrupt ones must not be
     // hidden merely because this section has no entry that references them.
     for (digest, file) in &objects {
-        if !used_objects.contains(digest) && hex::encode(hash(&read_source_bytes(file, cancel)?)) != *digest {
+        if !used_objects.contains(digest) && source_digest(file, cancel)? != *digest {
             return Err(corrupt("section object hash differs"));
         }
     }
@@ -1069,6 +1132,63 @@ mod scale_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ten_thousand_section_bodies_share_one_durable_file_and_exact_ranges() {
+        let root = tempfile::tempdir().unwrap();
+        let mut spool = SectionBodySpool::new(root.path()).unwrap();
+        let mut sources = Vec::new();
+        for index in 0..10_000 {
+            let bytes = format!("synthetic-value-{index}").into_bytes();
+            let (digest, path, offset) = spool.push(&bytes).unwrap();
+            sources.push((SectionSource { kind: wire::CatalogEntryKind::SectionEntry,
+                key: index.to_string(), content_sha256: digest,
+                byte_length: bytes.len() as u64, path, offset }, bytes));
+        }
+        let first_offset = sources[0].0.offset;
+        assert_eq!(spool.push(&sources[0].1).unwrap().2, first_offset);
+        let path = spool.finish().unwrap();
+        for (source, _) in &mut sources { source.path = path.clone(); }
+        let mut identical = SectionBodySpool::new(root.path()).unwrap();
+        for (_, bytes) in &sources { identical.push(bytes).unwrap(); }
+        assert_eq!(identical.finish().unwrap(), path);
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+        for (source, bytes) in &sources {
+            assert_eq!(read_source_bytes(source, &Cancellation::default()).unwrap(), *bytes);
+        }
+        let mut invalid = sources[0].0.clone();
+        invalid.offset = Some(u64::MAX);
+        assert!(read_source_bytes(&invalid, &Cancellation::default()).is_err());
+    }
+
+    #[test]
+    fn unfinished_section_spool_never_publishes_a_body_file() {
+        let root = tempfile::tempdir().unwrap();
+        let path = {
+            let mut spool = SectionBodySpool::new(root.path()).unwrap();
+            spool.push(b"interrupted").unwrap().1
+        };
+        assert!(!path.exists());
+        assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn cancelled_section_preparation_preserves_all_device_rows() {
+        let root = tempfile::tempdir().unwrap();
+        let spool = tempfile::tempdir().unwrap();
+        let mut store = participating_plugin_store(root.path());
+        let received = capture_section(SectionKind::LocalPlugins, &[], true,
+            Sequence::from(1u64), Sequence::from(0u64), Sequence::from(0u64),
+            spool.path(), &Cancellation::default()).unwrap();
+        let before = store.device_store_mut().unwrap().section_state(Section::LocalPlugins).unwrap();
+        let cancel = Cancellation::default();
+        cancel.cancel();
+        assert_eq!(prepare_received_section("connection", "lineage", SectionArrival::Rejoining,
+            &before.participation_generation, &received, &cancel).err().unwrap().kind, ErrorKind::Cancelled);
+        assert_eq!(store.device_store_mut().unwrap().section_state(Section::LocalPlugins).unwrap(), before);
+        assert!(store.device_store_mut().unwrap().read_section_rows(Section::LocalPlugins).unwrap().is_empty());
+    }
+
     use crate::persistent_store::{
         device_store::plugin_values::PluginDeviceMutation, PersistentStore,
     };
@@ -1192,7 +1312,7 @@ mod tests {
                 (
                     source.kind,
                     source.key.clone(),
-                    fs::read(&source.path).expect("read section source"),
+                    read_source_bytes(source, &Cancellation::default()).expect("read section source"),
                 )
             })
             .collect()

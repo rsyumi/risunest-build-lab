@@ -25,6 +25,16 @@ export class GitHubReleases {
   getByTag(tag) { parseTag(tag); return this.request(`/releases/tags/${encodeURIComponent(tag)}`, { allow404: true }); }
   getLatest() { return this.request("/releases/latest", { allow404: true }); }
   getById(id) { return this.request(`/releases/${Number(id)}`); }
+  async findDraftsByTag(tag) {
+    parseTag(tag);
+    const drafts = [];
+    for (let page = 1; ; page++) {
+      const releases = await this.request(`/releases?per_page=100&page=${page}`);
+      drafts.push(...releases.filter(release => release.draft && release.tag_name === tag));
+      if (releases.length < 100) return drafts;
+    }
+  }
+
   async hasPublishedStable() {
     for (let page = 1; ; page++) {
       const releases = await this.request(`/releases?per_page=100&page=${page}`);
@@ -82,7 +92,12 @@ export class GitHubReleases {
   async prepareDraft(tag, commit, body = "") {
     parseTag(tag);
     if (!/^[a-f0-9]{40}$/.test(commit)) throw new Error("invalid-source-commit");
-    const previous = await this.getByTag(tag);
+    let previous = await this.getByTag(tag);
+    if (!previous) {
+      const drafts = await this.findDraftsByTag(tag);
+      if (drafts.length > 1) throw new Error("duplicate-release-drafts");
+      previous = drafts[0];
+    }
     if (previous && (previous.target_commitish !== commit || previous.prerelease)) throw new Error("release-identity-conflict");
     await this.assertTagCommit(tag, commit);
     if (previous) return previous;

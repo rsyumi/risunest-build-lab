@@ -533,7 +533,7 @@ fn two_native_replicas_seed_publish_pull_and_preserve_same_key_conflicts() {
             .unwrap();
         first
             .commit(&WorkingSetCommit {
-                delete_character_id: Some("char-b".into()),
+                delete_character_ids: Some(vec!["char-b".into()]),
                 ..empty_working_set_commit(first.revision().unwrap())
             })
             .unwrap();

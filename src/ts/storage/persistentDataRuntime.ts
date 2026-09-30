@@ -1,5 +1,6 @@
+import { isTauri } from '../platform'
 import type { PersistenceCanonicalCapture } from './reactivePersistenceCapture.svelte'
-import type { Chat, Database, botPreset, character, groupChat } from './database.svelte'
+import type { Chat, Database, Message, botPreset, character, groupChat } from './database.svelte'
 import { removeGroupMemberReferences } from './groupMembership'
 import {
     ActiveWorkingSet,
@@ -8,6 +9,7 @@ import {
     type ConversationPublicationOptions,
     type CompleteConversationLease,
     type SelectedConversationTarget,
+    type WindowedChatListEditResult,
     type WindowedConversationMutationController,
 } from './activeWorkingSet.svelte'
 import type { ActiveConversationSession } from './activeConversationSession'
@@ -18,6 +20,7 @@ import type {
     PersistentDataStore,
     PersistentRevisionLease,
     PersistentRoot,
+    PersistentConversationMetadata,
     PluginStorageMutation,
 } from './persistentDataStore'
 import { RevisionConflictError } from './persistentDataStore'
@@ -55,11 +58,13 @@ import {
     isWorkingSetCharacterStub,
     isCatalogPresetWorkingSet,
     patchWorkingSetCharacterDetail,
+    patchWorkingSetRoot,
     projectPinnedScalableWorkingSet,
     projectScalableWorkingSetAtRevision,
 } from './workingSetCatalog'
 import {
     applyTargetedWorkingSetInvalidation,
+    isProjectedWorkingSet,
     readWorkingSetChangeWindow,
 } from './targetedWorkingSetInvalidation'
 import {
@@ -70,7 +75,7 @@ import {
     createConversationSummaryStubFromChat,
     isConversationSummaryStub,
 } from './conversationResidency'
-import { isMetadataOnlySelectedConversation } from './selectedConversationLifecycle'
+import { createMetadataOnlySelectedConversation, isMetadataOnlySelectedConversation } from './selectedConversationLifecycle'
 
 type CompleteCharacter = character | groupChat
 type RootDatabase = PersistentRoot
@@ -98,6 +103,7 @@ export function capturePersistentRoot(database: Database): RootDatabase {
         pluginStorageMeta: _pluginStorageMeta,
         ...root
     } = database
+    if (isTauri) delete root.account
     return root
 }
 
@@ -194,7 +200,7 @@ export function publishPersistentCharacterMutationToWorkingSet(
     selectedIndex: number,
     selectCharacterIndex: (index: number) => void,
 ): void {
-    Object.assign(database, state.root)
+    patchWorkingSetRoot(database, state.root)
     for (const detail of state.relatedCharacters ?? []) {
         const relatedIndex = database.characters.findIndex(
             (candidate) => candidate.chaId === detail.chaId,
@@ -331,6 +337,7 @@ export interface PersistentDataRuntimeDependencies {
     onLocalRevision?(revision: DataRevision): void
     onFlushPromise?(promise: Promise<void> | null): void
     onBackgroundError?(error: unknown): void
+    onLocalSaveFailure?(error: unknown | null): void
     onWorkingSetRefreshRequired?(revision: DataRevision | null): void
     onDestructiveReplacementFenceChanged?(active: boolean): void
     /** Detaches the input synchronously before any asynchronous preparation. */
@@ -345,6 +352,7 @@ export interface PersistentDataRuntime {
     markCommittedWorkingSetRefreshRequired(revision: DataRevision, error: unknown): void
     readonly pendingWorkingSetRefreshRevision: DataRevision | null
     initializeActiveWorkingSet(database: Database): Promise<void>
+    expirePersistentTrash(now?: number): Promise<number>
     refreshActiveWorkingSetFromStore(revision: DataRevision): Promise<CommittedApplyOutcome>
     retryCommittedWorkingSetRefresh(): Promise<CommittedApplyOutcome | null>
     runStorageOnlyMutation(
@@ -371,6 +379,7 @@ export interface PersistentDataRuntime {
     ): () => void
     captureSelectedConversationTarget(): SelectedConversationTarget | null
     captureSelectedConversationAuthority(): WindowedConversationPersistenceAuthority | null
+    captureWindowedMessageMutation(target: SelectedConversationTarget, absoluteIndex: number, evidence: Readonly<Message>): Promise<WindowedConversationMutationController | null>
     acquireCompleteConversation(
         reason: string,
         target?: SelectedConversationTarget | null,
@@ -380,6 +389,10 @@ export interface PersistentDataRuntime {
         chat: Chat,
         absoluteStartIndex: number,
     ): WindowedConversationMutationController | null
+    editWindowedChatList(
+        target: SelectedConversationTarget,
+        edit: (character: character | groupChat) => string | null | false,
+    ): WindowedChatListEditResult
     tryDemoteSelectedConversation(
         target?: SelectedConversationTarget | null,
     ): boolean
@@ -623,6 +636,7 @@ export function createPersistentDataRuntime(
         onPersistenceIdle: () => workingSet.scheduleSelectedConversationDemotion(),
         onFlushPromise: dependencies.onFlushPromise,
         onBackgroundError: dependencies.onBackgroundError,
+        onLocalSaveFailure: dependencies.onLocalSaveFailure,
         onWorkingSetRefreshRequired: (revision) => {
             if (revision === null) pendingRefreshChangeSet = null
             dependencies.onWorkingSetRefreshRequired?.(revision)
@@ -630,7 +644,10 @@ export function createPersistentDataRuntime(
         onDestructiveReplacementFenceChanged: (active) => {
             // A projection can request demotion while its input guard still blocks it.
             // Retry only after the final release, preserving all ordinary demotion checks.
-            if (!active) workingSet.scheduleSelectedConversationDemotion()
+            if (!active) {
+                workingSet.scheduleSelectedConversationDemotion()
+                queueMicrotask(() => retryDeferredContent())
+            }
             dependencies.onDestructiveReplacementFenceChanged?.(active)
         },
         isConversationOperationActive: dependencies.state.isConversationOperationActive,
@@ -717,13 +734,27 @@ export function createPersistentDataRuntime(
             activeCharacterIds: ReadonlySet<string>
         },
         changeSet?: ReplacementChangeSet,
-    ): Promise<{ database: Database; deferred: boolean }> => {
+    ): Promise<{ database: Database; deferred: boolean; windowedMetadata?: PersistentConversationMetadata }> => {
         const lease = await dependencies.store.acquireRevision(revision)
         let primaryError: unknown
         try {
             assertPinnedRevision(revision, lease.revision, 'Revision lease')
             const previous = dependencies.state.captureWorkingSetDatabase?.() ?? null
-            if (previous) {
+            const authority = workingSet.captureSelectedConversationAuthority()
+            let windowedMetadata: PersistentConversationMetadata | undefined
+            if (authority?.kind === 'windowed' &&
+                authority.sessionVersion === authority.persistedSessionVersion &&
+                pinned.selectedCharacterId === authority.characterId &&
+                pinned.selectedConversationId === authority.conversationId) {
+                const metadata = await lease.readConversationMetadata(authority.characterId, authority.conversationId)
+                if (metadata) {
+                    assertPinnedRevision(revision, metadata.revision, 'Selected conversation metadata')
+                    windowedMetadata = metadata.value
+                }
+            }
+            const shell = windowedMetadata && createMetadataOnlySelectedConversation(windowedMetadata.conversation)
+            const keepConversation = shell ? (id: string) => id === shell.id ? shell : null : undefined
+            if (previous && isProjectedWorkingSet(previous)) {
                 try {
                     const keys = changeSet
                         ? (changeSet.wholeLibrary ? null : [])
@@ -739,13 +770,14 @@ export function createPersistentDataRuntime(
                             lease,
                             {
                                 ...pinned,
+                                keepConversation,
                                 changeSet,
                                 deferredConversation: generating,
                                 onPluginStorageChanged:
                                     dependencies.state.onPluginStorageChanged,
                             },
                         )
-                        if (targeted) return targeted
+                        if (targeted) return { ...targeted, windowedMetadata }
                     }
                 } catch (error) {
                     // A failed pass leaves the cursor where it was and the whole
@@ -754,8 +786,9 @@ export function createPersistentDataRuntime(
                 }
             }
             return {
-                database: await projectPinnedScalableWorkingSet(lease, pinned),
+                database: await projectPinnedScalableWorkingSet(lease, { ...pinned, keepConversation }),
                 deferred: false,
+                windowedMetadata,
             }
         } catch (error) {
             primaryError = error
@@ -811,12 +844,9 @@ export function createPersistentDataRuntime(
                 activeCharacterIds,
                 options?.forceScalableProjection ?? true,
             )
-            workingSet.installCommittedWorkingSet(projected.database, revision)
-            if (projected.deferred) {
-                deferredContentPending = true
-            } else {
-                await commitContentCursor(revision)
-            }
+            workingSet.installCommittedWorkingSet(projected.database, revision, projected.windowedMetadata)
+            deferredContentPending = projected.deferred
+            if (!projected.deferred) await commitContentCursor(revision)
             return { kind: 'committed', revision, projection: 'applied' }
         } catch (error) {
             return requireCommittedRefresh(revision, error)
@@ -869,15 +899,16 @@ export function createPersistentDataRuntime(
     // A change held back from a generating conversation is applied once that
     // generation ends; until then the cursor stays behind it. The generated
     // reply is persisted first, so reprojecting cannot discard it.
-    dependencies.state.subscribeConversationOperationActive?.((active) => {
-        if (active || !deferredContentPending) return
-        deferredContentPending = false
+    let deferredRefreshRunning = false
+    const retryDeferredContent = () => {
+        if (deferredRefreshRunning || !deferredContentPending ||
+            dependencies.state.isConversationOperationActive?.() || coordinator.hasDestructiveReplacementFence) return
+        deferredRefreshRunning = true
         void (async () => {
             try {
                 await coordinator.flushPendingDataLocally('deferred-content-change')
                 const token = await coordinator.capturePersistentMutationToken(
-                    'deferred-content-change',
-                    { publishOfficial: false },
+                    'deferred-content-change', { publishOfficial: false },
                 )
                 const owner = await coordinator.acquireDestructiveReplacementFence(token)
                 try {
@@ -886,12 +917,28 @@ export function createPersistentDataRuntime(
                     coordinator.releaseDestructiveReplacementFence(owner)
                 }
             } catch (error) {
-                // The cursor still sits behind the held change, so the next
-                // refresh applies it.
-                dependencies.onBackgroundError?.(error)
+                if (!(error instanceof PersistentMutationFencedError) && !(error instanceof RevisionConflictError)) {
+                    dependencies.onBackgroundError?.(error)
+                }
+            } finally {
+                deferredRefreshRunning = false
             }
         })()
+    }
+    dependencies.state.subscribeConversationOperationActive?.((active) => {
+        if (!active) retryDeferredContent()
     })
+    const withCompleteCharacter = async <T>(characterId: string, operation: () => Promise<T>): Promise<T> => {
+        const target = workingSet.captureSelectedConversationTarget()
+        const lease = target?.characterId === characterId && workingSet.selectedConversationMode === 'windowed'
+            ? await workingSet.acquireCompleteConversation('explicit-mutation', target)
+            : null
+        try {
+            return await operation()
+        } finally {
+            lease?.release()
+        }
+    }
     return {
         store: dependencies.store,
         get revision() {
@@ -962,12 +1009,15 @@ export function createPersistentDataRuntime(
             workingSet.captureSelectedConversationAuthority(),
         acquireCompleteConversation: (reason, target) =>
             workingSet.acquireCompleteConversation(reason, target ?? undefined),
+        captureWindowedMessageMutation: (target, absoluteIndex, evidence) => workingSet.captureWindowedMessageMutation(target, absoluteIndex, evidence),
         captureWindowedConversationMutationController: (target, chat, absoluteStartIndex) =>
             workingSet.captureWindowedConversationMutationController(
                 target,
                 chat,
                 absoluteStartIndex,
             ),
+        editWindowedChatList: (target, edit) =>
+            workingSet.editWindowedChatList(target, edit),
         tryDemoteSelectedConversation: (target) =>
             workingSet.tryDemoteSelectedConversation(target ?? undefined),
         refreshSelectedConversationAfterReplacement: (
@@ -1024,29 +1074,35 @@ export function createPersistentDataRuntime(
                 patch,
                 publish,
             ),
+        expirePersistentTrash: (now) => {
+            const selected = dependencies.state.captureSelectedCharacter()
+            return withCompleteCharacter(selected?.type === 'group' ? selected.chaId : '', () =>
+                coordinator.expirePersistentTrash(now))
+        },
         mutatePersistentCharacterDetail: (characterId, reason, mutate) =>
-            coordinator.mutatePersistentCharacterDetail(
+            withCompleteCharacter(characterId, () => coordinator.mutatePersistentCharacterDetail(
                 characterId,
                 reason,
                 mutate,
-            ),
+            )),
         deletePersistentCharacterWithGroupReferences: (characterId, reason) =>
-            coordinator.deletePersistentCharacterWithGroupReferences(
+            withCompleteCharacter(dependencies.state.captureSelectedCharacter()?.type === 'group'
+                ? dependencies.state.captureSelectedCharacter()!.chaId : characterId, () => coordinator.deletePersistentCharacterWithGroupReferences(
                 characterId,
                 reason,
-            ),
+            )),
         replacePersistentCompleteCharacter: (
             characterId,
             reason,
             mutate,
             options,
         ) =>
-            coordinator.replacePersistentCompleteCharacter(
+            withCompleteCharacter(characterId, () => coordinator.replacePersistentCompleteCharacter(
                 characterId,
                 reason,
                 mutate,
                 options,
-            ),
+            )),
         replacePersistentConversation: (
             characterId,
             conversationId,
@@ -1067,12 +1123,12 @@ export function createPersistentDataRuntime(
             createOrMutate,
             options,
         ) =>
-            coordinator.upsertPersistentCompleteCharacter(
+            withCompleteCharacter(characterId, () => coordinator.upsertPersistentCompleteCharacter(
                 characterId,
                 reason,
                 createOrMutate,
                 options,
-            ),
+            )),
         readPersistentCharacterDetail: (characterId, reason) =>
             coordinator.readPersistentCharacterDetail(characterId, reason),
         readPersistentCompleteCharacter: (characterId, reason) =>

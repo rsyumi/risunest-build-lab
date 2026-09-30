@@ -362,7 +362,7 @@ await (async function() {
 
     function sendRequest(type, payload) {
         return new Promise((resolve, reject) => {
-            const reqId = Math.random().toString(36).substring(7);
+            const reqId = Math.random().toString(36).substring(2);
             pendingRequests.set(reqId, { resolve, reject });
 
 
@@ -380,8 +380,28 @@ await (async function() {
     
     
     window.addEventListener('message', async (event) => {
+        if (event.source !== window.parent) return;
         const data = event.data;
-        if (!data) return;
+        if (!data || typeof data !== 'object' || Array.isArray(data)) return;
+        const hasId = value => typeof value === 'string' && value.length > 0;
+        switch (data.type) {
+            case 'RESPONSE':
+                if (!hasId(data.reqId) || (data.error !== undefined && typeof data.error !== 'string')) return;
+                break;
+            case 'EXECUTE_CODE':
+                if (!hasId(data.reqId) || typeof data.code !== 'string') return;
+                break;
+            case 'ABORT_SIGNAL':
+                if (!hasId(data.abortId)) return;
+                break;
+            case 'INVOKE_CALLBACK':
+                if (!hasId(data.reqId) || !hasId(data.id) || !Array.isArray(data.args)) return;
+                if (data.args.some(arg => arg && arg.__type === 'ABORT_SIGNAL_REF'
+                    && (!hasId(arg.abortId) || typeof arg.aborted !== 'boolean'))) return;
+                break;
+            default:
+                return;
+        }
 
 
         if (data.type === 'RESPONSE' && data.reqId) {
@@ -543,6 +563,7 @@ await (async function() {
 export class SandboxHost {
     private iframe: HTMLIFrameElement;
     private apiFactory: any;
+    private terminated = false;
     private nonce = crypto.randomUUID();
     private csp = `connect-src 'none'; script-src 'nonce-${this.nonce}' 'wasm-unsafe-eval'; frame-src 'none'; object-src 'none'; style-src * 'unsafe-inline'; default-src 'none'; img-src * data: blob:; font-src * data: blob:; media-src * data: blob:; base-uri 'none';`;
 
@@ -591,7 +612,7 @@ export class SandboxHost {
                 if (event.source !== this.iframe.contentWindow) return;
                 const data = event.data;
 
-                if (data.type === 'EXEC_RESULT' && data.reqId === reqId) {
+                if (data && typeof data === 'object' && data.type === 'EXEC_RESULT' && data.reqId === reqId) {
                     window.removeEventListener('message', handler);
                     if (data.error) {
                         reject(new Error(data.error));
@@ -789,6 +810,7 @@ export class SandboxHost {
             };
 
             const cleanup = () => {
+                if (finished) return;
                 reader.cancel().catch(() => {});
                 finish();
             };
@@ -897,6 +919,26 @@ export class SandboxHost {
         return obj;
     }
 
+    private disposeUndeliveredResult(result: any) {
+        const streams = new Set<any>();
+        const collect = (value: any) => {
+            if (value instanceof Response) value = value.body;
+            if (value instanceof ReadableStream || value instanceof WritableStream || value instanceof TransformStream) {
+                streams.add(value);
+            }
+        };
+        collect(result);
+        if (result && result.constructor === Object) Object.values(result).forEach(collect);
+        for (const stream of streams) {
+            if (stream instanceof ReadableStream) void stream.cancel().catch(() => {});
+            else if (stream instanceof WritableStream) void stream.abort().catch(() => {});
+            else {
+                void stream.readable.cancel().catch(() => {});
+                void stream.writable.abort().catch(() => {});
+            }
+        }
+    }
+
     private closeActiveStreams() {
         for (const cleanup of [...this.activeStreamCleanups]) {
             try { cleanup(); } catch(_) {}
@@ -905,6 +947,7 @@ export class SandboxHost {
     }
 
     public run(container: HTMLElement|HTMLIFrameElement, userCode: string, sourceLabel = 'anonymous') {
+        if (this.terminated) throw new Error('Plugin sandbox terminated');
         if(container instanceof HTMLIFrameElement) {
             this.iframe = container;
         } else {
@@ -927,8 +970,9 @@ export class SandboxHost {
         this.iframe.setAttribute('csp', this.csp);
 
         const messageHandler = async (event: MessageEvent) => {
-            if (event.source !== this.iframe.contentWindow) return;
+            if (this.terminated || event.source !== this.iframe.contentWindow) return;
             const data = event.data as RpcMessage;
+            if (!data || typeof data !== 'object' || Array.isArray(data)) return;
 
 
             if (data.type === 'CALLBACK_RETURN') {
@@ -1001,6 +1045,10 @@ export class SandboxHost {
                     }
 
 
+                    if (this.terminated || !this.iframe.contentWindow) {
+                        this.disposeUndeliveredResult(result);
+                        return;
+                    }
                     response.result = this.serialize(result);
                     const { result: streamResult, ports: streamPorts, cleanups } = this.replaceStreamsWithPorts(response.result);
                     response.result = streamResult;
@@ -1023,8 +1071,13 @@ export class SandboxHost {
                     console.log("Original request:", data);
                     console.log('Original response:', response, transferables);
                 }
+                const target = this.terminated ? null : this.iframe.contentWindow;
+                if (!target) {
+                    rollbackStreams();
+                    return;
+                }
                 try {
-                    this.iframe.contentWindow?.postMessage(response, '*', transferables);
+                    target.postMessage(response, '*', transferables);
                 } catch (error) {
                     rollbackStreams();
                     try {
@@ -1082,6 +1135,7 @@ export class SandboxHost {
     }
 
     public terminate() {
+        this.terminated = true;
         if (this.messageHandlerRef) {
             window.removeEventListener('message', this.messageHandlerRef);
             this.messageHandlerRef = null;

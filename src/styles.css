@@ -23,6 +23,7 @@
   --color-primary-700: var(--risu-theme-primary-700);
   --color-primary-800: var(--risu-theme-primary-800);
   --color-primary-900: var(--risu-theme-primary-900);
+  --color-primary-foreground: var(--risu-theme-primary-foreground);
 
   --color-secondary-50: var(--risu-theme-secondary-50);
   --color-secondary-100: var(--risu-theme-secondary-100);
@@ -201,6 +202,8 @@ body {
   --risu-theme-primary-700: #1d4ed8;
   --risu-theme-primary-800: #1e40af;
   --risu-theme-primary-900: #1e3a8a;
+  /* Content drawn on a primary-500 background. */
+  --risu-theme-primary-foreground: #ffffff;
 
   --risu-theme-secondary-50: #f5f3ff;
   --risu-theme-secondary-100: #ede9fe;
@@ -538,7 +541,7 @@ select optgroup {
   display: block;
 }
 
-.chat-message-container.is-settled-history {
+.chat-history-isolated .chat-message-container.is-settled-history {
   content-visibility: auto;
   contain-intrinsic-size: auto 16rem;
 }

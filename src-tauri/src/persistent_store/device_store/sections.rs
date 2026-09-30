@@ -688,7 +688,7 @@ impl SectionSpoolBuilder {
         self.push_row(row, &entry_key, &entry_hash)
     }
 
-    fn push_backup_row(&mut self, row: SectionRow) -> StoreResult<()> {
+    pub(super) fn push_backup_row(&mut self, row: SectionRow) -> StoreResult<()> {
         if self.versioned || row.value.is_tombstone() { return Err(invalid("Backup section row is invalid")); }
         let entry = row.to_entry(self.kind, false)?;
         let entry_key = entry.key.clone();
@@ -763,7 +763,7 @@ impl SectionSpoolBuilder {
             kind: self.kind, versioned: self.versioned, count, max_write_clock: self.max_write_clock })
     }
 
-    fn finish_captured(self) -> StoreResult<PreparedSectionRows> {
+    pub(super) fn finish_captured(self) -> StoreResult<PreparedSectionRows> {
         let mut fingerprint = risunest_external_storage_format::format::FingerprintBuilder::new(
             &self.kind.fingerprint_domain(),
         );
@@ -2025,151 +2025,7 @@ impl DeviceStore {
         Ok(())
     }
 
-    /// Installs backup material for the same device. A restored value is this
-    /// device's own write, so it takes a freshly issued clock and this writer
-    /// rather than whatever produced the bundle. The section is replaced: a key
-    /// the material leaves out is removed, so restoring an empty section empties
-    /// it. A value this device already holds unpublished under its own writer is
-    /// left alone, which keeps a retried restore from issuing a second clock for
-    /// something it already wrote.
-    pub(crate) fn restore_section_rows(
-        &mut self,
-        section: Section,
-        rows: &[SectionRow],
-    ) -> StoreResult<()> {
-        let transaction = self.transaction()?;
-        let writer_id: String = transaction.query_row(
-            "SELECT writer_id FROM device_meta WHERE singleton=1",
-            [],
-            |row| row.get(0),
-        )?;
-        let restored: BTreeSet<(String, String, String)> =
-            rows.iter().map(SectionRow::key).collect();
-        if restored.len() != rows.len() {
-            return Err(invalid("restored section rows repeat a key"));
-        }
-        let unpublished = unpublished_keys(&transaction, section)?;
-        let held: BTreeMap<(String, String, String), SectionRow> = read_rows(&transaction, section)?
-            .into_iter()
-            .map(|row| (row.key(), row))
-            .collect();
-        super::begin_mutation(&transaction)?;
-        for row in rows {
-            if row.value.is_tombstone() {
-                return Err(invalid("restored section row has no value"));
-            }
-            let settled = held.get(&row.key()).is_some_and(|current| {
-                current.value.same_content(&row.value)
-                    && current.writer_id == writer_id
-                    && unpublished.contains(&row.key())
-            });
-            if settled {
-                continue;
-            }
-            let clock = super::issue_write_clock(&transaction, section)?;
-            write_row(
-                &transaction,
-                section,
-                &SectionRow {
-                    write_clock: clock,
-                    writer_id: writer_id.clone(),
-                    ..row.clone()
-                },
-                false,
-            )?;
-        }
-        for (key, current) in &held {
-            if restored.contains(key) || current.value.is_tombstone() {
-                continue;
-            }
-            let clock = super::issue_write_clock(&transaction, section)?;
-            write_row(
-                &transaction,
-                section,
-                &SectionRow {
-                    value: SectionValueRow::Tombstone {
-                        first_published: None,
-                    },
-                    write_clock: clock,
-                    writer_id: writer_id.clone(),
-                    ..current.clone()
-                },
-                false,
-            )?;
-        }
-        super::finish_mutation(&transaction)?;
-        transaction.commit()?;
-        Ok(())
-    }
 
-    /// Installs backup material for the same device. Versions are reissued
-    /// locally because a bundle carries user values without them. The area is
-    /// replaced within its own bounds: a local setting or permission the
-    /// material leaves out is removed, while every device setting outside the
-    /// backed-up list keeps whatever this device holds.
-    pub(crate) fn restore_local_setting_rows(&mut self, rows: &[SectionRow]) -> StoreResult<()> {
-        let transaction = self.transaction()?;
-        let mut settings = BTreeSet::new();
-        let mut permissions = BTreeSet::new();
-        for row in rows {
-            match &row.value {
-                SectionValueRow::Setting { value } => {
-                    if row.key1 != "setting" || !setting_is_local(&row.key2) {
-                        return Err(invalid("restored device setting is not a device setting"));
-                    }
-                    if !settings.insert(row.key2.clone()) {
-                        return Err(invalid("restored device settings repeat a key"));
-                    }
-                    transaction.execute(
-                        "INSERT INTO device_settings (key,value) VALUES (?1,?2)
-                            ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                        params![row.key2, value],
-                    )?;
-                }
-                SectionValueRow::PluginPermission { granted } => {
-                    if row.key1 != "pluginPermission" || row.key2.is_empty() || row.key3.is_empty()
-                    {
-                        return Err(invalid("restored plugin permission is incomplete"));
-                    }
-                    if !permissions.insert((row.key2.clone(), row.key3.clone())) {
-                        return Err(invalid("restored plugin permissions repeat a key"));
-                    }
-                    transaction.execute(
-                        "INSERT INTO plugin_permissions (code_hash,permission,granted)
-                            VALUES (?1,?2,?3)
-                            ON CONFLICT(code_hash,permission) DO UPDATE SET granted=excluded.granted",
-                        params![row.key2, row.key3, i64::from(*granted)],
-                    )?;
-                }
-                _ => return Err(invalid("restored device setting has the wrong shape")),
-            }
-        }
-        for key in LOCAL_SETTING_KEYS {
-            if !settings.contains(key) {
-                transaction.execute("DELETE FROM device_settings WHERE key=?1", [key])?;
-            }
-        }
-        let held = {
-            let mut statement =
-                transaction.prepare("SELECT code_hash,permission FROM plugin_permissions")?;
-            let mut query = statement.query([])?;
-            let mut held = Vec::new();
-            while let Some(row) = query.next()? {
-                held.push((row.get::<_, String>(0)?, row.get::<_, String>(1)?));
-            }
-            held
-        };
-        for key in held {
-            if !permissions.contains(&key) {
-                transaction.execute(
-                    "DELETE FROM plugin_permissions WHERE code_hash=?1 AND permission=?2",
-                    params![key.0, key.1],
-                )?;
-            }
-        }
-        transaction.commit()?;
-        Ok(())
-    }
 }
 
 /// `published` is false for a restored value: it is a new local write that no

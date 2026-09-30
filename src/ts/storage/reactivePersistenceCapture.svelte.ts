@@ -1,3 +1,4 @@
+import { isTauri } from '../platform'
 import { untrack } from 'svelte'
 import type { RootMutation } from './persistentDataStore'
 import {
@@ -181,7 +182,7 @@ export function createPersistenceCanonicalCapture(read: {
 }): PersistenceCanonicalCapture {
     const captureRoot = objectCapture(
         () => read.root() as Record<string, unknown>,
-        new Set(['characters', 'botPresets', 'pluginCustomStorage', 'pluginStorageMeta']),
+        new Set(['characters', 'botPresets', 'pluginCustomStorage', 'pluginStorageMeta', ...(isTauri ? ['account'] : [])]),
         false,
     )
     const storageStringSeeds = new Map<string, readonly [string, string]>()

@@ -36,6 +36,7 @@ describe('desktop MCP stdio framing', () => {
     beforeEach(() => {
         vi.resetModules()
         vi.clearAllMocks()
+        localStorage.removeItem('mcpStdioApprovals')
         mocks.stdout = undefined
         mocks.configured = []
         mocks.database.modules = []
@@ -104,7 +105,26 @@ describe('desktop MCP stdio framing', () => {
         expect(mocks.confirm).not.toHaveBeenCalled()
         expect(mocks.spawn).not.toHaveBeenCalled()
         expect(mocks.database.modules).toEqual([])
-        expect(mocks.error).toHaveBeenCalledWith(expect.objectContaining({ message: 'stdio MCPs are only supported in Local Version' }))
+        expect(mocks.error).toHaveBeenCalledWith(expect.objectContaining({ message: (await import('src/lang')).language.mcpDesktopOnly }))
+    })
+
+    it('rejects local MCP runtime initialization outside desktop with localized copy', async () => {
+        mocks.desktop = false
+        const { getMCPMeta, MCPs } = await import('./mcp')
+        MCPs['internal:risuai'] = { checkHandshake: async () => ({}) } as never
+        await expect(getMCPMeta(['stdio:{"command":"node","args":[]}'])).rejects.toThrow((await import('src/lang')).language.mcpDesktopOnly)
+        expect(mocks.spawn).not.toHaveBeenCalled()
+    })
+
+    it('requires local approval for a module arriving in the working set and remembers a decline for this session', async () => {
+        mocks.configured = ['stdio:{"command":"node","args":["remote.js"]}']
+        const { initializeMCPs, MCPs } = await import('./mcp')
+        MCPs['internal:risuai'] = { checkHandshake: async () => ({}) } as never
+        await initializeMCPs()
+        MCPs['internal:risuai'] = { checkHandshake: async () => ({}) } as never
+        await initializeMCPs()
+        expect(mocks.confirm).toHaveBeenCalledOnce()
+        expect(mocks.spawn).not.toHaveBeenCalled()
     })
 
     it('writes exactly one complete JSON line including messages containing newlines', async () => {
@@ -122,6 +142,7 @@ describe('desktop MCP stdio framing', () => {
     it('uses the same framed writes for startup, handshake, and normal sends without changing PATH', async () => {
         const configuration = { command: 'node', args: ['synthetic.js'], env: { PATH: '/synthetic/bin' } }
         const url = `stdio:${JSON.stringify(configuration)}`
+        mocks.confirm.mockResolvedValue(true)
         mocks.configured = [url]
         let unread = ''
         const received: Array<Record<string, unknown>> = []

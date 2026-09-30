@@ -3,7 +3,7 @@
     import { DBState, selectedCharID } from 'src/ts/stores.svelte'
     import { language } from 'src/lang'
     import { alertConfirm, alertError, alertToast } from 'src/ts/alert'
-    import { captureChatBindingTarget, saveChatBinding, updateChatBinding } from 'src/ts/chatBindings.svelte'
+    import { captureChatBindingTarget, chatBindingBlockedByGeneration, saveChatBinding, updateChatBinding } from 'src/ts/chatBindings.svelte'
     import { countToggleChanges, snapshotToggleValues, type ToggleValues } from 'src/ts/toggleBindings'
     import TogglePresetPopup from './TogglePresetPopup.svelte'
     let presetsOpen = $state(false)
@@ -18,21 +18,23 @@
     let hasLocalOverrides = $derived(
         Object.keys(chat?.GLGlobalVariables ?? {}).some((key) => key.startsWith('toggle_')),
     )
-    async function write(values: ToggleValues | undefined, message: string) {
-        const target = captureChatBindingTarget()
-        if (!target || disabled) return
+    async function write(values: ToggleValues | undefined, message: string, target = captureChatBindingTarget()) {
+        if (chatBindingBlockedByGeneration()) return
+        if (!target?.isCurrent() || disabled) return
         try {
             await updateChatBinding(target.conversation, { savedToggleValues: values })
             await saveChatBinding()
             alertToast(message)
         } catch (error) {
-            alertError(String(error))
+            alertError(language.toggleBindingSaveFailed)
         }
     }
     const bind = () => write(snapshotToggleValues(DBState.db.globalChatVariables), language.togglesBound)
     async function unbind() {
-        if (!(await alertConfirm(language.unbindTogglesConfirm))) return
-        await write(undefined, language.togglesUnbound)
+        if (chatBindingBlockedByGeneration()) return
+        const target = captureChatBindingTarget()
+        if (!(await alertConfirm(language.unbindTogglesConfirm)) || !target?.isCurrent()) return
+        await write(undefined, language.togglesUnbound, target)
     }
     const button =
         'inline-flex items-center justify-center gap-1.5 min-h-10 px-3 rounded-md border text-sm transition-colors disabled:opacity-40 disabled:pointer-events-none'
@@ -44,7 +46,7 @@
     <div class="flex gap-1 items-stretch">
         {#if bound}
             <button
-                class="{button} shrink-0 w-10 px-0 bg-primary-500 border-primary-500 text-white hover:bg-primary-600"
+                class="{button} shrink-0 w-10 px-0 bg-primary-500 border-primary-500 text-primary-foreground hover:bg-primary-600"
                 title={language.unbindToggles}
                 aria-pressed="true"
                 {disabled}

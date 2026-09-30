@@ -96,14 +96,9 @@ describe('ChatScreen navigation activity', () => {
         expect(oldChatControl?.closest('[inert]')).toBe(content)
         const chatListControl = target.querySelector('[data-chat-list-control]')
         expect(chatListControl?.closest('[inert]')).toBeNull()
-        expect(
-            chatListControl?.parentElement?.classList.contains('absolute'),
-        ).toBe(true)
-        expect(
-            chatListControl?.parentElement?.classList.contains('inset-0'),
-        ).toBe(true)
-        expect(chatListControl?.parentElement?.classList.contains('z-40')).toBe(
-            true,
-        )
+        const overlay = chatListControl?.closest('.z-40')
+        expect(overlay?.parentElement).toBe(pane)
+        expect(overlay?.classList.contains('absolute')).toBe(true)
+        expect(overlay?.classList.contains('inset-0')).toBe(true)
     })
 })

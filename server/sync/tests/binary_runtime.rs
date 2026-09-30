@@ -1,5 +1,9 @@
 use reqwest::{Client, Method, RequestBuilder};
-use risunest_sync_wire::{hash, transfer::{self, Frame, UPLOAD_CHUNK_BYTES}, RemoteHead};
+use risunest_sync_wire::{
+    hash,
+    transfer::{self, Frame, UPLOAD_CHUNK_BYTES},
+    RemoteHead,
+};
 use std::{
     io::{BufRead, BufReader},
     path::Path,
@@ -28,7 +32,13 @@ impl Drop for Daemon {
 }
 impl Daemon {
     fn start(root: &Path) -> Self {
-        let child = Command::new(env!("CARGO_BIN_EXE_risunest-sync-server"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_risunest-sync-server"));
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x08000000);
+        }
+        let child = command
             .args(["serve", "--data-dir"])
             .arg(root)
             .args(["--listen", "127.0.0.1:0"])
@@ -77,7 +87,13 @@ impl Daemon {
     }
 }
 fn cli(root: &Path, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_risunest-sync-server"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_risunest-sync-server"));
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    command
         .args(args)
         .arg("--data-dir")
         .arg(root)
@@ -122,13 +138,21 @@ async fn standalone_daemon_sigterm_releases_the_owner_and_reopens_exact_head() {
     let directory = tempfile::tempdir().unwrap();
     let initialized = cli(directory.path(), &["init"]);
     assert!(initialized.status.success());
+    let store = risunest_sync_server::store::Store::open(directory.path()).unwrap();
+    let credential = store.add_device().unwrap();
+    drop(store);
     let mut daemon = Daemon::start(directory.path());
+    let mut stream = Client::builder().no_proxy().build().unwrap()
+        .get(format!("{}/events", daemon.endpoint)).bearer_auth(&credential.token)
+        .header("x-risu-library", &credential.library_id).send().await.unwrap();
+    assert!(stream.chunk().await.unwrap().is_some());
     // Only the child created by this test is signalled. No process enumeration.
     let status = Command::new("/bin/kill")
         .args(["-TERM", &daemon.child.id().to_string()])
         .status()
         .unwrap();
     assert!(status.success());
+    assert!(tokio::time::timeout(Duration::from_secs(2), stream.chunk()).await.unwrap().unwrap().is_none());
     let start = std::time::Instant::now();
     loop {
         if let Some(status) = daemon.child.try_wait().unwrap() {
@@ -178,18 +202,27 @@ async fn thousand_small_objects_use_one_verified_frame_batch() {
     assert!(response.bytes().await.unwrap().is_empty());
     let upload_elapsed = started.elapsed();
     let hashes = objects.iter().map(|b| hash(b)).collect::<Vec<_>>();
-    let requests = hashes.iter()
+    let requests = hashes
+        .iter()
         .map(|digest| serde_json::json!({"target":digest,"bases":[]}))
         .collect::<Vec<_>>();
     let downloaded = daemon
         .request(&http, &credential, Method::POST, "/objects/transfer")
         .json(&requests)
-        .send().await.unwrap().error_for_status().unwrap()
-        .bytes().await.unwrap();
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
     let downloaded = transfer::decode(&downloaded).unwrap();
     assert_eq!(downloaded.len(), objects.len());
     for (frame, expected) in downloaded.iter().zip(&objects) {
-        let Frame::Full(bytes) = frame else { panic!("small objects must fit full frames") };
+        let Frame::Full(bytes) = frame else {
+            panic!("small objects must fit full frames")
+        };
         assert_eq!(bytes, expected);
         assert_eq!(hash(bytes), hash(expected));
     }
@@ -306,11 +339,18 @@ async fn standalone_binary_serves_with_empty_path_and_resumes_after_process_kill
     let transfer = daemon
         .request(&http, &credential, Method::POST, "/objects/transfer")
         .json(&serde_json::json!([{"target":digest,"bases":[]}]))
-        .send().await.unwrap().error_for_status().unwrap()
-        .bytes().await.unwrap();
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
     let frames = transfer::decode(&transfer).unwrap();
-    assert!(matches!(frames.as_slice(), [Frame::FullRequired { hash, size }]
-        if hash == &digest && *size == body.len() as u64));
+    // The resumed object is below the reply target, so it arrives inline. The
+    // direct object request below still covers the separate download path.
+    assert!(matches!(frames.as_slice(), [Frame::Full(bytes)] if bytes == &body));
     let received = daemon
         .request(
             &http,
@@ -345,7 +385,8 @@ async fn standalone_binary_serves_with_empty_path_and_resumes_after_process_kill
 
 #[cfg(windows)]
 fn memory(child: &Child) -> (u64, u64) {
-    let output = Command::new("powershell.exe").args(["-NoProfile", "-NonInteractive", "-Command", &format!("$sample=Get-Process -Id {}; Write-Output ($sample.WorkingSet64.ToString()+','+$sample.PeakWorkingSet64.ToString())", child.id())]).output().unwrap();
+    use std::os::windows::process::CommandExt;
+    let output = Command::new("powershell.exe").creation_flags(0x08000000).args(["-NoProfile", "-NonInteractive", "-Command", &format!("$sample=Get-Process -Id {}; Write-Output ($sample.WorkingSet64.ToString()+','+$sample.PeakWorkingSet64.ToString())", child.id())]).output().unwrap();
     assert!(output.status.success());
     let text = String::from_utf8(output.stdout).unwrap();
     let (current, peak) = text.trim().split_once(',').unwrap();
@@ -533,4 +574,38 @@ async fn release_daemon_head_and_four_delta_transfers_resource_gate() {
         peak <= 128 * 1024 * 1024,
         "four-transfer peak RSS exceeded candidate budget"
     );
+}
+
+#[tokio::test]
+async fn management_shutdown_ends_held_stream_and_releases_daemon_owner() {
+    let directory = tempfile::tempdir().unwrap();
+    assert!(cli(directory.path(), &["init"]).status.success());
+    let store = risunest_sync_server::store::Store::open(directory.path()).unwrap();
+    let credential = store.add_device().unwrap();
+    drop(store);
+    let mut daemon = Daemon::start(directory.path());
+    let client = Client::builder().no_proxy().build().unwrap();
+    let mut stream = client.get(format!("{}/events", daemon.endpoint)).bearer_auth(&credential.token)
+        .header("x-risu-library", &credential.library_id).send().await.unwrap();
+    assert!(stream.chunk().await.unwrap().is_some());
+    let discovery = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Ok(value) = risunest_sync_server::management::discovery::Discovery::load(directory.path()) { break value; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    let endpoint = format!("http://{}", discovery.address);
+    let status: serde_json::Value = client.get(format!("{endpoint}/status")).bearer_auth(&discovery.token)
+        .send().await.unwrap().error_for_status().unwrap().json().await.unwrap();
+    client.post(format!("{endpoint}/shutdown")).bearer_auth(&discovery.token)
+        .json(&serde_json::json!({"revision":status["revision"]})).send().await.unwrap().error_for_status().unwrap();
+    assert!(tokio::time::timeout(Duration::from_secs(2), stream.chunk()).await.unwrap().unwrap().is_none());
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            if let Some(status) = daemon.child.try_wait().unwrap() { assert!(status.success()); break; }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }).await.unwrap();
+    assert!(!directory.path().join("management-session").exists());
+    assert!(risunest_sync_server::store::Store::open(directory.path()).is_ok());
 }

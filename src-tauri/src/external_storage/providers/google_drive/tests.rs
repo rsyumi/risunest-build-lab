@@ -2407,3 +2407,85 @@ fn deleting_checks_the_parent_and_role_of_the_file_before_removing_it() {
         );
     });
 }
+
+#[test]
+fn transfer_401_refreshes_once_and_replays_only_confirmed_bytes() {
+    runtime().block_on(async {
+        for repeated in [false, true] {
+            let payload = vec![5u8; 1024];
+            let mut replies = open_existing_replies();
+            replies.push(ids_reply("session-file"));
+            replies.push(json_reply_with(200, &[("Location", "/synthetic/upload/session/one")], json!({})));
+            replies.push(error_reply(401, "authError"));
+            replies.push(json_reply(200, json!({"access_token":"fresh-access","expires_in":3600,"token_type":"Bearer"})));
+            replies.push(json_reply_with(308, &[("Range", "bytes=0-511")], json!({})));
+            replies.push(if repeated { error_reply(401, "authError") } else {
+                json_reply(200, json!({"id":"session-file","size":"1024","version":"1","sha256Checksum":hash(&payload)}))
+            });
+            let server = WireServer::start(replies);
+            let test = deps_with(Some(stored_secret(NOW_MS + 3_600_000)));
+            let cancel = Cancellation::default();
+            let (provider, repository) = opened(&server, &test, &cancel).await;
+            let directory = tempfile::tempdir().unwrap();
+            let source = spool(directory.path(), "pack", &payload);
+            let intent = intent(&repository, "object", ObjectRole::SyncState, &payload);
+            let resume = provider.begin_upload(&repository, &intent, &cancel).await.unwrap().unwrap();
+            let result = provider.create_object(&repository, &intent, &source, Some(&resume), &cancel).await;
+            if repeated { assert_eq!(result.err().unwrap().kind, ErrorKind::Unauthorized); }
+            else { assert_eq!(result.unwrap().byte_length, 1024); }
+            let requests = server.requests.lock().unwrap();
+            assert_eq!(requests.len(), 9);
+            assert!(requests[7].headers.to_lowercase().contains("content-range: bytes */1024"));
+            assert!(requests[8].headers.to_lowercase().contains("content-range: bytes 512-1023/1024"));
+            assert_eq!(requests[8].body, payload[512..]);
+        }
+    });
+}
+
+#[test]
+fn multipart_and_media_retry_once_after_token_rejection() {
+    runtime().block_on(async {
+        let payload = b"synthetic-body";
+        let file = json!({"id":"generated-file","size":payload.len().to_string(),"version":"1","sha256Checksum":hash(payload)});
+        let mut replies = open_existing_replies();
+        replies.extend([
+            control_reply(vec![]), ids_reply("generated-file"), error_reply(401, "authError"),
+            json_reply(200, json!({"access_token":"fresh-access","expires_in":3600,"token_type":"Bearer"})),
+            json_reply(200, file.clone()), json_reply(200, file), error_reply(401, "authError"),
+            json_reply(200, json!({"access_token":"fresh-access-2","expires_in":3600,"token_type":"Bearer"})),
+            Reply::Http { status: 200, headers: vec![], body: payload.to_vec() },
+        ]);
+        let server = WireServer::start(replies);
+        let test = deps_with(Some(stored_secret(NOW_MS + 3_600_000)));
+        let cancel = Cancellation::default();
+        let (provider, repository) = opened(&server, &test, &cancel).await;
+        let directory = tempfile::tempdir().unwrap();
+        let source = spool(directory.path(), "pack", payload);
+        let intent = intent(&repository, "object", ObjectRole::Pack, payload);
+        let receipt = provider.create_object(&repository, &intent, &source, None, &cancel).await.unwrap();
+        let mut sink = SpoolSink::create(&directory.path().join("read"), payload.len() as u64).unwrap();
+        provider.read_object(&repository, &receipt.locator, None, &mut sink, &cancel).await.unwrap();
+        let requests = server.requests.lock().unwrap();
+        assert_eq!(requests.len(), 12);
+        assert!(requests[5].body.windows(payload.len()).any(|bytes| bytes == payload));
+        assert!(requests[7].body.windows(payload.len()).any(|bytes| bytes == payload));
+    });
+}
+
+#[test]
+fn creation_rejects_crowded_folders_as_occupied() {
+    runtime().block_on(async {
+        for count in [1, 3, 4] {
+            let server = WireServer::start(vec![about_reply(), folder_reply(), control_reply(
+                (0..count).map(|index| descriptor_file(&format!("descriptor-{index}"))).collect())]);
+            let test = deps_with(Some(stored_secret(NOW_MS + 3_600_000)));
+            let provider = provider_of(&test.dependencies);
+            let result = provider.open_repository(&connection(server.url.as_str()), &secret_ref(),
+                OpenMode::Create, &Cancellation::default()).await;
+            assert_eq!(result.err().unwrap().kind, ErrorKind::PreconditionFailed);
+            let requests = request_lines(&server);
+            assert_eq!(requests.len(), 3);
+            assert!(requests[2].contains("pageSize=1"));
+        }
+    });
+}

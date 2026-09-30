@@ -16,11 +16,14 @@ use std::{
 use tokio::io::AsyncRead;
 
 pub(crate) const CONTROL_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+const TRANSFER_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+const RESPONSE_HEADERS_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Native HTTP streams both ways and does not follow redirects or retry status
 /// codes. Production adapters use `send` below, not the transport directly.
 pub(crate) struct NativeHttpTransport {
     client: reqwest::Client,
+    user_http_origin: Option<String>,
     #[cfg(test)]
     loopback_http: bool,
 }
@@ -33,9 +36,27 @@ impl NativeHttpTransport {
             .build().map_err(|_| ProviderError::new(ErrorKind::Unsupported))?;
         Ok(Self {
             client,
+            user_http_origin: None,
             #[cfg(test)]
             loopback_http: false,
         })
+    }
+    pub fn with_user_endpoint(mut self, config: &ConnectionConfig) -> Result<Self> {
+        if matches!(config.provider.as_str(), "webdav" | "s3" | "gitlab_packages") {
+            let endpoint = url::Url::parse(&config.endpoint).map_err(|_| ProviderError::new(ErrorKind::Unsupported))?;
+            if !user_endpoint_allowed(&endpoint) { return Err(ProviderError::new(ErrorKind::Unsupported)); }
+            if endpoint.scheme() == "http" {
+                let target = if config.provider == "s3" {
+                    super::providers::s3::configured_origin(config)?
+                } else { endpoint };
+                self.user_http_origin = Some(target.origin().ascii_serialization());
+            }
+        }
+        Ok(self)
+    }
+    fn permits_url(&self, url: &url::Url) -> bool {
+        url.scheme() == "https" || (url.scheme() == "http"
+            && self.user_http_origin.as_deref() == Some(url.origin().ascii_serialization().as_str()))
     }
     #[cfg(test)]
     pub fn for_loopback_tests() -> Self {
@@ -43,22 +64,76 @@ impl NativeHttpTransport {
             client: reqwest::Client::builder().no_proxy()
                 .no_gzip().no_brotli().no_deflate()
                 .redirect(reqwest::redirect::Policy::none()).build().unwrap(),
+            user_http_origin: None,
             loopback_http: true,
         }
     }
 }
-fn network_error(_: impl std::fmt::Display) -> ProviderError {
+pub(crate) fn user_endpoint_allowed(url: &url::Url) -> bool {
+    matches!(url.scheme(), "https" | "http") && url.host_str().is_some()
+        && url.username().is_empty() && url.password().is_none() && url.fragment().is_none()
+        && !url.cannot_be_a_base()
+}
+
+fn network_error(error: reqwest::Error) -> ProviderError {
     // reqwest errors may contain signed URLs. Their text never crosses this boundary.
+    let mut source: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+    while let Some(error) = source {
+        #[cfg(not(target_os = "android"))]
+        if error.is::<native_tls::Error>() {
+            return ProviderError::new(ErrorKind::EndpointRejected);
+        }
+        #[cfg(target_os = "android")]
+        if error.is::<rustls::Error>() || error.downcast_ref::<std::io::Error>()
+            .and_then(std::io::Error::get_ref).is_some_and(|inner| inner.is::<rustls::Error>()) {
+            return ProviderError::new(ErrorKind::EndpointRejected);
+        }
+        source = error.source();
+    }
     ProviderError::new(ErrorKind::Transient)
+}
+
+struct UploadProgress {
+    last_progress: tokio::time::Instant,
+    remaining: u64,
+}
+struct UploadReader {
+    reader: Pin<Box<dyn AsyncRead + Send>>,
+    progress: Arc<Mutex<UploadProgress>>,
+}
+impl AsyncRead for UploadReader {
+    fn poll_read(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>, buf: &mut tokio::io::ReadBuf<'_>) -> std::task::Poll<std::io::Result<()>> {
+        let before = buf.filled().len();
+        let result = self.reader.as_mut().poll_read(cx, buf);
+        if let std::task::Poll::Ready(Ok(())) = &result {
+            let read = buf.filled().len() - before;
+            if read > 0 {
+                let mut progress = self.progress.lock().unwrap_or_else(|error| error.into_inner());
+                progress.last_progress = tokio::time::Instant::now();
+                progress.remaining = progress.remaining.saturating_sub(read as u64);
+            }
+        }
+        result
+    }
+}
+async fn upload_watchdog(progress: Arc<Mutex<UploadProgress>>) {
+    loop {
+        let deadline = {
+            let progress = progress.lock().unwrap_or_else(|error| error.into_inner());
+            progress.last_progress + if progress.remaining == 0 { RESPONSE_HEADERS_TIMEOUT } else { TRANSFER_IDLE_TIMEOUT }
+        };
+        if tokio::time::Instant::now() >= deadline { return; }
+        tokio::time::sleep_until(deadline).await;
+    }
 }
 
 impl HttpTransport for NativeHttpTransport {
     fn send<'a>(&'a self, request: HttpRequest, cancel: &'a Cancellation) -> ProviderFuture<'a, HttpResponse> {
         Box::pin(async move {
-            use futures::{future::{select, Either}, TryStreamExt};
+            use futures::TryStreamExt;
             use tokio::io::AsyncReadExt;
             cancel.check()?;
-            let allowed = request.url.scheme() == "https";
+            let allowed = self.permits_url(&request.url);
             #[cfg(test)]
             let allowed = allowed || (self.loopback_http && request.url.scheme() == "http"
                 && request.url.host_str() == Some("127.0.0.1"));
@@ -72,19 +147,25 @@ impl HttpTransport for NativeHttpTransport {
                 { return Err(ProviderError::new(ErrorKind::Corrupt)); }
                 builder = builder.header(name, value);
             }
+            let progress = Arc::new(Mutex::new(UploadProgress {
+                last_progress: tokio::time::Instant::now(),
+                remaining: request.content_length.unwrap_or(0),
+            }));
             match (request.body, request.content_length) {
                 (Some(body), Some(length)) => {
+                    let reader = UploadReader { reader: body, progress: progress.clone() };
                     builder = builder.header(reqwest::header::CONTENT_LENGTH, length)
                         .body(reqwest::Body::wrap_stream(tokio_util::io::ReaderStream::with_capacity(
-                            body.take(length), 64 * 1024,
+                            reader.take(length), 64 * 1024,
                         )));
                 }
                 (None, None | Some(0)) => {}
                 _ => return Err(ProviderError::new(ErrorKind::Corrupt)),
             }
-            let response = match select(Box::pin(cancel.cancelled()), Box::pin(builder.send())).await {
-                Either::Left(_) => return Err(ProviderError::new(ErrorKind::Cancelled)),
-                Either::Right((result, _)) => result.map_err(network_error)?,
+            let response = tokio::select! {
+                _ = cancel.cancelled() => return Err(ProviderError::new(ErrorKind::Cancelled)),
+                _ = upload_watchdog(progress) => return Err(ProviderError::new(ErrorKind::Transient)),
+                result = builder.send() => result.map_err(network_error)?,
             };
             let status = response.status().as_u16();
             let mut headers: BTreeMap<String, String> = BTreeMap::new();
@@ -122,6 +203,7 @@ struct ResponseBody {
     cancelled: Pin<Box<dyn Future<Output = ()> + Send>>,
     deadline: Option<Instant>,
     deadline_wait: Option<Pin<Box<dyn Future<Output = ()> + Send>>>,
+    idle_wait: Pin<Box<tokio::time::Sleep>>,
 }
 impl ResponseBody {
     fn new(reader: Pin<Box<dyn AsyncRead + Send>>, cancel: &Cancellation, deadline: Option<Instant>) -> Self {
@@ -130,6 +212,7 @@ impl ResponseBody {
             reader, cancel: cancel.clone(),
             cancelled: Box::pin(async move { owned.cancelled().await }),
             deadline,
+            idle_wait: Box::pin(tokio::time::sleep(TRANSFER_IDLE_TIMEOUT)),
             deadline_wait: deadline.map(|deadline| Box::pin(async move {
                 tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
             }) as Pin<Box<dyn Future<Output = ()> + Send>>),
@@ -150,7 +233,15 @@ impl AsyncRead for ResponseBody {
         if self.cancelled.as_mut().poll(cx).is_ready() {
             return Poll::Ready(Err(std::io::Error::other("cancelled")));
         }
-        match self.reader.as_mut().poll_read(cx, buf) {
+        if self.idle_wait.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "external-transfer-idle")));
+        }
+        let before = buf.filled().len();
+        let result = self.reader.as_mut().poll_read(cx, buf);
+        if matches!(&result, Poll::Ready(Ok(()))) && buf.filled().len() > before {
+            self.idle_wait.as_mut().reset(tokio::time::Instant::now() + TRANSFER_IDLE_TIMEOUT);
+        }
+        match result {
             Poll::Ready(value) => match self.stopped() {
                 Some(error) => Poll::Ready(Err(error)),
                 None => Poll::Ready(value),
@@ -271,12 +362,12 @@ impl RequestState {
     /// A caller supplies the instant at which its control work resumed. Missing,
     /// cached, skewed and pre-resume observations never become a fresh proof.
     pub fn clock_sample_after(&self, account: &AccountKey, not_before: Instant) -> Result<Option<HttpClockSample>> {
-        let samples = self.samples.lock().map_err(network_error)?;
+        let samples = self.samples.lock().map_err(|_| ProviderError::new(ErrorKind::Transient))?;
         Ok(samples.get(account).filter(|sample| sample.observed_at >= not_before && sample.usable()).cloned())
     }
     pub fn resolve_pending(&self, pending: &AccountKey, account: &AccountKey) -> Result<()> {
         self.backoff.resolve_pending(pending, account)?;
-        let mut samples = self.samples.lock().map_err(network_error)?;
+        let mut samples = self.samples.lock().map_err(|_| ProviderError::new(ErrorKind::Transient))?;
         if let Some(source) = samples.remove(pending) {
             if samples.get(account).is_none_or(|target| target.observed_at < source.observed_at) {
                 samples.insert(account.clone(), source);
@@ -357,7 +448,7 @@ impl RequestState {
                 status: response.status,
             });
         }
-        self.samples.lock().map_err(network_error)?.insert(account.clone(), sample);
+        self.samples.lock().map_err(|_| ProviderError::new(ErrorKind::Transient))?.insert(account.clone(), sample);
         Ok(())
     }
 }
@@ -479,6 +570,7 @@ async fn dispatch_ready(
     cancel.check()?;
     let account = request.account.clone();
     let bypass = has_cache_bypass(&request.headers);
+    let body_deadline = if request.operation == ProviderOperation::DownloadUrl { None } else { deadline };
     let api_response = request.api_request
         && matches!(request.method, reqwest::Method::GET | reqwest::Method::HEAD);
     let before = clock.now_ms();
@@ -498,10 +590,17 @@ async fn dispatch_ready(
     };
     let retry_after = super::providers::common::retry_after_ms(&response.headers, after)
         .map(|until| Duration::from_millis(until.saturating_sub(after)));
+    if (200..300).contains(&response.status) && response.headers.get("content-type")
+        .is_some_and(|value| value.split(';').next().unwrap_or("").trim().eq_ignore_ascii_case("text/html")) {
+        return Err(super::providers::common::error(ErrorKind::EndpointRejected, response.status));
+    }
     match response.status {
         200..=299 => state.backoff.success(&account)?,
         429 => state.backoff.failure(&account, ErrorKind::RateLimited, retry_after, observed_at)?,
-        500..=599 => state.backoff.failure(&account, ErrorKind::Transient, retry_after, observed_at)?,
+        500..=599 => {
+            let kind = super::providers::common::classify_status(response.status, &response.headers, after).kind;
+            state.backoff.failure(&account, kind, retry_after, observed_at)?;
+        }
         403 if retry_after.is_some() => state.backoff.failure(&account, ErrorKind::RateLimited, retry_after, observed_at)?,
         _ => {}
     }
@@ -509,7 +608,7 @@ async fn dispatch_ready(
     if api_response { state.observe(&account, &response, bypass, before, after, started, observed_at)?; }
     cancel.check()?;
     if deadline.is_some_and(|deadline| Instant::now() >= deadline) { return Err(ProviderError::new(ErrorKind::Transient)); }
-    response.body = Box::pin(ResponseBody::new(response.body, cancel, deadline));
+    response.body = Box::pin(ResponseBody::new(response.body, cancel, body_deadline));
     Ok(response)
 }
 
@@ -519,6 +618,35 @@ mod tests {
     use super::super::quota_profiles::{MyboxCounter, MyboxPlan};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use tokio::io::AsyncReadExt;
+
+    #[test]
+    fn configured_http_is_exact_and_s3_uses_its_validated_bucket_origin() {
+        let parse = |value: &str| url::Url::parse(value).unwrap();
+        let config = |provider: &str, endpoint: &str, addressing: &str| serde_json::from_value::<ConnectionConfig>(serde_json::json!({
+            "provider":provider,"endpoint":endpoint,"accountId":"synthetic","profile":"generic",
+            "location":{"bucket":"chosen","region":"us-east-1","addressing":addressing}
+        })).unwrap();
+        let default = NativeHttpTransport::new().unwrap();
+        assert!(!default.permits_url(&parse("http://storage.invalid/data")));
+        for provider in ["webdav","gitlab_packages"] {
+            let transport = NativeHttpTransport::new().unwrap().with_user_endpoint(&config(provider,"http://storage.invalid:8080/root","path")).unwrap();
+            assert!(transport.permits_url(&parse("http://storage.invalid:8080/root/item")));
+            for other in ["http://storage.invalid/root", "http://other.invalid:8080/root"] { assert!(!transport.permits_url(&parse(other))); }
+        }
+        for (addressing, expected, rejected) in [
+            ("path","http://storage.invalid:8080/chosen/a","http://chosen.storage.invalid:8080/a"),
+            ("virtual","http://chosen.storage.invalid:8080/a","http://storage.invalid:8080/chosen/a")
+        ] {
+            let transport=NativeHttpTransport::new().unwrap().with_user_endpoint(&config("s3","http://storage.invalid:8080",addressing)).unwrap();
+            assert!(transport.permits_url(&parse(expected)));
+            assert!(!transport.permits_url(&parse(rejected)));
+            assert!(!transport.permits_url(&parse("http://other.storage.invalid:8080/a")));
+        }
+        let secure=NativeHttpTransport::new().unwrap().with_user_endpoint(&config("webdav","https://storage.invalid","path")).unwrap();
+        assert!(!secure.permits_url(&parse("http://storage.invalid/a")));
+        let fixed=NativeHttpTransport::new().unwrap().with_user_endpoint(&config("google_drive","http://storage.invalid","path")).unwrap();
+        assert!(!fixed.permits_url(&parse("http://storage.invalid/a")));
+    }
 
     #[derive(Default)]
     struct Boundary { deny: AtomicBool, reservations: AtomicUsize, sends: AtomicUsize }
@@ -757,6 +885,114 @@ mod tests {
         fn poll_read(self: Pin<&mut Self>, _: &mut std::task::Context<'_>, _: &mut tokio::io::ReadBuf<'_>) -> std::task::Poll<std::io::Result<()>> {
             std::task::Poll::Pending
         }
+    }
+    #[test]
+    fn untrusted_tls_is_endpoint_rejection_while_refusal_is_transient() {
+        use std::io::Read;
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+        let config = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+            .with_safe_default_protocol_versions().unwrap().with_no_client_auth()
+            .with_single_cert(vec![cert.cert.der().clone()], rustls::pki_types::PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der()).into()).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (socket, _) = listener.accept().unwrap();
+            socket.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let mut stream = rustls::StreamOwned::new(rustls::ServerConnection::new(Arc::new(config)).unwrap(), socket);
+            let _ = stream.read(&mut [0]);
+        });
+        runtime().block_on(async {
+            let transport = NativeHttpTransport::for_loopback_tests();
+            let mut tls = request("webdav", "synthetic");
+            tls.url = url::Url::parse(&format!("https://localhost:{}/synthetic?secret=must-not-leak", address.port())).unwrap();
+            let error = transport.send(tls, &Cancellation::default()).await.err().unwrap();
+            assert_eq!(error.kind, ErrorKind::EndpointRejected);
+            assert_eq!(error.http_status, None);
+            assert_eq!(error.oauth_error_description, None);
+            server.join().unwrap();
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            drop(listener);
+            let mut refused = request("webdav", "synthetic");
+            refused.url = url::Url::parse(&format!("http://{address}/synthetic")).unwrap();
+            assert_eq!(transport.send(refused, &Cancellation::default()).await.err().unwrap().kind, ErrorKind::Transient);
+        });
+    }
+    #[test]
+    fn transfer_idle_deadlines_reset_only_on_progress_and_headers_have_a_separate_bound() {
+        runtime().block_on(async {
+            tokio::time::pause();
+            let progress = Arc::new(Mutex::new(UploadProgress { last_progress: tokio::time::Instant::now(), remaining: 6 }));
+            let mut reader = UploadReader { reader: Box::pin(std::io::Cursor::new(vec![7; 6])), progress: progress.clone() };
+            let watchdog = upload_watchdog(progress.clone());
+            tokio::pin!(watchdog);
+            for _ in 0..6 {
+                tokio::time::advance(Duration::from_secs(50)).await;
+                assert!(futures::poll!(&mut watchdog).is_pending());
+                assert_eq!(reader.read(&mut [0]).await.unwrap(), 1);
+            }
+            tokio::time::advance(Duration::from_secs(119)).await;
+            assert!(futures::poll!(&mut watchdog).is_pending());
+            tokio::time::advance(Duration::from_secs(1)).await;
+            tokio::time::timeout(Duration::from_millis(2), &mut watchdog).await
+                .expect("headers must time out within one timer tick of the deadline");
+
+            let cancel = Cancellation::default();
+            let mut body = ResponseBody::new(Box::pin(std::io::Cursor::new(vec![1; 7])), &cancel, None);
+            for _ in 0..6 {
+                tokio::time::advance(Duration::from_secs(50)).await;
+                assert_eq!(body.read(&mut [0]).await.unwrap(), 1);
+            }
+            tokio::time::advance(TRANSFER_IDLE_TIMEOUT + Duration::from_millis(2)).await;
+            assert_eq!(body.read(&mut [0]).await.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+
+            let progress = Arc::new(Mutex::new(UploadProgress { last_progress: tokio::time::Instant::now(), remaining: 1 }));
+            let watchdog = upload_watchdog(progress);
+            tokio::pin!(watchdog);
+            assert!(futures::poll!(&mut watchdog).is_pending());
+            tokio::time::advance(TRANSFER_IDLE_TIMEOUT - Duration::from_secs(1)).await;
+            assert!(futures::poll!(&mut watchdog).is_pending());
+            tokio::time::advance(Duration::from_secs(1)).await;
+            tokio::time::timeout(Duration::from_millis(2), &mut watchdog).await
+                .expect("uploads must time out within one timer tick of the idle deadline");
+        });
+    }
+
+    struct SlowResponseBody { wait: Pin<Box<tokio::time::Sleep>> }
+    impl AsyncRead for SlowResponseBody {
+        fn poll_read(mut self: Pin<&mut Self>, cx: &mut std::task::Context<'_>, buf: &mut tokio::io::ReadBuf<'_>) -> std::task::Poll<std::io::Result<()>> {
+            if self.wait.as_mut().poll(cx).is_pending() { return std::task::Poll::Pending; }
+            buf.put_slice(&[7]);
+            self.wait.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(50));
+            std::task::Poll::Ready(Ok(()))
+        }
+    }
+    struct SyntheticResponse { html: bool }
+    impl HttpTransport for SyntheticResponse {
+        fn send<'a>(&'a self, _: HttpRequest, _: &'a Cancellation) -> ProviderFuture<'a, HttpResponse> {
+            Box::pin(async move { Ok(HttpResponse {
+                status: 200,
+                headers: if self.html { BTreeMap::from([("content-type".into(), "text/html; charset=utf-8".into())]) } else { BTreeMap::new() },
+                body: Box::pin(SlowResponseBody { wait: Box::pin(tokio::time::sleep(Duration::from_secs(50))) }),
+            }) })
+        }
+    }
+    #[test]
+    fn download_url_body_outlives_control_deadline_and_html_is_endpoint_rejection() {
+        runtime().block_on(async {
+            tokio::time::pause();
+            let boundary = Boundary::default();
+            let cancel = Cancellation::default();
+            let mut download = request("onedrive", "synthetic");
+            download.operation = ProviderOperation::DownloadUrl;
+            let mut response = dispatch_ready(&SyntheticResponse { html: false }, &boundary, &RequestState::default(), download, &cancel, Some(Instant::now() + CONTROL_REQUEST_TIMEOUT)).await.unwrap();
+            for _ in 0..6 {
+                assert_eq!(response.body.read(&mut [0]).await.unwrap(), 1);
+            }
+            let error = dispatch_ready(&SyntheticResponse { html: true }, &boundary, &RequestState::default(), request("webdav", "synthetic"), &cancel, None).await.err().unwrap();
+            assert_eq!(error.kind, ErrorKind::EndpointRejected);
+            assert_eq!(error.http_status, Some(200));
+        });
     }
     #[test]
     fn control_deadlines_cover_headers_and_stalled_bodies_and_cancellation_wakes_reads() {

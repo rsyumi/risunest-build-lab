@@ -5,6 +5,8 @@ const root = path.resolve(import.meta.dirname, "../..");
 const native = path.join(import.meta.dirname, "native");
 const read = (file) => JSON.parse(readFileSync(path.join(root, file), "utf8"));
 const config = read("src-tauri/tauri.conf.json");
+const platformConfig = read("src-tauri/tauri.macos.conf.json");
+config.app = { ...config.app, ...platformConfig.app };
 config.identifier = "io.github.rsyumi.risunest.macos.bench";
 config.productName = "RisuNest Mac Bench";
 config.mainBinaryName = "risunest-macos-bench";

@@ -7,6 +7,8 @@ const mocks = vi.hoisted(() => ({
     activeSession: null as import('../storage/activeConversationSession').ActiveConversationSession | null,
     doingChat: false,
     navigationGeneration: 0,
+    alertError: vi.fn(),
+    alertToast: vi.fn(),
     alertConfirm: vi.fn(async () => true),
     alertSelectChar: vi.fn(async () => 'member-b'),
     activateCharacter: vi.fn(async (_id?: string) => true),
@@ -26,10 +28,11 @@ vi.mock('../util', () => ({
 }))
 vi.mock('../alert', () => ({
     alertConfirm: mocks.alertConfirm,
-    alertError: vi.fn(),
+    alertError: mocks.alertError,
+    alertToast: mocks.alertToast,
     alertSelectChar: mocks.alertSelectChar,
 }))
-vi.mock('src/lang', () => ({ language: { askLoadFirstMsg: 'Load first message', errors: {} } }))
+vi.mock('src/lang', () => ({ language: { askLoadFirstMsg: 'Load first message', errors: {}, navigationBlockedWhileGenerating: 'busy', groupCharactersChangeFailed: 'group change failed' } }))
 vi.mock('svelte/store', async (importOriginal) => {
     const original = await importOriginal<typeof import('svelte/store')>()
     return {
@@ -145,6 +148,14 @@ describe('group working-set residency', () => {
             }),
         ])
         expect(mocks.markPersistentDataDirty).toHaveBeenCalled()
+    })
+
+    it('blocks add before showing selection or greeting dialogs while generation is active', async () => {
+        mocks.doingChat = true
+        expect(await addGroupChar()).toBe(false)
+        expect(mocks.alertSelectChar).not.toHaveBeenCalled()
+        expect(mocks.alertConfirm).not.toHaveBeenCalled()
+        expect(mocks.alertToast).toHaveBeenCalledWith('busy')
     })
 
     it('publishes restored scalable member detail before immediate group generation', async () => {
@@ -675,6 +686,7 @@ describe('group working-set residency', () => {
         expect(group.characterActive).toEqual([true, false])
         expect(mocks.activateCharacter).toHaveBeenCalledTimes(2)
         expect(mocks.flushPendingData).toHaveBeenCalledWith('group-membership-rollback')
+        expect(mocks.alertError).toHaveBeenCalledWith('group change failed')
         expect(mocks.reconcilePersistentActiveCharacterIds).toHaveBeenCalled()
     })
 
@@ -692,6 +704,7 @@ describe('group working-set residency', () => {
         expect(group.characterActive).toEqual([true, false])
         expect(mocks.activateCharacter).toHaveBeenCalledTimes(2)
         expect(mocks.flushPendingData).toHaveBeenCalledWith('group-membership-rollback')
+        expect(mocks.alertError).toHaveBeenCalledWith('group change failed')
     })
 
     it('rolls back a removed member when same-group activation rejects', async () => {
@@ -708,6 +721,7 @@ describe('group working-set residency', () => {
         expect(group.characterActive).toEqual([true, false])
         expect(mocks.activateCharacter).toHaveBeenCalledTimes(2)
         expect(mocks.flushPendingData).toHaveBeenCalledWith('group-membership-rollback')
+        expect(mocks.alertError).toHaveBeenCalledWith('group change failed')
     })
 
     it('does not duplicate a removed member restored by a concurrent group replacement', async () => {

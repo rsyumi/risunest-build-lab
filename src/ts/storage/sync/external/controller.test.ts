@@ -43,6 +43,13 @@ function deferred<T>() {
 }
 
 describe('external storage controller', () => {
+    it('retains structured native rejection causes', async () => {
+        const cause = { kind: 'preconditionFailed', httpStatus: null, retryAtMs: null }
+        const controller = createExternalStorageController({ startJob: vi.fn().mockRejectedValue(cause), getJob: vi.fn(), cancelJob: vi.fn() }, state)
+        await expect(controller.request({ connectionId: 'sync-1', kind: 'sync', targetRevision: '1', reason: 'manual',
+            session: { kind: 'foreground', id: 'session' } })).resolves.toMatchObject({ kind: 'blocked', reason: 'preconditionFailed', cause })
+    })
+
     it('finishes cleanup without inventing a published revision or applying received data', async () => {
         const applyReceived = vi.fn()
         const bridge: ExternalStorageJobBridge = {
@@ -235,6 +242,94 @@ describe('external storage controller', () => {
         expect(bridge.startJob).toHaveBeenLastCalledWith(expect.objectContaining({
             reason: 'automatic', session: 'foreground', sessionId: 'foreground-1',
         }))
+    })
+
+    const exitTarget = {
+        revision: 12,
+        libraryEpoch: 'library-1',
+        selectionEpoch: 'selection-1',
+        selectionId: 'selected',
+    }
+    const pausedJob = (id: string, error: NonNullable<ExternalJobSummary['error']>): ExternalJobSummary => ({
+        ...job(id, 'waiting'), phase: 'paused', error,
+    })
+    const transient = {
+        code: 'Transient', message: 'Offline', retryable: true, action: 'retry' as const,
+    }
+
+    it('retries a transient exit drain failure before reporting it', async () => {
+        const waits: number[] = []
+        let starts = 0
+        const bridge: ExternalStorageJobBridge = {
+            startJob: vi.fn(async () => ++starts === 1
+                ? pausedJob('exit-job', transient)
+                : job('exit-job', 'succeeded', '12')),
+            getJob: vi.fn(),
+            cancelJob: vi.fn(),
+        }
+        const controller = createExternalStorageController(bridge, state, {
+            wait: async delay => { waits.push(delay) },
+        })
+        await expect(controller.drainToRevision('sync-1', exitTarget, 'exit-1', new AbortController().signal))
+            .resolves.toEqual({ kind: 'complete' })
+        expect(waits).toEqual([1000])
+        expect(bridge.startJob).toHaveBeenCalledTimes(2)
+    })
+
+    it('stops retrying an exit drain after the bounded attempts', async () => {
+        const waits: number[] = []
+        const bridge: ExternalStorageJobBridge = {
+            startJob: vi.fn(async () => pausedJob('exit-job', transient)),
+            getJob: vi.fn(),
+            cancelJob: vi.fn(),
+        }
+        const controller = createExternalStorageController(bridge, state, {
+            wait: async delay => { waits.push(delay) },
+        })
+        await expect(controller.drainToRevision('sync-1', exitTarget, 'exit-1', new AbortController().signal))
+            .resolves.toEqual({ kind: 'blocked', reason: 'Transient' })
+        expect(waits).toEqual([1000, 2000, 4000])
+        expect(bridge.startJob).toHaveBeenCalledTimes(4)
+    })
+
+    it.each([
+        ['a quota wait', pausedJob('exit-job', {
+            code: 'RateLimited', message: 'Budget', retryable: true, action: 'wait',
+        })],
+        ['an unknown publication', pausedJob('exit-job', { ...transient, reason: 'publication-unknown' })],
+        ['a conflict', { ...job('exit-job', 'conflict'), phase: 'conflict-choice' }],
+    ])('reports %s without retrying the exit drain', async (_name, blocked) => {
+        const waits: number[] = []
+        const bridge: ExternalStorageJobBridge = {
+            startJob: vi.fn(async () => blocked),
+            getJob: vi.fn(),
+            cancelJob: vi.fn(),
+        }
+        const controller = createExternalStorageController(bridge, state, {
+            wait: async delay => { waits.push(delay) },
+        })
+        await expect(controller.drainToRevision('sync-1', exitTarget, 'exit-1', new AbortController().signal))
+            .resolves.toMatchObject({ kind: 'blocked' })
+        expect(waits).toEqual([])
+        expect(bridge.startJob).toHaveBeenCalledOnce()
+    })
+
+    it('stops waiting for an exit drain retry when the exit is cancelled', async () => {
+        const bridge: ExternalStorageJobBridge = {
+            startJob: vi.fn(async () => pausedJob('exit-job', transient)),
+            getJob: vi.fn(),
+            cancelJob: vi.fn(),
+        }
+        const abort = new AbortController()
+        const controller = createExternalStorageController(bridge, state, {
+            wait: async (_delay, signal) => {
+                abort.abort(new Error('exit cancelled'))
+                throw signal?.reason
+            },
+        })
+        await expect(controller.drainToRevision('sync-1', exitTarget, 'exit-1', abort.signal))
+            .resolves.toEqual({ kind: 'blocked', reason: 'cancelled' })
+        expect(bridge.startJob).toHaveBeenCalledOnce()
     })
 
     it('cancels a native exit job returned after its caller already aborted', async () => {

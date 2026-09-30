@@ -29,7 +29,7 @@ export function vitestInventory(root, directory = '.', owner) {
   try {
     const output = join(directoryRoot, 'inventory.json')
     const result = spawnSync(process.execPath, [cli, 'list', '--filesOnly', `--json=${output}`], {
-      cwd, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024,
+      cwd, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, windowsHide: true,
     })
     if (result.error) throw result.error
     if (result.status !== 0) throw new Error(`Vitest inventory failed (${owner ?? 'root'}): ${result.signal ?? result.status}\n${result.stdout}\n${result.stderr}`)

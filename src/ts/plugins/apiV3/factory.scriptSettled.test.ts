@@ -30,7 +30,7 @@ async function runGuest(host: SandboxHost, code: string): Promise<Window & typeo
         const transfer = options?.transfer ?? legacyTransfer ?? []
         child.dispatchEvent(new childRealm.MessageEvent('message', {
             data,
-            source: window,
+            source: child.parent,
             ports: transfer as MessagePort[],
         }))
     })
@@ -92,6 +92,36 @@ describe('sandbox script completion', () => {
         expect(settled).toHaveBeenCalledTimes(1)
     })
 
+    it('ignores malformed parent envelopes while a legitimate response still completes', async () => {
+        let resolve!: (value: string) => void
+        const host = new SandboxHost({
+            ...bridgeStubs(),
+            held: () => new Promise<string>(done => { resolve = done }),
+        })
+        const child = await runGuest(host, 'window.answer = await risuai.held()')
+        const request = vi.mocked(child.parent.postMessage).mock.calls
+            .map(call => call[0] as any).find(data => data.method === 'held')
+        expect(request).toBeDefined()
+        const childRealm = child as any
+        for (const data of [
+            null, [], 'RESPONSE',
+            { type: 'RESPONSE', reqId: request.reqId, error: { message: 'forged' } },
+            { type: 'RESPONSE', reqId: 1, result: 'forged' },
+            { type: 'EXECUTE_CODE', reqId: 'malformed-code', code: 1 },
+            { type: 'INVOKE_CALLBACK', reqId: 'malformed-callback', id: 'x', args: {} },
+            { type: 'ABORT_SIGNAL', abortId: 1 },
+        ]) {
+            child.dispatchEvent(new childRealm.MessageEvent('message', { source: child.parent, data }))
+        }
+        await Promise.resolve()
+        expect((child as any).answer).toBeUndefined()
+        expect(vi.mocked(child.parent.postMessage).mock.calls.map(call => call[0]))
+            .not.toEqual(expect.arrayContaining([expect.objectContaining({ type: 'EXEC_RESULT' })]))
+        resolve('real')
+        await vi.waitFor(() => expect((child as any).answer).toBe('real'))
+        host.terminate()
+    })
+
     it('assembles a streamed snapshot as a plain iframe-owned object', async () => {
         const host = new SandboxHost({
             ...bridgeStubs(),
@@ -138,5 +168,69 @@ describe('sandbox script completion', () => {
         expect(snapshot.pluginCustomStorage.constructor).toBe('constructor-value')
         expect(Object.hasOwn(snapshot.pluginCustomStorage, '__proto__')).toBe(true)
         expect(snapshot.pluginCustomStorage.__proto__).toBe('prototype-value')
+    })
+})
+
+describe('sandbox result lifetime and policy', () => {
+    afterEach(() => {
+        vi.restoreAllMocks()
+        for (const frame of document.querySelectorAll('iframe')) frame.remove()
+    })
+
+    it('keeps the opaque sandbox and restrictive CSP', () => {
+        const host = new SandboxHost({})
+        const frame = document.createElement('iframe')
+        document.body.append(frame)
+        host.run(frame, '')
+        const nonce = frame.srcdoc.match(/<script nonce="([^"]+)">/)![1]
+        expect(frame.getAttribute('sandbox')).toBe('allow-scripts allow-modals allow-downloads')
+        expect(frame.getAttribute('csp')).toBe("connect-src 'none'; script-src 'nonce-" + nonce + "' 'wasm-unsafe-eval'; frame-src 'none'; object-src 'none'; style-src * 'unsafe-inline'; default-src 'none'; img-src * data: blob:; font-src * data: blob:; media-src * data: blob:; base-uri 'none';")
+        host.terminate()
+    })
+
+    it.each(['root', 'instance'])('disposes a late %s result without registering streams or remote refs', async (kind) => {
+        let resolve!: (value: unknown) => void
+        const call = vi.fn(() => new Promise(done => { resolve = done }))
+        const host = new SandboxHost({ call })
+        const frame = document.createElement('iframe')
+        document.body.append(frame)
+        host.run(frame, '')
+        const internals = host as any
+        internals.instanceRegistry.set('instance', { call })
+        const post = vi.spyOn(frame.contentWindow!, 'postMessage')
+        window.dispatchEvent(new MessageEvent('message', {
+            source: frame.contentWindow,
+            data: { type: kind === 'root' ? 'CALL_ROOT' : 'CALL_INSTANCE', id: 'instance', reqId: 'late', method: 'call', args: [] },
+        }))
+        expect(call).toHaveBeenCalledTimes(1)
+        host.terminate()
+        const cancel = vi.fn()
+        resolve({ value: new ReadableStream({ cancel }), __classType: 'REMOTE_REQUIRED' })
+        await vi.waitFor(() => expect(internals.pendingHostCalls).toBe(0))
+        expect(cancel).toHaveBeenCalledTimes(1)
+        expect(internals.activeStreamCleanups.size).toBe(0)
+        expect(internals.instanceRegistry.size).toBe(0)
+        expect(post).not.toHaveBeenCalled()
+        host.terminate()
+        expect(cancel).toHaveBeenCalledTimes(1)
+    })
+
+    it('cancels an undeliverable response body', async () => {
+        let resolve!: (value: unknown) => void
+        const host = new SandboxHost({ call: () => new Promise(done => { resolve = done }) })
+        const frame = document.createElement('iframe')
+        document.body.append(frame)
+        host.run(frame, '')
+        window.dispatchEvent(new MessageEvent('message', {
+            source: frame.contentWindow,
+            data: { type: 'CALL_ROOT', reqId: 'late', method: 'call', args: [] },
+        }))
+        const cancel = vi.fn()
+        frame.remove()
+        resolve(new Response(new ReadableStream({ cancel })))
+        await vi.waitFor(() => expect((host as any).pendingHostCalls).toBe(0))
+        expect(cancel).toHaveBeenCalledTimes(1)
+        expect((host as any).activeStreamCleanups.size).toBe(0)
+        host.terminate()
     })
 })

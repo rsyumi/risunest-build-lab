@@ -21,8 +21,15 @@ pub(crate) struct SyncError {
     /// False for a rejection the same request would receive again. The scheduler
     /// stops automatic retries on it instead of backing off forever.
     pub retryable: bool,
+    /// Where the error was raised. Kept for the device log, never sent.
+    #[serde(skip)]
+    pub at: &'static std::panic::Location<'static>,
+    /// The io, SQLite or store failure behind the code, for the device log.
+    #[serde(skip)]
+    pub cause: Option<String>,
 }
 impl SyncError {
+    #[track_caller]
     pub fn new(code: impl Into<String>, status: u16) -> Self {
         let code = code.into();
         let retryable = retryable(&code, status);
@@ -30,15 +37,28 @@ impl SyncError {
             code,
             status,
             retryable,
+            at: std::panic::Location::caller(),
+            cause: None,
+        }
+    }
+    #[track_caller]
+    fn caused(code: &str, status: u16, cause: String) -> Self {
+        Self {
+            cause: Some(cause),
+            ..Self::new(code, status)
         }
     }
 }
-/// Transport failures, client-side waits, server load and ordering outcomes are
-/// worth another attempt. Every validation reply and local invariant failure is
-/// not, including a reply this client rejected as invalid.
+/// Transport failures, client-side waits, server load, another library
+/// operation that has not finished yet and ordering outcomes are worth another
+/// attempt. Every validation reply and local invariant failure is not,
+/// including a reply this client rejected as invalid.
 fn retryable(code: &str, status: u16) -> bool {
     match code {
+        "local-storage-full" => false,
         "cancelled"
+        | "library-operation-busy"
+        | "server-sync-busy"
         | "stale-head"
         | "operation-already-pending"
         | "local-revision-changed"
@@ -58,34 +78,51 @@ fn retryable(code: &str, status: u16) -> bool {
         },
     }
 }
+// Each conversion tracks its caller, so an error raised by `?` records the line
+// of that `?`.
 impl From<risunest_sync_wire::WireError> for SyncError {
+    #[track_caller]
     fn from(value: risunest_sync_wire::WireError) -> Self {
         Self::new(value.0, 400)
     }
 }
 impl From<std::io::Error> for SyncError {
-    fn from(_: std::io::Error) -> Self {
-        Self::new("local-storage", 503)
+    #[track_caller]
+    fn from(error: std::io::Error) -> Self {
+        let (code, status) = if error.kind() == std::io::ErrorKind::StorageFull {
+            ("local-storage-full", 507)
+        } else {
+            ("local-storage", 503)
+        };
+        Self::caused(code, status, format!("{:?}: {error}", error.kind()))
     }
 }
 impl From<rusqlite::Error> for SyncError {
-    fn from(_: rusqlite::Error) -> Self {
-        Self::new("local-metadata", 503)
+    #[track_caller]
+    fn from(error: rusqlite::Error) -> Self {
+        let (code, status) = if error.sqlite_error_code() == Some(rusqlite::ErrorCode::DiskFull) {
+            ("local-storage-full", 507)
+        } else {
+            ("local-metadata", 503)
+        };
+        Self::caused(code, status, error.to_string())
     }
 }
 impl From<crate::persistent_store::StoreError> for SyncError {
+    #[track_caller]
     fn from(value: crate::persistent_store::StoreError) -> Self {
         match value {
             crate::persistent_store::StoreError::RevisionConflict { .. } => {
                 Self::new("local-revision-changed", 409)
             }
-            _ => Self::new("local-validation", 409),
+            other => Self::caused("local-validation", 409, other.to_string()),
         }
     }
 }
 pub(crate) type Result<T> = std::result::Result<T, SyncError>;
 
 impl From<risunest_sync_connect::ConnectError> for SyncError {
+    #[track_caller]
     fn from(value: risunest_sync_connect::ConnectError) -> Self {
         Self::new(value.0, 400)
     }
@@ -96,6 +133,19 @@ mod classification_tests {
     use super::SyncError;
 
     #[test]
+    fn local_storage_exhaustion_requires_space_without_masking_server_failures() {
+        let io = SyncError::from(std::io::Error::from(std::io::ErrorKind::StorageFull));
+        let sqlite = SyncError::from(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_FULL), None));
+        for error in [io, sqlite, SyncError::new("local-storage-full", 507)] {
+            assert_eq!(error.code, "local-storage-full");
+            assert!(!error.retryable);
+        }
+        assert!(SyncError::new("server-storage-full", 507).retryable);
+        assert!(SyncError::new("local-storage", 503).retryable);
+    }
+
+    #[test]
     fn transport_waits_and_server_load_stay_retryable() {
         for (code, status) in [
             ("server-unreachable", 503),
@@ -104,6 +154,8 @@ mod classification_tests {
             ("directory-unreachable", 503),
             ("sync-retry-budget-exhausted", 503),
             ("cancelled", 409),
+            ("library-operation-busy", 409),
+            ("server-sync-busy", 409),
             ("device-busy", 429),
             ("server-busy", 429),
             ("server-updating", 503),
@@ -169,5 +221,35 @@ mod classification_tests {
                 "{code} ({status}) must block automatic retries"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod log_detail_tests {
+    use super::SyncError;
+
+    #[test]
+    fn a_failed_question_mark_keeps_its_line_and_cause_out_of_the_reply() {
+        let fail = || -> super::Result<()> {
+            Err(std::io::Error::from(std::io::ErrorKind::InvalidData))?;
+            Ok(())
+        };
+        let line = line!() - 3;
+        let error = fail().unwrap_err();
+        assert_eq!(error.code, "local-storage");
+        assert_eq!(error.at.line(), line);
+        assert!(error.at.file().ends_with("mod.rs"));
+        assert!(error.cause.as_deref().unwrap().starts_with("InvalidData: "));
+        let reply = serde_json::to_value(&error).unwrap();
+        let keys = reply.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+        assert_eq!(keys, ["code", "status", "retryable"]);
+    }
+
+    #[test]
+    fn a_created_error_records_where_it_was_made_without_a_cause() {
+        let line = line!() + 1;
+        let error = SyncError::new("server-sync-busy", 409);
+        assert_eq!(error.at.line(), line);
+        assert!(error.cause.is_none());
     }
 }

@@ -1,11 +1,10 @@
-//! Honest storage usage summaries. Local upload receipts establish only a
+//! Honest storage usage summaries. Cached remote receipts establish only a
 //! repository lower bound, while provider-wide physical usage remains unknown
 //! until a provider exposes an authoritative account API.
 use super::{
     connection_commands::ConnectedRepository,
     contract::{Cancellation, ErrorKind, ProviderError, Result},
     control,
-    gc_store::GcStore,
     packaging::RemoteObject,
 };
 use rusqlite::{Connection, OpenFlags};
@@ -42,7 +41,7 @@ fn package_cache_root(root: &Path, connection_id: &str) -> std::path::PathBuf {
         .join("package-cache")
 }
 
-fn local_upload_lower_bound(
+fn known_object_lower_bound(
     root: &Path,
     connection_id: &str,
     connected: &ConnectedRepository,
@@ -130,7 +129,7 @@ pub(crate) async fn summarize(
     cancel: &Cancellation,
 ) -> Result<StorageUsage> {
     let (locally_uploaded_objects_lower_bound, locally_uploaded_bytes_lower_bound) =
-        local_upload_lower_bound(root, connection_id, connected)?;
+        known_object_lower_bound(root, connection_id, connected)?;
     let latest_reachable = if connected.stored.descriptor.publication_strategy.is_some() {
         match control::read_head(
             connected.provider.as_ref(),
@@ -146,14 +145,7 @@ pub(crate) async fn summarize(
                 let document =
                     control::read_snapshot_document(connected, &head.document.state, cancel)
                         .await?;
-                let mut reachable = direct_reachable(&head.document.state, &document)?;
-                // Only a cleanup walks the catalogs, so a repository no
-                // cleanup has finished keeps reporting the lower bound rather
-                // than paying for that walk on every inspection.
-                if let Some(bytes) = GcStore::open(root)?.last_reachable_bytes(connection_id)? {
-                    reachable.known_direct_bytes = bytes;
-                    reachable.complete = true;
-                }
+                let reachable = direct_reachable(&head.document.state, &document)?;
                 Some(reachable)
             }
             None => None,

@@ -15,6 +15,9 @@ pub enum Error {
     /// IO errors.
     #[error(transparent)]
     Io(#[from] std::io::Error),
+    /// The installation must be moved before an update can replace it.
+    #[error("install-location-not-writable")]
+    InstallLocationNotWritable,
     /// Semver errors.
     #[error(transparent)]
     Semver(#[from] semver::Error),

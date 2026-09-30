@@ -47,10 +47,15 @@ export function createServerSyncScheduler(
       return;
     localSince = localDue = hintDue = undefined;
     automatic = true;
-    void controller.synchronize();
+    void controller.synchronizeAutomatically().catch(() => {});
     automatic = false;
   };
   const completed = (state: ServerSyncSnapshot) => {
+    if (["generation-active", "local-edit-pending"].includes(state.error)) {
+      failures = 0;
+      schedule(500);
+      return;
+    }
     if (serverSyncBlocked(state)) {
       blocked = true;
       clear();
@@ -85,6 +90,8 @@ export function createServerSyncScheduler(
       completed(state);
     } else if (!state.running && !controller.canAutoSync()) {
       clear();
+    } else if (before.draining && !state.draining) {
+      schedule(state.error ? 1000 : poll);
     } else if (
       !state.running &&
       ((!before.status?.configured && state.status?.configured) ||
@@ -122,9 +129,9 @@ export function createServerSyncScheduler(
       poll = 60_000;
       schedule(0);
     },
-    suspend() {
+    suspend(preserveActive = false) {
       clear();
-      if (controller.snapshot().running) void controller.suspend();
+      if (!preserveActive && controller.snapshot().running) void controller.suspend();
     },
     stop() {
       stopped = true;

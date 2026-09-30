@@ -64,7 +64,7 @@ impl Store {
         check_path(&path)?;
         let staging = self.root.join("staging");
         check_path(&staging)?;
-        let mut temp = tempfile::NamedTempFile::new_in(staging)?;
+        let mut temp = self.staging_temp()?;
         temp.write_all(&bytes)?;
         temp.as_file().sync_all()?;
         publish(temp.path(), &path)
@@ -87,7 +87,13 @@ impl Store {
                     directory.base_url = url;
                     directory
                 }
-                None => generate_directory(url)?,
+                None => {
+                    let mut writer = [0u8; 32];
+                    getrandom::getrandom(&mut writer)
+                        .map_err(|_| Error::new("random-unavailable", 503))?;
+                    state.writer = Some(hex::encode(writer));
+                    generate_directory(url)?
+                }
             }),
             None => state.directory.take(),
         };
@@ -187,6 +193,7 @@ impl Store {
         Ok(Some(Publication {
             directory,
             envelope: state.pending.as_ref().unwrap().envelope.clone(),
+            writer: state.writer.clone().ok_or(Error::new("invalid-connection-state", 409))?,
         }))
     }
     pub fn confirm_publication(&self, sent: &Publication) -> Result<()> {
@@ -256,6 +263,9 @@ impl Store {
             .lock()
             .map_err(|_| Error::new("connection-state-unavailable", 503))?;
         let state = self.read_connection()?;
+        if local.is_none() && state.cloudflared.is_some() && !state.directory_enabled {
+            return Err(Error::new("managed-registration-needs-directory", 409));
+        }
         let endpoint = match local {
             Some(value) => value.to_owned(),
             None => state
@@ -342,6 +352,76 @@ pub(crate) fn protect(bytes: &[u8], seal: bool) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod renewal_tests {
     use super::*;
+
+    #[test]
+    fn managed_registration_requires_directory_before_allocating_device_but_local_does_not() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::init(root.path()).unwrap();
+        let executable = root.path().join("synthetic-cloudflared");
+        fs::write(&executable, b"synthetic").unwrap();
+        store.configure_connection(ConnectionOptions {
+            endpoint: None, cloudflared: Some(executable), registry_url: None,
+        }).unwrap();
+        for connected in [false, true] {
+            if connected { store.observe_tunnel_endpoint("https://synthetic.trycloudflare.com").unwrap(); }
+            assert_eq!(store.issue_named_registration("device", &"a".repeat(64), None).unwrap_err().code,
+                "managed-registration-needs-directory");
+            assert!(store.managed_devices().unwrap().is_empty());
+        }
+        let uri = store.issue_named_registration("local", &"b".repeat(64), Some("http://127.0.0.1:8080")).unwrap();
+        assert!(Registration::parse_uri(&uri).unwrap().directory.is_none());
+        assert_eq!(store.managed_devices().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn writer_secret_is_stable_private_and_absent_from_registration_and_status() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::init(root.path()).unwrap();
+        store.configure_connection(ConnectionOptions {
+            endpoint: Some("https://sync.example".into()), cloudflared: None,
+            registry_url: Some("https://registry.example".into()),
+        }).unwrap();
+        let publication = store.plan_publication().unwrap().unwrap();
+        let writer = publication.writer.clone();
+        assert_eq!(writer.len(), 64);
+        assert_ne!(writer, publication.directory.key);
+        let uri = store.issue_registration().unwrap();
+        let registration = Registration::parse_uri(&uri).unwrap();
+        let json = serde_json::to_string(&registration).unwrap();
+        assert!(!uri.contains(&writer));
+        assert!(!json.contains(&writer));
+        assert!(!json.contains("writer"));
+        assert!(!serde_json::to_string(&store.connection_status().unwrap()).unwrap().contains(&writer));
+        drop(store);
+        let store = Store::open(root.path()).unwrap();
+        assert_eq!(store.plan_publication().unwrap().unwrap().writer, writer);
+        store.configure_connection(ConnectionOptions {
+            endpoint: Some("https://sync.example".into()), cloudflared: None, registry_url: None,
+        }).unwrap();
+        store.configure_connection(ConnectionOptions {
+            endpoint: Some("https://sync.example".into()), cloudflared: None,
+            registry_url: Some("https://registry.example".into()),
+        }).unwrap();
+        assert_eq!(store.plan_publication().unwrap().unwrap().writer, writer);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn connection_state_stays_private_after_replacement_and_rejects_group_access() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::init(root.path()).unwrap();
+        let path = root.path().join("connection-state");
+        for endpoint in ["https://first.example", "https://second.example"] {
+            store.configure_connection(ConnectionOptions {
+                endpoint: Some(endpoint.into()), cloudflared: None,
+                registry_url: Some("https://registry.example".into()),
+            }).unwrap();
+            assert_eq!(fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o640)).unwrap();
+        assert_eq!(store.connection_status().err().unwrap().code, "private-connection-state-required");
+    }
 
     #[test]
     fn renewal_survives_restart_retries_and_resets_only_after_success() {

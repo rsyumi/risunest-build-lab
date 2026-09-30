@@ -253,9 +253,7 @@ pub(super) fn settings(config: &ConnectionConfig) -> Result<Settings> {
         }
     }
     let endpoint = url::Url::parse(&config.endpoint).map_err(|_| unsupported())?;
-    let loopback = endpoint.host_str() == Some("127.0.0.1");
-    let secure = endpoint.scheme() == "https" || (endpoint.scheme() == "http" && loopback);
-    if !secure
+    if !super::super::super::http::user_endpoint_allowed(&endpoint)
         || endpoint.host_str().is_none()
         || !endpoint.username().is_empty()
         || endpoint.password().is_some()

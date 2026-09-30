@@ -1,12 +1,12 @@
 import { language } from 'src/lang'
 import { alertConfirm, alertError } from '../alert'
 import { isTauri } from '../platform'
+import { clearCharacterSelection } from 'src/lib/workingSetNavigation'
 import { get } from 'svelte/store'
 import { DBState, selectedCharID } from '../stores.svelte'
 import { getPersistentDataStore } from './persistentDataStoreFactory'
 import {
     getPersistentDataRuntime,
-    refreshActiveWorkingSetFromStore,
 } from './persistentDataRuntime.svelte'
 import type { ArchivePreview } from './persistentDataStore'
 export {
@@ -69,18 +69,28 @@ async function runArchiveMutation(
     mutate: (expectedRevision: number) => Promise<{ revision: number }>,
 ): Promise<boolean> {
     const runtime = getPersistentDataRuntime()
+    const strings = language.risuNest.archive
+    const restoring = reason === 'character-restore'
+    let committed = false
+    let fence: Awaited<ReturnType<typeof runtime.acquireDestructiveReplacementFence>> | undefined
     try {
-        await runtime.flushPendingData(reason)
-        let applied = runtime.revision
-        await runtime.runStorageOnlyMutation(async (expectedRevision) => {
-            applied = (await mutate(expectedRevision)).revision
-            return applied
-        })
-        await refreshActiveWorkingSetFromStore(applied)
+        const token = await runtime.capturePersistentMutationToken(reason)
+        fence = await runtime.acquireDestructiveReplacementFence(token)
+        const applied = await mutate(token.revision)
+        committed = true
+        const outcome = await fence.refreshCommittedWorkingSet(applied.revision)
+        if (outcome.projection !== 'applied') {
+            alertError(restoring ? strings.restoreRefreshFailed : strings.archiveRefreshFailed)
+        }
         return true
     } catch (error) {
-        alertError(`${error}`)
-        return false
+        console.error('Character archive operation failed', error)
+        alertError(committed
+            ? restoring ? strings.restoreRefreshFailed : strings.archiveRefreshFailed
+            : restoring ? strings.restoreFailed : strings.archiveFailed)
+        return committed
+    } finally {
+        fence?.release()
     }
 }
 
@@ -94,7 +104,8 @@ export async function archiveCharacterWithConfirmation(
     try {
         preview = await store.archivePreview(characterId)
     } catch (error) {
-        alertError(`${error}`)
+        console.error('Character archive preview failed', error)
+        alertError(language.risuNest.archive.archiveFailed)
         return false
     }
     if (preview.archived) return false
@@ -103,7 +114,7 @@ export async function archiveCharacterWithConfirmation(
     if (!await confirmWithTitle(strings.confirmTitle, body)) return false
     // An archived character cannot be open, so leave it before it is archived.
     const characters = DBState.db.characters
-    if (characters[get(selectedCharID)]?.chaId === characterId) selectedCharID.set(-1)
+    if (characters[get(selectedCharID)]?.chaId === characterId && !await clearCharacterSelection()) return false
     return await runArchiveMutation('character-archive', (expectedRevision) =>
         store.archiveCharacter(characterId, expectedRevision, signal))
 }

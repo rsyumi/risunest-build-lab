@@ -8,7 +8,7 @@ use rusqlite::OptionalExtension;
 pub enum MediaResponse {
     Refresh(String),
     File {
-        file: std::fs::File,
+        file: super::objects::Body,
         size: u64,
         hash: String,
         mime: String,
@@ -52,10 +52,7 @@ impl Store {
             if request.object.size != size.into() {
                 return Err(Error::new("object-size-mismatch", 409));
             }
-            let metadata = std::fs::metadata(self.object_path(&request.object.hash)?)?;
-            if !metadata.is_file() || metadata.len() != size {
-                return Err(Error::new("corrupt-object", 503));
-            }
+            self.check_object_body(&db, &request.object.hash, size)?;
             let claims = MediaClaims {
                 library_id: head.library_id.clone(),
                 epoch: head.epoch.clone(),

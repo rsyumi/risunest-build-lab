@@ -15,14 +15,22 @@ use std::{
     collections::BTreeSet,
     io::{Read, Seek, SeekFrom},
 };
-// Include the envelope for one 4 MiB full frame.
-const FRAME_TARGET_BYTES: usize = 4 * 1024 * 1024 + 53;
+// The upload side aims at the same reply target the download side plans
+// against, so one constant describes both directions.
+const FRAME_TARGET_BYTES: usize = transfer::PREFERRED_BATCH_BYTES;
 const CHUNK: usize = transfer::UPLOAD_CHUNK_BYTES;
+/// One regrouping round answers a reply the server filled. A second covers a
+/// bin the peer still declined; past that the single-object path is the
+/// correct outcome, and the constant is what stops a rebinning loop.
+const REBIN_PASSES: usize = 2;
 #[path = "transfer_references.rs"]
 mod references;
+#[cfg(test)]
+#[path = "transfer_pending_tests.rs"]
+mod pending_tests;
 
 /// Resume metadata contains only content identities and server staging IDs.
-/// Every resumed chunk lives in the verified cache CAS before its row is saved.
+/// Every resumed chunk lives in its verified transfer spool before its row is saved.
 pub(crate) struct Transfer<'a> {
     pub client: &'a ServerClient,
     pub cache: &'a Cache,
@@ -32,6 +40,8 @@ pub(crate) struct Transfer<'a> {
     frame_limit: std::cell::Cell<usize>,
     #[cfg(test)]
     frame_depth: usize,
+    #[cfg(test)]
+    pending_timeout: std::time::Duration,
     base_sizes: std::cell::RefCell<Option<(Vec<String>, Vec<(String, u64)>)>>,
 }
 pub(crate) struct UploadTarget {
@@ -75,6 +85,79 @@ impl<'a> Transfer<'a> {
         base_version: &risunest_sync_wire::RecordVersion,
     ) -> Result<Vec<String>> {
         self.download_record_inner(version, bases, base_version, true)
+    }
+    /// Fetch a whole page's record and descriptor identities in one request.
+    /// The per-record work that follows finds them cached and sends nothing,
+    /// so a page costs its own requests rather than one request per record.
+    pub(crate) fn prefetch_record_metadata(
+        &self,
+        records: &[(risunest_sync_wire::RecordVersion, Vec<String>)],
+    ) -> Result<()> {
+        let mut hashes = Vec::new();
+        let mut hints = std::collections::BTreeMap::new();
+        for (version, bases) in records {
+            let risunest_sync_wire::RecordVersion::Live {
+                object_hash,
+                descriptor_hash: Some(descriptor_hash),
+            } = version
+            else {
+                continue;
+            };
+            for digest in [object_hash, descriptor_hash] {
+                // Records sharing an identity belong in the request once. The
+                // first record's bases are kept; a base inventory is a delta
+                // hint, not part of the identity being requested.
+                if hints.insert(digest.clone(), bases.clone()).is_none() {
+                    hashes.push(digest.clone());
+                }
+            }
+        }
+        if hashes.is_empty() {
+            return Ok(());
+        }
+        self.download_with_hints(&hashes, &[], &hints)
+    }
+    /// Fetch the bodies a page's records declare, in the same batched shape.
+    /// The set comes from each record's already cached descriptor, so no
+    /// payload is retained for the page to collect it. A descriptor that does
+    /// not read or validate here is left to the per-record path, which reports
+    /// it; a prefetch never decides an outcome.
+    pub(crate) fn prefetch_record_dependencies(
+        &self,
+        records: &[(risunest_sync_wire::RecordVersion, Vec<String>)],
+    ) -> Result<()> {
+        use risunest_sync_wire::descriptor::RecordDescriptor;
+        self.ensure_active()?;
+        let mut hashes = Vec::new();
+        let mut hints = std::collections::BTreeMap::new();
+        for (version, bases) in records {
+            let risunest_sync_wire::RecordVersion::Live {
+                descriptor_hash: Some(descriptor_hash),
+                ..
+            } = version
+            else {
+                continue;
+            };
+            let Ok(bytes) = self.cache.read(descriptor_hash, MAX_METADATA_BYTES) else {
+                continue;
+            };
+            let Ok(descriptor) = canonical::decode::<RecordDescriptor>(&bytes, MAX_METADATA_BYTES)
+            else {
+                continue;
+            };
+            if descriptor.validate().is_err() {
+                continue;
+            }
+            for digest in descriptor.dependencies {
+                if hints.insert(digest.clone(), bases.clone()).is_none() {
+                    hashes.push(digest);
+                }
+            }
+        }
+        if hashes.is_empty() {
+            return Ok(());
+        }
+        self.download_with_hints(&hashes, &[], &hints)
     }
     fn download_record_inner(
         &self,
@@ -164,6 +247,8 @@ impl<'a> Transfer<'a> {
             frame_limit: std::cell::Cell::new(FRAME_TARGET_BYTES),
             #[cfg(test)]
             frame_depth: 2,
+            #[cfg(test)]
+            pending_timeout: std::time::Duration::from_secs(120),
             base_sizes: std::cell::RefCell::new(None),
         })
     }
@@ -201,6 +286,14 @@ impl<'a> Transfer<'a> {
         }
     }
     fn store_download(&self, hash: &str, bytes: &[u8]) -> Result<()> {
+        if self.destination.is_none() {
+            // The derived cache owns where a body of this size belongs, and
+            // collects the small ones so a page of them lands together.
+            if self.cache.put(bytes)? != hash {
+                return Err(SyncError::new("transfer-target-mismatch", 502));
+            }
+            return Ok(());
+        }
         prepare_checked(
             self.destination(hash, bytes.len() as u64)?,
             &mut std::io::Cursor::new(bytes),
@@ -613,6 +706,112 @@ impl<'a> Transfer<'a> {
     pub fn download(&self, hashes: &[String], base_candidates: &[String]) -> Result<()> {
         self.download_with_hints(hashes, base_candidates, &std::collections::BTreeMap::new())
     }
+    /// One `objects/transfer` request. Frames the server answered in full are
+    /// stored; the identities it declined are returned with the size it
+    /// reported, so the caller can decide whether they still fit a reply.
+    fn transfer_batch(
+        &self,
+        targets: &[String],
+        base_candidates: &[String],
+        hints: &std::collections::BTreeMap<String, Vec<String>>,
+    ) -> Result<Vec<(String, u64)>> {
+        let mut requests = Vec::new();
+        for target in targets {
+            let candidates = hints.get(target).map_or(base_candidates, Vec::as_slice);
+            requests.push(serde_json::json!({"target":target,"bases":self.select_bases(target,None,candidates)?}));
+        }
+        let reply = self.client.request(
+            Method::POST,
+            "objects/transfer",
+            &[],
+            Some(canonical::encode(&requests)?),
+            &[],
+            risunest_sync_wire::transfer::MAX_BATCH_BYTES,
+        )?;
+        if reply.status != 200 {
+            return Err(response_error(reply));
+        }
+        // The encoded reply has no reader once its frames are owned, and
+        // holding both keeps two copies of a batch alive until the last
+        // body is stored.
+        let frames = transfer::decode(&reply.body)?;
+        drop(reply);
+        if frames.len() != targets.len() {
+            return Err(SyncError::new("transfer-count-mismatch", 502));
+        }
+        let mut declined = Vec::new();
+        // One reply's bodies become durable together.
+        let batch = self.cache.begin_batch()?;
+        for (target, frame) in targets.iter().zip(frames) {
+            self.ensure_active()?;
+            match frame {
+                Frame::Full(bytes) => {
+                    if hash(&bytes) != *target {
+                        return Err(SyncError::new("transfer-target-mismatch", 502));
+                    }
+                    self.store_download(target, &bytes)?;
+                    self.client.verified(bytes.len() as u64);
+                }
+                Frame::Delta(recipe) => {
+                    if recipe.target_hash != *target {
+                        return Err(SyncError::new("transfer-target-mismatch", 502));
+                    }
+                    let bases = recipe
+                        .bases
+                        .iter()
+                        .map(|b| self.cache.read(&b.hash, delta::MAX_TARGET_BYTES))
+                        .collect::<Result<Vec<_>>>()?;
+                    let bytes =
+                        recipe.apply(&bases.iter().map(Vec::as_slice).collect::<Vec<_>>())?;
+                    self.store_download(target, &bytes)?;
+                    self.client.verified(bytes.len() as u64);
+                }
+                Frame::FullRequired { hash, size } => {
+                    if hash != *target {
+                        return Err(SyncError::new("transfer-target-mismatch", 502));
+                    }
+                    declined.push((hash, size));
+                }
+            }
+        }
+        batch.commit()?;
+        Ok(declined)
+    }
+
+    /// Group declined identities into requests the server can answer inline.
+    /// A reply starts at the eight-byte batch header and each full frame adds
+    /// its body plus 45 bytes of framing, so a bin fits exactly when that sum
+    /// stays within the shared reply target.
+    fn inline_bins(declined: Vec<(String, u64)>) -> (Vec<Vec<String>>, Vec<(String, u64)>) {
+        let (mut bins, mut oversized) = (Vec::new(), Vec::new());
+        let (mut bin, mut used) = (Vec::new(), 8usize);
+        for (target, size) in declined {
+            // A body that cannot fit an empty reply is never answered inline,
+            // whatever the budget. Those keep the existing large-object path.
+            let Some(framed) = usize::try_from(size)
+                .ok()
+                .and_then(|size| size.checked_add(45))
+                .filter(|framed| 8 + framed <= transfer::PREFERRED_BATCH_BYTES)
+            else {
+                oversized.push((target, size));
+                continue;
+            };
+            if !bin.is_empty()
+                && (used + framed > transfer::PREFERRED_BATCH_BYTES
+                    || bin.len() == transfer::MAX_BATCH_OBJECTS)
+            {
+                bins.push(std::mem::take(&mut bin));
+                used = 8;
+            }
+            used += framed;
+            bin.push(target);
+        }
+        if !bin.is_empty() {
+            bins.push(bin);
+        }
+        (bins, oversized)
+    }
+
     fn download_with_hints(
         &self,
         hashes: &[String],
@@ -632,65 +831,40 @@ impl<'a> Transfer<'a> {
             }
         });
         loop {
-            let missing = absent.by_ref().take(1024).collect::<Result<Vec<_>>>()?;
+            let missing = absent
+                .by_ref()
+                .take(transfer::MAX_BATCH_OBJECTS)
+                .collect::<Result<Vec<_>>>()?;
             if missing.is_empty() {
                 break;
             }
-            let mut requests = Vec::new();
-            for target in &missing {
-                let candidates = hints.get(target).map_or(base_candidates, Vec::as_slice);
-                requests.push(serde_json::json!({"target":target,"bases":self.select_bases(target,None,candidates)?}));
-            }
-            let reply = self.client.request(
-                Method::POST,
-                "objects/transfer",
-                &[],
-                Some(canonical::encode(&requests)?),
-                &[],
-                risunest_sync_wire::transfer::MAX_BATCH_BYTES,
-            )?;
-            if reply.status != 200 {
-                return Err(response_error(reply));
-            }
-            let frames = transfer::decode(&reply.body)?;
-            if frames.len() != missing.len() {
-                return Err(SyncError::new("transfer-count-mismatch", 502));
-            }
-            for (target, frame) in missing.iter().zip(frames) {
-                self.ensure_active()?;
-                match frame {
-                    Frame::Full(bytes) => {
-                        if hash(&bytes) != *target {
-                            return Err(SyncError::new("transfer-target-mismatch", 502));
-                        }
-                        self.store_download(target, &bytes)?;
-                        self.client.verified(bytes.len() as u64);
-                    }
-                    Frame::Delta(recipe) => {
-                        if recipe.target_hash != *target {
-                            return Err(SyncError::new("transfer-target-mismatch", 502));
-                        }
-                        let bases = recipe
-                            .bases
-                            .iter()
-                            .map(|b| self.cache.read(&b.hash, delta::MAX_TARGET_BYTES))
-                            .collect::<Result<Vec<_>>>()?;
-                        let bytes =
-                            recipe.apply(&bases.iter().map(Vec::as_slice).collect::<Vec<_>>())?;
-                        self.store_download(target, &bytes)?;
-                        self.client.verified(bytes.len() as u64);
-                    }
-                    Frame::FullRequired { hash, size } => {
-                        if hash != *target {
-                            return Err(SyncError::new("transfer-target-mismatch", 502));
-                        }
-                        let candidates = hints.get(target).map_or(base_candidates, Vec::as_slice);
-                        if !self.download_delta(target, size, candidates)? {
-                            self.download_large(target, size)?;
-                        }
-                        self.client.verified(size);
-                    }
+            let mut pending = self.transfer_batch(&missing, base_candidates, hints)?;
+            // A filled reply declines the remaining identities even when they
+            // would fit one of their own. Re-request those as sized bins
+            // instead of falling through to one request per object. The pass
+            // limit is the loop guard: a peer that keeps declining a fitting
+            // object gets the single-object path rather than another round.
+            for _ in 0..REBIN_PASSES {
+                if pending.is_empty() {
+                    break;
                 }
+                let (bins, oversized) = Self::inline_bins(std::mem::take(&mut pending));
+                pending = oversized;
+                if bins.is_empty() {
+                    break;
+                }
+                for bin in bins {
+                    self.ensure_active()?;
+                    pending.extend(self.transfer_batch(&bin, base_candidates, hints)?);
+                }
+            }
+            for (target, size) in pending {
+                self.ensure_active()?;
+                let candidates = hints.get(&target).map_or(base_candidates, Vec::as_slice);
+                if !self.download_delta(&target, size, candidates)? {
+                    self.download_large(&target, size)?;
+                }
+                self.client.verified(size);
             }
         }
         self.ensure_active()
@@ -747,10 +921,10 @@ impl<'a> Transfer<'a> {
         let identities = candidates
             .iter()
             .zip(&sources)
-            .map(|(hash, file)| {
+            .map(|(hash, body)| {
                 Ok(Base {
                     hash: hash.clone(),
-                    size: file.metadata()?.len(),
+                    size: body.len()?,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -827,6 +1001,7 @@ impl<'a> Transfer<'a> {
         let started: Started = canonical::decode(&reply.body, MAX_METADATA_BYTES)?;
         risunest_sync_wire::validate_id(&started.job_id)?;
         let path = format!("object-deltas/{}", started.job_id);
+        let pending_since = std::time::Instant::now();
         loop {
             self.ensure_active()?;
             let reply = self.client.request(
@@ -839,8 +1014,8 @@ impl<'a> Transfer<'a> {
             )?;
             self.ensure_active()?;
             match reply.status {
-                202 => continue,
-                204 => {
+                202 if pending_since.elapsed() < self.pending_timeout() => continue,
+                202 | 204 | 410 => {
                     self.client.request(
                         Method::DELETE,
                         &path,
@@ -1085,7 +1260,11 @@ impl<'a> Transfer<'a> {
         Ok(())
     }
     fn wait_upload(&self, id: &str, hash: &str, size: u64) -> Result<()> {
+        let pending_since = std::time::Instant::now();
         loop {
+            if pending_since.elapsed() >= self.pending_timeout() {
+                return Err(SyncError::new("upload-finalization-pending", 503));
+            }
             self.ensure_active()?;
             let (_, progress): (_, UploadProgress) = self.client.json(
                 Method::GET,
@@ -1132,6 +1311,7 @@ impl<'a> Transfer<'a> {
         }
     }
     fn download_large(&self, target: &str, size: u64) -> Result<()> {
+        risunest_sync_wire::validate_hash(target)?;
         if size > 1024 * 1024 * 1024 * 1024 {
             return Err(SyncError::new("object-too-large", 413));
         }
@@ -1154,7 +1334,7 @@ impl<'a> Transfer<'a> {
                 if let Some((hash, stored)) = cached {
                     if stored >= 0
                         && stored as u64 == length
-                        && self.cache.read(&hash, CHUNK).is_ok()
+                        && self.read_chunk(target, index, &hash).is_ok()
                     {
                         continue;
                     }
@@ -1210,7 +1390,12 @@ impl<'a> Transfer<'a> {
             let mut failure = None;
             for result in results {
                 let stored = result.and_then(|(index, length, bytes)| {
-                    let hash = self.cache.put(&bytes)?;
+                    let hash = risunest_sync_wire::hash(&bytes);
+                    let directory = self.chunk_directory(target)?;
+                    let mut file = tempfile::NamedTempFile::new_in(&directory)?;
+                    std::io::Write::write_all(&mut file, &bytes)?;
+                    file.as_file().sync_all()?;
+                    file.persist(directory.join(index.to_string())).map_err(|error| error.error)?;
                     self.db.execute("INSERT INTO chunks VALUES(?1,?2,?3,?4) ON CONFLICT(target,part) DO UPDATE SET hash=excluded.hash,size=excluded.size",params![target,index as i64,hash,length as i64])?;
                     self.client.progress();
                     Ok(())
@@ -1242,7 +1427,44 @@ impl<'a> Transfer<'a> {
         )?;
         self.db
             .execute("DELETE FROM chunks WHERE target=?1", [target])?;
+        std::fs::remove_dir_all(self.chunk_directory(target)?)?;
         Ok(())
+    }
+    fn chunk_directory(&self, target: &str) -> Result<std::path::PathBuf> {
+        risunest_sync_wire::validate_hash(target)?;
+        let staging = self.cache.cas.repository_root().join("staging");
+        let directory = staging.join(target);
+        for path in [&staging, &directory] {
+            match std::fs::create_dir(path) {
+                Ok(()) => (),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (),
+                Err(error) => return Err(error.into()),
+            }
+            let metadata = std::fs::symlink_metadata(path)?;
+            if !metadata.is_dir() || crate::trust_boundary::is_link_like(&metadata) {
+                return Err(SyncError::new("invalid-chunk-staging", 409));
+            }
+        }
+        Ok(directory)
+    }
+    fn pending_timeout(&self) -> std::time::Duration {
+        #[cfg(test)]
+        { self.pending_timeout }
+        #[cfg(not(test))]
+        { std::time::Duration::from_secs(120) }
+    }
+    fn read_chunk(&self, target: &str, index: u64, hash: &str) -> Result<Vec<u8>> {
+        let path = self.chunk_directory(target)?.join(index.to_string());
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if !metadata.is_file() || crate::trust_boundary::is_link_like(&metadata) || metadata.len() > CHUNK as u64 {
+            return Err(SyncError::new("invalid-chunk-staging", 409));
+        }
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)?.take(CHUNK as u64 + 1).read_to_end(&mut bytes)?;
+        if bytes.len() > CHUNK || risunest_sync_wire::hash(&bytes) != hash {
+            return Err(SyncError::new("invalid-verified-chunk", 409));
+        }
+        Ok(bytes)
     }
 }
 
@@ -1258,6 +1480,21 @@ pub(crate) fn prepare_checked(
     size: u64,
     check: &dyn Fn() -> Result<()>,
 ) -> Result<()> {
+    let staged = stage_checked(cas, reader, hash, size, check)?;
+    check()?;
+    let outcome = cas.publish_staged(staged);
+    check()?;
+    outcome?;
+    Ok(())
+}
+
+pub(crate) fn stage_checked(
+    cas: &crate::asset_repository::PayloadCas,
+    reader: &mut impl Read,
+    hash: &str,
+    size: u64,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<crate::asset_repository::StagedPayload> {
     struct Checked<'a, R> {
         reader: R,
         check: &'a dyn Fn() -> Result<()>,
@@ -1269,10 +1506,9 @@ pub(crate) fn prepare_checked(
         }
     }
     check()?;
-    let outcome = cas.prepare_reader_expected(&mut Checked { reader, check }, hash, size);
+    let outcome = cas.stage_reader_expected(&mut Checked { reader, check }, hash, size);
     check()?;
-    outcome?;
-    Ok(())
+    Ok(outcome?)
 }
 struct ChunkReader<'a, 'b> {
     transfer: &'a Transfer<'b>,
@@ -1302,8 +1538,7 @@ impl Read for ChunkReader<'_, '_> {
                 .map_err(|_| std::io::Error::other("Missing verified chunk"))?;
             self.chunk = std::io::Cursor::new(
                 self.transfer
-                    .cache
-                    .read(&hash, CHUNK)
+                    .read_chunk(self.target, self.index, &hash)
                     .map_err(|_| std::io::Error::other("Invalid verified chunk"))?,
             );
             self.index += 1;
@@ -1314,6 +1549,34 @@ impl Read for ChunkReader<'_, '_> {
 #[cfg(test)]
 mod transfer_policy_tests {
     use super::delta_job_falls_back;
+
+    #[test]
+    fn cancelled_staging_keeps_cancellation_and_removes_the_unpublished_temp() {
+        use sha2::Digest;
+        let directory = tempfile::tempdir().unwrap();
+        let cas = crate::asset_repository::PayloadCas::new(directory.path()).unwrap();
+        let bytes = vec![9_u8; 128 * 1024];
+        let hash = hex::encode(sha2::Sha256::digest(&bytes));
+        let reads = std::cell::Cell::new(0);
+        struct Reader<'a> {
+            source: std::io::Cursor<Vec<u8>>,
+            reads: &'a std::cell::Cell<usize>,
+        }
+        impl std::io::Read for Reader<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                self.reads.set(self.reads.get() + 1);
+                std::io::Read::read(&mut self.source, buffer)
+            }
+        }
+        let mut reader = Reader { source: std::io::Cursor::new(bytes.clone()), reads: &reads };
+        let result = super::stage_checked(&cas, &mut reader, &hash, bytes.len() as u64, &|| {
+            if reads.get() > 0 { Err(super::SyncError::new("cancelled", 409)) } else { Ok(()) }
+        });
+        assert!(matches!(result, Err(ref error) if error.code == "cancelled"));
+        assert_eq!(reads.get(), 1);
+        assert!(cas.stat_object(&hash).unwrap().is_none());
+        assert_eq!(std::fs::read_dir(directory.path().join("assets/staging")).unwrap().count(), 0);
+    }
 
     #[test]
     fn delta_job_capacity_and_generation_failures_use_the_full_transfer_path() {

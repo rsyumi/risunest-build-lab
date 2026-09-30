@@ -3,6 +3,15 @@ use common::*;
 use risunest_sync_server::store::{ChangeCursor, Store};
 use risunest_sync_wire::{hash, Domain, RecordVersion};
 
+/// How many bodies the metadata database still holds, for the collection
+/// assertions that would otherwise only see metadata disappear.
+fn inline_bodies(dir: &std::path::Path) -> i64 {
+    rusqlite::Connection::open(dir.join("metadata.sqlite"))
+        .unwrap()
+        .query_row("SELECT count(*) FROM small_objects", [], |r| r.get(0))
+        .unwrap()
+}
+
 fn expire_leases(dir: &std::path::Path) {
     rusqlite::Connection::open(dir.join("metadata.sqlite"))
         .unwrap()
@@ -56,6 +65,7 @@ fn checkpoint_and_each_device_pin_survive_concurrent_commit_and_collection() {
         .unwrap();
     assert_eq!(store.maintain().unwrap().objects_removed, 1);
     assert!(store.object_size(&hash(b"old")).unwrap().is_none());
+    assert_eq!(inline_bodies(dir.path()), 1);
     assert_eq!(store.get_object(&hash(b"new")).unwrap(), b"new");
     assert_eq!(
         store
@@ -88,6 +98,7 @@ fn offline_ack_keeps_tombstones_history_and_staged_objects_and_epoch_rotates() {
     let b = device(&store);
     store.put_object(&a, &hash(b"x"), b"x").unwrap();
     let h = store.head().unwrap();
+    store.acknowledge(&b, &h.epoch, &acks(&h.seq)).unwrap();
     let mut c = changes("k", b"x");
     let intent = stage(&store, &a, &h, 1, &c);
     let h = store.commit(&a, &intent, &h.etag()).unwrap().head;
@@ -153,9 +164,86 @@ fn maintenance_folds_the_write_ahead_log_back_and_reports_a_blocked_checkpoint()
     // reports instead of leaving the growth unexplained.
     store.put_object(&a, &hash(b"new"), b"new").unwrap();
     let reader = rusqlite::Connection::open(dir.path().join("metadata.sqlite")).unwrap();
-    reader.execute_batch("BEGIN; SELECT count(*) FROM objects;").unwrap();
+    reader
+        .execute_batch("BEGIN; SELECT count(*) FROM objects;")
+        .unwrap();
     let blocked = store.checkpoint_wal().unwrap();
     assert!(blocked.incomplete());
     reader.execute_batch("COMMIT").unwrap();
     assert!(!store.checkpoint_wal().unwrap().incomplete());
+}
+
+#[test]
+fn collection_removes_a_published_file_and_an_inline_body_together() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::init(dir.path()).unwrap();
+    let a = device(&store);
+    let inline = b"synthetic inline body".to_vec();
+    let published = vec![b'p'; 128 * 1024];
+    for bytes in [&inline, &published] {
+        store.put_object(&a, &hash(bytes), bytes).unwrap();
+    }
+    let digest = hash(&published);
+    let path = dir.path().join("objects").join(&digest[..2]).join(&digest);
+    assert!(path.exists());
+    assert_eq!(inline_bodies(dir.path()), 1);
+    expire_leases(dir.path());
+    assert_eq!(store.maintain().unwrap().objects_removed, 2);
+    for bytes in [&inline, &published] {
+        assert!(store.object_size(&hash(bytes)).unwrap().is_none());
+    }
+    assert!(!path.exists());
+    assert_eq!(inline_bodies(dir.path()), 0);
+}
+
+#[test]
+fn collection_removes_a_stray_file_under_an_inline_identity() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::init(dir.path()).unwrap();
+    let a = device(&store);
+    let bytes = b"synthetic inline body".to_vec();
+    let digest = hash(&bytes);
+    store.put_object(&a, &digest, &bytes).unwrap();
+    // Model a store where a file was published under an identity the metadata
+    // files inline, which is what collection has to survive.
+    let path = dir.path().join("objects").join(&digest[..2]).join(&digest);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, &bytes).unwrap();
+    expire_leases(dir.path());
+    assert_eq!(store.maintain().unwrap().objects_removed, 1);
+    assert!(!path.exists());
+    assert_eq!(inline_bodies(dir.path()), 0);
+}
+
+#[test]
+fn a_revoked_device_leaves_the_device_list_once_nothing_it_holds_remains() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::init(dir.path()).unwrap();
+    let kept = device(&store);
+    let idle = device(&store);
+    let busy = device(&store);
+    store.put_object(&idle, &hash(b"done"), b"done").unwrap();
+    store.put_object(&busy, &hash(b"pending"), b"pending").unwrap();
+    let h = store.head().unwrap();
+    let intent = stage(&store, &idle, &h, 1, &changes("done", b"done"));
+    let h = store.commit(&idle, &intent, &h.etag()).unwrap().head;
+    store.acknowledge(&idle, &h.epoch, &acks(&h.seq)).unwrap();
+    let intent = stage(&store, &busy, &h, 1, &changes("pending", b"pending"));
+    store.submit_commit(&busy, &intent, &h.etag()).unwrap();
+    store.revoke_device(&idle.id).unwrap();
+    store.revoke_device(&busy.id).unwrap();
+    let listed = |store: &Store| {
+        store
+            .managed_devices()
+            .unwrap()
+            .into_iter()
+            .map(|d| d.id)
+            .collect::<Vec<_>>()
+    };
+    store.maintain().unwrap();
+    assert_eq!(listed(&store), [kept.id.clone(), busy.id.clone()]);
+    assert!(store.run_pending_commit().unwrap());
+    store.maintain().unwrap();
+    assert_eq!(listed(&store), [kept.id.clone()]);
+    assert_eq!(store.head().unwrap().seq, h.seq);
 }

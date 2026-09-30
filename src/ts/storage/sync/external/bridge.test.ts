@@ -3,6 +3,36 @@ import { IDBFactory } from 'fake-indexeddb'
 import { ExternalStorageBridge, ExternalStorageUnsupportedError } from './bridge'
 
 describe('ExternalStorageBridge', () => {
+    it('renews and unlocks only the existing connection identity', async () => {
+        const invoke = vi.fn(async () => ({}))
+        const bridge = new ExternalStorageBridge({ supported: () => true, invoke })
+        await bridge.prepareRenewal('existing')
+        await bridge.unlockConnection('existing', 'synthetic-recovery')
+        expect(invoke.mock.calls).toEqual([
+            ['external_storage_prepare_renewal', { connectionId: 'existing' }],
+            ['external_storage_unlock_connection', { connectionId: 'existing', recoveryKey: 'synthetic-recovery' }],
+        ])
+    })
+
+    it('keeps pause commands separate from job admission', async () => {
+        const invoke = vi.fn(async () => true)
+        const bridge = new ExternalStorageBridge({ supported: () => true, invoke })
+        await bridge.setSyncPaused(true, '4')
+        await bridge.setAutomaticBackupPaused('existing', true)
+        expect(invoke.mock.calls).toEqual([
+            ['external_storage_set_sync_paused', { request: { paused: true, expectedSelectionEpoch: '4' } }],
+            ['external_storage_set_automatic_backup_paused', { connectionId: 'existing', paused: true }],
+        ])
+    })
+
+    it('does not construct a native export channel on the web', async () => {
+        const invoke = vi.fn()
+        const bridge = new ExternalStorageBridge({ supported: () => false, invoke })
+        await expect(bridge.exportSnapshot('connection', 'snapshot', 'export', vi.fn()))
+            .rejects.toBeInstanceOf(ExternalStorageUnsupportedError)
+        expect(invoke).not.toHaveBeenCalled()
+    })
+
     it('captures the native revision and selection identity for an exit drain', async () => {
         const capture = {
             revision: '9',

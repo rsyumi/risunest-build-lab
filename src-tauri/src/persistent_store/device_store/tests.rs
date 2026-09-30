@@ -763,7 +763,9 @@ fn device_settings_accept_only_the_assigned_keys() {
             "risu_service_tos_v1",
             "risu_lastsaved",
             "nightlyWarned",
+            "mcpStdioApprovals",
             "risuNestDeviceSettings",
+            "risuNestStartupExclusions",
             "risuNestUpdateSettings",
             "risuNestServerSyncRestoreHold",
             "official-account.association.v1",
@@ -1112,6 +1114,16 @@ fn a_committed_device_value_survives_reopening_the_device_file() {
 
 
 mod section_exchange {
+    use risunest_external_storage_format::section::SectionKind;
+
+    impl DeviceStore {
+        fn restore_backup_fixture(&mut self, kind: SectionKind, rows: &[SectionRow]) -> crate::persistent_store::StoreResult<()> {
+            let mut spool = SectionSpoolBuilder::new_backup(kind)?;
+            for row in rows { spool.push_backup_row(row.clone())?; }
+            self.restore_prepared_backup_section(&spool.finish_captured()?)
+        }
+    }
+
     use super::super::sections::{
         PublishedRows, SectionApplyOutcome, SectionCursor, SectionRow, SectionSpoolBuilder,
         SectionValueRow, TombstonePublication, LOCAL_SETTING_KEYS,
@@ -1460,8 +1472,8 @@ mod section_exchange {
     fn restored_backup_material_becomes_this_device_own_write() {
         let (_directory, mut store) = open();
         store
-            .restore_section_rows(
-                Section::LocalPlugins,
+            .restore_backup_fixture(
+                SectionKind::LocalPlugins,
                 &[plugin_row("alpha", "from-backup", 0, "")],
             )
             .expect("restore plugin value");
@@ -1500,6 +1512,35 @@ mod section_exchange {
         );
     }
 
+    #[test]
+    fn prepared_hypa_restore_reissues_local_clocks_and_retries_without_new_writes() {
+        let (_source_dir, mut source) = open();
+        source.write_hypa_embeddings(&[super::embedding("restored", &[1.0, 2.0])]).unwrap();
+        let rows = source.read_backup_section_rows(Section::Hypa).unwrap();
+        let (_target_dir, mut target) = open();
+        target.write_hypa_embeddings(&[super::embedding("dropped", &[3.0])]).unwrap();
+        target.restore_backup_fixture(SectionKind::Hypa, &rows).unwrap();
+        let first = target.read_section_rows(Section::Hypa).unwrap();
+        assert!(first.iter().all(|row| row.writer_id == target.writer_id().unwrap()));
+        let restored = first.iter().find(|row| !row.value.is_tombstone()).unwrap();
+        assert_eq!(restored.value, rows[0].value);
+        assert!(restored.write_clock > Sequence::from(1u64));
+        let clock = target.section_state(Section::Hypa).unwrap().max_write_clock;
+        target.restore_backup_fixture(SectionKind::Hypa, &rows).unwrap();
+        assert_eq!(target.read_section_rows(Section::Hypa).unwrap(), first);
+        assert_eq!(target.section_state(Section::Hypa).unwrap().max_write_clock, clock);
+        target.restore_backup_fixture(SectionKind::Hypa, &[]).unwrap();
+        assert!(target.read_backup_section_rows(Section::Hypa).unwrap().is_empty());
+    }
+
+    #[test]
+    fn backup_spool_rejects_duplicate_keys_before_restore() {
+        let mut spool = SectionSpoolBuilder::new_backup(SectionKind::LocalPlugins).unwrap();
+        let row = plugin_row("duplicate", "one", 0, "");
+        spool.push_backup_row(row.clone()).unwrap();
+        assert!(spool.push_backup_row(row).is_err());
+    }
+
     /// Invariant 31 on the device side. The material decides the section: a key
     /// it carries is installed, a key it leaves out is removed, and a section it
     /// says nothing about keeps everything this device holds.
@@ -1512,8 +1553,8 @@ mod section_exchange {
             .write_hypa_embeddings(&[super::embedding("kept-embedding", &[1.0])])
             .expect("write embedding");
         store
-            .restore_section_rows(
-                Section::LocalPlugins,
+            .restore_backup_fixture(
+                SectionKind::LocalPlugins,
                 &[
                     plugin_row("kept", "after", 0, ""),
                     plugin_row("added", "after", 0, ""),
@@ -1545,7 +1586,7 @@ mod section_exchange {
         set(&mut store, "alpha", "before");
         set(&mut store, "beta", "before");
         store
-            .restore_section_rows(Section::LocalPlugins, &[])
+            .restore_backup_fixture(SectionKind::LocalPlugins, &[])
             .expect("restore an empty section");
         assert_eq!(
             live(&mut store),
@@ -1570,7 +1611,7 @@ mod section_exchange {
             plugin_row("beta", "from-backup", 0, ""),
         ];
         store
-            .restore_section_rows(Section::LocalPlugins, &material)
+            .restore_backup_fixture(SectionKind::LocalPlugins, &material)
             .expect("restore plugin values");
         let after_first = store
             .section_state(Section::LocalPlugins)
@@ -1581,7 +1622,7 @@ mod section_exchange {
             .expect("read section rows");
 
         store
-            .restore_section_rows(Section::LocalPlugins, &material)
+            .restore_backup_fixture(SectionKind::LocalPlugins, &material)
             .expect("retry the restore");
         assert_eq!(
             store
@@ -1607,6 +1648,7 @@ mod section_exchange {
         store
             .write_setting("risuNestDeviceSettings", &serde_json::json!({ "a": 1 }))
             .expect("write device setting");
+        store.write_setting("risuNestStartupExclusions", &serde_json::json!(["plugin-script", "triggers"])).unwrap();
         store
             .write_setting("dosync", &serde_json::json!(true))
             .expect("write sync setting");
@@ -1614,14 +1656,14 @@ mod section_exchange {
             .write_setting("risu_lastsaved", &serde_json::json!("control"))
             .expect("write control setting");
         store
-            .write_plugin_permission("code-a", "network", true)
+            .write_plugin_permission(&"a".repeat(64), "network", true)
             .expect("write permission");
         store
             .write_plugin_permission("code-b", "network", true)
             .expect("write permission");
 
         store
-            .restore_local_setting_rows(&[
+            .restore_backup_fixture(SectionKind::LocalSettings, &[
                 SectionRow {
                     key1: "setting".into(),
                     key2: "dosync".into(),
@@ -1634,7 +1676,7 @@ mod section_exchange {
                 },
                 SectionRow {
                     key1: "pluginPermission".into(),
-                    key2: "code-b".into(),
+                    key2: "b".repeat(64),
                     key3: "network".into(),
                     value: SectionValueRow::PluginPermission { granted: false },
                     write_clock: Sequence::from(0u64),
@@ -1664,8 +1706,13 @@ mod section_exchange {
                 .into_iter()
                 .map(|permission| (permission.code_hash, permission.granted))
                 .collect::<Vec<_>>(),
-            vec![("code-b".to_owned(), false)]
+            vec![("b".repeat(64), false)]
         );
+        store.restore_backup_fixture(SectionKind::LocalSettings, &[]).unwrap();
+        assert!(store.read_setting("dosync").unwrap().is_none());
+        assert!(store.read_plugin_permissions().unwrap().is_empty());
+        assert_eq!(store.read_setting("risuNestStartupExclusions").unwrap(), Some(serde_json::json!(["plugin-script", "triggers"])));
+        assert_eq!(store.read_setting("risu_lastsaved").unwrap(), Some(serde_json::json!("control")));
     }
 
     /// A cursor only moves forward, so a replayed apply cannot lose ground and
@@ -1885,4 +1932,27 @@ fn a_synchronised_section_write_advances_the_device_revision_and_a_fixed_write_d
         .write_plugin_permission_grant("synthetic-plugin", "network", 1)
         .expect("grant a plugin permission");
     assert_eq!(store.revision().unwrap(), after_plugin);
+}
+
+#[test]
+fn clear_hypa_cache_reclaims_vectors_and_issues_publishable_tombstones() {
+    let (_directory, mut store) = open();
+    store.write_hypa_embeddings(&[embedding("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", &[1.0,2.0]), embedding("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", &[3.0])]).unwrap();
+    assert_eq!(store.hypa_embedding_usage().unwrap(), (2,12));
+    let before = store.revision().unwrap();
+    store.clear_hypa_embeddings().unwrap();
+    assert!(store.revision().unwrap() > before);
+    assert_eq!(store.hypa_embedding_usage().unwrap(), (0,0));
+    assert!(store.read_hypa_embeddings(&["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned()]).unwrap().iter().all(|row| row.vector.is_none()));
+    let tombstones: i64 = store.connection().query_row("SELECT count(*) FROM hypa_embeddings WHERE tombstone=1 AND vector IS NULL AND published_clock IS NULL", [], |row| row.get(0)).unwrap();
+    assert_eq!(tombstones, 2);
+    assert!(store.read_backup_section_rows(Section::Hypa).unwrap().is_empty());
+    let (_peer_directory, mut peer) = open();
+    peer.write_hypa_embeddings(&[embedding("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", &[1.0,2.0])]).unwrap();
+    let changes = store.read_section_rows(Section::Hypa).unwrap();
+    peer.apply_section_rows(Section::Hypa, &changes).unwrap();
+    assert_eq!(peer.hypa_embedding_usage().unwrap(), (0,0));
+    let cleared = store.revision().unwrap();
+    store.clear_hypa_embeddings().unwrap();
+    assert_eq!(store.revision().unwrap(), cleared);
 }

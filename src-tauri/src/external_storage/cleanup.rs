@@ -12,6 +12,7 @@ use super::{
     gc_store::{locator_key, GcStore},
     journal::TransferJournal,
     leases::{self, Admission, ClockReading, LeaseContext, LeaseOwner, PageTracker},
+    package_cache,
     packaging::{self, RemoteObject},
     reachability::{self, DocumentNode, DocumentSource, MarkRequest, RetiredPoint, Roots},
 };
@@ -154,6 +155,7 @@ pub(crate) trait RepositoryView: Sync {
         Box::pin(async { Err(ProviderError::new(ErrorKind::Unsupported)) })
     }
     fn confirmed_removed(&self, _object: &RemoteObject) -> Result<()> { Ok(()) }
+    fn prepare_removals(&self, _objects: &[RemoteObject]) -> Result<()> { Ok(()) }
     fn protected_jobs(&self) -> Vec<String> { Vec::new() }
 }
 pub(crate) struct CleanupRequest<'a> {
@@ -329,6 +331,9 @@ async fn run_owned(
             outcome.stop_reason = reason;
             break;
         }
+        // Invalidate the bounded candidate batch before deletion. An interrupted
+        // batch may discard reusable hints, but can never leave a deleted hint.
+        view.prepare_removals(batch)?;
         for object in batch {
             if sent >= request.limits.per_run {
                 outcome.stop_reason = StopReason::Limit;
@@ -540,7 +545,7 @@ pub(crate) struct UnfinishedJob {
     pub references: Vec<RemoteObject>,
 }
 
-fn job_roots_of(unfinished: &[UnfinishedJob]) -> Result<JobRoots> {
+fn job_roots_of(unfinished: &[UnfinishedJob], repository: &RepositoryHandle) -> Result<JobRoots> {
     let mut roots = JobRoots::default();
     for job in unfinished {
         roots.snapshot_ids.extend(job.snapshot_ids.iter().cloned());
@@ -551,6 +556,16 @@ fn job_roots_of(unfinished: &[UnfinishedJob]) -> Result<JobRoots> {
             Err(_) => return Err(ProviderError::new(ErrorKind::Transient)),
             Ok(_) => roots.objects.extend(TransferJournal::uploaded(&job.directory, &job.job_id)?),
         }
+    }
+    // A stopped publication is still entitled to the parent it selected, and
+    // its own inventory does not name what it reused without uploading. A
+    // stopped check likewise still owns the root it resumes on, which may be
+    // a head that has since moved on.
+    for job in unfinished {
+        for root in TransferJournal::parent(&job.directory)? {
+            roots.references.push(super::packaging::RemoteObject::from_stored(&root, repository)?);
+        }
+        roots.references.extend(super::repository_check::pinned_root(&job.directory, repository)?);
     }
     roots.objects.sort_by_key(|object| locator_key(&object.locator).unwrap_or_default());
     roots.references.sort_by_key(|object| locator_key(&object.receipt.locator).unwrap_or_default());
@@ -754,15 +769,17 @@ impl RepositoryView for ConnectedRepositoryView<'_> {
             }
         })
     }
-    fn job_roots(&self) -> Result<JobRoots> { job_roots_of(&self.unfinished) }
-    fn confirmed_removed(&self, object: &RemoteObject) -> Result<()> {
-        packaging::forget_remote_object(self.cache_root, &self.connected.handle, object)
+    fn job_roots(&self) -> Result<JobRoots> { job_roots_of(&self.unfinished, &self.connected.handle) }
+    fn prepare_removals(&self, objects: &[RemoteObject]) -> Result<()> {
+        let cache = package_cache::PackageCache::open(self.cache_root)?;
+        let ids: Vec<&str> = objects.iter().map(|object| object.object_id.as_str()).collect();
+        cache.forget_objects(&self.connected.stored.descriptor.repository_id, &self.connected.handle, &ids)
     }
     fn protected_jobs(&self) -> Vec<String> {
         self.unfinished.iter().map(|job| job.job_id.clone()).collect()
     }
     fn known_objects(&self) -> Result<Vec<RemoteObject>> {
-        packaging::known_remote_objects(
+        package_cache::known_remote_objects(
             self.cache_root, &self.connected.stored.descriptor.repository_id, &self.connected.handle,
         )
     }
@@ -1167,6 +1184,7 @@ mod tests {
                     retention_policy: None,
                     capabilities: fake::capabilities(true),
                     created_at_ms: 1_000,
+                    verified_at_ms: 1,
                     last_sync_at_ms: None,
                     last_backup_at_ms: None,
                 },
@@ -1366,6 +1384,45 @@ mod tests {
             assert_eq!(h.provider.delete_attempts("child-pack"), 0);
         });
     }
+    /// A publication that stopped still holds the parent it selected, and the
+    /// graph beneath that parent is what it is reusing.
+    #[test]
+    fn c_a_stopped_job_keeps_protecting_the_parent_it_recorded() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = fake::repository();
+        let jobs = vec![UnfinishedJob {
+            job_id: "job".into(), directory: directory.path().into(),
+            snapshot_ids: BTreeSet::new(), references: Vec::new(),
+        }];
+        assert!(job_roots_of(&jobs, &repository).unwrap().references.is_empty());
+        let parent = object("parent-catalog", ObjectRole::Catalog);
+        std::fs::write(
+            directory.path().join("parent.json"),
+            serde_json::to_vec(&vec![parent.stored(&repository).unwrap()]).unwrap(),
+        ).unwrap();
+        assert_eq!(job_roots_of(&jobs, &repository).unwrap().references, vec![parent]);
+        std::fs::write(directory.path().join("parent.json"), b"broken parent").unwrap();
+        assert!(job_roots_of(&jobs, &repository).is_err());
+    }
+
+    /// A check stopped part way keeps the root it started on, even when no
+    /// snapshot was named and the head it read has since moved on.
+    #[test]
+    fn c_a_stopped_check_keeps_protecting_the_root_it_pinned() {
+        let directory = tempfile::tempdir().unwrap();
+        let repository = fake::repository();
+        let jobs = vec![UnfinishedJob {
+            job_id: "check".into(), directory: directory.path().into(),
+            snapshot_ids: BTreeSet::new(), references: Vec::new(),
+        }];
+        assert!(job_roots_of(&jobs, &repository).unwrap().references.is_empty());
+        let checked = object("checked-state", ObjectRole::SyncState);
+        super::super::repository_check::pin_root(directory.path(), &checked, &repository).unwrap();
+        assert_eq!(job_roots_of(&jobs, &repository).unwrap().references, vec![checked]);
+        std::fs::write(directory.path().join("checked-root.json"), b"broken root").unwrap();
+        assert!(job_roots_of(&jobs, &repository).is_err(), "an unreadable pin became no root");
+    }
+
     #[test]
     fn c_corrupt_job_journal_is_not_silently_dropped_from_protected_roots() {
         let directory = tempfile::tempdir().unwrap();
@@ -1373,9 +1430,9 @@ mod tests {
             job_id: "job".into(), directory: directory.path().into(),
             snapshot_ids: BTreeSet::new(), references: Vec::new(),
         }];
-        assert!(job_roots_of(&jobs).unwrap().objects.is_empty());
+        assert!(job_roots_of(&jobs, &fake::repository()).unwrap().objects.is_empty());
         std::fs::write(directory.path().join("transfers.sqlite"), b"broken journal").unwrap();
-        assert!(job_roots_of(&jobs).is_err());
+        assert!(job_roots_of(&jobs, &fake::repository()).is_err());
     }
     #[test]
     fn c_root_identity_compares_bytes_and_locators_not_only_identifiers() {

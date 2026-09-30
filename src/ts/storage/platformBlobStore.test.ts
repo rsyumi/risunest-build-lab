@@ -43,6 +43,34 @@ function deferred() {
 
 describe('platform BlobStore', () => {
     const endpoint = 'http://127.0.0.1:12345/0123456789abcdef0123456789abcdef/'
+    test('conditional writes compare bytes under the existing gate and preserve equal-size replacements', async () => {
+        const { backend } = memoryBackend()
+        const store = createGatedBlobStore(createBackedBlobStore(backend), createStorageMutationGate({ locks: createInRealmStorageLockManager() }))
+        const metadata = { kind: 'inlay' as const, inlayType: 'image' as const, mime: 'image/png', name: 'synthetic', ext: 'png' }
+        await store.put('synthetic', Uint8Array.of(1, 2), metadata)
+        const writer = await store.captureConditionalWrite!('synthetic')
+        await store.put('synthetic', Uint8Array.of(3, 4), metadata)
+        expect(await writer!(Uint8Array.of(9), metadata, Uint8Array.of(1, 2))).toBeNull()
+        expect(await store.read('synthetic')).toEqual(Uint8Array.of(3, 4))
+        const deletedWriter = await store.captureConditionalWrite!('synthetic')
+        await store.remove('synthetic')
+        expect(await deletedWriter!(Uint8Array.of(9), metadata, Uint8Array.of(3, 4))).toBeNull()
+        expect(await store.read('synthetic')).toBeNull()
+    })
+
+    test('rejects a changed read even if the original bytes were restored before writing', async () => {
+        const { backend } = memoryBackend()
+        const store = createGatedBlobStore(createBackedBlobStore(backend), createStorageMutationGate({ locks: createInRealmStorageLockManager() }))
+        const metadata = { kind: 'inlay' as const, inlayType: 'image' as const, mime: 'image/png', name: 'synthetic', ext: 'png' }
+        await store.put('synthetic', Uint8Array.of(1), metadata)
+        const writer = await store.captureConditionalWrite!('synthetic')
+        await store.put('synthetic', Uint8Array.of(2), metadata)
+        const source = await store.read('synthetic')
+        await store.put('synthetic', Uint8Array.of(1), metadata)
+        expect(await writer!(Uint8Array.of(9), metadata, source!)).toBeNull()
+        expect(await store.read('synthetic')).toEqual(Uint8Array.of(1))
+    })
+
     test('encodes physical keys into a scoped loopback endpoint without AppData paths', () => {
         expect(
             createTauriNativeMediaUrl('assets/folder/photo.jpg', endpoint),
@@ -394,4 +422,18 @@ describe('platform BlobStore', () => {
 
         await expect(readBlobForFacade(store, 'assets/missing', false)).resolves.toBeNull()
     })
+})
+
+test('media recovery coalesces health checks and replaces a changed cached endpoint', async () => {
+    const first = 'http://127.0.0.1:12345/0123456789abcdef0123456789abcdef/'
+    const second = first.replace('12345', '23456')
+    const invoke = vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(first).mockResolvedValueOnce(second)
+    const changed = vi.fn()
+    const provider = createNativeMediaEndpointProvider(invoke, changed)
+    expect(await provider()).toBe(first)
+    expect(await provider.ensure()).toBe(false)
+    expect(await Promise.all([provider.ensure(), provider.ensure()])).toEqual([true, true])
+    expect(await provider()).toBe(second)
+    expect(invoke.mock.calls).toEqual([['native_media_base_url'], ['native_media_ensure'], ['native_media_ensure']])
+    expect(changed).toHaveBeenCalledOnce()
 })

@@ -1,5 +1,5 @@
 import { doingChat, reserveGeneration } from "../process/generationState";
-import { isLibraryFileOperationReserved } from "./libraryFileOperation";
+import { isLibraryFileOperationReserved, registerLibraryFileOperationGate } from "./libraryFileOperation";
 import { get } from 'svelte/store'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -33,6 +33,32 @@ function status(patch: Partial<NativeFileJobStatus> = {}): NativeFileJobStatus {
 }
 
 describe('renderer-lifetime native file job manager', () => {
+    it('waits for safe synchronization settlement and releases a cancelled wait', async () => {
+        let releaseSync!: () => void
+        const sync = new Promise<void>(resolve => { releaseSync = resolve })
+        const unregister = registerLibraryFileOperationGate(() => sync)
+        const work = vi.fn(async () => 'imported')
+        try {
+            const waiting = runSharedNativeFileOperation('import', 'synthetic-character', work, { format: 'content' })
+            expect(isLibraryFileOperationReserved()).toBe(true)
+            expect(work).not.toHaveBeenCalled()
+            expect(get(nativeFileOperation)?.waitingForSync).toBe(true)
+            cancelActiveNativeFileOperation()
+            await expect(waiting).rejects.toMatchObject({ name: 'AbortError' })
+            expect(isLibraryFileOperationReserved()).toBe(false)
+            expect(work).not.toHaveBeenCalled()
+            const next = runSharedNativeFileOperation('import', 'synthetic-character', work, { format: 'content' })
+            expect(work).not.toHaveBeenCalled()
+            releaseSync()
+            await expect(next).resolves.toBe('imported')
+            expect(work).toHaveBeenCalledOnce()
+            expect(isLibraryFileOperationReserved()).toBe(false)
+        } finally {
+            unregister()
+            releaseSync()
+        }
+    })
+
     beforeEach(() => {
         dismissNativeFileOperationOutcome()
     })
@@ -277,6 +303,13 @@ describe('renderer-lifetime native file job manager', () => {
                 expected: {
                     state: 'failed',
                     error: { code: 'unsupported-format', message: 'not a backup', recoveryRequired: false },
+                },
+            },
+            {
+                error: { code: 'invalid-source', message: 'Android spool manifest is invalid' },
+                expected: {
+                    state: 'failed',
+                    error: { code: 'invalid-source', message: 'Android spool manifest is invalid', recoveryRequired: false },
                 },
             },
             {

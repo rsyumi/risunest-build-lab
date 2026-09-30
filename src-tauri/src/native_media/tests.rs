@@ -956,3 +956,15 @@ fn huge_gif_canvas_is_preserved_without_decoding_pixels() {
     assert_eq!(result.data, source);
     assert_eq!(result.metadata.preservation_reason.as_deref(), Some("animation-cost"));
 }
+
+#[test]
+fn tagged_still_images_preserve_the_source_profile_and_exact_bytes() {
+    use image::ImageEncoder;
+    let mut source = Vec::new();
+    let mut encoder = image::codecs::png::PngEncoder::new(&mut source);
+    encoder.set_icc_profile(vec![0; 132]).unwrap();
+    encoder.write_image(&[255, 32, 0, 255], 1, 1, image::ExtendedColorType::Rgba8).unwrap();
+    let result = encode_inlay_image("profile", &source, "profile.png", None).unwrap();
+    assert_eq!(result.data, source);
+    assert_eq!(result.metadata.preservation_reason.as_deref(), Some("color-profile"));
+}

@@ -106,6 +106,25 @@ afterEach(() => {
 })
 
 describe('IME visibility', () => {
+    it('rechecks a growing focused editor after input and restores it on blur', () => {
+        const { app, input } = createApp(200, 240)
+        const action = keepFocusedInputVisible(app, true)
+        visualViewport.height = 500
+        input.focus()
+        flushAnimationFrames()
+        expect(app.style.translate ?? '').toBe('')
+        vi.mocked(input.getBoundingClientRect).mockReturnValue({ top: 200, bottom: 600, height: 400 } as DOMRect)
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+        flushAnimationFrames()
+        expect(app.style.translate).toBe('0 -108px')
+        input.blur()
+        flushAnimationFrames()
+        expect(app.style.translate ?? '').toBe('')
+        action.destroy()
+        input.dispatchEvent(new Event('input', { bubbles: true }))
+        expect(animationFrames).toHaveLength(0)
+    })
+
     it('keeps the app in place when the focused input remains visible', () => {
         const { app, input } = createApp(200, 240)
         const action = keepFocusedInputVisible(app, true)

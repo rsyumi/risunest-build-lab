@@ -15,7 +15,7 @@ import {
 } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { assertSyncIdentifier, mergeTauriConfig } from "../../../scripts/release/tauri-config.mjs";
+import { assertNoIdentifierOverride, assertSyncIdentifier, mergeTauriConfig } from "../../../scripts/release/tauri-config.mjs";
 
 const manager = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const gui = join(manager, "gui");
@@ -241,9 +241,12 @@ export function packageNativeSuite({ nativeBuild, rawArchive, output, releaseInp
   const os = target.includes("windows") ? "windows" : target.includes("linux") ? "linux" : "darwin";
   const tauriPlatform = os === "darwin" ? "macos" : os;
   const tauriRoot = join(gui, "src-tauri");
+  const overlayPath = join(tauriRoot, `tauri.${tauriPlatform}.conf.json`);
+  const overlay = existsSync(overlayPath) ? JSON.parse(readFileSync(overlayPath, "utf8")) : null;
+  assertNoIdentifierOverride(overlay, overlayPath);
   const tauriConfig = mergeTauriConfig(
     JSON.parse(readFileSync(join(tauriRoot, "tauri.conf.json"), "utf8")),
-    JSON.parse(readFileSync(join(tauriRoot, `tauri.${tauriPlatform}.conf.json`), "utf8")),
+    overlay,
   );
   assertSyncIdentifier(tauriConfig, tauriPlatform);
   const rawFormat = os === "windows" ? "zip" : "tar.gz";

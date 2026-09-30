@@ -1,7 +1,9 @@
 //! Incremental canonical projection, independent of server wire/view policy.
-//! The caller hydrates remote-only objects before preparation, and owns file(true)
-//! until the sink and its durable capture reference have been finalized. No network I/O is
-//! performed through this snapshot or while holding the live PDS connection.
+//! The caller hydrates remote-only owner manifests before preparation, and owns
+//! file(true) until the sink and its durable capture reference have been
+//! finalized. A payload is sized from its local body or its custody record. No
+//! network I/O is performed through this snapshot or while holding the live PDS
+//! connection.
 use super::{
     content_change_index::{self, ChangeWindow, ContentKey},
     record_projection::{codec_error, missing_source},
@@ -14,7 +16,55 @@ use crate::{
     logical_records::*,
 };
 use rusqlite::{params, Connection};
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc};
+use std::{
+    collections::BTreeMap,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
+
+/// The size a capture records for a payload: its local body's when the body is
+/// held, and otherwise what its active custody states. Projection never reads
+/// a payload, so a custody size is all it needs.
+struct PayloadSizes {
+    cas: PayloadCas,
+    residency: Option<crate::server_sync::residency::Residency>,
+}
+
+impl PayloadSizes {
+    fn open(repository_root: &Path) -> StoreResult<Self> {
+        let residency = if crate::server_sync::residency::Residency::exists(repository_root) {
+            Some(
+                crate::server_sync::residency::Residency::open(repository_root)
+                    .map_err(custody_error)?,
+            )
+        } else {
+            None
+        };
+        Ok(Self {
+            cas: PayloadCas::new(repository_root)?,
+            residency,
+        })
+    }
+
+    fn size(&self, hash: &str) -> StoreResult<Option<u64>> {
+        if let Some(size) = self.cas.stat_object(hash)? {
+            return Ok(Some(size));
+        }
+        let Some(residency) = &self.residency else {
+            return Ok(None);
+        };
+        Ok(residency
+            .object(hash, None)
+            .map_err(custody_error)?
+            .map(|object| object.size))
+    }
+}
+
+fn custody_error(error: crate::server_sync::SyncError) -> StoreError {
+    StoreError::Validation {
+        message: format!("Payload custody is unavailable: {}", error.code),
+    }
+}
 
 /// A sink must reset on a full capture, or verify its durable cache is exactly
 /// `after_revision` before accepting a delta. Aborting must not replace that cache.
@@ -136,6 +186,7 @@ impl PreparedContentCapture {
         check(probe)?;
         let db = &self.reader.connection;
         let cas = PayloadCas::new(&self.repository_root)?;
+        let sizes = PayloadSizes::open(&self.repository_root)?;
         let after = match content_change_index::window(&self.reader, &self.consumer)? {
             ChangeWindow::Rebuild => None,
             ChangeWindow::Incremental { after_revision } => {
@@ -166,7 +217,7 @@ impl PreparedContentCapture {
             }
             for key in &keys {
                 check(probe)?;
-                project_record(db, &cas, &self.identity.generation, key, sink, probe)?;
+                project_record(db, &cas, &sizes, &self.identity.generation, key, sink, probe)?;
                 count += 1;
             }
             previous = keys.last().cloned();
@@ -297,6 +348,7 @@ fn locator(key: &ContentKey) -> StoreResult<LogicalRecordLocator> {
 fn project_record(
     db: &Connection,
     cas: &PayloadCas,
+    sizes: &PayloadSizes,
     generation: &str,
     key: &ContentKey,
     sink: &mut dyn ContentCaptureSink,
@@ -377,8 +429,9 @@ fn project_record(
             Ok(())
         },
         &|hash| {
-            cas.stat_object(hash)?
-                .ok_or_else(|| missing_source("complete local payload"))
+            sizes
+                .size(hash)?
+                .ok_or_else(|| missing_source("local or custody payload"))
         },
     )?;
     let envelope = decode_logical_record(&record).map_err(codec_error)?;
@@ -392,8 +445,8 @@ fn project_record(
         let hash = object_hash
             .as_ref()
             .ok_or_else(|| missing_source("canonical payload before external capture"))?;
-        if cas.stat_object(hash)? != Some(*size) {
-            return Err(missing_source("exact local payload length"));
+        if sizes.size(hash)? != Some(*size) {
+            return Err(missing_source("exact payload length"));
         }
     }
     for (hash, bytes) in &derived {
@@ -422,9 +475,9 @@ fn project_record(
             };
             let size = match &bytes {
                 Some(bytes) => bytes.len() as u64,
-                None => cas
-                    .stat_object(&hash)?
-                    .ok_or_else(|| missing_source("complete local payload"))?,
+                None => sizes
+                    .size(&hash)?
+                    .ok_or_else(|| missing_source("local or custody payload"))?,
             };
             sink.reference(&wire_key, &hash, size)?;
             if let Some(bytes) = bytes {
@@ -432,9 +485,9 @@ fn project_record(
                 for entry in decode_owner_manifest(&bytes).map_err(codec_error)? {
                     if let Some(hash) = entry.payload_hash {
                         let hash = hex::encode(hash);
-                        let size = cas
-                            .stat_object(&hash)?
-                            .ok_or_else(|| missing_source("complete owner payload"))?;
+                        let size = sizes
+                            .size(&hash)?
+                            .ok_or_else(|| missing_source("local or custody owner payload"))?;
                         sink.reference(&wire_key, &hash, size)?;
                     }
                 }

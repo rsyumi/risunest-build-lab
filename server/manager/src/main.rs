@@ -27,6 +27,7 @@ async fn run() -> Result<()> {
     if !root.is_absolute() {
         return Err("absolute-data-dir-required".into());
     }
+    root = platform::resolve_manager_root(&root)?;
     let client = Client::new(root.clone())?;
     let manager = platform::manager_executable()?;
     match command
@@ -61,7 +62,11 @@ async fn run() -> Result<()> {
             risunest_sync_manager::lifecycle::stop(&root, &client).await
         }
         ["installer", "prepare"] => {
-            println!("{}", update::begin_installer_guard(&root, &executable)?);
+            println!("{}", update::begin_installer_guard(&root, &executable, None)?);
+            Ok(())
+        }
+        ["installer", "prepare", owner] => {
+            println!("{}", update::begin_installer_guard(&root, &executable, Some(owner.parse().map_err(|_| "invalid-installer-owner")?))?);
             Ok(())
         }
         ["installer", "swap", "lock-held", staged, was_running] => {
@@ -95,10 +100,18 @@ async fn run() -> Result<()> {
             update::installer_start_and_verify_while_locked(&root, &executable).await
         }
         ["installer", "guard", nonce] => {
-            update::run_installer_guard(&root, &executable, nonce).await
+            update::run_installer_guard(&root, &executable, nonce, None).await
         }
         ["installer", "guard", nonce, "--scheduled-task", task] => {
-            let result = update::run_installer_guard(&root, &executable, nonce).await;
+            let result = update::run_installer_guard(&root, &executable, nonce, None).await;
+            let cleanup = platform::finish_update_helper(&root, task);
+            result?;
+            cleanup
+        }
+        ["installer", "guard", nonce, "--owner", owner, "--scheduled-task", task] => {
+            let (pid, started) = owner.split_once(':').ok_or("invalid-installer-owner")?;
+            let identity = (pid.parse().map_err(|_| "invalid-installer-owner")?, started.parse().map_err(|_| "invalid-installer-owner")?);
+            let result = update::run_installer_guard(&root, &executable, nonce, Some(identity)).await;
             let cleanup = platform::finish_update_helper(&root, task);
             result?;
             cleanup
@@ -106,15 +119,26 @@ async fn run() -> Result<()> {
         ["installer", "finish", nonce] => update::finish_installer_guard(&root, nonce),
         #[cfg(not(windows))]
         ["removal-helper", parent, mode @ ("delete" | "preserve")] => {
-            risunest_sync_manager::removal::finish_after_exit(&root, &executable,
-                parent.parse().map_err(|_| "invalid-removal-parent")?, *mode == "delete").await
+            risunest_sync_manager::removal::finish_after_exit(
+                &root,
+                &executable,
+                parent.parse().map_err(|_| "invalid-removal-parent")?,
+                *mode == "delete",
+            )
+            .await
         }
         ["uninstall", "lock-held"] => {
             risunest_sync_manager::removal::cleanup_services(&root, &executable).await
         }
-        ["installer", "forget-removal"] => risunest_sync_manager::removal::forget_registration(&root, &executable),
-        ["installer", "delete-data"] => risunest_sync_manager::removal::delete_registered_data(&root, &executable),
-        ["uninstall", ..] => risunest_sync_manager::removal::cli(&root, &executable, &command[1..]).await,
+        ["installer", "forget-removal"] => {
+            risunest_sync_manager::removal::forget_registration(&root, &executable)
+        }
+        ["installer", "delete-data"] => {
+            risunest_sync_manager::removal::delete_registered_data(&root, &executable)
+        }
+        ["uninstall", ..] => {
+            risunest_sync_manager::removal::cli(&root, &executable, &command[1..]).await
+        }
         ["autostart", "status"] => {
             let status = platform::startup(&root, &executable, "status")?;
             println!(
@@ -271,8 +295,8 @@ async fn start_server(
             println!("서버 실행 중");
             return Ok(());
         }
+        if let Some(error) = platform::startup_error(&root) { return Err(error); }
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
-    Err(std::fs::read_to_string(root.join("startup-error.txt"))
-        .unwrap_or_else(|_| "server-not-ready".into()))
+    Err(platform::startup_error(&root).unwrap_or_else(|| "server-not-ready".into()))
 }

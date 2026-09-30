@@ -94,6 +94,7 @@ impl<R: Runtime, T: Manager<R>> UpdaterExt<R> for T {
             target,
             version_comparator,
             headers,
+            relaunch_args,
         } = self.state::<UpdaterState>().inner();
 
         let mut builder = UpdaterBuilder::new(app, config.clone()).headers(headers.clone());
@@ -104,7 +105,7 @@ impl<R: Runtime, T: Manager<R>> UpdaterExt<R> for T {
 
         #[cfg(windows)]
         {
-            builder = builder.current_exe_args(self.env().args_os);
+            builder = builder.current_exe_args(relaunch_args.clone().unwrap_or_else(|| self.env().args_os));
         }
 
         builder.version_comparator = version_comparator.clone();
@@ -146,6 +147,7 @@ struct UpdaterState {
     config: Config,
     version_comparator: Option<VersionComparator>,
     headers: HeaderMap,
+    relaunch_args: Option<Vec<OsString>>,
 }
 
 #[derive(Default)]
@@ -155,9 +157,15 @@ pub struct Builder {
     installer_args: Vec<OsString>,
     headers: HeaderMap,
     default_version_comparator: Option<VersionComparator>,
+    relaunch_args: Option<Vec<OsString>>,
 }
 
 impl Builder {
+    /// Overrides restart argv, including argv[0], for installer relaunches.
+    pub fn relaunch_args(mut self, args: Vec<OsString>) -> Self {
+        self.relaunch_args = Some(args);
+        self
+    }
     pub fn new() -> Self {
         Self::default()
     }
@@ -236,6 +244,7 @@ impl Builder {
         let version_comparator = self.default_version_comparator;
         let installer_args = self.installer_args;
         let headers = self.headers;
+        let relaunch_args = self.relaunch_args;
         PluginBuilder::<R, Config>::new("updater")
             .setup(move |app, api| {
                 let mut config = api.config().clone();
@@ -250,6 +259,7 @@ impl Builder {
                     config,
                     version_comparator,
                     headers,
+                    relaunch_args,
                 });
                 Ok(())
             })

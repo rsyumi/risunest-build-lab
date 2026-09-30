@@ -27,13 +27,41 @@ export interface PluginStorageSummary {
     byteSize: number
 }
 
+export interface PluginStorageValueCursor {
+    owner: string
+    key: string
+    ordinal: number
+}
+
+export interface PluginStorageValueQuery {
+    owner?: string
+    afterKey?: PluginStorageValueCursor
+    limit?: number
+}
+
+export interface PluginStorageValuePage {
+    items: PluginStorageValue[]
+    nextCursor: PluginStorageValueCursor | null
+    revision: DataRevision
+}
+
+export function validatePluginStorageValueQuery(query: PluginStorageValueQuery): void {
+    if (query.limit !== undefined && (!Number.isInteger(query.limit) || query.limit < 1 || query.limit > 256)) {
+        throw new Error('Plugin value page limit must be between 1 and 256')
+    }
+    if (query.afterKey && (!Number.isSafeInteger(query.afterKey.ordinal) || query.afterKey.ordinal < 0
+        || (query.owner !== undefined && query.afterKey.owner !== query.owner))) {
+        throw new Error('Invalid plugin value page cursor')
+    }
+}
+
 export interface PluginStorageValue {
     owner: string
     key: string
     value: unknown
 }
 
-/** What the plugin data screen lists. Values are fetched one at a time. */
+/** What the plugin data screen lists without loading value bodies. */
 export interface PluginStorageListItem {
     owner: string
     key: string
@@ -434,6 +462,12 @@ export type ConversationMutation =
           characterId: string
           conversationId: string
       }
+    | {
+          /** Lists every conversation of the character in its new order. */
+          type: 'reorder'
+          characterId: string
+          conversationIds: string[]
+      }
 
 export type RootMutation =
     { type: 'set'; key: string; value: unknown } | { type: 'delete'; key: string }
@@ -449,10 +483,17 @@ export interface WorkingSetCommit {
     replaceCharacter?: character | groupChat
     addCharacter?: character | groupChat
     conversations?: ConversationMutation[]
-    deleteCharacterId?: string
+    deleteCharacterIds?: string[]
     pluginStorage?: PluginStorageMutation[]
     assetAliases?: AssetAlias[]
     assetOwnerHeads?: AssetOwnerHead[]
+}
+
+export class PersistentStorageQuotaError extends Error {
+    constructor() {
+        super('There is not enough storage space to save changes')
+        this.name = 'QuotaExceededError'
+    }
 }
 
 export class RevisionConflictError extends Error {
@@ -494,6 +535,7 @@ export interface PersistentRevisionReader {
     readConversationMessageMetadataWindow?(
         input: ConversationWindowQuery,
     ): Promise<Versioned<ConversationMessageMetadataWindow> | null>
+    readPluginStorageValues(query: PluginStorageValueQuery): Promise<PluginStorageValuePage>
     queryPluginStorage(): Promise<PluginStorageCatalog>
     readPluginStorage(owner: string, key: string): Promise<Versioned<unknown> | null>
     readAssetAlias(identity: AssetAliasIdentity): Promise<Versioned<AssetAlias> | null>
@@ -534,6 +576,7 @@ export interface PersistentDataStore {
     readConversationMessageMetadataWindow?(
         input: ConversationWindowQuery,
     ): Promise<Versioned<ConversationMessageMetadataWindow> | null>
+    readPluginStorageValues(query: PluginStorageValueQuery): Promise<PluginStorageValuePage>
     queryPluginStorage(): Promise<PluginStorageCatalog>
     readPluginStorage(owner: string, key: string): Promise<Versioned<unknown> | null>
     /** Sizes and ownership only. Values stay in the store until one is opened. */

@@ -25,6 +25,7 @@ vi.mock('src/ts/stores.svelte', async () => {
     const { writable } = await import('svelte/store')
     return {
         DBState: { db: { streamingDisplayOptimizationMode: 'balanced' } },
+        selIdState: { selId: 0 },
         selectedCharID: writable(0),
         ReloadChatPointer: writable({}),
         ReloadGUIPointer: writable(0),
@@ -48,7 +49,7 @@ vi.mock('./CreatorQuote.svelte', async () => ({
 
 import { ReloadGUIPointer } from 'src/ts/stores.svelte'
 import ChatsHarness from './ChatsHarness.test.svelte'
-import { resetChatMountProbe } from './chatMountProbe'
+import { resetChatMountProbe } from './chatMountProbe.testSupport'
 
 interface HarnessInstance {
     getCurrentCharacter(): character

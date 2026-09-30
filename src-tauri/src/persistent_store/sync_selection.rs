@@ -115,6 +115,15 @@ pub(crate) fn select(
     read(tx)
 }
 
+pub(crate) fn set_paused(tx: &Transaction<'_>, expected_epoch: &str, paused: bool) -> StoreResult<Selection> {
+    let current = read(tx)?;
+    if current.epoch != expected_epoch || !matches!(current.target, SyncTarget::External(_)) {
+        return Err(invalid("Sync selection changed"));
+    }
+    tx.execute("UPDATE library_sync_selection SET paused=?1 WHERE singleton=1", [paused])?;
+    read(tx)
+}
+
 pub(crate) fn require_no_pending_publication(db: &Connection) -> StoreResult<()> {
     let pending:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM external_storage_jobs WHERE phase='applying') OR EXISTS(SELECT 1 FROM server_sync_operation)",[],|r|r.get(0))?;
     if pending {

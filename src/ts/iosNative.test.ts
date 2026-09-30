@@ -3,7 +3,9 @@ const { invoke } = vi.hoisted(() => ({ invoke: vi.fn(async () => undefined) }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke }));
 vi.mock("./platform", () => ({ isTauriIOS: true }));
 import {
+  isBackgroundExpiryReason,
   beginIOSGeneration,
+  beginIOSBackgroundTask,
   initializeIOSNative,
   installIOSPersistenceLifecycle,
   type IOSNativeState,
@@ -120,6 +122,7 @@ describe("iOS generation lifecycle", () => {
       }),
     );
     expect(lease.signal?.aborted).toBe(true);
+    expect(isBackgroundExpiryReason(lease.signal?.reason)).toBe(true);
     await lease.dispose();
     deps.events.dispatchEvent(
       new CustomEvent("risunest-ios-lifecycle", {
@@ -156,3 +159,38 @@ describe("iOS generation lifecycle", () => {
     expect(deps.begin).not.toHaveBeenCalled();
   });
 });
+
+it("reports measured task progress across stages and releases expired runtime", async () => {
+  await initializeIOSNative();
+  invoke.mockResolvedValueOnce({ id: "background" } as never);
+  const release = vi.fn();
+  const task = await beginIOSBackgroundTask("backup", undefined, release);
+  expect(invoke).toHaveBeenCalledWith("plugin:ios-native|begin", { kind: "backup", continued: false });
+  task.progress(60);
+  task.progress(null);
+  task.progress(15);
+  window.dispatchEvent(new CustomEvent("risunest-ios-lifecycle", { detail: { event: "expired", id: "background" } }));
+  expect(task.signal?.aborted).toBe(true);
+  expect(release).toHaveBeenCalledOnce();
+  await task.dispose(false);
+  expect(invoke).toHaveBeenCalledWith("plugin:ios-native|generation_progress", { id: "background", completed: 60, total: 100 });
+  expect(invoke).toHaveBeenCalledWith("plugin:ios-native|generation_progress", { id: "background", completed: 0, total: 0 });
+  expect(invoke).toHaveBeenCalledWith("plugin:ios-native|generation_progress", { id: "background", completed: 15, total: 100 });
+  expect(invoke).toHaveBeenLastCalledWith("plugin:ios-native|end", { id: "background", success: false });
+});
+
+it('keeps a current lease on activation and opts explicit work into continued processing', async () => {
+  invoke.mockResolvedValue({ id: 'current' } as never)
+  const automatic = await beginIOSBackgroundTask('sync', undefined, () => {})
+  const explicit = await beginIOSBackgroundTask('backup', undefined, () => {}, true)
+  expect(invoke).toHaveBeenCalledWith('plugin:ios-native|begin', { kind: 'sync', continued: false })
+  expect(invoke).toHaveBeenCalledWith('plugin:ios-native|begin', { kind: 'backup', continued: true })
+  await automatic.dispose()
+  await explicit.dispose()
+  const deps = harness()
+  const task = await beginIOSGeneration(undefined, deps)
+  deps.events.dispatchEvent(new CustomEvent('risunest-ios-lifecycle', { detail: { event: 'active' } }))
+  await vi.waitFor(() => expect(deps.state).toHaveBeenCalledOnce())
+  expect(task.signal?.aborted).toBe(false)
+  await task.dispose()
+})

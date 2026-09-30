@@ -106,7 +106,7 @@ fn character_deletion_records_the_character_and_its_removed_conversations() {
     let before = store.revision().unwrap();
     store
         .commit(&WorkingSetCommit {
-            delete_character_id: Some("char-a".to_owned()),
+            delete_character_ids: Some(vec!["char-a".to_owned()]),
             ..empty_working_set_commit(before)
         })
         .unwrap();
@@ -471,7 +471,7 @@ fn the_working_set_window_starts_as_a_rebuild_and_then_pages_through_one_lease()
     // A later commit must not reach a window pinned to revision 2.
     store
         .commit(&WorkingSetCommit {
-            delete_character_id: Some("char-c".to_owned()),
+            delete_character_ids: Some(vec!["char-c".to_owned()]),
             ..empty_working_set_commit(2)
         })
         .unwrap();

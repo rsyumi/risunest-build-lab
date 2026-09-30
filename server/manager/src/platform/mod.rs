@@ -44,6 +44,47 @@ pub fn default_data_dir() -> Result<PathBuf> {
     Ok(paths::current()?.data)
 }
 
+pub fn resolve_manager_root(path: &Path) -> Result<PathBuf> {
+    if !path.is_absolute() { return Err("absolute-data-dir-required".into()); }
+    if path.components().any(|part| matches!(part, std::path::Component::ParentDir)) {
+        return Err("unsafe-storage-path".into());
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            #[cfg(windows)]
+            let linked = {
+                use std::os::windows::fs::MetadataExt;
+                metadata.file_attributes() & 0x400 != 0
+            };
+            #[cfg(not(windows))]
+            let linked = metadata.file_type().is_symlink();
+            if linked { return Err("unsafe-storage-path".into()); }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+        Err(_) => return Err("storage-io".into()),
+    }
+    let mut ancestor = path.parent().ok_or("invalid-data-dir")?;
+    let mut missing = vec![path.file_name().ok_or("invalid-data-dir")?.to_owned()];
+    loop {
+        match std::fs::canonicalize(ancestor) {
+            Ok(mut resolved) => {
+                for name in missing.iter().rev() { resolved.push(name); }
+                return Ok(resolved);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match std::fs::symlink_metadata(ancestor) {
+                    Ok(_) => return Err("unsafe-storage-path".into()),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+                    Err(_) => return Err("storage-io".into()),
+                }
+                missing.push(ancestor.file_name().ok_or("invalid-data-dir")?.to_owned());
+                ancestor = ancestor.parent().ok_or("invalid-data-dir")?;
+            }
+            Err(_) => return Err("storage-io".into()),
+        }
+    }
+}
+
 pub fn webview_data_dir() -> Result<Option<PathBuf>> {
     Ok(paths::current()?.webview)
 }
@@ -87,7 +128,21 @@ pub fn process(program: impl AsRef<std::ffi::OsStr>) -> Command {
     command
 }
 
+pub fn startup_error_code(value: &str) -> Option<String> {
+    let code = value.lines().next()?.trim();
+    (!code.is_empty() && code.len() <= 64 && code.bytes().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')).then(|| code.to_owned())
+}
+
+pub fn startup_error(root: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut value = String::new();
+    std::fs::File::open(root.join("startup-error.txt")).ok()?.take(65).read_to_string(&mut value).ok()?;
+    startup_error_code(&value)
+}
+
 pub fn initialize(root: &Path, executable: &Path) -> Result<()> {
+    let resolved = resolve_manager_root(root)?;
+    let root = resolved.as_path();
     if !root.is_absolute() || !executable.is_absolute() || !executable.is_file() {
         return Err("server-executable-or-data-path-invalid".into());
     }
@@ -99,7 +154,7 @@ pub fn initialize(root: &Path, executable: &Path) -> Result<()> {
             .output()
             .map_err(|_| "server-init-failed")?;
         if !output.status.success() {
-            return Err("server-init-failed".into());
+            return Err(startup_error_code(&String::from_utf8_lossy(&output.stderr)).unwrap_or_else(|| "server-init-failed".into()));
         }
     }
     crate::removal::register(root, executable)?;
@@ -110,7 +165,6 @@ pub fn start(root: &Path, executable: &Path) -> Result<()> {
     initialize(root, executable)?;
     let _ = std::fs::remove_file(root.join("startup-error.txt"));
     let state = startup(root, executable, "status")?;
-    #[cfg(target_os = "macos")]
     let state = if state.registered && !state.action_matches {
         startup(root, executable, "install")?
     } else {
@@ -167,6 +221,21 @@ pub fn startup(root: &Path, executable: &Path, action: &str) -> Result<StartupSt
     {
         unix::startup(root, executable, action)
     }
+}
+
+pub(crate) fn reconcile_relocated_registration(root: &Path, server: &Path) -> Result<()> {
+    let state = startup(root, server, "status")?;
+    if state.registered && !state.action_matches {
+        if !state.enabled { return Err("update-startup-state-not-verifiable".into()); }
+        #[cfg(windows)]
+        windows::startup(root, server, "install")?;
+        #[cfg(unix)]
+        unix::startup(root, server, "install")?;
+    }
+    #[cfg(any(windows, target_os = "macos"))]
+    gui::reconcile(root, &server.with_file_name(if cfg!(windows) { "risunest-sync-gui.exe" } else { "risunest-sync-gui" }))?;
+    let manager = server.with_file_name(if cfg!(windows) { "risunest-sync-manager.exe" } else { "risunest-sync-manager" });
+    crate::update::reconcile_schedule_while_locked(root, &manager, server)
 }
 
 pub fn spawn_update_helper(root: &Path, command: &mut Command) -> Result<u32> {
@@ -429,6 +498,49 @@ fn cleanup_macos_update_helpers(root: &Path) -> Result<()> {
     Ok(())
 }
 
+#[cfg(windows)]
+pub struct InstallerOwner(windows_sys::Win32::Foundation::HANDLE);
+#[cfg(windows)]
+unsafe impl Send for InstallerOwner {}
+#[cfg(windows)]
+unsafe impl Sync for InstallerOwner {}
+#[cfg(windows)]
+impl InstallerOwner {
+    pub fn open(pid: u32) -> Result<Self> {
+        if pid == 0 { return Err("invalid-installer-owner".into()); }
+        let handle = unsafe { windows_sys::Win32::System::Threading::OpenProcess(0x00100000 | 0x1000, 0, pid) };
+        if handle.is_null() { return Err("installer-owner-unavailable".into()); }
+        Ok(Self(handle))
+    }
+    pub fn is_alive(&self) -> Result<bool> {
+        match unsafe { windows_sys::Win32::System::Threading::WaitForSingleObject(self.0, 0) } {
+            0 => Ok(false),
+            0x00000102 => Ok(true),
+            _ => Err("installer-owner-unavailable".into()),
+        }
+    }
+    pub fn started(&self) -> Result<u64> {
+        use windows_sys::Win32::{Foundation::FILETIME, System::Threading::GetProcessTimes};
+        let mut created = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+        let mut exited = created;
+        let mut kernel = created;
+        let mut user = created;
+        if unsafe { GetProcessTimes(self.0, &mut created, &mut exited, &mut kernel, &mut user) } == 0 {
+            return Err("installer-owner-unavailable".into());
+        }
+        Ok((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
+    }
+}
+#[cfg(windows)]
+impl Drop for InstallerOwner {
+    fn drop(&mut self) { unsafe { windows_sys::Win32::Foundation::CloseHandle(self.0); } }
+}
+
+#[cfg(windows)]
+pub fn sweep_stale_update_helpers(root: &Path) -> Result<()> {
+    windows::sweep_stale_update_helpers(root)
+}
+
 pub fn wait_for_parent_exit(process_id: u32, timeout: std::time::Duration) -> Result<()> {
     #[cfg(windows)]
     unsafe {
@@ -476,14 +588,16 @@ pub fn update_schedule(
     policy: UpdatePolicy,
     action: &str,
 ) -> Result<UpdateScheduleStatus> {
-    if !["status", "install", "remove"].contains(&action) {
+    if !["status", "install", "install-recovery", "remove"].contains(&action) {
         return Err("invalid-update-schedule-action".into());
     }
     if !root.is_absolute() || !manager.is_absolute() || !server.is_absolute() {
         return Err("absolute-path-required".into());
     }
+    let policy = if action == "install-recovery" { UpdatePolicy::Automatic } else { policy };
     #[cfg(windows)]
     {
+        let action = if action == "install-recovery" { "install" } else { action };
         windows::update_schedule(root, manager, server, policy, action)
     }
     #[cfg(unix)]
@@ -513,8 +627,51 @@ pub fn xml(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(not(windows))]
     use super::*;
+    #[test]
+    fn root_resolution_preserves_missing_parents_without_creating_them() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("missing/nested/data");
+        assert_eq!(resolve_manager_root(&root).unwrap(), temp.path().canonicalize().unwrap().join("missing/nested/data"));
+        assert!(!temp.path().join("missing").exists());
+        assert_eq!(resolve_manager_root(&temp.path().join("missing/../data")).unwrap_err(), "unsafe-storage-path");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_resolution_accepts_linked_ancestors_but_refuses_a_linked_live_leaf() {
+        let temp = tempfile::tempdir().unwrap();
+        let actual = temp.path().join("actual");
+        std::fs::create_dir(&actual).unwrap();
+        let alias = temp.path().join("alias");
+        std::os::unix::fs::symlink(&actual, &alias).unwrap();
+        assert_eq!(resolve_manager_root(&alias.join("new/data")).unwrap(), actual.canonicalize().unwrap().join("new/data"));
+        assert_eq!(resolve_manager_root(&alias).unwrap_err(), "unsafe-storage-path");
+        assert!(!actual.join("new").exists());
+    }
+
+    #[test]
+    fn startup_failures_are_bounded_codes_and_not_arbitrary_stderr() {
+        assert_eq!(startup_error_code("incompatible-store\nprivate diagnostic"), Some("incompatible-store".into()));
+        for invalid in ["", "Error: private path", "path/to/store", &"a".repeat(65)] {
+            assert_eq!(startup_error_code(invalid), None);
+        }
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("startup-error.txt"), "data-dir-busy").unwrap();
+        assert_eq!(startup_error(root.path()), Some("data-dir-busy".into()));
+        std::fs::write(root.path().join("startup-error.txt"), "x".repeat(100)).unwrap();
+        assert_eq!(startup_error(root.path()), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn installer_owner_handle_tracks_the_process_lifetime() {
+        let mut child = process("cmd.exe").args(["/C", "exit", "0"]).spawn().unwrap();
+        let owner = InstallerOwner::open(child.id()).unwrap();
+        child.wait().unwrap();
+        assert!(!owner.is_alive().unwrap());
+        assert!(InstallerOwner::open(std::process::id()).unwrap().is_alive().unwrap());
+    }
 
     #[cfg(not(windows))]
     #[test]
@@ -538,10 +695,13 @@ mod tests {
     }
 }
 
-
 pub fn remove_startup(root: &Path, executable: &Path) -> Result<()> {
     #[cfg(windows)]
-    { startup(root, executable, "remove").map(|_| ()) }
+    {
+        startup(root, executable, "remove").map(|_| ())
+    }
     #[cfg(unix)]
-    { unix::remove_startup(root, executable) }
+    {
+        unix::remove_startup(root, executable)
+    }
 }

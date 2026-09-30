@@ -16,6 +16,26 @@ describe('SqlitePersistentDataStore', () => {
         mocks.invoke.mockReset()
     })
 
+    it('reads owner pages with one native call per page and a pinned lease', async () => {
+        mocks.invoke.mockResolvedValueOnce({ lease: 'plugin-page-lease' })
+        const store = new SqlitePersistentDataStore()
+        const lease = await store.acquireRevision(9)
+        const query = { owner: 'owner-a', afterKey: { owner: 'owner-a', key: 'zeta', ordinal: 7 }, limit: 128 }
+        const page = { revision: 9, items: [{ owner: 'owner-a', key: 'alpha', value: false }], nextCursor: null }
+        mocks.invoke.mockResolvedValue(page)
+        await expect(store.readPluginStorageValues(query)).resolves.toEqual(page)
+        await expect(lease.readPluginStorageValues(query)).resolves.toEqual(page)
+        expect(mocks.invoke.mock.calls).toEqual([
+            ['pds_acquire_revision', { revision: 9 }],
+            ['pds_read_plugin_storage_page', { query }],
+            ['pds_read_plugin_storage_page', { query, lease: 'plugin-page-lease' }],
+        ])
+        await lease.release()
+        mocks.invoke.mockClear()
+        await expect(lease.readPluginStorageValues(query)).rejects.toBeInstanceOf(SnapshotReleasedError)
+        expect(mocks.invoke).not.toHaveBeenCalled()
+    })
+
     it('maps ordinary store operations to their native commands with camelCase payloads', async () => {
         mocks.invoke.mockResolvedValue({ revision: 9 })
         const store = new SqlitePersistentDataStore()
@@ -52,7 +72,7 @@ describe('SqlitePersistentDataStore', () => {
         }
         const commit = {
             expectedRevision: 8,
-            deleteCharacterId: 'char-c',
+            deleteCharacterIds: ['char-c'],
             characterDetails: [characterDetail],
             assetAliases: [alias],
         }
@@ -113,7 +133,7 @@ describe('SqlitePersistentDataStore', () => {
                 {
                     commit: {
                         expectedRevision: 8,
-                        deleteCharacterId: 'char-c',
+                        deleteCharacterIds: ['char-c'],
                         characterDetails: [characterDetail],
                     },
                     assetAliases: [alias],

@@ -7,6 +7,7 @@ import {
 import {
     UnsupportedPreparedNativeCharacterCardError,
     type PreparedNativePngCardMetadata,
+    type PreparedNativePngCardDecodeDependencies,
 } from './nativePngCardAdapter'
 import type { character } from './database.svelte'
 import type {
@@ -23,7 +24,7 @@ import type {
 } from './saveCoordinator'
 
 export interface NativeCharacterContentActivationDependencies {
-    decodePng(metadata: PreparedNativePngCardMetadata): Promise<PreparedNativeCharacterCardMetadata | null>
+    decodePng(metadata: PreparedNativePngCardMetadata, stageInlineAsset?: PreparedNativePngCardDecodeDependencies['stageInlineAsset']): Promise<PreparedNativeCharacterCardMetadata | null>
     map(input: PreparedNativeCharacterCardInput): Promise<character | false>
     upsert(
         characterId: string,
@@ -175,6 +176,7 @@ export async function activatePreparedNativeCharacterContent(
         content,
         dependencies,
         signal,
+        lifecycle,
     )
     if (!character) return null
 
@@ -204,6 +206,7 @@ export async function mapPreparedNativeContent(
         'decodePng' | 'map'
     > = productionDependencies,
     signal?: AbortSignal,
+    lifecycle?: PreparedNativeContentActivationLifecycle,
 ): Promise<character | null> {
     if (content.format === 'risu-module') {
         throw new UnsupportedPreparedNativeCharacterCardError()
@@ -215,6 +218,7 @@ export async function mapPreparedNativeContent(
         content.format === 'png-card'
             ? await dependencies.decodePng(
                   content.metadata as PreparedNativePngCardMetadata,
+                  lifecycle?.stageInlineAsset,
               )
             : requireCharacterCardMetadata(content.metadata)
     throwIfAborted(signal)

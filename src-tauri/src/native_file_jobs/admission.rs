@@ -94,6 +94,20 @@ mod tests {
         drop(second);
         assert!(admission.file(true).is_ok());
     }
+    /// A worker that releases its permit over a network wait is what lets
+    /// anything exclusive run at all, and it is admitted again once that has
+    /// finished rather than being locked out by it.
+    #[test]
+    fn a_released_worker_permit_admits_an_exclusive_run_and_is_taken_again_after_it() {
+        let admission = Arc::new(Admission::default());
+        let worker = admission.file(false).unwrap();
+        assert!(admission.file(true).is_err());
+        drop(worker);
+        let exclusive = admission.file(true).unwrap();
+        assert!(admission.file(false).is_err());
+        drop(exclusive);
+        assert!(admission.file(false).is_ok());
+    }
     #[test]
     fn concurrent_claims_have_one_owner() {
         let admission = Arc::new(Admission::default());

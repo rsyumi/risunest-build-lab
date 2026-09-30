@@ -1,6 +1,8 @@
 import { UNOWNED_PLUGIN_OWNER } from '../plugins/pluginOwner'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { get } from 'svelte/store'
+import { flushSync } from 'svelte'
+import { IDBFactory, IDBKeyRange } from 'fake-indexeddb'
 
 vi.mock('../parser/parser.svelte', () => ({
     assetRegex: /$^/,
@@ -32,6 +34,9 @@ import {
 } from './workingSetCatalog'
 import { workingSetResidency } from './workingSetResidency'
 import { canonicalJson, SaveCoordinator } from './saveCoordinator'
+import { capturePersistentRoot } from './persistentDataRuntime'
+import { IndexedDbPersistentDataStore } from './indexedDbPersistentDataStore'
+import { observePersistentSaveChanges } from './persistentSaveObserver.svelte'
 
 afterEach(() => {
     configurePersistentDataRuntime({ projectWorkingSet: undefined })
@@ -41,6 +46,75 @@ afterEach(() => {
 })
 
 describe('production persistent working-set publication', () => {
+    it('observes and persists edits through a retained module after a preset operation', async () => {
+        const initial = {
+            username: 'Before', botPresets: [], botPresetsId: 0, characters: [], plugins: [],
+            modules: [{ id: 'module', name: 'Synthetic module', description: '' }],
+        } as unknown as Database
+        const indexedDB = new IDBFactory()
+        const store = new IndexedDbPersistentDataStore('root-publication-edit', indexedDB, IDBKeyRange)
+        await store.open()
+        const { revision } = await store.replaceFromDatabase(initial)
+        setDatabaseLite(initial)
+        selectedCharID.set(-1)
+        const adapter = createProductionStateAdapter()
+        const coordinator = new SaveCoordinator({ store, ...adapter })
+        coordinator.initialize(revision)
+        const markDirty = vi.fn((bytes: number) => coordinator.markPersistentDataDirty(bytes))
+        const dispose = observePersistentSaveChanges({
+            readDatabase: getDatabase, readSelectedCharacter: () => null, markDirty,
+        })
+        try {
+            flushSync()
+            const module = getDatabase().modules[0]
+            await coordinator.mutatePersistentPresets('synthetic-preset-operation', ({ root }) => {
+                root.username = 'After'
+            })
+            flushSync()
+            markDirty.mockClear()
+            module.description = 'Edited after publication'
+            flushSync()
+            expect(markDirty).toHaveBeenCalled()
+            await coordinator.flushPendingDataLocally('synthetic-retained-editor')
+            const reopened = new IndexedDbPersistentDataStore('root-publication-edit', indexedDB, IDBKeyRange)
+            await reopened.open()
+            expect((await reopened.readRoot()).value).toMatchObject({
+                username: 'After', modules: [{ description: 'Edited after publication' }],
+            })
+        } finally {
+            dispose()
+        }
+    })
+
+    it.each(['root', 'preset', 'character'] as const)(
+        'keeps unchanged editor data attached during %s publication', (kind) => {
+            setDatabaseLite({
+                username: 'Before', botPresets: [], characters: [], plugins: [],
+                promptTemplate: [{ type: 'plain', text: 'Synthetic prompt', role: 'system' }],
+                modules: [{ id: 'synthetic-module', name: 'Synthetic module', description: '' }],
+                personas: [{ id: 'synthetic-persona', name: 'Synthetic persona', prompt: '' }],
+                globalscript: [{ comment: 'Synthetic regex', in: '', out: '', type: 'editinput' }],
+            } as unknown as Database)
+            const database = getDatabase()
+            const references = [database.promptTemplate, database.modules, database.personas, database.globalscript]
+            const root = JSON.parse(JSON.stringify(capturePersistentRoot(database)))
+            root.username = 'After'
+            const adapter = createProductionStateAdapter()
+            if (kind === 'root') adapter.publishRootWorkingSet!(root)
+            if (kind === 'preset') adapter.publishPresetWorkingSet!({ revision: 2, root, presets: [] })
+            if (kind === 'character') adapter.publishCharacterMutation!({
+                revision: 2, root, kind: 'detail', characterId: 'absent', character: null,
+            })
+            expect(database.username).toBe('After')
+            for (const [index, current] of [database.promptTemplate, database.modules, database.personas, database.globalscript].entries()) {
+                expect(current).toBe(references[index])
+            }
+            const module = references[1][0] as Database['modules'][number]
+            module.description = 'Edited after publication'
+            expect(adapter.captureRoot().modules[0].description).toBe('Edited after publication')
+        },
+    )
+
     it.each(['character', 'group'])('tracks cold selection and subsequent %s edits in the same canonical capture', (type) => {
         setDatabaseLite({
             botPresets: [], plugins: [], pluginCustomStorage: {},

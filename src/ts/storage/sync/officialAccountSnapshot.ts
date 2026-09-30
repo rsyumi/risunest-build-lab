@@ -11,6 +11,7 @@ import type {
     AccountStorage,
     AccountWriteResult,
 } from '../accountStorage'
+import type { NativeFileJobOptions } from '../nativeFileJobs'
 import type { BlobStore } from '../blobStore'
 import type { Database } from '../database.svelte'
 import type {
@@ -37,6 +38,20 @@ import {
 } from '../saveCoordinator'
 import type { OfficialAssetLedger } from './officialAssetLedger'
 import { officialAccountSnapshotCapability } from './types'
+
+export class ColdPayloadUnavailableError extends Error {
+    constructor(readonly unavailableCount: number) {
+        super('Official snapshot cold payloads are unavailable')
+        this.name = 'ColdPayloadUnavailableError'
+    }
+}
+
+export interface OfficialPublicationOptions {
+    signal?: AbortSignal
+    userInitiated?: boolean
+    onStatus?: NativeFileJobOptions['onStatus']
+    onProgress?(completed: number, total: number): void
+}
 
 const databaseKey = 'database/database.bin'
 
@@ -91,6 +106,8 @@ export interface OfficialAccountSnapshotDependencies {
     conflict?: OfficialSyncConflictHandler
     now?(): number
     nativeDatabasePublisher?: OfficialNativeDatabasePublisher
+    /** Native identity comes from the authenticated vault session, never a restored root. */
+    getAccountId?(): string | null
     flushPublicationMetadata?(): Promise<void>
 }
 
@@ -100,6 +117,8 @@ export interface OfficialNativeDatabasePublicationInput {
     lease: PersistentRevisionLease
     resourceReplacements: Readonly<Record<string, string>>
     signal?: AbortSignal
+    userInitiated?: boolean
+    onStatus?: NativeFileJobOptions['onStatus']
 }
 
 export interface OfficialNativeDatabasePublicationReceipt {
@@ -239,10 +258,11 @@ export function createOfficialAssociationMarkers(storage: {
     }
 }
 
-async function collectPinnedReferences(reader: PersistentRevisionReader): Promise<{
+export async function collectPinnedReferences(reader: PersistentRevisionReader, signal?: AbortSignal): Promise<{
     accountId: string | undefined
     assets: string[]
 }> {
+    throwIfAborted(signal)
     const rootRecord = await reader.readRoot()
     assertPinnedRevision(reader.revision, rootRecord.revision, 'Root')
     const root = rootRecord.value
@@ -251,6 +271,7 @@ async function collectPinnedReferences(reader: PersistentRevisionReader): Promis
     const pluginStorage = await reader.queryPluginStorage()
     assertPinnedRevision(reader.revision, pluginStorage.revision, 'Plugin storage catalog')
     for (const summary of pluginStorage.items) {
+        throwIfAborted(signal)
         const value = await reader.readPluginStorage(summary.owner, summary.key)
         if (!value) throw new Error(`Missing plugin storage value for ${summary.key}`)
         assertPinnedRevision(
@@ -264,6 +285,7 @@ async function collectPinnedReferences(reader: PersistentRevisionReader): Promis
         )
     }
     for await (const character of iteratePinnedCharacters(reader)) {
+        throwIfAborted(signal)
         const detail = {
             ...character.detail,
             chats: [],
@@ -317,6 +339,7 @@ class OfficialPinnedPublication implements PinnedPublication {
         private readonly assets: readonly PinnedAsset[],
         private readonly accountId: string | undefined,
         private readonly dependencies: OfficialAccountSnapshotDependencies,
+        private readonly options: OfficialPublicationOptions,
         private readonly onPublished: (
             revision: DataRevision,
             databaseFingerprint: string,
@@ -339,18 +362,30 @@ class OfficialPinnedPublication implements PinnedPublication {
         return this.inFlight
     }
 
+    private assertAccountCurrent(): void {
+        if (this.dependencies.getAccountId && this.dependencies.getAccountId() !== this.accountId) {
+            throw new Error('Official account session changed before publication')
+        }
+    }
     private async publishOnce(signal: AbortSignal): Promise<void> {
         if (this.publicationCommitted) return this.finalizePublication()
-        for (const asset of this.assets) {
+        this.assertAccountCurrent()
+        const uploads = this.assets.filter(asset => !this.replacements.has(asset.key))
+        let completed = 0
+        this.options.onProgress?.(completed, uploads.length)
+        for (const asset of uploads) {
             if (this.replacements.has(asset.key)) continue
             throwIfAborted(signal)
             const bytes = await this.blobs.read(asset.localKey)
             throwIfAborted(signal)
             if (!bytes) throw new Error(`Missing pinned asset payload: ${asset.key}`)
+            this.assertAccountCurrent()
             const result = await this.dependencies.account.writeItem(asset.key, bytes, { signal })
+            this.assertAccountCurrent()
             const replacementKey = requireWriteSuccess(result, asset.key)
             this.replacements.set(asset.key, replacementKey)
             this.dependencies.ledger.record(asset.key, replacementKey)
+            this.options.onProgress?.(++completed, uploads.length)
             throwIfAborted(signal)
         }
 
@@ -363,6 +398,7 @@ class OfficialPinnedPublication implements PinnedPublication {
             await this.dependencies.flushPublicationMetadata()
             throwIfAborted(signal)
             await this.refreshNativeLeaseIfNeeded()
+            this.assertAccountCurrent()
             let receipt: OfficialNativeDatabasePublicationReceipt | null
             try {
                 receipt = await this.dependencies.nativeDatabasePublisher({
@@ -371,6 +407,8 @@ class OfficialPinnedPublication implements PinnedPublication {
                     lease: this.lease,
                     resourceReplacements: replacementRecord,
                     signal,
+                    userInitiated: this.options.userInitiated,
+                    onStatus: this.options.onStatus,
                 })
             } catch (error) {
                 this.nativeLeaseNeedsRefresh = true
@@ -389,6 +427,7 @@ class OfficialPinnedPublication implements PinnedPublication {
         }))
         throwIfAborted(signal)
         this.databaseFingerprint ??= await fingerprintDatabase(this.databaseBytes)
+        this.assertAccountCurrent()
         const result = await this.dependencies.account.writeItem(
             databaseKey,
             this.databaseBytes,
@@ -467,8 +506,6 @@ export class OfficialAccountSnapshotAdapter implements OfficialRevisionPublisher
     readonly capability = officialAccountSnapshotCapability
     private associatedAccountId: string | null = null
     private associatedProjection: OfficialAssociationRecord | null = null
-    /** Keys already known to be unavailable everywhere; skipping them keeps publishes from re-probing. */
-    private readonly unavailableRemoteAssets = new Set<string>()
 
     constructor(private readonly dependencies: OfficialAccountSnapshotDependencies) {}
 
@@ -477,7 +514,6 @@ export class OfficialAccountSnapshotAdapter implements OfficialRevisionPublisher
         this.associatedProjection = accountId
             ? this.dependencies.association?.load(accountId) ?? null
             : null
-        this.unavailableRemoteAssets.clear()
     }
 
     rememberNativeActivation(
@@ -494,7 +530,7 @@ export class OfficialAccountSnapshotAdapter implements OfficialRevisionPublisher
 
     async adoptPublishedRevision(publication: OfficialRecoveredPublication): Promise<void> {
         const root = await this.dependencies.store.readRoot()
-        const activeAccountId = root.value.account?.id
+        const activeAccountId = this.resolveAccountId(root.value.account?.id)
         if (activeAccountId !== publication.accountId) {
             throw new Error('Recovered official publication account does not match the active account')
         }
@@ -507,6 +543,12 @@ export class OfficialAccountSnapshotAdapter implements OfficialRevisionPublisher
             databaseFingerprint: publication.databaseFingerprint,
             syncedAt: this.stampTime(),
         })
+    }
+
+    private resolveAccountId(rootAccountId: string | undefined): string | undefined {
+        return this.dependencies.getAccountId
+            ? this.dependencies.getAccountId() ?? undefined
+            : rootAccountId
     }
 
     private resolveAssociation(accountId: string | undefined): OfficialAssociationRecord | null {
@@ -530,14 +572,20 @@ export class OfficialAccountSnapshotAdapter implements OfficialRevisionPublisher
         return this.dependencies.now?.() ?? Date.now()
     }
 
-    async pin(revision: DataRevision): Promise<PinnedPublication> {
+    async pin(revision: DataRevision, options: OfficialPublicationOptions = {}): Promise<PinnedPublication> {
+        throwIfAborted(options.signal)
         const lease = await this.dependencies.store.acquireRevision(revision)
         try {
             const blobs = await this.dependencies.resolveBlobs()
-            const references = await collectPinnedReferences(lease)
+            const references = await collectPinnedReferences(lease, options.signal)
+            const accountId = this.resolveAccountId(references.accountId)
+            if (this.dependencies.getAccountId && !accountId) {
+                throw new Error('Native official account login is required')
+            }
             const assetKeys = new Set(references.assets)
             const assets: PinnedAsset[] = []
             for (const key of [...assetKeys].sort()) {
+                throwIfAborted(options.signal)
                 const publishedAs = this.dependencies.ledger.publishedAs(key)
                 if (publishedAs !== null) {
                     assets.push({ key, localKey: key, publishedAs })
@@ -552,15 +600,7 @@ export class OfficialAccountSnapshotAdapter implements OfficialRevisionPublisher
                     assets.push({ key, localKey: normalized, publishedAs: null })
                     continue
                 }
-                if (this.unavailableRemoteAssets.has(key)) continue
-                const remote = await this.dependencies.account.readItem(key)
-                if (remote.kind === 'missing') {
-                    this.unavailableRemoteAssets.add(key)
-                    console.warn(`Skipping an official asset that is missing locally and in the account: ${key}`)
-                    continue
-                }
-                this.dependencies.ledger.record(key, key)
-                assets.push({ key, localKey: key, publishedAs: key })
+
             }
 
             return new OfficialPinnedPublication(
@@ -568,10 +608,11 @@ export class OfficialAccountSnapshotAdapter implements OfficialRevisionPublisher
                 lease,
                 blobs,
                 assets,
-                references.accountId,
+                accountId,
                 this.dependencies,
+                options,
                 (publishedRevision, databaseFingerprint) => {
-                    this.rememberAssociation(references.accountId, {
+                    this.rememberAssociation(accountId, {
                         revision: publishedRevision,
                         databaseFingerprint,
                         syncedAt: this.stampTime(),
@@ -590,7 +631,8 @@ export class OfficialAccountSnapshotAdapter implements OfficialRevisionPublisher
         throwIfAborted(signal)
         const localRoot = await this.dependencies.store.readRoot()
         const expectedRevision = localRoot.revision
-        const association = this.resolveAssociation(localRoot.value.account?.id)
+        const accountId = this.resolveAccountId(localRoot.value.account?.id)
+        const association = this.resolveAssociation(accountId)
         const result = await this.dependencies.account.readItem(databaseKey, { signal })
         throwIfAborted(signal)
         if (result.kind === 'missing') return { kind: 'missing' }
@@ -636,9 +678,12 @@ export class OfficialAccountSnapshotAdapter implements OfficialRevisionPublisher
         validateCandidate(candidate)
 
         // Upstream account data can reference cold payloads. They become record bodies here,
-        // because nothing downstream resolves a reference; a missing one degrades that item.
+        // because nothing downstream resolves a reference. Unresolved payloads prevent activation.
         throwIfAborted(signal)
-        await expandColdPayloads(candidate, (key) => this.dependencies.cold.readRemote(key, signal))
+        const expansion = await expandColdPayloads(candidate, (key) => this.dependencies.cold.readRemote(key, signal))
+        if (expansion.unavailableKeys.length > 0) {
+            throw new ColdPayloadUnavailableError(expansion.unavailableKeys.length)
+        }
 
         // Referenced assets load lazily on use, matching the upstream client;
         // a missing one degrades that item instead of failing the whole pull.
@@ -647,7 +692,7 @@ export class OfficialAccountSnapshotAdapter implements OfficialRevisionPublisher
             candidate,
             expectedRevision,
         )
-        this.rememberAssociation(candidate.account?.id ?? localRoot.value.account?.id, {
+        this.rememberAssociation(this.dependencies.getAccountId ? accountId : candidate.account?.id ?? accountId, {
             revision: activated.revision,
             databaseFingerprint,
             syncedAt: this.stampTime(),

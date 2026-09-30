@@ -12,8 +12,8 @@ pub(super) fn store_error(error: StoreError) -> NativeJobError {
         StoreError::RevisionConflict { .. } => {
             NativeJobError::new("revision-conflict", error.to_string())
         }
-        StoreError::Validation { .. } => invalid_input(error.to_string()),
-        StoreError::SnapshotReleased | StoreError::Store { .. } => {
+        StoreError::Validation { .. } | StoreError::CommitDecode { .. } => invalid_input(error.to_string()),
+        StoreError::Committed { .. } | StoreError::SnapshotReleased | StoreError::RawBodyUnavailable | StoreError::CommitBusy | StoreError::Store { .. } => {
             NativeJobError::new("store-error", error.to_string())
         }
     }
@@ -40,7 +40,12 @@ pub(super) fn finish_with_release(
 }
 
 pub(super) fn io_error(error: std::io::Error) -> NativeJobError {
-    NativeJobError::new("io-error", error.to_string())
+    let code = if error.kind() == std::io::ErrorKind::StorageFull {
+        "storage-full"
+    } else {
+        "io-error"
+    };
+    NativeJobError::new(code, error.to_string())
 }
 
 pub(super) fn invalid_input(message: impl AsRef<str>) -> NativeJobError {
@@ -72,7 +77,28 @@ pub(super) fn destination_error_with(
         }
         DestinationWriteError::Cancelled => cancelled(cancelled_message),
         DestinationWriteError::Io { operation, source } => {
-            NativeJobError::new("destination-write-failed", format!("{operation}: {source}"))
+            let code = if source.kind() == std::io::ErrorKind::StorageFull {
+                "storage-full"
+            } else {
+                "destination-write-failed"
+            };
+            NativeJobError::new(code, format!("{operation}: {source}"))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn full_storage_is_distinct_from_other_io_failures() {
+        assert_eq!(io_error(std::io::ErrorKind::StorageFull.into()).code, "storage-full");
+        assert_eq!(io_error(std::io::ErrorKind::PermissionDenied.into()).code, "io-error");
+        let error = destination_error_with(
+            DestinationWriteError::Io { operation: "write", source: std::io::ErrorKind::StorageFull.into() },
+            "source", "destination", "cancelled",
+        );
+        assert_eq!(error.code, "storage-full");
     }
 }

@@ -185,3 +185,24 @@ afterEvaluate {
         }
     }
 }
+
+
+tasks.matching { it.name.startsWith("minify") && it.name.endsWith("ReleaseWithR8") }.configureEach {
+    doLast {
+        val variant = name.removePrefix("minify").removeSuffix("WithR8").replaceFirstChar { it.lowercase() }
+        val mapping = layout.buildDirectory.file("outputs/mapping/$variant/mapping.txt").get().asFile
+        check(mapping.isFile) { "Missing R8 mapping for JNI retention verification: $variant" }
+        val lines = mapping.readLines()
+        for (owner in listOf("ExternalStorageSecrets", "ServerSyncSecrets")) {
+            val className = "io.github.rsyumi.risunest.$owner"
+            val classIndex = lines.indexOf("$className -> $className:")
+            check(classIndex >= 0) { "R8 renamed or removed JNI class: $className" }
+            val members = lines.drop(classIndex + 1).takeWhile { it.startsWith(" ") || it.startsWith("#") }
+            for (method in listOf("initialize", "seal", "open", "removeKeys")) {
+                check(members.any { it.contains(" $method(") && it.endsWith(" -> $method") }) {
+                    "R8 renamed or removed JNI method: $className.$method"
+                }
+            }
+        }
+    }
+}

@@ -4,13 +4,14 @@ import {
     readFile,
     exists,
     mkdir,
-    readDir
+    readDir,
+    remove
 } from "@tauri-apps/plugin-fs"
 import { changeFullscreen, sleep } from "./util"
 import { convertFileSrc } from "@tauri-apps/api/core"
 import { v4 as uuidv4, v4 } from 'uuid';
 import { join } from "@tauri-apps/api/path";
-import { nativeDataPath } from "./storage/nativePaths";
+import { nativeDataPath, iosStagingPath } from "./storage/nativePaths";
 import { get } from "svelte/store";
 import { open } from '@tauri-apps/plugin-shell'
 import { openUrl } from '@tauri-apps/plugin-opener'
@@ -20,7 +21,8 @@ import versionData from "../../version.json";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { MobileGUI, botMakerMode, selectedCharID, loadedStore, DBState, LoadingStatusState, selIdState, ReloadGUIPointer, bodyIntercepterStore } from "./stores.svelte";
 import { loadPlugins } from "./plugins/plugins.svelte";
-import { alertConfirm, alertError, alertMd, alertNormal, alertNormalWait, alertSelect, alertTOS, waitAlert } from "./alert";
+import { alertConfirm, alertError, alertMd, alertNormal, alertNormalWait, alertSelect, alertToast, alertTOS, waitAlert } from "./alert";
+import { doingChat } from "./process/generationState";
 import { hasher } from "./parser/parser.svelte";
 import { characterURLImport, hubURL, realmHubURL } from "./characterCards";
 import { defaultJailbreak, defaultMainPrompt, oldJailbreak, oldMainPrompt } from "./storage/defaultPrompts";
@@ -46,7 +48,7 @@ import {
     replaceDatabaseRootResources,
 } from "./process/coldstorageData";
 import { collectExactPluginStorageAssetReferences } from "./drive/backupAssets";
-import { downloadIOSFile } from "./storage/iosFiles";
+import { downloadIOSFile, exportIOSFile } from "./storage/iosFiles";
 import { isTauriIOS, isTauri, isTauriMobile } from "./platform";
 import { isLocalNetworkUrl } from "./network/localNetwork";
 import { ByteBudgetLru } from "./util/byteBudgetLru";
@@ -54,12 +56,14 @@ import { getRuntimePerformanceBudgets, subscribeRuntimePerformanceProfile } from
 import { checkCharOrder as repairDatabaseCharacterOrder } from "./storage/databasePreparation";
 import {
     activateConversation,
+    captureSelectedConversationTarget,
     configurePersistentDataRuntime,
     fencePersistentNavigation,
     markPersistentDataDirty,
     replacePersistentDatabase,
 } from "./storage/persistentDataRuntime.svelte";
 import * as persistentDataRuntime from "./storage/persistentDataRuntime.svelte";
+import { PersistentMutationFencedError } from "./storage/saveCoordinator";
 import {
     queryChatMessageTargetAt,
     queryChatMessageTargetById,
@@ -71,7 +75,7 @@ import {
     installPersistentSaveNotifications,
 } from "./storage/persistentSaveNotifications";
 import { observePersistentSaveChanges } from './storage/persistentSaveObserver.svelte';
-import { configureBlobStoreStorageProvider, readBlobForFacade, resolveBlobStore } from "./storage/platformBlobStore";
+import { configureBlobStoreStorageProvider, readBlobForFacade, resolveBlobStore, subscribeNativeMediaEndpointChanges } from "./storage/platformBlobStore";
 import { inferBlobMime } from "./storage/blobStore";
 import { selectAssetSourceRoute } from "./storage/assetSourceRoute";
 import { readActiveAsset, storeActiveAsset } from "./storage/accountAssetAccess";
@@ -103,7 +107,10 @@ interface fetchLog {
 
 let fetchLog: fetchLog[] = []
 
+import { normalizeDownloadFileName } from "./downloadFileName"
+
 export async function downloadFile(name: string, dat: Uint8Array | ArrayBuffer | string): Promise<boolean> {
+    name = normalizeDownloadFileName(name)
     if (typeof (dat) === 'string') {
         dat = Buffer.from(dat, 'utf-8')
     }
@@ -206,6 +213,13 @@ async function readBrowserAssetDataUrl(loc: string): Promise<string | null> {
     }
     return await pending
 }
+
+function invalidateNativeMediaUrls(): void {
+    tauriAssetUrlCache.clear()
+    pendingTauriAssetUrls.clear()
+    ReloadGUIPointer.update(value => value + 1)
+}
+subscribeNativeMediaEndpointChanges(invalidateNativeMediaUrls)
 
 export function invalidateAssetSourceCache(key: string): void {
     tauriAssetUrlCache.delete(key)
@@ -1016,6 +1030,8 @@ export class TauriWriter {
  */
 export class LocalWriter {
     writer: WritableStreamDefaultWriter | TauriWriter
+    private iosExport?: { folder: string; path: string; name: string }
+    private closing?: Promise<void>
 
     /**
      * Initializes the writer.
@@ -1025,6 +1041,20 @@ export class LocalWriter {
      * @returns {Promise<boolean>} - A promise that resolves to a boolean indicating success.
      */
     async init(name = 'Binary', ext = ['bin'], defaultName?: string): Promise<boolean> {
+        if (isTauriIOS) {
+            const folder = await iosStagingPath()
+            const path = await join(folder, 'export.bin')
+            await mkdir(folder, { recursive: true })
+            try {
+                await writeFile(path, new Uint8Array())
+                this.writer = new TauriWriter(path)
+                this.iosExport = { folder, path, name: defaultName ?? `${name}.${ext[0] ?? 'bin'}` }
+                return true
+            } catch (error) {
+                await remove(folder, { recursive: true })
+                throw error
+            }
+        }
         if (isTauri) {
             // Android never appends the filter extension, so the suggested name has to carry it.
             const filePath = await save({
@@ -1104,15 +1134,40 @@ export class LocalWriter {
      * Closes the writer.
      */
     async close(): Promise<void> {
-        await this.writer.close()
+        this.closing ??= (async () => {
+            try {
+                await this.writer.close()
+                if (this.iosExport) {
+                    await exportIOSFile({ sourcePath: this.iosExport.path, suggestedName: this.iosExport.name })
+                }
+            } finally {
+                await this.cleanupIOSExport()
+            }
+        })()
+        await this.closing
+    }
+
+    private async cleanupIOSExport(): Promise<void> {
+        if (!this.iosExport) return
+        const { folder } = this.iosExport
+        await remove(folder, { recursive: true })
+        this.iosExport = undefined
     }
 
     async abort(): Promise<void> {
+        if (this.closing) {
+            await this.closing.catch(() => {})
+            return
+        }
         const abortable = this.writer as typeof this.writer & {
             abort?: () => void | Promise<void>
         }
         if (!abortable.abort) throw new Error('Local writer does not support abort')
-        await abortable.abort()
+        try {
+            await abortable.abort()
+        } finally {
+            await this.cleanupIOSExport()
+        }
     }
 }
 
@@ -1700,6 +1755,18 @@ export async function changeChatTo(IdOrIndex: string | number): Promise<boolean>
         ? chats[IdOrIndex]?.id
         : IdOrIndex
     if(!chatId || !chats.some((chat) => chat.id === chatId)) return false
+    // Reactivating the open conversation would reload it and reset the chat view.
+    const selected = captureSelectedConversationTarget()
+    if(
+        selected?.characterId === characterId &&
+        selected.conversationId === chatId &&
+        chats[character.chatPage]?.id === chatId
+    ) return true
+    // The navigation fence would orphan the running response, so refuse first.
+    if(get(doingChat)){
+        alertToast(language.navigationBlockedWhileGenerating)
+        return false
+    }
 
     fencePersistentNavigation()
     const activity = beginNavigationActivity('conversation')
@@ -1715,6 +1782,10 @@ export async function changeChatTo(IdOrIndex: string | number): Promise<boolean>
             return false
         const activated = await activateConversation(chatId)
         return activity.isCurrent() ? activated : false
+    } catch (error) {
+        // A replacement or refresh holding storage refuses the switch like a stale click.
+        if (error instanceof PersistentMutationFencedError) return false
+        throw error
     } finally {
         activity.finish()
     }

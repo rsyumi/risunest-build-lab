@@ -3,6 +3,7 @@ import {
     groupLoreFolders,
     loreDropIndex,
     loreListWindow,
+    lorePageOf,
 } from './loreListWindow'
 import type { loreBook } from '../storage/database.svelte'
 
@@ -37,4 +38,34 @@ it('moves backing rows correctly in both directions and across a filtered folder
         child,
         other,
     ])
+})
+
+it('keeps a moved folder together with children that precede its new position', () => {
+    const folder = { mode: 'folder', key: 'f' } as loreBook
+    const child = { folder: 'f' } as loreBook
+    const orphan = { folder: 'missing' } as loreBook
+    const other = {} as loreBook
+    expect(groupLoreFolders([child, other, folder, orphan])).toEqual([other, folder, child, orphan])
+})
+
+it('keeps pinned rows from other pages mounted at the requested edge', () => {
+    const items = Array.from({ length: 10 }, (_, i) => ({ key: String(i) }) as loreBook)
+    const keys = (rows: { book: loreBook }[]) => rows.map(row => row.book.key)
+    expect(keys(loreListWindow(items, '', 1, 4, [items[1]]).rows)).toEqual(['1', '4', '5', '6', '7'])
+    expect(keys(loreListWindow(items, '', 1, 4, [items[9], items[8]], 'end').rows)).toEqual(['4', '5', '6', '7', '8', '9'])
+    expect(keys(loreListWindow(items, '', 1, 4, [items[5]]).rows)).toEqual(['4', '5', '6', '7'])
+    expect(loreListWindow(items, '', 1, 4, [items[1]]).total).toBe(10)
+    const child = { key: 'c', folder: 'f' } as loreBook
+    expect(keys(loreListWindow([...items, child], '', 0, 4, [child]).rows)).toEqual(['0', '1', '2', '3'])
+})
+
+it('finds the page of a row within its folder level', () => {
+    const folder = { mode: 'folder', key: 'f' } as loreBook
+    const children = Array.from({ length: 5 }, (_, i) => ({ key: `c${i}`, folder: 'f' }) as loreBook)
+    const root = Array.from({ length: 5 }, (_, i) => ({ key: `r${i}` }) as loreBook)
+    const items = [folder, ...children, ...root]
+    expect(lorePageOf(items, 'f', children[4], 2)).toBe(2)
+    expect(lorePageOf(items, '', root[0], 2)).toBe(0)
+    expect(lorePageOf(items, '', root[1], 2)).toBe(1)
+    expect(lorePageOf(items, '', children[0], 2)).toBeNull()
 })

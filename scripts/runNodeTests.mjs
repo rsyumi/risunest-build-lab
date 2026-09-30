@@ -16,7 +16,7 @@ try {
   }
   const selected = selectNodeTests(files)
   console.log(`Running ${selected.length} Node test files`)
-  const result = spawnSync(process.execPath, ['--test', ...selected], { cwd: root, stdio: 'inherit' })
+  const result = spawnSync(process.execPath, ['--test', ...selected], { cwd: root, stdio: 'inherit', windowsHide: true })
   if (result.error) throw result.error
   if (result.signal) throw new Error(`Node tests terminated by ${result.signal}`)
   process.exitCode = result.status ?? 1

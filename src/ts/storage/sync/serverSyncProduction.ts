@@ -1,6 +1,9 @@
-import { isTauri } from "../../platform";
+import { hasMobileBackgroundTasks, subscribeMobileBackgroundTasks } from "../../mobileBackgroundTask";
+import { get } from "svelte/store";
+import { doingChat } from "../../process/generationState";
+import { isTauri, isTauriDesktop } from "../../platform";
 import { invalidatePluginDeviceKeyspaces } from "../../plugins/pluginDeviceKeyspace";
-import { subscribeLibraryFileOperationReleased } from "../libraryFileOperation";
+import { registerLibraryFileOperationGate, subscribeLibraryFileOperationReleased } from "../libraryFileOperation";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -9,14 +12,18 @@ import {
   acquireDestructiveReplacementFence,
   refreshActiveWorkingSetFromStore,
 } from "../persistentDataRuntime.svelte";
-import { createServerSyncFacade, type ServerHead } from "./serverSync";
+import { createServerSyncFacade, ServerSyncError, type ServerHead } from "./serverSync";
 import { createServerSyncController } from "./serverSyncController";
 import { createServerSyncScheduler } from "./serverSyncScheduler";
 import { subscribeLocalPersistentRevision } from "../persistentRevisionEvents";
 import { subscribeNativeServerSyncSignals } from "./serverSyncNativeSignals";
 import type { SyncExitDrainAdapter } from "../syncExitCoordinator";
+import type { RetainableReplacementFence } from "../retainableReplacementFence";
 
 let controller: ReturnType<typeof createServerSyncController> | undefined;
+// A restored library and a manual pause both wait for an explicit sync action,
+// including across restarts.
+const syncHold = "risuNestServerSyncRestoreHold";
 export function getServerSyncController() {
   return (controller ??= createServerSyncController(
     createServerSyncFacade({
@@ -24,6 +31,7 @@ export function getServerSyncController() {
       onVerifiedBytes: (bytes) => controller?.reportVerifiedBytes(bytes),
       onRetryableFailure: (code) => controller?.reportRetryableFailure(code),
       onCycleItems: (items) => controller?.reportCycleItems(items),
+      deferred: () => get(doingChat),
       runtime: {
         flushPendingData,
         capturePersistentMutationToken,
@@ -31,6 +39,7 @@ export function getServerSyncController() {
         refreshActiveWorkingSetFromStore,
       },
       invalidateDevicePlugins: invalidatePluginDeviceKeyspaces,
+      awaitLibrary: () => deletionCleanup ?? Promise.resolve(),
       restorePlugins: async () => {
         await (
           await import("../../plugins/plugins.svelte")
@@ -38,22 +47,23 @@ export function getServerSyncController() {
       },
     }),
     {
-      initiallyPaused:
-        localStorage.getItem("risuNestServerSyncRestoreHold") === "true",
-      onExplicitResume: () =>
-        localStorage.removeItem("risuNestServerSyncRestoreHold"),
+      initiallyPaused: localStorage.getItem(syncHold) === "true",
+      onPause: () => localStorage.setItem(syncHold, "true"),
+      onExplicitResume: () => localStorage.removeItem(syncHold),
+      deferred: () => get(doingChat),
     },
   ));
 }
 export function createServerSyncExitDrainAdapter(
   id = "server",
+  fence?: RetainableReplacementFence,
   syncController = getServerSyncController(),
 ): SyncExitDrainAdapter {
   return {
     id,
     drain: (target, signal) =>
       target.selectionId === id
-        ? syncController.drainToRevision(target.revision, signal)
+        ? syncController.drainToRevision(target.revision, signal, fence)
         : Promise.resolve({
             kind: "blocked",
             reason: "server-sync-selection-changed",
@@ -63,7 +73,7 @@ export function createServerSyncExitDrainAdapter(
 }
 /** A restored library waits for an explicit sync action, including across maintenance reloads. */
 export function holdServerSyncAfterRestore(): void {
-  localStorage.setItem("risuNestServerSyncRestoreHold", "true");
+  localStorage.setItem(syncHold, "true");
   getServerSyncController().holdAutomaticSync();
 }
 let started = false;
@@ -72,6 +82,9 @@ let syncAvailable: (() => boolean) | undefined;
 /** A read-only file backup may outlive the scheduled timer. Resume the existing
  * scheduler when it settles; restoring a library deliberately does not do this. */
 export function resumeServerSyncAfterBackup(): void {
+  if (controller && !controller.snapshot().status) {
+    void controller.ensureStatus().then(() => activeScheduler?.resume());
+  }
   activeScheduler?.resume();
   if (activeScheduler) {
     cleanupDeletedBackups();
@@ -115,9 +128,16 @@ export interface ServerSyncBackupInventory {
   diskBytes: number;
 }
 export interface ServerSyncCacheUsage {
+  /** cacheBytes plus ledgerBytes. */
   totalBytes: number;
+  /** The temporary files: protectedBytes plus reclaimableBytes. */
+  cacheBytes: number;
   protectedBytes: number;
   reclaimableBytes: number;
+  /** The asset residency ledger kept beside the temporary files. */
+  ledgerBytes: number;
+  /** Part of cacheBytes: what the cache's object database occupies on disk. */
+  databaseBytes: number;
   blockedReason: string | null;
 }
 export const getServerSyncBackupInventory = (before?: ServerSyncBackupCursor) =>
@@ -125,8 +145,25 @@ export const getServerSyncBackupInventory = (before?: ServerSyncBackupCursor) =>
     before: before ?? null,
   });
 let deletionCleanup: Promise<void> | undefined;
+let cleanupAfterAttempt = false;
 function cleanupDeletedBackups(): void {
-  if (!isTauri || deletionCleanup || getServerSyncController().snapshot().connecting) return;
+  if (!isTauri || deletionCleanup || cleanupAfterAttempt) return;
+  const controller = getServerSyncController();
+  const { connecting, running } = controller.snapshot();
+  if (connecting) return;
+  // An attempt holds the library from preparation to publication, so cleanup
+  // follows it, and the next attempt waits for cleanup through awaitLibrary.
+  if (running) {
+    cleanupAfterAttempt = true;
+    void controller
+      .waitForIdle()
+      .catch(() => {})
+      .then(() => {
+        cleanupAfterAttempt = false;
+        cleanupDeletedBackups();
+      });
+    return;
+  }
   // Native admission rejects busy attempts. Retry on the next safe lifecycle
   // signal, without cancelling work or making startup depend on cleanup.
   deletionCleanup = invoke("server_sync_backup_cleanup")
@@ -204,8 +241,9 @@ export async function exportServerSyncBackup(
  * in a state to act on them. */
 function suspendServerSync(
   scheduler: ReturnType<typeof createServerSyncScheduler>,
+  preserveActive = false,
 ): void {
-  scheduler.suspend();
+  scheduler.suspend(preserveActive);
   void invoke("server_sync_events_stop").catch(() => {});
 }
 export function startServerSync(): void {
@@ -217,6 +255,16 @@ export function startServerSync(): void {
   const scheduler = createServerSyncScheduler(controller, { available });
   activeScheduler = scheduler;
   syncAvailable = available;
+  registerLibraryFileOperationGate(async () => {
+    await controller.waitForIdle();
+    if (controller.snapshot().refreshPending || controller.snapshot().connecting || controller.snapshot().replacing)
+      throw new ServerSyncError("resolve-pending-operation-first");
+  });
+  let wasGenerating = get(doingChat);
+  doingChat.subscribe((generating) => {
+    if (wasGenerating && !generating) resumeServerSyncAfterBackup();
+    wasGenerating = generating;
+  });
   subscribeLibraryFileOperationReleased(() => {
     if (controller.canAutoSync()) resumeServerSyncAfterBackup();
   });
@@ -246,11 +294,29 @@ export function startServerSync(): void {
     }
     configured = bound;
   });
-  void controller.initialize().then(() => resumeServerSyncAfterBackup());
+  const retryStatus = (attempt = 0): void => {
+    if (controller.snapshot().status || attempt >= 3) return;
+    setTimeout(() => {
+      void controller.ensureStatus().then(() => {
+        if (controller.snapshot().status) resumeServerSyncAfterBackup();
+        else retryStatus(attempt + 1);
+      });
+    }, [250, 1000, 3000][attempt]);
+  };
+  void controller.initialize().then(() => {
+    resumeServerSyncAfterBackup();
+    retryStatus();
+  });
+  // A desktop window keeps running while hidden, and an attempt that loses
+  // the network retries on its own, so neither stops the attempt in flight.
+  const keepActive = () => isTauriDesktop || hasMobileBackgroundTasks();
   window.addEventListener("online", () => resumeServerSyncAfterBackup());
-  window.addEventListener("offline", () => suspendServerSync(scheduler));
+  window.addEventListener("offline", () => suspendServerSync(scheduler, true));
+  subscribeMobileBackgroundTasks(() => {
+    if (document.visibilityState === "hidden" && !keepActive()) suspendServerSync(scheduler);
+  });
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "hidden") suspendServerSync(scheduler);
+    if (document.visibilityState === "hidden") suspendServerSync(scheduler, keepActive());
     else resumeServerSyncAfterBackup();
   });
 }

@@ -1,5 +1,5 @@
 <script lang="ts">
-    import { onMount } from 'svelte'
+    import { onMount, untrack } from 'svelte'
     import SettingButton from 'src/lib/Setting/RisuNest/SettingButton.svelte'
     import SettingProgress from 'src/lib/Setting/RisuNest/SettingProgress.svelte'
     import { language } from 'src/lang'
@@ -14,11 +14,12 @@
     } from 'src/ts/update/controller'
     import { buildUpdateDialogModel } from 'src/ts/gui/updateDialogModel'
     import { parseReleaseNotes, selectLocalizedNotes, type ReleaseNoteInline } from 'src/ts/update/notes'
-    import { exit } from '@tauri-apps/plugin-process'
+    import { getCurrentWindow } from '@tauri-apps/api/window'
 
     let panel = $state<HTMLDivElement | undefined>()
     let copied = $state('')
     const text = $derived(language.risuNest.update)
+    const open = $derived($appUpdateState.popupVisible)
     const model = $derived(buildUpdateDialogModel($appUpdateState))
     const locale = $derived(getDatabase().language ?? 'en')
     const noteBlocks = $derived(parseReleaseNotes($appUpdateState.update
@@ -34,7 +35,7 @@
     })
 
     $effect(() => {
-        if (model.open) panel?.focus()
+        if (open && panel) untrack(() => panel?.focus())
     })
 
     async function copy(value: string): Promise<void> {
@@ -99,7 +100,7 @@
                         <div class="flex flex-wrap gap-2">
                             <SettingButton variant="secondary" onclick={() => void copy($appUpdateState.stagedDeb!.path)}>{copied === $appUpdateState.stagedDeb.path ? text.copied : text.copyPath}</SettingButton>
                             <SettingButton variant="secondary" onclick={() => void copy($appUpdateState.stagedDeb!.installCommand)}>{copied === $appUpdateState.stagedDeb.installCommand ? text.copied : text.copyCommand}</SettingButton>
-                            <SettingButton onclick={() => void exit(0)}>{text.exitApp}</SettingButton>
+                            <SettingButton onclick={() => void getCurrentWindow().close()}>{text.exitApp}</SettingButton>
                         </div>
                     </div>
                 {/if}

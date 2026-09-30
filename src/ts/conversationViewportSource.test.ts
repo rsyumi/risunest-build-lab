@@ -66,7 +66,6 @@ function harness(messages: Message[]) {
         conversationId: conversation.id,
         conversation,
         storeRevision: 1,
-        maxResidentBytes: 1024,
         measureMessage: () => 1,
     })
     const source = new SynchronousSessionConversationViewportSource({

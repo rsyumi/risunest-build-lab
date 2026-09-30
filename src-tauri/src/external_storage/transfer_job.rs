@@ -2,9 +2,15 @@
 //! uncertain results are reconciled before any subsequent payload request.
 use super::{
     contract::*,
-    journal::{validate_receipt, TransferJournal},
+    journal::{validate_receipt, TransferJournal, WaveMember},
     transfer::{SpoolSink, SpoolSource},
 };
+use std::collections::BTreeMap;
+
+/// How many ready intents one registration covers. The format allows more; the
+/// point of the bound is that a wave is registered while the next objects are
+/// still being produced, never after the whole library is spooled.
+pub(super) const REGISTRATION_WAVE: usize = 64;
 use risunest_external_storage_format::{content_identity::hash, format::Descriptor};
 
 /// Reconcile answers identify an object, but not every provider supplies a
@@ -133,6 +139,11 @@ async fn upload_inner(
                 return Err(ProviderError::new(ErrorKind::PreconditionFailed));
             }
         }
+        // A released ciphertext cannot be sent a second time. The object has to
+        // be produced again, which only a later job can do.
+        if record.released {
+            return Err(ProviderError::new(ErrorKind::NotFound));
+        }
         journal.reopen_object(object)?;
     }
     // Only missing objects need the original ciphertext, including its nonce.
@@ -209,6 +220,111 @@ async fn upload_inner(
     }
 }
 
+/// Registers a wave of sealed objects under one inventory page and then
+/// uploads what that page covers. Roles the inventory does not carry travel on
+/// their own. Receipts come back in the order the members were given.
+pub(crate) async fn upload_wave(
+    journal: &mut TransferJournal,
+    members: &[WaveMember],
+    format_repository_id: &str,
+    root_key: &[u8; 32],
+    provider: &dyn Provider,
+    repository: &RepositoryHandle,
+    cancel: &Cancellation,
+) -> Result<Vec<ObjectReceipt>> {
+    let descriptor = Descriptor::new(format_repository_id.to_owned(), None)
+        .map_err(|_| ProviderError::new(ErrorKind::Corrupt))?;
+    // A wave gathered differently after a restart resumes the pages it
+    // started rather than reshaping one whose upload has already begun.
+    let mut waves: BTreeMap<Option<String>, Vec<(WaveMember, String)>> = BTreeMap::new();
+    for member in members {
+        let record = journal
+            .record(&member.object_id)?
+            .ok_or_else(|| ProviderError::new(ErrorKind::Corrupt))?;
+        if !matches!(
+            record.intent.role,
+            ObjectRole::Pack
+                | ObjectRole::Catalog
+                | ObjectRole::SyncState
+                | ObjectRole::BackupBundle
+                | ObjectRole::BackupPoint
+        ) {
+            continue;
+        }
+        let page = journal.covered_by(&member.object_id)?;
+        waves
+            .entry(page)
+            .or_default()
+            .push((member.clone(), record.intent.sha256.clone()));
+    }
+    let mut pages = Vec::new();
+    for (page, group) in waves {
+        match page {
+            Some(page) => pages.push(page),
+            None => {
+                let mut group = group;
+                group.sort_unstable_by(|left, right| left.0.object_id.cmp(&right.0.object_id));
+                for slice in group.chunks(REGISTRATION_WAVE) {
+                    let identities = slice
+                        .iter()
+                        .map(|(member, sha256)| (member.object_id.as_str(), sha256.as_str()))
+                        .collect::<Vec<_>>();
+                    let page_object = format!(
+                        "inventory-page-{}",
+                        inventory_page_id(journal.job_id(), &identities)
+                    );
+                    let covered = slice
+                        .iter()
+                        .map(|(member, _)| member.clone())
+                        .collect::<Vec<_>>();
+                    journal.cover(&page_object, &covered)?;
+                    pages.push(page_object);
+                }
+            }
+        }
+    }
+    for page_object in pages {
+        let page_id = page_object
+            .strip_prefix("inventory-page-")
+            .ok_or_else(|| ProviderError::new(ErrorKind::Corrupt))?
+            .to_owned();
+        let recorded = journal.page_members(&page_object)?;
+        let registrations = recorded
+            .iter()
+            .map(|(intent, plaintext_length, plaintext_sha256)| {
+                super::control::InventoryRegistration {
+                    intent,
+                    plaintext_length: *plaintext_length,
+                    plaintext_sha256,
+                }
+            })
+            .collect::<Vec<_>>();
+        let document = super::control::inventory_page_document(
+            &descriptor,
+            repository,
+            journal.job_id(),
+            &page_id,
+            &registrations,
+        )?;
+        Box::pin(super::control::upload_inventory_page(
+            &descriptor,
+            root_key,
+            document,
+            journal,
+            provider,
+            repository,
+            cancel,
+        ))
+        .await?;
+    }
+    let mut receipts = Vec::with_capacity(members.len());
+    for member in members {
+        receipts.push(upload(journal, &member.object_id, provider, repository, cancel).await?);
+    }
+    Ok(receipts)
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn upload_registered(
     journal: &mut TransferJournal,
     object: &str,
@@ -220,53 +336,33 @@ pub(crate) async fn upload_registered(
     repository: &RepositoryHandle,
     cancel: &Cancellation,
 ) -> Result<ObjectReceipt> {
-    let descriptor = Descriptor::new(format_repository_id.to_owned(), None)
-        .map_err(|_| ProviderError::new(ErrorKind::Corrupt))?;
-    let record = journal
-        .record(object)?
-        .ok_or_else(|| ProviderError::new(ErrorKind::Corrupt))?;
-    if !matches!(
-        record.intent.role,
-        ObjectRole::Pack
-            | ObjectRole::Catalog
-            | ObjectRole::SyncState
-            | ObjectRole::BackupBundle
-            | ObjectRole::BackupPoint
-    ) {
-        return upload(journal, object, provider, repository, cancel).await;
-    }
-    let page_id = inventory_page_id(journal.job_id(), object, &record.intent.sha256);
-    let document = super::control::inventory_page_document(
-        &descriptor,
-        repository,
-        journal.job_id(),
-        &page_id,
-        &[super::control::InventoryRegistration {
-            intent: &record.intent,
-            plaintext_length,
-            plaintext_sha256,
-        }],
-    )?;
-    Box::pin(super::control::upload_inventory_page(
-        &descriptor,
-        root_key,
-        document,
+    upload_wave(
         journal,
+        &[WaveMember {
+            object_id: object.to_owned(),
+            plaintext_length,
+            plaintext_sha256: plaintext_sha256.to_owned(),
+        }],
+        format_repository_id,
+        root_key,
         provider,
         repository,
         cancel,
-    ))
-    .await?;
-    upload(journal, object, provider, repository, cancel).await
+    )
+    .await?
+    .pop()
+    .ok_or_else(|| ProviderError::new(ErrorKind::Corrupt))
 }
 
-fn inventory_page_id(job_id: &str, object: &str, sha256: &str) -> String {
-    let mut identity = Vec::with_capacity(job_id.len() + object.len() + 66);
+fn inventory_page_id(job_id: &str, members: &[(&str, &str)]) -> String {
+    let mut identity = Vec::with_capacity(job_id.len() + members.len() * 130);
     identity.extend_from_slice(job_id.as_bytes());
-    identity.push(0);
-    identity.extend_from_slice(object.as_bytes());
-    identity.push(0);
-    identity.extend_from_slice(sha256.as_bytes());
+    for (object, sha256) in members {
+        identity.push(0);
+        identity.extend_from_slice(object.as_bytes());
+        identity.push(0);
+        identity.extend_from_slice(sha256.as_bytes());
+    }
     hex::encode(hash(&identity))
 }
 
@@ -316,14 +412,59 @@ mod tests {
         journal.register(&intent).unwrap();
         (journal, intent)
     }
+    /// A wave of sealed objects, registered together.
+    fn prepare_wave(root: &std::path::Path, count: usize) -> (TransferJournal, Vec<WaveMember>) {
+        let mut journal = TransferJournal::open(root, identity()).unwrap();
+        let mut members = Vec::new();
+        for index in 0..count {
+            let bytes = format!("synthetic immutable ciphertext {index}").into_bytes();
+            let intent = ObjectIntent {
+                repository_id: identity().repository_id,
+                job_id: identity().job_id,
+                object_id: format!("pack-wave-{index}"),
+                role: ObjectRole::Pack,
+                byte_length: bytes.len() as u64,
+                sha256: risunest_sync_wire::hash(&bytes),
+            };
+            let mut file = std::fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(journal.spool_path(&intent.object_id))
+                .unwrap();
+            file.write_all(&bytes).unwrap();
+            file.sync_all().unwrap();
+            journal.register(&intent).unwrap();
+            members.push(WaveMember {
+                object_id: intent.object_id.clone(),
+                plaintext_length: intent.byte_length,
+                plaintext_sha256: intent.sha256.clone(),
+            });
+        }
+        (journal, members)
+    }
+
+    fn covering_page(journal: &TransferJournal, members: &[WaveMember]) -> String {
+        let page = journal.covered_by(&members[0].object_id).unwrap().unwrap();
+        for member in members {
+            assert_eq!(
+                journal.covered_by(&member.object_id).unwrap().as_deref(),
+                Some(page.as_str()),
+                "a wave was split across pages"
+            );
+        }
+        page
+    }
+
     fn runtime() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap()
     }
+    /// A released object cannot be sent a second time, and an object the
+    /// repository still holds is confirmed without one.
     #[test]
-    fn c_reopened_complete_receipt_repairs_only_the_missing_object() {
+    fn c_a_lost_remote_object_is_not_repaired_from_a_released_ciphertext() {
         runtime().block_on(async {
             let root = tempfile::tempdir().unwrap();
             let (mut journal, first) = prepare(root.path());
@@ -336,18 +477,20 @@ mod tests {
             let cancel = Cancellation::default();
             for intent in [&first, &second] {
                 upload(&mut journal, &intent.object_id, &provider, &repository, &cancel).await.unwrap();
-                assert!(journal.spool_path(&intent.object_id).exists());
+                assert!(!journal.spool_path(&intent.object_id).exists());
             }
             provider.forget(&first.object_id);
             drop(journal);
             let mut journal = TransferJournal::open(root.path(), identity()).unwrap();
-            for intent in [&first, &second] {
-                upload(&mut journal, &intent.object_id, &provider, &repository, &cancel).await.unwrap();
-            }
-            assert!(provider.holds(&first.object_id));
-            assert_eq!(provider.upload_attempts(&first.object_id), 2);
+            let error = upload(&mut journal, &first.object_id, &provider, &repository, &cancel)
+                .await.unwrap_err();
+            assert_eq!(error.kind, ErrorKind::NotFound);
+            assert!(!provider.holds(&first.object_id));
+            assert_eq!(provider.upload_attempts(&first.object_id), 1);
+            let record = journal.record(&first.object_id).unwrap().unwrap();
+            assert!(record.released && record.receipt.is_some());
+            upload(&mut journal, &second.object_id, &provider, &repository, &cancel).await.unwrap();
             assert_eq!(provider.upload_attempts(&second.object_id), 1);
-            assert_eq!(provider.reconcile_attempts(&first.object_id), 1);
             assert_eq!(provider.reconcile_attempts(&second.object_id), 1);
             assert!(provider.read_attempts(&second.object_id) > 0);
         });
@@ -361,13 +504,12 @@ mod tests {
             let provider = FakeProvider::new(false);
             let repository = fake::repository();
             let cancel = Cancellation::default();
-            upload(&mut journal, &intent.object_id, &provider, &repository, &cancel).await.unwrap();
-            provider.forget(&intent.object_id);
             std::fs::remove_file(journal.spool_path(&intent.object_id)).unwrap();
             let error = upload(&mut journal, &intent.object_id, &provider, &repository, &cancel).await.unwrap_err();
             assert_eq!(error.kind, ErrorKind::NotFound);
-            assert!(journal.record(&intent.object_id).unwrap().unwrap().receipt.is_none());
-            assert_eq!(provider.upload_attempts(&intent.object_id), 1);
+            let record = journal.record(&intent.object_id).unwrap().unwrap();
+            assert!(!record.released && record.receipt.is_none());
+            assert_eq!(provider.upload_attempts(&intent.object_id), 0);
         });
     }
 
@@ -380,7 +522,7 @@ mod tests {
             let repository = fake::repository();
             let cancel = Cancellation::default();
             let original = upload(&mut journal, &intent.object_id, &provider, &repository, &cancel).await.unwrap();
-            std::fs::remove_file(journal.spool_path(&intent.object_id)).unwrap();
+            assert!(!journal.spool_path(&intent.object_id).exists());
             assert_eq!(upload(&mut journal, &intent.object_id, &provider, &repository, &cancel).await.unwrap(), original);
             assert_eq!(provider.upload_attempts(&intent.object_id), 1);
             assert_eq!(provider.read_attempts(&intent.object_id), 1);
@@ -401,14 +543,13 @@ mod tests {
                 let error = upload(&mut journal, &intent.object_id, &provider, &repository, &cancel).await.unwrap_err();
                 assert_eq!(error.kind, kind);
                 assert_eq!(provider.upload_attempts(&intent.object_id), 1);
-                assert!(journal.spool_path(&intent.object_id).exists());
                 assert!(journal.record(&intent.object_id).unwrap().unwrap().receipt.is_some());
             }
         });
     }
 
     #[test]
-    fn c_cancelled_completed_upload_does_not_send_a_new_request_or_discard_spool() {
+    fn c_cancelled_completed_upload_does_not_send_a_new_request() {
         runtime().block_on(async {
             let root = tempfile::tempdir().unwrap();
             let (mut journal, intent) = prepare(root.path());
@@ -419,7 +560,6 @@ mod tests {
             cancel.cancel();
             assert_eq!(upload(&mut journal, &intent.object_id, &provider, &repository, &cancel).await.unwrap_err().kind, ErrorKind::Cancelled);
             assert_eq!(provider.reconcile_attempts(&intent.object_id), 0);
-            assert!(journal.spool_path(&intent.object_id).exists());
         });
     }
 
@@ -619,7 +759,7 @@ mod tests {
             .unwrap();
             let page = format!(
                 "inventory-page-{}",
-                inventory_page_id(&identity().job_id, &intent.object_id, &intent.sha256)
+                inventory_page_id(&identity().job_id, &[(&intent.object_id, &intent.sha256)])
             );
             assert!(provider.holds(&page));
             assert!(provider.holds(&intent.object_id));
@@ -649,7 +789,7 @@ mod tests {
             .unwrap();
             let page = format!(
                 "inventory-page-{}",
-                inventory_page_id(&identity().job_id, &intent.object_id, &intent.sha256)
+                inventory_page_id(&identity().job_id, &[(&intent.object_id, &intent.sha256)])
             );
             provider.forget(&page);
             drop(journal);
@@ -673,13 +813,13 @@ mod tests {
     }
 
     #[test]
-    fn missing_inventory_with_a_lost_confirmation_cannot_be_recreated() {
+    fn a_missing_inventory_page_cannot_be_recreated_for_a_new_payload() {
         runtime().block_on(async {
             let root = tempfile::tempdir().unwrap();
             let (mut journal, intent) = prepare(root.path());
             let provider = FakeProvider::new(false);
             let repository = fake::repository();
-            let page_id = inventory_page_id(journal.job_id(), &intent.object_id, &intent.sha256);
+            let page_id = inventory_page_id(journal.job_id(), &[(&intent.object_id, &intent.sha256)]);
             let document = super::super::control::inventory_page_document(
                 &Descriptor::new("format-repository".into(), None).unwrap(),
                 &repository, journal.job_id(), &page_id,
@@ -694,9 +834,6 @@ mod tests {
                 &Cancellation::default(),
             ).await.unwrap();
             let page_object = format!("inventory-page-{page_id}");
-            // Model a crash after remote creation but before recording its response.
-            journal.reopen_object(&page_object).unwrap();
-            assert!(journal.record(&page_object).unwrap().unwrap().attempted);
             provider.forget(&page_object);
             drop(journal);
             let mut journal = TransferJournal::open(root.path(), identity()).unwrap();
@@ -725,6 +862,7 @@ mod tests {
                 job.job_id = format!("cycle-{cycle}");
                 let directory = root.path().join(&job.job_id);
                 let mut journal = TransferJournal::open(&directory, job.clone()).unwrap();
+                let mut members = Vec::new();
                 for index in 0..32 {
                     let bytes = format!("synthetic-{cycle}-{index}").into_bytes();
                     let intent = ObjectIntent {
@@ -737,23 +875,29 @@ mod tests {
                     };
                     std::fs::write(journal.spool_path(&intent.object_id), &bytes).unwrap();
                     journal.register(&intent).unwrap();
-                    for _ in 0..2 {
-                        upload_registered(
-                            &mut journal, &intent.object_id, "format-repository", &[7; 32],
-                            intent.byte_length, &intent.sha256, &provider, &repository, &cancel,
-                        ).await.unwrap();
-                    }
-                    payload_requests += provider.upload_attempts(&intent.object_id);
-                    inventory_requests += provider.upload_attempts(&format!("inventory-page-{}",
-                        inventory_page_id(&job.job_id, &intent.object_id, &intent.sha256)));
+                    members.push(WaveMember {
+                        object_id: intent.object_id.clone(),
+                        plaintext_length: intent.byte_length,
+                        plaintext_sha256: intent.sha256.clone(),
+                    });
                 }
+                for _ in 0..2 {
+                    upload_wave(
+                        &mut journal, &members, "format-repository", &[7; 32], &provider,
+                        &repository, &cancel,
+                    ).await.unwrap();
+                }
+                for member in &members {
+                    payload_requests += provider.upload_attempts(&member.object_id);
+                }
+                inventory_requests += provider.upload_attempts(&covering_page(&journal, &members));
             }
             let state = provider.state.lock().unwrap();
             let pages = state.objects.iter().filter(|(id, _)| id.starts_with("inventory-page-"))
                 .map(|(_, (bytes, _))| bytes.len()).collect::<Vec<_>>();
-            assert_eq!(pages.len(), 96);
+            assert_eq!(pages.len(), 3);
             assert_eq!(payload_requests, 96);
-            assert_eq!(inventory_requests, 96);
+            assert_eq!(inventory_requests, 3);
             let metadata_bytes: usize = pages.iter().sum();
             assert!(metadata_bytes < 96 * 2048);
             eprintln!("3 cycles, 96 payloads, 96 retries: {} inventory pages, {metadata_bytes} encrypted metadata bytes, {payload_requests} payload creates, {inventory_requests} inventory creates", pages.len());
@@ -786,5 +930,133 @@ mod tests {
         assert_eq!(representative_objects, 10_000);
         assert_eq!(representative_objects * 2, 20_000);
         assert!(page_bytes * representative_objects < 16 * 1024 * 1024);
+    }
+
+    #[test]
+    fn c_a_wave_registers_once_and_uploads_every_member() {
+        runtime().block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let (mut journal, members) = prepare_wave(root.path(), 3);
+            let provider = FakeProvider::new(false);
+            let receipts = upload_wave(
+                &mut journal, &members, "format-repository", &[7; 32], &provider,
+                &fake::repository(), &Cancellation::default(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(receipts.len(), 3);
+            let page = covering_page(&journal, &members);
+            assert_eq!(provider.upload_attempts(&page), 1);
+            assert_eq!(
+                provider.uploaded_ids().iter()
+                    .filter(|id| id.starts_with("inventory-page-")).count(),
+                1,
+                "three objects cost three registrations"
+            );
+            for member in &members {
+                assert!(provider.holds(&member.object_id));
+                assert_eq!(provider.upload_attempts(&member.object_id), 1);
+            }
+        });
+    }
+
+    #[test]
+    fn c_a_lost_wave_response_is_resolved_without_a_second_page() {
+        runtime().block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let (mut journal, members) = prepare_wave(root.path(), 2);
+            let provider = FakeProvider::new(false);
+            provider.state.lock().unwrap().lose_response = true;
+            upload_wave(
+                &mut journal, &members, "format-repository", &[7; 32], &provider,
+                &fake::repository(), &Cancellation::default(),
+            )
+            .await
+            .unwrap();
+            let page = covering_page(&journal, &members);
+            assert!(provider.holds(&page));
+            assert_eq!(provider.upload_attempts(&page), 1);
+            assert_eq!(
+                provider.uploaded_ids().iter()
+                    .filter(|id| id.starts_with("inventory-page-")).count(),
+                1,
+                "a lost response produced a second page for the same wave"
+            );
+            for member in &members {
+                assert!(provider.holds(&member.object_id));
+                assert_eq!(provider.upload_attempts(&member.object_id), 1);
+            }
+        });
+    }
+
+    #[test]
+    fn c_a_retired_wave_page_makes_every_member_non_resumable() {
+        runtime().block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let (mut journal, members) = prepare_wave(root.path(), 2);
+            let provider = FakeProvider::new(false);
+            let repository = fake::repository();
+            upload_wave(
+                &mut journal, &members, "format-repository", &[7; 32], &provider, &repository,
+                &Cancellation::default(),
+            )
+            .await
+            .unwrap();
+            let page = covering_page(&journal, &members);
+            provider.forget(&page);
+            for member in &members {
+                provider.forget(&member.object_id);
+            }
+            drop(journal);
+            let mut journal = TransferJournal::open(root.path(), identity()).unwrap();
+            for member in &members {
+                let error = upload_wave(
+                    &mut journal, std::slice::from_ref(member), "format-repository", &[7; 32],
+                    &provider, &repository, &Cancellation::default(),
+                )
+                .await
+                .unwrap_err();
+                assert_eq!(error.kind, ErrorKind::PreconditionFailed);
+                assert_eq!(provider.upload_attempts(&member.object_id), 1);
+            }
+            assert_eq!(provider.upload_attempts(&page), 1);
+        });
+    }
+
+    #[test]
+    fn c_a_resumed_wave_keeps_the_page_its_members_were_covered_by() {
+        runtime().block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let (mut journal, members) = prepare_wave(root.path(), 3);
+            let provider = FakeProvider::new(false);
+            let repository = fake::repository();
+            upload_wave(
+                &mut journal, &members[..2], "format-repository", &[7; 32], &provider, &repository,
+                &Cancellation::default(),
+            )
+            .await
+            .unwrap();
+            let first = covering_page(&journal, &members[..2]);
+            // The rest of the library became ready afterwards, so the second
+            // attempt gathers a wave the first one never had.
+            upload_wave(
+                &mut journal, &members, "format-repository", &[7; 32], &provider, &repository,
+                &Cancellation::default(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                journal.covered_by(&members[0].object_id).unwrap(),
+                Some(first.clone()),
+                "a member moved to another page after its own page was uploaded"
+            );
+            let second = journal.covered_by(&members[2].object_id).unwrap().unwrap();
+            assert_ne!(second, first);
+            assert_eq!(provider.upload_attempts(&first), 1);
+            assert_eq!(provider.upload_attempts(&second), 1);
+            for member in &members {
+                assert_eq!(provider.upload_attempts(&member.object_id), 1);
+            }
+        });
     }
 }

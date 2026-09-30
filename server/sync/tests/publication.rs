@@ -25,7 +25,7 @@ async fn posts_only_ciphertext_and_keeps_uncertain_request_for_retry() {
     let url = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let root = tempfile::tempdir().unwrap();
-    let store = Store::init(root.path()).unwrap();
+    let store = Arc::new(Store::init(root.path()).unwrap());
     store
         .configure_connection(ConnectionOptions {
             endpoint: Some("https://sync.example/library".into()),
@@ -78,7 +78,7 @@ async fn publication_redirect_is_not_followed_or_confirmed() {
     let url = format!("http://{}", listener.local_addr().unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let root = tempfile::tempdir().unwrap();
-    let store = Store::init(root.path()).unwrap();
+    let store = Arc::new(Store::init(root.path()).unwrap());
     store
         .configure_connection(ConnectionOptions {
             endpoint: Some("https://sync.example".into()),
@@ -131,7 +131,7 @@ async fn stalled_registry_does_not_block_the_sync_listener_or_shutdown() {
         .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
-    let runtime = ConnectionRuntime::start(store.clone(), address).unwrap();
+    let runtime = ConnectionRuntime::start(store.clone(), address, false).unwrap();
     let sync =
         tokio::spawn(async move { axum::serve(listener, http::router(store)).await.unwrap() });
     tokio::time::timeout(std::time::Duration::from_secs(2), registry_hit.notified())
@@ -151,4 +151,34 @@ async fn stalled_registry_does_not_block_the_sync_listener_or_shutdown() {
         .unwrap();
     sync.abort();
     registry.abort();
+}
+
+#[tokio::test]
+async fn registry_failures_have_bounded_actionable_classification() {
+    for (status, body, expected) in [
+        (404, "{\"error\":\"not-found\"}".to_owned(), "directory-rejected"),
+        (503, "{\"error\":\"registry-full\"}".to_owned(), "directory-full"),
+        (503, "x".repeat(4096), "directory-unavailable"),
+        (403, "{\"error\":\"record-owned\"}".to_owned(), "directory-record-owned"),
+        (429, "{\"error\":\"creation-rate-limited\"}".to_owned(), "directory-admission-limited"),
+    ] {
+        let app = Router::new().route("/endpoints/{uuid}", post(move |headers: axum::http::HeaderMap| {
+            let body = body.clone();
+            async move {
+                let auth = headers.get("authorization").unwrap().to_str().unwrap();
+                assert!(auth.starts_with("Bearer "));
+                assert_eq!(auth.len(), 71);
+                (axum::http::StatusCode::from_u16(status).unwrap(), body)
+            }
+        }));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let root = tempfile::tempdir().unwrap();
+        let store = Arc::new(Store::init(root.path()).unwrap());
+        store.configure_connection(ConnectionOptions { endpoint: Some("https://sync.example".into()), cloudflared: None, registry_url: Some(url) }).unwrap();
+        assert_eq!(Publisher::new().unwrap().publish_once(&store).await.unwrap_err().code, expected);
+        assert_eq!(store.connection_status().unwrap().publication, "pending");
+        server.abort();
+    }
 }

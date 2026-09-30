@@ -100,12 +100,16 @@
     }
 
     async function importLoreBook(){
-        let lore = currentModule.lorebook
+        const moduleId = currentModule.id
         const lorebook = (await selectMultipleFile(['json', 'lorebook']))
         if(!lorebook){
             return
         }
         try {
+            const module = DBState.db.modules.find(module => module.id === moduleId)
+            if (!module) return
+            module.lorebook ??= []
+            const lore = module.lorebook
             for(const f of lorebook){
                 const importedlore = JSON.parse(Buffer.from(f.data).toString('utf-8'))
                 if(importedlore.type === 'risu' && importedlore.data){
@@ -241,7 +245,13 @@
             exportRegex(currentModule.regex)
         }}><DownloadIcon /></button>
         <button class="font-medium cursor-pointer hover:text-green-500" onclick={async () => {
-            currentModule.regex = await importRegex(currentModule.regex)
+            const moduleId = currentModule.id
+            const scripts = await importRegex()
+            const module = DBState.db.modules.find(module => module.id === moduleId)
+            if (module && scripts.length) {
+                module.regex ??= []
+                module.regex.push(...scripts)
+            }
         }}><HardDriveUploadIcon /></button>
     </div>
 {/if}
@@ -255,8 +265,8 @@
                 <th class="font-medium">{language.value}</th>
                 <th class="font-medium cursor-pointer w-10">
                     <button class="hover:text-green-500" onclick={async () => {
+                        const moduleId = currentModule.id
                         const da = await selectMultipleFile(['png', 'webp', 'mp4', 'mp3', 'gif', 'jpeg', 'jpg', 'ttf', 'otf', 'css', 'webm', 'woff', 'woff2', 'svg', 'avif'])
-                        currentModule.assets = currentModule.assets ?? []
                         if(!da){
                             return
                         }
@@ -265,8 +275,10 @@
                             const name = f.name
                             const extension = name.split('.').pop().toLowerCase()
                             const imgp = await saveAsset(img,'', extension)
-                            currentModule.assets.push([name, imgp, extension])
-                            currentModule.assets = currentModule.assets
+                            const module = DBState.db.modules.find(module => module.id === moduleId)
+                            if (!module) return
+                            module.assets ??= []
+                            module.assets.push([name, imgp, extension])
                         }
                     }}>
                         <PlusIcon />

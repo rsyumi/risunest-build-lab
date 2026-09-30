@@ -1,7 +1,9 @@
-import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
+import { Channel, invoke } from '@tauri-apps/api/core'
 import { isTauri } from '../../../platform'
 import type {
     ExternalCapturePolicy,
+    ExternalSnapshotExportProgress,
     DecimalString,
     ExternalConnectionResult,
     ExternalHistoryPage,
@@ -79,6 +81,27 @@ export class ExternalStorageBridge {
     getState(): Promise<ExternalStorageState> {
         if (!this.supported) return Promise.resolve(unsupportedExternalStorageState)
         return this.native('external_storage_get_state')
+    }
+
+    onJobStarted(listener: () => void): Promise<() => void> {
+        if (!this.supported) return Promise.resolve(() => {})
+        return listen('external-storage-job-started', listener)
+    }
+
+    prepareRenewal(connectionId: string): Promise<PreparedExternalConnection> {
+        return this.native('external_storage_prepare_renewal', { connectionId })
+    }
+
+    unlockConnection(connectionId: string, recoveryKey: string): Promise<void> {
+        return this.native('external_storage_unlock_connection', { connectionId, recoveryKey })
+    }
+
+    setSyncPaused(paused: boolean, expectedSelectionEpoch: string): Promise<LibrarySyncSelection> {
+        return this.native('external_storage_set_sync_paused', { request: { paused, expectedSelectionEpoch } })
+    }
+
+    setAutomaticBackupPaused(connectionId: string, paused: boolean): Promise<void> {
+        return this.native('external_storage_set_automatic_backup_paused', { connectionId, paused })
     }
 
     captureExitTarget(): Promise<ExternalExitCapture> {
@@ -260,10 +283,24 @@ export class ExternalStorageBridge {
         return this.native('external_storage_save_connection_settings_file', { transferId })
     }
 
-    exportSnapshot(connectionId: string, snapshotId: string): Promise<ExternalSnapshotExportResult> {
-        return this.native('external_storage_export_snapshot', {
-            request: { connectionId, snapshotId },
-        })
+    exportSnapshot(connectionId: string, snapshotId: string, exportId: string,
+        onProgress: (progress: ExternalSnapshotExportProgress) => void): Promise<ExternalSnapshotExportResult> {
+        if (!this.supported) return Promise.reject(new ExternalStorageUnsupportedError())
+        const progress = new Channel<ExternalSnapshotExportProgress>()
+        progress.onmessage = onProgress
+        return this.native('external_storage_export_snapshot', { request: { connectionId, snapshotId, exportId }, progress })
+    }
+
+    cancelExport(exportId: string): Promise<void> {
+        return this.native('external_storage_cancel_export', { exportId })
+    }
+
+    exportRetainedPublication(jobId: string): Promise<ExternalSnapshotExportResult> {
+        return this.native('external_storage_export_retained_publication', { jobId })
+    }
+
+    removeRetainedPublication(jobId: string): Promise<void> {
+        return this.native('external_storage_remove_retained_publication', { jobId })
     }
 
     prepareConnectionSettingsImport(payload: string, recoveryKey: string): Promise<PreparedExternalConnection> {

@@ -1,3 +1,5 @@
+import { NativeFileJobError } from './nativeFileJobs'
+import { language } from 'src/lang'
 import { join } from "@tauri-apps/api/path";
 import { nativeDataPath } from "./nativePaths";
 import { mkdir, open, readDir, remove, stat } from "@tauri-apps/plugin-fs";
@@ -88,8 +90,8 @@ export async function importNativeContentFile(
         },
       });
       if (result.kind === "destination-required")
-        throw new Error(
-          "This JPEG is not a character card. Choose an asset destination to import it.",
+        throw new NativeFileJobError(
+          "destination-required", language.risuNest.importDialog.reasonPlainJpeg,
         );
       return result.kind === "imported" ? result.value : null;
     } finally {

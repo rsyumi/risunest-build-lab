@@ -1,3 +1,4 @@
+import { PersistentStorageQuotaError } from './persistentDataStore'
 import isEqual from 'lodash/isEqual'
 import { applyRootMutations } from './rootMutation'
 import type { Chat, Database, Message, botPreset } from './database.svelte'
@@ -43,6 +44,10 @@ import {
     validateAssetAliasIdentity,
     assetOwnerLocatorKey,
     validateConversationWindowQuery,
+    validatePluginStorageValueQuery,
+    type PluginStorageValueQuery,
+    type PluginStorageValuePage,
+    type PluginStorageValueCursor,
     validateAssetOwnerHead,
 } from './persistentDataStore'
 import type { PluginStorageMeta } from '../plugins/pluginOwner'
@@ -435,12 +440,12 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
             this.createIndex(
                 transaction.objectStore('catalog'),
                 'byGenerationConfigured',
-                ['generation', 'configuredIndex'],
+                ['generation', 'configuredIndex', 'value.id'],
             )
             this.createIndex(
                 transaction.objectStore('catalog'),
                 'byGenerationRecent',
-                ['generation', 'recentSortValue', 'configuredIndex'],
+                ['generation', 'recentSortValue', 'configuredIndex', 'value.id'],
             )
             this.createIndex(transaction.objectStore('catalog'), 'byGeneration', 'generation')
             this.createIndex(transaction.objectStore('characters'), 'byGeneration', 'generation')
@@ -494,6 +499,8 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
                 ['generation', 'storageKey'],
             )
             this.createIndex(transaction.objectStore('pluginStorage'), 'byGeneration', 'generation')
+            this.createIndex(transaction.objectStore('pluginStorageMetadata'), 'byOwnerOrdinal',
+                ['generation', 'owner', 'ordinal', 'storageKey'])
             this.createIndex(
                 transaction.objectStore('pluginStorageMetadata'),
                 'byGenerationOrdinal',
@@ -557,7 +564,15 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
         ) {
             throw new Error('Unsupported RisuNest IndexedDB schema')
         }
-        const transaction = database.transaction('meta', 'readonly')
+        const transaction = database.transaction(['meta', 'catalog', 'pluginStorageMetadata'], 'readonly')
+        const catalog = transaction.objectStore('catalog')
+        if (JSON.stringify(catalog.index('byGenerationConfigured').keyPath) !== JSON.stringify(['generation', 'configuredIndex', 'value.id']) ||
+            JSON.stringify(catalog.index('byGenerationRecent').keyPath) !== JSON.stringify(['generation', 'recentSortValue', 'configuredIndex', 'value.id'])) {
+            throw new Error('Unsupported RisuNest IndexedDB catalog index')
+        }
+        if (!transaction.objectStore('pluginStorageMetadata').indexNames.contains('byOwnerOrdinal')) {
+            throw new Error('Unsupported RisuNest IndexedDB schema')
+        }
         const done = transactionDone(transaction)
         void done.catch(() => {})
         const meta = transaction.objectStore('meta')
@@ -685,6 +700,55 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
                 })),
             },
         }
+    }
+
+    async readPluginStorageValues(query: PluginStorageValueQuery): Promise<PluginStorageValuePage> {
+        validatePluginStorageValueQuery(query)
+        const transaction = this.requireDatabase().transaction(['meta', 'pluginStorage', 'pluginStorageMetadata'], 'readonly')
+        const { revision, generation } = await this.readActive(transaction)
+        return this.readPluginStorageValuesFromTransaction(transaction, revision, generation, query)
+    }
+
+    private async readPluginStorageValuesFromTransaction(
+        transaction: IDBTransaction, revision: DataRevision, generation: string,
+        query: PluginStorageValueQuery,
+    ): Promise<PluginStorageValuePage> {
+        const after = query.afterKey
+        const lower = after ? [generation, after.owner, after.ordinal, after.key]
+            : query.owner === undefined ? [generation] : [generation, query.owner]
+        const upper = query.owner === undefined ? [generation, []] : [generation, query.owner, []]
+        const range = this.keyRangeFactory.bound(lower, upper, !!after, true)
+        const items: PluginStorageValue[] = []
+        let bytes = 0
+        let last: PluginStorageValueCursor | null = null
+        let nextCursor: PluginStorageValueCursor | null = null
+        await new Promise<void>((resolve, reject) => {
+            const request = transaction.objectStore('pluginStorageMetadata').index('byOwnerOrdinal').openCursor(range)
+            request.onerror = () => reject(request.error)
+            request.onsuccess = () => {
+                const cursor = request.result
+                if (!cursor) { resolve(); return }
+                const record = cursor.value as StoredPluginStorageMetadata
+                if (items.length >= (query.limit ?? 256)
+                    || (items.length > 0 && bytes + record.byteSize > 1024 * 1024)) {
+                    nextCursor = last
+                    resolve()
+                    return
+                }
+                const valueRequest = transaction.objectStore('pluginStorage').get(record.key)
+                valueRequest.onerror = () => reject(valueRequest.error)
+                valueRequest.onsuccess = () => {
+                    const value = valueRequest.result as StoredPluginStorage | undefined
+                    if (!value) { reject(new Error('Missing plugin storage value')); return }
+                    items.push({ owner: record.owner, key: record.storageKey, value: value.value })
+                    bytes += record.byteSize
+                    last = { owner: record.owner, key: record.storageKey, ordinal: record.ordinal }
+                    cursor.continue()
+                }
+            }
+        })
+        await transactionDone(transaction)
+        return { items, revision, nextCursor }
     }
 
     async queryPluginStorage(): Promise<PluginStorageCatalog> {
@@ -871,7 +935,7 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
                     transaction,
                     active.generation,
                     input.characterDetails,
-                    input.deleteCharacterId,
+                    input.deleteCharacterIds,
                 )
             }
             const aliasKeys = new Set<string>()
@@ -882,6 +946,11 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
                     throw new TypeError(`Duplicate asset alias ${alias.kind}:${alias.key}`)
                 }
                 aliasKeys.add(key)
+            }
+            const deletedIds = new Set(input.deleteCharacterIds ?? [])
+            if (deletedIds.size > 128 || deletedIds.size !== (input.deleteCharacterIds?.length ?? 0) ||
+                [...deletedIds].some((id) => !id || commitCharacterParents(input).has(id))) {
+                throw new TypeError('Deleted character IDs must be unique and cannot be written in the same commit')
             }
             validateOwnerHeadsForCommit(input)
             const retainedOwnerHeads = await this.retainedCommitOwnerHeads(
@@ -898,8 +967,8 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
             )
             if (input.root) this.putRoot(transaction, generation, input.root)
             if (input.replacePresets) await this.putPresets(transaction, generation, input.replacePresets)
-            if (input.deleteCharacterId) {
-                await this.deleteCharacter(transaction, generation, input.deleteCharacterId)
+            for (const id of input.deleteCharacterIds ?? []) {
+                await this.deleteCharacter(transaction, generation, id)
             }
             if (input.character) await this.putCharacter(transaction, generation, input.character)
             for (const detail of input.characterDetails ?? []) {
@@ -937,6 +1006,7 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
             try {
                 transaction.abort()
             } catch {}
+            if (error instanceof Error && error.name === 'QuotaExceededError') throw new PersistentStorageQuotaError()
             throw error
         }
     }
@@ -1033,15 +1103,18 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
             transaction.objectStore('pluginStorage'),
             generation,
         ) as StoredPluginStorage[]
+        const characterByKey = new Map(characterRecords.map((record) => [record.key, record]))
+        const conversationsByCharacter = new Map<string, StoredConversation[]>()
+        for (const { value } of conversationRecords) {
+            const entries = conversationsByCharacter.get(value.summary.characterId) ?? []
+            entries.push(value)
+            conversationsByCharacter.set(value.summary.characterId, entries)
+        }
         const characters = [] as Database['characters']
         for (const summary of catalog) {
-            const detail = characterRecords.find(
-                (record) => record.key === this.characterKey(generation, summary.id),
-            )
+            const detail = characterByKey.get(this.characterKey(generation, summary.id))
             if (!detail) throw new Error(`Missing character detail for ${summary.id}`)
-            const conversations = conversationRecords
-                .map((record) => record.value)
-                .filter((conversation) => conversation.summary.characterId === summary.id)
+            const conversations = (conversationsByCharacter.get(summary.id) ?? [])
                 .sort(
                     (left, right) =>
                         left.summary.configuredIndex - right.summary.configuredIndex,
@@ -1288,6 +1361,13 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
                         })),
                     },
                 }
+            },
+            readPluginStorageValues: async (query) => {
+                assertActive()
+                validatePluginStorageValueQuery(query)
+                const transaction = this.requireDatabase().transaction(['meta', 'pluginStorage', 'pluginStorageMetadata'], 'readonly')
+                await this.validateSnapshotLease(transaction, lease, generation, revision)
+                return this.readPluginStorageValuesFromTransaction(transaction, revision, generation, query)
             },
             queryPluginStorage: async () => {
                 assertActive()
@@ -1597,7 +1677,7 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
         retained: AssetOwnerHead[],
     ): Promise<void> {
         const changedCharacters = new Set(commitCharacterParents(input).keys())
-        if (input.deleteCharacterId) changedCharacters.add(input.deleteCharacterId)
+        for (const id of input.deleteCharacterIds ?? []) changedCharacters.add(id)
         const store = transaction.objectStore('assetOwnerHeads')
         if (input.root) {
             this.deleteAssetOwnerHeadKind(store, generation, 'root-module-assets')
@@ -1676,7 +1756,7 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
             let owner = originalOwner
             let replacementTuple: ReplacementOwnerTuple | null
             if (owner.kind === 'character-additional-assets') {
-                if (input.deleteCharacterId === owner.characterId) continue
+                if (input.deleteCharacterIds?.includes(owner.characterId)) continue
                 replacementTuple = replacementOwnerTupleFromParent(
                     characterParents.get(owner.characterId),
                     'additionalAssets',
@@ -1806,22 +1886,47 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
         const index = transaction.objectStore('catalog').index(
             input.order === 'configured' ? 'byGenerationConfigured' : 'byGenerationRecent',
         )
-        const search = input.search?.trim().toLocaleLowerCase()
-        const range =
-            input.order === 'configured'
-                ? this.keyRangeFactory.bound([generation, 0], [generation, MAX_INDEX_VALUE])
-                : this.keyRangeFactory.bound(
-                      [generation, -MAX_INDEX_VALUE, 0],
-                      [generation, 0, MAX_INDEX_VALUE],
-                  )
-        const result = await cursorPage<CharacterSummary>(
-            index,
-            range,
-            input,
-            (item) =>
-                item.trashed === input.trash &&
-                (!search || item.name.toLocaleLowerCase().includes(search)),
+        if (!Number.isSafeInteger(input.limit) || input.limit < 1) throw new RangeError('Query limit must be positive')
+        const recent = input.order === 'recent'
+        const search = input.search?.trim().toLowerCase()
+        let lower: IDBValidKey[] = recent ? [generation, -MAX_INDEX_VALUE, 0] : [generation, 0]
+        if (input.cursor !== undefined) {
+            const cursor: unknown = JSON.parse(input.cursor)
+            if (!Array.isArray(cursor) || cursor.length !== (recent ? 3 : 2) ||
+                typeof cursor.at(-1) !== 'string' ||
+                !cursor.slice(0, -1).every((value) => typeof value === 'number' && Number.isFinite(value))) {
+                throw new TypeError('Invalid character query cursor')
+            }
+            lower = recent ? [generation, -cursor[0], cursor[1], cursor[2]] : [generation, cursor[0], cursor[1]]
+        }
+        const range = this.keyRangeFactory.bound(
+            lower, recent ? [generation, 0, MAX_INDEX_VALUE, []] : [generation, MAX_INDEX_VALUE, []],
+            input.cursor !== undefined,
         )
+        const result = await new Promise<{ items: CharacterSummary[]; nextCursor?: string }>((resolve, reject) => {
+            const items: CharacterSummary[] = []
+            const request = index.openCursor(range)
+            request.onerror = () => reject(request.error)
+            request.onsuccess = () => {
+                try {
+                    const cursor = request.result
+                    if (!cursor) return resolve({ items })
+                    const item = (cursor.value as StoredRecord<CharacterSummary>).value
+                    if (item.trashed === input.trash && (!search || item.name.toLowerCase().includes(search))) {
+                        if (items.length === input.limit) {
+                            const last = items.at(-1)!
+                            return resolve({ items, nextCursor: JSON.stringify(recent
+                                ? [last.recentAt, last.configuredIndex, last.id]
+                                : [last.configuredIndex, last.id]) })
+                        }
+                        items.push(item)
+                    }
+                    cursor.continue()
+                } catch (error) {
+                    reject(error)
+                }
+            }
+        })
         await transactionDone(transaction)
         return { revision, ...result }
     }
@@ -2374,6 +2479,10 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
         generation: string,
         mutation: ConversationMutation,
     ): Promise<void> {
+        if (mutation.type === 'reorder') {
+            await this.reorderConversations(transaction, generation, mutation)
+            return
+        }
         const key = this.conversationKey(generation, mutation.characterId, mutation.conversationId)
         if (mutation.type === 'delete') {
             transaction.objectStore('conversations').delete(key)
@@ -2554,14 +2663,14 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
         transaction: IDBTransaction,
         generation: string,
         details: readonly CharacterDetail[],
-        deleteCharacterId?: string,
+        deleteCharacterIds?: readonly string[],
     ): Promise<void> {
         const ids = new Set<string>()
         for (const detail of details) {
             if (!detail.chaId) {
                 throw new Error('Batch character detail mutation requires nonempty character IDs')
             }
-            if (detail.chaId === deleteCharacterId || ids.has(detail.chaId)) {
+            if (deleteCharacterIds?.includes(detail.chaId) || ids.has(detail.chaId)) {
                 throw new Error('Batch character detail mutation requires unique retained character IDs')
             }
             ids.add(detail.chaId)
@@ -2791,6 +2900,44 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
             transaction.objectStore('messageOccurrences').index('byGenerationCharacter'),
             this.keyRangeFactory.only([generation, characterId]),
         )
+    }
+
+    private async reorderConversations(
+        transaction: IDBTransaction,
+        generation: string,
+        mutation: Extract<ConversationMutation, { type: 'reorder' }>,
+    ): Promise<void> {
+        const records = await requestResult(
+            transaction
+                .objectStore('conversations')
+                .index('byGenerationCharacterConfigured')
+                .getAll(this.keyRangeFactory.bound(
+                    [generation, mutation.characterId, 0],
+                    [generation, mutation.characterId, MAX_INDEX_VALUE],
+                )),
+        ) as Array<StoredRecord<StoredConversation>>
+        const byId = new Map(records.map((record) => [record.value.summary.id, record]))
+        if (
+            new Set(mutation.conversationIds).size !== mutation.conversationIds.length ||
+            mutation.conversationIds.length !== byId.size ||
+            mutation.conversationIds.some((id) => !byId.has(id))
+        ) {
+            throw new Error(
+                `Conversation order for ${mutation.characterId} must list each conversation once`,
+            )
+        }
+        mutation.conversationIds.forEach((id, configuredIndex) => {
+            const record = byId.get(id)!
+            if (record.value.summary.configuredIndex === configuredIndex) return
+            transaction.objectStore('conversations').put({
+                ...record,
+                configuredIndex,
+                value: {
+                    ...record.value,
+                    summary: { ...record.value.summary, configuredIndex },
+                },
+            })
+        })
     }
 
     private async conversationCount(

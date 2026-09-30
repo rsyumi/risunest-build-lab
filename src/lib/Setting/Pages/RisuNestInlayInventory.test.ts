@@ -1,3 +1,4 @@
+import { inlayOptimizationController } from 'src/ts/process/files/inlayOptimizationController.svelte'
 // @vitest-environment happy-dom
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -54,6 +55,7 @@ describe('RisuNestInlayInventory', () => {
         mounted = undefined
         document.body.replaceChildren()
         vi.clearAllMocks()
+        inlayOptimizationController.result = null
         inlays.getInlayEncodeOptions.mockReturnValue({ ...encodeOptions })
         alerts.alertConfirm.mockResolvedValue(true)
     })
@@ -80,6 +82,21 @@ describe('RisuNestInlayInventory', () => {
                 .join(' ')
         ))
     }
+
+    it('reattaches to a running job before loading the inventory', async () => {
+        inlayOptimizationController.running = true
+        inlayOptimizationController.cancelRequested = false
+        try {
+            const target = setup()
+            await vi.waitFor(() => expect(target.querySelector('[data-inlay-optimize-progress]')).not.toBeNull())
+            expect(inlays.listInlayAssetMetadata).not.toHaveBeenCalled()
+            press(target, 'Cancel')
+            expect(inlayOptimizationController.cancelRequested).toBe(true)
+        } finally {
+            inlayOptimizationController.running = false
+            inlayOptimizationController.cancelRequested = false
+        }
+    })
 
     it('reads nothing until the load button is pressed', () => {
         const target = setup()
@@ -144,7 +161,7 @@ describe('RisuNestInlayInventory', () => {
         expect(alerts.alertConfirm.mock.calls[0][0]).toContain('2 images (2.5 KiB)')
         expect(optimization.write).toHaveBeenCalledTimes(2)
         expect(target.querySelector('[data-inlay-optimize-result]')?.textContent)
-            .toBe('Converted 2 and saved 3.0 KiB. Left alone 0, failed 0.')
+            .toBe('Converted 2 to WebP. Left unchanged 0, failed 0.')
         expect(inlays.listInlayAssetMetadata).toHaveBeenCalledTimes(2)
     })
 

@@ -1,8 +1,8 @@
 //! Bounded strings or ArrayBuffer packets. No partial payload changes the store.
 use crate::persistent_store::{
-    commands::with_store_mut, AssetAlias, RevisionResult, StoreError, StoreResult, WorkingSetCommit,
+    commands::with_store_mut, RevisionResult, StoreError, StoreResult,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::sync::{Arc, Mutex, MutexGuard};
 use tauri::{AppHandle, Manager, State, WebviewWindow};
 
@@ -22,15 +22,7 @@ fn guard(window: &WebviewWindow) -> StoreResult<()> {
     Ok(())
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Envelope {
-    commit: WorkingSetCommit,
-    asset_aliases: Vec<AssetAlias>,
-}
-fn decode(bytes: &[u8]) -> StoreResult<Envelope> {
-    serde_json::from_slice(bytes).map_err(|_| invalid("invalid commit envelope JSON"))
-}
+use crate::persistent_commit_raw::decode_envelope as decode;
 
 struct Transfer {
     id: String,
@@ -62,7 +54,10 @@ impl Pool {
         {
             return Err(invalid("invalid Android commit size or ID"));
         }
-        if self.transfer.is_some() || self.finishing.is_some() {
+        if self.finishing.is_some() {
+            return Err(StoreError::CommitBusy);
+        }
+        if self.transfer.is_some() {
             return Err(invalid("Android commit already active"));
         }
         let mut bytes = Vec::new();

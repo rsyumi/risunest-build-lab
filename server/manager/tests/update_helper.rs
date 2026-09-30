@@ -6,14 +6,16 @@ use risunest_sync_manager::update::{
 #[cfg(windows)]
 use risunest_sync_manager::{client::Client, lifecycle, platform};
 #[cfg(windows)]
-use risunest_sync_server::{management::discovery::Discovery, PROTOCOL_ID, STORE_FORMAT_ID};
+use risunest_sync_server::{config::NetworkSettings, management::discovery::Discovery, PROTOCOL_ID, STORE_FORMAT_ID};
 use std::{
     fs::{self, OpenOptions},
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Child, Stdio},
     sync::mpsc,
     time::Duration,
 };
+#[cfg(unix)]
+use std::process::Command;
 
 struct Fixture {
     _temp: tempfile::TempDir,
@@ -60,11 +62,13 @@ fn prepared_file_transaction(was_running: bool) -> Fixture {
 
 #[cfg(windows)]
 fn sleeping_parent() -> Child {
-    Command::new("powershell.exe")
+    platform::process("powershell.exe")
         .args([
             "-NoLogo",
             "-NoProfile",
             "-NonInteractive",
+            "-WindowStyle",
+            "Hidden",
             "-Command",
             "Start-Sleep -Seconds 2",
         ])
@@ -130,18 +134,17 @@ fn stopped_helper_rolls_back_when_the_replacement_cannot_be_started() {
 
     assert!(result.recv_timeout(Duration::from_millis(250)).is_err());
     assert_old_install(&fixture.install);
+    // The parent and both Task Scheduler calls each start Windows PowerShell,
+    // which takes about 22 s per start on Windows ARM runners.
     let error = result
-        .recv_timeout(Duration::from_secs(10))
+        .recv_timeout(Duration::from_secs(120))
         .unwrap()
         .unwrap_err();
     let _ = parent.wait();
 
     assert_eq!(error, "server-executable-or-data-path-invalid");
     assert_old_install(&fixture.install);
-    let transaction = InstallTransaction::load(&fixture.root, &fixture.install)
-        .unwrap()
-        .unwrap();
-    assert_eq!(transaction.phase, TransactionPhase::RolledBack);
+    assert!(InstallTransaction::load(&fixture.root, &fixture.install).unwrap().is_none());
     let status = load_status(&fixture.root).unwrap();
     assert_eq!(status.phase, UpdatePhase::Failed);
     assert_eq!(
@@ -206,8 +209,7 @@ fn stopped_directory_helper_rolls_back_when_the_target_cannot_be_health_checked(
     assert_eq!(error, "server-executable-or-data-path-invalid");
     assert_eq!(fs::read(install.join("version")).unwrap(), b"old");
     assert!(!backup.exists());
-    let transaction = InstallTransaction::load(&root, &install).unwrap().unwrap();
-    assert_eq!(transaction.phase, TransactionPhase::RolledBack);
+    assert!(InstallTransaction::load(&root, &install).unwrap().is_none());
     let status = load_status(&root).unwrap();
     assert_eq!(status.phase, UpdatePhase::Failed);
     assert_eq!(
@@ -232,8 +234,10 @@ fn helper_waits_for_the_parent_update_lock_handoff_before_replacement() {
     assert_old_install(&fixture.install);
     drop(lock);
 
+    // Task Scheduler calls each start Windows PowerShell, which can take
+    // about 22 s per start on Windows ARM runners.
     let error = result
-        .recv_timeout(Duration::from_secs(30))
+        .recv_timeout(Duration::from_secs(120))
         .unwrap()
         .unwrap_err();
     assert_eq!(error, "update-rollback-failed");
@@ -264,8 +268,10 @@ fn helper_waits_for_owner_release_and_restores_files_when_restart_fails() {
     assert_old_install(&fixture.install);
     owner.unlock().unwrap();
 
+    // Task Scheduler calls each start Windows PowerShell, which can take
+    // about 22 s per start on Windows ARM runners.
     let error = result
-        .recv_timeout(Duration::from_secs(30))
+        .recv_timeout(Duration::from_secs(120))
         .unwrap()
         .unwrap_err();
     assert_eq!(error, "update-rollback-failed");
@@ -304,6 +310,13 @@ fn explicit_test_binaries() -> (PathBuf, PathBuf) {
     assert!(server.is_absolute() && server.is_file());
     assert!(manager.is_absolute() && manager.is_file());
     (server, manager)
+}
+
+#[cfg(windows)]
+fn isolated_network(root: &Path) {
+    let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    NetworkSettings { port: reserved.local_addr().unwrap().port(), ..Default::default() }
+        .save(root).unwrap();
 }
 
 #[cfg(windows)]
@@ -695,6 +708,8 @@ $ErrorActionPreference='Stop'
 try {
  $config=Get-Content -Raw -LiteralPath $ConfigPath | ConvertFrom-Json
  $logPath=$config.log
+ if($logPath.StartsWith('\\?\UNC\',[StringComparison]::OrdinalIgnoreCase)){$logPath='\\'+$logPath.Substring(8)}
+ elseif($logPath.StartsWith('\\?\',[StringComparison]::Ordinal)){$logPath=$logPath.Substring(4)}
  $resultPath=$config.result
  $env:RISUNEST_HELPER_SUBPROCESS='1'
  $env:RISUNEST_HELPER_ROOT=$config.root
@@ -702,11 +717,13 @@ try {
  $env:RISUNEST_HELPER_SERVER=$config.server
  $env:RISUNEST_HELPER_MANAGER=$config.manager
  $env:RISUNEST_HELPER_MODE=$config.mode
- & $config.testExe --ignored --exact spawn_update_helper_subprocess *> $logPath
- if($LASTEXITCODE -ne 0){throw 'helper subprocess failed'}
+ $errorLogPath=$logPath+'.stderr'
+ $test=Start-Process -FilePath $config.testExe -ArgumentList @('--ignored','--exact','spawn_update_helper_subprocess') -WindowStyle Hidden -Wait -PassThru -RedirectStandardOutput $logPath -RedirectStandardError $errorLogPath
+ if([IO.File]::Exists($errorLogPath)){[IO.File]::AppendAllText($logPath,[IO.File]::ReadAllText($errorLogPath))}
+ if($test.ExitCode -ne 0){throw 'helper subprocess failed'}
  [IO.File]::WriteAllText($resultPath,'success')
 } catch {
- if(!(Test-Path -LiteralPath $logPath)){[IO.File]::WriteAllText($logPath,$_.Exception.ToString())}
+ if(!(Test-Path -LiteralPath $logPath)){[IO.File]::WriteAllText($logPath,($_.Exception.ToString()+"`n"+$_.InvocationInfo.PositionMessage+"`n"+$_.ScriptStackTrace))}
  [IO.File]::WriteAllText($resultPath,'failure')
  exit 1
 }
@@ -737,7 +754,7 @@ try {
     }
     let task_name = format!("{}-helper-test", platform::instance_name(root));
     let arguments = format!(
-        "-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"{}\" -ConfigPath \"{}\"",
+        "-NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File \"{}\" -ConfigPath \"{}\"",
         wrapper.display(),
         config.display()
     );
@@ -849,7 +866,7 @@ async fn live_helper_replacement(
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         let transaction = InstallTransaction::load(root, install)
-            .map_err(|error| format!("transaction-load:{error}"))?;
+            .map_err(|error| format!("transaction-load:{error}:journalExists={}:diagnostic={}", root.join("manager-update/transaction.json").exists(), helper_failure_diagnostic(root)))?;
         let status = load_status(root).map_err(|error| format!("status-load:{error}"))?;
         let completed = transaction.is_none() && status.phase == UpdatePhase::Completed;
         if completed {
@@ -897,7 +914,8 @@ async fn live_helper_replacement(
     {
         return Err("synthetic-live-helper-cleanup-incomplete".into());
     }
-    wait_for_transient_helper_cleanup(root).await?;
+    wait_for_transient_helper_cleanup(root).await
+        .map_err(|error| format!("helper-cleanup:{error}:diagnostic={}", helper_failure_diagnostic(root)))?;
     Ok(())
 }
 
@@ -906,11 +924,12 @@ async fn run_live_replacement_case(was_running: bool) {
     let (source_server, source_manager) = explicit_test_binaries();
 
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().join("synthetic-data");
+    let root = platform::resolve_manager_root(&temp.path().join("synthetic-data")).unwrap();
     let install = temp.path().join("managed-install");
     let staged = temp.path().join(".risunest-sync-update-stage-live");
     let backup = temp.path().join(".risunest-sync-update-backup-live");
     fs::create_dir_all(&root).unwrap();
+    isolated_network(&root);
     fs::create_dir_all(&install).unwrap();
     fs::create_dir_all(&staged).unwrap();
     let server_name = source_server.file_name().unwrap();
@@ -962,14 +981,14 @@ async fn run_live_replacement_case(was_running: bool) {
 
 #[cfg(windows)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires explicit synthetic server/manager binaries and exclusive port 14319"]
+#[ignore = "requires explicit synthetic server/manager binaries and current-user Task Scheduler"]
 async fn helper_replaces_and_restarts_an_isolated_live_server() {
     run_live_replacement_case(true).await;
 }
 
 #[cfg(windows)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires explicit synthetic server/manager binaries and exclusive port 14319"]
+#[ignore = "requires explicit synthetic server/manager binaries and current-user Task Scheduler"]
 async fn helper_verifies_a_stopped_replacement_then_restores_stopped_intent() {
     run_live_replacement_case(false).await;
 }
@@ -1303,7 +1322,7 @@ fn spawn_update_helper_subprocess() {
     let server = PathBuf::from(std::env::var_os("RISUNEST_HELPER_SERVER").unwrap());
     let manager = PathBuf::from(std::env::var_os("RISUNEST_HELPER_MANAGER").unwrap());
     if std::env::var("RISUNEST_HELPER_MODE").as_deref() == Ok("recover-manager") {
-        assert!(Command::new(manager)
+        assert!(platform::process(manager)
             .args(["--data-dir"])
             .arg(&root)
             .args(["--server"])
@@ -1322,7 +1341,7 @@ fn spawn_update_helper_subprocess() {
     let helper = helper_dir.join("risunest-sync-update-helper.exe");
     fs::copy(manager, &helper).unwrap();
     let parent_lock = try_lock(&root).unwrap();
-    let mut command = Command::new(helper);
+    let mut command = platform::process(helper);
     command
         .args(["--data-dir"])
         .arg(&root)
@@ -1378,11 +1397,13 @@ fn no_claim_helper_task_is_removed_without_consuming_recovery_state() {
 
     let result = (|| -> Result<(), String> {
         let _lock = try_lock(&fixture.root)?;
-        let mut command = Command::new("powershell.exe");
+        let mut command = platform::process("powershell.exe");
         command.args([
             "-NoLogo",
             "-NoProfile",
             "-NonInteractive",
+            "-WindowStyle",
+            "Hidden",
             "-Command",
             "exit 0",
         ]);
@@ -1443,6 +1464,7 @@ async fn live_recovery_from_installed_manager(
     server: &Path,
     manager: &Path,
 ) -> Result<(), String> {
+    isolated_network(root);
     platform::startup(root, server, "install")
         .map_err(|error| format!("startup-install:{error}"))?;
     platform::start(root, server).map_err(|error| format!("startup-start:{error}"))?;
@@ -1544,11 +1566,11 @@ async fn live_recovery_from_installed_manager(
 
 #[cfg(windows)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires explicit synthetic binaries and exclusive port 14319"]
+#[ignore = "requires explicit synthetic binaries and current-user Task Scheduler"]
 async fn interrupted_files_recovery_outlives_the_active_installed_manager() {
     let (source_server, source_manager) = explicit_test_binaries();
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().join("synthetic-data");
+    let root = platform::resolve_manager_root(&temp.path().join("synthetic-data")).unwrap();
     let install = temp.path().join("managed-install");
     let staged = temp
         .path()
@@ -1606,6 +1628,7 @@ async fn live_parent_timeout_recovery(
     server: &Path,
     files: Vec<PathBuf>,
 ) -> Result<(), String> {
+    isolated_network(root);
     platform::startup(root, server, "install")
         .map_err(|error| format!("startup-install:{error}"))?;
     platform::start(root, server).map_err(|error| format!("startup-start:{error}"))?;
@@ -1687,11 +1710,11 @@ async fn live_parent_timeout_recovery(
 
 #[cfg(windows)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires explicit synthetic binaries, exclusive port 14319, and the real 30 second parent timeout"]
+#[ignore = "requires explicit synthetic binaries, current-user Task Scheduler, and the real 30 second parent timeout"]
 async fn helper_recovers_the_live_server_when_its_parent_does_not_exit() {
     let (source_server, source_manager) = explicit_test_binaries();
     let temp = tempfile::tempdir().unwrap();
-    let root = temp.path().join("synthetic-data");
+    let root = platform::resolve_manager_root(&temp.path().join("synthetic-data")).unwrap();
     let install = temp.path().join("managed-install");
     let staged = temp
         .path()

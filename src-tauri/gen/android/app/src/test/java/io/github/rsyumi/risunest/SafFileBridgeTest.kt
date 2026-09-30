@@ -57,6 +57,52 @@ class SafFileBridgeTest {
   )
 
   @Test
+  fun `interrupted preparation has no ready identity and can retry`() {
+    val root = temporaryDirectory()
+    var cancelled = true
+    val source = object : SafInputSource {
+      override val operationId = "b".repeat(64)
+      override val displayName = "retry.charx"
+      override val totalBytes = 3L
+      override fun open(): InputStream = ByteArrayInputStream(byteArrayOf(1, 2, 3))
+    }
+    val store = SafSpoolStore(root, atomicPublisher = testAtomicPublisher)
+    assertTrue(store.spool(listOf(source), isCancelled = { cancelled }).ready.isEmpty())
+    assertTrue(store.listReady().isEmpty())
+    cancelled = false
+    assertEquals("b".repeat(64), store.spool(listOf(source), isCancelled = { cancelled }).ready.single().operationId)
+  }
+
+  @Test
+  fun `ready opened source identity replays without reopening provider`() {
+    val root = temporaryDirectory()
+    var opened = 0
+    val source = object : SafInputSource {
+      override val operationId = "a".repeat(64)
+      override val displayName = "한글 \"e\u0301\" 😀.charx"
+      override val totalBytes = 3L
+      override fun open(): InputStream { opened++; return ByteArrayInputStream(byteArrayOf(1, 2, 3)) }
+    }
+    val first = SafSpoolStore(root, atomicPublisher = testAtomicPublisher).spool(listOf(source))
+    val recreated = SafSpoolStore(root, atomicPublisher = testAtomicPublisher)
+    val second = recreated.spool(listOf(source))
+    assertEquals(1, opened)
+    assertEquals(first.ready, second.ready)
+    assertEquals("한글 \"é\" 😀.charx", second.ready.single().displayName)
+  }
+
+  @Test
+  fun `display name keeps Unicode and strips traversal controls within codepoint bound`() {
+    assertEquals("opened-file", safeSafDisplayName(".."))
+    assertEquals("opened-file", safeSafDisplayName("."))
+    assertEquals("이름é😀.CHARX", safeSafDisplayName("folder/이름e\u0301\u202e😀\u0000.CHARX"))
+    val bounded = safeSafDisplayName("😀".repeat(200) + ".charx")
+    assertEquals(180, bounded.codePointCount(0, bounded.length))
+    assertTrue(bounded.endsWith(".charx"))
+    assertFalse(Character.isHighSurrogate(bounded[bounded.length - 7]))
+  }
+
+  @Test
   fun `multiple sources spool to separate ready tokens without using display names as paths`() = runBlocking {
     val root = temporaryDirectory()
     val store = SafSpoolStore(
@@ -610,18 +656,10 @@ class SafFileBridgeTest {
   }
 
   @Test
-  fun `interrupted destination cleanup preserves provider limited warnings`() {
-    assertEquals(
-      listOf("android-saf-provider-not-atomic"),
-      interruptedSafDestinationWarnings { true },
-    )
+  fun `interrupted selected destination always reports possible partial file`() {
     assertEquals(
       listOf("android-saf-provider-not-atomic", "partial-destination-may-remain"),
-      interruptedSafDestinationWarnings { false },
-    )
-    assertEquals(
-      listOf("android-saf-provider-not-atomic", "partial-destination-may-remain"),
-      interruptedSafDestinationWarnings { error("provider lost permission") },
+      interruptedSafDestinationWarnings(),
     )
   }
 
@@ -791,6 +829,37 @@ class SafFileBridgeTest {
       listOf("android-saf-provider-not-atomic", "partial-destination-may-remain"),
       failure?.warningCodes,
     )
+  }
+
+  @Test
+  fun `failed or cancelled selected document is never deleted`() = runBlocking {
+    val root = temporaryDirectory()
+    val source = root.resolve("synthetic.risudat")
+    source.writeBytes(ByteArray(10) { it.toByte() })
+    for (cancelled in listOf(false, true)) {
+      var deleteAttempts = 0
+      var cancel = false
+      val failure = try {
+        copySafDestinationOnIo(
+          source,
+          openDestination = { if (cancelled) collectingOutput(mutableListOf()) else failingOutput(afterBytes = 4) },
+          deletePartial = { deleteAttempts += 1; true },
+          createdDocument = false,
+          isCancelled = { cancel },
+          onProgress = { if (cancelled) cancel = true },
+          bufferBytes = 4,
+        )
+        null
+      } catch (error: SafDestinationException) {
+        error
+      }
+      assertEquals(0, deleteAttempts)
+      assertEquals(if (cancelled) "cancelled" else "destination-write-failed", failure?.code)
+      assertEquals(
+        listOf("android-saf-provider-not-atomic", "partial-destination-may-remain"),
+        failure?.warningCodes,
+      )
+    }
   }
 
   @Test
@@ -1036,7 +1105,7 @@ class SafFileBridgeTest {
   @Test
   fun `destination picker receives a safe risudat display name`() {
     assertEquals("backup.risudat", safeSafDestinationName("folder/backup.risudat"))
-    assertEquals("backup_file.risudat", safeSafDestinationName("backup file"))
+    assertEquals("backup file.risudat", safeSafDestinationName("backup file"))
     assertEquals("opened-file.risudat", safeSafDestinationName("///"))
     assertEquals("chat.zip", safeSafDestinationName("folder/chat.zip"))
     assertEquals("Leased.charx", safeSafDestinationName("Leased.charx"))

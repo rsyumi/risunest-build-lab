@@ -23,7 +23,7 @@
         class:h-full={fullh}
         class:text-textcolor2={disabled}
 
-        autocomplete="new-password"
+        autocomplete={autocomplete ?? 'new-password'}
         {placeholder}
         id={id}
         type="password"
@@ -32,6 +32,12 @@
         oninput={oninput}
         onchange={onchange}
         list={list}
+        aria-label={ariaLabel}
+        aria-describedby={ariaDescribedby}
+        aria-invalid={ariaInvalid}
+        {maxlength}
+        {autocapitalize}
+        {spellcheck}
     />
 {:else}
 
@@ -56,7 +62,7 @@
         class:h-full={fullh}
         class:text-textcolor2={disabled}
 
-        {autocomplete}
+        autocomplete={autocomplete ?? 'off'}
         {placeholder}
         id={id}
         type="text"
@@ -64,17 +70,25 @@
         disabled={disabled}
         oninput={oninput}
         onchange={onchange}
+        aria-label={ariaLabel}
+        aria-describedby={ariaDescribedby}
+        aria-invalid={ariaInvalid}
+        {maxlength}
+        {autocapitalize}
+        {spellcheck}
     />
 {/if}
 
 <script lang="ts">
+    import type { HTMLInputAttributes } from 'svelte/elements'
+
     type FormEventHandler<T extends EventTarget> = (event: Event & {
         currentTarget: EventTarget & T;
     }) => any
 
     interface Props {
         size?: 'sm'|'md'|'lg'|'xl';
-        autocomplete?: 'on'|'off';
+        autocomplete?: HTMLInputAttributes['autocomplete'];
         placeholder?: string;
         value: string;
         id?: string;
@@ -89,11 +103,17 @@
         disabled?: boolean;
         hideText?: boolean;
         list?: string;
+        ariaLabel?: string;
+        ariaDescribedby?: string;
+        ariaInvalid?: HTMLInputAttributes['aria-invalid'];
+        maxlength?: number;
+        autocapitalize?: HTMLInputAttributes['autocapitalize'];
+        spellcheck?: HTMLInputAttributes['spellcheck'];
     }
 
     let {
         size = 'md',
-        autocomplete = 'off',
+        autocomplete = undefined,
         placeholder = '',
         value = $bindable(),
         id = undefined,
@@ -107,7 +127,13 @@
         className = '',
         disabled = false,
         hideText = false,
-        list = undefined
+        list = undefined,
+        ariaLabel = undefined,
+        ariaDescribedby = undefined,
+        ariaInvalid = undefined,
+        maxlength = undefined,
+        autocapitalize = undefined,
+        spellcheck = undefined
         
     }: Props = $props();
 </script>

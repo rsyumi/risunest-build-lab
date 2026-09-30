@@ -1,6 +1,21 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { languageEnglish } from "src/lang/en";
 import { createServerSyncController } from "./serverSyncController";
-import type { ServerSyncFacade, ServerStatus } from "./serverSync";
+import { serverSyncProgressView } from "./serverSyncConnectFlow";
+import { ServerSyncError, type ServerSyncFacade, type ServerStatus } from "./serverSync";
+import type { RetainableReplacementFence } from "../retainableReplacementFence";
+
+const mobile = vi.hoisted(() => ({
+  tasks: [] as { progress: ReturnType<typeof vi.fn>; dispose: ReturnType<typeof vi.fn> }[],
+}));
+vi.mock("../../mobileBackgroundTask", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  beginMobileBackgroundTask: () => {
+    const task = { signal: undefined, progress: vi.fn(), dispose: vi.fn(async () => {}) };
+    mobile.tasks.push(task);
+    return task;
+  },
+}));
 
 function fixture() {
   const status: ServerStatus = {
@@ -50,6 +65,55 @@ function fixture() {
 }
 afterEach(() => vi.useRealTimers());
 describe("server sync controller", () => {
+  it("recovers an unknown binding on a status retry without registration", async () => {
+    const { controller, facade } = fixture();
+    facade.status.mockRejectedValueOnce(new ServerSyncError("local-storage-unavailable"));
+    await controller.initialize();
+    expect(controller.snapshot().status).toBeUndefined();
+    await controller.ensureStatus();
+    expect(controller.snapshot().status?.configured).toBe(true);
+    expect(controller.snapshot().error).toBe("");
+    expect(facade.bind).not.toHaveBeenCalled();
+  });
+
+  it("does not clear a terminal synchronization refusal on a later status-only initialization", async () => {
+    const { controller, facade } = fixture();
+    facade.cycle.mockRejectedValueOnce(new ServerSyncError("unauthorized", false));
+    await controller.synchronize();
+    await controller.initialize();
+    expect(controller.snapshot().error).toBe("unauthorized");
+    expect(controller.canAutoSync()).toBe(false);
+    expect(facade.cycle).toHaveBeenCalledOnce();
+  });
+
+  it("clears binding-scoped failure after confirmed unbind even when status cannot be read", async () => {
+    const { controller, facade } = fixture();
+    facade.cycle.mockRejectedValueOnce(new ServerSyncError("unauthorized", false));
+    await controller.synchronize();
+    await controller.pause();
+    facade.status.mockRejectedValueOnce(new Error("status unavailable"));
+    await expect(controller.unbind()).rejects.toThrow();
+    expect(controller.snapshot()).toMatchObject({ paused: false, error: "" });
+    expect(controller.snapshot().status).toBeUndefined();
+  });
+
+  it("settles an earlier status read before unbinding and never republishes its old binding", async () => {
+    const { controller, facade, status } = fixture();
+    let read!: (status: ServerStatus) => void;
+    facade.status.mockImplementationOnce(() => new Promise(resolve => { read = resolve; }));
+    const initialize = controller.initialize();
+    const unbind = controller.unbind();
+    expect(controller.canAutoSync()).toBe(false);
+    expect(facade.unbind).not.toHaveBeenCalled();
+    read(status);
+    facade.status.mockResolvedValue({ ...status, configured: false });
+    await initialize;
+    await unbind;
+    expect(controller.snapshot().status?.configured).toBe(false);
+    expect(controller.snapshot().connecting).toBe(false);
+    expect(facade.unbind).toHaveBeenCalledOnce();
+  });
+
   it("joins an existing synchronization and ignores hidden suspension during an exit drain", async () => {
     const { controller, facade, status } = fixture();
     let finish!: (result: unknown) => void;
@@ -73,43 +137,113 @@ describe("server sync controller", () => {
     await expect(draining).resolves.toEqual({ kind: "complete" });
   });
 
-  it("drains through a newer target revision and restores the prior manual pause", async () => {
+  it("completes an exit drain without a new cycle when the target revision is already synchronized", async () => {
+    const { controller, facade } = fixture();
+    await controller.synchronize();
+    expect(controller.snapshot().initialSyncComplete).toBe(true);
+    facade.cycle.mockRejectedValue(new Error("synthetic fenced flush"));
+
+    await expect(
+      controller.drainToRevision(3, new AbortController().signal),
+    ).resolves.toEqual({ kind: "complete" });
+    expect(facade.cycle).toHaveBeenCalledOnce();
+    expect(controller.snapshot().error).toBeFalsy();
+  });
+
+  it("checks device section writes that did not advance the library revision before completing an exit", async () => {
+    const { controller, facade, status } = fixture();
+    facade.status.mockImplementation(async () => ({ ...status }));
+    await controller.synchronize();
+    expect(controller.snapshot().initialSyncComplete).toBe(true);
+    status.pendingDeviceSections = true;
+    facade.cycle.mockImplementationOnce(async () => {
+      status.pendingDeviceSections = false;
+      return { phase: "idle", conflictCount: 0, localRevision: 3, head: status.head };
+    });
+
+    await expect(controller.drainToRevision(3, new AbortController().signal))
+      .resolves.toEqual({ kind: "complete" });
+    expect(facade.cycle).toHaveBeenCalledTimes(2);
+    expect(status.pendingDeviceSections).toBe(false);
+  });
+
+  it("runs every exit drain cycle under the exit fence and later cycles without it", async () => {
     vi.useFakeTimers();
     const { controller, facade, status } = fixture();
+    const fence = {} as RetainableReplacementFence;
+    facade.cycle.mockResolvedValueOnce({
+      phase: "pending",
+      conflictCount: 0,
+      localRevision: 3,
+      head: status.head,
+    });
+    const draining = controller.drainToRevision(3, new AbortController().signal, fence);
+    await vi.advanceTimersByTimeAsync(300);
+    await expect(draining).resolves.toEqual({ kind: "complete" });
+    expect(facade.cycle.mock.calls).toEqual([[{}, fence], [{}, fence]]);
+
+    await controller.synchronize();
+    expect(facade.cycle).toHaveBeenLastCalledWith({}, undefined);
+  });
+
+  it("retries a failed exit drain cycle before reporting it", async () => {
+    vi.useFakeTimers();
+    const { controller, facade } = fixture();
+    facade.cycle.mockRejectedValueOnce(new Error("synthetic fenced flush"));
+    const draining = controller.drainToRevision(3, new AbortController().signal);
+    await vi.advanceTimersByTimeAsync(1000);
+    await expect(draining).resolves.toEqual({ kind: "complete" });
+    expect(facade.cycle).toHaveBeenCalledTimes(2);
+    expect(controller.snapshot().error).toBeFalsy();
+  });
+
+  it("reports a failure the same cycle would receive again without retrying", async () => {
+    const { controller, facade } = fixture();
+    facade.cycle.mockRejectedValue(new ServerSyncError("synthetic-rejected", false));
+    await expect(
+      controller.drainToRevision(3, new AbortController().signal),
+    ).resolves.toEqual({ kind: "blocked", reason: "synthetic-rejected" });
+    expect(facade.cycle).toHaveBeenCalledOnce();
+  });
+
+  it("reports a failure after the bounded exit drain retries", async () => {
+    vi.useFakeTimers();
+    const { controller, facade } = fixture();
+    facade.cycle.mockRejectedValue(new ServerSyncError("synthetic-offline"));
+    const draining = controller.drainToRevision(3, new AbortController().signal);
+    await vi.advanceTimersByTimeAsync(7000);
+    await expect(draining).resolves.toEqual({
+      kind: "blocked",
+      reason: "synthetic-offline",
+    });
+    expect(facade.cycle).toHaveBeenCalledTimes(4);
+  });
+
+  it("stops waiting for an exit drain retry when the drain is aborted", async () => {
+    const { controller, facade } = fixture();
+    facade.cycle.mockRejectedValue(new ServerSyncError("synthetic-offline"));
+    const abort = new AbortController();
+    const draining = controller.drainToRevision(3, abort.signal);
+    await vi.waitFor(() => expect(controller.snapshot().error).toBe("synthetic-offline"));
+    abort.abort();
+    await expect(draining).rejects.toMatchObject({ name: "AbortError" });
+    expect(facade.cycle).toHaveBeenCalledOnce();
+  });
+
+  it("preserves a manual pause without remote work at exit", async () => {
+    const { facade } = fixture();
     const resumed = vi.fn();
     const pausedController = createServerSyncController(
       facade as unknown as ServerSyncFacade,
       { initiallyPaused: true, onExplicitResume: resumed },
     );
-    facade.cycle
-      .mockResolvedValueOnce({
-        phase: "idle",
-        conflictCount: 0,
-        localRevision: 3,
-        head: status.head,
-      })
-      .mockImplementationOnce(async () => {
-        status.localRevision = 4;
-        return {
-          phase: "idle",
-          conflictCount: 0,
-          localRevision: 4,
-          head: status.head,
-        };
-      });
-
-    const draining = pausedController.drainToRevision(
-      4,
-      new AbortController().signal,
-    );
-    await vi.advanceTimersByTimeAsync(300);
-
-    await expect(draining).resolves.toEqual({ kind: "complete" });
-    expect(facade.cycle).toHaveBeenCalledTimes(2);
+    await expect(pausedController.drainToRevision(4, new AbortController().signal))
+      .resolves.toEqual({ kind: "complete" });
+    expect(facade.cycle).not.toHaveBeenCalled();
+    expect(facade.status).not.toHaveBeenCalled();
     expect(resumed).not.toHaveBeenCalled();
     expect(pausedController.snapshot().paused).toBe(true);
   });
-
   it("cancels an explicit revision drain through its abort signal", async () => {
     const { controller, facade } = fixture();
     let finish!: () => void;
@@ -149,6 +283,24 @@ describe("server sync controller", () => {
     expect(controller.canAutoSync()).toBe(true);
     controller.holdAutomaticSync();
     expect(controller.canAutoSync()).toBe(false);
+  });
+  it("records a manual pause so the next start keeps it until an explicit sync action", async () => {
+    const { facade } = fixture();
+    const paused = vi.fn();
+    const resumed = vi.fn();
+    const controller = createServerSyncController(
+      facade as unknown as ServerSyncFacade,
+      { onPause: paused, onExplicitResume: resumed },
+    );
+    await controller.initialize();
+    expect(controller.canAutoSync()).toBe(true);
+    await controller.pause();
+    expect(paused).toHaveBeenCalledOnce();
+    expect(controller.canAutoSync()).toBe(false);
+    expect(resumed).not.toHaveBeenCalled();
+    await controller.synchronize();
+    expect(resumed).toHaveBeenCalledOnce();
+    expect(controller.snapshot().paused).toBe(false);
   });
   it.each(["idle", "conflict"])(
     "keeps the %s result when progress publishes while the cycle awaits",
@@ -191,6 +343,62 @@ describe("server sync controller", () => {
     await controller.synchronize();
     expect(controller.snapshot().progress).toBeUndefined();
     expect(controller.snapshot().error).toBe("server-timeout");
+  });
+  it("reports the percent the progress panel shows to the mobile background task", async () => {
+    const { controller, facade, status } = fixture();
+    mobile.tasks.length = 0;
+    const text = languageEnglish.risuNest.serverSync;
+    const shown: (number | null)[] = [];
+    facade.cycle.mockImplementationOnce(async () => {
+      const report = (items: Parameters<typeof controller.reportCycleItems>[0]) => {
+        controller.reportCycleItems(items);
+        shown.push(serverSyncProgressView(controller.snapshot(), text, Date.now()).percent);
+      };
+      controller.reportProgress("preparing");
+      report({ done: 0, total: 0, activity: "downloading", processed: 25, expected: 100 });
+      report({ done: 0, total: 0, activity: "downloading", processed: 100, expected: 100 });
+      controller.reportProgress("publishing");
+      report({ done: 1, total: 4, activity: "uploading" });
+      report({ done: 4, total: 4, activity: "confirming" });
+      return { phase: "idle", conflictCount: 0, localRevision: 3, head: status.head };
+    });
+    await controller.synchronize();
+    const [task] = mobile.tasks;
+    const reported = task.progress.mock.calls.map(([percent]) => percent);
+    expect(shown).toEqual([25, 100, 25, null]);
+    expect(reported.filter((percent, index) => index === 0 || percent !== reported[index - 1]))
+      .toEqual([null, 25, 100, 25, null]);
+    expect(task.dispose).toHaveBeenCalledOnce();
+    expect(Math.max(...task.progress.mock.invocationCallOrder))
+      .toBeLessThan(task.dispose.mock.invocationCallOrder[0]);
+    controller.invalidateCompletion();
+    expect(task.progress).toHaveBeenCalledTimes(reported.length);
+  });
+  it("counts elapsed time from the attempt start across stage and upload activity changes", async () => {
+    vi.useFakeTimers();
+    const { controller, facade } = fixture();
+    const text = languageEnglish.risuNest.serverSync;
+    const elapsed = () =>
+      serverSyncProgressView(controller.snapshot(), text, Date.now()).elapsed;
+    facade.cycle.mockImplementationOnce(async () => {
+      controller.reportProgress("preparing");
+      await vi.advanceTimersByTimeAsync(1000);
+      controller.reportProgress("publishing");
+      const activities = ["verifying", "uploading", "verifying", "uploading", "confirming"] as const;
+      for (const [index, activity] of activities.entries()) {
+        await vi.advanceTimersByTimeAsync(1000);
+        controller.reportCycleItems({ done: 0, total: 2, activity });
+        expect(elapsed()).toBe(`${text.elapsed} 00:0${index + 2}`);
+      }
+      return {
+        phase: "idle",
+        conflictCount: 0,
+        localRevision: 3,
+        head: controller.snapshot().status!.head!,
+      };
+    });
+    await controller.synchronize();
+    expect(controller.snapshot().attemptStartedAt).toBeUndefined();
   });
   it("shows the latest retryable failure only during the active synchronization", async () => {
     const { controller, facade } = fixture();
@@ -246,7 +454,7 @@ describe("server sync controller", () => {
     expect(controller.canAutoSync()).toBe(false);
     const options = { resolution: "keep-local" as const, expectedRevision: 3 };
     await controller.synchronize(options);
-    expect(facade.cycle).toHaveBeenLastCalledWith(options);
+    expect(facade.cycle).toHaveBeenLastCalledWith(options, undefined);
     expect(controller.canAutoSync()).toBe(true);
   });
   it("bounds polling and coalesces concurrent foreground requests", async () => {

@@ -44,7 +44,7 @@ function payloadCharacter(payload: unknown): character | groupChat | null {
 
 /**
  * Expands upstream cold storage references into the records that carry them.
- * Imported and received databases keep their bodies inline; no reference survives.
+ * Unresolved references remain available for retry or an explicit incomplete restore.
  */
 export async function expandColdPayloads(
     db: Pick<Database, 'characters'>,
@@ -90,6 +90,9 @@ export async function expandColdPayloads(
                 characters[index] = restored as ColdCharacter
                 current = characters[index]
                 expandedKeys.push(characterKey)
+                delete current.coldstorage
+            } else if (payload !== null) {
+                unavailableKeys.push(characterKey)
             }
         }
 
@@ -105,8 +108,9 @@ export async function expandColdPayloads(
             }
         }
 
-        delete current.coldstorage
-        delete current.coldStoragedChats
+        if (!current.coldstorage && !(current.chats ?? []).some(chat => chatColdKey(chat))) {
+            delete current.coldStoragedChats
+        }
     }
 
     return { expandedKeys, unavailableKeys }

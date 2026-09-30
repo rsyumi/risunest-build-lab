@@ -143,8 +143,11 @@ fn version_of(headers: &BTreeMap<String, String>) -> Option<VersionToken> {
 
 fn checksum_of(headers: &BTreeMap<String, String>) -> Option<String> {
     let value = headers.get("x-amz-checksum-sha256")?.trim();
-    (!value.is_empty() && value.len() <= 128 && value.bytes().all(|b| b.is_ascii_graphic()))
-        .then(|| value.to_owned())
+    if value.len() != 44 || headers.get("x-amz-checksum-type").is_some_and(|kind| kind != "FULL_OBJECT") {
+        return None;
+    }
+    let decoded = base64::engine::general_purpose::STANDARD.decode(value).ok()?;
+    (decoded.len() == 32).then(|| value.to_owned())
 }
 
 fn base64_sha256(lower_hex: &str) -> Result<String> {
@@ -267,6 +270,12 @@ impl S3Provider {
     /// Default S3 status meanings with the documented per-service overrides.
     fn classify(&self, profile: &Profile, response: &HttpResponse) -> ProviderError {
         let mut error = common::classify_status(response.status, &response.headers, self.now_ms());
+        if response.status == 403 && response.headers.get("date")
+            .and_then(|date| httpdate::parse_http_date(date).ok())
+            .and_then(|date| date.duration_since(std::time::UNIX_EPOCH).ok())
+            .is_some_and(|date| date.as_millis().abs_diff(u128::from(self.now_ms())) > 14 * 60 * 1000) {
+            error.kind = ErrorKind::ClockSkew;
+        }
         if response.status == 503 && profile.slow_down_is_rate_limit {
             error.kind = ErrorKind::RateLimited;
             error.retry_at_ms = common::retry_after_ms(&response.headers, self.now_ms());
@@ -289,11 +298,15 @@ impl S3Provider {
         key: &str,
         cancel: &Cancellation,
     ) -> Result<Option<RemoteObject>> {
+        let mut call = Call::object(reqwest::Method::HEAD, key, ProviderOperation::Metadata);
+        if context.profile.checksum_header {
+            call = call.header("x-amz-checksum-mode", "ENABLED");
+        }
         let response = self
             .dispatch(
                 context,
                 credentials,
-                Call::object(reqwest::Method::HEAD, key, ProviderOperation::Metadata),
+                call,
                 cancel,
             )
             .await?;
@@ -339,6 +352,13 @@ impl S3Provider {
             return Err(corrupt());
         }
         let prefix = context.folder_prefix(folder);
+        let collection = if folder == collection_folder(Collection::Leases) {
+            Collection::Leases
+        } else { Collection::Descriptors };
+        page.objects.retain(|object| {
+            object.key.strip_prefix(&prefix).is_none_or(|name| name.is_empty() ||
+                crate::external_storage::contract::role_member_name(collection, name) != crate::external_storage::contract::RoleMemberName::Foreign)
+        });
         for object in &page.objects {
             if object.key == prefix {
                 if object.size != 0 { return Err(corrupt()); }
@@ -1201,4 +1221,23 @@ fn contiguous(
 
 pub(crate) fn create(dependencies: Dependencies) -> Result<Arc<dyn Provider>> {
     Ok(Arc::new(S3Provider::new(dependencies)))
+}
+
+#[cfg(test)]
+mod checksum_tests {
+    use super::*;
+    #[test]
+    fn only_full_object_sha256_is_verifiable() {
+        let value = base64::engine::general_purpose::STANDARD.encode([7u8; 32]);
+        let mut headers = BTreeMap::from([("x-amz-checksum-sha256".into(), value.clone())]);
+        assert_eq!(checksum_of(&headers), Some(value.clone()));
+        headers.insert("x-amz-checksum-type".into(), "COMPOSITE".into());
+        assert_eq!(checksum_of(&headers), None);
+        headers.insert("x-amz-checksum-type".into(), "FULL_OBJECT".into());
+        assert_eq!(checksum_of(&headers), Some(value.clone()));
+        for invalid in [format!("{value}-2"), "not-base64".into(), base64::engine::general_purpose::STANDARD.encode([7u8; 31])] {
+            headers.insert("x-amz-checksum-sha256".into(), invalid);
+            assert_eq!(checksum_of(&headers), None);
+        }
+    }
 }

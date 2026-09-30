@@ -3,6 +3,7 @@ import { get } from 'svelte/store'
 import { createConversationOperationContext, type ConversationCommitObserver } from './conversationOperationContext'
 
 const mocks = vi.hoisted(() => ({
+    iosDependencies: undefined as any,
     session: null as any,
     currentCharacter: null as any,
     events: [] as string[],
@@ -49,6 +50,13 @@ const mocks = vi.hoisted(() => ({
     trimUntilPunctuation: vi.fn((value: string) => value),
 }))
 
+vi.mock('../iosNative', async (importOriginal) => {
+    const original = await importOriginal<typeof import('../iosNative')>()
+    return { ...original,
+        beginIOSGeneration: (signal?: AbortSignal) => original.beginIOSGeneration(signal, mocks.iosDependencies),
+        notifyIOSGenerationComplete: vi.fn(),
+    }
+})
 vi.mock('../tokenizer', async () => (await import('./tests/sendChatTestHarness')).tokenizerModule({
     tokenize: vi.fn(async () => {
         mocks.events.push('tokenize-result')
@@ -320,6 +328,7 @@ function streamingSnapshots(...values: string[]) {
 
 describe('sendChat generation session integration', () => {
     beforeEach(() => {
+        mocks.iosDependencies = undefined
         vi.spyOn(console, 'log').mockImplementation(() => undefined)
         doingChat.set(false)
         mocks.session = null
@@ -1523,4 +1532,35 @@ describe('sendChat generation session integration', () => {
         })
         expect(session.pinCount('transaction')).toBe(0)
     })
+
+    it.each(['expired', 'foreground-expired', 'user-stop'] as const)('retains partial text and reports only background expiry for %s', async (end) => {
+        const { alertNormal } = await import('../alert')
+        const { notifyIOSGenerationComplete } = await import('../iosNative')
+        const { language } = await import('../../lang')
+        installDatabase()
+        const events = new EventTarget()
+        const dispose = vi.fn(async () => undefined)
+        mocks.iosDependencies = {
+            enabled: () => true, begin: async () => ({ id: 'generation' }), end: dispose,
+            events, state: async () => ({ activeTasks: [], expiredTasks: ['generation'] }),
+        }
+        const user = new AbortController()
+        mocks.modelResponse = { type: 'streaming', result: new ReadableStream<Record<string, string>>({
+            start(controller) { controller.enqueue({ 0: 'Kept partial' }) },
+        }) }
+        vi.mocked(alertNormal).mockClear()
+        vi.mocked(notifyIOSGenerationComplete).mockClear()
+        const pending = sendChat(-1, { signal: user.signal })
+        await vi.waitFor(() => expect(DBState.db.characters[0].chats[0].message.at(-1)?.data).toBe('Kept partial'))
+        if (end === 'user-stop') user.abort()
+        else events.dispatchEvent(new CustomEvent('risunest-ios-lifecycle', { detail: { event: end === 'expired' ? 'expired' : 'active', id: 'generation' } }))
+        await expect(pending).resolves.toBe(false)
+        expect(DBState.db.characters[0].chats[0].message.at(-1)?.data).toBe('Kept partial')
+        if (end === 'user-stop') expect(alertNormal).not.toHaveBeenCalled()
+        else expect(alertNormal).toHaveBeenCalledExactlyOnceWith(language.generationInterruptedInBackground)
+        expect(notifyIOSGenerationComplete).not.toHaveBeenCalled()
+        expect(dispose).toHaveBeenCalledWith('generation', false)
+        mocks.iosDependencies = undefined
+    })
+
 })

@@ -4,6 +4,7 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
     <application
@@ -15,7 +16,7 @@
         android:theme="@style/Theme.risunest"
         android:usesCleartextTraffic="${usesCleartextTraffic}">
         <activity
-            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|locale|smallestScreenSize|screenLayout|uiMode|density|fontScale|layoutDirection|navigation|touchscreen|colorMode|mcc|mnc|fontWeightAdjustment|grammaticalGender"
             android:launchMode="singleTask"
             android:label="@string/main_activity_title"
             android:name=".MainActivity"
@@ -53,23 +54,65 @@
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:scheme="content" />
+                <data android:mimeType="*/*" />
+                <data android:scheme="file" />
                 <data android:host="*" />
+                <data android:pathSuffix=".risum" />
                 <data android:pathPattern=".*\\.risum" />
+                <data android:pathPattern=".*\\..*\\.risum" />
+                <data android:pathPattern=".*\\..*\\..*\\.risum" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\.risum" />
+                <data android:pathSuffix=".risup" />
                 <data android:pathPattern=".*\\.risup" />
+                <data android:pathPattern=".*\\..*\\.risup" />
+                <data android:pathPattern=".*\\..*\\..*\\.risup" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\.risup" />
+                <data android:pathSuffix=".charx" />
                 <data android:pathPattern=".*\\.charx" />
+                <data android:pathPattern=".*\\..*\\.charx" />
+                <data android:pathPattern=".*\\..*\\..*\\.charx" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\.charx" />
+                <data android:pathSuffix=".risunest" />
                 <data android:pathPattern=".*\\.risunest" />
+                <data android:pathPattern=".*\\..*\\.risunest" />
+                <data android:pathPattern=".*\\..*\\..*\\.risunest" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\.risunest" />
+                <data android:pathSuffix=".risudat" />
                 <data android:pathPattern=".*\\.risudat" />
+                <data android:pathPattern=".*\\..*\\.risudat" />
+                <data android:pathPattern=".*\\..*\\..*\\.risudat" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\.risudat" />
             </intent-filter>
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:scheme="file" />
                 <data android:host="*" />
+                <data android:pathSuffix=".risum" />
                 <data android:pathPattern=".*\\.risum" />
+                <data android:pathPattern=".*\\..*\\.risum" />
+                <data android:pathPattern=".*\\..*\\..*\\.risum" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\.risum" />
+                <data android:pathSuffix=".risup" />
                 <data android:pathPattern=".*\\.risup" />
+                <data android:pathPattern=".*\\..*\\.risup" />
+                <data android:pathPattern=".*\\..*\\..*\\.risup" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\.risup" />
+                <data android:pathSuffix=".charx" />
                 <data android:pathPattern=".*\\.charx" />
+                <data android:pathPattern=".*\\..*\\.charx" />
+                <data android:pathPattern=".*\\..*\\..*\\.charx" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\.charx" />
+                <data android:pathSuffix=".risunest" />
                 <data android:pathPattern=".*\\.risunest" />
+                <data android:pathPattern=".*\\..*\\.risunest" />
+                <data android:pathPattern=".*\\..*\\..*\\.risunest" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\.risunest" />
+                <data android:pathSuffix=".risudat" />
                 <data android:pathPattern=".*\\.risudat" />
+                <data android:pathPattern=".*\\..*\\.risudat" />
+                <data android:pathPattern=".*\\..*\\..*\\.risudat" />
+                <data android:pathPattern=".*\\..*\\..*\\..*\\.risudat" />
             </intent-filter>
             <!-- DEEP LINK PLUGIN. AUTO-GENERATED. DO NOT REMOVE. -->
             <intent-filter >

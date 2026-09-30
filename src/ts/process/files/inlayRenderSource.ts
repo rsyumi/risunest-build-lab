@@ -1,3 +1,4 @@
+import { ScreenshotPreparationError } from '../../chatScreenshotErrors'
 import type { InlayBlobType, InlayBlobMetadata } from 'src/ts/storage/blobStore'
 import { getInlayAssetBlob, getInlayAssetMetadata, getInlayAssetRenderUrl } from './inlays'
 
@@ -50,14 +51,15 @@ export function renderDeferredInlaySourceMarkup(
     const slot = registry?.register(id, source)
     const marker = slot === undefined ? '' : ` data-risu-inlay-slot="${slot}"`
     const assetId = escapeHtmlAttribute(id)
-    const mime = escapeHtmlAttribute(source.mime)
+    const mime = mediaMimeHint(source.mime)
+    const typeHint = mime ? ` type="${mime}"` : ''
     const dimensions = source.width && source.height
         ? ` width="${Math.floor(source.width)}" height="${Math.floor(source.height)}"`
         : ''
     switch (source.type) {
         case 'image': return `<img data-risu-inlay-id="${assetId}"${marker}${dimensions} loading="lazy"/>`
-        case 'video': return `<video controls><source data-risu-inlay-id="${assetId}"${marker} type="${mime}"></video>`
-        case 'audio': return `<audio controls><source data-risu-inlay-id="${assetId}"${marker} type="${mime}"></audio>`
+        case 'video': return `<video controls><source data-risu-inlay-id="${assetId}"${marker}${typeHint}></video>`
+        case 'audio': return `<audio controls><source data-risu-inlay-id="${assetId}"${marker}${typeHint}></audio>`
         default: return ''
     }
 }
@@ -115,6 +117,9 @@ function startDeferredInlaySources(
             && validKind
     }
     const attach = (element: HTMLElement, url: string) => {
+        const media = element instanceof HTMLSourceElement && element.parentElement instanceof HTMLMediaElement
+            ? element.parentElement : null
+        if (element.getAttribute('src') === url && !media?.error) return
         element.setAttribute('src', url)
         if (element instanceof HTMLSourceElement && element.parentElement instanceof HTMLMediaElement) {
             element.parentElement.load()
@@ -187,7 +192,7 @@ function startDeferredInlaySources(
                 if (createdObjectUrl && resources.get(id)?.url !== createdObjectUrl) {
                     URL.revokeObjectURL(createdObjectUrl)
                 }
-                if (options.rejectOnError) throw error
+                if (options.rejectOnError) throw new ScreenshotPreparationError('resource', error)
             }
         })().finally(() => {
             if (pending.get(id) === load) pending.delete(id)
@@ -352,16 +357,23 @@ function escapeHtmlAttribute(value: string): string {
         .replaceAll('>', '&gt;')
 }
 
+export function mediaMimeHint(mime: string): string | undefined {
+    const normalized = mime.toLowerCase() === 'audio/mp3' ? 'audio/mpeg' : mime.toLowerCase()
+    return ['video/mp4', 'video/webm', 'audio/webm', 'audio/mpeg', 'audio/ogg', 'audio/wav', 'audio/flac'].includes(normalized)
+        ? normalized : undefined
+}
+
 export function renderInlaySourceMarkup(source: InlayRenderSource): string {
     const url = escapeHtmlAttribute(source.url)
-    const mime = escapeHtmlAttribute(source.mime)
+    const mime = mediaMimeHint(source.mime)
+    const typeHint = mime ? ` type="${mime}"` : ''
     switch (source.type) {
         case 'image':
             return `<img src="${url}"/>`
         case 'video':
-            return `<video controls><source src="${url}" type="${mime}"></video>`
+            return `<video controls><source src="${url}"${typeHint}></video>`
         case 'audio':
-            return `<audio controls><source src="${url}" type="${mime}"></audio>`
+            return `<audio controls><source src="${url}"${typeHint}></audio>`
         default:
             return ''
     }

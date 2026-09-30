@@ -35,6 +35,7 @@ vi.mock('../storage/persistentDataRuntime.svelte', () => ({
 const scriptingSelectionState = vi.hoisted(() => ({ index: 0 }))
 const createdLuaEngines = vi.hoisted(() => [] as LuaEngine[])
 const createdLuaEngineOptions = vi.hoisted(() => [] as unknown[])
+const diagnosticEngineSetup = vi.hoisted(() => ({ next: null as ((engine: LuaEngine) => void) | null }))
 
 vi.mock('../parser/parser.svelte', () => ({
   hasher: vi.fn(),
@@ -115,6 +116,9 @@ vi.mock('./luaRuntime', async (importOriginal) => {
         createdLuaEngineOptions.push(options)
         const engine = await createEngine(options)
         createdLuaEngines.push(engine)
+        const setup = diagnosticEngineSetup.next
+        diagnosticEngineSetup.next = null
+        setup?.(engine)
         return engine
       }
       return factory
@@ -1504,6 +1508,49 @@ test('creates production Lua engines with the handler deadline', async () => {
   })
 })
 
+test.each(['timeout', 'ordinary'] as const)('classifies the actual Wasmoon instruction-hook timeout without changing ordinary diagnostics (%s)', async (kind) => {
+  let now = Date.now()
+  const failure = new Error('synthetic ordinary listener failure')
+  diagnosticEngineSetup.next = (engine) => {
+    engine.global.set('diagnosticFailure', () => {
+      if (kind === 'ordinary') throw failure
+      now += 2_001
+    })
+  }
+  const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+  const elapsedClock = vi.spyOn(performance, 'now').mockReturnValueOnce(100).mockReturnValueOnce(125)
+  const deadlineClock = vi.spyOn(Date, 'now').mockImplementation(() => now)
+  try {
+    await runScripted(`function onOutput()
+      diagnosticFailure()
+      local total = 0
+      for i = 1, 10000 do total = total + i end
+      return total
+    end`, {
+      char: { chaId: `listener-diagnostic-${kind}` } as never,
+      chat: { message: [] } as never,
+      mode: 'output',
+    })
+    if (kind === 'timeout') {
+      expect(errors.mock.calls).toEqual([[{ code: 'lua-listener-timeout', mode: 'output', elapsedMs: 25 }]])
+      expect(Number.isFinite(errors.mock.calls[0][0].elapsedMs)).toBe(true)
+      expect(errors.mock.calls[0][0].elapsedMs).toBeGreaterThanOrEqual(0)
+    } else {
+      expect(errors).toHaveBeenCalledOnce()
+      expect(errors.mock.calls[0]).toHaveLength(1)
+      expect(errors.mock.calls[0][0]).toBeInstanceOf(Error)
+      expect(errors.mock.calls[0][0].message.split('\n', 1)[0]).toBe(String(failure))
+      expect(errors.mock.calls[0][0]).not.toHaveProperty('code')
+    }
+    expect(createdLuaEngineOptions.at(-1)).toEqual({ injectObjects: true, functionTimeout: 2_000 })
+  } finally {
+    diagnosticEngineSetup.next = null
+    elapsedClock.mockRestore()
+    deadlineClock.mockRestore()
+    errors.mockRestore()
+  }
+})
+
 test('resumes a Lua listener after an LLM wait longer than its CPU deadline', async () => {
   let now = Date.now()
   const clock = vi.spyOn(Date, 'now').mockImplementation(() => now)
@@ -2028,5 +2075,60 @@ test.each(['editinput', 'editoutput'] as const)(
     } finally {
       continuationRuntime.session = null
     }
+  },
+)
+
+
+test.each(['current', 'version-changed', 'session-switched'] as const)(
+  'settles started Lua effects on Stop only against the %s owned session', async (state) => {
+    const mutation = vi.fn()
+    const fixture = operationCharacterFixture(`stop-${state}`, mutation)
+    const controller = new AbortController()
+    let release!: (value: boolean) => void
+    const waiting = new Promise<boolean>((resolve) => { release = resolve })
+    vi.mocked(alertConfirm).mockReset()
+    vi.mocked(alertConfirm).mockReturnValueOnce(waiting)
+    vi.mocked(alertNormal).mockClear()
+    fixture.char.triggerscript = [
+      { type: 'start', conditions: [], effect: [{ type: 'triggerlua', code: `
+        listenEdit('editOutput', function(id, value)
+          setChat(id, 0, 'started effect')
+          alertConfirm(id, 'wait'):await()
+          return value .. ':processed'
+        end)
+      ` }] },
+      { type: 'start', conditions: [], effect: [{ type: 'triggerlua', code: `
+        listenEdit('editOutput', function(id, value)
+          alertNormal(id, 'must not run')
+          return value
+        end)
+      ` }] },
+    ] as never
+    installOperationCharacterFixture(fixture)
+    vi.mocked(getCurrentChat).mockReturnValue(fixture.chat)
+    vi.mocked(getCurrentCharacter).mockReturnValue(fixture.char)
+    continuationRuntime.session = fixture.session
+    const { runLuaEditTrigger } = await import('./scriptings')
+    const pending = runLuaEditTrigger(fixture.char, 'editoutput', 'input', {}, undefined, undefined, controller.signal)
+    const outcome = pending.then(value => ({ value }), error => ({ error }))
+    await vi.waitFor(() => expect(alertConfirm).toHaveBeenCalledOnce())
+    expect(fixture.chat.message[0].data).toBe('message')
+    controller.abort()
+    if (state === 'version-changed') fixture.session.edit(fixture.session.locate(0), { ...fixture.chat.message[0], data: 'concurrent' })
+    if (state === 'session-switched') continuationRuntime.session = operationCharacterFixture('replacement').session
+    release(true)
+    try {
+      const result = await outcome
+      if (state === 'current') {
+        expect(result).toEqual({ value: 'input' })
+        expect(fixture.chat.message[0].data).toBe('started effect')
+        expect(mutation).toHaveBeenCalledOnce()
+      } else {
+        expect(result).toHaveProperty('error')
+        expect(fixture.chat.message[0].data).toBe(state === 'version-changed' ? 'concurrent' : 'message')
+      }
+      expect(alertNormal).not.toHaveBeenCalled()
+      expect(fixture.session.activePinReasons).toEqual([])
+    } finally { continuationRuntime.session = null }
   },
 )

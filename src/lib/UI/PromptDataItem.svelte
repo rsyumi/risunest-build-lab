@@ -21,7 +21,7 @@
         isOpened?: boolean;
         draggedIndex?: number;
         dragOverIndex?: number;
-        openedItemIndices?: Set<number>;
+        openedItems?: Set<PromptItem>;
         currentIndex?: number;
         displayIndex?: number;
     }
@@ -36,7 +36,7 @@
         isOpened = false,
         draggedIndex = $bindable(-1),
         dragOverIndex = $bindable(-1),
-        openedItemIndices = $bindable(new Set<number>()),
+        openedItems = $bindable(new Set<PromptItem>()),
         currentIndex = -1,
         displayIndex = -1
     }: Props = $props();
@@ -103,25 +103,6 @@
         return ""
     }
 
-    function replacePrompt(prompt:PromptItem){
-        if(JSON.stringify(promptItem) === JSON.stringify(prompt)){
-            return
-        }
-
-        const ind = DBState.db.promptTemplate.findIndex((item, index) => {
-            return JSON.stringify(item) === JSON.stringify(prompt)
-        })
-
-        if(ind !== -1){
-            DBState.db.promptTemplate.splice(ind, 1)
-        }
-        const myInd = DBState.db.promptTemplate.findIndex((item, index) => {
-            return JSON.stringify(item) === JSON.stringify(promptItem)
-        })
-        DBState.db.promptTemplate.splice(myInd, 0, prompt)
-
-    }
-
     const isPromptDrag = (e:DragEvent) => {
         return e.dataTransfer?.types.includes(RISU_PROMPT_DRAG_TYPE) ?? false
     }
@@ -130,18 +111,19 @@
         e.dataTransfer.effectAllowed = 'move'
         e.dataTransfer.setData('text/plain', 'prompt')
         e.dataTransfer.setData(RISU_PROMPT_DRAG_TYPE, 'true')
-        e.dataTransfer.setData('prompt', JSON.stringify(promptItem))
     }
 
 </script>
 
 <div class="first:mt-0 w-full h-2" role="doc-pagebreak"
+    class:bg-borderc={draggedIndex !== -1 && dragOverIndex === currentIndex}
     ondrop={(e) => {
         if(!isPromptDrag(e)){
             return
         }
         e.preventDefault()
         e.stopPropagation()
+        dragOverIndex = currentIndex
         onDrop()
     }}
     ondragover={(e) => {
@@ -151,10 +133,7 @@
         e.preventDefault()
         e.stopPropagation()
         e.dataTransfer.dropEffect = 'move'
-    }}
-    draggable="true"
-    ondragstart={(e) => {
-        markPromptDrag(e)
+        dragOverIndex = currentIndex
     }}>
 
 </div>
@@ -163,6 +142,7 @@
     class="flex flex-col border border-selected p-4 rounded-md bg-darkbg transition-all duration-200"
     class:opacity-50={isDragging}
     class:scale-95={isDragging}
+    class:border-b-borderc={draggedIndex !== -1 && dragOverIndex === currentIndex + 1}
 
     ondragover={(e) => {
         if(!isPromptDrag(e)){
@@ -171,7 +151,11 @@
         e.preventDefault()
         e.stopPropagation()
         e.dataTransfer.dropEffect = 'move'
-        if(draggedIndex === -1 || draggedIndex === currentIndex) {
+        if(draggedIndex === -1) {
+            return
+        }
+        if(draggedIndex === currentIndex) {
+            dragOverIndex = currentIndex
             return
         }
 
@@ -210,7 +194,7 @@
             e.dataTransfer?.setDragImage(dragElement, 10, 10)
 
             setTimeout(() => {
-                document.body.removeChild(dragElement)
+                dragElement.remove()
             }, 0)
         }}
         ondragend={(e) => {
@@ -218,13 +202,13 @@
             dragOverIndex = -1
         }}
         onclick={() => {
-            const newIndices = new Set(openedItemIndices)
+            const next = new Set(openedItems)
             if (isOpened) {
-                newIndices.delete(currentIndex)
+                next.delete(promptItem)
             } else {
-                newIndices.add(currentIndex)
+                next.add(promptItem)
             }
-            openedItemIndices = newIndices
+            openedItems = next
         }}
     >
         <span>{getName(promptItem)}</span>

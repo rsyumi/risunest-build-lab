@@ -3,7 +3,7 @@
     import { ContactIcon } from '@lucide/svelte'
     import { DBState, selectedCharID } from 'src/ts/stores.svelte'
     import { language } from 'src/lang'
-    import { bindPersona, captureChatBindingTarget, saveChatBinding } from 'src/ts/chatBindings.svelte'
+    import { bindPersona, captureChatBindingTarget, chatBindingBlockedByGeneration, saveChatBinding } from 'src/ts/chatBindings.svelte'
     import { alertError } from 'src/ts/alert'
     import ListedPersona from '../Setting/listedPersona.svelte'
     let target = $state<ReturnType<typeof captureChatBindingTarget>>(null)
@@ -24,12 +24,12 @@
                 : `${language.inheritPersona} (${currentPersona})`),
     )
     async function select(index: number) {
-        if (!target?.isCurrent()) return
+        if (!target?.isCurrent() || chatBindingBlockedByGeneration()) return
         try {
             await bindPersona(target.conversation, index)
             await saveChatBinding()
         } catch (error) {
-            alertError(String(error))
+            alertError(language.personaBindingSaveFailed)
         }
     }
 </script>
@@ -42,6 +42,7 @@
             : 'border-darkborderc text-textcolor2 hover:text-textcolor'}"
         title={language.personaBinding}
         onclick={() => {
+            if (chatBindingBlockedByGeneration()) return
             target = captureChatBindingTarget()
         }}
     >

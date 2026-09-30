@@ -98,8 +98,8 @@ fn server_sync_local_commit_and_large_json_costs() {
             &generation,
             &outbox::ServerDirtyKey {
                 kind: "plugin".into(),
-                key1: "synthetic-large".into(),
-                key2: "".into(),
+                key1: "synthetic-plugin".into(),
+                key2: "synthetic-large".into(),
                 revision: store.revision().unwrap(),
             },
         )

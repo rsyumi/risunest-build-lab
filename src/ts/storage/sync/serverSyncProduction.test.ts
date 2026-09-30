@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const state = vi.hoisted(() => ({
   native: true,
+  desktop: false,
   ready: true,
   running: false,
   restoredSource: undefined as unknown,
@@ -15,6 +16,9 @@ const state = vi.hoisted(() => ({
     remoteHint: vi.fn(),
   },
   controllerListener: undefined as undefined | ((state: unknown) => void),
+  controllerOptions: undefined as
+    | undefined
+    | { initiallyPaused?: boolean; onPause?(): void; onExplicitResume?(): void },
   nativeListeners: new Map<string, () => void>(),
   listen: vi.fn(async (event: string, handler: () => void) => {
     return (
@@ -42,6 +46,7 @@ const state = vi.hoisted(() => ({
   }),
   controller: {
     initialize: vi.fn(async () => {}),
+    ensureStatus: vi.fn(async () => {}),
     invalidateCompletion: vi.fn(),
     canAutoSync: vi.fn(() => true),
     synchronize: vi.fn(async () => {}),
@@ -62,6 +67,9 @@ vi.mock("../../platform", () => ({
   get isTauri() {
     return state.native;
   },
+  get isTauriDesktop() {
+    return state.native && state.desktop;
+  },
 }));
 vi.mock("../persistentDataRuntime.svelte", () => ({
   flushPendingData: vi.fn(),
@@ -80,7 +88,13 @@ vi.mock("./serverSync", async (original) => ({
   createServerSyncFacade: vi.fn(() => ({})),
 }));
 vi.mock("./serverSyncController", () => ({
-  createServerSyncController: () => state.controller,
+  createServerSyncController: (
+    _facade: unknown,
+    options: typeof state.controllerOptions,
+  ) => {
+    state.controllerOptions = options;
+    return state.controller;
+  },
 }));
 vi.mock("./serverSyncScheduler", () => ({
   createServerSyncScheduler: (
@@ -102,6 +116,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   vi.useFakeTimers();
   state.native = true;
+  state.desktop = false;
   state.available = undefined;
   state.revisionListener = undefined;
   state.nativeListeners.clear();
@@ -114,6 +129,7 @@ beforeEach(() => {
   state.controller.canAutoSync.mockImplementation(() => state.ready);
   state.controller.snapshot.mockImplementation(() => ({
     running: state.running,
+    status: { configured: true },
   }));
 });
 afterEach(() => {
@@ -143,7 +159,8 @@ describe("native server synchronization scheduling", () => {
     const { createServerSyncExitDrainAdapter } = await import(
       "./serverSyncProduction"
     );
-    const adapter = createServerSyncExitDrainAdapter("server:selected:selection");
+    const fence = { retain: vi.fn() } as never;
+    const adapter = createServerSyncExitDrainAdapter("server:selected:selection", fence);
     const abort = new AbortController();
     const target = {
       revision: 17,
@@ -158,6 +175,7 @@ describe("native server synchronization scheduling", () => {
     expect(state.controller.drainToRevision).toHaveBeenCalledWith(
       17,
       abort.signal,
+      fence,
     );
     await adapter.cancel("cancel-exit");
     expect(state.controller.cancelExitDrain).toHaveBeenCalledOnce();
@@ -281,6 +299,7 @@ describe("native server synchronization scheduling", () => {
     visibility.mockReturnValue("hidden");
     listeners.get("visibilitychange")!(new Event("visibilitychange"));
     expect(state.scheduler.suspend).toHaveBeenCalledTimes(1);
+    expect(state.scheduler.suspend).toHaveBeenLastCalledWith(false);
     expect(state.available!()).toBe(false);
     visibility.mockReturnValue("visible");
     listeners.get("visibilitychange")!(new Event("visibilitychange"));
@@ -288,6 +307,8 @@ describe("native server synchronization scheduling", () => {
     listeners.get("offline")!(new Event("offline"));
     expect(state.available!()).toBe(false);
     expect(state.scheduler.suspend).toHaveBeenCalledTimes(2);
+    // Losing the network stops new attempts; the one in flight retries itself.
+    expect(state.scheduler.suspend).toHaveBeenLastCalledWith(true);
     online.mockReturnValue(true);
     listeners.get("online")!(new Event("online"));
     expect(state.scheduler.resume).toHaveBeenCalledTimes(3);
@@ -325,6 +346,71 @@ describe("native server synchronization scheduling", () => {
     resumeServerSyncAfterBackup();
     expect(cleanups()).toBe(2);
     expect(state.controller.pause).not.toHaveBeenCalled();
+  });
+  it("keeps a manual pause for the next start until an explicit sync action", async () => {
+    const start = async () => {
+      vi.resetModules();
+      const { getServerSyncController } = await import("./serverSyncProduction");
+      getServerSyncController();
+      return state.controllerOptions!;
+    };
+    localStorage.clear();
+    try {
+      const first = await start();
+      expect(first.initiallyPaused).toBe(false);
+      first.onPause!();
+      const paused = await start();
+      expect(paused.initiallyPaused).toBe(true);
+      paused.onExplicitResume!();
+      expect((await start()).initiallyPaused).toBe(false);
+    } finally {
+      localStorage.clear();
+    }
+  });
+  it("cleans after the attempt in flight and holds the next library claim until cleanup ends", async () => {
+    const { startServerSync, resumeServerSyncAfterBackup } = await import(
+      "./serverSyncProduction"
+    );
+    const { createServerSyncFacade } = await import("./serverSync");
+    const cleanups = () =>
+      state.invoke.mock.calls.filter(
+        ([command]) => command === "server_sync_backup_cleanup",
+      ).length;
+    let idle!: () => void;
+    state.controller.waitForIdle.mockImplementationOnce(
+      () => new Promise<void>((resolve) => { idle = resolve; }),
+    );
+    let cleaned!: () => void;
+    const original = state.invoke.getMockImplementation()!;
+    state.invoke.mockImplementation(async (command: string) => {
+      if (command !== "server_sync_backup_cleanup") return original(command);
+      await new Promise<void>((resolve) => { cleaned = resolve; });
+      return undefined;
+    });
+    try {
+      state.running = true;
+      startServerSync();
+      await vi.waitFor(() =>
+        expect(state.controller.waitForIdle).toHaveBeenCalledOnce(),
+      );
+      resumeServerSyncAfterBackup();
+      expect(state.controller.waitForIdle).toHaveBeenCalledOnce();
+      expect(cleanups()).toBe(0);
+
+      state.running = false;
+      idle();
+      await vi.waitFor(() => expect(cleanups()).toBe(1));
+      const { awaitLibrary } = vi.mocked(createServerSyncFacade).mock.calls[0][0];
+      let claimed = false;
+      const claim = awaitLibrary!().then(() => { claimed = true; });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(claimed).toBe(false);
+      cleaned();
+      await claim;
+      expect(cleanups()).toBe(1);
+    } finally {
+      state.invoke.mockImplementation(original);
+    }
   });
   it("holds and releases notifications with the rest of foreground synchronization", async () => {
     const { startServerSync } = await import("./serverSyncProduction");
@@ -366,6 +452,24 @@ describe("native server synchronization scheduling", () => {
     state.controllerListener!({ status: { configured: true }, connecting: false });
     expect(state.invoke).not.toHaveBeenCalledWith("server_sync_backup_cleanup");
     expect(state.invoke).toHaveBeenCalledWith("server_sync_events_start");
+  });
+  it("keeps a hidden desktop window's attempt running", async () => {
+    state.desktop = true;
+    const listeners = new Map<string, (event: Event) => void>();
+    vi.spyOn(document, "addEventListener").mockImplementation(
+      (type, listener) =>
+        void listeners.set(type, listener as (event: Event) => void),
+    );
+    const visibility = vi
+      .spyOn(document, "visibilityState", "get")
+      .mockReturnValue("visible");
+    const { startServerSync } = await import("./serverSyncProduction");
+    startServerSync();
+    await Promise.resolve();
+    visibility.mockReturnValue("hidden");
+    listeners.get("visibilitychange")!(new Event("visibilitychange"));
+    expect(state.scheduler.suspend).toHaveBeenCalledWith(true);
+    expect(state.invoke).toHaveBeenCalledWith("server_sync_events_stop");
   });
   it("does not install a native scheduler in the browser build", async () => {
     state.native = false;

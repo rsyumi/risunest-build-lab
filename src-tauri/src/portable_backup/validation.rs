@@ -232,7 +232,18 @@ fn reread_object(cas: &PayloadCas, hash: &str, size: u64) -> std::result::Result
         return Ok(0);
     };
     let mut digest = sha2::Sha256::new();
-    let read = std::io::copy(&mut file, &mut digest).map_err(|error| error.to_string())?;
+    let mut read = 0_u64;
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let count = match file.read(&mut buffer) {
+            Ok(0) => break,
+            Ok(count) => count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error.to_string()),
+        };
+        digest.update(&buffer[..count]);
+        read += count as u64;
+    }
     if read != size {
         return Err("stored payload length differs from the registered size".to_owned());
     }
@@ -455,6 +466,29 @@ impl LibraryView<'_> {
         if !report.running() {
             return Ok(counts);
         }
+        let mut statement = self.db.prepare("SELECT character_id,archived_object FROM characters WHERE archived_object IS NOT NULL")?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            check(probe)?;
+            let id: String = row.get(0)?;
+            let archived = serde_json::from_str::<crate::persistent_store::archive::ArchivedObject>(&row.get::<_, String>(1)?);
+            let valid = match archived {
+                Ok(archived) => {
+                    let mut valid = true;
+                    for hash in archived.object_roots() {
+                        match hex::decode(hash) {
+                            Ok(bytes) if bytes.len() == 32 => valid &= self.objects.has_object(self.db, &bytes)?,
+                            _ => valid = false,
+                        }
+                    }
+                    valid
+                }
+                Err(_) => false,
+            };
+            if !valid && !report.record(Finding::new(codes::RECORD_INVALID, "character", id, "archived character payload is invalid or missing")) {
+                return Ok(counts);
+            }
+        }
         let serialized: Option<String> = self
             .db
             .query_row("SELECT value FROM root", [], |r| r.get(0))
@@ -494,14 +528,14 @@ impl LibraryView<'_> {
             report,
             probe,
         )?;
-        for (sql,kind) in [("SELECT preset_id,configured_index,value FROM bot_presets ORDER BY configured_index","preset"),("SELECT storage_key,ordinal,value FROM plugin_storage ORDER BY ordinal","plugin")] {
+        for (sql,kind) in [("SELECT preset_id,configured_index,value,preset_id FROM bot_presets ORDER BY configured_index","preset"),("SELECT storage_key,ordinal,value,json_object('owner',owner,'key',storage_key) FROM plugin_storage ORDER BY ordinal","plugin")] {
             let mut statement=self.db.prepare(sql)?;let mut rows=statement.query([])?;
             while let Some(row)=rows.next()? {check(probe)?;
                 if !report.running() {return Ok(counts);}
-                let key:String=row.get(0)?;let index:i64=row.get(1)?;
-                let Some(value)=self.parsed(report,kind,&key,&row.get::<_,String>(2)?) else {continue};
+                let key:String=row.get(0)?;let index:i64=row.get(1)?;let owner_id:String=row.get(3)?;
+                let Some(value)=self.parsed(report,kind,&owner_id,&row.get::<_,String>(2)?) else {continue};
                 let fragment=if kind=="preset" {PortableFragment::Preset{value:&value,index}}else{PortableFragment::Plugin{value:&value,key:&key}};
-                self.validate_fragment(fragment,&root,kind,&key,&mut counts,report,probe)?;
+                self.validate_fragment(fragment,&root,kind,&owner_id,&mut counts,report,probe)?;
             }
         }
         let mut statement=self.db.prepare("SELECT character_id,detail,conversation_count FROM characters ORDER BY configured_index")?;

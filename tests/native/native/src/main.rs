@@ -56,9 +56,12 @@ fn main() {
             window.__TAURI_INTERNALS__.invoke('boundary_finish', {{ report: {{runId: {}, phase: {}, success: false, cases: [], error: String(event.reason)}} }});
         }});
     "#, serde_json::json!(id), serde_json::json!(value("RISUNEST_BOUNDARY_PHASE")), serde_json::json!(id), serde_json::json!(value("RISUNEST_BOUNDARY_PHASE")));
-    let app = risunest_lib::builder().manage(paths).append_invoke_initialization_script(&bootstrap).invoke_handler(move |invoke| {
+    let builder = risunest_lib::builder().manage(paths).append_invoke_initialization_script(&bootstrap).invoke_handler(move |invoke| {
         if invoke.message.command().starts_with("boundary_") { boundary(invoke) } else { product(invoke) }
-    }).build(context).expect("build isolated persistence boundary");
+    });
+    #[cfg(windows)]
+    let builder = builder.plugin(tauri::plugin::Builder::<tauri::Wry>::new("windows-appearance").build());
+    let app = builder.build(context).expect("build isolated persistence boundary");
     assert_eq!(app.path().app_data_dir().unwrap(), root);
     app.run(risunest_lib::handle_run_event);
 }

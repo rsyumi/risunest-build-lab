@@ -1,3 +1,4 @@
+import { runWithMobileBackgroundTask } from '../mobileBackgroundTask'
 import { BaseDirectory, open, writeFile } from "@tauri-apps/plugin-fs";
 import localforage from "localforage";
 import { alertError, alertNormal, alertWait, alertMd, alertConfirm } from "../alert";
@@ -21,7 +22,7 @@ import { classifyPocketRisuEntry, PocketRisuInlayImporter } from "./pocketRisuBa
 import { createLegacyBackupAttachments } from './legacyBackupAttachments';
 import { isTauri, isTauriDesktop } from "src/ts/platform"
 import { decodeRisuSave } from "../storage/risuSave";
-import { relaunch } from "@tauri-apps/plugin-process";
+import { relaunch } from "../desktopRelaunch";
 import { decryptBuffer, encryptBuffer, sleep } from "../util";
 import { hubURL } from "../characterCards";
 import { language } from "src/lang";
@@ -33,7 +34,10 @@ import { type PinnedRisuSaveExport, withFlushedRisuSaveExport } from "../storage
 import { emptyNativeImportCounts, NativeFileJobActivationCommittedError, NativeFileJobError, syntheticNativeFileJobStatus, type NativeFileJobStage } from "../storage/nativeFileJobs";
 import { recordNativeLogError } from "../nativeLog";
 import { NativeFileOperationBusyError, runSharedNativeFileOperation } from "../storage/nativeFileJobManager";
-import { isNativeLegacyBackupFallback, type LegacyLocalBackupFallbackContext } from "./legacyLocalBackupFileRoute";
+import type { SharedNativeFileOperationContext } from "../storage/nativeFileJobManager";
+
+type LegacyLocalBackupFallbackContext = Pick<SharedNativeFileOperationContext,
+    'signal' | 'onStatus' | 'setSource' | 'setPartialWritesPossible'>;
 
 const NATIVE_BACKUP_READ_BYTES = 1024 * 1024
 
@@ -105,19 +109,6 @@ function getBasename(data:string){
 }
 
 export async function SaveLocalBackup(){
-    if (isTauri) {
-        try {
-            const { exportLegacyLocalBackupFromSystemPicker } = await import(
-                './legacyLocalBackupFileRouteProduction.svelte'
-            )
-            const result = await exportLegacyLocalBackupFromSystemPicker()
-            if (result) alertNormal('Success')
-            return result
-        } catch (error) {
-            if (error instanceof DOMException && error.name === 'AbortError') return
-            if (!isNativeLegacyBackupFallback(error)) throw error
-        }
-    }
     return saveLocalBackupWithWebView()
 }
 
@@ -126,11 +117,11 @@ async function saveLocalBackupWithWebView(){
     if (!isTauri) await forageStorage.Init()
     const blobStore = await resolveBlobStore()
     alertWait("Saving local backup...")
-    return withFlushedRisuSaveExport(
+    return runWithMobileBackgroundTask('backup', () => withFlushedRisuSaveExport(
         getPersistentDataRuntime(),
         'local-backup',
         (pinned) => saveLocalBackupSnapshot(blobStore, pinned),
-    )
+    ), undefined, true)
 }
 
 async function saveLocalBackupSnapshot(blobStore: BlobStore, pinned: PinnedRisuSaveExport) {
@@ -266,11 +257,11 @@ export async function SavePartialLocalBackup(){
     }
 
     alertWait("Saving partial local backup...")
-    return withFlushedRisuSaveExport(
+    return runWithMobileBackgroundTask('backup', () => withFlushedRisuSaveExport(
         getPersistentDataRuntime(),
         'partial-local-backup',
         (pinned) => savePartialLocalBackupSnapshot(blobStore, pinned),
-    )
+    ), undefined, true)
 }
 
 async function savePartialLocalBackupSnapshot(blobStore: BlobStore, pinned: PinnedRisuSaveExport) {
@@ -337,23 +328,12 @@ async function savePartialLocalBackupSnapshot(blobStore: BlobStore, pinned: Pinn
 }
 
 export function LoadLocalBackup(): Promise<void> {
-    if (isTauri) return loadLocalBackupNativeFirst()
     return runSharedNativeFileOperation(
         'import',
         'legacy-local-backup-import',
         (context) => importLegacyBackupWithWebView(context),
         { presentation: 'dialog', format: 'local-backup' },
     ).then(() => undefined, handleLegacyImportFailure)
-}
-
-async function loadLocalBackupNativeFirst(): Promise<void> {
-    try {
-        const { importLegacyLocalBackupFromSystemPicker } =
-            await import('./legacyLocalBackupFileRouteProduction.svelte')
-        await importLegacyLocalBackupFromSystemPicker({ onNativeFallback: importLegacyBackupWithWebView })
-    } catch (error) {
-        handleLegacyImportFailure(error)
-    }
 }
 
 /**
@@ -420,6 +400,7 @@ function pickWebBackupFile(signal: AbortSignal): Promise<File | null> {
  */
 export async function importLegacyBackupWithWebView(
     context: LegacyLocalBackupFallbackContext,
+    lifecycle: { beforeActivation?(): Promise<void>; onCommitted?(): void } = {},
 ): Promise<{ warningCodes: string[] } | null> {
     const file = await pickWebBackupFile(context.signal)
     if (!file) return null
@@ -654,9 +635,12 @@ export async function importLegacyBackupWithWebView(
         report('activating')
         await installLocalBackup(dbData, {
             replaceDatabase: async (...args) => {
+                await lifecycle.beforeActivation?.()
+                checkCancelled()
+                let outcome: Awaited<ReturnType<typeof replacePersistentDatabase>>
                 try {
                     await attachments.activate(checkCancelled)
-                    return await replacePersistentDatabase(...args)
+                    outcome = await replacePersistentDatabase(...args)
                 } catch (error) {
                     try {
                         await attachments.rollback()
@@ -666,6 +650,8 @@ export async function importLegacyBackupWithWebView(
                     }
                     throw error
                 }
+                lifecycle.onCommitted?.()
+                return outcome
             },
             onPostCommitError: (error) => {
                 console.error('Committed local restore follow-up failed', error)

@@ -15,7 +15,7 @@ const json = (value, status = 200) => new Response(JSON.stringify(value), { stat
 
 test("draft creation resolves annotated tags and records the tested commit", async () => {
   const commit = "a".repeat(40);
-  const { github, calls } = client([json({}, 404), json({ object: { type: "tag", sha: "b".repeat(40) } }),
+  const { github, calls } = client([json({}, 404), json([]), json({ object: { type: "tag", sha: "b".repeat(40) } }),
     json({ object: { type: "commit", sha: commit } }), json({ id: 7, draft: true })]);
   assert.equal((await github.prepareDraft("app-v1.0.0", commit, "Release notes")).id, 7);
   assert.deepEqual(JSON.parse(calls.at(-1).body), { tag_name: "app-v1.0.0", target_commitish: commit,
@@ -23,7 +23,7 @@ test("draft creation resolves annotated tags and records the tested commit", asy
 });
 
 test("mismatched tag commits and API errors cannot create a release", async () => {
-  const { github, calls } = client([json({}, 404), json({ object: { type: "commit", sha: "b".repeat(40) } })]);
+  const { github, calls } = client([json({}, 404), json([]), json({ object: { type: "commit", sha: "b".repeat(40) } })]);
   await assert.rejects(github.prepareDraft("app-v1.0.0", "a".repeat(40)), /tag-commit-mismatch/);
   assert.ok(calls.every(call => call.method === "GET"));
   const unavailable = client([json({ message: "synthetic secret" }, 403)]);
@@ -32,7 +32,7 @@ test("mismatched tag commits and API errors cannot create a release", async () =
 
 test("an existing draft still requires the tag to resolve to the tested commit", async () => {
   const commit = "a".repeat(40);
-  const { github, calls } = client([json({ id: 7, draft: true, target_commitish: commit, prerelease: false }),
+  const { github, calls } = client([json({}, 404), json([{ id: 7, tag_name: "app-v1.0.0", draft: true, target_commitish: commit, prerelease: false }]),
     json({ object: { type: "commit", sha: "b".repeat(40) } })]);
   await assert.rejects(github.prepareDraft("app-v1.0.0", commit), /tag-commit-mismatch/);
   assert.ok(calls.every(call => call.method === "GET"));
@@ -51,4 +51,25 @@ test("asset reads enforce declared and streamed size limits", async () => {
   await assert.rejects(github.downloadAsset(release, "manifest.json", 3), /too-large/);
   await assert.rejects(github.downloadAsset(release, "manifest.json", 3), /size-mismatch/);
   await assert.rejects(github.downloadAsset(release, "missing", 3), /missing/);
+});
+
+ test("a rerun reuses the single matching draft found after pagination", async () => {
+  const commit = "a".repeat(40);
+  const draft = { id: 7, tag_name: "app-v1.0.0", draft: true, target_commitish: commit, prerelease: false };
+  const { github, calls } = client([json({}, 404), json(Array.from({ length: 100 }, (_, id) => ({ id, draft: false }))),
+    json([draft]), json({ object: { type: "commit", sha: commit } })]);
+  assert.equal((await github.prepareDraft(draft.tag_name, commit)).id, 7);
+  assert.match(calls[2].url, /page=2$/);
+  assert.ok(calls.every(call => call.method === "GET"));
+});
+
+test("duplicate drafts and mismatched draft identity are rejected without mutation", async () => {
+  const commit = "a".repeat(40);
+  const draft = { id: 7, tag_name: "app-v1.0.0", draft: true, target_commitish: commit };
+  for (const [drafts, error] of [[[draft, { ...draft, id: 8 }], /duplicate-release-drafts/],
+    [[{ ...draft, target_commitish: "b".repeat(40) }], /release-identity-conflict/]]) {
+    const { github, calls } = client([json({}, 404), json(drafts)]);
+    await assert.rejects(github.prepareDraft(draft.tag_name, commit), error);
+    assert.ok(calls.every(call => call.method === "GET"));
+  }
 });

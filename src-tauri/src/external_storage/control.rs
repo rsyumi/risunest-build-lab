@@ -10,7 +10,7 @@ use super::{
         Cancellation, Collection, ErrorKind, HeadBytes, ObjectIntent, ObjectReceipt, ObjectRole,
         Provider, ProviderError, ReadReceipt, RemoteLocator, RepositoryHandle, Result,
     },
-    journal::TransferJournal,
+    journal::{SpoolAdmission, TransferJournal},
     packaging::{native_role, wire_role, RemoteObject},
     publication::{Attempt, HeadObservation, Outcome, PublicationMode, PublicationWrite},
     transfer::SpoolSink,
@@ -656,6 +656,15 @@ pub(crate) async fn upload_backup_point(
     .await
 }
 
+/// Spool bytes the sealed inventory page registering `members` objects takes
+/// at most, for the object and job identities this app names. A wave admits
+/// each member with this room, so the page that registers the wave fits.
+pub(crate) fn inventory_page_headroom(members: usize) -> u64 {
+    const PAGE: u64 = 2 * 1024;
+    const ENTRY: u64 = 512;
+    PAGE.saturating_add(ENTRY.saturating_mul(members as u64))
+}
+
 pub(crate) async fn upload_inventory_page(
     descriptor: &Descriptor,
     root_key: &[u8; 32],
@@ -880,6 +889,29 @@ async fn upload_control_object(
         if ciphertext.len() as u64 > MAX_POINT_CIPHERTEXT {
             return Err(ProviderError::new(ErrorKind::FileTooLarge));
         }
+        // A file here that the journal never registered is a write that
+        // stopped before it was, so it is replaced rather than charged again.
+        match fs::symlink_metadata(&spool) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(transient(error)),
+            Ok(metadata) if crate::trust_boundary::is_link_like(&metadata) => {
+                return Err(corrupt("control spool is a link"));
+            }
+            Ok(_) => fs::remove_file(&spool).map_err(transient)?,
+        }
+        // Charged to the transfer spool before the file exists, with room for
+        // the page that registers it. A page is what sends the wave it
+        // registers, so it is charged without ever being refused.
+        let _room = if role == ObjectRole::InventoryPage {
+            journal.charge_page(ciphertext.len() as u64)?
+        } else {
+            match journal.reserve_spool(
+                (ciphertext.len() as u64).saturating_add(inventory_page_headroom(1)),
+            )? {
+                SpoolAdmission::Admitted(room) => room,
+                SpoolAdmission::Full => return Err(ProviderError::new(ErrorKind::Transient)),
+            }
+        };
         let mut file = fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -904,24 +936,38 @@ async fn upload_control_object(
     if record.intent.role != role {
         return Err(corrupt("history journal role differs"));
     }
-    let mut recorded = crate::trust_boundary::open_regular_source(&spool).map_err(corrupt)?;
-    let mut recorded_bytes = Vec::new();
-    recorded.read_to_end(&mut recorded_bytes).map_err(corrupt)?;
-    if recorded_bytes.len() as u64 != record.intent.byte_length
-        || hex::encode(hash(&recorded_bytes)) != record.intent.sha256
-    {
-        return Err(corrupt("control journal bytes differ"));
-    }
-    let (recorded_plaintext, _, _, _) = open(
-        descriptor,
-        root_key,
-        Some(&object_id),
-        wire_role(role)?,
-        &recorded_bytes,
-        MAX_POINT_PLAINTEXT,
-    )?;
-    if recorded_plaintext != plaintext {
-        return Err(corrupt("control journal content differs"));
+    // A released object left no local bytes to compare. Every role the
+    // inventory carries was registered with its plaintext identity, which says
+    // the same thing, and a page is named by the members it covers.
+    if record.released {
+        if role != ObjectRole::InventoryPage {
+            let Some((length, digest)) = &record.plaintext else {
+                return Err(corrupt("released control object was never registered"));
+            };
+            if *length != plaintext.len() as u64 || digest != &plaintext_sha256 {
+                return Err(corrupt("control journal content differs"));
+            }
+        }
+    } else {
+        let mut recorded = crate::trust_boundary::open_regular_source(&spool).map_err(corrupt)?;
+        let mut recorded_bytes = Vec::new();
+        recorded.read_to_end(&mut recorded_bytes).map_err(corrupt)?;
+        if recorded_bytes.len() as u64 != record.intent.byte_length
+            || hex::encode(hash(&recorded_bytes)) != record.intent.sha256
+        {
+            return Err(corrupt("control journal bytes differ"));
+        }
+        let (recorded_plaintext, _, _, _) = open(
+            descriptor,
+            root_key,
+            Some(&object_id),
+            wire_role(role)?,
+            &recorded_bytes,
+            MAX_POINT_PLAINTEXT,
+        )?;
+        if recorded_plaintext != plaintext {
+            return Err(corrupt("control journal content differs"));
+        }
     }
     let receipt = if role == ObjectRole::InventoryPage {
         transfer_job::upload_inventory(journal, &object_id, provider, repository, cancel).await?
@@ -1781,6 +1827,7 @@ mod tests {
                 retention_policy: None,
                 capabilities: fake::capabilities(true),
                 created_at_ms: 1_000,
+                verified_at_ms: 1,
                 last_sync_at_ms: None,
                 last_backup_at_ms: None,
             },
@@ -2363,6 +2410,204 @@ mod tests {
                 &Cancellation::default(),
             ).await.unwrap(), RemoteBackupPointDeleteOutcome::Deleted);
         });
+    }
+
+    /// A control object is charged to the transfer spool before its file is
+    /// written. While another job holds the spool, a point is refused without
+    /// leaving a file; once there is room it is sent with its page, and
+    /// neither is left behind.
+    #[test]
+    fn a_backup_point_waits_for_spool_room_before_it_is_written() {
+        runtime().block_on(async {
+            let provider = Arc::new(fake::FakeProvider::new(false));
+            let connected = connected(provider.clone());
+            let root = tempfile::tempdir().unwrap();
+            let peer = tempfile::tempdir().unwrap();
+            let job = format!("point-{}", uuid::Uuid::new_v4());
+            let identity = JobIdentity {
+                job_id: job.clone(),
+                connection_id: "connection".into(),
+                repository_id: connected.handle.repository_id.clone(),
+                capture_id: "capture".into(),
+                capture: CaptureIdentity {
+                    store_id: "store".into(),
+                    library_epoch: "epoch".into(),
+                    generation: "generation".into(),
+                    selection_epoch: "selection".into(),
+                    revision: 1,
+                },
+            };
+            let limit = 16 * 1024;
+            let held = peer.path().join("held.spool");
+            fs::write(&held, vec![0u8; limit as usize - 1024]).unwrap();
+            let mut journal = TransferJournal::open(root.path(), identity).unwrap();
+            let holders = vec![
+                (job.clone(), root.path().to_path_buf()),
+                ("peer".to_owned(), peer.path().to_path_buf()),
+            ];
+            journal.set_spool_budget(
+                super::super::journal::SpoolBudget::new(job, move || Ok(holders.clone()))
+                    .with_limit(limit),
+            );
+            let point = || {
+                BackupPointDocument::single(
+                    &connected.stored.descriptor,
+                    "charged".into(),
+                    BackupPointKind::Manual,
+                    1,
+                    bundle(&connected.handle, "bundle"),
+                )
+                .unwrap()
+            };
+            let error = upload_backup_point(
+                &connected.stored.descriptor,
+                &connected.root_key,
+                point(),
+                &mut journal,
+                connected.provider.as_ref(),
+                &connected.handle,
+                &Cancellation::default(),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.kind, ErrorKind::Transient);
+            assert_eq!(super::super::journal::held_spool_bytes(root.path()).unwrap(), 0);
+            assert_eq!(journal.record("backup-point-charged").unwrap().map(|_| ()), None);
+            assert!(provider.uploaded_ids().is_empty());
+
+            fs::write(&held, b"").unwrap();
+            upload_backup_point(
+                &connected.stored.descriptor,
+                &connected.root_key,
+                point(),
+                &mut journal,
+                connected.provider.as_ref(),
+                &connected.handle,
+                &Cancellation::default(),
+            )
+            .await
+            .unwrap();
+            let uploaded = provider.uploaded_ids();
+            assert!(uploaded.iter().any(|id| id == "backup-point-charged"));
+            assert!(uploaded.iter().any(|id| id.starts_with("inventory-page-")));
+            assert_eq!(super::super::journal::held_spool_bytes(root.path()).unwrap(), 0);
+        });
+    }
+
+    /// A control object whose file was written but never registered, as a
+    /// stopped write leaves it, is sealed again at the same path and sent with
+    /// the bytes the journal registers, not the ones left behind.
+    #[test]
+    fn a_control_object_replaces_a_spool_file_it_never_registered() {
+        runtime().block_on(async {
+            let provider = Arc::new(fake::FakeProvider::new(false));
+            let connected = connected(provider.clone());
+            let root = tempfile::tempdir().unwrap();
+            let mut journal = TransferJournal::open(
+                root.path(),
+                JobIdentity {
+                    job_id: format!("orphan-{}", uuid::Uuid::new_v4()),
+                    connection_id: "connection".into(),
+                    repository_id: connected.handle.repository_id.clone(),
+                    capture_id: "capture".into(),
+                    capture: CaptureIdentity {
+                        store_id: "store".into(),
+                        library_epoch: "epoch".into(),
+                        generation: "generation".into(),
+                        selection_epoch: "selection".into(),
+                        revision: 1,
+                    },
+                },
+            )
+            .unwrap();
+            let left = vec![7u8; 333];
+            fs::write(journal.spool_path("backup-point-orphan"), &left).unwrap();
+            let object = upload_backup_point(
+                &connected.stored.descriptor,
+                &connected.root_key,
+                BackupPointDocument::single(
+                    &connected.stored.descriptor,
+                    "orphan".into(),
+                    BackupPointKind::Manual,
+                    1,
+                    bundle(&connected.handle, "bundle"),
+                )
+                .unwrap(),
+                &mut journal,
+                connected.provider.as_ref(),
+                &connected.handle,
+                &Cancellation::default(),
+            )
+            .await
+            .unwrap();
+            let record = journal.record("backup-point-orphan").unwrap().unwrap();
+            let stored = provider.contents(&object.receipt.locator.object).unwrap();
+            assert_eq!(stored.len() as u64, record.intent.byte_length);
+            assert_eq!(hex::encode(hash(&stored)), record.intent.sha256);
+            assert_eq!(object.ciphertext_sha256, record.intent.sha256);
+            assert_ne!(hex::encode(hash(&left)), record.intent.sha256);
+            assert!(record.released);
+            assert_eq!(super::super::journal::held_spool_bytes(root.path()).unwrap(), 0);
+        });
+    }
+
+    /// A wave reserves spool room for the page that registers it, so the page
+    /// it seals has to fit that room from one member to a full wave.
+    #[test]
+    fn an_inventory_page_fits_the_room_its_wave_reserves() {
+        let connected = connected(Arc::new(fake::FakeProvider::new(false)));
+        let descriptor = Descriptor::new(uuid::Uuid::new_v4().to_string(), None).unwrap();
+        let job = uuid::Uuid::new_v4().to_string();
+        let key = [7u8; 32];
+        let intents = (0..super::super::transfer_job::REGISTRATION_WAVE)
+            .map(|index| ObjectIntent {
+                repository_id: connected.handle.repository_id.clone(),
+                job_id: job.clone(),
+                object_id: wire::keyed_object_id(
+                    &key,
+                    &job,
+                    wire::ObjectRole::Catalog,
+                    &[index as u8; 32],
+                )
+                .unwrap(),
+                role: ObjectRole::Catalog,
+                byte_length: 256 * 1024 * 1024,
+                sha256: "11".repeat(32),
+            })
+            .collect::<Vec<_>>();
+        let plaintext_sha256 = "22".repeat(32);
+        for members in [1, intents.len()] {
+            let registrations = intents[..members]
+                .iter()
+                .map(|intent| InventoryRegistration {
+                    intent,
+                    plaintext_length: 256 * 1024 * 1024,
+                    plaintext_sha256: &plaintext_sha256,
+                })
+                .collect::<Vec<_>>();
+            let page_id = "ab".repeat(32);
+            let document = inventory_page_document(
+                &descriptor,
+                &connected.handle,
+                &job,
+                &page_id,
+                &registrations,
+            )
+            .unwrap();
+            let sealed = seal(
+                &descriptor,
+                &connected.root_key,
+                &format!("inventory-page-{page_id}"),
+                wire::ObjectRole::InventoryPage,
+                &document.encode(MAX_POINT_PLAINTEXT).unwrap(),
+            )
+            .unwrap();
+            assert!(
+                sealed.len() as u64 <= inventory_page_headroom(members),
+                "a page of {members} members seals to {} bytes",
+                sealed.len()
+            );
+        }
     }
 
     #[test]

@@ -121,10 +121,7 @@ describe('storage mutation gate', () => {
         const error = new Error('synchronous failure')
 
         await expect(gate.runWrite(() => { throw error })).rejects.toBe(error)
-        await expect(Promise.race([
-            gate.runWrite(async () => 'continued'),
-            new Promise<string>((resolve) => setTimeout(() => resolve('stranded'), 50)),
-        ])).resolves.toBe('continued')
+        await expect(gate.runWrite(async () => 'continued')).resolves.toBe('continued')
     })
 
     test('still gates writes where Web Locks are unavailable', async () => {

@@ -1,5 +1,6 @@
 import { get } from 'svelte/store'
-import { relaunch } from '@tauri-apps/plugin-process'
+import { language } from '../../lang'
+import { relaunch } from '../desktopRelaunch'
 import { openURL } from '../globalApi.svelte'
 import { isTauri } from '../platform'
 import type { AvailableAppUpdate, NativeUpdateProgress } from './manifest'
@@ -264,7 +265,9 @@ function withTimeout<T>(promise: Promise<T>, timeout: number): Promise<T> {
 }
 
 function describe(error: unknown): string {
-    return error instanceof Error ? error.message : String(error)
+    const message = error instanceof Error ? error.message : String(error)
+    return message === 'install-location-not-writable'
+        ? language.risuNest.update.installLocationNotWritable : message
 }
 
 export type { AvailableAppUpdate }

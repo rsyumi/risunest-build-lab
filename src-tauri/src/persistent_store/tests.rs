@@ -85,7 +85,7 @@ fn empty_working_set_commit(expected_revision: i64) -> WorkingSetCommit {
         replace_character: None,
         add_character: None,
         conversations: None,
-        delete_character_id: None,
+        delete_character_ids: None,
         plugin_storage: None,
         asset_owner_heads: None,
     }
@@ -134,6 +134,8 @@ mod data_health_tests;
 mod selective_import_tests;
 #[path = "tests/display_name_tests.rs"]
 mod display_name_tests;
+#[path = "tests/external_content_gc_tests.rs"]
+mod external_content_gc_tests;
 #[path = "tests/external_storage_tests.rs"]
 mod external_storage_tests;
 #[path = "tests/plugin_owner_tests.rs"]

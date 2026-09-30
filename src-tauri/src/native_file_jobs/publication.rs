@@ -116,6 +116,14 @@ pub(super) fn run_job(
     }
     job.start(JobPhase::WritingExport)
         .map_err(|error| job_control_error(&job, error))?;
+    let account = crate::account_credential::export_account(&app, false)
+        .map_err(|message| NativeJobError::new("invalid-input", message))?
+        .ok_or_else(|| invalid_input("Official account credential is unavailable"))?;
+    let token = match &request.credential {
+        OfficialPublicationCredential::RisuAuth { token } => token,
+    };
+    crate::account_credential::validate_account(&account, &request.account_id, token, false)
+        .map_err(|message| NativeJobError::new("invalid-input", message))?;
     let prepared = crate::persistent_store::commands::with_store_mut(app.state(), |store| {
         store.prepare_official_publication_for_job(
             &request.lease,
@@ -130,6 +138,7 @@ pub(super) fn run_job(
     let payload = prepared
         .create_payload(
             &request.account_id,
+            &account,
             &request.replacements,
             || job.is_cancel_requested() || progress_failure.borrow().is_some(),
             |completed_bytes, _, _| {
@@ -167,7 +176,7 @@ pub(super) fn run_job(
     }
     if let Err(error) = job.set_progress(JobProgress {
         completed_bytes: payload.bytes,
-        total_bytes: None,
+        total_bytes: Some(payload.bytes.saturating_mul(2)),
         completed_items: 1,
         total_items: Some(2),
     }) {
@@ -181,8 +190,8 @@ pub(super) fn run_job(
             .map_err(|error| job_control_error(&job, error))?;
         let progress = job.status().progress;
         job.set_progress(JobProgress {
-            completed_bytes: progress.completed_bytes,
-            total_bytes: None,
+            completed_bytes: progress.total_bytes.unwrap_or(progress.completed_bytes),
+            total_bytes: progress.total_bytes,
             completed_items: 2,
             total_items: Some(2),
         })
@@ -247,55 +256,75 @@ async fn upload_attempt(
 ) -> Result<OfficialPublicationAttemptResult, NativeJobError> {
     let session = match requested_session {
         Some(session) if !session.is_empty() => Some(session),
-        _ => Some(acquire_session(client, base_url, credential, Arc::clone(&job)).await?),
+        _ => match acquire_session(client, base_url, account_id, save_date, credential, Arc::clone(&job)).await? {
+            SessionAcquisition::Session(session) => Some(session),
+            SessionAcquisition::Attempt(attempt) => return Ok(attempt),
+        },
     };
-    let (mut file, bytes) = payload.open().map_err(store_error)?;
-    if bytes != payload.bytes {
-        return Err(NativeJobError::new(
-            "invalid-source",
-            "official publication payload length changed",
-        ));
-    }
-    verify_and_rewind_payload(&mut file, &payload.sha256, &job)?;
-    let activity = Arc::new(AtomicU64::new(0));
-    let file = tokio::fs::File::from_std(file);
-    let body = reqwest::Body::wrap_stream(ReaderStream::new(PublicationPayloadReader {
-        file,
-        job: Arc::clone(&job),
-        activity: Arc::clone(&activity),
-    }));
-    let mut headers = authenticated_headers(credential)?;
-    for (name, value) in [
-        (CONTENT_TYPE, "application/octet-stream"),
-        (HeaderName::from_static("x-risu-key"), DATABASE_KEY),
-        (HeaderName::from_static("x-format"), "nocheck"),
-        (
-            HeaderName::from_static("x-risu-session"),
-            session.as_deref().unwrap_or_default(),
-        ),
-        (HeaderName::from_static("x-risu-save-date"), save_date),
-    ] {
+    let mut retries = 0;
+    let (response, activity) = loop {
+        let (mut file, bytes) = payload.open().map_err(store_error)?;
+        if bytes != payload.bytes {
+            return Err(NativeJobError::new(
+                "invalid-source",
+                "official publication payload length changed",
+            ));
+        }
+        verify_and_rewind_payload(&mut file, &payload.sha256, &job)?;
+        let activity = Arc::new(AtomicU64::new(0));
+        let file = tokio::fs::File::from_std(file);
+        let body = reqwest::Body::wrap_stream(ReaderStream::new(PublicationPayloadReader {
+            file,
+            job: Arc::clone(&job),
+            activity: Arc::clone(&activity),
+        }));
+        let mut headers = authenticated_headers(credential)?;
+        for (name, value) in [
+            (CONTENT_TYPE, "application/octet-stream"),
+            (HeaderName::from_static("x-risu-key"), DATABASE_KEY),
+            (HeaderName::from_static("x-format"), "nocheck"),
+            (
+                HeaderName::from_static("x-risu-session"),
+                session.as_deref().unwrap_or_default(),
+            ),
+            (HeaderName::from_static("x-risu-save-date"), save_date),
+        ] {
+            headers.insert(
+                name,
+                HeaderValue::from_str(value)
+                    .map_err(|_| invalid_input("official publication header is invalid"))?,
+            );
+        }
         headers.insert(
-            name,
-            HeaderValue::from_str(value)
-                .map_err(|_| invalid_input("official publication header is invalid"))?,
+            CONTENT_LENGTH,
+            HeaderValue::from_str(&bytes.to_string()).expect("file length is a valid header"),
         );
-    }
-    headers.insert(
-        CONTENT_LENGTH,
-        HeaderValue::from_str(&bytes.to_string()).expect("file length is a valid header"),
-    );
-    let response = await_controlled(
-        client
-            .post(endpoint(base_url, "/api/account/write")?)
-            .headers(headers)
-            .body(body)
-            .send(),
-        &job,
-        &activity,
-        IDLE_TIMEOUT,
-    )
-    .await?;
+        let response = await_controlled(
+            client
+                .post(endpoint(base_url, "/api/account/write")?)
+                .headers(headers)
+                .body(body)
+                .send(),
+            &job,
+            &activity,
+            IDLE_TIMEOUT,
+        )
+        .await;
+        match response {
+            Err(error) if error.code == "transport-connect" && retries < 2 => {
+                wait_for_retry(&job, Duration::from_secs(1 << retries)).await?;
+                retries += 1;
+            }
+            Err(error) => return Err(error),
+            Ok(response) if matches!(response.status().as_u16(), 429 | 503) && retries < 2 => {
+                let delay = retry_delay(response.headers(), retries);
+                drop(response);
+                wait_for_retry(&job, delay).await?;
+                retries += 1;
+            }
+            Ok(response) => break (response, activity),
+        }
+    };
     let status = response.status().as_u16();
     let warning_status =
         response.headers().get("x-risu-status") == Some(&HeaderValue::from_static("warn"));
@@ -369,12 +398,19 @@ fn verify_and_rewind_payload(
     Ok(())
 }
 
+enum SessionAcquisition {
+    Session(String),
+    Attempt(OfficialPublicationAttemptResult),
+}
+
 async fn acquire_session(
     client: &Client,
     base_url: &str,
+    account_id: &str,
+    save_date: &str,
     credential: &OfficialPublicationCredential,
     job: Arc<JobControl>,
-) -> Result<String, NativeJobError> {
+) -> Result<SessionAcquisition, NativeJobError> {
     let activity = Arc::new(AtomicU64::new(0));
     let response = await_controlled(
         client
@@ -387,6 +423,12 @@ async fn acquire_session(
     )
     .await?;
     let status = response.status().as_u16();
+    if status == 403 {
+        let warning = response.headers().get("x-risu-status") == Some(&HeaderValue::from_static("warn"));
+        let json = is_json_response(&response);
+        let body = if json { Some(response_bytes_controlled(response, &job, &activity, IDLE_TIMEOUT).await?) } else { None };
+        return classify_response(status, warning, json, body, account_id, None, save_date).map(SessionAcquisition::Attempt);
+    }
     if !(200..300).contains(&status) {
         return Err(NativeJobError::new(
             "http-status",
@@ -412,7 +454,7 @@ async fn acquire_session(
     };
     validate_string(&session, MAX_PRIVATE_STRING_BYTES, false, "session")?;
     validate_header_value(&session, "session")?;
-    Ok(session)
+    Ok(SessionAcquisition::Session(session))
 }
 
 async fn response_bytes_controlled(
@@ -601,8 +643,8 @@ fn classify_response(
 fn record_uploaded_bytes(job: &JobControl, added: u64) -> Result<(), String> {
     let progress = job.status().progress;
     job.set_progress(JobProgress {
-        completed_bytes: progress.completed_bytes.saturating_add(added),
-        total_bytes: None,
+        completed_bytes: progress.completed_bytes.saturating_add(added).min(progress.total_bytes.unwrap_or(u64::MAX)),
+        total_bytes: progress.total_bytes,
         completed_items: 1,
         total_items: Some(2),
     })
@@ -775,7 +817,22 @@ fn transport_error(error: reqwest::Error) -> NativeJobError {
     } else {
         "official publication network request failed"
     };
-    NativeJobError::new("transport-failed", message)
+    NativeJobError::new(if error.is_connect() { "transport-connect" } else { "transport-failed" }, message)
+}
+
+pub(super) fn retry_delay(headers: &HeaderMap, retries: u32) -> Duration {
+    Duration::from_secs(headers.get("retry-after").and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok()).unwrap_or(1 << retries).min(30))
+}
+
+pub(super) async fn wait_for_retry(job: &JobControl, delay: Duration) -> Result<(), NativeJobError> {
+    let deadline = tokio::time::Instant::now() + delay;
+    loop {
+        if job.is_cancel_requested() { return Err(cancelled("official transfer retry was cancelled")); }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() { return Ok(()); }
+        tokio::time::sleep(remaining.min(CONTROL_POLL_INTERVAL)).await;
+    }
 }
 
 fn now_millis() -> i64 {
@@ -879,6 +936,7 @@ mod tests {
         let payload = prepared
             .create_payload(
                 "account-1",
+                &json!({"id":"account-1", "token":"local-token"}),
                 &HashMap::from([("local-asset".to_owned(), "remote-asset".to_owned())]),
                 || false,
                 |_, _, _| {},
@@ -1107,10 +1165,11 @@ mod tests {
         let job = registry.create(JobKind::OfficialPublicationUpload).unwrap();
         job.start(JobPhase::WritingExport).unwrap();
         job.set_phase(JobPhase::UploadingDatabase).unwrap();
+        job.set_progress(JobProgress { completed_bytes: 10, total_bytes: Some(20), completed_items: 1, total_items: Some(2) }).unwrap();
         record_uploaded_bytes(&job, 10).unwrap();
         record_uploaded_bytes(&job, 5).unwrap();
-        assert_eq!(job.status().progress.completed_bytes, 15);
-        assert_eq!(job.status().progress.total_bytes, None);
+        assert_eq!(job.status().progress.completed_bytes, 20);
+        assert_eq!(job.status().progress.total_bytes, Some(20));
         assert_eq!(job.status().progress.completed_items, 1);
         assert_eq!(job.status().progress.total_items, Some(2));
     }
@@ -1227,6 +1286,110 @@ mod tests {
         .unwrap();
         assert_eq!(response.status().as_u16(), 302);
         assert_eq!(server.join().unwrap(), 1);
+    }
+
+    #[test]
+    fn session_forbidden_uses_the_same_authentication_outcomes_without_uploading() {
+        for warning in [false, true] {
+            let (_directory, payload) = publication_payload();
+            let (base_url, server) = mock_server(vec![MockResponse {
+                status: 403,
+                headers: if warning { vec![("x-risu-status", "warn".into()), ("Content-Type", "application/json".into())] } else { Vec::new() },
+                body: if warning { br#"{"warning":"quota"}"#.to_vec() } else { Vec::new() },
+            }]);
+            let result = tauri::async_runtime::block_on(upload_attempt(&build_client().unwrap(), &payload, &base_url, "account-1", None, "date", &request().credential, running_job())).unwrap();
+            let value = serde_json::to_value(result).unwrap();
+            assert_eq!(value["kind"], if warning { "auth-warning" } else { "reauthentication-needed" });
+            assert!(value["session"].is_null());
+            if warning { assert_eq!(value["warning"], "quota"); }
+            let requests = server.join().unwrap();
+            assert_eq!(requests.len(), 1);
+            assert_eq!(requests[0].method, "GET");
+            payload.cleanup().unwrap();
+        }
+    }
+
+    #[test]
+    fn session_reauthentication_reacquires_before_uploading_the_prepared_payload() {
+        let (_directory, payload) = publication_payload();
+        let (base_url, server) = mock_server(vec![
+            MockResponse { status: 403, headers: Vec::new(), body: Vec::new() },
+            MockResponse { status: 200, headers: vec![("Content-Type", "application/json".into())], body: br#"{"sessionNumber":"fresh-session"}"#.to_vec() },
+            MockResponse { status: 304, headers: Vec::new(), body: Vec::new() },
+        ]);
+        let client = build_client().unwrap();
+        let job = running_job();
+        let first = tauri::async_runtime::block_on(upload_attempt(&client, &payload, &base_url, "account-1", None, "date", &request().credential, Arc::clone(&job))).unwrap();
+        assert!(matches!(first, OfficialPublicationAttemptResult::ReauthenticationNeeded { session: None, .. }));
+        let fresh = OfficialPublicationCredential::RisuAuth { token: "fresh-token".into() };
+        let second = tauri::async_runtime::block_on(upload_attempt(&client, &payload, &base_url, "account-1", None, "date", &fresh, job)).unwrap();
+        assert!(matches!(second, OfficialPublicationAttemptResult::NotModified { .. }));
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0].method, "GET");
+        assert_eq!(requests[1].method, "GET");
+        assert_eq!(requests[1].headers["x-risu-auth"], "fresh-token");
+        assert_eq!(requests[2].headers["x-risu-session"], "fresh-session");
+        assert_eq!(requests[2].headers["x-risu-auth"], "fresh-token");
+        payload.cleanup().unwrap();
+    }
+
+    #[test]
+    fn safe_transient_upload_retries_preserve_payload_session_and_date() {
+        let (_directory, payload) = publication_payload();
+        let (base_url, server) = mock_server(vec![429, 503, 304].into_iter().map(|status| MockResponse {
+            status, headers: vec![("Retry-After", "0".into())], body: Vec::new(),
+        }).collect());
+        let result = tauri::async_runtime::block_on(upload_attempt(&build_client().unwrap(), &payload, &base_url, "account-1", Some("session".into()), "date", &request().credential, running_job())).unwrap();
+        assert!(matches!(result, OfficialPublicationAttemptResult::NotModified { .. }));
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 3);
+        assert_eq!(requests[0], requests[1]);
+        assert_eq!(requests[1], requests[2]);
+        payload.cleanup().unwrap();
+    }
+
+    #[test]
+    fn retries_are_bounded_and_backoff_is_cancellable() {
+        let (_directory, payload) = publication_payload();
+        let (base_url, server) = mock_server((0..3).map(|_| MockResponse {
+            status: 503, headers: vec![("Retry-After", "0".into())], body: Vec::new(),
+        }).collect());
+        let error = tauri::async_runtime::block_on(upload_attempt(&build_client().unwrap(), &payload, &base_url, "account-1", Some("session".into()), "date", &request().credential, running_job())).unwrap_err();
+        assert_eq!(error.code, "http-status");
+        assert_eq!(server.join().unwrap().len(), 3);
+        let job = running_job();
+        let error = tauri::async_runtime::block_on(async {
+            let wait = wait_for_retry(&job, Duration::from_secs(30));
+            let cancel = async { tokio::time::sleep(Duration::from_millis(10)).await; job.request_cancel().unwrap(); };
+            let (result, _) = tokio::join!(wait, cancel);
+            result.unwrap_err()
+        });
+        assert_eq!(error.code, "cancelled");
+        let mut headers = HeaderMap::new();
+        headers.insert("retry-after", HeaderValue::from_static("1000"));
+        assert_eq!(retry_delay(&headers, 0), Duration::from_secs(30));
+        payload.cleanup().unwrap();
+    }
+
+    #[test]
+    fn an_upload_with_a_lost_response_is_not_replayed() {
+        let (_directory, payload) = publication_payload();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let request = read_request(&mut stream);
+            drop(stream);
+            listener.set_nonblocking(true).unwrap();
+            std::thread::sleep(Duration::from_millis(150));
+            assert!(listener.accept().is_err());
+            request
+        });
+        let error = tauri::async_runtime::block_on(upload_attempt(&build_client().unwrap(), &payload, &format!("http://{address}"), "account-1", Some("session".into()), "date", &request().credential, running_job())).unwrap_err();
+        assert_eq!(error.code, "transport-failed");
+        assert!(!server.join().unwrap().body.is_empty());
+        payload.cleanup().unwrap();
     }
 
     #[test]

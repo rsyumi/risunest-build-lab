@@ -36,15 +36,16 @@ internal fun androidControlNotification(method: String): Boolean =
   )
 
 internal fun androidControlArgumentCount(method: String): Int? = when (method) {
-  "lifecycle.onFlushComplete", "lifecycle.onFlushHold",
+  "lifecycle.onFlushComplete", "lifecycle.onFlushHold", "lifecycle.exitListenerReady", "lifecycle.acknowledgeOpenedFile",
   "saf.pickBackupSource", "saf.pickLegacyBackupSource", "saf.cancelExport",
   "saf.cancelSource", "saf.discardSource", "saf.markExportPublicationReady",
   "saf.acknowledgeExport" -> 1
-  "saf.pickContentSource" -> 2
+  "background.begin", "background.end", "notification.completion" -> 1
+  "background.progress", "saf.pickContentSource" -> 2
   "saf.copyExport" -> 3
   "lifecycle.requestExit", "lifecycle.requestRestart", "lifecycle.onFrontendReady",
   "generation.begin", "generation.end", "generation.notificationsEnabled", "generation.requestNotifications",
-  "generation.openNotificationSettings", "generation.webViewVersion",
+  "generation.openNotificationSettings", "generation.webViewVersion", "notification.enabled",
   "saf.getActiveSourceRequestIds", "saf.getExportStatus", "saf.getExportSourceId" -> 0
   else -> null
 }

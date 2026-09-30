@@ -13,6 +13,8 @@ export interface NativeFileJobRecoveryDependencies {
 export interface NativeFileJobRecoveryResult {
     pendingRestoreAcknowledgements: string[]
     pendingOfficialPublications: string[]
+    interruptedRestores: string[]
+    libraryRestoreCommitted: boolean
 }
 
 export interface NativeFileJobRecoveryOptions {
@@ -36,8 +38,6 @@ export const ANDROID_SAF_HANDOFF_ID_PATTERNS: Partial<
         /(?:^|[\\/])risunest-rescue-([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.risunest-rescue\.zip$/,
     'export-portable-backup':
         /(?:^|[\\/])risunest-backup-([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.risunest$/,
-    'export-legacy-local-backup':
-        /(?:^|[\\/])risu-backup-([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.bin$/,
     'export-compatible-local-backup':
         /(?:^|[\\/])risu-backup-([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.bin$/,
     'export-character-charx':
@@ -54,12 +54,8 @@ function androidSafHandoffId(status: NativeFileJobStatus): string | null {
     return ANDROID_SAF_HANDOFF_ID_PATTERNS[status.kind]?.exec(path)?.[1] ?? null
 }
 
-export function shouldReconcileNativeFileJobs(
-    isDesktop: boolean,
-    isAndroid: boolean,
-    _isAndroidSafEnabled: boolean,
-): boolean {
-    return isDesktop || isAndroid
+export function shouldReconcileNativeFileJobs(isTauri: boolean): boolean {
+    return isTauri
 }
 
 async function reconcileRestore(
@@ -67,23 +63,11 @@ async function reconcileRestore(
     dependencies: NativeFileJobRecoveryDependencies,
 ): Promise<NativeFileJobStatus> {
     let status = initial
-    let finalized = false
+    if (!isTerminal(status) && status.phase !== 'activating-database') {
+        await dependencies.invoke('native_file_job_cancel', { jobId: status.jobId })
+    }
     while (!isTerminal(status)) {
-        if(status.kind==='restore-portable-backup'&&status.phase==='awaiting-backup-selection') {
-            await dependencies.invoke('native_file_job_cancel',{jobId:status.jobId})
-        }
-        else
-        if (
-            status.state === 'waitingForInput'
-            && status.phase === 'awaiting-activation'
-            && !finalized
-        ) {
-            await dependencies.invoke('native_file_job_finalize', { jobId: status.jobId })
-            finalized = true
-        }
-        else {
-            await dependencies.wait(100)
-        }
+        await dependencies.wait(100)
         status = await dependencies.invoke('native_file_job_status', {
             jobId: status.jobId,
         }) as NativeFileJobStatus
@@ -111,7 +95,6 @@ async function reconcileExportInBackground(
         }
         if (
             (status.kind === 'export-raw-recovery' ||
-                status.kind === 'export-legacy-local-backup' ||
                 status.kind === 'export-compatible-local-backup') &&
             status.result?.handoffPath
         ) {
@@ -193,6 +176,8 @@ export async function reconcileNativeFileJobsBeforeBootstrap(
     const jobs = await dependencies.invoke('native_file_job_list') as NativeFileJobStatus[]
     const pendingRestoreAcknowledgements: string[] = []
     const pendingOfficialPublications: string[] = []
+    const interruptedRestores: string[] = []
+    let libraryRestoreCommitted = false
     for (const job of jobs) {
         const kind = job.kind
         switch (kind) {
@@ -206,7 +191,10 @@ export async function reconcileNativeFileJobsBeforeBootstrap(
                     : await reconcileRestore(job, dependencies)
                 if (terminal.state === 'succeeded') {
                     pendingRestoreAcknowledgements.push(terminal.jobId)
+                    libraryRestoreCommitted ||= terminal.kind !== 'restore-portable-backup'
+                        || terminal.replacesLibrary === true
                 } else {
+                    interruptedRestores.push(terminal.jobId)
                     await dependencies.invoke('native_file_job_forget', {
                         jobId: terminal.jobId,
                     })
@@ -219,7 +207,6 @@ export async function reconcileNativeFileJobsBeforeBootstrap(
                 break
             case 'export-block-risu-save':
             case 'export-raw-recovery':
-            case 'export-legacy-local-backup':
             case 'export-compatible-local-backup':
             case 'export-character-charx':
             case 'export-character-card':
@@ -248,6 +235,8 @@ export async function reconcileNativeFileJobsBeforeBootstrap(
     return {
         pendingRestoreAcknowledgements,
         pendingOfficialPublications,
+        interruptedRestores,
+        libraryRestoreCommitted,
     }
 }
 

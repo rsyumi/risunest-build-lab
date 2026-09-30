@@ -33,6 +33,8 @@ fn all_live_tables_have_an_explicit_preservation_owner() {
         "external_storage_captures",
         "external_storage_capture_refs",
         "external_storage_capture_files",
+        "external_storage_base_records",
+        "external_storage_base_record_state",
     ];
     let server_operations = [
         "server_sync_state",

@@ -8,7 +8,11 @@
     "./linux/**/*.ts",
     "./macos/**/*.ts",
     "./device-backup/**/*.ts",
+    "./legacy-restore/**/*.ts",
+    "./plugin-review/**/*.ts",
     "../src/**/*.d.ts"
   ],
-  "exclude": ["**/dist/**"]
+  "exclude": [
+    "**/dist/**"
+  ]
 }
