@@ -19,6 +19,7 @@ vi.mock('./storage/platformBlobStore', () => ({
     configureBlobStoreStorageProvider: vi.fn(),
     readBlobForFacade: vi.fn(),
     resolveBlobStore: async () => state.blobStore,
+    subscribeNativeMediaEndpointChanges: vi.fn(() => vi.fn()),
 }))
 vi.mock('./storage/autoStorage', () => ({
     AutoStorage: class {

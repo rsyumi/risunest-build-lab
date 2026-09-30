@@ -159,6 +159,10 @@ fn native_client_roundtrips_large_objects_and_exact_delta_against_daemon() {
         )
         .unwrap();
     assert_eq!(second.read(&base_hash, 16 * 1024 * 1024).unwrap(), base);
+    for chunk in base.chunks(1024 * 1024) {
+        assert_eq!(second.stat_derived(&risunest_sync_wire::hash(chunk)).unwrap(), None);
+    }
+    assert!(!second_dir.path().join("staging").join(&base_hash).exists());
     assert_eq!(
         second.read(&changed_hash, 16 * 1024 * 1024).unwrap(),
         changed

@@ -184,6 +184,10 @@ describe('getInlayRenderSource', () => {
         expect(media.pause).not.toHaveBeenCalled()
         expect(source.getAttribute('src')).toContain(`native-${type}`)
 
+        observer.setVisible(media, true)
+        expect(media.load).toHaveBeenCalledTimes(1)
+        observer.setVisible(media, false)
+
         paused = true
         media.dispatchEvent(new Event('pause'))
         expect(source.getAttribute('src')).toBeNull()
@@ -228,6 +232,31 @@ describe('getInlayRenderSource', () => {
         expect(media.pause).not.toHaveBeenCalled()
         expect(source.getAttribute('src')).toBeNull()
         expect(media.load).toHaveBeenCalledTimes(2)
+        root.remove()
+    })
+
+    test.each(['audio', 'video'] as const)('retains original %s playback on reentry and retries a failed source', (type) => {
+        vi.stubGlobal('IntersectionObserver', TestIntersectionObserver)
+        const root = document.createElement('div')
+        root.innerHTML = `<${type}><source src="http://risuasset.localhost/synthetic"></${type}>`
+        document.body.append(root)
+        const media = root.querySelector(type) as HTMLMediaElement
+        let error: MediaError | null = null
+        Object.defineProperties(media, { paused: { get: () => false }, ended: { get: () => false }, error: { get: () => error } })
+        media.load = vi.fn()
+        const cleanup = mountDeferredInlaySources(root, new DeferredInlayMarkerRegistry())
+        const observer = TestIntersectionObserver.instances[0]
+        observer.setVisible(media, true)
+        const initialLoads = vi.mocked(media.load).mock.calls.length
+        media.dispatchEvent(new Event('play'))
+        observer.setVisible(media, false)
+        observer.setVisible(media, true)
+        expect(media.load).toHaveBeenCalledTimes(initialLoads)
+        error = { code: 3 } as MediaError
+        observer.setVisible(media, false)
+        observer.setVisible(media, true)
+        expect(media.load).toHaveBeenCalledTimes(initialLoads + 1)
+        cleanup()
         root.remove()
     })
 
@@ -408,7 +437,7 @@ describe('getInlayRenderSource', () => {
             name: 'clip.webm',
             size: 42,
             objectUrl: false,
-        })).toBe('<video controls><source src="http://example.test/a?x=&quot;&lt;&gt;&amp;&#39;value" type="video/webm&quot; onload=&quot;bad&lt;&gt;&amp;&#39;"></video>')
+        })).toBe('<video controls><source src="http://example.test/a?x=&quot;&lt;&gt;&amp;&#39;value"></video>')
     })
 
     test('escapes deferred marker IDs', () => {
@@ -526,7 +555,7 @@ describe('getInlayRenderSource', () => {
 
         await expect(
             resolveDeferredInlaySources(doc, registry, { rejectOnError: true }),
-        ).rejects.toBe(error)
+        ).rejects.toMatchObject({ name: 'ScreenshotPreparationError', reason: 'resource', cause: error })
         expect(clear).toHaveBeenCalled()
     })
 
@@ -612,5 +641,23 @@ describe('getInlayRenderSource', () => {
             objectUrl: true,
         })
         expect(inlayMocks.getInlayAssetRenderUrl).not.toHaveBeenCalled()
+    })
+})
+
+
+describe('media MIME hints', () => {
+    test.each([
+        ['video/mkv', 'video', null],
+        ['video/x-matroska', 'video', null],
+        ['video/mp4', 'video', 'video/mp4'],
+        ['audio/mp3', 'audio', 'audio/mpeg'],
+        ['audio/webm', 'audio', 'audio/webm'],
+    ] as const)('%s is normalized on both routes', (mime, type, expected) => {
+        const source = { url: 'data:,synthetic', mime, type, name: 'synthetic', size: 1, objectUrl: false }
+        for (const markup of [renderInlaySourceMarkup(source), renderDeferredInlaySourceMarkup('synthetic', source)]) {
+            const root = document.createElement('div')
+            root.innerHTML = markup
+            expect(root.querySelector('source')!.getAttribute('type')).toBe(expected)
+        }
     })
 })

@@ -19,6 +19,7 @@ vi.mock('../parser/parser.svelte', () => ({
 }))
 vi.mock('./apiV3/v3.svelte', () => ({
     loadV3Plugins: vi.fn(async () => undefined),
+    customV3ProviderMetaStore: [],
 }))
 
 // The store module has to finish evaluating before the plugin graph pulls it in
@@ -31,7 +32,9 @@ import {
     setDatabaseLite,
     type Database,
 } from '../storage/database.svelte'
-import { importPlugin, loadPlugins, type RisuPlugin } from './plugins.svelte'
+import { importPlugin, loadPlugins, handlePluginInstallViaPlugin, applyPreparedPluginDatabaseUpdate, allowedDbKeys, type RisuPlugin } from './plugins.svelte'
+
+import { createPluginDatabaseAccess } from './pluginDatabaseAccess'
 
 let alertError: ReturnType<typeof vi.spyOn>
 
@@ -83,6 +86,18 @@ describe('plugin API version gate', () => {
         ])
     })
 
+    it('reports unsupported content only once per session and notices changed scripts', async () => {
+        const db = getDatabase()
+        db.plugins = [makePlugin('deduplicated-legacy', '2.1')]
+        setDatabaseLite(db)
+        await loadPlugins()
+        await loadPlugins()
+        expect(alertError).toHaveBeenCalledTimes(1)
+        getDatabase().plugins[0].script = 'changed script'
+        await loadPlugins()
+        expect(alertError).toHaveBeenCalledTimes(2)
+    })
+
     it('loads without reporting when every enabled record is API 3.0', async () => {
         const db = getDatabase()
         db.plugins = [makePlugin('modern', '3.0')]
@@ -120,5 +135,65 @@ describe('plugin API version gate', () => {
             'modern-bundle',
         ])
         expect(getDatabase().plugins[0].version).toBe('3.0')
+    })
+})
+
+
+describe('plugin list database mutation policy', () => {
+    function access() {
+        return createPluginDatabaseAccess({
+            owner: 'caller',
+            getCompatibilityDatabase: getDatabase,
+            assertPersistentMutationAllowed: () => undefined,
+            getStorageAuthorityEpoch: () => 0,
+            getNavigationGeneration: () => 0,
+            snapshot: (value: unknown) => JSON.parse(JSON.stringify(value)),
+            applyCompatibilityDatabaseLite: (value: Record<string, unknown>) => applyPreparedPluginDatabaseUpdate(value, true),
+            mutatePluginStorage: async () => undefined,
+            flushPendingData: async () => undefined,
+            prepareAuthoritativeDatabaseUpdate: async (value: Record<string, unknown>) => ({
+                ...value, plugins: await handlePluginInstallViaPlugin(value.plugins as RisuPlugin[]),
+            }),
+        } as any)
+    }
+    it.each(['lite', 'async'])('preserves every installed record on %s round trips, omissions and replacement attempts', async (kind) => {
+        const installed = [makePlugin('caller', '3.0'), makePlugin('other', '3.0')]
+        installed[1].realArg = { marker: 'private' }
+        getDatabase().plugins = installed
+        const before = JSON.parse(JSON.stringify(installed))
+        const confirm = vi.spyOn(alertModule, 'alertConfirm').mockResolvedValue(false)
+        const api = access()
+        const write = (plugins: RisuPlugin[]) => kind === 'lite'
+            ? api.setDatabaseLite({ plugins }, allowedDbKeys)
+            : api.setDatabase({ plugins }, allowedDbKeys)
+        await write(before)
+        expect(getDatabase().plugins).toEqual(before)
+        await write([{ ...before[1], script: 'replacement', enabled: false, realArg: { marker: 'changed' }, allowedIPC: ['all'] }])
+        expect(getDatabase().plugins).toEqual(before)
+        expect(confirm).not.toHaveBeenCalled()
+    })
+    it('does not disclose existing plugin arguments through the installation helper', async () => {
+        getDatabase().plugins = [{ ...makePlugin('other', '3.0'), realArg: { marker: 'private' } }]
+        expect(await handlePluginInstallViaPlugin([])).toEqual([])
+        expect(await handlePluginInstallViaPlugin([makePlugin('other', '3.0')])).toEqual([])
+    })
+    it('requires async approval for additions and never runs lite additions', async () => {
+        const original = makePlugin('original', '3.0')
+        getDatabase().plugins = [original]
+        const proposed = makePlugin('new', '3.0')
+        const confirm = vi.spyOn(alertModule, 'alertConfirm').mockResolvedValue(false)
+        const api = access()
+        await api.setDatabaseLite({ plugins: [proposed] }, allowedDbKeys)
+        expect(confirm).not.toHaveBeenCalled()
+        expect(getDatabase().plugins).toEqual([original])
+        await api.setDatabase({ plugins: [proposed] }, allowedDbKeys)
+        expect(confirm).toHaveBeenCalledTimes(1)
+        expect(getDatabase().plugins).toEqual([original])
+        confirm.mockResolvedValue(true)
+        await api.setDatabase({ plugins: [proposed, proposed] }, allowedDbKeys)
+        expect(confirm).toHaveBeenCalledTimes(2)
+        expect(getDatabase().plugins).toEqual([original, proposed])
+        await loadPlugins()
+        expect(vi.mocked(loadV3Plugins).mock.calls.at(-1)![0].map((plugin) => plugin.name)).toEqual(['original', 'new'])
     })
 })

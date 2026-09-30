@@ -145,7 +145,7 @@ async function main() {
   assert.ok(adb, "--adb path required");
   const profile = options.profile ?? "smoke";
   assert.ok(
-    ["smoke", "stress", "persistence-spike", "persistence"].includes(profile),
+    ["smoke", "stress", "persistence-spike", "persistence", "viewport", "hypa-summary", "lease-release"].includes(profile),
     "Unknown profile",
   );
   assert.equal(
@@ -210,7 +210,7 @@ async function main() {
     const result = await client
       .evaluate(
         `window.__streamingSmoke.run(${JSON.stringify(profile)})`,
-        profile === "persistence" ? 300000 : 60000,
+        ["persistence", "hypa-summary", "lease-release"].includes(profile) ? 300000 : 60000,
       )
       .catch(() => ({
         passed: false,
@@ -218,6 +218,37 @@ async function main() {
         assertion: "evaluation-failed-or-timeout",
         cases: [],
       }));
+    if (profile === "viewport" && result.passed) {
+      try {
+        const api = "window.__streamingSmoke.viewport";
+        const point = await client.evaluate(`${api}.prepareInput()`);
+        await client.call("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x: point.x, y: point.y }] });
+        await client.call("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+        await delay(500);
+        const focused = await client.evaluate(`${api}.inputState()`);
+        await client.call("Input.imeSetComposition", { text: "합성", selectionStart: 2, selectionEnd: 2 });
+        const composing = await client.evaluate(`${api}.inputState()`);
+        await client.evaluate(`${api}.setInputBlocked(true)`);
+        await delay(100);
+        const blocked = await client.evaluate(`${api}.inputState()`);
+        await client.evaluate(`${api}.setInputBlocked(false)`);
+        await delay(100);
+        const restored = await client.evaluate(`${api}.inputState()`);
+        const grown = await client.evaluate(`${api}.growInput(12)`);
+        result.cases.push({ id: "input-growth-and-fence", fidelity: "CDP touch and synthetic composition, not OS Korean IME", focused, composing, blocked, restored, grown });
+        await client.evaluate(`${api}.mount(10000)`);
+        const gesture = await client.evaluate(`${api}.startGesture()`);
+        await client.call("Input.synthesizeScrollGesture", { x: gesture.x, y: gesture.y, yDistance: 2400, speed: 1600, gestureSourceType: "touch", preventFling: false });
+        await delay(500);
+        const motion = await client.evaluate(`${api}.finishGesture()`);
+        result.cases.push({ id: "touch-history-scroll", fidelity: "CDP synthesized touch gesture", ...motion });
+        assert.ok(motion.samples.length > 2, "Missing scroll-frame samples");
+        assert.ok(motion.samples.some((sample) => sample.top !== motion.samples[0].top), "Touch gesture did not scroll");
+      } catch {
+        result.passed = false;
+        result.assertion = "viewport-input-or-gesture-probe-failed";
+      }
+    }
     if (profile === "persistence" && result.passed) {
       try {
         await client.evaluate("delete window.__streamingSmoke");

@@ -69,6 +69,15 @@
         parserAbortSignal = value
     }
 
+    let translatorType = $state(DBState.db.translatorType)
+    Object.defineProperty(DBState.db, 'translatorType', {
+        configurable: true,
+        get: () => translatorType,
+    })
+    export function setTranslatorType(value: typeof DBState.db.translatorType) {
+        translatorType = value
+    }
+
     let raw = $state(false)
     let bodyRoot = $state<HTMLElement | null>(null)
     let assetWidth = $state(untrack(() => initialAssetWidth))

@@ -2,9 +2,32 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Database, botPreset } from './database.svelte'
 import {
     createPresetWorkingSetController,
+    capturePresetNames,
     readPersistentPresetBody,
     readPersistentPresetBodies,
 } from './presetWorkingSetOperations'
+
+vi.mock('../util', () => ({
+    checkNullish: (value: unknown) => value === null || value === undefined,
+    decryptBuffer: vi.fn(), encryptBuffer: vi.fn(), selectSingleFile: vi.fn(),
+}))
+vi.mock('../alert', () => ({ alertNormal: vi.fn() }))
+vi.mock('../gui/colorscheme', () => ({ defaultColorScheme: {} }))
+vi.mock('../translator/presets', () => ({ normalizeTranslatorPresetState: vi.fn() }))
+vi.mock('../model/modellist', () => ({ LLMFlags: {}, LLMFormat: {}, LLMTokenizer: {} }))
+vi.mock('../process/modules', () => ({ moduleUpdate: vi.fn() }))
+vi.mock('../process/scripts', () => ({ resetScriptCache: vi.fn() }))
+vi.mock('../parser/parser.svelte', () => ({}))
+vi.mock('../process/memory/hypav3', () => ({ createHypaV3Preset: vi.fn() }))
+const runtime = vi.hoisted(() => ({
+    mutatePersistentPresets: vi.fn(),
+    store: { queryPresets: vi.fn(), readPreset: vi.fn() },
+    revision: 1,
+}))
+vi.mock('./persistentDataRuntime.svelte', () => ({
+    mutatePersistentPresets: runtime.mutatePersistentPresets,
+    getPersistentDataRuntime: () => runtime,
+}))
 
 function preset(name: string, mainPrompt: string): botPreset {
     return { name, mainPrompt } as botPreset
@@ -137,4 +160,95 @@ describe('store-backed preset operations', () => {
             'complete preset-b',
         ])
     })
+})
+
+it('rejects an originally selected index after an earlier queued reorder publishes', async () => {
+    let live = { botPresetsId: 0, botPresets: ['A', 'B', 'C'].map(name => preset(name, name)) } as Database
+    let queue = Promise.resolve()
+    const controller = createPresetWorkingSetController({
+        getDatabase: () => live,
+        captureCurrentPreset: () => null,
+        applyPreset: () => {},
+        mutatePersistentPresets: (_reason, mutate) => {
+            const task = queue.then(async () => {
+                const state = { root: { botPresetsId: live.botPresetsId } as any, presets: structuredClone(live.botPresets) }
+                await mutate(state)
+                live = { ...live, ...state.root, botPresets: state.presets }
+            })
+            queue = task.catch(() => {})
+            return task
+        },
+    })
+    const moved = controller.movePreset(0, 3)
+    const removed = controller.removePreset(1)
+    await moved
+    await expect(removed).rejects.toThrow('Preset list changed')
+    expect(live.botPresets.map(item => item.name)).toEqual(['B', 'C', 'A'])
+})
+
+it.each(['remove', 'copy'] as const)('rejects queued %s after a same-name reorder without changing the wrong body', async operation => {
+    let live = { botPresetsId: 0, botPresets: ['A', 'B', 'C'].map(body => preset('X', body)) } as Database
+    let queue = Promise.resolve()
+    const controller = createPresetWorkingSetController({
+        getDatabase: () => live,
+        captureCurrentPreset: () => null,
+        applyPreset: () => {},
+        mutatePersistentPresets: (_reason, mutate) => {
+            const task = queue.then(async () => {
+                const state = { root: { botPresetsId: live.botPresetsId } as any, presets: structuredClone(live.botPresets) }
+                await mutate(state)
+                live = { ...live, ...state.root, botPresets: state.presets }
+            })
+            queue = task.catch(() => {})
+            return task
+        },
+    })
+    const moved = controller.movePreset(0, 3)
+    const pending = operation === 'remove' ? controller.removePreset(1) : controller.copyPreset(1)
+    await moved
+    await expect(pending).rejects.toThrow('Preset list changed')
+    expect(live.botPresets.map(item => item.mainPrompt)).toEqual(['B', 'C', 'A'])
+    await controller.copyPreset(0, ['X', 'X', 'X'])
+    expect(live.botPresets[3]).toEqual(preset('X Copy', 'B'))
+})
+
+it('rejects a confirmed same-name replacement before entering the mutation queue', async () => {
+    const live = { botPresetsId: 0, botPresets: [preset('X', 'A'), preset('X', 'B')] } as Database
+    const expected = capturePresetNames(live.botPresets)
+    live.botPresets[1] = preset('X', 'C')
+    const controller = createPresetWorkingSetController({
+        getDatabase: () => live,
+        captureCurrentPreset: () => null,
+        applyPreset: () => {},
+        mutatePersistentPresets: async (_reason, mutate) => {
+            await mutate({ root: { botPresetsId: 0 } as any, presets: structuredClone(live.botPresets) })
+        },
+    })
+    await expect(controller.removePreset(1, expected)).rejects.toThrow('Preset list changed')
+    expect(live.botPresets.map(item => item.mainPrompt)).toEqual(['A', 'C'])
+})
+
+it.each(['unchanged', 'replace-during-read'] as const)('reads a preset after its own save publication: %s', async mode => {
+    const { DBState } = await import('../stores.svelte')
+    const { readPresetBodies } = await import('./database.svelte')
+    DBState.db = { botPresetsId: 0, botPresets: [preset('X', 'A'), preset('X', 'B')], mainPrompt: 'edited A' } as Database
+    const expected = capturePresetNames(DBState.db.botPresets)
+    expect(DBState.db.botPresets[1]).toBe(DBState.db.botPresets[1])
+    const saved = [preset('X', 'edited A'), preset('X', 'B')]
+    runtime.mutatePersistentPresets.mockImplementation(async (_reason, mutate) => {
+        const state = { root: { botPresetsId: 0 }, presets: saved }
+        await mutate(state)
+        DBState.db.botPresets = [...state.presets]
+    })
+    runtime.store.queryPresets.mockResolvedValue({ revision: 1, items: [
+        { id: 'a', configuredIndex: 0, name: 'X' }, { id: 'b', configuredIndex: 1, name: 'X' },
+    ] })
+    runtime.store.readPreset.mockImplementation(async () => {
+        if (mode === 'replace-during-read') DBState.db.botPresets[1] = preset('X', 'C')
+        return { revision: 1, value: saved[1] }
+    })
+    const task = readPresetBodies([1], expected)
+    if (mode === 'unchanged') await expect(task).resolves.toEqual([preset('X', 'B')])
+    else await expect(task).rejects.toThrow('Preset list changed')
+    expect(DBState.db.botPresets[1].mainPrompt).toBe(mode === 'unchanged' ? 'B' : 'C')
 })

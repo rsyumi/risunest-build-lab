@@ -597,6 +597,38 @@ fn configured_catalog_cursor_handles_ties_and_does_not_parse_the_previous_prefix
 }
 
 #[test]
+fn recent_and_searched_catalog_pages_skip_previously_emitted_rows() {
+    for (order, search) in [(QueryOrder::Recent, None), (QueryOrder::Configured, Some("match")), (QueryOrder::Recent, Some("match"))] {
+        let (_directory, store, _) = open_fixture();
+        store.connection.execute("UPDATE characters SET configured_index=5,recent_at=8,name='match'", []).unwrap();
+        let mut query = CharacterQuery { search: search.map(str::to_owned), order, trash: false, limit: 1, cursor: None };
+        let first = store.query_characters(&query, None).unwrap();
+        assert_eq!(first.items[0].id, "char-a");
+        query.cursor = first.next_cursor;
+        store.connection.execute("UPDATE characters SET archived_object='invalid' WHERE character_id='char-a'", []).unwrap();
+        let second = store.query_characters(&query, None).unwrap();
+        assert_eq!(second.items[0].id, "char-b");
+        assert!(second.next_cursor.is_none());
+    }
+}
+
+#[test]
+fn account_credentials_are_rejected_by_commits_and_hidden_from_native_reads() {
+    let (_directory, mut store, _) = open_fixture();
+    let revision = store.revision().unwrap();
+    for commit in [
+        WorkingSetCommit { root: Some(json!({"account":{"token":"synthetic"}})), ..empty_working_set_commit(revision) },
+        WorkingSetCommit { root_mutations: Some(vec![crate::persistent_store::RootMutation::Set { key: "account".into(), value: json!({"token":"synthetic"}) }]), ..empty_working_set_commit(revision) },
+    ] {
+        assert!(matches!(store.commit(&commit), Err(StoreError::Validation { .. })));
+        assert_eq!(store.revision().unwrap(), revision);
+    }
+    store.connection.execute("UPDATE root SET value=json_set(value,'$.account',json('{\"token\":\"synthetic-old\"}'))", []).unwrap();
+    assert!(store.read_root(None).unwrap().value.get("account").is_none());
+    assert!(store.materialize(None).unwrap().get("account").is_none());
+}
+
+#[test]
 fn character_search_uses_rust_unicode_lowercase_matching() {
     let directory = tempfile::tempdir().expect("create temporary directory");
     let mut store = PersistentStore::open(directory.path()).expect("open persistent store");
@@ -1451,7 +1483,7 @@ fn replacement_uses_the_greatest_configured_index_after_a_gap() {
     let (_directory, mut store, database) = open_fixture();
     let deleted = store
         .commit(&WorkingSetCommit {
-            delete_character_id: Some("char-a".to_owned()),
+            delete_character_ids: Some(vec!["char-a".to_owned()]),
             ..empty_working_set_commit(1)
         })
         .expect("delete middle configured character");
@@ -1902,7 +1934,7 @@ fn wal_lease_keeps_every_final_record_family_and_native_export_canonical() {
                 conversation: None,
                 configured_index: None,
             }]),
-            delete_character_id: Some("char-b".to_owned()),
+            delete_character_ids: Some(vec!["char-b".to_owned()]),
             asset_owner_heads: Some(vec![AssetOwnerHead::absent(
                 AssetOwnerLocator::RootModuleAssets { index: 0 },
             )]),
@@ -2053,7 +2085,7 @@ fn revision_lease_survives_append_delete_root_change_and_staged_replace() {
                 conversation: None,
                 configured_index: None,
             }]),
-            delete_character_id: Some("char-b".to_owned()),
+            delete_character_ids: Some(vec!["char-b".to_owned()]),
             plugin_storage: Some(vec![PluginStorageMutation::Set {
                 owner: UNOWNED_OWNER.to_owned(),
                 key: "pinned-zero".to_owned(),
@@ -2292,7 +2324,7 @@ fn batch_character_details_delete_atomically_and_preserve_plugin_zero() {
     let failed = store.commit(&WorkingSetCommit {
         root: Some(json!({ "username": "Must roll back" })),
         character_details: Some(vec![updated_group.clone(), invalid_detail]),
-        delete_character_id: Some("char-a".to_owned()),
+        delete_character_ids: Some(vec!["char-a".to_owned()]),
         ..empty_working_set_commit(prepared.revision)
     });
 
@@ -2326,7 +2358,7 @@ fn batch_character_details_delete_atomically_and_preserve_plugin_zero() {
         .commit(&WorkingSetCommit {
             root: Some(json!({ "username": "Committed" })),
             character_details: Some(vec![updated_group]),
-            delete_character_id: Some("char-a".to_owned()),
+            delete_character_ids: Some(vec!["char-a".to_owned()]),
             ..empty_working_set_commit(prepared.revision)
         })
         .expect("commit batch delete");
@@ -2430,11 +2462,11 @@ fn invalid_batch_character_detail_ids_leave_every_character_row_unchanged() {
         ("missing", vec![missing], None),
     ];
 
-    for (name, character_details, delete_character_id) in cases {
+    for (name, character_details, delete_character_ids) in cases {
         let result = store.commit(&WorkingSetCommit {
             root: Some(json!({ "username": "Must not persist" })),
             character_details: Some(character_details),
-            delete_character_id,
+            delete_character_ids: delete_character_ids.map(|id| vec![id]),
             ..empty_working_set_commit(1)
         });
 

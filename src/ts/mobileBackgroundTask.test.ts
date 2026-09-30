@@ -128,3 +128,17 @@ describe('mobile background task lifetime', () => {
         await vi.waitFor(() => expect(bridge.end).toHaveBeenCalledWith('task-1'))
     })
 })
+
+it.each([false, true])('distinguishes OS expiry after inner cancellation, user cancel wins: %s', async userCancel => {
+    const caller = new AbortController()
+    const operation = runWithMobileBackgroundTask('import', async task => {
+        await new Promise<void>(resolve => task.signal!.addEventListener('abort', () => resolve(), { once: true }))
+        if (userCancel) caller.abort()
+        throw new DOMException('inner cancellation', 'AbortError')
+    }, caller.signal)
+    await vi.waitFor(() => expect(hasMobileBackgroundTasks()).toBe(true))
+    await Promise.resolve()
+    window.dispatchEvent(new CustomEvent('risunest-background-expired', { detail: 'task-1' }))
+    const { isBackgroundExpiryReason } = await import('./iosNative')
+    await expect(operation.catch(error => isBackgroundExpiryReason(error))).resolves.toBe(!userCancel)
+})

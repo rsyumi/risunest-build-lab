@@ -93,6 +93,7 @@ function makeLease(input: {
             }),
         readConversationMetadata: vi.fn(async () => null),
         readConversationWindow: vi.fn(),
+        readPluginStorageValues: vi.fn(async () => ({ revision, items: [], nextCursor: null })),
         queryPluginStorage: vi.fn(async () => ({ revision, items: [] })),
         readPluginStorage: vi.fn(async () => null),
         readAssetAlias: vi.fn(async () => null),
@@ -117,6 +118,7 @@ function makeHarness(
         mutationGeneration: 0,
         initialize: vi.fn(),
         flushPendingData: vi.fn(() => Promise.resolve()),
+        retireWindowedSelectedConversation: vi.fn(),
         replacePersistentDatabase: vi.fn(async () => ({
             kind: 'committed', revision: 1, projection: 'applied',
         } as const)),
@@ -314,6 +316,7 @@ function makeWindowedHarness(input: {
             },
         ),
     } as unknown as PersistentDataStore
+    store.acquireRevision = vi.fn(async () => ({ ...store, revision: storeRevision, release: vi.fn() }) as unknown as PersistentRevisionLease)
     let workingSet!: ActiveWorkingSet
     const coordinator = {
         revision: 1,
@@ -497,6 +500,30 @@ describe('ActiveWorkingSet', () => {
 
         expect(edit).not.toHaveBeenCalled()
         expect(harness.coordinator.recordWindowedChatListChange).not.toHaveBeenCalled()
+    })
+
+    it('edits a middle row with bounded reads and unchanged viewport ownership', async () => {
+        const full = makeChat('chat-a')
+        full.message = Array.from({ length: 5000 }, (_, index) => ({ role: 'user', data: 'x'.repeat(4096), chatId: String(index) })) as Message[]
+        const harness = makeWindowedHarness({ characters: [makeCharacter('a', [full])] })
+        await harness.workingSet.activateCharacter('a')
+        const source = harness.workingSet.activeConversationViewportSource
+        const target = harness.workingSet.captureSelectedConversationTarget()!
+        const controller = await harness.workingSet.captureWindowedMessageMutation(target, 123, full.message[123])
+        expect(controller).not.toBeNull()
+        expect(controller!.applyRange(0, 1, [{ ...full.message[123], data: 'edited' }], 'edit')).toBe(true)
+        expect(harness.workingSet.activeConversationViewportSource).toBe(source)
+        expect(harness.readConversation).not.toHaveBeenCalled()
+        expect(harness.coordinator.recordActiveConversationMutation).toHaveBeenCalledWith(expect.objectContaining({ mutations: [{ start: 123, deleteCount: 1, messages: [{ ...full.message[123], data: 'edited' }], sessionVersion: 1 }] }))
+        expect(controller!.applyRange(0, 0, [full.message[123]], 'append')).toBe(false)
+        controller!.release()
+    })
+
+    it('refuses a middle-row editor whose original evidence changed', async () => {
+        const { harness, target } = await activateWindowedChatList()
+        await expect(harness.workingSet.captureWindowedMessageMutation(target, 0, { role: 'user', data: 'stale', chatId: 'a' })).resolves.toBeNull()
+        expect(harness.coordinator.recordActiveConversationMutation).not.toHaveBeenCalled()
+        expect(harness.readConversation).not.toHaveBeenCalled()
     })
 
     it('fences a tail controller after another controller makes a same-length edit', async () => {
@@ -1066,6 +1093,9 @@ describe('ActiveWorkingSet', () => {
             'deactivate-working-set',
         )
         expect(harness.coordinator.flushPendingData.mock.invocationCallOrder[0]).toBeLessThan(
+            harness.coordinator.retireWindowedSelectedConversation.mock.invocationCallOrder[0],
+        )
+        expect(harness.coordinator.retireWindowedSelectedConversation.mock.invocationCallOrder[0]).toBeLessThan(
             harness.releaseInactiveCharacter.mock.invocationCallOrder[0],
         )
         expect([...harness.workingSet.activeCharacterIds]).toEqual([])
@@ -1080,6 +1110,7 @@ describe('ActiveWorkingSet', () => {
         await expect(harness.workingSet.deactivate()).rejects.toThrow('flush failed')
 
         expect(harness.releaseInactiveCharacter).not.toHaveBeenCalled()
+        expect(harness.coordinator.retireWindowedSelectedConversation).not.toHaveBeenCalled()
         expect([...harness.workingSet.activeCharacterIds]).toEqual(['char-a'])
     })
 

@@ -44,7 +44,7 @@ describe('removeChatMessage', () => {
             getCurrentSession: () => null,
             confirmRemoval: vi.fn(async () => true),
             confirmInstantRemoval: vi.fn(async () => true),
-        })).resolves.toBe(false)
+        })).resolves.toBe('stale')
 
         expect(current.conversation.message).toHaveLength(2)
     })
@@ -70,7 +70,7 @@ describe('removeChatMessage', () => {
         current = replacement
         confirmation.resolve(true)
 
-        await expect(removing).resolves.toBe(false)
+        await expect(removing).resolves.toBe('stale')
         expect(original.conversation.message.map((message) => message.data)).toEqual([
             'original-zero',
             'original-one',
@@ -102,7 +102,7 @@ describe('removeChatMessage', () => {
         current = replacement
         confirmation.resolve(false)
 
-        await expect(removing).resolves.toBe(false)
+        await expect(removing).resolves.toBe('stale')
         expect(original.conversation.message.map((message) => message.data)).toEqual([
             'original-zero',
             'original-one',

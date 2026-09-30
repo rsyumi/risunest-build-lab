@@ -19,6 +19,7 @@ pub(crate) struct StoredConnection {
     pub recovery_key_ref: String,
     pub capabilities: Capabilities,
     pub created_at_ms: u64,
+    pub verified_at_ms: u64,
     pub last_sync_at_ms: Option<u64>,
     pub last_backup_at_ms: Option<u64>,
     /// Backup connections only. Changing it applies to work started
@@ -106,10 +107,25 @@ impl ConnectionStore {
             .map_err(storage)?;
         db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;
             CREATE TABLE IF NOT EXISTS connections(id TEXT PRIMARY KEY,value TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS automatic_backup_pauses(connection_id TEXT PRIMARY KEY);
             CREATE TABLE IF NOT EXISTS pending_connections(id TEXT PRIMARY KEY,value TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS discovery(connection_id TEXT NOT NULL,id TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(connection_id,id));
             CREATE TABLE IF NOT EXISTS unusable_objects(connection_id TEXT NOT NULL,identity TEXT NOT NULL,object_id TEXT NOT NULL,reason TEXT NOT NULL,PRIMARY KEY(connection_id,identity));").map_err(storage)?;
         Ok(Self(db))
+    }
+    pub fn automatic_backup_paused(&self, id: &str) -> Result<bool> {
+        self.0.query_row("SELECT EXISTS(SELECT 1 FROM automatic_backup_pauses WHERE connection_id=?1)", [id], |row| row.get(0)).map_err(storage)
+    }
+    pub fn set_automatic_backup_paused(&self, id: &str, paused: bool) -> Result<()> {
+        if self.read(id)?.descriptor.publication_strategy.is_some() {
+            return Err(ProviderError::new(ErrorKind::PreconditionFailed));
+        }
+        if paused {
+            self.0.execute("INSERT OR IGNORE INTO automatic_backup_pauses VALUES(?1)", [id]).map_err(storage)?;
+        } else {
+            self.0.execute("DELETE FROM automatic_backup_pauses WHERE connection_id=?1", [id]).map_err(storage)?;
+        }
+        Ok(())
     }
     pub fn list(&self) -> Result<Vec<StoredConnection>> {
         let mut query = self
@@ -214,6 +230,50 @@ impl ConnectionStore {
         connection.retention_policy = Some(policy);
         self.write(id, connection)
     }
+    pub fn replace_credential(
+        &mut self,
+        id: &str,
+        expected: &str,
+        replacement: &str,
+    ) -> Result<StoredConnection> {
+        let tx = self.0.transaction_with_behavior(TransactionBehavior::Immediate).map_err(storage)?;
+        let encoded: String = tx.query_row("SELECT value FROM connections WHERE id=?1", [id], |row| row.get(0))
+            .optional().map_err(storage)?.ok_or_else(|| ProviderError::new(ErrorKind::NotFound))?;
+        let mut connection = decode(&encoded)?;
+        if connection.credential_ref != expected {
+            return Err(ProviderError::new(ErrorKind::PreconditionFailed));
+        }
+        connection.credential_ref = replacement.to_owned();
+        connection.verified_at_ms = super::runtime::now_ms();
+        let encoded = serde_json::to_string(&connection).map_err(storage)?;
+        decode(&encoded)?;
+        tx.execute("UPDATE connections SET value=?2 WHERE id=?1", params![id, encoded]).map_err(storage)?;
+        tx.commit().map_err(storage)?;
+        Ok(connection)
+    }
+
+    pub fn replace_repository_key(
+        &mut self,
+        id: &str,
+        expected: &str,
+        replacement: &str,
+    ) -> Result<StoredConnection> {
+        let tx = self.0.transaction_with_behavior(TransactionBehavior::Immediate).map_err(storage)?;
+        let encoded: String = tx.query_row("SELECT value FROM connections WHERE id=?1", [id], |row| row.get(0))
+            .optional().map_err(storage)?.ok_or_else(|| ProviderError::new(ErrorKind::NotFound))?;
+        let mut connection = decode(&encoded)?;
+        if connection.root_key_ref != expected {
+            return Err(ProviderError::new(ErrorKind::PreconditionFailed));
+        }
+        connection.root_key_ref = replacement.to_owned();
+        connection.verified_at_ms = super::runtime::now_ms();
+        let encoded = serde_json::to_string(&connection).map_err(storage)?;
+        decode(&encoded)?;
+        tx.execute("UPDATE connections SET value=?2 WHERE id=?1", params![id, encoded]).map_err(storage)?;
+        tx.commit().map_err(storage)?;
+        Ok(connection)
+    }
+
     fn write(&mut self, id: &str, connection: StoredConnection) -> Result<StoredConnection> {
         let encoded = serde_json::to_string(&connection).map_err(storage)?;
         decode(&encoded)?;
@@ -333,6 +393,7 @@ impl ConnectionStore {
             recovery_key_ref: pending.recovery_key_ref,
             capabilities,
             created_at_ms: pending.created_at_ms,
+            verified_at_ms: super::runtime::now_ms(),
             last_sync_at_ms: None,
             last_backup_at_ms: None,
         };
@@ -367,6 +428,8 @@ impl ConnectionStore {
         tx.execute("DELETE FROM discovery WHERE connection_id=?1", [id])
             .map_err(storage)?;
         tx.execute("DELETE FROM unusable_objects WHERE connection_id=?1", [id])
+            .map_err(storage)?;
+        tx.execute("DELETE FROM automatic_backup_pauses WHERE connection_id=?1", [id])
             .map_err(storage)?;
         tx.execute("DELETE FROM connections WHERE id=?1", [id])
             .map_err(storage)?;
@@ -1038,4 +1101,25 @@ mod tests {
             })
         ));
     }
+    #[test]
+    fn credential_replacement_preserves_connection_and_rejects_a_stale_owner() {
+        let root = tempfile::tempdir().unwrap();
+        let mut store = ConnectionStore::open(root.path()).unwrap();
+        let pending = pending();
+        store.put_pending(&pending).unwrap();
+        let original = store.promote_pending(&pending.id, locator("shared"), Capabilities::default()).unwrap();
+        let changed = store.replace_credential(&original.id, &original.credential_ref, "new-secret").unwrap();
+        let mut expected = serde_json::to_value(&original).unwrap();
+        expected["credentialRef"] = "new-secret".into();
+        assert!(changed.verified_at_ms >= original.verified_at_ms);
+        expected["verifiedAtMs"] = changed.verified_at_ms.into();
+        assert_eq!(serde_json::to_value(&changed).unwrap(), expected);
+        assert_eq!(store.replace_credential(&original.id, &original.credential_ref, "stale-secret").err().unwrap().kind,
+            ErrorKind::PreconditionFailed);
+        assert_eq!(store.read(&original.id).unwrap().credential_ref, "new-secret");
+        let unlocked = store.replace_repository_key(&original.id, &original.root_key_ref, "new-root").unwrap();
+        assert_eq!(unlocked.credential_ref, "new-secret");
+        assert_eq!(unlocked.recovery_key_ref, original.recovery_key_ref);
+    }
+
 }

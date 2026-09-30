@@ -14,6 +14,7 @@ import {
     SelectedConversationPromotionStaleError,
     type CompleteConversationLease,
     type SelectedConversationTarget,
+    type WindowedConversationMutationController,
 } from './storage/activeWorkingSet.svelte'
 
 type CapturedSessionChatMessageTarget = Extract<
@@ -22,6 +23,7 @@ type CapturedSessionChatMessageTarget = Extract<
 >
 
 export interface SelectedConversationOperationsDependencies {
+    captureWindowedMessageMutation?(target: SelectedConversationTarget, index: number, evidence: Readonly<Message>): Promise<WindowedConversationMutationController | null>
     captureSelectedConversationTarget(): SelectedConversationTarget | null
     acquireCompleteConversation(
         reason: string,
@@ -47,6 +49,11 @@ export interface AcquiredCompleteMessageTarget {
     release(): void
 }
 
+export interface AcquiredMessageMutationTarget {
+    readonly target: CapturedChatMessageTarget
+    release(): void
+}
+
 export interface SelectedConversationMessageEditIntent {
     readonly selection: SelectedConversationTarget
     readonly absoluteIndex: number
@@ -65,6 +72,7 @@ export interface CaptureSelectedConversationMessageEditIntentInput {
 }
 
 export interface SelectedConversationOperations {
+    acquireMessageMutation(input: CaptureSelectedConversationMessageEditIntentInput, reason: string): Promise<{ target: CapturedChatMessageTarget; release(): void } | null>
     withCompleteSelectedConversation<T>(
         reason: string,
         operation: (context: CompleteSelectedConversationContext) => T | Promise<T>,
@@ -76,10 +84,14 @@ export interface SelectedConversationOperations {
     captureMessageEditIntent(
         input: CaptureSelectedConversationMessageEditIntentInput,
     ): SelectedConversationMessageEditIntent | null
+    rebindMessageEditIntent(
+        intent: SelectedConversationMessageEditIntent,
+        input: CaptureSelectedConversationMessageEditIntentInput,
+    ): SelectedConversationMessageEditIntent
     acquireCompleteMessageTargetForIntent(
         intent: SelectedConversationMessageEditIntent,
         reason: string,
-    ): Promise<AcquiredCompleteMessageTarget | null>
+    ): Promise<AcquiredMessageMutationTarget | null>
 }
 
 interface StartedCompleteConversation<T> {
@@ -120,6 +132,18 @@ export function createSelectedConversationOperations(
     }
 
     return {
+        async acquireMessageMutation(input, reason) {
+            const intent = this.captureMessageEditIntent(input)
+            if (!intent) return null
+            const controller = await dependencies.captureWindowedMessageMutation?.(intent.selection, input.absoluteIndex, intent.messageEvidence)
+            if (controller) {
+                const current = dependencies.captureCurrent()
+                if (!current || !controller.isCurrent()) { controller.release(); return null }
+                return { target: { ...current, kind: 'windowed' as const, session: null, locator: null,
+                    absoluteIndex: input.absoluteIndex, message: controller.chat.message[0], controller }, release: () => controller.release() }
+            }
+            return this.acquireCompleteMessageTargetForIntent(intent, reason)
+        },
         async withCompleteSelectedConversation<T>(reason, operation): Promise<T | null> {
             const started = await startCompleteConversation(
                 reason,
@@ -180,13 +204,26 @@ export function createSelectedConversationOperations(
             })
         },
 
+        rebindMessageEditIntent(intent, input) {
+            if (!isEqual(intent.messageEvidence, input.message)) return intent
+            const rebound = this.captureMessageEditIntent(input)
+            if (!rebound || !matchesSelection(intent.selection, rebound.selection)) return intent
+            return Object.freeze({ ...rebound, messageEvidence: intent.messageEvidence })
+        },
         async acquireCompleteMessageTargetForIntent(
             intent,
             reason,
-        ): Promise<AcquiredCompleteMessageTarget | null> {
+        ): Promise<AcquiredMessageMutationTarget | null> {
             const selection = dependencies.captureSelectedConversationTarget()
             if (!selection || !matchesSelection(intent.selection, selection)) {
                 throw new SelectedConversationPromotionStaleError()
+            }
+            const controller = await dependencies.captureWindowedMessageMutation?.(selection, intent.absoluteIndex, intent.messageEvidence)
+            if (controller) {
+                const current = dependencies.captureCurrent()
+                if (!current || !controller.isCurrent()) { controller.release(); return null }
+                return { target: { ...current, kind: 'windowed' as const, session: null, locator: null,
+                    absoluteIndex: intent.absoluteIndex, message: controller.chat.message[0], controller }, release: () => controller.release() }
             }
             const acquired = await acquireCompleteMessageTarget(
                 selection,

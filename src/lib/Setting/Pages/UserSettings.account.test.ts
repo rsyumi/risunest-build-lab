@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from 'vitest'
 import { parse } from 'svelte/compiler'
 import { readFileSync } from 'node:fs'
+import { languageEnglish } from 'src/lang/en'
+import { NativeAccountLoginError } from 'src/ts/storage/sync/nativeOfficialAccountFlow'
+vi.mock('src/ts/storage/nativeFileJobs', () => ({
+    NativeFileJobActivationCommittedError: class extends Error {},
+    syntheticNativeFileJobStatus: vi.fn(),
+}))
 const source = readFileSync('src/lib/Setting/Pages/UserSettings.svelte', 'utf8')
 
 function handler(name: string, marker = 'unMigrationAccount') {
@@ -87,8 +93,6 @@ describe('web account settings actions', () => {
 })
 
 describe('native account settings actions', () => {
-    const failureText = "Couldn't complete the backup operation."
-
     function nativeDependencies() {
         const account = { id: 'account-a', token: 'synthetic', data: {} }
         const flow = {
@@ -110,8 +114,9 @@ describe('native account settings actions', () => {
                 $accountUnmigrationBusy: false,
                 runNativeAccountOperation: (operation: () => Promise<unknown>) => operation(),
                 getNativeOfficialAccountFlow: () => flow,
+                NativeAccountLoginError,
                 alertError: vi.fn(),
-                language: { risuNest: { backup: { actionFailed: failureText } } },
+                language: languageEnglish,
                 DBState: { db: { account: account as typeof account | undefined } },
                 forageStorage: { isAccount: false },
                 unMigrationAccount: vi.fn(),
@@ -137,7 +142,7 @@ describe('native account settings actions', () => {
         })
 
         expect(dependencies.DBState.db.account).toBeUndefined()
-        expect(dependencies.alertError).toHaveBeenCalledWith(failureText)
+        expect(dependencies.alertError).toHaveBeenCalledWith(languageEnglish.risuNest.account.loginFailed)
     })
 
     it('keeps the visible account and reports a native logout failure', async () => {
@@ -147,6 +152,20 @@ describe('native account settings actions', () => {
         await handler('onclick', 'getNativeOfficialAccountFlow().logout')(dependencies)()
 
         expect(dependencies.DBState.db.account).toBe(account)
-        expect(dependencies.alertError).toHaveBeenCalledWith(failureText)
+        expect(dependencies.alertError).toHaveBeenCalledWith(languageEnglish.risuNest.account.logoutFailed)
+    })
+
+    it.each([true, false])('reports whether failed login rolled back without replacing the account (rolledBack=%s)', async rolledBack => {
+        const { account, dependencies, flow } = nativeDependencies()
+        flow.login.mockRejectedValue(new NativeAccountLoginError(rolledBack, new Error('synthetic login failure')))
+
+        await handler('onmessage', 'getNativeOfficialAccountFlow().login')(dependencies)({
+            data: { msg: { id: 'account-b', token: 'synthetic-other', data: { vaild: true } } },
+        })
+
+        expect(dependencies.DBState.db.account).toBe(account)
+        expect(dependencies.alertError).toHaveBeenCalledWith(rolledBack
+            ? languageEnglish.risuNest.account.loginFailed
+            : languageEnglish.risuNest.account.loginRollbackFailed)
     })
 })

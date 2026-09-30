@@ -1,3 +1,4 @@
+import { prepareNativePersistenceValue } from './nativePersistenceValue'
 import { invoke } from '@tauri-apps/api/core'
 import { nativeCommitTransport } from './nativeCommitTransport'
 
@@ -10,6 +11,9 @@ import {
     RevisionConflictError,
     SnapshotReleasedError,
     validateConversationWindowQuery,
+    validatePluginStorageValueQuery,
+    type PluginStorageValueQuery,
+    type PluginStorageValuePage,
     type ArchivePreview,
     type AssetAlias,
     type AssetAliasIdentity,
@@ -79,7 +83,7 @@ function restoreStoreError(error: unknown): unknown {
         return new RevisionConflictError(expected, actual)
     }
     if (code === 'snapshot-released') return new SnapshotReleasedError()
-    if ((code === 'validation' || code === 'store-error') && message !== undefined) {
+    if ((code === 'validation' || code === 'store-error' || code === 'commit-decode') && message !== undefined) {
         return new Error(message)
     }
     return error
@@ -230,6 +234,11 @@ export class SqlitePersistentDataStore implements PersistentDataStore {
         })
     }
 
+    readPluginStorageValues(query: PluginStorageValueQuery): Promise<PluginStorageValuePage> {
+        validatePluginStorageValueQuery(query)
+        return invokeStore('pds_read_plugin_storage_page', { query })
+    }
+
     queryPluginStorage(): Promise<PluginStorageCatalog> {
         return invokeStore('pds_query_plugin_storage', {})
     }
@@ -322,6 +331,9 @@ export class SqlitePersistentDataStore implements PersistentDataStore {
         assetAliases: AssetAlias[] = [],
         pluginStorageValues?: PluginStorageValue[],
     ): Promise<{ revision: DataRevision }> {
+        database = prepareNativePersistenceValue(database, 'replacement database')
+        assetAliases = prepareNativePersistenceValue(assetAliases, 'asset aliases')
+        pluginStorageValues = prepareNativePersistenceValue(pluginStorageValues, 'plugin storage')
         const { stagingId } = await invokeStore<{ stagingId: string }>('pds_replace_begin')
         try {
             const { characters, botPresets, ...root } = database
@@ -455,6 +467,11 @@ export class SqlitePersistentDataStore implements PersistentDataStore {
                     query: input,
                     lease,
                 })
+            },
+            readPluginStorageValues: async (query) => {
+                assertActive()
+                validatePluginStorageValueQuery(query)
+                return invokeStore('pds_read_plugin_storage_page', { query, lease })
             },
             queryPluginStorage: async () => {
                 assertActive()

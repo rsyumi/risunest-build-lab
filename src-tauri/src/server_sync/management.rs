@@ -312,17 +312,30 @@ pub(crate) fn cache_usage(
             usage.ledger_bytes += metadata.len();
             continue;
         }
+        let staging = cache.join("staging");
+        let transfers = if staging.is_dir() && cache.join("transfers.sqlite").is_file() {
+            checked_metadata(&cache.join("transfers.sqlite"))?;
+            rusqlite::Connection::open_with_flags(cache.join("transfers.sqlite"), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).ok()
+        } else { None };
         visit_files(&cache, &mut |file, bytes| {
             if is_object_database(&cache, file) {
                 // An allocation, counted once below. The bodies a cleanup
                 // would delete from it are counted row by row.
                 return Ok(());
             }
+            let orphan_chunk = file.parent().and_then(|directory| {
+                if directory.parent() != Some(staging.as_path()) { return None; }
+                directory.file_name().and_then(|name| name.to_str())
+            }).filter(|target| is_lower_hex_256(target)).is_some_and(|target| {
+                transfers.as_ref().is_some_and(|db| db.query_row::<bool, _, _>(
+                    "SELECT NOT EXISTS(SELECT 1 FROM chunks WHERE target=?1)", [target], |row| row.get(0),
+                ).unwrap_or(false))
+            });
             let reclaimable = blocked.is_none()
                 && is_lower_hex_256(&name)
-                && cache_object_hash(&cache, file).is_some_and(|hash| {
+                && (orphan_chunk || cache_object_hash(&cache, file).is_some_and(|hash| {
                     active_cache != Some(name.as_str()) || !references.contains(&hash)
-                });
+                }));
             if reclaimable && clean {
                 fs::remove_file(file)?;
                 return Ok(());

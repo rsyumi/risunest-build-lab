@@ -5,6 +5,30 @@
 
 use std::io;
 use std::path::{Path, PathBuf};
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+
+fn active_attempts() -> &'static Mutex<HashMap<PathBuf, Option<Attempt>>> {
+    static ATTEMPTS: OnceLock<Mutex<HashMap<PathBuf, Option<Attempt>>>> = OnceLock::new();
+    ATTEMPTS.get_or_init(Mutex::default)
+}
+
+#[cfg(target_os = "android")]
+#[no_mangle]
+pub extern "system" fn Java_io_github_rsyumi_risunest_MainActivity_cancelIncompleteBoot(
+    _env: jni::JNIEnv,
+    _activity: jni::objects::JObject,
+) {
+    let _ = std::panic::catch_unwind(|| {
+        let roots: Vec<_> = active_attempts().lock().unwrap_or_else(|error| error.into_inner())
+            .keys().cloned().collect();
+        for root in roots {
+            if let Err(error) = cancel_if_incomplete(&root) {
+                crate::nlog!("warn", "startup cancellation failed: {error}");
+            }
+        }
+    });
+}
 
 /// What one start attempt recorded before it either finished or disappeared.
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -47,6 +71,7 @@ pub(crate) fn begin(
     app_version: &str,
     started_at: i64,
 ) -> io::Result<BootDecision> {
+    let mut active = active_attempts().lock().unwrap_or_else(|error| error.into_inner());
     let previous = read(app_data_root)?;
     let consecutive_failures = previous
         .as_ref()
@@ -66,6 +91,7 @@ pub(crate) fn begin(
         .map_err(io::Error::other)?,
     )?;
     std::fs::rename(&staging, &path)?;
+    active.insert(app_data_root.to_path_buf(), previous.clone());
     Ok(BootDecision {
         consecutive_failures,
         previous,
@@ -74,10 +100,32 @@ pub(crate) fn begin(
 
 /// Records that the start finished. The next start sees no marker and begins from zero.
 pub(crate) fn complete(app_data_root: &Path) -> io::Result<()> {
-    match std::fs::remove_file(marker_path(app_data_root)) {
+    let mut active = active_attempts().lock().unwrap_or_else(|error| error.into_inner());
+    let result = match std::fs::remove_file(marker_path(app_data_root)) {
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
         result => result,
+    };
+    if result.is_ok() { active.remove(app_data_root); }
+    result
+}
+
+/// Explicitly abandoning startup restores the preceding failure history.
+pub(crate) fn cancel_if_incomplete(app_data_root: &Path) -> io::Result<()> {
+    let mut active = active_attempts().lock().unwrap_or_else(|error| error.into_inner());
+    let Some(previous) = active.get(app_data_root) else { return Ok(()); };
+    let path = marker_path(app_data_root);
+    if let Some(previous) = previous {
+        let staging = path.with_extension("json.writing");
+        std::fs::write(&staging, serde_json::to_vec(previous).map_err(io::Error::other)?)?;
+        std::fs::rename(staging, path)?;
+    } else {
+        match std::fs::remove_file(path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            result => result?,
+        }
     }
+    active.remove(app_data_root);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -86,6 +134,26 @@ mod tests {
 
     fn now(offset: i64) -> i64 {
         1_700_000_000_000 + offset
+    }
+
+    #[test]
+    fn explicit_cancel_preserves_previous_failure_history() {
+        let directory = tempfile::tempdir().unwrap();
+        for _ in 0..2 {
+            begin(directory.path(), "1", now(0)).unwrap();
+            cancel_if_incomplete(directory.path()).unwrap();
+            assert_eq!(read(directory.path()).unwrap(), None);
+        }
+        begin(directory.path(), "1", now(1)).unwrap();
+        let previous = read(directory.path()).unwrap();
+        assert_eq!(begin(directory.path(), "1", now(2)).unwrap().consecutive_failures, 1);
+        cancel_if_incomplete(directory.path()).unwrap();
+        cancel_if_incomplete(directory.path()).unwrap();
+        assert_eq!(read(directory.path()).unwrap(), previous);
+        assert_eq!(begin(directory.path(), "1", now(3)).unwrap().consecutive_failures, 1);
+        complete(directory.path()).unwrap();
+        cancel_if_incomplete(directory.path()).unwrap();
+        assert_eq!(read(directory.path()).unwrap(), None);
     }
 
     #[test]

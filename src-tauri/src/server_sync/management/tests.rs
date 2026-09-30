@@ -225,6 +225,27 @@ fn cache_usage_counts_files_beside_the_caches_without_opening_them_as_caches() {
 }
 
 #[test]
+fn chunk_cleanup_removes_only_spools_without_resumable_transfer_rows() {
+    let root = tempfile::tempdir().unwrap();
+    let identity = "a".repeat(64);
+    let cache = root.path().join("server-sync").join(&identity);
+    super::super::cache::Cache::open(&cache).unwrap();
+    let pending = "b".repeat(64);
+    let completed = "c".repeat(64);
+    for hash in [&pending, &completed] {
+        fs::create_dir_all(cache.join("staging").join(hash)).unwrap();
+        fs::write(cache.join("staging").join(hash).join("0"), b"synthetic chunk").unwrap();
+    }
+    let db = rusqlite::Connection::open(cache.join("transfers.sqlite")).unwrap();
+    db.execute_batch("CREATE TABLE chunks(target TEXT,part INTEGER,hash TEXT,size INTEGER)").unwrap();
+    db.execute("INSERT INTO chunks VALUES(?1,0,?2,15)", rusqlite::params![pending, "d".repeat(64)]).unwrap();
+    drop(db);
+    cache_usage(root.path(), Some(&identity), &BTreeSet::new(), None, true).unwrap();
+    assert!(cache.join("staging").join(&pending).join("0").is_file());
+    assert!(!cache.join("staging").join(&completed).join("0").exists());
+}
+
+#[test]
 fn linked_backup_and_cache_paths_are_rejected_without_following_them() {
     let root = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();

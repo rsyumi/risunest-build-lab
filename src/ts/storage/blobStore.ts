@@ -60,7 +60,7 @@ export interface InlayBlobMetadata {
     inlayType: InlayBlobType
     width?: number
     height?: number
-    preservationReason?: 'animation-cost'
+    preservationReason?: 'animation-cost' | 'color-profile'
 }
 
 export type BlobMetadata = AssetBlobMetadata | InlayBlobMetadata
@@ -77,7 +77,10 @@ export interface BlobListQuery {
     kind?: BlobKind
 }
 
+export type ConditionalBlobWrite = (data: Uint8Array, metadata: BlobWriteMetadata, sourceBytes: Uint8Array) => Promise<BlobMetadata | null>
+
 export interface BlobStore {
+    captureConditionalWrite?(key: string): Promise<ConditionalBlobWrite | null>
     put(key: string, data: Uint8Array, metadata: BlobWriteMetadata): Promise<BlobMetadata>
     putNewInlayImage?(
         key: string,

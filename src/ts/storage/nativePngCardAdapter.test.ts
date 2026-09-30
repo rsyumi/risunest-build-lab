@@ -4,7 +4,6 @@ import { describe, expect, it, vi } from 'vitest'
 import {
     decodePreparedNativePngCardMetadata,
     InvalidPreparedNativePngCardError,
-    UnsupportedPreparedNativeCharacterCardError,
 } from './nativePngCardAdapter'
 
 function encoded(value: unknown): string {
@@ -145,19 +144,69 @@ describe('prepared native PNG card metadata adapter', () => {
         expect(dependencies.decrypt).not.toHaveBeenCalled()
     })
 
-    it('classifies inline v3 and v2 payloads for legacy fallback before activation', async () => {
-        const inlineV3 = v3() as any
-        inlineV3.data.assets = [{ type: 'icon', name: 'main', uri: 'data:image/png;base64,AA==' }]
-        await expect(decodePreparedNativePngCardMetadata({
-            ccv3: encoded(inlineV3),
-        }, unusedRccDependencies)).rejects.toBeInstanceOf(UnsupportedPreparedNativeCharacterCardError)
-
-        const inlineV2 = v2() as any
-        inlineV2.data.extensions.risuai = {
-            additionalAssets: [['inline', 'AA==', 'png']],
+    it('stages v2 inline emotions, additional assets and VITS using legacy base64 decoding', async () => {
+        const inline = v2() as any
+        inline.data.extensions.risuai = {
+            emotions: [['happy', 'AQI- _==']],
+            additionalAssets: [['audio', 'AwQ=', 'clip.wav']],
+            vits: { model: 'BQY=' },
         }
-        await expect(decodePreparedNativePngCardMetadata({
-            chara: encoded(inlineV2),
-        }, unusedRccDependencies)).rejects.toBeInstanceOf(UnsupportedPreparedNativeCharacterCardError)
+        const staged: Uint8Array[] = []
+        const stageInlineAsset = vi.fn(async (bytes: Uint8Array, name: string) => {
+            staged.push(bytes)
+            return { token: `inline-${staged.length}`, referenceKey: `inline-${staged.length}`,
+                logicalId: `assets/${staged.length}.png`, objectHash: 'a'.repeat(64),
+                byteSize: bytes.length, mime: '', name: name || 'inline.png', ext: 'png' }
+        })
+        const result = await decodePreparedNativePngCardMetadata({ chara: encoded(inline) }, {
+            ...unusedRccDependencies, stageInlineAsset,
+        }) as any
+        expect(staged).toEqual(['AQI- _==', 'AwQ=', 'BQY='].map((value) => Buffer.from(value, 'base64')))
+        expect(stageInlineAsset.mock.calls.map(([, name]) => name)).toEqual(['', 'clip.wav', ''])
+        expect(result.data.extensions.risuai).toEqual({
+            emotions: [['happy', '__asset:inline-1']],
+            additionalAssets: [['audio', '__asset:inline-2', 'clip.wav']],
+            vits: { model: '__asset:inline-3' },
+        })
+    })
+
+    it('stages v3 data URI bytes while retaining native and remote references', async () => {
+        const inline = v3() as any
+        inline.data.assets = [
+            { type: 'icon', name: 'main', uri: 'data:image/png;base64,AQI=,ignored' },
+            { type: 'emotion', name: 'happy', uri: '__asset:existing' },
+            { type: 'icon', name: 'other', uri: 'ccdefault:' },
+        ]
+        const stageInlineAsset = vi.fn(async (bytes: Uint8Array) => ({
+            token: 'inline', referenceKey: 'inline', logicalId: 'assets/inline.png',
+            objectHash: 'a'.repeat(64), byteSize: bytes.length, mime: '', name: 'inline.png', ext: 'png',
+        }))
+        const result = await decodePreparedNativePngCardMetadata({ ccv3: encoded(inline) }, {
+            ...unusedRccDependencies, stageInlineAsset,
+        }) as any
+        expect(stageInlineAsset).toHaveBeenCalledExactlyOnceWith(Buffer.from('AQI=', 'base64'), '')
+        expect(result.data.assets.map((asset: any) => asset.uri)).toEqual(['__asset:inline', '__asset:existing', 'ccdefault:'])
+    })
+
+    it('skips an encoded data URI at the legacy fifty MiB boundary', async () => {
+        const inline = v3() as any
+        inline.data.assets = [{ uri: `data:application/octet-stream;base64,${'A'.repeat(50 * 1024 * 1024)}` }]
+        const stageInlineAsset = vi.fn()
+        const onOversizedInlineAsset = vi.fn()
+        const result = await decodePreparedNativePngCardMetadata({ ccv3: encoded(inline) }, {
+            ...unusedRccDependencies, stageInlineAsset, onOversizedInlineAsset,
+        }) as any
+        expect(result.data.assets).toEqual([])
+        expect(stageInlineAsset).not.toHaveBeenCalled()
+        expect(onOversizedInlineAsset).toHaveBeenCalledOnce()
+    })
+
+    it('propagates inline staging failure instead of selecting a whole-file fallback', async () => {
+        const inline = v3() as any
+        inline.data.assets = [{ uri: 'data:image/png;base64,AA==' }]
+        const failure = new Error('cancelled staging')
+        await expect(decodePreparedNativePngCardMetadata({ ccv3: encoded(inline) }, {
+            ...unusedRccDependencies, stageInlineAsset: async () => { throw failure },
+        })).rejects.toBe(failure)
     })
 })

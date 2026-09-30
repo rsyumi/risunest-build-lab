@@ -8,6 +8,7 @@ use crate::{
     asset_repository::PayloadCas,
     external_storage::capture::{CaptureCatalog, DurableCaptureReference},
     local_backup::CancellationProbe,
+    server_sync::residency::HydrationSession,
 };
 use risunest_external_storage_format::format::library_fingerprint_domain;
 use rusqlite::{params, OptionalExtension};
@@ -78,6 +79,14 @@ const GC_REFERENCE_LIMIT: i64 = 32;
 fn invalid(message: &str) -> StoreError {
     StoreError::Validation {
         message: message.into(),
+    }
+}
+
+fn hydration_error(error: crate::server_sync::SyncError) -> StoreError {
+    if error.code == "cancelled" {
+        invalid("External capture cancelled")
+    } else {
+        invalid(&format!("External capture hydration failed: {}", error.code))
     }
 }
 
@@ -358,14 +367,12 @@ impl PersistentStore {
         Ok(removed)
     }
 
-    fn hydrate_hash(&self, hash: &str, probe: &dyn CancellationProbe) -> StoreResult<()> {
-        check(probe)?;
-        if PayloadCas::new(&self.repository_root)?
-            .stat_object(hash)?
-            .is_some()
-        {
-            return Ok(());
-        }
+    fn hydrate_hashes(
+        &self,
+        session: &mut HydrationSession,
+        hashes: &[String],
+        probe: &dyn CancellationProbe,
+    ) -> StoreResult<()> {
         let cancellation = || {
             if probe.is_cancelled() {
                 Err(crate::server_sync::SyncError::new("cancelled", 409))
@@ -373,22 +380,16 @@ impl PersistentStore {
                 Ok(())
             }
         };
-        match crate::server_sync::residency::open_or_hydrate_with_check(
-            &self.repository_root,
-            hash,
-            &cancellation,
-        ) {
-            Ok(Some(file)) => {
-                drop(file);
-                Ok(())
+        for group in hashes.chunks(64) {
+            check(probe)?;
+            let unavailable = session
+                .hydrate_many(group, &cancellation)
+                .map_err(hydration_error)?;
+            if !unavailable.is_empty() {
+                return Err(invalid("Required capture payload is unavailable"));
             }
-            Ok(None) => Err(invalid("Required capture payload is unavailable")),
-            Err(error) if error.code == "cancelled" => Err(invalid("External capture cancelled")),
-            Err(error) => Err(invalid(&format!(
-                "External capture hydration failed: {}",
-                error.code
-            ))),
         }
+        Ok(())
     }
 
     /// Only owner manifests, which projection reads to enumerate payloads. A
@@ -396,13 +397,16 @@ impl PersistentStore {
     /// locally or only through custody.
     fn hydrate_dependencies(
         &self,
+        session: &mut HydrationSession,
         dependencies: BTreeSet<Dependency>,
         probe: &dyn CancellationProbe,
     ) -> StoreResult<()> {
-        for dependency in dependencies.into_iter().filter(|item| item.manifest) {
-            self.hydrate_hash(&dependency.hash, probe)?;
-        }
-        Ok(())
+        let hashes = dependencies
+            .into_iter()
+            .filter(|item| item.manifest)
+            .map(|item| item.hash)
+            .collect::<Vec<_>>();
+        self.hydrate_hashes(session, &hashes, probe)
     }
 
     fn full_dependency_page(&self, after: &str) -> StoreResult<BTreeSet<Dependency>> {
@@ -602,6 +606,8 @@ impl PersistentStore {
             }
         };
         if crate::server_sync::residency::Residency::exists(&self.repository_root) {
+            let mut session = HydrationSession::new(&self.repository_root, None)
+                .map_err(hydration_error)?;
             match mode {
                 HydrationMode::Reuse => {}
                 HydrationMode::Incremental => {
@@ -614,7 +620,7 @@ impl PersistentStore {
                         params![identity.generation, after_revision, identity.revision], |row| row.get(0),
                     )?;
                     if full {
-                        self.hydrate_full_dependencies(probe)?;
+                        self.hydrate_full_dependencies(&mut session, probe)?;
                         mode = HydrationMode::Rebuild;
                     } else {
                         let mut after = None;
@@ -628,11 +634,11 @@ impl PersistentStore {
                                 break;
                             }
                             after = keys.last().cloned();
-                            self.hydrate_dependencies(dependencies, probe)?;
+                            self.hydrate_dependencies(&mut session, dependencies, probe)?;
                         }
                     }
                 }
-                HydrationMode::Rebuild => self.hydrate_full_dependencies(probe)?,
+                HydrationMode::Rebuild => self.hydrate_full_dependencies(&mut session, probe)?,
             }
         }
         if sync_selection::identity(&self.connection)? != identity {
@@ -646,7 +652,11 @@ impl PersistentStore {
         })
     }
 
-    fn hydrate_full_dependencies(&self, probe: &dyn CancellationProbe) -> StoreResult<()> {
+    fn hydrate_full_dependencies(
+        &self,
+        session: &mut HydrationSession,
+        probe: &dyn CancellationProbe,
+    ) -> StoreResult<()> {
         let mut after = String::new();
         loop {
             check(probe)?;
@@ -659,7 +669,7 @@ impl PersistentStore {
                 .expect("nonempty dependency page")
                 .hash
                 .clone();
-            self.hydrate_dependencies(dependencies, probe)?;
+            self.hydrate_dependencies(session, dependencies, probe)?;
         }
     }
 
@@ -682,11 +692,17 @@ impl PersistentStore {
             .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))?
             .collect::<Result<Vec<_>, _>>()?;
         drop(query);
-        for (hash, bytes) in payloads {
+        let mut session = HydrationSession::new(&self.repository_root, None)
+            .map_err(hydration_error)?;
+        for group in payloads.chunks(64) {
             check(probe)?;
-            if cas.stat_object(&hash)? != u64::try_from(bytes).ok() {
-                self.hydrate_hash(&hash, probe)?;
+            let mut missing = Vec::new();
+            for (hash, bytes) in group {
+                if cas.stat_object(hash)? != u64::try_from(*bytes).ok() {
+                    missing.push(hash.clone());
+                }
             }
+            self.hydrate_hashes(&mut session, &missing, probe)?;
         }
         let reference = capture.durable_reference(&self.repository_root)?;
         crate::external_storage::capture::validate_recovery_sources(
@@ -726,7 +742,7 @@ impl PersistentStore {
             )?;
             content_change_index::prune(&tx)?;
             tx.commit()?;
-            if self.cleanup_capture_cache(&candidate.id)? {
+            if !probe.is_cancelled() && self.cleanup_capture_cache(&candidate.id)? {
                 self.collect_released_external_content();
             }
             return Ok(CapturedSnapshot {
@@ -797,8 +813,9 @@ impl PersistentStore {
         let mut catalog = CaptureCatalog::create(&directory, &root, prior)?;
         let prepared = self.prepare_content_capture(&id, consumer, identity.revision)?;
         let projected_records = prepared.project(&mut catalog, probe)?;
+        check(probe)?;
         let capture_id = prepared.register(self, &catalog, &scope_id, CODEC)?;
-        if self.cleanup_capture_cache(&capture_id)? {
+        if !probe.is_cancelled() && self.cleanup_capture_cache(&capture_id)? {
             self.collect_released_external_content();
         }
         Ok(CapturedSnapshot {
@@ -963,6 +980,42 @@ mod conflict_cleanup_tests {
             plaintext_length: 1,
             plaintext_sha256: [1; 32],
         }
+    }
+
+    #[test]
+    fn grouped_manifest_hydration_preserves_scope_unavailability_and_cancellation() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = PersistentStore::open(directory.path()).unwrap();
+        let cas = PayloadCas::new(directory.path()).unwrap();
+        let mut dependencies = BTreeSet::new();
+        for index in 0..130 {
+            let object = cas.prepare_bytes(format!("synthetic manifest {index}").as_bytes()).unwrap();
+            dependencies.insert(Dependency { hash: object.content_hash, manifest: true });
+        }
+        let absent = "a1".repeat(32);
+        dependencies.insert(Dependency { hash: absent.clone(), manifest: false });
+        let mut session = HydrationSession::new(directory.path(), None).unwrap();
+        store.hydrate_dependencies(
+            &mut session, dependencies.clone(), &crate::local_backup::NeverCancelled,
+        ).unwrap();
+        assert_eq!(cas.stat_object(&absent).unwrap(), None);
+
+        dependencies.insert(Dependency { hash: absent, manifest: true });
+        let error = store.hydrate_dependencies(
+            &mut session, dependencies, &crate::local_backup::NeverCancelled,
+        ).unwrap_err();
+        assert!(matches!(error, StoreError::Validation { message }
+            if message == "Required capture payload is unavailable"));
+
+        struct Cancelled;
+        impl CancellationProbe for Cancelled {
+            fn is_cancelled(&self) -> bool { true }
+        }
+        let error = store.hydrate_hashes(
+            &mut session, &["b2".repeat(32)], &Cancelled,
+        ).unwrap_err();
+        assert!(matches!(error, StoreError::Validation { message }
+            if message == "External capture cancelled"));
     }
 
     #[test]

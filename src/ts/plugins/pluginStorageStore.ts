@@ -2,6 +2,7 @@ import {
     type PersistentDataStore,
     type PluginStorageMutation,
     type PluginStorageSummary,
+    type PluginStorageValueCursor,
 } from '../storage/persistentDataStore'
 import { defineOwnEnumerableProperty } from '../storage/ownEnumerableProperty'
 import { ByteBudgetLru } from '../util/byteBudgetLru'
@@ -232,7 +233,7 @@ export function createPluginStorageStore(
         await store.open()
         return acquireCurrentRevisionWithRetry(
             (revision) => store.acquireRevision(revision),
-            async () => (await store.queryPluginStorage()).revision,
+            async () => (await store.readRoot()).revision,
         )
     }
 
@@ -431,19 +432,17 @@ export function createPluginStorageStore(
         async snapshot() {
             const lease = await acquirePinnedPluginStorageLease()
             return withPersistentRevisionLease(lease, async (reader) => {
-                const pinnedCatalog = await reader.queryPluginStorage()
                 const storage: Record<string, unknown> = {}
-                for (const item of pinnedCatalog.items) {
-                    if (item.owner !== owner) continue
-                    const record = await reader.readPluginStorage(owner, item.key)
-                    if (record) {
-                        defineOwnEnumerableProperty(
-                            storage,
-                            item.key,
-                            structuredClone(record.value),
-                        )
+                let afterKey: PluginStorageValueCursor | undefined
+                do {
+                    const page = await reader.readPluginStorageValues({ owner, afterKey })
+                    if (page.revision !== reader.revision) throw new Error('Plugin storage revision changed')
+                    for (const item of page.items) {
+                        if (item.owner !== owner) throw new Error('Plugin storage owner changed')
+                        defineOwnEnumerableProperty(storage, item.key, structuredClone(item.value))
                     }
-                }
+                    afterKey = page.nextCursor ?? undefined
+                } while (afterKey)
                 return storage
             })
         },

@@ -1,6 +1,7 @@
 """External WebKitWebDriver runner. Only starts an isolated synthetic benchmark build."""
 import argparse
 import json
+import importlib.util
 import os
 from pathlib import Path
 import socket
@@ -14,8 +15,14 @@ import urllib.error
 parser = argparse.ArgumentParser()
 parser.add_argument('--binary', required=True)
 parser.add_argument('--output', required=True)
-parser.add_argument('--phase', choices=['persistence', 'reload', 'regex'], required=True)
+parser.add_argument('--phase', choices=['persistence', 'reload', 'regex', 'appearance-seed', 'appearance-app'], required=True)
+parser.add_argument('--app-theme', choices=['light', 'dark'])
+parser.add_argument('--system-theme', choices=['light', 'dark'])
+parser.add_argument('--capture-size')
+parser.add_argument('--display-owner-pid', type=int)
 args = parser.parse_args()
+if args.phase.startswith('appearance-') and (not args.app_theme or not args.system_theme):
+    raise RuntimeError('Appearance phase requires app and system theme labels')
 out = Path(args.output).resolve()
 out.mkdir(parents=True, exist_ok=True)
 marker = out / 'synthetic-profile.txt'
@@ -39,6 +46,8 @@ base = f'http://127.0.0.1:{port}'
 log = (out / f'{args.phase}-driver.log').open('w')
 driver = subprocess.Popen(['WebKitWebDriver', '--host=127.0.0.1', f'--port={port}'], stdout=log, stderr=log)
 session = None
+capture = None
+appearance_capture = None
 stop = threading.Event()
 memory = []
 
@@ -92,6 +101,13 @@ try:
             break
         except OSError:
             time.sleep(0.1)
+    if args.phase == 'appearance-app':
+        specification = importlib.util.spec_from_file_location('appearance_capture', Path(__file__).resolve().parents[1] / 'macos/run.py')
+        appearance_capture = importlib.util.module_from_spec(specification)
+        specification.loader.exec_module(appearance_capture)
+        capture = appearance_capture.start_appearance_capture(out,
+            f'appearance-{args.system_theme}-{args.app_theme}', 'linux', os.environ.get('DISPLAY'),
+            args.capture_size, args.display_owner_pid)
     created = call('POST', '/session', {'capabilities': {'alwaysMatch': {'webkitgtk:browserOptions': {'binary': str(Path(args.binary).resolve()), 'args': []}}}})
     session = created['sessionId']
     call('POST', f'/session/{session}/window/rect', {'width': 1280, 'height': 900})
@@ -108,7 +124,9 @@ try:
         time.sleep(0.1)
     thread = threading.Thread(target=monitor, daemon=True)
     thread.start()
-    execute(f"window.__linuxResult=null; window.__RISUNEST_LINUX_BENCHMARK__.{args.phase}().then(result=>window.__linuxResult={{result}},error=>window.__linuxResult={{error:String(error)}})")
+    operation = (f"startupAppearance({str(args.phase == 'appearance-seed').lower()},{json.dumps(args.app_theme)})"
+                 if args.phase.startswith('appearance-') else f"{args.phase}()")
+    execute(f"window.__linuxResult=null; window.__RISUNEST_LINUX_BENCHMARK__.{operation}.then(result=>window.__linuxResult={{result}},error=>window.__linuxResult={{error:String(error)}})")
     deadline = time.monotonic() + 600
     while time.monotonic() < deadline:
         result = execute('return window.__linuxResult')
@@ -120,6 +138,13 @@ try:
     if 'error' in result:
         raise RuntimeError(result['error'])
     result = result['result']
+    if args.phase == 'appearance-app':
+        if result['systemDark'] != (args.system_theme == 'dark'):
+            raise RuntimeError('WebKit observed system appearance differs from the requested theme')
+        completed_capture = capture
+        capture = None
+        result['capture'] = appearance_capture.finish_appearance_capture(completed_capture)
+        result['systemTheme'] = args.system_theme
     stop.set()
     thread.join(timeout=2)
     if not memory or not any(item['processes'] for item in memory):
@@ -130,9 +155,16 @@ try:
         previous = json.loads((out / 'persistence.json').read_text())
         if result['revision'] != previous['revision'] or result['finalHash'] != previous['finalHash']:
             raise RuntimeError('Restart hash/revision mismatch')
-    (out / f'{args.phase}.json').write_text(json.dumps(result, indent=2))
-    print(json.dumps({'phase': args.phase, 'passed': True, 'samples': len(result.get('samples', [])), 'memorySamples': len(memory)}))
+    output_name = f'{args.phase}-{args.system_theme}-{args.app_theme}' if args.phase.startswith('appearance-') else args.phase
+    (out / f'{output_name}.json').write_text(json.dumps(result, indent=2))
+    print(json.dumps({'phase': args.phase, 'passed': None if args.phase.startswith('appearance-') else True, 'visualReview': 'required' if args.phase.startswith('appearance-') else None, 'samples': len(result.get('samples', [])), 'memorySamples': len(memory)}))
 finally:
+    capture_error = None
+    if capture is not None:
+        try:
+            appearance_capture.finish_appearance_capture(capture)
+        except Exception as error:
+            capture_error = error
     stop.set()
     if session:
         try:
@@ -146,3 +178,5 @@ finally:
         driver.kill()
         driver.wait()
     log.close()
+    if capture_error is not None:
+        raise capture_error

@@ -18,7 +18,7 @@ const post = (
 ) =>
   exports.default.fetch(endpoint(id), {
     method: "POST",
-    headers: { "content-type": "text/plain", ...headers },
+    headers: { "authorization": `Bearer ${"a".repeat(64)}`, "cf-connecting-ip": crypto.randomUUID(), "content-type": "text/plain", ...headers },
     body,
   });
 const count = async () =>
@@ -50,7 +50,7 @@ it("stores and retrieves the exact opaque envelope without caching", async () =>
   expect(await fetched.text()).toBe(body);
   const stored = await env.DB.prepare("SELECT * FROM endpoints").all();
   expect(stored.results).toEqual([
-    { uuid: UUID, envelope: body, updated_at: expect.any(Number) },
+    { uuid: UUID, envelope: body, writer: expect.stringMatching(/^[0-9a-f]{64}$/), updated_at: expect.any(Number) },
   ]);
   const timestamp = stored.results[0]!.updated_at as number;
   expect(Number.isInteger(timestamp)).toBe(true);
@@ -76,13 +76,13 @@ it("refreshes the timestamp on identical POSTs but not GET or rejected POSTs", a
   expect(await readTime()).toBeLessThanOrEqual(Date.now());
 });
 
-it("deletes at the 30-day boundary, preserves newer rows and frees capacity", async () => {
+it("expires at the 30-day boundary while preserving ownership and the identity cap", async () => {
   const scheduledTime = Date.now();
   const cutoff = scheduledTime - 30 * 24 * 60 * 60 * 1000;
   const ids = Array.from({ length: 3 }, () => crypto.randomUUID());
   for (const [i, offset] of [-1, 0, 1].entries()) {
     await env.DB.prepare(
-      "INSERT INTO endpoints (uuid, envelope, updated_at) VALUES (?1, ?2, ?3)",
+      "INSERT INTO endpoints (uuid, envelope, updated_at, writer) VALUES (?1, ?2, ?3, 'owned')",
     )
       .bind(ids[i]!, opaque(), cutoff + offset)
       .run();
@@ -91,14 +91,14 @@ it("deletes at the 30-day boundary, preserves newer rows and frees capacity", as
   // Expired rows remain readable until the scheduled cleanup runs.
   expect((await exports.default.fetch(endpoint(ids[0]!))).status).toBe(200);
   await worker.scheduled(createScheduledController({ scheduledTime }), env);
-  expect(await count()).toBe(1);
+  expect(await count()).toBe(3);
   for (const id of ids.slice(0, 2)) {
     expect((await exports.default.fetch(endpoint(id))).status).toBe(404);
   }
   expect((await exports.default.fetch(endpoint(ids[2]!))).status).toBe(200);
-  expect((await post()).status).toBe(204);
+  expect((await post()).status).toBe(503);
   await worker.scheduled(createScheduledController({ scheduledTime }), env);
-  expect(await count()).toBe(2);
+  expect(await count()).toBe(3);
 });
 
 it("preserves a refreshed row and allows reposting after cleanup", async () => {
@@ -116,7 +116,9 @@ it("preserves a refreshed row and allows reposting after cleanup", async () => {
     }),
     env,
   );
-  expect(await count()).toBe(0);
+  expect(await count()).toBe(1);
+  expect((await exports.default.fetch(endpoint())).status).toBe(404);
+  expect((await post(opaque(9), UUID, { authorization: `Bearer ${"b".repeat(64)}` })).status).toBe(403);
   expect((await post()).status).toBe(204);
   expect(await (await exports.default.fetch(endpoint())).text()).toBe(opaque());
 });
@@ -141,7 +143,8 @@ it("reports cleanup failures without leaking D1 details and recovers next run", 
     createScheduledController({ scheduledTime: Date.now() }),
     env,
   );
-  expect(await count()).toBe(0);
+  expect(await count()).toBe(1);
+  expect((await exports.default.fetch(endpoint())).status).toBe(404);
 });
 
 it("normalizes UUID case without redirecting or creating another record", async () => {
@@ -282,12 +285,61 @@ it("accepts the documented UTF-8 media type and identity encoding", async () => 
   ).toBe(204);
 });
 
-it("retries, unauthenticated overwrites and old-envelope replay remain accepted", async () => {
+it("authenticated retries and owner updates remain accepted", async () => {
   for (const body of [opaque(1), opaque(1), opaque(2), opaque(1)]) {
     expect((await post(body)).status).toBe(204);
     expect(await (await exports.default.fetch(endpoint())).text()).toBe(body);
     expect(await count()).toBe(1);
   }
+});
+
+it("rejects missing and wrong writer capabilities without changing owned bytes or timestamps", async () => {
+  await post();
+  const before = await env.DB.prepare("SELECT * FROM endpoints").all();
+  for (const authorization of ["", `Bearer ${"b".repeat(64)}`, `Bearer ${"a".repeat(63)}`]) {
+    const rejected = await post(opaque(5), UUID, { authorization });
+    expect(rejected.status).toBe(403);
+    expect(await rejected.json()).toEqual({ error: "record-owned" });
+    expect((await env.DB.prepare("SELECT * FROM endpoints").all()).results).toEqual(before.results);
+  }
+  expect(JSON.stringify(before.results)).not.toContain("a".repeat(64));
+});
+
+it("admits one owner during concurrent first writes", async () => {
+  const responses = await Promise.all(["a", "b"].map((key, i) =>
+    post(opaque(i + 1), UUID, { authorization: `Bearer ${key.repeat(64)}` })));
+  expect(responses.map((response) => response.status).sort()).toEqual([204, 403]);
+  expect(await count()).toBe(1);
+  const winner = responses.findIndex((response) => response.status === 204);
+  expect(await (await exports.default.fetch(endpoint())).text()).toBe(opaque(winner + 1));
+});
+
+it("limits sustained creation from one caller but permits owner updates after admission is exhausted", async () => {
+  const origin = crypto.randomUUID();
+  const localEnv = { ...env, MAX_RECORDS: 100 };
+  const ids = Array.from({ length: 12 }, () => crypto.randomUUID());
+  const send = (id: string) => worker.fetch(new Request(endpoint(id), {
+    method: "POST",
+    headers: { "content-type": "text/plain", authorization: `Bearer ${"a".repeat(64)}`, "cf-connecting-ip": origin },
+    body: opaque(),
+  }), localEnv);
+  for (const id of ids.slice(0, 10)) expect((await send(id)).status).toBe(204);
+  for (const id of ids.slice(10)) {
+    const response = await send(id);
+    expect(response.status).toBe(429);
+    expect(response.headers.get("retry-after")).toBe("60");
+  }
+  expect((await send(ids[0]!)).status).toBe(204);
+  expect(await count()).toBe(10);
+});
+
+it("requires a trusted caller origin for creation but not existing owner updates", async () => {
+  const headers = { authorization: `Bearer ${"a".repeat(64)}`, "content-type": "text/plain" };
+  const send = () => worker.fetch(new Request(endpoint(), { method: "POST", headers, body: opaque() }), env);
+  expect((await send()).status).toBe(403);
+  expect(await count()).toBe(0);
+  await post();
+  expect((await send()).status).toBe(204);
 });
 
 it("atomically bounds concurrent registrations but allows updates at capacity", async () => {
@@ -338,7 +390,7 @@ it("returns bounded errors on D1 outages without leaking or logging exceptions",
     const request = new Request(endpoint(), {
       method,
       ...(method === "POST"
-        ? { body: opaque(), headers: { "content-type": "text/plain" } }
+        ? { body: opaque(), headers: { "authorization": `Bearer ${"a".repeat(64)}`, "cf-connecting-ip": crypto.randomUUID(), "content-type": "text/plain" } }
         : {}),
     });
     const response = await worker.fetch(request, env);
@@ -360,7 +412,7 @@ it("never fetches an endpoint or logs a successful request", async () => {
   const errorLog = vi.spyOn(console, "error");
   const request = new Request(endpoint(), {
     method: "POST",
-    headers: { "content-type": "text/plain" },
+    headers: { "authorization": `Bearer ${"a".repeat(64)}`, "cf-connecting-ip": crypto.randomUUID(), "content-type": "text/plain" },
     body: opaque(),
   });
   expect((await worker.fetch(request, env)).status).toBe(204);
@@ -374,7 +426,7 @@ it("rejects invalid capacity configuration without writing", async () => {
   for (const limit of [0, -1, 1.5, 10001, NaN]) {
     const request = new Request(endpoint(), {
       method: "POST",
-      headers: { "content-type": "text/plain" },
+      headers: { "authorization": `Bearer ${"a".repeat(64)}`, "cf-connecting-ip": crypto.randomUUID(), "content-type": "text/plain" },
       body: opaque(),
     });
     const response = await worker.fetch(request, {

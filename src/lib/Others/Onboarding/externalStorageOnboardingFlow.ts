@@ -4,7 +4,7 @@
  * checked without a DOM.
  */
 
-import { externalConflictActions, restorableExternalHistoryItems } from 'src/ts/storage/sync/external/connection'
+import { externalConflictActions, externalJobIsPaused, restorableExternalHistoryItems } from 'src/ts/storage/sync/external/connection'
 import {
     externalRestorableSections,
     externalRestoreAreas,
@@ -82,4 +82,38 @@ export function externalOnboardingSyncOutcome(
     if (result.kind === 'complete') return 'complete'
     if (result.kind === 'blocked' && result.reason === 'external-storage-conflict') return 'conflict'
     return 'error'
+}
+
+export interface ExternalOnboardingSelectionOwner {
+    connectionId: string
+    selectionEpoch: string
+}
+
+export async function abandonExternalOnboardingSelection(
+    owner: ExternalOnboardingSelectionOwner,
+    bridge: Pick<import('src/ts/storage/sync/external/bridge').ExternalStorageBridge,
+        'getState' | 'getJob' | 'cancelJob' | 'setSyncTarget'>,
+    wait: () => Promise<void> = () => new Promise(resolve => setTimeout(resolve, 100)),
+): Promise<void> {
+    const state = await bridge.getState()
+    const selection = state.selection
+    if (selection.kind !== 'external' || selection.connectionId !== owner.connectionId
+        || selection.selectionEpoch !== owner.selectionEpoch) return
+    const pending = state.jobs.filter(job => job.connectionId === owner.connectionId
+        && !['succeeded', 'failed', 'cancelled', 'conflict'].includes(job.state))
+    if (pending.some(job => job.state === 'uncertain' || job.error?.reason === 'publication-unknown')) {
+        throw { kind: 'preconditionFailed' }
+    }
+    for (const initial of pending) {
+        let job = await bridge.cancelJob(initial.id)
+        while (job.state === 'queued' || job.state === 'running'
+            || (job.state === 'waiting' && !externalJobIsPaused(job))) {
+            await wait()
+            job = await bridge.getJob(job.id)
+        }
+        if (job.state === 'uncertain' || job.error?.reason === 'publication-unknown') {
+            throw { kind: 'preconditionFailed' }
+        }
+    }
+    await bridge.setSyncTarget(null, owner.selectionEpoch)
 }

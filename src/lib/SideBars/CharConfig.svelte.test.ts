@@ -139,3 +139,21 @@ it('ignores an old asset preview that resolves after character navigation', asyn
     await tick()
     expect(document.querySelector('table img')?.getAttribute('src')).toBe(currentPreview)
 })
+
+it('resolves a large additional-asset list only while its submenu is open and ignores late results', async () => {
+    const pending = deferred<string>()
+    mocks.fileSrc.mockReturnValue(pending.promise)
+    DBState.db.useAdditionalAssetsPreview = true
+    DBState.db.characters[0].additionalAssets = Array.from({ length: 300 }, (_, index) => [`synthetic-${index}`, `assets/synthetic-${index}.png`, 'png']) as any
+    await setup(4)
+    expect(mocks.fileSrc).not.toHaveBeenCalled()
+    CharConfigSubMenu.set(1)
+    await tick()
+    expect(mocks.fileSrc).toHaveBeenCalledTimes(300)
+    CharConfigSubMenu.set(4)
+    await tick()
+    pending.resolve('data:,synthetic-late')
+    await tick()
+    expect(mocks.fileSrc).toHaveBeenCalledTimes(300)
+    expect(document.querySelector('img[src="data:,synthetic-late"]')).toBeNull()
+})

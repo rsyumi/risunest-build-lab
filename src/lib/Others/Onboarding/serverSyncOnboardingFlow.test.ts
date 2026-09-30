@@ -6,6 +6,7 @@ import {
     serverSyncOnboardingOpening,
     serverSyncOnboardingOutcome,
     serverSyncOnboardingResume,
+    createServerSyncOnboardingContinuation,
 } from './serverSyncOnboardingFlow'
 
 const head = {
@@ -69,7 +70,7 @@ describe('sync server onboarding outcome', () => {
         expect(serverSyncOnboardingOutcome(finished('idle'))).toBe('complete')
         const stale = finished('idle')
         stale.status!.dirtyRecords = 1
-        expect(serverSyncOnboardingOutcome(stale)).toBe('error')
+        expect(serverSyncOnboardingOutcome(stale)).toBe('continuing')
     })
 
     it('offers the conflict choice when the first comparison found one', () => {
@@ -90,7 +91,7 @@ describe('sync server onboarding outcome', () => {
     it('leaves the sync screen only for a completed attempt', () => {
         expect(serverSyncOnboardingNext('complete')).toBe('done')
         // A paused attempt stays on the screen so it can be continued there.
-        for (const outcome of ['syncing', 'paused', 'conflict', 'pending', 'error', undefined] as const)
+        for (const outcome of ['syncing', 'paused', 'conflict', 'pending', 'continuing', 'error', undefined] as const)
             expect(serverSyncOnboardingNext(outcome)).toBeUndefined()
     })
 
@@ -99,6 +100,23 @@ describe('sync server onboarding outcome', () => {
         expect(
             serverSyncOnboardingOutcome({ ...finished('pending'), error: 'server-unreachable' }),
         ).toBe('error')
+    })
+    it('bounds unchanging tails to two follow-ups and continues when the tail shrinks', () => {
+        const next = createServerSyncOnboardingContinuation()
+        const snapshot = finished('idle')
+        snapshot.status!.dirtyRecords = 5
+        expect(next(snapshot)).toBe(true)
+        expect(next(snapshot)).toBe(false)
+        snapshot.attemptId = 2
+        expect(next(snapshot)).toBe(true)
+        snapshot.attemptId = 3
+        expect(next(snapshot)).toBe(false)
+        snapshot.attemptId = 4
+        snapshot.status!.dirtyRecords = 4
+        expect(next(snapshot)).toBe(true)
+    })
+    it('shows registration errors even if a prior pause was retained', () => {
+        expect(serverSyncOnboardingOutcome({ ...finished('idle'), paused: true, error: 'unauthorized' })).toBe('error')
     })
 })
 

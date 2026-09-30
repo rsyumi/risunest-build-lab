@@ -41,6 +41,16 @@ pub struct PreparedPayload {
     pub directory_entries_synced: bool,
 }
 
+pub(crate) struct StagedPayload {
+    verified_file: File,
+    staging: StagingFile,
+    repository_root: PathBuf,
+    identity: ExactFileIdentity,
+    content_hash: String,
+    byte_size: u64,
+    directory_entries_synced: bool,
+}
+
 #[derive(Debug)]
 pub struct PayloadCas {
     repository_root: PathBuf,
@@ -248,6 +258,25 @@ impl PayloadCas {
         reader: &mut impl Read,
         expected: Option<(&str, u64)>,
     ) -> Result<PreparedPayload, io::Error> {
+        let staged = self.stage_reader_inner(reader, expected)?;
+        self.publish_staged(staged)
+    }
+
+    pub(crate) fn stage_reader_expected(
+        &self,
+        reader: &mut impl Read,
+        expected_content_hash: &str,
+        expected_byte_size: u64,
+    ) -> io::Result<StagedPayload> {
+        validate_content_hash(expected_content_hash)?;
+        self.stage_reader_inner(reader, Some((expected_content_hash, expected_byte_size)))
+    }
+
+    fn stage_reader_inner(
+        &self,
+        reader: &mut impl Read,
+        expected: Option<(&str, u64)>,
+    ) -> io::Result<StagedPayload> {
         self.ensure_repository_root()?;
         let mut directory_entries_synced = true;
         let assets_directory = self.ensure_directory(
@@ -258,7 +287,7 @@ impl PayloadCas {
         let staging_directory =
             self.ensure_directory(&assets_directory, "staging", &mut directory_entries_synced)?;
         let staging_path = staging_directory.join(format!("{}.tmp", uuid::Uuid::new_v4()));
-        let (mut file, mut staging) = create_staging_file(&staging_path, &staging_directory)?;
+        let (mut file, staging) = create_staging_file(&staging_path, &staging_directory)?;
         let mut hasher = Sha256::new();
         let mut byte_size = 0_u64;
         let mut buffer = [0_u8; COPY_BUFFER_BYTES];
@@ -275,7 +304,12 @@ impl PayloadCas {
         }
         file.flush()?;
         file.sync_all()?;
+        let identity = exact_file_identity(&file)?;
         drop(file);
+        let verified_file = self.open_exact_owned_file(&staging_path)?;
+        if exact_file_identity(&verified_file)? != identity {
+            return exact_object_changed();
+        }
         directory_entries_synced &= sync_directory(&staging_directory)?;
 
         let content_hash = hex::encode(hasher.finalize());
@@ -287,6 +321,46 @@ impl PayloadCas {
                 ));
             }
         }
+        Ok(StagedPayload {
+            verified_file,
+            staging,
+            repository_root: self.repository_root.clone(),
+            identity,
+            content_hash,
+            byte_size,
+            directory_entries_synced,
+        })
+    }
+
+    pub(crate) fn publish_staged(&self, staged: StagedPayload) -> io::Result<PreparedPayload> {
+        if staged.repository_root != self.repository_root {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                "staged payload belongs to another repository",
+            ));
+        }
+        self.ensure_repository_root()?;
+        let StagedPayload {
+            verified_file,
+            mut staging,
+            identity,
+            content_hash,
+            byte_size,
+            mut directory_entries_synced,
+            ..
+        } = staged;
+        let path_file = self.open_exact_owned_file(&staging.path)?;
+        if exact_file_identity(&verified_file)? != identity
+            || exact_file_identity(&path_file)? != identity
+        {
+            return exact_object_changed();
+        }
+        let staging_path = staging.path.clone();
+        let assets_directory = self.ensure_directory(
+            &self.repository_root,
+            "assets",
+            &mut directory_entries_synced,
+        )?;
         let physical_key = object_physical_key(&content_hash);
         let objects_directory =
             self.ensure_directory(&assets_directory, "objects", &mut directory_entries_synced)?;
@@ -320,6 +394,8 @@ impl PayloadCas {
             }
         };
 
+        drop(path_file);
+        drop(verified_file);
         directory_entries_synced &= staging.remove_and_sync()?;
         Ok(PreparedPayload {
             content_hash,
@@ -930,6 +1006,154 @@ mod tests {
     use super::{create_staging_file, ExactObjectUnlink, PayloadCas};
     use sha2::Digest;
     use std::io::Cursor;
+
+    #[test]
+    fn staged_copy_allows_repository_work_and_stays_invisible_until_publication() {
+        let directory = tempfile::tempdir().unwrap();
+        let cas = std::sync::Arc::new(PayloadCas::new(directory.path()).unwrap());
+        let existing = cas.prepare_bytes(b"synthetic available media").unwrap();
+        let bytes = vec![7_u8; super::COPY_BUFFER_BYTES * 3 + 1];
+        let hash = hex::encode(sha2::Sha256::digest(&bytes));
+        let (blocked_tx, blocked_rx) = std::sync::mpsc::channel();
+        let (resume_tx, resume_rx) = std::sync::mpsc::channel();
+        struct Reader {
+            source: Cursor<Vec<u8>>,
+            blocked: Option<std::sync::mpsc::Sender<()>>,
+            resume: std::sync::mpsc::Receiver<()>,
+        }
+        impl std::io::Read for Reader {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                if self.source.position() > 0 {
+                    if let Some(blocked) = self.blocked.take() {
+                        blocked.send(()).unwrap();
+                        self.resume.recv().unwrap();
+                    }
+                }
+                std::io::Read::read(&mut self.source, buffer)
+            }
+        }
+        let staging_worker = {
+            let cas = cas.clone();
+            let bytes = bytes.clone();
+            let hash = hash.clone();
+            std::thread::spawn(move || {
+                cas.stage_reader_expected(
+                    &mut Reader {
+                        source: Cursor::new(bytes.clone()),
+                        blocked: Some(blocked_tx),
+                        resume: resume_rx,
+                    },
+                    &hash,
+                    bytes.len() as u64,
+                ).unwrap()
+            })
+        };
+        blocked_rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        assert!(cas.stat_object(&hash).unwrap().is_none());
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(10));
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let readers: Vec<_> = (0..9).map(|_| {
+            let cas = cas.clone();
+            let hash = existing.content_hash.clone();
+            let barrier = barrier.clone();
+            let done = done_tx.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                let _guard = crate::asset_repository::coordinator::lock_repository_mutation().unwrap();
+                let expected = b"synthetic available media";
+                assert_eq!(cas.read_object_range(&hash, 0, expected.len() as u64).unwrap().unwrap(), expected);
+                done.send(()).unwrap();
+            })
+        }).collect();
+        barrier.wait();
+        let completed = (0..9).all(|_| done_rx.recv_timeout(std::time::Duration::from_secs(10)).is_ok());
+        assert!(cas.stat_object(&hash).unwrap().is_none());
+        resume_tx.send(()).unwrap();
+        let staged = staging_worker.join().unwrap();
+        for reader in readers { reader.join().unwrap(); }
+        assert!(completed, "repository readers must finish while staging is blocked");
+        assert!(cas.stat_object(&hash).unwrap().is_none());
+        let mut file = {
+            let _guard = crate::asset_repository::coordinator::lock_repository_mutation().unwrap();
+            cas.publish_staged(staged).unwrap();
+            cas.open_object(&hash).unwrap().unwrap()
+        };
+        let mut actual = Vec::new();
+        std::io::Read::read_to_end(&mut file, &mut actual).unwrap();
+        assert_eq!(actual, bytes);
+        assert_eq!(std::fs::read_dir(directory.path().join("assets/staging")).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn staged_drop_failure_and_wrong_repository_remove_only_owned_temporaries() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let cas = PayloadCas::new(first.path()).unwrap();
+        let other = PayloadCas::new(second.path()).unwrap();
+        let bytes = b"synthetic staged bytes";
+        let hash = hex::encode(sha2::Sha256::digest(bytes));
+        let stage = || cas.stage_reader_expected(&mut Cursor::new(bytes), &hash, bytes.len() as u64).unwrap();
+        let unrelated = first.path().join("assets/staging/unrelated.tmp");
+        let staged = stage();
+        std::fs::write(&unrelated, b"synthetic unrelated staging").unwrap();
+        drop(staged);
+        let error = other.publish_staged(stage()).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert_eq!(error.to_string(), "staged payload belongs to another repository");
+        assert!(cas.stage_reader_expected(&mut Cursor::new(bytes), &hash, bytes.len() as u64 + 1).is_err());
+        assert!(cas.stage_reader_expected(&mut Cursor::new(bytes), &"0".repeat(64), bytes.len() as u64).is_err());
+        struct Fails(bool);
+        impl std::io::Read for Fails {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                if self.0 { return Err(std::io::Error::other("synthetic read failure")); }
+                self.0 = true;
+                buffer[0] = 1;
+                Ok(1)
+            }
+        }
+        assert!(cas.stage_reader_expected(&mut Fails(false), &hash, bytes.len() as u64).is_err());
+        assert!(cas.stat_object(&hash).unwrap().is_none());
+        assert!(other.stat_object(&hash).unwrap().is_none());
+        assert_eq!(std::fs::read_dir(first.path().join("assets/staging")).unwrap().count(), 1);
+        assert_eq!(std::fs::read(unrelated).unwrap(), b"synthetic unrelated staging");
+        assert!(!second.path().join("assets").exists());
+    }
+
+    #[test]
+    fn staged_duplicate_publication_verifies_same_size_corruption() {
+        let directory = tempfile::tempdir().unwrap();
+        let cas = PayloadCas::new(directory.path()).unwrap();
+        let bytes = b"synthetic staged duplicate";
+        let hash = hex::encode(sha2::Sha256::digest(bytes));
+        let stage = || cas.stage_reader_expected(&mut Cursor::new(bytes), &hash, bytes.len() as u64).unwrap();
+        let prepared = cas.publish_staged(stage()).unwrap();
+        assert!(!prepared.deduplicated);
+        assert!(cas.publish_staged(stage()).unwrap().deduplicated);
+        let object = directory.path().join(&prepared.physical_key);
+        let corrupted = vec![b'x'; bytes.len()];
+        std::fs::write(&object, &corrupted).unwrap();
+        let error = cas.publish_staged(stage()).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(error.to_string().contains("payload collision or corruption"));
+        assert_eq!(std::fs::read(object).unwrap(), corrupted);
+        assert_eq!(std::fs::read_dir(directory.path().join("assets/staging")).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn staged_publication_rejects_replaced_file_identity() {
+        let directory = tempfile::tempdir().unwrap();
+        let cas = PayloadCas::new(directory.path()).unwrap();
+        let bytes = b"synthetic staged identity";
+        let hash = hex::encode(sha2::Sha256::digest(bytes));
+        let staged = cas.stage_reader_expected(&mut Cursor::new(bytes), &hash, bytes.len() as u64).unwrap();
+        let staging_path = staged.staging.path.clone();
+        std::fs::remove_file(&staging_path).unwrap();
+        std::fs::write(&staging_path, vec![b'x'; bytes.len()]).unwrap();
+        let error = cas.publish_staged(staged).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(cas.stat_object(&hash).unwrap().is_none());
+        assert_eq!(std::fs::read_dir(directory.path().join("assets/staging")).unwrap().count(), 0);
+    }
 
     #[test]
     fn read_scan_rejects_a_linked_object() {

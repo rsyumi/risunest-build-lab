@@ -141,6 +141,6 @@
         {@html displayedHtml}
     {/key}
     {#if failed}
-        <span class="text-textcolor2 italic" role="alert">{language.chatDataLoadFailed}</span>
+        <span class="text-textcolor2 italic" role="alert">{language.contentRenderFailed}</span>
     {/if}
 </span>

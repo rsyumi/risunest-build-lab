@@ -37,6 +37,24 @@ function makeStore() {
 }
 
 describe('createMutationGatedPersistentDataStore', () => {
+    it('forwards optional metadata reads with the original receiver without taking a mutation gate', async () => {
+        const store = makeStore()
+        const query = { characterId: 'char-a', conversationId: 'chat-a', startIndex: 0, limit: 64 }
+        const result = { revision: 1, value: { messages: [] } } as any
+        store.readConversationMessageMetadataWindow = vi.fn(async function (this: PersistentDataStore, input) {
+            expect(this).toBe(store)
+            expect(input).toBe(query)
+            return result
+        })
+        const gate = createStorageMutationGate({ locks: createInRealmStorageLockManager() })
+        const write = vi.spyOn(gate, 'runWrite')
+        const gated = createMutationGatedPersistentDataStore(store, gate)
+        expect(await gated.readConversationMessageMetadataWindow!(query)).toBe(result)
+        expect(write).not.toHaveBeenCalled()
+        delete store.readConversationMessageMetadataWindow
+        expect(createMutationGatedPersistentDataStore(store, gate).readConversationMessageMetadataWindow).toBeUndefined()
+    })
+
     it('gates ordinary commits and full replacements while preserving exact inputs and results', async () => {
         const store = makeStore()
         const calls: string[] = []

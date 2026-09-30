@@ -12,6 +12,8 @@ export interface Device {
   revoked: boolean;
   pending: boolean;
   registrationRequest: string | null;
+  retained?: number;
+  pendingError?: string | null;
 }
 export interface NetworkSettings { schema: number; address: string; port: number; }
 export interface Status {
@@ -41,7 +43,9 @@ export interface Startup {
   enabled: boolean;
   actionMatches: boolean;
 }
+export type PlatformStatus = Pick<Environment, "startup" | "startupError" | "trayStartup" | "updateSchedule" | "updateScheduleError">;
 export interface Environment {
+  registrationError?: string | null;
   network: NetworkSettings;
   platform: string;
   cloudflared: string;
@@ -70,7 +74,8 @@ export interface UpdateCheckOutcome {
 export interface Backend {
   status(): Promise<Status>;
   mutate(path: string, body: Record<string, unknown>): Promise<unknown>;
-  environment(): Promise<Environment>;
+  environment(): Promise<Omit<Environment, keyof PlatformStatus>>;
+  platformStatus(): Promise<PlatformStatus>;
   start(): Promise<void>;
   network(settings: NetworkSettings): Promise<void>;
   startup(action: "install" | "remove"): Promise<Startup>;
@@ -85,6 +90,7 @@ export const native: Backend = {
   status: () => invoke("manager_status"),
   mutate: (path, body) => invoke("manager_mutate", { path, body }),
   environment: () => invoke("manager_environment"),
+  platformStatus: () => invoke("manager_platform_status"),
   start: () => invoke("manager_start"),
   network: (settings) => invoke("manager_network", { settings }),
   startup: (action) => invoke("manager_startup", { action }),
@@ -116,7 +122,7 @@ export function updatePhase(value: string): string {
         deferred: "연기됨",
         failed: "실패",
       } as Record<string, string>
-    )[value] ?? value
+    )[value] ?? "상태를 확인하지 못했습니다."
   );
 }
 export function phase(value: string): string {
@@ -135,7 +141,7 @@ export function phase(value: string): string {
         disabled: "사용 안 함",
         "waiting-for-address": "주소 준비 중",
       } as Record<string, string>
-    )[value] ?? value
+    )[value] ?? "상태를 확인하지 못했습니다."
   );
 }
 export function message(error: unknown): string {
@@ -144,6 +150,20 @@ export function message(error: unknown): string {
       ? error.split(":")[0]
       : "management-request-failed";
   const known: Record<string, string> = {
+    "removal-installation-not-writable": "관리 앱을 쓰기 가능한 Applications 폴더로 옮긴 뒤 다시 실행하세요.",
+    "removal-unowned-profile-files": "관리 앱 데이터 폴더에 별도로 저장한 파일이 있습니다. 해당 파일을 다른 폴더로 옮긴 뒤 다시 시도하세요.",
+    "data-dir-busy": "다른 서버가 같은 데이터 폴더를 사용하고 있습니다. 해당 서버를 종료한 뒤 다시 시도하세요.",
+    "incompatible-store": "서버 데이터 형식이 현재 버전과 호환되지 않습니다.",
+    "unsafe-storage-path": "데이터 폴더에 링크가 포함되어 있습니다. 데이터 폴더 경로를 확인하세요.",
+    "not-initialized": "서버 데이터가 초기화되지 않았습니다. 서버 설치 상태를 확인하세요.",
+    "managed-registration-needs-directory": "임시 주소로 기기를 등록하려면 주소 레지스트리를 사용하세요.",
+    "directory-unreachable": "레지스트리 서버에 연결하지 못했습니다. 네트워크와 레지스트리 서버 주소를 확인하세요.",
+    "directory-unavailable": "레지스트리 서버를 사용할 수 없습니다. 잠시 후 다시 시도하세요.",
+    "directory-full": "레지스트리 서버의 저장 공간이 부족합니다. 잠시 후 다시 시도하세요.",
+    "directory-rejected": "레지스트리 서버가 게시 요청을 거부했습니다. 연결 설정을 확인하세요.",
+    "directory-record-owned": "다른 서버가 사용 중인 등록 정보입니다. 연결 설정을 확인하세요.",
+    "directory-admission-limited": "레지스트리 서버의 요청 한도를 초과했습니다. 잠시 후 다시 시도하세요.",
+
     "removal-shared-installation-or-data": "다른 서버가 같은 설치 경로나 데이터 폴더를 사용하고 있습니다. 해당 서버의 실행 등록을 먼저 정리하세요.",
     "removal-registration-missing": "설치 정보를 확인하지 못했습니다. 설치 상태를 확인한 뒤 다시 시도하세요.",
     "removal-registration-conflict": "설치 정보가 일치하지 않습니다. 설치 경로와 데이터 폴더를 확인하세요.",
@@ -155,6 +175,7 @@ export function message(error: unknown): string {
     "removal-data-failed": "데이터를 모두 삭제하지 못했습니다. 파일 사용 여부와 폴더 권한을 확인한 뒤 다시 시도하세요.",
     "removal-profile-failed": "관리 앱 데이터를 삭제하지 못했습니다. 관리 화면을 종료한 뒤 다시 시도하세요.",
     "update-recovery-required": "중단된 업데이트를 복구한 뒤 다시 시도하세요.",
+    "update-recovery-schedule-mismatch": "관리 앱을 다시 실행한 뒤 업데이트를 다시 확인하세요.",
     "invalid-network-settings": "바인딩 IP 주소와 포트(1~65535)를 확인하세요.",
     "listen-address-in-use": "주소와 포트를 이미 사용 중입니다. 네트워크 설정에서 포트를 변경하세요.",
     "listen-address-unavailable": "이 컴퓨터에 없는 IP 주소입니다. 네트워크 설정을 확인하세요.",
@@ -184,4 +205,15 @@ export function message(error: unknown): string {
   return (
     known[code] ?? "작업을 완료하지 못했습니다. 서버 상태와 설정을 확인하세요."
   );
+}
+
+export function updateReason(reason: string): string {
+  return ({
+    "update-recovery-schedule-mismatch": "관리 앱을 다시 실행한 뒤 업데이트를 다시 확인하세요.",
+    "management-active": "관리 작업이 끝난 뒤 다시 확인하세요.",
+    "management-app-open-or-install-locked": "다른 관리 앱을 닫거나 설치가 끝난 뒤 다시 확인하세요.",
+    "server-busy": "서버 작업이 끝난 뒤 업데이트를 다시 확인합니다.",
+    "update-network-unavailable": "네트워크 연결 후 업데이트를 다시 확인합니다.",
+    "update-recovery-required": "중단된 업데이트를 복구한 뒤 다시 시도하세요.",
+  } as Record<string, string>)[reason] ?? "업데이트를 완료하지 못했습니다.";
 }

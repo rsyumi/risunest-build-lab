@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { alertError } from "../../ts/alert";
     import { changeChar, getCharImage, removeChar } from "../../ts/characters";
     import { mutatePersistentCharacterDetail } from "../../ts/storage/persistentDataRuntime.svelte";
     import { DBState } from 'src/ts/stores.svelte';
@@ -277,19 +278,27 @@
                         <span class="text-textcolor2">{parsedDescription['en'] || parsedDescription['xx'] || 'No description'}</span>
                         <div class="flex gap-2 justify-end">
                             <button class="hover:text-textcolor text-textcolor2" onclick={async () => {
-                                await mutatePersistentCharacterDetail(
-                                    char.chaId,
-                                    'character-restore',
-                                    ({ root, character }) => {
-                                        delete character.trashTime
-                                        appendCharacterIdToOrder(root, char.chaId)
-                                    },
-                                )
+                                try {
+                                    await mutatePersistentCharacterDetail(
+                                        char.chaId,
+                                        'character-restore',
+                                        ({ root, character }) => {
+                                            delete character.trashTime
+                                            appendCharacterIdToOrder(root, char.chaId)
+                                        },
+                                    )
+                                } catch (error) {
+                                    alertError(error instanceof Error ? error : String(error))
+                                }
                             }}>
                                 <Undo2Icon />
                             </button>
-                            <button class="hover:text-textcolor text-textcolor2" onclick={() => {
-                                removeChar(char.chaId, char.name, 'permanent')
+                            <button class="hover:text-textcolor text-textcolor2" onclick={async () => {
+                                try {
+                                    await removeChar(char.chaId, char.name, 'permanent')
+                                } catch (error) {
+                                    alertError(error instanceof Error ? error : String(error))
+                                }
                             }}>
                                 <TrashIcon />
                             </button>

@@ -19,7 +19,7 @@ const HANDOFF_KIND_TO_JOB_KIND: Record<
 > = {
     'raw-recovery': 'export-raw-recovery',
     'portable-backup': 'export-portable-backup',
-    'legacy-backup': 'export-legacy-local-backup',
+    'legacy-backup': 'export-compatible-local-backup',
     'character-charx': 'export-character-charx',
     'character-card': 'export-character-card',
     'risu-module': 'export-risu-module',
@@ -32,24 +32,11 @@ function spoolSource(displayName: string): AndroidSpoolReady {
 describe('native file taxonomy golden fixture', () => {
     it('covers every recovery pattern with a fixture grammar and vice versa', () => {
         expect(
-            [
-                ...Object.values(HANDOFF_KIND_TO_JOB_KIND),
-                'export-compatible-local-backup',
-            ].sort(),
+            Object.values(HANDOFF_KIND_TO_JOB_KIND).sort(),
         ).toEqual(Object.keys(ANDROID_SAF_HANDOFF_ID_PATTERNS).sort())
         expect(
             taxonomy.managedHandoffs.map((grammar) => grammar.kind).sort(),
         ).toEqual(Object.keys(HANDOFF_KIND_TO_JOB_KIND).sort())
-    })
-
-    it('shares the legacy handoff grammar with target-specific compatible export', () => {
-        expect(
-            ANDROID_SAF_HANDOFF_ID_PATTERNS['export-compatible-local-backup']
-                ?.source,
-        ).toBe(
-            ANDROID_SAF_HANDOFF_ID_PATTERNS['export-legacy-local-backup']
-                ?.source,
-        )
     })
 
     it('accepts every managed handoff grammar and captures the export id', () => {

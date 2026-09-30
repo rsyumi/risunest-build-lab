@@ -15,7 +15,9 @@ export const DEVICE_MARKER_KEYS = [
     'risu_lastsaved',
     'nightlyWarned',
     'risuNestDeviceSettings',
+    'risuNestStartupExclusions',
     'risuNestUpdateSettings',
+    'mcpStdioApprovals',
 ] as const
 
 export type DeviceMarkerKey = (typeof DEVICE_MARKER_KEYS)[number]
@@ -26,6 +28,7 @@ export interface DeviceMarkerStorage {
     removeItem(key: string): void
     /** Resolves once every queued change has committed. */
     flush(): Promise<void>
+    reload?(): Promise<void>
 }
 
 function requireKey(key: string): DeviceMarkerKey {
@@ -81,6 +84,17 @@ export function createNativeDeviceMarkers(
             values.delete(key)
             enqueue(() => settings.set(key, null))
         },
+        async reload() {
+            await this.flush()
+            const loaded = await settings.readMany(DEVICE_MARKER_KEYS)
+            const next = new Map<string, string>()
+            DEVICE_MARKER_KEYS.forEach((key, index) => {
+                const value = readLoaded(key, loaded[index])
+                if (value !== null) next.set(key, value)
+            })
+            values.clear()
+            for (const [key, value] of next) values.set(key, value)
+        },
         async flush() {
             await tail
             if (failure !== null) {
@@ -133,4 +147,8 @@ export function getDeviceMarkers(): DeviceMarkerStorage {
     if (nativeInstall()) throw new Error('Device markers are not loaded yet')
     installed = createLocalDeviceMarkers(localStorage)
     return installed
+}
+
+export async function reloadDeviceMarkers(): Promise<void> {
+    await getDeviceMarkers().reload?.()
 }

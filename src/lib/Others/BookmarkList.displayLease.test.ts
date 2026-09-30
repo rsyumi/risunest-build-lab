@@ -87,6 +87,10 @@ vi.mock('src/ts/alert', () => ({
 vi.mock('src/lang', () => ({
     language: {
         expandAll: 'Expand all',
+        loading: 'Loading bookmarks',
+        bookmarkLoadFailed: 'Could not load bookmarks',
+        noBookmarks: 'No bookmarks',
+        retry: 'Retry',
         collapseAll: 'Collapse all',
         chatDataLoadFailed: 'Synthetic chat load failed',
         loadingChatData: 'Loading synthetic chat',
@@ -499,3 +503,46 @@ test.each([false, true])(
         else expect(mounts).toHaveLength(0)
     },
 )
+
+test('keeps bookmark loading distinct from empty and offers retry after a read failure', async () => {
+    prepare(false)
+    const lease = await state.acquireRevision()
+    state.acquireRevision.mockClear()
+    let reject!: (reason: unknown) => void
+    state.acquireRevision.mockReturnValueOnce(new Promise((_resolve, fail) => { reject = fail }))
+    mounted = mount(BookmarkList, { target })
+    await tick()
+    expect(target.textContent).toContain('Loading bookmarks')
+    expect(target.textContent).not.toContain('No bookmarks')
+    reject(new Error('synthetic read failure'))
+    await vi.waitFor(() => expect(target.textContent).toContain('Could not load bookmarks'))
+    expect(target.textContent).not.toContain('No bookmarks')
+    state.acquireRevision.mockResolvedValue(lease)
+    ;([...target.querySelectorAll('button')].find(button => button.textContent === 'Retry') as HTMLButtonElement).click()
+    await vi.waitFor(() => expect(target.querySelector('[role="button"]')).not.toBeNull())
+    expect(target.textContent).not.toContain('Could not load bookmarks')
+    expect(state.acquireRevision).toHaveBeenCalledTimes(2)
+})
+
+test('retries a stale bookmark revision before presenting a current result', async () => {
+    prepare(false)
+    const lease = await state.acquireRevision()
+    state.acquireRevision.mockClear()
+    state.acquireRevision.mockImplementationOnce(async () => ({
+        ...lease,
+        readConversationWindow: async (...args: any[]) => {
+            const result = await lease.readConversationWindow(...args)
+            state.selection = { ...state.selection, storeRevision: 2 }
+            return result
+        },
+    })).mockResolvedValue({
+        ...lease,
+        revision: 2,
+        readConversationWindow: async (...args: any[]) => ({ ...await lease.readConversationWindow(...args), revision: 2 }),
+    })
+    mounted = mount(BookmarkList, { target })
+    await vi.waitFor(() => expect(target.querySelector('[role="button"]')).not.toBeNull())
+    expect(state.acquireRevision).toHaveBeenCalledTimes(2)
+    expect(target.textContent).not.toContain('No bookmarks')
+    expect(target.textContent).not.toContain('Could not load bookmarks')
+})

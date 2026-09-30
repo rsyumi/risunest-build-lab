@@ -70,8 +70,8 @@ impl Store {
                 let mut db = self.db()?;
                 let tx = db.transaction()?;
                 tx.execute(
-                    "UPDATE upload_jobs SET terminal=?2,error=?3,retry_after=?4 WHERE upload=?1",
-                    params![id, terminal, error.code, now()? + 1],
+                    "UPDATE upload_jobs SET terminal=?2,error=?3,retry_after=?4+min(1 << min(attempts,9),300),attempts=attempts+1 WHERE upload=?1",
+                    params![id, terminal, error.code, now()?],
                 )?;
                 tx.execute(
                     "UPDATE uploads SET state=?2 WHERE id=?1",

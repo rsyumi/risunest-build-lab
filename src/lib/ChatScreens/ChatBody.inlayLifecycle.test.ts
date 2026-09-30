@@ -226,7 +226,7 @@ describe('ChatBody deferred inlay lifecycle', () => {
         parserMocks.ParseMarkdown.mockImplementation(
             async (value, _char, _mode, _idx, _conditions, context) => {
                 expect(context?.streamingThoughtMode).toBe('collapsed')
-                return `<details data-risu-streaming-thought><summary>Thought</summary>${value}</details>`
+                return `<details data-risu-thought data-risu-streaming-thought><summary>Thought</summary>${value}</details>`
             },
         )
         mounted = mount(ChatBodyInlayHarness, {
@@ -244,6 +244,45 @@ describe('ChatBody deferred inlay lifecycle', () => {
             ),
         )
         expect(target.querySelector('details')?.open).toBe(true)
+    })
+
+    test.each([true, false])('retains expanded thoughts when preview=%s settles to canonical markup', async (preview) => {
+        parserMocks.ParseMarkdown.mockImplementation(async () => '<details data-risu-thought><summary>Thought</summary>reasoning</details>')
+        mounted = mount(ChatBodyInlayHarness, {
+            target,
+            props: {
+                initialMessage: '<Thoughts>reasoning</Thoughts>Answer',
+                initialThoughtPreview: preview,
+                streamingThoughtMode: 'collapsed',
+            },
+        })
+        await vi.waitFor(() => expect(target.querySelector('details')).not.toBeNull())
+        const details = target.querySelector('details')!
+        details.open = true
+        details.dispatchEvent(new Event('toggle'))
+        await tick()
+        ;(mounted as { setThoughtPreview(value: boolean): void }).setThoughtPreview(false)
+        ;(mounted as { setThoughtMode(value: string): void }).setThoughtMode('off')
+        await vi.waitFor(() => expect(target.querySelector('details[data-risu-thought]')?.textContent).toContain('reasoning'))
+        await tick()
+        expect(target.querySelector<HTMLDetailsElement>('details[data-risu-thought]')!.open).toBe(true)
+    })
+
+    test('transfers preview expansion only to the last thought block on settle', async () => {
+        parserMocks.ParseMarkdown.mockResolvedValue('<details data-risu-thought><summary>First</summary>first</details><details data-risu-thought><summary>Last</summary>last</details>')
+        mounted = mount(ChatBodyInlayHarness, {
+            target,
+            props: { initialMessage: '<Thoughts>first</Thoughts><Thoughts>last</Thoughts>', initialThoughtPreview: true, streamingThoughtMode: 'collapsed' },
+        })
+        await tick()
+        const preview = target.querySelector('details')!
+        preview.open = true
+        preview.dispatchEvent(new Event('toggle'))
+        await tick()
+        ;(mounted as { setThoughtPreview(value: boolean): void }).setThoughtPreview(false)
+        ;(mounted as { setThoughtMode(value: string): void }).setThoughtMode('off')
+        await vi.waitFor(() => expect(target.querySelectorAll('details[data-risu-thought]')).toHaveLength(2))
+        expect([...target.querySelectorAll<HTMLDetailsElement>('details[data-risu-thought]')].map((element) => element.open)).toEqual([false, true])
     })
 
     test('defers display parsing even if translation was enabled and keeps raw text until the final render is ready', async () => {
@@ -667,6 +706,40 @@ describe('ChatBody deferred inlay lifecycle', () => {
             expect(parserMocks.ParseMarkdown).toHaveBeenCalledOnce(),
         )
         expect(schedulingMocks.yieldToMainThread).not.toHaveBeenCalled()
+    })
+
+    test('ignores a pending translation after translator configuration changes', async () => {
+        chatState.db = { autoTranslate: true, translatorType: 'mock', translateBeforeHTMLFormatting: false }
+        const { translateHTML } = await import('src/ts/translator/translator')
+        const stale = deferred<string>()
+        let staleMarkup = ''
+        let parseIndex = 0
+        parserMocks.ParseMarkdown.mockImplementation(async (_message: string, ...args: unknown[]) => {
+            const context = args[4] as { deferredInlays?: DeferredInlayMarkerRegistry }
+            return renderDeferredInlaySourceMarkup(++parseIndex === 1 ? 'first' : 'second', imageSource, context.deferredInlays)
+        })
+        inlayMocks.getInlayAssetBlob.mockImplementation(async (id: string) => ({
+            data: new Blob([id], { type: 'image/png' }), type: 'image', name: `${id}.png`,
+        }))
+        vi.mocked(translateHTML).mockReset()
+            .mockImplementationOnce(async (markup) => { staleMarkup = markup; return stale.promise })
+            .mockImplementationOnce(async (markup) => `${markup}<span>latest translation</span>`)
+        mounted = mount(ChatBodyInlayHarness, { target, props: { initialTranslated: true } })
+        await vi.waitFor(() => expect(translateHTML).toHaveBeenCalledOnce())
+        ;(mounted as { setTranslatorType(value: string): void }).setTranslatorType('changed')
+        await vi.waitFor(() => expect(target.textContent).toContain('latest translation'))
+        await vi.waitFor(() => expect(target.querySelector('img')?.getAttribute('src')).toBe('blob:second'))
+        stale.resolve(`${staleMarkup}<span>obsolete translation</span>`)
+        await tick()
+        await Promise.resolve()
+        expect(target.textContent).toContain('latest translation')
+        expect(target.textContent).not.toContain('obsolete translation')
+        expect(target.querySelector('img')?.getAttribute('src')).toBe('blob:second')
+        expect(inlayMocks.getInlayAssetBlob.mock.calls.map(([id]) => id)).toEqual(['second'])
+        expect(revokeObjectURL).not.toHaveBeenCalled()
+        await unmount(mounted)
+        mounted = undefined
+        expect(revokeObjectURL.mock.calls).toEqual([['blob:second']])
     })
 
     test('keeps translated state reactive when live parsing starts after a yield', async () => {

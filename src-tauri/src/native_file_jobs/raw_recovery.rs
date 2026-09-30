@@ -739,7 +739,8 @@ mod tests {
         let owned = tempfile::tempdir().unwrap();
         fs::create_dir_all(root.path().join("persistent")).unwrap();
         fs::create_dir_all(root.path().join("assets/objects/aa")).unwrap();
-        fs::write(root.path().join(MAIN_DATABASE), b"not sqlite").unwrap();
+        let damaged = b"not sqlite\0{\"account\":{\"id\":\"synthetic-account\",\"token\":\"synthetic-token\"}}";
+        fs::write(root.path().join(MAIN_DATABASE), damaged).unwrap();
         fs::write(
             root.path().join("assets/objects/aa/image.bin"),
             [0, 1, 2, 255],
@@ -758,7 +759,8 @@ mod tests {
             .unwrap()
             .read_to_end(&mut bytes)
             .unwrap();
-        assert_eq!(bytes, b"not sqlite");
+        assert_eq!(bytes, damaged);
+        assert_eq!(fs::read(root.path().join(MAIN_DATABASE)).unwrap(), damaged);
         bytes.clear();
         zip.by_name(&asset)
             .unwrap()

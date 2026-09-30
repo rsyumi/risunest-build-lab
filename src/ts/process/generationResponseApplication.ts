@@ -1,3 +1,4 @@
+import { setStreamingConversation, clearStreamingConversation } from '../storage/streamingConversationRegistry'
 import { precomputedResponseVariants } from '../responseVariants'
 import type { ActiveConversationSession } from '../storage/activeConversationSession'
 import type {
@@ -166,6 +167,7 @@ export async function applyGenerationResponse(
             const prefix = options.continueGeneration ? initialOutput.data : ''
             const outputMessageId = outputTarget.messageId
             const performanceMode = options.streamingDisplayOptimizationMode()
+            if (targetChat.id) setStreamingConversation(targetChat.id, performanceMode)
             targetChat.isStreaming = true
             targetChat.activeStreamingDisplayOptimizationMode = performanceMode
             options.operation.incrementReloadKeys()
@@ -234,6 +236,7 @@ export async function applyGenerationResponse(
                 })
                 streamCompleted = streamResult.completed
             } finally {
+                if (targetChat.id) clearStreamingConversation(targetChat.id)
                 targetChat.isStreaming = false
                 targetChat.activeStreamingDisplayOptimizationMode = undefined
                 options.operation.incrementReloadKeys()

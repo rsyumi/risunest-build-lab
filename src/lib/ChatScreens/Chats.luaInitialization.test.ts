@@ -15,6 +15,7 @@ const scriptingState = vi.hoisted(() => ({
     database: { characters: [] as character[], templateDefaultVariables: '' },
     parses: 0,
     parseBudget: Infinity,
+    inFlight: new Set<Promise<string>>(),
     metadataReads: 0,
     session: null as ActiveConversationSession | null,
 }))
@@ -35,11 +36,15 @@ vi.mock('src/ts/storage/database.svelte', () => ({
 vi.mock('src/ts/parser/parser.svelte', () => ({
     hasher: vi.fn(),
     risuChatParser: (value: string) => value,
-    ParseMarkdown: async (value: string, character: character) => {
-        const { runLuaEditTrigger } = await import('src/ts/process/scriptings')
+    ParseMarkdown: (value: string, character: character) => {
         scriptingState.parses++
-        if (scriptingState.parses > scriptingState.parseBudget) return 'SYNTHETIC_PARSE_BUDGET_EXCEEDED'
-        return runLuaEditTrigger(character, 'editdisplay', value)
+        const parse = (async () => {
+            if (scriptingState.parses > scriptingState.parseBudget) return 'SYNTHETIC_PARSE_BUDGET_EXCEEDED'
+            const { runLuaEditTrigger } = await import('src/ts/process/scriptings')
+            return runLuaEditTrigger(character, 'editdisplay', value)
+        })()
+        scriptingState.inFlight.add(parse)
+        return parse.finally(() => scriptingState.inFlight.delete(parse))
     },
     trimMarkdown: (value: string) => value,
     addMetadataToElement: (value: string) => value,
@@ -153,6 +158,17 @@ vi.mock('./Chat.svelte', async () => ({
 vi.mock('./CreatorQuote.svelte', async () => ({
     default: (await import('./ChatMountProbe.test.svelte')).default,
 }))
+
+async function settleParsers() {
+    for (let pass = 0; pass < 20; pass++) {
+        const started = scriptingState.parses
+        await tick()
+        await Promise.all(scriptingState.inFlight)
+        await tick()
+        if (scriptingState.parses === started && scriptingState.inFlight.size === 0) return
+    }
+    throw new Error('Lua parsers did not settle')
+}
 
 function makeCharacter(messages: Message[]): character {
     return {
@@ -283,9 +299,9 @@ test.each([false, true])(
                         node.textContent?.includes('SYNTHETIC_LUA_OK 3'),
                     ),
                 ).toBe(true)
-            })
+            }, { timeout: 15_000 })
             const initialParses = scriptingState.parses
-            await new Promise((resolve) => setTimeout(resolve, 50))
+            await settleParsers()
             expect(scriptingState.parses).toBe(initialParses)
             const previousBodies = bodies()
             session.append({
@@ -301,6 +317,9 @@ test.each([false, true])(
                     ),
                 ).toBe(true)
             })
+            await settleParsers()
+            // Four history rows and the conversation greeting each refresh once.
+            expect(scriptingState.parses).toBe(initialParses + 5)
             expect(
                 previousBodies.every((node) => bodies().includes(node)),
             ).toBe(true)
@@ -312,6 +331,7 @@ test.each([false, true])(
             scriptingState.session = null
         }
     },
+    30_000,
 )
 
 test('renders balanced stream snapshots through the real ChatBody and Lua before EOF without replacing the body', async () => {

@@ -1827,6 +1827,7 @@ mod tests {
                 retention_policy: None,
                 capabilities: fake::capabilities(true),
                 created_at_ms: 1_000,
+                verified_at_ms: 1,
                 last_sync_at_ms: None,
                 last_backup_at_ms: None,
             },

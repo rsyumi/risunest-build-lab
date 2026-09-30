@@ -18,7 +18,8 @@
     import { type Unsubscriber } from "svelte/store"
     import { v4 as uuidv4 } from 'uuid'
     import { language } from "../../lang"
-    import { alertClear, alertConfirm, alertError, alertInput, alertNormal, alertRequestData, alertWait } from "../../ts/alert"
+    import { alertClear, alertConfirm, alertError, alertInput, alertNormal, alertRequestData, alertWait, alertToast } from "../../ts/alert"
+    import { conversationMutationBlockedByGeneration } from 'src/ts/chatBindings.svelte'
     import { ParseMarkdown, type CbsConditions, type simpleCharacterArgument } from "../../ts/parser/parser.svelte"
     import { getCurrentCharacter, getCurrentChat, setCurrentChat, type character as CharacterRecord, type Message, type MessageGenerationInfo, type StreamingDisplayOptimizationMode } from "../../ts/storage/database.svelte"
     import { selectedCharID } from "../../ts/stores.svelte"
@@ -37,6 +38,7 @@
     import { createCapturedConversationBranch } from "../../ts/chatBranchUi"
     import {
         captureChatMessageTarget,
+        resolveChatMessageTarget,
         saveCapturedChatMessage,
         toggleCapturedBookmark,
         toggleCapturedMessageDisabled,
@@ -45,6 +47,7 @@
     } from "../../ts/chatMessageUi"
     import type { DeepReadonly, FrozenChatScreenshotRenderContext } from 'src/ts/chatScreenshotRange'
     import { safeStructuredClone } from 'src/ts/polyfill'
+    import isEqual from 'lodash/isEqual'
     import type { ConversationViewportRow } from 'src/ts/conversationViewportSource'
     import type { ChatDisplayRefresh } from 'src/ts/chatDisplayRefresh'
     import type { BoundedLiveChatParserProjection } from 'src/ts/selectedConversationLiveParserProjection'
@@ -66,9 +69,11 @@
     let chatBodyRevision = $state(0)
     let bodyRoot:HTMLElement|null = $state(null)
     let editTarget: CapturedChatMessageTarget | null = null
+    let editEvidence: Message | null = null
     let partialEditTarget: CapturedChatMessageTarget | null = null
     let editIntent: SelectedConversationMessageEditIntent | null = null
     let partialEditIntent: SelectedConversationMessageEditIntent | null = null
+    let partialEditController = $state<PartialEditController | undefined>()
     interface AcquiredChatMessageTarget {
         readonly target: CapturedChatMessageTarget
         release(): void
@@ -261,13 +266,16 @@
         parserProjection = state.parserProjection
         idx = state.viewportRow.absoluteIndex
         totalLength = state.totalMessages
-        if (editMode) {
-            editIntent = captureViewportEditIntent()
-            editTarget = editIntent ? null : captureCurrentMessage()
-        }
-        if (partialEditIntent || partialEditTarget) {
-            partialEditIntent = captureViewportEditIntent()
-            partialEditTarget = partialEditIntent ? null : captureCurrentMessage()
+        if (selectedConversationOperations) {
+            const input = {
+                absoluteIndex: viewportRow.absoluteIndex,
+                sourceToken: viewportSourceToken,
+                sourceVersion: viewportRow.sourceVersion,
+                rowKey: viewportRow.key,
+                message: viewportRow.message,
+            }
+            if (editIntent) editIntent = selectedConversationOperations.rebindMessageEditIntent(editIntent, input)
+            if (partialEditIntent) partialEditIntent = selectedConversationOperations.rebindMessageEditIntent(partialEditIntent, input)
         }
         updateDisplayedMessage()
     }
@@ -286,6 +294,21 @@
             partialEditIntent !== null ||
             partialEditTarget !== null
         )
+    }
+
+    export function takeEditorDraft(): string | null {
+        if (editMode) return editDraft
+        if (editTranslationMode) return editTranslationText
+        return partialEditController?.takeEditorDraft() ?? null
+    }
+
+    function reportRowActionRefused(): false {
+        alertToast(language.chatMessageActionFailed)
+        return false
+    }
+
+    function mutationBlocked(): boolean {
+        return conversationMutationBlockedByGeneration(captureCurrentChat()?.conversation.id)
     }
 
     export function refreshMessageDisplay(state: ChatDisplayRefresh): void {
@@ -340,6 +363,12 @@
     ): Promise<AcquiredChatMessageTarget | null> {
         if (viewportRow && selectedConversationOperations) {
             try {
+                if (viewportSourceToken && ['toggle-bookmark', 'toggle-message-disabled', 'toggle-messages-above-disabled', 'toggle-message-role'].includes(reason)) {
+                    return await selectedConversationOperations.acquireMessageMutation({
+                        absoluteIndex: viewportRow.absoluteIndex, sourceToken: viewportSourceToken,
+                        sourceVersion: viewportRow.sourceVersion, rowKey: viewportRow.key, message: viewportRow.message,
+                    }, reason)
+                }
                 return await selectedConversationOperations.acquireCompleteMessageTarget(
                     viewportRow.absoluteIndex,
                     reason,
@@ -386,6 +415,7 @@
     function beginEdit() {
         editIntent = captureViewportEditIntent()
         editTarget = editIntent ? null : captureCurrentMessage()
+        editEvidence = editTarget ? safeStructuredClone(editTarget.message) : null
         editDraft = message
         editMode = editIntent !== null || editTarget !== null
     }
@@ -401,10 +431,11 @@
     }
 
     async function rm(e:MouseEvent, rec?:boolean){
+        if (mutationBlocked()) return
         const acquired = await acquireCurrentMessage('remove-message')
-        if (!acquired) return
+        if (!acquired) return reportRowActionRefused()
         try {
-            await removeChatMessage({
+            const outcome = await removeChatMessage({
                 absoluteIndex: idx,
                 captureTarget: () => acquired.target,
                 shiftKey: e.shiftKey,
@@ -415,13 +446,16 @@
                 getCurrentSession: currentConversationSession,
                 confirmRemoval: () => alertConfirm(language.removeChat),
                 confirmInstantRemoval: () => alertConfirm(language.instantRemoveConfirm),
+                mutationBlocked,
             })
+            if (outcome === 'stale') reportRowActionRefused()
         } finally {
             acquired.release()
         }
     }
 
     async function edit(){
+        if (mutationBlocked()) return false
         const retainedIntent = editIntent
         const retainedTarget = editTarget
         const acquired = await acquireEditMessage(
@@ -429,8 +463,10 @@
             retainedTarget,
             'edit-message',
         )
-        if (!acquired) return false
+        if (!acquired) return reportRowActionRefused()
         try {
+            if (mutationBlocked()) return false
+            if (retainedTarget && !isEqual(resolveChatMessageTarget(retainedTarget, chatMessageContext)?.message, editEvidence)) return reportRowActionRefused()
             const result = saveCapturedChatMessage(acquired.target, chatMessageContext, editDraft)
             if (result.saved) {
                 editIntent = null
@@ -438,7 +474,7 @@
                 message = result.displayData
                 displaya(result.displayData)
             }
-            return result.saved
+            return result.saved || reportRowActionRefused()
         } finally {
             acquired.release()
         }
@@ -470,33 +506,38 @@
     }
 
     async function handlePartialEditSave(
-        e: CustomEvent<{
+        detail: {
             newData: string
+            sourceData: string
             target: 'original' | 'translation'
             translationKey?: string
-        }>,
+        },
     ) {
-        if (idx < 0) return
-        if (e.detail.target === 'translation') {
+        if (idx < 0) return false
+        if (detail.target === 'translation') {
             partialEditIntent = null
             partialEditTarget = null
-            if (!e.detail.translationKey) return
-            await updateTranslationCache(e.detail.translationKey, e.detail.newData)
-            return
+            if (!detail.translationKey) return false
+            await updateTranslationCache(detail.translationKey, detail.newData)
+            return true
         }
 
+        if (mutationBlocked()) return false
         const retainedIntent = partialEditIntent
         const retainedTarget = partialEditTarget
         const acquired = await acquireEditMessage(retainedIntent, retainedTarget, 'partial-edit-message')
-        if (!acquired) return
+        if (!acquired) return reportRowActionRefused()
         try {
-            const result = saveCapturedChatMessage(acquired.target, chatMessageContext, e.detail.newData)
+            if (mutationBlocked()) return false
+            if (acquired.target.message.data !== detail.sourceData) return reportRowActionRefused()
+            const result = saveCapturedChatMessage(acquired.target, chatMessageContext, detail.newData)
             if (result.saved) {
                 partialEditIntent = null
                 partialEditTarget = null
                 message = result.displayData
                 displaya(result.displayData)
             }
+            return result.saved || reportRowActionRefused()
         } finally {
             acquired.release()
         }
@@ -781,6 +822,7 @@
     async function toggleBookmark(target: CapturedChatMessageTarget) {
         await reportFailedBookmarkOperation(
             () => toggleCapturedBookmark(target, chatMessageContext, {
+                mutationBlocked,
                 requestName: (currentName) => alertInput(
                     language.bookmarkAskNameOrDefault,
                     [],
@@ -953,6 +995,7 @@
         </span>
         {#if !captureContext && idx >= 0 && !editMode && !editTranslationMode && !isOptimizedStreamingMessage && partialEditEnabled && (DBState.db.enableBlockPartialEdit || DBState.db.enableDragPartialEdit)}
             <PartialEditController
+                bind:this={partialEditController}
                 messageData={message}
                 chatIndex={idx}
                 {bodyRoot}
@@ -962,7 +1005,7 @@
                 getTranslationEditContext={getTranslationPartialEditContext}
                 on:start={beginPartialEdit}
                 on:cancel={cancelPartialEdit}
-                on:save={handlePartialEditSave}
+                onSave={handlePartialEditSave}
             />
         {/if}
     {/if}
@@ -1329,10 +1372,12 @@
     
     {#if DBState.db.enableBookmark}
         <button class="flex items-center hover:text-blue-500 transition-colors button-icon-bookmark {isBookmarked ? 'text-yellow-400' : ''}" onclick={async () => {
+            if (mutationBlocked()) return
             const acquired = await acquireCurrentMessage('toggle-bookmark')
-            if (!acquired) return
+            if (!acquired) return reportRowActionRefused()
             try {
                 await sleep(1)
+                if (mutationBlocked()) return
                 await toggleBookmark(acquired.target)
             } finally {
                 acquired.release()
@@ -1346,11 +1391,13 @@
     {/if}
 
     <button class="flex items-center hover:text-blue-500 transition-colors button-icon-branch" onclick={async () => {
+        if (mutationBlocked()) return
         const acquired = await acquireCurrentMessage('create-message-branch')
-        if (!acquired) return
+        if (!acquired) return reportRowActionRefused()
         try {
             await sleep(1)
-            await createCapturedConversationBranch({
+            if (mutationBlocked()) return
+            const created = await createCapturedConversationBranch({
                 target: acquired.target,
                 context: chatMessageContext,
                 runtime: getPersistentDataRuntime(),
@@ -1359,6 +1406,7 @@
                 createBranchName: (sourceName) => createChatCopyName(sourceName, 'Branch'),
                 navigateToBranch: changeChatTo,
             })
+            if (!created) reportRowActionRefused()
         } finally {
             acquired.release()
         }
@@ -1370,11 +1418,13 @@
     </button>
 
     <button class="flex items-center hover:text-blue-500 transition-colors button-icon-disable" onclick={async () => {
+        if (mutationBlocked()) return
         const acquired = await acquireCurrentMessage('toggle-message-disabled')
-        if (!acquired) return
+        if (!acquired) return reportRowActionRefused()
         try {
             await sleep(1)
-            toggleCapturedMessageDisabled(acquired.target, chatMessageContext, 'message')
+            if (mutationBlocked()) return
+            if (!toggleCapturedMessageDisabled(acquired.target, chatMessageContext, 'message')) reportRowActionRefused()
         } finally {
             acquired.release()
         }
@@ -1386,11 +1436,13 @@
     </button>
 
     <button class="flex items-center hover:text-blue-500 transition-colors button-icon-disable-above" onclick={async () => {
+        if (mutationBlocked()) return
         const acquired = await acquireCurrentMessage('toggle-messages-above-disabled')
-        if (!acquired) return
+        if (!acquired) return reportRowActionRefused()
         try {
             await sleep(1)
-            toggleCapturedMessageDisabled(acquired.target, chatMessageContext, 'allBefore')
+            if (mutationBlocked()) return
+            if (!toggleCapturedMessageDisabled(acquired.target, chatMessageContext, 'allBefore')) reportRowActionRefused()
         } finally {
             acquired.release()
         }
@@ -1650,10 +1702,12 @@
                         <span class="chat-width text-xl border-darkborderc flex items-center text-textcolor">
                             <span>{presentedRole === 'char' ? 'Assistant' : 'User'}</span>
                             <button class="ml-2 text-textcolor2 hover:text-textcolor button-icon-toggle-role" onclick={async () => {
+                                if (mutationBlocked()) return
                                 const acquired = await acquireCurrentMessage('toggle-message-role')
-                                if (!acquired) return
+                                if (!acquired) return reportRowActionRefused()
                                 try {
-                                    if (!toggleCapturedMessageRole(acquired.target, chatMessageContext)) return
+                                    if (mutationBlocked()) return
+                                    if (!toggleCapturedMessageRole(acquired.target, chatMessageContext)) return reportRowActionRefused()
                                     ReloadChatPointer.update((v) => {
                                         v[idx] = (v[idx] ?? 0) + 1
                                         return v

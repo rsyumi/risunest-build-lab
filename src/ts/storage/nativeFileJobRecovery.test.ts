@@ -38,41 +38,50 @@ function restoreStatus(
 }
 
 describe('native file job bootstrap reconciliation', () => {
-    it('reconciles restore jobs on every Tauri target', () => {
-        expect(shouldReconcileNativeFileJobs(true, false, false)).toBe(true)
-        expect(shouldReconcileNativeFileJobs(false, true, true)).toBe(true)
-        expect(shouldReconcileNativeFileJobs(false, true, false)).toBe(true)
-        expect(shouldReconcileNativeFileJobs(false, false, true)).toBe(false)
+    it('reconciles restore jobs on every Tauri target, including iOS', () => {
+        expect(shouldReconcileNativeFileJobs(true)).toBe(true)
+        expect(shouldReconcileNativeFileJobs(false)).toBe(false)
     })
 
-    it('waits for an active restore, finalizes staged data, and retains success for plugin reload', async () => {
+    it.each(['reading-source', 'awaiting-activation'] as const)('cancels abandoned %s restores without authorizing activation', async (phase) => {
         const calls: string[] = []
-        const statuses = [
-            restoreStatus('restore-1', 'waitingForInput', 'awaiting-activation'),
-            restoreStatus('restore-1', 'succeeded', 'complete'),
-        ]
-
-        const pending = await reconcileNativeRestoresBeforeBootstrap({
+        const result = await reconcileNativeFileJobsBeforeBootstrap({
             invoke: vi.fn(async (command) => {
                 calls.push(command)
-                if (command === 'native_file_job_list') {
-                    return [restoreStatus('restore-1', 'running', 'reading-source')]
-                }
-                if (command === 'native_file_job_status') return statuses.shift()
-                if (command === 'native_file_job_finalize') return 'requested'
+                if (command === 'native_file_job_list') return [restoreStatus('restore-1', 'waitingForInput', phase)]
+                if (command === 'native_file_job_cancel') return 'requested'
+                if (command === 'native_file_job_status') return restoreStatus('restore-1', 'cancelled', 'complete')
+                if (command === 'native_file_job_forget') return true
                 throw new Error(`Unexpected command: ${command}`)
             }),
             wait: vi.fn(async () => undefined),
         })
+        expect(result.interruptedRestores).toEqual(['restore-1'])
+        expect(result.libraryRestoreCommitted).toBe(false)
+        expect(calls).toEqual(['native_file_job_list', 'native_file_job_cancel', 'native_file_job_status', 'native_file_job_forget'])
+    })
 
-        expect(pending).toEqual(['restore-1'])
-        expect(calls).toEqual([
-            'native_file_job_list',
-            'native_file_job_status',
-            'native_file_job_finalize',
-            'native_file_job_status',
-        ])
-        expect(calls).not.toContain('native_file_job_forget')
+    it('waits for an already activating restore and retains its committed outcome', async () => {
+        const invoke = vi.fn(async (command: string) => {
+            if (command === 'native_file_job_list') return [restoreStatus('restore-1', 'running', 'activating-database')]
+            if (command === 'native_file_job_status') return restoreStatus('restore-1', 'succeeded', 'complete')
+            throw new Error(`Unexpected command: ${command}`)
+        })
+        const result = await reconcileNativeFileJobsBeforeBootstrap({ invoke, wait: async () => {} })
+        expect(result.pendingRestoreAcknowledgements).toEqual(['restore-1'])
+        expect(result.libraryRestoreCommitted).toBe(true)
+        expect(result.interruptedRestores).toEqual([])
+        expect(invoke).not.toHaveBeenCalledWith('native_file_job_cancel', expect.anything())
+        expect(invoke).not.toHaveBeenCalledWith('native_file_job_finalize', expect.anything())
+    })
+
+    it.each([true, false])('holds sync only when a portable restore replaced the library (%s)', async (replacesLibrary) => {
+        const result = await reconcileNativeFileJobsBeforeBootstrap({
+            invoke: async () => [{ ...restoreStatus('portable', 'succeeded', 'complete'), kind: 'restore-portable-backup', replacesLibrary }],
+            wait: async () => {},
+        })
+        expect(result.libraryRestoreCommitted).toBe(replacesLibrary)
+        expect(result.pendingRestoreAcknowledgements).toEqual(['portable'])
     })
 
     it('acknowledges failed restores immediately', async () => {
@@ -120,6 +129,8 @@ describe('native file job bootstrap reconciliation', () => {
         expect(result).toEqual({
             pendingRestoreAcknowledgements: [jobId],
             pendingOfficialPublications: [],
+            interruptedRestores: [],
+            libraryRestoreCommitted: true,
         })
         expect(calls).toEqual(['native_file_job_list'])
     })
@@ -225,7 +236,6 @@ describe('native file job bootstrap reconciliation', () => {
 
     it.each([
         ['export-block-risu-save', 'export-1'],
-        ['export-legacy-local-backup', 'legacy-export-1'],
         ['export-compatible-local-backup', 'compatible-export-1'],
         ['export-character-charx', 'charx-export-1'],
         ['kei-backup-upload', 'kei-1'],
@@ -280,7 +290,7 @@ describe('native file job bootstrap reconciliation', () => {
                                 'running',
                                 'writing-export',
                             ),
-                            kind: 'export-legacy-local-backup' as const,
+                            kind: 'export-compatible-local-backup' as const,
                         },
                     ]
                 if (command === 'native_file_job_status') return {
@@ -289,7 +299,7 @@ describe('native file job bootstrap reconciliation', () => {
                         'succeeded',
                         'complete',
                     ),
-                    kind: 'export-legacy-local-backup' as const,
+                    kind: 'export-compatible-local-backup' as const,
                     result: {
                         ...restoreStatus(
                             'lossless-export',
@@ -337,7 +347,7 @@ describe('native file job bootstrap reconciliation', () => {
                                 'succeeded',
                                 'complete',
                             ),
-                            kind: 'export-legacy-local-backup' as const,
+                            kind: 'export-compatible-local-backup' as const,
                             result: {
                                 ...restoreStatus(
                                     'lossless-export',
@@ -362,7 +372,7 @@ describe('native file job bootstrap reconciliation', () => {
         expect(calls).toEqual(['native_file_job_list'])
     })
 
-    it.each(['export-legacy-local-backup', 'export-compatible-local-backup'] as const)(
+    it.each(['export-compatible-local-backup'] as const)(
         'preserves a %s handoff still owned by persisted Android SAF state',
         async (kind) => {
             const calls: string[] = []
@@ -409,11 +419,11 @@ describe('native file job bootstrap reconciliation', () => {
                 calls.push([command, args])
                 if (command === 'native_file_job_list') return [{
                     ...restoreStatus('legacy-export', 'running', 'writing-export'),
-                    kind: 'export-legacy-local-backup' as const,
+                    kind: 'export-compatible-local-backup' as const,
                 }]
                 if (command === 'native_file_job_status') return {
                     ...restoreStatus('legacy-export', 'succeeded', 'complete'),
-                    kind: 'export-legacy-local-backup' as const,
+                    kind: 'export-compatible-local-backup' as const,
                     result: {
                         ...restoreStatus('legacy-export', 'succeeded', 'complete').result!,
                         handoffPath,
@@ -691,18 +701,6 @@ describe('native file job bootstrap reconciliation', () => {
 
     it.each([
         [
-            'export-legacy-local-backup',
-            'lossless-export',
-            'risu-backup-123e4567-e89b-42d3-a456-426614174004.bin',
-            'native_legacy_backup_handoff_cleanup',
-        ],
-        [
-            'export-legacy-local-backup',
-            'legacy-export',
-            'risu-backup-123e4567-e89b-42d3-a456-426614174004.bin',
-            'native_legacy_backup_handoff_cleanup',
-        ],
-        [
             'export-compatible-local-backup',
             'compatible-export',
             'risu-backup-123e4567-e89b-42d3-a456-426614174004.bin',
@@ -817,6 +815,8 @@ describe('native file job bootstrap reconciliation', () => {
 
         expect(result).toEqual({
             pendingRestoreAcknowledgements: [],
+            interruptedRestores: [],
+            libraryRestoreCommitted: false,
             pendingOfficialPublications: [
                 'publication-running',
                 'publication-succeeded',
@@ -850,6 +850,8 @@ describe('native file job bootstrap reconciliation', () => {
         expect(result).toEqual({
             pendingRestoreAcknowledgements: [],
             pendingOfficialPublications: ['publication-android'],
+            interruptedRestores: [],
+            libraryRestoreCommitted: false,
         })
         expect(calls).toEqual(['native_file_job_list'])
     })

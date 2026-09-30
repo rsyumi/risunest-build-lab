@@ -215,7 +215,7 @@ fn a_repair_is_selected_against_the_diagnosis_and_reported_with_a_fresh_one() {
 
     let selection = damaged_alias_selection(&state, &health);
     assert_eq!(selection.len(), 1, "one for the damaged alias");
-    let applied = apply_repair(&state, &health, &selection, false).unwrap();
+    let applied = apply_selected(&state, &health, &selection, false).unwrap();
     assert_eq!(applied.revision, before.revision + 1);
     assert!(
         !has(&applied.result, codes::ALIAS_OBJECT_MISMATCH),
@@ -239,9 +239,9 @@ fn an_undo_returns_the_library_and_drops_the_repair_it_replayed() {
     let (_directory, state, _) = damaged_payload_fixture();
     let health = DataHealthState::default();
     let selection = damaged_alias_selection(&state, &health);
-    let applied = apply_repair(&state, &health, &selection, false).unwrap();
+    let applied = apply_selected(&state, &health, &selection, false).unwrap();
 
-    let undone = undo_repair(&state, &health, &applied.journal_id).unwrap();
+    let undone = undo_repair(&state, &health, &applied.journal_id, applied.revision).unwrap();
     assert_eq!(undone.revision, applied.revision + 1);
     assert!(undone.skipped.is_empty());
     assert!(
@@ -270,7 +270,7 @@ fn a_repair_selected_against_an_older_diagnosis_is_refused() {
     .unwrap();
     drop(guard);
 
-    let error = apply_repair(&state, &health, &selection, false).unwrap_err();
+    let error = apply_selected(&state, &health, &selection, false).unwrap_err();
     assert!(
         matches!(error, StoreError::RevisionConflict { .. }),
         "check the library again before repairing it: {error:?}"
@@ -282,13 +282,13 @@ fn a_repair_needs_a_diagnosis_and_a_selection() {
     let (_directory, state, _) = damaged_payload_fixture();
     let health = DataHealthState::default();
     assert!(matches!(
-        apply_repair(&state, &health, &[], false).unwrap_err(),
+        apply_repair(&state, &health, &[], false, 0, 0).unwrap_err(),
         StoreError::Validation { .. }
     ));
 
     quick_scan(&state, &health).unwrap();
     assert!(matches!(
-        apply_repair(&state, &health, &["0:nothing".to_owned()], false).unwrap_err(),
+        apply_selected(&state, &health, &["0:nothing".to_owned()], false).unwrap_err(),
         StoreError::Validation { .. }
     ));
 }
@@ -298,7 +298,7 @@ fn the_repair_keeps_a_snapshot_of_the_library_it_was_selected_against() {
     let (_directory, state, _) = damaged_payload_fixture();
     let health = DataHealthState::default();
     let selection = damaged_alias_selection(&state, &health);
-    let applied = apply_repair(&state, &health, &selection, true).unwrap();
+    let applied = apply_selected(&state, &health, &selection, true).unwrap();
     let kept = applied.snapshot.expect("a snapshot was asked for");
     let guard = state.admit_renderer_operation().unwrap();
     let listed = with_store_mutex_admitted(&state, &guard, |store| store.snapshot_list()).unwrap();
@@ -310,7 +310,7 @@ fn the_journal_and_the_diagnosis_stay_in_the_working_folder() {
     let (directory, state, _) = damaged_payload_fixture();
     let health = DataHealthState::default();
     let selection = damaged_alias_selection(&state, &health);
-    apply_repair(&state, &health, &selection, false).unwrap();
+    apply_selected(&state, &health, &selection, false).unwrap();
 
     let working = directory.path().join("persistent").join("data-health");
     assert!(working.join("result.json").exists());
@@ -379,7 +379,7 @@ fn a_backup_never_carries_the_diagnosis_or_a_repair_journal() {
     let (directory, state, _) = damaged_payload_fixture();
     let health = DataHealthState::default();
     let selection = damaged_alias_selection(&state, &health);
-    apply_repair(&state, &health, &selection, false).unwrap();
+    apply_selected(&state, &health, &selection, false).unwrap();
 
     let guard = state.admit_renderer_operation().unwrap();
     let working = directory.path().join("persistent").join("data-health");
@@ -411,4 +411,35 @@ fn a_backup_never_carries_the_diagnosis_or_a_repair_journal() {
         std::fs::read_dir(&working).unwrap().count() > 0,
         "the working folder stays where it is"
     );
+}
+
+fn apply_selected(state: &PersistentStoreState, health: &DataHealthState, selection: &[String], snapshot: bool) -> StoreResult<RepairApplied> {
+    let diagnosis = last_result(state)?.unwrap();
+    apply_repair(state, health, selection, snapshot, diagnosis.revision, diagnosis.scanned_at)
+}
+
+#[test]
+fn diagnosis_identity_rejects_a_replaced_scan_at_the_same_revision() {
+    let (_directory, state, _) = damaged_payload_fixture();
+    let health = DataHealthState::default();
+    let selection = damaged_alias_selection(&state, &health);
+    let diagnosis = last_result(&state).unwrap().unwrap();
+    let error = apply_repair(&state, &health, &selection, false, diagnosis.revision, diagnosis.scanned_at - 1).unwrap_err();
+    assert!(matches!(error, StoreError::Validation { .. }));
+    assert!(journals(&state).unwrap().is_empty());
+}
+
+#[test]
+fn journal_failure_after_activation_reports_the_committed_revision() {
+    let (directory, state, _) = damaged_payload_fixture();
+    let health = DataHealthState::default();
+    let selection = damaged_alias_selection(&state, &health);
+    let before = last_result(&state).unwrap().unwrap().revision;
+    let journal_directory = crate::data_health::journal::directory(directory.path());
+    std::fs::create_dir_all(journal_directory.parent().unwrap()).unwrap();
+    std::fs::write(&journal_directory, b"synthetic journal failure").unwrap();
+    let error = apply_selected(&state, &health, &selection, false).unwrap_err();
+    assert!(matches!(error, StoreError::Committed { revision, .. } if revision == before + 1));
+    let guard = state.admit_renderer_operation().unwrap();
+    assert_eq!(with_store_mutex_admitted(&state, &guard, |store| store.revision()).unwrap(), before + 1);
 }

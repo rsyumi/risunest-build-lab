@@ -83,12 +83,7 @@ export const risuNestInlaySettingsItems: SettingItem[] = [
         bindKey: 'risunestInlaySkipReencode',
         condition: (ctx) => ctx.db.risunestInlayFormat === 'webp',
     },
-]
 
-/** Every RisuNest item in display order, used by the settings search. */
-export const risuNestSettingsItems: SettingItem[] = [
-    ...risuNestStreamingSettingsItems,
-    ...risuNestInlaySettingsItems,
     {
         id: 'risunest.inlay.animationFps',
         type: 'select',
@@ -119,3 +114,5 @@ export const risuNestSettingsItems: SettingItem[] = [
         bindKey: 'risunestInlayAnimationStillFrame',
     },
 ]
+
+export const risuNestSettingsItems: SettingItem[] = [...risuNestStreamingSettingsItems, ...risuNestInlaySettingsItems]

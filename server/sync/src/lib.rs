@@ -15,6 +15,29 @@ pub mod workload;
 pub use risunest_sync_wire::PROTOCOL_ID;
 pub const STORE_FORMAT_ID: &str = "risunest-sync-store/v1";
 
+pub fn resolve_data_root(path: &std::path::Path) -> Result<std::path::PathBuf> {
+    if !path.is_absolute() {
+        return Err(Error::new("absolute-data-dir-required", 400));
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => {
+            #[cfg(windows)]
+            let linked = {
+                use std::os::windows::fs::MetadataExt;
+                meta.file_attributes() & 0x400 != 0
+            };
+            #[cfg(not(windows))]
+            let linked = meta.file_type().is_symlink();
+            if linked { return Err(Error::new("unsafe-storage-path", 400)); }
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => (),
+        Err(error) => return Err(error.into()),
+    }
+    let parent = path.parent().ok_or(Error::new("invalid-data-dir", 400))?;
+    let name = path.file_name().ok_or(Error::new("invalid-data-dir", 400))?;
+    Ok(std::fs::canonicalize(parent)?.join(name))
+}
+
 #[derive(Debug)]
 pub struct Error {
     pub code: &'static str,

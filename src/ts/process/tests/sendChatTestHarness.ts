@@ -43,7 +43,7 @@ export function langModule(language: ModuleOverrides = {}) {
 }
 
 export function alertModule(overrides: ModuleOverrides = {}) {
-    return { alertError: vi.fn(), alertToast: vi.fn(), ...overrides }
+    return { alertError: vi.fn(), alertToast: vi.fn(), alertNormal: vi.fn(), ...overrides }
 }
 
 export function chatMLModule(overrides: ModuleOverrides = {}) {

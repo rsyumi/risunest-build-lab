@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { ScreenshotPreparationError } from 'src/ts/chatScreenshotErrors'
     import { v4 } from 'uuid'
     import { alertConfirm } from 'src/ts/alert'
 
@@ -10,7 +11,7 @@
     import { isCompositionKey } from 'src/ts/hotkeyModifier';
     import { type Chat as ChatRecord, type Database, type character, type groupChat, type Message } from "../../ts/storage/database.svelte";
     import { DBState } from 'src/ts/stores.svelte';
-    import { chatProcessStage, doingChat, sendChat, notifyGenerationCompletion } from "../../ts/process/index.svelte";
+    import { chatProcessStage, doingChat, sendChat, notifyGenerationCompletion, getSelectedBoundedGenerationFallbackReason } from "../../ts/process/index.svelte";
     import { getPersonaPrompt, parseKeyValue, sleep } from "../../ts/util";
     import { language } from "../../lang";
     import { isExpTranslator, translate } from "../../ts/translator/translator";
@@ -44,6 +45,7 @@
     import {
         LatestChatScrollRequestGuard,
         navigateCapturedChatMessage,
+        queryChatMessageTargetById,
         type CapturedChatMessageTarget,
     } from '../../ts/chatMessageUi'
     import type { ChatViewportHandle } from '../../ts/chatViewport';
@@ -69,6 +71,7 @@
     import { HideIconStore } from 'src/ts/stores.svelte';
     import { SelectedConversationViewportBinding } from '../../ts/selectedConversationViewportBinding';
     import { isMetadataOnlySelectedConversation } from '../../ts/storage/selectedConversationLifecycle';
+    import { cloneConversationMetadata } from '../../ts/storage/selectedConversationLifecycle';
     import { pluginV2 } from '../../ts/plugins/plugins.svelte';
     import {
         bindCompleteLiveParserContextAuthority,
@@ -130,6 +133,7 @@
         getCurrentSession: () => persistentRuntime.getActiveConversationSession(),
         getCurrentViewportSource: () =>
             persistentRuntime.getActiveConversationViewportSource(),
+        captureWindowedMessageMutation: (target, index, evidence) => persistentRuntime.captureWindowedMessageMutation(target, index, evidence),
     })
     let viewportBindingRevision = $state(0)
     const selectedConversationViewport = new SelectedConversationViewportBinding(
@@ -249,6 +253,9 @@
             return character && conversation ? { character, conversation } : null
         },
         getCurrentSession: getActiveConversationSession,
+        captureSelectedConversationTarget: () => getPersistentDataRuntime().captureSelectedConversationTarget(),
+        acquirePersistentRevision: (revision: number) => getPersistentDataRuntime().store.acquireRevision(revision),
+        acquireCompleteConversation: (reason: string, target) => getPersistentDataRuntime().acquireCompleteConversation(reason, target),
     }
     $effect(() => {
         if($ScrollToMessageStore && chatsInstance){
@@ -266,13 +273,28 @@
         try {
             const viewport = chatsInstance
             if (!viewport) return
-            await navigateCapturedChatMessage({
+            let navigated = await navigateCapturedChatMessage({
                 target,
                 context: scrollTargetContext,
                 guard: scrollRequestGuard,
                 requestGeneration,
                 viewport,
             })
+            const current = scrollTargetContext.captureSelectedConversationTarget()
+            if (!navigated && target.kind === 'persistent' && target.message.chatId &&
+                current?.characterId === target.selection.characterId &&
+                current.conversationId === target.selection.conversationId &&
+                current.navigationGeneration === target.selection.navigationGeneration &&
+                scrollRequestGuard.isCurrent(requestGeneration)) {
+                const fresh = await queryChatMessageTargetById(scrollTargetContext, target.message.chatId, 'last')
+                if (fresh) navigated = await navigateCapturedChatMessage({
+                    target: fresh, context: scrollTargetContext, guard: scrollRequestGuard, requestGeneration, viewport,
+                })
+                if (!navigated && scrollRequestGuard.isCurrent(requestGeneration) &&
+                    scrollTargetContext.captureSelectedConversationTarget()?.navigationGeneration === current.navigationGeneration) {
+                    alertError(language.bookmarkActionFailed)
+                }
+            }
         } finally {
             if (scrollRequestGuard.isCurrent(requestGeneration)) {
                 isScrollingToMessage = false
@@ -308,6 +330,30 @@
         const submittedInput = messageInput
         const submittedFiles = [...fileInput]
         try {
+            if (getSelectedBoundedGenerationFallbackReason() === null &&
+                !submittedInput.startsWith('/') && submittedFiles.length === 0 &&
+                (submittedInput !== '' || (continueResponse && !DBState.db.useSayNothing)) &&
+                !pluginV2.editinput?.size &&
+                ![...(DBState.db.presetRegex ?? []), ...(currentCharacter.type === 'character' ? currentCharacter.customscript ?? [] : []), ...getModuleRegexScripts()]
+                    .some((script) => script.type === 'editinput')) {
+                const target = persistentRuntime.captureSelectedConversationTarget()
+                const authority = persistentRuntime.captureSelectedConversationAuthority()
+                if (!target || !authority) return
+                if (submittedInput !== '') {
+                    const chat = { ...cloneConversationMetadata(currentCharacter.chats[currentCharacter.chatPage]), message: [] } as ChatRecord
+                    const controller = persistentRuntime.captureWindowedConversationMutationController(target, chat, authority.totalMessages)
+                    if (!controller) return
+                    try {
+                        if (!controller.applyRange(0, 0, [{ role: 'user', data: submittedInput, time: Date.now(), name: $ConnectionOpenStore ? DBState.db.username : null }], 'append')) return
+                    } finally { controller.release() }
+                    if (messageInput === submittedInput) { messageInput = ''; messageInputTranslate = '' }
+                    await persistentRuntime.flushPendingData('generation-input')
+                }
+                const current = persistentRuntime.captureSelectedConversationTarget()
+                if (!current || current.characterId !== target.characterId || current.conversationId !== target.conversationId || current.navigationGeneration !== target.navigationGeneration) return
+                updateInputSizeAll()
+                return await sendChatMainRaw(continueResponse)
+            }
             return await runSelectedConversationOperation(
                 continueResponse ? 'continue-response' : 'send-message',
                 (context) => sendMainComplete(context, continueResponse, submittedInput, submittedFiles),
@@ -541,6 +587,7 @@
     let abortController:null|AbortController = null
 
     async function sendChatMain(continued:boolean = false) {
+        if (getSelectedBoundedGenerationFallbackReason() === null) return sendChatMainRaw(continued)
         return runSelectedConversationOperation(
             continued ? 'continue-generation' : 'generate-response',
             (context) => sendChatMainComplete(context, continued),
@@ -552,9 +599,14 @@
         continued: boolean = false,
     ) {
         requireConversationMutationTarget(context)
+        return sendChatMainRaw(continued)
+    }
+
+    async function sendChatMainRaw(continued: boolean) {
         abortController = new AbortController()
+        let completed = false
         try {
-            await sendChat(-1, {
+            completed = await sendChat(-1, {
                 signal: abortController.signal,
                 continue: continued,
             })
@@ -565,7 +617,7 @@
         } finally {
             $doingChat = false
         }
-        if (DBState.db.playMessage) {
+        if (completed && DBState.db.playMessage) {
             const audio = new Audio(sendSound)
             audio.play().catch(() => {})
         }
@@ -742,7 +794,9 @@
             if (openGeneration !== screenshotOpenGeneration) return false
             if (!(error instanceof DOMException && error.name === 'AbortError')) {
                 const detail = error instanceof Error ? error.message : String(error)
-                screenshotError = language.screenshotFailed.replace('{error}', detail)
+                screenshotError = error instanceof ScreenshotPreparationError
+                    ? language.screenshotPreparationFailed
+                    : language.screenshotFailed.replace('{error}', detail)
                 alertError(screenshotError)
             }
             return false
@@ -1058,7 +1112,9 @@
                     error,
                     language.screenshotPartialDestinationMayRemain,
                 )
-                screenshotError = language.screenshotFailed.replace('{error}', detail)
+                screenshotError = error instanceof ScreenshotPreparationError
+                    ? language.screenshotPreparationFailed
+                    : language.screenshotFailed.replace('{error}', detail)
                 alertError(screenshotError)
                 // Keep the dialog open so the failure is readable and the entered
                 // range can be captured again without reopening the dialog.
@@ -1168,11 +1224,7 @@
         {/if}
     {:else}
         <div class="h-full w-full flex flex-col-reverse overflow-y-auto relative default-chat-screen" onscroll={(e) => {
-            const chatTarget = e.target as HTMLElement;
-            const latestMessage = chatTarget.querySelector<HTMLElement>('.is-latest-chat-row');
-            const isAtBottom = latestMessage
-                ? latestMessage.getBoundingClientRect().top <= chatTarget.getBoundingClientRect().bottom + 100
-                : true;
+            const isAtBottom = chatsInstance?.isAtBottom() ?? true;
             if(isAtBottom){
                 showNewMessageButton = false;
             }

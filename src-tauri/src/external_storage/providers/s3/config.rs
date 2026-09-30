@@ -173,8 +173,7 @@ fn origin_text(origin: &url::Url) -> Result<String> {
 
 fn endpoint(endpoint: &str, profile: &Profile) -> Result<(url::Url, String)> {
     let parsed = url::Url::parse(endpoint).map_err(|_| unsupported())?;
-    let loopback = parsed.scheme() == "http" && parsed.host_str() == Some("127.0.0.1");
-    if (parsed.scheme() != "https" && !loopback)
+    if !super::super::super::http::user_endpoint_allowed(&parsed)
         || !parsed.username().is_empty()
         || parsed.password().is_some()
         || parsed.query().is_some()

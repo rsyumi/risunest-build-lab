@@ -77,7 +77,8 @@ describe('expandColdPayloads', () => {
 
         expect(db.characters[0].name).toBe('Stub')
         expect(db.characters[0].chats[0].message[0].data).toBe(`${coldStorageHeader}missing-chat`)
-        expect(db.characters[0].coldstorage).toBeUndefined()
+        expect(db.characters[0].coldstorage).toBe('missing-character')
+        expect(db.characters[0].coldStoragedChats).toEqual(['missing-chat'])
         expect(result.expandedKeys).toEqual([])
         expect(result.unavailableKeys).toEqual(['missing-character', 'missing-chat'])
     })

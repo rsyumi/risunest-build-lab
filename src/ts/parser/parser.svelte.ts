@@ -720,7 +720,7 @@ function parseThoughtsAndTools(
             }
             if (depth === 0 || thoughtMode === 'collapsed') {
                 const contentEnd = depth === 0 ? j - 1 : data.length
-                result += `<details${thoughtMode === 'collapsed' ? ' data-risu-streaming-thought' : ''}><summary>${language.cot}</summary>${data.substring(i + 10, contentEnd)}</details>`
+                result += `<details data-risu-thought${thoughtMode === 'collapsed' ? ' data-risu-streaming-thought' : ''}><summary>${language.cot}</summary>${data.substring(i + 10, contentEnd)}</details>`
                 i = depth === 0 ? j + 10 : data.length
                 continue
             }

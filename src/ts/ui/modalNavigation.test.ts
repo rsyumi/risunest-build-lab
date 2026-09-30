@@ -1,7 +1,11 @@
 import { afterEach, expect, it, vi } from 'vitest'
-import { modalNavigation } from './modalNavigation'
+vi.mock('../stores.svelte', async () => ({ alertStore: (await import('svelte/store')).writable({ type: 'none', msg: '' }) }))
+import { alertStore } from '../stores.svelte'
+import { get } from 'svelte/store'
+import { modalNavigation, backNavigationLayer } from './modalNavigation'
 
 afterEach(() => {
+    alertStore.set({ type: "none", msg: "" })
     vi.restoreAllMocks()
     history.replaceState(null, '')
     document.body.replaceChildren()
@@ -12,7 +16,7 @@ it('dismisses on Escape and restores focus to the opener', async () => {
     modal.innerHTML = '<button>Close</button>'
     document.body.append(opener, modal)
     opener.focus()
-    const back = vi.spyOn(history, 'back').mockImplementation(() => {})
+    const back = vi.spyOn(history, 'go').mockImplementation(() => {})
     const close = vi.fn()
     const action = modalNavigation(modal, { close })
     await Promise.resolve()
@@ -21,13 +25,14 @@ it('dismisses on Escape and restores focus to the opener', async () => {
     expect(close).toHaveBeenCalledOnce()
     action.destroy()
     expect(document.activeElement).toBe(opener)
-    expect(back).toHaveBeenCalledOnce()
+    await Promise.resolve()
+    expect(back).toHaveBeenCalledWith(-1)
     back.mockRestore()
     history.replaceState(null, '')
     document.body.replaceChildren()
 })
 it('consumes a WebView/browser Back without going back a second time', () => {
-    const back = vi.spyOn(history, 'back').mockImplementation(() => {})
+    const back = vi.spyOn(history, 'go').mockImplementation(() => {})
     const close = vi.fn(),
         modal = document.createElement('div')
     const action = modalNavigation(modal, { close })
@@ -80,6 +85,46 @@ it('does not close a dialog for composition-owned Escape', () => {
         expect(event.defaultPrevented).toBe(false)
     }
     expect(close).not.toHaveBeenCalled()
+    history.replaceState(null, '')
+    action.destroy()
+})
+
+it('coalesces nested teardown into one asynchronous traversal', async () => {
+    const go = vi.spyOn(history, 'go').mockImplementation(() => {})
+    const parent = modalNavigation(document.createElement('div'), { close: vi.fn() })
+    const child = modalNavigation(document.createElement('div'), { close: vi.fn() })
+    child.destroy()
+    parent.destroy()
+    await Promise.resolve()
+    expect(go).toHaveBeenCalledOnce()
+    expect(go).toHaveBeenCalledWith(-2)
+})
+it('cancels a sibling confirmation before closing a modal for Escape and Back', () => {
+    const close = vi.fn()
+    const action = modalNavigation(document.createElement('div'), { close })
+    alertStore.set({ type: 'ask', msg: 'confirm' })
+    window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))
+    expect(get(alertStore)).toEqual({ type: 'none', msg: '' })
+    expect(close).not.toHaveBeenCalled()
+    alertStore.set({ type: 'ask', msg: 'confirm again' })
+    history.replaceState(null, '')
+    window.dispatchEvent(new PopStateEvent('popstate'))
+    expect(get(alertStore)).toEqual({ type: 'none', msg: '' })
+    expect(history.state.risunestModal).toHaveLength(1)
+    expect(close).not.toHaveBeenCalled()
+    history.replaceState(null, '')
+    action.destroy()
+})
+it('lets menu layers keep focus and opt out without a history entry', async () => {
+    const opener = document.createElement('button'), menu = document.createElement('div')
+    menu.innerHTML = '<button>Item</button>'
+    document.body.append(opener, menu)
+    opener.focus()
+    const action = backNavigationLayer(menu, { close: vi.fn(), enabled: false })
+    expect(history.state).toBeNull()
+    action.update({ close: vi.fn(), enabled: true })
+    await Promise.resolve()
+    expect(document.activeElement).toBe(opener)
     history.replaceState(null, '')
     action.destroy()
 })

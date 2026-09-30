@@ -76,6 +76,7 @@ pub(crate) struct Hives {
     /// The sandbox directories the OS hands a mobile application.
     pub os_data: Option<PathBuf>,
     pub os_cache: Option<PathBuf>,
+    pub os_documents: Option<PathBuf>,
 }
 
 impl Hives {
@@ -88,6 +89,7 @@ impl Hives {
             home: dirs::home_dir(),
             os_data: None,
             os_cache: None,
+            os_documents: None,
         }
     }
 
@@ -114,7 +116,7 @@ pub struct AppPaths {
     pub logs: PathBuf,
     pub cache: PathBuf,
     pub cleanup_control: PathBuf,
-    /// What Tauri would resolve from the identifier. Swept, never written.
+    /// Auxiliary Tauri directories and the iOS import Inbox, included in cleanup.
     pub tauri_derived: Vec<PathBuf>,
     /// The directory an uninstall removes. `None` on mobile and for an
     /// AppImage, which is a single file rather than an installed directory.
@@ -159,6 +161,8 @@ impl AppPaths {
         let mut hives = Hives::default();
         hives.os_data = app.path().app_data_dir().ok();
         hives.os_cache = app.path().app_cache_dir().ok();
+        #[cfg(target_os = "ios")]
+        { hives.os_documents = Some(app.path().document_dir().map_err(|_| "application documents directory unavailable")?); }
         let mut paths = Self::layout(platform, &hives, &app.config().identifier, false)?;
         paths.data = platform_store_root(&paths.data, platform)?;
         paths.logs = paths.data.join(LOGS_LEAF);
@@ -200,6 +204,7 @@ impl AppPaths {
         agent: bool,
     ) -> Result<Self, String> {
         validate_identifier(identifier)?;
+        if platform == Platform::Ios { Hives::require(&hives.os_documents, "application documents")?; }
         let leaf = |name: &str| {
             if agent && platform.is_desktop() {
                 format!("{name}{AGENT_SUFFIX}")
@@ -245,7 +250,8 @@ impl AppPaths {
                 )
             }
             Platform::Android | Platform::Ios => {
-                let data = Hives::require(&hives.os_data, "application data")?;
+                let os_data = Hives::require(&hives.os_data, "application data")?;
+                let data = if platform == Platform::Android { os_data.join("files") } else { os_data };
                 let cache = Hives::require(&hives.os_cache, "application cache")?;
                 let control = data
                     .parent()
@@ -371,9 +377,12 @@ fn tauri_derived(platform: Platform, hives: &Hives, identifier: &str) -> Vec<Pat
                 }
             }
         }
-        // The OS sandbox root is the store itself and the OS removes it on
-        // uninstall, so there is nothing separate to sweep.
-        Platform::Android | Platform::Ios => {}
+        Platform::Ios => {
+            if let Some(documents) = hives.os_documents.as_deref().filter(|path| path.is_absolute()) {
+                derived.push(documents.join("Inbox"));
+            }
+        }
+        Platform::Android => {}
     }
     derived.sort();
     derived.dedup();
@@ -451,7 +460,7 @@ fn platform_store_root(root: &Path, platform: Platform) -> Result<PathBuf, Strin
     if !matches!(platform, Platform::Android | Platform::Linux) {
         return Ok(root.to_owned());
     }
-    resolve_platform_root(root, platform == Platform::Linux)
+    resolve_platform_root(root, true)
         .map_err(|error| format!("application data root unavailable: {error}"))
 }
 

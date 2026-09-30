@@ -36,65 +36,71 @@ const bound = (): ServerSyncSnapshot => ({
 });
 
 describe("connecting a sync server", () => {
-  it("binds, stores the asset policy, then runs the first sync in that order", async () => {
+  it("binds with the durable asset policy before running the first sync", async () => {
     const trace: string[] = [];
     const controller = {
-      bind: vi.fn(async (_config: unknown, prepare?: () => Promise<unknown>) => {
+      bind: vi.fn(async (_config: unknown, residency?: "full" | "remote") => {
         trace.push("bind");
-      await prepare?.();
       }),
-      reregister: vi.fn(async (_config: unknown, prepare?: () => Promise<unknown>) => {
+      reregister: vi.fn(async (_config: unknown, residency?: "full" | "remote") => {
         trace.push("reregister");
-      await prepare?.();
       }),
       synchronize: vi.fn(async () => {
         trace.push("synchronize");
       }),
     };
-    const setPolicy = vi.fn(async (policy: string) => {
-      trace.push(`policy:${policy}`);
-    });
-    await connectServerSync(controller, setPolicy, { config, residency: "remote" });
-    expect(trace).toEqual(["bind", "policy:remote", "synchronize"]);
-    expect(controller.bind).toHaveBeenCalledWith(config, expect.any(Function));
+    await connectServerSync(controller, { config, residency: "remote" });
+    expect(trace).toEqual(["bind", "synchronize"]);
+    expect(controller.bind).toHaveBeenCalledWith(config, "remote");
   });
   it("re-registers instead of binding when replacing the device credentials", async () => {
     const controller = {
-      bind: vi.fn(async (_config: unknown, prepare?: () => Promise<unknown>) => { await prepare?.(); }),
-      reregister: vi.fn(async (_config: unknown, prepare?: () => Promise<unknown>) => { await prepare?.(); }),
+      bind: vi.fn(async (_config: unknown, residency?: "full" | "remote") => {  }),
+      reregister: vi.fn(async (_config: unknown, residency?: "full" | "remote") => {  }),
       synchronize: vi.fn(async () => {}),
     };
-    await connectServerSync(controller, async () => {}, {
+    await connectServerSync(controller, {
       config,
       residency: "full",
       replacing: true,
     });
-    expect(controller.reregister).toHaveBeenCalledWith(config, expect.any(Function));
+    expect(controller.reregister).toHaveBeenCalledWith(config, "full");
     expect(controller.bind).not.toHaveBeenCalled();
     expect(controller.synchronize).toHaveBeenCalledOnce();
   });
   it("does not sync when binding fails", async () => {
     const controller = {
-      bind: vi.fn(async (_config: unknown, prepare?: () => Promise<unknown>) => {
+      bind: vi.fn(async (_config: unknown, residency?: "full" | "remote") => {
         throw { code: "unauthorized" };
       }),
-      reregister: vi.fn(async (_config: unknown, prepare?: () => Promise<unknown>) => { await prepare?.(); }),
+      reregister: vi.fn(async (_config: unknown, residency?: "full" | "remote") => {  }),
       synchronize: vi.fn(async () => {}),
     };
-    const setPolicy = vi.fn(async () => {});
     await expect(
-      connectServerSync(controller, setPolicy, { config, residency: "full" }),
+      connectServerSync(controller, { config, residency: "full" }),
     ).rejects.toMatchObject({ code: "unauthorized" });
-    expect(setPolicy).not.toHaveBeenCalled();
     expect(controller.synchronize).not.toHaveBeenCalled();
   });
 });
 
 describe("status and error copy", () => {
+  it.each(['unauthorized', 'forbidden', 'media-device-revoked', 'new-device-registration-required', 'device-identity-mismatch'])("explains %s without retry or software upgrade advice", (code) => {
+    expect(serverSyncErrorHelp(code, text, false)).toBe(text.registrationRefusedHelp);
+  });
+  it("explains disconnect prerequisites and registration revocation", () => {
+    expect(serverSyncErrorHelp('download-all-assets-before-unbind', text, false)).toBe(text.downloadBeforeDisconnect);
+    expect(serverSyncErrorHelp('revoke-previous-device-first', text, false)).toBe(text.revokeBeforeRegistration);
+    expect(serverSyncErrorHelp('local-storage-full', text, false)).toBe(text.storageFullHelp);
+  });
+  it("prioritizes confirmed disconnection over inactive binding pause", () => {
+    expect(serverSyncStatus({ ...bound(), paused: true, status: { ...bound().status!, configured: false } }, text)).toEqual({ label: text.disconnected, tone: 'idle' });
+    expect(serverSyncStatus({ ...bound(), error: 'unauthorized', errorRetryable: false }, text)).toEqual({ label: text.registrationRequired, tone: 'attention' });
+    expect(serverSyncStatus({ ...bound(), error: 'generation-active' }, text)).toEqual({ label: text.waitingForLocal, tone: 'connected' });
+  });
   it("ranks attention states above activity and activity above the connection", () => {
     expect(serverSyncStatus(idle(), text)).toEqual({
-      label: text.disconnected,
-      tone: "idle",
+      label: text.statusUnknown,
+      tone: "attention",
     });
     expect(serverSyncStatus(bound(), text)).toEqual({
       label: text.ready,

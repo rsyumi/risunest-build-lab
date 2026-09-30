@@ -3,6 +3,16 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 
 pub(crate) const SCHEMA_VERSION: u32 = 1;
 
+const PLUGIN_CLAIM_ELIGIBILITY_TABLE_SQL: &str = r#"
+CREATE TABLE plugin_claim_eligibility (
+    import_batch_id TEXT NOT NULL,
+    owner TEXT NOT NULL,
+    code_hash TEXT NOT NULL,
+    process_id TEXT NOT NULL,
+    PRIMARY KEY (import_batch_id, owner, code_hash)
+)
+"#;
+
 const ASSET_GC_MAINTENANCE_STATE_TABLE_SQL: &str = r#"
 CREATE TABLE asset_gc_maintenance_state (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -95,7 +105,7 @@ fn create_schema(connection: &mut Connection) -> StoreResult<()> {
             assigned_at INTEGER,
             PRIMARY KEY (generation, owner, storage_key)
         );
-        CREATE INDEX plugin_storage_owner ON plugin_storage (generation, owner, ordinal);
+        CREATE INDEX plugin_storage_owner ON plugin_storage (generation, owner, ordinal, storage_key);
         CREATE TABLE bot_presets (
             generation TEXT NOT NULL,
             preset_id TEXT NOT NULL,
@@ -226,6 +236,7 @@ fn create_schema(connection: &mut Connection) -> StoreResult<()> {
     super::content_change_index::create_schema(&transaction)?;
     super::sync_selection::create_schema(&transaction)?;
     super::external_storage_state::create_schema(&transaction)?;
+    transaction.execute_batch(PLUGIN_CLAIM_ELIGIBILITY_TABLE_SQL)?;
     validate_schema(&transaction)?;
     transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     transaction.commit()?;
@@ -233,6 +244,8 @@ fn create_schema(connection: &mut Connection) -> StoreResult<()> {
 }
 
 fn validate_schema(connection: &Connection) -> StoreResult<()> {
+    validate_object_sql(connection, "table", "plugin_claim_eligibility",
+        PLUGIN_CLAIM_ELIGIBILITY_TABLE_SQL, "plugin claim eligibility table definition is invalid")?;
     super::server_sync_outbox::validate_schema(connection)?;
     super::content_change_index::validate_schema(connection)?;
     super::external_storage_state::validate_schema(connection)?;

@@ -1,0 +1,21 @@
+diff --git a/lib/runner/index.js b/lib/runner/index.js
+index 150bcc70cccfd05f7799f99ebca41d58f875812a..0b1201156db483e7847a2be3b001fa04936b66da 100644
+--- a/lib/runner/index.js
++++ b/lib/runner/index.js
+@@ -1917,6 +1917,7 @@ var ProcessHost = class extends import_events.EventEmitter {
+       // This way Ctrl+C or a kill command can shutdown all workers in case they misbehave.
+       // Otherwise user can end up with a bunch of workers stuck in a busy loop without self-destructing.
+       detached: false,
++      windowsHide: true,
+       env: {
+         ...process.env,
+         ...this._extraEnv
+@@ -2048,7 +2049,7 @@ var ProcessHost = class extends import_events.EventEmitter {
+       return;
+     try {
+       if (process.platform === "win32")
+-        import_child_process.default.spawnSync(`taskkill /pid ${pid} /T /F`, { shell: true });
++        import_child_process.default.spawnSync(`taskkill /pid ${pid} /T /F`, { shell: true, windowsHide: true });
+       else
+         process.kill(pid, "SIGKILL");
+     } catch {

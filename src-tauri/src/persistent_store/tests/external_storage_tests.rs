@@ -339,7 +339,7 @@ fn ordinary_publication_reuses_only_the_same_terminal_job_and_capture_ref() {
 }
 
 #[test]
-fn paused_target_allows_only_live_exit_drain_publication_paths() {
+fn paused_target_blocks_exit_drain_until_explicit_resume() {
     let (_dir, mut store, _) = open_fixture();
     select_external(&mut store);
     let identity = selection::identity(&store.connection).unwrap();
@@ -385,33 +385,16 @@ fn paused_target_allows_only_live_exit_drain_publication_paths() {
     );
     let tx = store.connection.transaction().unwrap();
     assert!(external::prepare_publication(&tx, &intent, &foreground).is_err());
-    external::prepare_publication(&tx, &intent, &exit).unwrap();
+    assert!(external::prepare_publication(&tx, &intent, &exit).is_err());
+    tx.rollback().unwrap();
+    let selected=selection::read(&store.connection).unwrap();
+    let resumed=store.external_set_paused(&selected.epoch,false).unwrap();
+    assert_eq!(resumed.epoch,selected.epoch);
+    assert!(!resumed.paused);
+    assert!(store.external_set_paused("stale-selection",true).is_err());
+    let tx=store.connection.transaction().unwrap();
+    external::prepare_publication(&tx,&intent,&exit).unwrap();
     tx.commit().unwrap();
-    let tx = store.connection.transaction().unwrap();
-    assert!(external::begin_publication(&tx, &foreground).is_err());
-    external::begin_publication(&tx, &exit).unwrap();
-    assert!(external::begin_publication(&tx, &exit).is_err());
-    external::publication_unknown(&tx, "exit-job").unwrap();
-    assert!(external::confirm_publication(
-        &tx,
-        &foreground,
-        "exit-commit",
-        "snapshot",
-        "observation",
-        None,
-    )
-    .is_err());
-    external::confirm_publication(
-        &tx,
-        &exit,
-        "exit-commit",
-        "snapshot",
-        "observation",
-        None,
-    )
-    .unwrap();
-    tx.commit().unwrap();
-    assert!(selection::read(&store.connection).unwrap().paused);
 }
 
 #[test]

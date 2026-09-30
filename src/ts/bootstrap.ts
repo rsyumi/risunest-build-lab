@@ -1,3 +1,4 @@
+import { classifyBootFailure, type BootStage } from './bootFailureClassification'
 import {
     writeFile,
     readFile,
@@ -11,11 +12,11 @@ import { nativeDataPath } from "./storage/nativePaths"
 import { changeFullscreen, sleep } from "./util"
 import { get } from "svelte/store";
 import { setDatabase, getDatabase, type Database } from "./storage/database.svelte";
-import { getDeviceSettings, loadDeviceSettings } from "./storage/deviceSettings";
+import { getStartupExclusions, loadDeviceSettings } from "./storage/deviceSettings";
 import { recordNativeLogError, setNativeLogFileEnabled } from "./nativeLog";
 import { registerRuntimeErrorHandlers } from "./runtimeErrors";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
-import { MobileGUI, botMakerMode, selectedCharID, loadedStore, LoadingStatusState, bootFailure, type BootFailure } from "./stores.svelte";
+import { MobileGUI, botMakerMode, selectedCharID, loadedStore, LoadingStatusState, bootFailure } from "./stores.svelte";
 import { loadPlugins, loadPluginsAfterAuthoritativeRestore } from "./plugins/plugins.svelte";
 import { alertConfirm, alertError, alertInput, alertLogin, alertMd, alertNormal, alertSelect, alertTOS, waitAlert } from "./alert";
 import { applyHubSelection, characterURLImport, downloadRisuHub, hubURL } from "./characterCards";
@@ -76,6 +77,7 @@ import {
     OfficialAccountSnapshotAdapter,
     createOfficialAssociationMarkers,
 } from "./storage/sync/officialAccountSnapshot";
+import { createNativeOfficialAccountAssets } from "./storage/sync/nativeOfficialAccountAssets";
 import { getSyncConflictBackupStore } from "./storage/sync/syncConflictBackup";
 import { formatNameList, summarizePinnedSyncConflict } from "./storage/sync/syncConflictSummary";
 import { withPersistentRevisionLease } from "./storage/persistentRecordIterator";
@@ -87,6 +89,7 @@ import {
     reconcileNativeFileJobsBeforeBootstrap,
     shouldReconcileNativeFileJobs,
 } from "./storage/nativeFileJobRecovery";
+import { refreshDeviceStateAfterRestore } from "./storage/deviceStateRestore";
 import { registerAndroidRisuSaveRoute } from "./storage/androidRisuSaveRouteProduction.svelte";
 import { isAndroidSafFileJobsEnabled } from "./storage/androidSafBridge";
 import {
@@ -143,7 +146,7 @@ import {
     registerWindowCloseDrain,
 } from './storage/syncExitProduction'
 import { getExternalStorageBridge } from './storage/sync/external/bridge'
-import { createServerSyncExitDrainAdapter } from './storage/sync/serverSyncProduction'
+import { createServerSyncExitDrainAdapter, holdServerSyncAfterRestore, getServerSyncController } from './storage/sync/serverSyncProduction'
 import {
     retainableReplacementFence,
     type RetainableReplacementFence,
@@ -187,65 +190,30 @@ function registerAndroidScreenshotPublicationRecovery() {
 }
 
 /**
- * Boot stages whose failures mean the local persistent store could not be
- * opened or bootstrapped. Both of them go through `store.open()`.
- */
-const persistentStoreOpenStages = new Set([
-    'persistent-storage',
-    'device-settings',
-    'persistent-database',
-])
-
-function describeBootFailureError(error: unknown): string {
-    if (error instanceof Error) return error.message
-    if (typeof error === 'string') return error
-    if (error && typeof error === 'object') {
-        const message = (error as { message?: unknown }).message
-        if (typeof message === 'string') return message
-    }
-    return String(error)
-}
-
-/**
- * Classifies a startup failure so the recovery panel can explain what the user
- * has to do. Pure so it can be tested without booting the application.
- */
-export function classifyBootFailure(error: unknown, stage?: string): BootFailure {
-    const message = describeBootFailureError(error)
-    if (message.includes('unsupported persistent schema version')) {
-        return { kind: 'schema-unsupported', message, stage }
-    }
-    if (stage !== undefined && persistentStoreOpenStages.has(stage)) {
-        return { kind: 'store-open', message, stage }
-    }
-    return { kind: 'unknown', message, stage }
-}
-
-/**
  * Loads the application data.
  */
 export async function loadData() {
     if (get(loadedStore)) return
-    let stage = 'startup'
+    let stage: BootStage = 'startup'
     LoadingStatusState.startedAt = performance.now()
     bootFailure.set(null)
-    const transition = async (nextStage: string, text: string) => {
+    const transition = async (nextStage: BootStage, text: string) => {
         stage = nextStage
         markBootStage(nextStage)
         LoadingStatusState.text = text
         await yieldToUi()
     }
     const excluded = (name: RecoveryExclusion): boolean =>
-        isStartupExcluded(name, getDeviceSettings().startupExclusions)
+        isStartupExcluded(name, getStartupExclusions())
     LoadingStatusState.text = language.risuNest.startup.storage
     try {
+        await initializeIOSNative()
         if (isTauri) {
             stage = 'native-setup'
             await checkNativeStartupStatus()
         }
         if (isTauri) {
             await transition('app-data-directories', language.risuNest.startup.storage)
-            if (isTauriDesktop) appWindow.maximize()
         } else {
             stage = 'browser-storage'
             await forageStorage.Init()
@@ -271,16 +239,18 @@ export async function loadData() {
         stage = 'native-file-jobs'
         const recoveredNativeFileJobs = isTauri
             ? await reconcileNativeFileJobsBeforeBootstrap(undefined, {
-                reconcileRestores: shouldReconcileNativeFileJobs(
-                    isTauriDesktop,
-                    isTauriAndroid,
-                    isAndroidSafFileJobsEnabled(),
-                ),
+                reconcileRestores: shouldReconcileNativeFileJobs(isTauri),
             })
             : {
                 pendingRestoreAcknowledgements: [],
                 pendingOfficialPublications: [],
+                interruptedRestores: [],
+                libraryRestoreCommitted: false,
             }
+        if (recoveredNativeFileJobs.pendingRestoreAcknowledgements.length > 0) {
+            await refreshDeviceStateAfterRestore()
+        }
+        if (recoveredNativeFileJobs.libraryRestoreCommitted) holdServerSyncAfterRestore()
         const recoveredNativeRestoreJobs =
             recoveredNativeFileJobs.pendingRestoreAcknowledgements
         const runtime = getPersistentDataRuntime()
@@ -384,20 +354,6 @@ export async function loadData() {
                 },
             },
         } : {})
-        const liveAccountStorage = isTauri
-            ? new AccountStorage({
-                ...nativeAccountStorageOptions,
-                credentialRouting: {
-                    getToken: () => nativeOfficialFlow?.getToken(),
-                    reauthenticate: async (loginResult) => {
-                        if (!nativeOfficialFlow) {
-                            throw new Error('Native official account flow is not configured')
-                        }
-                        await nativeOfficialFlow.reauthenticate(loginResult)
-                    },
-                },
-            })
-            : accountStorage
         const nativeAssociation = nativeDeviceSettings
             ? await createNativeDeviceSettingsBag(
                 nativeDeviceSettings,
@@ -412,9 +368,12 @@ export async function loadData() {
             : null
         const associationStorage = nativeAssociation?.storage ?? localStorage
         const ledgerStorage = nativeAssetLedger?.storage ?? localStorage
+        const getNativeAccountId = () => nativeOfficialFlow
+            ? nativeOfficialFlow.getAccountId()
+            : nativeCredential?.id ?? null
         const officialAssetLedger = createAccountScopedOfficialAssetLedger(
             ledgerStorage,
-            () => getDatabase().account?.id,
+            () => isTauri ? getNativeAccountId() ?? undefined : getDatabase().account?.id,
         )
         const flushNativeOfficialMetadata = async () => {
             await nativeAssociation?.flush()
@@ -452,6 +411,7 @@ export async function loadData() {
             ledger: officialAssetLedger,
             association: createOfficialAssociationMarkers(associationStorage),
             nativeDatabasePublisher,
+            getAccountId: isTauri ? getNativeAccountId : undefined,
             flushPublicationMetadata: nativeDatabasePublisher
                 ? flushNativeOfficialMetadata
                 : undefined,
@@ -492,8 +452,8 @@ export async function loadData() {
             },
         })
         let officialReconcilePublish = false
-        await transition('account-bootstrap', language.risuNest.startup.account)
-        const accountBootstrap = await initializeOfficialAccountBootstrap({
+        if (!excluded('account')) await transition('account-bootstrap', language.risuNest.startup.account)
+        const accountBootstrap = excluded('account') ? { officialEnabled: false } : await initializeOfficialAccountBootstrap({
             isTauri,
             local,
             resolveWorkingSet: async () => resolvePersistentWorkingSet(),
@@ -538,8 +498,15 @@ export async function loadData() {
             },
         })
         if (nativeCredentialVault) {
-            const assetReader = createStructuredAccountAssetReader(liveAccountStorage)
-            configureOfficialAccountAssetReader(nativeCredential ? assetReader : null)
+            configureOfficialAccountAssetReader(null)
+            const restoredAssets = createNativeOfficialAccountAssets({
+                settings: nativeDeviceSettings!, store: runtime.store, resolveBlobs: resolveBlobStore,
+                account: accountStorage, ledger: officialAssetLedger, flushMetadata: flushNativeOfficialMetadata,
+            })
+            const completeRestoreAssets = async (accountId: string, onProgress?: (completed: number, total: number) => void) => {
+                const missing = await restoredAssets.complete(accountId, onProgress)
+                if (missing > 0) alertNormal(language.risuNest.backup.officialAssetsMissing.replace('{count}', String(missing)))
+            }
             const service = createNativeOfficialAccountFlowService({
                 credentialVault: nativeCredentialVault,
                 adapter: officialAdapter,
@@ -552,12 +519,15 @@ export async function loadData() {
                     getDatabase().account = credential ?? undefined
                     forageStorage.setAccountModeForSession(false)
                     configurePersistentDataRuntime({ officialPublisher: null })
-                    configureOfficialAccountAssetReader(credential ? assetReader : null)
+                    configureOfficialAccountAssetReader(null)
                 },
                 flushMetadata: flushNativeOfficialMetadata,
                 clearMetadata: clearNativeOfficialMetadata,
                 resetAccountSession: resetAccountStorageSession,
-                nativeRestore: async (initialCredential) => {
+                prepareRestoreAssets: restoredAssets.prepare,
+                completeRestoreAssets,
+                clearRestoreAssets: restoredAssets.clear,
+                nativeRestore: async (initialCredential, options) => {
                     let credential = initialCredential
                     for (let attempt = 0; attempt < 3; attempt += 1) {
                         try {
@@ -570,7 +540,7 @@ export async function loadData() {
                                         token: credential.token,
                                     },
                                 },
-                                { afterRefresh: loadPluginsAfterAuthoritativeRestore },
+                                { ...options, afterRefresh: loadPluginsAfterAuthoritativeRestore },
                             )
                             if (result.kind !== 'activated') return result
                             officialAdapter.rememberNativeActivation(
@@ -599,26 +569,26 @@ export async function loadData() {
             nativeOfficialFlow = service.flow
             snapshotRequestReauthentication = service.snapshotRequestReauthentication
             configureNativeOfficialAccountFlow(service.flow)
+            if (nativeCredential && !excluded('account')) {
+                try { await completeRestoreAssets(nativeCredential.id) }
+                catch { alertError(language.risuNest.backup.officialAssetsRestoreFailed) }
+            }
             nativePublicationRecovery = createNativeOfficialPublicationRecovery(
                 recoveredNativeFileJobs.pendingOfficialPublications,
                 {
-                    activeAccountId: () => getDatabase().account?.id ?? null,
+                    activeAccountId: getNativeAccountId,
                     account: accountStorage,
                     adapter: officialAdapter,
                     flushMetadata: flushNativeOfficialMetadata,
                 },
             )
-            await nativePublicationRecovery.reconcile()
+            if (!excluded('account')) await nativePublicationRecovery.reconcileSettled()
         } else {
             configureNativeOfficialAccountFlow(null)
         }
         performance.mark('boot:account-ready')
-        if (officialReconcilePublish && accountBootstrap.officialEnabled) {
-            publishCurrentOfficialRevision().catch((error) => {
-                console.error('Official reconcile publish failed', error)
-            })
-        }
-        if (isTauri) {
+        if (isTauri && !excluded('sync')) {
+            await transition('drive-sync', language.risuNest.startup.account)
             try {
                 const { installExternalStorageProduction } = await import(
                     './storage/sync/external/production'
@@ -662,16 +632,22 @@ export async function loadData() {
                     throw new Error('Normal exit revision changed after the edit fence')
                 }
                 const selection = capture.selection
-                if (selection.kind !== 'none' && selection.decisionRequired) {
+                const syncDisabled = excluded('sync') || (
+                    selection.kind !== 'none' && (selection.paused || (
+                        selection.kind === 'server' && getServerSyncController().snapshot().paused
+                    ))
+                )
+                if (!syncDisabled && selection.kind !== 'none' && selection.decisionRequired) {
                     throw { code: 'sync-selection-decision-required' }
                 }
-                if (selection.kind !== 'none' && !selection.connectionId) {
+                if (!syncDisabled && selection.kind !== 'none' && !selection.connectionId) {
                     throw { code: 'sync-selection-invalid' }
                 }
                 selectedExitDrain = null
                 let selectionId = `none:${selection.selectionEpoch}`
                 if (
-                    !selection.decisionRequired
+                    !syncDisabled
+                    && !selection.decisionRequired
                     && selection.kind === 'server'
                     && selection.connectionId
                 ) {
@@ -681,7 +657,8 @@ export async function loadData() {
                         heldExitFence,
                     )
                 } else if (
-                    !selection.decisionRequired
+                    !syncDisabled
+                    && !selection.decisionRequired
                     && selection.kind === 'external'
                     && selection.connectionId
                 ) {
@@ -702,6 +679,7 @@ export async function loadData() {
                     }
                 } else if (
                     selection.kind === 'none'
+                    && !excluded('account')
                     && forageStorage.isAccount
                     && hasPendingOfficialPublication()
                 ) {
@@ -733,7 +711,10 @@ export async function loadData() {
         })
         configureSyncExitCoordinator(syncExitCoordinator)
         disposeLifecycleCommitListeners ??= registerLifecycleCommitListeners(
-            flushLifecycle,
+            (reason) => flushLifecycle(
+                reason,
+                isTauriDesktop && nativePlatform() === 'windows' && reason === 'stop',
+            ),
             syncExitCoordinator,
         )
 
@@ -798,7 +779,7 @@ export async function loadData() {
             }
         }
         performance.mark('boot:plugins-ready')
-        if (!isTauri && getDatabase().account) {
+        if (!isTauri && !excluded('account') && getDatabase().account) {
             await transition('account-data', language.risuNest.startup.account)
             try {
                 await loadRisuAccountData()
@@ -836,17 +817,33 @@ export async function loadData() {
             MobileGUI.set(true)
         }
         registerAndroidScreenshotPublicationRecovery()
-        await initializeIOSNative()
         LoadingStatusState.startedAt = null
         loadedStore.set(true)
+        setTimeout(() => {
+            void runtime.expirePersistentTrash().catch((error) => console.error('Trash expiry failed', error))
+        }, 0)
         void finishBoot()
         performance.mark('boot:interactive')
+        if (!excluded('account')) {
+            void nativePublicationRecovery?.reconcile(true).catch(error => {
+                console.error('Official publication recovery failed', error)
+            })
+        }
+        if (officialReconcilePublish && accountBootstrap.officialEnabled) {
+            publishCurrentOfficialRevision().catch((error) => {
+                console.error('Official reconcile publish failed', error)
+            })
+        }
         selectedCharID.set(-1)
         await yieldToUi()
         startObserveDom()
         registerModelDynamic()
         await saveDb()
         registerAndroidRisuSaveRoute()
+        if (recoveredNativeFileJobs.interruptedRestores.length > 0) {
+            alertNormal(language.risuNest.backup.restoreInterrupted)
+            await waitAlert()
+        }
         if (isTauri) {
           schedulePeriodicNativeSnapshot();
           installIOSPersistenceLifecycle((reason) => flushLifecycle(reason, true));

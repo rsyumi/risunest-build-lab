@@ -6,13 +6,15 @@ import { thoughtDriver } from './thoughtDriver'
 
 mount(Settings, { target: document.querySelector('#settings')! })
 const events: unknown[] = []
+const bridgeMessages: any[] = []
 window.addEventListener('message', event => {
     if (event.data?.fixture) events.push(event.data)
+    if (['CALL_ROOT', 'CALL_INSTANCE', 'EXEC_RESULT', 'CALLBACK_RETURN'].includes(event.data?.type)) bridgeMessages.push(event.data)
 })
 let callbackResult: unknown = null
 let oldHost: ReturnType<typeof getV3PluginInstance>
 const driver = {
-    state: fixtureState, events,
+    state: fixtureState, events, bridgeMessages,
     async load(script: string) {
         fixtureState.database.plugins = [{ name: 'boundary', script, arguments: {}, realArg: {}, version: '3.0', customLink: [], argMeta: {}, enabled: true }]
         await loadV3Plugins(fixtureState.database.plugins)
@@ -37,6 +39,14 @@ const driver = {
     },
     releaseHeld() { fixtureState.releaseHeld?.() },
     release() { document.querySelector<HTMLIFrameElement>('iframe[data-risu-plugin-frame]')?.contentWindow?.postMessage({ fixtureRelease: true }, '*') },
+    forgeGuest(messages: unknown[]) {
+        const target = document.querySelector<HTMLIFrameElement>('iframe[data-risu-plugin-frame]')!
+        const index = [...document.querySelectorAll('iframe')].indexOf(target)
+        const other = document.createElement('iframe')
+        other.sandbox.add('allow-scripts')
+        other.srcdoc = '<script>for(const message of ' + JSON.stringify(messages) + ')parent.frames[' + index + "].postMessage(message,'*');<\/script>"
+        document.body.append(other)
+    },
     forge(reqId: string) {
         const other = document.createElement('iframe')
         other.sandbox.add('allow-scripts')

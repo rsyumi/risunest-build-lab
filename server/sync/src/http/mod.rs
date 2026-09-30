@@ -41,6 +41,7 @@ struct App {
     notice_slots: Arc<Semaphore>,
     devices: Arc<Mutex<HashMap<String, Arc<Semaphore>>>>,
     workload: Workload,
+    shutdown: tokio::sync::watch::Receiver<bool>,
     _lifetime: Arc<()>,
 }
 #[derive(Clone)]
@@ -52,6 +53,35 @@ pub fn router(store: Arc<Store>) -> Router {
 }
 
 pub fn router_with_workload(store: Arc<Store>, workload: Workload) -> Router {
+    router_with_shutdown(store, workload, tokio::sync::watch::Sender::new(false).subscribe())
+}
+
+async fn drain_trash_backlog(
+    store: &std::sync::Weak<Store>,
+    alive: &std::sync::Weak<()>,
+    workload: &Workload,
+) {
+    loop {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        if alive.strong_count() == 0 { break; }
+        let Some(store) = store.upgrade() else { break };
+        let Ok(mut work) = workload.begin(WorkKind::Background) else { break };
+        let pass = blocking(move || {
+            let pass = store.drain_trash();
+            work.set_performed_work(matches!(&pass, Ok(value) if value.removed > 0));
+            pass
+        }).await;
+        match pass {
+            Ok(pass) => {
+                if pass.failed > 0 { eprintln!("sync trash failed={} backlog={}", pass.failed, pass.backlog); }
+                if pass.selected < 1024 || pass.removed == 0 || pass.backlog == 0 { break; }
+            },
+            Err(error) => { eprintln!("sync trash failed: {}", error.code); break; }
+        }
+    }
+}
+
+pub fn router_with_shutdown(store: Arc<Store>, workload: Workload, shutdown: tokio::sync::watch::Receiver<bool>) -> Router {
     let lifetime = Arc::new(());
     let maintenance_alive = Arc::downgrade(&lifetime);
     let maintenance_store = Arc::downgrade(&store);
@@ -68,22 +98,23 @@ pub fn router_with_workload(store: Arc<Store>, workload: Workload) -> Router {
             let Ok(mut work) = maintenance_workload.begin(WorkKind::Background) else {
                 continue;
             };
-            match blocking(move || {
+            let result = blocking(move || {
                 let result = store.maintain();
-                work.set_performed_work(true);
+                work.set_performed_work(matches!(&result, Ok(value) if value.objects_removed > 0));
                 result
-            })
-            .await
-            {
-                Err(error) => eprintln!("sync maintenance failed: {}", error.code),
-                Ok(result) if result.wal_checkpoint.incomplete() => eprintln!(
-                    "sync maintenance wal checkpoint incomplete: busy={} log={} checkpointed={}",
-                    result.wal_checkpoint.busy,
-                    result.wal_checkpoint.log_frames,
-                    result.wal_checkpoint.checkpointed_frames
-                ),
-                Ok(_) => (),
-            }
+            }).await;
+            let continue_trash = match result {
+                Err(error) => { eprintln!("sync maintenance failed: {}", error.code); false },
+                Ok(result) => {
+                    if result.wal_checkpoint.incomplete() {
+                        eprintln!("sync maintenance wal checkpoint incomplete: busy={} log={} checkpointed={}", result.wal_checkpoint.busy, result.wal_checkpoint.log_frames, result.wal_checkpoint.checkpointed_frames);
+                    }
+                    if result.trash_failed > 0 { eprintln!("sync trash failed={} backlog={}", result.trash_failed, result.trash_backlog); }
+                    result.trash_backlog > 0
+                }
+            };
+            if !continue_trash { continue; }
+            drain_trash_backlog(&maintenance_store, &maintenance_alive, &maintenance_workload).await;
         }
     });
     let uploads_alive = Arc::downgrade(&lifetime);
@@ -101,7 +132,7 @@ pub fn router_with_workload(store: Arc<Store>, workload: Workload) -> Router {
             if !matches!(
                 blocking(move || {
                     let result = store.run_pending_upload();
-                    work.set_performed_work(!matches!(&result, Ok(false)));
+                    work.set_performed_work(matches!(&result, Ok(true)));
                     result
                 })
                 .await,
@@ -167,6 +198,7 @@ pub fn router_with_workload(store: Arc<Store>, workload: Workload) -> Router {
         notice_slots: Arc::new(Semaphore::new(32)),
         devices: Arc::new(Mutex::new(HashMap::new())),
         workload,
+        shutdown,
         _lifetime: lifetime,
     };
     Router::new()
@@ -399,7 +431,7 @@ async fn events(State(app): State<App>, headers: HeaderMap) -> Result<Response> 
         .ok_or(Error::new("unauthorized", 401))?
         .to_owned();
     let store = app.store.clone();
-    blocking(move || store.authenticate(&library, &token)).await?;
+    let device = blocking(move || store.authenticate(&library, &token)).await?;
     let permit = app
         .notice_slots
         .clone()
@@ -407,12 +439,12 @@ async fn events(State(app): State<App>, headers: HeaderMap) -> Result<Response> 
         .map_err(|_| Error::new("server-busy", 429))?;
     let announced = app.store.head_announcements();
     let stream = futures_util::stream::unfold(
-        (app, announced, None::<String>, permit),
-        |(app, mut announced, last, permit)| async move {
+        (app, announced, None::<String>, permit, device),
+        |(mut app, mut announced, last, permit, device)| async move {
             loop {
                 // A stream outlives the drain a maintenance owner waits for, so
                 // it closes as soon as admission does.
-                if !app
+                if *app.shutdown.borrow() || !app
                     .workload
                     .status()
                     .is_ok_and(|status| status.state == "open")
@@ -420,15 +452,25 @@ async fn events(State(app): State<App>, headers: HeaderMap) -> Result<Response> 
                     return None;
                 }
                 let store = app.store.clone();
-                let head = blocking(move || store.head()).await.ok()?;
+                let actor = device.clone();
+                let head = blocking(move || store.device_head(&actor)).await.ok()?;
                 if last.as_deref() != Some(head.head_id.as_str()) {
                     let event = Event::default().event("head").data(&head.head_id);
                     return Some((
                         Ok::<_, std::convert::Infallible>(event),
-                        (app, announced, Some(head.head_id), permit),
+                        (app, announced, Some(head.head_id), permit, device),
                     ));
                 }
-                let _ = tokio::time::timeout(HEAD_NOTICE_INTERVAL, announced.changed()).await;
+                tokio::select! {
+                    _ = tokio::time::timeout(HEAD_NOTICE_INTERVAL, announced.changed()) => (),
+                    _ = async {
+                        if app.shutdown.has_changed().is_err() && !*app.shutdown.borrow() {
+                            std::future::pending::<()>().await;
+                        } else {
+                            let _ = app.shutdown.wait_for(|stopped| *stopped).await;
+                        }
+                    } => return None,
+                }
             }
         },
     );
@@ -520,6 +562,7 @@ async fn missing(State(app): State<App>, body: Bytes) -> Result<Response> {
                 Some(size) if candidate.size != size.into() => {
                     return Err(Error::new("object-size-mismatch", 409))
                 }
+                Some(_) if !app.store.object_presence(&candidate.hash)? => absent.push(candidate.hash),
                 _ => (),
             }
         }
@@ -1256,4 +1299,75 @@ mod tests {
         assert!(stream.next().await.is_none());
         drop(available);
     }
+
+    #[tokio::test]
+    async fn trash_continuation_yields_and_rechecks_maintenance_admission() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(crate::store::Store::init(dir.path()).unwrap());
+        let alive = Arc::new(());
+        let workload = crate::workload::Workload::with_clock(
+            std::time::Duration::ZERO, std::time::Duration::from_secs(45),
+            Arc::new(std::time::Instant::now),
+        );
+        let db = rusqlite::Connection::open(dir.path().join("metadata.sqlite")).unwrap();
+        db.execute_batch("BEGIN").unwrap();
+        for index in 0..2049 {
+            db.execute("INSERT INTO object_trash(hash) VALUES(?1)", [format!("{index:064x}")]).unwrap();
+        }
+        db.execute_batch("COMMIT").unwrap();
+        let weak_store = Arc::downgrade(&store);
+        let weak_alive = Arc::downgrade(&alive);
+        let pending = super::drain_trash_backlog(&weak_store, &weak_alive, &workload);
+        tokio::pin!(pending);
+        tokio::select! {
+            _ = &mut pending => panic!("cleanup must yield before its first batch"),
+            _ = tokio::time::sleep(std::time::Duration::from_millis(20)) => (),
+        }
+        assert_eq!(workload.status().unwrap().active_background_jobs, 0);
+        // Observe the first bounded batch and acquire maintenance during its yield.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let remaining: i64 = db.query_row("SELECT count(*) FROM object_trash", [], |row| row.get(0)).unwrap();
+                if remaining == 1025 && workload.status().unwrap().drained { break; }
+                tokio::select! {
+                    _ = &mut pending => panic!("cleanup finished before the maintenance window"),
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(1)) => (),
+                }
+            }
+        }).await.unwrap();
+        let (token, _) = workload.acquire().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), &mut pending).await.unwrap();
+        let remaining: i64 = db.query_row("SELECT count(*) FROM object_trash", [], |row| row.get(0)).unwrap();
+        assert_eq!(remaining, 1025);
+        assert!(workload.status().unwrap().drained);
+        workload.release(&token).unwrap();
+    }
+
+    #[tokio::test]
+    async fn trash_continuation_stops_when_a_batch_makes_no_progress() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(crate::store::Store::init(dir.path()).unwrap());
+        let alive = Arc::new(());
+        let workload = crate::workload::Workload::new();
+        let db = rusqlite::Connection::open(dir.path().join("metadata.sqlite")).unwrap();
+        db.execute_batch("BEGIN").unwrap();
+        for index in 0..1024 {
+            let hash = format!("{index:064x}");
+            std::fs::create_dir_all(dir.path().join("objects").join(&hash[..2]).join(&hash)).unwrap();
+            db.execute("INSERT INTO object_trash(hash) VALUES(?1)", [&hash]).unwrap();
+        }
+        let sentinel_hash = format!("{:064x}", 1024);
+        let sentinel = dir.path().join("objects").join(&sentinel_hash[..2]).join(&sentinel_hash);
+        std::fs::write(&sentinel, b"synthetic trash").unwrap();
+        db.execute("INSERT INTO object_trash(hash) VALUES(?1)", [&sentinel_hash]).unwrap();
+        db.execute_batch("COMMIT").unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5),
+            super::drain_trash_backlog(&Arc::downgrade(&store), &Arc::downgrade(&alive), &workload),
+        ).await.expect("an undeletable full batch must not spin");
+        let remaining: i64 = db.query_row("SELECT count(*) FROM object_trash", [], |row| row.get(0)).unwrap();
+        assert_eq!(remaining, 1025);
+        assert!(sentinel.is_file());
+        assert!(workload.status().unwrap().drained);
+    }
+
 }

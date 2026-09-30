@@ -13,7 +13,7 @@ vi.mock('../storage/persistentDataRuntime.svelte', () => ({
     getPersistentDataRuntime: () => ({ runStorageOnlyMutation }),
 }))
 
-import { PLUGIN_CLAIM_SESSION_LIMIT_MS, beginPluginClaimSession } from './pluginClaimSession'
+import { PLUGIN_CLAIM_SESSION_LIMIT_MS, beginPluginClaimSession, closePluginClaimEligibility } from './pluginClaimSession'
 
 const plugin = { name: 'provider-manager', script: '//@name provider-manager' }
 
@@ -39,6 +39,12 @@ describe('plugin claim session', () => {
 
     afterEach(() => {
         vi.useRealTimers()
+    })
+
+    it('closes unused activation eligibility without opening any new claim session', async () => {
+        answers()
+        await closePluginClaimEligibility()
+        expect(invoke).toHaveBeenCalledExactlyOnceWith('pds_close_plugin_claim_eligibility')
     })
 
     it('opens nothing when no import is waiting', async () => {

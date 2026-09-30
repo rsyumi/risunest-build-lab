@@ -1025,6 +1025,7 @@ impl PersistentStore {
         }
     }
     pub(crate) fn server_prepare_cycle(&mut self, options: &CycleOptions) -> Result<Preparation> {
+        self.server_repair_residency_access()?;
         super::sync_selection::require_server(&self.connection)?;
         let config = self
             .server_config()?
@@ -1750,7 +1751,7 @@ impl PersistentStore {
 
     pub(crate) fn server_cache(&self) -> Result<Cache> {
         let config = self
-            .server_config()?
+            .server_stored_config()?
             .ok_or_else(|| SyncError::new("server-not-bound", 409))?;
         Cache::open(&self.repository_root.join("server-sync").join(
             risunest_sync_wire::hash(
@@ -3024,6 +3025,7 @@ impl PersistentStore {
                 )?;
             }
             tx.commit()?;
+            drop(_guard);
             for object in &registrations {
                 check_active()?;
                 if native.stat_object(&object.object_hash)? != Some(object.byte_size) {
@@ -3046,6 +3048,7 @@ impl PersistentStore {
                     )?;
                 }
             }
+            let _guard = crate::asset_repository::coordinator::lock_repository_mutation()?;
             AssetObjectCatalog::new(&mut self.connection).register(&registrations, 0)?;
         }
         Ok(())

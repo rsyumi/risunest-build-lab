@@ -268,6 +268,23 @@ export function resolveNativeFileJobStage(
         return 'assign-plugin-values'
     }
     if (status.detail) return status.detail.stage
+    if (status.kind === 'official-publication-upload') {
+        switch (status.phase) {
+            case 'queued':
+            case 'reading-source':
+                return 'preparing-export'
+            case 'writing-export':
+                return 'writing-export'
+            case 'uploading-database':
+            case 'awaiting-publication-retry':
+                return 'publishing-destination'
+            case 'finalizing-publication':
+            case 'complete':
+                return 'finalizing-export'
+            default:
+                return null
+        }
+    }
     // Exports report phases only. The rescue archive keeps the archive wording it always had.
     if (status.kind.startsWith('export-') && status.kind !== 'export-raw-recovery') {
         switch (status.phase) {
@@ -370,7 +387,6 @@ export interface NativeFileJobStatus {
         | 'export-character-card'
         | 'export-risu-module'
         | 'restore-legacy-local-backup'
-        | 'export-legacy-local-backup'
         | 'export-compatible-local-backup'
         | 'export-portable-backup'
         | 'export-raw-recovery'
@@ -382,7 +398,9 @@ export interface NativeFileJobStatus {
         | 'official-publication-upload'
     expectedRevision?: number
     deviceSessionId?: string
+    replacesLibrary?: boolean
     restorePreview?: NativePortableRestorePreview
+    incompleteRestorePreview?: NativeIncompleteRestorePreview
     pluginValuePreview?: NativeStagedPluginPreview
     warningCodes?: string[]
     state: NativeFileJobState
@@ -428,12 +446,14 @@ export interface NativeFileJobStatus {
 export interface NativePortableSelection {
     library: boolean
     deviceSections: NativePortableDeviceSection[]
+    allowSourcePreservation?: boolean
     /** Absent brings the whole library; present brings only the records it names. */
     items?: NativeArchiveSelection
 }
 /** One record an import can take or leave. */
 export interface NativeArchiveEntry {
     id: string
+    name: string
     conversations: number
     damaged: number
 }
@@ -445,9 +465,9 @@ export interface NativeArchiveInventory {
 export interface NativeArchiveSelection {
     characters: string[]
     presets: string[]
-    plugins: string[]
+    plugins: { owner: string; key: string }[]
     /** Records left out on purpose, whose references come in broken. */
-    excluded: string[]
+    excluded: { characters: string[]; presets: string[]; plugins: { owner: string; key: string }[] }
 }
 export interface NativePortableRestorePreview {
     libraryIncluded: boolean
@@ -475,6 +495,7 @@ export interface NativeFileJobOptions {
 }
 
 export interface PreparedNativeContentActivationLifecycle {
+    stageInlineAsset?(bytes: Uint8Array, name: string): Promise<PreparedCardContentAssetDescriptor>
     prepareOwnerManifestAndSeal(
         bytes: Uint8Array,
     ): Promise<PreparedImmutablePayload>
@@ -517,7 +538,23 @@ export interface NativeStagedPluginChoice {
     automatic: boolean
 }
 
+export interface NativeIncompleteRestorePreview {
+    unavailableColdKeys: string[]
+    characterNames: string[]
+    invalidInlays: string[]
+}
+
+async function confirmIncompleteNativeRestore(preview: NativeIncompleteRestorePreview): Promise<boolean> {
+    const [{ alertConfirm }, { language }] = await Promise.all([import('../alert'), import('../../lang')])
+    if (preview.unavailableColdKeys.length && !await alertConfirm(language.errors.coldStorageIncompleteRestoreConfirm(
+        preview.characterNames.join(', '), preview.unavailableColdKeys.length, 0,
+    ))) return false
+    if (preview.invalidInlays.length && !await alertConfirm(language.portableBackup.invalidInlaysConfirm(preview.invalidInlays.length))) return false
+    return true
+}
+
 export interface NativeFileRestoreJobOptions extends NativeFileJobOptions {
+    confirmIncompleteRestore?(preview: NativeIncompleteRestorePreview): Promise<boolean>
     /** Runs after staging and before taking the destructive replacement fence. */
     beforeActivation?(): void | Promise<void>
     /**
@@ -666,60 +703,7 @@ function requiredDescriptorString(value: unknown, field: string): string {
     return value
 }
 
-function validatePreparedContent(
-    value: unknown,
-    expectedCasSessionId: string,
-): PreparedNativeContent {
-    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-        throw preparedContentError('Prepared content must be an object')
-    }
-    const content = value as Record<string, unknown>
-    if (
-        content.format !== 'json-card' &&
-        content.format !== 'png-card' &&
-        content.format !== 'charx-card' &&
-        content.format !== 'appended-charx-jpeg' &&
-        content.format !== 'risu-module'
-    ) {
-        throw preparedContentError('Prepared content format is unsupported')
-    }
-    if (
-        typeof content.metadata !== 'object' ||
-        content.metadata === null ||
-        Array.isArray(content.metadata)
-    ) {
-        throw preparedContentError(
-            'Prepared content metadata must be an object',
-        )
-    }
-    if (!Array.isArray(content.assets)) {
-        throw preparedContentError('Prepared content assets must be an array')
-    }
-    const casSessionId = requiredDescriptorString(
-        content.casSessionId,
-        'casSessionId',
-    )
-    if (casSessionId !== expectedCasSessionId) {
-        throw preparedContentError(
-            'Prepared content casSessionId must match its native job',
-        )
-    }
-    const expectedContentFields = [
-        'assets',
-        'casSessionId',
-        'format',
-        'metadata',
-    ]
-    if (content.portraitLogicalId !== undefined)
-        expectedContentFields.push('portraitLogicalId')
-    if (content.module !== undefined) expectedContentFields.push('module')
-    if (content.ownerHead !== undefined) expectedContentFields.push('ownerHead')
-    if (
-        Object.keys(content).sort().join('\0') !==
-        expectedContentFields.sort().join('\0')
-    ) {
-        throw preparedContentError('Prepared content fields are invalid')
-    }
+function validatePreparedAssetDescriptors(format: unknown, values: unknown[]): PreparedContentAssetDescriptor[] {
     const expectedCardFields = [
         'referenceKey',
         'token',
@@ -740,7 +724,7 @@ function validatePreparedContent(
         'ext',
     ].sort()
     const tokens = new Set<string>()
-    const assets = content.assets.map(
+    const assets = values.map(
         (value, index): PreparedContentAssetDescriptor => {
             if (
                 typeof value !== 'object' ||
@@ -752,7 +736,7 @@ function validatePreparedContent(
                 )
             }
             const asset = value as Record<string, unknown>
-            const risum = content.format === 'risu-module'
+            const risum = format === 'risu-module'
             const expectedFields = risum
                 ? expectedRisumFields
                 : expectedCardFields
@@ -830,7 +814,7 @@ function validatePreparedContent(
                 )
             }
             const mime = asset.mime
-            if (mime.length === 0 && content.format !== 'png-card' && !risum) {
+            if (mime.length === 0 && format !== 'png-card' && !risum) {
                 throw preparedContentError(
                     `Prepared content asset ${index} mime must be a nonempty string`,
                 )
@@ -869,6 +853,64 @@ function validatePreparedContent(
             }
         },
     )
+    return assets
+}
+
+function validatePreparedContent(
+    value: unknown,
+    expectedCasSessionId: string,
+): PreparedNativeContent {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+        throw preparedContentError('Prepared content must be an object')
+    }
+    const content = value as Record<string, unknown>
+    if (
+        content.format !== 'json-card' &&
+        content.format !== 'png-card' &&
+        content.format !== 'charx-card' &&
+        content.format !== 'appended-charx-jpeg' &&
+        content.format !== 'risu-module'
+    ) {
+        throw preparedContentError('Prepared content format is unsupported')
+    }
+    if (
+        typeof content.metadata !== 'object' ||
+        content.metadata === null ||
+        Array.isArray(content.metadata)
+    ) {
+        throw preparedContentError(
+            'Prepared content metadata must be an object',
+        )
+    }
+    if (!Array.isArray(content.assets)) {
+        throw preparedContentError('Prepared content assets must be an array')
+    }
+    const casSessionId = requiredDescriptorString(
+        content.casSessionId,
+        'casSessionId',
+    )
+    if (casSessionId !== expectedCasSessionId) {
+        throw preparedContentError(
+            'Prepared content casSessionId must match its native job',
+        )
+    }
+    const expectedContentFields = [
+        'assets',
+        'casSessionId',
+        'format',
+        'metadata',
+    ]
+    if (content.portraitLogicalId !== undefined)
+        expectedContentFields.push('portraitLogicalId')
+    if (content.module !== undefined) expectedContentFields.push('module')
+    if (content.ownerHead !== undefined) expectedContentFields.push('ownerHead')
+    if (
+        Object.keys(content).sort().join('\0') !==
+        expectedContentFields.sort().join('\0')
+    ) {
+        throw preparedContentError('Prepared content fields are invalid')
+    }
+    const assets = validatePreparedAssetDescriptors(content.format, content.assets)
     if (content.format === 'risu-module') {
         if (
             content.portraitLogicalId !== undefined ||
@@ -1032,9 +1074,11 @@ function validatePreparedContent(
                 )
             }
             if (
-                asset.ext !== 'png' ||
-                asset.logicalId !== `assets/${asset.objectHash}.png` ||
-                asset.name !== `${asset.objectHash}.png`
+                !/^native-inline-[0-9a-f-]{36}$/.test(asset.token) && (
+                    asset.ext !== 'png' ||
+                    asset.logicalId !== `assets/${asset.objectHash}.png` ||
+                    asset.name !== `${asset.objectHash}.png`
+                )
             ) {
                 throw preparedContentError(
                     `Prepared PNG embedded asset ${index} descriptor is invalid`,
@@ -1244,6 +1288,7 @@ async function runNativeReplacementRestore(
         ('type' in source && source.type === 'conflictReference')
     let terminal: NativeFileJobStatus | undefined
     let mutationConflict: NativeFileJobError | undefined
+    let incompleteConfirmed = false
     let assignedPreview: NativeStagedPluginPreview | undefined
     let replacementFence:
         | Awaited<
@@ -1330,6 +1375,16 @@ async function runNativeReplacementRestore(
                 portableSelectionMade = true
                 startUiBlocking()
             }
+            if (status.state === 'waitingForInput' && status.phase === 'awaiting-activation' &&
+                !cancellationRequested && !incompleteConfirmed && status.incompleteRestorePreview) {
+                const confirmed = await (options.confirmIncompleteRestore ?? confirmIncompleteNativeRestore)(status.incompleteRestorePreview)
+                if (!confirmed || options.signal?.aborted) {
+                    cancellationRequested = true
+                    await invokeNative(dependencies, 'native_file_job_cancel', { jobId: started.jobId })
+                    continue
+                }
+                incompleteConfirmed = true
+            }
             if (
                 status.state === 'waitingForInput' &&
                 status.phase === 'awaiting-activation' &&
@@ -1377,6 +1432,14 @@ async function runNativeReplacementRestore(
                         `${mutationReason}-activation`, { publishOfficial: false },
                     )
                     replacementFence = await runtime.acquireDestructiveReplacementFence(activationToken)
+                    if (kind === 'restore-portable-backup') {
+                        const { flushDeviceStateBeforeRestore } = await import('./deviceStateRestore')
+                        try {
+                            await flushDeviceStateBeforeRestore()
+                        } catch {
+                            throw new NativeFileJobError('store-error', 'Device settings could not be saved before restore')
+                        }
+                    }
                 } catch (error) {
                     mutationConflict =
                         error instanceof NativeFileJobError
@@ -1444,16 +1507,15 @@ async function runNativeReplacementRestore(
                 ),
             }
             const continueAfterRefresh = async (): Promise<void> => {
-                options.onStatus?.(
-                    syntheticNativeFileJobStatus(terminal, 'reloading-plugins'),
-                )
-                let followupFailed = false
-                let followupError: unknown
                 try {
+                    options.onStatus?.(
+                        syntheticNativeFileJobStatus(terminal, 'reloading-plugins'),
+                    )
                     await options.afterRefresh?.()
-                } catch (error) {
-                    followupFailed = true
-                    followupError = error
+                } catch {
+                    committedResult.warningCodes = mergeWarningCodes(
+                        committedResult.warningCodes, ['post-refresh-followup-failed'],
+                    )
                 }
                 try {
                     await invokeNative(dependencies, 'native_file_job_forget', {
@@ -1464,7 +1526,6 @@ async function runNativeReplacementRestore(
                         committedResult.warningCodes,
                     )
                 }
-                if (followupFailed) throw followupError
             }
             const deviceSessionId = terminal.deviceSessionId
             if (kind === 'restore-portable-backup' && deviceSessionId) {
@@ -1491,6 +1552,8 @@ async function runNativeReplacementRestore(
                             'Persistent store reopened before the committed native restore revision',
                         )
                     }
+                    const { refreshDeviceStateAfterRestore } = await import('./deviceStateRestore')
+                    await refreshDeviceStateAfterRestore()
                 }
                 try {
                     await prepareCommittedRefresh()
@@ -1632,7 +1695,7 @@ export async function runNativeOfficialAccountSnapshotRestore(
         }
         if (
             error instanceof NativeFileJobError &&
-            error.code === 'compatibility-required'
+            (error.code === 'compatibility-required' || error.code === 'cold-expansion-required')
         ) {
             return { kind: 'compatibility-fallback' }
         }
@@ -1996,27 +2059,6 @@ export function runNativeRisuModuleExport(
     )
 }
 
-export function runNativeLegacyLocalBackupExport(
-    runtime: {
-        readonly revision: number
-        flushPendingData(reason: string): Promise<void>
-    },
-    destination: NativeLegacyLocalBackupDestination,
-    options: NativeFileJobOptions = {},
-    dependencies: NativeBackupExportDependencies = productionBackupExportDependencies,
-): Promise<NativeFileJobResult> {
-    return runNativePortableBackupExport(
-        'export-legacy-local-backup',
-        'native-legacy-local-backup-export',
-        'Native legacy local backup export',
-        'native_legacy_backup_handoff_cleanup',
-        runtime,
-        destination,
-        options,
-        dependencies,
-    )
-}
-
 export function runNativeRawRecoveryExport(
     destination: NativeBackupDestination,
     options: NativeFileJobOptions = {},
@@ -2066,7 +2108,7 @@ export function runNativeCompatibleLocalBackupExport(
 }
 
 function runNativePortableBackupExport(
-    kind: 'export-legacy-local-backup' | 'export-compatible-local-backup',
+    kind: 'export-compatible-local-backup',
     flushReason: string,
     operation: string,
     handoffCleanupCommand: string,
@@ -2144,7 +2186,7 @@ export async function runNativeArchiveExport(
     },
     destination: NativeBackupDestination,
     selection: NativePortableSelection,
-    options: NativeFileJobOptions = {},
+    options: NativeFileJobOptions & { confirmSourcePreservation?(): Promise<boolean> } = {},
     dependencies: NativeBackupExportDependencies = productionBackupExportDependencies,
 ): Promise<NativeFileJobResult> {
     let expectedRevision = runtime.revision
@@ -2218,6 +2260,15 @@ export async function runNativeArchiveExport(
                 if (!pending.some((job) => job.jobId === startedId))
                     intent.clear(startedId)
             } catch {}
+        }
+        if (error instanceof NativeFileJobError &&
+            error.code === 'source-preservation-confirmation-required' &&
+            !selection.allowSourcePreservation && options.confirmSourcePreservation) {
+            if (options.signal?.aborted) throw abortError()
+            const confirmed = await options.confirmSourcePreservation()
+            if (options.signal?.aborted || !confirmed) throw abortError()
+            return runNativeArchiveExport(runtime, destination,
+                { ...selection, allowSourcePreservation: true }, options, dependencies)
         }
         throw error
     } finally {
@@ -2361,6 +2412,7 @@ export async function prepareNativeContentImport(
             )
             let lifecycleState:
                 | 'unfinalized'
+                | 'staging'
                 | 'finalizing'
                 | 'finalized'
                 | 'settling'
@@ -2376,6 +2428,42 @@ export async function prepareNativeContentImport(
                     lifecycleState = 'settled'
                 })
                 return settlement
+            }
+            const stagedTokens = new Set(content.assets.map((asset) => asset.token))
+            let stagingOperation: Promise<PreparedCardContentAssetDescriptor> | undefined
+            const stageInlineAsset = (bytes: Uint8Array, name: string): Promise<PreparedCardContentAssetDescriptor> => {
+                if (lifecycleState !== 'unfinalized') return Promise.reject(new Error('Native content is not awaiting asset mapping'))
+                lifecycleState = 'staging'
+                stagingOperation = (async () => {
+                    for (let offset = 0; offset < bytes.byteLength || offset === 0;) {
+                        if (lifecycleState !== 'staging' || options.signal?.aborted) throw abortError()
+                        const end = Math.min(offset + 64 * 1024, bytes.byteLength)
+                        const result = await dependencies.invoke(
+                            'native_file_job_stage_inline_asset', {
+                                jobId: started.jobId, name, totalBytes: bytes.byteLength, offset,
+                                data: Array.from(bytes.subarray(offset, end)),
+                            },
+                        ) as { received: number, asset: unknown }
+                        if (!result || result.received !== end || (end < bytes.byteLength && result.asset !== null)) {
+                            throw preparedContentError('Native inline asset acknowledgement is invalid')
+                        }
+                        if (end === bytes.byteLength) {
+                            const asset = validatePreparedAssetDescriptors('png-card', [result.asset])[0] as PreparedCardContentAssetDescriptor
+                            if (asset.token !== asset.referenceKey || asset.mime !== '' || asset.byteSize !== bytes.byteLength || stagedTokens.has(asset.token)) {
+                                throw preparedContentError('Native inline asset descriptor is invalid')
+                            }
+                            if (lifecycleState !== 'staging' || options.signal?.aborted) throw abortError()
+                            stagedTokens.add(asset.token)
+                            content.assets.push(asset)
+                            return asset
+                        }
+                        offset = end
+                    }
+                    throw preparedContentError('Native inline asset was not completed')
+                })().finally(() => {
+                    if (lifecycleState === 'staging') lifecycleState = 'unfinalized'
+                })
+                return stagingOperation
             }
             const prepareOwnerManifestAndSeal = async (
                 bytes: Uint8Array,
@@ -2452,6 +2540,13 @@ export async function prepareNativeContentImport(
                 await settle(() => releaseAndForget('committed'))
             }
             const abortPreparedContent = async (): Promise<void> => {
+                if (lifecycleState === 'staging') {
+                    await settle(async () => {
+                        try { await stagingOperation } catch {}
+                        await releaseAndForget('aborted')
+                    })
+                    return
+                }
                 if (lifecycleState === 'settled') return
                 if (settlement) return settlement
                 if (lifecycleState === 'finalizing') {
@@ -2467,6 +2562,13 @@ export async function prepareNativeContentImport(
                 await settle(() => releaseAndForget('aborted'))
             }
             const cancel = async (): Promise<void> => {
+                if (lifecycleState === 'staging') {
+                    await settle(async () => {
+                        try { await stagingOperation } catch {}
+                        await releaseAndForget('aborted')
+                    })
+                    return
+                }
                 if (lifecycleState === 'settled') return
                 if (settlement) return settlement
                 if (lifecycleState === 'finalizing') {
@@ -2492,6 +2594,7 @@ export async function prepareNativeContentImport(
                     started.warningCodes,
                     status.warningCodes,
                 ),
+                stageInlineAsset,
                 prepareOwnerManifestAndSeal,
                 sealPreparedContent,
                 abortPreparedContent,

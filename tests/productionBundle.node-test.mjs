@@ -28,6 +28,8 @@ test("accepts product code and RegExp.test polyfill", () => {
 test("rejects a test module in a dynamic chunk and a test framework", () => {
   for (const id of [
     "/src/foo.test.ts",
+    "/src/lib/ChatScreens/chatMountProbe.testSupport.ts",
+    "/src/ts/process/luaWorkerPilotClient.testSupport.ts",
     "/src/lib/ComponentHarness.test.svelte",
     "/src/lib/state.test.svelte.ts",
     "/src/ts/database.testUtils.ts",
@@ -173,5 +175,37 @@ test("rejects retired GGUF code while preserving Pyodide scripting", () => {
       () => assertProductionBundle([chunk(), map(["/src/main.ts"], [marker])]),
       /source text/,
     );
+  }
+});
+
+test("worker maps reject test support even when worker code has no marker", () => {
+  for (const source of ['../../src/lib/ChatScreens/chatMountProbe.testSupport.ts', '../../src/ts/process/luaWorkerPilotClient.testSupport.ts']) {
+    assert.throws(() => assertProductionBundle([
+      { type: 'asset', fileName: 'assets/worker.js', source: 'postMessage(1)' },
+      { ...map([source]), fileName: 'assets/worker.js.map' },
+    ]), /Verification source/);
+  }
+});
+
+test("rejects isolated appearance and plugin probes in product workers and source maps", () => {
+  for (const marker of ["startupAppearance", "RISUNEST_APPEARANCE_PROBE", "__pluginReviewCountInvoke", "__pluginReview", "synthetic-plugin-review-v1", "RisuNest synthetic plugin review", "synthetic-native-boundary", "synthetic-plugin-page-owner", "io.github.rsyumi.risunest.pluginreview"]) {
+    assert.throws(() => assertProductionBundle([chunk(), {
+      type: "asset", fileName: "assets/worker.js", source: marker,
+    }]), /Verification marker/);
+    assert.throws(() => assertProductionBundle([chunk(), map(["/src/main.ts"], [marker])]), /Verification source text/);
+  }
+});
+test("rejects isolated persistence probes in product chunks, workers and source maps", () => {
+  for (const marker of [
+    "risunest.synthetic-legacy-restore/v1", "syntheticMeasurementResetId",
+    "ios_bench_peak_rss", "legacy-restore-ready:", "runLegacyRestoreMeasurement",
+    "synthetic-unicode-persistence-v1", "runUnicodePersistenceProbe", "verifyUnicodePersistenceProbe",
+    "runLeaseReleaseCheckpointSuite", "lease-release-ipc", "synthetic-lease-release-owner",
+  ]) {
+    assert.throws(() => assertProductionBundle([chunk({}, marker)]), /Verification marker/);
+    assert.throws(() => assertProductionBundle([chunk(), {
+      type: "asset", fileName: "assets/worker.js", source: marker,
+    }]), /Verification marker/);
+    assert.throws(() => assertProductionBundle([chunk(), map(["/src/main.ts"], [marker])]), /Verification source text/);
   }
 });

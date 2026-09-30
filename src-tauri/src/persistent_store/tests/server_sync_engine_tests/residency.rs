@@ -5,6 +5,8 @@ use crate::server_sync::residency::{open_or_hydrate, AssetPolicy, Residency};
 mod media_admission;
 mod regressions;
 mod references;
+mod release_interleaving;
+mod classification_proposal;
 
 struct Fixture {
     _server_root: tempfile::TempDir,

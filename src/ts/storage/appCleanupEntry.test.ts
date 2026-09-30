@@ -37,13 +37,16 @@ describe('app cleanup startup gate', () => {
         expect(document.getElementById('preloading')).toBeNull()
     })
     it('offers retry after failure without exposing native error strings', async () => {
-        vi.mocked(invoke).mockResolvedValueOnce({ pending: true, mode: 'reset', error: null }).mockRejectedValueOnce(new Error('synthetic-private-path')).mockResolvedValue(undefined)
+        vi.mocked(invoke).mockResolvedValueOnce({ pending: true, mode: 'reset', error: null, canCancel: true })
+            .mockRejectedValueOnce(new Error('synthetic-private-path'))
+            .mockResolvedValueOnce({ pending: true, mode: 'reset', error: 'synthetic-private-path', canCancel: true })
+            .mockResolvedValue(undefined)
         const bootstrap = vi.fn()
         void appCleanupBeforeBootstrap().then(bootstrap)
         await vi.waitFor(() => expect(document.querySelector('button')?.disabled).toBe(false))
         expect(document.body.textContent).not.toContain('synthetic-private-path')
         document.querySelector('button')!.click()
-        await vi.waitFor(() => expect(invoke).toHaveBeenCalledTimes(3))
+        await vi.waitFor(() => expect(invoke).toHaveBeenCalledTimes(4))
         expect(bootstrap).not.toHaveBeenCalled()
     })
     it('blocks normal startup when cleanup status is unavailable', async () => {
@@ -77,5 +80,63 @@ describe('app cleanup startup gate', () => {
         await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('app_cleanup_resume'))
         expect(invoke).toHaveBeenCalledTimes(2)
         expect(bootstrap).not.toHaveBeenCalled()
+    })
+
+    it('allows normal startup when only cleanup is unavailable', async () => {
+        vi.mocked(invoke).mockResolvedValue({ pending: false, mode: null, error: 'cleanup-path-redirected', canCancel: false })
+        await appCleanupBeforeBootstrap()
+        expect(document.querySelector('main')).toBeNull()
+    })
+
+    it('offers cancellation only when native status proves roots are intact', async () => {
+        vi.mocked(invoke).mockResolvedValueOnce({ pending: true, mode: 'reset', error: 'secret-cleanup-unavailable', canCancel: true })
+            .mockResolvedValue(undefined)
+        const bootstrap = vi.fn()
+        void appCleanupBeforeBootstrap().then(bootstrap)
+        await vi.waitFor(() => expect(document.body.textContent).toContain('start and unlock the keyring'))
+        expect(document.body.textContent).toContain('reconnect sync and external storage')
+        const cancel = Array.from(document.querySelectorAll('button')).find(button => button.textContent === 'Cancel reset')!
+        expect(cancel.hidden).toBe(false)
+        cancel.click()
+        await vi.waitFor(() => expect(invoke).toHaveBeenCalledWith('app_cleanup_cancel'))
+        expect(bootstrap).not.toHaveBeenCalled()
+    })
+
+    it('refreshes cancellation eligibility after a retry enters root deletion', async () => {
+        vi.mocked(invoke).mockResolvedValueOnce({ pending: true, mode: 'reset', error: 'secret-cleanup-unavailable', canCancel: true })
+            .mockRejectedValueOnce('cleanup-files-busy-or-denied')
+            .mockResolvedValueOnce({ pending: true, mode: 'reset', error: 'cleanup-files-busy-or-denied', canCancel: false })
+        void appCleanupBeforeBootstrap()
+        await vi.waitFor(() => expect(document.querySelector('button')?.disabled).toBe(false))
+        document.querySelector('button')!.click()
+        await vi.waitFor(() => expect(document.body.textContent).toContain('Check file permissions'))
+        const cancel = Array.from(document.querySelectorAll('button')).find(button => button.textContent === 'Cancel reset')!
+        expect(cancel.hidden).toBe(true)
+        expect(invoke).not.toHaveBeenCalledWith('app_cleanup_cancel')
+    })
+
+    it('keeps a corrupt journal fail closed without a cancellation control', async () => {
+        vi.mocked(invoke).mockResolvedValue({ pending: true, mode: null, error: 'cleanup-journal-corrupt', canCancel: false })
+        const bootstrap = vi.fn()
+        void appCleanupBeforeBootstrap().then(bootstrap)
+        await vi.waitFor(() => expect(document.body.textContent).toContain('deletion record is damaged'))
+        const cancel = Array.from(document.querySelectorAll('button')).find(button => button.textContent === 'Cancel reset')!
+        expect(cancel.hidden).toBe(true)
+        expect(bootstrap).not.toHaveBeenCalled()
+    })
+
+    it('reloads safely if cancellation cleared the journal but navigation failed', async () => {
+        const reload = vi.spyOn(location, 'reload').mockImplementation(() => {})
+        vi.mocked(invoke).mockResolvedValueOnce({ pending: true, mode: 'reset', error: 'secret-cleanup-unavailable', canCancel: true })
+            .mockRejectedValueOnce('cleanup-navigation-failed')
+            .mockResolvedValueOnce({ pending: false, mode: null, error: null, canCancel: false })
+        void appCleanupBeforeBootstrap()
+        await vi.waitFor(() => expect(document.querySelectorAll('button')).toHaveLength(2))
+        document.querySelectorAll('button')[1].click()
+        await vi.waitFor(() => expect(invoke).toHaveBeenCalledTimes(3))
+        document.querySelector('button')!.click()
+        await vi.waitFor(() => expect(reload).toHaveBeenCalledOnce())
+        expect(invoke).not.toHaveBeenCalledWith('app_cleanup_resume')
+        reload.mockRestore()
     })
 })

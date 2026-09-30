@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { ScreenshotPreparationError } from 'src/ts/chatScreenshotErrors'
     import type { Message } from 'src/ts/storage/database.svelte'
     import type { ChatScreenshotJob, FrozenChatScreenshotRenderContext } from 'src/ts/chatScreenshotRange'
     import { getFileSrc } from 'src/ts/globalApi.svelte'
@@ -99,7 +100,7 @@
                 timeout: setTimeout(
                     () => reportError(
                         batchGeneration,
-                        new Error('Screenshot capture readiness timed out'),
+                        new ScreenshotPreparationError('readiness'),
                     ),
                     CHAT_SCREENSHOT_PARSE_TIMEOUT_MS,
                 ),

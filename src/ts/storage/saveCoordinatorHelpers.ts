@@ -1,3 +1,4 @@
+import { isTauri } from '../platform'
 import type { Database, botPreset, character, groupChat } from './database.svelte'
 import type { PersistentRoot, PluginStorageMutation } from './persistentDataStore'
 import { defineOwnEnumerableProperty } from './ownEnumerableProperty'
@@ -509,6 +510,7 @@ export function splitDatabase(database: Database): {
         pluginStorageMeta: _pluginStorageMeta,
         ...root
     } = database
+    if (isTauri) delete root.account
     return {
         root,
         characters,

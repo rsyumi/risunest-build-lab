@@ -21,7 +21,7 @@ pub struct ConnectionRuntime {
 }
 impl ConnectionRuntime {
     /// The caller must already own Store and a bound, serving loopback listener.
-    pub fn start(store: Arc<Store>, origin: SocketAddr) -> Result<Self> {
+    pub fn start(store: Arc<Store>, origin: SocketAddr, managed: bool) -> Result<Self> {
         let origin = crate::config::tunnel_origin(origin);
         let publisher = Publisher::new()?;
         let publication = publisher.subscribe();
@@ -33,7 +33,6 @@ impl ConnectionRuntime {
             error: None,
             ..Default::default()
         });
-        let managed = store.managed_cloudflared()?.is_some();
         let publisher_task =
             tokio::spawn(publisher.run(store.clone(), changed.clone(), stopped.clone(), managed));
         let tunnel_task = tokio::spawn(tunnel::supervise(

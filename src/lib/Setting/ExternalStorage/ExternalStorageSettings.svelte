@@ -1,6 +1,8 @@
 <script lang="ts">
     import { onDestroy, onMount } from 'svelte'
     import QRCode from 'qrcode'
+    import { runWithMobileBackgroundTask, measuredTaskPercent } from 'src/ts/mobileBackgroundTask'
+    import TextInput from 'src/lib/UI/GUI/TextInput.svelte'
     import NumberInput from 'src/lib/UI/GUI/NumberInput.svelte'
     import SettingGroup from '../RisuNest/SettingGroup.svelte'
     import SettingButton from '../RisuNest/SettingButton.svelte'
@@ -9,11 +11,12 @@
     import { alertConfirm, alertNormal } from 'src/ts/alert'
     import { DBState } from 'src/ts/stores.svelte'
     import { getExternalStorageBridge } from 'src/ts/storage/sync/external/bridge'
-    import { externalConflictActions, externalJobIsActive, externalJobProgress, mergeExternalHistoryItems } from 'src/ts/storage/sync/external/connection'
+    import { externalConflictActions, externalJobIsActive, externalJobIsPaused, externalJobProgress, mergeExternalHistoryItems } from 'src/ts/storage/sync/external/connection'
     import {
         refreshExternalStorageProductionState,
         requestExternalConflictExport,
         requestExternalStorageNow,
+        resumeExternalStorageJob,
         requestExternalConflictRestore,
         requestExternalStorageResolveConflict,
         requestExternalStorageRestore,
@@ -33,10 +36,11 @@
         ExternalRestoreArea,
         ExternalRestoreSection,
         ExternalStorageState,
+        ExternalSnapshotExportProgress,
     } from 'src/ts/storage/sync/external/types'
     import { externalRestorableSections, externalRestoreAreas } from 'src/ts/storage/sync/external/restoreScope'
     import ConnectionForm from './ConnectionForm.svelte'
-    import { externalConnectionTitle, externalErrorMessage, externalStorageStrings } from './strings'
+    import { externalConnectionTitle, externalErrorKind, externalErrorMessage, externalStorageStrings } from './strings'
 
     const bridge = getExternalStorageBridge()
     /** How many empty history pages one request reads past before stopping. */
@@ -46,6 +50,11 @@
     const strings = $derived(externalStorageStrings(DBState.db.language))
     let storageState = $state<ExternalStorageState | null>(null)
     let adding = $state(false)
+    let renewalConnection = $state<ExternalConnectionSummary | undefined>()
+    let unlockConnection = $state<ExternalConnectionSummary | undefined>()
+    let unlockKey = $state('')
+    let destroyed = false
+    let stopJobEvents: (() => void) | undefined
     let busy = $state(false)
     /** Which action is running, so only the button that started it shows a spinner. */
     let activeAction = $state('')
@@ -65,6 +74,8 @@
     let connectionSettingsQr = $state('')
     /** The history entry whose restore scope is open, and what is ticked in it. */
     let restoreScope = $state<{ id: string; sections: ExternalRestoreSection[] } | null>(null)
+    let exportRun = $state<{ id: string; connectionId: string; progress?: ExternalSnapshotExportProgress } | null>(null)
+    const pendingPins = new Map<string, string>()
     let pollTimer: ReturnType<typeof setTimeout> | undefined
 
     const sectionLabels: Record<ExternalRestoreSection, 'hypa' | 'devicePlugins' | 'deviceSettings'> = {
@@ -90,7 +101,7 @@
         const sections = externalRestorableSections(item)
         if (sections.length === 0) {
             void runJob(connection, 'restore', {
-                snapshotId: item.snapshotId ?? item.id,
+                snapshotId: item.snapshotId,
                 restoreAreas: externalRestoreAreas(item, []),
             })
             return
@@ -127,7 +138,14 @@
         }
         try {
             storageState = await bridge.getState()
-            error = ''
+            for (const [connectionId, jobId] of pendingPins) {
+                const completed = storageState.jobs.find(job => job.id === jobId)
+                if (!completed || externalJobIsActive(completed)) continue
+                pendingPins.delete(connectionId)
+                const connection = storageState.connections.find(item => item.id === connectionId)
+                if (completed.state === 'succeeded' && connection) await loadHistory(connection, false)
+            }
+            if (!silent) error = ''
         } catch (reason) {
             error = externalErrorMessage(strings, reason)
         } finally {
@@ -140,6 +158,7 @@
 
     function schedulePoll(whileBusy = false): void {
         clearTimeout(pollTimer)
+        if (destroyed) return
         if (!storageState?.jobs.some(externalJobIsActive) && !(whileBusy && busy)) return
         pollTimer = setTimeout(async () => {
             await refresh(true)
@@ -150,10 +169,17 @@
     async function onConnected(result: ExternalConnectionResult): Promise<void> {
         busy = false
         adding = false
+        const renewed = renewalConnection !== undefined
+        renewalConnection = undefined
         if (result.recovery) recoveryKey = result.recovery.key
         await refreshExternalStorageProductionState()
         await refresh()
         schedulePoll()
+        if (renewed) {
+            const job = activeJob(result.connection)
+            if (job && externalJobIsPaused(job)) await resumeJob(result.connection, job)
+            return
+        }
         // An already existing repository is opened to read what is in it, so
         // its contents are shown without asking for the history tab first.
         if (result.connection.mode === 'existing') {
@@ -164,12 +190,25 @@
 
     /** Re-enters the paused job instead of starting one beside it. */
     async function resumeJob(connection: ExternalConnectionSummary, job: ExternalJobSummary): Promise<void> {
-        if (job.kind === 'check-repository') {
-            const snapshotId = job.checkRequest?.snapshotId
-            await runJob(connection, 'check-repository', snapshotId ? { snapshotId } : {})
+        if (job.kind === 'sync') {
+            await runJob(connection, 'sync')
             return
         }
-        await runJob(connection, job.kind === 'backup' ? 'backup' : 'sync')
+        if (job.kind === 'restore' && job.restoreRequest) {
+            await runJob(connection, 'restore', job.restoreRequest)
+            return
+        }
+        busy = true
+        try {
+            const operation = resumeExternalStorageJob(job)
+            schedulePoll(true)
+            const result = await operation
+            if (result.kind === 'complete' && (job.kind === 'pin-history' || job.kind === 'delete-history')) await loadHistory(connection, false)
+            if (result.kind === 'blocked' && !result.job) error = externalErrorMessage(strings, result.error ?? result.cause)
+            await refresh(true)
+            schedulePoll()
+        } catch (reason) { error = externalErrorMessage(strings, reason) }
+        finally { busy = false }
     }
 
     async function runJob(
@@ -189,7 +228,10 @@
             if (job === 'backup' || job === 'sync' || job === 'cleanup') {
                 const operation = requestExternalStorageNow(connection.id, job)
                 schedulePoll(true)
-                await operation
+                const result = await operation
+                if (result.kind === 'blocked' && !result.job) {
+                    error = externalErrorMessage(strings, result.error ?? result.cause ?? { code: result.reason })
+                }
             } else if (job === 'restore') {
                 if (!details.snapshotId || !details.restoreAreas) {
                     throw new Error('Missing restore request')
@@ -213,12 +255,16 @@
                 schedulePoll(true)
                 await operation
             } else {
-                await bridge.startJob({
+                const started = await bridge.startJob({
                     connectionId: connection.id,
                     kind: job,
                     reason: 'manual',
                     ...details,
                 })
+                if (job === 'pin-history') {
+                    if (started.state === 'succeeded') await loadHistory(connection, false)
+                    else pendingPins.set(connection.id, started.id)
+                }
             }
             await refresh(true)
             schedulePoll()
@@ -264,6 +310,58 @@
         } finally {
             busy = false
         }
+    }
+
+    async function cancelJob(job: ExternalJobSummary): Promise<void> {
+        try {
+            await bridge.cancelJob(job.id)
+            await refresh(true)
+            schedulePoll()
+        } catch (reason) { error = externalErrorMessage(strings, reason) }
+    }
+
+    async function retainedPublication(id: string, remove: boolean): Promise<void> {
+        if (busy) return
+        if (remove && !(await alertConfirm(strings.removeRetainedConfirm))) return
+        busy = true
+        try {
+            if (remove) await bridge.removeRetainedPublication(id)
+            else await runWithMobileBackgroundTask('export', async () => {
+                const result = await bridge.exportRetainedPublication(id)
+                return result.cancelled ? null : result
+            }, undefined, true)
+            await refresh(true)
+        } catch (reason) { error = externalErrorMessage(strings, reason) }
+        finally { busy = false }
+    }
+
+    async function setAutomaticWork(connection: ExternalConnectionSummary, enabled: boolean): Promise<void> {
+        if (!storageState || busy) return
+        busy = true
+        try {
+            if (connection.purpose === 'sync') {
+                await bridge.setSyncPaused(!enabled, storageState.selection.selectionEpoch)
+            } else await bridge.setAutomaticBackupPaused(connection.id, !enabled)
+            await refreshExternalStorageProductionState()
+            await refresh(true)
+        } catch (reason) { error = externalErrorMessage(strings, reason) }
+        finally { busy = false }
+    }
+
+    async function unlock(): Promise<void> {
+        const connection = unlockConnection
+        if (!connection || busy) return
+        busy = true
+        try {
+            await bridge.unlockConnection(connection.id, unlockKey)
+            unlockKey = ''
+            unlockConnection = undefined
+            await refreshExternalStorageProductionState()
+            await refresh(true)
+        } catch (reason) { error = externalErrorMessage(strings, reason) }
+        finally { busy = false }
+        const job = activeJob(connection)
+        if (!unlockConnection && job && externalJobIsPaused(job)) await resumeJob(connection, job)
     }
 
     async function selectSyncTarget(connection: ExternalConnectionSummary): Promise<void> {
@@ -510,10 +608,28 @@
     }
 
     async function exportSnapshot(connectionId: string, snapshotId: string): Promise<void> {
+        if (busy || exportRun) return
+        const id = crypto.randomUUID()
+        exportRun = { id, connectionId }
+        busy = true
         try {
-            await bridge.exportSnapshot(connectionId, snapshotId)
+            await runWithMobileBackgroundTask('export', async background => {
+                const abort = () => { void bridge.cancelExport(id).catch(() => {}) }
+                background.signal?.addEventListener('abort', abort, { once: true })
+                try {
+                    background.signal?.throwIfAborted()
+                    const result = await bridge.exportSnapshot(connectionId, snapshotId, id, progress => {
+                        if (exportRun?.id === id) exportRun = { id, connectionId, progress }
+                        background.progress(measuredTaskPercent(Number(progress.completedBytes), Number(progress.totalBytes)))
+                    })
+                    return result.cancelled ? null : result
+                } finally { background.signal?.removeEventListener('abort', abort) }
+            }, undefined, true)
         } catch (reason) {
-            error = externalErrorMessage(strings, reason)
+            if (externalErrorKind(reason) !== 'cancelled') error = externalErrorMessage(strings, reason)
+        } finally {
+            if (exportRun?.id === id) exportRun = null
+            busy = false
         }
     }
 
@@ -535,11 +651,12 @@
         if (job.state === 'succeeded') return strings.completed
         if (job.state === 'failed') return errorLabel(job.error)
         if (job.state === 'uncertain') return strings.uncertain
+        if (externalJobIsPaused(job)) return errorLabel(job.error)
         if (job.state === 'waiting') return strings.waiting
         if (job.state === 'queued') return strings.queued
         if (job.state === 'running') return strings.running
         if (job.state === 'conflict') return strings.resolveRequired
-        return strings.cancel
+        return strings.cancelled
     }
 
     function errorLabel(value?: ExternalJobSummary['error']): string {
@@ -564,7 +681,9 @@
 
     function connectionTone(connection: ExternalConnectionSummary): 'connected' | 'working' | 'paused' | 'attention' {
         const job = activeJob(connection)
+        if (job && (externalJobIsPaused(job) || job.state === 'uncertain')) return 'attention'
         if (job && externalJobIsActive(job)) return 'working'
+        if (isSyncTarget(connection) && storageState?.selection.paused) return 'paused'
         if (connection.status === 'ready') return 'connected'
         if (connection.status === 'paused') return 'paused'
         return 'attention'
@@ -572,7 +691,10 @@
 
     function connectionStatus(connection: ExternalConnectionSummary): string {
         const job = activeJob(connection)
+        if (job?.state === 'uncertain') return strings.statusError
+        if (job && externalJobIsPaused(job)) return errorLabel(job.error)
         if (job && externalJobIsActive(job)) return strings.jobActive[job.kind]
+        if (isSyncTarget(connection) && storageState?.selection.paused) return strings.statusPaused
         return connectionStatusLabel(connection.status)
     }
 
@@ -627,10 +749,24 @@
     })
 
     onMount(async () => {
+        try {
+            const stop = await bridge.onJobStarted(() => {
+                if (destroyed) return
+                void refresh(true).then(() => { if (!destroyed) schedulePoll() })
+            })
+            if (destroyed) { stop(); return }
+            stopJobEvents = stop
+        } catch (reason) { error = externalErrorMessage(strings, reason) }
+        if (destroyed) return
         await refresh()
         schedulePoll()
     })
-    onDestroy(() => clearTimeout(pollTimer))
+    onDestroy(() => {
+        destroyed = true
+        clearTimeout(pollTimer)
+        stopJobEvents?.()
+        if (exportRun) void bridge.cancelExport(exportRun.id).catch(() => {})
+    })
 </script>
 
 
@@ -638,15 +774,27 @@
 
 <SettingGroup id="risunest-external-storage" title={strings.title} description={strings.help}>
     {#snippet actions()}
-        {#if storageState?.supported && !adding}<SettingButton disabled={busy} onclick={() => adding = true}>{strings.add}</SettingButton>{/if}
+        {#if storageState?.supported && !adding && !renewalConnection}<SettingButton disabled={busy} onclick={() => adding = true}>{strings.add}</SettingButton>{/if}
         {#if storageState?.supported !== false}<SettingButton variant="secondary" busy={activeAction === 'refresh'} disabled={busy} onclick={() => refresh()}>{strings.refresh}</SettingButton>{/if}
     {/snippet}
 
     {#if !storageState && busy}<p class="p-4 text-sm text-textcolor2">{strings.loading}</p>
     {:else if storageState && !storageState.supported}<p class="p-4 text-sm text-textcolor2">{strings.unsupported}</p>
-    {:else if adding}
-        <ConnectionForm {strings} onconnected={onConnected} oncancel={() => adding = false} onbusychange={value => busy = value} />
+    {:else if adding || renewalConnection}
+        <ConnectionForm {renewalConnection} {strings} onconnected={onConnected} oncancel={() => { adding = false; renewalConnection = undefined }} onbusychange={value => busy = value} />
     {:else if storageState}
+        {#if storageState.retainedPublications?.length}
+            <section class="card">
+                <h3 class="card-title">{strings.retainedPublications}</h3>
+                {#each storageState.retainedPublications as retained (retained.id)}
+                    <p>{strings.retainedPublication.replace('{0}', retained.revision)}</p>
+                    <div class="actions">
+                        <SettingButton disabled={busy} onclick={() => retainedPublication(retained.id, false)}>{strings.download}</SettingButton>
+                        <SettingButton variant="danger" disabled={busy} onclick={() => retainedPublication(retained.id, true)}>{strings.removeRetained}</SettingButton>
+                    </div>
+                {/each}
+            </section>
+        {/if}
         {#if !storageState.connections.length}<p class="p-4 text-sm text-textcolor2">{strings.noConnections}</p>{/if}
         {#each storageState.connections as connection (connection.id)}
             {@const job = activeJob(connection)}
@@ -667,18 +815,38 @@
                 </div>
 
                 {#if connection.lastError}<p class="text-sm text-danger-400">{errorLabel(connection.lastError)}</p>{/if}
-                {#if job && !externalJobIsActive(job) && job.state !== 'succeeded' && !connection.lastError}<p class="text-sm text-danger-400" role="status">{jobLabel(job)}</p>{/if}
+                {#if job && (!externalJobIsActive(job) || externalJobIsPaused(job)) && job.state !== 'succeeded' && !connection.lastError}<p class="text-sm text-danger-400" role="status">{jobLabel(job)}</p>{/if}
 
+                {#if job?.result?.decisionRequired || job?.state === 'uncertain'}
+                    <p class="text-sm" role="status">{strings.publicationDecision}</p>
+                {:else if syncTarget && storageState.selection.decisionRequired}
+                    <p class="text-sm" role="status">{strings.selectionDecision}</p>
+                {/if}
+
+                {#if exportRun?.connectionId === connection.id}
+                    {@const amount = exportRun.progress}
+                    <SettingProgress label={strings.download} detail={amount ? `${bytes(amount.completedBytes)}${amount.totalBytes ? ` / ${bytes(amount.totalBytes)}` : ''}` : ''} fraction={amount?.totalBytes && Number(amount.totalBytes) > 0 ? Number(amount.completedBytes) / Number(amount.totalBytes) : null} />
+                    <SettingButton variant="secondary" onclick={() => exportRun && bridge.cancelExport(exportRun.id)}>{strings.cancel}</SettingButton>
+                {/if}
                 <dl class="kv">
                     {#if connection.purpose === 'sync'}<dt>{strings.lastSync}</dt><dd>{when(connection.lastSyncAtMs)}</dd>{/if}
                     <dt>{strings.lastBackup}</dt><dd>{when(connection.lastBackupAtMs)}</dd>
                     {#if job && job.state === 'succeeded'}<dt>{strings.progress}</dt><dd role="status" aria-live="polite">{jobSummary(job)}</dd>{/if}
                 </dl>
-                {#if job && externalJobIsActive(job)}
+                {#if job && externalJobIsPaused(job) && job.error?.retryAtMs}<p class="text-sm">{strings.retryAt.replace('{0}', when(job.error.retryAtMs))}</p>{/if}
+                {#if job && externalJobIsActive(job) && !externalJobIsPaused(job)}
                     {@const progress = externalJobProgress(job)}
                     <SettingProgress label={strings.jobActive[job.kind]} detail={jobSize(job)} fraction={progress} />
                 {/if}
 
+                {#if syncTarget || connection.purpose === 'backup'}
+                    <SettingToggle showLabel label={syncTarget ? strings.automaticSync : strings.automaticBackup} disabled={busy} checked={syncTarget ? !storageState.selection.paused : !connection.automaticBackupPaused} onchange={enabled => setAutomaticWork(connection, enabled)} />
+                {/if}
+                {#if unlockConnection?.id === connection.id}
+                    <label>{strings.recoveryCode}<TextInput hideText bind:value={unlockKey} /></label>
+                    <SettingButton disabled={busy || !unlockKey.trim()} onclick={unlock}>{strings.unlock}</SettingButton>
+                    <SettingButton variant="secondary" disabled={busy} onclick={() => { unlockConnection = undefined; unlockKey = '' }}>{strings.cancel}</SettingButton>
+                {/if}
                 {#if connection.capturePolicy}
                     {@const policy = connection.capturePolicy}
                     <h3 class="policy-title">{strings.scope}</h3>
@@ -690,14 +858,20 @@
                 {/if}
 
                 <div class="actions">
-                    {#if job && job.state === 'waiting' && job.error?.action === 'retry' && (job.kind === 'backup' || job.kind === 'sync' || job.kind === 'check-repository')}
-                        <SettingButton disabled={busy} onclick={() => resumeJob(connection, job)}>{strings.retryAction}</SettingButton>
+                    {#if connection.status === 'reauth-required' || job?.error?.action === 'reauthenticate'}
+                        <SettingButton disabled={busy} onclick={() => renewalConnection = connection}>{strings.renew}</SettingButton>
+                    {/if}
+                    {#if connection.status === 'key-locked' || job?.error?.action === 'unlock-key'}
+                        <SettingButton disabled={busy} onclick={() => unlockConnection = connection}>{strings.unlock}</SettingButton>
+                    {/if}
+                    {#if job && ((job.state === 'waiting' && job.error?.action === 'retry' && job.kind === 'sync') || (externalJobIsPaused(job) && ['retry', 'wait', 'free-space'].includes(job.error?.action ?? '') && ['backup', 'cleanup', 'restore', 'check-repository', 'pin-history', 'delete-history'].includes(job.kind)))}
+                        <SettingButton disabled={busy || Number(job.error?.retryAtMs ?? 0) > Date.now()} onclick={() => resumeJob(connection, job)}>{strings.retryAction}</SettingButton>
                     {/if}
                     <SettingButton busy={activeAction === `backup:${connection.id}`} disabled={busy || (job && externalJobIsActive(job))} onclick={() => runJob(connection, 'backup')}>{strings.runBackup}</SettingButton>
                     {#if connection.purpose === 'sync'}<SettingButton busy={activeAction === `sync:${connection.id}`} disabled={busy || (job && externalJobIsActive(job))} onclick={() => runJob(connection, 'sync')}>{strings.runSync}</SettingButton>{/if}
                     {#if connection.purpose === 'sync' && !syncTarget}<SettingButton variant="secondary" disabled={busy} onclick={() => selectSyncTarget(connection)}>{strings.makeSyncTarget}</SettingButton>{/if}
                     {#if connection.purpose === 'sync'}<SettingButton variant="secondary" busy={activeAction === `check-repository:${connection.id}`} disabled={busy || (job && externalJobIsActive(job))} onclick={() => runJob(connection, 'check-repository')}>{strings.checkRepository}</SettingButton>{/if}
-                    {#if job && externalJobIsActive(job)}<SettingButton variant="secondary" onclick={async () => { await bridge.cancelJob(job.id); await refresh(true) }}>{strings.cancel}</SettingButton>{/if}
+                    {#if job && externalJobIsActive(job)}<SettingButton variant="secondary" onclick={() => cancelJob(job)}>{strings.cancel}</SettingButton>{/if}
                 </div>
 
                 <div class="tabs" role="tablist">
@@ -715,11 +889,11 @@
                                 <div class="line">
                                     <span>{historyLine(item)}</span>
                                     <span class="item-actions">
-                                        <SettingButton variant="secondary" disabled={!item.complete || !item.verified} onclick={() => beginRestore(connection, item)}>{strings.restore}</SettingButton>
-                                        <SettingButton variant="secondary" disabled={!item.complete || !item.verified} onclick={() => exportSnapshot(connection.id, item.snapshotId ?? item.id)}>{strings.download}</SettingButton>
-                                        <SettingButton variant="secondary" disabled={busy || !item.complete || !item.verified} onclick={() => runJob(connection, 'check-repository', { snapshotId: item.snapshotId ?? item.id })}>{strings.check}</SettingButton>
+                                        <SettingButton variant="secondary" disabled={busy || (job && externalJobIsActive(job)) || !item.complete || !item.verified} onclick={() => beginRestore(connection, item)}>{strings.restore}</SettingButton>
+                                        <SettingButton variant="secondary" disabled={busy || (job && externalJobIsActive(job)) || !item.complete || !item.verified} onclick={() => exportSnapshot(connection.id, item.snapshotId)}>{strings.download}</SettingButton>
+                                        <SettingButton variant="secondary" disabled={busy || !item.complete || !item.verified} onclick={() => runJob(connection, 'check-repository', { snapshotId: item.snapshotId })}>{strings.check}</SettingButton>
                                         {#if item.pinned}<SettingButton variant="secondary" disabled>{strings.pinned}</SettingButton>
-                                        {:else}<SettingButton variant="secondary" onclick={() => runJob(connection, 'pin-history', { snapshotId: item.snapshotId ?? item.id })}>{strings.pin}</SettingButton>{/if}
+                                        {:else}<SettingButton variant="secondary" disabled={busy || (job && externalJobIsActive(job))} onclick={() => runJob(connection, 'pin-history', { snapshotId: item.snapshotId })}>{strings.pin}</SettingButton>{/if}
                                         {#if item.deletable}<SettingButton variant="danger" disabled={busy} onclick={() => deleteHistory(connection, item)}>{strings.deleteHistory}</SettingButton>{/if}
                                     </span>
                                 </div>
@@ -733,7 +907,7 @@
                                             <p class="policy-note">{strings[sectionHelp[section]]}</p>
                                         {/each}
                                         <div class="actions">
-                                            <SettingButton disabled={busy} onclick={() => runJob(connection, 'restore', { snapshotId: item.snapshotId ?? item.id, restoreAreas: externalRestoreAreas(item, chosen) })}>{strings.restore}</SettingButton>
+                                            <SettingButton disabled={busy} onclick={() => runJob(connection, 'restore', { snapshotId: item.snapshotId, restoreAreas: externalRestoreAreas(item, chosen) })}>{strings.restore}</SettingButton>
                                             <SettingButton variant="secondary" disabled={busy} onclick={() => { restoreScope = null }}>{strings.cancel}</SettingButton>
                                         </div>
                                     </div>

@@ -92,6 +92,14 @@ function fixture(
   return { facade, native, runtime, fence, trace, progress };
 }
 describe("server sync activation boundary", () => {
+  it("defers generation before preparing remote work", async () => {
+    const { runtime, native } = fixture();
+    const facade = createServerSyncFacade({ runtime, invoke: native as never, deferred: () => true });
+    await expect(facade.cycle()).rejects.toMatchObject({ code: "generation-active" });
+    expect(native).not.toHaveBeenCalled();
+    expect(runtime.flushPendingData).not.toHaveBeenCalled();
+  });
+
   it("forwards native backup metadata counts while preparation is still running", async () => {
     vi.useFakeTimers();
     const { runtime } = fixture();

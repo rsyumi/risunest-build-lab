@@ -116,7 +116,7 @@ describe('external storage connection request', () => {
 
     it('deduplicates overlapping history pages by snapshot identifier', () => {
         const first = {
-            id: 'snapshot-1', kind: 'snapshot' as const, createdAtMs: '1' as const,
+            id: 'snapshot-1', snapshotId: 'snapshot-1', kind: 'snapshot' as const, createdAtMs: '1' as const,
             logicalRevision: '1' as const, pinned: false, complete: true, verified: true,
             includedSections: [], sameDevice: false,
         }
@@ -127,7 +127,7 @@ describe('external storage connection request', () => {
     })
 
     it('puts the newest entry first because pages arrive in object order', () => {
-        const base = {
+        const base = { snapshotId: 'snapshot',
             kind: 'recovery-candidate' as const, logicalRevision: '1' as const,
             pinned: false, complete: true, verified: true,
             includedSections: [], sameDevice: false,
@@ -143,7 +143,7 @@ describe('external storage connection request', () => {
     })
 
     it('keeps separate point rows and hides their weaker raw recovery candidate', () => {
-        const base = {
+        const base = { snapshotId: 'snapshot',
             createdAtMs: '1' as const, logicalRevision: '1' as const,
             pinned: false, complete: true, verified: true,
             includedSections: [], sameDevice: false,
@@ -156,7 +156,7 @@ describe('external storage connection request', () => {
     })
 
     it('keeps only the entries a restore can read back', () => {
-        const base = {
+        const base = { snapshotId: 'snapshot',
             kind: 'recovery-candidate' as const, createdAtMs: '1' as const,
             logicalRevision: '1' as const, pinned: false,
             includedSections: [], sameDevice: false,
@@ -171,7 +171,7 @@ describe('external storage connection request', () => {
 
     it('preserves pinned conflict metadata when a later root page repeats a snapshot', () => {
         const conflict = {
-            id: 'snapshot-1', kind: 'conflict' as const, createdAtMs: '1' as const,
+            id: 'snapshot-1', snapshotId: 'snapshot-1', kind: 'conflict' as const, createdAtMs: '1' as const,
             logicalRevision: '1' as const, pinned: true, complete: false, verified: false,
             includedSections: [], sameDevice: false,
         }

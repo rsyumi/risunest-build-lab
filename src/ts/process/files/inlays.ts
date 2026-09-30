@@ -8,6 +8,7 @@ import { getModelInfo, LLMFlags, LLMFormat } from "src/ts/model/modellist";
 import { asBuffer } from "../../util";
 import {
     normalizeInlayEncodeOptions,
+    inferBlobMime,
     type BlobMetadata,
     type BlobStore,
     type BlobWriteMetadata,
@@ -96,7 +97,7 @@ export async function postInlayAsset(img:{
     }
 
     if(inlayAudioExts.includes(extention)){
-        const audioBlob = new Blob([asBuffer(img.data)], {type: `audio/${extention}`})
+        const audioBlob = new Blob([asBuffer(img.data)], {type: inferBlobMime(undefined, extention)})
         const imgid = v4()
 
         await setInlayAsset(imgid, {
@@ -110,7 +111,7 @@ export async function postInlayAsset(img:{
     }
 
     if(inlayVideoExts.includes(extention)){
-        const videoBlob = new Blob([asBuffer(img.data)], {type: `video/${extention}`})
+        const videoBlob = new Blob([asBuffer(img.data)], {type: inferBlobMime(undefined, extention)})
         const imgid = v4()
 
         await setInlayAsset(imgid, {
@@ -175,7 +176,7 @@ export async function writeInlayImage(
         const blobStore = await resolveBlobStore()
         if (!blobStore.putNewInlayImage) throw new Error('Native Inlay image writer is unavailable')
         const metadata = await blobStore.putNewInlayImage(imgid, data, { name: arg.name ?? imgid, options })
-        if (metadata.preservationReason) alertToast(language.risuNest.inlay.animationPreserved)
+        if (metadata.preservationReason === 'animation-cost') alertToast(language.risuNest.inlay.animationPreserved)
         return imgid
     }
     let drawHeight = 0
@@ -374,7 +375,7 @@ export async function setInlayAsset(id: string, img: InlayAsset): Promise<string
     if (isTauri && img.type === 'image') {
         if (!blobStore.putNewInlayImage) throw new Error('Native Inlay image writer is unavailable')
         const metadata = await blobStore.putNewInlayImage(inlayId, bytes, { name: img.name, options: getInlayEncodeOptions() })
-        if (metadata.preservationReason) alertToast(language.risuNest.inlay.animationPreserved)
+        if (metadata.preservationReason === 'animation-cost') alertToast(language.risuNest.inlay.animationPreserved)
         return inlayId
     }
     if (img.type === 'image') {

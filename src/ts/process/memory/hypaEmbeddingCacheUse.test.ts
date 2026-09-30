@@ -220,3 +220,21 @@ describe('embedding identity', () => {
         expect(requested[0]).not.toBe(requested[1])
     })
 })
+
+
+it('stops remote document embedding after an aborted first batch', async () => {
+    const { globalFetch } = await import('src/ts/globalApi.svelte')
+    let finish!: (value: any) => void
+    vi.mocked(globalFetch).mockImplementationOnce(async () => new Promise((resolve) => { finish = resolve }))
+    const controller = new AbortController()
+    const processor = new HypaProcesser('ada')
+    processor.signal = controller.signal
+    const pending = processor.embedDocuments(Array.from({ length: 120 }, (_, i) => `text ${i}`))
+    const outcome = pending.catch((error) => error)
+    await vi.waitFor(() => expect(globalFetch).toHaveBeenCalledTimes(1))
+    expect(vi.mocked(globalFetch).mock.calls[0][1]?.abortSignal).toBe(controller.signal)
+    controller.abort()
+    finish({ ok: true, data: { data: Array.from({ length: 50 }, () => ({ embedding: [1, 2] })) } })
+    expect(await outcome).toMatchObject({ name: 'AbortError' })
+    expect(globalFetch).toHaveBeenCalledTimes(1)
+})

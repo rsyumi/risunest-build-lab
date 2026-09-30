@@ -4,6 +4,8 @@ import { get } from 'svelte/store'
 vi.mock('../globalApi.svelte', () => ({ openURL: vi.fn() }))
 vi.mock('../platform', () => ({ isTauri: true }))
 vi.mock('@tauri-apps/plugin-process', () => ({ relaunch: vi.fn() }))
+vi.mock('../desktopRelaunch', () => ({ relaunch: vi.fn() }))
+vi.mock('../../lang', () => ({ language: { risuNest: { update: { installLocationNotWritable: 'Move RisuNest to the Applications folder and try again.' } } } }))
 const nativeMocks = vi.hoisted(() => ({
     environment: vi.fn(async () => ({
         currentVersion: '1.0.0',
@@ -78,6 +80,14 @@ function dependencies(options: { auto?: boolean; skipped?: string; check?: () =>
 }
 
 describe('app update controller', () => {
+    it('maps an unwritable installation to actionable text and does not restart', async () => {
+        const { value } = dependencies()
+        vi.mocked(value.install).mockRejectedValue('install-location-not-writable')
+        appUpdateState.update(state => ({ ...state, update: available.update }))
+        await applyAppUpdate(value)
+        expect(get(appUpdateState)).toMatchObject({ phase: 'error', error: 'Move RisuNest to the Applications folder and try again.' })
+        expect(value.restart).not.toHaveBeenCalled()
+    })
     beforeEach(() => {
         stopAppUpdateChecks()
         appUpdateState.set({ ...initialAppUpdateState })

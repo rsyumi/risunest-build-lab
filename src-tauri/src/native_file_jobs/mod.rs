@@ -101,6 +101,7 @@ struct SpoolManifest {
     #[serde(deserialize_with = "deserialize_required_nullable_u64")]
     total_bytes: Option<u64>,
     import_destination: Option<String>,
+    operation_id: Option<String>,
 }
 
 fn deserialize_required_nullable_u64<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
@@ -254,10 +255,6 @@ pub(crate) enum NativeFileJobStartRequest {
         source: JobSource,
         expected_revision: i64,
         selection: Option<portable::PortableSelection>,
-    },
-    ExportLegacyLocalBackup {
-        destination: Option<String>,
-        expected_revision: i64,
     },
     ExportCompatibleLocalBackup {
         target: legacy_backup::CompatibilityTarget,
@@ -702,6 +699,9 @@ fn validate_spool_source(
     if manifest.token != token
         || manifest.state != SpoolState::Ready
         || !is_safe_spool_display_name(&manifest.display_name)
+        || manifest.operation_id.as_ref().is_some_and(|id| {
+            id.len() != 64 || !id.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
         || expected_display_name.is_some_and(|name| name != manifest.display_name)
     {
         return Err(invalid_source_error("Android spool source is not ready"));
@@ -725,10 +725,24 @@ fn validate_spool_source(
 
 fn is_safe_spool_display_name(name: &str) -> bool {
     !name.is_empty()
+        && name != "."
+        && name != ".."
         && name.chars().count() <= 180
         && name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+            .chars()
+            .all(|character| !character.is_control()
+                && !matches!(character, '/' | '\\' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}'))
+}
+
+#[cfg(test)]
+#[test]
+fn spool_display_names_preserve_unicode_without_path_or_display_controls() {
+    for name in ["캐릭터 이름.json", "設定.risum", "人物😀.png", "e\u{301}.json", &format!("{}.json", "😀".repeat(175))] {
+        assert!(is_safe_spool_display_name(name), "{name:?}");
+    }
+    for name in ["", ".", "..", "../card.png", "a\\b.json", "a\u{85}.json", "a\u{202e}.json", "a\u{2066}.png", &"😀".repeat(181)] {
+        assert!(!is_safe_spool_display_name(name), "{name:?}");
+    }
 }
 
 fn invalid_source_error(message: impl AsRef<str>) -> NativeJobError {
@@ -1506,25 +1520,6 @@ impl NativeFileJobState {
                     app,
                 }
             }
-            NativeFileJobStartRequest::ExportLegacyLocalBackup {
-                destination,
-                expected_revision,
-            } => {
-                let destination = destination.map(PathBuf::from);
-                if let Some(destination) = destination.as_deref() {
-                    validate_desktop_destination(destination)?;
-                }
-                let store =
-                    crate::persistent_store::commands::with_store_mut(app.state(), |store| {
-                        store.open_native_job_store()
-                    })
-                    .map_err(native_store_error)?;
-                NativeFileJobTask::ExportLegacyLocalBackup {
-                    destination,
-                    expected_revision,
-                    store,
-                }
-            }
             NativeFileJobStartRequest::ExportCompatibleLocalBackup {
                 target,
                 destination,
@@ -1706,6 +1701,9 @@ impl NativeFileJobState {
             } => {
                 #[cfg(feature = "native-kei-upload-pilot")]
                 {
+                    let account = crate::account_credential::export_account(&app, false)
+                        .map_err(|message| NativeJobError::new("invalid-input", message))?
+                        .ok_or_else(|| NativeJobError::new("invalid-input", "KEI account credential is unavailable"))?;
                     let prepared =
                         crate::persistent_store::commands::with_store_mut(app.state(), |store| {
                             store.prepare_kei_job_upload(
@@ -1714,6 +1712,7 @@ impl NativeFileJobState {
                                 &url,
                                 &expected_account_id,
                                 &token,
+                                &account,
                             )
                         })
                         .map_err(native_store_error)?;
@@ -2141,6 +2140,7 @@ impl NativeFileJobState {
                             store,
                             &job,
                             Some((&app, &selection)),
+                            &app.package_info().version.to_string(),
                         ),
                         _ => Err(NativeJobError::new(
                             "store-error",
@@ -2212,6 +2212,7 @@ impl NativeFileJobState {
                         Some(opened_source) => match sink {
                             RestoreJobSink::Persistent(app) => restore::restore_block_risu_save(
                                 opened_source,
+                                &owned_directory,
                                 expected_revision,
                                 &job,
                                 &PersistentReplacementSink { app },
@@ -2219,6 +2220,7 @@ impl NativeFileJobState {
                             #[cfg(test)]
                             RestoreJobSink::Test(sink) => restore::restore_block_risu_save(
                                 opened_source,
+                                &owned_directory,
                                 expected_revision,
                                 &job,
                                 sink.as_ref(),
@@ -2234,12 +2236,13 @@ impl NativeFileJobState {
                         expected_revision,
                         omit_account,
                         app,
-                    } => crate::persistent_store::commands::with_store_mut(app.state(), |store| {
-                        store.prepare_risu_save_export(expected_revision)
-                    })
-                    .map_err(native_store_error)
-                    .and_then(|prepared| {
-                        export::export_block_risu_save(prepared, &destination, omit_account, &job)
+                    } => crate::account_credential::export_account(&app, omit_account)
+                    .map_err(|message| NativeJobError::new("invalid-input", message))
+                    .and_then(|account| {
+                        let prepared = crate::persistent_store::commands::with_store_mut(app.state(), |store| {
+                            store.prepare_risu_save_export(expected_revision)
+                        }).map_err(native_store_error)?;
+                        export::export_block_risu_save(prepared, &destination, omit_account, account.as_ref(), &job)
                     }),
                     NativeFileJobTask::RestoreOfficialSnapshot {
                         request,
@@ -2272,18 +2275,6 @@ impl NativeFileJobState {
                             "native legacy backup job source was not prepared",
                         )),
                     },
-                    NativeFileJobTask::ExportLegacyLocalBackup {
-                        destination,
-                        expected_revision,
-                        store,
-                    } => legacy_backup::export_legacy_local_backup(
-                        destination.as_deref(),
-                        expected_revision,
-                        &owned_directory,
-                        &root.join("handoffs"),
-                        store,
-                        &job,
-                    ),
                     NativeFileJobTask::ExportCompatibleLocalBackup {
                         target,
                         destination,
@@ -2701,11 +2692,6 @@ enum NativeFileJobTask {
         repository_root: PathBuf,
         app: AppHandle,
     },
-    ExportLegacyLocalBackup {
-        destination: Option<PathBuf>,
-        expected_revision: i64,
-        store: crate::persistent_store::PersistentStore,
-    },
     ExportCompatibleLocalBackup {
         target: legacy_backup::CompatibilityTarget,
         destination: Option<PathBuf>,
@@ -2761,7 +2747,6 @@ impl NativeFileJobTask {
             Self::Export { .. } => JobKind::ExportBlockRisuSave,
             Self::RestoreOfficialSnapshot { .. } => JobKind::RestoreOfficialAccountSnapshot,
             Self::RestoreLegacyLocalBackup { .. } => JobKind::RestoreLegacyLocalBackup,
-            Self::ExportLegacyLocalBackup { .. } => JobKind::ExportLegacyLocalBackup,
             Self::ExportCompatibleLocalBackup { .. } => JobKind::ExportCompatibleLocalBackup,
             Self::ExportCharacterCharx { .. } => JobKind::ExportCharacterCharx,
             Self::ExportCharacterCard { .. } => JobKind::ExportCharacterCard,
@@ -2795,9 +2780,6 @@ impl NativeFileJobTask {
             | Self::RestoreLegacyLocalBackup {
                 expected_revision, ..
             }
-            | Self::ExportLegacyLocalBackup {
-                expected_revision, ..
-            }
             | Self::ExportCompatibleLocalBackup {
                 expected_revision, ..
             }
@@ -2818,8 +2800,8 @@ impl NativeFileJobTask {
 fn native_store_error(error: crate::persistent_store::StoreError) -> NativeJobError {
     let code = match error {
         crate::persistent_store::StoreError::RevisionConflict { .. } => "revision-conflict",
-        crate::persistent_store::StoreError::Validation { .. } => "invalid-input",
-        crate::persistent_store::StoreError::SnapshotReleased
+        crate::persistent_store::StoreError::CommitDecode { .. } | crate::persistent_store::StoreError::Validation { .. } => "invalid-input",
+        crate::persistent_store::StoreError::Committed { .. } | crate::persistent_store::StoreError::RawBodyUnavailable | crate::persistent_store::StoreError::CommitBusy | crate::persistent_store::StoreError::SnapshotReleased
         | crate::persistent_store::StoreError::Store { .. } => "store-error",
     };
     NativeJobError::new(code, error.to_string())
@@ -3140,6 +3122,27 @@ pub(crate) fn native_file_job_status(
 }
 
 #[tauri::command(async)]
+pub(crate) async fn native_file_job_stage_inline_asset(
+    app: AppHandle,
+    job_id: String,
+    name: String,
+    total_bytes: u64,
+    offset: u64,
+    data: Vec<u8>,
+) -> Result<content::InlineAssetStageResult, NativeJobError> {
+    if data.len() > 64 * 1024 {
+        return Err(NativeJobError::new("invalid-input", "Inline asset chunk exceeds the IPC limit"));
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        let _operation = app.state::<crate::persistent_store::PersistentStoreState>()
+            .admit_renderer_operation().map_err(|error| NativeJobError::new("store-error", error.to_string()))?;
+        crate::asset_repository::commands::with_unsealed_content_session(&app, &job_id, |session| {
+            app.state::<NativeFileJobState>().stage_inline_asset(&job_id, session, &name, total_bytes, offset, &data)
+        })
+    }).await.map_err(|error| NativeJobError::new("store-error", error.to_string()))?
+}
+
+#[tauri::command(async)]
 pub(crate) fn native_file_job_list(
     state: State<'_, NativeFileJobState>,
 ) -> Result<Vec<JobStatus>, NativeJobError> {
@@ -3323,7 +3326,6 @@ pub(crate) enum JobKind {
     RestoreOfficialAccountSnapshot,
     RestoreLegacyLocalBackup,
     ExportBlockRisuSave,
-    ExportLegacyLocalBackup,
     ExportCompatibleLocalBackup,
     ExportCharacterCharx,
     ExportCharacterCard,
@@ -3571,11 +3573,34 @@ pub(crate) struct JobStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) device_session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) replaces_library: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) restore_preview: Option<portable::RestorePreview>,
     /// Values the staged save left without an owner, shown while the job waits
     /// for activation so a person can hand them to a plugin first.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) plugin_value_preview: Option<crate::persistent_store::commit::StagedPluginPreview>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) incomplete_restore_preview: Option<IncompleteRestorePreview>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct IncompleteRestorePreview {
+    pub(crate) unavailable_cold_keys: Vec<String>,
+    pub(crate) character_names: Vec<String>,
+    pub(crate) invalid_inlays: Vec<String>,
+}
+
+impl IncompleteRestorePreview {
+    fn warning_codes(&self) -> Vec<String> {
+        let mut warnings = Vec::new();
+        if !self.unavailable_cold_keys.is_empty() {
+            warnings.push(format!("unavailable-cold-payloads:{}", self.unavailable_cold_keys.len()));
+        }
+        if !self.invalid_inlays.is_empty() { warnings.push("invalid-inlay-entry".to_owned()); }
+        warnings
+    }
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -3637,6 +3662,7 @@ pub(crate) struct JobRegistry {
 
 #[derive(Default)]
 struct JobWaitState {
+    inline_asset_upload: Option<content::InlineAssetUpload>,
     portable_selection: Option<portable::PortableSelection>,
     restore_finalized: bool,
     /// Revision the renderer holds its replacement fence at. The renderer is
@@ -3701,7 +3727,7 @@ impl JobRegistry {
         validate_warning_codes(&warning_codes)?;
         let id = Uuid::new_v4().to_string();
         let job = Arc::new(JobControl {
-            cancel_requested: AtomicBool::new(false),
+            cancel_requested: Arc::new(AtomicBool::new(false)),
             requires_restore_finalization,
             wait_state: Mutex::new(JobWaitState::default()),
             wait_changed: Condvar::new(),
@@ -3722,8 +3748,10 @@ impl JobRegistry {
                 compatibility_report: None,
                 preservation_report: None,
                 device_session_id: None,
+                replaces_library: None,
                 restore_preview: None,
                 plugin_value_preview: None,
+                incomplete_restore_preview: None,
             }),
         });
         self.jobs
@@ -3842,7 +3870,7 @@ impl JobRegistry {
 }
 
 pub(crate) struct JobControl {
-    cancel_requested: AtomicBool,
+    cancel_requested: Arc<AtomicBool>,
     requires_restore_finalization: bool,
     wait_state: Mutex<JobWaitState>,
     wait_changed: Condvar,
@@ -3851,6 +3879,11 @@ pub(crate) struct JobControl {
 }
 
 impl JobControl {
+    pub(crate) fn set_incomplete_restore_preview(&self, preview: IncompleteRestorePreview) -> Result<(), String> {
+        let mut status = self.status.lock().map_err(|_| "native job mutex poisoned".to_owned())?;
+        status.incomplete_restore_preview = if preview.warning_codes().is_empty() { None } else { Some(preview) };
+        Ok(())
+    }
     /// Records what the staged save left unowned, and which staging holds it, so
     /// the renderer can assign before the replacement is applied.
     pub(crate) fn set_plugin_value_preview(
@@ -3905,6 +3938,15 @@ impl JobControl {
         status.preservation_report = Some(report);
         Ok(())
     }
+    pub(crate) fn set_replaces_library(&self, replaces_library: bool) -> Result<(), String> {
+        let mut status = self.status.lock().map_err(|_| "native job mutex poisoned".to_owned())?;
+        if status.state.is_terminal() {
+            return Err("cannot change a completed restore selection".into());
+        }
+        status.replaces_library = Some(replaces_library);
+        Ok(())
+    }
+
     fn wait_for_portable_selection(
         &self,
         preview: portable::RestorePreview,
@@ -4025,6 +4067,8 @@ impl JobControl {
             .clone()
     }
 
+    pub(crate) fn cancellation_flag(&self) -> Arc<AtomicBool> { self.cancel_requested.clone() }
+
     pub(crate) fn is_cancel_requested(&self) -> bool {
         self.cancel_requested.load(Ordering::Acquire)
     }
@@ -4041,7 +4085,6 @@ impl JobControl {
             || (status.kind == JobKind::ExportCharacterCard && status.state.is_terminal())
             || (status.kind == JobKind::ExportRisuModule && status.state.is_terminal())
             || (status.kind == JobKind::ExportPortableBackup && status.state.is_terminal())
-            || (status.kind == JobKind::ExportLegacyLocalBackup && status.state.is_terminal())
             || (status.kind == JobKind::ExportCompatibleLocalBackup && status.state.is_terminal())
             || (status.device_session_id.is_some() && status.state.is_terminal())
             || (status.kind == JobKind::OfficialPublicationUpload && status.state.is_terminal())
@@ -4337,7 +4380,6 @@ impl JobControl {
             JobKind::RestoreOfficialAccountSnapshot => JobPhase::ReadingSource,
             JobKind::RestoreLegacyLocalBackup => JobPhase::ReadingSource,
             JobKind::ExportBlockRisuSave => JobPhase::WritingExport,
-            JobKind::ExportLegacyLocalBackup => JobPhase::WritingExport,
             JobKind::ExportCompatibleLocalBackup => JobPhase::WritingExport,
             JobKind::ExportCharacterCharx => JobPhase::WritingExport,
             JobKind::ExportCharacterCard => JobPhase::WritingExport,
@@ -4903,33 +4945,10 @@ mod tests {
     }
 
     #[test]
-    fn legacy_backup_export_request_accepts_android_handoff_or_desktop_destination() {
-        let android: NativeFileJobStartRequest = serde_json::from_value(json!({
-            "kind": "export-legacy-local-backup",
-            "expectedRevision": 8
-        }))
-        .unwrap();
-        assert!(matches!(
-            android,
-            NativeFileJobStartRequest::ExportLegacyLocalBackup {
-                destination: None,
-                expected_revision: 8,
-            }
-        ));
-
-        let desktop: NativeFileJobStartRequest = serde_json::from_value(json!({
-            "kind": "export-legacy-local-backup",
-            "destination": "C:\\chosen\\backup.bin",
-            "expectedRevision": 9
-        }))
-        .unwrap();
-        assert!(matches!(
-            desktop,
-            NativeFileJobStartRequest::ExportLegacyLocalBackup {
-                destination: Some(_),
-                expected_revision: 9,
-            }
-        ));
+    fn retired_legacy_export_request_is_rejected() {
+        assert!(serde_json::from_value::<NativeFileJobStartRequest>(json!({
+            "kind": "export-legacy-local-backup", "expectedRevision": 8
+        })).is_err());
     }
 
     #[test]
@@ -4939,6 +4958,7 @@ mod tests {
             .create_with_context(JobKind::RestorePortableBackup, Some(4), Vec::new())
             .unwrap();
         job.start(JobPhase::ReadingSource).unwrap();
+        job.set_replaces_library(true).unwrap();
         job.set_phase(JobPhase::StagingDatabase).unwrap();
 
         let waiter = Arc::clone(&job);
@@ -4957,6 +4977,9 @@ mod tests {
         assert_eq!(job.status().phase, JobPhase::ActivatingDatabase);
         assert_eq!(job.request_cancel().unwrap(), CancelOutcome::TooLate);
         job.finish_success(result(5)).unwrap();
+        assert_eq!(job.status().replaces_library, Some(true));
+        assert_eq!(serde_json::to_value(job.status()).unwrap()["replacesLibrary"], true);
+        assert!(job.set_replaces_library(false).is_err());
     }
 
     fn publication_retry(account_id: &str, token: &str) -> OfficialPublicationRetryRequest {
@@ -7012,6 +7035,7 @@ mod tests {
             library: true,
             device_sections: vec!["hypa".into()],
             items: None,
+            allow_source_preservation: false,
         };
         assert_eq!(
             portable_export_uses_reference_source(&reference, None, &with_device_section)
@@ -7050,6 +7074,7 @@ mod tests {
             library: true,
             device_sections: vec!["hypa".into()],
             items: None,
+            allow_source_preservation: false,
         });
         assert_eq!(
             validate_portable_restore_selection(&source, &selected)
@@ -7856,6 +7881,7 @@ mod tests {
                 bytes: Some(9),
                 total_bytes: Some(9),
                 import_destination: None,
+                operation_id: None,
             })
             .unwrap(),
         )
@@ -7877,6 +7903,7 @@ mod tests {
                 bytes: Some(9),
                 total_bytes: Some(9),
                 import_destination: None,
+                operation_id: None,
             })
             .unwrap(),
         )
@@ -7898,16 +7925,25 @@ mod tests {
                 bytes: Some(9),
                 total_bytes: Some(12),
                 import_destination: None,
+                operation_id: None,
             })
             .unwrap(),
         )
         .unwrap();
         assert_eq!(
-            open_job_source(directory.path(), &JobSource::AndroidSpool { token })
+            open_job_source(directory.path(), &JobSource::AndroidSpool { token: token.clone() })
                 .unwrap()
                 .total_bytes,
             9,
         );
+        for (operation_id, accepted) in [("a".repeat(64), true), ("A".repeat(64), false), ("a".repeat(63), false)] {
+            fs::write(spool.join("source.json"), serde_json::to_vec(&SpoolManifest {
+                token: token.clone(), state: SpoolState::Ready,
+                display_name: "캐릭터\"😀.risudat".to_owned(), bytes: Some(9), total_bytes: Some(12),
+                import_destination: None, operation_id: Some(operation_id),
+            }).unwrap()).unwrap();
+            assert_eq!(open_job_source(directory.path(), &JobSource::AndroidSpool { token: token.clone() }).is_ok(), accepted);
+        }
     }
 
     #[test]
@@ -8178,7 +8214,6 @@ mod tests {
     fn native_file_lifecycle_legacy_handoff_jobs_are_retained_until_forget() {
         let registry = JobRegistry::with_retention(0, Duration::ZERO);
         for kind in [
-            JobKind::ExportLegacyLocalBackup,
             JobKind::ExportCompatibleLocalBackup,
         ] {
             let job = registry.create(kind).unwrap();
@@ -8186,7 +8221,7 @@ mod tests {
             job.finish_success(result(1)).unwrap();
         }
 
-        assert_eq!(registry.list().unwrap().len(), 2);
+        assert_eq!(registry.list().unwrap().len(), 1);
     }
 
     #[test]
@@ -8258,6 +8293,12 @@ mod tests {
 
         assert!(serde_json::from_slice::<SpoolManifest>(missing).is_err());
         assert!(serde_json::from_slice::<SpoolManifest>(nullable).is_ok());
+        let with_operation = serde_json::json!({
+            "token": "token", "state": "ready", "displayName": "캐릭터.json", "bytes": 1,
+            "totalBytes": null, "operationId": "a".repeat(64),
+        });
+        let parsed = serde_json::from_value::<SpoolManifest>(with_operation).unwrap();
+        assert_eq!(parsed.operation_id.as_deref(), Some("a".repeat(64).as_str()));
     }
 
     #[test]
@@ -8372,6 +8413,7 @@ mod tests {
                 bytes: None,
                 total_bytes: None,
                 import_destination: None,
+                operation_id: None,
             })
             .unwrap(),
         )

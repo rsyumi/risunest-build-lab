@@ -2661,7 +2661,7 @@ mod receive_tests {
             content_fingerprint: fingerprint(&kind.fingerprint_domain(), &BTreeMap::from([(key.clone(), hash(&entry))])),
             sources: vec![super::super::sections::SectionSource {
                 kind: CatalogEntryKind::SectionEntry, key, content_sha256,
-                byte_length: entry.len() as u64, path,
+                byte_length: entry.len() as u64, path, offset: None,
             }],
         }
     }

@@ -120,7 +120,14 @@ export async function alertChatOptions() {
     return parseInt(get(alertStoreImported).msg)
 }
 
+export async function openRisuAccountLogin(open: () => void): Promise<boolean> {
+    if (!(await alertRisuServiceTOS())) return false
+    open()
+    return true
+}
+
 export async function alertLogin(){
+    if (!(await alertRisuServiceTOS())) return ""
     alertStoreImported.set({
         'type': 'login',
         'msg': 'login'

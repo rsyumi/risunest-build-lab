@@ -23,7 +23,10 @@
     } from '@lucide/svelte'
 
     import { changeLanguage, language } from 'src/lang'
-    import { alertConfirm, alertError, alertNormal } from 'src/ts/alert'
+    import { alertConfirm, alertError, alertNormal, openRisuAccountLogin } from 'src/ts/alert'
+    import { restoreNativeOfficialAccountBackup } from 'src/ts/storage/sync/nativeOfficialAccountOperations'
+    import { NativeAccountLoginError } from 'src/ts/storage/sync/nativeOfficialAccountFlow'
+    import { presentFileOperationError } from 'src/ts/storage/fileOperationErrorPresentation'
     import { hubURL } from 'src/ts/characterCards'
     import { getVersionString } from 'src/ts/globalApi.svelte'
     import { updateTextThemeAndCSS } from 'src/ts/gui/colorscheme'
@@ -31,6 +34,7 @@
         buildNativeFileJobDialogModel,
         type NativeFileJobDialogStageState,
     } from 'src/ts/gui/nativeFileJobDialogModel'
+    import { canScanServerRegistration } from 'src/ts/storage/sync/serverSyncQr'
     import { isTauri, isTauriAndroid } from 'src/ts/platform'
     import { prebuiltPresets } from 'src/ts/process/templates/templates'
     import { setPreset } from 'src/ts/storage/database.svelte'
@@ -68,10 +72,12 @@
         ExternalJobSummary,
     } from 'src/ts/storage/sync/external/types'
     import { getNativeOfficialAccountFlow } from 'src/ts/storage/sync/nativeOfficialAccountFlow'
-    import { setAssetResidencyPolicy } from 'src/ts/storage/sync/serverAssetResidency'
     import { serverSyncError } from 'src/ts/storage/sync/serverSync'
     import {
         connectServerSync,
+        serverSyncErrorHelp,
+        serverSyncWaiting,
+        serverSyncRegistrationRequired,
         serverSyncHostLabel,
         serverSyncProgressView,
         type ServerSyncConnectRequest,
@@ -96,6 +102,8 @@
         type OnboardingState,
     } from './onboardingFlow'
     import {
+        abandonExternalOnboardingSelection,
+        type ExternalOnboardingSelectionOwner,
         externalOnboardingAction,
         externalOnboardingConflictStep,
         externalOnboardingRestorable,
@@ -110,6 +118,7 @@
         serverSyncOnboardingOpening,
         serverSyncOnboardingOutcome,
         serverSyncOnboardingResume,
+        createServerSyncOnboardingContinuation,
     } from './serverSyncOnboardingFlow'
 
     const UI_LANGUAGES = [
@@ -149,7 +158,7 @@
         )
             return
         lastServerRequest = $serverSyncScreenRequest
-        flow = goToOnboardingState(flow, 'sync-hub')
+        void goTo('sync-hub')
     })
 
     let flow = $state(INITIAL_ONBOARDING_FLOW)
@@ -194,6 +203,8 @@
     let hubConnecting = $state(false)
     let hubPausing = $state(false)
     let hubError = $state('')
+    let hubErrorRetryable = $state(true)
+    let hubReplacing = $state(false)
     let hubKey = $state(0)
     let hubServer = $state<{ endpoint: string; libraryId: string; deviceId: string }>()
     // Kept only while this screen is up, so a failed registration can be retried.
@@ -216,6 +227,7 @@
     let externalSelected = $state('')
     let externalConflict = $state<ExternalConflictSummary | undefined>()
     let externalJob = $state<ExternalJobSummary | undefined>()
+    let externalSelectionOwner: ExternalOnboardingSelectionOwner | undefined
     let externalKey = $state(0)
     const externalRestorable = $derived(externalOnboardingRestorable(externalHistory))
     const externalPercent = $derived.by(() => {
@@ -245,6 +257,12 @@
 
     // Decided once, when the status first arrives, so going back to the first
     // screen afterwards stays possible.
+    let continueHub = createServerSyncOnboardingContinuation()
+    $effect(() => {
+        if (!hubStarted || hubConnecting || hubOutcome !== 'continuing' || !syncSnapshot) return
+        if (!continueHub(syncSnapshot)) return
+        void retryHub()
+    })
     let openingDecided = false
     $effect(() => {
         if (openingDecided || !syncSnapshot?.status) return
@@ -256,7 +274,7 @@
     // A device connected before the app started again continues here; its
     // registration code would be refused.
     $effect(() => {
-        if (flow.state !== 'sync-hub' || hubStarted) return
+        if (flow.state !== 'sync-hub' || hubStarted || hubReplacing) return
         const resume = serverSyncOnboardingResume(syncSnapshot)
         if (!resume) return
         hubStarted = true
@@ -327,7 +345,8 @@
         }
     })
 
-    function goTo(state: OnboardingState): void {
+    async function goTo(state: OnboardingState): Promise<void> {
+        if (flow.state === 'sync-external' && state !== 'sync-external' && !(await abandonExternal())) return
         flow = goToOnboardingState(flow, state)
     }
 
@@ -338,7 +357,8 @@
     }
 
     /** The defaults a reader who skips setup would otherwise have to choose. */
-    function startFresh(): void {
+    async function startFresh(): Promise<void> {
+        if (!(await abandonExternal())) return
         // Data that arrived outside this screen, such as a backup opened from
         // a file manager, already carries its own settings.
         if (DBState.db.didFirstSetup) {
@@ -399,10 +419,18 @@
         }
     }
 
+    function showHubError(cause: unknown): void {
+        const failure = serverSyncError(cause)
+        hubError = failure.code
+        hubErrorRetryable = failure.retryable
+    }
+
     function resetHub(): void {
+        continueHub = createServerSyncOnboardingContinuation()
         hubRequest = undefined
         hubServer = undefined
         hubStarted = false
+        hubReplacing = false
         hubError = ''
         hubStage = 'code'
         hubKey += 1
@@ -420,17 +448,30 @@
         hubConnecting = true
         hubError = ''
         try {
-            await connectServerSync(syncController, setAssetResidencyPolicy, request)
+            await connectServerSync(syncController, request)
         } catch (cause) {
-            hubError = serverSyncError(cause).code
+            showHubError(cause)
         } finally {
             hubConnecting = false
         }
     }
 
+    async function retryHubStatus(): Promise<void> {
+        if (!syncController || hubConnecting) return
+        hubConnecting = true
+        hubError = ''
+        try { await syncController.ensureStatus() }
+        catch (cause) { showHubError(cause) }
+        finally { hubConnecting = false }
+    }
+
     /** Bound already: run the attempt again. Not bound: register again. */
     async function retryHub(): Promise<void> {
         if (!syncController || hubConnecting) return
+        if (!syncSnapshot?.status) {
+            await retryHubStatus()
+            return
+        }
         if (!syncSnapshot?.status?.configured) {
             if (hubRequest) await startHub(hubRequest)
             else resetHub()
@@ -441,7 +482,7 @@
         try {
             await syncController.synchronize()
         } catch (cause) {
-            hubError = serverSyncError(cause).code
+            showHubError(cause)
         } finally {
             hubConnecting = false
         }
@@ -458,7 +499,7 @@
                 expectedHead: hubConflict.head,
             })
         } catch (cause) {
-            hubError = serverSyncError(cause).code
+            showHubError(cause)
         } finally {
             hubConnecting = false
         }
@@ -470,6 +511,8 @@
         try {
             await syncController.pause()
             await syncController.waitForIdle()
+        } catch (cause) {
+            showHubError(cause)
         } finally {
             hubPausing = false
         }
@@ -491,6 +534,20 @@
             index += 1
         }
         return `${index === 0 ? amount : Math.round(amount * 10) / 10} ${units[index]}`
+    }
+
+    async function abandonExternal(): Promise<boolean> {
+        if (!externalSelectionOwner || !externalBridge) return true
+        externalWorking = true
+        try {
+            await abandonExternalOnboardingSelection(externalSelectionOwner, externalBridge)
+            externalSelectionOwner = undefined
+            await refreshExternalStorageProductionState()
+            return true
+        } catch (cause) {
+            externalFailure(cause)
+            return false
+        } finally { externalWorking = false }
     }
 
     function resetExternal(): void {
@@ -585,10 +642,11 @@
                 state.selection.kind !== 'external'
                 || state.selection.connectionId !== connection.id
             ) {
-                await externalBridge.setSyncTarget(
+                const selection = await externalBridge.setSyncTarget(
                     connection.id,
                     state.selection.selectionEpoch,
                 )
+                externalSelectionOwner = { connectionId: connection.id, selectionEpoch: selection.selectionEpoch }
                 await refreshExternalStorageProductionState()
             }
             await readExternalSync(await requestExternalStorageNow(connection.id, 'sync'))
@@ -646,7 +704,7 @@
         try {
             await requestExternalStorageRestore(
                 connection.id,
-                item.id,
+                item.snapshotId,
                 externalOnboardingRestoreAreas(item),
             )
             flow = goToOnboardingState(flow, 'done', 'external')
@@ -657,9 +715,11 @@
         }
     }
 
-    function openAccountLogin(): void {
-        loginUrl = hubURL + '/hub/login'
-        loginOpen = true
+    async function openAccountLogin(): Promise<void> {
+        await openRisuAccountLogin(() => {
+            loginUrl = hubURL + '/hub/login'
+            loginOpen = true
+        })
     }
 
     function closeAccountLogin(): void {
@@ -670,24 +730,28 @@
         if (accountBusy) return
         accountBusy = true
         let restarting = false
+        const startedAt = Date.now()
         try {
             // The account snapshot, the same one the backup settings restore.
             // The versioned /hub/backup list is a rollback tool for readers
             // already running on account storage, not a way onto a new device.
-            const result = await getNativeOfficialAccountFlow().restore()
-            if (result.kind === 'missing') {
+            const result = await restoreNativeOfficialAccountBackup()
+            if (result?.kind === 'missing') {
                 alertNormal(strings.risuNest.backup.officialMissing)
                 return
             }
-            if (!accountRestoreApplied(result.kind)) {
+            if (!result || !accountRestoreApplied(result.kind)) {
                 alertNormal(t.accountFound.notRestored)
                 return
             }
             // An activated snapshot restarts the app, so the button stays busy
             // until the process goes.
             restarting = true
-        } catch {
-            alertError(strings.risuNest.backup.actionFailed)
+        } catch (error) {
+            presentFileOperationError('import', error, startedAt, {
+                fallbackMessage: strings.risuNest.backup.accountRestoreFailed,
+                committedMessage: strings.risuNest.backup.accountRestoreCommittedRestartFailed,
+            })
         } finally {
             if (!restarting) accountBusy = false
         }
@@ -720,8 +784,10 @@
         try {
             DBState.db.account =
                 await getNativeOfficialAccountFlow().login(credential)
-        } catch {
-            alertError(strings.risuNest.backup.actionFailed)
+        } catch (error) {
+            alertError(error instanceof NativeAccountLoginError && !error.rolledBack
+                ? strings.risuNest.account.loginRollbackFailed
+                : strings.risuNest.account.loginFailed)
             return
         }
         flow = goToOnboardingState(flow, 'sync-account-found', 'account')
@@ -1177,6 +1243,10 @@
                                     </button>
                                     <span class="dim">{t.hub.pauseNote}</span>
                                 </div>
+                            {:else if !syncSnapshot?.status}
+                                <h1>{t.hub.title}</h1>
+                                <p class="lead">{s.statusUnknown}</p>
+                                <button class="btn" type="button" disabled={hubConnecting} onclick={() => void retryHubStatus()}>{s.retryStatus}</button>
                             {:else if hubStarted && hubOutcome === 'conflict' && hubConflict}
                                 <h1>{t.hub.title}</h1>
                                 {@render hubServerChip()}
@@ -1225,14 +1295,15 @@
                             {:else if hubStarted}
                                 <h1>{t.hub.title}</h1>
                                 {@render hubServerChip()}
-                                <p class="result failed" role="status">
-                                    {t.hub.errorSummary}
+                                <p class:failed={hubOutcome === 'error' && !serverSyncWaiting(hubErrorCode)} class="result" role="status">
+                                    {serverSyncWaiting(hubErrorCode) ? s.waitingForLocal : hubOutcome === 'continuing' || hubOutcome === 'pending' ? s.pending : t.hub.errorSummary}
                                 </p>
                                 <p class="reason">
                                     {hubOutcome === 'pending'
                                         ? t.hub.pendingReason
-                                        : t.hub.errorReason}
-                                    {#if hubErrorCode && hubErrorCode !== 'cancelled'}<span
+                                        : hubOutcome === 'continuing' ? s.continuingHelp
+                                        : serverSyncErrorHelp(hubErrorCode, s, hubError ? hubErrorRetryable : syncSnapshot?.errorRetryable !== false)}
+                                    {#if hubErrorCode && hubErrorCode !== 'cancelled' && !serverSyncWaiting(hubErrorCode)}<span
                                             class="dim">({hubErrorCode})</span
                                         >{/if}
                                 </p>
@@ -1244,8 +1315,8 @@
                                     >
                                         {t.hub.retry}
                                     </button>
-                                    {#if !syncSnapshot?.status?.configured}
-                                        <button class="btn ghost" type="button" onclick={resetHub}>
+                                    {#if !syncSnapshot?.status?.configured || serverSyncRegistrationRequired(hubErrorCode) || syncSnapshot.status.registrationRequired}
+                                        <button class="btn ghost" type="button" onclick={() => { const replacing = Boolean(syncSnapshot?.status?.configured); resetHub(); hubReplacing = replacing; }}>
                                             {s.otherCode}
                                         </button>
                                     {/if}
@@ -1271,7 +1342,7 @@
                                     {@render back('sync', t.back)}
                                     <h1>{t.hub.title}</h1>
                                     <p class="lead">
-                                        {isTauriAndroid ? t.hub.leadScan : t.hub.lead}
+                                        {canScanServerRegistration ? t.hub.leadScan : t.hub.lead}
                                     </p>
                                     <ol class="howto">
                                         <li>{t.hub.stepLink}</li>
@@ -1284,6 +1355,7 @@
                                         bind:stage={hubStage}
                                         initialNavigation={$serverSyncScreenRequest}
                                         tone="onboarding"
+                                        replacing={hubReplacing}
                                         busy={hubConnecting}
                                         onSubmit={(request) => void startHub(request)}
                                     />
@@ -1348,9 +1420,9 @@
                                         class="btn ghost"
                                         type="button"
                                         disabled={externalWorking}
-                                        onclick={() => {
-                                            resetExternal()
-                                            goTo('home')
+                                        onclick={async () => {
+                                            await goTo('home')
+                                            if (flow.state === 'home') resetExternal()
                                         }}
                                     >
                                         {ex.other}
@@ -1384,9 +1456,9 @@
                                     <button
                                         class="btn ghost"
                                         type="button"
-                                        onclick={() => {
-                                            resetExternal()
-                                            goTo('home')
+                                        onclick={async () => {
+                                            await goTo('home')
+                                            if (flow.state === 'home') resetExternal()
                                         }}
                                     >
                                         {t.backHome}
@@ -1415,10 +1487,10 @@
                                             class="btn ghost"
                                             type="button"
                                             disabled={externalWorking}
-                                            onclick={() => {
-                                                resetExternal()
-                                                goTo('home')
-                                            }}
+                                            onclick={async () => {
+                                            await goTo('home')
+                                            if (flow.state === 'home') resetExternal()
+                                        }}
                                         >
                                             {ex.other}
                                         </button>
@@ -1478,10 +1550,10 @@
                                             class="btn ghost"
                                             type="button"
                                             disabled={externalWorking}
-                                            onclick={() => {
-                                                resetExternal()
-                                                goTo('home')
-                                            }}
+                                            onclick={async () => {
+                                            await goTo('home')
+                                            if (flow.state === 'home') resetExternal()
+                                        }}
                                         >
                                             {ex.other}
                                         </button>

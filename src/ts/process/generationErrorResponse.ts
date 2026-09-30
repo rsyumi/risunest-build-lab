@@ -1,7 +1,9 @@
 import type { ActiveConversationSession } from '../storage/activeConversationSession'
+import type { WindowedConversationMutationController } from '../storage/activeWorkingSet.svelte'
 import type { Chat, Message } from '../storage/database.svelte'
 
 export interface GenerationErrorResponseOptions {
+    windowedController?: WindowedConversationMutationController | null
     session: ActiveConversationSession | null
     getCurrentSession(): ActiveConversationSession | null
     characterId: string
@@ -16,6 +18,16 @@ export function applyGenerationErrorResponse(
     options: GenerationErrorResponseOptions,
 ): boolean {
     if (!isOwnerCurrent(options)) return false
+
+    const controller = options.windowedController
+    if (controller) {
+        if (!controller.isCurrent() || controller.chat !== options.chat) return false
+        const messages = options.chat.message
+        const last = messages.at(-1)
+        return last?.role === 'char'
+            ? controller.applyRange(messages.length - 1, 1, [{ ...last, data: last.data + options.suffix }], 'edit')
+            : controller.applyRange(messages.length, 0, [options.appendMessage], 'append')
+    }
 
     const session = options.session
     if (session === null) return applyFullArrayFallback(options)

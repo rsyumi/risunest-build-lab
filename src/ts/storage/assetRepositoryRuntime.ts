@@ -5,6 +5,7 @@ import type {
 } from './blobStore'
 import {
     createCompleteAssetRepositoryBlobStore,
+    ConditionalAssetWriteConflictError,
     type AssetObjectUrlResolver,
     type CompleteAssetRepositoryBlobStore,
     type DurableAssetWriteSessionFactory,
@@ -12,8 +13,8 @@ import {
     type PreparedCompleteAssetWrite,
     type RemoteAssetReader,
 } from './assetRepository'
-import type { ImmutablePayloadCas } from './payloadCas'
-import { RevisionConflictError, type PersistentDataStore } from './persistentDataStore'
+import { hashPayloadBytes, type ImmutablePayloadCas } from './payloadCas'
+import { RevisionConflictError, type PersistentDataStore, type AssetAlias } from './persistentDataStore'
 import type { PersistentStorageAuthority } from './persistentStorageAuthority'
 
 export function createNativeAssetBlobStore(input: {
@@ -50,7 +51,7 @@ export type RuntimeAssetRepositoryDispatcher = BlobStore &
             ownedData: Uint8Array,
             input: { name: string },
         ): Promise<StagedRuntimeAssetWrite>
-        activateStagedWrite(staged: StagedRuntimeAssetWrite): Promise<BlobMetadata>
+        activateStagedWrite(staged: StagedRuntimeAssetWrite, expectedAlias?: AssetAlias): Promise<BlobMetadata>
         abortStagedWrite(staged: StagedRuntimeAssetWrite): Promise<void>
     }
 
@@ -167,6 +168,39 @@ export function createCoordinatorOwnedAssetBlobStore(
         }
     }
     const coordinated: BlobStore = {
+        async captureConditionalWrite(key) {
+            const identity = { kind: key.startsWith('assets/') ? 'asset' as const : 'inlay' as const, key }
+            const epoch = runtime.getStorageAuthorityEpoch()
+            const original = await authority.rawStore.readAssetAlias(identity)
+            if (!original || epoch !== runtime.getStorageAuthorityEpoch()) return null
+            const expected = JSON.stringify(original.value)
+            let used = false
+            return async (data, metadata, sourceBytes) => {
+                if (used) throw new Error('Conditional asset writer already used')
+                used = true
+                if (sourceBytes.length !== original.value.size || await hashPayloadBytes(sourceBytes) !== original.value.objectHash) return null
+                const invocation = reserveInvocation(key)
+                let staged: StagedRuntimeAssetWrite | undefined
+                try {
+                    staged = await store.stagePut(key, data.slice(), { ...metadata })
+                    await invocation.previous
+                    return await mutate(key, async () => {
+                        const current = await authority.rawStore.readAssetAlias(identity)
+                        if (epoch !== runtime.getStorageAuthorityEpoch() || !current || JSON.stringify(current.value) !== expected) {
+                            await store.abortStagedWrite(staged!)
+                            return null
+                        }
+                        return store.activateStagedWrite(staged!, original.value)
+                    })
+                } catch (error) {
+                    if (staged) await store.abortStagedWrite(staged)
+                    if (error instanceof ConditionalAssetWriteConflictError) return null
+                    throw error
+                } finally {
+                    invocation.release()
+                }
+            }
+        },
         async put(key, data, metadata) {
             const ownedData = data.slice()
             const ownedMetadata = { ...metadata }
@@ -206,9 +240,9 @@ export function createRuntimeAssetRepositoryDispatcher(
                 prepared: await store.prepareOwnedNewInlayImage(key, ownedData, request),
             }
         },
-        async activateStagedWrite(staged) {
+        async activateStagedWrite(staged, expectedAlias) {
             activationStarted.add(staged)
-            return staged.prepared.activate()
+            return staged.prepared.activate(expectedAlias)
         },
         async abortStagedWrite(staged) {
             if (activationStarted.has(staged) || abortStarted.has(staged)) return

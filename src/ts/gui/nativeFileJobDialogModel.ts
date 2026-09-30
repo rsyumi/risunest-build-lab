@@ -238,20 +238,21 @@ function exportTitleOf(
 ): string {
     const copy = language.risuNest.importDialog
     switch (status?.kind) {
+        case 'official-publication-upload':
+            return language.risuNest.backup.officialPublish
         case 'export-block-risu-save':
             return copy.titleExportRisuSave
         case 'export-portable-backup':
             return copy.titleExportBackup
         case 'export-compatible-local-backup':
             return copy.titleExportCompatible
-        case 'export-legacy-local-backup':
-            return copy.titleExportLocalBackup
         default:
             return format === 'risu-save' ? copy.titleExportRisuSave : copy.titleExport
     }
 }
 
-function titleOf(format: NativeFileOperationFormat | undefined): string {
+function titleOf(format: NativeFileOperationFormat | undefined, status?: NativeFileJobStatus): string {
+    if (status?.kind === 'restore-official-account-snapshot') return language.risuNest.backup.officialRestore
     const copy = language.risuNest.importDialog
     switch (format) {
         case 'risu-save':
@@ -477,15 +478,42 @@ function warningText(code: string): string {
             return copy.warningPocketInlayFailed
         case 'partial-destination-may-remain':
             return language.screenshotPartialDestinationMayRemain
+        case 'source-problems':
+            return copy.warningSourceProblems
+        case 'source-preserved-repair-required':
+            return copy.warningRepairRequired
+        case 'compatibility-losses':
+        case 'risuai-inlays-excluded':
+        case 'converted-inlay-extension':
+        case 'converted-inlay-sidecars':
+        case 'converted-inlay-provenance':
+        case 'inlay-ids-remapped':
+        case 'asset-paths-remapped':
+            return copy.warningCompatibilityLosses
+        case 'opaque-plugin-inlay-references-unverified':
+        case 'opaque-plugin-asset-references-unverified':
+        case 'inlay-codec-playback-unverified':
+        case 'asset-playback-unverified':
+            return copy.warningCompatibilityReview
+        case 'android-saf-provider-not-atomic':
+            return copy.warningProviderNotAtomic
+        case 'android-saf-unavailable':
+            return copy.warningSafUnavailable
+        case 'post-refresh-followup-failed':
+            return copy.warningFollowupFailed
         default:
-            return fillTemplate(copy.warningUnknown, code)
+            return copy.warningUnknown
     }
 }
 
-export function failureReason(code: string): string {
+export function failureReason(code: string, direction: 'import' | 'export' = 'import'): string {
     const copy = language.risuNest.importDialog
     switch (code) {
+        case 'destination-required':
+        case 'unsupported-without-destination':
+            return copy.reasonPlainJpeg
         case 'unsupported-format':
+        case 'unsupported-source':
             return copy.reasonUnsupportedFormat
         case 'invalid-source':
         case 'invalid-input':
@@ -495,11 +523,54 @@ export function failureReason(code: string): string {
         case 'corrupt-input':
             return copy.reasonCorrupt
         case 'revision-conflict':
-            return copy.reasonRevisionConflict
+            return direction === 'export' ? copy.reasonExportRevisionConflict : copy.reasonRevisionConflict
         case 'store-error':
         case 'missing-result':
         case 'missing-activation-fence':
-            return copy.reasonStoreError
+            return direction === 'export' ? copy.reasonExportStoreError : copy.reasonStoreError
+        case 'invalid-destination':
+        case 'destination-write-failed':
+            return copy.reasonDestination
+        case 'destination-required':
+        case 'unsupported-without-destination':
+            return copy.reasonPlainJpeg
+        case 'length-mismatch':
+        case 'publication-pending':
+        case 'archive-output-failed':
+            return copy.reasonIncompletePublication
+        case 'storage-full':
+        case 'local-storage-full':
+        case 'insufficient-storage':
+            return copy.reasonStorageFull
+        case 'compatibility-import-required':
+            return copy.reasonCompatibilityImport
+        case 'io-error':
+        case 'source-picker-failed':
+        case 'source-copy-failed':
+        case 'spool-write-failed':
+        case 'source-open-failed':
+        case 'source-read-failed':
+            return copy.reasonIo
+        case 'source-reselect-required':
+            return copy.reasonReselectSource
+        case 'capability-unavailable':
+            return copy.reasonCapability
+        case 'rescue-format-not-restorable':
+            return copy.reasonRescueFormat
+        case 'no-recovery-source':
+            return copy.reasonNoRecoverySource
+        case 'cleanup-failed':
+        case 'discard-failed':
+            return copy.reasonCleanup
+        case 'source-busy':
+        case 'generation-active':
+        case 'library-operation-busy':
+        case 'server-sync-busy':
+            return copy.reasonBusy
+        case 'resolve-pending-operation-first':
+            return copy.reasonPendingOperation
+        case 'server-status-unavailable':
+            return copy.reasonServerStatus
         default:
             return copy.reasonUnknown
     }
@@ -597,7 +668,7 @@ export function buildNativeFileJobDialogModel(
         return {
             compact: format === 'content',
             open: true,
-            title: exporting ? exportTitleOf(format, state.status) : titleOf(format),
+            title: exporting ? exportTitleOf(format, state.status) : titleOf(format, state.status),
             subtitle: exporting ? '' : subtitleOf(format, counts, false),
             sourceName: state.source?.name ?? '',
             sourceSize:
@@ -610,6 +681,7 @@ export function buildNativeFileJobDialogModel(
             ),
             ...overallOf(state.status, null),
             ...(format === 'content' ? contentOverall(state.status) : {}),
+            ...(state.waitingForSync ? { overallText: copy.waitingForSync, overallPercent: null, indeterminate: true } : {}),
             stages: buildStages(
                 format,
                 state.observedStages,
@@ -666,7 +738,7 @@ export function buildNativeFileJobDialogModel(
                     : copy.resultExportCancelled
             } else {
                 summary = copy.resultExportFailed
-                reason = failureReason(outcome.error?.code ?? '')
+                reason = failureReason(outcome.error?.code ?? '', 'export')
             }
         } else if (outcome.state === 'succeeded') {
             summary = restarting ? copy.resultRestarting : copy.resultSucceeded
@@ -680,10 +752,13 @@ export function buildNativeFileJobDialogModel(
             summary = copy.resultFailed
             reason = failureReason(outcome.error?.code ?? '')
         }
+        if (outcome.interruption === 'background-expired') {
+            summary = outcome.partialWritesPossible ? copy.resultBackgroundExpiredPartial : copy.resultBackgroundExpired
+        }
         return {
             compact: format === 'content',
             open: true,
-            title: exporting ? exportTitleOf(format, outcome.status) : titleOf(format),
+            title: exporting ? exportTitleOf(format, outcome.status) : titleOf(format, outcome.status),
             subtitle: exporting ? '' : subtitleOf(format, counts, true),
             sourceName: outcome.source?.name ?? '',
             sourceSize:
@@ -716,9 +791,10 @@ export function buildNativeFileJobDialogModel(
                 state: outcome.state,
                 summary,
                 reason,
-                details: outcome.error
-                    ? `[${outcome.error.code}] ${outcome.error.message}`
-                    : '',
+                details: [
+                    outcome.error ? `[${outcome.error.code}] ${outcome.error.message}` : '',
+                    ...outcome.warningCodes.map((code) => `[${code}]`),
+                ].filter(Boolean).join('\n'),
                 restarting,
             },
             cancelVisible: false,

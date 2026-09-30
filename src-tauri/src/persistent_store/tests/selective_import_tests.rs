@@ -67,7 +67,7 @@ fn selection(characters: &[&str], presets: &[&str]) -> ArchiveSelection {
         characters: characters.iter().map(|id| (*id).to_owned()).collect(),
         presets: presets.iter().map(|id| (*id).to_owned()).collect(),
         plugins: Vec::new(),
-        excluded: Vec::new(),
+        excluded: Default::default(),
     }
 }
 
@@ -248,6 +248,12 @@ fn a_partial_import_never_writes_to_the_archive_it_read() {
     let staging = stage(&mut store, &source, selection(&["char-b"], &["1"]));
     store.replace_commit(&staging, Some(0)).unwrap();
 
+    // Discard the reader's TEMP projection to compare the underlying archive tables.
+    source.pragma_update(None, "query_only", false).unwrap();
+    for table in crate::persistent_store::portable::TABLES {
+        source.execute_batch(&format!("DROP VIEW IF EXISTS temp.{}", table.name)).unwrap();
+    }
+    source.pragma_update(None, "query_only", true).unwrap();
     assert_eq!(
         crate::persistent_store::portable::digest_raw_tables(&source, &NeverCancelled).unwrap(),
         before,

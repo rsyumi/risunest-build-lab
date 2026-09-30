@@ -1,4 +1,7 @@
+import { isConversationStreaming } from './streamingConversationRegistry'
 import { createPersistenceCanonicalCapture } from './reactivePersistenceCapture.svelte'
+import { isTauri } from '../platform'
+import { restoreStreamingConversationState } from './streamingConversationRegistry'
 import { derived, get, readonly, writable } from 'svelte/store'
 import { doingChat } from '../process/generationState'
 import { ReloadGUIPointer, selectedCharID, selIdState } from '../stores.svelte'
@@ -58,6 +61,7 @@ import { workingSetResidency } from './workingSetResidency'
 import {
     createPresetCatalogWorkingSetFromValues,
     hydrateWorkingSetCharacterDetail,
+    carryCatalogCharacterMetadata,
     patchWorkingSetRoot,
     isArchivedCharacter,
     isCatalogCharacterStub,
@@ -158,6 +162,10 @@ export function createProductionStateAdapter(): PersistentDataRuntimeStateAdapte
                 activeCharacterIds,
                 forceScalableProjection,
             ) ?? database
+            if (isTauri) replacement.account = getDatabase().account
+            for (const character of replacement.characters) {
+                for (const chat of character.chats) restoreStreamingConversationState(chat)
+            }
             setDatabase(replacement)
             notifyPluginStorageAuthorityReplacement()
             restoreStableWorkingSetSelection(
@@ -226,7 +234,7 @@ export function createProductionStateAdapter(): PersistentDataRuntimeStateAdapte
             if (index < 0) return
             workingSetResidency.markCharacterHydrated(character.chaId)
             workingSetResidency.reconcileConversationResidency(character)
-            database.characters[index] = character
+            database.characters[index] = carryCatalogCharacterMetadata(database.characters[index], character)
             selectedCharID.set(index)
         },
         publishCharacterSet(primary, related) {
@@ -251,7 +259,7 @@ export function createProductionStateAdapter(): PersistentDataRuntimeStateAdapte
             }
             workingSetResidency.markCharacterHydrated(primary.chaId)
             workingSetResidency.reconcileConversationResidency(primary)
-            database.characters[primaryIndex] = primary
+            database.characters[primaryIndex] = carryCatalogCharacterMetadata(database.characters[primaryIndex], primary)
             selectedCharID.set(primaryIndex)
         },
         publishConversation(
@@ -272,7 +280,7 @@ export function createProductionStateAdapter(): PersistentDataRuntimeStateAdapte
             if (conversationIndex < 0) return
             if (!nextCharacter) character.chats[conversationIndex] = conversation
             character.chatPage = conversationIndex
-            database.characters[characterIndex] = character
+            database.characters[characterIndex] = carryCatalogCharacterMetadata(database.characters[characterIndex], character)
             workingSetResidency.reconcileConversationResidency(character)
             selectedCharID.set(characterIndex)
             // The viewport source publishes representation changes itself. A
@@ -382,7 +390,7 @@ export function createProductionStateAdapter(): PersistentDataRuntimeStateAdapte
         },
         canDeactivateCharacter(id) {
             const character = getDatabase().characters.find((candidate) => candidate.chaId === id)
-            return !character?.chats.some((chat) => chat.isStreaming)
+            return !character?.chats.some((chat) => chat.isStreaming || isConversationStreaming(chat.id))
         },
         releaseInactiveCharacter(id) {
             workingSetResidency.releaseCharacterToCatalog(getDatabase(), id)
@@ -410,6 +418,8 @@ const productionConfiguration: ProductionRuntimeConfiguration = {
 let productionRuntime: PersistentDataRuntime | null = null
 const workingSetRefreshRevision = writable<DataRevision | null>(null)
 const destructiveReplacementActive = writable(false)
+const localSaveFailure = writable<unknown | null>(null)
+export const persistentLocalSaveFailure = readonly(localSaveFailure)
 export const persistentWorkingSetRefreshRevision = readonly(workingSetRefreshRevision)
 export const persistentWorkingSetInputBlocked = derived(
     [destructiveReplacementActive, workingSetRefreshRevision],
@@ -434,6 +444,7 @@ export function getPersistentDataRuntime(): PersistentDataRuntime {
             },
             onFlushPromise: (promise) => productionConfiguration.onFlushPromise?.(promise),
             onBackgroundError: (error) => productionConfiguration.onBackgroundError?.(error),
+            onLocalSaveFailure: (error) => localSaveFailure.set(error),
             onWorkingSetRefreshRequired: (revision) => workingSetRefreshRevision.set(revision),
             onDestructiveReplacementFenceChanged: (active) => destructiveReplacementActive.set(active),
             prepareDatabase: prepareDatabaseForPersistence,

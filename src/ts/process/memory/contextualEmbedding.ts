@@ -4,8 +4,8 @@ import { contextHash, type VectorArray } from "./hypamemory";
 
 export interface ContextualEmbeddingProvider {
   readonly modelId: string;
-  embedDocumentGroups(groups: string[][]): Promise<VectorArray[][]>;
-  embedQueries(queries: string[]): Promise<VectorArray[]>;
+  embedDocumentGroups(groups: string[][], signal?: AbortSignal): Promise<VectorArray[][]>;
+  embedQueries(queries: string[], signal?: AbortSignal): Promise<VectorArray[]>;
   getCacheKeySuffix(contextTexts?: string[]): string;
 }
 
@@ -39,14 +39,17 @@ class VoyageContext3Provider implements ContextualEmbeddingProvider {
     return apiKey;
   }
 
-  async embedDocumentGroups(groups: string[][]): Promise<VectorArray[][]> {
+  async embedDocumentGroups(groups: string[][], signal?: AbortSignal): Promise<VectorArray[][]> {
+    signal?.throwIfAborted();
     const apiKey = this.getApiKey();
     const batches = this.batchGroups(groups);
     const allResults: VectorArray[][] = new Array(groups.length);
 
     let groupOffset = 0;
     for (const batch of batches) {
+      signal?.throwIfAborted();
       const response = await globalFetch(VOYAGE_API_URL, {
+      abortSignal: signal,
         headers: {
           "Authorization": "Bearer " + apiKey,
           "Content-Type": "application/json"
@@ -58,6 +61,7 @@ class VoyageContext3Provider implements ContextualEmbeddingProvider {
         }
       });
 
+      signal?.throwIfAborted();
       if (!response.ok || !response.data.data) {
         throw new Error(JSON.stringify(response.data));
       }
@@ -75,9 +79,11 @@ class VoyageContext3Provider implements ContextualEmbeddingProvider {
     return allResults;
   }
 
-  async embedQueries(queries: string[]): Promise<VectorArray[]> {
+  async embedQueries(queries: string[], signal?: AbortSignal): Promise<VectorArray[]> {
+    signal?.throwIfAborted();
     const apiKey = this.getApiKey();
     const response = await globalFetch(VOYAGE_API_URL, {
+      abortSignal: signal,
       headers: {
         "Authorization": "Bearer " + apiKey,
         "Content-Type": "application/json"
@@ -89,6 +95,7 @@ class VoyageContext3Provider implements ContextualEmbeddingProvider {
       }
     });
 
+    signal?.throwIfAborted();
     if (!response.ok || !response.data.data) {
       throw new Error(JSON.stringify(response.data));
     }

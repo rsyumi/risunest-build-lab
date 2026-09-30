@@ -76,3 +76,12 @@ describe('primary foreground theme role', () => {
         expect(contrast(scheme.textcolor, scheme.darkbutton)).toBeGreaterThanOrEqual(3)
     })
 })
+
+it.each(['src/lib/Setting/RisuNest/SettingToggle.svelte', 'src/lib/UI/GUI/CheckInput.svelte'])('uses the contrasting primary pair for %s', path => {
+    const source = readFileSync(path, 'utf8')
+    expect(source).toContain('bg-primary-500 border-primary-500 text-primary-foreground')
+    expect(source).toContain('stroke="currentColor"')
+    expect(source).not.toContain('stroke="white"')
+    expect(source).not.toContain('bg-white')
+    expect(contrast(rootToken('primary-500'), rootToken('primary-foreground'))).toBeGreaterThanOrEqual(3)
+})

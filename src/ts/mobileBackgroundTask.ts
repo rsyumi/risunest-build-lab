@@ -1,10 +1,11 @@
 import './androidNativeControl'
 import { isTauriAndroid, isTauriIOS } from './platform'
-import { beginIOSBackgroundTask } from './iosNative'
+import { beginIOSBackgroundTask, BackgroundExecutionExpiredError, isBackgroundExpiryReason } from './iosNative'
 
 export type MobileTaskKind = 'backup' | 'restore' | 'sync' | 'import' | 'export' | 'maintenance'
 export interface MobileBackgroundTask {
     signal?: AbortSignal
+    expired?(): boolean
     progress(percent: number | null): void
     dispose(success?: boolean): Promise<void>
 }
@@ -29,7 +30,7 @@ export function measuredTaskPercent(completed: number, total?: number): number |
         ? Math.max(0, Math.min(100, Math.round(completed * 100 / total!))) : null
 }
 
-export function beginMobileBackgroundTask(kind: MobileTaskKind, signal?: AbortSignal): MobileBackgroundTask | Promise<MobileBackgroundTask> {
+export function beginMobileBackgroundTask(kind: MobileTaskKind, signal?: AbortSignal, userInitiated = false): MobileBackgroundTask | Promise<MobileBackgroundTask> {
     const noop: MobileBackgroundTask = { signal, progress() {}, async dispose() {} }
     if ((!isTauriAndroid && !isTauriIOS) || signal?.aborted) return noop
     // Register before awaiting native admission so Home cannot cancel work during acquisition.
@@ -41,7 +42,7 @@ export function beginMobileBackgroundTask(kind: MobileTaskKind, signal?: AbortSi
         let task: MobileBackgroundTask
         try {
             if (isTauriIOS) {
-                task = await beginIOSBackgroundTask(kind, signal, release)
+                task = await beginIOSBackgroundTask(kind, signal, release, userInitiated)
             } else {
                 const bridge = window.RisuBackgroundTasks
                 const id = await bridge?.begin(kind)
@@ -52,7 +53,7 @@ export function beginMobileBackgroundTask(kind: MobileTaskKind, signal?: AbortSi
                 if (signal?.aborted) abort()
                 const expired = (event: Event) => {
                     if ((event as CustomEvent<string>).detail !== id) return
-                    controller.abort(new DOMException('Background execution expired', 'AbortError'))
+                    controller.abort(new BackgroundExecutionExpiredError())
                     release()
                 }
                 window.addEventListener('risunest-background-expired', expired)
@@ -80,6 +81,7 @@ export function beginMobileBackgroundTask(kind: MobileTaskKind, signal?: AbortSi
         let disposed = false
         return {
             signal: task.signal,
+            expired: () => task.expired?.() ?? isBackgroundExpiryReason(task.signal?.reason),
             progress: percent => task.progress(percent === null ? null : measuredTaskPercent(percent, 100)),
             async dispose(success = false) {
                 if (disposed) return
@@ -94,16 +96,25 @@ export function runWithMobileBackgroundTask<T>(
     kind: MobileTaskKind,
     operation: (task: MobileBackgroundTask) => Promise<T>,
     signal?: AbortSignal,
+    userInitiated = false,
 ): Promise<T> {
     if (!isTauriAndroid && !isTauriIOS) return operation({ signal, progress() {}, async dispose() {} })
     return (async () => {
-        const task = await beginMobileBackgroundTask(kind, signal)
+        const task = await beginMobileBackgroundTask(kind, signal, userInitiated)
         let success = false
         try {
             task.signal?.throwIfAborted()
             const result = await operation(task)
             success = !task.signal?.aborted && result !== null
             return result
+        } catch (error) {
+            if (signal?.aborted && isBackgroundExpiryReason(error)) {
+                throw new DOMException('Operation cancelled', 'AbortError')
+            }
+            if (error instanceof Error && error.name === 'AbortError' && task.expired?.() && !signal?.aborted) {
+                throw new BackgroundExecutionExpiredError()
+            }
+            throw error
         } finally { await task.dispose(success) }
     })()
 }

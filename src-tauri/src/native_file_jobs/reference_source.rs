@@ -84,6 +84,11 @@ fn provider_error(error: crate::external_storage::contract::ProviderError) -> Na
         | ErrorKind::FolderInaccessible
         | ErrorKind::FolderNotRepository => "source-unavailable",
         ErrorKind::FolderUnsupportedLocation => "capability-unavailable",
+        ErrorKind::LocalStorageFull => "storage-full",
+        ErrorKind::LocalPermissionDenied => "source-unavailable",
+        ErrorKind::DeviceVaultUnavailable | ErrorKind::RepositoryKeyUnavailable => "source-unavailable",
+        ErrorKind::EndpointRejected | ErrorKind::ClockSkew | ErrorKind::RepositoryBusy => "source-unavailable",
+        ErrorKind::LocationOccupied => "invalid-source",
     };
     NativeJobError::new(code, "Conflict source operation failed")
 }
@@ -368,6 +373,7 @@ pub(crate) fn export_reference_source(
                     &destination,
                     &staging,
                     &cancellation,
+                    &app.package_info().version.to_string(),
                     || {
                         job.commit_export_publication().map_err(|message| {
                             if job.is_cancel_requested() {
@@ -436,7 +442,8 @@ pub(crate) fn export_reference_source(
                 handoffs,
                 store,
                 job,
-                None,
+                Some((app, &super::portable::PortableSelection::default())),
+                &app.package_info().version.to_string(),
             )?;
             drop(scratch);
             drop(guard);

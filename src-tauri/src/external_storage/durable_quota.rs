@@ -52,7 +52,9 @@ fn account_counters(db: &Connection, account: &AccountKey, now_ms: u64) -> Resul
         })
         .transpose()?;
     let (last_seen, reset, used) = previous.unwrap_or((now_ms, next_daily_reset_ms(now_ms), 0));
-    let effective_now = now_ms.max(last_seen);
+    let rebased = now_ms.saturating_add(60_000) < last_seen;
+    let effective_now = if rebased { now_ms } else { now_ms.max(last_seen) };
+    let reset = if rebased { reset.min(next_daily_reset_ms(now_ms)) } else { reset };
     require_mybox(account, effective_now)?;
     if reset == 0 || reset > i64::MAX as u64 { return Err(corrupt()); }
     Ok(AccountCounters {
@@ -121,6 +123,16 @@ impl MyboxBudget {
         { return Err(corrupt()); }
         self.with_db(|db| {
             let tx = db.transaction_with_behavior(TransactionBehavior::Immediate).map_err(storage_error)?;
+            let rebased = tx.query_row(
+                "SELECT last_seen_ms FROM mybox_accounts WHERE authority=?1 AND principal=?2",
+                params![account.authority(), account.principal()], |row| row.get::<_, i64>(0),
+            ).optional().map_err(storage_error)?.is_some_and(|last| last > now_ms.saturating_add(60_000) as i64);
+            if rebased {
+                tx.execute("UPDATE mybox_minute_requests SET issued_at_ms=?3 WHERE authority=?1 AND principal=?2 AND issued_at_ms>?3",
+                    params![account.authority(), account.principal(), now_ms as i64]).map_err(storage_error)?;
+                tx.execute("UPDATE mybox_accounts SET last_seen_ms=?3,download_reset_at_ms=MIN(download_reset_at_ms,?4) WHERE authority=?1 AND principal=?2",
+                    params![account.authority(), account.principal(), now_ms as i64, next_daily_reset_ms(now_ms) as i64]).map_err(storage_error)?;
+            }
             let mut state = account_counters(&tx, account, now_ms)?;
             let mut denied: Option<ProviderError> = None;
             for counter in &charge.counters {
@@ -143,7 +155,10 @@ impl MyboxBudget {
                     }
                 }
             }
-            if let Some(error) = denied { return Err(error); }
+            if let Some(error) = denied {
+                if rebased { tx.commit().map_err(storage_error)?; }
+                return Err(error);
+            }
             if charge.counters.contains(&MyboxCounter::DownloadDay) {
                 state.downloads_used = state.downloads_used.checked_add(1).ok_or_else(corrupt)?;
             }
@@ -190,7 +205,7 @@ impl MyboxBudget {
                     (state.downloads_used, Some(state.download_reset_at_ms))
                 } else {
                     let (used, oldest) = minute_usage(&tx, account, counter, state.now_ms)?;
-                    (used, oldest.map(|oldest| oldest.saturating_add(60_000)))
+                    (used, oldest.map(|oldest| oldest.min(state.now_ms).saturating_add(60_000)))
                 };
                 summaries.push(MyboxCounterSummary { id: counter.id().into(), limit: counter.limit(plan), used, reset_at_ms, local_estimate: true });
             }
@@ -297,4 +312,41 @@ mod tests {
         budget.reserve(&account, &charge(MyboxCounter::DownloadDay), 1).unwrap();
         assert_eq!(budget.snapshot(&account, MyboxPlan::Plan30gb, 1).unwrap()[0].used, 1);
     }
+    #[test]
+    fn corrected_forward_clock_recovers_after_one_full_minute_without_refund() {
+        let directory = tempfile::tempdir().unwrap();
+        let budget = MyboxBudget::new(directory.path().join("quota.sqlite"));
+        let account = account();
+        let now = 100_000;
+        let future = now + 86_400_000;
+        for _ in 0..60 { budget.reserve(&account, &charge(MyboxCounter::DownloadUrlMinute), future).unwrap(); }
+        let before = budget.snapshot(&account, MyboxPlan::Plan30gb, now).unwrap();
+        let minute = before.iter().find(|row| row.id == MyboxCounter::DownloadUrlMinute.id()).unwrap();
+        assert_eq!(minute.used, 60);
+        assert_eq!(minute.reset_at_ms, Some(now + 60_000));
+        for time in [now, now + 1, now + 59_999] {
+            let error = budget.reserve(&account, &charge(MyboxCounter::DownloadUrlMinute), time).unwrap_err();
+            assert_eq!(error.kind, ErrorKind::RateLimited);
+            assert_eq!(error.retry_at_ms, Some(now + 60_000));
+        }
+        budget.reserve(&account, &charge(MyboxCounter::DownloadUrlMinute), now + 60_000).unwrap();
+    }
+    #[test]
+    fn corrected_forward_clock_keeps_daily_consumption_until_corrected_reset() {
+        let directory = tempfile::tempdir().unwrap();
+        let budget = MyboxBudget::new(directory.path().join("quota.sqlite"));
+        let account = account();
+        let now = 100_000;
+        let future = now + 86_400_000;
+        budget.with_db(|db| {
+            db.execute("INSERT INTO mybox_accounts VALUES(?1,?2,?3,?4,500)",
+                params![account.authority(),account.principal(),future as i64,next_daily_reset_ms(future) as i64]).map_err(storage_error)?;
+            Ok(())
+        }).unwrap();
+        let error = budget.reserve(&account, &charge(MyboxCounter::DownloadDay), now).unwrap_err();
+        assert_eq!(error.kind, ErrorKind::DailyQuotaExhausted);
+        assert_eq!(error.retry_at_ms, Some(next_daily_reset_ms(now)));
+        budget.reserve(&account, &charge(MyboxCounter::DownloadDay), next_daily_reset_ms(now)).unwrap();
+    }
+
 }

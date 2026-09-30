@@ -138,6 +138,7 @@ interface HarnessOptions {
     conflict?: OfficialSyncConflictHandler
     now?: () => number
     nativeDatabasePublisher?: OfficialNativeDatabasePublisher
+    getAccountId?: () => string | null
     flushPublicationMetadata?: () => Promise<void>
     events?: string[]
 }
@@ -206,6 +207,7 @@ async function makeHarness(options: HarnessOptions = {}) {
         conflict: options.conflict,
         now: options.now,
         nativeDatabasePublisher: options.nativeDatabasePublisher,
+        getAccountId: options.getAccountId,
         flushPublicationMetadata: options.flushPublicationMetadata,
     }
     const adapter = new OfficialAccountSnapshotAdapter(dependencies)
@@ -268,6 +270,62 @@ describe('OfficialAccountSnapshotAdapter publication', () => {
         expect(association.save).toHaveBeenCalledOnce()
     })
 
+    it('publishes natively and recovers receipts using session identity with an account-free root', async () => {
+        const database = makeDatabase()
+        delete database.account
+        const association = { load: vi.fn(() => null), save: vi.fn() }
+        const nativeDatabasePublisher = vi.fn<OfficialNativeDatabasePublisher>(async () => ({
+            databaseFingerprint: 'f'.repeat(64), acknowledge: vi.fn(async () => {}), completeReload: vi.fn(async () => {}),
+        }))
+        const harness = await makeHarness({
+            database, getAccountId: () => 'vault-account', association, nativeDatabasePublisher,
+            flushPublicationMetadata: vi.fn(async () => {}),
+        })
+        expect((await harness.store.readRoot()).value.account).toBeUndefined()
+        await (await harness.adapter.pin(harness.imported.revision)).publish()
+        expect(nativeDatabasePublisher).toHaveBeenCalledWith(expect.objectContaining({ accountId: 'vault-account' }))
+        expect(harness.writes.some(write => write.key === databaseKey)).toBe(false)
+        expect(association.save).toHaveBeenCalledWith('vault-account', expect.anything())
+        await expect(harness.adapter.adoptPublishedRevision({
+            accountId: 'vault-account', revision: harness.imported.revision, databaseFingerprint: 'e'.repeat(64),
+        })).resolves.toBeUndefined()
+        await expect(harness.adapter.adoptPublishedRevision({
+            accountId: 'other-account', revision: harness.imported.revision, databaseFingerprint: 'e'.repeat(64),
+        })).rejects.toThrow('account does not match')
+    })
+
+    it('does not use a restored root account when the native session is signed out', async () => {
+        const harness = await makeHarness({ accountId: 'restored-account', getAccountId: () => null })
+        await expect(harness.adapter.pin(harness.imported.revision)).rejects.toThrow('login is required')
+        expect(harness.writeItem).not.toHaveBeenCalled()
+        await expect(harness.adapter.adoptPublishedRevision({
+            accountId: 'restored-account', revision: harness.imported.revision, databaseFingerprint: 'e'.repeat(64),
+        })).rejects.toThrow('account does not match')
+    })
+
+    it('refuses a pinned publication after its authenticated account changes', async () => {
+        let accountId = 'account-1'
+        const harness = await makeHarness({ getAccountId: () => accountId })
+        const publication = await harness.adapter.pin(harness.imported.revision)
+        accountId = 'account-2'
+        await expect(publication.publish()).rejects.toThrow('session changed')
+        expect(harness.writeItem).not.toHaveBeenCalled()
+        await publication.dispose()
+    })
+
+    it('rechecks account identity after asynchronous publication preparation', async () => {
+        let accountId = 'account-1'
+        const nativeDatabasePublisher = vi.fn<OfficialNativeDatabasePublisher>(async () => null)
+        const harness = await makeHarness({
+            getAccountId: () => accountId, nativeDatabasePublisher,
+            flushPublicationMetadata: async () => { accountId = 'account-2' },
+        })
+        const publication = await harness.adapter.pin(harness.imported.revision)
+        await expect(publication.publish()).rejects.toThrow('session changed')
+        expect(nativeDatabasePublisher).not.toHaveBeenCalled()
+        expect(harness.writes.some(write => write.key === databaseKey)).toBe(false)
+        await publication.dispose()
+    })
     it('publishes the exact replacement projection natively and finalizes it durably in order', async () => {
         const events: string[] = []
         const fingerprint = 'a'.repeat(64)
@@ -795,7 +853,7 @@ describe('OfficialAccountSnapshotAdapter publication', () => {
         expect(harness.markPublished).toHaveBeenCalledTimes(1)
     })
 
-    it('validates remote-only resources before publishing', async () => {
+    it('preserves remote-only references without downloading payloads during pin', async () => {
         const database = makeDatabase()
         const allResources = resources(database)
         const localKey = allResources[0]
@@ -813,12 +871,12 @@ describe('OfficialAccountSnapshotAdapter publication', () => {
         const publication = await harness.adapter.pin(harness.imported.revision)
         await publication.publish()
 
-        expect(harness.readItem).toHaveBeenCalledTimes(remoteOnly.length)
+        expect(harness.readItem).not.toHaveBeenCalled()
         expect(harness.writeItem.mock.calls.filter(([key]) => key.startsWith('assets/'))).toHaveLength(1)
         expect(harness.writeItem.mock.calls[0][0]).toBe(localKey)
     })
 
-    it('publishes without assets that are unavailable everywhere and probes each missing key once', async () => {
+    it('publishes byte-identical references without probing remote-only assets', async () => {
         const database = makeDatabase()
         const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
         try {
@@ -831,12 +889,33 @@ describe('OfficialAccountSnapshotAdapter publication', () => {
             const projected = await decodeRisuSave(databaseWrite!.bytes!) as Database
             expect(resources(projected)).toEqual(resources(database))
 
+            expect(harness.readItem).not.toHaveBeenCalled()
+            const firstBytes = databaseWrite!.bytes
             const probesAfterFirst = harness.readItem.mock.calls.length
             await (await harness.adapter.pin(harness.imported.revision)).publish()
             expect(harness.readItem.mock.calls.length).toBe(probesAfterFirst)
+            expect(harness.writes.filter(write => write.key === databaseKey)[1].bytes).toEqual(firstBytes)
         } finally {
             consoleWarn.mockRestore()
         }
+    })
+
+    it('reports completed uploads and stops before the next asset after cancellation', async () => {
+        const harness = await makeHarness()
+        const controller = new AbortController()
+        const progress = vi.fn()
+        const publication = await harness.adapter.pin(harness.imported.revision, {
+            signal: controller.signal, onProgress: progress,
+        })
+        harness.writeItem.mockImplementationOnce(async key => {
+            controller.abort()
+            return { kind: 'written', replacementKey: `remote/${key}` }
+        })
+        await expect(publication.publish(controller.signal)).rejects.toMatchObject({ name: 'AbortError' })
+        expect(harness.writeItem).toHaveBeenCalledOnce()
+        expect(progress.mock.calls).toEqual([[0, resources(harness.database).length], [1, resources(harness.database).length]])
+        expect(harness.markPublished).not.toHaveBeenCalled()
+        await publication.dispose()
     })
 
     it('releases the lease when resolving blobs fails during pin', async () => {
@@ -954,6 +1033,22 @@ describe('OfficialAccountSnapshotAdapter pull', () => {
         expect((await harness.store.readRoot()).value.username).toBe('Prepared remote')
     })
 
+    it('associates compatibility pulls with the native session instead of the incoming account', async () => {
+        const remote = makeDatabase()
+        remote.account = { id: 'snapshot-account', token: 'synthetic', data: {} }
+        const association = { load: vi.fn(() => null), save: vi.fn() }
+        const harness = await makeHarness({
+            getAccountId: () => 'vault-account', association,
+            databaseRead: { kind: 'value', bytes: encodeRisuSaveLegacy(remote, 'compression') },
+            remoteCold: new Map([['cold-message', { message: [] }]]),
+            prepareCandidate: async value => { const prepared = structuredClone(value); delete prepared.account; return prepared },
+        })
+        await expect(harness.adapter.pull()).resolves.toMatchObject({ kind: 'activated' })
+        expect(association.load).toHaveBeenCalledWith('vault-account')
+        expect(association.save).toHaveBeenCalledWith('vault-account', expect.anything())
+        expect((await harness.store.readRoot()).value.account).toBeUndefined()
+    })
+
     it('returns missing without preparing or replacing', async () => {
         const harness = await makeHarness({ databaseRead: { kind: 'missing' } })
         const replace = vi.spyOn(harness.store, 'replaceFromDatabase')
@@ -1047,27 +1142,34 @@ describe('OfficialAccountSnapshotAdapter pull', () => {
         }
     })
 
-    it('activates without probing account assets and keeps a degraded cold record', async () => {
+    it.each(['missing', '403', '503'])('rejects unresolved cold payloads (%s) before activation', async failure => {
         const remote = makeDatabase() as any
-        remote.characters[0].additionalAssets = [['legacy', 'assets\\windows.gif', 'gif']]
+        remote.characters[0].coldstorage = 'cold-character'
         const bytes = encodeRisuSaveLegacy(remote, 'compression')
-        const harness = await makeHarness({
-            databaseRead: { kind: 'value', bytes },
-            remoteAssets: new Map(),
-            remoteCold: new Map(),
-        })
+        const harness = await makeHarness({ databaseRead: { kind: 'value', bytes }, remoteCold: new Map() })
+        if (failure !== 'missing') harness.cold.readRemote.mockRejectedValue(new Error(failure))
         const replace = vi.spyOn(harness.store, 'replaceFromDatabase')
+        await expect(harness.adapter.pull()).rejects.toMatchObject({ name: 'ColdPayloadUnavailableError' })
+        expect(replace).not.toHaveBeenCalled()
+        expect((await harness.store.readRoot()).revision).toBe(harness.imported.revision)
+        expect(harness.writeItem).not.toHaveBeenCalled()
+        expect(remote.characters[0].coldstorage).toBe('cold-character')
+        expect(remote.characters[0].chats.at(-1).message[0].data).toBe(`${coldStorageHeader}cold-message`)
+    })
 
-        const result = await harness.adapter.pull()
-
-        expect(result.kind).toBe('activated')
-        expect(replace).toHaveBeenCalledTimes(1)
-        expect(harness.readItem.mock.calls.map(([key]) => key)).toEqual([databaseKey])
-        expect(harness.cold.readRemote.mock.calls.map(([key]) => key)).toEqual(['cold-message'])
-        const activated = replace.mock.calls[0][0] as any
-        expect(activated.characters[0].coldStoragedChats).toBeUndefined()
-        expect(activated.characters[0].chats.at(-1).message[0].data)
-            .toBe(`${coldStorageHeader}cold-message`)
+    it('stops pinning on cancellation and releases the revision without remote probes', async () => {
+        const harness = await makeHarness()
+        const controller = new AbortController()
+        vi.mocked(harness.blobStore.stat).mockImplementation(async () => {
+            controller.abort()
+            return null
+        })
+        const acquire = vi.spyOn(harness.store, 'acquireRevision')
+        await expect(harness.adapter.pin(harness.imported.revision, { signal: controller.signal }))
+            .rejects.toMatchObject({ name: 'AbortError' })
+        const lease = await acquire.mock.results[0].value
+        await expect(lease.readRoot()).rejects.toThrow('released')
+        expect(harness.readItem).not.toHaveBeenCalled()
     })
 
     it('checks abort immediately before the single replacement', async () => {
@@ -1111,7 +1213,7 @@ describe('OfficialAccountSnapshotAdapter pull', () => {
                     : { kind: 'value', bytes: Uint8Array.of(1) }),
                 writeItem: vi.fn(),
             },
-            cold: { readRemote: vi.fn(async () => null) },
+            cold: { readRemote: vi.fn(async () => ({ message: [] })) },
             prepareCandidate: async (value) => {
                 if (!raced) {
                     raced = true

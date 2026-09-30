@@ -219,7 +219,7 @@ test.describe('lore pages by touch', () => {
         await open(page, 'lore-pages')
         const start = await center(itemButton(page, 'Item 0'))
         const cdp = await context.newCDPSession(page)
-        const touch = (type: string, x: number, y: number) =>
+        const touch = (type: 'touchStart' | 'touchEnd' | 'touchMove' | 'touchCancel', x: number, y: number) =>
             cdp.send('Input.dispatchTouchEvent', { type, touchPoints: type === 'touchEnd' ? [] : [{ x, y }] })
         await touch('touchStart', start.x, start.y)
         await page.waitForTimeout(350)

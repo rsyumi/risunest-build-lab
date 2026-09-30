@@ -423,3 +423,35 @@ fn cancellation_at_marker_publication_preserves_sealed_pins_and_can_resume() {
     assert!(matches!(Capture::resume(root.path(), &id, 0, "generation", &head()),
         Err(error) if error.code == "conflict-already-complete"));
 }
+
+#[test]
+fn unrelated_files_do_not_block_pending_captures_or_reference_roots() {
+    let (root, _store, capture) = fixture();
+    let digest = hash(b"retained synthetic object");
+    capture.object(Side::Local, &Object {
+        hash: digest.clone(), byte_size: Some(25), metadata: false,
+        context_id: None, local_required: true,
+    }).unwrap();
+    let id = capture.id.clone();
+    drop(capture);
+    let parent = root.path().join("server-sync/backups");
+    std::fs::write(parent.join(".DS_Store"), b"synthetic").unwrap();
+    std::fs::create_dir(parent.join("unrelated")).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(parent.join(&id), parent.join("linked-reference")).unwrap();
+    let resumed = Capture::find_pending(root.path(), 0, "generation", &head()).unwrap().unwrap();
+    assert_eq!(resumed.id, id);
+    let mut roots = Vec::new();
+    visit_roots(root.path(), |object| { roots.push(object.hash); Ok(()) }).unwrap();
+    assert_eq!(roots, vec![digest]);
+}
+
+#[test]
+fn corrupt_reference_directory_still_blocks_root_discovery() {
+    let (root, _store, capture) = fixture();
+    drop(capture);
+    let corrupt = root.path().join("server-sync/backups").join(uuid::Uuid::new_v4().to_string());
+    std::fs::create_dir(&corrupt).unwrap();
+    std::fs::write(corrupt.join("index.sqlite"), b"corrupt synthetic database").unwrap();
+    assert!(visit_roots(root.path(), |_| Ok(())).is_err());
+}

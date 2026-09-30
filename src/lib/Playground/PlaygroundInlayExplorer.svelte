@@ -3,13 +3,10 @@
   import { SvelteSet } from 'svelte/reactivity'
 
   import { language } from 'src/lang'
-  import { alertConfirm, alertNormal } from 'src/ts/alert'
+  import { alertError, alertConfirm, alertNormal } from 'src/ts/alert'
   import { getInlayEncodeOptions, listInlayAssetMetadata, removeInlayAsset } from 'src/ts/process/files/inlays'
   import {
-    emptyInlayOptimizationProgress,
-    runInlayOptimization,
     selectInlayOptimizationTargets,
-    type InlayOptimizationProgress,
   } from 'src/ts/process/files/inlayOptimizationJob'
   import {
     inlayOptimizationConfirmMessage,
@@ -17,14 +14,17 @@
     inlayOptimizationResultMessage,
   } from 'src/ts/process/files/inlayOptimizationMessages'
   import { summarizeInlayAssets } from 'src/ts/process/files/inlayInventory'
-  import { getInlayRenderSource } from 'src/ts/process/files/inlayRenderSource'
+  import { getInlayRenderSource, mediaMimeHint } from 'src/ts/process/files/inlayRenderSource'
   import type { InlayRenderSource } from 'src/ts/process/files/inlayRenderSource'
   import { isTauri } from 'src/ts/platform'
+  import { subscribeNativeMediaEndpointChanges } from 'src/ts/storage/platformBlobStore'
   import type { InlayBlobMetadata } from 'src/ts/storage/blobStore'
   import { formatRisuNestStorageBytes } from 'src/ts/storage/risuNestStorageDashboard'
   import Button from '../UI/GUI/Button.svelte'
   import CheckInput from '../UI/GUI/CheckInput.svelte'
   import { loadMediaSource } from '../UI/mediaSource'
+
+  import { inlayOptimizationController as optimization } from 'src/ts/process/files/inlayOptimizationController.svelte'
 
   const PAGE_SIZE = 36
 
@@ -42,8 +42,9 @@
   const hasMore = $derived(displayCount < allAssets.length)
   const hasSelection = $derived(selection.size > 0)
   const inventory = $derived(summarizeInlayAssets(allAssets))
-  let optimizing = $state(false)
-  let optimizeProgress = $state<InlayOptimizationProgress>(emptyInlayOptimizationProgress())
+  let preparing = $state(false)
+  let optimizing = $derived(preparing || optimization.running)
+  let optimizeProgress = $derived(optimization.progress)
   const extensionSummary = $derived(
     [...inventory.images, ...inventory.others]
       .map((entry) => `${entry.ext || language.risuNest.inlay.inventoryNoExtension} ${entry.count.toLocaleString()}`)
@@ -86,6 +87,7 @@
   }
 
   const toggleSelect = (id: string) => {
+    if (optimizing) return
     if (selection.has(id)) {
       selection.delete(id)
     } else {
@@ -94,17 +96,21 @@
   }
 
   const selectAll = () => {
+    if (optimizing) return
     displayedAssets.forEach((asset) => selection.add(asset.key))
   }
 
   const deselectAll = () => {
+    if (optimizing) return
     selection.clear()
   }
 
   const deleteAsset = async (id: string, name: string) => {
+    if (optimizing) return
     if (!(await alertConfirm(language.playground.inlayDeleteConfirm.replace('{name}', name)))) {
       return
     }
+    if (optimizing) return
     await removeInlayAsset(id)
     removePreview(id)
     selection.delete(id)
@@ -112,10 +118,11 @@
   }
 
   const deleteSelected = async () => {
-    if (selection.size === 0) return
+    if (selection.size === 0 || optimizing) return
     if (!(await alertConfirm(language.playground.inlayDeleteMultipleConfirm.replace('{count}', selection.size.toString())))) {
       return
     }
+    if (optimizing) return
     for (const id of selection) {
       await removeInlayAsset(id)
       removePreview(id)
@@ -135,29 +142,19 @@
       alertNormal(language.risuNest.inlay.optimizeNone)
       return
     }
-    // Loaded here so the playground does not pull the storage and sync wiring on open.
-    const runtime = await import('src/ts/process/files/inlayOptimizationRuntime')
-    const message = inlayOptimizationConfirmMessage({
-      targets,
-      storedFormat: options.format,
-      ...(await runtime.readInlayOptimizationEnvironment()),
-    })
-    if (!(await alertConfirm(message))) return
-    optimizing = true
-    optimizeProgress = emptyInlayOptimizationProgress(targets.length)
+    preparing = true
     try {
-      const done = await runInlayOptimization(targets, runtime.createStoredInlayOptimizationDeps(), {
-        options,
-        onProgress: (value) => {
-          optimizeProgress = value
-        },
-      })
+      const runtime = await import('src/ts/process/files/inlayOptimizationRuntime')
+      const message = inlayOptimizationConfirmMessage({ targets, storedFormat: options.format, ...(await runtime.readInlayOptimizationEnvironment()) })
+      if (!(await alertConfirm(message)) || destroyed) return
+      const done = await optimization.start(targets, options, runtime.createStoredInlayOptimizationDeps())
+      if (!done || destroyed) return
       selection.clear()
-      await loadAssets()
       alertNormal(inlayOptimizationResultMessage(done))
-    } finally {
-      optimizing = false
-    }
+      await loadAssets()
+    } catch {
+      if (!destroyed) alertError(language.risuNest.inlay.optimizeFailed)
+    } finally { preparing = false }
   }
 
   const formatSize = (bytes: number) => {
@@ -301,10 +298,23 @@
     loadMoreObserver?.disconnect()
   })
 
+  let loadFailed = $state(false)
+  const unsubscribeMediaEndpoint = subscribeNativeMediaEndpointChanges(() => {
+    for (const id of new Set([...previewSources.keys(), ...pendingPreviews.keys()])) removePreview(id)
+    for (const target of visiblePreviewTargets) {
+      const asset = previewTargets.get(target)
+      if (asset) void getPreviewURL(asset)
+    }
+  })
+  onDestroy(unsubscribeMediaEndpoint)
+
   const loadAssets = async () => {
     loading = true
-    allAssets = await listInlayAssetMetadata()
-    loading = false
+    try {
+      const assets = await listInlayAssetMetadata()
+      if (!destroyed) { allAssets = assets; loadFailed = false }
+    } catch { if (!destroyed) loadFailed = true }
+    finally { loading = false }
   }
   loadAssets()
 </script>
@@ -318,6 +328,10 @@
       >{formatRisuNestStorageBytes(inventory.total.bytes)} · {extensionSummary}</span
     >
     <div class="flex gap-2 ml-auto">
+      {#if optimizing}
+        <span class="text-textcolor2 self-center text-sm tabular-nums" role="status" aria-live="polite">{inlayOptimizationProgressMessage(optimizeProgress)}</span>
+        <Button onclick={() => optimization.cancel()} styled="primary" size="sm" disabled={optimization.cancelRequested}>{language.cancel}</Button>
+      {/if}
       {#if hasSelection}
         {#if optimizing}
           <span class="text-textcolor2 self-center text-sm tabular-nums" role="status" aria-live="polite"
@@ -337,7 +351,11 @@
   {/if}
 </header>
 
-{#if allAssets.length === 0 && !loading}
+{#if loadFailed}
+  <p role="alert" class="text-textcolor">{language.risuNest.inlay.inventoryLoadFailed}</p>
+  <Button onclick={loadAssets} disabled={optimizing}>{language.retry}</Button>
+{/if}
+{#if allAssets.length === 0 && !loading && !loadFailed}
   <div class="text-center py-12 text-textcolor2">
     <p class="text-lg">{language.playground.inlayEmpty}</p>
     <p class="text-sm mt-2">{language.playground.inlayEmptyDesc}</p>
@@ -361,12 +379,12 @@
               <img alt={asset.name} class="w-full h-40 object-contain rounded bg-black/20" src={previewSources.get(asset.key)?.url} width={asset.width} height={asset.height} />
             {:else if asset.inlayType === 'video'}
               <video class="w-full h-40 object-contain rounded bg-black/20" controls onplay={() => markPreviewPlaying(asset.key)} onpause={() => markPreviewStopped(asset.key)} onended={() => markPreviewStopped(asset.key)}>
-                <source use:loadMediaSource={previewSources.get(asset.key)?.url} type={asset.mime} />
+                <source use:loadMediaSource={previewSources.get(asset.key)?.url} type={mediaMimeHint(asset.mime)} />
                 <track kind="captions" />
               </video>
             {:else if asset.inlayType === 'audio'}
               <audio class="w-full min-h-12" controls onplay={() => markPreviewPlaying(asset.key)} onpause={() => markPreviewStopped(asset.key)} onended={() => markPreviewStopped(asset.key)}>
-                <source use:loadMediaSource={previewSources.get(asset.key)?.url} type={asset.mime} />
+                <source use:loadMediaSource={previewSources.get(asset.key)?.url} type={mediaMimeHint(asset.mime)} />
                 <track kind="captions" />
               </audio>
             {/if}
@@ -388,7 +406,7 @@
             <span>{formatSize(asset.size)}</span>
           </div>
 
-          <Button onclick={() => deleteAsset(asset.key, asset.name)} styled="danger" size="sm">Delete</Button>
+          <Button disabled={optimizing} onclick={() => deleteAsset(asset.key, asset.name)} styled="danger" size="sm">Delete</Button>
       </div>
     {/each}
   </div>

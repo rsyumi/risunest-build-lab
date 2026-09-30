@@ -72,7 +72,7 @@ const button = (label: string) =>
 function show(section: "backups" | "cache"): void {
   component = mount(ServerSyncStorage, {
     target,
-    props: { onChange: changed, section },
+    props: { onLoaded: changed, section },
   });
 }
 beforeEach(() => {
@@ -102,6 +102,13 @@ afterEach(async () => {
   target.remove();
 });
 describe("shared local server storage management", () => {
+  it('loads only backup inventory for the backup list and publishes it to the parent', async () => {
+    show('backups');
+    await vi.waitFor(() => expect(changed).toHaveBeenCalledOnce());
+    expect(native.getServerSyncBackupInventory).toHaveBeenCalledOnce();
+    expect(native.getServerSyncCacheUsage).not.toHaveBeenCalled();
+    expect(changed).toHaveBeenCalledWith(expect.objectContaining({ completeCount: 105 }), undefined);
+  });
   it("displays whole-inventory totals separately from the current page and fetches older rows by cursor", async () => {
     show("cache");
     await vi.waitFor(() => expect(target.textContent).toContain("(105)"));
@@ -130,7 +137,7 @@ describe("shared local server storage management", () => {
     );
     expect(native.deleteServerSyncBackup).not.toHaveBeenCalled();
     button(languageEnglish.remove).click();
-    await vi.waitFor(() => expect(changed).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(changed).toHaveBeenCalledTimes(2));
     expect(native.deleteServerSyncBackup).toHaveBeenCalledExactlyOnceWith(
       "synthetic-id",
     );
@@ -228,7 +235,7 @@ describe("shared local server storage management", () => {
       new Error("synthetic private path and secret"),
     );
     button(labels.clean).click();
-    await vi.waitFor(() => expect(changed).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(changed).toHaveBeenCalledTimes(2));
     expect(confirm).toHaveBeenCalledWith(labels.cleanConfirm);
     expect(target.querySelector("dl")).toBeNull();
     expect(target.textContent).toContain(

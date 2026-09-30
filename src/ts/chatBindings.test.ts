@@ -31,9 +31,13 @@ vi.mock('./storage/persistentDataRuntime.svelte', () => ({
         },
     }),
 }))
-import { bindPersona, captureChatBindingTarget, chatBindingBlockedByGeneration, updateChatBinding } from './chatBindings.svelte'
+import { bindPersona, captureChatBindingTarget, chatBindingBlockedByGeneration, conversationMutationBlockedByGeneration, updateChatBinding } from './chatBindings.svelte'
 import { doingChat } from './process/generationState'
+import { activeRerollConversations } from './durableReroll'
 beforeEach(() => {
+    doingChat.set(false)
+    activeRerollConversations.set([])
+    state.toast.mockClear()
     state.navigation = 0
     state.bindings = []
     state.bindingGate = null
@@ -59,6 +63,17 @@ beforeEach(() => {
             },
         ],
     }
+})
+it('blocks row mutations for generation and the matching reroll until ownership ends', () => {
+    activeRerollConversations.set(['chat'])
+    expect(conversationMutationBlockedByGeneration('chat')).toBe(true)
+    expect(conversationMutationBlockedByGeneration('other')).toBe(false)
+    activeRerollConversations.set([])
+    doingChat.set(true)
+    expect(conversationMutationBlockedByGeneration('chat')).toBe(true)
+    doingChat.set(false)
+    expect(conversationMutationBlockedByGeneration('chat')).toBe(false)
+    expect(state.toast).toHaveBeenCalledTimes(2)
 })
 it('commits persona and toggle metadata through the coordinator without reading message bodies or changing the global persona', async () => {
     const target = captureChatBindingTarget()!

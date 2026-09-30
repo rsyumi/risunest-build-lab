@@ -76,7 +76,19 @@ fn ensure_directory(root: &Path) -> Result<std::path::PathBuf, String> {
     Ok(path)
 }
 
-fn read_entry(path: &Path) -> Result<Entry, String> {
+fn read_entry(root: &Path, path: &Path) -> Result<Entry, String> {
+    let name = path.file_name().and_then(|name| name.to_str()).ok_or("secret-index-corrupt")?;
+    let (purpose, id) = name.strip_suffix(".json").and_then(|name| name.split_once("--"))
+        .ok_or("secret-index-corrupt")?;
+    let purpose = match purpose {
+        "provider" => Purpose::Provider,
+        "repository-key" => Purpose::RepositoryKey,
+        "account-credential" => Purpose::AccountCredential,
+        "server-sync" => Purpose::ServerSync,
+        _ => return Err("secret-index-corrupt".into()),
+    };
+    let entry = Entry { purpose, id: id.to_owned() };
+    validate(root, &entry)?;
     let metadata = fs::symlink_metadata(path).map_err(|_| "secret-index-unavailable")?;
     if !metadata.is_file()
         || crate::trust_boundary::is_link_like(&metadata)
@@ -90,7 +102,11 @@ fn read_entry(path: &Path) -> Result<Entry, String> {
         .take(1025)
         .read_to_end(&mut bytes)
         .map_err(|_| "secret-index-unavailable")?;
-    serde_json::from_slice(&bytes).map_err(|_| "secret-index-corrupt".into())
+    if !bytes.is_empty() {
+        let contents: Entry = serde_json::from_slice(&bytes).map_err(|_| "secret-index-corrupt")?;
+        if contents != entry { return Err("secret-index-corrupt".into()); }
+    }
+    Ok(entry)
 }
 
 // Persist ownership before invoking the OS store, including failed creation attempts.
@@ -108,28 +124,21 @@ pub(crate) fn tracked_write<T>(
     validate(root, &entry)?;
     let directory = ensure_directory(root)?;
     let path = directory.join(format!("{}--{}.json", purpose.name(), id));
-    match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)
-    {
-        Ok(mut file) => {
-            let bytes = serde_json::to_vec(&entry).map_err(|_| "secret-index-unavailable")?;
-            file.write_all(&bytes)
-                .and_then(|_| file.sync_all())
-                .map_err(|_| "secret-index-unavailable")?;
-            #[cfg(unix)]
-            fs::File::open(&directory)
-                .and_then(|file| file.sync_all())
-                .map_err(|_| "secret-index-unavailable")?;
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            if read_entry(&path)? != entry {
-                return Err("secret-index-corrupt".into());
-            }
-        }
+    // Unpublished temporary files cannot be mistaken for credential identities.
+    let mut file = tempfile::NamedTempFile::new_in(root).map_err(|_| "secret-index-unavailable")?;
+    let bytes = serde_json::to_vec(&entry).map_err(|_| "secret-index-unavailable")?;
+    file.write_all(&bytes).and_then(|_| file.as_file().sync_all())
+        .map_err(|_| "secret-index-unavailable")?;
+    match file.persist_noclobber(&path) {
+        Ok(_) => {},
+        Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+            if read_entry(root, &path)? != entry { return Err("secret-index-corrupt".into()); }
+        },
         Err(_) => return Err("secret-index-unavailable".into()),
     }
+    #[cfg(unix)]
+    fs::File::open(&directory).and_then(|file| file.sync_all())
+        .map_err(|_| "secret-index-unavailable")?;
     write()
 }
 
@@ -150,13 +159,7 @@ fn remove_with(
     let mut entries = Vec::new();
     for file in fs::read_dir(&directory).map_err(|_| "secret-index-unavailable")? {
         let path = file.map_err(|_| "secret-index-unavailable")?.path();
-        let entry = read_entry(&path)?;
-        validate(root, &entry)?;
-        if path.file_name().and_then(|name| name.to_str())
-            != Some(format!("{}--{}.json", entry.purpose.name(), entry.id).as_str())
-        {
-            return Err("secret-index-corrupt".into());
-        }
+        let entry = read_entry(root, &path)?;
         entries.push((path, entry));
     }
     // Validate the complete inventory before deleting any credential.
@@ -183,6 +186,55 @@ pub(crate) fn remove_all(root: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_entries_recover_only_the_exact_filename_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = ensure_directory(root.path()).unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        fs::write(directory.join(format!("provider--{id}.json")), b"").unwrap();
+        let mut removed = 0;
+        remove_with(root.path(), |purpose, found| {
+            assert_eq!(purpose, Purpose::Provider);
+            assert_eq!(found, id);
+            removed += 1;
+            Ok(())
+        }).unwrap();
+        assert_eq!(removed, 1);
+        let directory = ensure_directory(root.path()).unwrap();
+        fs::write(directory.join("provider--invalid.json"), b"").unwrap();
+        assert!(remove_with(root.path(), |_, _| panic!("invalid filename cannot own a secret")).is_err());
+    }
+
+    #[test]
+    fn torn_or_mismatching_nonempty_entries_block_the_entire_inventory() {
+        for body in [b"{".to_vec(), serde_json::to_vec(&Entry {
+            purpose: Purpose::Provider, id: uuid::Uuid::new_v4().to_string(),
+        }).unwrap()] {
+            let root = tempfile::tempdir().unwrap();
+            let directory = ensure_directory(root.path()).unwrap();
+            let id = uuid::Uuid::new_v4().to_string();
+            fs::write(directory.join(format!("provider--{id}.json")), body).unwrap();
+            assert_eq!(remove_with(root.path(), |_, _| panic!("must validate first")).unwrap_err(), "secret-index-corrupt");
+            assert!(tracked_write(root.path(), Purpose::Provider, &id,
+                || -> Result<(), String> { panic!("must not overwrite a mismatching index") }).is_err());
+        }
+    }
+
+    #[test]
+    fn ownership_is_complete_and_durable_before_the_secret_write() {
+        let root = tempfile::tempdir().unwrap();
+        let id = uuid::Uuid::new_v4().to_string();
+        tracked_write(root.path(), Purpose::Provider, &id, || {
+            let directory = root.path().join(DIRECTORY);
+            let entries = fs::read_dir(&directory).unwrap().collect::<Vec<_>>();
+            assert_eq!(entries.len(), 1);
+            let entry = read_entry(root.path(), &entries[0].as_ref().unwrap().path()).unwrap();
+            assert_eq!(entry, Entry { purpose: Purpose::Provider, id: id.clone() });
+            assert_eq!(fs::read_dir(root.path()).unwrap().count(), 1);
+            Ok(())
+        }).unwrap();
+    }
 
     #[test]
     fn failed_creation_is_tracked_and_locked_store_remains_retryable() {

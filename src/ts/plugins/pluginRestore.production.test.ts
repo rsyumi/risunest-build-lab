@@ -15,6 +15,7 @@ vi.mock('../parser/parser.svelte', () => ({
 }))
 vi.mock('./apiV3/v3.svelte', () => ({
     loadV3Plugins: vi.fn(async () => undefined),
+    customV3ProviderMetaStore: [],
 }))
 
 import { loadV3Plugins } from './apiV3/v3.svelte'

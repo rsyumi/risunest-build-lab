@@ -58,7 +58,7 @@ export function importAndroidContentFromPicker(
 
 export function importReplayedAndroidContentSpool(
     source: AndroidSpoolReady,
-    destination: 'character' | 'module',
+    destination: 'character' | 'module' | 'auto',
 ): Promise<string | null> {
     return runSharedNativeFileOperation(
         'import',
@@ -73,7 +73,7 @@ export function importReplayedAndroidContentSpool(
 
 async function consumeAndroidContentSpool(
     source: AndroidSpoolReady,
-    destination: 'character' | 'module',
+    destination: 'character' | 'module' | 'auto',
     context: SharedNativeFileOperationContext,
 ): Promise<string | null> {
     const displayName = source.displayName
@@ -88,7 +88,14 @@ async function consumeAndroidContentSpool(
             )
             context.signal.throwIfAborted()
             const data = new TextEncoder().encode(text)
-            if (destination === 'module') {
+            const parsed = destination === 'auto' ? JSON.parse(text) : null
+            const moduleJson = parsed && typeof parsed === 'object' && (
+                parsed.type === 'risuModule'
+                || (parsed.type === 'risu' && Array.isArray(parsed.data))
+                || !!parsed.entries
+                || (parsed.type === 'regex' && !!parsed.data)
+            )
+            if (destination === 'module' || moduleJson) {
                 const { importModuleData } = await import('../process/modules')
                 await importModuleData({ name: displayName, data })
                 return 'module'

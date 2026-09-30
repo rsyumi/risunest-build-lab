@@ -10,6 +10,8 @@ mod app_update;
 mod appimage_integration;
 mod asset_repository;
 mod boot_marker;
+#[cfg(windows)]
+mod windows_session;
 mod cold_payload_codec;
 mod data_health;
 pub(crate) mod device_backup;
@@ -20,7 +22,6 @@ mod ios_lifecycle;
 #[allow(dead_code)]
 mod local_backup;
 mod logical_records;
-#[allow(dead_code)]
 mod lossless_f0;
 #[cfg(any(test, target_os = "macos"))]
 mod macos_lifecycle;
@@ -236,13 +237,15 @@ pub use app_paths::{AppPaths, Integration};
 
 /// Remembers the main window geometry beside the store. The plugin resolves its
 /// directory once at registration, so it is wired where the manifest is known.
-#[cfg(windows)]
+#[cfg(desktop)]
 fn window_state_plugin(directory: &std::path::Path) -> tauri::plugin::TauriPlugin<tauri::Wry> {
     use tauri_plugin_window_state::StateFlags;
     tauri_plugin_window_state::Builder::default()
         .with_state_flags(StateFlags::SIZE | StateFlags::POSITION | StateFlags::MAXIMIZED)
         .with_filter(|label| label == "main")
         .with_directory(directory.to_path_buf())
+        .with_default_maximized(true)
+        .with_show_after_restore(!cfg!(windows))
         .build()
 }
 
@@ -453,7 +456,14 @@ fn builder_with_main_window(
 
     #[cfg(desktop)]
     {
-        builder = builder.plugin(tauri_plugin_updater::Builder::new().build());
+        builder = builder.plugin(tauri_plugin_updater::Builder::new()
+            .relaunch_args(opened_files::relaunch_arguments(std::env::args_os(), std::env::current_dir().ok().as_deref()))
+            .build());
+    }
+    #[cfg(windows)]
+    {
+        builder = builder.manage(windows_session::SessionState::default())
+            .append_invoke_initialization_script(include_str!("windows_lifecycle.js"));
     }
 
     builder
@@ -467,15 +477,29 @@ fn builder_with_main_window(
             if app.try_state::<app_paths::AppPaths>().is_none() {
                 app.manage(app_paths::AppPaths::desktop(app.config())?.prepared()?);
             }
+            let app_data_dir = app_paths::data_root(app)?;
+            setup_native_log_state.configure_file_path(&app_data_dir);
+            app.manage(setup_native_log_state.clone());
             app.manage(app_cleanup::CleanupState::initialize(app.handle())?);
+            app.manage(native_file_jobs::NativeFileJobState::initialize(
+                app_data_dir.join("native-file-jobs"),
+            ));
             // Before the WebView exists, so no renderer call can precede it.
-            app_paths::permit_renderer_access(app.handle())?;
+            let renderer_access = app_paths::permit_renderer_access(app.handle());
+            if let Err(error) = &renderer_access {
+                let native_file_gate = app.state::<native_file_jobs::NativeFileJobState>().admission.file(true).ok();
+                let persistent_gate = app.state::<persistent_store::PersistentStoreState>().acquire_device_maintenance().ok();
+                setup_native_startup_state.record_failure(error, persistent_gate, native_file_gate);
+            }
             if let Some((config, data_directory)) = &main_window {
                 tauri::WebviewWindowBuilder::from_config(app, config)?
                     .data_directory(data_directory.clone())
                     .build()?;
             }
             let setup_result = (|| -> Result<(), String> {
+                renderer_access?;
+                #[cfg(windows)]
+                windows_session::install(app.handle())?;
                 #[cfg(target_os = "macos")]
                 macos_lifecycle::install_native_quit(app.handle())?;
                 #[cfg(any(target_os = "android", target_os = "ios"))]
@@ -511,16 +535,10 @@ fn builder_with_main_window(
                 let device_backup = device_backup::DeviceBackupState::initialize(
                     app_data_dir.join("device-backup"),
                 );
-                setup_native_log_state.configure_file_path(&app_data_dir);
-                app.manage(setup_native_log_state.clone());
-                let state = native_file_jobs::NativeFileJobState::initialize(
-                    app_data_dir.join("native-file-jobs"),
-                );
                 // Manage recovery state before acquiring either fence. If a later
                 // startup step fails, an attached fence remains live while the
                 // renderer shows the failure panel.
                 app.manage(device_backup);
-                app.manage(state);
                 let device_backup = app.state::<device_backup::DeviceBackupState>();
                 let state = app.state::<native_file_jobs::NativeFileJobState>();
                 // Recover device state before opening the PDS or permitting other
@@ -607,8 +625,11 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         app_cleanup::app_cleanup_status,
         app_cleanup::app_cleanup_request,
         app_cleanup::app_cleanup_resume,
+        app_cleanup::app_cleanup_cancel,
         external_storage::connection_commands::external_storage_list_providers,
         external_storage::connection_commands::external_storage_prepare_connection,
+        external_storage::connection_commands::external_storage_prepare_renewal,
+        external_storage::connection_commands::external_storage_unlock_connection,
         external_storage::connection_commands::external_storage_commit_connection,
         external_storage::connection_commands::external_storage_begin_authorization,
         external_storage::connection_commands::external_storage_complete_authorization,
@@ -625,7 +646,12 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         external_storage::runtime::external_storage_get_state,
         external_storage::runtime::external_storage_capture_exit_target,
         external_storage::runtime::external_storage_set_execution_session,
+        external_storage::snapshot_export_commands::external_storage_cancel_export,
+        external_storage::snapshot_export_commands::external_storage_export_retained_publication,
+        external_storage::runtime::external_storage_remove_retained_publication,
         external_storage::runtime::external_storage_set_sync_target,
+        external_storage::runtime::external_storage_set_sync_paused,
+        external_storage::runtime::external_storage_set_automatic_backup_paused,
         external_storage::runtime::external_storage_start_job,
         external_storage::runtime::external_storage_get_job,
         external_storage::runtime::external_storage_cancel_job,
@@ -645,6 +671,10 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         macos_lifecycle::macos_lifecycle_ready,
         #[cfg(target_os = "macos")]
         macos_lifecycle::macos_exit_response,
+        #[cfg(desktop)]
+        opened_files::desktop_relaunch,
+        #[cfg(windows)]
+        windows_session::desktop_flush_complete,
         native_startup_status,
         app_update::commands::app_update_environment,
         app_update::commands::app_update_check,
@@ -652,6 +682,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         app_update::commands::app_update_install,
         app_update::commands::app_update_stage_deb,
         native_media::streaming::native_media_base_url,
+        native_media::streaming::native_media_ensure,
         server_sync::commands::server_sync_status,
         server_sync::commands::server_sync_asset_status,
         server_sync::commands::server_sync_asset_policy,
@@ -713,7 +744,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         asset_repository::commands::asset_cas_read_object_range,
         asset_repository::commands::asset_cas_stat_object,
         asset_repository::commands::asset_remote_stat_object,
-        asset_repository::commands::asset_remote_read_object,
+        asset_repository::commands::asset_remote_hydrate_object,
         asset_repository::commands::asset_cas_job_begin,
         asset_repository::commands::asset_cas_job_prepare,
         asset_repository::commands::asset_cas_job_upload_open,
@@ -730,6 +761,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         device_backup::native_device_backup_recovery_complete,
         native_file_jobs::native_content_source_metadata,
         native_file_jobs::native_file_job_status,
+        native_file_jobs::native_file_job_stage_inline_asset,
         native_file_jobs::native_file_job_list,
         native_file_jobs::native_file_job_finalize,
         native_file_jobs::native_file_job_cancel,
@@ -763,9 +795,12 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         persistent_store::commands::pds_read_conversation_message_metadata_window,
         persistent_store::commands::pds_query_plugin_storage,
         persistent_store::commands::pds_list_plugin_storage,
+        persistent_store::commands::pds_read_plugin_storage_page,
         persistent_store::commands::pds_read_plugin_storage,
         persistent_store::commands::hypa::pds_read_hypa_embeddings,
         persistent_store::commands::hypa::pds_write_hypa_embeddings,
+        persistent_store::commands::hypa::pds_hypa_embedding_usage,
+        persistent_store::commands::hypa::pds_clear_hypa_embeddings,
         persistent_store::commands::pds_read_asset_alias,
         persistent_store::commands::pds_read_asset_aliases_by_keys,
         persistent_store::commands::pds_list_asset_aliases,
@@ -833,6 +868,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         persistent_store::commands::pds_begin_plugin_claim_session,
         persistent_store::commands::pds_claim_plugin_storage_value,
         persistent_store::commands::pds_close_plugin_claim_session,
+        persistent_store::commands::pds_close_plugin_claim_eligibility,
         persistent_store::commands::pds_colliding_plugin_storage_keys,
         persistent_store::commands::pds_assign_plugin_storage,
         account_credential::account_credential_read,
@@ -877,6 +913,12 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
 
 pub fn handle_run_event(_app: &tauri::AppHandle, _event: tauri::RunEvent) {
     if app_cleanup::closing(_app) { return; }
+    #[cfg(desktop)]
+    if matches!(&_event, tauri::RunEvent::Exit) { opened_files::restart_on_exit(_app); }
+    #[cfg(any(windows, target_os = "linux"))]
+    if matches!(&_event, tauri::RunEvent::WindowEvent { label, event: tauri::WindowEvent::CloseRequested { .. }, .. } if label == "main") {
+        cancel_incomplete_boot(_app);
+    }
     #[cfg(target_os = "ios")]
     if let tauri::RunEvent::Opened { urls } = &_event {
         use tauri_plugin_ios_native::IosNativeExt;
@@ -893,9 +935,22 @@ pub fn handle_run_event(_app: &tauri::AppHandle, _event: tauri::RunEvent) {
     macos_lifecycle::handle_run_event(_app, _event);
 }
 
+fn cancel_incomplete_boot(app: &tauri::AppHandle) {
+    if let Ok(root) = boot_marker_root(app) {
+        if let Err(error) = boot_marker::cancel_if_incomplete(&root) {
+            crate::nlog!("warn", "startup cancellation failed: {error}");
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    native_log::install_panic_hook();
     let mut context = tauri::generate_context!();
+    #[cfg(desktop)]
+    if let Some(window) = context.config_mut().app.windows.iter_mut().find(|window| window.label == "main") {
+        window.visible = false;
+    }
     #[cfg(desktop)]
     let paths = app_paths::AppPaths::desktop(context.config())
         .expect("application data roots unavailable");
@@ -910,7 +965,7 @@ pub fn run() {
     let main_window = None;
     #[allow(unused_mut)]
     let mut builder = builder_with_main_window(main_window);
-    #[cfg(windows)]
+    #[cfg(desktop)]
     {
         builder = builder.plugin(window_state_plugin(&paths.data));
     }
@@ -918,10 +973,22 @@ pub fn run() {
     {
         builder = builder.manage(paths.prepared().expect("application data root unavailable"));
     }
-    builder
-        .build(context)
-        .expect("error while building tauri application")
-        .run(handle_run_event);
+    match builder.build(context) {
+        Ok(app) => app.run(handle_run_event),
+        Err(error) => {
+            // Cleanup lock contention is an expected refusal while its owner runs.
+            // Other prerequisite failures still terminate, with a native diagnostic.
+            native_log::record_startup_failure(&error.to_string());
+            std::process::exit(startup_failure_exit_code(&error));
+        }
+    }
+}
+
+fn startup_failure_exit_code(error: &tauri::Error) -> i32 {
+    match error {
+        tauri::Error::Setup(error) if error.to_string() == "cleanup-app-still-running" => 0,
+        _ => 1,
+    }
 }
 
 fn header_map_to_json(header_map: &HeaderMap) -> serde_json::Value {
@@ -938,6 +1005,14 @@ fn header_map_to_json(header_map: &HeaderMap) -> serde_json::Value {
 #[cfg(test)]
 mod header_map_tests {
     use super::*;
+
+    #[test]
+    fn cleanup_owner_refusal_is_a_logged_exit_not_a_panic() {
+        let setup = |message: &str| tauri::Error::Setup(Box::<dyn std::error::Error>::from(message).into());
+        assert_eq!(startup_failure_exit_code(&setup("cleanup-app-still-running")), 0);
+        assert_eq!(startup_failure_exit_code(&setup("cleanup-lock-unavailable")), 1);
+        assert_eq!(startup_failure_exit_code(&setup("invalid native path")), 1);
+    }
     use reqwest::header::{HeaderName, HeaderValue};
 
     #[test]

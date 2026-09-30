@@ -255,6 +255,7 @@ function adb(serial, args, options = {}) {
         cwd: repositoryRoot,
         encoding: options.binary ? null : 'utf8',
         maxBuffer: 256 * 1024 * 1024,
+        windowsHide: true,
     })
     if (result.error) throw result.error
     if (result.status !== 0 && !options.allowFailure) {
@@ -268,7 +269,7 @@ function adb(serial, args, options = {}) {
 function requireSerial(options) {
     const serial = options.serial
     if (!serial) throw new Error('--serial is required')
-    const devices = execFileSync(resolveAdb(), ['devices'], { encoding: 'utf8' })
+    const devices = execFileSync(resolveAdb(), ['devices'], { encoding: 'utf8', windowsHide: true })
     const connected = devices
         .split(/\r?\n/)
         .some((line) => line.startsWith(`${serial}\tdevice`))

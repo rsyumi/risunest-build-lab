@@ -1,4 +1,6 @@
 import { save } from '@tauri-apps/plugin-dialog'
+import { language } from 'src/lang'
+import { alertConfirm } from '../alert'
 
 import { isTauri, isTauriAndroid, isTauriIOS } from '../platform'
 import { runSharedNativeFileOperation } from './nativeFileJobManager'
@@ -32,6 +34,9 @@ export async function exportOriginalData(): Promise<NativeFileJobResult | null> 
                       }],
                   })
             if (!isTauriAndroid && !isTauriIOS && !path) return null
+            if (signal.aborted)
+                throw new DOMException('File operation cancelled', 'AbortError')
+            if (!await alertConfirm(language.risuNest.backup.originalDataAccountConfirm)) return null
             if (signal.aborted)
                 throw new DOMException('File operation cancelled', 'AbortError')
             return runNativeRawRecoveryExport(

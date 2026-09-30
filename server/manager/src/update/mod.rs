@@ -30,6 +30,45 @@ const INSTALLER_GUARD_PREPARE_TIMEOUT: Duration = Duration::from_secs(45);
 const INSTALLER_GUARD_RELEASE_TIMEOUT: Duration = Duration::from_secs(30);
 const INSTALLER_GUARD_ABANDON_TIMEOUT: Duration = Duration::from_secs(300);
 
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct GuiRelaunch {
+    gui: PathBuf,
+    tray: bool,
+}
+
+pub fn prepare_gui_relaunch(root: &Path, server: &Path, tray: bool) -> Result<()> {
+    let gui = server.with_file_name(if cfg!(windows) { "risunest-sync-gui.exe" } else { "risunest-sync-gui" });
+    if std::env::current_exe().map_err(|_| "executable-unavailable")? != gui {
+        return Err("update-relaunch-path-invalid".into());
+    }
+    write_json(&directory(root).join("relaunch.json"), &GuiRelaunch { gui, tray }, "update-relaunch-unavailable")
+}
+
+pub fn cancel_gui_relaunch(root: &Path) -> Result<()> {
+    match fs::remove_file(directory(root).join("relaunch.json")) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err("update-relaunch-unavailable".into()),
+    }
+}
+
+fn relaunch_gui(root: &Path, server: &Path) -> Result<()> {
+    relaunch_gui_with(root, server, platform::gui::relaunch)
+}
+
+fn relaunch_gui_with(root: &Path, server: &Path, launch: impl FnOnce(&Path, &Path, bool) -> Result<()>) -> Result<()> {
+    let path = directory(root).join("relaunch.json");
+    if !path.exists() { return Ok(()); }
+    let intent: GuiRelaunch = read_json(&path, "update-relaunch-unavailable")?;
+    let expected = server.with_file_name(if cfg!(windows) { "risunest-sync-gui.exe" } else { "risunest-sync-gui" });
+    if intent.gui != expected || !expected.is_file() { return Err("update-relaunch-path-invalid".into()); }
+    if std::env::current_exe().ok().as_ref() != Some(&expected) {
+        launch(root, &expected, intent.tray)?;
+    }
+    cancel_gui_relaunch(root)
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum UpdatePolicy {
@@ -164,18 +203,23 @@ fn persist_json(file: tempfile::NamedTempFile, path: &Path, error: &'static str)
 }
 
 pub(crate) fn write_json<T: Serialize>(path: &Path, value: &T, error: &'static str) -> Result<()> {
+    let bytes = serde_json::to_vec(value).map_err(|_| error.to_owned())?;
+    write_bytes_atomic(path, &bytes, 0o600, error)
+}
+
+pub(crate) fn write_bytes_atomic(path: &Path, bytes: &[u8], _mode: u32, error: &'static str) -> Result<()> {
     let parent = path.parent().ok_or(error)?;
     fs::create_dir_all(parent).map_err(|_| error.to_owned())?;
-    let bytes = serde_json::to_vec(value).map_err(|_| error.to_owned())?;
-    let mut file = tempfile::NamedTempFile::new_in(parent).map_err(|_| error.to_owned())?;
-    file.write_all(&bytes).map_err(|_| error.to_owned())?;
+    let mut file = tempfile::Builder::new().prefix(".risunest-tmp-").tempfile_in(parent).map_err(|_| error.to_owned())?;
+    file.write_all(bytes).map_err(|_| error.to_owned())?;
     file.as_file().sync_all().map_err(|_| error.to_owned())?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         file.as_file()
-            .set_permissions(fs::Permissions::from_mode(0o600))
+            .set_permissions(fs::Permissions::from_mode(_mode))
             .map_err(|_| error.to_owned())?;
+        file.as_file().sync_all().map_err(|_| error.to_owned())?;
     }
     #[cfg(windows)]
     persist_json(file, path, error)?;
@@ -495,7 +539,7 @@ pub fn installer_swap_while_locked(
         Vec::new(),
         was_running,
     )?;
-    transaction.set_installer_startup_enabled(prior_startup_enabled);
+    transaction.set_prior_startup_enabled(prior_startup_enabled);
     transaction.save(root)?;
     transaction.apply(root)
 }
@@ -542,7 +586,7 @@ pub async fn installer_rollback_swap_while_locked(
     let client = crate::client::Client::new(root.to_owned())?;
     crate::lifecycle::stop(root, &client).await?;
     transaction.rollback(root)?;
-    if let Some(enabled) = transaction.installer_startup_enabled() {
+    if let Some(enabled) = transaction.prior_startup_enabled() {
         restore_installer_state(
             root,
             server,
@@ -638,7 +682,7 @@ async fn verified_installer_guard_failure(
     })
 }
 
-pub fn begin_installer_guard(root: &Path, server: &Path) -> Result<String> {
+pub fn begin_installer_guard(root: &Path, server: &Path, owner: Option<u32>) -> Result<String> {
     let nonce = risunest_sync_server::management::discovery::request_id()
         .map_err(|_| "installer-guard-unavailable".to_owned())?;
     let ready = installer_guard_path(root, &nonce, "ready")?;
@@ -658,6 +702,13 @@ pub fn begin_installer_guard(root: &Path, server: &Path) -> Result<String> {
         .args(["--server"])
         .arg(server)
         .args(["installer", "guard", &nonce]);
+    #[cfg(windows)]
+    if let Some(owner) = owner {
+        let process = crate::platform::InstallerOwner::open(owner)?;
+        command.args(["--owner", &format!("{owner}:{}", process.started()?)]);
+    }
+    #[cfg(not(windows))]
+    let _ = owner;
     platform::spawn_installer_guard(root, &mut command)?;
     let deadline = std::time::Instant::now() + INSTALLER_GUARD_PREPARE_TIMEOUT;
     while std::time::Instant::now() < deadline {
@@ -684,7 +735,15 @@ pub fn begin_installer_guard(root: &Path, server: &Path) -> Result<String> {
     Err("installer-guard-timeout".into())
 }
 
-pub async fn run_installer_guard(root: &Path, server: &Path, nonce: &str) -> Result<()> {
+pub async fn run_installer_guard(root: &Path, server: &Path, nonce: &str, owner: Option<(u32, u64)>) -> Result<()> {
+    #[cfg(windows)]
+    let owner = owner.map(|(pid, started)| {
+        let process = crate::platform::InstallerOwner::open(pid)?;
+        if process.started()? != started { return Err("installer-owner-unavailable".to_owned()); }
+        Ok(process)
+    }).transpose()?;
+    #[cfg(not(windows))]
+    let _ = owner;
     let ready = installer_guard_path(root, nonce, "ready")?;
     let error_path = installer_guard_path(root, nonce, "error")?;
     let release = installer_guard_path(root, nonce, "release")?;
@@ -705,12 +764,12 @@ pub async fn run_installer_guard(root: &Path, server: &Path, nonce: &str) -> Res
             if let Some(RecoveryOutcome::RolledBack {
                 was_running: recovered_was_running,
                 source_version,
-                installer_startup_enabled,
+                prior_startup_enabled: recovered_startup_enabled,
                 ..
             }) = recover_transaction(root, &install)?
             {
                 was_running = recovered_was_running;
-                if let Some(enabled) = installer_startup_enabled {
+                if let Some(enabled) = recovered_startup_enabled {
                     prior_startup_enabled = enabled;
                     restore_installer_state(
                         root,
@@ -752,7 +811,7 @@ pub async fn run_installer_guard(root: &Path, server: &Path, nonce: &str) -> Res
             .await);
         }
         let deadline = tokio::time::Instant::now() + INSTALLER_GUARD_ABANDON_TIMEOUT;
-        while tokio::time::Instant::now() < deadline {
+        loop {
             if cancel.is_file() {
                 let _ = fs::remove_file(&cancel);
                 return Err(verified_installer_guard_failure(
@@ -772,6 +831,14 @@ pub async fn run_installer_guard(root: &Path, server: &Path, nonce: &str) -> Res
                 fs::remove_file(&ready).map_err(|_| "installer-guard-release-failed".to_owned())?;
                 return Ok(());
             }
+            #[cfg(windows)]
+            let abandoned = match &owner {
+                Some(owner) => !owner.is_alive()?,
+                None => tokio::time::Instant::now() >= deadline,
+            };
+            #[cfg(not(windows))]
+            let abandoned = tokio::time::Instant::now() >= deadline;
+            if abandoned { break; }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
         Err(verified_installer_guard_failure(
@@ -987,6 +1054,41 @@ impl Drop for ActivityGuard {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn failed_gui_relaunch_preserves_intent_for_a_journalless_retry() {
+        let temp = tempfile::tempdir().unwrap();
+        let server = temp.path().join("risunest-sync-server");
+        let gui = server.with_file_name(if cfg!(windows) { "risunest-sync-gui.exe" } else { "risunest-sync-gui" });
+        std::fs::write(&gui, b"synthetic").unwrap();
+        let path = super::directory(temp.path()).join("relaunch.json");
+        super::write_json(&path, &super::GuiRelaunch { gui: gui.clone(), tray: true }, "write-failed").unwrap();
+        assert_eq!(super::relaunch_gui_with(temp.path(), &server, |_, _, _| Err("synthetic-launch-failure".into())).unwrap_err(), "synthetic-launch-failure");
+        assert!(path.exists());
+        assert!(!super::directory(temp.path()).join("transaction.json").exists());
+        super::relaunch_gui_with(temp.path(), &server, |root, target, tray| {
+            assert_eq!(root, temp.path());
+            assert_eq!(target, gui.as_path());
+            assert!(tray);
+            Ok(())
+        }).unwrap();
+        assert!(!path.exists());
+        super::relaunch_gui_with(temp.path(), &server, |_, _, _| panic!("intent already consumed")).unwrap();
+    }
+
+    #[test]
+    fn atomic_service_definition_replacement_keeps_complete_bytes_and_no_temporary_files() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("synthetic.service");
+        super::write_bytes_atomic(&path, b"old complete", 0o644, "write-failed").unwrap();
+        super::write_bytes_atomic(&path, b"new complete", 0o644, "write-failed").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"new complete");
+        assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
+        #[cfg(unix)] {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o644);
+        }
+    }
+
     use super::*;
 
     #[test]
@@ -1111,7 +1213,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            run_installer_guard(root.path(), &root.path().join("server"), &nonce)
+            run_installer_guard(root.path(), &root.path().join("server"), &nonce, None)
                 .await
                 .unwrap_err(),
             "installer-guard-cancelled"

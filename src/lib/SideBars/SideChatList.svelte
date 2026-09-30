@@ -12,7 +12,7 @@
     import Button from "../UI/GUI/Button.svelte";
     import TextInput from "../UI/GUI/TextInput.svelte";
 
-    import { addNewChat, duplicateChat, editSelectedChatList, exportChat, importChat, exportAllChats, removeChat } from "src/ts/characters";
+    import { addNewChat, duplicateChat, editSelectedChatList as applyChatListEdit, exportChat, importChat, exportAllChats, removeChat } from "src/ts/characters";
     import { alertChatOptions, alertConfirm, alertError, alertNormal, alertSelect, alertStore } from "src/ts/alert";
     import { sortableOptions } from "src/ts/util";
     import { createMultiuserRoom } from "src/ts/sync/multiuser";
@@ -41,6 +41,33 @@
     let sorted = $state(0)
     let opened = 0
     let sortableLoadId = 0
+
+    async function editSelectedChatList(...args: Parameters<typeof applyChatListEdit>): Promise<boolean> {
+        try {
+            return await applyChatListEdit(...args)
+        } catch (error) {
+            alertError(error)
+            return false
+        }
+    }
+
+    function editFolder(characterId: string, folderId: string, update: (folder: NonNullable<character['chatFolders']>[number]) => void) {
+        return editSelectedChatList(characterId, 'edit-chat-folder', (character) => {
+            const folder = character.chatFolders?.find((candidate) => candidate.id === folderId)
+            if (!folder) return false
+            update(folder)
+            return null
+        })
+    }
+
+    function renameChat(characterId: string, chatId: string, name: string) {
+        return editSelectedChatList(characterId, 'rename-chat', (character) => {
+            const chat = character.chats.find((candidate) => candidate.id === chatId)
+            if (!chat) return false
+            chat.name = name
+            return null
+        })
+    }
 
     const destroySortable = () => {
         if (folderStb) {
@@ -152,7 +179,7 @@
 
     $effect(() => {
         sorted
-        chara.chatFolders.length
+        chara.chatFolders?.length
         chara.chats.length
         void createStb()
         return () => {
@@ -180,7 +207,7 @@
                 <button 
                     onclick={() => {
                         if(!editMode) {
-                            chara.chatFolders[i].folded = !folder.folded
+                            void editFolder(chara.chaId, folder.id, (current) => { current.folded = !current.folded })
                         }
                     }}
                     class="flex items-center text-textcolor border-solid border-0 border-darkborderc p-2 cursor-pointer rounded-md"
@@ -193,7 +220,10 @@
                     class:bg-pink-900={folder.color === 'pink'}
                 >
                     {#if editMode}
-                        <TextInput bind:value={chara.chatFolders[i].name} className="grow min-w-0" padding={false}/>
+                        <TextInput value={folder.name} onchange={(e) => {
+                            const name = e.currentTarget.value
+                            void editFolder(chara.chaId, folder.id, (current) => { current.name = name })
+                        }} className="grow min-w-0" padding={false}/>
                     {:else}
                         <span>{folder.name}</span>
                     {/if}
@@ -204,12 +234,16 @@
                             }
                         }} class="text-textcolor2 hover:text-green-500 mr-1 cursor-pointer" onclick={async (e) => {
                             e.stopPropagation()
+                            const characterId = chara.chaId
+                            const folderId = folder.id
                             const sel = parseInt(await alertSelect([language.changeFolderColor, language.cancel]))
                             switch (sel) {
                                 case 0:
                                     const colors = ["red","green","blue","yellow","indigo","purple","pink","default"]
                                     const sel = parseInt(await alertSelect(colors))
-                                    folder.color = colors[sel]
+                                    if (Number.isInteger(sel) && sel >= 0 && sel < colors.length) {
+                                        await editFolder(characterId, folderId, (current) => { current.color = colors[sel] })
+                                    }
                                     break
                             }
                         }}>
@@ -231,16 +265,17 @@
                             }
                         }} class="text-textcolor2 hover:text-green-500 cursor-pointer" onclick={async (e) => {
                             e.stopPropagation()
+                            const characterId = chara.chaId
+                            const folderId = folder.id
                             const d = await alertConfirm(`${language.removeConfirm}${folder.name}`)
                             if (d) {
-                                const folders = chara.chatFolders
-                                folders.splice(i, 1)
-                                chara.chats.forEach(chat => {
-                                    if (chat.folderId == folder.id) {
-                                        chat.folderId = null
-                                    }
+                                await editSelectedChatList(characterId, 'remove-chat-folder', (character) => {
+                                    const index = character.chatFolders?.findIndex((candidate) => candidate.id === folderId) ?? -1
+                                    if (index < 0) return false
+                                    character.chatFolders.splice(index, 1)
+                                    for (const chat of character.chats) if (chat.folderId === folderId) chat.folderId = null
+                                    return null
                                 })
-                                chara.chatFolders = folders
                             }
                         }}>
                             <TrashIcon size={18}/>
@@ -262,7 +297,7 @@
                         }
                     }} class="risu-chats flex items-center text-textcolor border-solid border-0 border-darkborderc p-2 cursor-pointer rounded-md"class:bg-selected={chatIndex === chara.chatPage}>
                         {#if editMode}
-                            <TextInput bind:value={chat.name} className="grow min-w-0" padding={false}/>
+                            <TextInput value={chat.name} onchange={(e) => renameChat(chara.chaId, chat.id, e.currentTarget.value)} className="grow min-w-0" padding={false}/>
                         {:else}
                             <span>{chat.name}</span>
                         {/if}
@@ -364,7 +399,7 @@
             class="flex items-center text-textcolor border-solid border-0 border-darkborderc p-2 cursor-pointer rounded-md"
             class:bg-selected={i === chara.chatPage}>
                 {#if editMode}
-                    <TextInput bind:value={chara.chats[i].name} className="grow min-w-0" padding={false}/>
+                    <TextInput value={chat.name} onchange={(e) => renameChat(chara.chaId, chat.id, e.currentTarget.value)} className="grow min-w-0" padding={false}/>
                 {:else}
                     <span>{chat.name}</span>
                 {/if}
@@ -484,17 +519,11 @@
                 <BookmarkCheckIcon size={18}/>
             </button>
             <button class="ml-auto text-textcolor2 hover:text-green-500 mr-2 cursor-pointer" onclick={() => {
-                if (!chara.chatFolders) {
-                    chara.chatFolders = []
-                }
-                const folders = chara.chatFolders
-                const length = chara.chatFolders.length
-                folders.unshift({
-                    id: v4(),
-                    name: `New Folder ${length + 1}`,
-                    folded: false,
+                void editSelectedChatList(chara.chaId, 'create-chat-folder', (character) => {
+                    character.chatFolders ??= []
+                    character.chatFolders.unshift({ id: v4(), name: `New Folder ${character.chatFolders.length + 1}`, folded: false })
+                    return null
                 })
-                chara.chatFolders = folders
             }}>
                 <FolderPlusIcon size={18}/>
             </button>
@@ -506,7 +535,11 @@
     </div>
     {#if chara.type === 'group'}
     <div class="flex mt-2 items-center">
-        <CheckInput bind:check={chara.orderByOrder} name={language.orderByOrder}/>
+        <CheckInput check={chara.orderByOrder} onChange={(value) => editSelectedChatList(chara.chaId, 'group-chat-order', (character) => {
+            if (character.type !== 'group') return false
+            character.orderByOrder = value
+            return null
+        })} name={language.orderByOrder}/>
     </div>
     {/if}
 </div>

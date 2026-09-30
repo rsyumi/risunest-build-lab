@@ -99,6 +99,25 @@ describe('RisuNestStorageDashboard', () => {
             (candidate) => candidate.textContent?.trim() === text,
         )
 
+    it.each(['server', 'temp'] as const)('keeps snapshot restore usable when the first %s inventory fails', async source => {
+        if (source === 'server') server.getServerSyncBackupInventory.mockRejectedValueOnce(new Error('inventory'))
+        else server.getServerSyncCacheUsage.mockRejectedValueOnce(new Error('cache'))
+        const target = setup()
+        await vi.waitFor(() => expect(target.querySelector('[data-storage-backup-list="snapshots"]')).not.toBeNull())
+        expect(target.querySelector('[data-storage-summary]')).toBeNull()
+        expect(exact(target, languageEnglish.risuNest.storage.restoreSnapshot)?.disabled).toBe(false)
+        expect(target.textContent).toContain(languageEnglish.risuNest.storage.loadFailed)
+    })
+
+    it('localizes snapshot reasons without exposing unknown tokens', async () => {
+        maintenance.listNativePersistentSnapshots.mockResolvedValueOnce(['manual', 'periodic', 'pre-restore', 'data-health-repair', 'synthetic-unknown'].map((reason, index) => ({ id: `snapshot-${index}`, reason, bytes: 1, reclaimableBytes: 0, modifiedAt: 1 })))
+        const target = setup()
+        await vi.waitFor(() => expect(target.querySelectorAll('[data-storage-backup-list="snapshots"] [data-storage-backup-row]')).toHaveLength(5))
+        expect(target.textContent).toContain(languageEnglish.risuNest.storage.snapshotReasons.dataHealthRepair)
+        expect(target.textContent).not.toContain('synthetic-unknown')
+        expect(target.textContent).not.toContain('data-health-repair')
+    })
+
     function setup(
         statsPromise: Promise<typeof stats> = Promise.resolve(stats),
         serverBackups: ManagedServerSyncBackup[] = [],
@@ -247,7 +266,7 @@ describe('RisuNestStorageDashboard', () => {
             ).toHaveBeenCalledOnce(),
         )
         expect(alerts.alertConfirm).toHaveBeenCalledWith(
-            'This will delete 2 unused images (2.0 KiB). Continue?',
+            'This will delete 2 unused files (2.0 KiB). Continue?',
         )
         expect(server.cleanupServerSyncCache).not.toHaveBeenCalled()
     })
@@ -296,6 +315,16 @@ describe('RisuNestStorageDashboard', () => {
         expect(keptRows[2]).toContain('Too new to delete yet')
     })
 
+    it('shows the cleanup blocker instead of offering deletion', async () => {
+        const target = setup()
+        maintenance.previewNativePersistentAssetGc.mockResolvedValue({ candidateCount: 0, candidateBytes: 0, deletedCount: 0, deletedBytes: 0, blockers: ['plugin-storage-opaque'] })
+        await vi.waitFor(() => expect([...target.querySelectorAll('button')].some(button => button.textContent?.trim() === 'Find')).toBe(true))
+        ;[...target.querySelectorAll('button')].find(button => button.textContent?.trim() === 'Find')!.click()
+        await vi.waitFor(() => expect(target.textContent).toContain('Plugin data may reference these files.'))
+        expect([...target.querySelectorAll('button')].some(button => button.textContent?.trim() === 'Delete now')).toBe(false)
+        expect(maintenance.executeNativePersistentAssetGc).not.toHaveBeenCalled()
+    })
+
     it('shows the search as a progress panel while the cleanup preview runs', async () => {
         const target = setup()
         let release: (value: unknown) => void = () => {}
@@ -310,7 +339,7 @@ describe('RisuNestStorageDashboard', () => {
         find()!.click()
         await vi.waitFor(() =>
             expect(target.querySelector('[data-storage-gc-progress]')?.textContent).toContain(
-                'Looking for unused images',
+                'Looking for unused files',
             ),
         )
         release({ candidateCount: 0, candidateBytes: 0, deletedCount: 0, deletedBytes: 0, blockers: [], candidates: [] })
@@ -321,7 +350,7 @@ describe('RisuNestStorageDashboard', () => {
 
     it('says that clearing a link does not delete the file', async () => {
         const target = setup()
-        await vi.waitFor(() => expect(target.textContent).toContain('Unused images'))
+        await vi.waitFor(() => expect(target.textContent).toContain('Unused files'))
         expect(target.textContent).toContain(
             'Clearing a broken link in the data check does not delete the file.',
         )
@@ -348,7 +377,7 @@ describe('RisuNestStorageDashboard', () => {
         ))
         expect(backups.remove).not.toHaveBeenCalled()
         expect(languageKorean.risuNest.storage.deleteConflictBackupConfirm)
-            .toBe('이 충돌 백업을 삭제할까요? 삭제한 충돌 백업은 복구할 수 없습니다.')
+            .toBe('이 충돌 백업을 삭제하시겠습니까? 삭제한 충돌 백업은 복구할 수 없습니다.')
     })
 
     it('orders all backup lists before the storage action rows', async () => {
@@ -394,7 +423,7 @@ describe('RisuNestStorageDashboard', () => {
         await vi.waitFor(() => expect(maintenance.restartNativeApp).toHaveBeenCalledOnce())
         expect(maintenance.restoreNativePersistentSnapshot).toHaveBeenCalledOnce()
         expect(alerts.alertConfirm).toHaveBeenCalledWith(languageEnglish.restoreLocalSnapshotConfirm)
-        expect(languageKorean.restoreLocalSnapshotConfirm).toBe('현재 데이터를 이 로컬 스냅샷으로 교체하고 앱을 다시 시작할까요?')
+        expect(languageKorean.restoreLocalSnapshotConfirm).toBe('현재 데이터를 이 로컬 스냅샷으로 교체하고 앱을 다시 시작하시겠습니까?')
     })
 
     it('lists sync backups with restore and delete, and clears temporary files, through the dashboard actions', async () => {

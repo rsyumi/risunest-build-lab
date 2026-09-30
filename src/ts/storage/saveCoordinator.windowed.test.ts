@@ -130,6 +130,30 @@ describe('SaveCoordinator', () => {
             }
         }
 
+        it('retires flushed windowed ownership before deselection so root saves remain available', async () => {
+            const harness = makeWindowedHarness()
+            await harness.coordinator.flushPendingDataLocally('leave-windowed')
+            harness.coordinator.retireWindowedSelectedConversation()
+            harness.replaceAuthority(null)
+            harness.replaceSelected(null as any)
+            harness.database.username = 'Changed after Home'
+            harness.coordinator.markPersistentDataDirty(0)
+            await harness.coordinator.flushPendingDataLocally('save-after-Home')
+            expect(harness.commit).toHaveBeenCalledOnce()
+            expect(harness.commit.mock.calls[0][0]).toMatchObject({ rootMutations: [
+                { type: 'set', key: 'username', value: 'Changed after Home' },
+            ] })
+        })
+
+        it('does not retire windowed ownership while a zero-byte edit remains pending', async () => {
+            const harness = makeWindowedHarness()
+            harness.database.username = 'Pending root edit'
+            harness.coordinator.markPersistentDataDirty(0)
+            expect(() => harness.coordinator.retireWindowedSelectedConversation()).toThrow('pending persistence')
+            await harness.coordinator.flushPendingDataLocally('complete-before-leaving')
+            expect(() => harness.coordinator.retireWindowedSelectedConversation()).not.toThrow()
+        })
+
         function recordWindowedMutation(
             coordinator: SaveCoordinator,
             options: {

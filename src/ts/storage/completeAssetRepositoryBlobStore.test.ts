@@ -4,12 +4,13 @@ import { createTauriCasObjectUrl } from './platformBlobStore'
 import {
     createCompleteAssetRepositoryBlobStore,
     createCompleteTypedAssetRepository,
+    ConditionalAssetWriteConflictError,
     type CompleteAssetAliasStore,
     type DurableAssetWriteSessionFactory,
     type RemoteAssetReader,
 } from './assetRepository'
 import type { ImmutablePayloadCas } from './payloadCas'
-import type { AssetAlias, AssetAliasIdentity } from './persistentDataStore'
+import { RevisionConflictError, type AssetAlias, type AssetAliasIdentity } from './persistentDataStore'
 
 const assetHash = 'a'.repeat(64)
 const inlayHash = 'b'.repeat(64)
@@ -352,7 +353,7 @@ describe('complete AssetRepository BlobStore facade', () => {
         expect(release).toHaveBeenCalledExactlyOnceWith('aborted')
     })
 
-    it('retains durable ownership when seal commits natively but its IPC response fails', async () => {
+    it('releases durable ownership when seal commits natively but its IPC response fails', async () => {
         const sealFailure = new Error('seal response lost after durable mutation')
         const release = vi.fn(async () => undefined)
         let durableSealed = false
@@ -386,11 +387,11 @@ describe('complete AssetRepository BlobStore facade', () => {
         await expect(prepared.activate()).rejects.toBe(sealFailure)
 
         expect(durableSealed).toBe(true)
-        expect(release).not.toHaveBeenCalled()
+        expect(release).toHaveBeenCalledExactlyOnceWith('aborted')
         expect(store.commitAssetAlias).not.toHaveBeenCalled()
     })
 
-    it('aborts an unsealed direct write but retains a sealed session on ambiguous activation failure', async () => {
+    it('releases both unsealed and sealed sessions on activation failure', async () => {
         const preSealRelease = vi.fn(async () => undefined)
         const preSealFailure = new Error('prepare failed')
         const preSealSessions: DurableAssetWriteSessionFactory = {
@@ -437,7 +438,75 @@ describe('complete AssetRepository BlobStore facade', () => {
             name: 'sealed.bin',
             ext: 'bin',
         })).rejects.toBe(activationFailure)
-        expect(sealedRelease).not.toHaveBeenCalled()
+        expect(sealedRelease).toHaveBeenCalledExactlyOnceWith('aborted')
+    })
+
+    it.each(['seal', 'root', 'commit', 'conflict'] as const)('settles failed %s activation and prevents reactivation', async (point) => {
+        const failure = point === 'conflict' ? new RevisionConflictError(10, 11) : new Error(point)
+        const release = vi.fn(async () => undefined)
+        const store = createStore({
+            ...(point === 'root' ? { readRoot: vi.fn(async () => { throw failure }) } : {}),
+            ...(['commit', 'conflict'].includes(point) ? { commitAssetAlias: vi.fn(async () => { throw failure }) } : {}),
+        })
+        const { facade } = createFacade({ store, writeSessions: { begin: async () => ({
+            prepare: createCas().prepare,
+            seal: async () => { if (point === 'seal') throw failure },
+            release,
+        }) } })
+        const prepared = await facade.prepareOwnedPut('assets/fail.bin', Uint8Array.of(1), {
+            kind: 'asset', mime: 'application/octet-stream', name: 'fail.bin', ext: 'bin',
+        })
+        await expect(prepared.activate()).rejects.toBe(failure)
+        await expect(prepared.activate()).rejects.toThrow('already failed')
+        expect(release).toHaveBeenCalledExactlyOnceWith('aborted')
+        if (point === 'conflict') expect(store.commitAssetAlias).toHaveBeenCalledTimes(8)
+    })
+
+    it('retains a committed alias and retries failed release without repeating its commit', async () => {
+        const release = vi.fn(async () => undefined).mockRejectedValueOnce(new Error('response lost'))
+        const { facade, store } = createFacade({ writeSessions: { begin: async () => ({
+            prepare: createCas().prepare, seal: async () => undefined, release,
+        }) } })
+        await expect(facade.put('assets/release.bin', Uint8Array.of(1), {
+            kind: 'asset', mime: 'application/octet-stream', name: 'release.bin', ext: 'bin',
+        })).resolves.toMatchObject({ size: 1 })
+        expect(store.commitAssetAlias).toHaveBeenCalledOnce()
+        expect(release.mock.calls).toEqual([['committed'], ['committed']])
+    })
+
+    it('preserves an ambiguously committed alias while releasing its sealed session', async () => {
+        let committed: AssetAlias | undefined
+        const failure = new Error('commit response lost')
+        const release = vi.fn(async () => undefined)
+        const { facade } = createFacade({ store: createStore({ commitAssetAlias: async (alias) => {
+            committed = alias
+            throw failure
+        } }), writeSessions: { begin: async () => ({
+            prepare: createCas().prepare, seal: async () => undefined, release,
+        }) } })
+        await expect(facade.put('assets/ambiguous.bin', Uint8Array.of(1), {
+            kind: 'asset', mime: 'application/octet-stream', name: 'ambiguous.bin', ext: 'bin',
+        })).rejects.toBe(failure)
+        expect(committed?.objectHash).toBe(assetHash)
+        expect(release).toHaveBeenCalledExactlyOnceWith('aborted')
+    })
+
+    it.each([false, true])('surfaces exhausted release failures after committed=%s without repeating activation', async (committed) => {
+        const failure = new Error('release unavailable')
+        const release = vi.fn(async () => { throw failure })
+        const { facade, store } = createFacade({ writeSessions: { begin: async () => ({
+            prepare: createCas().prepare,
+            seal: async () => { if (!committed) throw new Error('seal unavailable') },
+            release,
+        }) } })
+        const prepared = await facade.prepareOwnedPut('assets/release-failure.bin', Uint8Array.of(1), {
+            kind: 'asset', mime: 'application/octet-stream', name: 'release-failure.bin', ext: 'bin',
+        })
+        if (committed) await expect(prepared.activate()).rejects.toBe(failure)
+        else await expect(prepared.activate()).rejects.toBeInstanceOf(AggregateError)
+        await expect(prepared.activate()).rejects.toThrow(committed ? 'already activated' : 'already failed')
+        expect(store.commitAssetAlias).toHaveBeenCalledTimes(committed ? 1 : 0)
+        expect(release.mock.calls).toEqual(committed ? [['committed'], ['committed']] : [['aborted'], ['aborted']])
     })
 
     it('uses bounded CAS reads for a non-null object hash', async () => {
@@ -641,4 +710,29 @@ describe('complete AssetRepository BlobStore facade', () => {
             height: 23,
         }))
     })
+})
+
+
+it('rechecks conditional source identity after a competing commit instead of overwriting the replacement', async () => {
+    const original = assetAlias()
+    let current = original
+    const release = vi.fn(async () => undefined)
+    const writeSessions: DurableAssetWriteSessionFactory = { begin: async () => ({
+        prepare: async data => ({ contentHash: assetHash, byteSize: data.length, physicalKey: `assets/objects/aa/${'a'.repeat(62)}`, deduplicated: false }),
+        seal: async () => undefined,
+        release,
+    }) }
+    const store = createStore({
+        readAssetAlias: async () => ({ revision: 10, value: current }),
+        commitAssetAlias: vi.fn(async () => {
+            current = assetAlias({ objectHash: inlayHash })
+            throw new RevisionConflictError(10, 11)
+        }),
+    })
+    const { facade } = createFacade({ store, writeSessions })
+    const prepared = await facade.prepareOwnedPut(original.key, Uint8Array.of(1), { kind: 'asset', mime: 'image/webp', name: 'optimized', ext: 'webp' })
+    await expect(prepared.activate(original)).rejects.toBeInstanceOf(ConditionalAssetWriteConflictError)
+    expect(store.commitAssetAlias).toHaveBeenCalledOnce()
+    expect(current.objectHash).toBe(inlayHash)
+    expect(release).toHaveBeenCalledWith('aborted')
 })

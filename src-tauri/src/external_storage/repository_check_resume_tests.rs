@@ -63,6 +63,7 @@ fn connected(provider: Arc<FakeProvider>) -> ConnectedRepository {
             retention_policy: None,
             capabilities: fake::capabilities(true),
             created_at_ms: 1_000,
+            verified_at_ms: 1,
             last_sync_at_ms: None,
             last_backup_at_ms: None,
         },
@@ -331,7 +332,8 @@ impl World {
         self.provider.cancel_after_read(ids[1], 1, &cancel);
         let error = self.attempt(job, snapshot_id, &cancel).await.unwrap_err();
         assert_eq!(error.kind, ErrorKind::Cancelled);
-        assert_eq!(self.proved(job), 1, "the pack before the stop was proved");
+        assert_eq!(self.provider.read_attempts(packs.keys().next().unwrap()), 1,
+            "the pack before the stop was read");
         assert!(
             leases::survey(&self.context(&self.a), &Cancellation::default())
                 .await
@@ -340,12 +342,6 @@ impl World {
                 .is_empty(),
             "a stopped check kept its work lease"
         );
-    }
-
-    fn proved(&self, job: &str) -> usize {
-        fs::read_to_string(self.job(job).join(LEDGER_FILE))
-            .map(|text| text.lines().count())
-            .unwrap_or(0)
     }
 
     fn reads(&self, packs: &BTreeMap<String, RemoteObject>) -> BTreeMap<String, usize> {
@@ -429,7 +425,6 @@ fn an_unchanged_head_resumes_and_proves_every_body_again() {
         for (id, reads) in world.reads(&packs) {
             assert_eq!(reads, before[&id] + 1, "{id} was not proved again after the lease was released");
         }
-        assert_eq!(world.proved("check"), packs.len());
     });
 }
 

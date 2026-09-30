@@ -116,7 +116,7 @@ fn section_digest(
     metadata: &str,
 ) -> Result<(u64, String)> {
     let mut hash = start_section_hash(metadata.as_bytes());
-    let mut statement=connection.prepare("SELECT ordinal,length(payload),sha256 FROM records WHERE session=?1 AND spool=?2 AND section=?3 ORDER BY ordinal")?;
+    let mut statement=connection.prepare("SELECT ordinal,length(payload),sha256,rowid FROM records WHERE session=?1 AND spool=?2 AND section=?3 ORDER BY ordinal")?;
     let mut rows = statement.query(params![id, spool.key(), section])?;
     let mut count = 0u64;
     while let Some(row) = rows.next()? {
@@ -129,13 +129,16 @@ fn section_digest(
         )?;
         start_record_hash(&mut hash, count, length as u64);
         let mut payload_hash = Sha256::new();
+        let payload = connection.blob_open("main",
+            "records", "payload", row.get(3)?, true)?;
+        let mut buffer = vec![0; MAX_CHUNK_BYTES];
         let mut offset = 0;
         while offset < length {
-            let bytes:Vec<u8>=connection.query_row("SELECT substr(payload,?5,?6) FROM records WHERE session=?1 AND spool=?2 AND section=?3 AND ordinal=?4",params![id,spool.key(),section,ordinal,offset+1,MAX_CHUNK_BYTES as i64],|r|r.get(0))?;
-            require(!bytes.is_empty(), "Device row ended early")?;
-            offset += bytes.len() as i64;
-            hash.update(&bytes);
-            payload_hash.update(&bytes);
+            let take = ((length - offset) as usize).min(buffer.len());
+            payload.read_at_exact(&mut buffer[..take], offset as usize)?;
+            offset += take as i64;
+            hash.update(&buffer[..take]);
+            payload_hash.update(&buffer[..take]);
         }
         require(
             hex::encode(payload_hash.finalize()) == recorded_hash,
@@ -231,13 +234,14 @@ fn read_blob_range(
         "Binary object is incomplete or offset is invalid",
     )?;
     let end = offset.saturating_add(length as u64).min(bytes);
-    let mut statement=connection.prepare("SELECT offset,bytes FROM chunks WHERE session=?1 AND spool=?2 AND object_id=?3 AND offset<?5 AND offset+length(bytes)>?4 ORDER BY offset")?;
+    let mut statement=connection.prepare("SELECT offset,bytes FROM chunks WHERE session=?1 AND spool=?2 AND object_id=?3 AND offset>?4-?6 AND offset<?5 AND offset+length(bytes)>?4 ORDER BY offset")?;
     let mut rows = statement.query(params![
         id,
         spool.key(),
         object,
         sql_integer(offset)?,
-        sql_integer(end)?
+        sql_integer(end)?,
+        MAX_CHUNK_BYTES as i64
     ])?;
     let mut output = Vec::with_capacity(length.min((bytes - offset) as usize));
     let mut position = offset;
@@ -524,8 +528,12 @@ impl DeviceBackupState {
         let inner = self.lock()?;
         let connection = inner.connection.as_ref().unwrap();
         session_for(connection, id)?;
-        let (total,bytes):(u64,Vec<u8>)=connection.query_row("SELECT length(payload),substr(payload,?5,?6) FROM records WHERE session=?1 AND spool=?2 AND section=?3 AND ordinal=?4",params![id,spool.key(),section,sql_integer(ordinal)?,sql_integer(offset+1)?,length as i64],|r|Ok((read_unsigned(r,0)?,r.get(1)?)))?;
+        let (rowid,total):(i64,u64)=connection.query_row("SELECT rowid,length(payload) FROM records WHERE session=?1 AND spool=?2 AND section=?3 AND ordinal=?4",params![id,spool.key(),section,sql_integer(ordinal)?],|r|Ok((r.get(0)?,read_unsigned(r,1)?)))?;
         require(offset <= total, "Row offset is beyond its end")?;
+        let payload = connection.blob_open("main",
+            "records", "payload", rowid, true)?;
+        let mut bytes = vec![0; length.min((total - offset) as usize)];
+        payload.read_at_exact(&mut bytes, offset as usize)?;
         Ok(bytes)
     }
 
@@ -651,4 +659,42 @@ fn sql_integer(value: u64) -> Result<i64> {
 fn read_unsigned(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<u64> {
     let value: i64 = row.get(index)?;
     u64::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(index, value))
+}
+
+#[cfg(test)]
+mod bounded_read_tests {
+    use super::*;
+
+    #[test]
+    fn large_row_digests_and_unaligned_blob_ranges_preserve_exact_bytes() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE records(session TEXT,spool TEXT,section TEXT,ordinal INTEGER,payload BLOB,sha256 TEXT);
+            CREATE TABLE blobs(session TEXT,spool TEXT,object_id TEXT,bytes INTEGER,sha256 TEXT,sealed INTEGER);
+            CREATE TABLE chunks(session TEXT,spool TEXT,object_id TEXT,offset INTEGER,bytes BLOB,PRIMARY KEY(session,spool,object_id,offset));").unwrap();
+        for size in [8 * 1024 * 1024, 32 * 1024 * 1024, MAX_GRAPH_BYTES] {
+            let value: Vec<u8> = (0..size).map(|index| (index % 251) as u8).collect();
+            let digest = hex::encode(Sha256::digest(&value));
+            db.execute("INSERT INTO records VALUES ('s','source','section',0,?1,?2)", params![value, digest]).unwrap();
+            let mut expected = start_section_hash(b"{}");
+            start_record_hash(&mut expected, 0, size as u64);
+            expected.update(&value);
+            assert_eq!(section_digest(&db, "s", Spool::Source, "section", "{}").unwrap(),
+                (1, hex::encode(expected.finalize())));
+            db.execute("INSERT INTO blobs VALUES ('s','source','object',?1,?2,1)", params![size as i64, digest]).unwrap();
+            for (index, chunk) in value.chunks(MAX_CHUNK_BYTES).enumerate() {
+                db.execute("INSERT INTO chunks VALUES ('s','source','object',?1,?2)",
+                    params![(index * MAX_CHUNK_BYTES) as i64, chunk]).unwrap();
+            }
+            for offset in [0, MAX_CHUNK_BYTES - 3, size / 2 + 7, size - 5, size] {
+                let actual = read_blob_range(&db, "s", Spool::Source, "object", offset as u64, MAX_CHUNK_BYTES).unwrap();
+                assert_eq!(actual, value[offset..(offset + MAX_CHUNK_BYTES).min(size)]);
+            }
+            db.execute("DELETE FROM chunks WHERE offset=?1", [MAX_CHUNK_BYTES as i64]).unwrap();
+            assert!(read_blob_range(&db, "s", Spool::Source, "object",
+                (MAX_CHUNK_BYTES - 3) as u64, MAX_CHUNK_BYTES).is_err());
+            db.execute("UPDATE records SET sha256='wrong'", []).unwrap();
+            assert!(section_digest(&db, "s", Spool::Source, "section", "{}").is_err());
+            db.execute_batch("DELETE FROM records; DELETE FROM blobs; DELETE FROM chunks;").unwrap();
+        }
+    }
 }

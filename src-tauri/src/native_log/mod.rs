@@ -474,6 +474,42 @@ pub(crate) fn install_panic_hook() {
     install_panic_hook_once_for(&PANIC_HOOK_INSTALLED, global_state());
 }
 
+pub(crate) fn record_startup_failure(message: &str) {
+    global_state().record("error", "startup", message);
+    #[cfg(desktop)]
+    append_startup_diagnostic(&std::env::temp_dir().join("risunest-startup-failure.log"), message);
+    #[cfg(any(target_os = "android", target_os = "ios", target_os = "macos"))]
+    platform_startup_diagnostic(message);
+    eprintln!("{}", format_console_line("error", "startup", message));
+}
+
+#[cfg(any(target_os = "android", target_os = "ios", target_os = "macos"))]
+fn platform_startup_diagnostic(message: &str) {
+    let bounded: String = format_console_line("error", "startup", message).chars().take(4096).collect();
+    let message = std::ffi::CString::new(bounded.replace('\0', " ")).unwrap();
+    #[cfg(target_os = "android")]
+    {
+        #[link(name = "log")]
+        unsafe extern "C" {
+            fn __android_log_write(priority: i32, tag: *const std::ffi::c_char, text: *const std::ffi::c_char) -> i32;
+        }
+        unsafe { __android_log_write(6, c"RisuNest".as_ptr(), message.as_ptr()); }
+    }
+    #[cfg(any(target_os = "ios", target_os = "macos"))]
+    {
+        unsafe extern "C" { fn risunest_startup_log(message: *const std::ffi::c_char); }
+        unsafe { risunest_startup_log(message.as_ptr()); }
+    }
+}
+
+#[cfg(any(desktop, test))]
+fn append_startup_diagnostic(path: &Path, message: &str) {
+    let line: String = format_console_line("error", "startup", message).chars().take(4096).collect();
+    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(file, "{line}");
+    }
+}
+
 fn install_panic_hook_once_for(installed: &Once, state: NativeLogState) {
     installed.call_once(move || install_panic_hook_for(state));
 }
@@ -486,6 +522,13 @@ fn install_panic_hook_for(state: NativeLogState) {
             .downcast_ref::<&str>()
             .copied()
             .or_else(|| info.payload().downcast_ref::<String>().map(String::as_str));
+        #[cfg(desktop)]
+        if state.0.lock().map(|inner| inner.root.is_none()).unwrap_or(true) {
+            append_startup_diagnostic(&std::env::temp_dir().join("risunest-startup-failure.log"),
+                payload.unwrap_or("native startup panic"));
+        }
+        #[cfg(any(target_os = "android", target_os = "ios", target_os = "macos"))]
+        platform_startup_diagnostic(payload.unwrap_or("native startup panic"));
         if let Some(location) = info.location() {
             state.record_panic(payload, location.file(), location.line(), location.column());
         } else {

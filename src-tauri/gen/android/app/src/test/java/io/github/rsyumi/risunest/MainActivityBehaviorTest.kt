@@ -13,6 +13,18 @@ import org.junit.Test
 import org.junit.rules.TemporaryFolder
 
 class MainActivityBehaviorTest {
+  @Test
+  fun `repeated back requests cannot replace a pending exit decision`() {
+    val gate = ExitFlushGate()
+    assertEquals(true, gate.begin("first"))
+    assertEquals(false, gate.begin("second"))
+    assertEquals(true, gate.isPending("first"))
+    assertEquals(false, gate.shouldFinish("second"))
+    gate.cancel("first")
+    assertEquals(false, gate.shouldFinish("first"))
+    assertEquals(true, gate.begin("third"))
+  }
+
   @get:Rule val temporaryFolder = TemporaryFolder.builder().assureDeletion().build()
 
   @Test
@@ -118,15 +130,14 @@ class MainActivityBehaviorTest {
   }
 
   @Test
-  fun `restored intent payload is consumed only once before asynchronous work`() {
-    var consumed = false
-    val marker = RestoredIntentConsumptionMarker(
-      isConsumed = { consumed },
-      markConsumed = { consumed = true },
-    )
-
-    assertEquals(true, marker.claim())
-    assertEquals(false, marker.claim())
+  fun `claiming an open does not consume it before durable preparation`() {
+    val claims = OpenedFileClaimRegistry()
+    assertEquals(true, claims.claim("source", consumed = false))
+    assertEquals(false, claims.claim("source", consumed = false))
+    claims.release("source")
+    assertEquals(true, claims.claim("source", consumed = false))
+    claims.release("source")
+    assertEquals(false, claims.claim("source", consumed = true))
   }
 
   @Test
@@ -660,6 +671,18 @@ class MainActivityBehaviorTest {
     assertEquals(false, stale.exists())
     assertEquals(true, recent.exists())
     assertEquals(true, nested.exists())
+  }
+
+  @Test
+  fun `legacy cleanup retains unacknowledged sources and their durable markers`() {
+    val directory = temporaryFolder.newFolder("pending-legacy")
+    val source = java.io.File(directory, "source.risup").apply { writeText("synthetic"); setLastModified(1_000) }
+    val marker = java.io.File(directory, "source.risup.pending").apply { writeText(""); setLastModified(1_000) }
+    assertEquals(emptyList<String>(), cleanupLegacyOpenedFiles(directory, nowMillis = 2_000, staleAfterMillis = 100))
+    assertEquals(true, source.exists())
+    assertEquals(true, marker.exists())
+    marker.delete()
+    assertEquals(listOf("source.risup"), cleanupLegacyOpenedFiles(directory, nowMillis = 2_000, staleAfterMillis = 100))
   }
 
   @Test

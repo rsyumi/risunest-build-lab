@@ -2,6 +2,8 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { mount, tick, unmount } from 'svelte'
+import { get } from 'svelte/store'
+import { modalNavigation } from 'src/ts/ui/modalNavigation'
 import { alertStore } from 'src/ts/stores.svelte'
 
 const branchMocks = vi.hoisted(() => ({
@@ -128,6 +130,47 @@ describe('AlertComp branch view', () => {
         vi.clearAllMocks()
     })
 
+    it.each(['Escape', 'Back'])('dismisses a mounted confirmation before its modal host on %s', async action => {
+        const host = document.createElement('div')
+        host.innerHTML = '<button>Open confirmation</button>'
+        const target = document.createElement('div')
+        document.body.append(host, target)
+        const close = vi.fn()
+        const navigation = modalNavigation(host, { close })
+        await Promise.resolve()
+        const opener = host.querySelector('button')!
+        opener.focus()
+        alertStore.set({ type: 'ask', msg: 'Synthetic confirmation' })
+        mounted = mount(AlertComp, { target })
+        await tick()
+        const confirm = [...target.querySelectorAll<HTMLButtonElement>('button')].find(button => button.textContent === 'YES')!
+        confirm.focus()
+        let settlements = 0
+        const unsubscribe = alertStore.subscribe(value => { if (value.type === 'none') settlements++ })
+        if (action === 'Escape') window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))
+        else { history.replaceState(null, ''); window.dispatchEvent(new PopStateEvent('popstate')) }
+        await tick()
+        expect(get(alertStore)).toEqual({ type: 'none', msg: '' })
+        expect(settlements).toBe(1)
+        expect(close).not.toHaveBeenCalled()
+        expect(document.activeElement).toBe(opener)
+        unsubscribe()
+        history.replaceState(null, '')
+        navigation.destroy()
+    })
+    it('cancels its branch scan on close and exposes retry after failure', async () => {
+        branchMocks.getChatBranches.mockRejectedValueOnce(new Error('synthetic scan')).mockResolvedValueOnce([])
+        alertStore.set({ type: 'branches', msg: 'character' })
+        const target = document.createElement('div'); document.body.append(target)
+        mounted = mount(AlertComp, { target })
+        await vi.waitFor(() => expect(target.textContent).toContain('branchLoadFailed'))
+        ;[...target.querySelectorAll('button')].find(button => button.textContent === 'retry')!.click()
+        await vi.waitFor(() => expect(branchMocks.getChatBranches).toHaveBeenCalledTimes(2))
+        const signal = branchMocks.getChatBranches.mock.calls[1][1] as AbortSignal
+        alertStore.set({ type: 'none', msg: '' }); await tick()
+        expect(signal.aborted).toBe(true)
+    })
+
     it('runs a selected action synchronously inside its button click', async () => {
         const onSelect = vi.fn();
         alertStore.set({ type: 'select', msg: '__DISPLAY__Prepared export||Copy||Cancel', onSelect });
@@ -152,7 +195,7 @@ describe('AlertComp branch view', () => {
         document.body.appendChild(target)
         mounted = mount(AlertComp, { target })
         await vi.waitFor(() => {
-            expect(branchMocks.getChatBranches).toHaveBeenCalledWith('char-a')
+            expect(branchMocks.getChatBranches).toHaveBeenCalledWith('char-a', expect.any(AbortSignal))
         })
 
         alertStore.set({ type: 'branches', msg: 'char-b' })

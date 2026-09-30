@@ -1,5 +1,5 @@
 use super::{
-    default_install_dirs, overlaps, resolve_platform_root, AppPaths, Hives, Integration, Platform,
+    default_install_dirs, overlaps, platform_store_root, resolve_platform_root, AppPaths, Hives, Integration, Platform,
 };
 use crate::asset_repository::{ExactObjectUnlink, PayloadCas};
 use std::{fs, io::ErrorKind, path::Path, path::PathBuf};
@@ -22,13 +22,24 @@ fn hives() -> Hives {
         config: Some(base("config")),
         cache: Some(base("cache")),
         home: Some(base("home")),
-        os_data: Some(base("sandbox/files")),
+        os_data: Some(base("sandbox")),
         os_cache: Some(base("sandbox/cache")),
+        os_documents: None,
     }
 }
 
 fn layout(platform: Platform) -> AppPaths {
-    AppPaths::layout(platform, &hives(), IDENTIFIER, false).expect("resolve synthetic layout")
+    AppPaths::layout(platform, &platform_hives(platform), IDENTIFIER, false).expect("resolve synthetic layout")
+}
+
+fn platform_hives(platform: Platform) -> Hives {
+    let mut result = hives();
+    if platform == Platform::Ios {
+        result.os_data = Some(base("sandbox/Library/Application Support").join(IDENTIFIER));
+        result.os_cache = Some(base("sandbox/Library/Caches").join(IDENTIFIER));
+        result.os_documents = Some(base("sandbox/Documents"));
+    }
+    result
 }
 
 #[test]
@@ -76,15 +87,17 @@ fn every_platform_row_matches_the_recorded_matrix() {
 
     for platform in [Platform::Android, Platform::Ios] {
         let mobile = layout(platform);
-        assert_eq!(mobile.data, base("sandbox/files"));
+        let expected = if platform == Platform::Android { base("sandbox/files") } else { base("sandbox/Library/Application Support").join(IDENTIFIER) };
+        assert_eq!(mobile.data, expected);
         assert_eq!(mobile.webview, None);
-        assert_eq!(mobile.cache, base("sandbox/cache"));
+        let expected_cache = if platform == Platform::Android { base("sandbox/cache") } else { base("sandbox/Library/Caches").join(IDENTIFIER) };
+        assert_eq!(mobile.cache, expected_cache);
         assert_eq!(
             mobile.cleanup_control,
-            base("sandbox").join("risunest-cleanup")
+            expected.parent().unwrap().join("risunest-cleanup")
         );
-        // The OS removes the sandbox on uninstall, so nothing is swept.
-        assert!(mobile.tauri_derived.is_empty());
+        if platform == Platform::Android { assert!(mobile.tauri_derived.is_empty()); }
+        else { assert_eq!(mobile.tauri_derived, vec![base("sandbox/Documents/Inbox")]); }
     }
 
     for platform in [
@@ -98,6 +111,39 @@ fn every_platform_row_matches_the_recorded_matrix() {
         assert_eq!(paths.logs, paths.data.join("logs"));
         assert_eq!(paths.install, None);
     }
+}
+
+#[test]
+fn android_owns_only_files_and_cache_inside_the_actual_data_dir() {
+    let fixture = tempfile::tempdir().unwrap();
+    let sandbox = fixture.path().join("user/10/synthetic.app");
+    let mut hives = hives();
+    hives.os_data = Some(sandbox.clone());
+    hives.os_cache = Some(sandbox.join("cache"));
+    let paths = AppPaths::layout(Platform::Android, &hives, IDENTIFIER, false).unwrap();
+    assert_eq!(paths.data, sandbox.join("files"));
+    assert_eq!(paths.cleanup_control, sandbox.join("risunest-cleanup"));
+    let mut roots = paths.owned_roots();
+    roots.sort();
+    assert_eq!(roots, vec![sandbox.join("cache"), sandbox.join("files")]);
+    for managed in ["shared_prefs", "databases", "app_webview", "code_cache", "lib"] {
+        assert!(!roots.iter().any(|root| sandbox.join(managed).starts_with(root)));
+    }
+}
+
+#[test]
+fn ios_cleanup_owns_only_the_inbox_child_of_os_documents() {
+    let paths = layout(Platform::Ios);
+    let roots = paths.owned_roots();
+    let documents = base("sandbox/Documents");
+    assert!(roots.contains(&documents.join("Inbox")));
+    for preserved in [documents.clone(), documents.join("export.risunest"), documents.join("exports")] {
+        assert!(!roots.iter().any(|root| preserved.starts_with(root)));
+    }
+    let mut relocated = platform_hives(Platform::Ios);
+    relocated.os_documents = Some(base("another-container/Documents"));
+    let paths = AppPaths::layout(Platform::Ios, &relocated, IDENTIFIER, false).unwrap();
+    assert_eq!(paths.tauri_derived, vec![base("another-container/Documents/Inbox")]);
 }
 
 #[test]
@@ -202,7 +248,7 @@ fn an_agent_build_never_shares_a_desktop_root_with_the_installed_product() {
 fn an_agent_build_keeps_the_mobile_sandbox_unchanged() {
     for platform in [Platform::Android, Platform::Ios] {
         assert_eq!(
-            AppPaths::layout(platform, &hives(), IDENTIFIER, true).unwrap(),
+            AppPaths::layout(platform, &platform_hives(platform), IDENTIFIER, true).unwrap(),
             layout(platform)
         );
     }
@@ -210,6 +256,9 @@ fn an_agent_build_keeps_the_mobile_sandbox_unchanged() {
 
 #[test]
 fn a_missing_hive_or_invalid_identifier_is_an_error_not_a_guess() {
+    let mut missing_documents = platform_hives(Platform::Ios);
+    missing_documents.os_documents = None;
+    assert!(AppPaths::layout(Platform::Ios, &missing_documents, IDENTIFIER, false).is_err());
     let mut missing = hives();
     missing.local = None;
     assert!(AppPaths::layout(Platform::Windows, &missing, IDENTIFIER, false).is_err());
@@ -230,7 +279,9 @@ fn link_directory(target: &Path, link: &Path) {
 
 #[cfg(windows)]
 fn link_directory(target: &Path, link: &Path) {
+    use std::os::windows::process::CommandExt;
     let output = std::process::Command::new("cmd")
+        .creation_flags(0x08000000)
         .args(["/C", "mklink", "/J"])
         .arg(link)
         .arg(target)
@@ -338,6 +389,35 @@ fn first_run_creates_a_real_root_beneath_a_trusted_parent_alias() {
         cas.read_object(&payload.content_hash).unwrap().unwrap(),
         b"first-run asset"
     );
+}
+
+#[test]
+fn android_first_run_creates_only_the_owned_files_root() {
+    let sandbox = tempfile::tempdir().unwrap();
+    for sibling in ["shared_prefs", "app_webview", "no_backup"] {
+        fs::create_dir(sandbox.path().join(sibling)).unwrap();
+        fs::write(sandbox.path().join(sibling).join("synthetic"), b"keep").unwrap();
+    }
+    let files = sandbox.path().join("files");
+    assert!(!files.exists());
+    let resolved = platform_store_root(&files, Platform::Android).unwrap();
+    assert_eq!(resolved, files.canonicalize().unwrap());
+    assert_eq!(platform_store_root(&files, Platform::Android).unwrap(), resolved);
+    for sibling in ["shared_prefs", "app_webview", "no_backup"] {
+        assert_eq!(fs::read(sandbox.path().join(sibling).join("synthetic")).unwrap(), b"keep");
+    }
+}
+
+#[test]
+fn android_store_root_rejects_an_existing_link_or_file() {
+    let sandbox = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let files = sandbox.path().join("files");
+    link_directory(outside.path(), &files);
+    assert!(platform_store_root(&files, Platform::Android).is_err());
+    let occupied = sandbox.path().join("occupied");
+    fs::write(&occupied, b"synthetic").unwrap();
+    assert!(platform_store_root(&occupied, Platform::Android).is_err());
 }
 
 #[test]

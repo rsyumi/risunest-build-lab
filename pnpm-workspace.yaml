@@ -4,6 +4,10 @@ overrides:
   'monaco-editor>dompurify': 3.4.15
   'rollup@>=4.0.0 <4.59.0': ^4.59.0
   'yaml@>=2.0.0 <2.8.3': ^2.8.3
+minimumReleaseAge: 10080
 minimumReleaseAgeExclude:
   - svelte@5.57.1
   - '@tauri-apps/plugin-updater@2.12.0'
+patchedDependencies:
+  playwright-core@1.63.0: patches/playwright-core@1.63.0.patch
+  playwright@1.63.0: patches/playwright@1.63.0.patch

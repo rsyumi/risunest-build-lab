@@ -1904,7 +1904,7 @@ fn the_lease_collection_is_its_own_key_folder_and_is_removable() {
         let test = dependencies();
         let server = WireServer::start(vec![
             one_descriptor(),
-            reply(200, &[], listing("leases", &[&name], None)),
+            reply(200, &[], listing("leases", &[&name, ".DS_Store", "readme.txt"], None)),
             reply(204, &[], Vec::new()),
         ]);
         let (provider, handle) = opened(&test, "generic", &server).await;
@@ -1927,5 +1927,42 @@ fn the_lease_collection_is_its_own_key_folder_and_is_removable() {
         let records = server.requests.lock().unwrap();
         assert!(line(&records[1]).contains(&format!("prefix={PREFIX}%2Fleases%2F")));
         assert!(line(&records[2]).ends_with(&format!("/{PREFIX}/leases/{name} HTTP/1.1")));
+    });
+}
+
+#[test]
+fn forbidden_with_large_server_clock_difference_reports_clock_skew() {
+    runtime().block_on(async {
+        for (date, expected) in [(NOW_MS + 20 * 60 * 1000, ErrorKind::ClockSkew), (NOW_MS, ErrorKind::Unauthorized)] {
+            let date = httpdate::fmt_http_date(std::time::UNIX_EPOCH + std::time::Duration::from_millis(date));
+            for head in [false, true] {
+                let server = WireServer::start(vec![one_descriptor(),
+                    reply(403, &[("Date", &date)], b"<Error><Code>AccessDenied</Code></Error>".to_vec())]);
+                let test = dependencies();
+                let (provider, handle, _) = open(&test, "aws", server.url.as_str(), OpenMode::Existing).await.unwrap();
+                let error = if head {
+                    let intent = ObjectIntent { repository_id: handle.repository_id.clone(), job_id: "job".into(),
+                        object_id: "object".into(), role: ObjectRole::Pack, byte_length: 4, sha256: risunest_sync_wire::hash(b"data") };
+                    provider.reconcile_upload(&handle, &intent, None, &Cancellation::default()).await.err().unwrap()
+                } else {
+                    provider.list_objects(&handle, Collection::Snapshots, None, 30, &Cancellation::default()).await.err().unwrap()
+                };
+                assert_eq!(error.kind, expected);
+                if head { assert_eq!(header(&server.requests.lock().unwrap()[1], "x-amz-checksum-mode").as_deref(), Some("ENABLED")); }
+            }
+        }
+    });
+}
+
+#[test]
+fn ambiguous_lease_copies_are_not_filtered_as_foreign() {
+    runtime().block_on(async {
+        let test = dependencies();
+        let name = format!("work-{} (1)", "a".repeat(32));
+        let server = WireServer::start(vec![one_descriptor(),
+            reply(200, &[], listing("leases", &[&name], None))]);
+        let (provider, handle) = opened(&test, "generic", &server).await;
+        assert_eq!(provider.list_objects(&handle, Collection::Leases, None, 10, &Cancellation::default())
+            .await.unwrap_err().kind, ErrorKind::Corrupt);
     });
 }

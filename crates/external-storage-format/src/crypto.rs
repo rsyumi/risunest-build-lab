@@ -450,6 +450,27 @@ impl RepositoryBootstrapEnvelope {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stream_io_failures_remain_distinct_from_authentication_failures() {
+        struct FailingWriter(std::io::ErrorKind);
+        impl std::io::Write for FailingWriter {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> { Err(self.0.into()) }
+            fn flush(&mut self) -> std::io::Result<()> { Ok(()) }
+        }
+        for kind in [std::io::ErrorKind::StorageFull, std::io::ErrorKind::PermissionDenied, std::io::ErrorKind::ReadOnlyFilesystem] {
+            let seal_error = encrypt(&mut &b"body"[..], &mut FailingWriter(kind), &[7;32], b"binding", 4).unwrap_err();
+            assert_eq!(seal_error.io_kind(), Some(kind));
+            let ciphertext = sealed(b"body");
+            let open_error = decrypt(&mut ciphertext.as_slice(), &mut FailingWriter(kind), &[7;32], b"repository/object/data/v1", 4).unwrap_err();
+            assert_eq!(open_error.io_kind(), Some(kind));
+        }
+        let mut ciphertext = sealed(b"body");
+        let last = ciphertext.len()-1;
+        ciphertext[last] ^= 1;
+        assert!(open(&ciphertext, b"repository/object/data/v1", &[7;32]).unwrap_err().io_kind().is_none());
+    }
+
     fn sealed(bytes: &[u8]) -> Vec<u8> {
         let mut result = Vec::new();
         encrypt(

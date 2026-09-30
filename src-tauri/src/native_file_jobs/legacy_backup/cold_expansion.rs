@@ -4,6 +4,7 @@ use super::super::restore::pocket_features;
 use serde_json::{Map, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::io::Read;
 
 const COLD_STORAGE_HEADER: &str = "\u{ef01}COLDSTORAGE\u{ef01}";
 
@@ -32,9 +33,16 @@ fn references_cold(character: &Value) -> bool {
 }
 
 fn load(path: &Path) -> Result<Value, String> {
+    load_with_limit(path, super::restore::RestoreLimits::default().max_decoded_block_bytes)
+}
+
+fn load_with_limit(path: &Path, limit: u64) -> Result<Value, String> {
     let file = std::fs::File::open(path)
         .map_err(|error| format!("staged cold payload cannot be opened: {error}"))?;
-    serde_json::from_reader(std::io::BufReader::new(file))
+    if file.metadata().map_err(|error| error.to_string())?.len() > limit {
+        return Err("decoded block limit exceeded for staged cold payload".to_owned());
+    }
+    serde_json::from_reader(std::io::BufReader::new(file.take(limit.saturating_add(1))))
         .map_err(|error| format!("staged cold payload cannot be parsed: {error}"))
 }
 
@@ -80,26 +88,31 @@ fn expand_character(
     character: &mut Value,
     payloads: &HashMap<String, PathBuf>,
     fallback: &str,
+    unavailable: &mut Vec<String>,
 ) -> Result<(), String> {
-    if let Some(key) = character_cold_key(character) {
-        if let Some(path) = payloads.get(key) {
-            if let Value::Object(mut payload) = load(path)? {
-                if let Some(restored @ Value::Object(_)) = payload.remove("character") {
-                    *character = restored;
-                }
-            }
+    if let Some(key) = character_cold_key(character).map(str::to_owned) {
+        let restored = match payloads.get(&key) {
+            Some(path) => load(path)?.as_object_mut().and_then(|payload| payload.remove("character")),
+            None => None,
+        };
+        match restored {
+            Some(restored @ Value::Object(_)) => *character = restored,
+            _ => unavailable.push(key),
         }
     }
     if let Some(chats) = character.get_mut("chats").and_then(Value::as_array_mut) {
         for chat in chats.iter_mut() {
-            let Some(key) = chat_cold_key(chat) else {
-                continue;
+            let Some(key) = chat_cold_key(chat).map(str::to_owned) else { continue; };
+            let applied = match payloads.get(&key) {
+                Some(path) => apply_chat_payload(chat, load(path)?),
+                None => false,
             };
-            let Some(path) = payloads.get(key) else {
-                continue;
-            };
-            let payload = load(path)?;
-            apply_chat_payload(chat, payload);
+            if !applied {
+                unavailable.push(key);
+                if let Some(object) = chat.as_object_mut() {
+                    object.insert("message".to_owned(), Value::Array(Vec::new()));
+                }
+            }
         }
     }
     if let Some(object) = character.as_object_mut() {
@@ -113,13 +126,14 @@ fn expand_character(
 pub(super) fn expand_cold_payloads(
     characters: &[Value],
     payloads: &HashMap<String, PathBuf>,
+    unavailable: &mut Vec<String>,
 ) -> Result<Option<Vec<Value>>, String> {
     if !characters.iter().any(references_cold) {
         return Ok(None);
     }
     let mut expanded = characters.to_vec();
     for (index, character) in expanded.iter_mut().enumerate() {
-        expand_character(character, payloads, &format!("cold:character:{index}"))?;
+        expand_character(character, payloads, &format!("cold:character:{index}"), unavailable)?;
     }
     Ok(Some(expanded))
 }
@@ -180,7 +194,7 @@ mod tests {
             "coldStoragedChats": ["chat-key"],
         })];
 
-        let expanded = expand_cold_payloads(&characters, &payloads)
+        let expanded = expand_cold_payloads(&characters, &payloads, &mut Vec::new())
             .unwrap()
             .unwrap();
 
@@ -205,7 +219,7 @@ mod tests {
         )]);
         let characters = vec![json!({ "chaId": "cha-1", "chats": [placeholder_chat("chat-key")] })];
 
-        let expanded = expand_cold_payloads(&characters, &payloads)
+        let expanded = expand_cold_payloads(&characters, &payloads, &mut Vec::new())
             .unwrap()
             .unwrap();
 
@@ -225,24 +239,43 @@ mod tests {
             "coldstorage": "absent-character",
         })];
 
-        let expanded = expand_cold_payloads(&characters, &HashMap::new())
+        let expanded = expand_cold_payloads(&characters, &HashMap::new(), &mut Vec::new())
             .unwrap()
             .unwrap();
 
         assert_eq!(expanded[0]["name"], json!("Stub"));
-        assert_eq!(
-            expanded[0]["chats"][0]["message"][0]["data"],
-            json!(format!("{COLD_STORAGE_HEADER}absent"))
-        );
+        assert_eq!(expanded[0]["chats"][0]["message"], json!([]));
         assert!(expanded[0].get("coldstorage").is_none());
+    }
+
+    #[test]
+    fn reports_missing_and_wrong_role_payloads_without_retaining_markers() {
+        let directory = temp_directory();
+        let payloads = HashMap::from([staged(&directory, "wrong-role", json!({"character":{"chaId":"other","chats":[]}}))]);
+        let characters = vec![json!({"chaId":"stub","coldstorage":"missing-character","chats":[placeholder_chat("missing-chat"),placeholder_chat("wrong-role")]})];
+        let mut unavailable = Vec::new();
+        let restored = expand_cold_payloads(&characters, &payloads, &mut unavailable).unwrap().unwrap();
+        assert_eq!(unavailable, ["missing-character", "missing-chat", "wrong-role"]);
+        assert!(restored[0].get("coldstorage").is_none());
+        assert!(restored[0]["chats"].as_array().unwrap().iter().all(|chat| chat["message"].as_array().unwrap().is_empty()));
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
     fn leaves_a_batch_without_references_untouched() {
         let characters = vec![json!({ "chaId": "cha-1", "chats": [] })];
-        assert!(expand_cold_payloads(&characters, &HashMap::new())
+        assert!(expand_cold_payloads(&characters, &HashMap::new(), &mut Vec::new())
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn messagepack_cold_fallback_rejects_payloads_above_decoded_limit() {
+        let directory = temp_directory();
+        let (_, path) = staged(&directory, "bounded", json!([{"role":"user", "data":"x".repeat(128)}]));
+        let error = load_with_limit(&path, 64).unwrap_err();
+        assert!(error.contains("decoded block limit exceeded"));
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -255,7 +288,7 @@ mod tests {
         )]);
         let characters = vec![json!({ "chaId": "cha-1", "chats": [placeholder_chat("chat-key")] })];
 
-        let expanded = expand_cold_payloads(&characters, &payloads)
+        let expanded = expand_cold_payloads(&characters, &payloads, &mut Vec::new())
             .unwrap()
             .unwrap();
 

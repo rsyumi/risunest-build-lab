@@ -166,6 +166,18 @@ export interface PortableExportResumeDependencies {
   onResult?(result: NativeFileJobResult): void | Promise<void>;
 }
 
+export async function androidReceiptSettled(
+  dependencies: Pick<PortableExportResumeDependencies, "acknowledgeAndroid" | "androidAcknowledgementPending">,
+  requestId: string,
+): Promise<boolean> {
+  try {
+    return await dependencies.acknowledgeAndroid(requestId)
+      || await dependencies.androidAcknowledgementPending?.(requestId) === false;
+  } catch {
+    return false;
+  }
+}
+
 /** Resume after normal bootstrap. Generic file-job recovery must leave this job retained. */
 export async function resumePendingPortableExport(
   dependencies: PortableExportResumeDependencies,
@@ -294,8 +306,7 @@ export async function resumePendingPortableExport(
     };
     dependencies.store.write(intent);
     if (
-      !await dependencies.acknowledgeAndroid(intent.requestId) &&
-      await dependencies.androidAcknowledgementPending?.(intent.requestId) !== false
+      !await androidReceiptSettled(dependencies, intent.requestId)
     )
       throw new PortableExportNeedsAttention(
         "destination-acknowledgement-pending",
@@ -306,8 +317,7 @@ export async function resumePendingPortableExport(
     // A previous acknowledgement can have succeeded before the WebView disappeared.
     // The native job keeps the verified handoff until its final forget operation.
     if (
-      !await dependencies.acknowledgeAndroid(intent.requestId) &&
-      await dependencies.androidAcknowledgementPending?.(intent.requestId) !== false
+      !await androidReceiptSettled(dependencies, intent.requestId)
     )
       throw new PortableExportNeedsAttention(
         "destination-acknowledgement-pending",

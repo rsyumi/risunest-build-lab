@@ -9,6 +9,7 @@ pub(crate) fn export_block_risu_save(
     mut prepared: PreparedRisuSaveExport,
     destination_path: &Path,
     omit_account: bool,
+    account: Option<&serde_json::Value>,
     job: &JobControl,
 ) -> Result<JobResultSummary, NativeJobError> {
     let reader = prepared.take_reader().map_err(store_error)?;
@@ -35,6 +36,7 @@ pub(crate) fn export_block_risu_save(
         &reader.target,
         &prepared.lease,
         omit_account,
+        account,
         || job.is_cancel_requested() || progress_failure.borrow().is_some(),
         |completed_bytes, completed, total| {
             completed_items.set(completed);
@@ -359,7 +361,7 @@ mod tests {
                 .unwrap();
 
             let result =
-                export_block_risu_save(prepared, &destination, omit_account, &job).unwrap();
+                export_block_risu_save(prepared, &destination, omit_account, Some(&json!({"token":"secret"})), &job).unwrap();
 
             assert_eq!(fs::read(&destination).unwrap(), expected);
             assert_eq!(result.revision, revision);
@@ -386,7 +388,7 @@ mod tests {
             .unwrap();
         job.request_cancel().unwrap();
 
-        let error = export_block_risu_save(prepared, &destination, false, &job).unwrap_err();
+        let error = export_block_risu_save(prepared, &destination, false, Some(&json!({"token":"secret"})), &job).unwrap_err();
 
         assert_eq!(error.code, "cancelled");
         assert_eq!(fs::read(destination).unwrap(), b"previous export");
@@ -422,7 +424,7 @@ mod tests {
         let job = JobRegistry::default()
             .create(JobKind::ExportBlockRisuSave)
             .unwrap();
-        let result = export_block_risu_save(prepared, &destination, false, &job).unwrap();
+        let result = export_block_risu_save(prepared, &destination, false, None, &job).unwrap();
 
         assert_eq!(result.revision, revision);
         assert_eq!(result.export_exclusions, Some(super::super::ExportExclusions {

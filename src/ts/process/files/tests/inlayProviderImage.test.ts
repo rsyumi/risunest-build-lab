@@ -56,7 +56,7 @@ describe('inlayImageForProvider', () => {
 
     test('evicts by bytes in access order and returns oversized images without retaining them', async () => {
         const budget = vi.spyOn(performanceProfile, 'getRuntimePerformanceBudgets').mockReturnValue({
-            ...performanceProfile.getRuntimePerformanceBudgets(), providerImageCacheBytes: 180,
+            ...performanceProfile.getRuntimePerformanceBudgets(), providerImageCacheBytes: 530,
         })
         try {
             forgetInlayProviderImages()
@@ -68,7 +68,7 @@ describe('inlayImageForProvider', () => {
             expect(createBitmap).toHaveBeenCalledTimes(3)
             await inlayImageForProvider('b', asset)
             expect(createBitmap).toHaveBeenCalledTimes(4)
-            encodedBytes = new Uint8Array(100)
+            encodedBytes = new Uint8Array(300)
             const first = await inlayImageForProvider('large', asset)
             const second = await inlayImageForProvider('large', asset)
             expect(first.data).toBe(dataUri('image/webp', encodedBytes))
@@ -90,6 +90,19 @@ describe('inlayImageForProvider', () => {
         resume({ width: 40, height: 20, close: vi.fn() })
         await pending
         await inlayImageForProvider('a', asset)
+        expect(createBitmap).toHaveBeenCalledTimes(2)
+    })
+
+    test('caps a large still request copy even when animation conversion is disabled', async () => {
+        mocks.getDatabase.mockReturnValue({ risunestInlayAnimationStillFrame: false, risunestInlayWebpQuality: 85 })
+        createBitmap.mockResolvedValue({ width: 4000, height: 3000, close: vi.fn() })
+        const asset = { data: dataUri('image/png', pngBytes), width: 4000, height: 3000 }
+        const original = { ...asset }
+        const result = await inlayImageForProvider('large', asset)
+        expect(result.width! * result.height!).toBeLessThanOrEqual(1024 * 1024)
+        expect(result.data).toBe(dataUri('image/webp', encodedBytes))
+        expect(asset).toEqual(original)
+        await inlayImageForProvider('large', { ...asset, data: dataUri('image/png', Uint8Array.from([...pngBytes.slice(0, -1), 8])) })
         expect(createBitmap).toHaveBeenCalledTimes(2)
     })
 

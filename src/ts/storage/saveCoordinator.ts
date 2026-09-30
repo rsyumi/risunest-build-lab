@@ -1,3 +1,4 @@
+import { isTauri } from '../platform'
 import { Mutex } from '../mutex'
 import { diffRootMutations } from './rootMutation'
 import type { PersistenceCanonicalCapture } from './reactivePersistenceCapture.svelte'
@@ -11,6 +12,7 @@ import type {
     PersistentDataStore,
     PluginStorageMutation,
     PluginStorageValue,
+    PluginStorageValueCursor,
     PersistentRoot,
     WorkingSetCommit,
 } from './persistentDataStore'
@@ -121,6 +123,7 @@ export interface SaveCoordinatorDependencies {
     onPersistenceIdle?(): void
     onFlushPromise?(promise: Promise<void> | null): void
     onBackgroundError?(error: unknown): void
+    onLocalSaveFailure?(error: unknown | null): void
     onWorkingSetRefreshRequired?(revision: DataRevision | null): void
     onDestructiveReplacementFenceChanged?(active: boolean): void
     isConversationOperationActive?(): boolean
@@ -564,6 +567,10 @@ export class SaveCoordinator {
     private pendingWindowedActivationChange: PendingWindowedActivationChange | null = null
     private pendingWindowedChatListChange: PendingWindowedChatListChange | null = null
     private dirtyGeneration = 0
+    private persistedDirtyGeneration = 0
+    private backgroundRetryDelay = 2_000
+    private flushAfterFenceRelease = false
+    private publishAfterFenceRelease = false
     private pendingByteCount = 0
     private debounceHandle: unknown
     private readonly operationMutex = new Mutex()
@@ -585,6 +592,7 @@ export class SaveCoordinator {
     private reservedCharacterAddition: ReservedCharacterAddition | null = null
     private pendingConversationMutations: PendingConversationMutation[] = []
     private lastBackgroundErrorMessage: string | null = null
+    private localSaveFailure: unknown | null = null
     private destructiveReplacementFenceState: {
         owner: symbol
         state: 'acquiring' | 'held'
@@ -651,6 +659,7 @@ export class SaveCoordinator {
 
     get hasPendingPersistenceWork(): boolean {
         return (
+            this.dirtyGeneration !== this.persistedDirtyGeneration ||
             this.pendingByteCount > 0 ||
             this.debounceHandle !== undefined ||
             this.flushPromise !== null ||
@@ -726,7 +735,14 @@ export class SaveCoordinator {
               : new PluginStorageBaseline(captured.pluginStorageCanonical)
         this.presetsBaseline = captured.presetsCanonical
         this.setCharacterBaseline(captured)
+        if (captured.windowedCharacter) {
+            this.setWindowedCharacterBaseline(captured.windowedCharacter, revision,
+                captured.windowedCharacter.authority.persistedSessionVersion)
+        }
         this.dirtyGeneration = 0
+        this.persistedDirtyGeneration = 0
+        this.setLocalSaveFailure(null)
+        this.backgroundRetryDelay = 2_000
         this.pendingByteCount = 0
         if (!retainPublication) {
             if (this.pendingPublication) {
@@ -833,6 +849,7 @@ export class SaveCoordinator {
             currentCharacter?.chaId !== authority.characterId
         )
             return false
+        if (this.dirtyGeneration !== this.persistedDirtyGeneration) return false
         const shell = captureWindowedCharacterShell(character)
         const currentShell = captureWindowedCharacterShell(currentCharacter)
         const matchingConversations = shell.chats.filter(
@@ -863,6 +880,18 @@ export class SaveCoordinator {
         this.characterBaselineId = null
         this.pendingWindowedActivationChange = pendingActivation
         return true
+    }
+
+    retireWindowedSelectedConversation(): void {
+        this.assertPersistentMutationAllowed()
+        if (this.hasPendingPersistenceWork || !this.captureMatchesBaseline()) {
+            throw new Error('Selected conversation ownership has pending persistence')
+        }
+        this.windowedCharacterBaseline = null
+        this.characterBaseline = null
+        this.characterBaselineId = null
+        this.pendingWindowedActivationChange = null
+        this.pendingWindowedChatListChange = null
     }
 
     advanceWindowedSelectedConversationRevision(
@@ -1566,7 +1595,7 @@ export class SaveCoordinator {
             this.dependencies.onLocalRevision?.(committed.revision)
             this.pendingByteCount = 0
             this.lastBackgroundErrorMessage = null
-            await this.finishExplicitCommit(committed.revision)
+            await this.finishExplicitCommit(committed.revision, false)
         })
     }
 
@@ -1674,7 +1703,7 @@ export class SaveCoordinator {
             const committedDetail = deleting ? null : canonicalClone(state.character)
             const commit: WorkingSetCommit = { expectedRevision: revision }
             if (rootChanged) commit.root = committedRoot
-            if (deleting) commit.deleteCharacterId = characterId
+            if (deleting) commit.deleteCharacterIds = [characterId]
             else commit.character = committedDetail!
 
             const committed = await this.dependencies.store.commit(commit)
@@ -1731,12 +1760,50 @@ export class SaveCoordinator {
         characterId: string,
         reason: string,
     ): Promise<boolean> {
+        return this.deletePersistentCharactersWithGroupReferences([characterId], reason)
+            .then((count) => count > 0)
+    }
+
+    async expirePersistentTrash(now = Date.now()): Promise<number> {
+        const cutoff = now - 3 * 24 * 60 * 60 * 1000
+        const expired: string[] = []
+        const revision = this.revision
+        let cursor: string | undefined
+        do {
+            const page = await this.dependencies.store.queryCharacters({
+                order: 'configured', trash: true, limit: 200, cursor,
+            })
+            this.assertReadRevision(revision, page.revision)
+            for (const summary of page.items) {
+                if (summary.trashTime !== undefined && summary.trashTime < cutoff) expired.push(summary.id)
+            }
+            cursor = page.nextCursor
+        } while (cursor)
+        let removed = 0
+        for (let offset = 0; offset < expired.length; offset += 128) {
+            removed += await this.deletePersistentCharactersWithGroupReferences(
+                expired.slice(offset, offset + 128), 'trash-expiry', cutoff,
+            )
+        }
+        return removed
+    }
+
+    deletePersistentCharactersWithGroupReferences(
+        characterIds: readonly string[],
+        reason: string,
+        expiryCutoff?: number,
+    ): Promise<number> {
+        const deletedIds = new Set(characterIds)
+        if (deletedIds.size === 0) return Promise.resolve(0)
+        if (deletedIds.size > 128 || deletedIds.size !== characterIds.length || [...deletedIds].some((id) => !id)) {
+            return Promise.reject(new TypeError('Deletion requires at most 128 unique nonempty character IDs'))
+        }
         this.assertInitialized()
         this.assertPersistentMutationAllowed()
         this.cancelDebounce()
         return this.enqueue(async () => {
             await this.flushIterations(reason, true)
-            const residentBefore = this.captureResidentCharacter(characterId)
+            const residentsBefore = new Map([...deletedIds].map((id) => [id, this.captureResidentCharacter(id)]))
             const revision = this.revision
             const mutationGeneration = this.dirtyGeneration
             const lease = await this.dependencies.store.acquireRevision(revision)
@@ -1746,16 +1813,25 @@ export class SaveCoordinator {
                 string,
                 ReturnType<SaveCoordinator['captureResidentCharacter']>
             >()
+            const selected = this.dependencies.captureSelectedCharacter()
+            if (selected?.type === 'group' && !deletedIds.has(selected.chaId)) {
+                relatedResidentsBefore.set(selected.chaId, this.captureResidentCharacter(selected.chaId))
+            }
             const found = await withPersistentRevisionLease(lease, async (reader) => {
                 this.assertReadRevision(revision, reader.revision)
                 rootValue = await reader.readRoot()
                 this.assertReadRevision(revision, rootValue.revision)
-                const targetValue = await reader.readCharacter(characterId)
-                if (!targetValue) return false
-                this.assertReadRevision(revision, targetValue.revision)
-                if (targetValue.value.chaId !== characterId) {
-                    throw new Error(`Character ${characterId} returned mismatched detail`)
+                for (const id of deletedIds) {
+                    const targetValue = await reader.readCharacter(id)
+                    if (!targetValue || (expiryCutoff !== undefined &&
+                        (targetValue.value.trashTime === undefined || targetValue.value.trashTime >= expiryCutoff))) {
+                        deletedIds.delete(id)
+                        continue
+                    }
+                    this.assertReadRevision(revision, targetValue.revision)
+                    if (targetValue.value.chaId !== id) throw new Error(`Character ${id} returned mismatched detail`)
                 }
+                if (deletedIds.size === 0) return false
 
                 for (const trash of [false, true]) {
                     let cursor: string | undefined
@@ -1768,7 +1844,7 @@ export class SaveCoordinator {
                         })
                         this.assertReadRevision(revision, page.revision)
                         for (const summary of page.items) {
-                            if (summary.id === characterId || summary.type !== 'group') continue
+                            if (deletedIds.has(summary.id) || summary.type !== 'group') continue
                             const value = await reader.readCharacter(summary.id)
                             if (!value) throw new Error(`Character ${summary.id} was not found`)
                             this.assertReadRevision(revision, value.revision)
@@ -1778,8 +1854,9 @@ export class SaveCoordinator {
                                 )
                             }
                             const group = canonicalClone(value.value) as Omit<groupChat, 'chats'>
-                            if (!this.removeGroupCharacterReference(group, characterId)) continue
-                            relatedResidentsBefore.set(
+                            if (!group.characters.some((id) => deletedIds.has(id))) continue
+                            Object.assign(group, removeGroupMemberReferences(group, deletedIds))
+                            if (!relatedResidentsBefore.has(summary.id)) relatedResidentsBefore.set(
                                 summary.id,
                                 this.captureResidentCharacter(summary.id),
                             )
@@ -1790,18 +1867,15 @@ export class SaveCoordinator {
                 }
                 return true
             })
-            if (!found) return false
-            if (!rootValue) return false
-            if (this.dirtyGeneration !== mutationGeneration) {
-                throw new Error(`Persistent data changed during character deletion: ${characterId}`)
-            }
-            this.assertResidentCharacterUnchanged(characterId, residentBefore)
+            if (!found) return 0
+            if (!rootValue) return 0
+            for (const id of deletedIds) this.assertResidentCharacterUnchanged(id, residentsBefore.get(id) ?? null)
             for (const [relatedId, before] of relatedResidentsBefore) {
                 this.assertResidentCharacterUnchanged(relatedId, before)
             }
 
             const mutatedRoot = canonicalClone(rootValue.value)
-            removeCharacterIdFromOrder(mutatedRoot, characterId)
+            for (const id of deletedIds) removeCharacterIdFromOrder(mutatedRoot, id)
             const liveBeforeCommit = this.capture()
             const committedRoot = rebaseRootMutation(
                 rootValue.value,
@@ -1810,7 +1884,7 @@ export class SaveCoordinator {
             )
             const commit: WorkingSetCommit = {
                 expectedRevision: revision,
-                deleteCharacterId: characterId,
+                deleteCharacterIds: [...deletedIds],
                 characterDetails: canonicalClone(relatedCharacters),
             }
             if (canonicalJson(committedRoot) !== canonicalJson(rootValue.value)) {
@@ -1832,7 +1906,7 @@ export class SaveCoordinator {
                 const raced = relatedRaces.get(detail.chaId)
                 if (!raced) return canonicalClone(detail)
                 const resident = canonicalClone(raced.character)
-                this.removeGroupCharacterReference(resident, characterId)
+                Object.assign(resident, removeGroupMemberReferences(resident as groupChat, deletedIds))
                 const { chats: _chats, ...residentDetail } = resident
                 return residentDetail as CharacterDetail
             })
@@ -1843,6 +1917,7 @@ export class SaveCoordinator {
             const selectedRelatedBefore = liveAfterCommit.character
                 ? relatedResidentsBefore.get(liveAfterCommit.character.chaId)
                 : null
+            const [characterId, ...additionalDeletedCharacterIds] = deletedIds
             this.finishCharacterMutation(
                 {
                     revision: committed.revision,
@@ -1859,6 +1934,7 @@ export class SaveCoordinator {
                 committedRoot,
                 {
                     preservePendingWork: changedDuringCommit || relatedRaces.size > 0,
+                    additionalDeletedCharacterIds,
                     committedSelectedCharacter: selectedRelatedDetail
                         ? {
                               id: selectedRelatedDetail.chaId,
@@ -1871,7 +1947,7 @@ export class SaveCoordinator {
                 },
             )
             await this.finishExplicitCommit(committed.revision)
-            return true
+            return deletedIds.size
         })
     }
 
@@ -1906,11 +1982,13 @@ export class SaveCoordinator {
                 revision,
                 characterValue.value,
             )
+            const beforeCanonical = canonicalJson(current)
             const replacement = canonicalClone(await mutate(current))
             this.assertResidentCharacterUnchanged(characterId, residentBefore)
             if (replacement.chaId !== characterId) {
                 throw new Error(`Replacement character ID must remain ${characterId}`)
             }
+            if (canonicalJson(replacement) === beforeCanonical) return true
 
             const committed = await this.dependencies.store.commit({
                 expectedRevision: revision,
@@ -2082,11 +2160,14 @@ export class SaveCoordinator {
             const current = characterValue
                 ? await this.readCompleteCharacter(characterId, revision, characterValue.value)
                 : null
+            const beforeCanonical = current ? canonicalJson(current) : null
             const replacement = canonicalClone(await createOrMutate(current))
             this.assertResidentCharacterUnchanged(characterId, residentBefore)
             if (replacement.chaId !== characterId) {
                 throw new Error(`Upserted character ID must remain ${characterId}`)
             }
+            if (beforeCanonical !== null && canonicalJson(replacement) === beforeCanonical &&
+                !assetAliases?.length && !assetOwnerHeads?.length) return true
 
             const commit: WorkingSetCommit = { expectedRevision: revision }
             if (assetAliases !== undefined) {
@@ -2404,8 +2485,15 @@ export class SaveCoordinator {
             throw new Error('Destructive persistent replacement fence is not held')
         }
         this.destructiveReplacementFence = null
-        if (this.committedRefreshRevision === null && this.hasPendingOfficialPublication) {
-            this.armOfficialPublishRetry(this.officialPublishDelayMs())
+        if (this.committedRefreshRevision === null) {
+            if (this.hasPendingOfficialPublication || this.publishAfterFenceRelease) {
+                this.publishAfterFenceRelease = false
+                this.armOfficialPublishRetry(this.officialPublishDelayMs())
+            }
+            if (this.flushAfterFenceRelease) {
+                this.flushAfterFenceRelease = false
+                this.armDebounce()
+            }
         }
     }
 
@@ -2444,16 +2532,15 @@ export class SaveCoordinator {
     private async materializePluginStorageValues(
         revision: DataRevision,
     ): Promise<PluginStorageValue[]> {
-        const catalog = await this.dependencies.store.queryPluginStorage()
-        this.assertReadRevision(revision, catalog.revision)
-        return Promise.all(
-            catalog.items.map(async ({ owner, key }) => {
-                const stored = await this.dependencies.store.readPluginStorage(owner, key)
-                if (!stored) throw new Error(`Missing plugin storage value for ${key}`)
-                this.assertReadRevision(revision, stored.revision)
-                return { owner, key, value: canonicalClone(stored.value) }
-            }),
-        )
+        const values: PluginStorageValue[] = []
+        let afterKey: PluginStorageValueCursor | undefined
+        do {
+            const page = await this.dependencies.store.readPluginStorageValues({ afterKey })
+            this.assertReadRevision(revision, page.revision)
+            for (const item of page.items) values.push({ ...item, value: canonicalClone(item.value) })
+            afterKey = page.nextCursor ?? undefined
+        } while (afterKey)
+        return values
     }
 
     publishCurrentOfficialRevision(): Promise<void> {
@@ -2558,7 +2645,23 @@ export class SaveCoordinator {
         this.reportPersistenceIdleIfNeeded()
     }
 
-    private async flushIterations(_reason: string, publishOfficial: boolean): Promise<void> {
+    private async flushIterations(reason: string, publishOfficial: boolean): Promise<void> {
+        const localState = { settled: true }
+        try {
+            await this.flushIterationsUntilIdle(reason, publishOfficial, localState)
+        } catch (error) {
+            if (!localState.settled && !(error instanceof PersistentMutationFencedError)) {
+                this.setLocalSaveFailure(error)
+            }
+            throw error
+        }
+    }
+
+    private async flushIterationsUntilIdle(
+        _reason: string,
+        publishOfficial: boolean,
+        localState: { settled: boolean },
+    ): Promise<void> {
         if (this.committedRefreshRevision !== null) throw new PersistentMutationFencedError()
         if (this.destructiveReplacementFence) publishOfficial = false
         if (publishOfficial && this.deferredPublicationRevision !== null) {
@@ -2568,6 +2671,7 @@ export class SaveCoordinator {
             await this.retryPublicationCleanup()
         }
         while (true) {
+            localState.settled = false
             const generation = this.dirtyGeneration
             const captured = this.capture()
             const pendingConversationMutations = [...this.pendingConversationMutations]
@@ -2842,6 +2946,10 @@ export class SaveCoordinator {
                     continue
                 }
                 this.pendingByteCount = 0
+                this.persistedDirtyGeneration = generation
+                localState.settled = true
+                this.setLocalSaveFailure(null)
+                this.backgroundRetryDelay = 2_000
                 if (publishOfficial && this.pendingPublicationRevision !== null) {
                     const delay = this.officialPublishDelayMs()
                     if (delay <= 0) {
@@ -3030,8 +3138,8 @@ export class SaveCoordinator {
         conversationStubIds: ReadonlySet<string>
     } | null {
         if (
-            this.windowedCharacterBaseline ||
-            (this.dependencies.captureSelectedConversationAuthority?.() ?? null) !== null
+            this.windowedCharacterBaseline?.authority.characterId === characterId ||
+            this.dependencies.captureSelectedConversationAuthority?.()?.characterId === characterId
         ) {
             throw new WindowedConversationRequiresCompatibilityError(
                 'resident character capture requires complete ownership',
@@ -3142,6 +3250,7 @@ export class SaveCoordinator {
         committedRoot: RootDatabase,
         options: {
             preservePendingWork?: boolean
+            additionalDeletedCharacterIds?: readonly string[]
             publish?: boolean
             committedSelectedCharacter?: { id: string; character: CompleteCharacter | null }
         } = {},
@@ -3150,11 +3259,14 @@ export class SaveCoordinator {
         this.dirtyGeneration++
         this.rootBaseline = canonicalJson(committedRoot)
         if (options.publish !== false) {
+            for (const id of options.additionalDeletedCharacterIds ?? []) {
+                this.dependencies.publishCharacterMutation?.({ ...result, characterId: id, relatedCharacters: [] })
+            }
             this.dependencies.publishCharacterMutation?.(result)
             const published = this.capture()
             if (
                 published.character?.chaId === result.characterId ||
-                (result.kind === 'delete' && !published.character) ||
+                (result.kind === 'delete' && !published.character && !published.windowedCharacter) ||
                 (this.dependencies.publishCharacterMutation !== undefined &&
                     result.relatedCharacters?.some(
                         (detail) => detail.chaId === published.character?.chaId,
@@ -3250,7 +3362,14 @@ export class SaveCoordinator {
         return true
     }
 
-    private async finishExplicitCommit(revision: DataRevision): Promise<void> {
+    private async finishExplicitCommit(revision: DataRevision, verifyBaseline = true): Promise<void> {
+        if (verifyBaseline && this.captureMatchesBaseline() && this.pendingConversationMutations.length === 0 &&
+            this.pendingWindowedActivationChange === null && this.pendingWindowedChatListChange === null) {
+            this.persistedDirtyGeneration = this.dirtyGeneration
+            this.setLocalSaveFailure(null)
+        } else {
+            this.armDebounce()
+        }
         if (!this.dependencies.officialPublisher) return
         this.deferPublication(revision)
         this.armOfficialPublishRetry(this.officialPublishDelayMs())
@@ -4045,6 +4164,7 @@ export class SaveCoordinator {
             pluginStorageMeta: _pluginStorageMeta,
             ...rootValue
         } = database
+        if (isTauri) delete rootValue.account
         const rootCanonical = canonicalJson(rootValue)
         const presetsCanonical = canonicalJson(botPresets ?? [])
         const pluginStorageUnavailable =
@@ -4182,22 +4302,50 @@ export class SaveCoordinator {
         this.pendingByteCount += bytes
     }
 
-    private armDebounce(): void {
+    private armDebounce(delay = SAVE_DEBOUNCE_MS): void {
         if (this.debounceHandle !== undefined || this.committedRefreshRevision !== null) return
         this.debounceHandle = this.clock.setTimeout(() => {
             this.debounceHandle = undefined
             this.startBackgroundFlush('debounce')
-        }, SAVE_DEBOUNCE_MS)
+        }, delay)
     }
 
     private startBackgroundFlush(reason: string): void {
         try {
-            void this.flushPendingData(reason).catch((error) => this.reportBackgroundError(error))
+            void this.flushPendingData(reason).catch((error) => this.handleBackgroundSaveFailure(error))
         } catch (error) {
-            this.reportBackgroundError(error)
-            if (this.hasPendingOfficialPublication) {
-                this.armOfficialPublishRetry(OFFICIAL_PUBLISH_MIN_INTERVAL_MS)
+            this.handleBackgroundSaveFailure(error)
+        }
+    }
+
+    private handleBackgroundSaveFailure(error: unknown): void {
+        if (error instanceof PersistentMutationFencedError) {
+            if (this.destructiveReplacementFence || this.committedRefreshRevision !== null) {
+                this.flushAfterFenceRelease = true
+            } else {
+                this.armDebounce(this.backgroundRetryDelay)
             }
+            return
+        }
+        this.reportBackgroundError(error)
+        if (this.dirtyGeneration !== this.persistedDirtyGeneration &&
+            !(error instanceof TypeError) && !(error instanceof RevisionConflictError) &&
+            !(error instanceof Error && (error.name === 'QuotaExceededError' || error.name === 'UnsaveableValueError'))) {
+            this.armDebounce(this.backgroundRetryDelay)
+            this.backgroundRetryDelay = Math.min(60_000, this.backgroundRetryDelay * 2)
+        }
+        if (this.hasPendingOfficialPublication) {
+            this.armOfficialPublishRetry(OFFICIAL_PUBLISH_MIN_INTERVAL_MS)
+        }
+    }
+
+    private setLocalSaveFailure(error: unknown | null): void {
+        if (this.localSaveFailure === error) return
+        this.localSaveFailure = error
+        try {
+            this.dependencies.onLocalSaveFailure?.(error)
+        } catch {
+            // Notification failures cannot change the outcome of a durable write.
         }
     }
 
@@ -4287,6 +4435,10 @@ export class SaveCoordinator {
         if (this.officialPublishRetryHandle !== undefined) return
         this.officialPublishRetryHandle = this.clock.setTimeout(() => {
             this.officialPublishRetryHandle = undefined
+            if (this.destructiveReplacementFence || this.committedRefreshRevision !== null) {
+                this.publishAfterFenceRelease = true
+                return
+            }
             this.startBackgroundFlush('official-publish-interval')
         }, delay)
     }

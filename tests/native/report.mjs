@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict'
 const expectedCases = {
+    contract: ['delta-lease-pagination-large-commit'],
+    'read-contract': ['contract-restart-without-reseed'],
     write: ['commit', 'readback', 'stale-rejected'],
     read: ['readback', 'restart-without-reseed'],
     abort: ['commit', 'readback', 'abort-released'],

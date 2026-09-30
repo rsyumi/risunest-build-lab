@@ -3,6 +3,11 @@
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest'
 import { mount, tick, unmount } from 'svelte'
 
+vi.mock('src/ts/stores.svelte', async () => {
+    const { writable } = await import('svelte/store')
+    return { alertStore: writable({ type: 'none', msg: '' }) }
+})
+
 vi.mock('src/lang', () => ({
     language: {
         screenshot: 'Screenshot',
@@ -130,6 +135,7 @@ describe('ChatScreenshotDialog', () => {
             target,
             props: { totalTurns: 10, onStart: vi.fn(), onCancel, onClose },
         })
+        await tick()
 
         window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
         expect(onClose).toHaveBeenCalledOnce()
@@ -140,6 +146,7 @@ describe('ChatScreenshotDialog', () => {
             target,
             props: { totalTurns: 10, running: true, onStart: vi.fn(), onCancel, onClose },
         })
+        await tick()
 
         window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
         expect(onCancel).toHaveBeenCalledOnce()

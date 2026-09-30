@@ -91,6 +91,10 @@ struct WindowState {
     fullscreen: bool,
 }
 
+impl WindowState {
+    fn has_geometry(&self) -> bool { self.width > 0 && self.height > 0 }
+}
+
 impl Default for WindowState {
     fn default() -> Self {
         Self {
@@ -109,6 +113,25 @@ impl Default for WindowState {
 }
 
 struct WindowStateCache(Arc<Mutex<HashMap<String, WindowState>>>);
+
+#[cfg(test)]
+mod startup_geometry_tests {
+    use super::*;
+
+    #[test]
+    fn saved_normal_geometry_is_distinct_from_missing_or_empty_state() {
+        let mut saved = WindowState::default();
+        assert!(!saved.has_geometry());
+        saved.width = 1024;
+        assert!(!saved.has_geometry());
+        saved.height = 768;
+        assert!(saved.has_geometry());
+        assert!(!saved.maximized);
+        let restored: WindowState = serde_json::from_slice(&serde_json::to_vec(&saved).unwrap()).unwrap();
+        assert!(restored.has_geometry());
+        assert!(!restored.maximized);
+    }
+}
 /// Used to prevent deadlocks from resize and position event listeners setting the cached state on restoring states
 struct RestoringWindowState(Mutex<()>);
 
@@ -182,7 +205,7 @@ impl<R: Runtime> WindowExt for Window<R> {
 
         if let Some(state) = c
             .get(label)
-            .filter(|state| state != &&WindowState::default())
+            .filter(|state| state.has_geometry())
         {
             if flags.contains(StateFlags::DECORATIONS) {
                 self.set_decorations(state.decorated)?;
@@ -332,9 +355,22 @@ pub struct Builder {
     map_label: Option<Box<LabelMapperFn>>,
     filename: Option<String>,
     directory: Option<PathBuf>,
+    default_maximized: bool,
+    show_after_restore: bool,
 }
 
 impl Builder {
+    /// Maximizes tracked windows only when no saved geometry exists.
+    pub fn with_default_maximized(mut self, maximized: bool) -> Self {
+        self.default_maximized = maximized;
+        self
+    }
+
+    /// Shows tracked windows after their initial geometry has been restored.
+    pub fn with_show_after_restore(mut self, show: bool) -> Self {
+        self.show_after_restore = show;
+        self
+    }
     pub fn new() -> Self {
         Self::default()
     }
@@ -442,7 +478,13 @@ impl Builder {
                 }
 
                 if !self.skip_initial_state.contains(label) {
+                    let has_saved = window.state::<WindowStateCache>().0.lock().unwrap()
+                        .get(label).is_some_and(WindowState::has_geometry);
+                    if !has_saved && self.default_maximized {
+                        let _ = window.maximize();
+                    }
                     let _ = window.restore_state(state_flags);
+                    if self.show_after_restore { let _ = window.show(); }
                 }
 
                 let cache = window.state::<WindowStateCache>();

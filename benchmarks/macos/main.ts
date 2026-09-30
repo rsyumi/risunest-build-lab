@@ -226,10 +226,81 @@ async function lifecycle() {
   await invoke("macos_bench_quit");
 }
 
+async function startupAppearance(seed: boolean, theme: "light" | "dark") {
+  await guard();
+  check(Boolean(document.getElementById("preloading")), "appearance probe requires product HTML build");
+  if (seed) {
+    const { defaultColorScheme } = await import("../../src/ts/gui/colorscheme");
+    const colorScheme = theme === "dark" ? defaultColorScheme : {
+      bgcolor: "#ffffff", darkbg: "#f0f0f0", borderc: "#0f172a", selected: "#e0e0e0",
+      draculared: "#ff5555", textcolor: "#0f172a", textcolor2: "#64748b",
+      darkBorderc: "#d1d5db", darkbutton: "#e5e7eb", type: "light",
+    };
+    const opened = await invoke<{ revision: number }>("pds_open");
+    await invoke("pds_commit", {
+      commit: { expectedRevision: opened.revision, rootMutations: [
+        { type: "set", key: "didFirstSetup", value: true },
+        { type: "set", key: "colorScheme", value: colorScheme },
+      ] }, assetAliases: [],
+    });
+    localStorage.setItem("tos4", "true");
+    localStorage.setItem("appearance-theme", theme);
+    return { seeded: true, theme };
+  }
+  check(localStorage.getItem("appearance-theme") === theme, "appearance theme seed mismatch");
+  const preloaderBackground = getComputedStyle(document.getElementById("preloading")!).backgroundColor;
+  const app = await import("../../src/main");
+  await app.default;
+  const deadline = performance.now() + 60_000;
+  while (!performance.getEntriesByName("boot:interactive").length) {
+    check(performance.now() < deadline, "product appearance bootstrap timed out");
+    await pause(50);
+  }
+  const style = getComputedStyle(document.documentElement);
+  const bounds = document.getElementById("app")!.getBoundingClientRect();
+  await pause(1500);
+  return {
+    theme, systemDark: matchMedia("(prefers-color-scheme: dark)").matches,
+    preloaderBackground, colorScheme: style.colorScheme,
+    appBackground: style.getPropertyValue("--risu-theme-bgcolor"),
+    bounds: { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height },
+    interactiveMs: performance.getEntriesByName("boot:interactive")[0].startTime,
+    visualReview: "required", contentBackgroundPass: null, titlebarPass: null,
+  };
+}
+
 async function main() {
   await guard();
   const phase = await invoke<string>("macos_bench_phase");
-  if (phase === "contracts") {
+  if (/^appearance-(seed|app)-(light|dark)$/.test(phase)) {
+    const [, action, theme] = phase.split("-");
+    await report(phase, await startupAppearance(action === "seed", theme as "light" | "dark"));
+    await invoke("macos_bench_quit");
+  } else if (phase === "termination-probe") {
+    const settle = async (attempt: number) => {
+      await invoke("macos_bench_modal_ack", { attempt, approve: attempt === 3 });
+      if (attempt !== 3) {
+        await until(async () => !(await invoke<{ pending: boolean }>("macos_bench_modal_status")).pending,
+          "native termination reply did not settle");
+        void invoke("macos_bench_modal_begin");
+      }
+    };
+    window.addEventListener("termination-probe", event => {
+      const attempt = (event as CustomEvent<number>).detail;
+      if (attempt === 2) {
+        sessionStorage.setItem("termination-probe-reloading", "true");
+        location.reload();
+      } else {
+        void settle(attempt);
+      }
+    });
+    if (sessionStorage.getItem("termination-probe-reloading")) {
+      sessionStorage.removeItem("termination-probe-reloading");
+      await settle(2);
+    } else {
+      void invoke("macos_bench_modal_begin");
+    }
+  } else if (phase === "contracts") {
     if (sessionStorage.getItem("macos-contract-reload")) {
       await report("reload", { passed: true, ...(await verifyStored()) });
       await lifecycle();

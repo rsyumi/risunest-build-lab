@@ -57,7 +57,7 @@
     // Restoring restarts the app, so the flag only ever clears on cancel or failure.
     let restoringSnapshot: string | null = $state(null)
     let rollup = $derived(
-        view.stats
+        view.stats && view.loadedSources.length === 5
             ? storageDashboardRollup(
                   view.stats,
                   view.snapshots,
@@ -139,7 +139,8 @@
         if (reason === 'manual') return reasons.manual
         if (reason === 'periodic') return reasons.periodic
         if (reason === 'pre-restore') return reasons.preRestore
-        return reason
+        if (reason === "data-health-repair") return reasons.dataHealthRepair
+        return ""
     }
 
     function showActionError(error: unknown, fallback = strings.actionFailed): void {
@@ -167,6 +168,7 @@
         deletable: strings.gcStateDeletable,
         recent: strings.gcStateRecent,
         held: strings.gcStateHeld,
+        blocked: strings.gcBlocked,
     }
     const gcHolders: Record<string, string> = {
         snapshot: strings.gcHeldSnapshot,
@@ -274,6 +276,14 @@
     onDestroy(unsubscribe)
 </script>
 
+{#snippet listHeader(label: string, summary: string)}
+    <summary class={listHeaderClass}>
+        <ChevronRight size={16} class="shrink-0 text-textcolor2 transition-transform duration-200 group-open:rotate-90" aria-hidden="true" />
+        <span>{label}</span>
+        {#if summary}<span class="ml-auto text-sm text-textcolor2 tabular-nums">{summary}</span>{/if}
+    </summary>
+{/snippet}
+
 <SettingGroup id="risunest-storage" title={strings.title}>
     {#snippet actions()}
         <SettingButton variant="secondary" busy={view.loading} onclick={() => dashboard.load()}>{strings.refresh}</SettingButton>
@@ -332,16 +342,12 @@
             </p>
         </div>
 
-        {#snippet listHeader(label: string, summary: string)}
-            <summary class={listHeaderClass}>
-                <ChevronRight size={16} class="shrink-0 text-textcolor2 transition-transform duration-200 group-open:rotate-90" aria-hidden="true" />
-                <span>{label}</span>
-                {#if summary}<span class="ml-auto text-sm text-textcolor2 tabular-nums">{summary}</span>{/if}
-            </summary>
-        {/snippet}
+    {/if}
+        {#if view.loadedSources.includes('snapshots')}
         <details data-storage-backup-list="snapshots" class="group">
-            {@render listHeader(strings.snapshots, view.snapshots.length > 0 ? listSummary(view.snapshots.length, rollup.snapshotBytes) : '')}
+            {@render listHeader(strings.snapshots, view.snapshots.length > 0 && view.stats ? listSummary(view.snapshots.length, view.stats?.snapshotBytes ?? 0) : '')}
             <p class={listNoteClass}>{strings.snapshotSizeNote}</p>
+            {#if view.failedSources.includes('snapshots')}<p role="alert" class={listNoteClass}>{strings.loadFailed}</p>{/if}
             {#each view.snapshots as snapshot (snapshot.id)}
                 <div data-storage-backup-row class={listRowClass}>
                     <span class="min-w-0 flex-1 break-words tabular-nums">{new Date(snapshot.modifiedAt).toLocaleString()}<span class="ml-2 text-textcolor2">{snapshotReason(snapshot.reason)}</span></span>
@@ -353,8 +359,11 @@
                 <p class={listEmptyClass}>{strings.emptyList}</p>
             {/each}
         </details>
+        {/if}
+        {#if view.loadedSources.includes('conflictBackups')}
         <details data-storage-backup-list="conflict-backups" class="group">
-            {@render listHeader(strings.conflictBackups, view.conflictBackups.length > 0 ? listSummary(view.conflictBackups.length, rollup.conflictBackupBytes) : '')}
+            {@render listHeader(strings.conflictBackups, view.conflictBackups.length > 0 ? listSummary(view.conflictBackups.length, view.conflictBackups.reduce((sum, backup) => sum + backup.byteLength, 0)) : '')}
+            {#if view.failedSources.includes('conflictBackups')}<p role="alert" class={listNoteClass}>{strings.loadFailed}</p>{/if}
             {#each view.conflictBackups as backup (backup.id)}
                 <div data-storage-backup-row class={listRowClass}>
                     <span class="min-w-0 flex-1 break-words tabular-nums">{new Date(backup.createdAt).toLocaleString()}</span>
@@ -365,11 +374,14 @@
                 <p class={listEmptyClass}>{strings.emptyList}</p>
             {/each}
         </details>
+        {/if}
+        {#if view.loadedSources.includes('serverBackups')}
         <details data-storage-backup-list="sync-backups" class="group">
-            {@render listHeader(strings.syncBackups, serverBackupCount > 0 ? listSummary(serverBackupCount, rollup.serverBackupBytes) : '')}
+            {@render listHeader(strings.syncBackups, serverBackupCount > 0 ? listSummary(serverBackupCount, view.serverBackups?.diskBytes ?? 0) : '')}
             {#if view.serverBackups && view.serverBackups.incompleteCount > 0}
                 <p class="{listNoteClass} tabular-nums">{syncLabels.incomplete} ({formatCount(view.serverBackups.incompleteCount)}) · {formatRisuNestStorageBytes(view.serverBackups.incompleteBytes)}</p>
             {/if}
+            {#if view.failedSources.includes('serverBackups')}<p role="alert" class={listNoteClass}>{strings.loadFailed}</p>{/if}
             {#each view.serverBackups?.items ?? [] as backup (backup.id)}
                 {@const localBytes = backup.local.localRequiredBytes + backup.local.remoteDependentBytes}
                 {@const remoteBytes = backup.remote.localRequiredBytes + backup.remote.remoteDependentBytes}
@@ -392,8 +404,10 @@
                 </div>
             {/if}
         </details>
+        {/if}
+        {#if view.loadedSources.includes('tempUsage')}
         <details data-storage-backup-list="temp-files" class="group">
-            {@render listHeader(syncLabels.cache, rollup.cacheBytes > 0 ? formatRisuNestStorageBytes(rollup.cacheBytes) : '')}
+            {@render listHeader(syncLabels.cache, (view.tempUsage?.cacheBytes ?? 0) > 0 ? formatRisuNestStorageBytes((view.tempUsage?.cacheBytes ?? 0)) : '')}
             {#if view.tempUsage}
                 <div data-storage-temp-row class="grid items-center gap-x-6 gap-y-2 border-t border-darkborderc/55 py-2 pr-4 pl-10 text-sm @xl:grid-cols-[minmax(50%,1fr)_auto]">
                     <div class="min-w-0">
@@ -408,7 +422,9 @@
                 <p class={listEmptyClass}>{strings.emptyList}</p>
             {/if}
         </details>
+        {/if}
 
+    {#if view.stats}
         <SettingRow data-storage-action="snapshot" label={strings.createSnapshotTitle} help={strings.createSnapshotHelp}>
             <SettingButton busy={isBusy('create-snapshot')} onclick={createSnapshot}>{strings.createSnapshot}</SettingButton>
         </SettingRow>
@@ -417,12 +433,14 @@
                 <!-- The controls stay above the lists they produce instead of beside them. -->
                 <div class="mt-2 flex flex-wrap items-center gap-2">
                     <SettingButton variant="secondary" busy={isBusy('preview-gc')} disabled={isBusy('execute-gc')} onclick={previewGc}>{strings.gcRun}</SettingButton>
-                    {#if view.gcPreview}
+                    {#if view.gcPreview && view.gcPreview.blockers.length === 0 && view.gcPreview.candidateCount > 0}
                         <SettingButton busy={isBusy('execute-gc')} onclick={executeGc}>{strings.gcRunConfirm}</SettingButton>
                     {/if}
                 </div>
                 <div role="status" aria-live="polite">
-                    {#if view.gcPreview}
+                    {#if view.gcPreview?.blockers.length}
+                        <p class="mt-1 text-sm">{strings.gcBlocked} {view.gcPreview.blockers.includes('plugin-storage-opaque') ? strings.gcPluginBlocked : ''}</p>
+                    {:else if view.gcPreview}
                         <p class="mt-1 text-sm tabular-nums">{strings.gcResult.replace('{0}', formatCount(view.gcPreview.candidateCount)).replace('{1}', formatRisuNestStorageBytes(view.gcPreview.candidateBytes))}</p>
                     {:else if view.gcResult}
                         <p class="mt-1 text-sm tabular-nums">{strings.gcDeletedResult.replace('{0}', formatCount(view.gcResult.deletedCount)).replace('{1}', formatRisuNestStorageBytes(view.gcResult.deletedBytes))}</p>

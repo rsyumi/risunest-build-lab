@@ -635,15 +635,16 @@ async fn recover_locked(root: &Path, server: &Path, install: &Path) -> Result<Op
             recovered.last_completed_at = Some(now());
             recovered.last_failed_version = None;
             transition(root, &mut recovered, UpdatePhase::Completed, None)?;
+            finish_update_state(root, server)?;
             Ok(Some(RunOutcome::Completed(target_version)))
         }
         RecoveryOutcome::RolledBack {
             was_running,
             source_version,
             target_version,
-            installer_startup_enabled,
+            prior_startup_enabled,
         } => {
-            let restored = if let Some(enabled) = installer_startup_enabled {
+            let restored = if let Some(enabled) = prior_startup_enabled {
                 super::restore_installer_state(root, server, was_running, enabled, &source_version)
                     .await
             } else if was_running {
@@ -672,6 +673,7 @@ async fn recover_locked(root: &Path, server: &Path, install: &Path) -> Result<Op
                 UpdatePhase::Failed,
                 Some("update-interrupted-and-rolled-back"),
             )?;
+            finish_update_state(root, server)?;
             Err("update-interrupted-and-rolled-back".into())
         }
     }
@@ -706,6 +708,8 @@ async fn acquire_helper_update_lock(root: &Path) -> Result<UpdateLock> {
 }
 
 async fn run_inner_locked(root: &Path, server: &Path, mode: RunMode) -> Result<RunOutcome> {
+    #[cfg(windows)]
+    if let Err(error) = platform::sweep_stale_update_helpers(root) { eprintln!("{error}"); }
     let install = install_path(server)?;
     #[cfg(windows)]
     if let Some(transaction) = InstallTransaction::load(root, &install)? {
@@ -748,6 +752,9 @@ async fn run_inner_locked(root: &Path, server: &Path, mode: RunMode) -> Result<R
     if mode == RunMode::Scheduled
         && (settings.policy == UpdatePolicy::Off || !due(&status, current_time))
     {
+        if settings.policy == UpdatePolicy::Off {
+            finish_update_state(root, server)?;
+        }
         return Ok(RunOutcome::Skipped);
     }
     let prior_status = status.clone();
@@ -976,6 +983,7 @@ async fn run_inner_locked(root: &Path, server: &Path, mode: RunMode) -> Result<R
         return defer(root, &mut status, "management-app-open-or-install-locked");
     }
     let helper = copy_helper(root)?;
+    platform::update_schedule(root, &manager, server, settings.policy, "install-recovery")?;
     transaction.save(root)?;
     let mut shutdown_pending = false;
     if daemon.is_some() {
@@ -1139,6 +1147,7 @@ pub async fn run_helper(
         transaction.cancel_prepared(root)?;
         status.last_failed_version = Some(transaction.target_version);
         transition(root, &mut status, UpdatePhase::Failed, Some(&parent_error))?;
+        finish_update_state(root, server)?;
         return Err(parent_error);
     }
     let mut transaction =
@@ -1167,12 +1176,21 @@ pub async fn run_helper(
                 "update-rollback-failed"
             }),
         )?;
+        if rollback.is_ok() {
+            finish_rollback_recovery(root, install)?;
+            finish_update_state(root, server)?;
+        }
         return Err(error);
     }
-    transaction.mark_restarting(root)?;
+    let startup_snapshot = if !transaction.was_running {
+        super::installer_startup_snapshot(root, server).map(|enabled| transaction.set_prior_startup_enabled(enabled))
+    } else { Ok(()) };
+    if startup_snapshot.is_ok() { transaction.mark_restarting(root)?; }
     transition(root, &mut status, UpdatePhase::Restarting, None)?;
     let mut temporary_registration = false;
-    let registration = if transaction.was_running {
+    let registration = if let Err(error) = startup_snapshot {
+        Err(error)
+    } else if transaction.was_running {
         Ok(())
     } else {
         match platform::startup(root, server, "status") {
@@ -1222,6 +1240,7 @@ pub async fn run_helper(
             status.last_failed_version = None;
             status.deferred_until = None;
             transition(root, &mut status, UpdatePhase::Completed, external_reason)?;
+            finish_update_state(root, server)?;
             Ok(RunOutcome::Completed(transaction.target_version))
         }
         Err(error) => {
@@ -1239,10 +1258,29 @@ pub async fn run_helper(
                 Err("update-rollback-failed".into())
             } else {
                 transition(root, &mut status, UpdatePhase::Failed, Some(&error))?;
+                finish_rollback_recovery(root, install)?;
+                finish_update_state(root, server)?;
                 Err(error)
             }
         }
     }
+}
+
+fn finish_update_state(root: &Path, server: &Path) -> Result<()> {
+    let manager = server.with_file_name(if cfg!(windows) { "risunest-sync-manager.exe" } else { "risunest-sync-manager" });
+    finish_update_state_with(|| super::relaunch_gui(root, server), || {
+        if super::load_settings(root)?.policy == UpdatePolicy::Off {
+            if let Err(error) = super::reconcile_schedule_while_locked(root, &manager, server) {
+                eprintln!("{error}");
+            }
+        }
+        Ok(())
+    })
+}
+
+fn finish_update_state_with(relaunch: impl FnOnce() -> Result<()>, remove_schedule: impl FnOnce() -> Result<()>) -> Result<()> {
+    relaunch()?;
+    remove_schedule()
 }
 
 pub async fn run_recovery_helper(
@@ -1265,6 +1303,16 @@ mod tests {
     use crate::client::tests::read_request;
     use fs2::FileExt;
     use std::{io::Write, net::TcpListener, sync::Arc};
+
+    #[test]
+    fn gui_relaunch_precedes_potentially_self_terminating_schedule_cleanup() {
+        let relaunched = std::cell::Cell::new(false);
+        finish_update_state_with(|| { relaunched.set(true); Ok(()) }, || {
+            assert!(relaunched.get());
+            Ok(())
+        }).unwrap();
+        assert_eq!(finish_update_state_with(|| Err("synthetic-relaunch-failure".into()), || panic!("keep recovery schedule for retry")).unwrap_err(), "synthetic-relaunch-failure");
+    }
 
     #[tokio::test]
     async fn ready_helper_retries_a_transient_instance_lock_holder() {
@@ -1653,13 +1701,7 @@ mod tests {
 
         assert_eq!(error, "server-executable-or-data-path-invalid");
         assert_eq!(fs::read_to_string(install.join("version")).unwrap(), "old");
-        assert_eq!(
-            InstallTransaction::load(temp.path(), &install)
-                .unwrap()
-                .unwrap()
-                .phase,
-            TransactionPhase::RolledBack
-        );
+        assert!(InstallTransaction::load(temp.path(), &install).unwrap().is_none());
         assert_eq!(load_status(temp.path()).unwrap().phase, UpdatePhase::Failed);
     }
 

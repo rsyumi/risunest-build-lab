@@ -13,6 +13,7 @@ interface Application {
     fence: PersistentDestructiveReplacementFence
     confirm(): Promise<ExternalApplicationConfirmation>
     refreshReleased(revision: number): Promise<CommittedApplyOutcome>
+    refreshDeviceState?(): Promise<void>
     afterRefresh(): Promise<void>
     settled(): void
 }
@@ -59,10 +60,12 @@ async function resume(current: PendingApplication): Promise<void> {
             let outcome: CommittedApplyOutcome
             if (current.fence) {
                 outcome = await current.fence.refreshCommittedWorkingSet(current.revision)
+                await current.application.refreshDeviceState?.()
                 current.fence.release()
                 current.fence = undefined
             } else {
                 outcome = await current.application.refreshReleased(current.revision)
+                await current.application.refreshDeviceState?.()
             }
             if (outcome.projection !== 'applied') {
                 throw new Error('Committed external data needs a read-only screen refresh')

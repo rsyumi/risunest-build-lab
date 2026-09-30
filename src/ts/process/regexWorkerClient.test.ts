@@ -8,6 +8,9 @@ import {
 import {
     DEFAULT_REGEX_WORKER_TIMEOUT_MS,
     RegexExecutionTimeoutError,
+    RegexWorkerResetError,
+    RegexWorkerUnavailableError,
+    REGEX_WORKER_READY_TIMEOUT_MS,
     RegexWorkerClient,
     type RegexWorkerLike,
     type RegexWorkerRequest,
@@ -16,6 +19,7 @@ import {
 import { createRegexWorkerMessageHandler } from './regexWorker'
 
 class FakeWorker implements RegexWorkerLike {
+    constructor(private readonly autoReady = true) {}
     readonly requests: RegexWorkerRequest[] = []
     terminated = false
     private readonly messageListeners = new Set<(event: MessageEvent<RegexWorkerResponse>) => void>()
@@ -32,6 +36,7 @@ class FakeWorker implements RegexWorkerLike {
     addEventListener(type: 'message' | 'error', listener: EventListener): void {
         if (type === 'message') {
             this.messageListeners.add(listener as (event: MessageEvent<RegexWorkerResponse>) => void)
+            if (this.autoReady) this.respond({ type: 'ready' })
         }
         else {
             this.errorListeners.add(listener as (event: ErrorEvent) => void)
@@ -167,19 +172,50 @@ describe('RegexWorkerClient', () => {
         expect(result.errors[0].sourceIndex).toBe(4)
     })
 
-    it('routes out-of-order responses to the matching requests', async () => {
+    it('starts each execution deadline after the preceding request completes', async () => {
+        vi.useFakeTimers()
+        try {
+            const worker = new FakeWorker()
+            const client = new RegexWorkerClient(() => worker)
+            const first = client.execute(plan(), 'first')
+            const second = client.execute(plan(), 'second')
+            expect(worker.requests.filter((message) => message.type === 'execute')).toHaveLength(1)
+            await vi.advanceTimersByTimeAsync(1_900)
+            const firstRequest = worker.requests.at(-1) as Extract<RegexWorkerRequest, { type: 'execute' }>
+            worker.respond({ type: 'result', id: firstRequest.id, data: 'first-result', errors: [] })
+            await first
+            await vi.advanceTimersByTimeAsync(1_900)
+            expect(worker.terminated).toBe(false)
+            const secondRequest = worker.requests.at(-1) as Extract<RegexWorkerRequest, { type: 'execute' }>
+            worker.respond({ type: 'result', id: secondRequest.id, data: 'second-result', errors: [] })
+            await expect(second).resolves.toMatchObject({ data: 'second-result' })
+        } finally { vi.useRealTimers() }
+    })
+
+    it('bounds startup separately without posting execution before readiness', async () => {
+        vi.useFakeTimers()
+        try {
+            const worker = new FakeWorker(false)
+            const client = new RegexWorkerClient(() => worker)
+            const pending = client.execute(plan(), 'first').catch((error) => error)
+            await vi.advanceTimersByTimeAsync(DEFAULT_REGEX_WORKER_TIMEOUT_MS + 1)
+            expect(worker.requests).toEqual([])
+            expect(worker.terminated).toBe(false)
+            await vi.advanceTimersByTimeAsync(REGEX_WORKER_READY_TIMEOUT_MS)
+            expect(await pending).toBeInstanceOf(RegexWorkerUnavailableError)
+            expect(worker.terminated).toBe(true)
+        } finally { vi.useRealTimers() }
+    })
+
+    it('distinguishes an active abort from a queued victim', async () => {
         const worker = new FakeWorker()
         const client = new RegexWorkerClient(() => worker)
-        const executionPlan = plan()
-
-        const first = client.execute(executionPlan, 'first')
-        const second = client.execute(executionPlan, 'second')
-        const executes = worker.requests.filter((message) => message.type === 'execute')
-
-        worker.respond({ type: 'result', id: executes[1].id, data: 'second-result', errors: [] })
-        await expect(second).resolves.toEqual({ data: 'second-result', errors: [] })
-        worker.respond({ type: 'result', id: executes[0].id, data: 'first-result', errors: [] })
-        await expect(first).resolves.toEqual({ data: 'first-result', errors: [] })
+        const controller = new AbortController()
+        const active = client.execute(plan(), 'first', { signal: controller.signal }).catch((error) => error)
+        const victim = client.execute(plan(), 'second').catch((error) => error)
+        controller.abort()
+        expect(await active).toMatchObject({ name: 'AbortError' })
+        expect(await victim).toBeInstanceOf(RegexWorkerResetError)
     })
 
     it('cleans listeners and terminates an in-flight Worker on abort', async () => {
@@ -220,11 +256,11 @@ describe('RegexWorkerClient', () => {
             const timeoutError = await timedOutOutcome
             expect(timeoutError).toBeInstanceOf(RegexExecutionTimeoutError)
             expect(timeoutError).toMatchObject({ category: 'regex_timeout', revision: timedOutPlan.revision })
-            await expect(staleOutcome).resolves.toBe(timeoutError)
+            await expect(staleOutcome).resolves.toBeInstanceOf(RegexWorkerResetError)
             expect(workers[0].terminated).toBe(true)
             expect(workers[0].listenerCount).toBe(0)
             expect(workers).toHaveLength(1)
-            expect(workers[0].requests.filter((message) => message.type === 'execute')).toHaveLength(2)
+            expect(workers[0].requests.filter((message) => message.type === 'execute')).toHaveLength(1)
 
             const replacement = client.execute(timedOutPlan, 'fresh')
             expect(workers).toHaveLength(2)

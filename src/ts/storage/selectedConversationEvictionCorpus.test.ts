@@ -712,6 +712,8 @@ describe('selected conversation eviction correctness corpus', () => {
         }))
         vi.doMock('../process/modules', () => ({
             getModuleAssets: () => [], getModuleToggles: () => '', moduleUpdate: vi.fn(),
+            getModuleTriggers: () => [],
+            getModuleLorebooks: () => [], getModuleRegexScripts: () => [],
         }))
         for (const [id, exports] of [
             ['../process/lorebook.svelte', { loadLoreBookV3Prompt: vi.fn(async () => ({ actives: [] })) }],

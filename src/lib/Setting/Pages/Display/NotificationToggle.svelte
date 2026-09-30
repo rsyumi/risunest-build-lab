@@ -1,6 +1,7 @@
 <script lang="ts">
   import { language } from "src/lang";
-  import { isTauriIOS } from "src/ts/platform";
+  import { isTauriIOS, isTauriAndroid } from "src/ts/platform";
+  import { requestAndroidGenerationNotifications } from "src/ts/androidGenerationKeepAlive";
   import { requestIOSNotifications } from "src/ts/iosNative";
   import { alertError } from "src/ts/alert";
   import { DBState } from "src/ts/stores.svelte";
@@ -25,23 +26,22 @@
         }
         return;
       }
-      let hasPermission = { state: "denied" };
+      if (!DBState.db.notification) return;
       try {
-        hasPermission = await navigator.permissions.query({
-          name: "notifications",
-        });
-      } catch (error) {
-        // Some browsers do not support the Permissions API.
-      }
-      if (!DBState.db.notification) {
-        return;
-      }
-      if (hasPermission.state === "denied") {
-        const permission = await Notification.requestPermission();
-        if (permission === "denied") {
-          alertError(language.permissionDenied);
-          DBState.db.notification = false;
+        let granted = false;
+        if (isTauriAndroid) {
+          await requestAndroidGenerationNotifications();
+          granted = await window.RisuCompletionNotifications?.enabled() === true;
+        } else if (typeof Notification !== 'undefined') {
+          granted = await Notification.requestPermission() === 'granted';
         }
+        if (!granted) {
+          DBState.db.notification = false;
+          alertError(language.permissionDenied);
+        }
+      } catch {
+        DBState.db.notification = false;
+        alertError(language.permissionDenied);
       }
     }}
   />

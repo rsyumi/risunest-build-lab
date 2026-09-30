@@ -10,15 +10,27 @@ use tauri::{
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct Envelope {
-    commit: WorkingSetCommit,
-    asset_aliases: Vec<AssetAlias>,
+pub(crate) struct Envelope {
+    pub(crate) commit: WorkingSetCommit,
+    pub(crate) asset_aliases: Vec<AssetAlias>,
+}
+
+pub(crate) fn decode_envelope(bytes: &[u8]) -> StoreResult<Envelope> {
+    serde_json::from_slice(bytes).map_err(|error| {
+        let category = match error.classify() {
+            serde_json::error::Category::Io => "io",
+            serde_json::error::Category::Syntax => "syntax",
+            serde_json::error::Category::Data => "shape",
+            serde_json::error::Category::Eof => "incomplete",
+        };
+        StoreError::CommitDecode {
+            message: format!("commit envelope {category} error at line {} column {}", error.line(), error.column()),
+        }
+    })
 }
 
 pub(crate) fn commit_bytes(app: &AppHandle, bytes: &[u8]) -> StoreResult<RevisionResult> {
-    let envelope: Envelope = serde_json::from_slice(bytes).map_err(|_| StoreError::Validation {
-        message: "invalid commit envelope JSON".to_owned(),
-    })?;
+    let envelope = decode_envelope(bytes)?;
     with_store_mut(app.state(), |store| {
         store.commit_with_asset_aliases(&envelope.commit, &envelope.asset_aliases)
     })
@@ -37,8 +49,26 @@ pub(crate) fn pds_commit_raw(
     }
     match request.body() {
         InvokeBody::Raw(bytes) => commit_bytes(&app, bytes),
-        _ => Err(StoreError::Validation {
-            message: "expected a raw commit body".to_owned(),
-        }),
+        _ => Err(StoreError::RawBodyUnavailable),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn decoder_errors_are_classified_without_echoing_payload_strings() {
+        for (bytes, category) in [
+            (b"{".as_slice(), "incomplete"),
+            (br#"{"commit":"private-value","assetAliases":[]}"#.as_slice(), "shape"),
+            (b"{#".as_slice(), "syntax"),
+        ] {
+            let error = decode_envelope(bytes).err().expect("invalid envelope");
+            assert!(matches!(error, StoreError::CommitDecode { .. }));
+            let text = error.to_string();
+            assert!(text.contains(category));
+            assert!(text.contains("line"));
+            assert!(!text.contains("private-value"));
+        }
     }
 }

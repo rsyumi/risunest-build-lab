@@ -113,7 +113,7 @@ impl Archive {
                 CREATE TABLE snapshot_pages(snapshot_id TEXT NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
                     seq INTEGER NOT NULL CHECK(seq>=0), hash BLOB NOT NULL REFERENCES chunks(hash), PRIMARY KEY(snapshot_id,seq));
                 CREATE INDEX snapshot_pages_hash ON snapshot_pages(hash);
-                CREATE TABLE pending_restore(singleton INTEGER PRIMARY KEY CHECK(singleton=1), id TEXT NOT NULL REFERENCES snapshots(id));
+                CREATE TABLE pending_restore(singleton INTEGER PRIMARY KEY CHECK(singleton=1), id TEXT NOT NULL REFERENCES snapshots(id), request_token TEXT NOT NULL);
                 PRAGMA user_version=1;")?;
             tx.pragma_update(None, "application_id", APPLICATION_ID)?;
             tx.commit()?;
@@ -331,9 +331,21 @@ impl Archive {
             .optional()?)
     }
 
+    pub fn pending_restore_token(&self) -> StoreResult<Option<String>> {
+        Ok(self.connection.query_row(
+            "SELECT request_token FROM pending_restore WHERE singleton=1", [], |row| row.get(0),
+        ).optional()?)
+    }
+
     pub fn request_restore(&self, id: &str) -> StoreResult<()> {
         self.metadata(id)?;
-        self.connection.execute("INSERT INTO pending_restore(singleton,id) VALUES(1,?1) ON CONFLICT(singleton) DO UPDATE SET id=excluded.id", [id])?;
+        self.connection.execute("INSERT INTO pending_restore(singleton,id,request_token) VALUES(1,?1,?2) ON CONFLICT(singleton) DO UPDATE SET id=excluded.id, request_token=excluded.request_token", rusqlite::params![id, uuid::Uuid::new_v4().to_string()])?;
+        let attempt = self.directory.join("restore-attempt");
+        match fs::remove_file(attempt) {
+            Ok(()) => {},
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
+            Err(error) => return Err(error.into()),
+        }
         Ok(())
     }
 
@@ -367,7 +379,8 @@ impl Archive {
             let Some(oldest) = snapshots
                 .iter()
                 .rev()
-                .find(|s| s.id != protected && pending.as_deref() != Some(&s.id))
+                .filter(|s| s.id != protected && pending.as_deref() != Some(&s.id))
+                .min_by_key(|s| (s.reason != "periodic", s.modified_at))
             else {
                 break;
             };
@@ -524,6 +537,30 @@ mod tests {
         archive.clear_pending_restore(&second.id).unwrap();
         archive.delete(&second.id).unwrap();
         assert!(archive.list().unwrap().is_empty());
+    }
+
+    #[test]
+    fn rotation_prefers_periodic_and_keeps_protected_oversized_snapshots() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut archive = Archive::open(dir.path()).unwrap();
+        let source = archive.scratch().unwrap();
+        fs::write(&source.path, vec![1_u8; 4096]).unwrap();
+        let manual = archive.insert(&source.path, 1, "manual", AssetRootSet::default()).unwrap();
+        let periodic = archive.insert(&source.path, 1, "periodic", AssetRootSet::default()).unwrap();
+        let mut latest = String::new();
+        for _ in 0..7 {
+            latest = archive.insert(&source.path, 1, "manual", AssetRootSet::default()).unwrap().id;
+        }
+        archive.rotate(u64::MAX, &latest).unwrap();
+        assert!(archive.metadata(&periodic.id).is_err());
+        assert!(archive.metadata(&manual.id).is_ok());
+        archive.request_restore(&manual.id).unwrap();
+        archive.rotate(1, &latest).unwrap();
+        let kept = archive.list().unwrap();
+        assert_eq!(kept.len(), 2);
+        assert!(kept.iter().any(|item| item.id == manual.id));
+        assert!(kept.iter().any(|item| item.id == latest));
+        assert!(archive.bytes().unwrap() > 1);
     }
 
     #[test]

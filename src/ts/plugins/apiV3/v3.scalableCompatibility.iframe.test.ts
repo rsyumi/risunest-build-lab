@@ -235,7 +235,7 @@ async function executeIframeSrcdoc(frame: HTMLIFrameElement): Promise<void> {
         window.dispatchEvent(new MessageEvent('message', { data, source: child }))
     })
     vi.spyOn(child, 'postMessage').mockImplementation((data, _origin, transfer?: Transferable[]) => {
-        child.dispatchEvent(new childRealm.MessageEvent('message', { data, source: window, ports: transfer ?? [] }))
+        child.dispatchEvent(new childRealm.MessageEvent('message', { data, source: child.parent, ports: transfer ?? [] }))
     })
     const source = frame.srcdoc.match(/<script nonce="[^"]+">([\s\S]*)<\/script>/)?.[1]
     if (!source) throw new Error('Sandbox guest script was not found')

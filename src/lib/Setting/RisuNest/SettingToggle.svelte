@@ -18,13 +18,13 @@
 
 <label class="inline-flex min-w-0 items-center gap-2 rounded-md text-textcolor focus-within:outline focus-within:outline-2 focus-within:outline-darkborderc focus-within:outline-offset-2 {disabled ? 'cursor-not-allowed opacity-50' : 'cursor-pointer'}">
     <input {...rest} {id} class="sr-only" type="checkbox" bind:checked {indeterminate} {disabled} onchange={(event) => onchange?.(event.currentTarget.checked)} />
-    <span class="flex h-5 w-5 min-h-5 min-w-5 items-center justify-center rounded-md border-2 border-darkborderc transition-colors duration-200 {checked || indeterminate ? 'bg-darkborderc' : 'bg-darkbutton'}" aria-hidden="true">
+    <span class="flex h-5 w-5 min-h-5 min-w-5 items-center justify-center rounded-md border-2 border-darkborderc transition-colors duration-200 {checked || indeterminate ? 'bg-primary-500 border-primary-500 text-primary-foreground' : 'bg-darkbutton'}" aria-hidden="true">
         {#if checked}
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="white" class="h-3 w-3" aria-hidden="true">
+            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" stroke="currentColor" class="h-3 w-3" aria-hidden="true">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/>
             </svg>
         {:else if indeterminate}
-            <span class="h-0.5 w-2.5 rounded-full bg-white"></span>
+            <span class="h-0.5 w-2.5 rounded-full bg-primary-foreground"></span>
         {/if}
     </span>
     <span class="min-w-0 text-sm break-words" class:sr-only={!showLabel}>{label}</span>

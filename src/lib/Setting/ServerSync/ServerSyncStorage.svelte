@@ -20,9 +20,9 @@
   /** `backups` lists the conflict backups, `cache` the space they, the
    * temporary files and the asset residency ledger take. */
   let {
-    onChange,
+    onLoaded,
     section,
-  }: { onChange?: () => void; section: "backups" | "cache" } = $props();
+  }: { onLoaded?: (inventory?: ServerSyncBackupInventory, cache?: ServerSyncCacheUsage) => void; section: "backups" | "cache" } = $props();
   let inventory = $state<ServerSyncBackupInventory>();
   let cache = $state<ServerSyncCacheUsage>();
   let pending = $state("");
@@ -37,10 +37,11 @@
     const cursor = older ? (inventory?.next ?? undefined) : undefined;
     const [next, usage] = await Promise.all([
       getServerSyncBackupInventory(cursor),
-      getServerSyncCacheUsage(),
+      section === "cache" && !older ? getServerSyncCacheUsage() : Promise.resolve(undefined),
     ]);
     inventory = next;
-    cache = usage;
+    if (usage) cache = usage;
+    onLoaded?.(next, usage);
   }
   async function action(
     run: () => Promise<unknown>,
@@ -58,10 +59,10 @@
       if (changed) {
         inventory = undefined;
         cache = undefined;
+        onLoaded?.();
       }
     } finally {
       pending = "";
-      if (changed) onChange?.();
     }
   }
   async function remove(id: string): Promise<void> {

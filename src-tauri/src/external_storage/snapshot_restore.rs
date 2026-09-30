@@ -142,8 +142,8 @@ fn record_test_read(downloads: &Path, pack: bool, byte_length: u64) {
 fn corrupt(_: impl std::fmt::Display) -> ProviderError {
     ProviderError::new(ErrorKind::Corrupt)
 }
-fn transient(_: impl std::fmt::Display) -> ProviderError {
-    ProviderError::new(ErrorKind::Transient)
+fn transient(error: impl std::fmt::Display + 'static) -> ProviderError {
+    super::packaging::transient(error)
 }
 
 #[derive(Clone, Debug)]
@@ -387,7 +387,7 @@ pub(super) async fn open_object(
         let key = derive_key(&root, &repository_id, purpose).map_err(corrupt)?;
         let header =
             wire::open_envelope(&mut input, &mut output, &key, object_copy.plaintext_length)
-                .map_err(corrupt)?;
+                .map_err(super::packaging::format_error)?;
         output.sync_all().map_err(transient)?;
         drop(output);
         let expected_role = match object_copy.role {
@@ -1393,7 +1393,23 @@ fn insert_prepared(
     Ok(())
 }
 
+fn validate_section_lengths(entries: &[CompleteEntry]) -> Result<()> {
+    use risunest_external_storage_format::section::{MAX_SECTION_ENTRY_BYTES, MAX_SECTION_OBJECT_BYTES};
+    for entry in entries {
+        let limit = match entry.kind {
+            wire::CatalogEntryKind::SectionEntry => MAX_SECTION_ENTRY_BYTES,
+            wire::CatalogEntryKind::SectionObject => MAX_SECTION_OBJECT_BYTES,
+            _ => return Err(corrupt("non-section entry in section catalog")),
+        };
+        if entry.byte_length > limit as u64 {
+            return Err(corrupt("section source exceeds its codec limit"));
+        }
+    }
+    Ok(())
+}
+
 fn assemble(entry: &CompleteEntry, packs: &BTreeMap<String, PathBuf>) -> Result<Vec<u8>> {
+    validate_section_lengths(std::slice::from_ref(entry))?;
     let mut bytes = Vec::with_capacity(usize::try_from(entry.byte_length).map_err(corrupt)?);
     let mut digest = Sha256::new();
     for chunk in &entry.chunks {
@@ -1449,6 +1465,7 @@ fn materialize_section_entries(
             content_sha256: digest,
             byte_length: entry.byte_length,
             path: destination,
+            offset: None,
         });
     }
     sources.sort_by(|a, b| (a.kind as u8, &a.key).cmp(&(b.kind as u8, &b.key)));
@@ -1517,6 +1534,7 @@ pub(crate) async fn download_sections(
             &nodes,
             repository,
         );
+        validate_section_lengths(&complete)?;
         let pack_paths =
             open_packs(&packs, root_key, staging_root, provider, repository, progress, cancel)
                 .await?;
@@ -1697,6 +1715,20 @@ pub(crate) async fn download_snapshot(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oversized_section_is_rejected_before_pack_access_or_allocation() {
+        let entry = CompleteEntry {
+            kind: wire::CatalogEntryKind::SectionObject,
+            key: "object/oversized".into(),
+            content_sha256: [0; 32],
+            byte_length: u64::MAX,
+            chunks: Vec::new(),
+        };
+        assert_eq!(assemble(&entry, &BTreeMap::new()).unwrap_err().kind, ErrorKind::Corrupt);
+        assert!(validate_section_lengths(&[entry]).is_err());
+    }
+
 
     #[test]
     fn test_read_counts_are_scoped_to_registered_staging_root() {

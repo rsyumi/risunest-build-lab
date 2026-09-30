@@ -1,4 +1,5 @@
 <script lang="ts">
+    import LazyScreenError from "./lib/UI/LazyScreenError.svelte";
     import ChatBindingLifecycle from './lib/SideBars/ChatBindingLifecycle.svelte'
     import { DynamicGUI, settingsOpen, sideBarStore, ShowRealmFrameStore, openPresetList, openPersonaList, MobileGUI, CustomGUISettingMenuStore, loadedStore, alertStore, LoadingStatusState, bookmarkListOpen, popupStore, easyPanelStore, popUpEditorStore, loadoutModalStore, irisStore, customSideBarConfigDialogStore, bootFailure, recoveryStart, type BootFailure } from './ts/stores.svelte';
     import Sidebar from './lib/SideBars/Sidebar.svelte';
@@ -44,9 +45,10 @@
         RECOVERY_EXCLUSIONS,
         type RecoveryExclusion,
     } from './ts/storage/recoveryMode.svelte';
-    import { getDeviceSettings, updateDeviceSettings } from './ts/storage/deviceSettings';
+    import { getStartupExclusions, updateStartupExclusions } from './ts/storage/deviceSettings';
     import LoadingIndicator from './lib/UI/GUI/LoadingIndicator.svelte';
     import SyncExitDialog from './lib/Others/SyncExitDialog.svelte';
+    import PersistentLocalSaveFailure from './lib/Others/PersistentLocalSaveFailure.svelte';
     import PersistentWorkingSetRecovery from './lib/Others/PersistentWorkingSetRecovery.svelte';
     import { persistentWorkingSetInputBlocked } from './ts/storage/persistentDataRuntime.svelte';
     import { restoreFocusAfterInputBlock } from './ts/ui/restoreFocusAfterInputBlock';
@@ -128,12 +130,10 @@
             alertConfirm,
             (exclusions) => {
                 const kept = new Set([
-                    ...getDeviceSettings().startupExclusions,
+                    ...getStartupExclusions(),
                     ...exclusions,
                 ])
-                updateDeviceSettings({
-                    startupExclusions: RECOVERY_EXCLUSIONS.filter((item) => kept.has(item)),
-                })
+                updateStartupExclusions(RECOVERY_EXCLUSIONS.filter((item) => kept.has(item)))
             },
             exclusionName,
             language.risuNest.recovery.keepBody,
@@ -155,36 +155,31 @@
     $effect(() => {
         if (isTauri && $loadedStore) {
             // Start only after storage, asset authority and the working set are ready.
-            void import('./ts/storage/sync/serverSyncProduction').then(({ startServerSync }) => startServerSync())
+            if (!isStartupExcluded('sync', getStartupExclusions()))
+                void import('./ts/storage/sync/serverSyncProduction').then(({ startServerSync }) => startServerSync())
             // The update check runs after the start finishes, so a start that left it off keeps it off.
-            if (!isStartupExcluded('autoUpdate', getDeviceSettings().startupExclusions))
+            if (!isStartupExcluded('autoUpdate', getStartupExclusions()))
                 void import('./ts/update/controller').then(({ startAppUpdateChecks }) => startAppUpdateChecks())
         }
     })
 
-    let settingsPromise:
-        Promise<typeof import('./lib/Setting/Settings.svelte')> | undefined
-    let gridCharsPromise:
-        Promise<typeof import('./lib/Others/GridCatalog.svelte')> | undefined
-    let botpresetPromise:
-        Promise<typeof import('./lib/Setting/botpreset.svelte')> | undefined
-    let listedPersonaPromise:
-        Promise<typeof import('./lib/Setting/listedPersona.svelte')> | undefined
-    let customGUISettingMenuPromise:
-        | Promise<
-              typeof import('./lib/Setting/Pages/CustomGUISettingMenu.svelte')
-          >
-        | undefined
+    let settingsPromise: Promise<typeof import('./lib/Setting/Settings.svelte')> | undefined
+    let gridCharsPromise: Promise<typeof import('./lib/Others/GridCatalog.svelte')> | undefined
+    let botpresetPromise: Promise<typeof import('./lib/Setting/botpreset.svelte')> | undefined
+    let listedPersonaPromise: Promise<typeof import('./lib/Setting/listedPersona.svelte')> | undefined
+    let customGUISettingMenuPromise: Promise<typeof import('./lib/Setting/Pages/CustomGUISettingMenu.svelte')> | undefined
 
-    const loadSettings = () =>
+    let lazyRetry = $state(0)
+
+    const loadSettings = (_retry: number) =>
         (settingsPromise ??= import('./lib/Setting/Settings.svelte'))
-    const loadGridChars = () =>
+    const loadGridChars = (_retry: number) =>
         (gridCharsPromise ??= import('./lib/Others/GridCatalog.svelte'))
-    const loadBotpreset = () =>
+    const loadBotpreset = (_retry: number) =>
         (botpresetPromise ??= import('./lib/Setting/botpreset.svelte'))
-    const loadListedPersona = () =>
+    const loadListedPersona = (_retry: number) =>
         (listedPersonaPromise ??= import('./lib/Setting/listedPersona.svelte'))
-    const loadCustomGUISettingMenu = () =>
+    const loadCustomGUISettingMenu = (_retry: number) =>
         (customGUISettingMenuPromise ??=
             import('./lib/Setting/Pages/CustomGUISettingMenu.svelte'))
 
@@ -445,7 +440,7 @@
             </div>
         {/if}
     {:else if $CustomGUISettingMenuStore}
-        {#await loadCustomGUISettingMenu()}
+        {#await loadCustomGUISettingMenu(lazyRetry)}
             <div
                 class="w-full h-full flex items-center justify-center text-textcolor"
             >
@@ -455,24 +450,12 @@
             {@const CustomGUISettingMenu = module.default}
             <CustomGUISettingMenu />
         {:catch}
-            <div
-                class="w-full h-full flex flex-col gap-3 items-center justify-center text-textcolor"
-                role="alert"
-            >
-                <span>{language.error}</span>
-                <button
-                    class="bg-darkbutton border border-darkborderc rounded-md px-4 py-2 hover:bg-selected"
-                    onclick={() => {
-                        customGUISettingMenuPromise = undefined
-                        $CustomGUISettingMenuStore = false
-                    }}>{language.cancel}</button
-                >
-            </div>
+            <LazyScreenError message={language.risuNest.lazy.screen} onRetry={() => { customGUISettingMenuPromise = undefined; lazyRetry++ }} backLabel={language.close} onBack={() => { customGUISettingMenuPromise = undefined; $CustomGUISettingMenuStore = false }} />
         {/await}
     {:else if !didFirstSetup || $onboardingHold}
         <Onboarding />
     {:else if $settingsOpen}
-        {#await loadSettings()}
+        {#await loadSettings(lazyRetry)}
             <div
                 class="w-full h-full flex items-center justify-center text-textcolor"
             >
@@ -482,19 +465,7 @@
             {@const Settings = module.default}
             <Settings />
         {:catch}
-            <div
-                class="w-full h-full flex flex-col gap-3 items-center justify-center text-textcolor"
-                role="alert"
-            >
-                <span>{language.error}</span>
-                <button
-                    class="bg-darkbutton border border-darkborderc rounded-md px-4 py-2 hover:bg-selected"
-                    onclick={() => {
-                        settingsPromise = undefined
-                        $settingsOpen = false
-                    }}>{language.cancel}</button
-                >
-            </div>
+            <LazyScreenError message={language.risuNest.lazy.settings} onRetry={() => { settingsPromise = undefined; lazyRetry++ }} backLabel={language.close} onBack={() => { settingsPromise = undefined; $settingsOpen = false }} />
         {/await}
     {:else if $MobileGUI}
         <div class="w-full h-full flex flex-col">
@@ -504,7 +475,7 @@
         </div>
     {:else}
         {#if gridOpen}
-            {#await loadGridChars()}
+            {#await loadGridChars(lazyRetry)}
                 <div
                     class="w-full h-full flex items-center justify-center text-textcolor"
                 >
@@ -518,19 +489,7 @@
                     }}
                 />
             {:catch}
-                <div
-                    class="w-full h-full flex flex-col gap-3 items-center justify-center text-textcolor"
-                    role="alert"
-                >
-                    <span>{language.error}</span>
-                    <button
-                        class="bg-darkbutton border border-darkborderc rounded-md px-4 py-2 hover:bg-selected"
-                        onclick={() => {
-                            gridCharsPromise = undefined
-                            gridOpen = false
-                        }}>{language.cancel}</button
-                    >
-                </div>
+            <LazyScreenError message={language.risuNest.lazy.screen} onRetry={() => { gridCharsPromise = undefined; lazyRetry++ }} backLabel={language.close} onBack={() => { gridCharsPromise = undefined; gridOpen = false }} />
             {/await}
         {:else}
             {#if (!$DynamicGUI)}
@@ -557,7 +516,7 @@
         <RealmFrame />
     {/if}
     {#if $openPresetList}
-        {#await loadBotpreset()}
+        {#await loadBotpreset(lazyRetry)}
             <div
                 class="absolute inset-0 z-40 flex items-center justify-center bg-darkbg text-textcolor"
             >
@@ -571,23 +530,11 @@
                 }}
             />
         {:catch}
-            <div
-                class="absolute inset-0 z-40 flex flex-col gap-3 items-center justify-center bg-darkbg text-textcolor"
-                role="alert"
-            >
-                <span>{language.error}</span>
-                <button
-                    class="bg-darkbutton border border-darkborderc rounded-md px-4 py-2 hover:bg-selected"
-                    onclick={() => {
-                        botpresetPromise = undefined
-                        $openPresetList = false
-                    }}>{language.cancel}</button
-                >
-            </div>
+            <LazyScreenError overlay message={language.risuNest.lazy.screen} onRetry={() => { botpresetPromise = undefined; lazyRetry++ }} backLabel={language.close} onBack={() => { botpresetPromise = undefined; $openPresetList = false }} />
         {/await}
     {/if}
     {#if $openPersonaList}
-        {#await loadListedPersona()}
+        {#await loadListedPersona(lazyRetry)}
             <div
                 class="absolute inset-0 z-40 flex items-center justify-center bg-darkbg text-textcolor"
             >
@@ -601,19 +548,7 @@
                 }}
             />
         {:catch}
-            <div
-                class="absolute inset-0 z-40 flex flex-col gap-3 items-center justify-center bg-darkbg text-textcolor"
-                role="alert"
-            >
-                <span>{language.error}</span>
-                <button
-                    class="bg-darkbutton border border-darkborderc rounded-md px-4 py-2 hover:bg-selected"
-                    onclick={() => {
-                        listedPersonaPromise = undefined
-                        $openPersonaList = false
-                    }}>{language.cancel}</button
-                >
-            </div>
+            <LazyScreenError overlay message={language.risuNest.lazy.screen} onRetry={() => { listedPersonaPromise = undefined; lazyRetry++ }} backLabel={language.close} onBack={() => { listedPersonaPromise = undefined; $openPersonaList = false }} />
         {/await}
     {/if}
     {#if $bookmarkListOpen}
@@ -649,3 +584,4 @@
 </main>
 <SyncExitDialog />
 <PersistentWorkingSetRecovery />
+<PersistentLocalSaveFailure />

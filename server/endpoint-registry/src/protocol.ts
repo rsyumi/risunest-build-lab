@@ -23,6 +23,13 @@ export function endpointId(url: URL): string {
   return uuid.toLowerCase();
 }
 
+export async function writerHash(request: Request): Promise<string> {
+  const match = /^Bearer ([0-9a-f]{64})$/.exec(request.headers.get("authorization") ?? "");
+  if (!match) throw new ProtocolError("record-owned", 403);
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(match[1]!));
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
 export function validateEnvelope(envelope: string): string {
   if (envelope.length > MAX_BODY_BYTES)
     throw new ProtocolError("body-too-large", 413);

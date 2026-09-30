@@ -19,6 +19,14 @@ pub(crate) type ProviderFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T>> +
 pub(crate) enum ErrorKind {
     Unauthorized,
     ReauthRequired,
+    EndpointRejected,
+    DeviceVaultUnavailable,
+    RepositoryKeyUnavailable,
+    ClockSkew,
+    LocationOccupied,
+    RepositoryBusy,
+    LocalStorageFull,
+    LocalPermissionDenied,
     NotFound,
     PreconditionFailed,
     RateLimited,
@@ -197,6 +205,24 @@ pub(crate) fn parse_lease_object_id(object_id: &str) -> Result<(LeaseKind, Strin
         return Err(corrupt());
     }
     Ok((kind, tag.to_owned()))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RoleMemberName { Owned, Foreign, Ambiguous }
+
+pub(crate) fn role_member_name(collection: Collection, name: &str) -> RoleMemberName {
+    if name.starts_with('.') || name.eq_ignore_ascii_case("Thumbs.db")
+        || name.eq_ignore_ascii_case("desktop.ini") {
+        return RoleMemberName::Foreign;
+    }
+    if collection == Collection::Leases {
+        if parse_lease_object_id(name).is_ok() { return RoleMemberName::Owned; }
+        if ["work-", "cleanup-", "deleting-"].iter().any(|prefix| name.starts_with(prefix)) {
+            return RoleMemberName::Ambiguous;
+        }
+        return RoleMemberName::Foreign;
+    }
+    RoleMemberName::Ambiguous
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -480,6 +506,24 @@ impl HeadBytes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn role_names_ignore_only_proven_foreign_members() {
+        for collection in [Collection::Leases, Collection::Snapshots, Collection::BackupPoints,
+            Collection::InventoryPages, Collection::Descriptors] {
+            for name in [".DS_Store", "._metadata", "Thumbs.db", "desktop.ini"] {
+                assert_eq!(role_member_name(collection, name), RoleMemberName::Foreign);
+            }
+        }
+        assert_eq!(role_member_name(Collection::Leases, "readme.txt"), RoleMemberName::Foreign);
+        let name = lease_object_id(LeaseKind::Work, &"a".repeat(32)).unwrap();
+        assert_eq!(role_member_name(Collection::Leases, &name), RoleMemberName::Owned);
+        for name in [format!("{name} (1)"), "work-broken".into(), "deleting-".into(), "cleanup-unknown".into()] {
+            assert_eq!(role_member_name(Collection::Leases, &name), RoleMemberName::Ambiguous);
+        }
+        assert_eq!(role_member_name(Collection::BackupPoints, "readme.txt"), RoleMemberName::Ambiguous);
+    }
+
 
     #[test]
     fn a_lease_name_carries_its_kind_and_tag_and_nothing_else() {

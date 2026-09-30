@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { openRisuNestSettingsTab } from "src/ts/setting/risuNestSettingsTabs";
     import { PlusIcon, TrashIcon, LinkIcon, CodeXmlIcon, PowerIcon, PowerOffIcon, ShieldIcon } from "@lucide/svelte";
     import { language } from "src/lang";
     import { alertConfirm, alertMd, alertSelect, alertToast } from "src/ts/alert";
@@ -28,7 +29,7 @@
 
 <span class="text-draculared text-xs mb-4">{language.pluginWarn}</span>
 
-<button type="button" class="text-textcolor2 hover:text-textcolor text-sm underline self-start mb-2" onclick={() => { $SettingsMenuIndex = 17; setTimeout(() => document.getElementById('risunest-plugin-data')?.scrollIntoView({ block: 'start' }), 0) }}>{language.risuNest.pluginData.title}</button>
+<button type="button" class="text-textcolor2 hover:text-textcolor text-sm underline self-start mb-2" onclick={() => { openRisuNestSettingsTab('plugin-data'); $SettingsMenuIndex = 17 }}>{language.risuNest.pluginData.title}</button>
 
 <div class="border-solid border-darkborderc p-2 flex flex-col border-1">
     {#if !DBState.db.plugins || DBState.db.plugins?.length === 0}
@@ -126,7 +127,8 @@
                 onclick={async () => {
                     const v = await alertConfirm(
                         language.removeConfirm +
-                            (plugin.displayName ?? plugin.name),
+                            (plugin.displayName ?? plugin.name) + "\n\n" +
+                            language.risuNest.plugins.removeRetainedDataNotice,
                     );
                     if (v) {
                         if (DBState.db.currentPluginProvider === plugin.name) {
@@ -142,10 +144,10 @@
                 <TrashIcon />
             </button>
         </div>
-        {#if plugin.version === 1}
+        {#if plugin.version !== "3.0"}
             <span class="text-draculared text-xs">
                 {language.pluginVersionWarn
-                    .replace("{{plugin_version}}", "API V1")
+                    .replace("{{plugin_version}}", `API V${plugin.version ?? "2.0"}`)
                     .replace("{{required_version}}", "API V3")}
             </span>
             <!--List up args-->

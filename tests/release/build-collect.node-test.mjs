@@ -58,7 +58,7 @@ test("record and collect require every signed app target and retain both Linux u
   const generated = spawnSync(process.execPath, [
     "node_modules/@tauri-apps/cli/tauri.js", "signer", "generate", "--ci",
     "--password", "synthetic-password", "--write-keys", key,
-  ], { cwd: new URL("../..", import.meta.url), encoding: "utf8" });
+  ], { cwd: new URL("../..", import.meta.url), encoding: "utf8", windowsHide: true });
   assert.equal(generated.status, 0, generated.stderr);
   const publicKey = readFileSync(`${key}.pub`, "utf8");
   const previousKey = process.env.TAURI_SIGNING_PRIVATE_KEY;
@@ -135,7 +135,7 @@ test("record and collect require every signed sync target and exact vendor field
   const generated = spawnSync(process.execPath, [
     "node_modules/@tauri-apps/cli/tauri.js", "signer", "generate", "--ci",
     "--password", "synthetic-password", "--write-keys", key,
-  ], { cwd: new URL("../..", import.meta.url), encoding: "utf8" });
+  ], { cwd: new URL("../..", import.meta.url), encoding: "utf8", windowsHide: true });
   assert.equal(generated.status, 0, generated.stderr);
   const publicKey = readFileSync(`${key}.pub`, "utf8");
   const previousKey = process.env.TAURI_SIGNING_PRIVATE_KEY;

@@ -75,7 +75,7 @@ impl IosWebAuthenticationAuthorization {
         };
         match outcome {
             WebAuthenticationOutcome::Callback(callback) => self.finish(&callback),
-            WebAuthenticationOutcome::Cancelled => {
+            WebAuthenticationOutcome::Cancelled | WebAuthenticationOutcome::Unavailable => {
                 Err(ProviderError::new(ErrorKind::Cancelled))
             }
             WebAuthenticationOutcome::Failed => {
@@ -156,17 +156,33 @@ async fn receive_loopback_callback(
     redirect_url: url::Url,
     pending: PendingAuthorization,
 ) -> Result<AuthorizationCode> {
-    let (mut stream, peer) = listener
-        .accept()
-        .await
-        .map_err(|_| ProviderError::new(ErrorKind::Transient))?;
-    if !peer.ip().is_loopback() {
-        return Err(ProviderError::new(ErrorKind::ReauthRequired));
+    loop {
+        let (mut stream, peer) = listener
+            .accept()
+            .await
+            .map_err(|_| ProviderError::new(ErrorKind::Transient))?;
+        if !peer.ip().is_loopback() {
+            continue;
+        }
+        let callback = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            read_callback(&mut stream, &redirect_url, &Cancellation::default()),
+        ).await;
+        let callback = match callback {
+            Ok(Ok(callback)) => callback,
+            _ => {
+                write_browser_response(&mut stream, "404 Not Found", false).await;
+                continue;
+            }
+        };
+        if !pending.matches_state(&callback) {
+            write_browser_response(&mut stream, "400 Bad Request", false).await;
+            continue;
+        }
+        let result = pending.finish(&callback);
+        write_browser_response(&mut stream, if result.is_ok() { "200 OK" } else { "400 Bad Request" }, result.is_ok()).await;
+        return result;
     }
-    let callback = read_callback(&mut stream, &redirect_url, &Cancellation::default()).await;
-    let success = callback.is_ok();
-    write_browser_response(&mut stream, success).await;
-    pending.finish(&callback?)
 }
 
 #[cfg(not(target_os = "android"))]
@@ -236,25 +252,21 @@ async fn read_callback(
 }
 
 #[cfg(not(target_os = "android"))]
-async fn write_browser_response(stream: &mut tokio::net::TcpStream, success: bool) {
+async fn write_browser_response(stream: &mut tokio::net::TcpStream, status: &str, success: bool) {
     use tokio::io::AsyncWriteExt;
-    let (status, message) = if success {
-        (
-            "200 OK",
-            "Authorization received. You can return to RisuNest.",
-        )
+    let message = if success {
+        "Authorization received. You can return to RisuNest."
     } else {
-        (
-            "400 Bad Request",
-            "Authorization could not be accepted. Return to RisuNest and retry.",
-        )
+        "Authorization could not be accepted. Return to RisuNest and retry."
     };
     let response = format!(
         "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nCache-Control: no-store\r\nContent-Security-Policy: default-src 'none'\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{message}",
         message.len()
     );
-    let _ = stream.write_all(response.as_bytes()).await;
-    let _ = stream.shutdown().await;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let _ = stream.write_all(response.as_bytes()).await;
+        let _ = stream.shutdown().await;
+    }).await;
 }
 
 #[cfg(target_os = "android")]
@@ -796,7 +808,41 @@ mod tests {
     }
 
     #[test]
-    fn loopback_callback_rejects_wrong_paths_before_granting() {
+    fn loopback_idle_and_empty_connections_do_not_consume_provider_denial() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let (pending, authorization_url) = LoopbackAuthorization::start(policy).await.unwrap();
+            let redirect = url::Url::parse(&authorization_url.query_pairs().find(|(name, _)| name == "redirect_uri").unwrap().1).unwrap();
+            let state = authorization_url.query_pairs().find(|(name, _)| name == "state").unwrap().1.to_string();
+            let empty = tokio::net::TcpStream::connect(("127.0.0.1", redirect.port().unwrap())).await.unwrap();
+            drop(empty);
+            let mut idle = tokio::net::TcpStream::connect(("127.0.0.1", redirect.port().unwrap())).await.unwrap();
+            let mut response = String::new();
+            tokio::time::timeout(std::time::Duration::from_secs(12), idle.read_to_string(&mut response)).await.unwrap().unwrap();
+            assert!(response.starts_with("HTTP/1.1 404"));
+            assert!(!pending.callback.as_ref().unwrap().is_finished());
+            let mut denial = tokio::net::TcpStream::connect(("127.0.0.1", redirect.port().unwrap())).await.unwrap();
+            denial.write_all(format!("GET {}?error=access_denied&state={state} HTTP/1.1\r\n\r\n", redirect.path()).as_bytes()).await.unwrap();
+            assert_eq!(pending.wait(&Cancellation::default()).await.err().unwrap().kind, ErrorKind::Cancelled);
+        });
+    }
+
+    #[test]
+    fn cancelling_loopback_authorization_aborts_an_idle_socket() {
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        runtime.block_on(async {
+            let (pending, authorization_url) = LoopbackAuthorization::start(policy).await.unwrap();
+            let redirect = url::Url::parse(&authorization_url.query_pairs().find(|(name, _)| name == "redirect_uri").unwrap().1).unwrap();
+            let _idle = tokio::net::TcpStream::connect(("127.0.0.1", redirect.port().unwrap())).await.unwrap();
+            let cancel = Cancellation::default();
+            cancel.cancel();
+            let result = tokio::time::timeout(std::time::Duration::from_millis(200), pending.wait(&cancel)).await.unwrap();
+            assert_eq!(result.err().unwrap().kind, ErrorKind::Cancelled);
+        });
+    }
+
+    #[test]
+    fn loopback_callback_ignores_unrelated_requests_before_granting() {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
             let (pending, authorization_url) = LoopbackAuthorization::start(policy).await.unwrap();
@@ -808,26 +854,33 @@ mod tests {
                     .1,
             )
             .unwrap();
+            let state = authorization_url.query_pairs().find(|(name, _)| name == "state").unwrap().1.to_string();
             let task = tokio::spawn(async move { pending.wait(&Cancellation::default()).await });
+            for (request, status) in [
+                ("GET /wrong?code=a&state=b HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n".to_owned(), "404 Not Found"),
+                ("malformed\r\n\r\n".to_owned(), "404 Not Found"),
+                (format!("GET {}?code=a&state=wrong HTTP/1.1\r\n\r\n", redirect.path()), "400 Bad Request"),
+                (format!("GET {}?code=a&state={state}&state={state} HTTP/1.1\r\n\r\n", redirect.path()), "400 Bad Request"),
+            ] {
             let mut stream =
                 tokio::net::TcpStream::connect(("127.0.0.1", redirect.port().unwrap()))
                     .await
                     .unwrap();
             stream
-                .write_all(b"GET /wrong?code=a&state=b HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+                .write_all(request.as_bytes())
                 .await
                 .unwrap();
             let mut response = String::new();
             stream.read_to_string(&mut response).await.unwrap();
-            assert!(response.starts_with("HTTP/1.1 400 Bad Request"));
-            let result = task.await.unwrap();
-            assert!(matches!(
-                result,
-                Err(ProviderError {
-                    kind: ErrorKind::ReauthRequired,
-                    ..
-                })
-            ));
+            assert!(response.starts_with(&format!("HTTP/1.1 {status}")));
+            assert!(!task.is_finished());
+            }
+            let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", redirect.port().unwrap())).await.unwrap();
+            stream.write_all(format!("GET {}?code=synthetic&state={state} HTTP/1.1\r\n\r\n", redirect.path()).as_bytes()).await.unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).await.unwrap();
+            assert!(response.starts_with("HTTP/1.1 200 OK"));
+            assert_eq!(task.await.unwrap().unwrap().code.0.as_slice(), b"synthetic");
         });
     }
 }

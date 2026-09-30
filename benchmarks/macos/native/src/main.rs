@@ -1,6 +1,8 @@
 //! This executable alone owns the verification commands. Product builds never import it.
 use std::{io::Write, sync::Mutex};
 use tauri::Manager;
+#[cfg(target_os = "macos")]
+mod termination_probe;
 
 #[derive(Default)]
 struct Events(Mutex<Vec<&'static str>>);
@@ -40,6 +42,12 @@ fn benchmark_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send
         macos_bench_report,
         macos_bench_events,
         macos_bench_quit,
+        #[cfg(target_os = "macos")]
+        termination_probe::macos_bench_modal_begin,
+        #[cfg(target_os = "macos")]
+        termination_probe::macos_bench_modal_ack,
+        #[cfg(target_os = "macos")]
+        termination_probe::macos_bench_modal_status,
     ]
 }
 

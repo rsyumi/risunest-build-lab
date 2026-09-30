@@ -11,6 +11,14 @@ overrides:
   rollup@>=4.0.0 <4.59.0: ^4.59.0
   yaml@>=2.0.0 <2.8.3: ^2.8.3
 
+patchedDependencies:
+  playwright-core@1.63.0:
+    hash: d13341af3fe9b0ae7940de27c9665bbc64fd2038d9358ffae7279fbf83e7353f
+    path: patches/playwright-core@1.63.0.patch
+  playwright@1.63.0:
+    hash: b19010ee7d16dd5c3a984ba66a2ff3d77d900633b07ed0cd01cf5180f9049cd8
+    path: patches/playwright@1.63.0.patch
+
 importers:
 
   .:
@@ -3088,7 +3096,7 @@ snapshots:
 
   '@playwright/test@1.63.0':
     dependencies:
-      playwright: 1.63.0
+      playwright: 1.63.0(patch_hash=b19010ee7d16dd5c3a984ba66a2ff3d77d900633b07ed0cd01cf5180f9049cd8)
 
   '@popperjs/core@2.11.8': {}
 
@@ -4347,11 +4355,11 @@ snapshots:
 
   platform@1.3.6: {}
 
-  playwright-core@1.63.0: {}
+  playwright-core@1.63.0(patch_hash=d13341af3fe9b0ae7940de27c9665bbc64fd2038d9358ffae7279fbf83e7353f): {}
 
-  playwright@1.63.0:
+  playwright@1.63.0(patch_hash=b19010ee7d16dd5c3a984ba66a2ff3d77d900633b07ed0cd01cf5180f9049cd8):
     dependencies:
-      playwright-core: 1.63.0
+      playwright-core: 1.63.0(patch_hash=d13341af3fe9b0ae7940de27c9665bbc64fd2038d9358ffae7279fbf83e7353f)
 
   png-chunk-text@1.0.0: {}
 

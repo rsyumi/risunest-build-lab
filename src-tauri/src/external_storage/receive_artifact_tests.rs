@@ -159,7 +159,9 @@ fn link_directory(target: &Path, link: &Path) {
 
 #[cfg(windows)]
 fn link_directory(target: &Path, link: &Path) {
+    use std::os::windows::process::CommandExt;
     let output = std::process::Command::new("cmd")
+        .creation_flags(0x08000000)
         .args(["/C", "mklink", "/J"])
         .arg(link)
         .arg(target)

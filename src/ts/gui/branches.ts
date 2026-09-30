@@ -275,12 +275,15 @@ export async function scanPinnedChatBranches(
         scanPinnedGraph(reader, characterId, options.signal))
 }
 
-export async function getChatBranches(characterId: string): Promise<RenderedBranch[]> {
+export async function getChatBranches(characterId: string, signal?: AbortSignal): Promise<RenderedBranch[]> {
+    signal?.throwIfAborted()
     const token = await capturePersistentMutationToken('chat-branches')
+    signal?.throwIfAborted()
     const result = await scanPinnedChatBranches(
         getPersistentDataRuntime().store,
         characterId,
         token.revision,
+        { signal },
     )
     return result.branches
 }

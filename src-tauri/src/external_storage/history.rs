@@ -67,7 +67,7 @@ async fn open_snapshot(
     if !receipt.complete || receipt.byte_length == 0 || receipt.byte_length > MAX_CIPHERTEXT {
         return Err(corrupt());
     }
-    let directory = tempfile::tempdir_in(runtime::root(app)?).map_err(runtime::local_error)?;
+    let directory = super::leftovers::managed_scratch(&runtime::root(app)?, "history-")?;
     let path = directory.path().join("snapshot");
     let mut sink = SpoolSink::create(&path, receipt.byte_length)?;
     if !matches!(

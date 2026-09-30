@@ -321,6 +321,7 @@ pub(crate) struct ConnectionSummary {
     /// The policy in force, which is the default until the user changes it.
     pub retention_policy: RetentionPolicy,
     pub capabilities: Capabilities,
+    pub automatic_backup_paused: bool,
     pub status: ConnectionStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_verified_at_ms: Option<String>,
@@ -819,8 +820,9 @@ pub(crate) fn summary(connection: &StoredConnection) -> ConnectionSummary {
             .retention_policy
             .unwrap_or(RetentionPolicy::DEFAULT),
         capabilities: connection.capabilities.clone(),
+        automatic_backup_paused: false,
         status: ConnectionStatus::Ready,
-        last_verified_at_ms: Some(connection.created_at_ms.to_string()),
+        last_verified_at_ms: Some(connection.verified_at_ms.to_string()),
         last_sync_at_ms: connection.last_sync_at_ms.map(|value| value.to_string()),
         last_backup_at_ms: connection.last_backup_at_ms.map(|value| value.to_string()),
         last_error: None,
@@ -836,6 +838,12 @@ pub(crate) fn dependencies(root: &Path) -> Result<Dependencies> {
         clock: Arc::new(SystemClock),
         vault: secrets::provider_vault(root),
     })
+}
+
+pub(crate) fn dependencies_for_config(root: &Path, config: &ConnectionConfig) -> Result<Dependencies> {
+    let mut dependencies = dependencies(root)?;
+    dependencies.http = Arc::new(NativeHttpTransport::new()?.with_user_endpoint(config)?);
+    Ok(dependencies)
 }
 
 pub(crate) struct EncodedProviderSecret {
@@ -1368,6 +1376,7 @@ mod tests {
             recovery_key_ref: "synthetic-recovery-key-ref".into(),
             capabilities: Capabilities::default(),
             created_at_ms: 1,
+            verified_at_ms: 1,
             last_sync_at_ms: None,
             last_backup_at_ms: None,
             capture_policy: Some(CapturePolicy::default()),

@@ -80,7 +80,7 @@ pub(crate) fn validate_records_into(
                 };
                 if !sink.record(Finding::new(
                     codes::RECORD_INVALID,
-                    table.name,
+                    product_kind(table.name),
                     row_identity(table, row)?,
                     message,
                 )) {
@@ -311,6 +311,10 @@ fn validate_row(table: &PortableTable, row: &Row<'_>) -> StoreResult<()> {
 }
 
 /// Singleton tables order by their only column, which is the record body itself.
+fn product_kind(table: &str) -> &str {
+    match table { "characters" => "character", "conversations" => "conversation", "messages" => "message", "bot_presets" => "preset", "plugin_storage" => "plugin", other => other }
+}
+
 fn row_identity(table: &PortableTable, row: &Row<'_>) -> StoreResult<String> {
     if table.order == "value" {
         return Ok(String::new());
@@ -322,6 +326,9 @@ fn row_identity(table: &PortableTable, row: &Row<'_>) -> StoreResult<String> {
             ValueRef::Integer(value) => value.to_string(),
             _ => String::new(),
         });
+    }
+    if table.name == "plugin_storage" {
+        return Ok(crate::portable_backup::PluginKey { owner: parts[0].clone(), key: parts[1].clone() }.identity());
     }
     Ok(parts.join("/"))
 }

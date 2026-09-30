@@ -1,16 +1,21 @@
 use serde_json::Value;
+#[cfg(test)]
 use sha2::{Digest, Sha256};
+use std::collections::{HashMap, HashSet};
+#[cfg(test)]
 use std::{
-    collections::{HashMap, HashSet},
     fs::File,
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
 };
 
+#[cfg(test)]
 const MAX_COLD_DECODED_BYTES: usize = 64 * 1024 * 1024;
+#[cfg(test)]
 const COLD_COPY_BUFFER_BYTES: usize = 64 * 1024;
 const COLD_STORAGE_HEADER: &str = "\u{ef01}COLDSTORAGE\u{ef01}";
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum F0PayloadKind {
     Asset,
@@ -18,6 +23,7 @@ pub(crate) enum F0PayloadKind {
     Cold,
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct F0PayloadDescriptor {
     pub(crate) kind: F0PayloadKind,
@@ -28,6 +34,7 @@ pub(crate) struct F0PayloadDescriptor {
     pub(crate) cold_source: Option<PathBuf>,
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct F0ExpectedMissing {
     pub(crate) target_kind: String,
@@ -56,6 +63,7 @@ pub(crate) struct F0Reference {
     pub(crate) metadata: Value,
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct F0Validation {
     pub(crate) canonical_database_sha256: String,
@@ -65,10 +73,14 @@ pub(crate) struct F0Validation {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum F0ErrorCode {
+    #[cfg(test)]
     CanonicalValue,
     InvalidDatabase,
+    #[cfg(test)]
     InvalidInventory,
+    #[cfg(test)]
     ColdPayload,
+    #[cfg(test)]
     UnexpectedMissing,
 }
 
@@ -86,6 +98,7 @@ impl std::fmt::Display for F0Error {
 
 impl std::error::Error for F0Error {}
 
+#[cfg(test)]
 pub(crate) fn validate_f0_v1(
     database: &Value,
     payloads: &[F0PayloadDescriptor],
@@ -108,6 +121,7 @@ pub(crate) fn validate_f0_v1(
     Ok(validation)
 }
 
+#[cfg(test)]
 pub(crate) fn rebuild_f0_v1(
     database: &Value,
     payloads: &[F0PayloadDescriptor],
@@ -312,6 +326,7 @@ struct ReferenceIndexes {
 type TargetIndex = HashMap<String, HashSet<String>>;
 
 impl ReferenceIndexes {
+    #[cfg(test)]
     fn new(
         database: &Value,
         payloads: &[F0PayloadDescriptor],
@@ -1109,6 +1124,7 @@ fn scan_asset_tuples(
     }
 }
 
+#[cfg(test)]
 fn scan_cold_payloads(
     payloads: &[F0PayloadDescriptor],
     collector: &mut GraphCollector<'_>,
@@ -1134,10 +1150,12 @@ fn scan_cold_payloads(
     Ok(())
 }
 
+#[cfg(test)]
 fn decode_cold_payload(source: &Path, payload: &F0PayloadDescriptor) -> Result<Value, F0Error> {
     decode_cold_payload_with_limit(source, payload, MAX_COLD_DECODED_BYTES)
 }
 
+#[cfg(test)]
 fn decode_cold_payload_with_limit(
     source: &Path,
     payload: &F0PayloadDescriptor,
@@ -1182,6 +1200,7 @@ fn decode_cold_payload_with_limit(
         .map_err(|error| cold_error(payload, error))
 }
 
+#[cfg(test)]
 fn validate_payload_descriptor(payload: &F0PayloadDescriptor) -> Result<(), F0Error> {
     if payload.sha256.len() != 64 || !payload.sha256.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(F0Error {
@@ -1235,6 +1254,7 @@ fn validate_payload_descriptor(payload: &F0PayloadDescriptor) -> Result<(), F0Er
     Ok(())
 }
 
+#[cfg(test)]
 fn cold_error(payload: &F0PayloadDescriptor, error: std::io::Error) -> F0Error {
     F0Error {
         code: F0ErrorCode::ColdPayload,
@@ -1308,6 +1328,7 @@ fn inlay_tokens(value: &str) -> Vec<(String, usize)> {
     tokens
 }
 
+#[cfg(test)]
 fn reference_graph_sha256(references: &[F0Reference]) -> Result<String, F0Error> {
     let mut hasher = Sha256::new();
     hasher.update(b"L");
@@ -1320,6 +1341,7 @@ fn reference_graph_sha256(references: &[F0Reference]) -> Result<String, F0Error>
     Ok(hex::encode(hasher.finalize()))
 }
 
+#[cfg(test)]
 fn reference_graph_value(reference: &F0Reference) -> Value {
     object(&[
         (
@@ -1343,6 +1365,7 @@ fn reference_graph_value(reference: &F0Reference) -> Value {
     ])
 }
 
+#[cfg(test)]
 fn payload_kind_name(kind: F0PayloadKind) -> &'static str {
     match kind {
         F0PayloadKind::Asset => "asset",
@@ -1351,6 +1374,7 @@ fn payload_kind_name(kind: F0PayloadKind) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn is_target_kind(kind: &str) -> bool {
     matches!(
         kind,
@@ -1368,6 +1392,7 @@ fn is_target_kind(kind: &str) -> bool {
     )
 }
 
+#[cfg(test)]
 fn status_name(status: F0ReferenceStatus) -> &'static str {
     match status {
         F0ReferenceStatus::Present => "present",
@@ -1404,6 +1429,7 @@ fn string_field<'a>(object: &'a serde_json::Map<String, Value>, field: &str) -> 
     object.get(field).and_then(Value::as_str)
 }
 
+#[cfg(test)]
 fn index_named(
     database: &Value,
     collection: &str,
@@ -1422,6 +1448,7 @@ fn index_named(
     }
 }
 
+#[cfg(test)]
 fn insert_target(index: &mut TargetIndex, kind: &str, key: &str) -> bool {
     index
         .entry(kind.to_owned())
@@ -1524,6 +1551,8 @@ fn invalid_database(message: impl Into<String>) -> F0Error {
     }
 }
 
+#[cfg(test)]
+// The reference oracle hashes numbers as binary64 to match JavaScript.
 fn canonical_sha256(value: &Value) -> Result<String, F0Error> {
     canonical_sha256_with_order(value, ObjectKeyOrder::Sorted)
 }
@@ -1533,6 +1562,7 @@ pub(crate) fn legacy_canonical_database_sha256_v1(value: &Value) -> Result<Strin
     canonical_sha256_with_order(value, ObjectKeyOrder::Iteration)
 }
 
+#[cfg(test)]
 fn canonical_sha256_with_order(
     value: &Value,
     object_key_order: ObjectKeyOrder,
@@ -1543,12 +1573,14 @@ fn canonical_sha256_with_order(
     Ok(hex::encode(hasher.finalize()))
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy)]
 enum ObjectKeyOrder {
     Iteration,
     Sorted,
 }
 
+#[cfg(test)]
 fn canonical_length(value: &Value) -> Result<u32, F0Error> {
     let length = match value {
         Value::Null | Value::Bool(_) => 1_u64,
@@ -1578,6 +1610,7 @@ fn canonical_length(value: &Value) -> Result<u32, F0Error> {
     u32::try_from(length).map_err(|_| canonical_too_large())
 }
 
+#[cfg(test)]
 fn hash_canonical(
     value: &Value,
     hasher: &mut Sha256,
@@ -1637,6 +1670,7 @@ fn hash_canonical(
     Ok(())
 }
 
+#[cfg(test)]
 fn hash_canonical_object_entry(
     key: &str,
     item: &Value,
@@ -1649,18 +1683,21 @@ fn hash_canonical_object_entry(
     hash_canonical(item, hasher, object_key_order)
 }
 
+#[cfg(test)]
 fn hash_count(hasher: &mut Sha256, count: usize) -> Result<(), F0Error> {
     let count = u32::try_from(count).map_err(|_| canonical_too_large())?;
     hasher.update(count.to_be_bytes());
     Ok(())
 }
 
+#[cfg(test)]
 fn hash_length_delimiter(hasher: &mut Sha256, length: usize) -> Result<(), F0Error> {
     let length = u32::try_from(length).map_err(|_| canonical_too_large())?;
     hasher.update(length.to_be_bytes());
     Ok(())
 }
 
+#[cfg(test)]
 fn canonical_too_large() -> F0Error {
     F0Error {
         code: F0ErrorCode::CanonicalValue,
