@@ -101,16 +101,26 @@ extern "C" fn requested() {
 #[tauri::command]
 pub(crate) fn macos_bench_modal_begin(app: tauri::AppHandle) -> Result<(), String> {
     let handle = app.clone();
-    app.run_on_main_thread(move || {
-        if APP.get().is_none() {
-            APP.set(handle.clone()).unwrap();
-            if unsafe { risunest_probe_install(requested, native_diagnostic) } != 1 {
-                failed(&handle, "Unable to install isolated termination probe");
+    std::thread::spawn(move || {
+        if let Err(error) = app.run_on_main_thread(move || {
+            if APP.get().is_none() {
+                APP.set(handle.clone()).unwrap();
+                if unsafe { risunest_probe_install(requested, native_diagnostic) } != 1 {
+                    failed(&handle, "Unable to install isolated termination probe");
+                    return;
+                }
+            }
+            let pending = STATE.lock().unwrap().pending;
+            if pending {
+                failed(&handle, "A native termination probe is already pending");
                 return;
             }
+            unsafe { risunest_probe_begin(); }
+        }) {
+            failed(&app, &format!("Unable to queue native termination probe: {error}"));
         }
-        unsafe { risunest_probe_begin(); }
-    }).map_err(|error| error.to_string())
+    });
+    Ok(())
 }
 
 #[tauri::command]

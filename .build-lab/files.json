@@ -279,8 +279,8 @@
     {
       "path": "benchmarks/linux/run.py",
       "mode": "100644",
-      "bytes": 8644,
-      "sha256": "9cb3cecf7cbe190d106bf6962b58d164af7549d9d69f1579a46b3777aa579071"
+      "bytes": 14415,
+      "sha256": "26a25c14049700253beb348874a41b280c08edcffc7288e2a60d612a966c359c"
     },
     {
       "path": "benchmarks/linux/summarize.mjs",
@@ -351,8 +351,8 @@
     {
       "path": "benchmarks/macos/main.ts",
       "mode": "100644",
-      "bytes": 18265,
-      "sha256": "5acefccf1c8724c217db2b76970d26d4031481eadbc7eed3c12c5b43e65206d7"
+      "bytes": 18326,
+      "sha256": "cf83d72d6f85b6d8f8669317b6b1aea0713c7402603b632540c62378a0ae563f"
     },
     {
       "path": "benchmarks/macos/native/Cargo.lock",
@@ -387,8 +387,8 @@
     {
       "path": "benchmarks/macos/native/src/termination_probe.rs",
       "mode": "100644",
-      "bytes": 6582,
-      "sha256": "9fc1186808812c17fda30ff9b4cde28dc9bace753f1ea79451a73cb34ed562f1"
+      "bytes": 6962,
+      "sha256": "f96e4c6899492153f5f6d27f80c0573a136fffe98c4e9aace7466c89ecde4dc2"
     },
     {
       "path": "benchmarks/macos/prepare.mjs",
@@ -6111,8 +6111,8 @@
     {
       "path": "src-tauri/src/native_file_jobs/restore.rs",
       "mode": "100644",
-      "bytes": 198938,
-      "sha256": "5ecbf1ce84d8252befe7b5e9bb7ed5aefedec8363af89d8d443bfe9e0695e139"
+      "bytes": 199018,
+      "sha256": "0fd7c8867ebf8be9b2adb30a9874805f88bde27ee9c0c398eeb38081790f3c8b"
     },
     {
       "path": "src-tauri/src/native_file_jobs/risum_export.rs",

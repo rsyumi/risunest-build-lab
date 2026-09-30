@@ -1,5 +1,6 @@
 """External WebKitWebDriver runner. Only starts an isolated synthetic benchmark build."""
 import argparse
+import hashlib
 import json
 import importlib.util
 import os
@@ -50,6 +51,77 @@ capture = None
 appearance_capture = None
 stop = threading.Event()
 memory = []
+diagnostic_path = out / f'{args.phase}-diagnostics.jsonl'
+receipt_path = out / 'owned-process-receipt.json'
+profile_id = hashlib.sha256(str(profile).encode()).hexdigest()
+owned_processes = {}
+primary_error = None
+current_stage = 'driver-start'
+
+def diagnostic(event, **details):
+    record = {'diagnosticOnly': True, 'phase': args.phase, 'event': event,
+              'monotonicSeconds': time.monotonic(), 'profileId': profile_id, **details}
+    try:
+        with diagnostic_path.open('a') as destination:
+            destination.write(json.dumps(record) + '\n')
+    except OSError as error:
+        print(json.dumps({'diagnosticWriteError': type(error).__name__}), flush=True)
+
+def process_identity(pid):
+    try:
+        text = Path(f'/proc/{pid}/stat').read_text()
+        fields = text[text.rfind(')') + 2:].split()
+        executable = Path(os.readlink(f'/proc/{pid}/exe'))
+        known_names = {Path(args.binary).name, 'WebKitWebDriver', 'WebKitWebProcess',
+                       'WebKitNetworkProcess', 'bwrap', 'xdg-dbus-proxy'}
+        return {'pid': pid, 'ppid': int(fields[1]), 'state': fields[0],
+                'starttime': int(fields[19]),
+                'exe': executable.name if executable.name in known_names else 'other',
+                'isBenchmarkBinary': executable == Path(args.binary).resolve()}
+    except (OSError, ValueError, IndexError):
+        return None
+
+def process_snapshot(event):
+    try:
+        candidates = sorted({driver.pid, *descendants(driver.pid), *owned_processes})
+        identities = []
+        for pid in candidates[:64]:
+            identity = process_identity(pid)
+            expected_start = owned_processes.get(pid)
+            if identity is None:
+                identities.append({'pid': pid, 'starttime': expected_start, 'status': 'exited'})
+            elif expected_start is not None and identity['starttime'] != expected_start:
+                identities.append({'pid': pid, 'starttime': expected_start, 'status': 'pid-reused'})
+            else:
+                owned_processes[pid] = identity['starttime']
+                identities.append(identity)
+        diagnostic(event, driverReturncode=driver.poll(), processes=identities,
+                   omittedProcesses=max(0, len(candidates) - 64))
+    except (OSError, subprocess.SubprocessError, ValueError) as error:
+        diagnostic('process-snapshot-error', sourceEvent=event, errorType=type(error).__name__)
+
+def inspect_seed_receipt():
+    if args.phase != 'appearance-app' or not receipt_path.exists():
+        return
+    try:
+        receipt = json.loads(receipt_path.read_text())
+        entries = receipt['processes']
+        if receipt.get('scope') != 'owned-driver-descendants' or receipt.get('profileId') != profile_id or len(entries) > 64:
+            diagnostic('seed-receipt-invalid')
+            return
+        observations = []
+        for entry in entries:
+            pid, starttime = entry['pid'], entry['starttime']
+            if not isinstance(pid, int) or pid <= 0 or not isinstance(starttime, int) or starttime < 0:
+                diagnostic('seed-receipt-invalid')
+                return
+            identity = process_identity(pid)
+            status = 'exited' if identity is None else ('surviving' if identity['starttime'] == starttime else 'pid-reused')
+            observations.append({**(identity if status == 'surviving' else {}),
+                                 'pid': pid, 'starttime': starttime, 'status': status})
+        diagnostic('seed-receipt-survival', processes=observations)
+    except (OSError, ValueError, KeyError, TypeError) as error:
+        diagnostic('seed-receipt-error', errorType=type(error).__name__)
 
 def call(method, route, payload=None):
     body = None if payload is None else json.dumps(payload).encode()
@@ -95,37 +167,55 @@ def monitor():
         memory.append(totals)
 
 try:
+    diagnostic('driver-start', driverPid=driver.pid)
+    inspect_seed_receipt()
+    current_stage = 'driver-status'
     for attempt in range(100):
         try:
             call('GET', '/status')
+            diagnostic('driver-status-ready')
             break
         except OSError:
             time.sleep(0.1)
     if args.phase == 'appearance-app':
+        current_stage = 'capture-start'
         specification = importlib.util.spec_from_file_location('appearance_capture', Path(__file__).resolve().parents[1] / 'macos/run.py')
         appearance_capture = importlib.util.module_from_spec(specification)
         specification.loader.exec_module(appearance_capture)
         capture = appearance_capture.start_appearance_capture(out,
             f'appearance-{args.system_theme}-{args.app_theme}', 'linux', os.environ.get('DISPLAY'),
             args.capture_size, args.display_owner_pid)
+        diagnostic('capture-started')
+    current_stage = 'session-create'
+    process_snapshot('session-create-enter')
     created = call('POST', '/session', {'capabilities': {'alwaysMatch': {'webkitgtk:browserOptions': {'binary': str(Path(args.binary).resolve()), 'args': []}}}})
     session = created['sessionId']
+    process_snapshot('session-created')
+    current_stage = 'window-rect'
     call('POST', f'/session/{session}/window/rect', {'width': 1280, 'height': 900})
+    current_stage = 'tauri-ready'
     for attempt in range(100):
         if execute('return !!window.__TAURI_INTERNALS__'):
+            diagnostic('tauri-ready')
             break
         time.sleep(0.1)
+    current_stage = 'identity-path'
     identity = call('POST', f'/session/{session}/execute/async', {'script': '''const done=arguments[arguments.length-1]; Promise.all([window.__TAURI_INTERNALS__.invoke('plugin:app|identifier'),window.__TAURI_INTERNALS__.invoke('plugin:path|resolve_directory',{directory:14})]).then(done,()=>done(null));''', 'args': []})
     if not identity or identity[0] != 'io.github.rsyumi.risunest.linux.bench' or Path(identity[1]).resolve() != (profile / 'data' / identity[0]).resolve():
         raise RuntimeError('Synthetic identity/path gate failed')
+    diagnostic('identity-path-verified')
+    current_stage = 'benchmark-ready'
     for attempt in range(100):
         if execute('return !!window.__RISUNEST_LINUX_BENCHMARK__'):
+            diagnostic('benchmark-ready')
             break
         time.sleep(0.1)
     thread = threading.Thread(target=monitor, daemon=True)
     thread.start()
     operation = (f"startupAppearance({str(args.phase == 'appearance-seed').lower()},{json.dumps(args.app_theme)})"
                  if args.phase.startswith('appearance-') else f"{args.phase}()")
+    current_stage = 'operation'
+    diagnostic('operation-enter')
     execute(f"window.__linuxResult=null; window.__RISUNEST_LINUX_BENCHMARK__.{operation}.then(result=>window.__linuxResult={{result}},error=>window.__linuxResult={{error:String(error)}})")
     deadline = time.monotonic() + 600
     while time.monotonic() < deadline:
@@ -138,13 +228,21 @@ try:
     if 'error' in result:
         raise RuntimeError(result['error'])
     result = result['result']
+    diagnostic('operation-resolved')
     if args.phase == 'appearance-app':
         if result['systemDark'] != (args.system_theme == 'dark'):
             raise RuntimeError('WebKit observed system appearance differs from the requested theme')
+        (out / f'{args.phase}-runtime-observation.json').write_text(json.dumps({
+            'diagnosticOnly': True, 'systemTheme': args.system_theme, 'appTheme': args.app_theme,
+            'observation': result}, indent=2))
+        diagnostic('appearance-runtime-observation-saved')
+        current_stage = 'capture-finalize'
         completed_capture = capture
         capture = None
         result['capture'] = appearance_capture.finish_appearance_capture(completed_capture)
+        diagnostic('capture-finalized')
         result['systemTheme'] = args.system_theme
+    current_stage = 'result-finalize'
     stop.set()
     thread.join(timeout=2)
     if not memory or not any(item['processes'] for item in memory):
@@ -158,6 +256,11 @@ try:
     output_name = f'{args.phase}-{args.system_theme}-{args.app_theme}' if args.phase.startswith('appearance-') else args.phase
     (out / f'{output_name}.json').write_text(json.dumps(result, indent=2))
     print(json.dumps({'phase': args.phase, 'passed': None if args.phase.startswith('appearance-') else True, 'visualReview': 'required' if args.phase.startswith('appearance-') else None, 'samples': len(result.get('samples', [])), 'memorySamples': len(memory)}))
+except Exception as error:
+    primary_error = error
+    diagnostic('primary-error', stage=current_stage, errorType=type(error).__name__,
+               category='capture' if current_stage == 'capture-finalize' else 'runtime')
+    raise
 finally:
     capture_error = None
     if capture is not None:
@@ -165,18 +268,29 @@ finally:
             appearance_capture.finish_appearance_capture(capture)
         except Exception as error:
             capture_error = error
+            diagnostic('cleanup-capture-error', errorType=type(error).__name__)
     stop.set()
+    process_snapshot('session-cleanup-enter')
+    if args.phase == 'appearance-seed':
+        try:
+            receipt_path.write_text(json.dumps({'diagnosticOnly': True, 'scope': 'owned-driver-descendants',
+                'profileId': profile_id, 'processes': [
+                    {'pid': pid, 'starttime': starttime} for pid, starttime in sorted(owned_processes.items())[:64]]}, indent=2))
+        except OSError as error:
+            diagnostic('seed-receipt-write-error', errorType=type(error).__name__)
     if session:
         try:
             call('DELETE', f'/session/{session}')
         except Exception:
             pass
+    process_snapshot('session-cleanup-return')
     driver.terminate()
     try:
         driver.wait(timeout=10)
     except subprocess.TimeoutExpired:
         driver.kill()
         driver.wait()
+    process_snapshot('driver-cleanup-return')
     log.close()
-    if capture_error is not None:
+    if capture_error is not None and primary_error is None:
         raise capture_error
