@@ -159,14 +159,14 @@
     {
       "path": "benchmarks/ios/native/Cargo.lock",
       "mode": "100644",
-      "bytes": 183451,
-      "sha256": "d2e9529efa7db56612cb72df7281ba0ac89ba3ab2c31d3adb0fc2d2b6dad377c"
+      "bytes": 183388,
+      "sha256": "1d907eff5b8e9506f2c2ba0e0bd95d04efe82a1363146b6e64b2952203c75e5b"
     },
     {
       "path": "benchmarks/ios/native/Cargo.toml",
       "mode": "100644",
-      "bytes": 995,
-      "sha256": "8301ddee9f681f399f173152b0da9d3933fa2ed8885383fe9d1a920ed9627a0f"
+      "bytes": 1034,
+      "sha256": "9d21aa1eda6736388c597f4d4c142e6dd7b45e2e2779d063e143cb6d5ad8bfef"
     },
     {
       "path": "benchmarks/ios/native/build.rs",
@@ -357,14 +357,14 @@
     {
       "path": "benchmarks/macos/native/Cargo.lock",
       "mode": "100644",
-      "bytes": 183307,
-      "sha256": "9184e132004b5e4fe0b4b09bf8fd614049b8a4f4e5a99cb22dee3d5bf2087813"
+      "bytes": 183244,
+      "sha256": "320982637b7d6f2515f1b88b1267487370e662ff5fc793283430cec5d5e4c912"
     },
     {
       "path": "benchmarks/macos/native/Cargo.toml",
       "mode": "100644",
-      "bytes": 1046,
-      "sha256": "4dfe41efe4975bd1edac7181909bbc2e10f7b4b913ff4fe1e249ac3c4166cd81"
+      "bytes": 1085,
+      "sha256": "f034cc98b6fad2843c3c005257edee10e489b6e1762bdd2f83b7e2eaee2f4ff7"
     },
     {
       "path": "benchmarks/macos/native/build.rs",
@@ -1641,8 +1641,8 @@
     {
       "path": "crates/tauri-plugin-ios-native/ios/Sources/NativeFileState.swift",
       "mode": "100644",
-      "bytes": 2199,
-      "sha256": "a86013d1a64cc6e5804a54f1b7be3fcba8ddd0fab2699ea1f561b5604a1e0e3f"
+      "bytes": 2188,
+      "sha256": "962732ebae9100d4880ade3b7b4ba30bea6ce52fd49f3430e2226355c7e6e809"
     },
     {
       "path": "crates/tauri-plugin-ios-native/ios/Tests/NativeFileStateTests.swift",
@@ -5877,8 +5877,8 @@
     {
       "path": "src-tauri/src/lib.rs",
       "mode": "100644",
-      "bytes": 49138,
-      "sha256": "c0227a2d910a5bbfbe9e1bb25fc381e3a4477ffd2ca930eb29ff117fc2d5ec45"
+      "bytes": 49161,
+      "sha256": "4d35f506b35435f75a1b5bd413e4fcf7143261b28827d7dd7d1108f14d5cbab9"
     },
     {
       "path": "src-tauri/src/local_backup.rs",
