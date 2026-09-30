@@ -14,7 +14,7 @@ on:
       scope:
         type: choice
         default: full
-        options: [full, streaming, termination-probe, appearance-light, appearance-dark]
+        options: [full, streaming, termination-probe, appearance-light, appearance-dark, appearance-codec-experiment]
 permissions:
   contents: read
 concurrency:
@@ -44,7 +44,7 @@ jobs:
           test "$GITHUB_REF" = refs/heads/main
           [[ "$SNAPSHOT_SHA" =~ ^[0-9a-f]{40}$ ]]
           case "$RUNNER_LABEL" in macos-15|macos-14|macos-15-intel|macos-26) ;; *) exit 1;; esac
-          case "$CHECK_SCOPE" in full|streaming|termination-probe|appearance-light|appearance-dark) ;; *) exit 1;; esac
+          case "$CHECK_SCOPE" in full|streaming|termination-probe|appearance-light|appearance-dark|appearance-codec-experiment) ;; *) exit 1;; esac
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.sha }}
@@ -186,6 +186,11 @@ jobs:
           fi
           if [[ "$CHECK_SCOPE" == appearance-* ]]; then
             theme="${CHECK_SCOPE#appearance-}"
+            capture_mode=--appearance
+            if [[ "$CHECK_SCOPE" == appearance-codec-experiment ]]; then
+              theme=light
+              capture_mode=--capture-codec-experiment
+            fi
             dark=false
             [[ "$theme" != dark ]] || dark=true
             osascript -e "tell application \"System Events\" to tell appearance preferences to set dark mode to $dark"
@@ -194,7 +199,7 @@ jobs:
             ffmpeg -f avfoundation -list_devices true -i "" > artifacts/capture-devices.txt 2>&1 || true
             capture_input="$(python3 -c 'import pathlib,re; text=pathlib.Path("artifacts/capture-devices.txt").read_text(); screens=re.findall(r"Capture screen [0-9]+",text); assert screens,"No enumerated screen"; print(screens[0]+":none")')"
             python3 benchmarks/macos/run.py --app "$app" --artifacts artifacts/appearance \
-              --appearance --system-theme "$theme" --capture-input "$capture_input" 2>&1 | tee artifacts/appearance.log
+              "$capture_mode" --system-theme "$theme" --capture-input "$capture_input" 2>&1 | tee artifacts/appearance.log
           else
             python3 benchmarks/macos/run.py --app "$app" --artifacts artifacts/wkwebview 2>&1 | tee artifacts/wkwebview.log
           fi
