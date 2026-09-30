@@ -85,6 +85,8 @@ fn main() {
         if let Some(name) = name {
             app.state::<Events>().0.lock().unwrap().push(name);
         }
+        #[cfg(target_os = "macos")]
+        termination_probe::record_run_event(&event);
         risunest_lib::handle_run_event(app, event);
     });
 }

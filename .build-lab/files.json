@@ -189,8 +189,8 @@
     {
       "path": "benchmarks/ios/native/src/lib.rs",
       "mode": "100644",
-      "bytes": 4092,
-      "sha256": "a87a1020770a62df2d6353da4963936a114ccd1ad9d7b5e03866666812b5f3dc"
+      "bytes": 4132,
+      "sha256": "fe0160fa2ed6933d9f1822cac33eac41726a839b4737a79afc0a306363bab0e4"
     },
     {
       "path": "benchmarks/ios/native/src/network_probe.rs",
@@ -375,8 +375,8 @@
     {
       "path": "benchmarks/macos/native/src/main.rs",
       "mode": "100644",
-      "bytes": 2986,
-      "sha256": "820a78bd6a1d7a67acd5ea06cc6a1f00ec289f4c8631f999abc1a1be068a7e67"
+      "bytes": 3075,
+      "sha256": "5d0174cd6f63b54b4d68d0bb6076f17693c8278f6d12a475c12db1617713320d"
     },
     {
       "path": "benchmarks/macos/native/src/termination_probe.m",
@@ -387,8 +387,8 @@
     {
       "path": "benchmarks/macos/native/src/termination_probe.rs",
       "mode": "100644",
-      "bytes": 4217,
-      "sha256": "c2f1a46774fae72d14340207ab94656efa66af9732868ab15274db0590967856"
+      "bytes": 5329,
+      "sha256": "0c621b09bbbefc579ccc59097f4fa67d1c61e9fd3f9ce1a7548937b5e24a9275"
     },
     {
       "path": "benchmarks/macos/prepare.mjs",
@@ -3989,12 +3989,6 @@
       "mode": "100644",
       "bytes": 163,
       "sha256": "aee7db33988e045b0f2ce8159d04914880868439c0c667866c7e55e7c02248ca"
-    },
-    {
-      "path": "src-tauri/.cargo/config.toml",
-      "mode": "100644",
-      "bytes": 267,
-      "sha256": "bb031387431c22676e4528bd874f6ebd58657fb2e037f824314bcca0f5e911df"
     },
     {
       "path": "src-tauri/.gitignore",
@@ -15399,14 +15393,14 @@
     {
       "path": "tests/native/native/Cargo.lock",
       "mode": "100644",
-      "bytes": 183285,
-      "sha256": "e67325795b67190e2e1d246dd5816d2f3e5acb3d23a2825562631f08c1c75cea"
+      "bytes": 183222,
+      "sha256": "a2750f8377d40b3cb6178075192e908fa3426aa4a810a9cc3f301550a15c31de"
     },
     {
       "path": "tests/native/native/Cargo.toml",
       "mode": "100644",
-      "bytes": 1016,
-      "sha256": "28fc4c18493c91f9da2d380896dee5e5b0d73ccf6b604bcc4e9413d5beaed99b"
+      "bytes": 1055,
+      "sha256": "2c94b9bce75e74aa1e0d90a6814133a06b665101c3322bbac273bc2d42f05e0b"
     },
     {
       "path": "tests/native/native/build.rs",
