@@ -32,7 +32,7 @@ async fn ios_bench_authenticate(
             WebAuthenticationOutcome::Callback(callback_url) => {
                 serde_json::json!({ "status": "succeeded", "callbackUrl": callback_url })
             }
-            WebAuthenticationOutcome::Cancelled => serde_json::json!({ "status": "cancelled" }),
+            WebAuthenticationOutcome::Cancelled | WebAuthenticationOutcome::Unavailable => serde_json::json!({ "status": "cancelled" }),
             WebAuthenticationOutcome::Failed => serde_json::json!({ "status": "failed" }),
         });
     }

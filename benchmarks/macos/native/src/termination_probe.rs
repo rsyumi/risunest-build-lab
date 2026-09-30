@@ -18,6 +18,29 @@ fn failed(app: &tauri::AppHandle, reason: &str) {
     app.exit(1);
 }
 
+fn diagnostic(stage: &str, detail: serde_json::Value) {
+    let state = STATE.lock().unwrap();
+    let result = serde_json::json!({
+        "diagnostic": true, "attempt": state.attempt, "pending": state.pending,
+        "replyCount": unsafe { risunest_probe_reply_count() }, "detail": detail,
+    });
+    drop(state);
+    super::macos_bench_report(stage.into(), result).unwrap();
+}
+
+pub(crate) fn record_run_event(event: &tauri::RunEvent) {
+    if std::env::var("RISUNEST_MACOS_PHASE").ok().as_deref() != Some("termination-probe") {
+        return;
+    }
+    match event {
+        tauri::RunEvent::ExitRequested { code, .. } => diagnostic(
+            "termination-probe-exit-requested", serde_json::json!({ "code": code }),
+        ),
+        tauri::RunEvent::Exit => diagnostic("termination-probe-exit", serde_json::json!({})),
+        _ => {}
+    }
+}
+
 extern "C" fn requested() {
     let app = APP.get().unwrap().clone();
     let attempt = {
@@ -96,7 +119,10 @@ pub(crate) fn macos_bench_modal_ack(app: tauri::AppHandle, attempt: u32, approve
         })).unwrap();
         state.pending = false;
         drop(state);
-        if unsafe { risunest_probe_reply(i32::from(approve)) } != 1 {
+        diagnostic("termination-probe-native-reply-enter", serde_json::json!({ "approve": approve }));
+        let replied = unsafe { risunest_probe_reply(i32::from(approve)) };
+        diagnostic("termination-probe-native-reply-return", serde_json::json!({ "approve": approve, "result": replied }));
+        if replied != 1 {
             failed(&handle, "Native termination reply was rejected");
         }
     }).map_err(|error| error.to_string())
