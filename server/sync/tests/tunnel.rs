@@ -99,7 +99,12 @@ async fn managed_child_restarts_and_shutdown_owns_its_lifetime() {
     drop(view);
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(runtime.tunnel.borrow().phase, "connected");
-    assert!(runtime.tunnel.borrow().logs.iter().any(|line| line.contains("synthetic after oversized output")));
+    assert!(runtime
+        .tunnel
+        .borrow()
+        .logs
+        .iter()
+        .any(|line| line.contains("synthetic after oversized output")));
     runtime.shutdown().await;
     let pids = std::fs::read_to_string(binaries.path().join("pids")).unwrap();
     assert_eq!(pids.lines().count(), 2);
@@ -130,7 +135,8 @@ async fn fixed_endpoint_mode_does_not_start_a_tunnel() {
             registry_url: None,
         })
         .unwrap();
-    let runtime = ConnectionRuntime::start(store, "127.0.0.1:4319".parse().unwrap(), false).unwrap();
+    let runtime =
+        ConnectionRuntime::start(store, "127.0.0.1:4319".parse().unwrap(), false).unwrap();
     let mut view = runtime.tunnel.clone();
     tokio::time::timeout(Duration::from_secs(2), view.changed())
         .await

@@ -38,11 +38,19 @@ struct GuiRelaunch {
 }
 
 pub fn prepare_gui_relaunch(root: &Path, server: &Path, tray: bool) -> Result<()> {
-    let gui = server.with_file_name(if cfg!(windows) { "risunest-sync-gui.exe" } else { "risunest-sync-gui" });
+    let gui = server.with_file_name(if cfg!(windows) {
+        "risunest-sync-gui.exe"
+    } else {
+        "risunest-sync-gui"
+    });
     if std::env::current_exe().map_err(|_| "executable-unavailable")? != gui {
         return Err("update-relaunch-path-invalid".into());
     }
-    write_json(&directory(root).join("relaunch.json"), &GuiRelaunch { gui, tray }, "update-relaunch-unavailable")
+    write_json(
+        &directory(root).join("relaunch.json"),
+        &GuiRelaunch { gui, tray },
+        "update-relaunch-unavailable",
+    )
 }
 
 pub fn cancel_gui_relaunch(root: &Path) -> Result<()> {
@@ -57,12 +65,24 @@ fn relaunch_gui(root: &Path, server: &Path) -> Result<()> {
     relaunch_gui_with(root, server, platform::gui::relaunch)
 }
 
-fn relaunch_gui_with(root: &Path, server: &Path, launch: impl FnOnce(&Path, &Path, bool) -> Result<()>) -> Result<()> {
+fn relaunch_gui_with(
+    root: &Path,
+    server: &Path,
+    launch: impl FnOnce(&Path, &Path, bool) -> Result<()>,
+) -> Result<()> {
     let path = directory(root).join("relaunch.json");
-    if !path.exists() { return Ok(()); }
+    if !path.exists() {
+        return Ok(());
+    }
     let intent: GuiRelaunch = read_json(&path, "update-relaunch-unavailable")?;
-    let expected = server.with_file_name(if cfg!(windows) { "risunest-sync-gui.exe" } else { "risunest-sync-gui" });
-    if intent.gui != expected || !expected.is_file() { return Err("update-relaunch-path-invalid".into()); }
+    let expected = server.with_file_name(if cfg!(windows) {
+        "risunest-sync-gui.exe"
+    } else {
+        "risunest-sync-gui"
+    });
+    if intent.gui != expected || !expected.is_file() {
+        return Err("update-relaunch-path-invalid".into());
+    }
     if std::env::current_exe().ok().as_ref() != Some(&expected) {
         launch(root, &expected, intent.tray)?;
     }
@@ -207,10 +227,18 @@ pub(crate) fn write_json<T: Serialize>(path: &Path, value: &T, error: &'static s
     write_bytes_atomic(path, &bytes, 0o600, error)
 }
 
-pub(crate) fn write_bytes_atomic(path: &Path, bytes: &[u8], _mode: u32, error: &'static str) -> Result<()> {
+pub(crate) fn write_bytes_atomic(
+    path: &Path,
+    bytes: &[u8],
+    _mode: u32,
+    error: &'static str,
+) -> Result<()> {
     let parent = path.parent().ok_or(error)?;
     fs::create_dir_all(parent).map_err(|_| error.to_owned())?;
-    let mut file = tempfile::Builder::new().prefix(".risunest-tmp-").tempfile_in(parent).map_err(|_| error.to_owned())?;
+    let mut file = tempfile::Builder::new()
+        .prefix(".risunest-tmp-")
+        .tempfile_in(parent)
+        .map_err(|_| error.to_owned())?;
     file.write_all(bytes).map_err(|_| error.to_owned())?;
     file.as_file().sync_all().map_err(|_| error.to_owned())?;
     #[cfg(unix)]
@@ -735,13 +763,22 @@ pub fn begin_installer_guard(root: &Path, server: &Path, owner: Option<u32>) -> 
     Err("installer-guard-timeout".into())
 }
 
-pub async fn run_installer_guard(root: &Path, server: &Path, nonce: &str, owner: Option<(u32, u64)>) -> Result<()> {
+pub async fn run_installer_guard(
+    root: &Path,
+    server: &Path,
+    nonce: &str,
+    owner: Option<(u32, u64)>,
+) -> Result<()> {
     #[cfg(windows)]
-    let owner = owner.map(|(pid, started)| {
-        let process = crate::platform::InstallerOwner::open(pid)?;
-        if process.started()? != started { return Err("installer-owner-unavailable".to_owned()); }
-        Ok(process)
-    }).transpose()?;
+    let owner = owner
+        .map(|(pid, started)| {
+            let process = crate::platform::InstallerOwner::open(pid)?;
+            if process.started()? != started {
+                return Err("installer-owner-unavailable".to_owned());
+            }
+            Ok(process)
+        })
+        .transpose()?;
     #[cfg(not(windows))]
     let _ = owner;
     let ready = installer_guard_path(root, nonce, "ready")?;
@@ -838,7 +875,9 @@ pub async fn run_installer_guard(root: &Path, server: &Path, nonce: &str, owner:
             };
             #[cfg(not(windows))]
             let abandoned = tokio::time::Instant::now() >= deadline;
-            if abandoned { break; }
+            if abandoned {
+                break;
+            }
             tokio::time::sleep(Duration::from_secs(1)).await;
         }
         Err(verified_installer_guard_failure(
@@ -1058,21 +1097,45 @@ mod tests {
     fn failed_gui_relaunch_preserves_intent_for_a_journalless_retry() {
         let temp = tempfile::tempdir().unwrap();
         let server = temp.path().join("risunest-sync-server");
-        let gui = server.with_file_name(if cfg!(windows) { "risunest-sync-gui.exe" } else { "risunest-sync-gui" });
+        let gui = server.with_file_name(if cfg!(windows) {
+            "risunest-sync-gui.exe"
+        } else {
+            "risunest-sync-gui"
+        });
         std::fs::write(&gui, b"synthetic").unwrap();
         let path = super::directory(temp.path()).join("relaunch.json");
-        super::write_json(&path, &super::GuiRelaunch { gui: gui.clone(), tray: true }, "write-failed").unwrap();
-        assert_eq!(super::relaunch_gui_with(temp.path(), &server, |_, _, _| Err("synthetic-launch-failure".into())).unwrap_err(), "synthetic-launch-failure");
+        super::write_json(
+            &path,
+            &super::GuiRelaunch {
+                gui: gui.clone(),
+                tray: true,
+            },
+            "write-failed",
+        )
+        .unwrap();
+        assert_eq!(
+            super::relaunch_gui_with(temp.path(), &server, |_, _, _| Err(
+                "synthetic-launch-failure".into()
+            ))
+            .unwrap_err(),
+            "synthetic-launch-failure"
+        );
         assert!(path.exists());
-        assert!(!super::directory(temp.path()).join("transaction.json").exists());
+        assert!(!super::directory(temp.path())
+            .join("transaction.json")
+            .exists());
         super::relaunch_gui_with(temp.path(), &server, |root, target, tray| {
             assert_eq!(root, temp.path());
             assert_eq!(target, gui.as_path());
             assert!(tray);
             Ok(())
-        }).unwrap();
+        })
+        .unwrap();
         assert!(!path.exists());
-        super::relaunch_gui_with(temp.path(), &server, |_, _, _| panic!("intent already consumed")).unwrap();
+        super::relaunch_gui_with(temp.path(), &server, |_, _, _| {
+            panic!("intent already consumed")
+        })
+        .unwrap();
     }
 
     #[test]
@@ -1083,9 +1146,13 @@ mod tests {
         super::write_bytes_atomic(&path, b"new complete", 0o644, "write-failed").unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"new complete");
         assert_eq!(std::fs::read_dir(temp.path()).unwrap().count(), 1);
-        #[cfg(unix)] {
+        #[cfg(unix)]
+        {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o644);
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o644
+            );
         }
     }
 

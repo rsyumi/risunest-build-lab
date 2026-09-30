@@ -1515,10 +1515,10 @@ mod section_exchange {
     #[test]
     fn prepared_hypa_restore_reissues_local_clocks_and_retries_without_new_writes() {
         let (_source_dir, mut source) = open();
-        source.write_hypa_embeddings(&[super::embedding("restored", &[1.0, 2.0])]).unwrap();
+        source.write_hypa_embeddings(&[super::embedding("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", &[1.0, 2.0])]).unwrap();
         let rows = source.read_backup_section_rows(Section::Hypa).unwrap();
         let (_target_dir, mut target) = open();
-        target.write_hypa_embeddings(&[super::embedding("dropped", &[3.0])]).unwrap();
+        target.write_hypa_embeddings(&[super::embedding("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", &[3.0])]).unwrap();
         target.restore_backup_fixture(SectionKind::Hypa, &rows).unwrap();
         let first = target.read_section_rows(Section::Hypa).unwrap();
         assert!(first.iter().all(|row| row.writer_id == target.writer_id().unwrap()));

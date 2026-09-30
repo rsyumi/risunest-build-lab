@@ -8,7 +8,7 @@ function equal(actual: unknown, expected: unknown, label: string) {
     if (canonical(actual) !== canonical(expected)) throw new Error(label)
 }
 const largeText = 'synthetic'.repeat(160_000)
-const aliases: AssetAlias[] = ['a', 'b'].map(key => ({ kind: 'asset', key: `assets/${key}.bin`, objectHash: null, size: 0, mime: '', name: key, ext: 'bin' }))
+const aliases: AssetAlias[] = ['a', 'b'].map(key => ({ kind: 'asset', key: `assets/${key}.bin`, objectHash: null, size: 0, mime: '', name: key, ext: 'bin', metadata: {} }))
 
 export async function verifyContractReadback(store: PersistentDataStore): Promise<void> {
     const root = await store.readRoot()

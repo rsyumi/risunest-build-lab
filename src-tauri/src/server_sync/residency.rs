@@ -432,6 +432,28 @@ pub(crate) fn open_transient_with_check(
     }
     let Some(proof) = Residency::open(root)?.object(digest, None)? else { return Ok(None); };
     let _budget = lock_with_check(&TRANSFER_BUDGET, check)?;
+    #[cfg(test)]
+    if let Some(bytes) = test_remote::body(&std::fs::canonicalize(root)?, digest) {
+        if bytes.len() > super::cache::SMALL_OBJECT_BYTES {
+            return Err(SyncError::new("transient-fixture-body-too-large", 409));
+        }
+        if bytes.len() as u64 != proof.size {
+            return Err(SyncError::new("hydration-size-mismatch", 409));
+        }
+        let directory = tempfile::Builder::new().prefix("asset-transient-").tempdir_in(scratch_root)?;
+        let cache = super::cache::Cache::open(directory.path())?;
+        check()?;
+        if cache.put(&bytes)? != digest {
+            return Err(SyncError::new("transfer-target-mismatch", 502));
+        }
+        cache.verify(digest, check)?;
+        if cache.stat_object(digest)? != Some(proof.size) {
+            return Err(SyncError::new("hydration-size-mismatch", 409));
+        }
+        let body = cache.open_object(digest)?.ok_or_else(|| SyncError::new("hydration-incomplete", 502))?;
+        check()?;
+        return Ok(Some(TransientBody { body, _directory: Some(directory) }));
+    }
     let client = super::client::ServerClient::new(proof.config.resolve(root)?)?;
     client.resolve_identity(false)?;
     check()?;

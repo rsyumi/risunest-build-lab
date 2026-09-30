@@ -197,3 +197,40 @@ fn per_use_opens_race_only_without_an_anchor() {
     eprintln!("unarmed failures: {unarmed_failures}/4000, armed failures: {armed_failures}/4000");
     assert_eq!(armed_failures, 0);
 }
+
+
+#[test]
+fn transient_fixture_rejects_corrupt_body_and_reclaims_its_scratch() {
+    let root = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let bytes = b"synthetic-body";
+    let corrupt = b"synthetic-bodY";
+    assert_eq!(corrupt.len(), bytes.len());
+    let digest = hash(bytes);
+    test_remote::hold(root.path(), &[(&digest, bytes.len() as u64)]);
+    test_remote::serve(root.path(), &digest, corrupt.to_vec());
+    let error = open_transient_with_check(root.path(), scratch.path(), &digest, &|| Ok(()))
+        .err().expect("a corrupt fixture body must be refused");
+    assert_eq!(error.code, "transfer-target-mismatch");
+    assert_eq!(test_remote::fetched(root.path()), 1);
+    assert!(crate::asset_repository::PayloadCas::new(root.path()).unwrap()
+        .stat_object(&digest).unwrap().is_none());
+    assert_eq!(std::fs::read_dir(scratch.path()).unwrap().count(), 0);
+}
+
+#[test]
+fn transient_fixture_rejects_wrong_custody_size_without_publishing() {
+    let root = tempfile::tempdir().unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let bytes = b"synthetic-body";
+    let digest = hash(bytes);
+    test_remote::hold(root.path(), &[(&digest, bytes.len() as u64 + 1)]);
+    test_remote::serve(root.path(), &digest, bytes.to_vec());
+    let error = open_transient_with_check(root.path(), scratch.path(), &digest, &|| Ok(()))
+        .err().expect("a fixture body with the wrong custody size must be refused");
+    assert_eq!(error.code, "hydration-size-mismatch");
+    assert_eq!(test_remote::fetched(root.path()), 1);
+    assert!(crate::asset_repository::PayloadCas::new(root.path()).unwrap()
+        .stat_object(&digest).unwrap().is_none());
+    assert_eq!(std::fs::read_dir(scratch.path()).unwrap().count(), 0);
+}

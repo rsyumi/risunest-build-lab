@@ -280,9 +280,7 @@ impl Store {
                         full.update(&buffer[..n]);
                         temp.write_all(&buffer[..n])?;
                     }
-                    if length != expected_size as u64
-                        || hex::encode(chunk.finalize()) != expected
-                    {
+                    if length != expected_size as u64 || hex::encode(chunk.finalize()) != expected {
                         return Err(Error::new("corrupt-chunk", 503));
                     }
                     total += length;

@@ -105,7 +105,8 @@ fn copy_objects(db: &Connection, source: &Path, target: &Path) -> Result<u64> {
     Ok(count)
 }
 fn verify_inline(db: &Connection) -> Result<()> {
-    let mut query = db.prepare("SELECT hash,size FROM objects WHERE storage='inline' ORDER BY hash")?;
+    let mut query =
+        db.prepare("SELECT hash,size FROM objects WHERE storage='inline' ORDER BY hash")?;
     let mut rows = query.query([])?;
     while let Some(row) = rows.next()? {
         let hash: String = row.get(0)?;
@@ -113,7 +114,9 @@ fn verify_inline(db: &Connection) -> Result<()> {
         let body = risunest_small_object_store::read(db, &hash, super::objects::SMALL_OBJECT_BYTES)
             .map_err(|_| Error::new("corrupt-backup-object", 409))?
             .ok_or(Error::new("corrupt-backup-object", 409))?;
-        if size < 0 || body.len() as u64 != size as u64 { return Err(Error::new("corrupt-backup-object", 409)); }
+        if size < 0 || body.len() as u64 != size as u64 {
+            return Err(Error::new("corrupt-backup-object", 409));
+        }
     }
     Ok(())
 }
@@ -202,8 +205,12 @@ impl Store {
         if integrity != "ok" || Self::read_head(&db)? != manifest.head {
             return Err(Error::new("corrupt-backup-metadata", 409));
         }
-        let parent = destination.parent().ok_or(Error::new("invalid-backup-path", 400))?;
-        let staged = tempfile::Builder::new().prefix(".risunest-restore-").tempdir_in(parent)?;
+        let parent = destination
+            .parent()
+            .ok_or(Error::new("invalid-backup-path", 400))?;
+        let staged = tempfile::Builder::new()
+            .prefix(".risunest-restore-")
+            .tempdir_in(parent)?;
         fs::create_dir(staged.path().join("objects"))?;
         fs::create_dir(staged.path().join("staging"))?;
         let count = copy_objects(&db, source, staged.path())?;
@@ -218,10 +225,14 @@ impl Store {
         let store = Self::open(staged.path())?;
         store.rotate_restored_epoch()?;
         let checkpoint = store.checkpoint_wal()?;
-        if checkpoint.incomplete() { return Err(Error::new("restore-checkpoint-incomplete", 503)); }
+        if checkpoint.incomplete() {
+            return Err(Error::new("restore-checkpoint-incomplete", 503));
+        }
         drop(store);
         sync_directory(staged.path())?;
-        if destination.exists() { return Err(Error::new("restore-destination-exists", 409)); }
+        if destination.exists() {
+            return Err(Error::new("restore-destination-exists", 409));
+        }
         fs::rename(staged.path(), destination)?;
         sync_directory(parent)?;
         Self::open(destination)

@@ -4240,6 +4240,7 @@ dependencies = [
  "base64 0.23.1",
  "cap-primitives",
  "cc",
+ "core-foundation 0.10.1",
  "crc32fast",
  "darling 0.20.11",
  "dirs",
@@ -4254,6 +4255,7 @@ dependencies = [
  "jni 0.21.1",
  "keyring",
  "libc",
+ "native-tls",
  "oauth2",
  "percent-encoding",
  "quick-xml",
@@ -4266,8 +4268,10 @@ dependencies = [
  "risunest-sync-wire",
  "rmpv",
  "rusqlite",
+ "rustls",
  "ryu-js",
  "security-framework",
+ "security-framework-sys",
  "serde",
  "serde_json",
  "sha2 0.11.0",
@@ -7167,8 +7171,6 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 [[package]]
 name = "wry"
 version = "0.55.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "186f9871daa55fd9c016578b810d149de58367113db7fb72b462d2323ce19514"
 dependencies = [
  "base64 0.22.1",
  "block2",

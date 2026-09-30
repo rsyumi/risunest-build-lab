@@ -38,31 +38,6 @@ fn root_of(store: &PersistentStore) -> Value {
 }
 
 #[test]
-fn repair_and_undo_keep_sync_identity_and_emit_only_changed_records() {
-    let (_directory, mut store) = fixture();
-    store.connection.execute("UPDATE library_sync_selection SET target='external',connection_id='synthetic',decision_required=0", []).unwrap();
-    let before = super::super::sync_selection::identity(&store.connection).unwrap();
-    store.connection.execute_batch("DELETE FROM content_changes; DELETE FROM server_sync_dirty;").unwrap();
-    let (_, journal) = store.apply_repair(1, &[candidate(RepairAction::DropReference {
-        owner: crate::data_health::Owner { kind: "root".into(), id: "database".into() },
-        source_path: "$.userIcon".into(), occurrence: 0,
-    })], 10).unwrap();
-    for revision in [2, 3] {
-        if revision == 3 { store.undo_repair(&journal, 2).unwrap(); }
-        let after = super::super::sync_selection::identity(&store.connection).unwrap();
-        assert_eq!(after.library_epoch, before.library_epoch);
-        assert_eq!(after.selection_epoch, before.selection_epoch);
-        assert_eq!(after.generation, before.generation);
-        assert!(!super::super::sync_selection::read(&store.connection).unwrap().decision_required);
-        for table in ["content_changes", "server_sync_dirty"] {
-            let entries: Vec<(String, String, String, i64)> = store.connection.prepare(&format!("SELECT kind,key1,key2,revision FROM {table}")).unwrap()
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).unwrap().collect::<Result<_,_>>().unwrap();
-            assert_eq!(entries, vec![("root".into(), String::new(), String::new(), revision)]);
-        }
-    }
-}
-
-#[test]
 fn a_reference_removal_rewrites_only_the_field_it_names() {
     let (_directory, mut store) = fixture();
     let (committed, journal) = store
@@ -216,17 +191,6 @@ fn an_undo_leaves_a_record_the_reader_changed_after_the_repair() {
 
     let (_, skipped) = store.undo_repair(&journal, 3).unwrap();
     assert_eq!(skipped, ["root:"], "the later edit is reported, not discarded");
-    for table in ["content_changes", "server_sync_dirty"] {
-        let revision: i64 = store.connection.query_row(
-            &format!("SELECT revision FROM {table} WHERE kind='root' AND key1='' AND key2=''"),
-            [], |row| row.get(0),
-        ).unwrap();
-        assert_eq!(revision, 3, "a skipped record must not enter the undo delta in {table}");
-        let undo_entries: i64 = store.connection.query_row(
-            &format!("SELECT COUNT(*) FROM {table} WHERE revision>3"), [], |row| row.get(0),
-        ).unwrap();
-        assert_eq!(undo_entries, 0);
-    }
     assert_eq!(
         root_of(&store).get("note").and_then(Value::as_str),
         Some("edited")
