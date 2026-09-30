@@ -110,6 +110,10 @@ jobs:
         run: |
           set -euo pipefail
           dbus-run-session -- bash scripts/linux-native-tests.sh --release --target x86_64-unknown-linux-gnu --lib -- --test-threads=1 2>&1 | tee artifacts/rust-contracts.log
+          dbus-run-session -- bash scripts/linux-native-tests.sh --release --target x86_64-unknown-linux-gnu --test ios_native_contracts -- --test-threads=1 2>&1 | tee artifacts/ios-native-contracts.log
+          dbus-run-session -- bash scripts/linux-native-tests.sh --package tauri-plugin-window-state --release --target x86_64-unknown-linux-gnu --lib -- --test-threads=1 2>&1 | tee artifacts/window-state-contracts.log
+          dbus-run-session -- cargo test --manifest-path crates/wry/Cargo.toml --package wry --release --locked --target x86_64-unknown-linux-gnu --lib -- --test-threads=1 2>&1 | tee artifacts/wry-contracts.log
+          dbus-run-session -- bash scripts/linux-native-tests.sh --package tauri-plugin-updater --release --target x86_64-unknown-linux-gnu --lib -- --test-threads=1 2>&1 | tee artifacts/updater-contracts.log
       - name: Build agent packages
         run: |
           set -euo pipefail

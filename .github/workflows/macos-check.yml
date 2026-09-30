@@ -110,6 +110,10 @@ jobs:
           export TMPDIR="$(cd "$contract_tmp" && pwd -P)"
           printf 'rust_test_tmpdir=%s\n' "$TMPDIR" >> artifacts/environment.txt
           cargo test --manifest-path src-tauri/Cargo.toml --release --locked --lib -- --test-threads=1 2>&1 | tee artifacts/rust-contracts.log
+          cargo test --manifest-path src-tauri/Cargo.toml --release --locked --test ios_native_contracts -- --test-threads=1 2>&1 | tee artifacts/ios-native-contracts.log
+          cargo test --manifest-path src-tauri/Cargo.toml --package tauri-plugin-window-state --release --locked --lib -- --test-threads=1 2>&1 | tee artifacts/window-state-contracts.log
+          cargo test --manifest-path crates/wry/Cargo.toml --package wry --release --locked --lib -- --test-threads=1 2>&1 | tee artifacts/wry-contracts.log
+          cargo test --manifest-path src-tauri/Cargo.toml --package tauri-plugin-updater --release --locked --lib -- --test-threads=1 2>&1 | tee artifacts/updater-contracts.log
       - name: Build agent app
         if: inputs.scope == 'full'
         run: |
