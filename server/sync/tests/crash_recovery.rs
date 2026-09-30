@@ -25,7 +25,13 @@ fn child_exit_without_destructors() {
 fn abrupt_process_exit_reopens_wal() {
     for phase in ["published", "committed"] {
         let dir = tempfile::tempdir().unwrap();
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::CommandExt;
+            command.creation_flags(0x08000000);
+        }
+        let output = command
             .args(["--exact", "child_exit_without_destructors", "--ignored"])
             .env("RISUNEST_SYNTHETIC_CRASH_DIR", dir.path())
             .env("RISUNEST_SYNTHETIC_CRASH_PHASE", phase)

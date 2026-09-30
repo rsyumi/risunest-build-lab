@@ -153,7 +153,11 @@ class SafFileTaxonomyGoldenTest {
       if (schemes.isEmpty()) continue
       assertEquals(setOf("android.intent.action.VIEW"), actionNames)
       assertEquals(setOf("android.intent.category.DEFAULT"), categoryNames)
-      assertTrue(dataElements.none { it.hasAttributeNS(androidNamespace, "mimeType") })
+      val types = dataElements.map { it.getAttributeNS(androidNamespace, "mimeType") }.filter { it.isNotEmpty() }.toSet()
+      if ("content" in schemes) assertEquals(setOf("*/*"), types)
+      else assertTrue(types.isEmpty())
+      assertEquals(setOf(".risum", ".risup", ".charx", ".risunest", ".risudat"),
+        dataElements.map { it.getAttributeNS(androidNamespace, "pathSuffix") }.filter { it.isNotEmpty() }.toSet())
       assertEquals(setOf("*"), dataElements.map {
         it.getAttributeNS(androidNamespace, "host")
       }.filter { it.isNotEmpty() }.toSet())
@@ -173,7 +177,7 @@ class SafFileTaxonomyGoldenTest {
     val expectedExtensions = setOf("risum", "risup", "charx", "risunest", "risudat")
     assertEquals(expectedExtensions, configured)
     for (scheme in listOf("content", "file")) {
-      assertEquals(expectedExtensions.map { ".*\\\\.$it" }.toSet(),
+      assertEquals(expectedExtensions.flatMap { extension -> (1..4).map { ".*\\\\.".repeat(it) + extension } }.toSet(),
         registered.getValue(scheme).filter { it.isNotEmpty() }.toSet())
     }
     for (suffix in taxonomy.databaseSuffixes) {

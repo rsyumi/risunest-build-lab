@@ -2,9 +2,14 @@ import { describe, expect, it } from 'vitest'
 import { parse } from 'svelte/compiler'
 
 import { readFileSync } from 'node:fs'
+import { language } from 'src/lang'
+import { buildNativeFileJobDialogModel } from 'src/ts/gui/nativeFileJobDialogModel'
 const source = readFileSync('src/lib/Setting/Pages/UserSettings.svelte', 'utf8')
 const backupSource = readFileSync('src/lib/Setting/Pages/RisuNestBackupRestore.svelte', 'utf8')
 const storageSource = readFileSync('src/lib/Setting/Pages/RisuNestStorageDashboard.svelte', 'utf8')
+const accountOperationsSource = readFileSync('src/ts/storage/sync/nativeOfficialAccountOperations.ts', 'utf8')
+const errorPresentationSource = readFileSync('src/ts/storage/fileOperationErrorPresentation.ts', 'utf8')
+const fileJobManagerSource = readFileSync('src/ts/storage/nativeFileJobManager.ts', 'utf8')
 
 describe('UserSettings local backup route', () => {
     it('makes the existing backup import action reachable on Android and uses the common native picker', () => {
@@ -59,24 +64,6 @@ describe('UserSettings local backup route', () => {
             "if (isTauri) return runRisuSaveOperation('import')",
         )
     })
-    it('routes native full backup and restore through the common production caller and retains the web adapter', () => {
-        expect(source).toContain('exportPortableBackupFromSystemPicker')
-        expect(source).toContain('restoreBackupFromSystemPicker')
-        expect(source).toContain('exportRisuSaveFromSystemPicker')
-        expect(source).toContain('language.portableBackup.dbOnly')
-        expect(source).toContain('SaveLocalBackup()')
-        expect(source).toContain('LoadLocalBackup()')
-        expect(source).toMatch(
-            /isTauri[\s\S]*?restoreBackupFromSystemPicker\(\)[\s\S]*?LoadLocalBackup\(\)/,
-        )
-        expect(source).toMatch(
-            /await runLocalBackupOperation\(["']export["']\)/,
-        )
-        expect(source).toMatch(
-            /await runLocalBackupOperation\(["']import["']\)/,
-        )
-    })
-
     it('keeps local backup and official account controls but removes legacy Drive controls', () => {
         expect(source).toContain('SavePartialLocalBackup()')
         expect(source).toContain('loadRisuAccountBackup')
@@ -90,13 +77,21 @@ describe('UserSettings local backup route', () => {
         for (const control of [
             'runRisuSaveOperation',
             'openSyncConflictBackups()',
-            'getNativeOfficialAccountFlow().publish',
-            'getNativeOfficialAccountFlow().restore',
-            'nativePublishController?.abort()',
+            'publishNativeOfficialAccountBackup()',
+            'restoreNativeOfficialAccountBackup()',
+            'onclick={cancelActiveNativeFileOperation}',
         ]) {
             expect(backupSource).toContain(control)
             expect(source).not.toContain(control)
         }
+        expect(accountOperationsSource).toContain('getNativeOfficialAccountFlow().publish')
+        expect(accountOperationsSource).toContain('getNativeOfficialAccountFlow().restore')
+        expect(source).not.toContain('getNativeOfficialAccountFlow().publish')
+        expect(source).not.toContain('getNativeOfficialAccountFlow().restore')
+        expect(fileJobManagerSource).toContain('activeController.abort()')
+        expect(accountOperationsSource).toContain("runSharedNativeFileOperation('export', 'official-account-publish'")
+        expect(accountOperationsSource).toContain("runSharedNativeFileOperation('import', 'official-account-restore'")
+        expect(accountOperationsSource).toContain("{ presentation: 'dialog', format: 'library-backup' }")
     })
 
     it('keeps official account actions behind the existing account gate', () => {
@@ -121,10 +116,23 @@ describe('UserSettings local backup route', () => {
             'officialRestoreInlayWarning',
             'officialMissing',
             'officialPublishConfirm',
-            'officialPublished',
-            'actionFailed',
         ])
             expect(backupSource).toContain(`language.risuNest.backup.${key}`)
+
+        expect(backupSource).toContain("presentFileOperationError('export', error, startedAt)")
+        expect(errorPresentationSource).toContain('const text = language.risuNest.backup')
+        expect(errorPresentationSource).toContain('options.fallbackMessage ?? text.actionFailed')
+        const completion = buildNativeFileJobDialogModel(null, {
+            kind: 'export', format: 'library-backup', state: 'succeeded',
+            startedAt: 0, finishedAt: 1, observedStages: [], warningCodes: [], partialWritesPossible: false,
+            status: {
+                jobId: 'synthetic-publication', kind: 'official-publication-upload', state: 'succeeded',
+                phase: 'complete', progress: { completedBytes: 0, completedItems: 0 },
+            },
+        }, 1)
+        expect(completion.open).toBe(true)
+        expect(completion.title).toBe(language.risuNest.backup.officialPublish)
+        expect(completion.terminal?.summary).toBe(language.risuNest.importDialog.resultExportSucceeded)
 
         expect(backupSource).not.toContain('status.phase}')
         expect(backupSource).not.toContain('${status.phase}')

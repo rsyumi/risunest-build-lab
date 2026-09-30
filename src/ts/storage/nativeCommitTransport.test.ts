@@ -4,6 +4,7 @@ import {
     isLargeCommit,
     LARGE_COMMIT_BYTES,
     type CommitEnvelope,
+    type CommitTransportDependencies,
     type SharedWebview,
 } from './nativeCommitTransport'
 
@@ -87,6 +88,46 @@ function harness(
 }
 
 describe('native commit transport', () => {
+    it('replays only a typed pre-commit raw-body rejection and keeps JSON fallback', async () => {
+        const input = fixture()
+        const invoke = vi.fn(async (command: string) => {
+            if (command === 'pds_commit_raw') throw { code: 'raw-body-unavailable' }
+            return { revision: 2 }
+        })
+        const transport = new NativeCommitTransport({
+            windows: () => false, linux: () => true, invoke: invoke as CommitTransportDependencies['invoke'],
+            encode: async (value) => new TextEncoder().encode(JSON.stringify(value)),
+            shared: () => undefined,
+        })
+        await transport.commit(input)
+        await transport.commit(input)
+        expect(invoke.mock.calls.map(([command]) => command)).toEqual(['pds_commit_raw', 'pds_commit', 'pds_commit'])
+        expect(invoke).toHaveBeenLastCalledWith('pds_commit', input)
+    })
+
+    it('does not replay an ambiguous raw transport error', async () => {
+        const invoke = vi.fn(async () => { throw new Error('response lost') })
+        const transport = new NativeCommitTransport({
+            windows: () => false, linux: () => true, invoke: invoke as CommitTransportDependencies['invoke'],
+            encode: async (value) => new TextEncoder().encode(JSON.stringify(value)),
+            shared: () => undefined,
+        })
+        await expect(transport.commit(fixture())).rejects.toThrow('response lost')
+        expect(invoke).toHaveBeenCalledTimes(1)
+    })
+
+    it('sanitizes small native commits before invocation without mutating the caller', async () => {
+        const h = harness({ windows: false })
+        const input = fixture(false)
+        input.commit.rootMutations = [{ type: 'set', key: 'text', value: '\ud800e\u0301' }]
+        const diagnostic = vi.spyOn(console, 'warn').mockImplementation(() => {})
+        await h.transport.commit(input)
+        expect(h.invoke).toHaveBeenCalledWith('pds_commit', {
+            ...input, commit: { ...input.commit, rootMutations: [{ type: 'set', key: 'text', value: '\ufffde\u0301' }] },
+        })
+        expect(input.commit.rootMutations[0]).toEqual({ type: 'set', key: 'text', value: '\ud800e\u0301' })
+        diagnostic.mockRestore()
+    })
     it.each(['linux', 'ios', 'macos'] as const)(
         'encodes %s large saves and submits raw bytes without touching shared buffers',
         async (os) => {

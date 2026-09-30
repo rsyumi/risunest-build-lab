@@ -663,6 +663,22 @@ async function runCatalogue(order: readonly number[], variant: Variant): Promise
 }
 
 describe('targeted invalidation equals a full reprojection', () => {
+    it('keeps an unchanged nested root object attached across an unrelated committed root edit', async () => {
+        const model = newModel()
+        model.root.modules = [{ id: 'module', name: 'Synthetic module', description: 'Before' }]
+        const options = { selectedCharacterId: null, selectedConversationId: null, activeCharacterIds: new Set<string>() }
+        const previous = await projectPinnedScalableWorkingSet(createReader(model), options)
+        const retained = previous.modules
+        model.root.theme = 'Changed'
+        model.revision++
+        const result = await applyTargetedWorkingSetInvalidation(previous,
+            [{ kind: 'root', key1: '', key2: '' }], createReader(model), options)
+        expect(result?.database.modules).toBe(retained)
+        expect(result?.database.theme).toBe('Changed')
+        retained[0].description = 'Edited by retained editor'
+        expect(result?.database.modules[0].description).toBe('Edited by retained editor')
+    })
+
     it('refreshes a nonresident changed ID without reading unchanged character or preset bodies', async () => {
         const model = newModel()
         const options = {

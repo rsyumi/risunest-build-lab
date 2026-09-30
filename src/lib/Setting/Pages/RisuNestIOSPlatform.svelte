@@ -64,7 +64,7 @@
     >
   </SettingRow>
   <SettingRow
-    label={language.risuNest.platform.keepAlive}
+    label={language.risuNest.platform.iosBackgroundLabel}
     help={language.risuNest.platform.iosBackgroundHelp}
   />
   {#if os}

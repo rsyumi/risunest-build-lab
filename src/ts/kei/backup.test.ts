@@ -1,6 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { Database } from '../storage/database.svelte'
 
+let native = false
+const vaultRead = vi.fn()
+vi.mock('../platform', () => ({ get isTauri() { return native } }))
+vi.mock('../storage/nativeAccountCredential', () => ({
+    createNativeAccountCredentialVault: () => ({ read: vaultRead }),
+}))
+
 let database: Partial<Database>
 let persistentDatabase: Partial<Database>
 const materializePersistentDatabaseSnapshot = vi.fn()
@@ -31,6 +38,8 @@ async function loadSaveDbKei() {
 
 describe('saveDbKei', () => {
     beforeEach(() => {
+        native = false
+        vaultRead.mockReset()
         vi.useFakeTimers()
         vi.setSystemTime(1_000_000)
         fetchMock.mockClear()
@@ -70,6 +79,42 @@ describe('saveDbKei', () => {
             token: 'secret-token',
             database: persistentDatabase,
         })
+    })
+
+    it('injects the fake vault account into an account-free native fallback snapshot', async () => {
+        native = true
+        const account = database.account
+        vaultRead.mockResolvedValue(account)
+        delete persistentDatabase.account
+        const saveDbKei = await loadSaveDbKei()
+        await saveDbKei()
+        expect(vaultRead).toHaveBeenCalledOnce()
+        expect(fetchMock).toHaveBeenCalledOnce()
+        const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+        expect(JSON.parse(init.body as string).database.account).toEqual(account)
+    })
+
+    it.each(['missing', 'foreign', 'foreign-token', 'not-kei', 'changed-during-read', 'changed-during-materialization'])('rejects %s native fallback identity before upload', async scenario => {
+        native = true
+        const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+        const account = database.account
+        vaultRead.mockImplementation(async () => {
+            if (scenario === 'changed-during-read') database.account = undefined
+            if (scenario === 'missing') return null
+            if (scenario === 'foreign') return { ...account, id: 'foreign' }
+            if (scenario === 'foreign-token') return { ...account, token: 'foreign-token' }
+            if (scenario === 'not-kei') return { ...account, kei: false }
+            return account
+        })
+        materializePersistentDatabaseSnapshot.mockImplementation(async () => {
+            if (scenario === 'changed-during-materialization') database.account = undefined
+            return persistentDatabase
+        })
+        const saveDbKei = await loadSaveDbKei()
+        await saveDbKei()
+        expect(fetchMock).not.toHaveBeenCalled()
+        expect(consoleError).toHaveBeenCalled()
+        consoleError.mockRestore()
     })
 
     it('uses the native job without materializing the database when it is available', async () => {

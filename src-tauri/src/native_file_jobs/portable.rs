@@ -29,6 +29,8 @@ pub(crate) struct PortableSelection {
     /// what those records refer to.
     #[serde(default)]
     pub(crate) items: Option<portable_backup::ArchiveSelection>,
+    #[serde(default)]
+    pub(crate) allow_source_preservation: bool,
 }
 impl Default for PortableSelection {
     fn default() -> Self {
@@ -36,6 +38,7 @@ impl Default for PortableSelection {
             library: true,
             device_sections: vec![],
             items: None,
+            allow_source_preservation: false,
         }
     }
 }
@@ -123,14 +126,59 @@ fn append_cleanup_failure(
     );
 }
 
-struct Probe<'a>(&'a JobControl);
-impl CancellationProbe for Probe<'_> {
-    fn is_cancelled(&self) -> bool {
-        self.0.is_cancel_requested()
+struct Probe<'a> {
+    job: &'a JobControl,
+    progress: std::sync::Mutex<(super::JobProgress, bool, Option<String>)>,
+}
+impl<'a> Probe<'a> {
+    fn new(job: &'a JobControl) -> Self { Self { job, progress: std::sync::Mutex::new((super::JobProgress::default(), false, None)) } }
+    fn track_bytes(&self, total: u64) -> Result<(), NativeJobError> {
+        let mut state = self.progress.lock().map_err(|_| error("portable progress mutex poisoned"))?;
+        state.0.total_bytes = Some(total);
+        state.1 = true;
+        self.job.set_progress(state.0).map_err(error)
+    }
+    fn result(&self) -> Result<(), NativeJobError> {
+        match self.progress.lock().map_err(|_| error("portable progress mutex poisoned"))?.2.as_ref() {
+            Some(message) => Err(NativeJobError::new("job-error", message)), None => Ok(())
+        }
     }
 }
-fn error(error: impl std::fmt::Display) -> NativeJobError {
-    NativeJobError::new("portable-backup-failed", error.to_string())
+impl CancellationProbe for Probe<'_> {
+    fn cancellation_flag(&self) -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> { Some(self.job.cancellation_flag()) }
+    fn is_cancelled(&self) -> bool { self.job.is_cancel_requested() }
+    fn backup_bytes_processed(&self, bytes: u64) {
+        let mut state = self.progress.lock().unwrap();
+        if state.1 {
+            state.0.completed_bytes = state.0.completed_bytes.saturating_add(bytes).min(state.0.total_bytes.unwrap_or(u64::MAX));
+            if let Err(error) = self.job.set_progress(state.0) { state.2 = Some(error); }
+        }
+    }
+    fn backup_item_processed(&self) {
+        let mut state = self.progress.lock().unwrap();
+        state.0.completed_items = state.0.completed_items.saturating_add(1);
+        if let Err(error) = self.job.set_progress(state.0) { state.2 = Some(error); }
+    }
+}
+fn storage_full(mut error: &(dyn std::error::Error + 'static)) -> bool {
+    loop {
+        if error.downcast_ref::<std::io::Error>().is_some_and(|error| error.kind() == std::io::ErrorKind::StorageFull)
+            || error.downcast_ref::<serde_json::Error>().is_some_and(|error| error.io_error_kind() == Some(std::io::ErrorKind::StorageFull))
+            || error.downcast_ref::<rusqlite::Error>().is_some_and(|error| matches!(error, rusqlite::Error::SqliteFailure(code, _) if code.code == rusqlite::ErrorCode::DiskFull)) {
+            return true;
+        }
+        match error.source() { Some(source) => error = source, None => return false }
+    }
+}
+fn error(error: impl std::fmt::Display + 'static) -> NativeJobError {
+    let value = &error as &dyn std::any::Any;
+    if value.downcast_ref::<portable_backup::Error>().is_some_and(|error| matches!(error, portable_backup::Error::Cancelled)) {
+        return NativeJobError::new("cancelled", "Portable backup was cancelled");
+    }
+    let full = value.downcast_ref::<std::io::Error>().is_some_and(|error| storage_full(error))
+        || value.downcast_ref::<portable_backup::Error>().is_some_and(|error| storage_full(error))
+        || value.downcast_ref::<rusqlite::Error>().is_some_and(|error| storage_full(error));
+    NativeJobError::new(if full { "local-storage-full" } else { "portable-backup-failed" }, error.to_string())
 }
 fn device_error(failure: DeviceBackupError) -> NativeJobError {
     if failure.code == "device-cancelled" {
@@ -225,12 +273,20 @@ fn capture(
     owned: &Path,
     pins: &mut DurableCasJob,
     probe: &dyn CancellationProbe,
+    source_build: &str,
+    allow_source_preservation: bool,
 ) -> Result<portable_backup::CapturedLibrary, NativeJobError> {
-    match portable_backup::capture_library(store, revision, owned, pins, false, probe) {
+    match portable_backup::capture_library(store, revision, owned, pins, false, probe, source_build) {
         Err(portable_backup::Error::SourceNeedsPreservation) => {
+            if !allow_source_preservation {
+                return Err(NativeJobError::new(
+                    "source-preservation-confirmation-required",
+                    "Source preservation may include account information and requires confirmation",
+                ));
+            }
             pins.release(CasReleaseOutcome::Aborted).map_err(error)?;
             *pins = new_pins(store, CasJobKind::OfficialPublicationOrExportPreparation)?;
-            portable_backup::capture_library(store, revision, owned, pins, true, probe)
+            portable_backup::capture_library(store, revision, owned, pins, true, probe, source_build)
                 .map_err(portable_error)
         }
         result => result.map_err(portable_error),
@@ -260,7 +316,9 @@ fn publish(
     destination: &Path,
     owned: &Path,
     job: &JobControl,
+    probe: &Probe<'_>,
 ) -> Result<crate::persistent_store::export::destination::DestinationWriteResult, NativeJobError> {
+    let copied = std::cell::Cell::new(0_u64);
     crate::persistent_store::export::destination::write_portable_destination_controlled(
         owned,
         source,
@@ -269,7 +327,10 @@ fn publish(
             .ok_or_else(|| error("destination has no parent"))?,
         destination,
         || job.is_cancel_requested(),
-        |_| {},
+        |progress| {
+            let previous = copied.replace(progress.copied_bytes);
+            probe.backup_bytes_processed(progress.copied_bytes.saturating_sub(previous));
+        },
         || {
             job.commit_export_publication().map_err(|message| {
                 if job.is_cancel_requested() {
@@ -284,6 +345,9 @@ fn publish(
         },
     )
     .map_err(|failure| {
+        if let crate::persistent_store::export::destination::DestinationWriteError::Io { source, .. } = &failure {
+            if storage_full(source) { return NativeJobError::new("local-storage-full", source.to_string()); }
+        }
         super::error::destination_error_with(
             failure,
             "Verified portable archive is unavailable",
@@ -301,6 +365,7 @@ pub(crate) fn export_portable(
     store: PersistentStore,
     job: &JobControl,
     device: Option<(&tauri::AppHandle, &PortableSelection)>,
+    source_build: &str,
 ) -> Result<JobResultSummary, NativeJobError> {
     super::job_transition(job, job.start(JobPhase::WritingExport))?;
     let fallback = PortableSelection::default();
@@ -313,6 +378,7 @@ pub(crate) fn export_portable(
         store,
         job,
         selection,
+        source_build,
     )
 }
 
@@ -324,6 +390,7 @@ fn export_portable_running(
     mut store: PersistentStore,
     job: &JobControl,
     selection: &PortableSelection,
+    source_build: &str,
 ) -> Result<JobResultSummary, NativeJobError> {
     if !selection.library && selection.device_sections.is_empty() {
         return Err(error("Select at least one backup section"));
@@ -334,14 +401,17 @@ fn export_portable_running(
             "Library changed before portable backup capture",
         ));
     }
-    let probe = Probe(job);
+    if selection.library {
+        require_capacity(owned, store.portable_export_lower_bound().map_err(error)?)?;
+    }
+    let probe = Probe::new(job);
     let mut pins = new_pins(&store, CasJobKind::OfficialPublicationOrExportPreparation)?;
     let outcome = (|| {
         let captured = if selection.library {
-            capture(&mut store, revision, owned, &mut pins, &probe)?
+            capture(&mut store, revision, owned, &mut pins, &probe, source_build, selection.allow_source_preservation)?
         } else {
             let catalog =
-                Catalog::create(owned, env!("CARGO_PKG_VERSION"), revision).map_err(error)?;
+                Catalog::create(owned, source_build, revision).map_err(error)?;
             catalog
                 .db
                 .execute(
@@ -363,6 +433,8 @@ fn export_portable_running(
             )
             .map_err(device_error)?;
         }
+        let payload_bytes: i64 = captured.catalog.db.query_row("SELECT coalesce(sum(byte_length),0) FROM objects", [], |row| row.get(0)).map_err(error)?;
+        probe.track_bytes((payload_bytes.max(0) as u64).saturating_mul(3))?;
         let path = owned.join("archive.risunest.part");
         let archive = write_verified(
             captured.catalog,
@@ -384,7 +456,9 @@ fn export_portable_running(
             }
         };
         super::job_transition(job, job.set_phase(JobPhase::PublishingDestination))?;
-        let published = publish(&path, &destination, owned, job)?;
+        probe.result()?;
+        let published = publish(&path, &destination, owned, job, &probe)?;
+        probe.result()?;
         Ok(JobResultSummary {
             export_exclusions: None,
             revision,
@@ -469,7 +543,8 @@ pub(crate) fn restore_portable(
     device: Option<(&tauri::AppHandle, Option<&PortableSelection>)>,
 ) -> Result<JobResultSummary, NativeJobError> {
     job.start(JobPhase::ReadingSource).map_err(error)?;
-    let probe = Probe(job);
+    let probe = Probe::new(job);
+    probe.track_bytes(source.total_bytes.saturating_mul(3))?;
     let (input, source_sha256) = if already_owned {
         let hash = portable_backup::copy_hash(
             &mut source.file,
@@ -484,6 +559,7 @@ pub(crate) fn restore_portable(
         source.file.seek(SeekFrom::Start(0)).map_err(error)?;
         (source.file, hash)
     } else {
+        require_capacity(owned, source.total_bytes)?;
         let identity = crate::asset_repository::exact_file_identity(&source.file).map_err(error)?;
         let path = owned.join("input.risunest");
         let mut output = fs::OpenOptions::new()
@@ -526,6 +602,7 @@ pub(crate) fn restore_portable(
     if !selection.library && selection.device_sections.is_empty() {
         return Err(error("Select at least one backup section"));
     }
+    job.set_replaces_library(selection.library).map_err(error)?;
     if selection.library && selection.items.is_none() {
         archive.validate_library(&probe).map_err(error)?;
     }
@@ -568,7 +645,10 @@ pub(crate) fn restore_portable(
                     job.set_preservation_report(report).map_err(error)?;
                 }
             }
-            let counts = counts(&archive)?;
+            let counts = match stage.as_ref() {
+                Some(stage) => store.portable_staged_counts(&stage.staging_id).map_err(error)?,
+                None => (0, 0),
+            };
             if let Some(finalized) = job.wait_for_restore_finalization().map_err(error)? {
                 revision = finalized;
             }
@@ -598,6 +678,7 @@ pub(crate) fn restore_portable(
                     ));
                 }
             }
+            probe.result()?;
             let warning_codes = vec![];
             let final_revision = if !prepared_device.is_empty() {
                 let app = app.ok_or_else(|| {
@@ -680,6 +761,21 @@ pub(crate) fn restore_portable(
     }
 }
 
+fn require_capacity(directory: &Path, bytes: u64) -> Result<(), NativeJobError> {
+    if let Ok(available) = fs2::available_space(directory) {
+        check_capacity(available, bytes)?;
+    }
+    Ok(())
+}
+
+fn check_capacity(available: u64, bytes: u64) -> Result<(), NativeJobError> {
+    let required = bytes.checked_add(1024 * 1024).ok_or_else(|| NativeJobError::new("insufficient-storage", "Backup staging size exceeds available storage"))?;
+    if available < required {
+        return Err(NativeJobError::new("insufficient-storage", "Not enough storage to stage the backup"));
+    }
+    Ok(())
+}
+
 fn install(
     archive: &VerifiedArchive,
     inventory: &portable_backup::RestoreInventory,
@@ -695,7 +791,7 @@ fn install(
     let mut rows = statement.query([]).map_err(error)?;
     while let Some(row) = rows.next().map_err(error)? {
         if probe.is_cancelled() {
-            return Err(error("portable restore cancelled during CAS staging"));
+            return Err(NativeJobError::new("cancelled", "Portable restore cancelled during CAS staging"));
         }
         let hash: String = row.get(0).map_err(error)?;
         let owner: bool = row.get(1).map_err(error)?;
@@ -726,20 +822,15 @@ impl<R: Read> Read for CancelledRead<'_, R> {
         if self.probe.is_cancelled() {
             return Err(std::io::Error::other("portable restore cancelled"));
         }
-        self.input.read(bytes)
+        let count = self.input.read(bytes)?;
+        self.probe.backup_bytes_processed(count as u64);
+        Ok(count)
     }
 }
+
 fn counts(archive: &VerifiedArchive) -> Result<(u64, u64), NativeJobError> {
-    Ok((
-        archive
-            .db
-            .query_row::<i64, _, _>("SELECT count(*) FROM characters", [], |r| r.get(0))
-            .map_err(error)? as u64,
-        archive
-            .db
-            .query_row::<i64, _, _>("SELECT count(*) FROM bot_presets", [], |r| r.get(0))
-            .map_err(error)? as u64,
-    ))
+    Ok((archive.db.query_row("SELECT count(*) FROM characters", [], |row| row.get::<_,i64>(0)).map_err(error)? as u64,
+        archive.db.query_row("SELECT count(*) FROM bot_presets", [], |row| row.get::<_,i64>(0)).map_err(error)? as u64))
 }
 
 #[cfg(test)]
@@ -858,11 +949,13 @@ mod tests {
             &directory.path().join("handoffs"),
             store,
             &job,
-            &PortableSelection {
+                &PortableSelection {
                 library: false,
                 device_sections: vec!["hypa".into()],
                 items: None,
+                allow_source_preservation: false,
             },
+            "9.8.7-synthetic",
         )
         .unwrap_err();
 
@@ -938,12 +1031,69 @@ mod tests {
             )
             .unwrap();
         let result =
-            export_portable(None, 1, &jobs, &root.join("handoffs"), store, &job, None).unwrap();
+            export_portable(None, 1, &jobs, &root.join("handoffs"), store, &job, None, "9.8.7-synthetic").unwrap();
         (
             result.handoff_path.unwrap().into(),
             result.source_bytes,
             hash,
         )
+    }
+
+    #[test]
+    fn portable_progress_reports_real_bytes_without_resetting_between_passes() {
+        let job = super::super::JobRegistry::default().create(super::super::JobKind::ExportPortableBackup).unwrap();
+        job.start(JobPhase::WritingExport).unwrap();
+        let probe = Probe::new(&job);
+        portable_backup::copy_hash(&mut &b"fixture"[..], &mut std::io::sink(), 7, &probe).unwrap();
+        assert_eq!(job.status().progress.completed_items, 1);
+        assert_eq!(job.status().progress.total_bytes, None);
+        probe.track_bytes(21).unwrap();
+        for expected in [7, 14, 21] {
+            portable_backup::copy_hash(&mut &b"fixture"[..], &mut std::io::sink(), 7, &probe).unwrap();
+            assert_eq!(job.status().progress.completed_bytes, expected);
+            assert_eq!(job.status().progress.total_bytes, Some(21));
+            probe.result().unwrap();
+        }
+    }
+
+    #[test]
+    fn portable_disk_full_keeps_its_classification_through_wrappers() {
+        let disk_full = || std::io::Error::from(std::io::ErrorKind::StorageFull);
+        assert_eq!(error(disk_full()).code, "local-storage-full");
+        assert_eq!(error(portable_backup::Error::Io(disk_full())).code, "local-storage-full");
+        assert_eq!(portable_error(portable_backup::Error::Zip(zip::result::ZipError::Io(disk_full()))).code, "local-storage-full");
+    }
+
+    #[test]
+    fn portable_export_writes_runtime_build_provenance() {
+        let directory = tempfile::tempdir().unwrap();
+        let (path, _, _) = test_archive(directory.path(), false);
+        let mut zip = zip::ZipArchive::new(File::open(path).unwrap()).unwrap();
+        let format: serde_json::Value = serde_json::from_reader(zip.by_name("format.json").unwrap()).unwrap();
+        assert_eq!(format["sourceAppBuild"], "9.8.7-synthetic");
+        assert_eq!(format["formatVersion"], 1);
+    }
+
+    #[test]
+    fn device_only_portable_export_writes_runtime_build_provenance() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = library(&directory.path().join("source"));
+        let owned = directory.path().join("jobs");
+        fs::create_dir_all(&owned).unwrap();
+        let job = super::super::JobRegistry::default().create(super::super::JobKind::ExportPortableBackup).unwrap();
+        job.start(JobPhase::WritingExport).unwrap();
+        let selection = PortableSelection { library: false, device_sections: vec!["local-settings".into()], items: None, allow_source_preservation: false };
+        let result = export_portable_running(None, 1, &owned, &directory.path().join("handoffs"), store, &job, &selection, "9.8.7-device").unwrap();
+        let mut zip = zip::ZipArchive::new(File::open(result.handoff_path.unwrap()).unwrap()).unwrap();
+        let format: serde_json::Value = serde_json::from_reader(zip.by_name("format.json").unwrap()).unwrap();
+        assert_eq!(format["sourceAppBuild"], "9.8.7-device");
+    }
+
+    #[test]
+    fn capacity_preflight_requires_copy_plus_margin_without_overflow() {
+        assert!(check_capacity(1024 * 1024 + 7, 7).is_ok());
+        assert_eq!(check_capacity(1024 * 1024 + 6, 7).unwrap_err().code, "insufficient-storage");
+        assert_eq!(check_capacity(u64::MAX, u64::MAX).unwrap_err().code, "insufficient-storage");
     }
 
     #[test]
@@ -1090,8 +1240,7 @@ mod tests {
             &directory.path().join("handoffs"),
             store,
             &export,
-            None,
-        )
+            None, "9.8.7-synthetic")
         .unwrap();
         let target_store = library(&target);
         let revision = target_store.revision().unwrap();
@@ -1148,12 +1297,22 @@ mod tests {
             let db =
                 rusqlite::Connection::open(source.join("persistent/persistent.sqlite")).unwrap();
             if unknown {
-                db.execute_batch("CREATE TABLE future_records(generation TEXT,value TEXT); INSERT INTO future_records VALUES('synthetic','unclassified raw value')").unwrap();
+                db.execute_batch("CREATE TABLE future_records(generation TEXT,value TEXT)").unwrap();
+                db.execute("INSERT INTO future_records VALUES('synthetic',?1)",
+                    [r#"{"account":{"id":"synthetic-account","token":"synthetic-token"}}"#]).unwrap();
             } else {
                 db.execute("UPDATE messages SET value='not JSON'", [])
                     .unwrap();
             }
             drop(db);
+            let mut refused_store = PersistentStore::open(&source).unwrap();
+            let mut refused_pins = new_pins(&refused_store, CasJobKind::OfficialPublicationOrExportPreparation).unwrap();
+            let denied = capture(&mut refused_store, revision, &jobs, &mut refused_pins,
+                &NeverCancelled, "9.8.7-synthetic", false);
+            assert!(matches!(denied, Err(ref failure) if failure.code == "source-preservation-confirmation-required"));
+            refused_pins.release(CasReleaseOutcome::Aborted).unwrap();
+            drop(refused_store);
+            assert!(!handoffs.exists());
             let registry = super::super::JobRegistry::default();
             let job = registry
                 .create_internal(
@@ -1163,15 +1322,16 @@ mod tests {
                     false,
                 )
                 .unwrap();
-            let exported = export_portable(
+            job.start(JobPhase::WritingExport).unwrap();
+            let exported = export_portable_running(
                 None,
                 revision,
                 &jobs,
                 &handoffs,
                 PersistentStore::open(&source).unwrap(),
                 &job,
-                None,
-            )
+                &PortableSelection { allow_source_preservation: true, ..PortableSelection::default() },
+                "9.8.7-synthetic")
             .unwrap();
             assert_eq!(
                 exported.warning_codes,
@@ -1202,6 +1362,14 @@ mod tests {
                     portable_backup::Profile::SourceSqlite
                 );
                 assert!(archive.db.query_row::<bool,_,_>("SELECT EXISTS(SELECT 1 FROM files WHERE logical_key='source.sqlite' AND state='present')",[],|r|r.get(0)).unwrap());
+                let hash: String = archive.db.query_row("SELECT lower(hex(object_hash)) FROM files WHERE logical_key='source.sqlite'", [], |row| row.get(0)).unwrap();
+                let preserved_path = jobs.join("preserved-synthetic.sqlite");
+                let mut preserved = File::create(&preserved_path).unwrap();
+                archive.copy_object(&hash, &mut preserved, &NeverCancelled).unwrap();
+                drop(preserved);
+                let recovered = rusqlite::Connection::open(&preserved_path).unwrap();
+                let account: String = recovered.query_row("SELECT value FROM future_records", [], |row| row.get(0)).unwrap();
+                assert!(account == r#"{"account":{"id":"synthetic-account","token":"synthetic-token"}}"#);
             } else {
                 assert_eq!(archive.manifest.profile, portable_backup::Profile::Portable);
                 assert!(archive
@@ -1244,7 +1412,7 @@ mod tests {
             )
             .unwrap();
         let exported =
-            export_portable(None, revision, &jobs, &handoffs, store, &export, None).unwrap();
+            export_portable(None, revision, &jobs, &handoffs, store, &export, None, "9.8.7-synthetic").unwrap();
         let path = std::path::PathBuf::from(exported.handoff_path.unwrap());
         let target_store = library(&target);
         let target_revision = target_store.revision().unwrap();
@@ -1296,6 +1464,8 @@ mod tests {
             &jobs,
             &mut pins,
             &NeverCancelled,
+            "9.8.7-synthetic",
+            false,
         )
         .unwrap();
         let (key,stored_hash,metadata):(String,String,String)=captured.catalog.db.query_row("SELECT logical_key,lower(hex(object_hash)),metadata FROM files WHERE kind='preserved'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap();
@@ -1332,7 +1502,7 @@ mod tests {
             )
             .unwrap();
         let result =
-            export_portable(None, revision, &jobs, &handoffs, store, &export, None).unwrap();
+            export_portable(None, revision, &jobs, &handoffs, store, &export, None, "9.8.7-synthetic").unwrap();
         assert!(result.warning_codes.is_empty());
         let path = std::path::PathBuf::from(result.handoff_path.unwrap());
         let before =
@@ -1381,6 +1551,8 @@ mod tests {
             &jobs,
             &mut pins,
             &NeverCancelled,
+            "9.8.7-synthetic",
+            false,
         )
         .unwrap();
         assert_eq!(

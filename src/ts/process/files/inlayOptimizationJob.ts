@@ -79,13 +79,16 @@ export async function runInlayOptimization(
             void error
             prepared = null
         }
-        if (!prepared) progress.skipped += 1
+        if (!prepared || run.isCancelled?.()) progress.skipped += 1
         else {
             try {
-                await deps.write(target.key, prepared.encoded.data, prepared.encoded.metadata)
-                progress.converted += 1
-                progress.beforeBytes += prepared.source.byteLength
-                progress.afterBytes += prepared.encoded.data.byteLength
+                const result = await deps.write(target.key, prepared.encoded.data, prepared.encoded.metadata)
+                if (result === null) progress.skipped += 1
+                else {
+                    progress.converted += 1
+                    progress.beforeBytes += prepared.source.byteLength
+                    progress.afterBytes += prepared.encoded.data.byteLength
+                }
             } catch (error) {
                 void error
                 progress.failed += 1

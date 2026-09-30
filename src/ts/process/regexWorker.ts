@@ -90,6 +90,7 @@ if (workerScope.document === undefined
     const handleRequest = createRegexWorkerMessageHandler((response) => {
         workerScope.postMessage!(response)
     })
+    workerScope.postMessage({ type: 'ready' })
     workerScope.addEventListener('message', ((event: MessageEvent<RegexWorkerRequest>) => {
         handleRequest(event.data)
     }) as EventListener)

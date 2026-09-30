@@ -5,6 +5,7 @@ edition = "2021"
 
 [build-dependencies]
 tauri-build = "2.6.3"
+cc = "1"
 
 [dependencies]
 risunest = { path = "../../../src-tauri" }
@@ -29,3 +30,4 @@ custom-protocol = ["tauri/custom-protocol", "risunest/custom-protocol"]
 
 [patch.crates-io]
 tauri-plugin-updater = { path = "../../../crates/tauri-plugin-updater" }
+tauri-plugin-window-state = { path = "../../../crates/tauri-plugin-window-state" }

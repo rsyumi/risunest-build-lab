@@ -85,7 +85,7 @@ fn empty_working_set_commit(expected_revision: i64) -> WorkingSetCommit {
         replace_character: None,
         add_character: None,
         conversations: None,
-        delete_character_id: None,
+        delete_character_ids: None,
         plugin_storage: None,
         asset_owner_heads: None,
     }

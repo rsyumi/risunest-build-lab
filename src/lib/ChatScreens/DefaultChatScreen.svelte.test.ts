@@ -5,7 +5,10 @@ import { languageEnglish } from 'src/lang/en'
 import { DBState } from 'src/ts/stores.svelte'
 import DefaultChatScreen from './DefaultChatScreen.svelte'
 
-const mocks = vi.hoisted(() => ({ trigger: vi.fn(), generate: vi.fn(), process: vi.fn(), error: vi.fn(), postFile: vi.fn() }))
+const mocks = vi.hoisted(() => ({ trigger: vi.fn(), generate: vi.fn(), process: vi.fn(), error: vi.fn(), postFile: vi.fn(),
+    bounded: false, appended: [] as any[], acquireComplete: vi.fn(), flush: vi.fn(async () => {}),
+    target: { characterId: 'character', conversationId: 'chat', navigationGeneration: 1, storeRevision: 1, sessionToken: 'windowed' },
+}))
 vi.mock('src/lang', () => ({ language: languageEnglish }))
 vi.mock('src/ts/stores.svelte', () => {
     const DBState = $state({ db: {} })
@@ -13,7 +16,7 @@ vi.mock('src/ts/stores.svelte', () => {
         ScrollToMessageStore: writable(null), additionalChatMenu: writable([]), additionalFloatingActionButtons: writable([]),
         easyPanelStore: writable(false), chatPanelStore: writable(false), HideIconStore: writable(false) }
 })
-vi.mock('src/ts/process/index.svelte', () => ({ doingChat: writable(false), chatProcessStage: writable(0), sendChat: mocks.generate }))
+vi.mock('src/ts/process/index.svelte', () => ({ doingChat: writable(false), chatProcessStage: writable(0), sendChat: mocks.generate, getSelectedBoundedGenerationFallbackReason: () => mocks.bounded ? null : 'test-complete-conversation' }))
 vi.mock('src/ts/util', () => ({ sleep: async () => {}, getPersonaPrompt: () => '' }))
 vi.mock('src/ts/alert', () => ({ alertError: mocks.error }))
 vi.mock('src/ts/translator/translator', () => ({}))
@@ -27,7 +30,14 @@ vi.mock('src/ts/sync/multiuser', () => ({ ConnectionOpenStore: writable(false) }
 vi.mock('src/ts/storage/persistentDataRuntime.svelte', () => ({
     getActiveConversationSession: () => null,
     getPersistentDataRuntime: () => ({
-        captureSelectedConversationTarget: () => null, getActiveConversationSession: () => null,
+        captureSelectedConversationTarget: () => mocks.bounded ? mocks.target : null, getActiveConversationSession: () => null,
+        captureSelectedConversationAuthority: () => ({ totalMessages: 1500 }),
+        acquireCompleteConversation: mocks.acquireComplete,
+        flushPendingData: mocks.flush,
+        captureWindowedConversationMutationController: () => ({
+            applyRange: (_start: number, _count: number, messages: any[]) => { mocks.appended.push(...messages); return true },
+            release: () => {},
+        }),
         getActiveConversationViewportSource: () => null, getNavigationGeneration: () => 0,
         subscribeActiveConversationViewportSource: () => () => {},
     }),
@@ -37,7 +47,7 @@ vi.mock('src/ts/chatScreenshotSourceLease', () => ({}))
 vi.mock('src/ts/chatScreenshotArchive', () => ({}))
 vi.mock('src/ts/nativeScreenshotArchiveWriter', () => ({}))
 vi.mock('src/ts/storage/androidSafBridge', () => ({}))
-vi.mock('src/ts/process/modules', () => ({}))
+vi.mock('src/ts/process/modules', () => ({ getModuleRegexScripts: () => [] }))
 vi.mock('src/ts/gui/colorscheme', () => ({ ColorSchemeTypeStore: writable('dark') }))
 vi.mock('src/ts/plugins/plugins.svelte', () => ({ pluginV2: { editdisplay: new Set() } }))
 vi.mock('src/ts/parser/parser.svelte', () => ({}))
@@ -63,6 +73,8 @@ function send() {
 }
 beforeEach(async () => {
     vi.clearAllMocks()
+    mocks.bounded = false
+    mocks.appended = []
     mocks.trigger.mockImplementation(() => new Promise(resolve => { finishTrigger = () => resolve(null) }))
     mocks.process.mockImplementation(async (_character, value) => value)
     mocks.generate.mockResolvedValue(true)
@@ -72,6 +84,18 @@ beforeEach(async () => {
     } as any
     instance = mount(DefaultChatScreen, { target: document.body })
     await tick()
+})
+
+it('sends plain input through the bounded controller without complete-history acquisition', async () => {
+    mocks.bounded = true
+    type('Bounded submitted text')
+    send()
+    await vi.waitFor(() => expect(mocks.generate).toHaveBeenCalledOnce())
+    expect(mocks.appended).toEqual([expect.objectContaining({ role: 'user', data: 'Bounded submitted text' })])
+    expect(mocks.acquireComplete).not.toHaveBeenCalled()
+    expect(mocks.trigger).not.toHaveBeenCalled()
+    expect(mocks.flush).toHaveBeenCalledWith('generation-input')
+    expect(document.querySelector<HTMLTextAreaElement>('textarea.input-text')!.value).toBe('')
 })
 afterEach(async () => {
     if (instance) await unmount(instance)

@@ -98,6 +98,7 @@ fn offline_ack_keeps_tombstones_history_and_staged_objects_and_epoch_rotates() {
     let b = device(&store);
     store.put_object(&a, &hash(b"x"), b"x").unwrap();
     let h = store.head().unwrap();
+    store.acknowledge(&b, &h.epoch, &acks(&h.seq)).unwrap();
     let mut c = changes("k", b"x");
     let intent = stage(&store, &a, &h, 1, &c);
     let h = store.commit(&a, &intent, &h.etag()).unwrap().head;

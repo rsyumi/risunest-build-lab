@@ -15,7 +15,7 @@
         getPersistentDataRuntime,
     } from "src/ts/storage/persistentDataRuntime.svelte";
     import {
-        queryChatMessageTargetsByIds,
+        queryChatMessageTargetsByIdsWithStatus,
         removeCapturedBookmark,
         renameCapturedBookmark,
         type CapturedChatMessageTarget,
@@ -48,21 +48,29 @@
 
     let bookmarkedMessages = $state<any[]>([]);
     let bookmarkQueryGeneration = 0;
+    let bookmarkLoad = $state<"loading" | "ready" | "failed">("loading");
+    let bookmarkRetry = $state(0);
     $effect(() => {
+        bookmarkRetry;
+        bookmarkLoad = "loading";
         const currentCharacter = chara;
         const chat = currentCharacter?.chats[currentCharacter.chatPage];
         const bookmarkIds = [...(chat?.bookmarks ?? [])];
         const generation = ++bookmarkQueryGeneration;
         if (!currentCharacter || !chat || bookmarkIds.length === 0) {
             bookmarkedMessages = [];
+            bookmarkLoad = "ready";
             return;
         }
-        void queryChatMessageTargetsByIds(
+        const query = () => queryChatMessageTargetsByIdsWithStatus(
             chatMessageContext,
             bookmarkIds,
             'last',
-        ).then((targets) => {
+        );
+        void query().then(async result => result.status === 'stale' ? query() : result).then(({ status, targets }) => {
             if (generation !== bookmarkQueryGeneration) return;
+            if (status === "stale") { bookmarkLoad = "failed"; return; }
+            bookmarkLoad = "ready";
             bookmarkedMessages = targets.map(target => {
                 const message = target.message;
                 let speaker = null;
@@ -79,7 +87,7 @@
                 };
             });
         }).catch(() => {
-            if (generation === bookmarkQueryGeneration) bookmarkedMessages = [];
+            if (generation === bookmarkQueryGeneration) bookmarkLoad = "failed";
         });
     });
 
@@ -187,7 +195,11 @@
             </div>
         </div>
         
-        {#if bookmarkedMessages.length === 0}
+        {#if bookmarkLoad === "loading" && (bookmarkedMessages.length === 0 || bookmarkedMessages.some(message => message.target.character.chaId !== selectedCharacterId || message.target.conversation.id !== selectedConversationId))}
+            <p role="status">{language.loading}</p>
+        {:else if bookmarkLoad === "failed"}
+            <div role="alert"><p>{language.bookmarkLoadFailed}</p><button onclick={() => bookmarkRetry++}>{language.retry}</button></div>
+        {:else if bookmarkedMessages.length === 0}
             <p class="text-textcolor2">{language.noBookmarks}</p>
         {:else}
             <div class="flex flex-col gap-2">

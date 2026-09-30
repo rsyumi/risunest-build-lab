@@ -61,6 +61,7 @@ describe('coordinated staged asset activation', () => {
     function harness() {
         let revision = 1
         let authorityEpoch = 1
+        let alias: unknown = { ...metadata, key: 'assets/item.bin', objectHash: '4bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a', size: 1 }
         let failure: 'admission' | 'fence' | 'gate' | 'root' | null = null
         let prepareHook: (() => Promise<void>) | null = null
         let resolvePreparationStarted!: () => void
@@ -108,6 +109,7 @@ describe('coordinated staged asset activation', () => {
         }
         const authority = {
             rawStore: {
+                async readAssetAlias() { return alias ? { revision, value: structuredClone(alias) } : null },
                 async readRoot() {
                     if (failure === 'root') {
                         failure = null
@@ -128,6 +130,7 @@ describe('coordinated staged asset activation', () => {
         }
         return {
             handles,
+            setAlias(value: unknown) { alias = value },
             preparationStarted,
             currentRemove: current.remove as ReturnType<typeof vi.fn>,
             setFailure(value: typeof failure) {
@@ -142,6 +145,35 @@ describe('coordinated staged asset activation', () => {
             blob: createCoordinatorOwnedAssetBlobStore(dispatcher, authority as never, runtime),
         }
     }
+
+    it.each(['replacement', 'deletion', 'authority'] as const)('rejects stale conditional optimization after %s and releases staging', async (change) => {
+        const setup = harness()
+        const writer = await setup.blob.captureConditionalWrite!('assets/item.bin')
+        expect(writer).not.toBeNull()
+        if (change === 'deletion') setup.setAlias(null)
+        if (change === 'replacement') setup.setAlias({ ...metadata, key: 'assets/item.bin', objectHash: 'b'.repeat(64), size: 1 })
+        if (change === 'authority') setup.bumpAuthorityEpoch()
+        expect(await writer!(Uint8Array.of(2), metadata, Uint8Array.of(1))).toBeNull()
+        expect(setup.handles[0].activate).not.toHaveBeenCalled()
+        expect(setup.handles[0].abort).toHaveBeenCalledOnce()
+        await expect(writer!(Uint8Array.of(2), metadata, Uint8Array.of(1))).rejects.toThrow('already used')
+    })
+
+    it('rejects transformed B when the captured A alias was restored before activation', async () => {
+        const setup = harness()
+        const writer = await setup.blob.captureConditionalWrite!('assets/item.bin')
+        const sourceB = Uint8Array.of(3)
+        expect(await writer!(Uint8Array.of(2), metadata, sourceB)).toBeNull()
+        expect(setup.handles).toHaveLength(0)
+    })
+
+    it('publishes an unchanged conditional source once', async () => {
+        const setup = harness()
+        const writer = await setup.blob.captureConditionalWrite!('assets/item.bin')
+        expect(await writer!(Uint8Array.of(2), metadata, Uint8Array.of(1))).toMatchObject({ key: 'assets/item.bin' })
+        expect(setup.handles[0].activate).toHaveBeenCalledOnce()
+        expect(setup.handles[0].abort).not.toHaveBeenCalled()
+    })
 
     it.each([
         ['synchronous coordinator admission', 'admission'],

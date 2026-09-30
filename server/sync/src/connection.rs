@@ -46,6 +46,7 @@ pub struct ConnectionStatus {
 pub struct Publication {
     pub directory: Directory,
     pub envelope: String,
+    pub(crate) writer: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -62,6 +63,7 @@ pub(crate) struct ConnectionState {
     pub endpoint: Option<String>,
     pub cloudflared: Option<PathBuf>,
     pub directory: Option<Directory>,
+    pub writer: Option<String>,
     pub last_published: Option<String>,
     pub last_published_at: i64,
     pub pending: Option<PendingPublication>,
@@ -80,6 +82,13 @@ impl ConnectionState {
             directory.validate()?;
         }
         if self.directory_enabled && self.directory.is_none() {
+            return Err(Error::new("invalid-connection-state", 409));
+        }
+        if self.directory.is_some() != self.writer.is_some()
+            || self.writer.as_ref().is_some_and(|writer| {
+                writer.len() != 64 || !writer.bytes().all(|b| b.is_ascii_hexdigit())
+            })
+        {
             return Err(Error::new("invalid-connection-state", 409));
         }
         if let Some(last) = &self.last_published {

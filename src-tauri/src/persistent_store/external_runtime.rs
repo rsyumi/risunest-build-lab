@@ -227,6 +227,12 @@ impl PersistentStore {
         tx.commit()?;
         Ok(selected)
     }
+    pub(crate) fn external_set_paused(&mut self, epoch: &str, paused: bool) -> StoreResult<sync_selection::Selection> {
+        let tx = self.connection.transaction()?;
+        let selected = sync_selection::set_paused(&tx, epoch, paused)?;
+        tx.commit()?;
+        Ok(selected)
+    }
     pub(crate) fn external_base(&self, connection: &str) -> StoreResult<Option<ExternalBase>> {
         let row: Option<(String,String,String,String,String)> = self.connection.query_row(
             "SELECT repository_id,snapshot_id,commit_id,head_observation,identity FROM external_storage_bases WHERE connection_id=?1", [connection],
@@ -260,6 +266,33 @@ impl PersistentStore {
             return Ok(None);
         }
         jobs::base_records(&self.connection, connection, &base.snapshot_id)
+    }
+
+    pub(crate) fn external_job_has_no_capture_owner(&self, job: &str) -> StoreResult<bool> {
+        Ok(!self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM external_storage_capture_refs WHERE job_id=?1)
+             OR EXISTS(SELECT 1 FROM external_storage_jobs WHERE id=?1 AND phase NOT IN ('complete','cancelled'))",
+            [job], |row| row.get::<_, bool>(0),
+        )?)
+    }
+
+    pub(crate) fn external_unknown_publications(&self) -> StoreResult<Vec<ExternalJob>> {
+        let ids = {
+            let mut query = self.connection.prepare("SELECT id FROM external_storage_jobs WHERE phase='publicationUnknown' ORDER BY rowid DESC")?;
+            let rows = query.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        ids.into_iter().map(|id| self.external_job(&id)?.ok_or_else(|| invalid("Retained publication disappeared"))).collect()
+    }
+
+    pub(crate) fn external_remove_retained_publication(&mut self, job: &str) -> StoreResult<()> {
+        let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if tx.execute("UPDATE external_storage_jobs SET phase='cancelled' WHERE id=?1 AND phase='publicationUnknown'", [job])? != 1 {
+            return Err(invalid("Retained publication changed"));
+        }
+        tx.execute("DELETE FROM external_storage_capture_refs WHERE job_id=?1", [job])?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub(crate) fn external_jobs(&self, connection: &str) -> StoreResult<Vec<ExternalJob>> {

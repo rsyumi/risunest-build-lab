@@ -587,3 +587,31 @@ function fail(error: unknown) {
 const entryCompletion = deviceMaintenanceBeforeBootstrap()
   .then(resume)
   .catch(fail);
+
+let legacyMeasurement: Record<string, unknown> = { phase: 'idle' };
+(globalThis as typeof globalThis & { __legacyRestoreMeasurement?: {
+  state(): Record<string, unknown>;
+  start(megabytes: 100 | 300 | 600, encoding: 'raw' | 'gzip'): Promise<void>;
+} }).__legacyRestoreMeasurement = {
+  state: () => legacyMeasurement,
+  async start(megabytes, encoding) {
+    if (legacyMeasurement.phase !== 'idle') throw new Error('Restart the synthetic harness for each memory case');
+    legacyMeasurement = { phase: 'preparing', megabytes, encoding };
+    try {
+      await entryCompletion;
+      if (control.failure || control.stage !== 'ready') throw new Error('Fresh synthetic harness required');
+      const { runLegacyRestoreMeasurement } = await import('../legacy-restore/run');
+      await runLegacyRestoreMeasurement({
+        megabytes, encoding,
+        assertIsolatedHarness: async () => {
+          const { getIdentifier } = await import('@tauri-apps/api/app');
+          if (await getIdentifier() !== 'io.github.rsyumi.risunest' || document.title !== 'RisuNest synthetic device backup smoke')
+            throw new Error('Synthetic Android benchmark identity required');
+        },
+        report: async (event) => { legacyMeasurement = event; },
+      });
+    } catch (error) {
+      legacyMeasurement = { ...legacyMeasurement, phase: 'failed', code: error instanceof Error ? error.message : String(error) };
+    }
+  },
+};

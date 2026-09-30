@@ -13,10 +13,7 @@
         type InlayInventoryEntry,
     } from 'src/ts/process/files/inlayInventory'
     import {
-        emptyInlayOptimizationProgress,
-        runInlayOptimization,
         selectInlayOptimizationTargets,
-        type InlayOptimizationProgress,
     } from 'src/ts/process/files/inlayOptimizationJob'
     import {
         inlayOptimizationConfirmMessage,
@@ -30,13 +27,15 @@
     import { formatRisuNestStorageBytes } from 'src/ts/storage/risuNestStorageDashboard'
     import type { InlayBlobMetadata } from 'src/ts/storage/blobStore'
 
+    import { inlayOptimizationController as optimization } from 'src/ts/process/files/inlayOptimizationController.svelte'
+
     const strings = language.risuNest.inlay
     let assets: InlayBlobMetadata[] | null = $state(null)
     let loading = $state(false)
     let loadFailed = $state(false)
-    let optimizing = $state(false)
-    let cancelRequested = $state(false)
-    let progress: InlayOptimizationProgress = $state(emptyInlayOptimizationProgress())
+    let optimizing = $derived(optimization.running)
+    let cancelRequested = $derived(optimization.cancelRequested)
+    let progress = $derived(optimization.progress)
     let resultText = $state('')
     let inventory: InlayInventory | null = $derived(assets ? summarizeInlayAssets(assets) : null)
     let summary = $derived(
@@ -46,6 +45,7 @@
                   .replace('{size}', formatRisuNestStorageBytes(inventory.total.bytes))
             : '',
     )
+    const sharedResultText = $derived(resultText || (optimization.result ? inlayOptimizationResultMessage(optimization.result) : ''))
     let progressText = $derived(inlayOptimizationProgressMessage(progress))
 
     async function load(): Promise<void> {
@@ -81,20 +81,7 @@
             ...await readInlayOptimizationEnvironment(),
         })
         if (!await alertConfirm(message)) return
-        optimizing = true
-        cancelRequested = false
-        progress = emptyInlayOptimizationProgress(targets.length)
-        try {
-            const done = await runInlayOptimization(targets, createStoredInlayOptimizationDeps(), {
-                options,
-                isCancelled: () => cancelRequested,
-                onProgress: (value) => { progress = value },
-            })
-            resultText = inlayOptimizationResultMessage(done)
-        } finally {
-            optimizing = false
-            cancelRequested = false
-        }
+        await optimization.start(targets, options, createStoredInlayOptimizationDeps())
         await load()
     }
 </script>
@@ -154,7 +141,8 @@
         {#if inventory.others.length > 0}
             {@render table(strings.inventoryOthers, inventory.others)}
         {/if}
-        {#if inventory.images.length > 0}
+    {/if}
+        {#if optimizing || sharedResultText || (inventory && inventory.images.length > 0)}
             <div class="border-t border-darkborderc/55">
                 <SettingRow label={strings.optimize} help={strings.optimizeHelp}>
                     {#snippet below()}
@@ -166,17 +154,16 @@
                                     fraction={progress.total > 0 ? progress.scanned / progress.total : null}
                                 />
                             </div>
-                        {:else if resultText}
-                            <p data-inlay-optimize-result class="mt-1 text-sm text-textcolor2" role="status" aria-live="polite">{resultText}</p>
+                        {:else if sharedResultText}
+                            <p data-inlay-optimize-result class="mt-1 text-sm text-textcolor2" role="status" aria-live="polite">{sharedResultText}</p>
                         {/if}
                     {/snippet}
                     {#if optimizing}
-                        <SettingButton variant="secondary" disabled={cancelRequested} onclick={() => { cancelRequested = true }}>{language.cancel}</SettingButton>
+                        <SettingButton variant="secondary" disabled={cancelRequested} onclick={() => optimization.cancel()}>{language.cancel}</SettingButton>
                     {:else}
-                        <SettingButton disabled={loading} onclick={optimize}>{strings.optimize}</SettingButton>
+                        <SettingButton disabled={loading || !inventory} onclick={optimize}>{strings.optimize}</SettingButton>
                     {/if}
                 </SettingRow>
             </div>
         {/if}
-    {/if}
 </SettingGroup>

@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from 'node:child_process'
 import { mkdirSync, existsSync, readFileSync, writeFileSync, rmSync, lstatSync } from 'node:fs'
-import { resolve, join, dirname } from 'node:path'
+import { resolve, join, dirname, basename, isAbsolute } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import { verifyReport } from './report.mjs'
@@ -21,17 +21,23 @@ if (process.env.CARGO_TARGET_DIR && resolve(process.env.CARGO_TARGET_DIR) !== ta
 const env = { ...process.env, CARGO_TARGET_DIR: target, TAURI_CONFIG: JSON.stringify({ build: { frontendDist: [join(root, '.tmp/test-results/native/dist')] } }) }
 await command(process.execPath, [join(dirname(require.resolve('vite/package.json')), 'bin/vite.js'), 'build', '--mode', 'agent', '--config', 'tests/native/vite.config.ts'])
 await command('cargo', ['build', '--release', '--locked', '--manifest-path', 'tests/native/native/Cargo.toml'], env)
-for (const phases of [['write', 'read'], ['abort', 'read-abort']]) {
+for (const phases of [['write', 'read'], ['abort', 'read-abort'], ['contract', 'read-contract']]) {
     const runId = randomUUID().replaceAll('-', '')
     const identifier = `io.github.rsyumi.risunest.boundary.${runId}`
     const dataHome = process.platform === 'win32' ? process.env.APPDATA
         : process.platform === 'darwin' ? join(process.env.HOME, 'Library/Application Support')
         : process.platform === 'linux' ? (process.env.XDG_DATA_HOME || join(process.env.HOME, '.local/share')) : null
     if (!dataHome) throw new Error('Desktop host required')
-    const ownedRoot = join(dataHome, identifier)
-    if (existsSync(ownedRoot)) throw new Error('Run identity already exists')
-    mkdirSync(ownedRoot)
-    writeFileSync(join(ownedRoot, 'boundary-owner'), runId, { flag: 'wx' })
+    const ownedRoot = resolve(dataHome, identifier)
+    const cleanupRoot = resolve(dataHome, `${identifier}-cleanup`)
+    const ownedProfiles = [[ownedRoot, identifier], [cleanupRoot, `${identifier}-cleanup`]]
+    for (const [directory] of ownedProfiles) {
+        if (existsSync(directory)) throw new Error('Run identity already exists')
+    }
+    for (const [directory] of ownedProfiles) {
+        mkdirSync(directory)
+        writeFileSync(join(directory, 'boundary-owner'), runId, { flag: 'wx' })
+    }
     const output = join(root, '.tmp/test-results/native', runId)
     mkdirSync(output, { recursive: true })
     const executable = join(target, 'release', `risunest-persistence-boundary${process.platform === 'win32' ? '.exe' : ''}`)
@@ -50,7 +56,7 @@ for (const phases of [['write', 'read'], ['abort', 'read-abort']]) {
                     else process.kill(-child.pid, 'SIGKILL')
                 }, 90_000)
                 child.on('error', error => { clearTimeout(timeout); reject(error) })
-                child.on('exit', code => {
+                child.on('close', code => {
                     clearTimeout(timeout)
                     timedOut ? reject(new Error(`Native ${phase} timed out`)) : accept(code)
                 })
@@ -59,9 +65,18 @@ for (const phases of [['write', 'read'], ['abort', 'read-abort']]) {
             console.log(`Native persistence ${phase}: passed (${process.platform})`)
         }
     } finally {
-        if (dirname(ownedRoot) !== resolve(dataHome) || !ownedRoot.endsWith(identifier)
-            || lstatSync(ownedRoot).isSymbolicLink()
-            || readFileSync(join(ownedRoot, 'boundary-owner'), 'utf8') !== runId) throw new Error('Owned cleanup validation failed')
-        rmSync(ownedRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
+        for (const [directory, name] of ownedProfiles) {
+            const marker = join(directory, 'boundary-owner')
+            const metadata = lstatSync(directory)
+            const markerMetadata = lstatSync(marker)
+            if (!isAbsolute(directory) || dirname(directory) !== resolve(dataHome)
+                || basename(directory) !== name || directory !== resolve(dataHome, name)
+                || !metadata.isDirectory() || metadata.isSymbolicLink()
+                || !markerMetadata.isFile() || markerMetadata.isSymbolicLink()
+                || readFileSync(marker, 'utf8') !== runId) throw new Error('Owned cleanup validation failed')
+        }
+        for (const [directory] of ownedProfiles) {
+            rmSync(directory, { recursive: true, force: true, maxRetries: 10, retryDelay: 200 })
+        }
     }
 }

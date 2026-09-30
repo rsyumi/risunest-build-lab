@@ -23,6 +23,7 @@
     } from 'src/ts/storage/sync/external/providerRegistry'
     import type {
         ExternalConnectionResult,
+        ExternalConnectionSummary,
         ExternalConnectionPurpose,
         ExternalOpenMode,
         ExternalProviderId,
@@ -50,6 +51,7 @@
         onbusychange?: (busy: boolean) => void
         /** Opens an already existing repository only, without the create form. */
         restoreOnly?: boolean
+        renewalConnection?: ExternalConnectionSummary
         tone?: 'settings' | 'onboarding'
     }
 
@@ -59,6 +61,7 @@
         oncancel,
         onbusychange = () => {},
         restoreOnly = false,
+        renewalConnection,
         tone = 'settings',
     }: Props = $props()
     const bridge = getExternalStorageBridge()
@@ -96,7 +99,7 @@
     let error = $state('')
     let authorizationStatus = $state('')
     let destroyed = false
-    let authorizationCompletionInFlight = false
+    let authorizationCompletionInFlight = $state(false)
     let cancellationId: string | null = null
     let cancellationPromise: Promise<boolean> | null = null
     let folder = $state<ExternalFolderSelection | null>(null)
@@ -127,7 +130,7 @@
             ? strings.folderSelectHelp
             : '',
     )
-    const folderSelection = $derived(prepared !== null && (prepared.requiresFolderSelection || reselectRequired))
+    const folderSelection = $derived(!renewalConnection && prepared !== null && (prepared.requiresFolderSelection || reselectRequired))
     const folderRowState = $derived<'empty' | 'selecting' | 'selected' | 'invalid'>(
         selectingFolder ? 'selecting' : folder ? 'selected' : folderError ? 'invalid' : 'empty',
     )
@@ -162,16 +165,25 @@
     $effect(() => onbusychange(busy))
 
     onMount(async () => {
+        if (renewalConnection) busy = true
         try {
             providerDescriptors = await bridge.listProviders()
+            if (renewalConnection) {
+                providerId = renewalConnection.providerId
+                chosenMode = 'existing'
+                purpose = renewalConnection.purpose
+                prepared = await bridge.prepareRenewal(renewalConnection.id)
+            }
         } catch (reason) {
             error = externalErrorMessage(strings, reason)
+        } finally {
+            if (renewalConnection) busy = false
         }
     })
     onDestroy(() => {
         destroyed = true
         const authorizationId = pendingAuthorizationId
-        if (authorizationId && !authorizationCompletionInFlight) {
+        if (authorizationId) {
             void cancelNativeAuthorization(authorizationId)
         }
         if (folderSelector) void bridge.cancelFolderSelection(folderSelector.selectionId).catch(() => {})
@@ -214,7 +226,8 @@
             busy = false
             return
         }
-        clearPrepared()
+        if (renewalConnection) oncancel()
+        else clearPrepared()
         busy = false
     }
 
@@ -437,7 +450,7 @@
                 return
             }
             pendingAuthorizationId = pending.authorizationId
-            authorizationStatus = pending.state === 'complete' ? '' : strings.authorizationWaiting
+            authorizationStatus = pending.state === 'complete' ? '' : (isTauriAndroid || isTauriIOS ? strings.authorizationWaitingMobile : strings.authorizationWaiting)
             if (pending.authorizationUrl) {
                 await openUrl(pending.authorizationUrl)
                 return
@@ -447,6 +460,10 @@
             await finishFolderSelection()
         } catch (reason) {
             await cancelPendingAuthorization()
+            if (externalErrorKind(reason) === 'cancelled') {
+                restorePreviousFolder()
+                return
+            }
             failFolderSelection(reason)
         } finally {
             busy = false
@@ -471,7 +488,7 @@
             if ('authorizationPending' in outcome) {
                 authorizationStatus = outcome.callbackRejected
                     ? strings.callbackRejected
-                    : strings.authorizationWaiting
+                    : (isTauriAndroid || isTauriIOS ? strings.authorizationWaitingMobile : strings.authorizationWaiting)
                 return
             }
             pendingAuthorizationId = null
@@ -490,6 +507,10 @@
             }
         } catch (reason) {
             await cancelPendingAuthorization()
+            if (externalErrorKind(reason) === 'cancelled') {
+                restorePreviousFolder()
+                return
+            }
             failFolderSelection(reason)
         } finally {
             busy = false
@@ -533,7 +554,7 @@
                     pendingAuthorizationId = pending.authorizationId
                     authorizationStatus = pending.state === 'complete'
                         ? ''
-                        : strings.authorizationWaiting
+                        : (isTauriAndroid || isTauriIOS ? strings.authorizationWaitingMobile : strings.authorizationWaiting)
                     if (pending.authorizationUrl) {
                         await openUrl(pending.authorizationUrl)
                         return
@@ -553,7 +574,7 @@
                 if ('authorizationPending' in result) {
                     authorizationStatus = result.callbackRejected
                         ? strings.callbackRejected
-                        : strings.authorizationWaiting
+                        : (isTauriAndroid || isTauriIOS ? strings.authorizationWaitingMobile : strings.authorizationWaiting)
                     return
                 }
                 oauthClientSecret = ''
@@ -585,6 +606,10 @@
             for (const field of definition.secretFields) values[field.key] = ''
         } catch (reason) {
             await cancelPendingAuthorization()
+            if (externalErrorKind(reason) === 'cancelled') {
+                authorizationStatus = ''
+                return
+            }
             if (externalFolderErrorKind(reason)) {
                 reselectRequired = true
                 failFolderSelection(reason)
@@ -603,7 +628,11 @@
     }
 </script>
 
+{#if authorizationCompletionInFlight && pendingAuthorizationId}
+    <SettingButton variant="secondary" onclick={cancelPendingAuthorization}>{strings.cancel}</SettingButton>
+{/if}
 <fieldset disabled={busy} class="form" data-external-storage-connection-form data-tone={tone}>
+    {#if !renewalConnection}
     <fieldset disabled={prepared !== null} class="contents">
     <section class="sub">
         <h3 class="sub-title">{strings.provider}</h3>
@@ -729,6 +758,7 @@
     </fieldset>
     {/if}
     </fieldset>
+    {/if}
 
     {#if prepared}
         <section class="sub">
@@ -822,10 +852,10 @@
     {:else}
         <section class="sub">
             <div class="actions">
-                <SettingButton {busy} disabled={!authorizationAvailable || (mode === 'existing' && !recoveryKey.trim()) || requiredAcks.some(item => !accepted.includes(item))} onclick={prepare}>{strings.prepare}</SettingButton>
+                {#if !renewalConnection}<SettingButton {busy} disabled={!authorizationAvailable || (mode === 'existing' && !recoveryKey.trim()) || requiredAcks.some(item => !accepted.includes(item))} onclick={prepare}>{strings.prepare}</SettingButton>{/if}
                 <SettingButton variant="secondary" onclick={oncancel}>{strings.cancel}</SettingButton>
             </div>
-            <p class="sub-help">{strings.pendingVerification}</p>
+            {#if !renewalConnection}<p class="sub-help">{strings.pendingVerification}</p>{/if}
         </section>
     {/if}
     {#if error}<p class="form-error" role="alert">{error}</p>{/if}

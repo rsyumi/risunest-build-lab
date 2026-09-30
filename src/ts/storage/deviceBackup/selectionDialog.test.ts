@@ -46,7 +46,8 @@ describe("portable backup scope selection", () => {
       [
         ...current.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'),
       ].map((input) => input.checked),
-    ).toEqual([true, true, true, false]);
+    ).toEqual([true, true, false]);
+    expect(current.querySelector("select")?.value).toBe("all");
     submit(current);
     await expect(pending).resolves.toEqual({
       library: true,
@@ -61,11 +62,8 @@ describe("portable backup scope selection", () => {
       deviceSections: ["hypa", "local-settings"],
     });
     const current = await dialog();
-    const library = current.querySelector<HTMLInputElement>(
-      'input[type="checkbox"]',
-    )!;
-    expect(library.disabled).toBe(true);
-    expect(library.checked).toBe(false);
+    expect(current.querySelector("select")).toBeNull();
+    expect(current.querySelector("input:disabled")).toBeNull();
     submit(current);
     await expect(pending).resolves.toEqual({
       library: false,
@@ -169,10 +167,10 @@ describe("a damaged archive offers what is still whole", () => {
         },
         items: {
             characters: [
-                { id: "char-a", conversations: 2, damaged: 0 },
-                { id: "char-b", conversations: 0, damaged: 3 },
+                { id: "char-a", name: "Character A", conversations: 2, damaged: 0 },
+                { id: "char-b", name: "Character B", conversations: 0, damaged: 3 },
             ],
-            presets: [{ id: "0", conversations: 0, damaged: 0 }],
+            presets: [{ id: "0", name: "Preset", conversations: 0, damaged: 0 }],
             plugins: [],
         },
     };
@@ -196,7 +194,7 @@ describe("a damaged archive offers what is still whole", () => {
                 characters: ["char-a"],
                 presets: ["0"],
                 plugins: [],
-                excluded: ["char-b"],
+                excluded: { characters: ["char-b"], presets: [], plugins: [] },
             },
         });
     });
@@ -221,7 +219,7 @@ describe("a damaged archive offers what is still whole", () => {
                 characters: ["char-a", "char-b"],
                 presets: [],
                 plugins: [],
-                excluded: ["0"],
+                excluded: { characters: [], presets: ["0"], plugins: [] },
             },
         });
     });
@@ -229,12 +227,57 @@ describe("a damaged archive offers what is still whole", () => {
     it("keeps the whole-library choice unavailable while the archive is refused", async () => {
         const pending = selectPortableBackupRestore(damaged);
         const current = await dialog();
-        const library = [...current.querySelectorAll("label")]
-            .find((label) => label.textContent?.includes(language.portableBackup.library))
-            ?.querySelector<HTMLInputElement>("input[type='checkbox']");
-        expect(library?.disabled).toBe(true);
-        expect(library?.checked).toBe(false);
-        submit(current);
-        await pending;
+        const library = current.querySelector("select")!;
+        expect(library.value).toBe("selected");
+        expect(library.querySelector('option[value="all"]')).toBeNull();
+        expect(current.querySelector("input:disabled")).toBeNull();
+        library.value = "off";
+        library.dispatchEvent(new Event("change", { bubbles: true }));
+        await tick();
+        expect(current.querySelector<HTMLButtonElement>('button[type="submit"]')!.disabled).toBe(true);
+        current.dispatchEvent(new Event("cancel", { cancelable: true }));
+        await expect(pending).resolves.toBeNull();
     });
 })
+
+it("bounds a large chooser and independently selects owner-qualified plugin keys", async () => {
+    const plugins = ["owner/a", "owner/b"].map((owner) => ({
+        id: JSON.stringify({ owner, key: "shared/key" }), name: `${owner} / shared/key`, conversations: 0, damaged: 0,
+    }));
+    const pending = selectPortableBackupRestore({
+        libraryIncluded: true, repairRequired: true, deviceSections: [],
+        items: {
+            characters: Array.from({ length: 10_000 }, (_, index) => ({ id: `c-${index}`, name: `Character ${index}`, conversations: 0, damaged: 0 })),
+            presets: [], plugins,
+        },
+    });
+    const current = await dialog();
+    expect(current.querySelectorAll("[data-portable-items='characters'] input")).toHaveLength(100);
+    expect(current.textContent).toContain("Character 0");
+    const pluginBoxes = current.querySelectorAll<HTMLInputElement>("[data-portable-items='plugins'] input");
+    expect(pluginBoxes).toHaveLength(2);
+    pluginBoxes[1].click();
+    await tick();
+    submit(current);
+    const selected = await pending;
+    expect(selected?.items?.plugins).toEqual([{ owner: "owner/a", key: "shared/key" }]);
+    expect(selected?.items?.excluded.plugins).toEqual([{ owner: "owner/b", key: "shared/key" }]);
+});
+
+it("does not submit an empty selected-library mode alongside device data", async () => {
+    const pending = selectPortableBackupRestore({
+        libraryIncluded: true, repairRequired: true, deviceSections: ["local-settings"],
+        items: { characters: [{ id: "one", name: "One", conversations: 0, damaged: 0 }], presets: [], plugins: [] },
+    });
+    const current = await dialog();
+    current.querySelector<HTMLInputElement>("[data-portable-items='characters'] input")!.click();
+    await tick();
+    expect(current.querySelector<HTMLButtonElement>('button[type="submit"]')!.disabled).toBe(true);
+    const library = current.querySelector("select")!;
+    library.value = "off";
+    library.dispatchEvent(new Event("change", { bubbles: true }));
+    await tick();
+    expect(current.querySelector<HTMLButtonElement>('button[type="submit"]')!.disabled).toBe(false);
+    submit(current);
+    await expect(pending).resolves.toEqual({ library: false, deviceSections: ["local-settings"] });
+});

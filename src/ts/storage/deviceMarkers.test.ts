@@ -101,4 +101,26 @@ describe('device markers', () => {
             localStorage.removeItem('hub')
         }
     })
+    it('reloads restored markers in place and persists a return to the previous value', async () => {
+        const { stored, settings } = settingsBackend()
+        stored.set('dosync', 'old')
+        const markers = await initializeDeviceMarkers(settings)
+        stored.set('dosync', 'restored')
+        await markers.reload!()
+        expect(getDeviceMarkers()).toBe(markers)
+        expect(markers.getItem('dosync')).toBe('restored')
+        markers.setItem('dosync', 'old')
+        await markers.flush()
+        expect(stored.get('dosync')).toBe('old')
+    })
+
+    it('does not replace cached markers when restored values fail validation', async () => {
+        const { stored, settings } = settingsBackend()
+        stored.set('dosync', 'old')
+        const markers = await initializeDeviceMarkers(settings)
+        stored.set('dosync', {})
+        await expect(markers.reload!()).rejects.toThrow('unreadable')
+        expect(markers.getItem('dosync')).toBe('old')
+    })
+
 })

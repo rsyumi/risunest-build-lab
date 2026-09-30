@@ -24,13 +24,26 @@ pub fn measure(root: &Path) -> Result<StorageUsage> {
     let mut pending: Vec<PathBuf> = vec![root.to_owned()];
     let mut count = 0u64;
     while let Some(dir) = pending.pop() {
-        for entry in std::fs::read_dir(dir)? {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(error) if dir != root && error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
+        for entry in entries {
             count += 1;
             if count > 1_000_000 || started.elapsed().as_secs() >= 10 {
                 return Err(Error::new("storage-measurement-budget-exceeded", 503));
             }
-            let entry = entry?;
-            let meta = std::fs::symlink_metadata(entry.path())?;
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            let meta = match entry.metadata() {
+                Ok(meta) => meta,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
             #[cfg(windows)]
             {
                 use std::os::windows::fs::MetadataExt;
@@ -115,4 +128,31 @@ fn available(path: &Path) -> Option<u64> {
     #[cfg(not(target_vendor = "apple"))]
     let blocks = stat.f_bavail;
     blocks.checked_mul(stat.f_frsize)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn concurrent_descendant_removal_keeps_approximate_measurements_available() {
+        let root = tempfile::tempdir().unwrap();
+        let active = root.path().join("staging");
+        std::fs::create_dir(&active).unwrap();
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let finished = stop.clone();
+        let churn = std::thread::spawn(move || {
+            while !finished.load(std::sync::atomic::Ordering::Relaxed) {
+                for index in 0..64 {
+                    let path = active.join(index.to_string());
+                    let _ = std::fs::write(&path, b"synthetic");
+                    let _ = std::fs::remove_file(&path);
+                }
+            }
+        });
+        let results = (0..30).map(|_| measure(root.path())).collect::<Vec<_>>();
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        churn.join().unwrap();
+        assert!(results.iter().all(Result::is_ok));
+        assert!(measure(&root.path().join("absent-root")).is_err());
+    }
 }

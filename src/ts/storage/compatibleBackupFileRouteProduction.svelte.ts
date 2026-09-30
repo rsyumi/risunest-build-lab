@@ -1,6 +1,6 @@
 import { save } from '@tauri-apps/plugin-dialog'
 
-import { isTauri, isTauriAndroid } from '../platform'
+import { isTauri, isTauriAndroid, isTauriIOS } from '../platform'
 import { runSharedNativeFileOperation } from './nativeFileJobManager'
 import {
     NativeFileJobError,
@@ -65,6 +65,8 @@ export async function exportCompatibilityBackupFromSystemPicker(
                 let destination: NativeLegacyLocalBackupDestination
                 if (isTauriAndroid) {
                     destination = { type: 'androidSaf', suggestedName }
+                } else if (isTauriIOS) {
+                    destination = { type: 'iosFiles', suggestedName }
                 } else {
                     const path = await save({
                         defaultPath: suggestedName,

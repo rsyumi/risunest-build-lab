@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import type { CharacterSummary } from './persistentDataStore'
 import {
     createCatalogPresetWorkingSet,
+    carryCatalogCharacterMetadata,
     createCatalogCharacterStub,
     getCatalogCharacterMetadata,
     getCatalogConversationCount,
@@ -32,6 +33,15 @@ const summary: CharacterSummary = {
 }
 
 describe('working-set catalog', () => {
+    it('retains catalog eligibility after publishing hydrated detail', () => {
+        const previous = createCatalogCharacterStub(summary)
+        const replacement = { ...previous, chats: [{ id: 'chat-a', name: 'Chat A', note: '', localLore: [], message: [] }] }
+        expect(getCatalogCharacterMetadata(replacement)).toBeUndefined()
+        expect(carryCatalogCharacterMetadata(previous, replacement)).toBe(replacement)
+        expect(getCatalogCharacterMetadata(replacement)).toMatchObject({ residency: 'detail', conversationCount: 1 })
+        expect(JSON.stringify(replacement)).not.toContain('residency')
+    })
+
     it('publishes changed and removed root fields without disturbing separately owned data', () => {
         const database = {
             username: 'Before', userNote: 'Removed',

@@ -254,6 +254,18 @@ impl Cache {
         Ok(())
     }
     /// The derived cache only, without the library a receive may read through.
+    pub(crate) fn remove_derived(&self, hash: &str) -> Result<()> {
+        risunest_sync_wire::validate_hash(hash)?;
+        let mut objects = self.objects()?;
+        let tx = objects.transaction()?;
+        small_object_store::delete_batch(&tx, &[hash])
+            .map_err(|_| SyncError::new("cache-store-unavailable", 503))?;
+        tx.commit()?;
+        if let Some(size) = self.cas.stat_object(hash)? {
+            self.cas.unlink_exact_object(hash, size, &crate::asset_repository::object_physical_key(hash))?;
+        }
+        Ok(())
+    }
     pub fn stat_derived(&self, hash: &str) -> Result<Option<u64>> {
         if let Some((_, bytes)) = self.staged()?.bodies.get(hash) {
             return Ok(Some(bytes.len() as u64));

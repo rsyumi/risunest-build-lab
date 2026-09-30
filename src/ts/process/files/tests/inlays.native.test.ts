@@ -339,3 +339,13 @@ test('reports original preservation after both native image entry points finish 
     expect(alertToast).toHaveBeenCalledTimes(2)
     expect(alertToast).toHaveBeenCalledWith(language.risuNest.inlay.animationPreserved)
 })
+
+
+test('preserves a tagged original without claiming animation preservation', async () => {
+    vi.mocked(alertToast).mockClear()
+    native.preservationReason = 'color-profile'
+    const bytes = Uint8Array.of(1, 2, 3)
+    await writeInlayImage({ src: 'synthetic:tagged' } as HTMLImageElement, { id: 'profile', data: bytes })
+    expect(native.payloads.get('profile')).toEqual(bytes)
+    expect(alertToast).not.toHaveBeenCalled()
+})

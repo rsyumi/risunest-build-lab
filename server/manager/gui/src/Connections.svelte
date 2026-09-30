@@ -182,6 +182,7 @@
       <p>
         {phase(status.publication.phase)}. 주소가 바뀌면 자동으로 갱신합니다.
       </p>
+      {#if status.publication.error}<p class="warning" role="alert">{message(status.publication.error)}</p>{/if}
       <div class="actions">
         <button
           type="button"

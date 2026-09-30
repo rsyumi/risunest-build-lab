@@ -4,11 +4,12 @@
 use super::{
     connection_store::ConnectionStore,
     contract::Result,
-    job_store::JobStore,
+    job_store::{JobCommandState, JobStore},
     receive_artifacts::{managed_directory, remove_tree},
-    runtime::{connection_directory, local_error},
+    runtime::{connection_directory, job_directory, local_error},
     runtime_restore::discard_finished_staging,
 };
+use tauri::{AppHandle, Manager};
 use std::{
     collections::BTreeSet,
     fs, io,
@@ -40,6 +41,15 @@ fn remove_managed(root: &Path, directory: &Path) -> io::Result<()> {
     Ok(())
 }
 
+pub(crate) fn managed_scratch(root: &Path, prefix: &str) -> Result<tempfile::TempDir> {
+    let directory = root.join("external-storage").join("scratch");
+    fs::create_dir_all(&directory).map_err(local_error)?;
+    if !managed_directory(root, &directory).map_err(local_error)? {
+        return Err(super::contract::ProviderError::new(super::contract::ErrorKind::Corrupt));
+    }
+    tempfile::Builder::new().prefix(prefix).tempdir_in(directory).map_err(local_error)
+}
+
 pub(crate) fn remove_connection_directory(root: &Path, connection_id: &str) -> io::Result<()> {
     remove_managed(root, &connection_directory(root, connection_id))
 }
@@ -53,7 +63,72 @@ pub(crate) fn remove_at_startup(root: &Path) {
     }
 }
 
+/// Runs only after the normal PDS open has passed startup recovery admission.
+/// Each pass visits one page, including owners that were retained last time.
+pub(crate) fn reclaim_terminal_spools_later(app: &AppHandle) {
+    let Ok(root) = super::runtime::root(app) else { return; };
+    if !root.join("external-jobs.sqlite").is_file() { return; }
+    let worker = app.state::<JobCommandState>().track_worker();
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _worker = worker;
+        let result = (|| -> Result<()> {
+            let jobs = JobStore::open(&root)?;
+            let page = jobs.terminal_spool_page()?;
+            let admission = app.state::<crate::native_file_jobs::NativeFileJobState>()
+                .admission.clone();
+            for (_, job) in &page {
+                let Ok((cancel, _claim)) = app.state::<JobCommandState>().claim(job) else { continue; };
+                let result = (|| -> Result<()> {
+                    let _permit = admission.file(false).map_err(local_error)?;
+                    cancel.check()?;
+                    let mut pds = super::runtime::native_store(&app)?;
+                    reclaim_terminal_spool(&root, &jobs, &mut pds, &job.id)
+                })();
+                if let Err(error) = result {
+                    crate::nlog!("warn", "External terminal spool was retained: {error}");
+                }
+            }
+            jobs.advance_terminal_spool_page(&page)?;
+            jobs.prune_released()
+        })();
+        if let Err(error) = result {
+            crate::nlog!("warn", "External terminal spools were not examined: {error}");
+        }
+    });
+}
+
+// The caller holds this job's connection claim and native file admission.
+fn reclaim_terminal_spool(
+    root: &Path,
+    jobs: &JobStore,
+    pds: &mut crate::persistent_store::PersistentStore,
+    id: &str,
+) -> Result<()> {
+    let job = jobs.read(id)?;
+    if !job.terminal() || job.spool_released { return Ok(()); }
+    let repository = match pds.external_job(id).map_err(local_error)? {
+        Some(owner) => {
+            if owner.connection_id != job.request.connection_id {
+                return Err(super::contract::ProviderError::new(super::contract::ErrorKind::Corrupt));
+            }
+            owner.repository_id
+        }
+        // Without an authoritative job, cleanup can only release bookkeeping
+        // when no journal or registered capture owner exists.
+        None => String::new(),
+    };
+    let cleanup = super::journal::TransferJournal::cleanup_terminal_spools_at(
+        &job_directory(root, &job.request.connection_id, id), id, pds, &repository,
+    )?;
+    if matches!(cleanup, super::journal::SpoolCleanup::Removed { .. }) {
+        jobs.release_spool(id)?;
+    }
+    Ok(())
+}
+
 fn remove_unowned(root: &Path) -> Result<()> {
+    remove_managed(root, &root.join("external-storage").join("scratch")).map_err(local_error)?;
     let directories = connection_directories(root).map_err(local_error)?;
     let live: BTreeSet<String> = ConnectionStore::open(root)?
         .ids()?
@@ -72,9 +147,17 @@ fn remove_unowned(root: &Path) -> Result<()> {
         }
     }
     if root.join("external-jobs.sqlite").is_file() {
-        for job in JobStore::open(root)?.list()? {
-            discard_finished_staging(root, &job);
+        let jobs = JobStore::open(root)?;
+        let mut after = 0;
+        loop {
+            let page = jobs.finished_restore_page(after)?;
+            if page.is_empty() { break; }
+            for (cursor, job) in page {
+                discard_finished_staging(root, &job);
+                after = cursor;
+            }
         }
+        jobs.prune_released()?;
     }
     Ok(())
 }
@@ -88,6 +171,48 @@ mod tests {
     fn write(path: &Path) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, b"synthetic").unwrap();
+    }
+
+    #[test]
+    fn terminal_spool_reconciliation_releases_only_unowned_terminal_jobs() {
+        let root = tempfile::tempdir().unwrap();
+        let mut pds = crate::persistent_store::PersistentStore::open(root.path()).unwrap();
+        let jobs = JobStore::open(root.path()).unwrap();
+        let identity = pds.external_identity().unwrap();
+        let request = serde_json::from_value(serde_json::json!({
+            "connectionId":"removed-connection", "kind":"backup"
+        })).unwrap();
+        let mut terminal = DurableJob::new(request, false, 1, identity.clone());
+        terminal.summary["state"] = serde_json::json!("failed");
+        jobs.put(&terminal).unwrap();
+        let unrelated = job_directory(root.path(), "removed-connection", &terminal.id)
+            .join("unregistered.partial");
+        write(&unrelated);
+        reclaim_terminal_spool(root.path(), &jobs, &mut pds, &terminal.id).unwrap();
+        assert!(jobs.read(&terminal.id).unwrap().spool_released);
+        assert!(unrelated.is_file());
+        reclaim_terminal_spool(root.path(), &jobs, &mut pds, &terminal.id).unwrap();
+
+        let mut held = terminal.clone();
+        held.id = uuid::Uuid::new_v4().to_string();
+        held.spool_released = false;
+        jobs.put(&held).unwrap();
+        let mut db = rusqlite::Connection::open(root.path().join("persistent/persistent.sqlite")).unwrap();
+        let tx = db.transaction().unwrap();
+        crate::persistent_store::external_storage_state::register_capture(
+            &tx, "capture", &identity, "scope", "logical-v1", "", &"a".repeat(64), "connection",
+        ).unwrap();
+        tx.commit().unwrap();
+        pds.retain_external_capture("capture", &held.id).unwrap();
+        reclaim_terminal_spool(root.path(), &jobs, &mut pds, &held.id).unwrap();
+        assert!(!jobs.read(&held.id).unwrap().spool_released);
+
+        let mut live = held.clone();
+        live.id = uuid::Uuid::new_v4().to_string();
+        live.summary["state"] = serde_json::json!("waiting");
+        jobs.put(&live).unwrap();
+        reclaim_terminal_spool(root.path(), &jobs, &mut pds, &live.id).unwrap();
+        assert!(!jobs.read(&live.id).unwrap().spool_released);
     }
 
     #[test]
@@ -174,7 +299,9 @@ mod tests {
 
     #[cfg(windows)]
     fn link_directory(target: &Path, link: &Path) {
+        use std::os::windows::process::CommandExt;
         let output = std::process::Command::new("cmd")
+            .creation_flags(0x08000000)
             .args(["/C", "mklink", "/J"])
             .arg(link)
             .arg(target)
@@ -198,4 +325,18 @@ mod tests {
         assert!(remove_connection_directory(root, "connection").is_err());
         assert!(outside.path().join("kept").is_file());
     }
+    #[test]
+    fn startup_removes_only_managed_abandoned_scratch() {
+        let root = tempfile::tempdir().unwrap();
+        let scratch = managed_scratch(root.path(), "export-").unwrap();
+        std::fs::write(scratch.path().join("body"), b"synthetic").unwrap();
+        let orphan = scratch.keep();
+        let unrelated = root.path().join("unrelated");
+        std::fs::create_dir(&unrelated).unwrap();
+        std::fs::write(unrelated.join("keep"), b"keep").unwrap();
+        remove_at_startup(root.path());
+        assert!(!orphan.exists());
+        assert!(unrelated.join("keep").is_file());
+    }
+
 }

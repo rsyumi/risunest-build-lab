@@ -209,9 +209,11 @@ impl GithubReleases {
         tag: &str,
         cancel: &Cancellation,
     ) -> Result<Option<u64>> {
-        for page in 1..=api::MAX_RELEASE_SCAN_PAGES {
+        let maximum = if tag == context.descriptor_tag() { u32::MAX } else { api::MAX_RELEASE_SCAN_PAGES };
+        for page in 1..=maximum {
+            cancel.check()?;
             let releases = self.releases_page(context, page, cancel).await?;
-            if let Some(found) = releases.iter().find(|release| release.tag_name == tag) {
+            if let Some(found) = releases.iter().find(|release| release.tag_name == tag && release.draft) {
                 return Ok(Some(found.id));
             }
             if releases.len() < api::RELEASE_PAGE_SIZE {
@@ -538,26 +540,7 @@ impl Provider for GithubReleases {
                 OpenMode::ResumeCreate => {
                     self.resume_create_layout(&context, cancel).await?;
                 }
-                OpenMode::Existing => {
-                    let tag = context.descriptor_tag();
-                    let release = self
-                        .find_release(&context, &tag, cancel)
-                        .await?
-                        .ok_or_else(|| ProviderError::new(ErrorKind::NotFound))?;
-                    let assets = self.assets_page(&context, release, 1, cancel).await?;
-                    let prefix = format!("{}-", api::role_prefix(ObjectRole::Descriptor));
-                    if !assets.iter().any(|asset| asset.name.starts_with(&prefix)) {
-                        return Err(ProviderError::new(ErrorKind::NotFound));
-                    }
-                    context.batches().insert(
-                        api::DESCRIPTOR_BATCH.to_owned(),
-                        Batch {
-                            seq: 0,
-                            release,
-                            assets: assets.len(),
-                        },
-                    );
-                }
+                OpenMode::Existing => {}
             }
             let identity = context.identity.clone();
             Ok((

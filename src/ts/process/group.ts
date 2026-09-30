@@ -1,6 +1,6 @@
 import shuffle from "lodash/shuffle";
 import { findCharacterbyId } from "../util";
-import { alertConfirm, alertError, alertSelectChar } from "../alert";
+import { alertConfirm, alertError, alertSelectChar, alertToast } from "../alert";
 import { language } from "src/lang";
 import { get } from "svelte/store";
 import { DBState, selectedCharID } from "../stores.svelte";
@@ -67,7 +67,14 @@ async function settleGroupRollback(groupId: string): Promise<void> {
     reconcilePersistentActiveCharacterIds(DBState.db, groupId)
 }
 
+function generationBlocksMembership(): boolean {
+    if (!get(doingChat)) return false
+    alertToast(language.navigationBlockedWhileGenerating)
+    return true
+}
+
 export async function addGroupChar(): Promise<boolean> {
+    if (generationBlocksMembership()) return false
     const group = DBState.db.characters[get(selectedCharID)]
     if(group.type === 'group'){
         const res = await alertSelectChar()
@@ -78,17 +85,20 @@ export async function addGroupChar(): Promise<boolean> {
             }
             const candidate = DBState.db.characters.find((value) => value.chaId === res)
             if(candidate && isArchivedCharacter(candidate)){
-                alertError(language.risuNest.archive.groupMemberBlocked.replace('{0}', '1'))
+                alertError(language.risuNest.archive.groupMemberArchived)
                 return false
             }
             else{
                 const loadFirstMessage = await alertConfirm(language.askLoadFirstMsg)
                 const groupId = group.chaId
-                if (get(doingChat)) return false
+                if (generationBlocksMembership()) return false
                 if (!revalidateSelectedGroup(groupId, res)) return false
                 const activation = await activateSelectedGroup(groupId)
-                if (activation !== 'activated') return false
-                if (!isSelectedGroup(groupId) || get(doingChat)) return false
+                if (activation !== 'activated') {
+                    if (activation === 'failed') alertError(language.groupCharactersChangeFailed)
+                    return false
+                }
+                if (!isSelectedGroup(groupId) || generationBlocksMembership()) return false
                 let completeLease: CompleteConversationLease | null = null
                 if (loadFirstMessage) {
                     const target = captureSelectedConversationTarget()
@@ -101,7 +111,7 @@ export async function addGroupChar(): Promise<boolean> {
                 }
                 try {
                     const activatedGroup = revalidateSelectedGroup(groupId, res)
-                    if (!activatedGroup || get(doingChat)) return false
+                    if (!activatedGroup || generationBlocksMembership()) return false
                     const selectedChat = activatedGroup.chats[activatedGroup.chatPage]
                     const activeSession = completeLease?.session ?? getActiveConversationSession()
                     if (
@@ -117,7 +127,7 @@ export async function addGroupChar(): Promise<boolean> {
                         !member ||
                         getPersistentNavigationGeneration() !== restoreGeneration ||
                         !isSelectedGroup(groupId) ||
-                        get(doingChat)
+                        generationBlocksMembership()
                     ) return false
                     const restoredGroup = revalidateSelectedGroup(groupId, res)
                     if (!restoredGroup) return false
@@ -164,7 +174,7 @@ export async function rmCharFromGroup(index:number): Promise<boolean> {
     let selectedId = get(selectedCharID)
     let group = DBState.db.characters[selectedId]
     if(group.type === 'group'){
-        if (get(doingChat)) return false
+        if (generationBlocksMembership()) return false
         if (index < 0 || index >= group.characters.length) return false
         const groupId = group.chaId
         const removedCharacter = group.characters[index]
@@ -196,6 +206,7 @@ export async function rmCharFromGroup(index:number): Promise<boolean> {
         }
         markGroupDirty(group)
         await settleGroupRollback(groupId)
+        alertError(language.groupCharactersChangeFailed)
         return false
     }
     return false

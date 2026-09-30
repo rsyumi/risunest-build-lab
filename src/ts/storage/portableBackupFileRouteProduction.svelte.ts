@@ -1,3 +1,4 @@
+import { portableBackupSuggestedName } from './portableBackupName'
 import { invoke } from '@tauri-apps/api/core'
 import { open, save } from '@tauri-apps/plugin-dialog'
 import { language } from 'src/lang'
@@ -46,6 +47,7 @@ export interface BackupPickerContext {
 export type BackupSourceFactory = (
     context: BackupPickerContext,
 ) => Promise<NativeFileJobSource | null>
+export type BackupRestoreResult = NativeFileJobResult | { warningCodes: string[] }
 export type BackupReferenceSourceFactory = () => Promise<NativeFileJobSource>
 export interface BackupRestoreOptions extends NativeFileRestoreJobOptions {
     onSource?(source: SourceInfo): void
@@ -95,7 +97,7 @@ export async function exportPortableBackupFromSystemPicker(
                 const selection = await selectPortableBackupExport()
                 if (!selection) return null
                 checkSignal(joined.signal)
-                const suggestedName = `risunest-${new Date().toISOString().replace(/[:.]/g, '-')}.risunest`
+                const suggestedName = portableBackupSuggestedName()
                 const path =
                     isTauriAndroid || isTauriIOS
                         ? null
@@ -121,6 +123,7 @@ export async function exportPortableBackupFromSystemPicker(
                     {
                         ...options,
                         signal: joined.signal,
+                        confirmSourcePreservation: () => alertConfirm(language.risuNest.backup.sourcePreservationConfirm),
                         onStatus(status) {
                             onStatus(status)
                             options.onStatus?.(status)
@@ -151,7 +154,7 @@ export async function exportPortableBackupFromReferenceSource(
         async ({ signal, onStatus }) => {
             const joined = combineSignals(signal, options.signal)
             try {
-                const suggestedName = `risunest-${new Date().toISOString().replace(/[:.]/g, '-')}.risunest`
+                const suggestedName = portableBackupSuggestedName()
                 const path =
                     isTauriAndroid || isTauriIOS
                         ? null
@@ -246,7 +249,7 @@ export function restoreBackupFromSystemPicker(
 export async function restoreBackupFromNativeSource(
     source: NativeFileJobSource | BackupSourceFactory,
     options: BackupRestoreOptions = {},
-): Promise<NativeFileJobResult | null> {
+): Promise<BackupRestoreResult | null> {
     if (!isTauri)
         throw new NativeFileJobError(
             'native-required',
@@ -369,12 +372,27 @@ export async function restoreBackupFromNativeSource(
                                 selectedInput,
                                 restoreOptions,
                             )
-                        if (format === 'local-backup')
-                            return runNativeLegacyLocalBackupRestore(
-                                runtime,
-                                selectedInput,
-                                restoreOptions,
-                            )
+                        if (format === 'local-backup') {
+                            try {
+                                return await runNativeLegacyLocalBackupRestore(runtime, selectedInput, restoreOptions)
+                            } catch (error) {
+                                if (!(error instanceof NativeFileJobError) || error.code !== 'compatibility-import-required') throw error
+                                checkSignal(joined.signal)
+                                onStatus(syntheticNativeFileJobStatus({ kind: 'restore-legacy-local-backup' }, 'awaiting-reselect'))
+                                const { importLegacyBackupWithWebView } = await import('../drive/backuplocal')
+                                return importLegacyBackupWithWebView({
+                                    signal: joined.signal,
+                                    onStatus,
+                                    setSource: onSource,
+                                    setPartialWritesPossible: context.setPartialWritesPossible,
+                                }, {
+                                    beforeActivation: async () => {
+                                        await restoreOptions.beforeActivation?.()
+                                    },
+                                    onCommitted: holdServerSyncAfterRestore,
+                                })
+                            }
+                        }
                         throw new NativeFileJobError(
                             'unsupported-format',
                             'Unsupported backup format',

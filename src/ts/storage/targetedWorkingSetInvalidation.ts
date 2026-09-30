@@ -1,3 +1,4 @@
+import { patchWorkingSetRoot } from './workingSetCatalog'
 import type { Chat, Database, character, groupChat } from './database.svelte'
 import type { ReplacementChangeSet } from './persistentDataRuntime'
 import {
@@ -5,6 +6,7 @@ import {
     type CharacterDetail,
     type CharacterSummary,
     type ContentChangeKey,
+    type PersistentRoot,
     type PersistentRevisionReader,
 } from './persistentDataStore'
 import { assertPinnedRevision } from './persistentRecordIterator'
@@ -140,7 +142,7 @@ function compareCatalogPosition(left: CompleteCharacter, right: CompleteCharacte
     return Number(characterIsTrashed(left)) - Number(characterIsTrashed(right))
 }
 
-function isProjectedWorkingSet(previous: Database): boolean {
+export function isProjectedWorkingSet(previous: Database): boolean {
     if (!isCatalogPresetWorkingSet(previous.botPresets)) return false
     return previous.characters.every((value) => getCatalogCharacterMetadata(value) !== undefined)
 }
@@ -161,14 +163,14 @@ export async function applyTargetedWorkingSetInvalidation(
     const positions = new Map<string, number>()
     previous.characters.forEach((value, position) => positions.set(value.chaId, position))
 
-    let rootValue: Record<string, unknown> | null = null
+    let rootValue: PersistentRoot | null = null
     if (plan.root) {
         const root = await reader.readRoot()
         assertPinnedRevision(reader.revision, root.revision, 'Root')
-        rootValue = root.value as unknown as Record<string, unknown>
+        rootValue = root.value
     }
 
-    const botPresetsId = (rootValue?.botPresetsId ?? previous.botPresetsId) as number
+    const botPresetsId = rootValue?.botPresetsId ?? previous.botPresetsId
     let botPresets: Database['botPresets']
     if (plan.presets || botPresetsId !== previous.botPresetsId ||
         (getCatalogPresetMetadata(previous.botPresets)?.activeConfiguredIndex ?? null) !==
@@ -262,7 +264,7 @@ export async function applyTargetedWorkingSetInvalidation(
                             deferred = true
                             return existing as Chat
                         }
-                        : undefined,
+                        : options.keepConversation,
                 ),
             )
             continue
@@ -289,9 +291,11 @@ export async function applyTargetedWorkingSetInvalidation(
         pluginCustomStorage: _pluginCustomStorage,
         ...carriedRoot
     } = previous
+    const projectedRoot = { ...carriedRoot } as Database
+    if (rootValue) patchWorkingSetRoot(projectedRoot, rootValue)
     return {
         database: {
-            ...(rootValue ?? carriedRoot),
+            ...projectedRoot,
             pluginCustomStorage: {},
             botPresets,
             characters,

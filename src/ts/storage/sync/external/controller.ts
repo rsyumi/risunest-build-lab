@@ -1,3 +1,4 @@
+import { externalErrorKind } from './connection'
 import { beginMobileBackgroundTask, measuredTaskPercent, type MobileBackgroundTask } from '../../../mobileBackgroundTask'
 import type { SyncExitDrainResult, SyncExitTarget } from '../../syncExitCoordinator'
 import type {
@@ -16,7 +17,7 @@ export type ExternalExecutionSession =
 export type ExternalJobReason = 'automatic' | 'manual' | 'exitDrain'
 
 export interface ExternalStorageJobBridge {
-    startJob(request: StartExternalJobRequest): Promise<ExternalJobSummary>
+    startJob(request: StartExternalJobRequest, jobId?: string): Promise<ExternalJobSummary>
     getJob(jobId: string): Promise<ExternalJobSummary>
     cancelJob(jobId: string): Promise<ExternalJobSummary>
 }
@@ -34,11 +35,12 @@ export interface ExternalControllerRequest {
     session: ExternalExecutionSession
     signal?: AbortSignal
     backgroundTask?: MobileBackgroundTask
+    jobId?: string
 }
 
 export type ExternalControllerResult =
     | { kind: 'complete'; revision: DecimalString; job: ExternalJobSummary }
-    | { kind: 'blocked'; reason: string; error?: ExternalConnectionError; job?: ExternalJobSummary }
+    | { kind: 'blocked'; reason: string; error?: ExternalConnectionError; cause?: unknown; job?: ExternalJobSummary }
     | { kind: 'cancelled' }
 
 export interface ExternalStorageControllerSnapshot {
@@ -223,7 +225,7 @@ export function createExternalStorageController(
             run.activeGoal = selectedGoal
             if (run.abort.signal.aborted) run.abort = new AbortController()
             const acquisition = request.backgroundTask ?? beginMobileBackgroundTask(
-                request.kind === 'cleanup' ? 'maintenance' : request.kind, run.abort.signal,
+                request.kind === 'cleanup' ? 'maintenance' : request.kind, run.abort.signal, request.reason === 'manual',
             )
             const background = acquisition instanceof Promise ? await acquisition : acquisition
             const expired = () => {
@@ -243,7 +245,7 @@ export function createExternalStorageController(
                     reason: request.reason,
                     session: request.session.kind,
                     sessionId: request.session.id,
-                })
+                }, ...(request.jobId ? [request.jobId] as const : [] as const))
                 run.active = started
                 publish()
                 if (
@@ -259,6 +261,7 @@ export function createExternalStorageController(
                 success = completed.state === 'succeeded'
                 run.active = completed
                 if (completed.state !== 'succeeded') {
+                    publish()
                     const reason = blockedReason(completed)
                     errors.set(connectionId, reason)
                     settleKind(run, request.kind, {
@@ -294,11 +297,11 @@ export function createExternalStorageController(
                 } else if (request.signal?.aborted) {
                     continue
                 } else {
-                    const reason = error instanceof Error && error.message
+                    const reason = externalErrorKind(error) ?? (error instanceof Error && error.message
                         ? error.message
-                        : 'external-storage-job-failed'
+                        : 'external-storage-job-failed')
                     errors.set(connectionId, reason)
-                    settleKind(run, request.kind, { kind: 'blocked', reason })
+                    settleKind(run, request.kind, { kind: 'blocked', reason, cause: error })
                     continue
                 }
             } finally {

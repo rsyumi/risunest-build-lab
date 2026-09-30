@@ -215,16 +215,15 @@ impl ServerSyncCommandState {
         Ok(())
     }
 }
-fn claim_library(app: &AppHandle) -> Result<crate::native_file_jobs::admission::Permit> {
+fn claim_library<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<crate::native_file_jobs::admission::Permit> {
     app.state::<crate::native_file_jobs::NativeFileJobState>()
         .admission
         .server()
         .map_err(|code| SyncError::new(code, 409))
 }
-fn job_store(app: &AppHandle) -> Result<PersistentStore> {
-    Ok(with_store_mut(app.state(), |store| {
-        store.open_native_job_store()
-    })?)
+fn job_store<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<PersistentStore> {
+    with_store_mut(app.state(), |store| store.open_native_job_store())
+        .map_err(|error| SyncError::caused("local-store-unavailable", 503, error.to_string()))
 }
 async fn blocking<T: Send + 'static>(
     operation: impl FnOnce() -> Result<T> + Send + 'static,
@@ -507,37 +506,39 @@ pub(crate) async fn server_sync_asset_policy(
     app: AppHandle,
     policy: super::residency::AssetPolicy,
 ) -> Result<crate::persistent_store::asset_residency::ResidencyStatus> {
-    logged_blocking("asset-policy", move || {
-        let _admission = claim_library(&app)?;
-        let state = app.state::<ServerSyncCommandState>();
-        let (_running, cancelled) = state.claim_preparation()?;
-        job_store(&app)?.asset_residency_set_policy(policy, || {
-            if cancelled.load(Ordering::Acquire) {
-                Err(SyncError::new("cancelled", 409))
-            } else {
-                Ok(())
-            }
-        })
+    logged_blocking("asset-policy", move || server_sync_asset_policy_operation(&app, policy)).await
+}
+
+fn server_sync_asset_policy_operation<R: tauri::Runtime>(app: &AppHandle<R>, policy: super::residency::AssetPolicy) -> Result<crate::persistent_store::asset_residency::ResidencyStatus> {
+    let _admission = claim_library(&app)?;
+    let state = app.state::<ServerSyncCommandState>();
+    let (_running, cancelled) = state.claim_preparation()?;
+    job_store(&app)?.asset_residency_set_policy_cancelled(policy, Some(cancelled.clone()), || {
+        if cancelled.load(Ordering::Acquire) {
+            Err(SyncError::new("cancelled", 409))
+        } else {
+            Ok(())
+        }
     })
-    .await
 }
 #[tauri::command]
 pub(crate) async fn server_sync_asset_evict(
     app: AppHandle,
 ) -> Result<crate::persistent_store::asset_residency::ResidencyStatus> {
-    logged_blocking("asset-evict", move || {
-        let _admission = claim_library(&app)?;
-        let state = app.state::<ServerSyncCommandState>();
-        let (_running, cancelled) = state.claim_preparation()?;
-        job_store(&app)?.asset_residency_evict(|| {
-            if cancelled.load(Ordering::Acquire) {
-                Err(SyncError::new("cancelled", 409))
-            } else {
-                Ok(())
-            }
-        })
+    logged_blocking("asset-evict", move || server_sync_asset_evict_operation(&app)).await
+}
+
+fn server_sync_asset_evict_operation<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<crate::persistent_store::asset_residency::ResidencyStatus> {
+    let _admission = claim_library(&app)?;
+    let state = app.state::<ServerSyncCommandState>();
+    let (_running, cancelled) = state.claim_preparation()?;
+    job_store(&app)?.asset_residency_evict_cancelled(Some(cancelled.clone()), || {
+        if cancelled.load(Ordering::Acquire) {
+            Err(SyncError::new("cancelled", 409))
+        } else {
+            Ok(())
+        }
     })
-    .await
 }
 #[tauri::command]
 pub(crate) fn server_sync_verified_bytes(app: AppHandle) -> Result<String> {
@@ -647,74 +648,93 @@ pub(crate) fn server_sync_retryable_failure(app: AppHandle) -> Result<Option<Str
 pub(crate) async fn server_sync_bind(
     app: AppHandle,
     config: ServerConfig,
+    residency: Option<super::residency::AssetPolicy>,
 ) -> Result<ReplicaStatus> {
-    logged_blocking("bind", move || {
-        let _admission = claim_library(&app)?;
-        let state = app.state::<ServerSyncCommandState>();
-        let _running = state.claim()?;
-        state.require_no_preparation()?;
-        let client = ServerClient::new(config.clone())?;
-        client.resolve_identity(true)?;
-        let mut store = job_store(&app)?;
-        store.server_bind(&client.config())?;
-        store.server_status()
-    })
-    .await
+    logged_blocking("bind", move || server_sync_bind_operation(&app, config, residency)).await
+}
+
+fn server_sync_bind_operation<R: tauri::Runtime>(app: &AppHandle<R>, config: ServerConfig, residency: Option<super::residency::AssetPolicy>) -> Result<ReplicaStatus> {
+    let _admission = claim_library(&app)?;
+    let state = app.state::<ServerSyncCommandState>();
+    let _running = state.claim()?;
+    state.require_no_preparation()?;
+    let client = ServerClient::new(config.clone())?;
+    client.resolve_identity(true)?;
+    let mut store = job_store(&app)?;
+    let previous = store.device_store()?.asset_residency_policy()?;
+    store.device_store()?.set_asset_residency_policy(residency.unwrap_or(super::residency::AssetPolicy::Full))?;
+    if let Err(error) = store.server_bind(&client.config()) {
+        store.device_store()?.set_asset_residency_policy(previous)?;
+        return Err(error);
+    }
+    super::events::release(&app);
+    store.server_status()
 }
 #[tauri::command]
 pub(crate) async fn server_sync_unbind(app: AppHandle) -> Result<()> {
-    logged_blocking("unbind", move || {
-        let _admission = claim_library(&app)?;
-        let state = app.state::<ServerSyncCommandState>();
-        let _running = state.claim()?;
-        state.require_no_preparation()?;
-        job_store(&app)?.server_unbind()
-    })
-    .await
+    logged_blocking("unbind", move || server_sync_unbind_operation(&app)).await
+}
+
+fn server_sync_unbind_operation<R: tauri::Runtime>(app: &AppHandle<R>) -> Result<()> {
+    let _admission = claim_library(&app)?;
+    let state = app.state::<ServerSyncCommandState>();
+    let _running = state.claim()?;
+    state.require_no_preparation()?;
+    job_store(&app)?.server_unbind()?;
+    super::events::release(&app);
+    Ok(())
 }
 #[tauri::command]
 pub(crate) async fn server_sync_reregister(
     app: AppHandle,
     config: ServerConfig,
     expected_revision: i64,
+    residency: Option<super::residency::AssetPolicy>,
 ) -> Result<ReplicaStatus> {
-    logged_blocking("reregister", move || {
-        let _admission = claim_library(&app)?;
-        let state = app.state::<ServerSyncCommandState>();
-        let _running = state.claim()?;
-        state.require_no_preparation()?;
-        let mut store = job_store(&app)?;
-        let old = store
-            .server_stored_config()?
-            .ok_or_else(|| SyncError::new("server-not-bound", 409))?;
-        if old.library_id != config.library_id || old.device_id == config.device_id {
-            return Err(SyncError::new("new-device-registration-required", 409));
-        }
-        let client = ServerClient::new(config.clone())?;
-        client.resolve_identity(true)?;
-        #[derive(serde::Deserialize)]
-        #[serde(rename_all = "camelCase", deny_unknown_fields)]
-        struct DeviceStatus {
-            device_id: String,
-            active: bool,
-        }
-        let (_, status): (_, DeviceStatus) = client.json(
-            reqwest::Method::GET,
-            &format!("devices/{}/status", old.device_id),
-            &[],
-            None::<&()>,
-            &[],
-        )?;
-        if status.device_id != old.device_id {
-            return Err(SyncError::new("device-identity-mismatch", 409));
-        }
-        if status.active {
-            return Err(SyncError::new("revoke-previous-device-first", 409));
-        }
-        store.server_replace_registration(&client.config(), expected_revision)?;
-        store.server_status()
-    })
-    .await
+    logged_blocking("reregister", move || server_sync_reregister_operation(&app, config, expected_revision, residency)).await
+}
+
+fn server_sync_reregister_operation<R: tauri::Runtime>(app: &AppHandle<R>, config: ServerConfig, expected_revision: i64, residency: Option<super::residency::AssetPolicy>) -> Result<ReplicaStatus> {
+    let _admission = claim_library(&app)?;
+    let state = app.state::<ServerSyncCommandState>();
+    let _running = state.claim()?;
+    state.require_no_preparation()?;
+    let mut store = job_store(&app)?;
+    let old = store
+        .server_stored_config()?
+        .ok_or_else(|| SyncError::new("server-not-bound", 409))?;
+    if old.library_id != config.library_id || old.device_id == config.device_id {
+        return Err(SyncError::new("new-device-registration-required", 409));
+    }
+    let client = ServerClient::new(config.clone())?;
+    client.resolve_identity(true)?;
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct DeviceStatus {
+        device_id: String,
+        active: bool,
+    }
+    let (_, status): (_, DeviceStatus) = client.json(
+        reqwest::Method::GET,
+        &format!("devices/{}/status", old.device_id),
+        &[],
+        None::<&()>,
+        &[],
+    )?;
+    if status.device_id != old.device_id {
+        return Err(SyncError::new("device-identity-mismatch", 409));
+    }
+    if status.active {
+        return Err(SyncError::new("revoke-previous-device-first", 409));
+    }
+    let previous = store.device_store()?.asset_residency_policy()?;
+    store.device_store()?.set_asset_residency_policy(residency.unwrap_or(previous))?;
+    if let Err(error) = store.server_replace_registration(&client.config(), expected_revision) {
+        store.device_store()?.set_asset_residency_policy(previous)?;
+        return Err(error);
+    }
+    super::events::release(&app);
+    store.server_status()
 }
 #[tauri::command]
 pub(crate) async fn server_sync_reconcile(
@@ -1041,3 +1061,6 @@ mod failure_log_tests {
             .all(|entry| !entry.message.starts_with("synthetic-quiet-stage")));
     }
 }
+
+#[cfg(test)]
+mod command_boundary_tests;

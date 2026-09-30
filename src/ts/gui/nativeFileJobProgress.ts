@@ -63,6 +63,10 @@ export function nativeFileJobTitle(
     status: NativeFileJobStatus | undefined,
 ): string {
     switch (status?.kind) {
+        case 'official-publication-upload':
+            return language.risuNest.backup.officialPublish
+        case 'restore-official-account-snapshot':
+            return language.risuNest.backup.officialRestore
         case 'restore-portable-backup':
             return language.portableBackup.restore
         case 'export-portable-backup':
@@ -71,8 +75,6 @@ export function nativeFileJobTitle(
             return language.portableBackup.report
         case 'restore-legacy-local-backup':
             return language.loadBackupLocal
-        case 'export-legacy-local-backup':
-            return language.saveBackupLocal
         default:
             return kind === 'import'
                 ? language.importRisuSave

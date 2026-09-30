@@ -324,14 +324,13 @@ export function createNativeRemoteAssetReader(
         async readObject(contentHash, range) {
             objectPhysicalKey(contentHash)
             if (range) validateBlobReadRange(range)
-            const result = await invokeCommand('asset_remote_read_object', {
-                contentHash,
-                start: range?.start ?? null,
-                endExclusive: range?.endExclusive ?? null,
-            })
-            return result === null
-                ? null
-                : bytes(result, 'Native remote asset read')
+            const hydrated = await invokeCommand('asset_remote_hydrate_object', { contentHash })
+            if (hydrated === null) return null
+            const size = safeSize(hydrated, 'Native remote asset hydration')
+            const start = Math.min(range?.start ?? 0, size)
+            const end = Math.min(range?.endExclusive ?? size, size)
+            const result = await readCasObjectRange(invokeCommand, contentHash, start, end)
+            return result?.byteLength === end - start ? result : null
         },
     }
 }

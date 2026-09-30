@@ -1,4 +1,5 @@
 <script lang="ts">
+    import LoadingIndicator from "../UI/GUI/LoadingIndicator.svelte";
     import { alertGenerationInfoStore } from "../../ts/alert";
     
     import { DBState } from 'src/ts/stores.svelte';
@@ -73,6 +74,8 @@
     } = $state(null)
     let chatBranches = $state<Awaited<ReturnType<typeof getChatBranches>>>([])
     let branchLoadGeneration = 0
+    let branchLoad = $state<"loading" | "ready" | "failed">("loading")
+    let branchRetry = $state(0)
     let expandedLogs: Set<number> = $state(new Set())
     let allExpanded = $state(false)
     let copiedKey: string | null = $state(null)
@@ -148,16 +151,20 @@
 
     $effect(() => {
         const characterId = $alertStore.type === 'branches' ? $alertStore.msg : ''
+        branchRetry
         const generation = ++branchLoadGeneration
         chatBranches = []
         if (!characterId) return
-        void getChatBranches(characterId).then((branches) => {
-            if (
-                generation === branchLoadGeneration &&
-                $alertStore.type === 'branches' &&
-                $alertStore.msg === characterId
-            ) chatBranches = branches
-        }).catch(() => undefined)
+        const controller = new AbortController()
+        branchLoad = 'loading'
+        void getChatBranches(characterId, controller.signal).then((branches) => {
+            if (generation !== branchLoadGeneration || controller.signal.aborted) return
+            chatBranches = branches
+            branchLoad = 'ready'
+        }).catch(() => {
+            if (generation === branchLoadGeneration && !controller.signal.aborted) branchLoad = 'failed'
+        })
+        return () => controller.abort()
     })
 
     $effect(() => {
@@ -228,36 +235,18 @@
                 <!-- svelte-ignore a11y_missing_attribute -->
                 <!-- svelte-ignore a11y_click_events_have_key_events -->
 
-                {#if $alertStore.type === 'tos'}
-                    <div class="text-textcolor">
-                        To use RisuNest, you should accept the
-                        <a role="button" tabindex="0" class="text-green-600 hover:text-green-500 transition-colors duration-200 cursor-pointer" onclick={() => {
-                            openURL(RISUNEST_TERMS_URL)
-                        }}>Terms of Use</a>
-
-                        and
-
-                        <a role="button" tabindex="0" class="text-green-600 hover:text-green-500 transition-colors duration-200 cursor-pointer" onclick={() => {
-                            openURL(RISUNEST_PRIVACY_URL)
-                        }}>Privacy Notice</a>.
-                    </div>
-                {:else}
-                    <div class="text-textcolor">
-                        This feature connects to a service operated by the RisuAI maintainers. To continue, you should accept their
-                        <a role="button" tabindex="0" class="text-green-600 hover:text-green-500 transition-colors duration-200 cursor-pointer" onclick={() => {
-                            openURL(RISU_SERVICE_TERMS_URL)
-                        }}>Terms of Service</a>
-
-                        and
-
-                        <a role="button" tabindex="0" class="text-green-600 hover:text-green-500 transition-colors duration-200 cursor-pointer" onclick={() => {
-                            openURL(RISU_SERVICE_PRIVACY_URL)
-                        }}>Privacy Policy</a>.
-                    </div>
-                    <div class="text-gray-500 mt-4 text-sm">
-                        These services are not operated by RisuNest.
-                    </div>
-                {/if}
+                {@const ownTerms = $alertStore.type === 'tos'}
+                {@const legal = language.risuNest.legal}
+                <div class="text-textcolor">
+                    {#each (ownTerms ? legal.tosBody : legal.serviceBody).split(/(\{terms\}|\{privacy\})/) as part}
+                        {#if part === '{terms}'}
+                            <button class="text-green-600 hover:text-green-500 underline" onclick={() => openURL(ownTerms ? RISUNEST_TERMS_URL : RISU_SERVICE_TERMS_URL)}>{ownTerms ? legal.termsOfUse : legal.serviceTerms}</button>
+                        {:else if part === '{privacy}'}
+                            <button class="text-green-600 hover:text-green-500 underline" onclick={() => openURL(ownTerms ? RISUNEST_PRIVACY_URL : RISU_SERVICE_PRIVACY_URL)}>{ownTerms ? legal.privacyNotice : legal.servicePrivacy}</button>
+                        {:else}{part}{/if}
+                    {/each}
+                </div>
+                {#if !ownTerms}<div class="text-textcolor2 mt-4 text-sm">{legal.serviceNotOperated}</div>{/if}
             {:else if $alertStore.type === 'pluginconfirm'}
                 {@const parts = $alertStore.msg.split('\n\n')}
                 {@const mainPart = parts[0]}
@@ -343,13 +332,13 @@
                             type: 'none',
                             msg: 'yes'
                         })
-                    }}>Accept</Button>
+                    }}>{language.risuNest.legal.accept}</Button>
                     <Button styled={'outlined'} className="mt-4 grow" onclick={() => {
                         alertStore.set({
                             type: 'none',
                             msg: 'no'
                         })
-                    }}>Do not Accept</Button>
+                    }}>{language.risuNest.legal.decline}</Button>
                 </div>
             {:else if $alertStore.type === 'select'}
                 {@const hasDisplay = $alertStore.msg.startsWith('__DISPLAY__')}
@@ -861,6 +850,11 @@
     </div>
 {:else if $alertStore.type === 'branches'}
     <div class="absolute w-full h-full z-modal bg-black/80 flex justify-center items-center overflow-x-auto overflow-y-auto">
+        {#if branchLoad === "loading"}
+            <LoadingIndicator label={language.loading} />
+        {:else if branchLoad === "failed"}
+            <div role="alert" class="text-textcolor"><p>{language.branchLoadFailed}</p><Button onclick={() => branchRetry++}>{language.retry}</Button></div>
+        {/if}
         {#if branchHover !== null}
             <div class="z-30 whitespace-pre-wrap p-4 text-textcolor bg-darkbg border-darkborderc border rounded-md absolute" style="top: {branchHover.y * 80 + 24}px; left: {(branchHover.x + 1) * 80 + 24}px">
                 {branchHover.content}

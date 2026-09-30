@@ -462,7 +462,23 @@ impl TransferJournal {
         let path = directory.join("transfers.sqlite");
         match std::fs::symlink_metadata(&path) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(SpoolCleanup::Retained);
+                let released = match store.external_job(job_id).map_err(storage)? {
+                    Some(job) => {
+                        if job.id != job_id || job.repository_id != format_repository_id {
+                            return Err(corrupt());
+                        }
+                        if !matches!(job.phase.as_str(), "complete" | "cancelled") {
+                            return Ok(SpoolCleanup::Retained);
+                        }
+                        store.release_external_capture(&job.capture_id, &job.id).map_err(storage)?
+                    }
+                    None => store.external_job_has_no_capture_owner(job_id).map_err(storage)?,
+                };
+                return Ok(if released {
+                    SpoolCleanup::Removed { objects: 0, bytes: 0 }
+                } else {
+                    SpoolCleanup::Retained
+                });
             }
             Err(error) => return Err(storage(error)),
             Ok(_) => {}
@@ -1228,6 +1244,37 @@ mod tests {
     }
 
     #[test]
+    fn missing_journal_requires_released_authoritative_capture_owners() {
+        let (root, mut store, _identity, directory) = fixture();
+        std::fs::remove_file(directory.join("transfers.sqlite")).unwrap();
+        let unregistered = directory.join("unregistered.partial");
+        std::fs::write(&unregistered, b"unregistered source").unwrap();
+        assert_eq!(TransferJournal::cleanup_terminal_spools_at(
+            &directory, "job", &mut store, "format-repository",
+        ).unwrap(), SpoolCleanup::Retained);
+        assert_eq!(TransferJournal::cleanup_terminal_spools_at(
+            &directory, "job", &mut store, "different-repository",
+        ).unwrap_err().kind, ErrorKind::Corrupt);
+        store.retain_external_capture("capture", "conflict-owner").unwrap();
+        store.external_finish_backup("job", "point", "bundle", "authenticated-synthetic-observation").unwrap();
+        assert_eq!(TransferJournal::cleanup_terminal_spools_at(
+            &directory, "job", &mut store, "format-repository",
+        ).unwrap(), SpoolCleanup::Retained);
+        assert!(store.release_external_capture("capture", "conflict-owner").unwrap());
+        assert_eq!(TransferJournal::cleanup_terminal_spools_at(
+            &directory, "job", &mut store, "format-repository",
+        ).unwrap(), SpoolCleanup::Removed { objects: 0, bytes: 0 });
+        assert_eq!(std::fs::read(&unregistered).unwrap(), b"unregistered source");
+        assert_eq!(TransferJournal::cleanup_terminal_spools_at(
+            &root.path().join("never-created"), "before-pds-job", &mut store, "format-repository",
+        ).unwrap(), SpoolCleanup::Removed { objects: 0, bytes: 0 });
+        store.retain_external_capture("capture", "before-pds-job").unwrap();
+        assert_eq!(TransferJournal::cleanup_terminal_spools_at(
+            &root.path().join("never-created"), "before-pds-job", &mut store, "format-repository",
+        ).unwrap(), SpoolCleanup::Retained);
+    }
+
+    #[test]
     fn c_terminal_spool_cleanup_preserves_failed_work_and_conflict_or_export_owners() {
         let (root, mut store, identity, directory) = fixture();
         let journal = TransferJournal::open(&directory, identity.clone()).unwrap();
@@ -1258,7 +1305,7 @@ mod tests {
             SpoolCleanup::Removed { objects: 0, bytes: 0 });
         assert_eq!(TransferJournal::cleanup_terminal_spools_at(
             &root.path().join("no-journal"), "job", &mut store, "format-repository",
-        ).unwrap(), SpoolCleanup::Retained);
+        ).unwrap(), SpoolCleanup::Removed { objects: 0, bytes: 0 });
     }
 
 

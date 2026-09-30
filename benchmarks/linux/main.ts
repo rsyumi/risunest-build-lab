@@ -1,3 +1,4 @@
+import { runUnicodePersistenceProbe, verifyUnicodePersistenceProbe } from "../unicodePersistenceProbe";
 import { invoke } from "@tauri-apps/api/core";
 import { getIdentifier } from "@tauri-apps/api/app";
 import { platform } from "@tauri-apps/plugin-os";
@@ -173,10 +174,13 @@ async function persistence() {
       }
     }
   }
+  const unicode = await runUnicodePersistenceProbe(revision);
+  revision = unicode.revision;
   const final = await readMessage();
   return {
     passed: true,
     samples,
+    unicode,
     revision,
     finalHash: await digest(final.value.message[0].data),
   };
@@ -184,8 +188,10 @@ async function persistence() {
 async function reload() {
   await guard();
   await invoke("pds_open");
+  const unicode = await verifyUnicodePersistenceProbe();
   const final = await readMessage();
   return {
+    unicode,
     revision: final.revision,
     finalHash: await digest(final.value.message[0].data),
   };
@@ -217,6 +223,49 @@ async function regex() {
   }
   return { passed: true, samples };
 }
+async function startupAppearance(seed: boolean, theme: "light" | "dark") {
+  await guard();
+  check(Boolean(document.getElementById("preloading")), "appearance probe requires product HTML build");
+  if (seed) {
+    const { defaultColorScheme } = await import("../../src/ts/gui/colorscheme");
+    const colorScheme = theme === "dark" ? defaultColorScheme : {
+      bgcolor: "#ffffff", darkbg: "#f0f0f0", borderc: "#0f172a", selected: "#e0e0e0",
+      draculared: "#ff5555", textcolor: "#0f172a", textcolor2: "#64748b",
+      darkBorderc: "#d1d5db", darkbutton: "#e5e7eb", type: "light",
+    };
+    const opened = await invoke<{ revision: number }>("pds_open");
+    await invoke("pds_commit", {
+      commit: { expectedRevision: opened.revision, rootMutations: [
+        { type: "set", key: "didFirstSetup", value: true },
+        { type: "set", key: "colorScheme", value: colorScheme },
+      ] }, assetAliases: [],
+    });
+    localStorage.setItem("tos4", "true");
+    localStorage.setItem("appearance-theme", theme);
+    return { seeded: true, theme };
+  }
+  check(localStorage.getItem("appearance-theme") === theme, "appearance theme seed mismatch");
+  const preloaderBackground = getComputedStyle(document.getElementById("preloading")!).backgroundColor;
+  const app = await import("../../src/main");
+  await app.default;
+  const deadline = performance.now() + 60_000;
+  while (!performance.getEntriesByName("boot:interactive").length) {
+    check(performance.now() < deadline, "product appearance bootstrap timed out");
+    await pause(50);
+  }
+  const style = getComputedStyle(document.documentElement);
+  const bounds = document.getElementById("app")!.getBoundingClientRect();
+  await pause(1500);
+  return {
+    theme, systemDark: matchMedia("(prefers-color-scheme: dark)").matches,
+    preloaderBackground, colorScheme: style.colorScheme,
+    appBackground: style.getPropertyValue("--risu-theme-bgcolor"),
+    bounds: { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height },
+    interactiveMs: performance.getEntriesByName("boot:interactive")[0].startTime,
+    visualReview: "required", contentBackgroundPass: null, titlebarPass: null,
+  };
+}
+
 Object.assign(window, {
-  __RISUNEST_LINUX_BENCHMARK__: { persistence, reload, regex },
+  __RISUNEST_LINUX_BENCHMARK__: { persistence, reload, regex, startupAppearance },
 });

@@ -152,11 +152,7 @@ fn has_header(record: &crate::external_storage::wire_fixture::WireRequest, name:
 }
 
 fn existing_repository_replies() -> Vec<Reply> {
-    vec![
-        repository_reply(true),
-        reply(200, json!([release(7, &format!("{PREFIX}-d-0"))])),
-        reply(200, json!([asset(1, "descriptor-root", 4, None)])),
-    ]
+    vec![repository_reply(true)]
 }
 
 #[test]
@@ -185,7 +181,7 @@ fn inventory_lookup_finds_later_releases_after_gaps_and_rejects_duplicates() {
                 assert_eq!(result.unwrap().unwrap().locator.object, "40/90");
             }
             let requests = server.requests.lock().unwrap();
-            assert_eq!(requests.len(), 6);
+            assert_eq!(requests.len(), 4);
             assert!(requests.iter().all(|request| method_of(request) == "GET"));
         }
     });
@@ -316,6 +312,7 @@ fn backup_only_cleanup_reads_points_without_requesting_an_unsupported_head() {
                 credential_ref: SECRET.into(), root_key_ref: "synthetic-root-key".into(),
                 recovery_key_ref: "synthetic-recovery-key".into(),
                 capabilities: super::capabilities(), created_at_ms: NOW_MS,
+                verified_at_ms: 1,
                 last_sync_at_ms: None, last_backup_at_ms: None, capture_policy: None, retention_policy: None,
             },
             provider, handle, dependencies: test.dependencies,
@@ -329,7 +326,7 @@ fn backup_only_cleanup_reads_points_without_requesting_an_unsupported_head() {
         let roots = cleanup::RepositoryView::roots(&view, &Cancellation::default()).await.unwrap();
         assert!(roots.head.is_none());
         assert!(roots.points.is_empty());
-        assert_eq!(server.requests.lock().unwrap().len(), 4);
+        assert_eq!(server.requests.lock().unwrap().len(), 2);
     });
 }
 
@@ -805,54 +802,37 @@ fn a_public_repository_is_refused_and_an_occupied_root_cannot_be_created() {
 }
 
 #[test]
-fn existing_needs_the_descriptor_release_and_one_descriptor_asset() {
+fn existing_open_does_not_scan_release_history() {
     runtime().block_on(async {
-        let test = dependencies();
-        let provider = adapter(test.dependencies.clone());
+        let server = github_server(vec![repository_reply(true), reply(200, json!([]))]);
+        let provider = adapter(dependencies().dependencies);
+        let handle = open(provider.as_ref(), &server, OpenMode::Existing).await.unwrap();
+        assert_eq!(server.requests.lock().unwrap().len(), 1);
+        let page = provider.list_objects(&handle, Collection::Descriptors, None, 30, &Cancellation::default()).await.unwrap();
+        assert!(page.objects.is_empty());
+        assert!(page.next_cursor.is_none());
+    });
+}
 
-        let missing = github_server(vec![
-            repository_reply(true),
-            reply(200, json!([release(1, "v1.0.0")])),
-        ]);
-        assert_eq!(
-            open(provider.as_ref(), &missing, OpenMode::Existing)
-                .await
-                .err()
-                .unwrap()
-                .kind,
-            ErrorKind::NotFound
-        );
-
-        let empty = github_server(vec![
-            repository_reply(true),
-            reply(200, json!([release(7, &format!("{PREFIX}-d-0"))])),
-            reply(200, json!([asset(1, "pack-other", 4, None)])),
-        ]);
-        assert_eq!(
-            open(provider.as_ref(), &empty, OpenMode::Existing)
-                .await
-                .err()
-                .unwrap()
-                .kind,
-            ErrorKind::NotFound
-        );
-
-        let present = github_server(vec![
-            repository_reply(true),
-            reply(200, json!([release(7, &format!("{PREFIX}-d-0"))])),
-            reply(200, json!([asset(1, "descriptor-root", 4, None)])),
-        ]);
-        let handle = open(provider.as_ref(), &present, OpenMode::Existing)
-            .await
-            .unwrap();
-        assert_eq!(handle.repository_id, handle.connection_identity);
-        let records = present.requests.lock().unwrap();
-        assert!(head_line(&records[0]).contains("/repos/synthetic-owner/synthetic-repo "));
-        assert!(head_line(&records[1]).contains("/releases?per_page=30&page=1"));
-        assert!(head_line(&records[2]).contains("/releases/7/assets?per_page=100&page=1"));
-        assert!(records
-            .iter()
-            .all(|record| has_header(record, "authorization")));
+#[test]
+fn descriptor_discovery_reaches_beyond_twenty_pages() {
+    runtime().block_on(async {
+        let mut replies = existing_repository_replies();
+        for page in 0..23 {
+            replies.push(reply(200, json!((0..30).map(|index| release(page * 30 + index + 10,
+                &format!("unrelated-{page}-{index}"))).collect::<Vec<_>>())));
+        }
+        replies.push(reply(200, json!([release(7, &format!("{PREFIX}-d-0"))])));
+        let server = github_server(replies);
+        let provider = super::GithubReleases { dependencies: dependencies().dependencies };
+        let handle = open(&provider, &server, OpenMode::Existing).await.unwrap();
+        assert_eq!(server.requests.lock().unwrap().len(), 1);
+        let context = provider.context(&handle).unwrap();
+        let found = provider.find_release(context, &context.descriptor_tag(), &Cancellation::default()).await.unwrap();
+        assert_eq!(found, Some(7));
+        let requests = server.requests.lock().unwrap();
+        assert_eq!(requests.len(), 25);
+        assert!(head_line(requests.last().unwrap()).contains("page=24"));
     });
 }
 
@@ -1136,8 +1116,6 @@ fn a_download_follows_one_redirect_without_the_token() {
         let bytes = vec![6u8; 4096];
         let server = github_server(vec![
             repository_reply(true),
-            reply(200, json!([release(9, &format!("{PREFIX}-d-0"))])),
-            reply(200, json!([asset(3, "descriptor-root", 4, None)])),
             Reply::Http {
                 status: 302,
                 headers: vec![("Location".into(), "/synthetic/objects/blob".into())],
@@ -1177,13 +1155,13 @@ fn a_download_follows_one_redirect_without_the_token() {
         assert!(sink.is_verified());
 
         let records = server.requests.lock().unwrap();
-        assert!(head_line(&records[3]).contains("/releases/assets/3"));
-        assert!(records[3]
+        assert!(head_line(&records[1]).contains("/releases/assets/3"));
+        assert!(records[1]
             .headers
             .contains("accept: application/octet-stream"));
-        assert!(has_header(&records[3], "authorization"));
-        assert!(head_line(&records[4]).contains("/synthetic/objects/blob"));
-        assert!(!has_header(&records[4], "authorization"));
+        assert!(has_header(&records[1], "authorization"));
+        assert!(head_line(&records[2]).contains("/synthetic/objects/blob"));
+        assert!(!has_header(&records[2], "authorization"));
 
     });
 }
@@ -1505,8 +1483,6 @@ fn cancelling_during_the_body_stops_the_read() {
     runtime().block_on(async {
         let server = github_server(vec![
             repository_reply(true),
-            reply(200, json!([release(9, &format!("{PREFIX}-d-0"))])),
-            reply(200, json!([asset(3, "descriptor-root", 4, None)])),
             Reply::DelayedBody,
         ]);
         let test = dependencies();
@@ -1524,7 +1500,7 @@ fn cancelling_during_the_body_stops_the_read() {
         let cancel = Cancellation::default();
         let read = provider.read_object(&handle, &locator, None, &mut sink, &cancel);
         let trigger = async {
-            while server.requests.lock().unwrap().len() < 4 {
+            while server.requests.lock().unwrap().len() < 2 {
                 tokio::time::sleep(std::time::Duration::from_millis(1)).await;
             }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -1603,8 +1579,6 @@ fn descriptor_listing_reads_only_the_descriptor_release() {
         let descriptor_tag = format!("{PREFIX}-d-0");
         let server = github_server(vec![
             repository_reply(true),
-            reply(200, json!([release(9, &descriptor_tag)])),
-            reply(200, json!([asset(3, "descriptor-root", 4, None)])),
             reply(
                 200,
                 json!([
@@ -1642,7 +1616,7 @@ fn descriptor_listing_reads_only_the_descriptor_release() {
             Some(descriptor_tag.as_str())
         );
         assert_eq!(page.next_cursor, None);
-        assert_eq!(server.requests.lock().unwrap().len(), 5);
+        assert_eq!(server.requests.lock().unwrap().len(), 3);
     });
 }
 

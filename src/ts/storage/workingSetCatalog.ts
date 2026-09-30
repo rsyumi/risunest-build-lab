@@ -1,3 +1,4 @@
+import { isTauri } from '../platform'
 import isEqual from 'lodash/isEqual'
 import type { Chat, Database, character, groupChat } from './database.svelte'
 import {
@@ -30,11 +31,12 @@ export function patchWorkingSetRoot(target: Database, root: PersistentRoot): voi
     const targetRecord = target as unknown as Record<string, unknown>
     const rootRecord = root as unknown as Record<string, unknown>
     for (const key of Object.keys(targetRecord)) {
-        if (key === 'characters' || key === 'botPresets' ||
+        if ((isTauri && key === 'account') || key === 'characters' || key === 'botPresets' ||
             key === 'pluginCustomStorage' || key === 'pluginStorageMeta') continue
         if (!Object.hasOwn(rootRecord, key)) delete targetRecord[key]
     }
     for (const key of Object.keys(rootRecord)) {
+        if (isTauri && key === 'account') continue
         if (!isEqual(targetRecord[key], rootRecord[key])) targetRecord[key] = rootRecord[key]
     }
 }
@@ -106,6 +108,17 @@ export function getCatalogCharacterMetadata(
     value: CompleteCharacter,
 ): CatalogCharacterMetadata | undefined {
     return (value as CatalogCharacter)[catalogCharacterMetadata]
+}
+
+export function carryCatalogCharacterMetadata(previous: CompleteCharacter, replacement: CompleteCharacter): CompleteCharacter {
+    const metadata = getCatalogCharacterMetadata(previous)
+    if (metadata && !getCatalogCharacterMetadata(replacement)) {
+        Object.defineProperty(replacement, catalogCharacterMetadata, {
+            enumerable: false,
+            value: { ...metadata, residency: 'detail', conversationCount: replacement.chats.length },
+        })
+    }
+    return replacement
 }
 
 export function isCatalogCharacterStub(value: CompleteCharacter): boolean {
@@ -377,6 +390,7 @@ export async function materializePinnedCompatibilityDatabase(
 }
 
 export interface PinnedScalableWorkingSetOptions {
+    keepConversation?: (conversationId: string) => Chat | null
     selectedCharacterId: string | null
     selectedConversationId?: string | null
     activeCharacterIds?: ReadonlySet<string>
@@ -512,6 +526,7 @@ export async function projectPinnedScalableWorkingSet(
                 summary,
                 detail,
                 options.selectedConversationId,
+                options.keepConversation,
             )
             : createPinnedDetailOnlyCharacter(summary, detail))
     }

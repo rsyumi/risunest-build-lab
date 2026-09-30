@@ -2,6 +2,8 @@ import type { Database } from '../database.svelte'
 import type { NativeAccountCredentialVault } from '../nativeAccountCredential'
 import type { DataRevision } from '../persistentDataStore'
 import type { PinnedPublication } from '../saveCoordinator'
+import { NativeFileJobActivationCommittedError, syntheticNativeFileJobStatus, type NativeFileRestoreJobOptions } from '../nativeFileJobs'
+import type { OfficialPublicationOptions } from './officialAccountSnapshot'
 import type { OfficialPullResult } from './officialAccountSnapshot'
 
 /**
@@ -11,13 +13,14 @@ import type { OfficialPullResult } from './officialAccountSnapshot'
 export const nativeOfficialAccountKeys = {
     association: 'official-account.association.v1',
     assetLedger: 'official-account.asset-ledger.v1',
+    pendingAssets: 'official-account.pending-assets.v1',
 } as const
 
 export type NativeOfficialAccountCredential = NonNullable<Database['account']>
 
 interface NativeOfficialAdapter {
-    pull(): Promise<OfficialPullResult>
-    pin(revision: DataRevision): Promise<PinnedPublication>
+    pull(signal?: AbortSignal): Promise<OfficialPullResult>
+    pin(revision: DataRevision, options?: OfficialPublicationOptions): Promise<PinnedPublication>
     resetAccountAssociation(accountId: string | null): void
 }
 
@@ -34,17 +37,30 @@ export interface NativeOfficialAccountFlowDependencies {
     /** Removes the stored account metadata and drops the in-memory copies. */
     clearMetadata(): Promise<void>
     resetAccountSession(): void
-    nativeRestore?(credential: NativeOfficialAccountCredential): Promise<
+    prepareRestoreAssets?(accountId: string): Promise<void>
+    completeRestoreAssets?(accountId: string, onProgress?: (completed: number, total: number) => void): Promise<void>
+    clearRestoreAssets?(): Promise<void>
+    nativeRestore?(credential: NativeOfficialAccountCredential, options: NativeOfficialRestoreOptions): Promise<
         OfficialPullResult | { kind: 'compatibility-fallback' }
     >
 }
 
+export type NativeOfficialRestoreOptions = Pick<NativeFileRestoreJobOptions, 'signal' | 'onStatus' | 'onBlockingChange'>
+
+export class NativeAccountLoginError extends Error {
+    constructor(readonly rolledBack: boolean, readonly cause: unknown) {
+        super('Native official account login failed')
+        this.name = 'NativeAccountLoginError'
+    }
+}
+
 export interface NativeOfficialAccountFlow {
     login(credential: NativeOfficialAccountCredential): Promise<NativeOfficialAccountCredential>
+    getAccountId(): string | null
     getToken(): string | null
     reauthenticate(loginResult: string): Promise<NativeOfficialAccountCredential>
-    restore(): Promise<OfficialPullResult>
-    publish(signal?: AbortSignal): Promise<void>
+    restore(options?: NativeOfficialRestoreOptions): Promise<OfficialPullResult>
+    publish(signal?: AbortSignal, onProgress?: OfficialPublicationOptions['onProgress'], onStatus?: OfficialPublicationOptions['onStatus']): Promise<void>
     logout(): Promise<void>
 }
 
@@ -74,6 +90,10 @@ export function normalizeNativeOfficialAccountCredential(
     }
 }
 
+function throwIfAborted(signal?: AbortSignal): void {
+    if (signal?.aborted) throw signal.reason ?? new DOMException('The operation was aborted', 'AbortError')
+}
+
 export function createNativeOfficialAccountFlowService(
     dependencies: NativeOfficialAccountFlowDependencies,
 ): NativeOfficialAccountFlowService {
@@ -98,22 +118,23 @@ export function createNativeOfficialAccountFlowService(
                 dependencies.adapter.resetAccountAssociation(nextCredential.id)
             }
         } catch (error) {
+            let rolledBack = true
             try {
                 if (previousCredential) {
                     await dependencies.credentialVault.write(previousCredential)
                 } else {
                     await dependencies.credentialVault.clear()
                 }
-            } catch {}
+            } catch { rolledBack = false }
             try {
                 await dependencies.setRouting(previousCredential)
-            } catch {}
+            } catch { rolledBack = false }
             if (accountChanged) {
                 try {
                     dependencies.adapter.resetAccountAssociation(previousCredential?.id ?? null)
-                } catch {}
+                } catch { rolledBack = false }
             }
-            throw error
+            throw new NativeAccountLoginError(rolledBack, error)
         }
         credential = nextCredential
         credentialGeneration += 1
@@ -135,6 +156,9 @@ export function createNativeOfficialAccountFlowService(
         login(input) {
             return serialize(() => login(input))
         },
+        getAccountId() {
+            return credential?.id ?? null
+        },
         getToken() {
             return credential?.token ?? null
         },
@@ -150,24 +174,46 @@ export function createNativeOfficialAccountFlowService(
                 return reauthenticate(loginResult)
             })
         },
-        restore() {
+        restore(options = {}) {
             return serialize(async () => {
                 if (!credential) throw new Error('Native official account login is required')
+                throwIfAborted(options.signal)
                 await dependencies.flushPendingData('native-official-restore')
-                const nativeResult = dependencies.nativeRestore
-                    ? await dependencies.nativeRestore(credential)
-                    : await dependencies.adapter.pull()
-                const result = nativeResult.kind === 'compatibility-fallback'
-                    ? await dependencies.adapter.pull()
-                    : nativeResult
+                throwIfAborted(options.signal)
+                await dependencies.prepareRestoreAssets?.(credential.id)
+                let result: OfficialPullResult
+                try {
+                    const nativeResult = dependencies.nativeRestore
+                        ? await dependencies.nativeRestore(credential, options)
+                        : await dependencies.adapter.pull(options.signal)
+                    result = nativeResult.kind === 'compatibility-fallback'
+                        ? await dependencies.adapter.pull(options.signal)
+                        : nativeResult
+                } catch (error) {
+                    if (!(error instanceof NativeFileJobActivationCommittedError)) {
+                        try { await dependencies.clearRestoreAssets?.() } catch {}
+                    }
+                    throw error
+                }
                 if (result.kind === 'activated') {
+                    options.onBlockingChange?.(true)
                     let failed = false
                     let originalError: unknown
                     try {
-                        await dependencies.flushMetadata()
+                        await dependencies.completeRestoreAssets?.(credential.id, (completed, total) => {
+                            options.onStatus?.(syntheticNativeFileJobStatus(
+                                { kind: 'restore-official-account-snapshot' }, 'refreshing-app',
+                                { stageCompleted: completed, stageTotal: total, stageUnit: 'items' },
+                            ))
+                        })
                     } catch (error) {
                         failed = true
                         originalError = error
+                    }
+                    try {
+                        await dependencies.flushMetadata()
+                    } catch (error) {
+                        if (!failed) { failed = true; originalError = error }
                     }
                     try {
                         await dependencies.restart()
@@ -177,20 +223,25 @@ export function createNativeOfficialAccountFlowService(
                             originalError = error
                         }
                     }
-                    if (failed) throw originalError
+                    options.onBlockingChange?.(false)
+                    if (failed) throw new NativeFileJobActivationCommittedError(result.revision, originalError)
+                } else {
+                    await dependencies.clearRestoreAssets?.()
                 }
                 return result
             })
         },
-        publish(signal) {
+        publish(signal, onProgress, onStatus) {
             return serialize(async () => {
                 if (!credential) throw new Error('Native official account login is required')
+                throwIfAborted(signal)
                 await dependencies.flushPendingData('native-official-publish')
+                throwIfAborted(signal)
                 let publication: PinnedPublication | null = null
                 let failed = false
                 let originalError: unknown
                 try {
-                    publication = await dependencies.adapter.pin(dependencies.getRevision())
+                    publication = await dependencies.adapter.pin(dependencies.getRevision(), { signal, onProgress, onStatus, userInitiated: true })
                     await publication.publish(signal)
                 } catch (error) {
                     failed = true

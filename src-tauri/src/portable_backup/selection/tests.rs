@@ -54,7 +54,7 @@ fn selection(characters: &[&str], excluded: &[&str]) -> ArchiveSelection {
         characters: characters.iter().map(|id| (*id).to_owned()).collect(),
         presets: Vec::new(),
         plugins: Vec::new(),
-        excluded: excluded.iter().map(|id| (*id).to_owned()).collect(),
+        excluded: ArchiveExclusions { characters: excluded.iter().map(|id| (*id).to_owned()).collect(), ..ArchiveExclusions::default() },
     }
 }
 
@@ -83,7 +83,8 @@ fn the_inventory_lists_what_an_archive_holds_and_marks_what_is_damaged() {
     );
     assert_eq!(inventory.presets.len(), 2);
     assert_eq!(inventory.presets[1].damaged, 1);
-    assert_eq!(inventory.plugins[0].id, "p-1");
+    assert_eq!(inventory.plugins[0].id, PluginKey { owner: "synthetic-plugin".into(), key: "p-1".into() }.identity());
+    assert_eq!(inventory.characters[0].name, "a");
 }
 
 #[test]
@@ -112,13 +113,13 @@ fn a_preset_is_chosen_on_its_own_and_an_excluded_one_never_comes() {
         &ArchiveSelection {
             characters: Vec::new(),
             presets: vec!["0".to_owned(), "1".to_owned()],
-            plugins: vec!["p-1".to_owned()],
-            excluded: vec!["1".to_owned()],
+            plugins: vec![PluginKey { owner: "synthetic-plugin".into(), key: "p-1".into() }],
+            excluded: ArchiveExclusions { presets: vec!["1".to_owned()], ..ArchiveExclusions::default() },
         },
     )
     .unwrap();
     assert_eq!(closed.presets, ["0"]);
-    assert_eq!(closed.plugins, ["p-1"]);
+    assert_eq!(closed.plugins[0].key, "p-1");
 }
 
 #[test]

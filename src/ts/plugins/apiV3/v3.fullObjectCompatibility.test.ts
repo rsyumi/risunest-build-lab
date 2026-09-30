@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { Database } from '../../storage/database.svelte'
 
@@ -7,6 +7,8 @@ const fixture = vi.hoisted(() => ({
     selectedIndex: 0,
     databaseAccessDependencies: null as null | { getSelectedCharacterId(): string | null },
     pluginPermissionReads: vi.fn(),
+    permissionValues: new Map<string, unknown>(),
+    replacers: new Map<string, Set<Function>>(),
     listeners: new Set<Function>(),
     scopedAccess: {
         getFullObjectSnapshotStream: async (target: { characterIndex?: number; chatIndex?: number }, context: unknown) => {
@@ -46,7 +48,8 @@ const ownedStorageStub = {
     mutate: vi.fn(),
 }
 
-vi.mock('../plugins.svelte', () => {
+vi.mock('../plugins.svelte', async () => {
+    const { writable } = await import('svelte/store')
     const unrelated = vi.fn()
     const oldApis = new Proxy({
         getChar: () => {
@@ -60,6 +63,10 @@ vi.mock('../plugins.svelte', () => {
         },
         addRisuChatListener: (_mode: string, listener: Function) => fixture.listeners.add(listener),
         removeRisuChatListener: (_mode: string, listener: Function) => fixture.listeners.delete(listener),
+        getArg: (arg: string) => { const [name, key] = arg.split('::'); return fixture.database.plugins.find((plugin) => plugin.name === name)?.realArg[key] },
+        setArg: (arg: string, value: string) => { const [name, key] = arg.split('::'); const plugin = fixture.database.plugins.find((plugin) => plugin.name === name); if (plugin) plugin.realArg[key] = value },
+        addRisuReplacer: (name: string, callback: Function) => { const callbacks = fixture.replacers.get(name) ?? new Set(); callbacks.add(callback); fixture.replacers.set(name, callbacks) },
+        removeRisuReplacer: (name: string, callback: Function) => fixture.replacers.get(name)?.delete(callback),
         safeLocalStorage: {
             getItem: unrelated,
             setItem: unrelated,
@@ -73,10 +80,7 @@ vi.mock('../plugins.svelte', () => {
     return {
         allowedDbKeys: [],
         applyPreparedPluginDatabaseUpdate: vi.fn(),
-        customProviderStore: {
-            subscribe(run: (value: string[]) => void) { run([]); return () => undefined },
-            set: vi.fn(),
-        },
+        customProviderStore: writable<string[]>([]),
         getV2PluginAPIs: () => oldApis,
         handlePluginInstallViaPlugin: vi.fn(),
         pluginStorageStore: {
@@ -127,10 +131,11 @@ vi.mock('src/ts/platform', () => ({ isTauri: false }))
 vi.mock('src/ts/process/mcp/pluginmcp', () => ({ registerMCPModule: vi.fn(), unregisterMCPModule: vi.fn() }))
 vi.mock('src/ts/process/files/inlays', () => ({ getInlayAsset: vi.fn() }))
 vi.mock('src/ts/translator/translator', () => ({ getLLMCache: vi.fn(), searchLLMCache: vi.fn() }))
-vi.mock('src/ts/parser/parser.svelte', () => ({ hasher: vi.fn(async () => 'hash') }))
+vi.mock('src/ts/parser/parser.svelte', () => ({ hasher: vi.fn(async (bytes: Uint8Array) => 'hash:' + new TextDecoder().decode(bytes)) }))
 vi.mock('localforage', () => ({ default: { createInstance: () => ({
     getItem: fixture.pluginPermissionReads,
-    setItem: vi.fn(),
+    setItem: vi.fn(async (key: string, value: unknown) => { fixture.permissionValues.set(key, value) }),
+    clear: vi.fn(async () => fixture.permissionValues.clear()),
 }) } }))
 vi.mock('src/ts/process/index.svelte', () => ({
     sendChat: vi.fn(),
@@ -166,7 +171,11 @@ vi.mock('../pluginDatabaseAccess', () => ({
     linkPluginQueryAbortSignals: vi.fn(),
 }))
 
-import { executePluginV3 } from './v3.svelte'
+import { executePluginV3, loadV3Plugins, resetAllPluginPermissions, customV3ProviderMetaStore } from './v3.svelte'
+import { alertConfirm } from 'src/ts/alert'
+import { customProviderStore, pluginV2 } from '../plugins.svelte'
+import { get } from 'svelte/store'
+import { getPluginPermissionStore } from 'src/ts/storage/nativePluginPermissions'
 
 function resetDatabase(): void {
     fixture.database = {
@@ -275,5 +284,136 @@ describe('Plugin v3 full-object access routing', () => {
         expect(fixture.pluginPermissionReads).not.toHaveBeenCalledWith(
             expect.stringContaining('_db'),
         )
+    })
+})
+
+
+describe('Plugin v3 runtime consent and ownership', () => {
+    beforeEach(async () => {
+        await loadV3Plugins([])
+        fixture.permissionValues.clear()
+        fixture.pluginPermissionReads.mockImplementation(async (key: string) => fixture.permissionValues.get(key) ?? null)
+        vi.mocked(alertConfirm).mockReset().mockResolvedValue(true)
+        fixture.replacers.clear()
+        fixture.database.plugins = [
+            { name: 'owner', script: 'original', realArg: { marker: 'own' } },
+            { name: 'other', script: 'other-code', realArg: { marker: 'foreign' } },
+        ] as any
+    })
+    afterEach(async () => { await loadV3Plugins([]); vi.restoreAllMocks() })
+    async function start(name = 'owner', script = 'original') {
+        await executePluginV3({ name, script } as any)
+        return fixture.api!
+    }
+
+    it('binds deprecated arguments to the executing owner', async () => {
+        const api = await start()
+        expect(api.getArg('owner::marker')).toBe('own')
+        api.setArg('owner::marker', 'updated')
+        expect(api.getArg('owner::marker')).toBe('updated')
+        expect(api.getArg('other::marker')).toBeUndefined()
+        api.setArg('other::marker', 'stolen')
+        expect(fixture.database.plugins[1].realArg.marker).toBe('foreign')
+    })
+
+    it('hashes executing code rather than a mutable installed record', async () => {
+        const api = await start()
+        fixture.database.plugins[0].script = 'granted'
+        fixture.permissionValues.set('hash:granted_mainDom', true)
+        vi.mocked(alertConfirm).mockResolvedValue(false)
+        expect(await api.requestPluginPermission('mainDom')).toBe(false)
+        expect(alertConfirm).toHaveBeenCalledOnce()
+    })
+
+    it('requires a fresh grant when the same name executes changed source', async () => {
+        const first = await start()
+        expect(await first.requestPluginPermission('mainDom')).toBe(true)
+        await loadV3Plugins([])
+        const next = await start('owner', 'changed')
+        expect(await next.requestPluginPermission('mainDom')).toBe(true)
+        expect(alertConfirm).toHaveBeenCalledTimes(2)
+    })
+
+    it('waits for an in-flight reset before reading grants into a new epoch', async () => {
+        const api = await start()
+        await api.requestPluginPermission('mainDom')
+        const store = getPluginPermissionStore()
+        const original = store.clearAll.bind(store)
+        let release!: () => void
+        const gate = new Promise<void>((resolve) => { release = resolve })
+        const clear = vi.spyOn(store, 'clearAll').mockImplementation(async () => { await gate; await original() })
+        const reset = resetAllPluginPermissions()
+        await vi.waitFor(() => expect(clear).toHaveBeenCalledOnce())
+        let settled = false
+        const permission = api.requestPluginPermission('mainDom').then((value) => { settled = true; return value })
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        expect(settled).toBe(false)
+        release()
+        await reset
+        expect(await permission).toBe(true)
+        expect(alertConfirm).toHaveBeenCalledTimes(2)
+    })
+
+    it('drops denied runtime decisions when the same name loads new code', async () => {
+        vi.mocked(alertConfirm).mockResolvedValue(false)
+        const first = await start()
+        expect(await first.requestPluginPermission('mainDom')).toBe(false)
+        expect(await first.requestPluginPermission('mainDom')).toBe(false)
+        await loadV3Plugins([])
+        vi.mocked(alertConfirm).mockResolvedValue(true)
+        const next = await start('owner', 'changed')
+        expect(await next.requestPluginPermission('mainDom')).toBe(true)
+        expect(alertConfirm).toHaveBeenCalledTimes(2)
+    })
+
+    it('honors periodic upfront grants across reload and rechecks at the deadline', async () => {
+        let now = 1000
+        vi.spyOn(Date, 'now').mockImplementation(() => now)
+        const first = await start()
+        expect(await first.requestPluginPermission('db')).toBe(true)
+        await loadV3Plugins([])
+        const next = await start()
+        expect(await next.requestPluginPermission('db')).toBe(true)
+        expect(alertConfirm).toHaveBeenCalledOnce()
+        now += 3 * 24 * 60 * 60 * 1000
+        expect(await next.requestPluginPermission('db')).toBe(true)
+        expect(alertConfirm).toHaveBeenCalledTimes(2)
+        await resetAllPluginPermissions()
+        expect(await next.requestPluginPermission('db')).toBe(true)
+        expect(alertConfirm).toHaveBeenCalledTimes(3)
+    })
+
+    it('removes both replacer kinds and rejects registrations after unload', async () => {
+        const api = await start()
+        const callback = vi.fn()
+        await api.addRisuReplacer('beforeRequest', callback)
+        await api.addRisuReplacer('afterRequest', callback)
+        expect(fixture.replacers.get('beforeRequest')?.size).toBe(1)
+        await loadV3Plugins([])
+        expect(fixture.replacers.get('beforeRequest')?.size).toBe(0)
+        expect(fixture.replacers.get('afterRequest')?.size).toBe(0)
+        const next = await start()
+        let approve!: (value: boolean) => void
+        await resetAllPluginPermissions()
+        vi.mocked(alertConfirm).mockImplementation(() => new Promise((resolve) => { approve = resolve }))
+        const pending = next.addRisuReplacer('beforeRequest', callback)
+        await vi.waitFor(() => expect(approve).toBeTypeOf('function'))
+        await loadV3Plugins([])
+        approve(true)
+        await pending
+        expect(fixture.replacers.get('beforeRequest')?.size).toBe(0)
+    })
+
+    it('replaces provider metadata and cleans up the currently owned registration', async () => {
+        const api = await start()
+        api.addProvider('provider', vi.fn(), { model: { name: 'First' } })
+        api.addProvider('provider', vi.fn(), { model: { name: 'Latest' } })
+        expect(get(customProviderStore)).toEqual(['provider'])
+        expect(customV3ProviderMetaStore.filter((model) => model.id === 'pluginmodel:::provider').map((model) => model.name)).toEqual(['Latest'])
+        await loadV3Plugins([])
+        expect(get(customProviderStore)).toEqual([])
+        expect(customV3ProviderMetaStore).toEqual([])
+        expect(pluginV2.providerOptions.has('provider')).toBe(false)
+        expect(pluginV2.providers.has('provider')).toBe(false)
     })
 })

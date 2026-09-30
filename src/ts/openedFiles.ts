@@ -2,7 +2,7 @@ import { readFile } from '@tauri-apps/plugin-fs'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { alertError } from './alert'
-import { isTauriDesktop, isTauriIOS } from 'src/ts/platform'
+import { isTauriAndroid, isTauriDesktop, isTauriIOS } from 'src/ts/platform'
 import { discardIOSFile } from './storage/iosFiles'
 
 /**
@@ -15,9 +15,9 @@ export const OPENED_FILES_EVENT = 'risu-opened-files'
 /** Desktop command that returns the pending opened files and clears them in the same call. */
 export const OPENED_FILES_TAKE_COMMAND = 'opened_files_take'
 
-export type OpenedFileImporter = (name: string, data: Uint8Array) => Promise<void>
+export type OpenedFileImporter = (name: string, data: Uint8Array) => Promise<void | 'failed'>
 
-let openedPathImporter: ((path: string) => Promise<boolean>) | undefined
+let openedPathImporter: ((path: string) => Promise<boolean | 'failed'>) | undefined
 let openedFileImporter: OpenedFileImporter | null = null
 let domListener: ((event: Event) => void) | null = null
 let queue: Promise<void> = Promise.resolve()
@@ -37,9 +37,13 @@ export async function consumeOpenedFiles(files: string[]): Promise<void> {
                 continue
             }
             try {
-                if (await openedPathImporter?.(file)) continue
-                const data = await readFile(file)
-                await importer(file, data)
+                const nativeResult = await openedPathImporter?.(file)
+                if (nativeResult === 'failed') continue
+                if (!nativeResult) {
+                    const data = await readFile(file)
+                    if (await importer(file, data) === 'failed') continue
+                }
+                if (isTauriAndroid) await window.RisuLifecycleBridge?.acknowledgeOpenedFile?.(file)
             } catch (error) {
                 alertError(
                     `Failed to open the selected file: ${file}\n${error}`,
@@ -61,7 +65,7 @@ export async function consumeOpenedFiles(files: string[]): Promise<void> {
  */
 export function registerOpenedFileListeners(
     importFile: OpenedFileImporter,
-    importPath?: (path: string) => Promise<boolean>,
+    importPath?: (path: string) => Promise<boolean | 'failed'>,
 ): void {
     openedFileImporter = importFile
     openedPathImporter = importPath

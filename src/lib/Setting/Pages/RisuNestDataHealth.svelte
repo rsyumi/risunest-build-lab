@@ -63,10 +63,25 @@
         cancel: cancelNativeDataHealthScan,
         planRepair: planNativeDataHealthRepair,
         previewRepair: previewNativeDataHealthRepair,
-        applyRepair: applyNativeDataHealthRepair,
+        applyRepair: (selection, snapshot, revision, scannedAt) => repair(
+            revision, (expected) => applyNativeDataHealthRepair(selection, snapshot, expected, scannedAt),
+        ),
         listJournals: listNativeDataHealthJournals,
-        undoRepair: undoNativeDataHealthRepair,
+        undoRepair: (journalId, revision) => repair(
+            revision, (expected) => undoNativeDataHealthRepair(journalId, expected),
+        ),
     })
+    async function repair<T extends { revision: number }>(
+        revision: number,
+        mutate: (expectedRevision: number) => Promise<T>,
+    ): Promise<T> {
+        if (prepare) return mutate(revision)
+        const [{ runNativeDataHealthRepair }, { getPersistentDataRuntime }] = await Promise.all([
+            import('src/ts/storage/nativeDataHealthRepair'),
+            import('src/ts/storage/persistentDataRuntime.svelte'),
+        ])
+        return runNativeDataHealthRepair(revision, mutate, getPersistentDataRuntime())
+    }
     let view = $state(model.snapshot())
     let resolvedNames = $state(new Map<string, DataHealthResolvedNames>())
     let includeNames = $state(false)
@@ -208,22 +223,27 @@
             await navigator.clipboard.writeText(reportText())
             alertNormal(strings.copied)
         } catch {
-            alertError(strings.scanFailed)
+            alertError(strings.copyFailed)
         }
     }
 
-    function saveReport(): void {
+    async function saveReport(): Promise<void> {
         const result = view.result
         if (!result) return
-        void downloadFile(dataHealthReportFileName(result), reportText())
-        alertNormal(strings.saved)
+        try {
+            if (await downloadFile(dataHealthReportFileName(result), reportText())) {
+                alertNormal(strings.saved)
+            }
+        } catch {
+            alertError(strings.saveFailed)
+        }
     }
 
     async function run(action: () => Promise<void>): Promise<void> {
         try {
             await action()
         } catch {
-            alertError(strings.scanFailed)
+            // The model owns the operation-specific failure message.
         }
     }
 
@@ -276,12 +296,21 @@
             void refreshNames(next.result?.items ?? [])
         }
     })
-    onMount(() => {
-        void (prepare ? prepare() : Promise.resolve())
-            .then(() => model.load())
-            .then(() => model.loadRepairs())
-            .catch(() => alertError(strings.scanFailed))
-    })
+    let preparation = $state<'pending' | 'ready' | 'failed'>('pending')
+    async function initialize(): Promise<void> {
+        preparation = 'pending'
+        try {
+            await prepare?.()
+            preparation = 'ready'
+            await model.load()
+            await model.loadRepairs()
+        } catch { preparation = 'failed' }
+    }
+    const failureMessages = {
+        load: strings.loadFailed, scan: strings.scanFailed, repair: strings.repairFailed,
+        undo: strings.undoFailed, refresh: strings.refreshFailed, preview: strings.previewFailed,
+    }
+    onMount(() => { void initialize() })
     onDestroy(() => {
         namesGeneration++
         unsubscribe()
@@ -318,8 +347,12 @@
                     <p class="mt-1 text-sm text-textcolor2 tabular-nums">{deepProgress}</p>
                 {/if}
             {/if}
-            {#if view.failed}
-                <p class="mt-1 text-sm text-danger-400" role="alert">{strings.scanFailed}</p>
+            {#if preparation === 'failed'}
+                <p role="alert">{strings.openFailed}</p><SettingButton onclick={initialize}>{language.retry}</SettingButton>
+            {/if}
+            {#if view.applied}<p role="status">{strings.repairApplied.replace('{0}', count(view.applied.remaining))}</p>{/if}
+            {#if view.failure}
+                <p class="mt-1 text-sm text-danger-400" role="alert">{failureMessages[view.failure]}</p>
             {/if}
         </div>
         {#if view.running}
@@ -343,18 +376,18 @@
         <SettingButton
             variant="secondary"
             busy={view.running === 'quick'}
-            disabled={Boolean(view.running) || view.loading}
+            disabled={preparation !== 'ready' || Boolean(view.activity) || view.loading}
             onclick={() => run(() => model.quickScan())}
         >{strings.quickScan}</SettingButton>
     </SettingRow>
     <SettingRow data-data-health-deep label={strings.deepScan} help={strings.deepScanHelp}>
         <!-- Stopping a running check is offered once, beside the progress bar above. -->
         {#if view.resumable}
-            <SettingButton variant="secondary" disabled={Boolean(view.running) || view.loading} onclick={() => run(() => model.deepScan(true))}>{strings.resume}</SettingButton>
+            <SettingButton variant="secondary" disabled={preparation !== 'ready' || Boolean(view.activity) || view.loading} onclick={() => run(() => model.deepScan(true))}>{strings.resume}</SettingButton>
         {/if}
         <SettingButton
             busy={view.running === 'deep'}
-            disabled={Boolean(view.running) || view.loading}
+            disabled={preparation !== 'ready' || Boolean(view.activity) || view.loading}
             onclick={() => run(() => model.deepScan(false))}
         >{view.resumable ? strings.restart : strings.deepScan}</SettingButton>
     </SettingRow>
@@ -411,7 +444,7 @@
                     showLabel
                     checked={allSelected}
                     indeterminate={someSelected}
-                    disabled={view.repairing}
+                    disabled={preparation !== 'ready' || Boolean(view.activity)}
                     onchange={(next) => { void model.setAll(next) }}
                 />
                 <span class="text-sm text-textcolor2 tabular-nums">{strings.repairSelected.replace('{0}', count(view.selection.length))}</span>
@@ -424,7 +457,7 @@
                             <SettingToggle
                                 checked={view.selection.includes(option.id)}
                                 showLabel
-                                disabled={view.repairing}
+                                disabled={preparation !== 'ready' || Boolean(view.activity)}
                                 label={actionLabels[option.action.action]}
                                 onchange={() => { void model.toggle(option.id) }}
                             />
@@ -448,7 +481,7 @@
                         <SettingToggle
                             checked={keepSnapshot}
                             showLabel
-                            disabled={view.repairing}
+                            disabled={preparation !== 'ready' || Boolean(view.activity)}
                             label={strings.repairSnapshot}
                             onchange={(next) => { snapshotTouched = true; keepSnapshot = next }}
                         />
@@ -459,7 +492,7 @@
                         </div>
                     {/if}
                 {/snippet}
-                <SettingButton busy={view.repairing} disabled={view.selection.length === 0} onclick={applyRepair}>{strings.repairApply}</SettingButton>
+                <SettingButton busy={view.repairing} disabled={preparation !== "ready" || Boolean(view.activity) || view.selection.length === 0} onclick={applyRepair}>{strings.repairApply}</SettingButton>
             </SettingRow>
         {/if}
         {#if view.skipped.length > 0}
@@ -473,7 +506,7 @@
                         .replace('{0}', new Date(entry.createdAt).toLocaleString())
                         .replace('{1}', count(entry.changes))
                         .replace('{2}', count(entry.heldObjects))}</span>
-                    <SettingButton variant="secondary" disabled={view.repairing || !entry.current} onclick={() => undoRepair(entry.id)}>{strings.undoAction}</SettingButton>
+                    <SettingButton variant="secondary" disabled={preparation !== 'ready' || Boolean(view.activity) || !entry.current} onclick={() => undoRepair(entry.id)}>{strings.undoAction}</SettingButton>
                 </div>
             {:else}
                 <p class="px-4 py-2.5 text-sm text-textcolor2">{strings.undoNone}</p>

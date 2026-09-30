@@ -23,9 +23,11 @@ impl restore::ReplacementSink for StoreSink {
         self.store.lock().unwrap().replace_put_presets(id, presets)
     }
     fn add_characters(&self, id: &str, characters: &[Value]) -> StoreResult<()> {
+        let mut unavailable = Vec::new();
         let expanded =
-            cold_expansion::expand_cold_payloads(characters, &self.payloads.cold_payloads)
+            cold_expansion::expand_cold_payloads(characters, &self.payloads.cold_payloads, &mut unavailable)
                 .map_err(|message| crate::persistent_store::StoreError::Store { message })?;
+        assert!(unavailable.is_empty(), "synthetic PocketRisu fixture has unavailable cold payloads");
         self.store
             .lock()
             .unwrap()
@@ -100,7 +102,7 @@ impl StrictLocalBackupDatabaseRestore for Import<'_> {
             1,
             self.job,
             &sink,
-            restore::RestoreProgressScale::default(),
+            restore::RestoreProgressScale { spool_directory: Some(self.root.to_path_buf()), ..Default::default() },
         );
         sink.durable
             .lock()

@@ -15,6 +15,21 @@ import org.w3c.dom.Element
 
 class GenerationForegroundServiceTest {
   @Test
+  fun `notification refresh failure preserves an admitted owner until end`() {
+    val registry = BackgroundTaskRegistry()
+    val lifecycle = GenerationForegroundLifecycle()
+    var stops = 0
+    val first = registry.begin("sync", { lifecycle.begin { true } }, {})!!
+    val second = registry.begin("backup", { lifecycle.begin { true } }, {}, { error("refresh") })!!
+    assertEquals(2, registry.snapshot().size)
+    assertTrue(registry.end(first) { lifecycle.end { stops++; true } })
+    assertEquals(0, stops)
+    assertTrue(registry.end(second) { lifecycle.end { stops++; true } })
+    assertEquals(1, stops)
+    assertTrue(registry.snapshot().isEmpty())
+  }
+
+  @Test
   fun `background owners keep independent progress and cannot end a newer task`() {
     val registry = BackgroundTaskRegistry()
     val lifecycle = GenerationForegroundLifecycle()

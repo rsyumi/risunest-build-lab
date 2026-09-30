@@ -6,7 +6,7 @@ import type {
 } from './nativeFileJobs'
 
 const mocks = vi.hoisted(() => ({
-    platform: 'desktop' as 'desktop' | 'android' | 'web',
+    platform: 'desktop' as 'desktop' | 'android' | 'ios' | 'web',
     save: vi.fn(),
     runExport: vi.fn(),
     assertAvailable: vi.fn(),
@@ -21,6 +21,9 @@ vi.mock('@tauri-apps/plugin-dialog', () => ({ save: mocks.save }))
 vi.mock('../platform', () => ({
     get isTauri() {
         return mocks.platform !== 'web'
+    },
+    get isTauriIOS() {
+        return mocks.platform === 'ios'
     },
     get isTauriAndroid() {
         return mocks.platform === 'android'
@@ -213,4 +216,20 @@ describe('compatibility backup production picker', () => {
         expect(mocks.manager).not.toHaveBeenCalled()
         expect(mocks.save).not.toHaveBeenCalled()
     })
+})
+
+it.each(['risuai', 'pocketrisu'] as const)('publishes %s on iOS without a placeholder picker', async (target) => {
+    mocks.assertAvailable.mockReset()
+    mocks.platform = 'ios'
+    mocks.save.mockClear()
+    mocks.runExport.mockReset().mockResolvedValue(result)
+    mocks.managedController = new AbortController()
+    mocks.manager.mockImplementation(async (_kind, _key, operation) => operation({
+        signal: mocks.managedController.signal,
+        onStatus: mocks.managedStatus,
+    }))
+    await exportCompatibilityBackupFromSystemPicker(target)
+    expect(mocks.save).not.toHaveBeenCalled()
+    expect(mocks.runExport).toHaveBeenCalledWith(mocks.runtime, target,
+        { type: 'iosFiles', suggestedName: `${target}-backup.bin` }, expect.any(Object))
 })

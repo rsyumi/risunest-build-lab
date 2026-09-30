@@ -46,11 +46,20 @@ interface NativeLifecycleDetail {
 interface NativeLifecycleFlushBridge {
     onFlushComplete?: (token: string) => void
     onFlushHold?: (token: string) => void
+    exitListenerReady?: (ready: boolean) => void
     requestExit?: () => void
 }
 
 function nativeBridge(): NativeLifecycleFlushBridge | undefined {
     return (window as { RisuLifecycleBridge?: NativeLifecycleFlushBridge }).RisuLifecycleBridge
+}
+
+function setNativeExitListenerReady(ready: boolean): void {
+    try {
+        nativeBridge()?.exitListenerReady?.(ready)
+    } catch (error) {
+        console.error('Lifecycle exit readiness failed', error)
+    }
 }
 
 function acknowledgeNativeFlush(token: string): void {
@@ -158,11 +167,11 @@ export function registerLifecycleCommitListeners(
         })
     }
     const requestExitFlush = (ackToken: string) => {
-        if (pendingExit) return
         if (!holdNativeExit(ackToken)) {
             requestFlush('exit', ackToken)
             return
         }
+        if (pendingExit) return
         pendingExit = (async () => {
             if (isExitCoordinator(exitHandler)) {
                 if (await exitHandler.requestExit() === 'exit') requestNativeExit()
@@ -222,8 +231,10 @@ export function registerLifecycleCommitListeners(
     window.addEventListener('pagehide', onPageHide)
     document.addEventListener('visibilitychange', onVisibilityChange)
     window.addEventListener('risu-native-lifecycle', onNativeLifecycle)
+    setNativeExitListenerReady(true)
 
     return () => {
+        setNativeExitListenerReady(false)
         window.removeEventListener('pagehide', onPageHide)
         document.removeEventListener('visibilitychange', onVisibilityChange)
         window.removeEventListener('risu-native-lifecycle', onNativeLifecycle)

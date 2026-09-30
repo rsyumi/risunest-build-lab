@@ -19,10 +19,20 @@ const alerts = vi.hoisted(() => ({
     alertNormal: vi.fn(),
 }))
 const files = vi.hoisted(() => ({ downloadFile: vi.fn() }))
+const repairRuntime = vi.hoisted(() => ({
+    flushPendingDataLocally: vi.fn(async () => {}),
+    capturePersistentMutationToken: vi.fn(async () => ({ revision: 12, mutationGeneration: 0 })),
+    acquireDestructiveReplacementFence: vi.fn(async () => ({
+        revision: 12,
+        refreshCommittedWorkingSet: vi.fn(async (revision: number) => ({ kind: 'committed', revision, projection: 'applied' })),
+        release: vi.fn(),
+    })),
+}))
 
 vi.mock('src/ts/storage/nativePersistentMaintenance', () => maintenance)
 vi.mock('src/ts/alert', () => alerts)
 vi.mock('src/ts/globalApi.svelte', () => files)
+vi.mock('src/ts/storage/persistentDataRuntime.svelte', () => ({ getPersistentDataRuntime: () => repairRuntime }))
 vi.mock('src/lang', async () => ({
     language: (await import('src/lang/en')).languageEnglish,
 }))
@@ -145,6 +155,20 @@ describe('RisuNestDataHealth', () => {
         await settle()
         return target
     }
+
+    it('retries failed store preparation and keeps scans disabled until it succeeds', async () => {
+        const prepare = vi.fn().mockRejectedValueOnce(new Error('synthetic open')).mockResolvedValueOnce(undefined)
+        const target = await setup(null, { prepare })
+        const buttons = () => [...target.querySelectorAll<HTMLButtonElement>('button')]
+        expect(target.textContent).toContain(strings.openFailed)
+        expect(buttons().find(button => button.textContent?.trim() === strings.quickScan)?.disabled).toBe(true)
+        expect(maintenance.getNativeDataHealthResult).not.toHaveBeenCalled()
+        buttons().find(button => button.textContent?.trim() === languageEnglish.retry)!.click()
+        await settle()
+        expect(prepare).toHaveBeenCalledTimes(2)
+        expect(maintenance.getNativeDataHealthResult).toHaveBeenCalledOnce()
+        expect(buttons().find(button => button.textContent?.trim() === strings.quickScan)?.disabled).toBe(false)
+    })
 
     it('shows the last diagnosis on open without scanning again', async () => {
         const target = await setup(damaged)
@@ -311,6 +335,24 @@ describe('RisuNestDataHealth', () => {
         expect(onOpenUnusedImages).toHaveBeenCalledOnce()
     })
 
+    it.each([true, false, 'failure'])('waits for report save settlement (%s) before reporting the outcome', async (result) => {
+        let resolve!: (value: boolean) => void
+        let reject!: (error: unknown) => void
+        files.downloadFile.mockImplementationOnce(() => new Promise<boolean>((yes, no) => { resolve = yes; reject = no }))
+        const target = await setup(damaged)
+        const save = [...target.querySelectorAll('button')].find(button => button.textContent?.trim() === strings.saveReport)
+        save?.click()
+        await settle()
+        expect(alerts.alertNormal).not.toHaveBeenCalled()
+        if (result === 'failure') reject(new Error('write failed'))
+        else resolve(result as boolean)
+        await settle()
+        if (result === true) expect(alerts.alertNormal).toHaveBeenCalledExactlyOnceWith(strings.saved)
+        else expect(alerts.alertNormal).not.toHaveBeenCalled()
+        if (result === 'failure') expect(alerts.alertError).toHaveBeenCalledExactlyOnceWith(strings.saveFailed)
+        else expect(alerts.alertError).not.toHaveBeenCalled()
+    })
+
     it('saves a report that carries no name unless the reader asks', async () => {
         const target = await setup(damaged)
         const save = [...target.querySelectorAll('button')].find(
@@ -370,10 +412,13 @@ describe('RisuNestDataHealth', () => {
             (button) => button.textContent?.trim() === strings.repairApply,
         )
         apply?.click()
+        await vi.waitFor(() => expect(maintenance.applyNativeDataHealthRepair).toHaveBeenCalled())
         await settle()
         expect(maintenance.applyNativeDataHealthRepair).toHaveBeenCalledWith(
             ['1:drop-reference'],
             true,
+            damaged.revision,
+            damaged.scannedAt,
         )
         expect(target.querySelectorAll('[data-data-health-group]')).toHaveLength(0)
     })
@@ -386,8 +431,9 @@ describe('RisuNestDataHealth', () => {
             (button) => button.textContent?.trim() === strings.undoAction,
         )
         undo?.click()
+        await vi.waitFor(() => expect(maintenance.undoNativeDataHealthRepair).toHaveBeenCalled())
         await settle()
-        expect(maintenance.undoNativeDataHealthRepair).toHaveBeenCalledWith('repair-1')
+        expect(maintenance.undoNativeDataHealthRepair).toHaveBeenCalledWith('repair-1', damaged.revision)
         expect(
             target.querySelector('[data-data-health-skipped]')?.textContent,
         ).toContain('characters:char-9')

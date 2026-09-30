@@ -1,5 +1,5 @@
 import "../../src/styles.css";
-import { mount, tick } from "svelte";
+import { mount, tick, unmount } from "svelte";
 import Fixture from "./Fixture.svelte";
 import { DBState, selectedCharID } from "../../src/ts/stores.svelte";
 import {
@@ -10,11 +10,15 @@ import { changeLanguage } from "../../src/lang";
 import { updateColorScheme } from "../../src/ts/gui/colorscheme";
 import { processScriptFull } from "../../src/ts/process/scripts";
 import { runStreamingSuite } from "./suite";
+import { runLeaseReleaseCheckpointSuite } from "./lease-release";
+import { runHypaSummaryProbe } from "./hypaSummaryProbe";
 import {
   runPersistenceSpike,
   runPersistenceSuite,
   checkPersistenceReload,
 } from "./persistence";
+
+import { viewportProbe } from "./viewport";
 
 export function startStreamingSmoke() {
   const character = {
@@ -123,13 +127,20 @@ export function startStreamingSmoke() {
   Object.assign(window, {
     __streamingSmoke: {
       ...api,
+      viewport: viewportProbe,
       checkPersistenceReload,
       run: (profile = "smoke") =>
-        profile === "persistence-spike"
-          ? runPersistenceSpike()
-          : profile === "persistence"
-            ? runPersistenceSuite(api)
-            : runStreamingSuite(api, profile),
+        profile === "viewport"
+          ? unmount(fixture).then(() => viewportProbe.run())
+          : profile === "hypa-summary"
+            ? runHypaSummaryProbe(() => unmount(fixture))
+            : profile === "persistence-spike"
+              ? runPersistenceSpike()
+              : profile === "persistence"
+                ? runPersistenceSuite(api)
+                : profile === "lease-release"
+                  ? runLeaseReleaseCheckpointSuite(api)
+                  : runStreamingSuite(api, profile),
     },
   });
 }

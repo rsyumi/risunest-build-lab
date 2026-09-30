@@ -25,16 +25,30 @@ test("unsupported container and Cloudflare Pages distribution channels stay remo
   assert.doesNotMatch(readme, /Docker Installation|docker compose|run RisuNest using Docker/i);
 });
 
-test("pull requests run only the standard and CodeQL checks", () => {
+test("pull requests run only the standard, CodeQL and scoped native checks", () => {
   const pullRequestWorkflows = readdirSync(workflows, { withFileTypes: true })
     .filter((entry) => entry.isFile() && /\.ya?ml$/.test(entry.name))
     .filter((entry) => /^  pull_request:/m.test(readFileSync(new URL(entry.name, workflows), "utf8")))
     .map((entry) => entry.name)
     .sort();
-  assert.deepEqual(pullRequestWorkflows, ["codeql.yml", "pr-check.yml"]);
+  assert.deepEqual(pullRequestWorkflows, ["codeql.yml", "native-check.yml", "pr-check.yml"]);
 
   const pullRequestCheck = readFileSync(new URL("pr-check.yml", workflows), "utf8");
   assert.doesNotMatch(pullRequestCheck, /pull-requests:\s*write/);
+
+  const nativeCheck = readFileSync(new URL("native-check.yml", workflows), "utf8").replace(/\r\n/g, "\n");
+  const nativePullRequest = nativeCheck.match(/^  pull_request:\n((?: {4,}[^\n]*\n)+)/m)?.[1];
+  assert.equal(nativePullRequest, [
+    "    branches: [main]",
+    "    paths:",
+    "      - 'src-tauri/**'",
+    "      - 'crates/**'",
+    "      - 'scripts/linux-native-tests.sh'",
+    "      - '.github/workflows/native-check.yml'",
+    "",
+  ].join("\n"));
+  const nativePermissions = nativeCheck.match(/^permissions:\n((?: {2,}[^\n]*\n)+)/m)?.[1];
+  assert.equal(nativePermissions, "  contents: read\n");
 });
 
 test("CodeQL analyzes the native Rust sources without a product build", () => {

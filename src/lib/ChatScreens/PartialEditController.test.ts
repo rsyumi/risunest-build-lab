@@ -2,8 +2,10 @@
 
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import { mount, tick, unmount } from 'svelte'
+import { writable } from 'svelte/store'
 
 vi.mock('src/ts/stores.svelte', () => ({
+    alertStore: writable({ type: 'none', msg: '' }),
     DBState: {
         db: {
             zoomsize: 100,
@@ -74,6 +76,37 @@ afterEach(async () => {
     document.body.replaceChildren()
     vi.unstubAllGlobals()
     vi.restoreAllMocks()
+})
+
+test('retains the original source and draft when an asynchronous partial save is refused', async () => {
+    const saved = deferred<boolean>()
+    const onSave = vi.fn(() => saved.promise)
+    mounted = mount(PartialEditControllerHarness, { target, props: {
+        getTranslationEditContext: async () => null, onSave,
+    } })
+    ;(mounted as HarnessInstance).setTranslatedView(false)
+    await tick()
+    const root = target.querySelector('div')!
+    const block = target.querySelector('p')!
+    vi.spyOn(document, 'elementFromPoint').mockReturnValue(block)
+    TestIntersectionObserver.instance?.setVisible(root)
+    await tick()
+    document.dispatchEvent(new MouseEvent('mousemove', { clientX: 10, clientY: 10 }))
+    await tick()
+    document.querySelector<HTMLButtonElement>('.partial-edit-btn-edit')!.click()
+    await vi.waitFor(() => expect(document.querySelector('.partial-edit-modal textarea')).not.toBeNull())
+    const input = document.querySelector<HTMLTextAreaElement>('.partial-edit-modal textarea')!
+    input.value = 'Retained draft'
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+    await tick()
+    document.querySelector<HTMLButtonElement>('.partial-edit-save-btn')!.click()
+    await vi.waitFor(() => expect(onSave).toHaveBeenCalledOnce())
+    expect(onSave).toHaveBeenCalledWith(expect.objectContaining({ sourceData: 'Shared text', newData: 'Retained draft' }))
+    saved.resolve(false)
+    await tick()
+    await Promise.resolve()
+    expect(document.querySelector('.partial-edit-modal')).not.toBeNull()
+    expect(input.value).toBe('Retained draft')
 })
 
 test('abandons a deferred translation partial edit when the translated view changes', async () => {

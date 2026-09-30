@@ -43,6 +43,7 @@ export interface SyncExitDrainAdapter {
     drain(target: SyncExitTarget, signal: AbortSignal): Promise<SyncExitDrainResult>
     /** Resolves only after the engine has stopped scheduling work for this session. */
     cancel(reason: Exclude<SyncExitDecision, 'wait'>): Promise<void>
+    resumeAfterExitCancel?(): Promise<void>
 }
 
 export interface SyncExitCoordinatorDependencies {
@@ -311,6 +312,7 @@ export function createSyncExitCoordinator(
     const run = async (): Promise<SyncExitDisposition> => {
         let fence: SyncExitFence | undefined
         let target: SyncExitTarget | null = null
+        let cancelledAdapter: SyncExitDrainAdapter | undefined
         try {
             const local = await settleLocal()
             if (local.kind === 'exit') {
@@ -337,12 +339,20 @@ export function createSyncExitCoordinator(
             const adapter = await dependencies.selectedDrain()
             if (adapter) {
                 const result = await drainRemote(target, adapter)
-                if (result === 'cancelled') return settleCancelled(target)
+                if (result === 'cancelled') {
+                    cancelledAdapter = adapter
+                    return settleCancelled(target)
+                }
             }
             publish({ phase: 'complete', target })
             return 'exit'
         } finally {
             fence?.release()
+            try {
+                await cancelledAdapter?.resumeAfterExitCancel?.()
+            } catch (error) {
+                dependencies.reportError?.(error)
+            }
         }
     }
 

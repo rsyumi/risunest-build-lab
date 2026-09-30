@@ -7,6 +7,7 @@ import test from "node:test";
 
 const compiler = process.env.NSIS_MAKENSIS ?? join(process.env.LOCALAPPDATA ?? "", "tauri", "NSIS", "makensis.exe");
 const skip = process.platform !== "win32" ? "NSIS execution requires Windows" : !existsSync(compiler) ? "NSIS compiler is unavailable" : false;
+if (process.env.RISUNEST_REQUIRE_NSIS === "1" && skip) throw new Error(skip);
 const quote = (value) => value.replaceAll("$", "$$").replaceAll('"', '$\\"');
 
 test("NSIS executes app cleanup only on explicit removal and retains retry capability on failure", { skip }, () => {
@@ -14,7 +15,7 @@ test("NSIS executes app cleanup only on explicit removal and retains retry capab
   const compile = (name, source) => {
     const script = join(root, `${name}.nsi`);
     writeFileSync(script, source);
-    const result = spawnSync(compiler, ["/V2", script], { encoding: "utf8", timeout: 30_000 });
+    const result = spawnSync(compiler, ["/V2", script], { encoding: "utf8", timeout: 30_000, windowsHide: true });
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   };
   try {
@@ -94,12 +95,12 @@ SectionEnd
     ]) {
       const location = join(root, scenario.name);
       mkdirSync(location);
-      const install = spawnSync(join(root, "installer.exe"), ["/S", `/D=${location}`], { timeout: 30_000 });
+      const install = spawnSync(join(root, "installer.exe"), ["/S", `/D=${location}`], { timeout: 30_000, windowsHide: true });
       assert.equal(install.status, 0, scenario.name);
       writeFileSync(join(location, "synthetic-data"), "fixture");
       if (scenario.fail) writeFileSync(join(location, "fail-cleanup"), "fixture");
       if (scenario.missing) rmSync(join(location, "SyntheticRisuNest.exe"));
-      const uninstall = spawnSync(join(location, "uninstall.exe"), ["/S", ...scenario.args, `_?=${location}`], { timeout: 30_000 });
+      const uninstall = spawnSync(join(location, "uninstall.exe"), ["/S", ...scenario.args, `_?=${location}`], { timeout: 30_000, windowsHide: true });
       assert.equal(uninstall.status, scenario.status, `${scenario.name}: exit`);
       assert.equal(existsSync(join(location, "synthetic-data")), scenario.data, `${scenario.name}: data`);
       assert.equal(existsSync(join(location, "cleanup-called")), scenario.called, `${scenario.name}: cleanup invocation`);
@@ -107,7 +108,7 @@ SectionEnd
       if (!scenario.missing) assert.equal(existsSync(join(location, "SyntheticRisuNest.exe")), scenario.installed, `${scenario.name}: binary`);
       if (scenario.fail) {
         rmSync(join(location, "fail-cleanup"));
-        const retry = spawnSync(join(location, "uninstall.exe"), ["/S", "/DELETE_DATA", `_?=${location}`], { timeout: 30_000 });
+        const retry = spawnSync(join(location, "uninstall.exe"), ["/S", "/DELETE_DATA", `_?=${location}`], { timeout: 30_000, windowsHide: true });
         assert.equal(retry.status, 0, "retry succeeds");
         assert.equal(existsSync(join(location, "synthetic-data")), false);
         assert.equal(existsSync(join(location, "registered")), false);

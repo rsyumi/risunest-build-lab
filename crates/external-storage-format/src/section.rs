@@ -12,6 +12,8 @@ pub const SECTION_CODEC: &str = "risunest.section-codec/v1";
 pub const MAX_INLINE_VALUE_BYTES: usize = 4 * 1024;
 
 pub const MAX_SECTION_ENTRY_BYTES: usize = 64 * 1024;
+pub const MAX_SECTION_OBJECT_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_VECTOR_DIMENSIONS: u32 = 16_384;
 
 const HYPA_ID: &str = "hypa";
 const LOCAL_PLUGINS_ID: &str = "local-plugins";
@@ -145,7 +147,7 @@ impl InlineOrObject {
         match self {
             Self::Inline(_) => self.decode_inline().map(|_| ()),
             Self::Object(reference) => {
-                if reference.byte_length == 0 || reference.byte_length > i64::MAX as u64 {
+                if reference.byte_length == 0 || reference.byte_length > MAX_SECTION_OBJECT_BYTES as u64 {
                     Err(FormatError("invalid-section-value"))
                 } else {
                     Ok(())
@@ -283,6 +285,7 @@ impl SectionEntry {
                 if value.producer.is_empty()
                     || value.model.is_empty()
                     || value.dimensions == 0
+                    || value.dimensions > MAX_VECTOR_DIMENSIONS
                     || value
                         .endpoint
                         .as_ref()
@@ -362,6 +365,27 @@ impl SectionEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn section_objects_and_vectors_have_practical_limits() {
+        assert!(InlineOrObject::Object(ObjectReference {
+            content_sha256: [1;32], byte_length: MAX_SECTION_OBJECT_BYTES as u64 + 1,
+        }).validate().is_err());
+        let mut entry = hypa_entry(&"a".repeat(64));
+        let SectionValue::Hypa(value) = &mut entry.value else { unreachable!() };
+        value.dimensions = MAX_VECTOR_DIMENSIONS;
+        value.vector = InlineOrObject::Object(ObjectReference {
+            content_sha256: [1;32], byte_length: u64::from(MAX_VECTOR_DIMENSIONS)*4,
+        });
+        entry.validate().unwrap();
+        let SectionValue::Hypa(value) = &mut entry.value else { unreachable!() };
+        value.dimensions += 1;
+        value.vector = InlineOrObject::Object(ObjectReference {
+            content_sha256: [1;32], byte_length: u64::from(value.dimensions)*4,
+        });
+        assert!(entry.validate().is_err());
+    }
+
     use std::collections::BTreeMap;
 
     fn version(clock: u64) -> Option<SectionEntryVersion> {

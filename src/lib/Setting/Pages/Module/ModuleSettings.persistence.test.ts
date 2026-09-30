@@ -11,19 +11,24 @@ describe('module character conversion persistence', () => {
     })
 
     it('reports success only after durable addition', async () => {
-        const events: string[] = []
-
-        await commitModuleCharacterConversion({ chaId: 'converted' } as any, {
-            commit: vi.fn(async () => { events.push('commit') }),
-            onSuccess: () => { events.push('success') },
-            onError: vi.fn(),
+        let resolve!: () => void
+        const pending = new Promise<void>(accept => { resolve = accept })
+        const onSuccess = vi.fn()
+        const onError = vi.fn()
+        const operation = commitModuleCharacterConversion({ chaId: 'converted' } as any, {
+            commit: vi.fn(() => pending), onSuccess, onError,
         })
-
-        expect(events).toEqual(['commit', 'success'])
+        await Promise.resolve()
+        expect(onSuccess).not.toHaveBeenCalled()
+        expect(onError).not.toHaveBeenCalled()
+        resolve()
+        await operation
+        expect(onSuccess).toHaveBeenCalledOnce()
+        expect(onError).not.toHaveBeenCalled()
     })
 
-    it.each(['local', 'official'])('settles a %s rejection with one error alert', async (kind) => {
-        const failure = new Error(`${kind} failed`)
+    it('settles a rejection with one error alert', async () => {
+        const failure = new Error('durable commit failed')
         const onSuccess = vi.fn()
         const onError = vi.fn()
         const commit = vi.fn(async () => { throw failure })

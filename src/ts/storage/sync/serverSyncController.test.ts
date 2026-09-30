@@ -65,6 +65,55 @@ function fixture() {
 }
 afterEach(() => vi.useRealTimers());
 describe("server sync controller", () => {
+  it("recovers an unknown binding on a status retry without registration", async () => {
+    const { controller, facade } = fixture();
+    facade.status.mockRejectedValueOnce(new ServerSyncError("local-storage-unavailable"));
+    await controller.initialize();
+    expect(controller.snapshot().status).toBeUndefined();
+    await controller.ensureStatus();
+    expect(controller.snapshot().status?.configured).toBe(true);
+    expect(controller.snapshot().error).toBe("");
+    expect(facade.bind).not.toHaveBeenCalled();
+  });
+
+  it("does not clear a terminal synchronization refusal on a later status-only initialization", async () => {
+    const { controller, facade } = fixture();
+    facade.cycle.mockRejectedValueOnce(new ServerSyncError("unauthorized", false));
+    await controller.synchronize();
+    await controller.initialize();
+    expect(controller.snapshot().error).toBe("unauthorized");
+    expect(controller.canAutoSync()).toBe(false);
+    expect(facade.cycle).toHaveBeenCalledOnce();
+  });
+
+  it("clears binding-scoped failure after confirmed unbind even when status cannot be read", async () => {
+    const { controller, facade } = fixture();
+    facade.cycle.mockRejectedValueOnce(new ServerSyncError("unauthorized", false));
+    await controller.synchronize();
+    await controller.pause();
+    facade.status.mockRejectedValueOnce(new Error("status unavailable"));
+    await expect(controller.unbind()).rejects.toThrow();
+    expect(controller.snapshot()).toMatchObject({ paused: false, error: "" });
+    expect(controller.snapshot().status).toBeUndefined();
+  });
+
+  it("settles an earlier status read before unbinding and never republishes its old binding", async () => {
+    const { controller, facade, status } = fixture();
+    let read!: (status: ServerStatus) => void;
+    facade.status.mockImplementationOnce(() => new Promise(resolve => { read = resolve; }));
+    const initialize = controller.initialize();
+    const unbind = controller.unbind();
+    expect(controller.canAutoSync()).toBe(false);
+    expect(facade.unbind).not.toHaveBeenCalled();
+    read(status);
+    facade.status.mockResolvedValue({ ...status, configured: false });
+    await initialize;
+    await unbind;
+    expect(controller.snapshot().status?.configured).toBe(false);
+    expect(controller.snapshot().connecting).toBe(false);
+    expect(facade.unbind).toHaveBeenCalledOnce();
+  });
+
   it("joins an existing synchronization and ignores hidden suspension during an exit drain", async () => {
     const { controller, facade, status } = fixture();
     let finish!: (result: unknown) => void;
@@ -181,43 +230,20 @@ describe("server sync controller", () => {
     expect(facade.cycle).toHaveBeenCalledOnce();
   });
 
-  it("drains through a newer target revision and restores the prior manual pause", async () => {
-    vi.useFakeTimers();
-    const { controller, facade, status } = fixture();
+  it("preserves a manual pause without remote work at exit", async () => {
+    const { facade } = fixture();
     const resumed = vi.fn();
     const pausedController = createServerSyncController(
       facade as unknown as ServerSyncFacade,
       { initiallyPaused: true, onExplicitResume: resumed },
     );
-    facade.cycle
-      .mockResolvedValueOnce({
-        phase: "idle",
-        conflictCount: 0,
-        localRevision: 3,
-        head: status.head,
-      })
-      .mockImplementationOnce(async () => {
-        status.localRevision = 4;
-        return {
-          phase: "idle",
-          conflictCount: 0,
-          localRevision: 4,
-          head: status.head,
-        };
-      });
-
-    const draining = pausedController.drainToRevision(
-      4,
-      new AbortController().signal,
-    );
-    await vi.advanceTimersByTimeAsync(300);
-
-    await expect(draining).resolves.toEqual({ kind: "complete" });
-    expect(facade.cycle).toHaveBeenCalledTimes(2);
+    await expect(pausedController.drainToRevision(4, new AbortController().signal))
+      .resolves.toEqual({ kind: "complete" });
+    expect(facade.cycle).not.toHaveBeenCalled();
+    expect(facade.status).not.toHaveBeenCalled();
     expect(resumed).not.toHaveBeenCalled();
     expect(pausedController.snapshot().paused).toBe(true);
   });
-
   it("cancels an explicit revision drain through its abort signal", async () => {
     const { controller, facade } = fixture();
     let finish!: () => void;

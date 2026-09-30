@@ -17,6 +17,7 @@ export interface InlayProviderImage {
 /** What every image provider reads. Anything else travels as a still WebP. */
 const providerReadableMimes = new Set(['image/png', 'image/jpeg', 'image/webp'])
 const maxRememberedStillFrames = 16
+export const providerImagePixelBudget = 1024 * 1024
 function createStillFrameCache() {
     return new ByteBudgetLru<string, InlayProviderImage>(
         getRuntimePerformanceBudgets().providerImageCacheBytes,
@@ -73,17 +74,26 @@ export async function inlayImageForProvider(
     asset: InlayProviderImage,
 ): Promise<InlayProviderImage> {
     const settings = providerImageSettings()
-    if (settings.risunestInlayAnimationStillFrame === false) return asset
     const cache = stillFrames
-    const remembered = cache.get(id)
-    if (remembered) return remembered
     const parts = dataUriParts(asset.data)
     if (!parts) return asset
     try {
         const bytes = decodeBase64(parts.base64)
-        if (providerReadableMimes.has(parts.mime) && !isAnimatedInlayImage(bytes)) return asset
+        const animated = isAnimatedInlayImage(bytes)
+        if (animated && settings.risunestInlayAnimationStillFrame === false) return asset
+        const oversized = (asset.width ?? 0) * (asset.height ?? 0) > providerImagePixelBudget
+        if (providerReadableMimes.has(parts.mime) && !animated && !oversized && asset.width && asset.height) return asset
+        const digest = await crypto.subtle.digest('SHA-256', bytes as Uint8Array<ArrayBuffer>)
+        const hash = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('')
+        const cacheKey = `${id}:${hash}:${settings.risunestInlayWebpQuality ?? 85}:${parts.mime}`
+        const remembered = cache.get(cacheKey)
+        if (remembered) return remembered
         const bitmap = await decodeInlayImageBitmap(bytes, parts.mime)
         try {
+            const pixels = bitmap.width * bitmap.height
+            if (!animated && providerReadableMimes.has(parts.mime) && pixels <= providerImagePixelBudget) return asset
+            const maxDimension = pixels > providerImagePixelBudget
+                ? Math.max(1, Math.floor(Math.max(bitmap.width, bitmap.height) * Math.sqrt(providerImagePixelBudget / pixels))) : 0
             const encoded = await encodeInlayImageWithCanvas(
                 bitmap,
                 bitmap.width,
@@ -91,10 +101,10 @@ export async function inlayImageForProvider(
                 {
                     ...normalizeInlayEncodeOptions({ quality: settings.risunestInlayWebpQuality }),
                     format: 'webp',
-                    maxDimension: 0,
+                    maxDimension,
                 },
             )
-            return remember(id, {
+            return remember(cacheKey, {
                 data: `data:${encoded.mime};base64,${encodeBase64(encoded.data)}`,
                 width: encoded.width,
                 height: encoded.height,

@@ -239,8 +239,19 @@ mod platform {
         delete_generic_password, get_generic_password, set_generic_password,
     };
     const SERVICE: &str = "io.github.rsyumi.risunest.server-sync";
+    #[cfg(target_os = "macos")]
     pub fn write(_: &Path, id: &str, token: &[u8]) -> Result<()> {
         set_generic_password(SERVICE, id, token).map_err(|_| unavailable())
+    }
+    #[cfg(target_os = "ios")]
+    pub fn write(_: &Path, id: &str, token: &[u8]) -> Result<()> {
+        use security_framework::{access_control::{ProtectionMode, SecAccessControl}, passwords_options::PasswordOptions};
+        let mut options = PasswordOptions::new_generic_password(SERVICE, id);
+        options.set_access_control(SecAccessControl::create_with_protection(
+            Some(ProtectionMode::AccessibleAfterFirstUnlockThisDeviceOnly), 0,
+        ).map_err(|_| unavailable())?);
+        security_framework::passwords::set_generic_password_options(token, options)
+            .map_err(|_| unavailable())
     }
     pub fn read(_: &Path, id: &str) -> Result<Vec<u8>> {
         get_generic_password(SERVICE, id).map_err(|_| unavailable())

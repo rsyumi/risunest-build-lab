@@ -34,7 +34,7 @@ fn transient(_: impl std::fmt::Display) -> ProviderError {
 }
 
 const ROOT_FILE: &str = "checked-root.json";
-const LEDGER_FILE: &str = "verified-objects";
+const ATTEMPT_FILE: &str = "check-started";
 const STAGING_DIRECTORY: &str = "checked-metadata";
 /// How many damaged objects the result names one by one. The count stays exact
 /// past this point.
@@ -115,43 +115,6 @@ pub(crate) fn pin_root(
     fs::rename(&partial, directory.join(ROOT_FILE)).map_err(transient)?;
     crate::trust_boundary::sync_directory(directory).map_err(transient)?;
     Ok(root.clone())
-}
-
-/// Names what this job already proved. A line reaches the disk before its
-/// bodies are removed, so an interruption repeats one object at most and never
-/// skips one on the strength of an unwritten line.
-struct Ledger {
-    path: PathBuf,
-    verified: BTreeSet<String>,
-}
-impl Ledger {
-    fn open(directory: &Path) -> Result<Self> {
-        let path = directory.join(LEDGER_FILE);
-        let verified = match fs::read_to_string(&path) {
-            Ok(text) => text
-                .lines()
-                .filter(|line| !line.is_empty())
-                .map(str::to_owned)
-                .collect(),
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeSet::new(),
-            Err(error) => return Err(transient(error)),
-        };
-        Ok(Self { path, verified })
-    }
-    fn holds(&self, identity: &str) -> bool {
-        self.verified.contains(identity)
-    }
-    fn record(&mut self, identity: &str) -> Result<()> {
-        let mut file = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-            .map_err(transient)?;
-        writeln!(file, "{identity}").map_err(transient)?;
-        file.sync_all().map_err(transient)?;
-        self.verified.insert(identity.to_owned());
-        Ok(())
-    }
 }
 
 /// One pack and every distinct placement the catalogs read out of it. Two
@@ -361,7 +324,6 @@ pub(crate) async fn check(
             .values()
             .map(|pack| pack.object.receipt.byte_length)
             .sum::<u64>();
-    let mut ledger = Ledger::open(directory)?;
     let mut outcome = CheckOutcome {
         snapshot_id: plan.snapshot_id,
         created_at_ms: plan.created_at_ms,
@@ -379,12 +341,11 @@ pub(crate) async fn check(
     );
     for pack in plan.packs.values() {
         cancel.check()?;
-        let identity = reachability::object_identity(&pack.object, repository)?;
-        if !ledger.holds(&identity) {
+        {
             let proved = verify_pack(pack, root_key, &staging, provider, repository, cancel).await;
             snapshot_restore::discard_object(&staging, &pack.object);
             match proved {
-                Ok(()) => ledger.record(&identity)?,
+                Ok(()) => {},
                 Err(error)
                     if matches!(error.kind, ErrorKind::Corrupt | ErrorKind::NotFound) =>
                 {
@@ -452,7 +413,7 @@ pub(super) async fn run_job(
     let attempt = attempt(context, connected, job, evidence, progress, cancel);
     match leases::admit(context, job.job_id, LeaseKind::Work, cancel).await? {
         Admission::Admitted(owner) => owner.run(context, cancel, attempt).await,
-        Admission::Yield { .. } => Err(ProviderError::new(ErrorKind::Transient)),
+        Admission::Yield { reason } => Err(leases::yield_error(reason)),
         Admission::UnsupportedProtection => attempt.await,
     }
 }
@@ -475,7 +436,7 @@ async fn attempt(
         }
         // An attempt already ran but its root is gone, so continuing would
         // quietly check a different one under the same job.
-        None if job.directory.join(LEDGER_FILE).exists()
+        None if job.directory.join(ATTEMPT_FILE).exists()
             || job.directory.join(STAGING_DIRECTORY).exists() =>
         {
             return Ok(expired());
@@ -485,6 +446,10 @@ async fn attempt(
             pin_root(job.directory, &selected, &connected.handle)?
         }
     };
+    let marker = fs::OpenOptions::new().create(true).truncate(false).write(true)
+        .open(job.directory.join(ATTEMPT_FILE)).map_err(transient)?;
+    marker.sync_all().map_err(transient)?;
+    crate::trust_boundary::sync_directory(job.directory).map_err(transient)?;
     check(
         &root,
         &connected.root_key,
@@ -574,11 +539,6 @@ async fn kept(
 /// proves every body again. Only the selected root carries over. Damage found
 /// earlier stays with the connection's evidence, which this does not touch.
 fn begin_attempt(directory: &Path) -> Result<()> {
-    match fs::remove_file(directory.join(LEDGER_FILE)) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(transient(error)),
-    }
     match fs::remove_dir_all(directory.join(STAGING_DIRECTORY)) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -833,7 +793,7 @@ mod tests {
     }
 
     #[test]
-    fn c_a_resumed_check_reads_no_body_it_already_proved() {
+    fn c_a_resumed_check_proves_each_body_again() {
         runtime().block_on(async {
             let directory = tempfile::tempdir().unwrap();
             let provider = FakeProvider::new(false);
@@ -861,10 +821,9 @@ mod tests {
             assert_eq!(second.verified_bytes, first.verified_bytes);
             assert_eq!(
                 provider.read_attempts(&pack),
-                1,
-                "a resumed check downloaded a body it had already proved"
+                2,
+                "a resumed check must prove the body again"
             );
-            fs::remove_file(job.join(LEDGER_FILE)).unwrap();
             check(
                 &root, &[9; 32], &job, &cache, &mut evidence(directory.path()),
                 &provider, &repository, &silent(), &Cancellation::default(),
@@ -873,8 +832,8 @@ mod tests {
             .unwrap();
             assert_eq!(
                 provider.read_attempts(&pack),
-                2,
-                "without its record the check has to read the body again"
+                3,
+                "every attempt reads the body again"
             );
         });
     }
@@ -1210,7 +1169,7 @@ mod tests {
     }
 
     #[test]
-    fn c_a_cancelled_check_keeps_what_it_proved_and_carries_on_from_there() {
+    fn c_a_cancelled_check_reproves_previously_read_bodies() {
         runtime().block_on(async {
             let directory = tempfile::tempdir().unwrap();
             let provider = FakeProvider::new(false);
@@ -1237,15 +1196,7 @@ mod tests {
             .await
             .expect_err("the check was cancelled part way through");
             assert_eq!(error.kind, ErrorKind::Cancelled);
-            let proved = fs::read_to_string(job.join(LEDGER_FILE))
-                .unwrap()
-                .lines()
-                .count();
-            assert!(
-                (1..packs.len()).contains(&proved),
-                "a cancelled check kept {proved} of {} packs",
-                packs.len()
-            );
+            assert_eq!(provider.read_attempts(&packs[0]), 1);
             let outcome = check(
                 &root,
                 &[9; 32],
@@ -1266,8 +1217,8 @@ mod tests {
             assert_eq!(outcome.damaged_objects, 0);
             assert_eq!(
                 provider.read_attempts(&packs[0]),
-                1,
-                "the body proved before the cut was read again"
+                2,
+                "the body proved before the cut must be read again"
             );
         });
     }

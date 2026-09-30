@@ -109,6 +109,58 @@ fn inlay_extension(value: &str) -> String {
     }
 }
 
+fn safe_owner_extension(extension: &str) -> String {
+    if !extension.is_empty()
+        && extension.len() <= 16
+        && extension.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    {
+        extension.to_ascii_lowercase()
+    } else {
+        "bin".to_owned()
+    }
+}
+
+fn read_owner_manifest(
+    cas: &PayloadCas,
+    hash: &str,
+    expected_size: u64,
+    cancellation: &dyn CancellationProbe,
+) -> Result<Vec<owner_manifest_codec::OwnerManifestEntry>, NativeJobError> {
+    check_cancelled(cancellation).map_err(local_backup_error)?;
+    if expected_size > MAX_OWNER_MANIFEST_BYTES {
+        return Err(invalid_source("owner manifest exceeds the decode limit"));
+    }
+    let file = cas
+        .open_available_object(hash)
+        .map_err(io_job_error)?
+        .ok_or_else(|| {
+            NativeJobError::new("invalid-source", "legacy backup owner manifest is missing")
+        })?;
+    let mut bytes = Vec::with_capacity(expected_size as usize);
+    CancellationReader::new(file, cancellation)
+        .take(MAX_OWNER_MANIFEST_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| local_backup_error(cancellation_io(error, cancellation)))?;
+    if bytes.len() as u64 != expected_size || bytes.len() as u64 > MAX_OWNER_MANIFEST_BYTES {
+        return Err(NativeJobError::new(
+            "invalid-source",
+            "legacy backup owner manifest changed while being read",
+        ));
+    }
+    if owner_manifest_codec::owner_manifest_identity(&bytes) != hash {
+        return Err(NativeJobError::new(
+            "invalid-source",
+            "legacy backup owner manifest content hash mismatch",
+        ));
+    }
+    owner_manifest_codec::decode_owner_manifest(&bytes).map_err(|error| {
+        NativeJobError::new(
+            "invalid-source",
+            format!("legacy backup owner manifest is invalid: {error}"),
+        )
+    })
+}
+
 fn supported_image_extension(value: &str) -> bool {
     matches!(
         value.to_ascii_lowercase().as_str(),
@@ -1422,6 +1474,11 @@ mod tests {
 
     #[test]
     fn names_and_extensions_match_target_rules() {
+        assert_eq!(safe_owner_extension("PNG"), "png");
+        assert_eq!(safe_owner_extension(&"a".repeat(16)), "a".repeat(16));
+        for extension in ["", "../png", "custom.codec", "a\\png", "abcdefghijklmnopq"] {
+            assert_eq!(safe_owner_extension(extension), "bin");
+        }
         assert_eq!(
             asset_name("assets/a.png", CompatibilityTarget::RisuAi).as_deref(),
             Some("a.png")
@@ -1526,5 +1583,27 @@ mod tests {
         )
         .is_err());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn owner_manifest_reader_checks_bounds_hash_size_and_cancellation() {
+        struct Cancel;
+        impl CancellationProbe for Cancel {
+            fn is_cancelled(&self) -> bool { true }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let repository = root.path().join("repository");
+        std::fs::create_dir(&repository).unwrap();
+        let cas = PayloadCas::new(&repository).unwrap();
+        let bytes = owner_manifest_codec::encode_owner_manifest(&[]).unwrap();
+        let manifest = cas.prepare_bytes(&bytes).unwrap();
+        let never = crate::local_backup::NeverCancelled;
+        assert!(read_owner_manifest(&cas, &manifest.content_hash, manifest.byte_size, &never).unwrap().is_empty());
+        assert_eq!(read_owner_manifest(&cas, &manifest.content_hash, MAX_OWNER_MANIFEST_BYTES + 1, &never).unwrap_err().code, "invalid-source");
+        assert_eq!(read_owner_manifest(&cas, &manifest.content_hash, manifest.byte_size + 1, &never).unwrap_err().code, "invalid-source");
+        assert_eq!(read_owner_manifest(&cas, &manifest.content_hash, manifest.byte_size, &Cancel).unwrap_err().code, "cancelled");
+        let path = cas.object_path(&manifest.content_hash).unwrap().unwrap();
+        std::fs::write(path, vec![0; bytes.len()]).unwrap();
+        assert_eq!(read_owner_manifest(&cas, &manifest.content_hash, manifest.byte_size, &never).unwrap_err().code, "invalid-source");
     }
 }

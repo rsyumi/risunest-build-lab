@@ -2674,7 +2674,7 @@ describe('SaveCoordinator', () => {
             root: expect.objectContaining({
                 characterOrder: ['group-a', 'group-b', 'group-trash'],
             }),
-            deleteCharacterId: 'char-a',
+            deleteCharacterIds: ['char-a'],
             characterDetails: [
                 expect.objectContaining({
                     chaId: 'group-a',
@@ -2761,7 +2761,7 @@ describe('SaveCoordinator', () => {
         expect(commit).toHaveBeenCalledOnce()
         expect(commit.mock.calls[0][0]).toMatchObject({
             expectedRevision: 1,
-            deleteCharacterId: 'char-a',
+            deleteCharacterIds: ['char-a'],
             characterDetails: [expect.objectContaining({
                 chaId: 'group-a',
                 characters: ['char-b'],
@@ -2785,7 +2785,7 @@ describe('SaveCoordinator', () => {
         let durable: character | groupChat | null = structuredClone(target)
         const commit = vi.fn(async (input: WorkingSetCommit) => {
             if (commit.mock.calls.length === 1) await firstCommit.promise
-            if (input.deleteCharacterId === 'char-a') durable = null
+            if (input.deleteCharacterIds?.includes('char-a')) durable = null
             if (input.addCharacter) durable = structuredClone(input.addCharacter)
             return { revision: ++revision }
         })
@@ -2834,7 +2834,7 @@ describe('SaveCoordinator', () => {
         expect(commit).toHaveBeenCalledTimes(2)
         expect(commit.mock.calls[0][0]).toMatchObject({
             expectedRevision: 1,
-            deleteCharacterId: 'char-a',
+            deleteCharacterIds: ['char-a'],
         })
         expect(commit.mock.calls[1][0]).toMatchObject({
             expectedRevision: 2,
@@ -3695,6 +3695,9 @@ describe('SaveCoordinator', () => {
         snapshot.username = 'Revision 12 snapshot'
         const store = {
             materializeDatabase: vi.fn(async () => snapshot),
+            readPluginStorageValues: vi.fn(async () => ({ revision: 12, nextCursor: null,
+                items: [{ owner: 'plugin-a', key: 'shared', value: 'a' },
+                    { owner: 'plugin-b', key: 'shared', value: 'b' }] })),
             queryPluginStorage: vi.fn(async () => ({
                 revision: 12,
                 items: [

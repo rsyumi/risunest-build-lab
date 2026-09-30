@@ -192,6 +192,17 @@ function createReader(
         }),
         readConversationMetadata: vi.fn(async () => null),
         readConversationWindow: async () => null,
+        readPluginStorageValues: vi.fn(async ({ owner, afterKey, limit = 256 }) => {
+            const records = pluginCatalog.items.map((item, ordinal) => ({ ...item, ordinal }))
+                .filter((item) => (!owner || owner === item.owner) && item.ordinal > (afterKey?.ordinal ?? -1))
+            const selected = records.slice(0, limit)
+            const last = selected.at(-1)
+            return {
+                revision,
+                items: selected.map(({ owner, key }) => ({ owner, key, value: clone(pluginCustomStorage[key]) })),
+                nextCursor: records.length > limit && last ? { owner: last.owner, key: last.key, ordinal: last.ordinal } : null,
+            }
+        }),
         queryPluginStorage: vi.fn(async () => clone(pluginCatalog)),
         readPluginStorage: async (_owner, key) => Object.hasOwn(pluginCustomStorage, key)
             ? { revision, value: clone(pluginCustomStorage[key]) }

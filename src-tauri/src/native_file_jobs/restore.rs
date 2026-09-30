@@ -8,14 +8,15 @@ use crate::persistent_store::{RevisionResult, StagingResult, StoreError, StoreRe
 use flate2::bufread::GzDecoder;
 use rmpv::Value as MessagePackValue;
 use serde::de::{self, DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::fs::File;
-use std::io::{self, BufReader, Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
+use std::io::{self, BufReader, Read, Seek, Write};
 
 const RISU_SAVE_HEADER: &[u8] = b"RISUSAVE\0";
 const LEGACY_RISU_SAVE_PREFIX: &[u8] = b"\0RISUSAVE\0";
@@ -48,6 +49,15 @@ pub(crate) trait ReplacementSink: Send + Sync {
     fn add_characters(&self, staging_id: &str, characters: &[Value]) -> StoreResult<()>;
     fn supports_incremental_characters(&self) -> bool {
         false
+    }
+    fn expands_cold_payloads(&self) -> bool {
+        false
+    }
+    fn cold_payload_path(&self, _key: &str) -> Option<PathBuf> {
+        None
+    }
+    fn unavailable_cold_payload(&self, _key: &str, _character_name: &str) -> StoreResult<()> {
+        Ok(())
     }
     fn put_character_detail(
         &self,
@@ -100,6 +110,9 @@ pub(crate) trait ReplacementSink: Send + Sync {
     ) -> StoreResult<crate::persistent_store::commit::StagedPluginPreview> {
         Ok(crate::persistent_store::commit::StagedPluginPreview::default())
     }
+    fn incomplete_restore_preview(&self) -> StoreResult<super::IncompleteRestorePreview> {
+        Ok(super::IncompleteRestorePreview::default())
+    }
     fn commit(&self, staging_id: &str, expected_revision: i64) -> StoreResult<RevisionResult>;
     fn abort(&self, staging_id: &str) -> StoreResult<()>;
 }
@@ -135,6 +148,8 @@ impl RestoreControl for JobControl {
 /// so it offsets the database bytes and keeps the archive's entry count.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RestoreProgressScale {
+    pub(crate) spool_directory: Option<PathBuf>,
+    pub(crate) reject_cold_references: bool,
     /// Bytes already counted before the database read started.
     pub(crate) base_bytes: u64,
     /// Fixed total for the whole job; `None` uses the database size.
@@ -147,6 +162,7 @@ pub(crate) struct RestoreProgressScale {
 
 pub(crate) fn restore_block_risu_save(
     mut source: OpenedJobSource,
+    owned_directory: &Path,
     expected_revision: i64,
     job: &JobControl,
     sink: &dyn ReplacementSink,
@@ -165,7 +181,7 @@ pub(crate) fn restore_block_risu_save(
         sink,
         RestoreLimits::default(),
         true,
-        RestoreProgressScale::default(),
+        RestoreProgressScale { spool_directory: Some(owned_directory.to_path_buf()), ..Default::default() },
     )
 }
 
@@ -251,7 +267,7 @@ fn restore_block_risu_save_path(
     sink: &dyn ReplacementSink,
 ) -> Result<JobResultSummary, NativeJobError> {
     let source = super::open_regular_file_no_follow(source)?;
-    restore_block_risu_save(source, expected_revision, job, sink)
+    restore_block_risu_save(source, &tempfile::tempdir().unwrap().path(), expected_revision, job, sink)
 }
 
 #[cfg(test)]
@@ -287,6 +303,7 @@ fn restore_risu_save_reader<R: Read>(
     sink: &dyn ReplacementSink,
     limits: RestoreLimits,
 ) -> Result<JobResultSummary, NativeJobError> {
+    let directory = tempfile::tempdir().unwrap();
     restore_risu_save_reader_controlled(
         source,
         total_bytes,
@@ -295,7 +312,7 @@ fn restore_risu_save_reader<R: Read>(
         sink,
         limits,
         true,
-        RestoreProgressScale::default(),
+        RestoreProgressScale { spool_directory: Some(directory.path().to_path_buf()), ..Default::default() },
     )
 }
 
@@ -319,13 +336,15 @@ fn restore_risu_save_reader_controlled<R: Read>(
         job.start(JobPhase::ReadingSource)
             .map_err(|error| job_error(job, error))?;
     }
+    let spool_directory = scale.spool_directory.clone();
+    let reject_cold_references = scale.reject_cold_references;
     let mut reader = TrackedReader::new_with_scale(source, total_bytes, job, scale);
     let format = read_risu_save_format(&mut reader)?;
 
     let staging_id = sink.begin().map_err(store_error)?.staging_id;
     let outcome = (|| {
         let parsed = match format {
-            RisuSaveFormat::Block => parse_and_stage(&mut reader, &staging_id, job, sink, limits)?,
+            RisuSaveFormat::Block => parse_and_stage(&mut reader, &staging_id, job, sink, limits, spool_directory.as_deref().ok_or_else(|| store_error(StoreError::Store { message: "Restore spool directory is unavailable".into() }))?, reject_cold_references)?,
             RisuSaveFormat::LegacyRaw => {
                 parse_and_stage_legacy(&mut reader, &staging_id, job, sink, limits)?
             }
@@ -362,6 +381,9 @@ fn restore_risu_save_reader_controlled<R: Read>(
             .map_err(store_error)?;
         job.set_plugin_value_preview(&staging_id, preview)
             .map_err(|error| job_error(job, error))?;
+        let incomplete = sink.incomplete_restore_preview().map_err(store_error)?;
+        let warning_codes = incomplete.warning_codes();
+        job.set_incomplete_restore_preview(incomplete).map_err(|error| job_error(job, error))?;
         let activation_revision = job
             .wait_for_restore_finalization()
             .map_err(|error| job_error(job, error))?
@@ -381,7 +403,7 @@ fn restore_risu_save_reader_controlled<R: Read>(
             source_sha256: hex::encode(reader.hasher.finalize()),
             character_count: parsed.character_count,
             preset_count: parsed.preset_count,
-            warning_codes: Vec::new(),
+            warning_codes,
             handoff_path: None,
             publication: None,
         })
@@ -614,6 +636,7 @@ fn stage_legacy_database<R: Read>(
         .map_err(|error| job_error(job, error))?;
     reader.report_stage_items(JobStage::FinalizingStaging, 0, None)?;
     pocket_features::root(&root).map_err(invalid)?;
+    root.shift_remove("account");
     sink.put_root(staging_id, &Value::Object(root))
         .map_err(store_error)?;
     sink.put_presets(staging_id, &presets)
@@ -863,13 +886,26 @@ impl<R: Read> Read for RemainingSourceReader<'_, '_, R> {
     }
 }
 
+fn cold_expansion_required() -> NativeJobError {
+    NativeJobError::new("cold-expansion-required", "Official snapshot requires cold payload expansion before activation")
+}
+
+fn has_cold_references(character: &Value) -> bool {
+    character.get("coldstorage").and_then(Value::as_str).is_some_and(|key| !key.is_empty()) ||
+    character.get("chats").and_then(Value::as_array).is_some_and(|chats| chats.iter().any(|chat|
+        chat.get("message").and_then(Value::as_array).and_then(|messages| messages.first()).and_then(|message| message.get("data")).and_then(Value::as_str).is_some_and(|data| data.starts_with("\u{ef01}COLDSTORAGE\u{ef01}"))))
+}
+
 fn parse_and_stage<R: Read>(
     reader: &mut TrackedReader<'_, R>,
     staging_id: &str,
     job: &dyn RestoreControl,
     sink: &dyn ReplacementSink,
     limits: RestoreLimits,
+    spool_directory: &Path,
+    reject_cold_references: bool,
 ) -> Result<ParsedCounts, NativeJobError> {
+    let cold_detected = Cell::new(false);
     let mut loaded = HashSet::new();
     let mut directory = None;
     let mut root = None;
@@ -934,7 +970,10 @@ fn parse_and_stage<R: Read>(
                 limits,
                 job,
                 sink,
+                spool_directory,
+                &cold_detected,
             )?;
+            if reject_cold_references && cold_detected.get() { return Err(cold_expansion_required()); }
             character_count += 1;
             reader.counts.characters = character_count;
             reader.counts.blocks += 1;
@@ -968,6 +1007,8 @@ fn parse_and_stage<R: Read>(
                         "character block name does not match chaId {name}"
                     )));
                 }
+                if reject_cold_references && has_cold_references(&value) { return Err(cold_expansion_required()); }
+                assign_legacy_chat_ids(std::slice::from_mut(&mut value))?;
                 character_batch_bytes = character_batch_bytes.saturating_add(decoded_bytes);
                 pocket_features::character(&mut value, &format!("character:{character_count}"))
                     .map_err(invalid)?;
@@ -1092,6 +1133,7 @@ fn parse_and_stage<R: Read>(
     }
     let presets = presets.ok_or_else(|| invalid("missing required block preset"))?;
     pocket_features::root(&root).map_err(invalid)?;
+    root.shift_remove("account");
     sink.put_root(staging_id, &Value::Object(root))
         .map_err(store_error)?;
     sink.put_presets(staging_id, &presets)
@@ -1183,13 +1225,22 @@ fn read_character_block<R: Read>(
     limits: RestoreLimits,
     job: &dyn RestoreControl,
     sink: &dyn ReplacementSink,
+    spool_directory: &Path,
+    cold_detected: &Cell<bool>,
 ) -> Result<(), NativeJobError> {
     let block = EncodedBlockReader {
         reader,
         remaining: encoded_length,
     };
     let staging_error = RefCell::new(None);
+    let record_bytes = Cell::new(None);
     let seed = CharacterSeed {
+        chats_to_skip: 0,
+        limits,
+        record_bytes: &record_bytes,
+        character_name: "",
+        cold_detected,
+        spool_directory,
         staging_id,
         expected_id: name,
         character_index,
@@ -1203,16 +1254,12 @@ fn read_character_block<R: Read>(
         }
         let decoded = DecodedLimitReader::new(block, limits.max_decoded_block_bytes, job, name);
         let mut buffered = BufReader::with_capacity(READ_CHUNK_BYTES, decoded);
-        let mut deserializer = serde_json::Deserializer::from_reader(&mut buffered);
-        if let Err(error) = seed.deserialize(&mut deserializer) {
+        if let Err(error) = read_character_json(&mut buffered, seed) {
             if let Some(error) = staging_error.take() {
                 return Err(store_error(error));
             }
             return Err(json_error(name, compression, error, job));
         }
-        deserializer
-            .end()
-            .map_err(|error| json_error(name, compression, error, job))?;
         if !buffered.buffer().is_empty() || buffered.get_ref().inner.remaining != 0 {
             return Err(corrupt(format!("trailing data in block {name}")));
         }
@@ -1223,17 +1270,12 @@ fn read_character_block<R: Read>(
     let decoder = GzDecoder::new(buffered);
     let decoded = DecodedLimitReader::new(decoder, limits.max_decoded_block_bytes, job, name);
     let mut json_reader = BufReader::with_capacity(READ_CHUNK_BYTES, decoded);
-    let mut deserializer = serde_json::Deserializer::from_reader(&mut json_reader);
-    if let Err(error) = seed.deserialize(&mut deserializer) {
+    if let Err(error) = read_character_json(&mut json_reader, seed) {
         if let Some(error) = staging_error.take() {
             return Err(store_error(error));
         }
         return Err(json_error(name, compression, error, job));
     }
-    deserializer
-        .end()
-        .map_err(|error| json_error(name, compression, error, job))?;
-    drop(deserializer);
     let mut decoded = json_reader.into_inner();
     let mut buffer = [0u8; READ_CHUNK_BYTES];
     while decoded
@@ -1247,6 +1289,236 @@ fn read_character_block<R: Read>(
         return Err(corrupt(format!("trailing data in gzip block {name}")));
     }
     Ok(())
+}
+
+pub(super) struct RecordLimitReader<'a, R> {
+    pub(super) inner: R,
+    pub(super) bytes: &'a Cell<Option<u64>>,
+}
+
+impl<R: Read> Read for RecordLimitReader<'_, R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let read = self.inner.read(buffer)?;
+        if let Some(bytes) = self.bytes.get() {
+            let bytes = bytes.saturating_add(read as u64);
+            self.bytes.set(Some(bytes));
+            if bytes > MESSAGE_PAGE_BYTES {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "restore record limit exceeded"));
+            }
+        }
+        Ok(read)
+    }
+}
+
+pub(super) struct BoundedValueSeed<'a>(pub(super) &'a Cell<Option<u64>>);
+pub(super) struct BoundedStringSeed<'a>(pub(super) &'a Cell<Option<u64>>);
+
+impl<'de> DeserializeSeed<'de> for BoundedStringSeed<'_> {
+    type Value = String;
+    fn deserialize<D: de::Deserializer<'de>>(self, deserializer: D) -> Result<String, D::Error> {
+        self.0.set(Some(0));
+        let value = String::deserialize(deserializer);
+        self.0.set(None);
+        value
+    }
+}
+
+impl<'de> DeserializeSeed<'de> for BoundedValueSeed<'_> {
+    type Value = Value;
+
+    fn deserialize<D: de::Deserializer<'de>>(self, deserializer: D) -> Result<Value, D::Error> {
+        self.0.set(Some(0));
+        let value = Value::deserialize(deserializer);
+        self.0.set(None);
+        value
+    }
+}
+
+fn retained_json_bytes<E: de::Error>(value: &impl serde::Serialize) -> Result<u64, E> {
+    struct SizeWriter(u64);
+    impl Write for SizeWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0 = self.0.saturating_add(bytes.len() as u64);
+            if self.0 > MESSAGE_PAGE_BYTES {
+                return Err(io::Error::new(io::ErrorKind::InvalidData, "restore record limit exceeded"));
+            }
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> io::Result<()> { Ok(()) }
+    }
+    let mut size = SizeWriter(0);
+    serde_json::to_writer(&mut size, value).map_err(E::custom)?;
+    Ok(size.0)
+}
+
+fn check_detail_size<E: de::Error>(detail: &Map<String, Value>) -> Result<(), E> {
+    retained_json_bytes::<E>(detail).map(|_| ())
+}
+
+fn insert_detail<E: de::Error>(detail: &mut Map<String, Value>, bytes: &mut u64, key: String, value: Value) -> Result<(), E> {
+    if let Some(previous) = detail.get(&key) {
+        *bytes = bytes.saturating_sub(retained_json_bytes::<E>(&key)? + retained_json_bytes::<E>(previous)? + 2);
+    }
+    *bytes = bytes.saturating_add(retained_json_bytes::<E>(&key)?)
+        .saturating_add(retained_json_bytes::<E>(&value)?).saturating_add(2);
+    if *bytes > MESSAGE_PAGE_BYTES { return Err(E::custom("restore record limit exceeded")); }
+    detail.insert(key, value);
+    Ok(())
+}
+
+#[derive(Default)]
+struct CharacterMetadata {
+    character_id: Option<String>,
+    name: String,
+    cold_key: Option<String>,
+    chats_count: u64,
+    envelope_occurrence: u64,
+}
+
+struct CharacterMetadataSeed<'a> {
+    wrapped: bool,
+    record_bytes: &'a Cell<Option<u64>>,
+}
+
+impl<'de> DeserializeSeed<'de> for CharacterMetadataSeed<'_> {
+    type Value = Option<CharacterMetadata>;
+    fn deserialize<D: de::Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        let record_bytes = self.record_bytes;
+        record_bytes.set(Some(0));
+        let result = deserializer.deserialize_any(self);
+        record_bytes.set(None);
+        result
+    }
+}
+
+impl<'de> Visitor<'de> for CharacterMetadataSeed<'_> {
+    type Value = Option<CharacterMetadata>;
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result { formatter.write_str("a cold character payload") }
+    fn visit_bool<E: de::Error>(self, _: bool) -> Result<Self::Value, E> { Ok(None) }
+    fn visit_i64<E: de::Error>(self, _: i64) -> Result<Self::Value, E> { Ok(None) }
+    fn visit_u64<E: de::Error>(self, _: u64) -> Result<Self::Value, E> { Ok(None) }
+    fn visit_f64<E: de::Error>(self, _: f64) -> Result<Self::Value, E> { Ok(None) }
+    fn visit_str<E: de::Error>(self, _: &str) -> Result<Self::Value, E> { Ok(None) }
+    fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> { Ok(None) }
+    fn visit_seq<A: SeqAccess<'de>>(self, mut sequence: A) -> Result<Self::Value, A::Error> {
+        self.record_bytes.set(None);
+        while sequence.next_element::<IgnoredAny>()?.is_some() {}
+        Ok(None)
+    }
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        self.record_bytes.set(None);
+        let mut metadata = (!self.wrapped).then(CharacterMetadata::default);
+        let mut character_count = 0;
+        while let Some(key) = map.next_key_seed(BoundedStringSeed(self.record_bytes))? {
+            if self.wrapped && key == "character" {
+                character_count += 1;
+                metadata = map.next_value_seed(CharacterMetadataSeed { wrapped: false, record_bytes: self.record_bytes })?;
+                if let Some(metadata) = metadata.as_mut() { metadata.envelope_occurrence = character_count; }
+            } else if !self.wrapped && key == "chats" {
+                metadata.as_mut().unwrap().chats_count += 1;
+                map.next_value::<IgnoredAny>()?;
+            } else if !self.wrapped && matches!(key.as_str(), "chaId" | "name" | "coldstorage") {
+                let value = map.next_value_seed(BoundedValueSeed(self.record_bytes))?;
+                let metadata = metadata.as_mut().unwrap();
+                match key.as_str() {
+                    "chaId" => metadata.character_id = value.as_str().map(str::to_owned),
+                    "name" => metadata.name = value.as_str().unwrap_or_default().to_owned(),
+                    _ => metadata.cold_key = value.as_str().filter(|key| !key.is_empty()).map(str::to_owned),
+                }
+            } else { map.next_value::<IgnoredAny>()?; }
+        }
+        Ok(metadata)
+    }
+}
+
+fn staging_io<E: de::Error>(error: io::Error, staging_error: &RefCell<Option<StoreError>>) -> E {
+    let message = error.to_string();
+    *staging_error.borrow_mut() = Some(StoreError::from(error));
+    E::custom(message)
+}
+
+fn read_character_metadata(file: &mut File, seed: &CharacterSeed<'_>, wrapped: bool) -> Result<Option<CharacterMetadata>, serde_json::Error> {
+    file.rewind().map_err(|error| staging_io(error, seed.staging_error))?;
+    let reader = DecodedLimitReader::new(file, seed.limits.max_decoded_block_bytes, seed.job, "cold character");
+    let reader = RecordLimitReader { inner: BufReader::new(reader), bytes: seed.record_bytes };
+    let mut deserializer = serde_json::Deserializer::from_reader(reader);
+    let metadata = CharacterMetadataSeed { wrapped, record_bytes: seed.record_bytes }.deserialize(&mut deserializer)?;
+    deserializer.end()?;
+    Ok(metadata)
+}
+
+fn read_character_json<R: Read>(reader: &mut R, seed: CharacterSeed<'_>) -> Result<(), serde_json::Error> {
+    if !seed.sink.expands_cold_payloads() {
+        let reader = RecordLimitReader { inner: reader, bytes: seed.record_bytes };
+        let mut deserializer = serde_json::Deserializer::from_reader(reader);
+        seed.deserialize(&mut deserializer)?;
+        return deserializer.end();
+    }
+    // The reference may follow chats, so inspect metadata before staging any row.
+    let mut spool = tempfile::tempfile_in(seed.spool_directory).map_err(|error| staging_io(error, seed.staging_error))?;
+    let mut buffer = [0u8; READ_CHUNK_BYTES];
+    loop {
+        let read = reader.read(&mut buffer).map_err(serde_json::Error::io)?;
+        if read == 0 { break; }
+        spool.write_all(&buffer[..read]).map_err(|error| staging_io(error, seed.staging_error))?;
+    }
+    let metadata = read_character_metadata(&mut spool, &seed, false)?
+        .ok_or_else(|| <serde_json::Error as de::Error>::custom("a character object is required"))?;
+    if metadata.character_id.as_deref() != Some(seed.expected_id) {
+        return Err(<serde_json::Error as de::Error>::custom("character block name does not match chaId"));
+    }
+    let mut name = metadata.name;
+    let mut chats_to_skip = metadata.chats_count.saturating_sub(1);
+    let mut envelope_occurrence = 0;
+    let mut wrapped = false;
+    if let Some(key) = metadata.cold_key {
+        seed.cold_detected.set(true);
+        if let Some(path) = seed.sink.cold_payload_path(&key) {
+            let mut payload = File::open(path).map_err(|error| staging_io(error, seed.staging_error))?;
+            if let Some(metadata) = read_character_metadata(&mut payload, &seed, true)? {
+                name = metadata.name;
+                chats_to_skip = metadata.chats_count.saturating_sub(1);
+                envelope_occurrence = metadata.envelope_occurrence;
+                spool = payload;
+                wrapped = true;
+            }
+        }
+        if !wrapped {
+            seed.sink.unavailable_cold_payload(&key, &name).map_err(|error| {
+                *seed.staging_error.borrow_mut() = Some(error);
+                <serde_json::Error as de::Error>::custom("cold payload preview failed")
+            })?;
+        }
+    }
+    spool.rewind().map_err(|error| staging_io(error, seed.staging_error))?;
+    let seed = CharacterSeed { character_name: &name, chats_to_skip, ..seed };
+    let reader = DecodedLimitReader::new(spool, seed.limits.max_decoded_block_bytes, seed.job, "cold character");
+    let reader = RecordLimitReader { inner: BufReader::new(reader), bytes: seed.record_bytes };
+    let mut deserializer = serde_json::Deserializer::from_reader(reader);
+    if wrapped { deserializer.deserialize_map(ColdCharacterVisitor(seed, envelope_occurrence))?; }
+    else { seed.deserialize(&mut deserializer)?; }
+    deserializer.end()
+}
+
+struct ColdCharacterVisitor<'a>(CharacterSeed<'a>, u64);
+impl<'de> Visitor<'de> for ColdCharacterVisitor<'_> {
+    type Value = ();
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result { formatter.write_str("a cold character envelope") }
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<(), A::Error> {
+        let record_bytes = self.0.record_bytes;
+        let mut seed = Some(self.0);
+        let mut occurrence = 0;
+        while let Some(key) = map.next_key_seed(BoundedStringSeed(record_bytes))? {
+            if key == "character" {
+                occurrence += 1;
+                if occurrence == self.1 {
+                    map.next_value_seed(seed.take().ok_or_else(|| de::Error::custom("cold character already staged"))?)?;
+                } else { map.next_value::<IgnoredAny>()?; }
+            } else { map.next_value::<IgnoredAny>()?; }
+        }
+        if seed.is_some() { return Err(de::Error::custom("cold character is missing")); }
+        Ok(())
+    }
 }
 
 trait IgnoredJsonValue: Sized {
@@ -1336,6 +1608,12 @@ macro_rules! ignored_visits {
 }
 
 struct CharacterSeed<'a> {
+    chats_to_skip: u64,
+    limits: RestoreLimits,
+    record_bytes: &'a Cell<Option<u64>>,
+    character_name: &'a str,
+    cold_detected: &'a Cell<bool>,
+    spool_directory: &'a Path,
     staging_id: &'a str,
     expected_id: &'a str,
     character_index: u64,
@@ -1369,18 +1647,30 @@ impl<'de> Visitor<'de> for CharacterVisitor<'_> {
         A: MapAccess<'de>,
     {
         let mut detail = Map::new();
+        let mut detail_bytes = 2;
         let mut conversation_count = 0i64;
         let mut saw_chats = false;
-        while let Some(key) = map.next_key::<String>()? {
+        let mut chats_to_skip = self.0.chats_to_skip;
+        while let Some(key) = map.next_key_seed(BoundedStringSeed(self.0.record_bytes))? {
             if self.0.job.is_cancel_requested() {
                 return Err(de::Error::custom("restore cancelled while reading character"));
             }
             if key == "chats" {
+                if chats_to_skip != 0 {
+                    chats_to_skip -= 1;
+                    map.next_value::<IgnoredAny>()?;
+                    continue;
+                }
                 if saw_chats {
                     return Err(de::Error::custom("duplicate chats field in character"));
                 }
                 saw_chats = true;
                 conversation_count = map.next_value_seed(ChatsSeed {
+                    limits: self.0.limits,
+                    record_bytes: self.0.record_bytes,
+                    character_name: self.0.character_name,
+                    cold_detected: self.0.cold_detected,
+                    spool_directory: self.0.spool_directory,
                     staging_id: self.0.staging_id,
                     character_id: self.0.expected_id,
                     character_index: self.0.character_index,
@@ -1389,8 +1679,14 @@ impl<'de> Visitor<'de> for CharacterVisitor<'_> {
                     staging_error: self.0.staging_error,
                 })?;
             } else {
-                detail.insert(key, map.next_value()?);
+                let value = map.next_value_seed(BoundedValueSeed(self.0.record_bytes))?;
+                insert_detail::<A::Error>(&mut detail, &mut detail_bytes, key, value)?;
             }
+        }
+        if detail.get("coldstorage").and_then(Value::as_str).is_some_and(|key| !key.is_empty()) { self.0.cold_detected.set(true); }
+        if self.0.sink.expands_cold_payloads() {
+            detail.remove("coldstorage");
+            detail.remove("coldStoragedChats");
         }
         let character_id = detail
             .get("chaId")
@@ -1414,6 +1710,11 @@ impl<'de> Visitor<'de> for CharacterVisitor<'_> {
 }
 
 struct ChatsSeed<'a> {
+    limits: RestoreLimits,
+    record_bytes: &'a Cell<Option<u64>>,
+    character_name: &'a str,
+    cold_detected: &'a Cell<bool>,
+    spool_directory: &'a Path,
     staging_id: &'a str,
     character_id: &'a str,
     character_index: u64,
@@ -1447,8 +1748,15 @@ impl<'de> Visitor<'de> for ChatsVisitor<'_> {
         A: SeqAccess<'de>,
     {
         let mut count = 0i64;
+        let seen_ids = RefCell::new(HashSet::new());
         while sequence
             .next_element_seed(ConversationSeed {
+                limits: self.0.limits,
+                record_bytes: self.0.record_bytes,
+                character_name: self.0.character_name,
+                cold_detected: self.0.cold_detected,
+                spool_directory: self.0.spool_directory,
+                seen_ids: &seen_ids,
                 staging_id: self.0.staging_id,
                 character_id: self.0.character_id,
                 configured_index: count,
@@ -1471,6 +1779,12 @@ impl<'de> Visitor<'de> for ChatsVisitor<'_> {
 }
 
 struct ConversationSeed<'a> {
+    limits: RestoreLimits,
+    record_bytes: &'a Cell<Option<u64>>,
+    character_name: &'a str,
+    cold_detected: &'a Cell<bool>,
+    spool_directory: &'a Path,
+    seen_ids: &'a RefCell<HashSet<String>>,
     staging_id: &'a str,
     character_id: &'a str,
     configured_index: i64,
@@ -1505,30 +1819,69 @@ impl<'de> Visitor<'de> for ConversationVisitor<'_> {
         A: MapAccess<'de>,
     {
         let mut detail = Map::new();
-        let mut messages = MessageSpool::new().map_err(de::Error::custom)?;
+        let mut detail_bytes = 2;
+        let mut messages = MessageSpool::empty();
         let mut saw_messages = false;
-        while let Some(key) = map.next_key::<String>()? {
+        while let Some(key) = map.next_key_seed(BoundedStringSeed(self.0.record_bytes))? {
             if self.0.job.is_cancel_requested() {
                 return Err(de::Error::custom("restore cancelled while reading conversation"));
             }
             if key == "message" {
-                if saw_messages {
+                if saw_messages && !self.0.sink.expands_cold_payloads() {
                     return Err(de::Error::custom("duplicate message field in conversation"));
                 }
                 saw_messages = true;
                 messages = map.next_value_seed(MessagesSeed {
+                    record_bytes: self.0.record_bytes,
+                    cold_detected: self.0.cold_detected,
+                    spool_directory: self.0.spool_directory,
+                    staging_error: self.0.staging_error,
                     job: self.0.job,
                 })?;
             } else {
-                detail.insert(key, map.next_value()?);
+                let value = map.next_value_seed(BoundedValueSeed(self.0.record_bytes))?;
+                insert_detail::<A::Error>(&mut detail, &mut detail_bytes, key, value)?;
             }
         }
-        let conversation_id = detail
-            .get("id")
-            .and_then(Value::as_str)
-            .filter(|id| !id.is_empty())
-            .ok_or_else(|| de::Error::custom("conversation requires a nonempty id"))?
-            .to_owned();
+        if self.0.sink.expands_cold_payloads() {
+            if let Some(key) = messages.cold_key.take() {
+                let payload = match self.0.sink.cold_payload_path(&key) {
+                    Some(path) => read_cold_chat(&path, &self.0).map_err(de::Error::custom)?,
+                    None => None,
+                };
+                if let Some((expanded, fields)) = payload {
+                    messages = expanded;
+                    if let Some(mut fields) = fields {
+                        for field in ["savedToggleValues", "bindedPersona"] {
+                            if let Some(value) = fields.remove(field) { detail.insert(field.to_owned(), value); }
+                        }
+                        for field in ["hypaV2Data", "hypaV3Data", "scriptstate", "localLore"] {
+                            detail.remove(field);
+                            if let Some(value) = fields.remove(field) { detail.insert(field.to_owned(), value); }
+                        }
+                    }
+                    check_detail_size::<A::Error>(&detail)?;
+                } else {
+                    self.0.sink.unavailable_cold_payload(&key, self.0.character_name).map_err(|error| {
+                        *self.0.staging_error.borrow_mut() = Some(error);
+                        de::Error::custom("cold payload preview failed")
+                    })?;
+                    messages = MessageSpool::empty();
+                }
+            }
+        }
+        let conversation_id = match detail.get("id") {
+            Some(Value::String(id)) if !id.is_empty() && self.0.seen_ids.borrow_mut().insert(id.clone()) => id.clone(),
+            None | Some(Value::Null) | Some(Value::String(_)) => {
+                let id = loop {
+                    let id = uuid::Uuid::new_v4().to_string();
+                    if self.0.seen_ids.borrow_mut().insert(id.clone()) { break id; }
+                };
+                detail.insert("id".into(), Value::String(id.clone()));
+                id
+            }
+            _ => return Err(de::Error::custom("legacy chat ID must be a string when present")),
+        };
         let mut normalized_detail = Value::Object(detail);
         pocket_features::chat(&mut normalized_detail, &self.0.fallback)
             .map_err(de::Error::custom)?;
@@ -1543,7 +1896,7 @@ impl<'de> Visitor<'de> for ConversationVisitor<'_> {
             self.0.configured_index,
             &normalized_detail,
             recent_at,
-            messages.entries.len() as i64,
+            messages.count,
         )
             .map_err(|error| {
                 *self.0.staging_error.borrow_mut() = Some(error);
@@ -1562,24 +1915,73 @@ impl<'de> Visitor<'de> for ConversationVisitor<'_> {
     }
 }
 
+type ColdChatPayload = (MessageSpool, Option<Map<String, Value>>);
+
+fn read_cold_chat(path: &Path, seed: &ConversationSeed<'_>) -> Result<Option<ColdChatPayload>, serde_json::Error> {
+    let file = File::open(path).map_err(|error| staging_io(error, seed.staging_error))?;
+    let reader = DecodedLimitReader::new(file, seed.limits.max_decoded_block_bytes, seed.job, "cold chat");
+    let reader = RecordLimitReader { inner: BufReader::new(reader), bytes: seed.record_bytes };
+    let mut deserializer = serde_json::Deserializer::from_reader(reader);
+    let payload = deserializer.deserialize_any(ColdChatVisitor(MessagesSeed {
+        record_bytes: seed.record_bytes,
+        cold_detected: seed.cold_detected,
+        spool_directory: seed.spool_directory,
+        staging_error: seed.staging_error,
+        job: seed.job,
+    }))?;
+    deserializer.end()?;
+    Ok(payload)
+}
+
+struct ColdChatVisitor<'a>(MessagesSeed<'a>);
+
+impl<'de> Visitor<'de> for ColdChatVisitor<'_> {
+    type Value = Option<ColdChatPayload>;
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result { formatter.write_str("a cold chat object or message array") }
+    fn visit_seq<A: SeqAccess<'de>>(self, sequence: A) -> Result<Self::Value, A::Error> {
+        MessagesVisitor(self.0).visit_seq(sequence).map(|messages| Some((messages, None)))
+    }
+    fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        let mut messages = None;
+        let mut fields = Map::new();
+        let mut field_bytes = 2;
+        while let Some(key) = map.next_key_seed(BoundedStringSeed(self.0.record_bytes))? {
+            if key == "message" {
+                messages = Some(map.next_value_seed(MessagesSeed { ..self.0 })?);
+            } else if matches!(key.as_str(), "savedToggleValues" | "bindedPersona" | "hypaV2Data" | "hypaV3Data" | "scriptstate" | "localLore") {
+                let value = map.next_value_seed(BoundedValueSeed(self.0.record_bytes))?;
+                insert_detail::<A::Error>(&mut fields, &mut field_bytes, key, value)?;
+            } else { map.next_value::<IgnoredAny>()?; }
+        }
+        Ok(messages.filter(|messages| messages.is_array).map(|messages| (messages, Some(fields))))
+    }
+}
+
 struct MessageSpool {
-    file: File,
-    entries: Vec<(u64, u64)>,
+    file: Option<File>,
+    count: i64,
     last_time: Option<i64>,
+    cold_key: Option<String>,
+    is_array: bool,
 }
 
 impl IgnoredJsonValue for MessageSpool {
     fn ignored<E: de::Error>() -> Result<Self, E> {
-        Self::new().map_err(E::custom)
+        Ok(Self::empty())
     }
 }
 
 impl MessageSpool {
-    fn new() -> io::Result<Self> {
+    fn empty() -> Self {
+        Self { file: None, count: 0, last_time: None, cold_key: None, is_array: false }
+    }
+    fn new(directory: &Path) -> io::Result<Self> {
         Ok(Self {
-            file: tempfile::tempfile()?,
-            entries: Vec::new(),
+            file: Some(tempfile::tempfile_in(directory)?),
+            count: 0,
             last_time: None,
+            cold_key: None,
+            is_array: true,
         })
     }
 
@@ -1592,46 +1994,50 @@ impl MessageSpool {
         sink: &dyn ReplacementSink,
         staging_error: &RefCell<Option<StoreError>>,
     ) -> Result<(), String> {
+        let Some(file) = self.file.as_mut() else { return Ok(()); };
+        let spool_error = |error: io::Error| {
+            let message = error.to_string();
+            *staging_error.borrow_mut() = Some(StoreError::from(error));
+            message
+        };
         let mut page = Vec::with_capacity(MESSAGE_PAGE_COUNT);
         let mut page_bytes = 0u64;
         let mut start = 0i64;
-        for (index, (offset, length)) in self.entries.iter().copied().enumerate() {
+        file.rewind().map_err(&spool_error)?;
+        let mut reader = BufReader::with_capacity(READ_CHUNK_BYTES, file);
+        for index in 0..self.count {
             if job.is_cancel_requested() {
                 return Err("restore cancelled while staging messages".to_owned());
             }
-            if !page.is_empty()
-                && (page.len() >= MESSAGE_PAGE_COUNT
-                    || page_bytes.saturating_add(length) > MESSAGE_PAGE_BYTES)
-            {
-                sink.add_conversation_messages(
-                    staging_id,
-                    character_id,
-                    conversation_id,
-                    start,
-                    &page,
-                )
-                .map_err(|error| {
-                    let message = error.to_string();
-                    *staging_error.borrow_mut() = Some(error);
-                    message
-                })?;
-                start += page.len() as i64;
-                page.clear();
-                page_bytes = 0;
+            let mut length = [0u8; 4];
+            reader.read_exact(&mut length).map_err(&spool_error)?;
+            let length = u32::from_le_bytes(length) as u64;
+            if length > MESSAGE_PAGE_BYTES {
+                return Err(spool_error(io::Error::new(io::ErrorKind::InvalidData, "message spool record limit exceeded")));
             }
-            self.file
-                .seek(SeekFrom::Start(offset))
-                .map_err(|error| error.to_string())?;
             let mut bytes = vec![0u8; length as usize];
-            self.file
-                .read_exact(&mut bytes)
-                .map_err(|error| error.to_string())?;
+            reader.read_exact(&mut bytes).map_err(&spool_error)?;
             let mut message: Value =
                 serde_json::from_slice(&bytes).map_err(|error| error.to_string())?;
             pocket_features::message(
                 &mut message,
                 &format!("{conversation_id}:response:{index}"),
             )?;
+            let length = retained_json_bytes::<serde_json::Error>(&message).map_err(|error| error.to_string())?;
+            if !page.is_empty()
+                && (page.len() >= MESSAGE_PAGE_COUNT
+                    || page_bytes.saturating_add(length) > MESSAGE_PAGE_BYTES)
+            {
+                sink.add_conversation_messages(staging_id, character_id, conversation_id, start, &page)
+                    .map_err(|error| {
+                        let message = error.to_string();
+                        *staging_error.borrow_mut() = Some(error);
+                        message
+                    })?;
+                start += page.len() as i64;
+                page.clear();
+                page_bytes = 0;
+            }
             page.push(message);
             page_bytes = page_bytes.saturating_add(length);
         }
@@ -1654,6 +2060,10 @@ impl MessageSpool {
 }
 
 struct MessagesSeed<'a> {
+    record_bytes: &'a Cell<Option<u64>>,
+    cold_detected: &'a Cell<bool>,
+    spool_directory: &'a Path,
+    staging_error: &'a RefCell<Option<StoreError>>,
     job: &'a dyn RestoreControl,
 }
 
@@ -1681,15 +2091,30 @@ impl<'de> Visitor<'de> for MessagesVisitor<'_> {
     where
         A: SeqAccess<'de>,
     {
-        let mut spool = MessageSpool::new().map_err(de::Error::custom)?;
-        while let Some(message) = sequence.next_element::<Value>()? {
+        let spool_error = |error: io::Error| -> A::Error {
+            let message = error.to_string();
+            *self.0.staging_error.borrow_mut() = Some(StoreError::from(error));
+            de::Error::custom(message)
+        };
+        let mut spool = MessageSpool::new(self.0.spool_directory).map_err(&spool_error)?;
+        let file = spool.file.as_mut().expect("created message spool");
+        while let Some(message) = sequence.next_element_seed(BoundedValueSeed(self.0.record_bytes))? {
             if self.0.job.is_cancel_requested() {
                 return Err(de::Error::custom("restore cancelled while reading messages"));
             }
-            let offset = spool.file.stream_position().map_err(de::Error::custom)?;
-            serde_json::to_writer(&mut spool.file, &message).map_err(de::Error::custom)?;
-            let end = spool.file.stream_position().map_err(de::Error::custom)?;
-            spool.entries.push((offset, end - offset));
+            if spool.count == 0 {
+                spool.cold_key = message.get("data").and_then(Value::as_str)
+                    .and_then(|data| data.strip_prefix("\u{ef01}COLDSTORAGE\u{ef01}")).map(str::to_owned);
+                if spool.cold_key.is_some() { self.0.cold_detected.set(true); }
+            }
+            let bytes = serde_json::to_vec(&message).map_err(|error| {
+                *self.0.staging_error.borrow_mut() = Some(StoreError::Store { message: error.to_string() });
+                de::Error::custom(error)
+            })?;
+            if bytes.len() as u64 > MESSAGE_PAGE_BYTES { return Err(de::Error::custom("restore record limit exceeded")); }
+            file.write_all(&(bytes.len() as u32).to_le_bytes()).map_err(&spool_error)?;
+            file.write_all(&bytes).map_err(&spool_error)?;
+            spool.count = spool.count.checked_add(1).ok_or_else(|| de::Error::custom("message count overflow"))?;
             spool.last_time = message.get("time").and_then(Value::as_i64);
         }
         Ok(spool)
@@ -1973,7 +2398,7 @@ fn json_error(
         return cancelled(format!("restore cancelled while decoding block {name}"));
     }
     let message = error.to_string();
-    if message.contains("decoded block limit exceeded") {
+    if message.contains("decoded block limit exceeded") || message.contains("restore record limit exceeded") {
         return invalid(message);
     }
     if message.contains("source read failed") {
@@ -2049,7 +2474,8 @@ fn store_error(error: StoreError) -> NativeJobError {
         StoreError::SnapshotReleased => {
             NativeJobError::new("store-error", "persistent snapshot was released")
         }
-        StoreError::Validation { message } | StoreError::Store { message } => {
+        StoreError::RawBodyUnavailable | StoreError::CommitBusy => NativeJobError::new("store-error", error.to_string()),
+        StoreError::Committed { message, .. } | StoreError::CommitDecode { message } | StoreError::Validation { message } | StoreError::Store { message } => {
             NativeJobError::new("store-error", message)
         }
     }
@@ -2097,6 +2523,10 @@ mod tests {
         full_character_calls: AtomicUsize,
         incremental_character_calls: AtomicUsize,
         max_message_page: AtomicUsize,
+        message_pages: Mutex<Vec<usize>>,
+        cold_payloads: Option<std::collections::HashMap<String, PathBuf>>,
+        unavailable_cold: Mutex<Vec<(String, String)>>,
+        cancel_after_page: Option<(Arc<JobRegistry>, String)>,
     }
 
     impl ReplacementSink for StoreSink {
@@ -2133,6 +2563,26 @@ mod tests {
 
         fn supports_incremental_characters(&self) -> bool {
             true
+        }
+
+        fn expands_cold_payloads(&self) -> bool { self.cold_payloads.is_some() }
+
+        fn cold_payload_path(&self, key: &str) -> Option<PathBuf> {
+            self.cold_payloads.as_ref().and_then(|payloads| payloads.get(key)).cloned()
+        }
+
+        fn unavailable_cold_payload(&self, key: &str, name: &str) -> StoreResult<()> {
+            self.unavailable_cold.lock().unwrap().push((key.to_owned(), name.to_owned()));
+            Ok(())
+        }
+
+        fn incomplete_restore_preview(&self) -> StoreResult<super::super::IncompleteRestorePreview> {
+            let mut preview = super::super::IncompleteRestorePreview::default();
+            for (key, name) in self.unavailable_cold.lock().unwrap().iter() {
+                preview.unavailable_cold_keys.push(key.clone());
+                preview.character_names.push(name.clone());
+            }
+            Ok(preview)
         }
 
         fn put_character_detail(
@@ -2187,6 +2637,7 @@ mod tests {
             messages: &[Value],
         ) -> StoreResult<()> {
             self.max_message_page.fetch_max(messages.len(), Ordering::AcqRel);
+            self.message_pages.lock().unwrap().push(messages.len());
             if self.fail_character_batches {
                 return Err(crate::persistent_store::StoreError::Store {
                     message: "simulated disk full".to_owned(),
@@ -2198,7 +2649,9 @@ mod tests {
                 conversation_id,
                 start,
                 messages,
-            )
+            )?;
+            if let Some((registry, id)) = &self.cancel_after_page { registry.cancel(id).unwrap(); }
+            Ok(())
         }
 
         fn preserve_active_repositories(
@@ -2247,6 +2700,10 @@ mod tests {
                 full_character_calls: AtomicUsize::new(0),
                 incremental_character_calls: AtomicUsize::new(0),
                 max_message_page: AtomicUsize::new(0),
+                message_pages: Mutex::new(Vec::new()),
+                cold_payloads: None,
+                unavailable_cold: Mutex::new(Vec::new()),
+                cancel_after_page: None,
             },
         )
     }
@@ -2324,6 +2781,429 @@ mod tests {
         fs::write(path, bytes).unwrap();
     }
 
+    fn cold_block_source(directory: &Path, body: &[u8], compressed: bool) -> PathBuf {
+        let mut blocks = valid_blocks();
+        let encoded = if compressed { gzip(body) } else { body.to_vec() };
+        blocks[6] = raw_block(2, u8::from(compressed), "char-1", &encoded);
+        let source = directory.join("cold.risudat");
+        fs::write(&source, save_bytes(blocks)).unwrap();
+        source
+    }
+
+    fn write_cold_payload(directory: &Path, key: &str, value: &Value) -> (String, PathBuf) {
+        let path = directory.join(format!("{key}.json"));
+        serde_json::to_writer(File::create(&path).unwrap(), value).unwrap();
+        (key.to_owned(), path)
+    }
+
+    fn cold_chat(key: &str) -> Value {
+        json!({"id":"chat-1", "message":[{"role":"char", "data":format!("\u{ef01}COLDSTORAGE\u{ef01}{key}")}]})
+    }
+
+    #[test]
+    fn cold_streaming_resolves_trailing_character_reference_before_staging_stub_chats() {
+        for compressed in [false, true] {
+            let (directory, mut sink) = fixture();
+            let messages = (0..300).map(|index| json!({"role":"user", "data":format!("synthetic-{index}"), "chatId":format!("m-{index}")})).collect::<Vec<_>>();
+            sink.cold_payloads = Some(std::collections::HashMap::from([
+                write_cold_payload(directory.path(), "character", &json!({"character":{"chaId":"char-1", "name":"Expanded", "chats":[cold_chat("chat")], "coldStoragedChats":["chat"]}})),
+                write_cold_payload(directory.path(), "chat", &json!({"message":messages, "scriptstate":{"restored":true}, "bindedPersona":"persona"})),
+            ]));
+            let source = cold_block_source(directory.path(), br#"{"chaId":"char-1","chats":[{"id":"discarded-stub","message":[{"role":"user","data":"must not stage"}]}],"name":"Stub","coldstorage":"character"}"#, compressed);
+            let job = JobRegistry::default().create(JobKind::RestoreBlockRisuSave).unwrap();
+            restore_block_risu_save_path(&source, 1, &job, &sink).unwrap();
+            let restored = sink.store.lock().unwrap().materialize(Some(2)).unwrap();
+            let character = &restored["characters"][0];
+            assert_eq!(character["name"], "Expanded");
+            assert!(character.get("coldstorage").is_none());
+            assert!(character.get("coldStoragedChats").is_none());
+            assert_eq!(character["chats"].as_array().unwrap().len(), 1);
+            assert_eq!(character["chats"][0]["id"], "chat-1");
+            assert_eq!(character["chats"][0]["message"], json!(messages));
+            assert_eq!(character["chats"][0]["scriptstate"], json!({"restored":true}));
+            assert_eq!(character["chats"][0]["bindedPersona"], "persona");
+            assert_eq!(sink.full_character_calls.load(Ordering::Acquire), 0);
+            assert_eq!(sink.incremental_character_calls.load(Ordering::Acquire), 1);
+            assert_eq!(sink.max_message_page.load(Ordering::Acquire), MESSAGE_PAGE_COUNT);
+        }
+    }
+
+    #[test]
+    fn cold_streaming_preserves_array_fields_and_applies_object_field_removal() {
+        for bare in [false, true] {
+            let (directory, mut sink) = fixture();
+            let messages = json!([{"role":"char", "data":"second", "swipes":["first","second"], "swipeId":1}]);
+            let payload = if bare { messages.clone() } else { json!({"message":messages}) };
+            sink.cold_payloads = Some(std::collections::HashMap::from([write_cold_payload(directory.path(), "chat", &payload)]));
+            let mut chat = cold_chat("chat");
+            chat["savedToggleValues"] = json!({"toggle_kept":"true"});
+            chat["bindedPersona"] = json!("kept-persona");
+            chat["scriptstate"] = json!({"old":true});
+            chat["localLore"] = json!([]);
+            let source = cold_block_source(directory.path(), &serde_json::to_vec(&json!({"chaId":"char-1","name":"Synthetic","chats":[chat]})).unwrap(), false);
+            let job = JobRegistry::default().create(JobKind::RestoreBlockRisuSave).unwrap();
+            restore_block_risu_save_path(&source, 1, &job, &sink).unwrap();
+            let restored = sink.store.lock().unwrap().materialize(Some(2)).unwrap();
+            let chat = &restored["characters"][0]["chats"][0];
+            assert_eq!(chat["savedToggleValues"], json!({"toggle_kept":"true"}));
+            assert_eq!(chat["bindedPersona"], "kept-persona");
+            assert_eq!(chat.get("scriptstate").is_some(), bare);
+            assert_eq!(chat.get("localLore").is_some(), bare);
+            let variants = &chat["message"][0]["responseVariants"];
+            assert_eq!(variants["candidates"].as_array().unwrap().len(), 2);
+            assert_eq!(variants["selectedId"], variants["candidates"][1]["id"]);
+        }
+    }
+
+    #[test]
+    fn cold_streaming_reports_missing_and_wrong_role_payloads_with_late_character_name() {
+        let (directory, mut sink) = fixture();
+        sink.cold_payloads = Some(std::collections::HashMap::from([
+            write_cold_payload(directory.path(), "wrong-chat", &json!({"character":{"chaId":"other"}})),
+            write_cold_payload(directory.path(), "wrong-character", &json!({"character":[], "message":[]})),
+        ]));
+        let source = cold_block_source(directory.path(), &format!(r#"{{"chaId":"char-1","chats":[{},{}],"name":"Late name","coldstorage":"wrong-character"}}"#, cold_chat("missing-chat"), cold_chat("wrong-chat")).into_bytes(), true);
+        let job = JobRegistry::default().create(JobKind::RestoreBlockRisuSave).unwrap();
+        let result = restore_block_risu_save_path(&source, 1, &job, &sink).unwrap();
+        assert_eq!(*sink.unavailable_cold.lock().unwrap(), vec![
+            ("wrong-character".to_owned(), "Late name".to_owned()),
+            ("missing-chat".to_owned(), "Late name".to_owned()),
+            ("wrong-chat".to_owned(), "Late name".to_owned()),
+        ]);
+        assert!(!result.warning_codes.is_empty());
+        let restored = sink.store.lock().unwrap().materialize(Some(2)).unwrap();
+        assert!(restored["characters"][0].get("coldstorage").is_none());
+        assert!(restored["characters"][0]["chats"].as_array().unwrap().iter().all(|chat| chat["message"].as_array().unwrap().is_empty()));
+    }
+
+    #[test]
+    fn cold_streaming_rejects_payload_decoded_overflow_before_activation() {
+        for character_payload in [false, true] {
+            let (directory, mut sink) = fixture();
+            let payload = if character_payload {
+                json!({"character":{"chaId":"char-1", "name":"x".repeat(8192), "chats":[]}})
+            } else { json!([{"role":"user", "data":"x".repeat(8192)}]) };
+            sink.cold_payloads = Some(std::collections::HashMap::from([write_cold_payload(directory.path(), "large", &payload)]));
+            let character = if character_payload { json!({"chaId":"char-1", "chats":[], "coldstorage":"large"}) }
+                else { json!({"chaId":"char-1", "chats":[cold_chat("large")]}) };
+            let source = cold_block_source(directory.path(), &serde_json::to_vec(&character).unwrap(), true);
+            let job = JobRegistry::default().create(JobKind::RestoreBlockRisuSave).unwrap();
+            let error = restore_block_risu_save_path_with_limits(&source, 1, &job, &sink, RestoreLimits { max_decoded_block_bytes:4096, ..Default::default() }).unwrap_err();
+            assert!(error.message.contains("decoded block limit exceeded"), "{error:?}");
+            assert_eq!(sink.store.lock().unwrap().revision().unwrap(), 1);
+            assert_eq!(sink.abort_calls.load(Ordering::Acquire), 1);
+        }
+    }
+
+    #[test]
+    fn cold_streaming_bounds_one_message_before_materializing_the_rest_of_the_payload() {
+        let (directory, mut sink) = fixture();
+        let path = directory.path().join("oversized.json");
+        let mut file = File::create(&path).unwrap();
+        file.write_all(b"[{\"role\":\"user\",\"data\":\"").unwrap();
+        for _ in 0..129 { file.write_all(&[b'x'; 64 * 1024]).unwrap(); }
+        file.write_all(b"\"}]").unwrap();
+        drop(file);
+        sink.cold_payloads = Some(std::collections::HashMap::from([("chat".to_owned(), path)]));
+        let source = cold_block_source(directory.path(), &serde_json::to_vec(&json!({"chaId":"char-1","chats":[cold_chat("chat")]})).unwrap(), false);
+        let job = JobRegistry::default().create(JobKind::RestoreBlockRisuSave).unwrap();
+        let error = restore_block_risu_save_path(&source, 1, &job, &sink).unwrap_err();
+        assert!(error.message.contains("restore record limit exceeded"), "{error:?}");
+        assert_eq!(sink.store.lock().unwrap().revision().unwrap(), 1);
+        assert_eq!(sink.max_message_page.load(Ordering::Acquire), 0);
+        assert_eq!(sink.abort_calls.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn cold_streaming_cancellation_during_page_replay_aborts_and_cleans_owned_spools() {
+        let (directory, mut sink) = fixture();
+        let messages = (0..300).map(|index| json!({"role":"user","data":format!("synthetic-{index}")})).collect::<Vec<_>>();
+        sink.cold_payloads = Some(std::collections::HashMap::from([write_cold_payload(directory.path(), "chat", &json!(messages))]));
+        let source = cold_block_source(directory.path(), &serde_json::to_vec(&json!({"chaId":"char-1","chats":[cold_chat("chat")]})).unwrap(), true);
+        let registry = Arc::new(JobRegistry::default());
+        let job = registry.create(JobKind::RestoreBlockRisuSave).unwrap();
+        sink.cancel_after_page = Some((registry, job.id()));
+        let spool_directory = directory.path().join("owned-spools");
+        fs::create_dir(&spool_directory).unwrap();
+        let error = restore_risu_save_reader_controlled(
+            File::open(&source).unwrap(), fs::metadata(&source).unwrap().len(), 1, &job, &sink,
+            RestoreLimits::default(), true,
+            RestoreProgressScale { spool_directory:Some(spool_directory.clone()), ..Default::default() },
+        ).unwrap_err();
+        assert_eq!(error.code, "cancelled");
+        assert_eq!(sink.max_message_page.load(Ordering::Acquire), MESSAGE_PAGE_COUNT);
+        assert_eq!(sink.store.lock().unwrap().revision().unwrap(), 1);
+        assert_eq!(sink.abort_calls.load(Ordering::Acquire), 1);
+        assert_eq!(fs::read_dir(spool_directory).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn cold_streaming_sequential_spool_preserves_small_records_at_exact_page_boundaries() {
+        for count in [0, 1, 127, 128, 129, 256, 10_001] {
+            let (directory, mut sink) = fixture();
+            let messages = (0..count).map(|index| json!({"role":"user","data":format!("{index}"),"chatId":format!("m-{index}")})).collect::<Vec<_>>();
+            sink.cold_payloads = Some(std::collections::HashMap::from([write_cold_payload(directory.path(), "chat", &json!(messages))]));
+            let source = cold_block_source(directory.path(), &serde_json::to_vec(&json!({"chaId":"char-1","chats":[cold_chat("chat")]})).unwrap(), true);
+            let job = JobRegistry::default().create(JobKind::RestoreBlockRisuSave).unwrap();
+            restore_block_risu_save_path(&source, 1, &job, &sink).unwrap();
+            let restored = sink.store.lock().unwrap().materialize(Some(2)).unwrap();
+            assert_eq!(restored["characters"][0]["chats"][0]["message"], json!(messages));
+            let expected = messages.chunks(MESSAGE_PAGE_COUNT).map(|page| page.len()).collect::<Vec<_>>();
+            assert_eq!(*sink.message_pages.lock().unwrap(), expected);
+        }
+    }
+
+    #[test]
+    fn cold_streaming_sequential_spool_respects_message_page_byte_limit() {
+        let (directory, mut sink) = fixture();
+        let messages = json!([
+            {"role":"user", "data":"a".repeat(MESSAGE_PAGE_BYTES as usize / 2)},
+            {"role":"char", "data":"b".repeat(MESSAGE_PAGE_BYTES as usize / 2)},
+        ]);
+        sink.cold_payloads = Some(std::collections::HashMap::from([write_cold_payload(directory.path(), "chat", &messages)]));
+        let source = cold_block_source(directory.path(), &serde_json::to_vec(&json!({"chaId":"char-1","chats":[cold_chat("chat")]})).unwrap(), false);
+        let job = JobRegistry::default().create(JobKind::RestoreBlockRisuSave).unwrap();
+        restore_block_risu_save_path(&source, 1, &job, &sink).unwrap();
+        let restored = sink.store.lock().unwrap().materialize(Some(2)).unwrap();
+        assert_eq!(restored["characters"][0]["chats"][0]["message"], messages);
+        assert_eq!(*sink.message_pages.lock().unwrap(), [1, 1]);
+    }
+
+    #[test]
+    fn cold_streaming_sequential_spool_rejects_truncated_and_oversized_lengths_as_store_errors() {
+        for bytes in [vec![4, 0], vec![4, 0, 0, 0, b'{'], ((MESSAGE_PAGE_BYTES + 1) as u32).to_le_bytes().to_vec()] {
+            let (directory, sink) = fixture();
+            let mut spool = MessageSpool::new(directory.path()).unwrap();
+            spool.count = 1;
+            spool.file.as_mut().unwrap().write_all(&bytes).unwrap();
+            let job = JobRegistry::default().create(JobKind::RestoreBlockRisuSave).unwrap();
+            let staging_error = RefCell::new(None);
+            assert!(spool.replay("unused-staging", "char-1", "chat-1", job.as_ref(), &sink, &staging_error).is_err());
+            assert!(staging_error.borrow().is_some());
+            assert_eq!(sink.max_message_page.load(Ordering::Acquire), 0);
+            assert_eq!(sink.store.lock().unwrap().revision().unwrap(), 1);
+        }
+    }
+
+    fn write_container_entry(output: &mut File, name: &str, path: &Path) {
+        output.write_all(&(name.len() as u32).to_le_bytes()).unwrap();
+        output.write_all(name.as_bytes()).unwrap();
+        output.write_all(&u32::try_from(fs::metadata(path).unwrap().len()).unwrap().to_le_bytes()).unwrap();
+        io::copy(&mut File::open(path).unwrap(), output).unwrap();
+    }
+
+    fn restore_cold_container(source: &Path, directory: &Path, sink: &mut StoreSink, job: &JobControl) -> JobResultSummary {
+        try_restore_cold_container(source, directory, sink, job).unwrap()
+    }
+
+    fn try_restore_cold_container(source: &Path, directory: &Path, sink: &mut StoreSink, job: &JobControl) -> Result<JobResultSummary, crate::local_backup::LocalBackupError> {
+        use crate::local_backup::{LocalBackupError, NeverCancelled, PayloadTarget, StagedLocalBackupEntry, StrictLocalBackupDatabaseRestore};
+        struct Restore<'a> { directory: &'a Path, sink: &'a mut StoreSink, job: &'a JobControl, result: Option<JobResultSummary> }
+        impl StrictLocalBackupDatabaseRestore for Restore<'_> {
+            fn restore_database(&mut self, database: &StagedLocalBackupEntry, entries: &[StagedLocalBackupEntry]) -> Result<(), LocalBackupError> {
+                use crate::asset_repository::job_pins::{CasJobKind, CasReleaseOutcome, DurableCasJob};
+                use crate::asset_repository::PayloadCas;
+                let cas = PayloadCas::new(self.directory).unwrap();
+                let mut durable = DurableCasJob::begin(self.directory, &self.job.id(), CasJobKind::LocalBackupRestore, 0).unwrap();
+                let payloads = super::super::legacy_backup::prepare_legacy_restore_payloads(entries, &cas, &mut durable, &NeverCancelled)?;
+                self.sink.cold_payloads = Some(payloads.cold_payloads);
+                self.result = Some(restore_block_risu_save_path(database.staged_path.as_ref().unwrap(), 1, self.job, self.sink)
+                    .map_err(|error| LocalBackupError::database_restore(error.message))?);
+                durable.release(CasReleaseOutcome::Committed).unwrap();
+                Ok(())
+            }
+        }
+        let mut restore = Restore { directory, sink, job, result: None };
+        crate::local_backup::parse_legacy_local_backup_v1(&mut File::open(source).unwrap(), directory, PayloadTarget::JobStaging, &mut restore, &NeverCancelled)?;
+        Ok(restore.result.unwrap())
+    }
+
+    #[test]
+    fn cold_streaming_expands_character_stub_in_embedded_block_backup() {
+        let (directory, mut sink) = fixture();
+        let (_, payload) = write_cold_payload(directory.path(), "archived", &json!({"character":{"chaId":"char-1", "name":"Expanded in container", "chats":[{"id":"real-chat","message":[{"role":"user","data":"preserved"}]}]}}));
+        let database = cold_block_source(directory.path(), br#"{"chaId":"char-1","chats":[{"id":"stub","message":[]}],"coldstorage":"archived"}"#, true);
+        let archive = directory.path().join("backup.bin");
+        let mut output = File::create(&archive).unwrap();
+        write_container_entry(&mut output, "database.risudat", &database);
+        write_container_entry(&mut output, "coldstorage/archived.json", &payload);
+        drop(output);
+        let job = JobRegistry::default().create(JobKind::RestoreLegacyLocalBackup).unwrap();
+        restore_cold_container(&archive, directory.path(), &mut sink, &job);
+        let restored = sink.store.lock().unwrap().materialize(Some(2)).unwrap();
+        assert_eq!(restored["characters"][0]["name"], "Expanded in container");
+        assert_eq!(restored["characters"][0]["chats"].as_array().unwrap().len(), 1);
+        assert_eq!(restored["characters"][0]["chats"][0]["id"], "real-chat");
+        assert_eq!(restored["characters"][0]["chats"][0]["message"][0]["data"], "preserved");
+        assert_eq!(sink.full_character_calls.load(Ordering::Acquire), 0);
+        assert_eq!(sink.incremental_character_calls.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn cold_streaming_container_rejects_oversized_records_during_preparation() {
+        for nested in [false, true] {
+            let (directory, mut sink) = fixture();
+            let payload = directory.path().join("oversized.json");
+            let mut output = File::create(&payload).unwrap();
+            if nested { output.write_all(br#"{"character":{"chaId":"char-1","chats":[{"message":"#).unwrap(); }
+            output.write_all(br#"[{"role":"user","data":""#).unwrap();
+            for _ in 0..144 { output.write_all(&[b'x';64*1024]).unwrap(); }
+            output.write_all(b"\"}]").unwrap();
+            if nested { output.write_all(b"}]}}").unwrap(); }
+            drop(output);
+            let character = if nested { json!({"chaId":"char-1","chats":[],"coldstorage":"large"}) }
+                else { json!({"chaId":"char-1","chats":[cold_chat("large")]}) };
+            let database = cold_block_source(directory.path(), &serde_json::to_vec(&character).unwrap(), true);
+            let archive = directory.path().join("oversized.bin");
+            let mut output = File::create(&archive).unwrap();
+            write_container_entry(&mut output, "database.risudat", &database);
+            write_container_entry(&mut output, "coldstorage/large.json", &payload);
+            drop(output);
+            let job = JobRegistry::default().create(JobKind::RestoreLegacyLocalBackup).unwrap();
+            let error = try_restore_cold_container(&archive, directory.path(), &mut sink, &job).unwrap_err();
+            assert!(error.message.contains("cold payload exceeds the record limit"), "{error:?}");
+            assert_eq!(sink.abort_calls.load(Ordering::Acquire), 0, "preparation must reject before replacement staging begins");
+            assert_eq!(sink.incremental_character_calls.load(Ordering::Acquire), 0);
+            assert_eq!(sink.store.lock().unwrap().revision().unwrap(), 1);
+        }
+    }
+
+    #[test]
+    fn cold_streaming_container_keeps_last_duplicate_character_chats_and_messages() {
+        for (envelope, empty) in [(false, false), (true, false), (false, true), (true, true)] {
+            let (directory, mut sink) = fixture();
+            let payload = directory.path().join("duplicates.json");
+            let header = "\u{ef01}COLDSTORAGE\u{ef01}payload";
+            let character = format!(r#"{{"chaId":"char-1","name":"Final","chats":[{{"id":"discarded","message":[]}}],"chats":[{{"id":"kept","message":[{{"role":"user","data":"discarded"}}],"message":[{{"role":"user","data":"{header}"}}]}}]}}"#);
+            let database_body;
+            let final_messages = if empty { "[]" } else { r#"[{"role":"user","data":"kept"}]"# };
+            if envelope {
+                let final_character = format!(r#"{{"chaId":"char-1","name":"Final","chats":[{{"id":"discarded","message":[]}}],"chats":[{{"id":"kept","message":[{{"role":"user","data":"discarded","time":9876}}],"message":{final_messages}}}]}}"#);
+                fs::write(&payload, format!(r#"{{"character":{{"chaId":"char-1","name":"Discarded","chats":[{{"id":"old","message":[]}}]}},"character":{final_character}}}"#)).unwrap();
+                database_body = br#"{"chaId":"char-1","chats":[],"coldstorage":"payload"}"#.to_vec();
+            } else {
+                fs::write(&payload, format!(r#"{{"message":[{{"role":"user","data":"discarded","time":9876}}],"message":{final_messages}}}"#)).unwrap();
+                database_body = character.into_bytes();
+            }
+            let database = cold_block_source(directory.path(), &database_body, true);
+            let archive = directory.path().join("duplicates.bin");
+            let mut output = File::create(&archive).unwrap();
+            write_container_entry(&mut output, "database.risudat", &database);
+            write_container_entry(&mut output, "coldstorage/payload.json", &payload);
+            drop(output);
+            let job = JobRegistry::default().create(JobKind::RestoreLegacyLocalBackup).unwrap();
+            restore_cold_container(&archive, directory.path(), &mut sink, &job);
+            let restored = sink.store.lock().unwrap().materialize(Some(2)).unwrap();
+            let character = &restored["characters"][0];
+            assert_eq!(character["name"], "Final");
+            assert_eq!(character["chats"].as_array().unwrap().len(), 1);
+            assert_eq!(character["chats"][0]["id"], "kept");
+            assert_eq!(character["chats"][0]["message"], serde_json::from_str::<Value>(final_messages).unwrap());
+            assert_eq!(sink.incremental_character_calls.load(Ordering::Acquire), 1);
+            assert_eq!(*sink.message_pages.lock().unwrap(), if empty { vec![] } else { vec![1] });
+        }
+        for final_messages in ["[]", "null"] {
+            let (directory, mut sink) = fixture();
+            let header = "\u{ef01}COLDSTORAGE\u{ef01}missing-discarded-payload";
+            let character = format!(r#"{{"chaId":"char-1","chats":[{{"id":"kept","message":[{{"role":"user","data":"{header}","time":9876}}],"message":{final_messages}}}]}}"#);
+            let database = cold_block_source(directory.path(), character.as_bytes(), true);
+            let archive = directory.path().join("reset.bin");
+            let mut output = File::create(&archive).unwrap();
+            write_container_entry(&mut output, "database.risudat", &database);
+            drop(output);
+            let job = JobRegistry::default().create(JobKind::RestoreLegacyLocalBackup).unwrap();
+            let result = restore_cold_container(&archive, directory.path(), &mut sink, &job);
+            let restored = sink.store.lock().unwrap().materialize(Some(2)).unwrap();
+            assert_eq!(restored["characters"][0]["chats"][0]["message"], json!([]));
+            assert!(sink.message_pages.lock().unwrap().is_empty());
+            assert!(sink.unavailable_cold.lock().unwrap().is_empty());
+            assert!(result.warning_codes.is_empty());
+        }
+    }
+
+    #[test]
+    fn cold_streaming_character_metadata_limits_wrong_role_scalar_before_allocation() {
+        let (directory, mut sink) = fixture();
+        let payload = directory.path().join("scalar.json");
+        let mut output = File::create(&payload).unwrap();
+        output.write_all(br#"{"character":""#).unwrap();
+        for _ in 0..144 { output.write_all(&[b'x';64*1024]).unwrap(); }
+        output.write_all(b"\"}").unwrap();
+        drop(output);
+        sink.cold_payloads = Some(std::collections::HashMap::from([("scalar".to_owned(), payload)]));
+        let source = cold_block_source(directory.path(), br#"{"chaId":"char-1","chats":[],"coldstorage":"scalar"}"#, true);
+        let job = JobRegistry::default().create(JobKind::RestoreBlockRisuSave).unwrap();
+        let error = restore_block_risu_save_path(&source, 1, &job, &sink).unwrap_err();
+        assert!(error.message.contains("restore record limit exceeded"), "{error:?}");
+        assert_eq!(sink.incremental_character_calls.load(Ordering::Acquire), 0);
+        assert_eq!(sink.store.lock().unwrap().revision().unwrap(), 1);
+    }
+
+    #[test]
+    #[ignore = "explicit 200 MiB restore memory measurement"]
+    fn cold_streaming_200_mib_direct_and_container_memory_measurement() {
+        const COUNT: usize = 51_200;
+        for container in [false, true] {
+            let (directory, mut sink) = fixture();
+            let payload = directory.path().join("large-chat.json");
+            let mut output = std::io::BufWriter::new(File::create(&payload).unwrap());
+            output.write_all(b"[").unwrap();
+            let text = "x".repeat(4096);
+            for index in 0..COUNT {
+                if index != 0 { output.write_all(b",").unwrap(); }
+                serde_json::to_writer(&mut output, &json!({"role":"user","data":text,"chatId":format!("message-{index}")})).unwrap();
+            }
+            output.write_all(b"]").unwrap();
+            output.flush().unwrap();
+            drop(output);
+            let database = if container {
+                cold_block_source(directory.path(), &serde_json::to_vec(&json!({"chaId":"char-1","chats":[cold_chat("large")]})).unwrap(), true)
+            } else {
+                let character = directory.path().join("large-character.json");
+                let mut output = File::create(&character).unwrap();
+                output.write_all(br#"{"chaId":"char-1","chats":[{"id":"chat-1","message":"#).unwrap();
+                io::copy(&mut File::open(&payload).unwrap(), &mut output).unwrap();
+                output.write_all(b"}]}").unwrap();
+                drop(output);
+                let source = directory.path().join("direct.risudat");
+                let mut output = File::create(&source).unwrap();
+                output.write_all(RISU_SAVE_HEADER).unwrap();
+                let blocks = valid_blocks();
+                for block in &blocks[..6] { output.write_all(block).unwrap(); }
+                output.write_all(&[2,0,6]).unwrap();
+                output.write_all(b"char-1").unwrap();
+                output.write_all(&u32::try_from(fs::metadata(&character).unwrap().len()).unwrap().to_le_bytes()).unwrap();
+                io::copy(&mut File::open(character).unwrap(), &mut output).unwrap();
+                output.write_all(&blocks[7]).unwrap();
+                source
+            };
+            let archive = directory.path().join("large.bin");
+            if container {
+                let mut output = File::create(&archive).unwrap();
+                write_container_entry(&mut output, "database.risudat", &database);
+                write_container_entry(&mut output, "coldstorage/large.json", &payload);
+            }
+            let job = JobRegistry::default().create(if container { JobKind::RestoreLegacyLocalBackup } else { JobKind::RestoreBlockRisuSave }).unwrap();
+            let measurement = crate::test_memory::measure_working_set(|| {
+                if container { restore_cold_container(&archive, directory.path(), &mut sink, &job) }
+                else { restore_block_risu_save_path(&database, 1, &job, &sink).unwrap() }
+            });
+            assert_eq!(measurement.value.revision, 2);
+            assert_eq!(sink.full_character_calls.load(Ordering::Acquire), 0);
+            assert!(sink.max_message_page.load(Ordering::Acquire) <= MESSAGE_PAGE_COUNT);
+            let query = serde_json::from_value(json!({"characterId":"char-1","conversationId":"chat-1","startIndex":COUNT-1,"limit":1})).unwrap();
+            let window = sink.store.lock().unwrap().read_conversation_window(&query, None).unwrap().unwrap().value;
+            assert_eq!(window.total_messages, COUNT as i64);
+            assert_eq!(window.messages.len(), 1);
+            assert_eq!(window.messages[0]["data"], text);
+            assert_eq!(window.messages[0]["chatId"], format!("message-{}", COUNT-1));
+            println!("COLD_STREAMING_MEMORY {{\"container\":{container},\"messageCount\":{COUNT},\"baselineWorkingSetBytes\":{:?},\"peakWorkingSetBytes\":{:?},\"retainedWorkingSetBytes\":{:?}}}", measurement.baseline_working_set_bytes, measurement.peak_working_set_bytes, measurement.retained_working_set_bytes);
+            if let (Some(baseline), Some(peak)) = (measurement.baseline_working_set_bytes, measurement.peak_working_set_bytes) {
+                assert!(peak.saturating_sub(baseline) < 192 * 1024 * 1024, "restore retained a payload-sized working set");
+            }
+        }
+    }
+
     fn raw_recovery_archive(path: &Path) {
         let file = fs::File::create(path).unwrap();
         let mut archive = zip::ZipWriter::new(file);
@@ -2338,6 +3218,52 @@ mod tests {
             .write_all(br#"{"format":"risunest-raw-recovery","version":1}"#)
             .unwrap();
         archive.finish().unwrap();
+    }
+
+    #[test]
+    fn official_cold_references_fail_before_activation() {
+        for cold in [
+            json!({"chaId":"char-1","name":"Stub","chats":[],"coldstorage":"missing-character"}),
+            json!({"chaId":"char-1","chats":[{"id":"chat-1","message":[{"role":"char","data":"\u{ef01}COLDSTORAGE\u{ef01}missing-chat"}]}]}),
+        ] {
+            let (directory, sink) = fixture();
+            let mut blocks = valid_blocks();
+            blocks[6] = block(2, false, "char-1", &cold);
+            let bytes = save_bytes(blocks);
+            let registry = JobRegistry::default();
+            let job = registry.create(JobKind::RestoreBlockRisuSave).unwrap();
+            let error = restore_risu_save_reader_controlled(
+                bytes.as_slice(), bytes.len() as u64, 1, &job, &sink, RestoreLimits::default(), true,
+                RestoreProgressScale { spool_directory: Some(directory.path().to_owned()), reject_cold_references: true, ..Default::default() },
+            ).unwrap_err();
+            assert_eq!(error.code, "cold-expansion-required");
+            assert_eq!(sink.abort_calls.load(Ordering::Acquire), 1);
+            assert_eq!(sink.store.lock().unwrap().revision().unwrap(), 1);
+        }
+    }
+
+    #[test]
+    fn block_restore_assigns_missing_and_duplicate_chat_ids() {
+        let (directory, sink) = fixture();
+        let mut blocks = valid_blocks();
+        blocks[6] = block(2, false, "char-1", &json!({
+            "chaId":"char-1","chats":[
+                {"message":[]},{"id":null,"message":[]},{"id":"","message":[]},
+                {"id":"existing","message":[]},{"id":"existing","message":[]}
+            ]
+        }));
+        let path = directory.path().join("ids.risudat");
+        fs::write(&path, save_bytes(blocks)).unwrap();
+        let registry = JobRegistry::default();
+        let job = registry.create(JobKind::RestoreBlockRisuSave).unwrap();
+        restore_block_risu_save_path(&path, 1, &job, &sink).unwrap();
+        let restored = sink.store.lock().unwrap().materialize(None).unwrap();
+        let chats = restored["characters"][0]["chats"].as_array().unwrap();
+        let ids: HashSet<_> = chats.iter().map(|chat| chat["id"].as_str().unwrap()).collect();
+        assert_eq!(chats.len(), 5);
+        assert_eq!(ids.len(), 5);
+        assert!(!ids.contains(""));
+        assert_eq!(chats[3]["id"], "existing");
     }
 
     #[test]
@@ -3138,6 +4064,10 @@ mod tests {
             full_character_calls: AtomicUsize::new(0),
             incremental_character_calls: AtomicUsize::new(0),
             max_message_page: AtomicUsize::new(0),
+            message_pages: Mutex::new(Vec::new()),
+            cold_payloads: None,
+            unavailable_cold: Mutex::new(Vec::new()),
+            cancel_after_page: None,
         };
         let job = JobRegistry::default()
             .create(JobKind::RestoreBlockRisuSave)
@@ -3282,7 +4212,7 @@ mod tests {
         let restoring = {
             let job = Arc::clone(&job);
             let sink = Arc::clone(&sink);
-            thread::spawn(move || restore_block_risu_save(opened, 1, &job, sink.as_ref()))
+            thread::spawn(move || restore_block_risu_save(opened, tempfile::tempdir().unwrap().path(), 1, &job, sink.as_ref()))
         };
 
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -3342,7 +4272,7 @@ mod tests {
             .create(JobKind::RestoreBlockRisuSave)
             .unwrap();
 
-        let result = restore_block_risu_save(opened, 1, &job, &sink).unwrap();
+        let result = restore_block_risu_save(opened, tempfile::tempdir().unwrap().path(), 1, &job, &sink).unwrap();
 
         assert_eq!(result.revision, 2);
         assert_eq!(result.character_count, 1);
@@ -3367,7 +4297,7 @@ mod tests {
             .create(JobKind::RestoreBlockRisuSave)
             .unwrap();
 
-        let error = restore_block_risu_save(opened, 1, &job, &sink).unwrap_err();
+        let error = restore_block_risu_save(opened, tempfile::tempdir().unwrap().path(), 1, &job, &sink).unwrap_err();
 
         assert_eq!(error.code, "corrupt-input");
         assert!(error.message.contains("appended"));
@@ -3396,7 +4326,7 @@ mod tests {
             .create(JobKind::RestoreBlockRisuSave)
             .unwrap();
 
-        let error = restore_block_risu_save(opened, 1, &job, &sink).unwrap_err();
+        let error = restore_block_risu_save(opened, tempfile::tempdir().unwrap().path(), 1, &job, &sink).unwrap_err();
 
         assert_eq!(error.code, "truncated-input");
         assert_eq!(sink.store.lock().unwrap().revision().unwrap(), 1);
@@ -3677,6 +4607,7 @@ mod tests {
                 bytes: Some(source_bytes),
                 total_bytes: Some(source_bytes),
                 import_destination: None,
+                operation_id: None,
             })
             .unwrap(),
         )

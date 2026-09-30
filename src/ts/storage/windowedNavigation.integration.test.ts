@@ -927,4 +927,53 @@ describe('selected chat list edits', () => {
             Object.assign(globalThis, previousGlobals)
         }
     })
+    it('persists edits after committed replacement and captures only the active production working set', async () => {
+        const indexedDB = new IDBFactory()
+        const previousGlobals = { indexedDB: globalThis.indexedDB, IDBKeyRange: globalThis.IDBKeyRange }
+        let app: ProductionApp | undefined
+        try {
+            app = await bootProductionApp(indexedDB, syntheticLibrary('character'))
+            const selectOwner = async () => {
+                expect(await app!.characters.changeChar(app!.stores.DBState.db.characters.findIndex(item => item.chaId === 'edited-owner'))).toBe(true)
+            }
+            await selectOwner()
+            const inactiveIndex = app.stores.DBState.db.characters.findIndex(item => item.chaId === 'second-character')
+            const inactive = app.stores.DBState.db.characters[inactiveIndex]
+            // A non-plain test object retains its guard without Svelte replacing its descriptor.
+            const guarded = Object.assign(Object.create({}), inactive)
+            Object.defineProperty(guarded, 'chats', { configurable: true, enumerable: true, get: () => { throw new Error('inactive production capture') } })
+            app.stores.DBState.db.characters[inactiveIndex] = guarded
+            try {
+                app.stores.DBState.db.username = 'Captured without inactive traversal'
+                app.runtime.markPersistentDataDirty(1)
+                await app.runtime.flushPendingDataLocally('synthetic-capture')
+                expect((await app.runtime.store.readRoot()).value.username).toBe('Captured without inactive traversal')
+            } finally { app.stores.DBState.db.characters[inactiveIndex] = inactive }
+
+            const replacement = syntheticLibrary('character')
+            replacement.characters[0].chats[0].message[0].data = 'Committed replacement'
+            const compatibility = await app.runtime.acquireCompleteConversation('replacement-compatibility')
+            try {
+                const outcome = await app.runtime.replacePersistentDatabase(replacement, 'synthetic-replacement', { authoritative: true })
+                expect(outcome.projection).toBe('applied')
+            } finally { compatibility.release() }
+            await selectOwner()
+            const next = await app.runtime.acquireCompleteConversation('post-replacement-edit')
+            const row = next.session.readRange(0, 1)
+            expect(row.messages[0].data).toBe('Committed replacement')
+            next.session.edit(row.locators[0], { ...row.messages[0], data: 'Edit after replacement' })
+            await app.runtime.acknowledgeGenerationCompletion(app.runtime.getStorageAuthorityEpoch())
+            next.release()
+            await app.runtime.flushPendingData('exit')
+            app = await bootProductionApp(indexedDB)
+            await selectOwner()
+            const reopened = await app.runtime.acquireCompleteConversation('reopen-contract')
+            expect(reopened.session.readRange(0, 8).messages.map(message => message.data)).toEqual(['Edit after replacement'])
+            reopened.release()
+        } finally {
+            await app?.runtime.flushPendingData('exit')
+            Object.assign(globalThis, previousGlobals)
+        }
+    }, 30_000)
+
 })

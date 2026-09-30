@@ -156,6 +156,7 @@ export function createServerSyncFacade(options: {
   /** Settles once library work outside this facade has released the library,
    * so native admission does not turn the next claim away as busy. */
   awaitLibrary?: () => Promise<void>;
+  deferred?: () => boolean;
 }) {
   const native = options.invoke ?? invoke;
   const transfer = async <T>(
@@ -336,6 +337,7 @@ export function createServerSyncFacade(options: {
       return transfer<ServerCycle>("server_sync_publish", { preparationId });
     }
     // A held fence has already saved local data and refuses further writes.
+    if (options.deferred?.()) throw new ServerSyncError("generation-active");
     if (!held) {
       options.onProgress?.("saving");
       await options.runtime.flushPendingData("server-sync-prepare");
@@ -356,7 +358,13 @@ export function createServerSyncFacade(options: {
         const token = await options.runtime.capturePersistentMutationToken(
           "server-sync-activate",
         );
-        fence = await options.runtime.acquireDestructiveReplacementFence(token);
+        try {
+          fence = await options.runtime.acquireDestructiveReplacementFence(token);
+        } catch (cause) {
+          if (cause instanceof Error && cause.name === "PersistentMutationFencedError")
+            throw new ServerSyncError(options.deferred?.() ? "generation-active" : "local-edit-pending");
+          throw cause;
+        }
       }
       if (cancelled) throw new ServerSyncError("cancelled");
       pendingActivation = { prepared, fence };
@@ -380,6 +388,7 @@ export function createServerSyncFacade(options: {
   const recover = async (
     command: string,
     config?: ServerConfig,
+    residency?: "full" | "remote",
   ): Promise<ServerStatus> => {
     await options.awaitLibrary?.();
     if (pendingRefresh) throw new ServerSyncError("committed-refresh-pending");
@@ -391,20 +400,21 @@ export function createServerSyncFacade(options: {
     return native<ServerStatus>(command, {
       expectedRevision: status.localRevision,
       ...(config ? { config } : {}),
+      ...(residency ? { residency } : {}),
     });
   };
   return {
     status: () => native<ServerStatus>("server_sync_status"),
-    bind: async (config: ServerConfig) => {
+    bind: async (config: ServerConfig, residency?: "full" | "remote") => {
       await options.awaitLibrary?.();
-      return native<ServerStatus>("server_sync_bind", { config });
+      return native<ServerStatus>("server_sync_bind", { config, ...(residency ? { residency } : {}) });
     },
     unbind: async () => {
       await options.awaitLibrary?.();
       await native<void>("server_sync_unbind");
     },
-    reregister: (config: ServerConfig) =>
-      recover("server_sync_reregister", config),
+    reregister: (config: ServerConfig, residency?: "full" | "remote") =>
+      recover("server_sync_reregister", config, residency),
     reconcile: () => recover("server_sync_reconcile"),
     needsRefresh: () =>
       pendingRefresh !== undefined || pendingActivation !== undefined,

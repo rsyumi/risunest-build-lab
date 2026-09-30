@@ -104,9 +104,11 @@ export const runSummarizer = async (text: string) => {
 let extractor: FeatureExtractionPipeline = null
 let lastEmbeddingModelQuery: string = ''
 type EmbeddingModel = 'Xenova/all-MiniLM-L6-v2' | 'nomic-ai/nomic-embed-text-v1.5'
-export const runEmbedding = async (texts: string[], model: EmbeddingModel = 'Xenova/all-MiniLM-L6-v2', device: 'webgpu' | 'wasm'): Promise<Float32Array[]> => {
+export const runEmbedding = async (texts: string[], model: EmbeddingModel = 'Xenova/all-MiniLM-L6-v2', device: 'webgpu' | 'wasm', signal?: AbortSignal): Promise<Float32Array[]> => {
     if (texts.length === 0) return []
+    signal?.throwIfAborted()
     return embeddingMutex.runExclusive(async () => {
+        signal?.throwIfAborted()
         await initTransformers()
         const embeddingModelQuery = model + device
         const { pipeline } = await import('@huggingface/transformers');
@@ -126,8 +128,10 @@ export const runEmbedding = async (texts: string[], model: EmbeddingModel = 'Xen
         const vectors: Float32Array[] = []
         const batchSize = Math.min(texts.length, getRuntimePerformanceBudgets().localEmbeddingBatchEntries)
         for (let offset = 0; offset < texts.length; offset += batchSize) {
+            signal?.throwIfAborted()
             const batch = texts.slice(offset, offset + batchSize)
             const result = await extractor(batch, { pooling: 'mean', normalize: true });
+            signal?.throwIfAborted()
             const data = result.data as Float32Array
             const lenPerText = data.length / batch.length
             for (let i = 0; i < batch.length; i++) {

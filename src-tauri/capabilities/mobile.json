@@ -5,7 +5,6 @@
   "platforms": ["android"],
   "permissions": [
     "core:default",
-    "core:window:allow-set-fullscreen",
     "fs:allow-read-file",
     "fs:allow-write-file",
     "fs:allow-write",
@@ -47,6 +46,7 @@
     "deep-link:default",
     "barcode-scanner:allow-scan",
     "barcode-scanner:allow-cancel",
+    "barcode-scanner:allow-open-app-settings",
     "barcode-scanner:allow-check-permissions",
     "barcode-scanner:allow-request-permissions"
   ]

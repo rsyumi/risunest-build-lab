@@ -127,6 +127,8 @@ impl Capture {
         if let Some(parent) = reference_parent(root, false)? {
             for entry in std::fs::read_dir(parent)? {
                 let entry = entry?;
+                let metadata = std::fs::symlink_metadata(entry.path())?;
+                if !metadata.is_dir() || crate::trust_boundary::is_link_like(&metadata) { continue; }
                 let Some(id) = entry.file_name().to_str().map(str::to_owned) else { continue; };
                 if entry.path().join("complete.json").try_exists()? { continue; }
                 if !entry.path().join("index.sqlite").try_exists()? { continue; }
@@ -777,6 +779,8 @@ pub(crate) fn visit_roots(root: &Path, mut visit: impl FnMut(Object) -> Result<(
     let entries = std::fs::read_dir(parent)?;
     for entry in entries {
         let entry = entry?;
+        let metadata = std::fs::symlink_metadata(entry.path())?;
+        if !metadata.is_dir() || crate::trust_boundary::is_link_like(&metadata) { continue; }
         let Some(id) = entry.file_name().to_str().map(str::to_owned) else { continue; };
         // Other backup kinds have no reference index. Never use receipt presence
         // as a liveness gate: interrupted captures own their known references.

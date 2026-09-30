@@ -17,6 +17,7 @@ export type ServerSyncOnboardingOutcome =
     | 'conflict'
     | 'paused'
     | 'pending'
+    | 'continuing'
     | 'error'
 
 /**
@@ -29,10 +30,27 @@ export function serverSyncOnboardingOutcome(
 ): ServerSyncOnboardingOutcome {
     if (snapshot.running) return 'syncing'
     if (completedServerSyncAttempt(snapshot) !== null) return 'complete'
+    if (snapshot.error && snapshot.error !== 'cancelled') return 'error'
     if (snapshot.result?.phase === 'conflict') return 'conflict'
     if (snapshot.paused) return 'paused'
+    if (!snapshot.error && snapshot.result?.phase === 'idle') return 'continuing'
     if (!snapshot.error && snapshot.result?.phase === 'pending') return 'pending'
     return 'error'
+}
+
+export function createServerSyncOnboardingContinuation() {
+    let attempt: number | undefined
+    let previousTail: number | undefined
+    let unchanged = 0
+    return (snapshot: ServerSyncSnapshot): boolean => {
+        if (serverSyncOnboardingOutcome(snapshot) !== 'continuing' || attempt === snapshot.attemptId) return false
+        attempt = snapshot.attemptId
+        const status = snapshot.status
+        const tail = (status?.dirtyRecords ?? 0) + Number(status?.pendingDeviceSections) + Number(status?.fullScan)
+        unchanged = previousTail !== undefined && tail >= previousTail ? unchanged + 1 : 0
+        previousTail = tail
+        return unchanged < 2
+    }
 }
 
 /**

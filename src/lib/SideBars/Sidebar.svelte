@@ -935,9 +935,7 @@
         <span class="text-xs text-textcolor2">Select a bot to start chatting</span>
       </div>
     {:else if DBState.db.characters[$selectedCharID]?.chaId === '§playground'}
-      <SelectedConversationEditor active={!hidden}>
-        <SideChatList bind:chara={DBState.db.characters[$selectedCharID]} />
-      </SelectedConversationEditor>
+      <SideChatList bind:chara={DBState.db.characters[$selectedCharID]} />
     {:else if $ConnectionOpenStore}
       <div class="flex flex-col">
         <h1 class="text-xl">{language.connectionOpen}</h1>
@@ -981,9 +979,7 @@
           <CharConfig />
         </SelectedConversationEditor>
       {:else}
-        <SelectedConversationEditor active={!hidden}>
-          <SideChatList bind:chara={DBState.db.characters[$selectedCharID]} />
-        </SelectedConversationEditor>
+        <SideChatList bind:chara={DBState.db.characters[$selectedCharID]} />
       {/if}
     {/if}
   {/if}

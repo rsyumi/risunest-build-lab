@@ -1,3 +1,5 @@
+import { language } from "../../../lang";
+import { portableBackupSuggestedName } from "../portableBackupName";
 import { invoke } from "@tauri-apps/api/core";
 import { isTauriIOS } from "../../platform";
 import { alertNormal, alertSelect } from "../../alert";
@@ -5,6 +7,7 @@ import {
   createPortableExportIntentStore,
   portableAndroidPublicationDependencies,
   PortableExportNeedsAttention,
+  androidReceiptSettled,
   rememberPortableExport,
   resumePendingPortableExport,
   type PendingPortableExport,
@@ -18,6 +21,7 @@ async function recover(): Promise<void> {
     !(window as Window & { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__
   )
     return;
+  const text = language.portableBackup.recovery;
   const store = createPortableExportIntentStore();
   const jobs = await invoke<PortableJobStatus[]>("native_file_job_list");
   const portable = jobs.filter((job) => job.kind === "export-portable-backup");
@@ -26,8 +30,8 @@ async function recover(): Promise<void> {
     if (stored.phase === "published") store.clear(stored.jobId);
     else {
       const choice = await alertSelect(
-        ["Dismiss this attempt", "Keep for later"],
-        "The previous portable backup job is no longer available. Its export could not be confirmed.",
+        [text.dismiss, text.later],
+        text.unavailable,
       );
       if (choice !== "0") return;
       store.clear(stored.jobId);
@@ -38,14 +42,20 @@ async function recover(): Promise<void> {
     if (existing && existing.jobId !== job.jobId) continue;
     if (!existing) {
       const choice = await alertSelect(
-        ["Review this backup", "Keep for later"],
-        "A previous portable backup task needs review.",
+        [text.review, text.later],
+        text.needsReview,
       );
       if (choice !== "0") continue;
       let status = await invoke<PortableJobStatus>("native_file_job_status", {
         jobId: job.jobId,
       });
+      let deadline = Date.now() + 60_000;
       while (!["succeeded", "failed", "cancelled"].includes(status.state)) {
+        if (Date.now() >= deadline) {
+          const choice = await alertSelect([text.wait, text.later], text.stillRunning);
+          if (choice !== "0") return;
+          deadline = Date.now() + 60_000;
+        }
         await new Promise((resolve) => setTimeout(resolve, 100));
         status = await invoke<PortableJobStatus>("native_file_job_status", {
           jobId: job.jobId,
@@ -56,7 +66,7 @@ async function recover(): Promise<void> {
         status.result?.handoffPath
           ? {
               type: isTauriIOS ? "iosFiles" : "androidSaf",
-              suggestedName: "RisuNest backup.risunest",
+              suggestedName: portableBackupSuggestedName(),
             }
           : { type: "desktopPath" },
         store,
@@ -76,8 +86,8 @@ async function recover(): Promise<void> {
           onResult: (result) =>
             alertNormal(
               result.warningCodes.length
-                ? "The portable backup was saved. Review the task warnings before moving the backup."
-                : "The portable backup was saved.",
+                ? text.savedWarnings
+                : text.saved,
             ),
         });
       } catch (error) {
@@ -96,22 +106,22 @@ async function recover(): Promise<void> {
         const canRetry = status.state === "succeeded";
         const labels = canRetry
           ? [
-              published ? "Retry cleanup" : "Retry saving backup",
-              "Discard this export",
-              "Keep for later",
+              published ? text.retryCleanup : text.retrySave,
+              text.discard,
+              text.later,
             ]
-          : ["Dismiss failed attempt", "Keep for later"];
+          : [text.dismiss, text.later];
         const code =
           error instanceof PortableExportNeedsAttention
             ? error.code
             : "portable-export-recovery-failed";
         const choice = await alertSelect(
           labels,
-          `${published ? "The backup was saved, but cleanup needs attention." : "The previous backup export needs attention."} (${code})${partial ? " A partial file may remain at the selected destination." : ""}`,
+          `${published ? text.cleanupNeeded : text.needsAttention} (${code})${partial ? text.partialFile : ""}`,
         );
         if (choice === "0" && canRetry) {
           if (!published) {
-            ensureAndroidReceiptSettled(intent);
+            await ensureAndroidReceiptSettled(intent);
             // User explicitly chose another save attempt. The native archive is
             // retained and no old destination URI is replayed from backup data.
             store.write({
@@ -137,7 +147,7 @@ async function discard(
   intent: PendingPortableExport,
   status: PortableJobStatus,
 ): Promise<void> {
-  ensureAndroidReceiptSettled(intent);
+  await ensureAndroidReceiptSettled(intent);
   if (status.result?.handoffPath)
     await invoke("native_portable_handoff_cleanup", {
       path: status.result.handoffPath,
@@ -145,12 +155,11 @@ async function discard(
   await invoke("native_file_job_forget", { jobId: intent.jobId });
 }
 
-function ensureAndroidReceiptSettled(intent: PendingPortableExport): void {
+async function ensureAndroidReceiptSettled(intent: PendingPortableExport): Promise<void> {
   if (intent.publication !== "android-saf" || !intent.requestId) return;
   const publication = portableAndroidPublicationDependencies();
   if (
-    publication.androidAcknowledgementPending(intent.requestId) &&
-    !publication.acknowledgeAndroid(intent.requestId)
+    !await androidReceiptSettled(publication, intent.requestId)
   )
     throw new PortableExportNeedsAttention(
       "android-publication-still-active",
@@ -163,9 +172,10 @@ export function resumePortableExportsAfterBootstrap(): Promise<void> {
   if (!running)
     running = recover()
       .catch(async () => {
+        const text = language.portableBackup.recovery;
         await alertSelect(
-          ["Keep for later"],
-          "Portable backup recovery could not finish. The pending task and its source file have been retained.",
+          [text.later],
+          text.recoveryFailed,
         );
       })
       .finally(() => {

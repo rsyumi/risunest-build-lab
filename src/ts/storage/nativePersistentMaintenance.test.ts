@@ -7,7 +7,7 @@ const mocks = vi.hoisted(() => ({
 }))
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: mocks.invoke }))
-vi.mock('@tauri-apps/plugin-process', () => ({ relaunch: mocks.relaunch }))
+vi.mock('../desktopRelaunch', () => ({ relaunch: mocks.relaunch }))
 vi.mock('../platform', () => ({
     isTauriIOS: false,
     get isTauriMobile() {
@@ -16,6 +16,9 @@ vi.mock('../platform', () => ({
 }))
 
 import {
+    applyNativeDataHealthRepair,
+    previewNativeDataHealthRepair,
+    undoNativeDataHealthRepair,
     deleteNativePersistentSnapshot,
     executeNativePersistentAssetGc,
     getNativePersistentStorageStats,
@@ -31,6 +34,16 @@ import {
 } from './nativePersistentMaintenance'
 
 describe('native persistent maintenance', () => {
+    it('sends the viewed diagnosis identity and expected revision for repair and undo', async () => {
+        await previewNativeDataHealthRepair(['repair'], 123)
+        await applyNativeDataHealthRepair(['repair'], true, 7, 123)
+        await undoNativeDataHealthRepair('journal', 8)
+        expect(mocks.invoke.mock.calls).toEqual([
+            ['pds_data_health_repair_preview', { selection: ['repair'], expectedScannedAt: 123 }],
+            ['pds_data_health_repair_apply', { selection: ['repair'], snapshot: true, expectedRevision: 7, expectedScannedAt: 123 }],
+            ['pds_data_health_undo', { journalId: 'journal', expectedRevision: 8 }],
+        ])
+    })
     beforeEach(() => {
         mocks.invoke.mockReset()
         mocks.isTauriMobile = true

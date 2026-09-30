@@ -4,6 +4,7 @@
  * Data-driven definition for DisplaySettings page.
  */
 
+import { isTauriDesktop } from '../platform';
 import type { SettingItem } from './types';
 import { changeFullscreen } from '../util';
 import { updateAnimationSpeed } from '../gui/animation';
@@ -250,6 +251,7 @@ export const displaySizeSettingsItems: SettingItem[] = [
 export const displayOtherSettingsItems: SettingItem[] = [
     {
         id: 'display.fullScreen',
+        condition: () => isTauriDesktop,
         type: 'check',
         labelKey: 'fullscreen',
         bindKey: 'fullScreen',

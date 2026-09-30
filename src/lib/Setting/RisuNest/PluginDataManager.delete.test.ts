@@ -6,7 +6,7 @@ import { mount, tick, unmount } from 'svelte'
 vi.mock('src/lang', async () => ({
     language: (await import('src/lang/en')).languageEnglish,
 }))
-vi.mock('src/ts/platform', () => ({ isTauri: false }))
+vi.mock('src/ts/platform', () => ({ isTauri: true }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke: vi.fn() }))
 vi.mock('src/ts/stores.svelte', () => ({ DBState: { db: { plugins: [] } } }))
 vi.mock('src/ts/plugins/plugins.svelte', () => ({
@@ -20,11 +20,16 @@ vi.mock('src/ts/alert', () => alerts)
 const inventory = vi.hoisted(() => ({
     listPluginDataItems: vi.fn(),
     deletePluginDataItems: vi.fn(async () => {}),
+    readPluginDataValue: vi.fn(async () => 'matching value'),
+    searchPluginDataValues: vi.fn(async (items: { owner: string; key: string; space?: string }[]) => new Set(
+        items.map((item) => JSON.stringify([item.space ?? '', item.owner, item.key])))),
 }))
 vi.mock('src/ts/plugins/pluginDataInventory', async (importOriginal) => ({
     ...(await importOriginal<typeof import('src/ts/plugins/pluginDataInventory')>()),
     listPluginDataItems: inventory.listPluginDataItems,
     deletePluginDataItems: inventory.deletePluginDataItems,
+    readPluginDataValue: inventory.readPluginDataValue,
+    searchPluginDataValues: inventory.searchPluginDataValues,
 }))
 
 import PluginDataManager from './PluginDataManager.svelte'
@@ -47,11 +52,11 @@ async function settle(): Promise<void> {
     for (let index = 0; index < 8; index += 1) await tick()
 }
 
-async function open(): Promise<HTMLDivElement> {
-    inventory.listPluginDataItems.mockResolvedValue(items)
+async function open(seed = true, pluginNames?: string[]): Promise<HTMLDivElement> {
+    if (seed) inventory.listPluginDataItems.mockResolvedValue(items)
     target = document.createElement('div')
     document.body.append(target)
-    component = mount(PluginDataManager, { target, props: { place: 'settings' } })
+    component = mount(PluginDataManager, { target, props: { place: 'settings', pluginNames } })
     await settle()
     return target
 }
@@ -68,9 +73,117 @@ afterEach(async () => {
     target?.remove()
     target = undefined
     vi.clearAllMocks()
+    inventory.listPluginDataItems.mockReset()
+    inventory.readPluginDataValue.mockReset().mockResolvedValue('matching value')
+    inventory.searchPluginDataValues.mockReset().mockImplementation(async (items) => new Set(
+        items.map((item: PluginDataItem) => JSON.stringify([item.space ?? '', item.owner, item.key]))))
+    vi.useRealTimers()
 })
 
 describe('plugin data manager deletions', () => {
+    it.each([true, false])('rejects a stale scope listing (old first: %s)', async (oldFirst) => {
+        let old!: (rows: PluginDataItem[]) => void
+        let current!: (rows: PluginDataItem[]) => void
+        inventory.listPluginDataItems
+            .mockImplementationOnce(() => new Promise(resolve => { old = resolve }))
+            .mockImplementationOnce(() => new Promise(resolve => { current = resolve }))
+        const root = await open(false)
+        button(root, strings.scopeThisDevice)!.click()
+        await settle()
+        const device = [{ ...items[0], key: 'device_value', space: 'json' as const }]
+        if (oldFirst) { old(items); await settle(); current(device) }
+        else { current(device); await settle(); old(items) }
+        await settle()
+        expect(root.querySelector('[data-plugin-data-row="pm_store"]')).toBeNull()
+        expect(root.querySelector('[data-plugin-data-row="device_value"]')).not.toBeNull()
+    })
+
+    it('cancels deletion when the scope changes during confirmation', async () => {
+        const root = await open()
+        let confirm!: (answer: boolean) => void
+        alerts.alertConfirm.mockImplementationOnce(() => new Promise(resolve => { confirm = resolve }))
+        root.querySelector<HTMLButtonElement>('[data-plugin-data-row="pm_store"] button[aria-label]')!.click()
+        await vi.waitFor(() => expect(alerts.alertConfirm).toHaveBeenCalled())
+        inventory.listPluginDataItems.mockResolvedValue([])
+        button(root, strings.scopeThisDevice)!.click()
+        await settle()
+        confirm(true)
+        await settle()
+        expect(inventory.deletePluginDataItems).not.toHaveBeenCalled()
+    })
+
+    it('searches while typing and repeats the retained query after refresh', async () => {
+        const root = await open()
+        vi.useFakeTimers()
+        const search = root.querySelector<HTMLInputElement>(`input[placeholder="${strings.searchValue}"]`)!
+        search.value = 'matching'
+        search.dispatchEvent(new Event('input', { bubbles: true }))
+        await settle()
+        expect(root.querySelector('[role="status"]')?.textContent).toBe(languageEnglish.loading)
+        expect(root.textContent).not.toContain(strings.empty)
+        await vi.advanceTimersByTimeAsync(250)
+        await settle()
+        expect(root.querySelectorAll('[data-plugin-data-row]')).toHaveLength(3)
+        button(root, strings.refresh)!.click()
+        await settle()
+        expect(root.querySelector('[role="status"]')).not.toBeNull()
+        await vi.advanceTimersByTimeAsync(250)
+        await settle()
+        expect(inventory.searchPluginDataValues).toHaveBeenCalledTimes(2)
+        expect(root.querySelectorAll('[data-plugin-data-row]')).toHaveLength(3)
+    })
+
+    it('does not publish a value search completed after a scope switch', async () => {
+        const root = await open()
+        vi.useFakeTimers()
+        let finish!: (value: Set<string>) => void
+        inventory.searchPluginDataValues.mockImplementationOnce(() => new Promise(resolve => { finish = resolve }))
+        const search = root.querySelector<HTMLInputElement>(`input[placeholder="${strings.searchValue}"]`)!
+        search.value = 'matching'
+        search.dispatchEvent(new Event('input', { bubbles: true }))
+        await settle()
+        await vi.advanceTimersByTimeAsync(250)
+        inventory.listPluginDataItems.mockResolvedValue([{ ...items[0], key: 'device_value', space: 'json' }])
+        button(root, strings.scopeThisDevice)!.click()
+        await settle()
+        await vi.advanceTimersByTimeAsync(250)
+        finish(new Set(items.map((item) => JSON.stringify(['', item.owner, item.key]))))
+        await settle()
+        expect(inventory.searchPluginDataValues).toHaveBeenCalledTimes(2)
+        expect(root.querySelectorAll('[data-plugin-data-row]')).toHaveLength(1)
+        expect(root.querySelector('[data-plugin-data-row="device_value"]')).not.toBeNull()
+    })
+
+    it('reloads a retained value query when the key filter is widened', async () => {
+        const root = await open()
+        vi.useFakeTimers()
+        const key = root.querySelector<HTMLInputElement>(`input[placeholder="${strings.searchKey}"]`)!
+        const value = root.querySelector<HTMLInputElement>(`input[placeholder="${strings.searchValue}"]`)!
+        key.value = 'pm_'
+        key.dispatchEvent(new Event('input', { bubbles: true }))
+        value.value = 'matching'
+        value.dispatchEvent(new Event('input', { bubbles: true }))
+        await settle()
+        await vi.advanceTimersByTimeAsync(250)
+        await settle()
+        expect(root.querySelectorAll('[data-plugin-data-row]')).toHaveLength(2)
+        key.value = ''
+        key.dispatchEvent(new Event('input', { bubbles: true }))
+        await settle()
+        expect(root.querySelector('[role="status"]')).not.toBeNull()
+        await vi.advanceTimersByTimeAsync(250)
+        await settle()
+        expect(root.querySelectorAll('[data-plugin-data-row]')).toHaveLength(3)
+        expect(inventory.searchPluginDataValues).toHaveBeenCalledTimes(2)
+    })
+
+    it('offers reload after deleting data for an installed owner', async () => {
+        const root = await open(true, ['provider-manager'])
+        alerts.alertConfirm.mockResolvedValue(true)
+        root.querySelector<HTMLButtonElement>('[data-plugin-data-row="pm_store"] button[aria-label]')!.click()
+        await vi.waitFor(() => expect(root.textContent).toContain(strings.assign.reloadTitle))
+    })
+
     it('keeps the list inside its own scroll area', async () => {
         const root = await open()
         const list = root.querySelector('[data-plugin-data-list]')
@@ -100,7 +213,7 @@ describe('plugin data manager deletions', () => {
         alerts.alertConfirm.mockResolvedValue(true)
         root.querySelector<HTMLButtonElement>('[data-plugin-data-row="pm_store"] button[aria-label]')?.click()
         await vi.waitFor(() =>
-            expect(inventory.deletePluginDataItems).toHaveBeenCalledWith([items[0]]),
+            expect(inventory.deletePluginDataItems).toHaveBeenCalledWith([items[0]], 'library'),
         )
     })
 
@@ -121,7 +234,7 @@ describe('plugin data manager deletions', () => {
         alerts.alertConfirm.mockResolvedValue(true)
         button(root, strings.deleteAll.replace('{0}', '3'))?.click()
         await vi.waitFor(() =>
-            expect(inventory.deletePluginDataItems).toHaveBeenCalledWith(items),
+            expect(inventory.deletePluginDataItems).toHaveBeenCalledWith(items, 'library'),
         )
         expect(alerts.alertConfirm).toHaveBeenCalledTimes(2)
     })
@@ -137,7 +250,7 @@ describe('plugin data manager deletions', () => {
         alerts.alertConfirm.mockResolvedValue(true)
         button(root, strings.deleteVisible.replace('{0}', '2'))?.click()
         await vi.waitFor(() =>
-            expect(inventory.deletePluginDataItems).toHaveBeenCalledWith(items.slice(0, 2)),
+            expect(inventory.deletePluginDataItems).toHaveBeenCalledWith(items.slice(0, 2), 'library'),
         )
         expect(alerts.alertConfirm.mock.calls.map(([message]) => message)).toEqual([
             strings.deleteVisibleConfirm.replace('{0}', '2'),

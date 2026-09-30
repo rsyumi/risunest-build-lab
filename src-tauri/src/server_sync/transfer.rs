@@ -25,9 +25,12 @@ const CHUNK: usize = transfer::UPLOAD_CHUNK_BYTES;
 const REBIN_PASSES: usize = 2;
 #[path = "transfer_references.rs"]
 mod references;
+#[cfg(test)]
+#[path = "transfer_pending_tests.rs"]
+mod pending_tests;
 
 /// Resume metadata contains only content identities and server staging IDs.
-/// Every resumed chunk lives in the verified cache CAS before its row is saved.
+/// Every resumed chunk lives in its verified transfer spool before its row is saved.
 pub(crate) struct Transfer<'a> {
     pub client: &'a ServerClient,
     pub cache: &'a Cache,
@@ -37,6 +40,8 @@ pub(crate) struct Transfer<'a> {
     frame_limit: std::cell::Cell<usize>,
     #[cfg(test)]
     frame_depth: usize,
+    #[cfg(test)]
+    pending_timeout: std::time::Duration,
     base_sizes: std::cell::RefCell<Option<(Vec<String>, Vec<(String, u64)>)>>,
 }
 pub(crate) struct UploadTarget {
@@ -242,6 +247,8 @@ impl<'a> Transfer<'a> {
             frame_limit: std::cell::Cell::new(FRAME_TARGET_BYTES),
             #[cfg(test)]
             frame_depth: 2,
+            #[cfg(test)]
+            pending_timeout: std::time::Duration::from_secs(120),
             base_sizes: std::cell::RefCell::new(None),
         })
     }
@@ -994,6 +1001,7 @@ impl<'a> Transfer<'a> {
         let started: Started = canonical::decode(&reply.body, MAX_METADATA_BYTES)?;
         risunest_sync_wire::validate_id(&started.job_id)?;
         let path = format!("object-deltas/{}", started.job_id);
+        let pending_since = std::time::Instant::now();
         loop {
             self.ensure_active()?;
             let reply = self.client.request(
@@ -1006,8 +1014,8 @@ impl<'a> Transfer<'a> {
             )?;
             self.ensure_active()?;
             match reply.status {
-                202 => continue,
-                204 => {
+                202 if pending_since.elapsed() < self.pending_timeout() => continue,
+                202 | 204 | 410 => {
                     self.client.request(
                         Method::DELETE,
                         &path,
@@ -1252,7 +1260,11 @@ impl<'a> Transfer<'a> {
         Ok(())
     }
     fn wait_upload(&self, id: &str, hash: &str, size: u64) -> Result<()> {
+        let pending_since = std::time::Instant::now();
         loop {
+            if pending_since.elapsed() >= self.pending_timeout() {
+                return Err(SyncError::new("upload-finalization-pending", 503));
+            }
             self.ensure_active()?;
             let (_, progress): (_, UploadProgress) = self.client.json(
                 Method::GET,
@@ -1299,6 +1311,7 @@ impl<'a> Transfer<'a> {
         }
     }
     fn download_large(&self, target: &str, size: u64) -> Result<()> {
+        risunest_sync_wire::validate_hash(target)?;
         if size > 1024 * 1024 * 1024 * 1024 {
             return Err(SyncError::new("object-too-large", 413));
         }
@@ -1321,7 +1334,7 @@ impl<'a> Transfer<'a> {
                 if let Some((hash, stored)) = cached {
                     if stored >= 0
                         && stored as u64 == length
-                        && self.cache.read(&hash, CHUNK).is_ok()
+                        && self.read_chunk(target, index, &hash).is_ok()
                     {
                         continue;
                     }
@@ -1377,7 +1390,12 @@ impl<'a> Transfer<'a> {
             let mut failure = None;
             for result in results {
                 let stored = result.and_then(|(index, length, bytes)| {
-                    let hash = self.cache.put(&bytes)?;
+                    let hash = risunest_sync_wire::hash(&bytes);
+                    let directory = self.chunk_directory(target)?;
+                    let mut file = tempfile::NamedTempFile::new_in(&directory)?;
+                    std::io::Write::write_all(&mut file, &bytes)?;
+                    file.as_file().sync_all()?;
+                    file.persist(directory.join(index.to_string())).map_err(|error| error.error)?;
                     self.db.execute("INSERT INTO chunks VALUES(?1,?2,?3,?4) ON CONFLICT(target,part) DO UPDATE SET hash=excluded.hash,size=excluded.size",params![target,index as i64,hash,length as i64])?;
                     self.client.progress();
                     Ok(())
@@ -1409,7 +1427,44 @@ impl<'a> Transfer<'a> {
         )?;
         self.db
             .execute("DELETE FROM chunks WHERE target=?1", [target])?;
+        std::fs::remove_dir_all(self.chunk_directory(target)?)?;
         Ok(())
+    }
+    fn chunk_directory(&self, target: &str) -> Result<std::path::PathBuf> {
+        risunest_sync_wire::validate_hash(target)?;
+        let staging = self.cache.cas.repository_root().join("staging");
+        let directory = staging.join(target);
+        for path in [&staging, &directory] {
+            match std::fs::create_dir(path) {
+                Ok(()) => (),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => (),
+                Err(error) => return Err(error.into()),
+            }
+            let metadata = std::fs::symlink_metadata(path)?;
+            if !metadata.is_dir() || crate::trust_boundary::is_link_like(&metadata) {
+                return Err(SyncError::new("invalid-chunk-staging", 409));
+            }
+        }
+        Ok(directory)
+    }
+    fn pending_timeout(&self) -> std::time::Duration {
+        #[cfg(test)]
+        { self.pending_timeout }
+        #[cfg(not(test))]
+        { std::time::Duration::from_secs(120) }
+    }
+    fn read_chunk(&self, target: &str, index: u64, hash: &str) -> Result<Vec<u8>> {
+        let path = self.chunk_directory(target)?.join(index.to_string());
+        let metadata = std::fs::symlink_metadata(&path)?;
+        if !metadata.is_file() || crate::trust_boundary::is_link_like(&metadata) || metadata.len() > CHUNK as u64 {
+            return Err(SyncError::new("invalid-chunk-staging", 409));
+        }
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)?.take(CHUNK as u64 + 1).read_to_end(&mut bytes)?;
+        if bytes.len() > CHUNK || risunest_sync_wire::hash(&bytes) != hash {
+            return Err(SyncError::new("invalid-verified-chunk", 409));
+        }
+        Ok(bytes)
     }
 }
 
@@ -1425,6 +1480,21 @@ pub(crate) fn prepare_checked(
     size: u64,
     check: &dyn Fn() -> Result<()>,
 ) -> Result<()> {
+    let staged = stage_checked(cas, reader, hash, size, check)?;
+    check()?;
+    let outcome = cas.publish_staged(staged);
+    check()?;
+    outcome?;
+    Ok(())
+}
+
+pub(crate) fn stage_checked(
+    cas: &crate::asset_repository::PayloadCas,
+    reader: &mut impl Read,
+    hash: &str,
+    size: u64,
+    check: &dyn Fn() -> Result<()>,
+) -> Result<crate::asset_repository::StagedPayload> {
     struct Checked<'a, R> {
         reader: R,
         check: &'a dyn Fn() -> Result<()>,
@@ -1436,10 +1506,9 @@ pub(crate) fn prepare_checked(
         }
     }
     check()?;
-    let outcome = cas.prepare_reader_expected(&mut Checked { reader, check }, hash, size);
+    let outcome = cas.stage_reader_expected(&mut Checked { reader, check }, hash, size);
     check()?;
-    outcome?;
-    Ok(())
+    Ok(outcome?)
 }
 struct ChunkReader<'a, 'b> {
     transfer: &'a Transfer<'b>,
@@ -1469,8 +1538,7 @@ impl Read for ChunkReader<'_, '_> {
                 .map_err(|_| std::io::Error::other("Missing verified chunk"))?;
             self.chunk = std::io::Cursor::new(
                 self.transfer
-                    .cache
-                    .read(&hash, CHUNK)
+                    .read_chunk(self.target, self.index, &hash)
                     .map_err(|_| std::io::Error::other("Invalid verified chunk"))?,
             );
             self.index += 1;
@@ -1481,6 +1549,34 @@ impl Read for ChunkReader<'_, '_> {
 #[cfg(test)]
 mod transfer_policy_tests {
     use super::delta_job_falls_back;
+
+    #[test]
+    fn cancelled_staging_keeps_cancellation_and_removes_the_unpublished_temp() {
+        use sha2::Digest;
+        let directory = tempfile::tempdir().unwrap();
+        let cas = crate::asset_repository::PayloadCas::new(directory.path()).unwrap();
+        let bytes = vec![9_u8; 128 * 1024];
+        let hash = hex::encode(sha2::Sha256::digest(&bytes));
+        let reads = std::cell::Cell::new(0);
+        struct Reader<'a> {
+            source: std::io::Cursor<Vec<u8>>,
+            reads: &'a std::cell::Cell<usize>,
+        }
+        impl std::io::Read for Reader<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                self.reads.set(self.reads.get() + 1);
+                std::io::Read::read(&mut self.source, buffer)
+            }
+        }
+        let mut reader = Reader { source: std::io::Cursor::new(bytes.clone()), reads: &reads };
+        let result = super::stage_checked(&cas, &mut reader, &hash, bytes.len() as u64, &|| {
+            if reads.get() > 0 { Err(super::SyncError::new("cancelled", 409)) } else { Ok(()) }
+        });
+        assert!(matches!(result, Err(ref error) if error.code == "cancelled"));
+        assert_eq!(reads.get(), 1);
+        assert!(cas.stat_object(&hash).unwrap().is_none());
+        assert_eq!(std::fs::read_dir(directory.path().join("assets/staging")).unwrap().count(), 0);
+    }
 
     #[test]
     fn delta_job_capacity_and_generation_failures_use_the_full_transfer_path() {

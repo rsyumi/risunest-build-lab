@@ -24,7 +24,11 @@ export type RisuNestStorageCardId =
     | 'snapshots'
     | 'conflictBackups'
 
+export type StorageDashboardSource = 'stats' | 'snapshots' | 'conflictBackups' | 'serverBackups' | 'tempUsage'
+
 export interface RisuNestStorageDashboardSnapshot {
+    failedSources: StorageDashboardSource[]
+    loadedSources: StorageDashboardSource[]
     loading: boolean
     loadFailed: boolean
     busy: string[]
@@ -142,6 +146,8 @@ export function createRisuNestStorageDashboard(
     let state: RisuNestStorageDashboardSnapshot = {
         loading: false,
         loadFailed: false,
+        failedSources: [],
+        loadedSources: [],
         busy: [],
         stats: null,
         snapshots: [],
@@ -188,28 +194,23 @@ export function createRisuNestStorageDashboard(
         pendingReloads += 1
         update({ loading: true })
         try {
-            const [
-                stats,
-                snapshots,
-                conflictBackups,
-                serverBackups,
-                tempUsage,
-            ] = await Promise.all([
-                deps.getStats(),
-                deps.listSnapshots(),
-                deps.listConflictBackups(),
-                deps.getServerBackups(),
-                deps.getTemp(),
+            const sources: StorageDashboardSource[] = ['stats', 'snapshots', 'conflictBackups', 'serverBackups', 'tempUsage']
+            const results = await Promise.allSettled([
+                deps.getStats(), deps.listSnapshots(), deps.listConflictBackups(), deps.getServerBackups(), deps.getTemp(),
             ])
-            if (reloadId === latestReload)
-                update({
-                    stats,
-                    snapshots,
-                    conflictBackups,
-                    serverBackups,
-                    tempUsage,
-                    loadFailed: false,
+            if (reloadId === latestReload) {
+                const next: Partial<RisuNestStorageDashboardSnapshot> = {}
+                const loaded = new Set(state.loadedSources)
+                const failed: StorageDashboardSource[] = []
+                results.forEach((result, index) => {
+                    const source = sources[index]
+                    if (result.status === 'fulfilled') {
+                        Object.assign(next, { [source]: result.value })
+                        loaded.add(source)
+                    } else failed.push(source)
                 })
+                update({ ...next, loadedSources: [...loaded], failedSources: failed, loadFailed: failed.length > 0 })
+            }
         } catch {
             if (reloadId === latestReload) update({ loadFailed: true })
         } finally {

@@ -1,13 +1,17 @@
 import { mount, tick, unmount } from "svelte";
 import { beforeEach, afterEach, expect, it, vi } from "vitest";
 import App from "../src/App.svelte";
-import type { Backend, Environment, Status } from "../src/api";
+import type { Backend, Environment, PlatformStatus, Status } from "../src/api";
 
 let component: ReturnType<typeof mount> | undefined;
 let target: HTMLDivElement;
 let snapshot: Status;
 let environmentSnapshot: Environment;
 let backend: Backend;
+function platformSnapshot(): PlatformStatus {
+  const { startup, startupError, trayStartup, updateSchedule, updateScheduleError } = structuredClone(environmentSnapshot);
+  return { startup, startupError, trayStartup, updateSchedule, updateScheduleError };
+}
 beforeEach(() => {
   vi.useFakeTimers();
   vi.stubGlobal(
@@ -71,6 +75,7 @@ beforeEach(() => {
   backend = {
     status: vi.fn(async () => structuredClone(snapshot)),
     environment: vi.fn(async () => structuredClone(environmentSnapshot)),
+    platformStatus: vi.fn(async () => platformSnapshot()),
     mutate: vi.fn(async () => ({})),
     start: vi.fn(async () => {}),
     network: vi.fn(async (settings) => { environmentSnapshot.network = settings; }),
@@ -290,7 +295,7 @@ it("changes the shared update policy from run settings", async () => {
   expect(backend.updatePolicy).toHaveBeenCalledWith("notify");
 });
 
-it("shows a schedule repair failure and enables retry after the next environment refresh", async () => {
+it("refreshes a schedule failure on window focus without periodically querying services", async () => {
   environmentSnapshot.updateSchedule = null;
   environmentSnapshot.updateScheduleError = "update-already-running";
   await open();
@@ -308,11 +313,16 @@ it("shows a schedule repair failure and enables retry after the next environment
     actionMatches: true,
   };
   environmentSnapshot.updateScheduleError = null;
+  const platformReads = vi.mocked(backend.platformStatus).mock.calls.length;
   await vi.advanceTimersByTimeAsync(15_000);
+  await settle();
+  expect(target.textContent).toContain("예약 업데이트 상태를 확인하지 못했습니다.");
+  expect(backend.platformStatus).toHaveBeenCalledTimes(platformReads);
+  window.dispatchEvent(new Event("focus"));
   await settle();
   expect(target.textContent).not.toContain("예약 업데이트 상태를 확인하지 못했습니다.");
   expect(select.disabled).toBe(false);
-  expect(backend.environment).toHaveBeenCalledTimes(3);
+  expect(backend.platformStatus).toHaveBeenCalledTimes(platformReads + 1);
 });
 
 it("keeps a dirty connection draft on its page and away from update actions", async () => {
@@ -327,13 +337,14 @@ it("keeps a dirty connection draft on its page and away from update actions", as
   expect(target.querySelector<HTMLInputElement>("input[type=url]")?.value).toBe(
     "https://unsaved.example.com",
   );
-  expect(target.querySelector("dialog[open]")?.textContent).toContain("저장하지 않은 변경사항이 있습니다. 정말로 이동하시겠습니까? 변경한 내용이 초기화됩니다.");
-  button("아니오").click();
+  expect(target.querySelector("dialog[open] h2")?.textContent).toBe("페이지를 이동하시겠습니까?");
+  expect(target.querySelector("dialog[open]")?.textContent).toContain("적용하지 않은 변경사항은 초기화됩니다.");
+  button("취소").click();
   await settle();
   expect(input.value).toBe("https://unsaved.example.com");
   button("실행 설정").click();
   await settle();
-  button("네").click();
+  button("이동").click();
   await settle();
   expect(target.querySelector('form[aria-label="연결 설정"]')).toBeNull();
   button("연결").click();
@@ -542,4 +553,56 @@ it("hides the local option and keeps configured issuance for a specific listener
       "등록할 기기의 RisuNest 앱에서 QR 코드를 스캔하거나",
     ),
   );
+});
+
+it("keeps slow environment and platform reads single flight without periodically querying services", async () => {
+  let resolveEnvironment!: (value: Environment) => void;
+  let resolvePlatform!: (value: PlatformStatus) => void;
+  vi.mocked(backend.environment).mockImplementation(() => new Promise(resolve => { resolveEnvironment = resolve; }));
+  vi.mocked(backend.platformStatus).mockImplementation(() => new Promise(resolve => { resolvePlatform = resolve; }));
+  await open();
+  button("실행 설정").click();
+  await vi.advanceTimersByTimeAsync(60000);
+  expect(backend.environment).toHaveBeenCalledTimes(1);
+  expect(backend.platformStatus).toHaveBeenCalledTimes(1);
+  resolveEnvironment(environmentSnapshot);
+  resolvePlatform(platformSnapshot());
+  await settle();
+  await vi.advanceTimersByTimeAsync(60000);
+  expect(backend.platformStatus).toHaveBeenCalledTimes(1);
+});
+
+it("renders registration conflicts and publication failures as actionable messages", async () => {
+  environmentSnapshot.registrationError = "removal-registration-conflict";
+  snapshot.publication = { phase: "failed", error: "directory-full" };
+  await open();
+  expect(target.textContent).toContain("설치 정보가 일치하지 않습니다.");
+  button("연결").click();
+  await settle();
+  expect(target.textContent).toContain("레지스트리 서버의 저장 공간이 부족합니다.");
+});
+
+it("requires confirmation before releasing revoked device custody", async () => {
+  snapshot.devices = [{ id: "synthetic-device", name: "Synthetic", revoked: true, pending: false, registrationRequest: null, retained: 2, pendingError: "incompatible-store" }];
+  await open();
+  button("기기").click();
+  await settle();
+  expect(target.textContent).toContain("서버 데이터 형식이 현재 버전과 호환되지 않습니다.");
+  button("보관 해제").click();
+  await settle();
+  expect(backend.mutate).not.toHaveBeenCalled();
+  expect(target.querySelector("dialog[open]")?.textContent).toContain("삭제될 수 있습니다.");
+  target.querySelector<HTMLButtonElement>("dialog[open] button.primary")!.click();
+  await settle();
+  expect(backend.mutate).toHaveBeenCalledWith("devices/synthetic-device/forget", expect.objectContaining({ revision: "synthetic:0" }));
+});
+
+it("renders unknown update reasons as a localized outcome with a separate diagnostic code", async () => {
+  environmentSnapshot.updateStatus.reason = "synthetic-unknown-reason";
+  await open();
+  button("실행 설정").click();
+  await settle();
+  expect(target.textContent).toContain("업데이트를 완료하지 못했습니다.");
+  expect(target.querySelector("code")?.textContent).toBe("synthetic-unknown-reason");
+  expect(target.textContent).toContain("RisuNest Sync · 1.0.0");
 });

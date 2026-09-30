@@ -1,4 +1,5 @@
 import { language } from 'src/lang'
+import { isTauri } from '../../platform'
 import { alertConfirm, alertError, alertNormal, alertSelect } from '../../alert'
 import type { Database } from '../database.svelte'
 import { installLocalBackup } from '../databaseRestore'
@@ -36,32 +37,53 @@ export async function openSyncConflictBackups(): Promise<void> {
     const entry = entries[Number(selected)]
     if (!entry) return
     if (!await alertConfirm(language.syncConflictRestoreConfirm)) return
-    const bytes = await store.read(entry.id)
-    if (!bytes) {
-        alertError(language.syncConflictNoBackups)
+    let decoded: Database
+    try {
+        const bytes = await store.read(entry.id)
+        if (!bytes) throw new Error('conflict-backup-missing')
+        decoded = await decodeRisuSave(bytes) as Database
+        if (!decoded || typeof decoded !== 'object' || !Array.isArray(decoded.characters)) {
+            throw new Error('conflict-backup-invalid')
+        }
+    } catch (cause) {
+        console.error('Conflict backup could not be read', cause)
+        alertError(language.syncConflictBackupUnreadable)
         return
     }
-    const decoded = await decodeRisuSave(bytes) as Database
-    if (!decoded || typeof decoded !== 'object' || !Array.isArray(decoded.characters)) {
-        alertError('Invalid sync conflict backup')
-        return
+    let release: (() => void | Promise<void>) | undefined
+    let hold: (() => void) | undefined
+    try {
+        if (isTauri) {
+            const { getServerSyncController, holdServerSyncAfterRestore } = await import('./serverSyncProduction')
+            const controller = getServerSyncController()
+            release = await controller.beginReplacement()
+            await controller.confirmReplacement()
+            hold = holdServerSyncAfterRestore
+        }
+        await flushPendingData('sync-conflict-restore')
+        const current = await capturePersistentMutationToken('sync-conflict-restore')
+        await installLocalBackup(decoded, {
+            replaceDatabase: async (database, reason, options) => {
+                const outcome = await replacePersistentDatabase(database, reason, {
+                    ...options,
+                    authoritative: true,
+                    expectedRevision: current.revision,
+                    expectedMutationGeneration: current.mutationGeneration,
+                })
+                hold?.()
+                return outcome
+            },
+            publishAcceptedRevision: publishCurrentOfficialRevision,
+            onPostCommitError: (error) => {
+                console.error('Committed conflict restore follow-up failed', error)
+                alertError(language.risuNest.persistentData.followupFailed)
+            },
+            relaunch: () => location.reload(),
+        })
+    } catch (cause) {
+        console.error('Conflict backup restoration failed', cause)
+        alertError(language.risuNest.backup.actionFailed)
+    } finally {
+        await release?.()
     }
-    await flushPendingData('sync-conflict-restore')
-    const current = await capturePersistentMutationToken(
-        'sync-conflict-restore',
-    )
-    await installLocalBackup(decoded, {
-        replaceDatabase: (database, reason, options) => replacePersistentDatabase(database, reason, {
-            ...options,
-            authoritative: true,
-            expectedRevision: current.revision,
-            expectedMutationGeneration: current.mutationGeneration,
-        }),
-        publishAcceptedRevision: publishCurrentOfficialRevision,
-        onPostCommitError: (error) => {
-            console.error('Committed conflict restore follow-up failed', error)
-            alertError(language.risuNest.persistentData.followupFailed)
-        },
-        relaunch: () => location.reload(),
-    })
 }

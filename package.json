@@ -21,7 +21,7 @@
     "dev:agent": "vite --mode agent",
     "build:agent": "vite build --mode agent --sourcemap",
     "check:plugin-dts": "tsc --noEmit --skipLibCheck --target es2023 --module es2022 --moduleResolution bundler --lib es2023,dom src/ts/plugins/apiV3/risuai.d.ts",
-    "check:production-bundle": "node tests/productionBundle.mjs",
+    "check:production-bundle": "node tests/productionBundle.mjs desktop && node tests/productionBundle.mjs android android && node tests/productionBundle.mjs production",
     "check:benchmark-harnesses": "svelte-check --tsconfig benchmarks/tsconfig.json --config ./vite.config.ts",
     "test:dev": "vitest run --project app",
     "test:coverage": "vitest run --project app --project app-extended --coverage",

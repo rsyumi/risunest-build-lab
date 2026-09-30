@@ -43,6 +43,13 @@ function deferred<T>() {
 }
 
 describe('external storage controller', () => {
+    it('retains structured native rejection causes', async () => {
+        const cause = { kind: 'preconditionFailed', httpStatus: null, retryAtMs: null }
+        const controller = createExternalStorageController({ startJob: vi.fn().mockRejectedValue(cause), getJob: vi.fn(), cancelJob: vi.fn() }, state)
+        await expect(controller.request({ connectionId: 'sync-1', kind: 'sync', targetRevision: '1', reason: 'manual',
+            session: { kind: 'foreground', id: 'session' } })).resolves.toMatchObject({ kind: 'blocked', reason: 'preconditionFailed', cause })
+    })
+
     it('finishes cleanup without inventing a published revision or applying received data', async () => {
         const applyReceived = vi.fn()
         const bridge: ExternalStorageJobBridge = {

@@ -10,6 +10,7 @@ import {
 import {
     defaultInlayEncodeOptions,
     type InlayBlobMetadata,
+    type ConditionalBlobWrite,
 } from "../../storage/blobStore";
 import type { NewInlayImageEncoder } from "../../storage/assetRepository";
 import type { InlayOptimizationDeps } from "./inlayOptimizationJob";
@@ -40,10 +41,26 @@ export function resolveInlayImageEncoder(): NewInlayImageEncoder {
 
 /** Binds the optimization job to the live blob store and the platform encoder. */
 export function createStoredInlayOptimizationDeps(): InlayOptimizationDeps {
+    const store = resolveBlobStore()
+    let pending: { key: string, writer: ConditionalBlobWrite, source: Uint8Array } | null = null
     return {
-        async read(key) { return (await resolveBlobStore()).read(key) },
+        async read(key) {
+            pending = null
+            const captured = await store
+            const writer = await captured.captureConditionalWrite?.(key)
+            if (!writer) return null
+            const source = await captured.read(key)
+            if (!source) return null
+            pending = { key, writer, source }
+            return source
+        },
         encoder: resolveInlayImageEncoder(),
-        async write(key, data, metadata) { return (await resolveBlobStore()).put(key, data, metadata) },
+        async write(key, data, metadata) {
+            const captured = pending?.key === key ? pending : null
+            pending = null
+            if (!captured || await resolveBlobStore() !== await store) return null
+            return captured.writer(data, metadata, captured.source)
+        },
     }
 }
 

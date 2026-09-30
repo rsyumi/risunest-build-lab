@@ -138,10 +138,13 @@
         openMenu = null
         alertToast(language.togglePresetDuplicated(copy.name))
     }
-    function exportPreset(preset: Preset) {
+    async function exportPreset(preset: Preset) {
         const { name, values, promptPresetName } = $state.snapshot(preset)
-        void downloadFile(`${name}_toggle.json`, JSON.stringify({ name, values, promptPresetName }, null, 2))
-        alertToast(language.togglePresetExported(name))
+        try {
+            if (await downloadFile(`${name}_toggle.json`, JSON.stringify({ name, values, promptPresetName }, null, 2))) alertToast(language.togglePresetExported(name))
+        } catch {
+            alertError(language.togglePresetExportError)
+        }
     }
     const remove = (index: number) =>
         guarded(async () => {
@@ -294,7 +297,7 @@
                     <span class="truncate"
                         >{DBState.db.defaultToggleValues === undefined
                             ? language.saveDefaultToggles
-                            : language.defaultTogglesSaved}</span
+                            : language.defaultTogglesManage}</span
                     >
                 </button>
                 <SwitchInput name={language.disableToggleBinding} bind:check={DBState.db.disableToggleBinding} />

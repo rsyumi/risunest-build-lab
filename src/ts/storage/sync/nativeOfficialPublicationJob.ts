@@ -68,8 +68,10 @@ export function createNativeOfficialPublicationJobPublisher(
             }
         }
         if (!hasNativePersistentRevisionLease(input.lease)) return null
-        const onStatus: NonNullable<NativeFileJobOptions['onStatus']> = status =>
+        const onStatus: NonNullable<NativeFileJobOptions['onStatus']> = status => {
+            input.onStatus?.(status)
             background.progress(measuredTaskPercent(status.progress.completedBytes, status.progress.totalBytes))
+        }
         let pendingJobId: string | null = null
         let result
         try {
@@ -88,7 +90,7 @@ export function createNativeOfficialPublicationJobPublisher(
                                 revision: input.revision,
                                 accountId: input.accountId,
                             },
-                            { signal: context.signal, onStatus },
+                            { signal: context.signal, onStatus: status => { input.onStatus?.(status); background.progress(null) } },
                         )
                         : await runAttempt({
                             expectedRevision: input.revision,
@@ -168,5 +170,5 @@ export function createNativeOfficialPublicationJobPublisher(
             acknowledge: result.receipt.acknowledge,
             completeReload: result.completeReload,
         }
-    }, input.signal)
+    }, input.signal, input.userInitiated)
 }

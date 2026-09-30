@@ -4,6 +4,7 @@ const state = vi.hoisted(() => ({
     database: { hypaModel: 'voyageContext3', hypaCustomSettings: { url: '', key: '', model: '' } },
     groups: [] as string[][][],
     width: 4,
+    distinct: false,
     cache: null as unknown,
 }))
 
@@ -18,7 +19,7 @@ vi.mock('./contextualEmbedding', () => ({
         async embedDocumentGroups(groups: string[][]) {
             state.groups.push(groups.map((group) => [...group]))
             return groups.map((group) =>
-                group.map(() => new Float32Array(state.width).fill(1)),
+                group.map(() => new Float32Array(state.width).fill(state.distinct && group.includes('second context') ? 2 : 1)),
             )
         },
         async embedQueries(queries: string[]) {
@@ -84,6 +85,7 @@ const groups = [
 beforeEach(() => {
     state.groups = []
     state.width = 4
+    state.distinct = false
     setDatabaseLite(state.database as never)
     expect(DBState.db.hypaModel).toBe('voyageContext3')
 })
@@ -171,4 +173,25 @@ describe('HypaProcesserEx contextual chunks', () => {
 
         expect(state.groups).toEqual([[[groups[0][0], 'gamma one', 'gamma two']]])
     })
+})
+
+
+it.each(['cold', 'warm', 'mixed'] as const)('preserves repeated text vector identity with a %s contextual cache', async (mode) => {
+    state.distinct = true
+    const recorder = recordingCache()
+    state.cache = recorder.cache
+    const groups = [['repeated text', 'first context'], ['repeated text', 'second context']]
+    if (mode !== 'cold') {
+        await new HypaProcesserEx('voyageContext3').addSummaryChunks(chunksOf(groups))
+        if (mode === 'mixed') recorder.stored.delete(recorder.writes[0][0].key)
+    }
+    state.groups = []
+    const chunks = chunksOf(groups)
+    const processor = new HypaProcesserEx('voyageContext3')
+    await processor.addSummaryChunks(chunks)
+    expect(processor.summaryChunkVectors.map(({ chunk, vector }) => [chunks.indexOf(chunk), [...vector.embedding]]))
+        .toEqual([[0, [1, 1, 1, 1]], [1, [1, 1, 1, 1]], [2, [2, 2, 2, 2]], [3, [2, 2, 2, 2]]])
+    vi.spyOn(processor, 'getEmbeds').mockResolvedValue([new Float32Array([1, 0, 0, 0])])
+    const ranked = await processor.similaritySearchScoredEx('query')
+    expect(ranked.map(([chunk, score]) => [chunks.indexOf(chunk), score])).toEqual([[2, 2], [3, 2], [0, 1], [1, 1]])
 })

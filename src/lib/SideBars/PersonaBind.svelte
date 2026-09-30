@@ -29,7 +29,7 @@
             await bindPersona(target.conversation, index)
             await saveChatBinding()
         } catch (error) {
-            alertError(String(error))
+            alertError(language.personaBindingSaveFailed)
         }
     }
 </script>

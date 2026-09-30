@@ -109,12 +109,13 @@ internal class BackgroundTaskRegistry {
   private val tasks = linkedMapOf<String, BackgroundTaskStatus>()
   private val expired = mutableMapOf<String, (String) -> Unit>()
 
-  fun begin(kind: String, start: () -> Boolean, onExpired: (String) -> Unit): String? {
+  fun begin(kind: String, start: () -> Boolean, onExpired: (String) -> Unit, refresh: () -> Unit = {}): String? {
     if (kind !in setOf("backup", "restore", "sync", "import", "export", "maintenance")) return null
     if (!start()) return null
     val id = UUID.randomUUID().toString()
     tasks[id] = BackgroundTaskStatus(kind)
     expired[id] = onExpired
+    runCatching(refresh)
     return id
   }
 
@@ -195,7 +196,17 @@ class GenerationForegroundService : Service() {
   }
 
   private fun startInForeground() {
+    val notification = buildNotification()
+    startForeground(GENERATION_FOREGROUND_NOTIFICATION_ID, notification)
     instance = this
+  }
+
+  private fun refreshNotification() {
+    val notification = buildNotification()
+    NotificationManagerCompat.from(this).notify(GENERATION_FOREGROUND_NOTIFICATION_ID, notification)
+  }
+
+  private fun buildNotification(): android.app.Notification {
     createNotificationChannel()
     val openAppIntent = PendingIntent.getActivity(
       this,
@@ -238,7 +249,7 @@ class GenerationForegroundService : Service() {
         .setStyle(androidx.core.app.NotificationCompat.InboxStyle().also { style -> lines.forEach { style.addLine(it) } })
         .setProgress(100, maxOf(0, percent), percent < 0)
     }
-    startForeground(GENERATION_FOREGROUND_NOTIFICATION_ID, builder.build())
+    return builder.build()
   }
 
   private fun releaseWakeLock() {
@@ -263,20 +274,18 @@ class GenerationForegroundService : Service() {
     private var instance: GenerationForegroundService? = null
 
     internal fun beginTask(context: Context, kind: String, expired: (String) -> Unit): String? {
-      val id = background.begin(kind, { start(context) }, expired)
-      instance?.startInForeground()
-      return id
+      return background.begin(kind, { start(context) }, expired) { instance?.refreshNotification() }
     }
 
     internal fun taskProgress(id: String, percent: Int): Boolean {
       val updated = background.progress(id, percent)
-      if (updated) instance?.startInForeground()
+      if (updated) runCatching { instance?.refreshNotification() }
       return updated
     }
 
     internal fun endTask(context: Context, id: String): Boolean {
       val ended = background.end(id) { stop(context) }
-      if (ended && background.snapshot().isNotEmpty()) instance?.startInForeground()
+      if (ended && background.snapshot().isNotEmpty()) runCatching { instance?.refreshNotification() }
       else if (ended) instance?.releaseWakeLock()
       return ended
     }
@@ -299,7 +308,7 @@ class GenerationForegroundService : Service() {
         stopping = true
         runCatching { context.stopService(Intent(context, GenerationForegroundService::class.java)) }.getOrDefault(false)
       }
-      if (!stopping) instance?.startInForeground()
+      if (!stopping) runCatching { instance?.refreshNotification() }
       return result
     }
 

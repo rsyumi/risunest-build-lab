@@ -453,6 +453,7 @@ impl GoogleDrive {
         session: Session<'_>,
         query: &str,
         maximum: usize,
+        overflow: ErrorKind,
         cancel: &Cancellation,
     ) -> Result<Vec<DriveFile>> {
         let mut files = Vec::new();
@@ -470,7 +471,7 @@ impl GoogleDrive {
                 .await?;
             page.validate_page(cursor.as_deref())?;
             if files.len().saturating_add(page.files.len()) > maximum {
-                return Err(corrupt());
+                return Err(ProviderError::new(overflow));
             }
             files.extend(page.files);
             let Some(next) = page.next_page_token else {
@@ -661,6 +662,7 @@ impl GoogleDrive {
     ) -> Result<ObjectReceipt> {
         let total = intent.byte_length;
         let mut offset = start_offset;
+        let mut refreshed = false;
         if offset > total {
             return Err(corrupt());
         }
@@ -688,6 +690,18 @@ impl GoogleDrive {
                 control: false,
             };
             let mut response = self.dispatch(request, cancel).await?;
+            if response.status == 401 && !refreshed {
+                refreshed = true;
+                self.token(session, true, cancel).await?;
+                match self.session_status(session, &upload.session_uri, total, cancel).await? {
+                    SessionStatus::Complete(file) => return self.completed_receipt(
+                        session.settings, intent, &file, Some(&upload.file_id)),
+                    SessionStatus::Incomplete(confirmed) if confirmed <= total => offset = confirmed,
+                    SessionStatus::Incomplete(_) => return Err(corrupt()),
+                    SessionStatus::Gone => return Err(ProviderError::new(ErrorKind::NotFound)),
+                }
+                continue;
+            }
             match response.status {
                 200 | 201 => {
                     let file: DriveFile = wire::json(&mut response, cancel).await?;
@@ -777,7 +791,7 @@ impl GoogleDrive {
             config::escape_query_literal(&intent.object_id)?
         );
         let mut files = self
-            .list_control_files(session, &query, 2, cancel)
+            .list_control_files(session, &query, 2, ErrorKind::Corrupt, cancel)
             .await?
             .into_iter();
         let Some(file) = files.next() else {
@@ -810,6 +824,8 @@ impl GoogleDrive {
             &[("uploadType", "multipart"), ("fields", FILE_FIELDS)],
         );
         let metadata = self.object_metadata(session.settings, intent, file_id);
+        let mut refreshed = false;
+        loop {
         let content = source.open(0, intent.byte_length, cancel).await?;
         let token = self.token(session, false, cancel).await?;
         let (body, length, content_type) = multipart_body(&metadata, content, intent.byte_length);
@@ -817,7 +833,7 @@ impl GoogleDrive {
         headers.insert("content-type".to_owned(), content_type);
         let request = HttpRequest {
             method: reqwest::Method::POST,
-            url,
+            url: url.clone(),
             headers,
             body: Some(body),
             content_length: Some(length),
@@ -828,10 +844,16 @@ impl GoogleDrive {
             control: false,
         };
         let mut response = self.dispatch(request, cancel).await?;
+        if response.status == 401 && !refreshed {
+            refreshed = true;
+            self.token(session, true, cancel).await?;
+            continue;
+        }
         self.require_status(&mut response, &[200, 201], session.account, cancel)
             .await?;
         let file: DriveFile = wire::json(&mut response, cancel).await?;
-        self.completed_receipt(session.settings, intent, &file, Some(file_id))
+        return self.completed_receipt(session.settings, intent, &file, Some(file_id));
+        }
     }
 }
 
@@ -1008,7 +1030,20 @@ impl Provider for GoogleDrive {
                     settings.folder_id
                 )
             };
-            let control = self.list_control_files(session, &query, 3, cancel).await?;
+            let control = if matches!(mode, OpenMode::Create) {
+                let url = self.list_url(&settings, &query, &[("pageSize", "1")])?;
+                let page: FileList = self.control(session, &url, ProviderOperation::List, cancel).await?;
+                page.validate_page(None)?;
+                if !page.files.is_empty() || page.next_page_token.is_some() {
+                    return Err(ProviderError::new(ErrorKind::PreconditionFailed));
+                }
+                Vec::new()
+            } else {
+                let overflow = if matches!(mode, OpenMode::ResumeCreate) {
+                    ErrorKind::PreconditionFailed
+                } else { ErrorKind::Corrupt };
+                self.list_control_files(session, &query, 3, overflow, cancel).await?
+            };
             let heads: Vec<&DriveFile> = control
                 .iter()
                 .filter(|file| file.property(ROLE_KEY) == Some(HEAD_ROLE))
@@ -1106,6 +1141,8 @@ impl Provider for GoogleDrive {
                 }
             }
             let length = metadata.byte_length()?;
+            let mut refreshed = false;
+            let mut response = loop {
             let token = self.token(session, false, cancel).await?;
             let request = HttpRequest {
                 method: reqwest::Method::GET,
@@ -1122,7 +1159,14 @@ impl Provider for GoogleDrive {
                 mybox_charge: None,
                 control: false,
             };
-            let mut response = self.dispatch(request, cancel).await?;
+            let response = self.dispatch(request, cancel).await?;
+            if response.status == 401 && !refreshed {
+                refreshed = true;
+                self.token(session, true, cancel).await?;
+                continue;
+            }
+            break response;
+            };
             self.require_status(&mut response, &[200], session.account, cancel)
                 .await?;
             let declared = common::content_length(&response.headers)?;

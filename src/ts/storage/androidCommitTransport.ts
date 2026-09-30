@@ -27,11 +27,23 @@ export async function sendAndroidCommit(
     const sender = bridge ? binaryCommitSender(bridge, id) : undefined
     const expectedCapacity = sender ? ANDROID_BINARY_CHUNK_BYTES : ANDROID_COMMIT_CHUNK_BYTES
     try {
-        const { capacity } = await invoke<{ capacity: number }>('pds_commit_android_open', {
-            id,
-            totalBytes: bytes.length,
-            binary: Boolean(sender),
-        })
+        let opened: { capacity: number } | undefined
+        for (let attempt = 0; !opened; attempt++) {
+            try {
+                opened = await invoke<{ capacity: number }>('pds_commit_android_open', {
+                    id, totalBytes: bytes.length, binary: Boolean(sender),
+                })
+            } catch (error) {
+                let value = error
+                if (typeof value === 'string') {
+                    try { value = JSON.parse(value) } catch { /* Not a typed native error. */ }
+                }
+                if (attempt >= 40 || !value || typeof value !== 'object'
+                    || (value as { code?: string }).code !== 'commit-busy') throw error
+                await new Promise((resolve) => setTimeout(resolve, 250))
+            }
+        }
+        const { capacity } = opened
         if (capacity !== expectedCapacity)
             throw new Error('Invalid Android persistence chunk capacity')
         for (let offset = 0; offset < bytes.length; ) {

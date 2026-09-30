@@ -3,7 +3,7 @@ import { Mutex } from '../mutex';
 import { CharEmotion, selectedCharID } from "../stores.svelte";
 import { type Chat, type character, type customscript, type Database, type groupChat, type loreBook, getDatabase, getCurrentCharacter, getCurrentChat } from "../storage/database.svelte";
 import { downloadFile } from "../globalApi.svelte";
-import { getDeviceSettings } from "../storage/deviceSettings";
+import { getStartupExclusions } from "../storage/deviceSettings";
 import { isStartupExcluded } from "../storage/recoveryMode.svelte";
 import { alertError, alertNormal } from "../alert";
 import { language } from "src/lang";
@@ -16,7 +16,7 @@ import { pluginV2 } from "../plugins/plugins.svelte";
 import { runTrigger } from "./triggers";
 import { ByteBudgetLru } from "../util/byteBudgetLru";
 import { canExecuteRegexPlanInWorker, executeRegexPlanSync, getRegexExecutionPlan, type RegexExecutionPlanEntry, type RegexExecutionResult } from "./regexExecutionPlan";
-import { RegexExecutionTimeoutError, getSharedRegexWorkerClient, isRegexWorkerAvailable } from "./regexWorkerClient";
+import { RegexExecutionTimeoutError, RegexWorkerResetError, getSharedRegexWorkerClient, isRegexWorkerAvailable } from "./regexWorkerClient";
 import { tryExecuteNativeRegexBatch } from "./nativeRegexBatch";
 import { getRuntimePerformanceBudgets, subscribeRuntimePerformanceProfile } from "../runtimePerformanceProfile";
 import { createConversationOperationContext, type ConversationOperationContext, type ConversationCommitObserver } from "./conversationOperationContext";
@@ -551,6 +551,7 @@ async function processScriptFullImpl(char:character|groupChat|simpleCharacterArg
             { index: chatID },
             undefined,
             options.onConversationCommit,
+            options.signal,
         )
         options.signal?.throwIfAborted()
     }
@@ -608,7 +609,7 @@ async function processScriptFullImpl(char:character|groupChat|simpleCharacterArg
     try {
         const globalRegexOff = isStartupExcluded(
             'regex',
-            getDeviceSettings().startupExclusions,
+            getStartupExclusions(),
         )
         scripts = globalRegexOff
             ? [...char.customscript]
@@ -909,13 +910,21 @@ async function processScriptFullImpl(char:character|groupChat|simpleCharacterArg
             console.error(error)
         }
         if(result === undefined){
+            let resetRetry = false
             try {
-                result = await getSharedRegexWorkerClient().execute(plan, data, { signal: options.signal })
+                try {
+                    result = await getSharedRegexWorkerClient().execute(plan, data, { signal: options.signal })
+                } catch (error) {
+                    if (!(error instanceof RegexWorkerResetError) || options.signal?.aborted) throw error
+                    resetRetry = true
+                    result = await getSharedRegexWorkerClient().execute(plan, data, { signal: options.signal })
+                }
                 options.signal?.throwIfAborted()
             } catch (error) {
                 // A pathological ruleset must not be retried on the UI thread, and a cancelled
                 // generation must stay cancelled. Anything else means the Worker is unusable here.
-                if(error instanceof RegexExecutionTimeoutError || options.signal?.aborted){
+                if(error instanceof RegexExecutionTimeoutError) error.message = language.regexScriptTimeout
+                if(resetRetry || error instanceof RegexExecutionTimeoutError || error instanceof RegexWorkerResetError || options.signal?.aborted){
                     throw error
                 }
                 console.error(error)

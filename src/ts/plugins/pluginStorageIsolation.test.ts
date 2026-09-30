@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import type { PersistentDataStore, PluginStorageMutation } from '../storage/persistentDataStore'
+import type { PersistentDataStore, PluginStorageMutation, PluginStorageValueQuery } from '../storage/persistentDataStore'
 import { createPluginStorageStore } from './pluginStorageStore'
 import { applyPluginDatabaseUpdate } from './pluginDatabaseAccess'
 import type { Database } from '../storage/database.svelte'
@@ -17,6 +17,7 @@ function sharedStore(initial: readonly Row[]) {
     const committed: PluginStorageMutation[] = []
     const store = {
         open: vi.fn(async () => undefined),
+        readRoot: vi.fn(async () => ({ revision: 1, value: {} })),
         queryPluginStorage: vi.fn(async () => ({
             revision: 1,
             items: rows.map((row) => ({
@@ -31,6 +32,20 @@ function sharedStore(initial: readonly Row[]) {
         }),
         acquireRevision: vi.fn(async () => ({
             revision: 1,
+            readPluginStorageValues: async ({ owner, afterKey, limit = 256 }: PluginStorageValueQuery) => {
+                const records = rows.map((row, ordinal) => ({ ...row, ordinal }))
+                    .filter((row) => (!owner || row.owner === owner)
+                        && row.ordinal > (afterKey?.ordinal ?? -1))
+                const selected = records.slice(0, limit)
+                const last = selected.at(-1)
+                return {
+                    revision: 1,
+                    items: selected.map(({ ordinal, ...row }) => structuredClone(row)),
+                    nextCursor: records.length > limit && last
+                        ? { owner: last.owner, key: last.key, ordinal: last.ordinal }
+                        : null,
+                }
+            },
             queryPluginStorage: async () => ({
                 revision: 1,
                 items: rows.map((row) => ({

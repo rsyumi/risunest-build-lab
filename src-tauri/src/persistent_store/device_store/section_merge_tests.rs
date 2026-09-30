@@ -18,6 +18,33 @@ fn local_entry(row: &SectionRow) -> LocalSectionEntry {
     }
 }
 
+#[test]
+fn pending_plugin_keys_page_by_tuple_with_escaped_identifiers_and_indexed_status() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut device = DeviceStore::open(directory.path()).unwrap();
+    let keys = ["a", "a\"", "a\\", "a/", "b"];
+    for key in keys {
+        device.write_plugin_device_values("plugin", &[PluginDeviceMutation::Set {
+            space: "string".into(), key: key.into(), value: "synthetic".into(),
+        }]).unwrap();
+    }
+    let mut after = String::new();
+    let mut collected = std::collections::BTreeSet::new();
+    loop {
+        let page = device.pending_section_entry_keys(Section::LocalPlugins, &after, 2).unwrap();
+        if page.is_empty() { break; }
+        for key in &page { assert!(collected.insert(key.clone()), "duplicate pending key"); }
+        after = page.last().unwrap().clone();
+    }
+    assert_eq!(collected.len(), keys.len());
+    for (table, index) in [("plugin_device_storage", "plugin_device_storage_pending"), ("hypa_embeddings", "hypa_embeddings_pending")] {
+        let plan: Vec<String> = device.connection.prepare(&format!(
+            "EXPLAIN QUERY PLAN SELECT EXISTS(SELECT 1 FROM {table} WHERE published_clock IS NULL OR published_clock<>write_clock)"
+        )).unwrap().query_map([], |row| row.get(3)).unwrap().collect::<Result<_,_>>().unwrap();
+        assert!(plan.iter().any(|line| line.contains(index)), "{plan:?}");
+    }
+}
+
 fn assert_both(local: &SectionRow, incoming: &SectionRow, decision: SectionMergeDecision, outcome: server::Outcome) {
     assert_eq!(resolve_section_row(Some(local), incoming).unwrap(), decision);
     assert_eq!(server::resolve(Some(&local_entry(local)), &local_entry(incoming).entry).unwrap(), outcome);

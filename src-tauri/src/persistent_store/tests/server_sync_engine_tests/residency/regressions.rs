@@ -1,4 +1,58 @@
 use super::*;
+
+mod cr279_staging;
+
+#[test]
+fn external_conflict_payload_is_kept_local_without_decoding_it_as_an_owner_manifest() {
+    use crate::external_storage::capture::CaptureCatalog;
+    use crate::persistent_store::{
+        content_capture::ContentCaptureSink,
+        external_conflicts::{preserve_local_conflict, ExternalConflictRecord, PreservedHeadObservation, PreservedRemoteState},
+        sync_selection::CaptureIdentity,
+    };
+    use risunest_external_storage_format::snapshot::{envelope_length, ObjectRole, PublicObjectHeader, StoredObject, WireLocator};
+
+    let fixture = Fixture::new();
+    let (_directory, mut store) = prepared();
+    fixture.bind(&mut store);
+    assert_eq!(settle(&mut store).phase, "idle");
+    let cas = PayloadCas::new(store.repository_root()).unwrap();
+    let bytes = b"synthetic external conflict asset, not an owner manifest";
+    assert!(crate::asset_repository::owner_manifest_codec::decode_owner_manifest(bytes).is_err());
+    let payload = cas.prepare_bytes(bytes).unwrap();
+    let external = store.repository_root().join("external-storage");
+    let mut catalog = CaptureCatalog::create(&external.join("captures/synthetic-residency-conflict"), &external, None).unwrap();
+    catalog.begin(&CaptureIdentity {
+        store_id: "store".into(), library_epoch: "library".into(), generation: "generation".into(),
+        selection_epoch: "selection".into(), revision: 1,
+    }, None).unwrap();
+    catalog.record("synthetic-record", b"synthetic capture record").unwrap();
+    catalog.reference("synthetic-record", &payload.content_hash, payload.byte_size).unwrap();
+    catalog.finish().unwrap();
+    let local = catalog.durable_reference("synthetic-residency-conflict", store.repository_root()).unwrap();
+    let header = PublicObjectHeader::new("repository".into(), "snapshot-remote".into(), ObjectRole::SyncState, 1).unwrap();
+    preserve_local_conflict(store.device_store().unwrap().connection(), &ExternalConflictRecord {
+        id: "synthetic-residency-conflict".into(), created_at_ms: 1, connection_id: "connection".into(),
+        repository_id: "repository".into(), local,
+        remote: PreservedRemoteState {
+            snapshot: StoredObject { ciphertext_length: envelope_length(&header).unwrap(), header,
+                locator: WireLocator { connection_identity: "synthetic/root".into(), collection: None, object: "snapshot-remote".into() },
+                ciphertext_sha256: [2; 32], plaintext_length: 1, plaintext_sha256: [1; 32] },
+            logical_revision: 8, commit_id: "remote-commit".into(),
+            head: PreservedHeadObservation { commit_id: "remote-commit".into(), authenticated_body_hash: "02".repeat(32) },
+        }, remote_point: None, resolved: false,
+    }).unwrap();
+    drop(catalog);
+    let roots = crate::persistent_store::external_conflicts::registered_conflict_roots(
+        store.device_store().unwrap().connection(), store.repository_root(),
+    ).unwrap();
+    assert!(roots.assets.object_hashes.contains(&payload.content_hash));
+    assert!(!roots.assets.manifest_hashes.contains(&payload.content_hash));
+    store.asset_residency_status().unwrap();
+    store.asset_residency_set_policy(AssetPolicy::Remote, || Ok(())).unwrap();
+    store.asset_residency_evict(|| Ok(())).unwrap();
+    assert_eq!(cas.read_object(&payload.content_hash).unwrap().unwrap(), bytes);
+}
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[derive(Default)]
@@ -42,6 +96,19 @@ fn observed_fixture(cancellation: Arc<Cancellation>) -> Fixture {
             let cancellation = cancellation.clone();
             async move {
                 let direction = cancellation.direction.load(Ordering::SeqCst);
+                if direction == 3 && request.uri().path().starts_with("/objects/") {
+                    axum::body::to_bytes(request.into_body(), risunest_sync_wire::MAX_METADATA_BYTES).await.unwrap();
+                    cancellation.requests.fetch_add(1, Ordering::SeqCst);
+                    let signal = cancellation.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        *signal.cancelled_at.lock().unwrap() = Some(std::time::Instant::now());
+                        signal.cancelled.store(true, Ordering::SeqCst);
+                    });
+                    return axum::response::Response::builder().status(503)
+                        .header("retry-after", "30")
+                        .body(axum::body::Body::from(r#"{"error":"synthetic-unavailable"}"#)).unwrap();
+                }
                 if (direction == 1 && request.headers().contains_key("range"))
                     || (direction == 2 && request.uri().path().contains("/chunks/"))
                 {
@@ -298,6 +365,72 @@ fn full_policy_cancels_during_last_object_and_can_retry() {
         .asset_residency_set_policy(AssetPolicy::Full, || cancellation.check())
         .unwrap();
     assert_eq!(cas.read_object(hash).unwrap().unwrap(), bytes);
+}
+
+#[test]
+fn full_policy_cancellation_interrupts_http_retry_backoff() {
+    let cancellation = Arc::new(Cancellation::default());
+    let fixture = observed_fixture(cancellation.clone());
+    let (_root, mut store) = prepared();
+    fixture.bind(&mut store);
+    let bytes = vec![43; 128 * 1024 + 1];
+    let hash = put(&mut store, "assets/retry.png", &bytes).object_hash.unwrap();
+    store.asset_residency_set_policy(AssetPolicy::Remote, || Ok(())).unwrap();
+    store.asset_residency_evict(|| Ok(())).unwrap();
+    cancellation.arm(3);
+    let started = std::time::Instant::now();
+    let error = store.asset_residency_set_policy_cancelled(AssetPolicy::Full,
+        Some(cancellation.cancelled.clone()), || cancellation.check()).err().unwrap();
+    assert_eq!(error.code, "cancelled");
+    assert!(started.elapsed() < std::time::Duration::from_secs(3));
+    assert_eq!(cancellation.requests.load(Ordering::SeqCst), 1);
+    assert_eq!(PayloadCas::new(store.repository_root()).unwrap().stat_object(&hash).unwrap(), None);
+    cancellation.arm(0);
+    store.asset_residency_set_policy(AssetPolicy::Full, || Ok(())).unwrap();
+    assert_eq!(PayloadCas::new(store.repository_root()).unwrap().read_object(&hash).unwrap().unwrap(), bytes);
+}
+
+#[test]
+fn transient_hydration_keeps_the_local_cas_remote_and_cleans_its_spool() {
+    let fixture = Fixture::new();
+    let (_root, mut store) = prepared();
+    fixture.bind(&mut store);
+    let bytes = vec![89; 128 * 1024 + 1];
+    let alias = put(&mut store, "assets/transient.png", &bytes);
+    let hash = alias.object_hash.unwrap();
+    store.asset_residency_set_policy(AssetPolicy::Remote, || Ok(())).unwrap();
+    store.asset_residency_evict(|| Ok(())).unwrap();
+    let cas = PayloadCas::new(store.repository_root()).unwrap();
+    let mut body = crate::server_sync::residency::open_transient_with_check(store.repository_root(), store.repository_root(), &hash, &|| Ok(())).unwrap().unwrap();
+    let mut actual = Vec::new();
+    std::io::Read::read_to_end(&mut body, &mut actual).unwrap();
+    assert_eq!(actual, bytes);
+    assert_eq!(cas.stat_object(&hash).unwrap(), None);
+    drop(body);
+    assert!(!std::fs::read_dir(store.repository_root()).unwrap().any(|entry|
+        entry.unwrap().file_name().to_string_lossy().starts_with("asset-transient-")));
+}
+
+#[test]
+fn full_policy_materializes_obtainable_assets_after_an_earlier_missing_hash() {
+    let fixture = Fixture::new();
+    let (_root, mut store) = prepared();
+    fixture.bind(&mut store);
+    let bytes = vec![81; 128 * 1024 + 1];
+    let remote = put(&mut store, "assets/obtainable.png", &bytes).object_hash.unwrap();
+    store.asset_residency_set_policy(AssetPolicy::Remote, || Ok(())).unwrap();
+    store.asset_residency_evict(|| Ok(())).unwrap();
+    let missing_bytes = (0..10000).map(|i| format!("synthetic missing {i}").into_bytes())
+        .find(|value| risunest_sync_wire::hash(value) < remote).unwrap();
+    let missing = put(&mut store, "assets/unavailable.png", &missing_bytes).object_hash.unwrap();
+    let cas = PayloadCas::new(store.repository_root()).unwrap();
+    std::fs::remove_file(cas.object_path(&missing).unwrap().unwrap()).unwrap();
+    let error = store.asset_residency_set_policy(AssetPolicy::Full, || Ok(())).err().unwrap();
+    assert_eq!(error.code, "required-asset-unavailable");
+    assert_eq!(cas.read_object(&remote).unwrap().unwrap(), bytes);
+    assert_eq!(cas.stat_object(&missing).unwrap(), None);
+    assert_eq!(store.device_store().unwrap().asset_residency_policy().unwrap(), AssetPolicy::Full);
+    store.server_unbind().unwrap();
 }
 
 #[test]

@@ -997,6 +997,8 @@ fn collections_page_with_a_cursor_and_reject_limits_outside_the_documented_range
                         resource("snap-a.bin", "file-a", "file", 4),
                         resource("snap-b.bin", "file-b", "file", 5),
                         resource("nested", "file-n", "folder", 0),
+                        resource(".DS_Store", "file-noise", "file", 0),
+                        resource("Thumbs.db", "file-thumb", "file", 0),
                     ],
                     Some("MjA"),
                 ),
@@ -1307,5 +1309,48 @@ fn deleting_resolves_the_resource_id_and_refuses_the_head_and_descriptor_folders
                 &[MyboxCounter::ListMinute][..],
             ]
         );
+    });
+}
+
+#[test]
+fn partial_listing_positives_are_read_without_enumerating_the_folder() {
+    runtime().block_on(async {
+        let mut replies = open_replies(1024, 4096, 0);
+        replies.push(json(200, &listing(&[resource("snap-a.bin", "file-a", "file", 4)], Some("next"))));
+        replies.push(json(200, &listing(&[resource("snap-b.bin", "file-b", "file", 5)], None)));
+        let api = WireServer::start(replies);
+        let deps = fixture();
+        let provider = Mybox { deps: deps.dependencies.clone() };
+        let cancel = Cancellation::default();
+        let (repository, _) = provider.open_repository(&settings(&api), &secret(), OpenMode::Existing, &cancel).await.unwrap();
+        provider.list_objects(&repository, Collection::Snapshots, None, 1, &cancel).await.unwrap();
+        let context = provider.context(&repository).unwrap();
+        assert_eq!(provider.lookup(context, "snapshots", "snap-a.bin", &cancel).await.unwrap().unwrap().id, "file-a");
+        assert_eq!(api.requests.lock().unwrap().len(), 5);
+        assert!(provider.lookup(context, "snapshots", "missing.bin", &cancel).await.unwrap().is_none());
+        assert_eq!(api.requests.lock().unwrap().len(), 6);
+    });
+}
+
+#[test]
+fn upload_confirmation_uses_verified_newest_first_entries() {
+    runtime().block_on(async {
+        let mut replies = open_replies(1024, 4096, 0);
+        replies.push(json(200, &listing(&[resource("new-a.bin", "file-a", "file", 4)], Some("older"))));
+        replies.push(json(200, &listing(&[resource("new-b.bin", "file-b", "file", 5)], Some("older"))));
+        let api = WireServer::start(replies);
+        let provider = Mybox { deps: fixture().dependencies };
+        let cancel = Cancellation::default();
+        let (repository, _) = provider.open_repository(&settings(&api), &secret(), OpenMode::Existing, &cancel).await.unwrap();
+        let context = provider.context(&repository).unwrap();
+        assert_eq!(provider.confirm(context, "packs", "new-a.bin", &cancel).await.unwrap().unwrap().size, 4);
+        assert_eq!(provider.confirm(context, "packs", "new-b.bin", &cancel).await.unwrap().unwrap().size, 5);
+        let requests = api.requests.lock().unwrap();
+        assert_eq!(requests.len(), 6);
+        for request in &requests[4..] {
+            assert!(request.headers.lines().next().unwrap().contains("sort=createdAt%2Cdesc"));
+        }
+        assert_eq!(context.cached("packs", "new-a.bin").unwrap().unwrap().id, "file-a");
+        assert!(context.cached("packs", "unknown.bin").is_none());
     });
 }

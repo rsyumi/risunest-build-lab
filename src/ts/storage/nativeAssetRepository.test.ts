@@ -5,6 +5,7 @@ import {
     createNativeDurableAssetWriteSessionFactory,
     createNativeDurableCasJobSessionFactory,
     createNativeImmutablePayloadCas,
+    createNativeRemoteAssetReader,
     createNativeNewInlayImageEncoder,
     finalizeContentCasJob,
     NATIVE_CAS_IPC_CHUNK_BYTES,
@@ -39,6 +40,36 @@ describe('native asset repository adapters', () => {
             start: 1,
             endExclusive: 2,
         })
+    })
+
+    it('hydrates remote bytes once and reconstructs bounded CAS responses', async () => {
+        const source = Uint8Array.from({ length: 200 * 1024 }, (_, index) => index % 251)
+        const invoke = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+            if (command === 'asset_remote_hydrate_object') return source.length
+            if (command === 'asset_cas_read_object_range') {
+                expect(Number(args?.endExclusive) - Number(args?.start)).toBeLessThanOrEqual(64 * 1024)
+                return source.slice(Number(args?.start), Number(args?.endExclusive))
+            }
+            throw new Error(`Unexpected command ${command}`)
+        })
+        const remote = createNativeRemoteAssetReader(invoke)
+        await expect(remote.readObject('11'.repeat(32))).resolves.toEqual(source)
+        expect(invoke.mock.calls.filter(([command]) => command === 'asset_remote_hydrate_object')).toHaveLength(1)
+        expect(invoke.mock.calls.filter(([command]) => command === 'asset_cas_read_object_range')).toHaveLength(4)
+        await expect(remote.readObject('11'.repeat(32), { start: 199 * 1024, endExclusive: 300 * 1024 }))
+            .resolves.toEqual(source.slice(199 * 1024))
+    })
+
+    it.each([null, new Uint8Array(1)])('treats missing or short hydrated chunks as missing (%s)', async (missing) => {
+        const invoke = vi.fn(async (command: string, args?: Record<string, unknown>) => {
+            if (command === 'asset_remote_hydrate_object') return 200 * 1024
+            if (command === 'asset_cas_read_object_range') {
+                return args?.start === 0 ? new Uint8Array(64 * 1024) : missing
+            }
+            throw new Error(`Unexpected command ${command}`)
+        })
+        await expect(createNativeRemoteAssetReader(invoke).readObject('11'.repeat(32))).resolves.toBeNull()
+        expect(invoke).toHaveBeenCalledTimes(3)
     })
 
     it('streams large CAS writes through bounded chunks and always cancels the spool', async () => {

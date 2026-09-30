@@ -159,7 +159,18 @@ fn unavailable() -> ProviderError {
 }
 
 fn transient() -> ProviderError {
-    ProviderError::new(ErrorKind::Transient)
+    ProviderError::new(ErrorKind::DeviceVaultUnavailable)
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios", target_os = "linux"))]
+fn service_name(purpose: Purpose) -> String {
+    #[cfg(test)]
+    {
+        static PREFIX: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| format!("io.github.rsyumi.risunest.test.{}", uuid::Uuid::new_v4()));
+        format!("{}.{}", *PREFIX, purpose.os_name())
+    }
+    #[cfg(not(test))]
+    { format!("io.github.rsyumi.risunest.{}", purpose.os_name()) }
 }
 
 impl NativeSecretVault {
@@ -276,16 +287,18 @@ mod platform {
 
     pub fn read(root: &Path, purpose: Purpose, id: &str) -> Result<Vec<u8>> {
         let path = path(root, purpose, id);
-        let metadata = fs::symlink_metadata(&path).map_err(|_| unavailable())?;
+        let metadata = fs::symlink_metadata(&path).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound { unavailable() } else { transient() }
+        })?;
         if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_ENVELOPE_BYTES {
             return Err(unavailable());
         }
         let mut sealed = Vec::with_capacity(metadata.len() as usize);
         fs::File::open(path)
-            .map_err(|_| unavailable())?
+            .map_err(|_| transient())?
             .take(MAX_ENVELOPE_BYTES + 1)
             .read_to_end(&mut sealed)
-            .map_err(|_| unavailable())?;
+            .map_err(|_| transient())?;
         if sealed.len() as u64 > MAX_ENVELOPE_BYTES {
             return Err(unavailable());
         }
@@ -294,7 +307,10 @@ mod platform {
 
     pub fn replace(root: &Path, purpose: Purpose, id: &str, bytes: &[u8]) -> Result<()> {
         let destination = path(root, purpose, id);
-        if !fs::symlink_metadata(&destination).is_ok_and(|metadata| metadata.is_file()) {
+        let metadata = fs::symlink_metadata(&destination).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::NotFound { unavailable() } else { transient() }
+        })?;
+        if !metadata.is_file() {
             return Err(unavailable());
         }
         let temporary =
@@ -402,7 +418,7 @@ mod protection {
             }
         };
         if ok == 0 || output.pbData.is_null() {
-            return Err(unavailable());
+            return Err(transient());
         }
         let transformed = unsafe {
             let result = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
@@ -435,19 +451,19 @@ mod protection {
     }
 
     pub fn remove_keys() -> Result<()> {
-        let (vm, class) = JAVA.get().ok_or_else(unavailable)?;
-        let mut env = vm.attach_current_thread().map_err(|_| unavailable())?;
+        let (vm, class) = JAVA.get().ok_or_else(transient)?;
+        let mut env = vm.attach_current_thread().map_err(|_| transient())?;
         let class: &JClass = class.as_obj().into();
         let result = env.call_static_method(class, "removeKeys", "()V", &[]);
         if result.is_err() {
             let _ = env.exception_clear();
         }
-        result.map(|_| ()).map_err(|_| unavailable())
+        result.map(|_| ()).map_err(|_| transient())
     }
 
     pub fn transform(purpose: Purpose, bytes: &[u8], seal: bool) -> Result<Vec<u8>> {
-        let (vm, class) = JAVA.get().ok_or_else(unavailable)?;
-        let mut env = vm.attach_current_thread().map_err(|_| unavailable())?;
+        let (vm, class) = JAVA.get().ok_or_else(transient)?;
+        let mut env = vm.attach_current_thread().map_err(|_| transient())?;
         let result = (|| {
             let purpose = env.new_string(purpose.os_name())?;
             let input = env.byte_array_from_slice(bytes)?;
@@ -467,7 +483,7 @@ mod protection {
         if result.is_err() {
             let _ = env.exception_clear();
         }
-        result.map_err(|_| unavailable())
+        result.map_err(|_| transient())
     }
 }
 
@@ -475,41 +491,92 @@ mod protection {
 mod platform {
     use super::*;
     use security_framework::passwords::{
-        delete_generic_password, get_generic_password, set_generic_password,
+        delete_generic_password, get_generic_password,
     };
+    #[cfg(target_os = "macos")]
+    use security_framework::passwords::set_generic_password;
 
     // Security.framework exposes OSStatus through its typed Error. This is
     // errSecItemNotFound from Security.framework/SecBase.h.
     const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
 
     fn service(purpose: Purpose) -> String {
-        format!("io.github.rsyumi.risunest.{}", purpose.os_name())
+        service_name(purpose)
+    }
+
+    fn read_error(error: security_framework::base::Error) -> ProviderError {
+        if error.code() == ERR_SEC_ITEM_NOT_FOUND { unavailable() } else { transient() }
+    }
+
+    #[test]
+    fn apple_access_failures_are_not_missing_credentials() {
+        assert_eq!(read_error(security_framework::base::Error::from(ERR_SEC_ITEM_NOT_FOUND)).kind, ErrorKind::ReauthRequired);
+        for status in [-25308, -25293, -128] {
+            assert_eq!(read_error(security_framework::base::Error::from(status)).kind, ErrorKind::DeviceVaultUnavailable);
+        }
+        assert!(service(Purpose::Provider).starts_with("io.github.rsyumi.risunest.test."));
     }
 
     pub fn write_new(_: &Path, purpose: Purpose, id: &str, bytes: &[u8]) -> Result<()> {
-        if get_generic_password(&service(purpose), id).is_ok() {
-            return Err(transient());
+        match get_generic_password(&service(purpose), id) {
+            Ok(_) => return Err(transient()),
+            Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => {},
+            Err(error) => return Err(read_error(error)),
         }
-        set_generic_password(&service(purpose), id, bytes).map_err(|_| transient())
+        write_password(purpose, id, bytes, false)
     }
 
     pub fn read(_: &Path, purpose: Purpose, id: &str) -> Result<Vec<u8>> {
-        get_generic_password(&service(purpose), id).map_err(|_| unavailable())
+        get_generic_password(&service(purpose), id).map_err(read_error)
     }
 
     pub fn replace(_: &Path, purpose: Purpose, id: &str, bytes: &[u8]) -> Result<()> {
-        if get_generic_password(&service(purpose), id).is_err() {
-            return Err(unavailable());
-        }
-        set_generic_password(&service(purpose), id, bytes).map_err(|_| transient())
+        get_generic_password(&service(purpose), id).map_err(read_error)?;
+        write_password(purpose, id, bytes, true)
     }
 
     pub fn remove(_: &Path, purpose: Purpose, id: &str) -> Result<()> {
         match delete_generic_password(&service(purpose), id) {
             Ok(()) => Ok(()),
             Err(error) if error.code() == ERR_SEC_ITEM_NOT_FOUND => Ok(()),
-            Err(_) => Err(unavailable()),
+            Err(_) => Err(transient()),
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn write_password(purpose: Purpose, id: &str, bytes: &[u8], _: bool) -> Result<()> {
+        set_generic_password(&service(purpose), id, bytes).map_err(|_| transient())
+    }
+
+    #[cfg(target_os = "ios")]
+    fn write_password(purpose: Purpose, id: &str, bytes: &[u8], replace: bool) -> Result<()> {
+        use core_foundation::{base::TCFType, data::CFData, dictionary::CFDictionary, string::CFString};
+        use security_framework_sys::item::*;
+        use security_framework_sys::keychain_item::{SecItemAdd, SecItemUpdate};
+        use security_framework_sys::access_control::kSecAttrAccessibleAfterFirstUnlock;
+        extern "C" {
+            static kSecAttrAccessible: core_foundation::string::CFStringRef;
+        }
+        let pair = |key, value| unsafe { (CFString::wrap_under_get_rule(key), value) };
+        let mut query = vec![
+            pair(unsafe { kSecClass }, unsafe { CFString::wrap_under_get_rule(kSecClassGenericPassword) }.into_CFType()),
+            pair(unsafe { kSecAttrService }, CFString::new(&service(purpose)).into_CFType()),
+            pair(unsafe { kSecAttrAccount }, CFString::new(id).into_CFType()),
+        ];
+        let attributes = vec![
+            pair(unsafe { kSecValueData }, CFData::from_buffer(bytes).into_CFType()),
+            pair(unsafe { kSecAttrAccessible }, unsafe { CFString::wrap_under_get_rule(kSecAttrAccessibleAfterFirstUnlock) }.into_CFType()),
+        ];
+        let status = if replace {
+            let query = CFDictionary::from_CFType_pairs(&query);
+            let attributes = CFDictionary::from_CFType_pairs(&attributes);
+            unsafe { SecItemUpdate(query.as_concrete_TypeRef(), attributes.as_concrete_TypeRef()) }
+        } else {
+            query.extend(attributes);
+            let query = CFDictionary::from_CFType_pairs(&query);
+            unsafe { SecItemAdd(query.as_concrete_TypeRef(), std::ptr::null_mut()) }
+        };
+        if status == 0 { Ok(()) } else if status == ERR_SEC_ITEM_NOT_FOUND { Err(unavailable()) } else { Err(transient()) }
     }
 }
 
@@ -519,15 +586,29 @@ mod platform {
 
     fn entry(purpose: Purpose, id: &str) -> Result<keyring::Entry> {
         keyring::Entry::new(
-            &format!("io.github.rsyumi.risunest.{}", purpose.os_name()),
+            &service_name(purpose),
             id,
         )
-        .map_err(|_| unavailable())
+        .map_err(|_| transient())
+    }
+
+    fn read_error(error: keyring::Error) -> ProviderError {
+        match error { keyring::Error::NoEntry => unavailable(), _ => transient() }
+    }
+
+    #[test]
+    fn linux_access_failures_are_not_missing_credentials() {
+        assert_eq!(read_error(keyring::Error::NoEntry).kind, ErrorKind::ReauthRequired);
+        assert_eq!(read_error(keyring::Error::NoStorageAccess(Box::new(std::io::Error::other("synthetic locked collection")))).kind, ErrorKind::DeviceVaultUnavailable);
+        assert_eq!(read_error(keyring::Error::PlatformFailure(Box::new(std::io::Error::other("synthetic absent service")))).kind, ErrorKind::DeviceVaultUnavailable);
+        assert!(service_name(Purpose::Provider).starts_with("io.github.rsyumi.risunest.test."));
     }
 
     pub fn write_new(_: &Path, purpose: Purpose, id: &str, bytes: &[u8]) -> Result<()> {
-        if entry(purpose, id)?.get_secret().is_ok() {
-            return Err(transient());
+        match entry(purpose, id)?.get_secret() {
+            Ok(_) => return Err(transient()),
+            Err(keyring::Error::NoEntry) => {},
+            Err(error) => return Err(read_error(error)),
         }
         entry(purpose, id)?
             .set_secret(bytes)
@@ -535,13 +616,11 @@ mod platform {
     }
 
     pub fn read(_: &Path, purpose: Purpose, id: &str) -> Result<Vec<u8>> {
-        entry(purpose, id)?.get_secret().map_err(|_| unavailable())
+        entry(purpose, id)?.get_secret().map_err(read_error)
     }
 
     pub fn replace(_: &Path, purpose: Purpose, id: &str, bytes: &[u8]) -> Result<()> {
-        if entry(purpose, id)?.get_secret().is_err() {
-            return Err(unavailable());
-        }
+        entry(purpose, id)?.get_secret().map_err(read_error)?;
         entry(purpose, id)?
             .set_secret(bytes)
             .map_err(|_| transient())
@@ -550,17 +629,22 @@ mod platform {
     pub fn remove(_: &Path, purpose: Purpose, id: &str) -> Result<()> {
         match entry(purpose, id)?.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(_) => Err(unavailable()),
+            Err(_) => Err(transient()),
         }
     }
 }
 
-#[cfg(all(test, windows))]
+#[cfg(all(test, any(windows, target_os = "macos", target_os = "linux")))]
 mod tests {
     use super::*;
 
+    struct RemoveSyntheticSecret { root: PathBuf, purpose: Purpose, id: String }
+    impl Drop for RemoveSyntheticSecret {
+        fn drop(&mut self) { let _ = platform::remove(&self.root, self.purpose, &self.id); }
+    }
+
     #[test]
-    fn purpose_bound_dpapi_vault_roundtrips_replaces_and_removes() {
+    fn purpose_bound_vault_roundtrips_replaces_and_removes() {
         let root = tempfile::tempdir().unwrap();
         let provider = provider_vault(root.path());
         let keys = repository_key_vault(root.path());
@@ -572,6 +656,7 @@ mod tests {
         let runtime = tokio::runtime::Runtime::new().unwrap();
         runtime.block_on(async {
             let reference = provider.store(&original).await.unwrap();
+            let _cleanup = RemoveSyntheticSecret { root: root.path().to_owned(), purpose: Purpose::Provider, id: reference.0.strip_prefix("provider-v1:").unwrap().to_owned() };
             assert_eq!(
                 provider.read(&reference).await.unwrap().0.as_slice(),
                 original.0.as_slice()
@@ -583,6 +668,8 @@ mod tests {
                 replacement.0.as_slice()
             );
 
+            #[cfg(windows)]
+            {
             let path = root
                 .path()
                 .join("external-storage-secrets")
@@ -591,6 +678,7 @@ mod tests {
             assert!(!sealed
                 .windows(replacement.0.len())
                 .any(|part| part == replacement.0.as_slice()));
+            }
 
             provider.remove(&reference).await.unwrap();
             assert!(provider.read(&reference).await.is_err());
@@ -601,6 +689,7 @@ mod tests {
     fn the_account_slot_keeps_one_named_secret_in_its_own_namespace() {
         let root = tempfile::tempdir().unwrap();
         let slot = account_credential_slot(root.path());
+        let _cleanup = RemoveSyntheticSecret { root: root.path().to_owned(), purpose: Purpose::AccountCredential, id: slot.name.clone() };
         let token = SecretBytes(zeroize::Zeroizing::new(
             br#"{"id":"synthetic","token":"synthetic-account-token"}"#.to_vec(),
         ));
@@ -614,11 +703,14 @@ mod tests {
         slot.write(&rotated).unwrap();
         assert_eq!(slot.read().unwrap().0.as_slice(), rotated.0.as_slice());
 
+        #[cfg(windows)]
+        {
         let sealed =
             std::fs::read(root.path().join("account-credentials").join(&slot.name)).unwrap();
         assert!(!sealed
             .windows(rotated.0.len())
             .any(|part| part == rotated.0.as_slice()));
+        }
 
         // The provider vault namespace cannot reach the account slot.
         let provider = provider_vault(root.path());
@@ -644,6 +736,7 @@ mod tests {
         runtime.block_on(async {
             let key = SecretBytes(zeroize::Zeroizing::new(vec![7; 32]));
             let reference = keys.store(&key).await.unwrap();
+            let _cleanup = RemoveSyntheticSecret { root: root.path().to_owned(), purpose: Purpose::RepositoryKey, id: reference.0.strip_prefix("repository-key-v1:").unwrap().to_owned() };
             assert!(provider.read(&reference).await.is_err());
             assert!(provider
                 .read(&SecretRef("provider-v1:../outside".into()))

@@ -52,6 +52,7 @@ extern "C" fn request_native_quit() -> std::ffi::c_int {
             decision.ready && !decision.allowed
         };
         if held { app.exit(0); }
+        else { crate::cancel_incomplete_boot(app); }
         i32::from(held)
     }).unwrap_or(1)
 }

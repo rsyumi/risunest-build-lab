@@ -155,6 +155,7 @@ pub(crate) trait RepositoryView: Sync {
         Box::pin(async { Err(ProviderError::new(ErrorKind::Unsupported)) })
     }
     fn confirmed_removed(&self, _object: &RemoteObject) -> Result<()> { Ok(()) }
+    fn prepare_removals(&self, _objects: &[RemoteObject]) -> Result<()> { Ok(()) }
     fn protected_jobs(&self) -> Vec<String> { Vec::new() }
 }
 pub(crate) struct CleanupRequest<'a> {
@@ -330,6 +331,9 @@ async fn run_owned(
             outcome.stop_reason = reason;
             break;
         }
+        // Invalidate the bounded candidate batch before deletion. An interrupted
+        // batch may discard reusable hints, but can never leave a deleted hint.
+        view.prepare_removals(batch)?;
         for object in batch {
             if sent >= request.limits.per_run {
                 outcome.stop_reason = StopReason::Limit;
@@ -766,8 +770,10 @@ impl RepositoryView for ConnectedRepositoryView<'_> {
         })
     }
     fn job_roots(&self) -> Result<JobRoots> { job_roots_of(&self.unfinished, &self.connected.handle) }
-    fn confirmed_removed(&self, object: &RemoteObject) -> Result<()> {
-        package_cache::forget_remote_object(self.cache_root, &self.connected.handle, object)
+    fn prepare_removals(&self, objects: &[RemoteObject]) -> Result<()> {
+        let cache = package_cache::PackageCache::open(self.cache_root)?;
+        let ids: Vec<&str> = objects.iter().map(|object| object.object_id.as_str()).collect();
+        cache.forget_objects(&self.connected.stored.descriptor.repository_id, &self.connected.handle, &ids)
     }
     fn protected_jobs(&self) -> Vec<String> {
         self.unfinished.iter().map(|job| job.job_id.clone()).collect()
@@ -1178,6 +1184,7 @@ mod tests {
                     retention_policy: None,
                     capabilities: fake::capabilities(true),
                     created_at_ms: 1_000,
+                    verified_at_ms: 1,
                     last_sync_at_ms: None,
                     last_backup_at_ms: None,
                 },

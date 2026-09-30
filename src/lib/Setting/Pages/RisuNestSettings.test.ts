@@ -179,7 +179,7 @@ describe('RisuNest backup and restore layout', () => {
 
     it('lets the shared progress dialog report the RisuSave export', () => {
         expect(backupRestoreSource).toContain('dismissNativeFileOperationOutcome()')
-        expect(backupRestoreSource).toContain("nativeFileOperationOutcomeShown('export')")
+        expect(backupRestoreSource).toContain('presentFileOperationError(kind, error, startedAt)')
     })
 })
 

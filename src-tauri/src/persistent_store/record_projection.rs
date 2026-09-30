@@ -112,6 +112,7 @@ fn resolve_owner_heads_with_sizes(
         let values = property_value
             .as_array()
             .ok_or_else(|| missing_source("owner array"))?;
+        owner_tuple_shape(values, character_id.is_none())?;
         let mut entries = Vec::with_capacity(values.len());
         let mut dependencies = BTreeMap::new();
         for value in values {
@@ -309,6 +310,17 @@ pub(super) fn owner_dependencies(
         .collect())
 }
 
+pub(super) fn owner_tuple_shape(values: &[Value], allow_trailing: bool) -> StoreResult<()> {
+    for value in values {
+        let Some(tuple) = value.as_array() else { return validation("owner tuple must be an array"); };
+        if tuple.len() < 3 || (!allow_trailing && tuple.len() != 3)
+            || !tuple[..3].iter().all(Value::is_string) {
+            return validation("owner tuple requires three string fields");
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn strip_owner_property(
     parent: &mut serde_json::Map<String, Value>,
     property: &str,
@@ -323,6 +335,7 @@ pub(super) fn strip_owner_property(
         let Some(actual) = parent.get(property).and_then(Value::as_array) else {
             return validation("owner manifest tuples do not match their parent record");
         };
+        owner_tuple_shape(actual, allow_trailing_fields)?;
         if actual.len() != expected.len() {
             return validation("owner manifest tuples do not match their parent record");
         }
@@ -477,6 +490,7 @@ pub(super) fn reconstruct_record_with_owner_objects(
                 "root record source is missing",
             )?;
             let mut value: Value = serde_json::from_str(&raw)?;
+            if let Some(root) = value.as_object_mut() { root.shift_remove("account"); }
             let mut owner_heads = resolve_owner_heads_with_sizes(
                 connection,
                 cas,

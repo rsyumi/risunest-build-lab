@@ -12,7 +12,7 @@ vi.mock('./CreatorQuote.svelte', async () => ({
 }))
 
 import ChatConversationStart from './ChatConversationStart.svelte'
-import { chatMountProbe, resetChatMountProbe } from './chatMountProbe'
+import { chatMountProbe, resetChatMountProbe } from './chatMountProbe.testSupport'
 
 function metadataOnlyCharacter(): character {
     const conversation = { id: 'chat-id', fmIndex: -1 } as character['chats'][number]

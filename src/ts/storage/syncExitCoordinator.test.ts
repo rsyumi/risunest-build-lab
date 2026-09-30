@@ -43,6 +43,24 @@ function harness(adapter: SyncExitDrainAdapter | null = null) {
 }
 
 describe('sync exit coordinator', () => {
+    it('resumes a cancelled adapter only after its destructive exit fence releases', async () => {
+        const adapter = {
+            id: 'external',
+            drain: vi.fn(async () => ({ kind: 'blocked' as const, reason: 'offline' })),
+            cancel: vi.fn(async () => {}),
+            resumeAfterExitCancel: vi.fn(async () => {
+                expect(h.fence.release).toHaveBeenCalledOnce()
+                expect(adapter.cancel).toHaveBeenCalledOnce()
+            }),
+        }
+        const h = harness(adapter)
+        const exit = h.coordinator.requestExit()
+        await vi.waitFor(() => expect(h.coordinator.snapshot().phase).toBe('remote-blocked'))
+        h.coordinator.decide('cancel-exit')
+        await expect(exit).resolves.toBe('cancelled')
+        expect(adapter.resumeAfterExitCancel).toHaveBeenCalledOnce()
+    })
+
     it('fences edits, flushes locally, then captures the exit target', async () => {
         const h = harness()
 

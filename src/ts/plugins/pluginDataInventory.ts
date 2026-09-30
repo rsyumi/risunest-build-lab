@@ -1,9 +1,12 @@
 import { invoke } from '@tauri-apps/api/core'
 import { isTauri } from '../platform'
+import { acquireCurrentRevisionWithRetry, assertPinnedRevision, withPersistentRevisionLease } from '../storage/persistentRecordIterator'
+import type { PluginStorageValueCursor } from '../storage/persistentDataStore'
 import { getPersistentDataStore } from '../storage/persistentDataStoreFactory'
 import { isUnownedPluginOwner, UNOWNED_PLUGIN_OWNER } from './pluginOwner'
 import {
     createBrowserPluginDeviceBackend,
+    invalidatePluginDeviceKeyspaces,
     type PluginDeviceSpace,
 } from './pluginDeviceKeyspace'
 import { pluginStorageStore } from './plugins.svelte'
@@ -89,7 +92,54 @@ export async function readPluginDataValue(item: PluginDataItem): Promise<string 
         : JSON.stringify(stored.value, null, 2)
 }
 
-export async function deletePluginDataItems(items: readonly PluginDataItem[]): Promise<void> {
+export async function searchPluginDataValues(
+    items: readonly PluginDataItem[], query: string, cancelled: () => boolean,
+): Promise<Set<string>> {
+    const matches = new Set<string>()
+    const needle = query.trim().toLowerCase()
+    if (!needle || cancelled()) return matches
+    const library = items.filter((item) => item.space === undefined)
+    const eligible = new Set(library.map(pluginDataItemId))
+    if (library.length > 0) {
+        const store = getPersistentDataStore()
+        const lease = await acquireCurrentRevisionWithRetry(
+            (revision) => store.acquireRevision(revision), async () => (await store.readRoot()).revision)
+        await withPersistentRevisionLease(lease, async (reader) => {
+            for (const owner of new Set(library.map((item) => item.owner))) {
+                let afterKey: PluginStorageValueCursor | undefined
+                do {
+                    if (cancelled()) return
+                    const page = await reader.readPluginStorageValues({ owner, afterKey })
+                    if (cancelled()) return
+                    assertPinnedRevision(reader.revision, page.revision, 'Plugin value search')
+                    for (const item of page.items) {
+                        const id = pluginDataItemId(item)
+                        if (!eligible.has(id)) continue
+                        const value = typeof item.value === 'string' ? item.value : JSON.stringify(item.value, null, 2)
+                        if (value.toLowerCase().includes(needle)) matches.add(id)
+                    }
+                    afterKey = page.nextCursor ?? undefined
+                } while (afterKey)
+            }
+        })
+    }
+    for (const item of items) {
+        if (item.space === undefined) continue
+        if (cancelled()) return matches
+        const value = await readPluginDataValue(item)
+        if (cancelled()) return matches
+        if (value?.toLowerCase().includes(needle)) matches.add(pluginDataItemId(item))
+    }
+    return matches
+}
+
+export async function deletePluginDataItems(
+    items: readonly PluginDataItem[],
+    expectedScope: PluginDataScope,
+): Promise<void> {
+    if (items.some((item) => (item.space === undefined ? 'library' : 'device') !== expectedScope)) {
+        throw new Error('Plugin data deletion scope changed')
+    }
     const byOwner = new Map<string, PluginDataItem[]>()
     for (const item of items) {
         const owned = byOwner.get(item.owner) ?? []
@@ -110,10 +160,14 @@ export async function deletePluginDataItems(items: readonly PluginDataItem[]): P
             space: item.space as PluginDeviceSpace,
             key: item.key,
         }))
-        if (isTauri) {
-            await invoke('pds_write_plugin_device_values', { owner, mutations })
-        } else {
-            await createBrowserPluginDeviceBackend().write(owner, mutations)
+        try {
+            if (isTauri) {
+                await invoke('pds_write_plugin_device_values', { owner, mutations })
+            } else {
+                await createBrowserPluginDeviceBackend().write(owner, mutations)
+            }
+        } finally {
+            invalidatePluginDeviceKeyspaces(owner)
         }
     }
 }
@@ -309,6 +363,6 @@ export function filterPluginDataItems(
     })
 }
 
-export function pluginDataItemId(item: PluginDataItem): string {
+export function pluginDataItemId(item: Pick<PluginDataItem, 'owner' | 'key' | 'space'>): string {
     return JSON.stringify([item.space ?? '', item.owner, item.key])
 }

@@ -1,4 +1,5 @@
 <script lang="ts">
+    import { shortcutModifierLabel } from "src/ts/hotkeyModifier";
     import { language } from "src/lang";
     import { DBState } from "src/ts/stores.svelte";
 
@@ -31,7 +32,7 @@
                                 hotkey.ctrl = !hotkey.ctrl;
                             }}
                         >
-                            Ctrl
+                            {shortcutModifierLabel()}
                         </button>
                     </td>
                     <td>

@@ -89,46 +89,11 @@ impl PackageCache {
                PRIMARY KEY(repository_id,connection_identity,root_identity,member_identity));",
         )
         .map_err(transient)?;
-        // Which publication an entry belonged to is no longer carried by the
-        // row, and everything here is rebuildable, so a table that still
-        // carries it starts again rather than being read two ways.
-        let tagged: bool = db
-            .prepare("SELECT 1 FROM pragma_table_info('entries') WHERE name='source'")
-            .map_err(transient)?
-            .exists([])
-            .map_err(transient)?;
-        // A catalog kind that changes every publication would otherwise crowd
-        // out one that never changes, so the bound is per kind and a table
-        // without it cannot be read the way this one is.
-        let scoped: bool = db
-            .prepare("SELECT 1 FROM pragma_table_info('graph_members') WHERE name='catalog_kind'")
-            .map_err(transient)?
-            .exists([])
-            .map_err(transient)?;
-        if !scoped {
-            db.execute_batch(
-                "DROP TABLE graph_members;
-                 CREATE TABLE graph_members(
-                   repository_id TEXT NOT NULL, connection_identity TEXT NOT NULL,
-                   catalog_kind TEXT NOT NULL,
-                   root_identity TEXT NOT NULL, member_identity TEXT NOT NULL,
-                   member_stored TEXT NOT NULL,
-                   PRIMARY KEY(repository_id,connection_identity,root_identity,member_identity));",
-            )
-            .map_err(transient)?;
-        }
-        if tagged {
-            db.execute_batch(
-                "DROP TABLE entries;
-                 CREATE TABLE entries(
-                   repository_id TEXT NOT NULL, connection_identity TEXT NOT NULL,
-                   catalog_kind TEXT NOT NULL, entry_key TEXT NOT NULL,
-                   content_sha256 TEXT NOT NULL, byte_length INTEGER NOT NULL,
-                   value TEXT NOT NULL,
-                   PRIMARY KEY(repository_id,connection_identity,catalog_kind,entry_key));",
-            )
-            .map_err(transient)?;
-        }
+        // Compile the current row shapes without rewriting an incompatible cache.
+        db.prepare("INSERT INTO entries VALUES(?1,?2,?3,?4,?5,?6,?7)")
+            .map_err(corrupt)?;
+        db.prepare("SELECT catalog_kind FROM graph_members LIMIT 0")
+            .map_err(corrupt)?;
         Ok(Self { db })
     }
     pub(super) fn object(
@@ -189,23 +154,51 @@ impl PackageCache {
         repository: &RepositoryHandle,
         object_id: &str,
     ) -> Result<()> {
+        self.forget_objects(format_repository_id, repository, &[object_id])
+    }
+
+    pub(super) fn forget_objects(
+        &self,
+        format_repository_id: &str,
+        repository: &RepositoryHandle,
+        object_ids: &[&str],
+    ) -> Result<()> {
         let transaction = self.db.unchecked_transaction().map_err(transient)?;
+        transaction.execute_batch(
+            "CREATE TEMP TABLE IF NOT EXISTS removed_objects(object_id TEXT PRIMARY KEY);
+             DELETE FROM removed_objects;",
+        ).map_err(transient)?;
+        for id in object_ids {
+            transaction.execute("INSERT OR IGNORE INTO removed_objects VALUES(?1)", [id])
+                .map_err(transient)?;
+        }
         transaction.execute(
-            "DELETE FROM remote_objects WHERE repository_id=?1 AND connection_identity=?2 AND object_id=?3",
-            params![format_repository_id, repository.connection_identity, object_id],
+            "DELETE FROM remote_objects WHERE repository_id=?1 AND connection_identity=?2
+             AND object_id IN (SELECT object_id FROM removed_objects)",
+            params![format_repository_id, repository.connection_identity],
         ).map_err(transient)?;
         transaction.execute(
             "DELETE FROM entries WHERE repository_id=?1 AND connection_identity=?2
              AND EXISTS(SELECT 1 FROM json_each(entries.value,'$.packs') AS pack
-               WHERE json_extract(pack.value,'$.objectId')=?3)",
-            params![format_repository_id, repository.connection_identity, object_id],
+               JOIN removed_objects removed ON removed.object_id=json_extract(pack.value,'$.objectId'))",
+            params![format_repository_id, repository.connection_identity],
         ).map_err(transient)?;
-        // A changed child can change every parent hash. These roots are only
-        // an optimization; their source entries and sealed uploads stay intact.
         transaction.execute(
             "DELETE FROM catalogs WHERE repository_id=?1 AND connection_identity=?2",
             params![format_repository_id, repository.connection_identity],
         ).map_err(transient)?;
+        transaction.commit().map_err(transient)
+    }
+
+    pub(super) fn put_objects<'a>(
+        &self,
+        repository: &RepositoryHandle,
+        values: impl IntoIterator<Item = &'a RemoteObject>,
+    ) -> Result<()> {
+        let transaction = self.db.unchecked_transaction().map_err(transient)?;
+        for value in values {
+            self.put_object(repository, value)?;
+        }
         transaction.commit().map_err(transient)
     }
 
@@ -546,6 +539,54 @@ mod tests {
     use super::*;
     use crate::external_storage::{contract::ErrorKind, fake};
 
+    #[test]
+    fn incompatible_cache_shapes_fail_without_rewriting_rows() {
+        let root = tempfile::tempdir().unwrap();
+        let db = Connection::open(root.path().join("snapshot-cache.sqlite")).unwrap();
+        db.execute_batch("CREATE TABLE entries(a,b,c,d,e,f,g,h); INSERT INTO entries VALUES(1,2,3,4,5,6,7,8);").unwrap();
+        assert!(PackageCache::open(root.path()).is_err());
+        assert_eq!(db.query_row::<i64,_,_>("SELECT count(*) FROM entries", [], |row| row.get(0)).unwrap(), 1);
+    }
+
+    #[test]
+    fn invalid_hydration_object_rolls_back_the_entire_batch() {
+        let root = tempfile::tempdir().unwrap();
+        let repository = fake::repository();
+        let cache = PackageCache::open(root.path()).unwrap();
+        let valid = crate::external_storage::reachability::tests::object("valid", ObjectRole::Pack);
+        let mut invalid = valid.clone();
+        invalid.receipt.locator.connection_identity = "another-connection".into();
+        assert!(cache.put_objects(&repository, [&valid, &invalid]).is_err());
+        assert_eq!(cache.db.query_row::<i64,_,_>("SELECT count(*) FROM remote_objects", [], |row| row.get(0)).unwrap(), 0);
+        cache.put_objects(&repository, [&valid]).unwrap();
+        cache.put_objects(&repository, [&valid]).unwrap();
+        assert_eq!(cache.db.query_row::<i64,_,_>("SELECT count(*) FROM remote_objects", [], |row| row.get(0)).unwrap(), 1);
+    }
+
+    #[test]
+    fn batch_invalidation_removes_only_dependent_entries_in_its_scope() {
+        let root = tempfile::tempdir().unwrap();
+        let repository = fake::repository();
+        let cache = PackageCache::open(root.path()).unwrap();
+        let tx = cache.db.unchecked_transaction().unwrap();
+        for index in 0..2000 {
+            tx.execute("INSERT INTO entries VALUES('repository',?1,'assets',?2,'hash',1,?3)",
+                params![repository.connection_identity, format!("key-{index}"),
+                    format!(r#"{{"packs":[{{"objectId":"pack-{}"}}]}}"#, index % 200)],
+            ).unwrap();
+        }
+        tx.execute("INSERT INTO catalogs VALUES('repository',?1,'assets','fingerprint','{}')", [&repository.connection_identity]).unwrap();
+        tx.commit().unwrap();
+        let ids: Vec<String> = (0..100).map(|i| format!("pack-{i}")).collect();
+        let before = cache.db.total_changes();
+        let started = std::time::Instant::now();
+        cache.forget_objects("repository", &repository, &ids.iter().map(String::as_str).collect::<Vec<_>>()).unwrap();
+        eprintln!("batch invalidation: {:?}, {} changed rows", started.elapsed(), cache.db.total_changes()-before);
+        assert_eq!(cache.db.query_row::<i64,_,_>("SELECT count(*) FROM entries", [], |row| row.get(0)).unwrap(), 1000);
+        assert_eq!(cache.db.query_row::<i64,_,_>("SELECT count(*) FROM catalogs", [], |row| row.get(0)).unwrap(), 0);
+    }
+
+
     /// A catalog kind republished every time must not evict one that never
     /// changes, because the unchanging one is still what a parent names.
     #[test]
@@ -584,35 +625,4 @@ mod tests {
         assert_eq!(held, RETAINED_GRAPHS);
     }
 
-    /// Nothing here is authoritative, so a cache that still names a row's
-    /// publication on the row starts again instead of being read two ways.
-    #[test]
-    fn entries_naming_their_publication_are_discarded_on_open() {
-        let root = tempfile::tempdir().unwrap();
-        let repository = fake::repository();
-        {
-            let db = Connection::open(root.path().join("snapshot-cache.sqlite")).unwrap();
-            db.execute_batch(
-                "CREATE TABLE entries(
-                   repository_id TEXT NOT NULL, connection_identity TEXT NOT NULL,
-                   catalog_kind TEXT NOT NULL, entry_key TEXT NOT NULL,
-                   content_sha256 TEXT NOT NULL, byte_length INTEGER NOT NULL,
-                   value TEXT NOT NULL, source TEXT NOT NULL,
-                   PRIMARY KEY(repository_id,connection_identity,catalog_kind,entry_key));
-                 INSERT INTO entries VALUES('format-repository','synthetic-identity','assets','a','b',1,'{}','root');",
-            ).unwrap();
-        }
-        let cache = PackageCache::open(root.path()).unwrap();
-        let held: i64 = cache.db.query_row("SELECT count(*) FROM entries", [], |row| row.get(0)).unwrap();
-        assert_eq!(held, 0);
-        assert!(cache
-            .entry("format-repository", &repository, wire::CatalogKind::Assets, "a", &"b".repeat(64), 1)
-            .unwrap()
-            .is_none());
-        assert_eq!(
-            cache.record_graph("format-repository", &repository, wire::CatalogKind::Assets, "", &[], &[])
-                .unwrap_err().kind,
-            ErrorKind::Corrupt,
-        );
-    }
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { risuNestSettingsItems } from './risuNestSettingsData'
+import { risuNestSettingsItems, risuNestInlaySettingsItems, risuNestStreamingSettingsItems } from './risuNestSettingsData'
 import type { Database } from '../storage/database.svelte'
 
 describe('RisuNest inlay settings data', () => {
@@ -21,4 +21,13 @@ describe('RisuNest inlay settings data', () => {
 
         expect(database.risunestInlayMaxDimension).toBe(expected)
     })
+})
+
+it('renders every aggregate control in a settings group', () => {
+    expect(risuNestSettingsItems).toEqual([...risuNestStreamingSettingsItems, ...risuNestInlaySettingsItems])
+    const fps = risuNestInlaySettingsItems.find(item => item.id === 'risunest.inlay.animationFps')!
+    const still = risuNestInlaySettingsItems.find(item => item.id === 'risunest.inlay.animationStillFrame')!
+    expect(still).toBeDefined()
+    expect(still.condition).toBeUndefined()
+    for (const format of ['webp', 'png', 'original']) expect(fps.condition?.({ db: { risunestInlayFormat: format } } as any)).toBe(format !== 'original')
 })

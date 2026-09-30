@@ -1,3 +1,4 @@
+import { Mutex } from "src/ts/mutex";
 import { allowedDbKeys, applyPreparedPluginDatabaseUpdate, customProviderStore, getV2PluginAPIs, handlePluginInstallViaPlugin, pluginStorageStore, pluginV2, type PluginV2ProviderArgument, type PluginV2ProviderOptions, type RisuPlugin } from "../plugins.svelte";
 import { SandboxHost } from "./factory";
 import versionData from "../../../../version.json";
@@ -647,16 +648,21 @@ const unloadV3Plugin = async (pluginName: string) => {
 
 type PluginPermission = 'fetchLogs' | 'db' | 'mainDom' | 'replacer' | 'provider' | 'sendChat' | 'inlay'
 
-const permissionCacheKey = (pluginName: string, permissionDesc: PluginPermission) =>
-    `${pluginName}\u0000${permissionDesc}`
-
-const permissionGivenPlugins: Set<string> = new Set();
-const permissionDeniedPlugins: Set<string> = new Set();
+const permissionWrites = new Mutex()
+let permissionEpoch = 0
+const periodicPermissions = new Set<PluginPermission>(['db', 'replacer', 'provider', 'inlay'])
+const permissionReconfirmInterval = 3 * 24 * 60 * 60 * 1000
+interface PluginPermissionContext {
+    name: string
+    hash: Promise<string>
+    signal: AbortSignal
+    epoch: number
+    decisions: Map<PluginPermission, { granted: boolean; grantedAt: number }>
+}
 
 export async function resetAllPluginPermissions() {
-    await getPluginPermissionStore().clearAll()
-    permissionGivenPlugins.clear()
-    permissionDeniedPlugins.clear()
+    permissionEpoch++
+    await permissionWrites.runExclusive(() => getPluginPermissionStore().clearAll())
 }
 
 type PluginV3ProviderOptions = PluginV2ProviderOptions & {
@@ -665,45 +671,33 @@ type PluginV3ProviderOptions = PluginV2ProviderOptions & {
 
 export const customV3ProviderMetaStore:LLMModel[] = []
 
-const getPluginPermission = async (pluginName: string, permissionDesc: PluginPermission, reconfirm: boolean|'periodically' = false) => {
-    const cacheKey = permissionCacheKey(pluginName, permissionDesc)
-    if(permissionGivenPlugins.has(cacheKey)){
-        return true;
+const getPluginPermission = async (context: PluginPermissionContext, permissionDesc: PluginPermission, reconfirm: boolean|'periodically' = false) => {
+    if (context.signal.aborted) return false
+    if (context.epoch !== permissionEpoch) {
+        context.decisions.clear()
+        context.epoch = permissionEpoch
     }
-    if(permissionDeniedPlugins.has(cacheKey)){
-        return false;
+    const epoch = permissionEpoch
+    const periodic = reconfirm === 'periodically' || periodicPermissions.has(permissionDesc)
+    const cached = context.decisions.get(permissionDesc)
+    if (reconfirm !== true && cached && (!cached.granted || !periodic
+        || Date.now() - cached.grantedAt < permissionReconfirmInterval)) return cached.granted
+
+    const pluginName = context.name
+    const pluginHash = await context.hash
+    const permissions = getPluginPermissionStore()
+    const { lastGrantAt, persistedGrant } = await permissionWrites.runExclusive(async () => ({
+        lastGrantAt: periodic ? await permissions.lastGrantAt(pluginName, permissionDesc) : 0,
+        persistedGrant: await permissions.isGranted(pluginHash, permissionDesc),
+    }))
+    const requiresReconfirm = reconfirm === true || (periodic && (!lastGrantAt
+        || Date.now() - lastGrantAt >= permissionReconfirmInterval))
+    if (!requiresReconfirm && persistedGrant) {
+        if (context.signal.aborted || epoch !== permissionEpoch) return false
+        context.decisions.set(permissionDesc, { granted: true, grantedAt: lastGrantAt ?? 0 })
+        return true
     }
-
-    let pluginHash = ''
-
-    let requiresReconfirm = false;
-
-    const permissions = getPluginPermissionStore();
-
-    if(reconfirm === 'periodically'){
-        const lastGrantTime = await permissions.lastGrantAt(pluginName, permissionDesc);
-        const now = Date.now();
-        if(!lastGrantTime || now - lastGrantTime > 3 * 24 * 60 * 60 * 1000){ //3 days
-            requiresReconfirm = true;
-        }
-    }
-    else if(reconfirm === true){
-        requiresReconfirm = true;
-    }
-
-    pluginHash = await hasher(
-        new TextEncoder().encode(
-            DBState.db.plugins.find(p => p.name === pluginName)?.script
-        )
-    );
-
-    if(!requiresReconfirm && await permissions.isGranted(pluginHash, permissionDesc)){
-        permissionGivenPlugins.add(cacheKey);
-        return true;
-    }   
-    
-
-    let alertTitle =
+    const alertTitle =
         permissionDesc === 'fetchLogs' ? language.fetchLogConsent.replace("{}", pluginName)
         : permissionDesc === 'db' ? language.getFullDatabaseConsent.replace("{}", pluginName)
         : permissionDesc === 'mainDom' ? language.mainDomAccessConsent.replace("{}", pluginName)
@@ -711,21 +705,21 @@ const getPluginPermission = async (pluginName: string, permissionDesc: PluginPer
         : permissionDesc === 'provider' ? language.providerPermissionConsent.replace("{}", pluginName)
         : permissionDesc === 'sendChat' ? language.sendChatConsent.replace("{}", pluginName)
         : permissionDesc === 'inlay' ? language.inlayPermissionConsent.replace("{}", pluginName)
-        : `Error`
-    if(alertTitle === 'Error'){
-        return false;
+        : null
+    if (!alertTitle || context.signal.aborted || epoch !== permissionEpoch) return false
+    const granted = await alertConfirm(alertTitle)
+    if (context.signal.aborted || epoch !== permissionEpoch) return false
+    const grantedAt = Date.now()
+    if (granted) {
+        await permissionWrites.runExclusive(async () => {
+            if (context.signal.aborted || epoch !== permissionEpoch) return
+            await permissions.grant(pluginHash, permissionDesc)
+            if (periodic) await permissions.recordGrant(pluginName, permissionDesc, grantedAt)
+        })
     }
-    const conf = await alertConfirm(alertTitle)
-    if(conf && pluginHash){
-        permissionGivenPlugins.add(cacheKey);
-        await permissions.grant(pluginHash, permissionDesc);
-        if(reconfirm === 'periodically'){
-            await permissions.recordGrant(pluginName, permissionDesc, Date.now());
-        }
-        return true;
-    }
-    permissionDeniedPlugins.add(cacheKey);
-    return false;
+    if (context.signal.aborted || epoch !== permissionEpoch) return false
+    context.decisions.set(permissionDesc, { granted, grantedAt })
+    return granted
 }
 
 const urlBlacklist = ['risuai.xyz', 'risuai.net', 'sionyw.com']
@@ -768,6 +762,13 @@ const makeRisuaiAPIV3 = (
     const ownedPluginStorage = pluginStorageStore.forOwner(plugin.name)
     const ownedSafeLocalStorage = new SafeLocalStorage(plugin.name)
     const pluginLifetime = new AbortController()
+    const permissionContext: PluginPermissionContext = {
+        name: plugin.name,
+        hash: hasher(new TextEncoder().encode(plugin.script)),
+        signal: pluginLifetime.signal,
+        epoch: permissionEpoch,
+        decisions: new Map(),
+    }
     const fullObjectContext = (): PluginFullObjectCallContext => ({
         pluginName: plugin.name,
         signal: pluginLifetime.signal,
@@ -810,20 +811,20 @@ const makeRisuaiAPIV3 = (
         setChar: setCompleteCurrentCharacter,
         addProvider: (name: string, func: (arg: PluginV2ProviderArgument, abortSignal?: AbortSignal) => Promise<{ success: boolean, content: string | ReadableStream<string> }>, options?: PluginV3ProviderOptions) => {
             console.warn(`[WARN] addProvider is a powerful API that can potentially be unsafe if used incorrectly. addProvider's functionality might be limited or changed in future updates to ensure security. please use other APIs if possible.`);
-            let provs = get(customProviderStore)
-            provs.push(name)
-            pluginV2.providers.set(name, async (arg, abortSignal) => {
-               const allowed = await getPluginPermission(plugin.name, 'provider', 'periodically');
-               if(!allowed){
+            if (pluginLifetime.signal.aborted) return
+            const provider: (typeof pluginV2.providers extends Map<string, infer V> ? V : never) = async (arg, abortSignal) => {
+               const allowed = await getPluginPermission(permissionContext, 'provider', 'periodically');
+               if(!allowed || pluginLifetime.signal.aborted){
                    return { success: false, content: language.pluginProviderPermissionDenied };
                }
                //mode is overridden to v3, due to vulnerabilities using mode.
                //Alternative to mode will be added in future
                arg.mode = 'v3'
                return await func(arg, abortSignal);
-            }),
+            }
+            pluginV2.providers.set(name, provider)
             pluginV2.providerOptions.set(name, options ?? {})
-            customProviderStore.set(provs)
+            customProviderStore.update((names) => names.includes(name) ? names : [...names, name])
 
             const modelData:LLMModel = {
                 id: `pluginmodel:::${name}`,
@@ -837,7 +838,17 @@ const makeRisuaiAPIV3 = (
                 parameters: options?.model?.parameters ?? ['temperature', 'top_p', 'frequency_penalty', 'presence_penalty', 'repetition_penalty', 'min_p', 'top_a', 'top_k', 'thinking_tokens'],
                 tokenizer:options?.model?.tokenizer ??  LLMTokenizer.Unknown
             }
-            customV3ProviderMetaStore.push(modelData);
+            const index = customV3ProviderMetaStore.findIndex((model) => model.id === modelData.id)
+            if (index < 0) customV3ProviderMetaStore.push(modelData)
+            else customV3ProviderMetaStore[index] = modelData
+            addPluginUnloadCallback(plugin.name, () => {
+                if (pluginV2.providers.get(name) !== provider) return
+                pluginV2.providers.delete(name)
+                pluginV2.providerOptions.delete(name)
+                customProviderStore.update((names) => names.filter((value) => value !== name))
+                const index = customV3ProviderMetaStore.indexOf(modelData)
+                if (index >= 0) customV3ProviderMetaStore.splice(index, 1)
+            })
         },
         addTTSPreprocessor: async (
             func: TTSHookFn<BeforeTTSContext, BeforeTTSResult>,
@@ -855,17 +866,19 @@ const makeRisuaiAPIV3 = (
         removeRisuScriptHandler: oldApis.removeRisuScriptHandler,
         addRisuReplacer: async (name:string,func:Function) => {
             //permission check for replacer
-            const conf = await getPluginPermission(plugin.name, 'replacer', 'periodically');
+            const conf = await getPluginPermission(permissionContext, 'replacer', 'periodically');
             if(!conf){
                 return;
             }
+            if (pluginLifetime.signal.aborted) return
             oldApis.addRisuReplacer(name, func as any);
+            addPluginUnloadCallback(plugin.name, () => oldApis.removeRisuReplacer(name, func as any));
         },
         removeRisuReplacer: oldApis.removeRisuReplacer,
         addRisuChatListener: async (mode:'output', func:Function) => {
             if (mode !== 'output') throw (`chat listener mode ${mode} not found`)
             //permission check, lets use same as replacer
-            const conf = await getPluginPermission(plugin.name, 'replacer', 'periodically');
+            const conf = await getPluginPermission(permissionContext, 'replacer', 'periodically');
             if(!conf){
                 return;
             }
@@ -888,7 +901,7 @@ const makeRisuaiAPIV3 = (
         loadPlugins: oldApis.loadPlugins,
         readImage: oldApis.readImage,
         readInlay: async (id: string) => {
-            const conf = await getPluginPermission(plugin.name, 'inlay', 'periodically');
+            const conf = await getPluginPermission(permissionContext, 'inlay', 'periodically');
             if(!conf){
                 return null;
             }
@@ -897,7 +910,7 @@ const makeRisuaiAPIV3 = (
         saveAsset: oldApis.saveAsset,
         //Same functionality, but new implementation
         getDatabase: async (includeOnly:string[]|'all' = 'all') => {
-            const conf = await getPluginPermission(plugin.name, 'db', 'periodically');
+            const conf = await getPluginPermission(permissionContext, 'db', 'periodically');
             if(!conf){
                 return null;
             }
@@ -910,18 +923,18 @@ const makeRisuaiAPIV3 = (
             }
         },
         queryCharacters: async (input?: PluginCharacterQuery) => {
-            const allowed = await getPluginPermission(plugin.name, 'db', 'periodically')
+            const allowed = await getPluginPermission(permissionContext, 'db', 'periodically')
             return allowed ? getPluginDatabaseAccess(plugin.name).queryCharacters(input) : null
         },
         queryConversations: async (input: PluginConversationQuery) => {
-            const allowed = await getPluginPermission(plugin.name, 'db', 'periodically')
+            const allowed = await getPluginPermission(permissionContext, 'db', 'periodically')
             return allowed ? getPluginDatabaseAccess(plugin.name).queryConversations(input) : null
         },
         queryConversationMessages: async (input: PluginConversationMessageQuery) => {
             const linked = linkPluginQueryAbortSignals(input.signal, pluginLifetime.signal)
             try {
                 throwIfPluginReadAborted(linked.signal)
-                const allowed = await getPluginPermission(plugin.name, 'db', 'periodically')
+                const allowed = await getPluginPermission(permissionContext, 'db', 'periodically')
                 throwIfPluginReadAborted(linked.signal)
                 if (!allowed) return null
                 const result = await getPluginDatabaseAccess(plugin.name).queryConversationMessages({
@@ -1009,8 +1022,20 @@ const makeRisuaiAPIV3 = (
 
         //Deprecated APIs from v2.1
         //Use getArgument / setArgument instead if possible
-        getArg: oldApis.getArg,
-        setArg: oldApis.setArg,
+        getArg: (arg: string) => {
+            if (arg.split('::')[0] !== plugin.name) {
+                console.warn('getArg: arguments belong to another plugin')
+                return undefined
+            }
+            return oldApis.getArg(arg)
+        },
+        setArg: (arg: string, value: string | number) => {
+            if (arg.split('::')[0] !== plugin.name) {
+                console.warn('setArg: arguments belong to another plugin')
+                return
+            }
+            return oldApis.setArg(arg, value)
+        },
 
         //New APIs for v3
         getArgument: async (key:string) => {
@@ -1121,7 +1146,7 @@ const makeRisuaiAPIV3 = (
             iframe.style.display = "none";
         },
         getRootDocument: async () => {
-            const conf = await getPluginPermission(plugin.name, 'mainDom');
+            const conf = await getPluginPermission(permissionContext, 'mainDom');
             if(!conf){
                 return null;
             }
@@ -1166,7 +1191,7 @@ const makeRisuaiAPIV3 = (
         },
         registerBodyIntercepter: async (callback: (body: any, type: string) => any) => {
 
-            if(await getPluginPermission(plugin.name, 'replacer') === false){
+            if(await getPluginPermission(permissionContext, 'replacer') === false){
                 return null;
             }
             
@@ -1336,7 +1361,7 @@ const makeRisuaiAPIV3 = (
         },
         getFetchLogs: async () => {
             const unsafeFetchLog = getFetchLogs()
-            const conf = await getPluginPermission(plugin.name, 'fetchLogs');
+            const conf = await getPluginPermission(permissionContext, 'fetchLogs');
             if(!conf){
                 return null;
             }
@@ -1380,7 +1405,7 @@ const makeRisuaiAPIV3 = (
         },
         checkCharOrder: checkCharOrder,
         requestPluginPermission: (permission:string) => {
-            return getPluginPermission(plugin.name, permission as any);
+            return getPluginPermission(permissionContext, permission as any);
         },
         //Internal use APIs
         // Global aliases the guest installs through initOldApiGlobal(). The list is
@@ -1505,7 +1530,7 @@ const makeRisuaiAPIV3 = (
                     current?.chaId === characterId &&
                     current?.chats[current.chatPage]?.id === conversationId;
             };
-            const conf = await getPluginPermission(plugin.name, 'sendChat');
+            const conf = await getPluginPermission(permissionContext, 'sendChat');
             if(!conf){
                 return false;
             }

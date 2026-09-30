@@ -5,7 +5,7 @@
 //! through the single instance plugin. Both entry points park the paths here and the frontend
 //! drains them once with `opened_files_take`, so a file is never delivered twice.
 
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard};
 
@@ -20,6 +20,8 @@ pub(crate) const OPENED_FILES_EVENT: &str = "risu-opened-files";
 #[derive(Default)]
 pub(crate) struct OpenedFilesState {
     pending: Mutex<Vec<PathBuf>>,
+    relaunch_args: Vec<OsString>,
+    restarting: std::sync::atomic::AtomicBool,
 }
 
 impl OpenedFilesState {
@@ -31,6 +33,8 @@ impl OpenedFilesState {
                 std::env::args_os(),
                 launch_directory.as_deref(),
             )),
+            relaunch_args: relaunch_arguments(std::env::args_os(), launch_directory.as_deref()),
+            restarting: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -48,6 +52,33 @@ impl OpenedFilesState {
 
     fn take(&self) -> Vec<PathBuf> {
         std::mem::take(&mut *lock(&self.pending))
+    }
+}
+
+/// Retain argv[0] and runtime options, omitting file operands accepted at launch.
+pub(crate) fn relaunch_arguments<I, S>(args: I, launch_directory: Option<&Path>) -> Vec<OsString>
+where I: IntoIterator<Item = S>, S: AsRef<OsStr> {
+    args.into_iter().enumerate()
+        .filter(|(index, arg)| *index == 0 || normalize_opened_file(arg.as_ref(), launch_directory).is_none())
+        .map(|(_, arg)| arg.as_ref().to_owned()).collect()
+}
+
+#[tauri::command]
+pub(crate) fn desktop_relaunch(window: tauri::WebviewWindow) -> Result<(), String> {
+    if window.label() != "main" { return Err("Restart belongs to the main window".into()); }
+    let app = window.app_handle();
+    tauri::process::current_binary(&app.env()).map_err(|error| error.to_string())?;
+    app.state::<OpenedFilesState>().restarting.store(true, std::sync::atomic::Ordering::Release);
+    app.request_restart();
+    Ok(())
+}
+
+pub(crate) fn restart_on_exit(app: &AppHandle) {
+    let state = app.state::<OpenedFilesState>();
+    if state.restarting.load(std::sync::atomic::Ordering::Acquire) {
+        let mut env = app.env();
+        env.args_os = state.relaunch_args.clone();
+        tauri::process::restart(&env);
     }
 }
 
@@ -198,6 +229,22 @@ fn has_url_scheme(value: &str) -> bool {
 mod tests {
     use super::*;
     use std::ffi::OsString;
+
+    #[test]
+    fn internal_restart_omits_files_but_new_external_opens_still_deliver() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("synthetic.charx");
+        std::fs::write(&file, b"fixture").unwrap();
+        let args = vec![OsString::from("RisuNest"), OsString::from("--flag"),
+            OsString::from("risunestlocal:sync"), file.clone().into_os_string()];
+        assert_eq!(relaunch_arguments(&args, None), args[..3]);
+        assert_eq!(collect_opened_files(&args, None).len(), 1);
+        assert_eq!(collect_opened_files(&args, None).len(), 1);
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        assert_eq!(relaunch_arguments([OsString::from("RisuNest"),
+            OsString::from(url::Url::from_file_path(file).unwrap().as_str())], None),
+            vec![OsString::from("RisuNest")]);
+    }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]
     #[test]

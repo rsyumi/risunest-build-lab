@@ -5,13 +5,23 @@ export function isCompositionKey(event: Pick<KeyboardEvent, 'isComposing' | 'key
     return event.isComposing || event.keyCode === 229
 }
 
-/** Keep existing Ctrl bindings usable and add the native Mac Command equivalent. */
+function nativePlatform() {
+    return (globalThis as typeof globalThis & { __TAURI_INTERNALS__?: unknown })
+        .__TAURI_INTERNALS__ ? platform() : undefined
+}
+
+export function acceptsCommand(os: string | undefined): boolean {
+    return os === 'macos' || os === 'ios'
+}
+
+export function shortcutModifierLabel(os = nativePlatform()): string {
+    return acceptsCommand(os) ? 'Ctrl/⌘' : 'Ctrl'
+}
+
+/** Keep existing Ctrl bindings usable and add the native Apple Command equivalent. */
 export function shortcutModifier(
     event: Pick<KeyboardEvent, 'ctrlKey' | 'metaKey'>,
-    os = (globalThis as typeof globalThis & { __TAURI_INTERNALS__?: unknown })
-        .__TAURI_INTERNALS__
-        ? platform()
-        : undefined,
+    os = nativePlatform(),
 ): boolean {
-    return event.ctrlKey || (os === 'macos' && event.metaKey)
+    return event.ctrlKey || (acceptsCommand(os) && event.metaKey)
 }

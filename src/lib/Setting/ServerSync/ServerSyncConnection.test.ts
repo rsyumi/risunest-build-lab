@@ -14,23 +14,23 @@ const state = vi.hoisted(() => {
       };
     }),
     initialize: vi.fn(),
-    bind: vi.fn(async (_config: unknown, prepare?: () => Promise<unknown>) => {
+    ensureStatus: vi.fn(),
+    bind: vi.fn(async (_config: unknown, residency?: "full" | "remote") => {
       trace.push("bind");
-      await prepare?.();
     }),
-    reregister: vi.fn(async (_config: unknown, prepare?: () => Promise<unknown>) => {
+    reregister: vi.fn(async (_config: unknown, residency?: "full" | "remote") => {
       trace.push("reregister");
-      await prepare?.();
     }),
     synchronize: vi.fn(async () => {
       trace.push("synchronize");
     }),
-    unbind: vi.fn(async (_config: unknown, prepare?: () => Promise<unknown>) => { await prepare?.(); }),
+    unbind: vi.fn(async (_config: unknown, residency?: "full" | "remote") => {  }),
     pause: vi.fn(async () => {}),
     waitForIdle: vi.fn(async () => {}),
   };
   const setPolicy = vi.fn(async (policy: string) => {
     trace.push(`policy:${policy}`);
+    return { policy: policy as 'full' | 'remote', localBytes: 0, localObjects: 0, remoteBytes: 0, remoteObjects: 0, unavailableObjects: 0, evictedBytes: 0 };
   });
   return { controller, setPolicy, trace, emit: (value: unknown) => listener?.(value) };
 });
@@ -76,11 +76,18 @@ vi.mock("src/lang", async () => ({
   language: (await import("src/lang/en")).languageEnglish,
 }));
 vi.mock("src/ts/alert", () => ({ alertConfirm: vi.fn() }));
+vi.mock("src/ts/stores.svelte", async () => ({
+  alertStore: (await import("svelte/store")).writable({ type: "none", msg: "" }),
+}));
 import { serverRegistrationInbox } from "src/ts/storage/sync/serverSyncRegistrationInbox";
 import { receiveServerRegistration } from "src/ts/storage/sync/serverSyncRegistrationDispatch";
 import { languageEnglish } from "src/lang/en";
 import vector from "../../../../crates/sync-connect/tests/registration-vector.json";
 import ServerSyncConnection from "./ServerSyncConnection.svelte";
+import { getServerSyncBackupInventory, getServerSyncCacheUsage } from "src/ts/storage/sync/serverSyncProduction";
+import { getAssetResidencyStatus } from "src/ts/storage/sync/serverAssetResidency";
+import { isLibraryFileOperationReserved, reserveLibraryFileOperation, subscribeLibraryFileOperationReleased } from "src/ts/storage/libraryFileOperation";
+vi.mock("src/ts/storage/persistentDataRuntime.svelte", () => ({ getPersistentDataRuntime: () => ({ store: { acquireRevision: async () => { throw new Error("expired"); } } }) }));
 
 const text = languageEnglish.risuNest.serverSync;
 let target: HTMLDivElement;
@@ -89,6 +96,7 @@ const idle = (): ServerSyncSnapshot => ({
   running: false,
   paused: false,
   error: "",
+  status: { configured: false } as ServerSyncSnapshot["status"],
 });
 const bound = (endpoint = "https://bound.test/", libraryId = "lib"): ServerSyncSnapshot => ({
   ...idle(),
@@ -140,6 +148,94 @@ afterEach(async () => {
   target.remove();
 });
 describe("settings server connection", () => {
+  it("ignores unchanged idle publications and refreshes once after an attempt", async () => {
+    const snapshot = bound();
+    state.controller.snapshot.mockReturnValue(snapshot);
+    component = mount(ServerSyncConnection, { target });
+    await vi.waitFor(() => expect(getServerSyncBackupInventory).toHaveBeenCalledTimes(1));
+    for (let i = 0; i < 10; i++) { state.emit({ ...snapshot }); await tick(); }
+    expect(getServerSyncBackupInventory).toHaveBeenCalledTimes(1);
+    expect(getServerSyncCacheUsage).toHaveBeenCalledTimes(1);
+    state.emit({ ...snapshot, running: true }); await tick();
+    state.emit({ ...snapshot, running: false }); await tick();
+    await vi.waitFor(() => expect(getServerSyncBackupInventory).toHaveBeenCalledTimes(2));
+  });
+  it("retries unknown status without requesting a new registration", async () => {
+    state.controller.snapshot.mockReturnValue({ ...idle(), status: undefined, error: 'local-validation' });
+    component = mount(ServerSyncConnection, { target }); await tick();
+    expect(button(text.enterCode)).toBeUndefined();
+    expect(target.textContent).toContain(text.statusUnknown);
+    button(text.retryStatus).click();
+    expect(state.controller.ensureStatus).toHaveBeenCalledOnce();
+    state.emit(bound()); await tick();
+    expect(button(text.syncNow)).toBeDefined();
+  });
+  it("preserves a newer child inventory when an older parent summary completes", async () => {
+    const inventory = { items: [], next: null, completeCount: 9, completeBytes: 0, incompleteCount: 0, incompleteBytes: 0, diskBytes: 0 };
+    let finish!: (value: typeof inventory) => void;
+    vi.mocked(getServerSyncBackupInventory).mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    vi.mocked(getServerSyncBackupInventory).mockResolvedValueOnce(inventory);
+    component = mount(ServerSyncConnection, { target }); await tick();
+    button(text.viewList).click(); await tick();
+    await vi.waitFor(() => expect(target.textContent).toContain(text.backupCount.replace('{0}', '9')));
+    finish({ ...inventory, completeCount: 1 }); await tick(); await tick();
+    expect(target.textContent).toContain(text.backupCount.replace('{0}', '9'));
+  });
+  it("renders synchronization admission refusal inline without an unhandled rejection", async () => {
+    state.controller.snapshot.mockReturnValue(bound());
+    state.controller.synchronize.mockRejectedValueOnce({ code: 'library-operation-busy' });
+    component = mount(ServerSyncConnection, { target }); await tick();
+    button(text.syncNow).click();
+    await vi.waitFor(() => expect(target.querySelector('[role="alert"]')?.textContent).toContain(text.busyHelp));
+  });
+  it('keeps Pause enabled while the first connection cycle is active', async () => {
+    let settle!: () => void;
+    state.controller.synchronize.mockImplementationOnce(() => new Promise<void>((resolve) => { settle = resolve; }));
+    component = mount(ServerSyncConnection, { target }); await tick();
+    button(text.enterCode).click(); await tick();
+    button(text.manualEntry).click(); await tick();
+    fillManual(['https://bound.test/', 'lib', 'device', 'a'.repeat(64)]); await tick();
+    submitReview(); await tick(); await tick();
+    state.emit({ ...bound(), running: true, connecting: false }); await tick();
+    expect(button(text.pause).disabled).toBe(false);
+    button(text.pause).click(); await tick();
+    expect(state.controller.pause).toHaveBeenCalledOnce();
+    settle(); await tick();
+  });
+  it("resumes Full hydration, reserves admission and disables neighboring actions until settlement", async () => {
+    state.controller.snapshot.mockReturnValue(bound());
+    const status = { policy: 'full' as const, localBytes: 0, localObjects: 0, remoteBytes: 9, remoteObjects: 1, unavailableObjects: 0, evictedBytes: 0 };
+    vi.mocked(getAssetResidencyStatus).mockResolvedValueOnce(status);
+    let finish!: () => void;
+    state.setPolicy.mockImplementationOnce(() => new Promise<Awaited<ReturnType<typeof state.setPolicy>>>((resolve) => { finish = () => resolve({ ...status, remoteObjects: 0 }); }));
+    const released = vi.fn();
+    const stop = subscribeLibraryFileOperationReleased(released);
+    component = mount(ServerSyncConnection, { target });
+    await vi.waitFor(() => expect(button(text.residency.download)).toBeDefined());
+    button(text.residency.download).click(); await tick();
+    expect(state.setPolicy).toHaveBeenCalledWith('full');
+    expect(isLibraryFileOperationReserved()).toBe(true);
+    expect(button(text.syncNow).disabled).toBe(true);
+    expect(button(text.disconnect).disabled).toBe(true);
+    expect(button(text.register).disabled).toBe(true);
+    finish();
+    await vi.waitFor(() => expect(isLibraryFileOperationReserved()).toBe(false));
+    expect(released).toHaveBeenCalledOnce();
+    stop();
+  });
+  it('explains a residency reservation refusal without starting native work', async () => {
+    state.controller.snapshot.mockReturnValue(bound());
+    vi.mocked(getAssetResidencyStatus).mockResolvedValueOnce({ policy: 'full', localBytes: 0, remoteBytes: 1, remoteObjects: 1, unavailableObjects: 0, evictedBytes: 0 });
+    component = mount(ServerSyncConnection, { target });
+    await vi.waitFor(() => expect(button(text.residency.download)).toBeDefined());
+    const release = reserveLibraryFileOperation();
+    try {
+      button(text.residency.download).click();
+      await vi.waitFor(() => expect(target.textContent).toContain(text.busyHelp));
+      expect(state.setPolicy).not.toHaveBeenCalled();
+      expect(isLibraryFileOperationReserved()).toBe(true);
+    } finally { release(); }
+  });
   it("separates comparison, receiving and application while naming backup metadata", async () => {
     const snapshot = { ...bound(), running: true, progress: "preparing" as const,
       cycleItems: { done: 0, total: 230, activity: "downloadingBackupMetadata" as const, processed: 1200, expected: 0 } };
@@ -236,8 +332,8 @@ describe("settings server connection", () => {
       libraryId: "lib",
       deviceId: "device",
       token: "a".repeat(64),
-    }, expect.any(Function));
-    expect(state.trace).toEqual(["bind", "policy:remote", "synchronize"]);
+    }, "remote");
+    expect(state.trace).toEqual(["bind", "synchronize"]);
     await vi.waitFor(() => expect(target.querySelector("dl.review")).toBeNull());
     expect(
       target.querySelector<HTMLInputElement>('form input[type="password"]')!
@@ -317,11 +413,11 @@ describe("settings server connection", () => {
         libraryId: "bound",
         deviceId: "device2",
         token: "b".repeat(64),
-      }, expect.any(Function)),
+      }, "full"),
     );
     expect(state.controller.bind).not.toHaveBeenCalled();
     await vi.waitFor(() =>
-      expect(state.trace).toEqual(["reregister", "policy:full", "synchronize"]),
+      expect(state.trace).toEqual(["reregister", "synchronize"]),
     );
   });
 });
@@ -347,7 +443,7 @@ it("receives a cold registration after mounting, shows the check without secrets
     expect(state.controller.bind).toHaveBeenCalledExactlyOnceWith({
       ...vector.registration,
       endpoint: "https://sync.example/base/",
-    }, expect.any(Function)),
+    }, "full"),
   );
   await vi.waitFor(() => expect(target.querySelector("dl.review")).toBeNull());
   expect(target.textContent).not.toContain(

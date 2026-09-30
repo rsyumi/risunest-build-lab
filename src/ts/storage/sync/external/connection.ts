@@ -104,10 +104,10 @@ export function mergeExternalHistoryItems(
     }
     const retainedSnapshots = new Set([...merged.values()]
         .filter(item => item.kind === 'backup-point' || item.kind === 'conflict')
-        .map(item => item.snapshotId ?? item.id))
+        .map(item => item.snapshotId))
     return [...merged.values()]
         .filter(item => item.kind !== 'recovery-candidate'
-            || !retainedSnapshots.has(item.snapshotId ?? item.id))
+            || !retainedSnapshots.has(item.snapshotId))
         .sort((left, right) => {
         const difference = Number(right.createdAtMs) - Number(left.createdAtMs)
         return Number.isFinite(difference) ? difference : 0
@@ -132,4 +132,17 @@ export function externalConflictActions(
     if (conflict.localAvailable) actions.push('keep-local')
     if (conflict.remoteAvailable) actions.push('use-remote')
     return actions
+}
+
+/** Native failure kind of a rejected command (`kind`) or of a job error DTO (`code`). */
+export function externalErrorKind(value: unknown): string | undefined {
+    if (typeof value !== 'object' || value === null) return undefined
+    const carrier = value as { kind?: unknown; code?: unknown }
+    const kind = typeof carrier.kind === 'string' ? carrier.kind : carrier.code
+    return typeof kind === 'string' ? kind : undefined
+}
+
+export function externalJobIsPaused(job: ExternalJobSummary): boolean {
+    return job.state === 'waiting'
+        && (job.phase === 'paused' || job.phase === 'conflict-preservation-paused')
 }

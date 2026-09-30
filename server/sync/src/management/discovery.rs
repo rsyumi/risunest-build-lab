@@ -16,6 +16,7 @@ pub struct Discovery {
 
 impl Discovery {
     pub fn load(root: &Path) -> Result<Self> {
+        let root = crate::resolve_data_root(root)?;
         let path = root.join("management-session");
         for part in path.ancestors() {
             let meta = std::fs::symlink_metadata(part)?;
@@ -64,7 +65,8 @@ impl Discovery {
         let bytes =
             serde_json::to_vec(self).map_err(|_| Error::new("invalid-management-session", 409))?;
         let bytes = crate::store::management::protect(&bytes, true)?;
-        let mut file = tempfile::NamedTempFile::new_in(root)?;
+        let root = crate::resolve_data_root(root)?;
+        let mut file = tempfile::Builder::new().prefix(".risunest-tmp-").tempfile_in(&root)?;
         file.write_all(&bytes)?;
         file.as_file().sync_all()?;
         file.persist(root.join("management-session"))

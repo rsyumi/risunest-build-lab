@@ -1,3 +1,4 @@
+import * as mobileTasks from '../../mobileBackgroundTask'
 import { describe, expect, it, vi } from 'vitest'
 
 import type {
@@ -33,6 +34,7 @@ function pinnedLease(): NativePersistentRevisionLease {
         readConversation: vi.fn(),
         readConversationMetadata: vi.fn(),
         readConversationWindow: vi.fn(),
+        readPluginStorageValues: vi.fn(async () => { throw new Error('Unexpected renderer plugin storage read') }),
         queryPluginStorage: vi.fn(),
         readPluginStorage: vi.fn(),
         readAssetAlias: vi.fn(),
@@ -539,4 +541,28 @@ describe('native official publication job publisher', () => {
         await expect(result?.acknowledge()).resolves.toBeUndefined()
         await expect(result?.completeReload()).resolves.toBeUndefined()
     })
+})
+
+it('uses indeterminate mobile progress for reauthentication retries and forwards both statuses', async () => {
+    const progress = vi.fn()
+    const status = { jobId: 'publication-1', kind: 'official-publication-upload' as const, state: 'running' as const, phase: 'uploading-database' as const, progress: { completedBytes: 50, totalBytes: 100, completedItems: 1 } }
+    const lease = vi.spyOn(mobileTasks, 'runWithMobileBackgroundTask').mockImplementationOnce(async (_kind, operation, signal) => operation({ signal, progress, dispose: async () => {} }))
+    const onStatus = vi.fn()
+    const terminal = receipt({ kind: 'written', accountId: 'account-1', session: 'session-1', saveDate: 'date', status: 200, replacementKey: 'database/database.bin', warning: null, reloadSession: false })
+    try {
+        const publish = createNativeOfficialPublicationJobPublisher({
+            ...accountHarness(), baseUrl: 'https://hub.invalid',
+            runAttempt: async (_request, options) => {
+                options?.onStatus?.(status)
+                return { kind: 'waiting-for-reauthentication', jobId: 'publication-1', accountId: 'account-1', session: 'session-1', warning: null }
+            },
+            continueAttempt: async (_id, _request, _expected, options) => {
+                options?.onStatus?.(status)
+                return { kind: 'completed', receipt: terminal }
+            },
+        })
+        await publish({ revision: 7, accountId: 'account-1', lease: pinnedLease(), resourceReplacements: {}, onStatus })
+        expect(progress.mock.calls).toEqual([[50], [null]])
+        expect(onStatus).toHaveBeenCalledTimes(2)
+    } finally { lease.mockRestore() }
 })

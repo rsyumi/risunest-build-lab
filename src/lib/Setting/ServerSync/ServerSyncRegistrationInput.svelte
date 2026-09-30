@@ -3,7 +3,7 @@
   import { language } from "src/lang";
   import TextInput from "src/lib/UI/GUI/TextInput.svelte";
   import SettingButton from "../RisuNest/SettingButton.svelte";
-  import { isTauriAndroid, isTauriIOS } from "src/ts/platform";
+
   import { modalNavigation } from "src/ts/ui/modalNavigation";
   import type { ServerConfig } from "src/ts/storage/sync/serverSync";
   import {
@@ -12,7 +12,7 @@
     RegistrationError,
   } from "src/ts/storage/sync/serverSyncRegistration";
   import { serverRegistrationInbox } from "src/ts/storage/sync/serverSyncRegistrationInbox";
-  import { createServerQrScanner } from "src/ts/storage/sync/serverSyncQr";
+  import { createServerQrScanner, canScanServerRegistration, openServerRegistrationSettings } from "src/ts/storage/sync/serverSyncQr";
   let {
     available = true,
     busy = false,
@@ -27,6 +27,7 @@
   } = $props();
   let code = $state("");
   let scanning = $state(false);
+  let permissionBlocked = $state(false);
   let camera = $state(false);
   let mounted = true;
   const scanner = createServerQrScanner();
@@ -52,6 +53,7 @@
   async function scan() {
     if (busy || !available || scanning) return;
     scanning = true;
+    permissionBlocked = false;
     message = "";
     try {
       const config = await scanner.scan(() => {
@@ -69,8 +71,10 @@
           error.code === "qr-scan-cancelled"
         )
       ) {
-        message =
-          error instanceof RegistrationError &&
+        permissionBlocked = error instanceof RegistrationError && error.code === "qr-camera-permission-blocked";
+        message = permissionBlocked ? text.cameraBlocked
+          : error instanceof RegistrationError && error.code === "qr-scan-timeout" ? text.cameraTimeout
+          : error instanceof RegistrationError &&
           error.code === "qr-camera-permission-denied"
             ? text.cameraDenied
             : error instanceof RegistrationError &&
@@ -130,13 +134,13 @@
         className="font-mono text-sm"
       />
     </label>
-    <p class="text-sm text-textcolor2">{text.registrationCodeHelp}</p>
+    <p class="text-sm text-textcolor2">{canScanServerRegistration ? text.registrationCodeHelpScan : text.registrationCodeHelp}</p>
     <div class="flex flex-wrap gap-2">
       <SettingButton
         disabled={busy || scanning || !code.trim()}
         onclick={read}>{text.readRegistration}</SettingButton
       >
-      {#if isTauriAndroid || isTauriIOS}<SettingButton
+      {#if canScanServerRegistration}<SettingButton
           variant="secondary"
           disabled={busy || scanning}
           onclick={() => void scan()}>{text.scanRegistration}</SettingButton
@@ -145,6 +149,9 @@
   </div>
 {/if}
 {#if message}<p role="status" class="text-sm">{message}</p>{/if}
+{#if permissionBlocked}
+  <SettingButton onclick={() => openServerRegistrationSettings().catch(() => { message = text.cameraUnavailable; })}>{text.openCameraSettings}</SettingButton>
+{/if}
 {#if scanning}
   <div
     class="scanner-overlay"

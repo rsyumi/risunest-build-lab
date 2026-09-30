@@ -99,4 +99,16 @@ describe('external application outcome ownership', () => {
         expect(application.fence.refreshCommittedWorkingSet).toHaveBeenCalledOnce()
         expect(application.refreshReleased).not.toHaveBeenCalled()
     })
+    it('keeps restore fenced until device caches refresh and retries that refresh after failure', async () => {
+        const { recovery, application } = await fixture()
+        const refreshDeviceState = vi.fn().mockRejectedValueOnce(new Error('device cache unreadable')).mockResolvedValue(undefined)
+        await expect(recovery.runExternalApplication({ ...application, refreshDeviceState })).rejects.toThrow('device cache unreadable')
+        expect(application.fence.release).not.toHaveBeenCalled()
+        expect(application.afterRefresh).not.toHaveBeenCalled()
+        await recovery.retryExternalApplication()
+        expect(refreshDeviceState).toHaveBeenCalledTimes(2)
+        expect(application.confirm).toHaveBeenCalledOnce()
+        expect(application.fence.release).toHaveBeenCalledOnce()
+    })
+
 })

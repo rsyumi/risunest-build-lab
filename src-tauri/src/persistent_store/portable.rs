@@ -1,4 +1,4 @@
-//! Raw generation projection for portable archives. Never execute source DDL or reserialize JSON.
+//! Raw generation projection for portable archives. Never execute source DDL.
 use super::{PersistentStore, StoreError, StoreResult};
 use crate::local_backup::CancellationProbe;
 use rusqlite::{types::ValueRef, Connection, OptionalExtension};
@@ -216,8 +216,20 @@ fn copy_generation(
         while let Some(row) = rows.next()? {
             cancelled(probe)?;
             digest.update([0xf0]);
+            let sanitized_root = if table.name == "root" {
+                match row.get_ref(0)? {
+                    ValueRef::Text(bytes) => serde_json::from_slice::<serde_json::Value>(bytes).ok().and_then(|mut value| {
+                        value.as_object_mut()?.remove("account")?;
+                        serde_json::to_string(&value).ok()
+                    }),
+                    _ => None,
+                }
+            } else { None };
             for index in 0..table.columns.len() {
-                let value = row.get_ref(index)?;
+                let value = match sanitized_root.as_ref() {
+                    Some(root) if index == 0 => ValueRef::Text(root.as_bytes()),
+                    _ => row.get_ref(index)?,
+                };
                 hash_value(&mut digest, value);
                 insert
                     .raw_bind_parameter(index + 1, rusqlite::types::ToSqlOutput::Borrowed(value))?;
@@ -240,10 +252,25 @@ fn copy_generation(
 }
 
 impl PersistentStore {
+    pub(crate) fn portable_staged_counts(&self, staging: &str) -> StoreResult<(u64, u64)> {
+        Ok((
+            self.connection.query_row("SELECT count(*) FROM characters WHERE generation=?1", [staging], |row| row.get::<_, i64>(0))? as u64,
+            self.connection.query_row("SELECT count(*) FROM bot_presets WHERE generation=?1", [staging], |row| row.get::<_, i64>(0))? as u64,
+        ))
+    }
     pub(crate) fn portable_source_generation(&self, lease: &str) -> StoreResult<String> {
         let (_, target) = self.read_view(Some(lease))?;
         Ok(target.generation.clone())
     }
+    pub(crate) fn portable_export_lower_bound(&self) -> StoreResult<u64> {
+        let objects: i64 = self.connection.query_row("SELECT coalesce(sum(byte_size),0) FROM asset_objects", [], |row| row.get(0))?;
+        let pages: i64 = self.connection.query_row("PRAGMA page_count", [], |row| row.get(0))?;
+        let page_size: i64 = self.connection.query_row("PRAGMA page_size", [], |row| row.get(0))?;
+        u64::try_from(objects).ok().and_then(|objects| {
+            u64::try_from(pages).ok()?.checked_mul(u64::try_from(page_size).ok()?)?.checked_add(objects)
+        }).ok_or_else(|| invalid("portable export size overflow"))
+    }
+
     pub(crate) fn capture_portable_records(
         &self,
         lease: &str,
@@ -318,15 +345,14 @@ impl PersistentStore {
 /// authorities whole. Every row it writes is copied from the archive unchanged except for the
 /// ordering columns, which are renumbered because the records around them are gone.
 ///
-/// The stored files all come in: an import that left some out would have to decide which of them
-/// the kept records still need, and the unused image cleanup answers that question afterwards
-/// with the whole library in view.
+/// The selected view is shared by validation, copying and object installation.
 pub(crate) fn stage_portable_records_selected(
     store: &mut PersistentStore,
     source: &Connection,
     selection: &crate::portable_backup::ClosedSelection,
     probe: &dyn CancellationProbe,
 ) -> StoreResult<super::StagingResult> {
+    install_selected_views(source, selection, probe)?;
     super::portable_validation::validate_records(source, probe)?;
     let stage = store.replace_begin()?;
     let result = copy_selected(store, source, &stage.staging_id, selection, probe);
@@ -337,49 +363,96 @@ pub(crate) fn stage_portable_records_selected(
     Ok(stage)
 }
 
-fn quoted_list(values: &[String]) -> String {
-    values
-        .iter()
-        .map(|value| format!("'{}'", value.replace('\'', "''")))
-        .collect::<Vec<_>>()
-        .join(",")
+fn install_selected_views(
+    source: &Connection,
+    selection: &crate::portable_backup::ClosedSelection,
+    probe: &dyn CancellationProbe,
+) -> StoreResult<()> {
+    let query_only: bool = source.pragma_query_value(None, "query_only", |row| row.get(0))?;
+    source.pragma_update(None, "query_only", false)?;
+    let result = (|| -> StoreResult<()> {
+    source.execute_batch("CREATE TEMP TABLE selected_characters(id TEXT PRIMARY KEY); CREATE TEMP TABLE selected_presets(id TEXT PRIMARY KEY); CREATE TEMP TABLE selected_plugins(owner TEXT,storage_key TEXT,PRIMARY KEY(owner,storage_key)); CREATE TEMP TABLE selected_aliases(kind TEXT,logical_key TEXT,PRIMARY KEY(kind,logical_key));")?;
+    for id in &selection.characters { source.execute("INSERT OR IGNORE INTO selected_characters VALUES(?1)", [id])?; }
+    for id in &selection.presets { source.execute("INSERT OR IGNORE INTO selected_presets VALUES(?1)", [id])?; }
+    for key in &selection.plugins { source.execute("INSERT OR IGNORE INTO selected_plugins VALUES(?1,?2)", rusqlite::params![key.owner,key.key])?; }
+    for (table, condition) in [
+        ("characters", "character_id IN (SELECT id FROM selected_characters)"),
+        ("conversations", "character_id IN (SELECT id FROM selected_characters)"),
+        ("messages", "character_id IN (SELECT id FROM selected_characters)"),
+        ("bot_presets", "preset_id IN (SELECT id FROM selected_presets)"),
+        ("plugin_storage", "(owner,storage_key) IN (SELECT owner,storage_key FROM selected_plugins)"),
+        ("asset_owner_heads", "owner_kind!='character-additional-assets' OR owner_locator IN (SELECT id FROM selected_characters)"),
+    ] {
+        source.execute_batch(&format!("CREATE TEMP VIEW {table} AS SELECT * FROM main.{table} WHERE {condition}"))?;
+    }
+    use crate::lossless_f0::{scan_portable_fragment, PortableFragment};
+    for (kind, sql) in [
+        ("root", "SELECT value,'','',0 FROM root"),
+        ("preset", "SELECT value,'','',configured_index FROM bot_presets"),
+        ("plugin", "SELECT value,storage_key,'',0 FROM plugin_storage"),
+        ("character", "SELECT detail,character_id,'',conversation_count FROM characters"),
+        ("conversation", "SELECT detail,character_id,'',0 FROM conversations"),
+        ("message", "SELECT value,character_id,conversation_id,message_index FROM messages"),
+    ] {
+        let mut statement = source.prepare(sql)?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            cancelled(probe)?;
+            let encoded: String = row.get(0)?;
+            let value: serde_json::Value = serde_json::from_str(&encoded).map_err(|_| invalid("selected record JSON is invalid"))?;
+            let id: String = row.get(1)?;
+            let conversation: String = row.get(2)?;
+            let index: i64 = row.get(3)?;
+            let fragment = match kind {
+                "root" => PortableFragment::Root { value: &value, selected_preset: None },
+                "preset" => PortableFragment::Preset { value: &value, index },
+                "plugin" => PortableFragment::Plugin { value: &value, key: &id },
+                "character" => PortableFragment::Character { value: &value, selected_chat: None, has_chats: index > 0 },
+                "conversation" => PortableFragment::Conversation { value: &value, character_id: &id },
+                _ => PortableFragment::Message { value: &value, character_id: &id, conversation_id: &conversation, index },
+            };
+            for reference in scan_portable_fragment(fragment).map_err(|_| invalid("selected reference cannot be scanned"))? {
+                if matches!(reference.target_kind.as_str(), "asset" | "inlay") {
+                    source.execute("INSERT OR IGNORE INTO selected_aliases VALUES(?1,?2)", rusqlite::params![reference.target_kind,reference.target_key])?;
+                }
+            }
+        }
+    }
+    source.execute_batch("CREATE TEMP TABLE selected_archived_hashes(hash TEXT PRIMARY KEY)")?;
+    let mut statement = source.prepare("SELECT archived_object FROM characters WHERE archived_object IS NOT NULL")?;
+    let mut rows = statement.query([])?;
+    while let Some(row) = rows.next()? {
+        cancelled(probe)?;
+        let archived: super::archive::ArchivedObject = serde_json::from_str(&row.get::<_,String>(0)?).map_err(|_| invalid("selected archived payload is invalid"))?;
+        for hash in archived.object_roots() {
+            source.execute("INSERT OR IGNORE INTO selected_archived_hashes VALUES(?1)", [hash])?;
+        }
+    }
+    source.execute_batch("CREATE TEMP VIEW asset_aliases AS SELECT * FROM main.asset_aliases WHERE (kind,logical_key) IN (SELECT kind,logical_key FROM selected_aliases) OR object_hash IN (SELECT hash FROM selected_archived_hashes)")?;
+    Ok(())
+    })();
+    source.pragma_update(None, "query_only", query_only)?;
+    result
 }
 
 fn copy_selected(
     store: &mut PersistentStore,
     source: &Connection,
     staging: &str,
-    selection: &crate::portable_backup::ClosedSelection,
+    _selection: &crate::portable_backup::ClosedSelection,
     probe: &dyn CancellationProbe,
 ) -> StoreResult<()> {
-    let characters = quoted_list(&selection.characters);
-    let filters: Vec<(&str, String)> = vec![
-        ("bot_presets", format!("preset_id IN ({})", quoted_list(&selection.presets))),
-        ("plugin_storage", format!("storage_key IN ({})", quoted_list(&selection.plugins))),
-        ("characters", format!("character_id IN ({characters})")),
-        ("conversations", format!("character_id IN ({characters})")),
-        ("messages", format!("character_id IN ({characters})")),
-    ];
     let transaction = store.connection.transaction()?;
     for table in TABLES {
         cancelled(probe)?;
-        let filter = filters
-            .iter()
-            .find(|(name, _)| *name == table.name)
-            .map(|(_, filter)| filter.as_str())
-            .unwrap_or_default();
         let columns = table.column_list();
         transaction.execute(
             &format!("DELETE FROM {} WHERE generation=?1", table.name),
             [staging],
         )?;
         let mut select = source.prepare(&format!(
-            "SELECT {columns} FROM {}{} ORDER BY {}",
+            "SELECT {columns} FROM {} ORDER BY {}",
             table.name,
-            match filter.is_empty() {
-                true => String::new(),
-                false => format!(" WHERE {filter}"),
-            },
             table.order
         ))?;
         let placeholders = (0..=table.columns.len())
@@ -408,7 +481,7 @@ fn copy_selected(
     }
     // An owner head belongs to a record; the ones whose character stayed behind have no owner.
     transaction.execute(
-        "DELETE FROM asset_owner_heads WHERE generation=?1 AND owner_kind IN ('character','group')
+        "DELETE FROM asset_owner_heads WHERE generation=?1 AND owner_kind='character-additional-assets'
          AND owner_locator NOT IN (SELECT character_id FROM characters WHERE generation=?1)",
         [staging],
     )?;
@@ -631,6 +704,43 @@ fn invalid(message: &str) -> StoreError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn selected_views_keep_only_selected_valid_rows_and_owner_qualified_plugins() {
+        let source = Connection::open_in_memory().unwrap();
+        create_raw_tables(&source).unwrap();
+        source.execute("INSERT INTO root VALUES('{}')", []).unwrap();
+        for (index, id) in ["a", "b"].into_iter().enumerate() {
+            let detail = serde_json::json!({"chaId":id,"name":id,"type":"character","image":format!("assets/{id}")}).to_string();
+            source.execute("INSERT INTO characters VALUES(?1,?2,0,0,?1,?3,0,'character',NULL,NULL,?4,NULL)", rusqlite::params![id,index as i64,format!("assets/{id}"),detail]).unwrap();
+            source.execute("INSERT INTO asset_aliases VALUES(?1,?2,'asset',1,'application/octet-stream','','',NULL,NULL,NULL,'{}')", rusqlite::params![format!("assets/{id}"),"a".repeat(64)]).unwrap();
+            source.execute("INSERT INTO asset_owner_heads VALUES('character-additional-assets',?1,0,NULL,0)", [id]).unwrap();
+        }
+        source.execute("UPDATE characters SET detail='broken' WHERE character_id='b'", []).unwrap();
+        for (index, owner) in ["plugin:a", "plugin:b"].into_iter().enumerate() {
+            source.execute("INSERT INTO plugin_storage VALUES(?1,'same/key',2,?2,'{}',NULL,NULL,NULL)", rusqlite::params![owner,index as i64]).unwrap();
+        }
+        let selection = crate::portable_backup::ClosedSelection {
+            characters: vec!["a".into()],
+            plugins: vec![crate::portable_backup::PluginKey { owner:"plugin:a".into(),key:"same/key".into() }],
+            ..Default::default()
+        };
+        source.pragma_update(None, "query_only", true).unwrap();
+        install_selected_views(&source, &selection, &Never).unwrap();
+        assert!(source.pragma_query_value(None, "query_only", |row| row.get::<_,bool>(0)).unwrap());
+        for (table, column, expected) in [("characters","character_id","a"),("asset_aliases","logical_key","assets/a"),("asset_owner_heads","owner_locator","a"),("plugin_storage","owner","plugin:a")] {
+            let mut statement = source.prepare(&format!("SELECT {column} FROM {table}")).unwrap();
+            let values = statement.query_map([], |row| row.get::<_,String>(0)).unwrap().collect::<Result<Vec<_>,_>>().unwrap();
+            assert_eq!(values, [expected]);
+        }
+        let root = tempfile::tempdir().unwrap();
+        let mut store = PersistentStore::open(root.path()).unwrap();
+        super::super::portable_validation::validate_records(&source, &Never).unwrap();
+        let stage = store.replace_begin().unwrap();
+        copy_selected(&mut store, &source, &stage.staging_id, &selection, &Never).unwrap();
+        assert_eq!(store.portable_staged_counts(&stage.staging_id).unwrap(), (1,0));
+        store.replace_abort(&stage.staging_id).unwrap();
+    }
+
     use super::*;
     use rusqlite::params;
     struct Never;
@@ -638,6 +748,25 @@ mod tests {
         fn is_cancelled(&self) -> bool {
             false
         }
+    }
+
+    #[test]
+    fn portable_capture_excludes_root_account_but_keeps_other_values() {
+        let source = rusqlite::Connection::open_in_memory().unwrap();
+        source.execute_batch("CREATE TABLE root(generation TEXT,value TEXT)").unwrap();
+        source.execute("INSERT INTO root VALUES('chosen',?1)", [r#"{"account":{"token":"synthetic-secret"},"username":"Synthetic"}"#]).unwrap();
+        for table in TABLES.iter().filter(|table| table.name != "root") {
+            let columns = table.columns.iter().map(|(name, kind)| format!("{name} {kind}")).collect::<Vec<_>>().join(",");
+            source.execute_batch(&format!("CREATE TABLE {} (generation TEXT,{columns})", table.name)).unwrap();
+        }
+        let mut output = rusqlite::Connection::open_in_memory().unwrap();
+        create_raw_tables(&output).unwrap();
+        copy_generation(&source, "chosen", &mut output, &Never).unwrap();
+        let encoded: String = output.query_row("SELECT value FROM root", [], |row| row.get(0)).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(value, serde_json::json!({"username":"Synthetic"}));
+        let original: String = source.query_row("SELECT value FROM root", [], |row| row.get(0)).unwrap();
+        assert!(original.contains("synthetic-secret"));
     }
 
     #[test]

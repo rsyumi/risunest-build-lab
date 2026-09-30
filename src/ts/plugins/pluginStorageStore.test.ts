@@ -4,6 +4,7 @@ import {
     RevisionConflictError,
     type PersistentDataStore,
     type PluginStorageMutation,
+    type PluginStorageValueQuery,
 } from '../storage/persistentDataStore'
 import {
     createPluginStorageStore,
@@ -30,8 +31,18 @@ function harness(entries: Record<string, { byteSize: number; value: unknown }>, 
         const entry = entries[key]
         return entry ? { revision, value: structuredClone(entry.value) } : null
     })
+    const readPluginStorageValues = vi.fn(async ({ owner, afterKey, limit = 256 }: PluginStorageValueQuery) => {
+        const records = Object.entries(entries).map(([key, entry], ordinal) => ({
+            owner: OWNER, key, value: structuredClone(entry.value), ordinal,
+        })).filter((item) => (!owner || owner === item.owner) && item.ordinal > (afterKey?.ordinal ?? -1))
+        const selected = records.slice(0, limit)
+        const last = selected.at(-1)
+        return { revision, items: selected.map(({ ordinal, ...item }) => item),
+            nextCursor: records.length > limit && last ? { owner: last.owner, key: last.key, ordinal: last.ordinal } : null }
+    })
     const store = {
         open: vi.fn(async () => undefined),
+        readRoot: vi.fn(async () => ({ revision, value: {} })),
         queryPluginStorage: vi.fn(async () => ({
             revision,
             items: Object.entries(entries)
@@ -41,6 +52,9 @@ function harness(entries: Record<string, { byteSize: number; value: unknown }>, 
         readPluginStorage,
         acquireRevision: vi.fn(async (requestedRevision: number) => ({
             revision: requestedRevision,
+            readPluginStorageValues: async (query: PluginStorageValueQuery) => ({
+                ...await readPluginStorageValues(query), revision: requestedRevision,
+            }),
             queryPluginStorage: async () => ({
                 revision: requestedRevision,
                 items: Object.entries(entries)
@@ -76,6 +90,7 @@ function harness(entries: Record<string, { byteSize: number; value: unknown }>, 
         store,
         mutate,
         readPluginStorage,
+        readPluginStorageValues,
         storage: createPluginStorageStore({
             store, mutate,
             getStorageAuthorityEpoch: () => authorityEpoch,
@@ -86,6 +101,18 @@ function harness(entries: Record<string, { byteSize: number; value: unknown }>, 
 }
 
 describe('plugin storage V3 residency', () => {
+    it('reads an exact 2000-key owner snapshot in eight bounded page calls', async () => {
+        const entries = Object.fromEntries(Array.from({ length: 2000 }, (_, index) =>
+            [`key-${2000 - index}`, { value: { index }, byteSize: 16 }]))
+        const { storage, readPluginStorageValues, readPluginStorage } = harness(entries)
+        const snapshot = await storage.forOwner(OWNER).snapshot()
+        expect(snapshot).toEqual(Object.fromEntries(Object.entries(entries).map(([key, entry]) => [key, entry.value])))
+        expect(Object.keys(snapshot)).toEqual(Object.keys(entries))
+        expect(readPluginStorageValues).toHaveBeenCalledTimes(8)
+        expect(readPluginStorageValues.mock.calls.every(([query]) => query.owner === OWNER)).toBe(true)
+        expect(readPluginStorage).not.toHaveBeenCalled()
+    })
+
     it('freezes mutations before waiting for the first storage index', async () => {
         const { storage, store, mutate } = harness({}, 100)
         const opening = deferred<void>()
@@ -444,6 +471,8 @@ describe('plugin storage V3 residency', () => {
                 revision: 4,
                 items: [{ owner: 'test-plugin', key: 'zero', byteSize: 1 }],
             }),
+            readPluginStorageValues: async () => ({ revision: 4, nextCursor: null,
+                items: [{ owner: OWNER, key: 'zero', value: 0 }] }),
             readPluginStorage: async () => ({ revision: 4, value: 0 }),
             release,
         } as any)
@@ -465,6 +494,9 @@ describe('plugin storage V3 residency', () => {
                     { owner: 'test-plugin', key: 'alpha', byteSize: 1 },
                 ],
             }),
+            readPluginStorageValues: async () => ({ revision: 4, nextCursor: null,
+                items: ['zeta', '0', '__proto__', 'alpha'].map((key) => ({ owner: OWNER, key,
+                    value: key === '__proto__' ? false : key === '0' ? 0 : '' })) }),
             readPluginStorage: async (_owner: string, key: string) => ({
                 revision: 4,
                 value: key === '__proto__' ? false : key === '0' ? 0 : '',
@@ -486,14 +518,14 @@ describe('plugin storage V3 residency', () => {
         const { storage, store } = harness({
             zero: { byteSize: 1, value: 0 },
         }, 1)
-        vi.mocked(store.queryPluginStorage)
+        vi.mocked(store.readRoot)
             .mockResolvedValueOnce({
                 revision: 4,
-                items: [{ owner: 'test-plugin', key: 'zero', byteSize: 1 }],
+                value: {} as any,
             })
             .mockResolvedValueOnce({
                 revision: 5,
-                items: [{ owner: 'test-plugin', key: 'zero', byteSize: 1 }],
+                value: {} as any,
             })
         vi.mocked(store.acquireRevision)
             .mockRejectedValueOnce(new RevisionConflictError(4, 5))

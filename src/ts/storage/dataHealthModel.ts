@@ -22,6 +22,9 @@ export interface DataHealthSnapshot {
     result: DataHealthResult | null
     groups: DataHealthGroup[]
     deepFraction: number | null
+    failure: 'load' | 'scan' | 'repair' | 'undo' | 'refresh' | 'preview' | null
+    applied: { remaining: number } | null
+    activity: 'quick' | 'deep' | 'repair' | 'undo' | 'preview' | 'load' | null
     failed: boolean
     /** What the diagnosis can be answered with, and what the reader has chosen. */
     candidates: RepairCandidate[]
@@ -40,14 +43,17 @@ export interface DataHealthDependencies {
     deepScan(resume: boolean): Promise<DataHealthResult>
     cancel(): Promise<void>
     planRepair(): Promise<RepairCandidate[]>
-    previewRepair(selection: string[]): Promise<RepairPreview>
+    previewRepair(selection: string[], expectedScannedAt: number): Promise<RepairPreview>
     applyRepair(
         selection: string[],
         snapshot: boolean,
+        expectedRevision: number,
+        expectedScannedAt: number,
     ): Promise<{ result: DataHealthResult }>
     listJournals(): Promise<RepairJournalSummary[]>
     undoRepair(
         journalId: string,
+        expectedRevision: number,
     ): Promise<{ result: DataHealthResult; skipped: string[] }>
 }
 
@@ -73,6 +79,9 @@ export function createDataHealthModel(deps: DataHealthDependencies) {
         loading: false,
         running: null,
         failed: false,
+        failure: null,
+        applied: null,
+        activity: null,
         candidates: [],
         selection: [],
         preview: null,
@@ -83,8 +92,14 @@ export function createDataHealthModel(deps: DataHealthDependencies) {
     }
     const listeners = new Set<(snapshot: DataHealthSnapshot) => void>()
     const update = (next: Partial<DataHealthSnapshot>) => {
-        state = { ...state, ...next }
+        state = { ...state, ...next, ...("failure" in next ? { failed: next.failure !== null } : {}) }
         listeners.forEach((listener) => listener(state))
+    }
+    const mutationFailed = (error: unknown, action: 'repair' | 'undo') => {
+        const code = error && typeof error === 'object' && 'code' in error ? error.code : null
+        if (code === 'committed' || code === 'activation-committed-refresh-failed') {
+            update({ failure: 'refresh', candidates: [], selection: [], preview: null, journals: [], ...derive(null) })
+        } else update({ failure: action })
     }
     let cancelRequested = false
 
@@ -97,7 +112,7 @@ export function createDataHealthModel(deps: DataHealthDependencies) {
         try {
             await loadPlan()
         } catch {
-            update({ failed: true })
+            update({ failure: 'preview' })
         }
     }
 
@@ -113,7 +128,8 @@ export function createDataHealthModel(deps: DataHealthDependencies) {
     const refreshPreview = async (selection: string[]): Promise<void> => {
         update({
             preview:
-                selection.length > 0 ? await deps.previewRepair(selection) : null,
+                selection.length > 0 && state.result
+                    ? await deps.previewRepair(selection, state.result.scannedAt) : null,
         })
     }
 
@@ -134,18 +150,18 @@ export function createDataHealthModel(deps: DataHealthDependencies) {
         running: Exclude<DataHealthRun, null>,
         action: () => Promise<void>,
     ): Promise<void> => {
-        if (state.running) return
+        if (state.activity || state.loading) return
         cancelRequested = false
-        update({ running, failed: false })
+        update({ running, activity: running, failure: null, applied: null })
         try {
             await action()
         } catch (error) {
             if (!isDataHealthCancellation(error)) {
-                update({ failed: true })
+                update({ failure: 'scan' })
                 throw error
             }
         } finally {
-            update({ running: null })
+            update({ running: null, activity: null })
         }
     }
 
@@ -158,14 +174,14 @@ export function createDataHealthModel(deps: DataHealthDependencies) {
         },
         /** Shows the last diagnosis without scanning again. */
         async load(): Promise<void> {
-            if (state.loading || state.running) return
-            update({ loading: true })
+            if (state.activity || state.loading) return
+            update({ loading: true, activity: "load", failure: null })
             try {
                 finish(await deps.getResult())
             } catch {
-                update({ failed: true })
+                update({ failure: "load" })
             } finally {
-                update({ loading: false })
+                update({ loading: false, activity: null })
             }
         },
         quickScan(): Promise<void> {
@@ -181,16 +197,19 @@ export function createDataHealthModel(deps: DataHealthDependencies) {
         },
         /** Reads the repair choices for the diagnosis on screen. */
         async loadRepairs(): Promise<void> {
-            if (state.repairing || state.running) return
+            if (state.activity || state.loading) return
+            update({ activity: "load" })
             try {
                 await loadPlan()
                 update({ journals: await deps.listJournals() })
             } catch {
-                update({ failed: true })
-            }
+                update({ failure: "load" })
+            } finally { update({ activity: null }) }
         },
         /** One choice per finding: picking one drops the other answers to the same finding. */
         async toggle(id: string): Promise<void> {
+            if (state.activity || state.loading) return
+            update({ activity: "preview", failure: null })
             const selection = toggleRepairSelection(
                 state.candidates,
                 state.selection,
@@ -200,51 +219,52 @@ export function createDataHealthModel(deps: DataHealthDependencies) {
             try {
                 await refreshPreview(selection)
             } catch {
-                update({ failed: true })
-            }
+                update({ failure: "preview" })
+            } finally { update({ activity: null }) }
         },
         /** Chooses one answer for every finding, or clears the selection. */
         async setAll(on: boolean): Promise<void> {
+            if (state.activity || state.loading) return
+            update({ activity: "preview", failure: null })
             const selection = on ? allRepairSelection(state.candidates) : []
             update({ selection })
             try {
                 await refreshPreview(selection)
             } catch {
-                update({ failed: true })
-            }
+                update({ failure: "preview" })
+            } finally { update({ activity: null }) }
         },
         async apply(snapshot: boolean): Promise<void> {
-            if (state.repairing || state.selection.length === 0) return
-            update({ repairing: true, failed: false, skipped: [] })
+            if (state.activity || state.loading || state.selection.length === 0 || !state.result) return
+            update({ repairing: true, activity: 'repair', failure: null, applied: null, skipped: [] })
             try {
-                const applied = await deps.applyRepair(state.selection, snapshot)
+                let applied: { result: DataHealthResult }
+                try {
+                    applied = await deps.applyRepair([...state.selection], snapshot, state.result.revision, state.result.scannedAt)
+                } catch (error) { mutationFailed(error, 'repair'); throw error }
                 finish(applied.result)
-                await loadPlan()
-                update({ journals: await deps.listJournals() })
-            } catch (error) {
-                update({ failed: true })
-                throw error
-            } finally {
-                update({ repairing: false })
-            }
+                update({ applied: { remaining: Object.values(applied.result.counts).reduce((sum, count) => sum + count, 0) } })
+                try {
+                    await loadPlan()
+                    update({ journals: await deps.listJournals() })
+                } catch { update({ failure: 'refresh' }) }
+            } finally { update({ repairing: false, activity: null }) }
         },
         async undo(journalId: string): Promise<void> {
-            if (state.repairing) return
-            update({ repairing: true, failed: false, skipped: [] })
+            if (state.activity || state.loading || !state.result) return
+            update({ repairing: true, activity: 'undo', failure: null, applied: null, skipped: [] })
             try {
-                const undone = await deps.undoRepair(journalId)
+                let undone: { result: DataHealthResult; skipped: string[] }
+                try {
+                    undone = await deps.undoRepair(journalId, state.result.revision)
+                } catch (error) { mutationFailed(error, 'undo'); throw error }
                 finish(undone.result)
-                await loadPlan()
-                update({
-                    journals: await deps.listJournals(),
-                    skipped: undone.skipped,
-                })
-            } catch (error) {
-                update({ failed: true })
-                throw error
-            } finally {
-                update({ repairing: false })
-            }
+                update({ applied: { remaining: Object.values(undone.result.counts).reduce((sum, count) => sum + count, 0) }, skipped: undone.skipped })
+                try {
+                    await loadPlan()
+                    update({ journals: await deps.listJournals() })
+                } catch { update({ failure: 'refresh' }) }
+            } finally { update({ repairing: false, activity: null }) }
         },
     }
 }

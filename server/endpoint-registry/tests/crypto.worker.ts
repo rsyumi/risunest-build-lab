@@ -68,7 +68,7 @@ it("roundtrips encrypted URLs while storing only UUID, opaque bytes and timestam
   const url = `https://registry.invalid/endpoints/${vector.uuid}`;
   const response = await exports.default.fetch(url, {
     method: "POST",
-    headers: { "content-type": "text/plain" },
+    headers: { "authorization": `Bearer ${"a".repeat(64)}`, "cf-connecting-ip": crypto.randomUUID(), "content-type": "text/plain" },
     body: vector.envelope,
   });
   expect(response.status).toBe(204);
@@ -79,7 +79,7 @@ it("roundtrips encrypted URLs while storing only UUID, opaque bytes and timestam
     {
       uuid: vector.uuid,
       envelope: vector.envelope,
-      updated_at: expect.any(Number),
+      writer: expect.stringMatching(/^[0-9a-f]{64}$/), updated_at: expect.any(Number),
     },
   ]);
 });
@@ -91,7 +91,7 @@ it("leaves tag validation to the client, including UUID binding", async () => {
     (
       await exports.default.fetch(url, {
         method: "POST",
-        headers: { "content-type": "text/plain" },
+        headers: { "authorization": `Bearer ${"a".repeat(64)}`, "cf-connecting-ip": crypto.randomUUID(), "content-type": "text/plain" },
         body: vector.envelope,
       })
     ).status,
@@ -110,7 +110,7 @@ it.each([0, 12, decode(vector.envelope).length - 1])(
       `https://registry.invalid/endpoints/${vector.uuid}`,
       {
         method: "POST",
-        headers: { "content-type": "text/plain" },
+        headers: { "authorization": `Bearer ${"a".repeat(64)}`, "cf-connecting-ip": crypto.randomUUID(), "content-type": "text/plain" },
         body: tampered,
       },
     );

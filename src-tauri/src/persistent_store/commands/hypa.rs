@@ -184,5 +184,29 @@ pub(crate) fn pds_write_hypa_embeddings(
     Ok(())
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct HypaEmbeddingUsage { count: u64, bytes: u64 }
+
+#[tauri::command(async)]
+pub(crate) fn pds_hypa_embedding_usage(state: State<'_, PersistentStoreState>) -> StoreResult<HypaEmbeddingUsage> {
+    with_store(state, |store| {
+        let (count, bytes) = store.device_store()?.hypa_embedding_usage()?;
+        Ok(HypaEmbeddingUsage { count, bytes })
+    })
+}
+
+#[tauri::command(async)]
+pub(crate) fn pds_clear_hypa_embeddings(app: AppHandle, state: State<'_, PersistentStoreState>) -> StoreResult<()> {
+    let changed = with_store_mut(state, |store| {
+        let device = store.device_store_mut()?;
+        let before = device.revision()?;
+        device.clear_hypa_embeddings()?;
+        Ok(device.revision()? != before)
+    })?;
+    if changed { crate::server_sync::events::notify_device_changed(&app); }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests;

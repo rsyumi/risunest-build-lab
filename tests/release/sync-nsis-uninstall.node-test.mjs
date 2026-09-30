@@ -31,7 +31,7 @@ Section Uninstall
 !insertmacro NSIS_HOOK_POSTUNINSTALL
 SectionEnd
 `);
-    const result = spawnSync(compiler, ['/V2', script], { encoding: 'utf8', timeout: 30000 });
+    const result = spawnSync(compiler, ['/V2', script], { encoding: 'utf8', timeout: 30000, windowsHide: true });
     assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
   } finally { rmSync(directory, { recursive: true, force: true }); }
 });
@@ -53,7 +53,12 @@ fn main() {
  let args=values.join(" ");
  let mut log=fs::OpenOptions::new().create(true).append(true).open(root.join("calls")).unwrap();
  writeln!(log,"{args}: {}",data.display()).unwrap();
- if args=="installer prepare" {println!("{}","a".repeat(64));}
+ if values.first().is_some_and(|v| v=="installer") && values.get(1).is_some_and(|v| v=="prepare") {
+  assert_eq!(values.len(),3);
+  let owner=values[2].parse::<u32>().unwrap();
+  assert!(owner>0 && owner!=std::process::id());
+  println!("{}","a".repeat(64));
+ }
  if args=="installer delete-data" {
   if root.join("fail").exists() {std::process::exit(9);}
   fs::remove_dir_all(data).unwrap();
@@ -61,7 +66,7 @@ fn main() {
 }
 `);
     const binary = join(directory, 'manager.exe');
-    const built = spawnSync('rustc', ['--edition=2021', stubSource, '-o', binary], { encoding: 'utf8', timeout: 60000 });
+    const built = spawnSync('rustc', ['--edition=2021', stubSource, '-o', binary], { encoding: 'utf8', timeout: 60000, windowsHide: true });
     assert.equal(built.status, 0, built.stderr);
     const hook = join(directory, 'hook.nsh');
     writeFileSync(hook, readFileSync(resolve('server/manager/install/windows.nsh'), 'utf8').replaceAll('$LOCALAPPDATA', '$INSTDIR\\local'));
@@ -100,7 +105,7 @@ Delete "$INSTDIR\risunest-sync-manager.exe"
 !insertmacro NSIS_HOOK_POSTUNINSTALL
 SectionEnd
 `);
-    const compile = spawnSync(compiler, ['/V2', script], { encoding: 'utf8', timeout: 30000 });
+    const compile = spawnSync(compiler, ['/V2', script], { encoding: 'utf8', timeout: 30000, windowsHide: true });
     assert.equal(compile.status, 0, `${compile.stdout}\n${compile.stderr}`);
     for (const scenario of [
       { name: 'preserve', args: [], data: true, installed: false, code: 0 },
@@ -115,18 +120,22 @@ SectionEnd
       writeFileSync(join(dataRoot, 'synthetic'), 'fixture');
       writeFileSync(join(dataRoot, 'risunest-sync-instance.json'), '{}');
       if (scenario.fail) writeFileSync(join(location, 'fail'), 'fixture');
-      assert.equal(spawnSync(join(directory, 'installer.exe'), ['/S', `/D=${location}`], { timeout: 30000 }).status, 0);
-      const result = spawnSync(join(location, 'uninstall.exe'), ['/S', ...scenario.args, `_?=${location}`], { timeout: 30000, env: { ...process.env, RISUNEST_SYNC_UNINSTALL_DATA_DIR: scenario.custom ? dataRoot : '' } });
+      assert.equal(spawnSync(join(directory, 'installer.exe'), ['/S', `/D=${location}`], { timeout: 30000, windowsHide: true }).status, 0);
+      const result = spawnSync(join(location, 'uninstall.exe'), ['/S', ...scenario.args, `_?=${location}`], { timeout: 30000, windowsHide: true, env: { ...process.env, RISUNEST_SYNC_UNINSTALL_DATA_DIR: scenario.custom ? dataRoot : '' } });
       assert.equal(result.status, scenario.code, `${scenario.name}: exit ${existsSync(join(location, "calls")) ? readFileSync(join(location, "calls"), "utf8") : "no manager calls"}`);
       assert.equal(existsSync(join(location, 'risunest-sync-manager.exe')), scenario.installed, `${scenario.name}: manager remains on failure`);
       assert.equal(existsSync(join(dataRoot, 'synthetic')), scenario.data, `${scenario.name}: data`);
+      const calls = readFileSync(join(location, 'calls'), 'utf8');
       if (scenario.name === 'update') {
-        const calls = readFileSync(join(location, 'calls'), 'utf8');
         assert.match(calls, /^prepare-update:/);
         assert.doesNotMatch(calls, /uninstall|delete-data|forget-removal/);
+      } else {
+        assert.equal([...calls.matchAll(/^installer prepare ([1-9]\d*):/gm)].length, 1, `${scenario.name}: prepare receives the uninstaller owner PID`);
+        assert.match(calls, /^uninstall lock-held:/m);
+        assert.ok(calls.indexOf('installer prepare ') < calls.indexOf('uninstall lock-held'), `${scenario.name}: acquire guard before cleanup`);
       }
       if (scenario.name === 'delete') {
-        const calls = readFileSync(join(location, 'calls'), 'utf8');
+        assert.match(calls, new RegExp(`^installer finish ${'a'.repeat(64)}:`, 'm'));
         assert.ok(calls.indexOf('installer finish') < calls.indexOf('installer delete-data'));
       }
     }

@@ -21,27 +21,23 @@ export interface ServerSyncConnectRequest {
   replacing?: boolean;
 }
 export interface ServerSyncConnectPort {
-  bind(config: ServerConfig, prepare?: () => Promise<unknown>): Promise<void>;
-  reregister(config: ServerConfig, prepare?: () => Promise<unknown>): Promise<void>;
+  bind(config: ServerConfig, residency?: AssetResidencyPolicy): Promise<void>;
+  reregister(config: ServerConfig, residency?: AssetResidencyPolicy): Promise<void>;
   synchronize(): Promise<void>;
 }
 
-/**
- * Registers the device, stores the asset policy, then runs the first sync.
- * The policy is written after binding because native refuses a remote policy
- * without a bound server, and before the first cycle because the engine reads
- * it at sync time: a remote device then receives asset metadata instead of
- * every asset body.
- */
+/** Stores registration and residency before running the first synchronization. */
 export async function connectServerSync(
   controller: ServerSyncConnectPort,
-  setAssetResidencyPolicy: (policy: AssetResidencyPolicy) => Promise<unknown>,
   request: ServerSyncConnectRequest,
 ): Promise<void> {
-  const prepare = () => setAssetResidencyPolicy(request.residency);
-  if (request.replacing) await controller.reregister(request.config, prepare);
-  else await controller.bind(request.config, prepare);
+  if (request.replacing) await controller.reregister(request.config, request.residency);
+  else await controller.bind(request.config, request.residency);
   await controller.synchronize();
+}
+
+export function serverSyncRegistrationRequired(code: string): boolean {
+  return ["unauthorized", "forbidden", "media-device-revoked", "device-registration-required", "new-device-registration-required"].includes(code);
 }
 
 export function serverSyncRefreshRequired(error: string): boolean {
@@ -49,6 +45,10 @@ export function serverSyncRefreshRequired(error: string): boolean {
     error === "committed-refresh-pending" ||
     error === "activation-confirmation-pending"
   );
+}
+
+export function serverSyncWaiting(code: string): boolean {
+  return code === "generation-active" || code === "local-edit-pending";
 }
 
 /** The sentence shown for a failed action or attempt. A rejection the same
@@ -67,6 +67,23 @@ export function serverSyncErrorHelp(
       return text.busyHelp;
     case "device-credential-unavailable":
       return text.credentialUnavailable;
+    case "generation-active":
+    case "local-edit-pending":
+      return text.waitingForLocal;
+    case "download-all-assets-before-unbind":
+      return text.downloadBeforeDisconnect;
+    case "local-storage-full":
+      return text.storageFullHelp;
+    case "unauthorized":
+    case "forbidden":
+    case "media-device-revoked":
+    case "device-registration-required":
+    case "new-device-registration-required":
+      return text.registrationRefusedHelp;
+    case "revoke-previous-device-first":
+      return text.revokeBeforeRegistration;
+    case "device-identity-mismatch":
+      return text.registrationRefusedHelp;
     case "server-incompatible":
       return text.incompatibleHelp;
     default:
@@ -92,7 +109,11 @@ export function serverSyncStatus(
   actionError = "",
 ): ServerSyncStatusView {
   const error = actionError || snapshot.error;
-  if (snapshot.status?.registrationRequired)
+  if (snapshot.status?.configured === false && !snapshot.running)
+    return { label: text.disconnected, tone: "idle" };
+  if (!snapshot.status && !snapshot.running)
+    return { label: text.statusUnknown, tone: "attention" };
+  if (snapshot.status?.registrationRequired || serverSyncRegistrationRequired(error))
     return { label: text.registrationRequired, tone: "attention" };
   if (serverSyncRefreshRequired(error))
     return { label: text.refreshPending, tone: "attention" };
@@ -104,6 +125,7 @@ export function serverSyncStatus(
       tone: "working",
     };
   if (snapshot.paused) return { label: text.paused, tone: "paused" };
+  if (serverSyncWaiting(error)) return { label: text.waitingForLocal, tone: "connected" };
   if (error === "server-incompatible")
     return { label: text.incompatible, tone: "attention" };
   if (serverSyncBlocked(snapshot))

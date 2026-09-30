@@ -289,12 +289,12 @@ pub(crate) fn pds_data_health_repair_plan(
 pub(crate) fn pds_data_health_repair_preview(
     state: State<'_, PersistentStoreState>,
     selection: Vec<String>,
+    expected_scanned_at: i64,
 ) -> Result<RepairPreview, StoreError> {
     let operation_guard = state.admit_renderer_operation()?;
-    Ok(repair::preview(
-        &current_diagnosis(&state, &operation_guard)?.1,
-        &selection,
-    ))
+    let diagnosis = current_diagnosis(&state, &operation_guard)?.1;
+    require_diagnosis_identity(&diagnosis, diagnosis.revision, expected_scanned_at)?;
+    Ok(repair::preview(&diagnosis, &selection))
 }
 
 #[tauri::command(async)]
@@ -303,18 +303,32 @@ pub(crate) fn pds_data_health_repair_apply(
     health: State<'_, DataHealthState>,
     selection: Vec<String>,
     snapshot: bool,
+    expected_revision: i64,
+    expected_scanned_at: i64,
 ) -> Result<RepairApplied, StoreError> {
-    apply_repair(&state, &health, &selection, snapshot)
+    apply_repair(&state, &health, &selection, snapshot, expected_revision, expected_scanned_at)
 }
 
+fn require_diagnosis_identity(result: &ScanResult, revision: i64, scanned_at: i64) -> StoreResult<()> {
+    if result.revision != revision {
+        return Err(StoreError::RevisionConflict { expected: revision, actual: result.revision });
+    }
+    if result.scanned_at != scanned_at {
+        return Err(StoreError::Validation { message: "the diagnosis changed; review the repair again".to_owned() });
+    }
+    Ok(())
+}
 fn apply_repair(
     state: &PersistentStoreState,
     health: &DataHealthState,
     selection: &[String],
     snapshot: bool,
+    expected_revision: i64,
+    expected_scanned_at: i64,
 ) -> StoreResult<RepairApplied> {
     let operation_guard = state.admit_renderer_operation()?;
     let (root, diagnosis) = current_diagnosis(state, &operation_guard)?;
+    require_diagnosis_identity(&diagnosis, expected_revision, expected_scanned_at)?;
     let preview = repair::preview(&diagnosis, selection);
     if preview.selected.is_empty() {
         return Err(StoreError::Validation {
@@ -336,7 +350,8 @@ fn apply_repair(
     let (revision, journal) = with_store_mutex_mut_admitted(state, &operation_guard, |store| {
         store.apply_repair(diagnosis.revision, &preview.selected, now)
     })?;
-    journal::write(&root, &journal).map_err(|error| StoreError::Store {
+    journal::write(&root, &journal).map_err(|error| StoreError::Committed {
+        revision: revision.revision,
         message: format!("failed to write the repair journal: {error}"),
     })?;
     drop(operation_guard);
@@ -344,7 +359,10 @@ fn apply_repair(
         revision: revision.revision,
         journal_id: journal.id,
         snapshot,
-        result: quick_scan(state, health)?,
+        result: quick_scan(state, health).map_err(|error| StoreError::Committed {
+            revision: revision.revision,
+            message: error.to_string(),
+        })?,
     })
 }
 
@@ -381,14 +399,16 @@ pub(crate) fn pds_data_health_undo(
     state: State<'_, PersistentStoreState>,
     health: State<'_, DataHealthState>,
     journal_id: String,
+    expected_revision: i64,
 ) -> Result<RepairUndone, StoreError> {
-    undo_repair(&state, &health, &journal_id)
+    undo_repair(&state, &health, &journal_id, expected_revision)
 }
 
 fn undo_repair(
     state: &PersistentStoreState,
     health: &DataHealthState,
     journal_id: &str,
+    expected_revision: i64,
 ) -> StoreResult<RepairUndone> {
     let operation_guard = state.admit_renderer_operation()?;
     let root = working_root(state, &operation_guard)?;
@@ -399,18 +419,21 @@ fn undo_repair(
         .ok_or_else(|| StoreError::Validation {
             message: "that repair is no longer kept".to_owned(),
         })?;
-    let revision = with_store_mutex_admitted(state, &operation_guard, |store| store.revision())?;
     let (committed, skipped) = with_store_mutex_mut_admitted(state, &operation_guard, |store| {
-        store.undo_repair(&entry, revision)
+        store.undo_repair(&entry, expected_revision)
     })?;
-    journal::remove(&root, journal_id).map_err(|error| StoreError::Store {
+    journal::remove(&root, journal_id).map_err(|error| StoreError::Committed {
+        revision: committed.revision,
         message: format!("failed to drop the repair journal: {error}"),
     })?;
     drop(operation_guard);
     Ok(RepairUndone {
         revision: committed.revision,
         skipped,
-        result: quick_scan(state, health)?,
+        result: quick_scan(state, health).map_err(|error| StoreError::Committed {
+            revision: committed.revision,
+            message: error.to_string(),
+        })?,
     })
 }
 

@@ -135,7 +135,7 @@ pub(crate) async fn run_delete_history(
     };
     let owner = match leases::admit(&context, &job.id, LeaseKind::Cleanup, cancel).await? {
         Admission::Admitted(owner) => owner,
-        Admission::Yield { .. } => return Err(ProviderError::new(ErrorKind::Transient)),
+        Admission::Yield { reason } => return Err(leases::yield_error(reason)),
         Admission::UnsupportedProtection => return Err(ProviderError::new(ErrorKind::Unsupported)),
     };
     owner.run(&context, cancel, async {

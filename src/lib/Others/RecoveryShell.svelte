@@ -52,7 +52,7 @@
     // The data check needs it and nothing else here does, so it opens it and stops there.
     let opened: Promise<void> | null = null
     const openStore = (): Promise<void> => {
-        opened ??= invoke<unknown>('pds_open').then(() => undefined)
+        opened ??= invoke<unknown>('pds_open').then(() => undefined).catch(error => { opened = null; throw error })
         return opened
     }
 

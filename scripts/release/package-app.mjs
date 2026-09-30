@@ -335,11 +335,12 @@ export function packageApp(options) {
   const output = resolve(options.output);
   mkdirSync(output, { recursive: true });
   const os = options.kind === "desktop" ? options.os : options.kind;
+  const tauriPlatform = os === "darwin" ? "macos" : os;
   const platformConfig = options.kind === "ios" && options.iosConfig
-    ? options.iosConfig : readJson(resolve(`src-tauri/tauri.${os}.conf.json`));
+    ? options.iosConfig : readJson(resolve(`src-tauri/tauri.${tauriPlatform}.conf.json`));
   const tauriConfig = mergeTauriConfig(options.tauriConfig ?? readJson(resolve("src-tauri/tauri.conf.json")),
     platformConfig, { version: options.releaseInput.version });
-  assertAppIdentifier(tauriConfig, os);
+  assertAppIdentifier(tauriConfig, tauriPlatform);
   let assets;
   if (options.kind === "desktop") assets = desktopAssets({ ...options, output, tauriConfig });
   else if (options.kind === "android") assets = androidAssets(options);

@@ -6,6 +6,7 @@
   import SettingButton from "../RisuNest/SettingButton.svelte";
   import { formatRisuNestStorageBytes as bytes } from "src/ts/storage/risuNestStorageDashboard";
   import { serverSyncError } from "src/ts/storage/sync/serverSync";
+  import { serverSyncErrorHelp } from "src/ts/storage/sync/serverSyncConnectFlow";
   import {
     getAssetResidencyStatus,
     setAssetResidencyPolicy,
@@ -14,9 +15,9 @@
     type AssetResidencyPolicy,
     type AssetResidencyStatus,
   } from "src/ts/storage/sync/serverAssetResidency";
-  let { disabled = false }: { disabled?: boolean } = $props();
+  import { reserveLibraryFileOperation } from "src/ts/storage/libraryFileOperation";
+  let { disabled = false, running = $bindable(null) }: { disabled?: boolean; running?: "policy" | "evict" | null } = $props();
   let status = $state<AssetResidencyStatus>();
-  let running = $state<"policy" | "evict" | null>(null);
   let loading = $state(false);
   const busy = $derived(running !== null);
   let error = $state("");
@@ -35,11 +36,14 @@
     running = kind;
     error = "";
     freed = 0;
+    let release: (() => void) | undefined;
     try {
+      release = reserveLibraryFileOperation();
       status = await action();
       freed = status.evictedBytes;
     } catch (cause) {
-      error = serverSyncError(cause).code;
+      error = !release && cause instanceof Error && cause.message === "library-file-operation-busy"
+        ? "library-operation-busy" : serverSyncError(cause).code;
       try {
         status = await getAssetResidencyStatus();
       } catch {
@@ -47,6 +51,7 @@
       }
     } finally {
       running = null;
+      release?.();
     }
   }
   /** Reading the counts is not an operation the row can cancel. */
@@ -84,7 +89,9 @@
         {text.freed}: {bytes(freed)}
       </p>{/if}
     {#if error}<p role="alert" class="mt-1 text-sm text-danger-400">
-        {language.risuNest.storage.actionFailed} ({error})
+        {error === "library-operation-busy" || error === "local-storage-full"
+          ? serverSyncErrorHelp(error, language.risuNest.serverSync)
+          : language.risuNest.storage.actionFailed} ({error})
       </p>{/if}
   {/snippet}
   <SegmentedButtons
@@ -101,6 +108,9 @@
     disabled={busy || loading || disabled || policy !== "remote"}
     onclick={() => run(evictLocalAssets, "evict")}>{text.clean}</SettingButton
   >
+  {#if status?.policy === "full" && status.remoteObjects > 0}
+    <SettingButton disabled={busy || loading || disabled} onclick={() => run(() => setAssetResidencyPolicy("full"))}>{text.download}</SettingButton>
+  {/if}
   {#if busy}<SettingButton
       variant="secondary"
       onclick={() =>

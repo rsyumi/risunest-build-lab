@@ -48,7 +48,7 @@ describe('nativeFileJobProgress', () => {
     it('says an import is reading the file while an export is transferring it', () => {
         expect(nativeFileJobPhaseLabel(status({ kind: 'restore-legacy-local-backup', phase: 'reading-source' })))
             .toBe(languageEnglish.risuNest.backup.progressReading)
-        expect(nativeFileJobPhaseLabel(status({ kind: 'export-legacy-local-backup', phase: 'writing-export' })))
+        expect(nativeFileJobPhaseLabel(status({ kind: 'export-compatible-local-backup', phase: 'writing-export' })))
             .toBe(languageEnglish.risuNest.backup.progressTransferring)
     })
 
@@ -72,8 +72,8 @@ describe('nativeFileJobProgress', () => {
                 status({ kind: 'restore-legacy-local-backup' }),
             ),
         ).toBe(languageEnglish.loadBackupLocal)
-        expect(nativeFileJobTitle('export', status({ kind: 'export-legacy-local-backup' })))
-            .toBe(languageEnglish.saveBackupLocal)
+        expect(nativeFileJobTitle('export', status({ kind: 'export-compatible-local-backup' })))
+            .toBe(languageEnglish.portableBackup.report)
         expect(nativeFileJobTitle('import', status({ kind: 'restore-block-risu-save' })))
             .toBe(languageEnglish.importRisuSave)
         expect(nativeFileJobTitle('export', undefined)).toBe(languageEnglish.exportRisuSave)
@@ -86,4 +86,13 @@ describe('nativeFileJobProgress', () => {
         expect(dialogSource).not.toContain('.phase')
         expect(dialogSource).not.toContain('status?.')
     })
+    it('names official account operations and shows measured upload bytes', () => {
+        const upload = status({ kind: 'official-publication-upload', phase: 'uploading-database',
+            progress: { completedBytes: 1_024, totalBytes: 4_096, completedItems: 0 } })
+        expect(nativeFileJobTitle('export', upload)).toBe(languageEnglish.risuNest.backup.officialPublish)
+        expect(nativeFileJobProgressText(upload)).toBe(`${languageEnglish.risuNest.backup.progressTransferring}: 25%`)
+        expect(nativeFileJobTitle('import', status({ kind: 'restore-official-account-snapshot' })))
+            .toBe(languageEnglish.risuNest.backup.officialRestore)
+    })
+
 })

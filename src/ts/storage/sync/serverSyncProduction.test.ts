@@ -46,6 +46,7 @@ const state = vi.hoisted(() => ({
   }),
   controller: {
     initialize: vi.fn(async () => {}),
+    ensureStatus: vi.fn(async () => {}),
     invalidateCompletion: vi.fn(),
     canAutoSync: vi.fn(() => true),
     synchronize: vi.fn(async () => {}),
@@ -128,6 +129,7 @@ beforeEach(() => {
   state.controller.canAutoSync.mockImplementation(() => state.ready);
   state.controller.snapshot.mockImplementation(() => ({
     running: state.running,
+    status: { configured: true },
   }));
 });
 afterEach(() => {

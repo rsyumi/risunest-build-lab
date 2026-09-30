@@ -308,6 +308,14 @@ pub(crate) enum YieldReason {
     Suspended,
     ProtectionLost,
 }
+pub(crate) fn yield_error(reason: YieldReason) -> ProviderError {
+    crate::nlog!("info", "External repository admission deferred: {reason:?}");
+    ProviderError::new(match reason {
+        YieldReason::ForeignWork | YieldReason::ForeignCleanup | YieldReason::ForeignDeletion
+        | YieldReason::Suspended => ErrorKind::RepositoryBusy,
+        YieldReason::UnknownProtection | YieldReason::ProtectionLost => ErrorKind::Transient,
+    })
+}
 pub(crate) enum Admission {
     Admitted(LeaseOwner),
     Yield { reason: YieldReason },
@@ -773,6 +781,14 @@ mod tests {
                 _ => panic!("expected admission"),
             }
         }
+    }
+
+    #[test]
+    fn lease_yields_keep_actionable_classification() {
+        for reason in [YieldReason::ForeignWork,YieldReason::ForeignCleanup,YieldReason::ForeignDeletion,YieldReason::Suspended] {
+            assert_eq!(yield_error(reason).kind,ErrorKind::RepositoryBusy);
+        }
+        for reason in [YieldReason::UnknownProtection,YieldReason::ProtectionLost] { assert_eq!(yield_error(reason).kind,ErrorKind::Transient); }
     }
 
     #[test]

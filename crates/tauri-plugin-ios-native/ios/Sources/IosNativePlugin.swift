@@ -7,7 +7,7 @@ import WebKit
 import BackgroundTasks
 
 private struct EndArgs: Decodable { let id: String; let success: Bool? }
-private struct BeginArgs: Decodable { let kind: String? }
+private struct BeginArgs: Decodable { let kind: String?; let continued: Bool? }
 private struct ProgressArgs: Decodable { let id: String; let completed: Int64; let total: Int64? }
 private struct TaskProgress { let completed: Int64; let total: Int64 }
 private struct OpenedArgs: Decodable { let urls: [String] }
@@ -94,8 +94,8 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
     }
 
     private func emit(_ event: String, id: String = "") {
-        // Fixed native event names and UUIDs only. No document or conversation content.
-        webView?.evaluateJavaScript("window.dispatchEvent(new CustomEvent('risunest-ios-lifecycle',{detail:{event:'\(event)',id:'\(id)'}}))", completionHandler: nil)
+        guard let script = NativeFileState.lifecycleScript(event, id: id) else { return }
+        webView?.evaluateJavaScript(script, completionHandler: nil)
     }
 
     @objc func state(_ invoke: Invoke) {
@@ -159,7 +159,7 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
             self.continuedErrorCode = nil
             var mode = "limited"
             #if compiler(>=6.2)
-            if #available(iOS 26.0, *), self.continuedRegistered,
+            if #available(iOS 26.0, *), args.continued == true, self.continuedRegistered,
                self.continued.isEmpty, self.continuedPending == nil {
                 let request = BGContinuedProcessingTaskRequest(identifier: self.taskIdentifier, title: "RisuNest", subtitle: label)
                 request.strategy = .fail
@@ -380,6 +380,9 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
             if let error = copyError { throw error }
             let values = try destination.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
             guard values.isRegularFile == true else { throw CocoaError(.fileReadUnsupportedScheme) }
+            let handle = try FileHandle(forWritingTo: destination)
+            handle.synchronizeFile()
+            handle.closeFile()
             return ["cancelled": false, "path": destination.path, "name": url.lastPathComponent, "bytes": values.fileSize ?? 0]
         } catch {
             try? FileManager.default.removeItem(at: folder)
@@ -397,6 +400,9 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
                 do {
                     let staged = try self.stageFile(url)
                     entry = ["path": staged["path"] as! String]
+                    if let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first {
+                        try? NativeFileState.removeStagedInboxSource(url, inbox: documents.appendingPathComponent("Inbox", isDirectory: true))
+                    }
                 } catch { entry = ["error": "The selected file could not be prepared for import"] }
                 DispatchQueue.main.async {
                     self.openedFiles.append(entry)
@@ -572,13 +578,7 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
         let args = try invoke.parseArgs(EndArgs.self)
         guard UUID(uuidString: args.id) != nil else { invoke.reject("Invalid publication identifier"); return }
         guard let staging = staging else { invoke.reject(rootUnavailable().localizedDescription); return }
-        let receipt = staging.appendingPathComponent("receipts/\(args.id).json")
-        guard FileManager.default.fileExists(atPath: receipt.path) else { invoke.resolve(); return }
-        guard let value = try JSONSerialization.jsonObject(with: Data(contentsOf: receipt)) as? [String: Any],
-              ["succeeded", "cancelled"].contains(value["state"] as? String ?? "") else {
-            invoke.reject("Publication has not completed"); return
-        }
-        try FileManager.default.removeItem(at: receipt)
+        try NativeFileState(staging: staging).acknowledge(args.id)
         invoke.resolve()
     }
 
@@ -586,11 +586,8 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
         let call = pickerCall
         pickerCall = nil
         if exporting, let id = publicationId, let staging = staging {
-            let receipt = staging.appendingPathComponent("receipts/\(id).json")
             do {
-                var terminal = result
-                terminal["state"] = result["cancelled"] as? Bool == true ? "cancelled" : "succeeded"
-                try JSONSerialization.data(withJSONObject: terminal).write(to: receipt, options: .atomic)
+                try NativeFileState(staging: staging).complete(id, result: result)
             } catch {
                 // Keep both the native handoff and pending receipt for explicit recovery.
                 publicationId = nil

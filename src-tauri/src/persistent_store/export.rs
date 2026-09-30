@@ -161,6 +161,7 @@ pub(super) fn create(
     target: &ReadTarget,
     lease: &str,
     omit_account: bool,
+    account: Option<&Value>,
 ) -> StoreResult<ExportedRisuSave> {
     create_controlled(
         connection,
@@ -168,6 +169,7 @@ pub(super) fn create(
         target,
         lease,
         omit_account,
+        account,
         || false,
         |_, _, _| {},
     )
@@ -179,6 +181,7 @@ pub(crate) fn create_controlled(
     target: &ReadTarget,
     lease: &str,
     omit_account: bool,
+    account: Option<&Value>,
     is_cancelled: impl Fn() -> bool,
     on_progress: impl FnMut(u64, u64, u64),
 ) -> StoreResult<ExportedRisuSave> {
@@ -188,32 +191,10 @@ pub(crate) fn create_controlled(
         target,
         lease,
         omit_account,
+        account,
         None,
         None,
         None,
-        is_cancelled,
-        on_progress,
-    )
-}
-
-pub(crate) fn create_legacy_backup_controlled(
-    connection: &Connection,
-    snapshots_dir: &Path,
-    target: &ReadTarget,
-    lease: &str,
-    replacement_keys: HashMap<AssetOwnerLocator, Vec<String>>,
-    is_cancelled: impl Fn() -> bool,
-    on_progress: impl FnMut(u64, u64, u64),
-) -> StoreResult<ExportedRisuSave> {
-    create_controlled_inner(
-        connection,
-        snapshots_dir,
-        target,
-        lease,
-        true,
-        None,
-        None,
-        Some(replacement_keys),
         is_cancelled,
         on_progress,
     )
@@ -225,6 +206,7 @@ pub(crate) fn create_projected_controlled(
     target: &ReadTarget,
     lease: &str,
     omit_account: bool,
+    account: Option<&Value>,
     replacements: &HashMap<String, String>,
     is_cancelled: impl Fn() -> bool,
     on_progress: impl FnMut(u64, u64, u64),
@@ -235,6 +217,7 @@ pub(crate) fn create_projected_controlled(
         target,
         lease,
         omit_account,
+        account,
         Some(replacements),
         None,
         None,
@@ -250,6 +233,7 @@ pub(crate) fn create_projected_controlled_for_account(
     target: &ReadTarget,
     lease: &str,
     expected_account_id: &str,
+    account: &Value,
     replacements: &HashMap<String, String>,
     is_cancelled: impl Fn() -> bool,
     on_progress: impl FnMut(u64, u64, u64),
@@ -260,6 +244,7 @@ pub(crate) fn create_projected_controlled_for_account(
         target,
         lease,
         false,
+        Some(account),
         Some(replacements),
         Some(expected_account_id),
         None,
@@ -274,6 +259,7 @@ fn create_controlled_inner(
     target: &ReadTarget,
     lease: &str,
     omit_account: bool,
+    account: Option<&Value>,
     replacements: Option<&HashMap<String, String>>,
     expected_account_id: Option<&str>,
     owner_replacement_keys: Option<HashMap<AssetOwnerLocator, Vec<String>>>,
@@ -323,6 +309,12 @@ fn create_controlled_inner(
         serde_json::from_str(&root)?,
         "Persistent root must be an object",
     )?;
+    root.shift_remove("account");
+    if !omit_account {
+        if let Some(account) = account {
+            root.insert("account".to_owned(), account.clone());
+        }
+    }
     if let Some(expected_account_id) = expected_account_id {
         validate_pinned_account(&root, expected_account_id)?;
     }
@@ -337,7 +329,8 @@ fn create_controlled_inner(
     let plugins = take_root_block_value(&mut root, "plugins");
     root.shift_remove("pluginCustomStorage");
     let flattened = flattened_plugin_storage(connection, &target.generation)?;
-    let excluded_colliding_plugin_value_count = flattened.collisions.len() as u64;
+    let excluded_colliding_plugin_value_count = flattened.collisions.iter()
+        .map(|(_, owners)| owners.len() as u64).sum();
     let plugin_storage_meta = plugin_storage_meta_value(&flattened.owners);
     if omit_account {
         root.shift_remove("account");
@@ -650,7 +643,7 @@ pub(crate) fn materialized_plugin_storage(
     Ok(values)
 }
 
-fn read_plugin_storage_value(
+pub(crate) fn read_plugin_storage_value(
     connection: &Connection,
     generation: &str,
     row: &PluginStorageRow,
@@ -1025,7 +1018,7 @@ impl<F: Fn() -> bool> Write for CancellationAwareWriter<'_, F> {
 
 // One enumerator serves the RisuSave export and the official account projection,
 // so an archived character cannot reach either as a marker-only shell.
-fn character_ids(connection: &Connection, generation: &str) -> StoreResult<Vec<String>> {
+pub(crate) fn character_ids(connection: &Connection, generation: &str) -> StoreResult<Vec<String>> {
     let mut statement = connection.prepare(
         "SELECT character_id FROM characters
          WHERE generation = ?1 AND archived_object IS NULL
@@ -2116,6 +2109,7 @@ mod tests {
             &source_target,
             &source_lease,
             false,
+            None,
             &replacements,
             || false,
             |_, _, _| {},
@@ -2249,6 +2243,7 @@ mod tests {
             &target,
             &lease,
             "account-1",
+            &json!({"id":"account-1", "token":"synthetic-vault-token"}),
             &HashMap::new(),
             || false,
             |_, _, _| {},
@@ -2286,6 +2281,7 @@ mod tests {
             &target,
             &lease,
             false,
+            None,
             &HashMap::new(),
             || false,
             |_, _, _| {},
@@ -2300,7 +2296,7 @@ mod tests {
 
     #[cfg(feature = "native-official-publication")]
     #[test]
-    fn projected_publication_validates_the_pinned_account_during_root_projection() {
+    fn projected_publication_validates_the_vault_account_during_root_projection() {
         let (_directory, store, _revision, lease) = fixture();
         let (connection, target) = store.read_view(Some(&lease)).unwrap();
 
@@ -2310,6 +2306,7 @@ mod tests {
             &target,
             &lease,
             "different-account",
+            &json!({"id":"account-1", "token":"synthetic-vault-token"}),
             &HashMap::new(),
             || false,
             |_, _, _| {},
@@ -2341,14 +2338,46 @@ mod tests {
             &target,
             &lease,
             "account-1",
+            &json!({"id":"account-1", "token":"synthetic-vault-token"}),
             &HashMap::from([("old".to_owned(), "new".to_owned())]),
             || false,
             |_, _, _| {},
         )
         .unwrap();
         let blocks = read_blocks(Path::new(&exported.path));
-        assert_eq!(blocks[0].value["account"]["token"], "not-pinned");
+        assert_eq!(blocks[0].value["account"]["token"], "synthetic-vault-token");
         assert_eq!(blocks[0].value["customBackground"], "new");
+    }
+
+    #[test]
+    fn local_exports_replace_inert_stored_accounts_only_with_explicit_vault_data() {
+        let (_directory, store, _revision, lease) = fixture();
+        let (connection, target) = store.read_view(Some(&lease)).unwrap();
+        let stored: String = connection.query_row(
+            "SELECT value FROM root WHERE generation = ?1", [&target.generation], |row| row.get(0),
+        ).unwrap();
+        let mut root: Value = serde_json::from_str(&stored).unwrap();
+        root["account"] = json!({"id":"foreign-account", "token":"inert-stored-token"});
+        store.connection.execute(
+            "UPDATE root SET value = ?1 WHERE generation = ?2",
+            rusqlite::params![serde_json::to_string(&root).unwrap(), target.generation],
+        ).unwrap();
+        // Use a fresh lease to observe the synthetic pre-existing stored account.
+        let mut store = store;
+        store.release_revision(&lease).unwrap();
+        let lease = store.acquire_revision(store.revision().unwrap()).unwrap().lease;
+        let (connection, target) = store.read_view(Some(&lease)).unwrap();
+        let vault = json!({"id":"local-account", "token":"synthetic-vault-token"});
+        for (omit, account) in [(false, None), (false, Some(&vault)), (true, Some(&vault))] {
+            let exported = create(connection, &store.snapshots_dir, &target, &lease, omit, account).unwrap();
+            let blocks = read_blocks(Path::new(&exported.path));
+            assert_eq!(blocks[0].value.get("account"), if omit { None } else { account });
+            assert!(!blocks[0].value.to_string().contains("inert-stored-token"));
+        }
+        let persisted: String = store.connection.query_row(
+            "SELECT value FROM root WHERE generation = ?1", [&target.generation], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(serde_json::from_str::<Value>(&persisted).unwrap()["account"], root["account"]);
     }
 
     #[test]
@@ -2560,7 +2589,7 @@ mod tests {
                 replace_character: None,
                 add_character: None,
                 conversations: None,
-                delete_character_id: None,
+                delete_character_ids: None,
                 asset_owner_heads: None,
                 plugin_storage: Some(vec![
                     PluginStorageMutation::Clear { owner: UNOWNED_OWNER.to_owned() },

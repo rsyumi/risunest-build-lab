@@ -9,8 +9,10 @@
 
     let {
         getTranslationEditContext,
+        onSave,
     }: {
         getTranslationEditContext: () => Promise<{ key: string; data: string } | null>
+        onSave?: (detail: SaveDetail & { sourceData: string }) => Promise<boolean>
     } = $props()
 
     let translatedView = $state(true)
@@ -42,6 +44,7 @@
         blockEditEnabled={true}
         {translatedView}
         {getTranslationEditContext}
+        {onSave}
         on:save={handleSave}
     />
 {/if}

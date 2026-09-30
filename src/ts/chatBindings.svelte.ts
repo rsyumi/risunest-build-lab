@@ -4,6 +4,7 @@ import { DBState, selectedCharID } from './stores.svelte'
 import { alertToast } from './alert'
 import { language } from 'src/lang'
 import { doingChat } from './process/generationState'
+import { activeRerollConversations } from './durableReroll'
 import type { Chat } from './storage/database.svelte'
 import { cloneConversationMetadata } from './storage/selectedConversationLifecycle'
 import { isConversationSummaryStub } from './storage/conversationResidency'
@@ -20,7 +21,12 @@ import {
 
 /** A binding edit during a generation would discard its response, so it waits for it. */
 export function chatBindingBlockedByGeneration(): boolean {
-    if (!get(doingChat)) return false
+    const character = DBState.db.characters[get(selectedCharID)]
+    return conversationMutationBlockedByGeneration(character?.chats[character.chatPage]?.id)
+}
+
+export function conversationMutationBlockedByGeneration(conversationId?: string): boolean {
+    if (!get(doingChat) && (!conversationId || !get(activeRerollConversations).includes(conversationId))) return false
     alertToast(language.navigationBlockedWhileGenerating)
     return true
 }

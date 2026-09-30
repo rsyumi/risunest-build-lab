@@ -64,6 +64,7 @@ function createStore(input?: {
         readConversationMetadata: vi.fn(),
         readConversationWindow: vi.fn(),
         listPluginStorage: vi.fn(async () => []),
+        readPluginStorageValues: vi.fn(async () => ({ revision, items: [], nextCursor: null })),
         queryPluginStorage: vi.fn(async () => ({ revision, items: [] as never[] })),
         readPluginStorage: vi.fn(async () => null),
         readAssetAlias: vi.fn(async () => null),
@@ -428,7 +429,7 @@ describe('bootstrapPersistentDatabase', () => {
         expect(result.database.characters.every(isCatalogCharacterStub)).toBe(true)
     })
 
-    it('expires scalable trash by stable ID and requeries the final catalog', async () => {
+    it('leaves trash expiry off the scalable startup critical path', async () => {
         const day = 24 * 60 * 60 * 1000
         const now = 10 * day
         const indexedDB = new IDBFactory()
@@ -470,16 +471,17 @@ describe('bootstrapPersistentDatabase', () => {
         })
 
         expect(result.database.characters.map((character) => character.chaId))
-            .not.toContain('char-c')
+            .toContain('char-c')
         expect(result.database.characters.map((character) => character.chaId))
             .toContain('char-recent-trash')
         expect(result.database.characterOrder).toEqual([
             'char-b',
-            { id: 'folder', name: 'Folder', color: '', data: ['char-a'] },
+            'char-c',
+            { id: 'folder', name: 'Folder', color: '', data: ['char-c', 'char-a'] },
         ])
-        expect(queryCharacters).toHaveBeenCalledTimes(4)
+        expect(queryCharacters).toHaveBeenCalledTimes(2)
         const stored = await store.materializeDatabase(result.revision)
-        expect(stored.characters.map((character) => character.chaId)).not.toContain('char-c')
+        expect(stored.characters.map((character) => character.chaId)).toContain('char-c')
         expect(stored.characters.find((character) => character.chaId === 'char-a')?.chats)
             .toEqual(persistent.characters[1].chats)
     })

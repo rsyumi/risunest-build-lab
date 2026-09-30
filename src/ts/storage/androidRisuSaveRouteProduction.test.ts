@@ -1,10 +1,16 @@
 import { describe, expect, it, vi } from 'vitest'
 
 const backupMocks = vi.hoisted(() => ({
+    presented: vi.fn(),
+    reason: vi.fn((code: string) => `localized:${code || "unknown"}`),
+    replay: vi.fn(),
     restore: vi.fn(),
     externalManager: vi.fn(),
 }))
 
+vi.mock('../gui/nativeFileJobDialogModel', () => ({ failureReason: backupMocks.reason }))
+vi.mock('./fileOperationErrorPresentation', () => ({ fileOperationErrorWasPresented: backupMocks.presented }))
+vi.mock('./androidContentPicker', () => ({ importReplayedAndroidContentSpool: backupMocks.replay }))
 vi.mock('src/lang', () => ({
     language: {
         risuSaveCleanupWarning: 'cleanup warning',
@@ -30,9 +36,12 @@ vi.mock('./nativeFileJobManager', () => ({
     runExternalAndroidNativeFileOperation: backupMocks.externalManager,
 }))
 
-import { alertConfirm, alertNormal } from '../alert'
+import { alertConfirm, alertNormal, alertError } from '../alert'
 
 import {
+    showAndroidFileError,
+    showDestinationRequired,
+    importAndroidCharacterSpool,
     createAndroidOpenedSpoolDispatcher,
     dispatchAndroidOpenedSpoolBatch,
     importAndroidOpenedPreparedContent,
@@ -205,7 +214,7 @@ describe('Android opened spool production route', () => {
             failures: [],
         }, dependencies)
 
-        expect(dependencies.reportDestinationRequired).toHaveBeenCalledExactlyOnceWith(source)
+        expect(dependencies.reportDestinationRequired).toHaveBeenCalledExactlyOnceWith(source, expect.any(Number))
         expect(dependencies.reportCharacterError).not.toHaveBeenCalled()
     })
 
@@ -420,4 +429,45 @@ describe('Android opened spool production route', () => {
         expect(cancel).toHaveBeenCalledOnce()
         expect(confirmActivated).not.toHaveBeenCalled()
     })
+})
+
+it.each([['synthetic.JSON', 'auto'], ['synthetic.lorebook', 'module']] as const)(
+    'classifies external %s before a native job can claim its token', async (displayName, destination) => {
+        const source = { token: 'synthetic-token', displayName, bytes: 100 }
+        backupMocks.replay.mockReset().mockResolvedValue('imported-id')
+        backupMocks.externalManager.mockClear()
+        await expect(importAndroidCharacterSpool(source)).resolves.toEqual({ kind: 'imported', value: 'imported-id' })
+        expect(backupMocks.replay).toHaveBeenCalledExactlyOnceWith(source, destination)
+        expect(backupMocks.externalManager).not.toHaveBeenCalled()
+    },
+)
+
+it('localizes external preparation failures without exposing exception diagnostics', () => {
+    backupMocks.presented.mockReturnValue(false)
+    vi.mocked(alertError).mockClear()
+    showAndroidFileError(Object.assign(new Error('private diagnostic source-busy'), { code: 'source-busy' }))
+    expect(alertError).toHaveBeenCalledExactlyOnceWith('localized:source-busy')
+    vi.mocked(alertError).mockClear()
+    showAndroidFileError(new Error('private diagnostic'))
+    expect(alertError).toHaveBeenCalledExactlyOnceWith('localized:unknown')
+})
+it('does not duplicate a fresh managed dialog failure', () => {
+    backupMocks.presented.mockReturnValue(true)
+    vi.mocked(alertError).mockClear()
+    showAndroidFileError(new Error('managed'), 123)
+    expect(backupMocks.presented).toHaveBeenLastCalledWith('import', 123)
+    expect(alertError).not.toHaveBeenCalled()
+    backupMocks.presented.mockReturnValue(false)
+})
+
+it('keeps the managed plain-JPEG failure as the sole outcome', () => {
+    const source = { token: 'synthetic-token', displayName: 'photo.jpg', bytes: 100 }
+    backupMocks.presented.mockReturnValue(true)
+    vi.mocked(alertError).mockClear()
+    showDestinationRequired(source, 123)
+    expect(backupMocks.presented).toHaveBeenLastCalledWith('import', 123)
+    expect(alertError).not.toHaveBeenCalled()
+    backupMocks.presented.mockReturnValue(false)
+    showDestinationRequired(source, 456)
+    expect(alertError).toHaveBeenCalledExactlyOnceWith('photo.jpg: localized:destination-required')
 })

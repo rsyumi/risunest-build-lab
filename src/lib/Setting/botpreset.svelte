@@ -21,7 +21,10 @@
     import PromptDiffModal from "../Others/PromptDiffModal.svelte";
     import { RISU_PRESET_DRAG_TYPE } from "src/ts/dragTypes";
     import { reportPresetOperation } from './presetOperation';
+    import { assertPresetNames, capturePresetNames, type PresetListExpectation } from '../../ts/storage/presetWorkingSetOperations';
 
+    const presetNames = () => capturePresetNames(DBState.db.botPresets)
+    let dragNames: PresetListExpectation = []
     let editMode = $state(false)
     let isDragging = $state(false)
     let dragOverIndex = $state(-1)
@@ -44,6 +47,7 @@
     }
 
     function markPresetDrag(e: DragEvent, index: number) {
+        dragNames = presetNames()
         e.dataTransfer.effectAllowed = 'move';
         e.dataTransfer.setData('text/plain', 'preset');
         e.dataTransfer.setData(RISU_PRESET_DRAG_TYPE, index.toString());
@@ -63,7 +67,7 @@
         e.stopPropagation();
         const sourceIndex = parseInt(e.dataTransfer?.getData(RISU_PRESET_DRAG_TYPE) || '0');
         if (sourceIndex === targetIndex) return
-        await runPresetOperation(() => movePreset(sourceIndex, targetIndex));
+        await runPresetOperation(() => movePreset(sourceIndex, targetIndex, dragNames));
     }
 
 
@@ -238,13 +242,17 @@
                     </div>
                     <div class="text-textcolor2 hover:text-green-500 cursor-pointer mr-2" role="button" tabindex="0" onclick={async (e) => {
                         e.stopPropagation()
+                        const expectedNames = presetNames()
                         const data = await alertCardExport('preset')
                         console.log(data.type)
                         if(data.type === ''){
-                            await downloadPreset(i, 'risupreset')
+                            await runPresetOperation(() => downloadPreset(i, 'risupreset', expectedNames))
                         }
                         if(data.type === 'realm'){
-                            $ShowRealmFrameStore = `preset:${i}`
+                            await runPresetOperation(async () => {
+                                assertPresetNames(DBState.db.botPresets, expectedNames)
+                                $ShowRealmFrameStore = `preset:${i}`
+                            })
                         }
                     }} onkeydown={(e) => {
                         if(e.key === 'Enter' && e.currentTarget instanceof HTMLElement){
@@ -260,9 +268,10 @@
                             alertError(language.errors.onlyOneChat)
                             return
                         }
+                        const expectedNames = presetNames()
                         const d = await alertConfirm(`${language.removeConfirm}${preset.name}`)
                         if(d){
-                            await runPresetOperation(() => removePreset(i))
+                            await runPresetOperation(() => removePreset(i, expectedNames))
                         }
                     }} onkeydown={(e) => {
                         if(e.key === 'Enter' && e.currentTarget instanceof HTMLElement){

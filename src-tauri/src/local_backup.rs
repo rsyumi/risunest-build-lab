@@ -30,6 +30,8 @@ pub(crate) enum LocalBackupErrorCode {
     DatabaseRestore,
     UnsupportedEncryption,
     UnsupportedFormat,
+    CompatibilityImportRequired,
+    MetadataLimit,
 }
 
 #[derive(Debug, Eq, PartialEq)]
@@ -70,6 +72,9 @@ impl std::error::Error for LocalBackupError {}
 
 pub(crate) trait CancellationProbe {
     fn is_cancelled(&self) -> bool;
+    fn cancellation_flag(&self) -> Option<Arc<AtomicBool>> { None }
+    fn backup_bytes_processed(&self, _bytes: u64) {}
+    fn backup_item_processed(&self) {}
 }
 
 pub(crate) struct NeverCancelled;
@@ -103,6 +108,7 @@ impl AtomicCancellation {
 }
 
 impl CancellationProbe for AtomicCancellation {
+    fn cancellation_flag(&self) -> Option<Arc<AtomicBool>> { Some(self.cancelled.clone()) }
     fn is_cancelled(&self) -> bool {
         self.cancelled.load(Ordering::SeqCst)
     }
@@ -152,6 +158,12 @@ pub(crate) fn parse_legacy_local_backup_v1(
     )
 }
 
+#[derive(Clone, Copy)]
+struct EntryMetadataBudget { entries: usize, name_bytes: u64 }
+impl Default for EntryMetadataBudget {
+    fn default() -> Self { Self { entries: 200_000, name_bytes: 64 * 1024 * 1024 } }
+}
+
 pub(crate) fn parse_legacy_local_backup_v1_observed(
     reader: &mut impl Read,
     job_staging_root: &Path,
@@ -160,11 +172,24 @@ pub(crate) fn parse_legacy_local_backup_v1_observed(
     cancellation: &dyn CancellationProbe,
     observer: &dyn LocalBackupParseObserver,
 ) -> Result<LegacyLocalBackupParseReport, LocalBackupError> {
+    parse_legacy_local_backup_with_budget(reader, job_staging_root, _payload_target, database_restore, cancellation, observer, EntryMetadataBudget::default())
+}
+
+fn parse_legacy_local_backup_with_budget(
+    reader: &mut impl Read,
+    job_staging_root: &Path,
+    _payload_target: PayloadTarget,
+    database_restore: &mut dyn StrictLocalBackupDatabaseRestore,
+    cancellation: &dyn CancellationProbe,
+    observer: &dyn LocalBackupParseObserver,
+    budget: EntryMetadataBudget,
+) -> Result<LegacyLocalBackupParseReport, LocalBackupError> {
     check_cancelled(cancellation)?;
     let staging_directory = prepare_staging_directory(job_staging_root)?;
     let mut staging_ownership = ParseStagingOwnership::default();
     let mut source = TrackedReader::new(reader);
     let mut entries = Vec::new();
+    let mut name_bytes = 0_u64;
     let mut normalized_names = HashSet::new();
     let mut database_index = None;
 
@@ -172,6 +197,10 @@ pub(crate) fn parse_legacy_local_backup_v1_observed(
         let Some(name_length) = read_entry_name_length(&mut source, cancellation)? else {
             break;
         };
+        name_bytes = name_bytes.checked_add(u64::from(name_length)).ok_or_else(|| LocalBackupError::new(LocalBackupErrorCode::MetadataLimit, "legacy backup name metadata exceeds limit"))?;
+        if entries.len() >= budget.entries || name_bytes > budget.name_bytes {
+            return Err(LocalBackupError::new(LocalBackupErrorCode::MetadataLimit, "legacy backup entry metadata exceeds limit"));
+        }
         if name_length > MAX_NAME_BYTES {
             return Err(name_length_error());
         }
@@ -313,7 +342,6 @@ fn stage_entry(
     }
     check_cancelled(cancellation)?;
     output.flush().map_err(LocalBackupError::io)?;
-    output.sync_all().map_err(LocalBackupError::io)?;
     drop(output);
     staging_ownership.track(staged_path.clone());
     guard.keep();
@@ -785,6 +813,19 @@ mod tests {
             restore,
             &NeverCancelled,
         )
+    }
+
+    #[test]
+    fn rejects_entry_metadata_before_creating_the_over_budget_file() {
+        for budget in [EntryMetadataBudget { entries: 1, name_bytes: 100 }, EntryMetadataBudget { entries: 10, name_bytes: 2 }] {
+            let bytes = archive(&[(b"aa", b""), (b"bb", b"")]);
+            let directory = tempfile::tempdir().unwrap();
+            let mut restore = RestoreSpy::default();
+            let error = parse_legacy_local_backup_with_budget(&mut Cursor::new(bytes), directory.path(), PayloadTarget::JobStaging, &mut restore, &NeverCancelled, &NoopParseObserver, budget).unwrap_err();
+            assert_eq!(error.code, LocalBackupErrorCode::MetadataLimit);
+            let staging = directory.path().join("local-backup-v1");
+            assert_eq!(std::fs::read_dir(staging).unwrap().count(), 0);
+        }
     }
 
     #[test]

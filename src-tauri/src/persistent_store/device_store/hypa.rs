@@ -58,6 +58,38 @@ fn validate_write(entry: &HypaEmbeddingWrite) -> StoreResult<()> {
 }
 
 impl DeviceStore {
+    pub(crate) fn hypa_embedding_usage(&self) -> StoreResult<(u64, u64)> {
+        Ok(self.connection.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(length(vector)),0) FROM hypa_embeddings WHERE tombstone=0",
+            [], |row| Ok((row.get::<_, i64>(0)? as u64, row.get::<_, i64>(1)? as u64)),
+        )?)
+    }
+
+    pub(crate) fn clear_hypa_embeddings(&mut self) -> StoreResult<()> {
+        if self.hypa_embedding_usage()?.0 == 0 { return Ok(()); }
+        let transaction = self.transaction()?;
+        let writer: String = transaction.query_row("SELECT writer_id FROM device_meta WHERE singleton=1", [], |row| row.get(0))?;
+        begin_mutation(&transaction)?;
+        loop {
+            let keys = {
+                let mut statement = transaction.prepare("SELECT cache_key FROM hypa_embeddings WHERE tombstone=0 ORDER BY cache_key LIMIT 512")?;
+                let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+                rows.collect::<Result<Vec<_>, _>>()?
+            };
+            if keys.is_empty() { break; }
+            for key in keys {
+                let clock = issue_write_clock(&transaction, Section::Hypa)?;
+                transaction.execute(
+                    "UPDATE hypa_embeddings SET vector=NULL,tombstone=1,write_clock=?1,writer_id=?2,published_clock=NULL,first_published_generation=NULL,first_published_at_ms=NULL WHERE cache_key=?3",
+                    params![clock.as_str(), writer, key],
+                )?;
+            }
+        }
+        finish_mutation(&transaction)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     /// Answers in request order. A missing or tombstoned key reports no vector,
     /// so the caller can recompute exactly the gaps.
     pub(crate) fn read_hypa_embeddings(

@@ -4,6 +4,15 @@ import { mount, tick, unmount } from 'svelte'
 
 const state = vi.hoisted(() => ({
     getState: vi.fn(),
+    jobStarted: undefined as (() => void) | undefined,
+    stopJobEvents: vi.fn(),
+    cancelJob: vi.fn(),
+    startJob: vi.fn(),
+    setAutomaticBackupPaused: vi.fn(),
+    exportSnapshot: vi.fn(),
+    cancelExport: vi.fn(),
+    exportRetainedPublication: vi.fn(),
+    removeRetainedPublication: vi.fn(),
     getQuota: vi.fn(),
     setRetentionPolicy: vi.fn(),
     listHistory: vi.fn(),
@@ -23,6 +32,7 @@ vi.mock('src/ts/stores.svelte', () => ({ DBState: { db: { language: 'en' } } }))
 vi.mock('src/ts/storage/sync/external/production', () => ({
     refreshExternalStorageProductionState: vi.fn(),
     requestExternalStorageNow: vi.fn(),
+    resumeExternalStorageJob: vi.fn(),
     requestExternalConflictExport: vi.fn(),
     requestExternalConflictRestore: vi.fn(),
     requestExternalStorageResolveConflict: vi.fn(),
@@ -31,6 +41,14 @@ vi.mock('src/ts/storage/sync/external/production', () => ({
 vi.mock('src/ts/storage/sync/external/bridge', () => ({
     getExternalStorageBridge: () => ({
         getState: state.getState,
+        onJobStarted: async (listener: () => void) => { state.jobStarted = listener; return state.stopJobEvents },
+        cancelJob: state.cancelJob,
+        startJob: state.startJob,
+        setAutomaticBackupPaused: state.setAutomaticBackupPaused,
+        exportSnapshot: state.exportSnapshot,
+        cancelExport: state.cancelExport,
+        exportRetainedPublication: state.exportRetainedPublication,
+        removeRetainedPublication: state.removeRetainedPublication,
         getQuota: state.getQuota,
         setRetentionPolicy: state.setRetentionPolicy,
         listHistory: state.listHistory,
@@ -42,8 +60,9 @@ vi.mock('src/ts/storage/sync/external/bridge', () => ({
     }),
 }))
 
+import { alertConfirm } from 'src/ts/alert'
 import ExternalStorageSettings from './ExternalStorageSettings.svelte'
-import { requestExternalStorageNow } from 'src/ts/storage/sync/external/production'
+import { requestExternalStorageNow, resumeExternalStorageJob } from 'src/ts/storage/sync/external/production'
 import { externalStorageStrings } from './strings'
 
 const strings = externalStorageStrings('en')
@@ -73,7 +92,7 @@ function connection(keepCount: number, keepDays: number) {
             conditionalGet: false, resumableUpload: false, range: false,
             snapshotDiscovery: true, maxStoredBytes: null, sdkOverheadBytes: 0, uploadAlignment: 1,
         },
-        status: 'ready' as const,
+        status: 'ready' as const, automaticBackupPaused: false,
     }
 }
 
@@ -102,6 +121,7 @@ async function settle(): Promise<void> {
 
 describe('the storage usage tab', () => {
     beforeEach(async () => {
+        vi.mocked(requestExternalStorageNow).mockResolvedValue({ kind: 'cancelled' })
         state.getState.mockResolvedValue({
             supported: true,
             selection: { kind: 'none', selectionEpoch: '0', paused: false, decisionRequired: false },
@@ -131,6 +151,149 @@ describe('the storage usage tab', () => {
         vi.clearAllMocks()
     })
 
+    it('observes an automatic job starting after the panel became idle', async () => {
+        const active = { id: 'job', connectionId: 'connection-1', kind: 'backup', state: 'running', phase: 'upload',
+            completedBytes: '4', totalBytes: '10', completedItems: '1', startedAtMs: '1', updatedAtMs: '1' }
+        state.getState.mockResolvedValue({ supported: true, selection: { kind: 'none', selectionEpoch: '0' },
+            connections: [connection(10, 30)], jobs: [active] })
+        state.jobStarted?.()
+        await settle()
+        expect(target.textContent).toContain(strings.jobActive.backup)
+        expect([...target.querySelectorAll('button')].some(button => button.textContent?.trim() === strings.cancel)).toBe(true)
+        state.getState.mockResolvedValue({ supported: true, selection: { kind: 'none', selectionEpoch: '0' },
+            connections: [connection(10, 30)], jobs: [{ ...active, state: 'conflict' }] })
+        state.jobStarted?.()
+        await settle()
+        expect(target.textContent).toContain(strings.resolveRequired)
+    })
+
+    it.each(['sync', 'backup', 'cleanup', 'restore', 'check-repository'])(
+        'shows the paused %s reason while preventing a competing operation', async kind => {
+        const job = { id: 'paused', connectionId: 'connection-1', kind, state: 'waiting', phase: 'paused',
+            reason: 'automatic', targetRevision: '8', completedBytes: '4', totalBytes: '10', completedItems: '1',
+            startedAtMs: '1', updatedAtMs: '1',
+            error: { code: 'storageFull', action: 'free-space', retryable: false } }
+        state.getState.mockResolvedValue({ supported: true, selection: { kind: 'none', selectionEpoch: '0' },
+            connections: [connection(10, 30)], jobs: [job] })
+        state.jobStarted?.()
+        await settle()
+        expect(target.textContent).toContain(strings.freeSpace)
+        expect(target.querySelector('[role="progressbar"]')).toBeNull()
+        const backup = [...target.querySelectorAll('button')].find(button => button.textContent?.trim() === strings.runBackup)
+        expect(backup?.disabled).toBe(true)
+        expect([...target.querySelectorAll('button')].some(button => button.textContent?.trim() === strings.retryAction)).toBe(kind !== 'sync')
+    })
+
+    it('shows a structured start refusal after refreshing native state', async () => {
+        vi.mocked(requestExternalStorageNow).mockResolvedValue({ kind: 'blocked', reason: 'preconditionFailed', cause: { kind: 'preconditionFailed' } })
+        const backup = [...target.querySelectorAll('button')].find(button => button.textContent?.trim() === strings.runBackup)!
+        backup.click()
+        await settle()
+        expect(target.textContent).toContain(strings.stateChanged)
+    })
+
+    it('retries the retained automatic operation and persists its pause choice', async () => {
+        const job = { id: 'retained', connectionId: 'connection-1', kind: 'backup', state: 'waiting', phase: 'paused',
+            reason: 'automatic', targetRevision: '8', completedBytes: '0', completedItems: '0', startedAtMs: '1', updatedAtMs: '1',
+            error: { code: 'transient', action: 'retry', retryable: true } }
+        state.getState.mockResolvedValue({ supported: true, selection: { kind: 'none', selectionEpoch: '0' },
+            connections: [connection(10, 30)], jobs: [job] })
+        vi.mocked(resumeExternalStorageJob).mockResolvedValue({ kind: 'cancelled' })
+        state.jobStarted?.()
+        await settle()
+        const retry = [...target.querySelectorAll('button')].find(button => button.textContent?.trim() === strings.retryAction)!
+        retry.click()
+        await settle()
+        expect(resumeExternalStorageJob).toHaveBeenCalledWith(job)
+        labelled(strings.automaticBackup).click()
+        await settle()
+        expect(state.setAutomaticBackupPaused).toHaveBeenCalledWith('connection-1', true)
+    })
+
+    it('owns one snapshot export, reports progress and cancels that export ID', async () => {
+        state.listHistory.mockResolvedValue({ items: [{ id: 'point', snapshotId: 'snapshot', kind: 'backup-point',
+            createdAtMs: '1', logicalRevision: '1', complete: true, verified: true, pinned: false,
+            includedSections: [], sameDevice: true }] })
+        const tab = [...target.querySelectorAll('button')].find(button => button.textContent?.trim() === strings.history)!
+        tab.click()
+        await settle()
+        let finish!: (result: unknown) => void
+        state.exportSnapshot.mockImplementation((_connection, _snapshot, _id, progress) => {
+            progress({ completedBytes: '10', totalBytes: '20', completedItems: '1', totalItems: '2' })
+            return new Promise(resolve => { finish = resolve })
+        })
+        state.cancelExport.mockResolvedValue(undefined)
+        const download = [...target.querySelectorAll('button')].find(button => button.textContent?.trim() === strings.download)!
+        download.click()
+        await settle()
+        expect(download.disabled).toBe(true)
+        expect(state.exportSnapshot).toHaveBeenCalledOnce()
+        expect(state.exportSnapshot.mock.calls[0].slice(0, 2)).toEqual(['connection-1', 'snapshot'])
+        expect(target.textContent).toContain('10 B / 20 B')
+        const cancel = [...target.querySelectorAll('button')].find(button => button.textContent?.trim() === strings.cancel)!
+        cancel.click()
+        await settle()
+        expect(state.cancelExport).toHaveBeenCalledWith(state.exportSnapshot.mock.calls[0][2])
+        finish({ cancelled: true })
+        await settle()
+        expect(download.disabled).toBe(false)
+    })
+
+    it('refreshes history after a pin job settles successfully', async () => {
+        const item = { id: 'point', snapshotId: 'snapshot', kind: 'backup-point', createdAtMs: '1', logicalRevision: '1',
+            complete: true, verified: true, pinned: false, includedSections: [], sameDevice: true }
+        state.listHistory.mockResolvedValue({ items: [item] })
+        const tab = [...target.querySelectorAll('button')].find(button => button.textContent?.trim() === strings.history)!
+        tab.click()
+        await settle()
+        state.startJob.mockResolvedValue({ id: 'pin-job', connectionId: 'connection-1', kind: 'pin-history', state: 'queued' })
+        const pin = [...target.querySelectorAll('button')].find(button => button.textContent?.trim() === strings.pin)!
+        pin.click()
+        await settle()
+        state.listHistory.mockResolvedValue({ items: [{ ...item, pinned: true }] })
+        state.getState.mockResolvedValue({ supported: true, selection: { kind: 'none', selectionEpoch: '0' },
+            connections: [connection(10, 30)], jobs: [{ id: 'pin-job', connectionId: 'connection-1', kind: 'pin-history', state: 'succeeded' }] })
+        state.jobStarted?.()
+        await settle()
+        expect(state.listHistory).toHaveBeenCalledTimes(2)
+        expect(target.textContent).toContain(strings.pinned)
+    })
+
+    it('keeps the quota label scoped to locally known repository data', async () => {
+        state.getQuota.mockResolvedValue({ connectionId: 'connection-1', buckets: [], storage: {
+            providerPhysicalKnown: false, locallyUploadedBytesLowerBound: '12',
+            locallyUploadedObjectCountLowerBound: '1', locallyUploadedCoverage: 'cached-upload-receipts',
+        } })
+        await openStorageUsage()
+        await settle()
+        expect(target.textContent).toContain('Known repository data')
+        expect(target.textContent).not.toContain('Uploaded from this device')
+    })
+
+    it('exports a retained publication and requires confirmation to remove its local copy', async () => {
+        const retained = { id: 'retained-job', connectionId: 'removed-connection', repositoryId: 'repository', revision: '8' }
+        state.getState.mockResolvedValue({ supported: true, selection: { kind: 'none', selectionEpoch: '0' },
+            connections: [], jobs: [], retainedPublications: [retained] })
+        state.exportRetainedPublication.mockResolvedValue({ cancelled: true })
+        state.jobStarted?.()
+        await settle()
+        expect(target.textContent).toContain(strings.retainedPublications)
+        const download = [...target.querySelectorAll('button')].find(button => button.textContent?.trim() === strings.download)!
+        download.click()
+        await settle()
+        expect(state.exportRetainedPublication).toHaveBeenCalledWith('retained-job')
+        const remove = [...target.querySelectorAll('button')].find(button => button.textContent?.trim() === strings.removeRetained)!
+        vi.mocked(alertConfirm).mockResolvedValueOnce(false)
+        remove.click()
+        await settle()
+        expect(state.removeRetainedPublication).not.toHaveBeenCalled()
+        vi.mocked(alertConfirm).mockResolvedValueOnce(true)
+        remove.click()
+        await settle()
+        expect(alertConfirm).toHaveBeenCalledWith(strings.removeRetainedConfirm)
+        expect(state.removeRetainedPublication).toHaveBeenCalledWith('retained-job')
+    })
+
     it('runs manual cleanup through the production queue only for a capable connection', async () => {
         await openStorageUsage()
         expect([...target.querySelectorAll('button')].some(button => button.textContent?.trim() === strings.cleanup)).toBe(false)
@@ -138,6 +301,7 @@ describe('the storage usage tab', () => {
         const capable = connection(10, 30)
         capable.capabilities.leaseOperations = true
         capable.capabilities.deleteObjects = true
+        vi.mocked(requestExternalStorageNow).mockResolvedValue({ kind: 'cancelled' })
         state.getState.mockResolvedValue({ supported: true, selection: { kind: 'none', selectionEpoch: '0', paused: false, decisionRequired: false }, connections: [capable], jobs: [] })
         component = mount(ExternalStorageSettings, { target })
         await settle()
@@ -235,6 +399,7 @@ describe('the storage usage tab', () => {
 
     it.each(['cas', 'sequential'])('shows the same single-device guidance for %s synchronization', async (strategy) => {
         if (component) unmount(component)
+        vi.mocked(requestExternalStorageNow).mockResolvedValue({ kind: 'cancelled' })
         state.getState.mockResolvedValue({
             supported: true,
             selection: { kind: 'none', selectionEpoch: '0', paused: false, decisionRequired: false },
@@ -310,6 +475,7 @@ describe('a running job', () => {
     }
 
     async function show(counters?: 'prepared' | 'transferred'): Promise<string> {
+        vi.mocked(requestExternalStorageNow).mockResolvedValue({ kind: 'cancelled' })
         state.getState.mockResolvedValue({
             supported: true,
             selection: { kind: 'none', selectionEpoch: '0', paused: false, decisionRequired: false },
@@ -348,6 +514,7 @@ describe('a running job', () => {
     })
 
     it('reports a check that could not finish on its root without a verified count', async () => {
+        vi.mocked(requestExternalStorageNow).mockResolvedValue({ kind: 'cancelled' })
         state.getState.mockResolvedValue({
             supported: true,
             selection: { kind: 'none', selectionEpoch: '0', paused: false, decisionRequired: false },

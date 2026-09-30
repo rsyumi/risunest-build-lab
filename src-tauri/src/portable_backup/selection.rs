@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, BTreeSet};
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ArchiveEntry {
     pub(crate) id: String,
+    pub(crate) name: String,
     /// Conversations under a character; zero for anything else.
     pub(crate) conversations: u64,
     /// Findings the diagnosis raised against this record.
@@ -29,6 +30,25 @@ pub(crate) struct ArchiveInventory {
     pub(crate) plugins: Vec<ArchiveEntry>,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PluginKey {
+    pub(crate) owner: String,
+    pub(crate) key: String,
+}
+impl PluginKey {
+    pub(crate) fn identity(&self) -> String {
+        serde_json::to_string(self).expect("plugin identity serialization")
+    }
+}
+#[derive(Clone, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ArchiveExclusions {
+    pub(crate) characters: Vec<String>,
+    pub(crate) presets: Vec<String>,
+    pub(crate) plugins: Vec<PluginKey>,
+}
+
 /// What the reader chose. An empty selection of a kind means none of that kind, so a partial
 /// import must name what it wants rather than relying on a default.
 #[derive(Clone, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
@@ -36,10 +56,10 @@ pub(crate) struct ArchiveInventory {
 pub(crate) struct ArchiveSelection {
     pub(crate) characters: Vec<String>,
     pub(crate) presets: Vec<String>,
-    pub(crate) plugins: Vec<String>,
+    pub(crate) plugins: Vec<PluginKey>,
     /// Records the reader left out on purpose even though a chosen record refers to them. Their
     /// references come in broken, which the preview says before anything is staged.
-    pub(crate) excluded: Vec<String>,
+    pub(crate) excluded: ArchiveExclusions,
 }
 
 /// A selection after closure, with what closing it added and what it still leaves broken.
@@ -48,7 +68,7 @@ pub(crate) struct ArchiveSelection {
 pub(crate) struct ClosedSelection {
     pub(crate) characters: Vec<String>,
     pub(crate) presets: Vec<String>,
-    pub(crate) plugins: Vec<String>,
+    pub(crate) plugins: Vec<PluginKey>,
     /// Records closure pulled in because something chosen refers to them.
     pub(crate) added: Vec<String>,
     /// References that come in with nothing to point at, because the reader excluded the target.
@@ -63,6 +83,7 @@ fn counted(db: &Connection, sql: &str) -> Result<Vec<ArchiveEntry>> {
         entries.push(ArchiveEntry {
             id: row.get(0)?,
             conversations: sql_u64(row.get(1)?)?,
+            name: row.get(2)?,
             damaged: 0,
         });
     }
@@ -78,16 +99,22 @@ pub(crate) fn inventory(
     let mut inventory = ArchiveInventory {
         characters: counted(
             db,
-            "SELECT character_id,conversation_count FROM characters ORDER BY configured_index",
+            "SELECT character_id,conversation_count,name FROM characters ORDER BY configured_index",
         )?,
-        presets: counted(db, "SELECT preset_id,0 FROM bot_presets ORDER BY configured_index")?,
-        plugins: counted(db, "SELECT storage_key,0 FROM plugin_storage ORDER BY ordinal")?,
+        presets: counted(db, "SELECT preset_id,0,name FROM bot_presets ORDER BY configured_index")?,
+        plugins: {
+            let mut statement = db.prepare("SELECT owner,storage_key FROM plugin_storage ORDER BY ordinal")?;
+            let rows = statement.query_map([], |row| Ok(PluginKey { owner: row.get(0)?, key: row.get(1)? }))?;
+            rows.map(|row| row.map(|key| ArchiveEntry { id: key.identity(), name: format!("{} / {}", key.owner, key.key), ..ArchiveEntry::default() })).collect::<std::result::Result<Vec<_>, _>>()?
+        },
     };
     let mut damage: BTreeMap<(&str, &str), u64> = BTreeMap::new();
     for finding in findings {
         // A conversation or message names its character first, which is the record the reader
         // chooses, so the damage is counted there.
-        let owner = finding.owner.id.split('/').next().unwrap_or_default();
+        let owner = if matches!(finding.owner.kind.as_str(), "conversation" | "message") {
+            finding.owner.id.split('/').next().unwrap_or_default()
+        } else { finding.owner.id.as_str() };
         let kind = match finding.owner.kind.as_str() {
             "conversation" | "message" => "character",
             kind => kind,
@@ -123,7 +150,7 @@ fn character_detail(db: &Connection, id: &str) -> Result<Option<Value>> {
 /// Adds the records a chosen record contains, unless the reader excluded them. A group names its
 /// members, and a member the reader left out is reported rather than quietly followed.
 pub(crate) fn close(db: &Connection, selection: &ArchiveSelection) -> Result<ClosedSelection> {
-    let excluded: BTreeSet<&str> = selection.excluded.iter().map(String::as_str).collect();
+    let excluded: BTreeSet<&str> = selection.excluded.characters.iter().map(String::as_str).collect();
     let mut characters: BTreeSet<String> = selection
         .characters
         .iter()
@@ -166,13 +193,13 @@ pub(crate) fn close(db: &Connection, selection: &ArchiveSelection) -> Result<Clo
         presets: selection
             .presets
             .iter()
-            .filter(|id| !excluded.contains(id.as_str()))
+            .filter(|id| !selection.excluded.presets.contains(id))
             .cloned()
             .collect(),
         plugins: selection
             .plugins
             .iter()
-            .filter(|key| !excluded.contains(key.as_str()))
+            .filter(|key| !selection.excluded.plugins.contains(key))
             .cloned()
             .collect(),
         added: added.into_iter().collect(),

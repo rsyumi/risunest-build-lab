@@ -596,6 +596,16 @@ fn encode_inlay_image(
         return Ok(preserved_inlay_image(id, data, name, None));
     };
     if let Some(source) = inlay_animation(format, data) {
+        if let Ok(reader) = ImageReader::new(Cursor::new(data)).with_guessed_format() {
+            if let Ok(mut decoder) = reader.into_decoder() {
+                if !matches!(decoder.icc_profile(), Ok(None)) {
+                    let mut preserved = preserved_inlay_image(id, data, name, Some(decoder.dimensions()));
+                    preserved.metadata.preservation_reason = Some("color-profile".to_owned());
+                    return Ok(preserved);
+                }
+            }
+        }
+
         if options.format != InlayEncodeFormat::Original {
             if !animation_policy::permits_decode(data, source, options.animation_decode_bytes) {
                 let mut preserved = preserved_inlay_image(id, data, name, None);
@@ -634,6 +644,14 @@ fn encode_inlay_image(
             && format == ImageFormat::WebP && !needs_resize)
     {
         return Ok(preserved_inlay_image(id, data, name, Some((width, height))));
+    }
+    match decoder.icc_profile() {
+        Ok(None) => {},
+        _ => {
+            let mut preserved = preserved_inlay_image(id, data, name, Some((width, height)));
+            preserved.metadata.preservation_reason = Some("color-profile".to_owned());
+            return Ok(preserved);
+        }
     }
     let Ok(mut decoded) = DynamicImage::from_decoder(decoder) else {
         return Ok(preserved_inlay_image(id, data, name, None));

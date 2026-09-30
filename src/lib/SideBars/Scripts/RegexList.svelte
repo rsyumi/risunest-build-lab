@@ -9,9 +9,10 @@
     interface Props {
         value?: customscript[];
         buttons?: boolean
+        onImport?: () => Promise<void>
     }
 
-    let { value = $bindable([]), buttons = false }: Props = $props();
+    let { value = $bindable([]), buttons = false, onImport }: Props = $props();
     let stb: Sortable = null
     let ele: HTMLDivElement = $state()
     let originalNextSibling: Node | null = null
@@ -93,7 +94,8 @@
             exportRegex(value)
         }}><DownloadIcon /></button>
         <button class="rounded-md text-textcolor2 hover:text-textcolor focus-within:text-textcolor" onclick={async () => {
-            value = await importRegex(value)
+            if (onImport) await onImport()
+            else { const scripts = await importRegex(); if (scripts.length) value = [...value, ...scripts] }
         }}><HardDriveUploadIcon /></button>
     </div>
 {/if}

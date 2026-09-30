@@ -8,7 +8,8 @@ import type { OpenAIChat } from "../process/index.svelte";
 import { fetchNative, globalFetch, readImage, saveAsset } from "../globalApi.svelte";
 import { DBState, hotReloading } from "../stores.svelte";
 import type { ScriptMode } from "../process/scripts";
-import { loadV3Plugins } from "./apiV3/v3.svelte";
+import { reconcilePluginListUpdate } from "./pluginListUpdate";
+import { customV3ProviderMetaStore, loadV3Plugins } from "./apiV3/v3.svelte";
 import { pluginCodeTranspiler } from "./apiV3/transpiler";
 import {
     createPluginLoadOrchestrator,
@@ -448,7 +449,19 @@ function isSupportedPluginVersion(plugin: RisuPlugin): boolean {
     return plugin.version === '3.0'
 }
 
-function reportUnsupportedPlugins(plugins: readonly RisuPlugin[]): void {
+const reportedUnsupportedPlugins = new Set<string>()
+
+async function reportUnsupportedPlugins(plugins: readonly RisuPlugin[]): Promise<void> {
+    const unreported: RisuPlugin[] = []
+    for (const plugin of plugins) {
+        const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(plugin.script))
+        const hash = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('')
+        const identity = JSON.stringify([plugin.name, plugin.version, hash])
+        if (reportedUnsupportedPlugins.has(identity)) continue
+        reportedUnsupportedPlugins.add(identity)
+        unreported.push(plugin)
+    }
+    plugins = unreported
     if (plugins.length === 0) return
     const listed = plugins
         .map((plugin) => `${plugin.displayName ?? plugin.name} (API ${plugin.version ?? '2.0'})`)
@@ -467,7 +480,7 @@ export async function loadPlugins() {
 
     const plugins = safeStructuredClone(db.plugins)
     const enabledPlugins = plugins.filter((p: RisuPlugin) => p.enabled)
-    reportUnsupportedPlugins(
+    await reportUnsupportedPlugins(
         enabledPlugins.filter((plugin: RisuPlugin) => !isSupportedPluginVersion(plugin)),
     )
 
@@ -477,7 +490,12 @@ export async function loadPlugins() {
 export async function loadPluginsAfterAuthoritativeRestore() {
     const { invalidatePluginDeviceKeyspaces } = await import('./pluginDeviceKeyspace')
     invalidatePluginDeviceKeyspaces()
-    await loadPlugins()
+    try {
+        await loadPlugins()
+    } finally {
+        const { closePluginClaimEligibility } = await import('./pluginClaimSession')
+        await closePluginClaimEligibility()
+    }
 }
 
 function loadPluginsFromPlugin(): Promise<void> {
@@ -661,6 +679,11 @@ export async function resetPluginRuntimeRegistry(
 
         if (!isCurrent()) return
         pluginV2.providers.clear()
+        pluginV2.providerOptions.clear()
+        customProviderStore.set([])
+        customV3ProviderMetaStore.splice(0)
+        pluginV2.replacerbeforeRequest.clear()
+        pluginV2.replacerafterRequest.clear()
         pluginV2.editdisplay.clear()
         pluginV2.editoutput.clear()
         pluginV2.editprocess.clear()
@@ -693,23 +716,12 @@ export async function pluginProcess(arg: {
 
 export async function handlePluginInstallViaPlugin(plugins: RisuPlugin[]){
 
-    const trimmedPlugins: RisuPlugin[] = []
-    for(const plugin of plugins){
-        if(!DBState.db.plugins.find((p: RisuPlugin) => p.name === plugin.name && p.script === plugin.script)){
-
-            if(plugin.version !== '3.0'){
-                console.warn(`Plugin "${plugin.name}" has version "${plugin.version}", which is not supported for installation via plugin. Only API version 3.0 plugins can be installed via plugin. Skipping installation of this plugin.`)
-                continue
-            }
-            const confirmation = await alertConfirm(language.confirmInstallPluginViaPlugin.replace('{plugin}', plugin.name))
-            if(confirmation){
-                trimmedPlugins.push(plugin)
-            }
-        }
-        else{
-            console.warn(`Plugin "${plugin.name}" already exists, skipping installation via plugin.`)
-        }
+    const { additions } = reconcilePluginListUpdate(DBState.db.plugins, plugins)
+    const approved: RisuPlugin[] = []
+    for (const plugin of additions) {
+        if (plugin.version !== '3.0') continue
+        const confirmation = await alertConfirm(language.confirmInstallPluginViaPlugin.replace('{plugin}', plugin.name))
+        if (confirmation) approved.push(plugin)
     }
-
-    return trimmedPlugins
+    return reconcilePluginListUpdate(DBState.db.plugins, approved).additions
 }

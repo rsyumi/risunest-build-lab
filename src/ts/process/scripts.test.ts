@@ -24,6 +24,7 @@ const mocks = vi.hoisted(() => {
         cbsFirstPattern: 'x',
         cbsFirstError: null as Error | null,
         workerFailure: null as unknown,
+        workerFailures: [] as unknown[],
         workerCalls: 0,
         workerAvailable: false,
         workerData: 'worker-output',
@@ -134,6 +135,7 @@ vi.mock('./regexWorkerClient', async (importOriginal) => {
             execute: async (_plan: unknown, input: string) => {
                 mocks.state.workerCalls++
                 mocks.state.workerInput = input
+                if (mocks.state.workerFailures.length > 0) throw mocks.state.workerFailures.shift()
                 if(mocks.state.workerFailure !== null){
                     throw mocks.state.workerFailure
                 }
@@ -160,7 +162,7 @@ const {
     processScriptFull,
     resetScriptCache,
 } = await import('./scripts')
-const { RegexExecutionTimeoutError } = await import('./regexWorkerClient')
+const { RegexExecutionTimeoutError, RegexWorkerResetError } = await import('./regexWorkerClient')
 const { getCurrentCharacter, getCurrentChat } = await import('../storage/database.svelte')
 
 function makeScript(input: string, output: string, flag = 'g'): customscript {
@@ -1341,4 +1343,56 @@ describe('live display script ordering', () => {
             f.cleanup()
         }
     })
+})
+
+
+it('retries a collateral worker reset once on the worker and never synchronously after a second reset', async () => {
+    resetScriptCache()
+    const character = makeCharacter([makeScript('cat', 'dog')])
+    mocks.state.workerAvailable = true
+    mocks.state.nativeData = undefined
+    mocks.state.nativeFailure = null
+    mocks.state.workerFailure = null
+    mocks.state.workerCalls = 0
+    mocks.state.workerData = 'worker retry result'
+    mocks.state.workerFailures = [new RegexWorkerResetError()]
+    const result = await processScriptFull(character, 'cat', 'editoutput', -1, {}, { cache: 'bypass' })
+    expect(result.data).toBe('worker retry result')
+    expect(mocks.state.workerCalls).toBe(2)
+    mocks.state.workerFailures = [new RegexWorkerResetError(), new RegexWorkerResetError()]
+    await expect(processScriptFull(character, 'cat', 'editoutput', -1, {}, { cache: 'bypass' })).rejects.toBeInstanceOf(RegexWorkerResetError)
+    expect(mocks.state.workerCalls).toBe(4)
+    const unavailable = new Error('replacement worker unavailable')
+    mocks.state.workerFailures = [new RegexWorkerResetError(), unavailable]
+    await expect(processScriptFull(character, 'cat', 'editoutput', -1, {}, { cache: 'bypass' })).rejects.toBe(unavailable)
+    expect(mocks.state.workerCalls).toBe(6)
+})
+
+it('retains an already-started Lua effect but skips regex and plugin stages after Stop', async () => {
+    resetScriptCache()
+    const controller = new AbortController()
+    let release!: () => void
+    const deferred = new Promise<void>((resolve) => { release = resolve })
+    let started!: () => void
+    const entered = new Promise<void>((resolve) => { started = resolve })
+    const effect = vi.fn()
+    const plugin = vi.fn(async (value: string) => value + ':plugin')
+    mocks.pluginV2.editoutput.add(plugin)
+    scriptingsMocks.runLuaEditTrigger.mockImplementationOnce(async (_char, _mode, data) => {
+        effect()
+        started()
+        await deferred
+        return data
+    })
+    const pending = processScriptFull(makeCharacter([makeScript('cat', 'dog')]), 'cat', 'editoutput', -1, {}, {
+        cache: 'bypass', signal: controller.signal,
+    })
+    const outcome = pending.catch((error) => error)
+    await entered
+    controller.abort()
+    release()
+    expect(await outcome).toMatchObject({ name: 'AbortError' })
+    expect(effect).toHaveBeenCalledOnce()
+    expect(plugin).not.toHaveBeenCalled()
+    mocks.pluginV2.editoutput.delete(plugin)
 })

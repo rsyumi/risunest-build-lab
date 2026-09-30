@@ -1,7 +1,7 @@
 <script lang="ts">
     import { onDestroy, onMount, untrack } from 'svelte'
     import type { StreamingDisplayOptimizationMode } from 'src/ts/storage/database.svelte'
-    import { chatMountProbe } from './chatMountProbe'
+    import { chatMountProbe } from './chatMountProbe.testSupport'
     import type { BoundedLiveChatParserProjection } from 'src/ts/selectedConversationLiveParserProjection'
     import type { ChatDisplayRefresh } from 'src/ts/chatDisplayRefresh'
 
@@ -53,6 +53,9 @@
     }
 
     export function updateViewportBinding() {}
+    export function takeEditorDraft() {
+        return hasActiveEditor() ? `draft-${idx}` : null
+    }
     export function hasActiveEditor() {
         return chatMountProbe.activeEditors.has(instanceId)
     }

@@ -714,6 +714,19 @@ fn connection_removal_detaches_unknown_publication_but_keeps_its_recovery_root()
                 .unwrap(),
             0
         );
+        let retained=store.external_unknown_publications().unwrap();
+        assert_eq!(retained.len(),1);
+        assert_eq!(retained[0].id,"unsettled");
+        store.connection.execute("INSERT INTO external_storage_capture_refs VALUES('capture','independent-export')",[]).unwrap();
+        store.external_remove_retained_publication("unsettled").unwrap();
+        assert!(store.external_unknown_publications().unwrap().is_empty());
+        assert_eq!(store.external_job("unsettled").unwrap().unwrap().phase,"cancelled");
+        let owners: Vec<String>={
+            let mut query=store.connection.prepare("SELECT job_id FROM external_storage_capture_refs WHERE capture_id='capture'").unwrap();
+            let rows=query.query_map([],|row|row.get(0)).unwrap(); rows.collect::<Result<_,_>>().unwrap()
+        };
+        assert_eq!(owners,vec!["independent-export"]);
+        assert!(store.external_remove_retained_publication("unsettled").is_err());
         let after = sync_selection::read(&store.connection).unwrap();
         assert_eq!(after.target, sync_selection::SyncTarget::None);
     }

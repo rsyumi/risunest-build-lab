@@ -55,6 +55,7 @@ impl SyncError {
 /// including a reply this client rejected as invalid.
 fn retryable(code: &str, status: u16) -> bool {
     match code {
+        "local-storage-full" => false,
         "cancelled"
         | "library-operation-busy"
         | "server-sync-busy"
@@ -88,13 +89,23 @@ impl From<risunest_sync_wire::WireError> for SyncError {
 impl From<std::io::Error> for SyncError {
     #[track_caller]
     fn from(error: std::io::Error) -> Self {
-        Self::caused("local-storage", 503, format!("{:?}: {error}", error.kind()))
+        let (code, status) = if error.kind() == std::io::ErrorKind::StorageFull {
+            ("local-storage-full", 507)
+        } else {
+            ("local-storage", 503)
+        };
+        Self::caused(code, status, format!("{:?}: {error}", error.kind()))
     }
 }
 impl From<rusqlite::Error> for SyncError {
     #[track_caller]
     fn from(error: rusqlite::Error) -> Self {
-        Self::caused("local-metadata", 503, error.to_string())
+        let (code, status) = if error.sqlite_error_code() == Some(rusqlite::ErrorCode::DiskFull) {
+            ("local-storage-full", 507)
+        } else {
+            ("local-metadata", 503)
+        };
+        Self::caused(code, status, error.to_string())
     }
 }
 impl From<crate::persistent_store::StoreError> for SyncError {
@@ -120,6 +131,19 @@ impl From<risunest_sync_connect::ConnectError> for SyncError {
 #[cfg(test)]
 mod classification_tests {
     use super::SyncError;
+
+    #[test]
+    fn local_storage_exhaustion_requires_space_without_masking_server_failures() {
+        let io = SyncError::from(std::io::Error::from(std::io::ErrorKind::StorageFull));
+        let sqlite = SyncError::from(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_FULL), None));
+        for error in [io, sqlite, SyncError::new("local-storage-full", 507)] {
+            assert_eq!(error.code, "local-storage-full");
+            assert!(!error.retryable);
+        }
+        assert!(SyncError::new("server-storage-full", 507).retryable);
+        assert!(SyncError::new("local-storage", 503).retryable);
+    }
 
     #[test]
     fn transport_waits_and_server_load_stay_retryable() {

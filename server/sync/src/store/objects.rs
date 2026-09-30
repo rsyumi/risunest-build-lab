@@ -265,7 +265,7 @@ impl Store {
             let destination = self.object_path(digest)?;
             fs::create_dir_all(destination.parent().unwrap())?;
             directories.insert(destination.parent().unwrap().to_path_buf());
-            let mut temp = tempfile::NamedTempFile::new_in(&staging)?;
+            let mut temp = self.staging_temp()?;
             temp.write_all(bytes)?;
             #[cfg(test)]
             frame_metrics::record(2, measured);
@@ -347,6 +347,18 @@ impl Store {
             .optional()?;
         size.map(|s| u64::try_from(s).map_err(|_| Error::new("corrupt-metadata", 503)))
             .transpose()
+    }
+    pub fn object_presence(&self, digest: &str) -> Result<bool> {
+        let db = self.reader()?;
+        let Some((size, inline)) = placement(&db, digest)? else { return Ok(false); };
+        if inline {
+            return Ok(small_object_store::size(&db, digest).map_err(body_error)? == Some(size));
+        }
+        match fs::metadata(self.object_path(digest)?) {
+            Ok(meta) => Ok(meta.is_file() && meta.len() == size),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error.into()),
+        }
     }
     pub fn get_object(&self, digest: &str) -> Result<Vec<u8>> {
         let (size, inline) = {
@@ -754,13 +766,9 @@ mod tests {
                 .unwrap(),
             0
         );
+        store.db().unwrap().execute_batch("DROP TRIGGER synthetic_batch_failure").unwrap();
         drop(store);
         let store = Store::open(directory.path()).unwrap();
-        store
-            .db()
-            .unwrap()
-            .execute_batch("DROP TRIGGER synthetic_batch_failure")
-            .unwrap();
         for _ in 0..2 {
             assert_eq!(
                 store.receive_frames(&device, &frames).unwrap(),

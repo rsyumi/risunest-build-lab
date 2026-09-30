@@ -2044,6 +2044,7 @@ fn official_publication_payload_closes_its_reader_and_reopens_exact_managed_byte
     let payload = prepared
         .create_payload(
             "account-1",
+            &json!({"id":"account-1", "token":"local-token"}),
             &std::collections::HashMap::from([(
                 "local-asset".to_owned(),
                 "remote-asset".to_owned(),
@@ -2123,6 +2124,7 @@ fn official_publication_hash_cancellation_closes_reader_and_cleans_managed_pair(
     let error = prepared
         .create_payload(
             "account-1",
+            &json!({"id":"account-1", "token":"local-token"}),
             &std::collections::HashMap::new(),
             || active_readers.active_count() == 0,
             |_, _, _| {},
@@ -2174,6 +2176,7 @@ fn pinned_publication_account_mismatch_releases_reader_and_cleans_export_files()
     let error = prepared
         .create_payload(
             "different-account",
+            &json!({"id":"account-1", "token":"local-token"}),
             &std::collections::HashMap::new(),
             || false,
             |_, _, _| {},

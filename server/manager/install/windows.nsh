@@ -6,13 +6,15 @@
 !endif
 
 !macro NSIS_HOOK_PREINSTALL
+  !insertmacro CheckIfAppIsRunning "${MAINBINARYNAME}.exe" "${PRODUCTNAME}"
   StrCmp $INSTDIR "${RISUNEST_SYNC_DEFAULT_INSTALL_DIR}" 0 sync_install_dir_ready
   StrCpy $INSTDIR "${RISUNEST_SYNC_INSTALL_DIR}"
   SetOutPath $INSTDIR
   sync_install_dir_ready:
   StrCpy $R7 ""
   IfFileExists "$INSTDIR\risunest-sync-manager.exe" 0 sync_prepare_done
-  nsExec::ExecToStack '"$INSTDIR\risunest-sync-manager.exe" installer prepare'
+  System::Call 'kernel32::GetCurrentProcessId()i.r0'
+  nsExec::ExecToStack '"$INSTDIR\risunest-sync-manager.exe" installer prepare $0'
   Pop $0
   Pop $1
   StrCmp $0 "0" 0 sync_prepare_failed
@@ -114,7 +116,8 @@
   StrCmp $0 "0" 0 sync_uninstall_failed
   StrCpy $R7 ""
   IfFileExists "$R9\risunest-sync-instance.json" 0 sync_uninstall_cleanup
-  nsExec::ExecToStack '"$INSTDIR\risunest-sync-manager.exe" --data-dir "$R9" installer prepare'
+  System::Call 'kernel32::GetCurrentProcessId()i.r0'
+  nsExec::ExecToStack '"$INSTDIR\risunest-sync-manager.exe" --data-dir "$R9" installer prepare $0'
   Pop $0
   Pop $1
   StrCmp $0 "0" 0 sync_uninstall_failed

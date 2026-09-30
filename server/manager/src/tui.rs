@@ -176,6 +176,20 @@ pub fn bytes(value: &Value) -> String {
 }
 pub fn error_message(code: &str) -> &str {
     match code {
+        "update-recovery-schedule-mismatch" => "관리 앱을 다시 실행한 뒤 업데이트를 다시 확인하세요.",
+        "removal-unowned-profile-files" => "관리 앱 데이터 폴더에 별도로 저장한 파일이 있습니다. 해당 파일을 다른 폴더로 옮긴 뒤 다시 시도하세요.",
+        "data-dir-busy" => "다른 서버가 같은 데이터 폴더를 사용하고 있습니다. 해당 서버를 종료한 뒤 다시 시도하세요.",
+        "incompatible-store" => "서버 데이터 형식이 현재 버전과 호환되지 않습니다.",
+        "unsafe-storage-path" => "데이터 폴더에 링크가 포함되어 있습니다. 데이터 폴더 경로를 확인하세요.",
+        "not-initialized" => "서버 데이터가 초기화되지 않았습니다. 서버 설치 상태를 확인하세요.",
+        "managed-registration-needs-directory" => "임시 주소로 기기를 등록하려면 주소 레지스트리를 사용하세요.",
+        "directory-unreachable" => "레지스트리 서버에 연결하지 못했습니다. 네트워크와 레지스트리 서버 주소를 확인하세요.",
+        "directory-unavailable" => "레지스트리 서버를 사용할 수 없습니다. 잠시 후 다시 시도하세요.",
+        "directory-full" => "레지스트리 서버의 저장 공간이 부족합니다. 잠시 후 다시 시도하세요.",
+        "directory-rejected" => "레지스트리 서버가 게시 요청을 거부했습니다. 연결 설정을 확인하세요.",
+        "directory-record-owned" => "다른 서버가 사용 중인 등록 정보입니다. 연결 설정을 확인하세요.",
+        "directory-admission-limited" => "레지스트리 서버의 요청 한도를 초과했습니다. 잠시 후 다시 시도하세요.",
+
         "invalid-network-settings" => "바인딩 IP 주소와 포트(1~65535)를 확인하세요.",
         "listen-address-in-use" => "주소와 포트를 이미 사용 중입니다. 네트워크 설정에서 포트를 변경하세요.",
         "listen-address-unavailable" => "이 컴퓨터에 없는 IP 주소입니다. 네트워크 설정을 확인하세요.",
@@ -414,7 +428,7 @@ async fn connection(root: &Path, client: &Client, status: &Value, executable: &P
             } else {
                 None
             };
-            if menu("연결 설정을 적용할까요?", &["적용", "취소"])? != Some(0) {
+            if menu("연결 설정을 적용하시겠습니까?", &["적용", "취소"])? != Some(0) {
                 return Ok(());
             }
             client.mutate("connection",json!({"revision":status["revision"],"options":{"endpoint":endpoint,"cloudflared":cloudflared,"registryUrl":registry}})).await?;
@@ -525,13 +539,13 @@ pub async fn run(root: &Path, executable: &Path) -> Result<()> {
                                 ready = true;
                                 break;
                             }
+                            if platform::startup_error(root).is_some() { break; }
                             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                         }
                         if ready {
                             Ok(())
                         } else {
-                            Err(std::fs::read_to_string(root.join("startup-error.txt"))
-                                .unwrap_or_else(|_| "server-not-ready".into()))
+                            Err(platform::startup_error(root).unwrap_or_else(|| "server-not-ready".into()))
                         }
                     }
                 }

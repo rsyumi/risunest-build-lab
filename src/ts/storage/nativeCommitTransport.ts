@@ -1,3 +1,4 @@
+import { prepareNativePersistenceValue, UnsaveableValueError } from './nativePersistenceValue'
 import { invoke } from '@tauri-apps/api/core'
 import { platform } from '@tauri-apps/plugin-os'
 import type { AssetAlias, WorkingSetCommit } from './persistentDataStore'
@@ -67,6 +68,7 @@ export interface CommitTransportDependencies {
 }
 
 export class NativeCommitTransport {
+    private rawUnavailable = false
     private pending: Promise<unknown> = Promise.resolve()
     constructor(private readonly dependencies: CommitTransportDependencies) {}
 
@@ -76,6 +78,24 @@ export class NativeCommitTransport {
         return run
     }
 
+    private async sendRaw(bytes: Uint8Array): Promise<{ revision: number }> {
+        const json = () => this.dependencies.invoke<{ revision: number }>(
+            'pds_commit', JSON.parse(new TextDecoder().decode(bytes)),
+        )
+        if (this.rawUnavailable) return json()
+        try {
+            return await this.dependencies.invoke('pds_commit_raw', bytes)
+        } catch (error) {
+            let value = error
+            if (typeof value === 'string') {
+                try { value = JSON.parse(value) } catch { /* Not a native typed rejection. */ }
+            }
+            if (!value || typeof value !== 'object' || (value as { code?: string }).code !== 'raw-body-unavailable') throw error
+            // The endpoint rejected the body before decoding or entering the store.
+            this.rawUnavailable = true
+            return json()
+        }
+    }
     private async send(input: CommitEnvelope): Promise<{ revision: number }> {
         const deps = this.dependencies
         const android = deps.android?.() ?? false
@@ -88,31 +108,31 @@ export class NativeCommitTransport {
                 android ? ANDROID_LARGE_COMMIT_SIZE : LARGE_COMMIT_BYTES,
             )
         )
-            return deps.invoke('pds_commit', { ...input })
+            return deps.invoke('pds_commit', { ...prepareNativePersistenceValue(input) })
         let bytes: Uint8Array
         try {
             bytes = await deps.encode(input)
         } catch (error) {
             // Callable hooks cannot be structured-cloned. No native save has started yet.
             if (error instanceof DOMException && error.name === 'DataCloneError') {
-                return deps.invoke('pds_commit', { ...input })
+                return deps.invoke('pds_commit', { ...prepareNativePersistenceValue(input) })
             }
             throw error
         }
         if (android) {
             // Keep the existing large-save contract beyond the bounded assembly budget.
             if (bytes.byteLength > MAX_ANDROID_COMMIT_BYTES)
-                return deps.invoke('pds_commit', { ...input })
+                return deps.invoke('pds_commit', { ...prepareNativePersistenceValue(input) })
             return sendAndroidCommit(
                 bytes,
                 deps.invoke,
                 deps.androidBinary ? deps.androidBinary() : getAndroidBinaryCommitBridge(),
             )
         }
-        if (rawPlatform) return deps.invoke('pds_commit_raw', bytes)
+        if (rawPlatform) return this.sendRaw(bytes)
         const webview = deps.shared()
         if (!webview || bytes.byteLength > MAX_SHARED_COMMIT_BYTES)
-            return deps.invoke('pds_commit_raw', bytes)
+            return this.sendRaw(bytes)
         const requestId = crypto.randomUUID()
         let buffer: ArrayBuffer | undefined
         let nativeId: string | undefined
@@ -139,7 +159,7 @@ export class NativeCommitTransport {
                 'pds_commit_shared_open',
                 { requestId, totalBytes: bytes.byteLength },
             )
-            if (!opened) return deps.invoke('pds_commit_raw', bytes)
+            if (!opened) return this.sendRaw(bytes)
             nativeId = opened.id
             await Promise.race([
                 received,
@@ -213,9 +233,10 @@ export function encodeNativeCommit(input: CommitEnvelope): Promise<Uint8Array> {
                 if (encoder === worker) encoder = undefined
             }, 30_000)
         }
-        worker.onmessage = ({ data }: MessageEvent<{ bytes?: Uint8Array; error?: string }>) => {
+        worker.onmessage = ({ data }: MessageEvent<{ bytes?: Uint8Array; error?: string; code?: string; area?: string; reason?: string; recordId?: string }>) => {
             cleanup()
             if (data.bytes) resolve(data.bytes)
+            else if (data.code === 'unsaveable-value') reject(new UnsaveableValueError(data.area ?? 'persistent data', data.reason ?? 'unsupported value', data.recordId))
             else reject(new Error(data.error ?? 'Persistence encoding failed'))
         }
         worker.onerror = () => {

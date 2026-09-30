@@ -2,7 +2,7 @@
 //! This layer starts only after the PDS read snapshot has closed.
 use super::{
     capabilities::Capabilities,
-    content_store::{Body, ContentStore, ObjectSource},
+    content_store::{ContentStore, ObjectSource},
     contract::{
         Cancellation, ErrorKind, ObjectIntent, ObjectReceipt, ObjectRole, Provider, ProviderError,
         ReadReceipt, RemoteLocator, RepositoryHandle, Result,
@@ -48,8 +48,25 @@ static SNAPSHOT_CPU: LazyLock<Arc<tokio::sync::Semaphore>> =
 pub(super) fn corrupt(_: impl std::fmt::Display) -> ProviderError {
     ProviderError::new(ErrorKind::Corrupt)
 }
-pub(super) fn transient(_: impl std::fmt::Display) -> ProviderError {
+pub(super) fn transient(error: impl std::fmt::Display + 'static) -> ProviderError {
+    let error = &error as &dyn std::any::Any;
+    if let Some(error) = error.downcast_ref::<std::io::Error>() {
+        return local_io_kind(error.kind());
+    }
     ProviderError::new(ErrorKind::Transient)
+}
+
+fn local_io_kind(kind: std::io::ErrorKind) -> ProviderError {
+    use std::io::ErrorKind as IoKind;
+    ProviderError::new(match kind {
+        IoKind::StorageFull => ErrorKind::LocalStorageFull,
+        IoKind::PermissionDenied | IoKind::ReadOnlyFilesystem => ErrorKind::LocalPermissionDenied,
+        _ => ErrorKind::Transient,
+    })
+}
+
+pub(super) fn format_error(error: risunest_external_storage_format::FormatError) -> ProviderError {
+    error.io_kind().map(local_io_kind).unwrap_or_else(|| corrupt(error))
 }
 
 pub(super) async fn cpu_permit() -> Result<tokio::sync::OwnedSemaphorePermit> {
@@ -991,7 +1008,7 @@ async fn revalidate_cached_catalog(
             let mut plaintext = Vec::new();
             let header = wire::open_envelope(
                 &mut input, &mut plaintext, &metadata_key, wire::MAX_METADATA_BYTES as u64,
-            ).map_err(corrupt)?;
+            ).map_err(format_error)?;
             if header != stored.header
                 || hex::encode(hash(&plaintext)) != object.plaintext_sha256
                 || plaintext.len() as u64 != object.plaintext_length
@@ -1073,6 +1090,7 @@ struct SourceEntry {
     content_sha256: String,
     byte_length: u64,
     source: ObjectSource,
+    file_offset: Option<u64>,
     compression: CompressionPolicy,
 }
 #[derive(Clone)]
@@ -1175,6 +1193,7 @@ fn capture_sources(capture: &CapturedSnapshot) -> Result<(Vec<SourceEntry>, Vec<
             content_sha256: digest.clone(),
             byte_length: u64::try_from(bytes).map_err(corrupt)?,
             source: ObjectSource::Captured(digest),
+            file_offset: None,
             compression: CompressionPolicy::Text,
         });
     }
@@ -1199,6 +1218,7 @@ fn capture_sources(capture: &CapturedSnapshot) -> Result<(Vec<SourceEntry>, Vec<
             content_sha256: digest.clone(),
             byte_length: u64::try_from(bytes).map_err(corrupt)?,
             source: ObjectSource::Captured(digest),
+            file_offset: None,
             compression: CompressionPolicy::Text,
         });
     }
@@ -1221,6 +1241,7 @@ fn capture_sources(capture: &CapturedSnapshot) -> Result<(Vec<SourceEntry>, Vec<
             content_sha256: digest.clone(),
             byte_length: u64::try_from(bytes).map_err(corrupt)?,
             source: ObjectSource::Library(digest),
+            file_offset: None,
             compression: CompressionPolicy::AlreadyCompressed,
         });
     }
@@ -1838,24 +1859,37 @@ fn prepare_packs(
     let mut payloads = None;
     for source in sources {
         cancel.check()?;
-        let mut input = match &source.source {
+        let (mut input, input_length): (Box<dyn Read>, u64) = match &source.source {
             ObjectSource::Library(digest) => {
                 let payloads = match &mut payloads {
                     Some(payloads) => payloads,
                     None => payloads
                         .insert(PayloadCas::new(repository_root).map_err(transient)?),
                 };
-                Body::File(open_library_source(payloads, digest, &mut hydration, cancel)?)
+                open_library_source(payloads, digest, &mut hydration, cancel)?
             }
-            other => content.open_source(other).map_err(corrupt)?,
+            ObjectSource::File(path) if source.file_offset.is_some() => {
+                let offset = source.file_offset.unwrap();
+                let mut file = crate::trust_boundary::open_regular_source(path).map_err(transient)?;
+                let end = offset.checked_add(source.byte_length).ok_or_else(|| corrupt("section source range"))?;
+                if end > file.metadata().map_err(transient)?.len() { return Err(corrupt("section source range")); }
+                file.seek(SeekFrom::Start(offset)).map_err(transient)?;
+                (Box::new(file.take(source.byte_length)), source.byte_length)
+            }
+            other => {
+                let body = content.open_source(other).map_err(corrupt)?;
+                let length = body.len().map_err(transient)?;
+                (Box::new(body), length)
+            },
         };
-        if input.len().map_err(corrupt)? != source.byte_length {
+        if input_length != source.byte_length {
             return Err(corrupt("capture source length differs"));
         }
         let mut remaining = source.byte_length;
         let mut source_hash = Sha256::new();
         let mut chunks = Vec::new();
         loop {
+            cancel.check()?;
             let count = if remaining == 0 && chunks.is_empty() {
                 0
             } else {
@@ -1942,15 +1976,26 @@ fn prepare_packs(
 /// custody first. A held body is opened where it is, as any capture source is.
 /// A fetch is verified against the body's hash and custody size before
 /// anything reads it, and needs that much free space on the repository volume.
+struct TransientLibrarySource {
+    body: crate::server_sync::residency::TransientBody,
+    _scratch: tempfile::TempDir,
+}
+impl Read for TransientLibrarySource {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        self.body.read(buffer)
+    }
+}
+
 fn open_library_source(
     payloads: &PayloadCas,
     digest: &str,
     hydration: &mut SourceHydration,
     cancel: &Cancellation,
-) -> Result<fs::File> {
-    use crate::server_sync::residency::{open_or_hydrate_with_check, Residency};
+) -> Result<(Box<dyn Read>, u64)> {
+    use crate::server_sync::residency::{open_transient_with_check, Residency};
     if let Some(file) = payloads.open_object(digest).map_err(transient)? {
-        return Ok(file);
+        let length = file.metadata().map_err(transient)?.len();
+        return Ok((Box::new(file), length));
     }
     let custody = |error: crate::server_sync::SyncError| {
         if cancel.check().is_err() {
@@ -1972,19 +2017,21 @@ fn open_library_source(
         return Err(ProviderError::new(ErrorKind::NotFound));
     };
     if fs2::available_space(repository_root).map_err(transient)? < size {
-        return Err(ProviderError::new(ErrorKind::StorageFull));
+        return Err(ProviderError::new(ErrorKind::LocalStorageFull));
     }
     let check = || {
         cancel
             .check()
             .map_err(|_| crate::server_sync::SyncError::new("cancelled", 409))
     };
-    let file = open_or_hydrate_with_check(repository_root, digest, &check)
+    let scratch = super::leftovers::managed_scratch(repository_root, "asset-transient-")?;
+    let file = open_transient_with_check(repository_root, scratch.path(), digest, &check)
         .map_err(custody)?
         .ok_or_else(|| ProviderError::new(ErrorKind::NotFound))?;
     hydration.objects += 1;
     hydration.bytes += size;
-    Ok(file)
+    let length = file.len().map_err(transient)?;
+    Ok((Box::new(TransientLibrarySource { body: file, _scratch: scratch }), length))
 }
 
 /// The pack is durable before it is handed over, and the producer holds no CPU
@@ -2197,7 +2244,7 @@ async fn seal_plain_object(
                 length: 0,
             };
             let opened = wire::open_envelope(&mut input, &mut output, &key_copy, plaintext_length)
-                .map_err(corrupt)?;
+                .map_err(format_error)?;
             let actual: [u8; 32] = output.digest.finalize().into();
             if opened != header_copy
                 || output.length != plaintext_length
@@ -2246,7 +2293,7 @@ async fn seal_plain_object(
             .write(true)
             .open(&spool_path)
             .map_err(transient)?;
-        wire::seal_envelope(&mut input, &mut output, &key_copy, &header_copy).map_err(corrupt)?;
+        wire::seal_envelope(&mut input, &mut output, &key_copy, &header_copy).map_err(format_error)?;
         output.sync_all().map_err(transient)?;
         drop(output);
         let mut ciphertext =
@@ -3425,6 +3472,7 @@ pub(crate) async fn package_and_upload(
                 content_sha256: source.content_sha256.clone(),
                 byte_length: source.byte_length,
                 source: ObjectSource::File(source.path.clone()),
+                file_offset: source.offset,
                 compression: match source.kind {
                     wire::CatalogEntryKind::SectionObject => CompressionPolicy::AlreadyCompressed,
                     _ => CompressionPolicy::Text,
@@ -3594,6 +3642,24 @@ pub(crate) async fn package_and_upload(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn local_file_and_envelope_errors_keep_their_remediation_kind() {
+        for (cause, expected) in [
+            (std::io::ErrorKind::StorageFull, ErrorKind::LocalStorageFull),
+            (std::io::ErrorKind::PermissionDenied, ErrorKind::LocalPermissionDenied),
+            (std::io::ErrorKind::ReadOnlyFilesystem, ErrorKind::LocalPermissionDenied),
+            (std::io::ErrorKind::WouldBlock, ErrorKind::Transient),
+        ] {
+            assert_eq!(transient(std::io::Error::from(cause)).kind, expected);
+            assert_eq!(format_error(std::io::Error::from(cause).into()).kind, expected);
+        }
+        assert_eq!(format_error(risunest_external_storage_format::FormatError("object-authentication-failed")).kind,
+            ErrorKind::Corrupt);
+        assert_eq!(format_error(std::io::Error::from(std::io::ErrorKind::UnexpectedEof).into()).kind,
+            ErrorKind::Corrupt);
+    }
+
     use rusqlite::params;
     use crate::{
         external_storage::{
@@ -6299,7 +6365,7 @@ mod tests {
             assert_eq!(second.hydration, SourceHydration { objects: 1, bytes: 9 });
             assert_eq!(crate::server_sync::residency::test_remote::fetched(root.path()), 1);
             let cas = PayloadCas::new(root.path()).unwrap();
-            assert_eq!(cas.stat_object(&missing).unwrap(), Some(9));
+            assert_eq!(cas.stat_object(&missing).unwrap(), None);
             assert!(cas.stat_object(&held).unwrap().is_none());
             let restored = snapshot_restore::download_snapshot(&second.reference,
                 &root.path().join("restored"), &key, None, snapshot_restore::SourceTrust::Downloaded,
@@ -7461,6 +7527,7 @@ mod tests {
             content_sha256: digest.into(),
             byte_length: key.len() as u64,
             source: ObjectSource::Captured(digest.into()),
+            file_offset: None,
             compression: CompressionPolicy::Text,
         };
         let plan = |kind, key: &str, digest: &str| EntryPlan {

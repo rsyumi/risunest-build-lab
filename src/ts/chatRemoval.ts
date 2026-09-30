@@ -23,11 +23,12 @@ export interface RemoveChatMessageOptions {
     instantRemove: boolean
     captureCurrent(): CurrentChatRemovalTarget | null
     getCurrentSession(): ActiveConversationSession | null
+    mutationBlocked?(): boolean
     confirmRemoval(): Promise<boolean>
     confirmInstantRemoval(): Promise<boolean>
 }
 
-export async function removeChatMessage(options: RemoveChatMessageOptions): Promise<boolean> {
+export async function removeChatMessage(options: RemoveChatMessageOptions): Promise<'removed' | 'cancelled' | 'stale' | 'blocked'> {
     const target = options.captureTarget
         ? options.captureTarget()
         : captureChatMessageTarget({
@@ -35,16 +36,16 @@ export async function removeChatMessage(options: RemoveChatMessageOptions): Prom
             captureCurrent: options.captureCurrent,
             getCurrentSession: options.getCurrentSession,
         })
-    if (!target) return false
+    if (!target) return 'stale'
 
     if (options.shiftKey) return mutateCapturedTarget(options, target, 'truncate')
 
-    if (options.askRemoval && !await options.confirmRemoval()) return false
-    if (!isCurrentTarget(options, target)) return false
+    if (options.askRemoval && !await options.confirmRemoval()) return 'cancelled'
+    if (!isCurrentTarget(options, target)) return 'stale'
 
     if (options.instantRemove || options.recursive) {
         const removeOnlySelected = await options.confirmInstantRemoval()
-        if (!isCurrentTarget(options, target)) return false
+        if (!isCurrentTarget(options, target)) return 'stale'
         return mutateCapturedTarget(
             options,
             target,
@@ -65,9 +66,10 @@ function mutateCapturedTarget(
     options: RemoveChatMessageOptions,
     target: CapturedChatMessageTarget,
     mutation: 'delete' | 'truncate',
-): boolean {
+): 'removed' | 'stale' | 'blocked' {
+    if (options.mutationBlocked?.()) return 'blocked'
     const current = resolveChatMessageTarget(target, options)
-    if (!current) return false
+    if (!current) return 'stale'
     if (current.kind === 'session') {
         const session = requireCurrentConversationSession(
             current.session,
@@ -75,7 +77,7 @@ function mutateCapturedTarget(
         )
         if (mutation === 'delete') session.delete(current.locator)
         else session.truncate(current.locator)
-        return true
+        return 'removed'
     }
     if (mutation === 'delete') {
         current.conversation.message.splice(current.absoluteIndex, 1)
@@ -86,5 +88,5 @@ function mutateCapturedTarget(
             current.absoluteIndex,
         )
     }
-    return true
+    return 'removed'
 }

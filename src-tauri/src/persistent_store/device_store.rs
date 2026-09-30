@@ -24,7 +24,7 @@ pub(crate) mod sections;
 /// The complete set of settings this device file holds. A key outside it is a
 /// caller mistake, so both directions reject it rather than storing a row no
 /// reader will ever ask for.
-pub(crate) const DEVICE_SETTING_KEYS: [&str; 14] = [
+pub(crate) const DEVICE_SETTING_KEYS: [&str; 16] = [
     "accountst",
     "ignoreRisuAuth",
     "dosync",
@@ -33,7 +33,9 @@ pub(crate) const DEVICE_SETTING_KEYS: [&str; 14] = [
     "risu_service_tos_v1",
     "risu_lastsaved",
     "nightlyWarned",
+    "mcpStdioApprovals",
     "risuNestDeviceSettings",
+    "risuNestStartupExclusions",
     "risuNestUpdateSettings",
     "risuNestServerSyncRestoreHold",
     "official-account.association.v1",

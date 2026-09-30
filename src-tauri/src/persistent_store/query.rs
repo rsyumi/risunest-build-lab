@@ -5,6 +5,7 @@ use super::{
     CharacterSummary, ConversationPage, ConversationQuery, ConversationSummary,
     ConversationMessageMetadata, ConversationMessageMetadataWindow, ConversationWindow,
     ConversationWindowQuery, PluginStorageCatalog, PluginStorageListItem, PluginStorageSummary,
+    PluginStorageValue, PluginStorageValueCursor, PluginStorageValueQuery, PluginStorageValuePage,
     PresetCatalog, PresetSummary, QueryOrder, ReadTarget, StoreError, StoreResult, Versioned,
     CONVERSATION_RANGE_MAX_LIMIT, JAVASCRIPT_MAX_SAFE_INTEGER,
 };
@@ -23,11 +24,13 @@ pub(super) fn read_root(
             |row| row.get(0),
         )
         .optional()?;
+    let mut value = value.map_or(Ok(Value::Object(Map::new())), |value| {
+        serde_json::from_str(&value).map_err(StoreError::from)
+    })?;
+    if let Some(root) = value.as_object_mut() { root.shift_remove("account"); }
     Ok(Versioned {
         revision: target.revision,
-        value: value.map_or(Ok(Value::Object(Map::new())), |value| {
-            serde_json::from_str(&value).map_err(StoreError::from)
-        })?,
+        value,
     })
 }
 
@@ -141,6 +144,54 @@ pub(super) fn list_plugin_storage(
         })
     });
     Ok(items.into_iter().map(|(item, _)| item).collect())
+}
+
+pub(super) fn read_plugin_storage_page(
+    connection: &Connection,
+    target: &ReadTarget,
+    input: &PluginStorageValueQuery,
+) -> StoreResult<PluginStorageValuePage> {
+    let limit = input.limit.unwrap_or(256);
+    if !(1..=256).contains(&limit) || input.after_key.as_ref().is_some_and(|cursor| {
+        cursor.ordinal < 0 || cursor.ordinal > JAVASCRIPT_MAX_SAFE_INTEGER
+            || input.owner.as_ref().is_some_and(|owner| owner != &cursor.owner)
+    }) {
+        return Err(StoreError::Validation { message: "Invalid plugin value page query".to_owned() });
+    }
+    let after = input.after_key.as_ref();
+    let owner_filter = if input.owner.is_some() { " AND owner = ?2" } else { "" };
+    let cursor_filter = match (input.owner.is_some(), after.is_some()) {
+        (true, true) => " AND (ordinal, storage_key) > (?4, ?5)",
+        (false, true) => " AND (owner, ordinal, storage_key) > (?3, ?4, ?5)",
+        (_, false) => "",
+    };
+    let sql = format!(
+        "SELECT owner, storage_key, ordinal, byte_size, value FROM plugin_storage
+         WHERE generation = ?1{owner_filter}{cursor_filter}
+         ORDER BY owner, ordinal, storage_key LIMIT ?6",
+    );
+    let mut statement = connection.prepare(&sql)?;
+    let mut rows = statement.query(params![target.generation, input.owner,
+        after.map(|cursor| &cursor.owner), after.map(|cursor| cursor.ordinal),
+        after.map(|cursor| &cursor.key), limit + 1])?;
+    let mut items = Vec::new();
+    let mut bytes = 0_i64;
+    let mut last = None;
+    let mut next_cursor = None;
+    while let Some(row) = rows.next()? {
+        let byte_size: i64 = row.get(3)?;
+        if items.len() >= limit as usize || (!items.is_empty() && bytes.saturating_add(byte_size) > 1024 * 1024) {
+            next_cursor = last;
+            break;
+        }
+        let owner: String = row.get(0)?;
+        let key: String = row.get(1)?;
+        last = Some(PluginStorageValueCursor { owner: owner.clone(), key: key.clone(), ordinal: row.get(2)? });
+        let value: String = row.get(4)?;
+        items.push(PluginStorageValue { owner, key, value: serde_json::from_str(&value)? });
+        bytes = bytes.saturating_add(byte_size);
+    }
+    Ok(PluginStorageValuePage { items, next_cursor, revision: target.revision })
 }
 
 pub(super) fn read_plugin_storage(
@@ -522,44 +573,53 @@ pub(super) fn query_characters(
     if search.is_none() && matches!(query.order, QueryOrder::Configured) {
         return query_configured_characters(connection, query, target);
     }
-    let (limit, offset) = page_input(query.limit, query.cursor.as_deref())?;
-    let order = order_sql(query.order);
+    let (limit, _) = page_input(query.limit, None)?;
+    let recent = matches!(query.order, QueryOrder::Recent);
+    let after: (i64, i64, String) = match query.cursor.as_deref() {
+        Some(cursor) if recent => serde_json::from_str(cursor).map_err(|_| StoreError::Validation {
+            message: "Invalid recent character cursor".to_owned(),
+        })?,
+        Some(cursor) => {
+            let (configured, id): (i64, String) = serde_json::from_str(cursor).map_err(|_| StoreError::Validation {
+                message: "Invalid configured character cursor".to_owned(),
+            })?;
+            (0, configured, id)
+        },
+        None => (i64::MAX, i64::MIN, String::new()),
+    };
+    let predicate = if recent {
+        "(recent_at<?3 OR (recent_at=?3 AND (configured_index,character_id)>(?4,?5)))"
+    } else {
+        "(configured_index,character_id)>(?4,?5)"
+    };
+    let order = if recent { "recent_at DESC, configured_index ASC, character_id ASC" }
+        else { "configured_index ASC, character_id ASC" };
     let mut statement = connection.prepare(&format!(
-        "SELECT {CHARACTER_SUMMARY_COLUMNS}
-         FROM characters
-         WHERE generation = ?1 AND trashed = ?2
-         ORDER BY {order}"
+        "SELECT {CHARACTER_SUMMARY_COLUMNS} FROM characters
+         WHERE generation=?1 AND trashed=?2 AND {predicate} ORDER BY {order}"
     ))?;
-    let mut rows = statement.query(params![target.generation, query.trash as i64])?;
+    let mut rows = statement.query(params![target.generation, query.trash as i64,
+        after.0, after.1, after.2])?;
     let mut items = Vec::new();
-    let mut matched = 0;
     let mut has_more = false;
     while let Some(row) = rows.next()? {
-        let summary = character_summary_from_row(row)?;
-        if search
-            .as_ref()
-            .is_some_and(|search| !summary.name.to_lowercase().contains(search))
-        {
-            continue;
+        if let Some(search) = &search {
+            let name: String = row.get(1)?;
+            if !name.to_lowercase().contains(search) { continue; }
         }
-        if matched < offset {
-            matched += 1;
-            continue;
-        }
-        if items.len() as i64 == limit {
-            has_more = true;
-            break;
-        }
-        items.push(summary);
-        matched += 1;
+        if items.len() as i64 == limit { has_more = true; break; }
+        items.push(character_summary_from_row(row)?);
     }
-    Ok(CharacterPage {
-        revision: target.revision,
-        next_cursor: has_more.then(|| (offset + items.len() as i64).to_string()),
-        items,
-    })
+    let next_cursor = if has_more {
+        let last = items.last().expect("positive page limit");
+        Some(if recent {
+            serde_json::to_string(&(last.recent_at, last.configured_index, &last.id))?
+        } else {
+            serde_json::to_string(&(last.configured_index, &last.id))?
+        })
+    } else { None };
+    Ok(CharacterPage { revision: target.revision, next_cursor, items })
 }
-
 fn query_configured_characters(
     connection: &Connection,
     query: &CharacterQuery,
@@ -1064,6 +1124,7 @@ fn materialize_generation(connection: &Connection, generation: &str) -> StoreRes
         serde_json::from_str(&root)?,
         "Persistent root must be an object",
     )?;
+    database.shift_remove("account");
     let character_records = {
         let mut statement = connection.prepare(
             "SELECT character_id, detail FROM characters

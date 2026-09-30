@@ -1,4 +1,7 @@
 <script lang="ts">
+    import { alertError } from "src/ts/alert";
+    import { importRegex } from "src/ts/process/scripts";
+    import { importPresetRegex } from "src/ts/setting/importPresetRegex";
 
     import Check from "src/lib/UI/GUI/CheckInput.svelte";
     import { language } from "src/lang";
@@ -787,7 +790,7 @@
     </Accordion>
     
     <Accordion styled name={language.regexScript}>
-        <RegexList bind:value={DBState.db.presetRegex} buttons />
+        <RegexList bind:value={DBState.db.presetRegex} buttons onImport={() => importPresetRegex(() => DBState.db, importRegex, () => alertError(language.presetActionFailed))} />
     </Accordion>
 
     <Accordion styled name={language.icon}>

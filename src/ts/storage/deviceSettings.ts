@@ -13,26 +13,21 @@ export interface RisuNestDeviceSettings {
     performanceProfile: RuntimePerformanceProfile
     androidKeepAliveDuringGeneration: boolean
     nativeFileLogEnabled: boolean
-    /**
-     * What every start on this device leaves switched off. Written only after a start that
-     * finished and only when the reader confirms it, and kept per device rather than in the
-     * library, so it never travels through a backup or a sync.
-     */
-    startupExclusions: RecoveryExclusion[]
+
 }
 
 const storageKey = 'risuNestDeviceSettings'
+const exclusionsKey = 'risuNestStartupExclusions'
 
 const defaults: RisuNestDeviceSettings = {
     schema: 'risunest.device-settings/v1',
     performanceProfile: 'normal',
     androidKeepAliveDuringGeneration: true,
     nativeFileLogEnabled: true,
-    startupExclusions: [],
 }
 
 function snapshot(settings: RisuNestDeviceSettings): RisuNestDeviceSettings {
-    return { ...settings, startupExclusions: [...settings.startupExclusions] }
+    return { ...settings }
 }
 
 function isExclusionList(value: unknown): value is RecoveryExclusion[] {
@@ -48,13 +43,12 @@ function isValidSettings(value: unknown): value is RisuNestDeviceSettings {
     if (!value || typeof value !== 'object') return false
     const settings = value as Record<string, unknown>
     return (
-        Object.keys(settings).length === 5 &&
+        Object.keys(settings).length === 4 &&
         settings.schema === defaults.schema &&
         (settings.performanceProfile === 'normal' ||
             settings.performanceProfile === 'low-spec') &&
         typeof settings.androidKeepAliveDuringGeneration === 'boolean' &&
-        typeof settings.nativeFileLogEnabled === 'boolean' &&
-        isExclusionList(settings.startupExclusions)
+        typeof settings.nativeFileLogEnabled === 'boolean'
     )
 }
 
@@ -96,6 +90,14 @@ export function loadDeviceSettings(markers: DeviceMarkerStorage): RisuNestDevice
     settings = readSettings(markers)
     setRuntimePerformanceProfile(settings.performanceProfile)
     return settings
+}
+
+export function reloadDeviceSettings(): RisuNestDeviceSettings {
+    storage = getDeviceMarkers()
+    settings = readSettings(storage)
+    setRuntimePerformanceProfile(settings.performanceProfile)
+    for (const listener of listeners) listener(snapshot(settings))
+    return snapshot(settings)
 }
 
 export function getDeviceSettings(): RisuNestDeviceSettings {
@@ -143,4 +145,20 @@ export function subscribeDeviceSettings(
     initializeSettings()
     listeners.add(listener)
     return () => listeners.delete(listener)
+}
+
+/** Recovery exclusions remain on this installation when portable settings are restored. */
+export function getStartupExclusions(): RecoveryExclusion[] {
+    initializeSettings()
+    try {
+        const value: unknown = JSON.parse(storage?.getItem(exclusionsKey) ?? '[]')
+        return isExclusionList(value) ? [...value] : []
+    } catch { return [] }
+}
+
+export function updateStartupExclusions(exclusions: readonly RecoveryExclusion[]): void {
+    initializeSettings()
+    if (!isExclusionList(exclusions)) throw new Error('Invalid startup exclusions')
+    storage?.setItem(exclusionsKey, JSON.stringify([...new Set(exclusions)]))
+    void flushDeviceSettings().catch(reportStoreFailure)
 }

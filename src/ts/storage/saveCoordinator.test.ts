@@ -123,7 +123,7 @@ describe('SaveCoordinator', () => {
         expect(coordinator.revision).toBe(4)
     })
 
-    it('captures root and the selected character without traversing inactive characters', async () => {
+    it('SaveCoordinator flush does not traverse inactive characters', async () => {
         const database = makeDatabase()
         const inactive = makeDatabase().characters[0]
         Object.defineProperty(inactive, 'chats', {
@@ -573,7 +573,6 @@ describe('SaveCoordinator', () => {
             conversationId: 'two',
             conversation: database.characters[0].chats[1],
             storeRevision: 2,
-            maxResidentBytes: 0,
             measureMessage: () => 1,
             onMutation: (event) => coordinator.recordActiveConversationMutation(event),
         })
@@ -703,7 +702,6 @@ describe('SaveCoordinator', () => {
             conversationId: 'two',
             conversation: database.characters[0].chats[1],
             storeRevision: 2,
-            maxResidentBytes: 0,
             measureMessage: () => 1,
             onMutation: (event) => coordinator.recordActiveConversationMutation(event),
         })
@@ -763,7 +761,6 @@ describe('SaveCoordinator', () => {
             conversationId: 'two',
             conversation: database.characters[0].chats[1],
             storeRevision: 2,
-            maxResidentBytes: 0,
             measureMessage: () => 1,
             onMutation: (event) => coordinator.recordActiveConversationMutation(event),
         })
@@ -815,7 +812,6 @@ describe('SaveCoordinator', () => {
             conversationId: 'two',
             conversation,
             storeRevision: 2,
-            maxResidentBytes: 0,
             measureMessage: () => 1,
             onMutation: (event) => coordinator.recordActiveConversationMutation(event),
         })
@@ -2226,12 +2222,7 @@ describe('SaveCoordinator', () => {
         database.username = 'Completed generation revision'
         coordinator.markPersistentDataDirty(1)
 
-        const result = await Promise.race([
-            coordinator.flushPendingDataLocally('generation-completion').then(() => 'committed'),
-            new Promise<string>((resolve) => setTimeout(() => resolve('blocked'), 25)),
-        ])
-
-        expect(result).toBe('committed')
+        await coordinator.flushPendingDataLocally('generation-completion')
         expect(commit).toHaveBeenCalledTimes(2)
         expect(coordinator.revision).toBe(3)
         expect(coordinator.hasPendingOfficialPublication).toBe(true)
@@ -2256,12 +2247,7 @@ describe('SaveCoordinator', () => {
         coordinator.markPersistentDataDirty(1)
 
         void coordinator.flushPendingData('ordinary-save')
-        const result = await Promise.race([
-            coordinator.flushPendingDataLocally('generation-completion').then(() => 'committed'),
-            new Promise<string>((resolve) => setTimeout(() => resolve('blocked'), 25)),
-        ])
-
-        expect(result).toBe('committed')
+        await coordinator.flushPendingDataLocally('generation-completion')
         expect(commit).toHaveBeenCalledOnce()
         expect(coordinator.revision).toBe(2)
         expect(coordinator.hasPendingOfficialPublication).toBe(true)
@@ -2297,12 +2283,7 @@ describe('SaveCoordinator', () => {
 
         database.username = 'Completed generation'
         coordinator.markPersistentDataDirty(1)
-        const result = await Promise.race([
-            coordinator.flushPendingDataLocally('generation-completion').then(() => 'committed'),
-            new Promise<string>((resolve) => setTimeout(() => resolve('blocked'), 25)),
-        ])
-
-        expect(result).toBe('committed')
+        await coordinator.flushPendingDataLocally('generation-completion')
         expect(commit).toHaveBeenCalledTimes(2)
         expect(dispose).toHaveBeenCalledOnce()
     })
@@ -2455,7 +2436,7 @@ describe('SaveCoordinator', () => {
             await vi.advanceTimersByTimeAsync(3_000)
 
             expect(publish).toHaveBeenCalledOnce()
-            expect(onBackgroundError).toHaveBeenCalledOnce()
+            expect(onBackgroundError).not.toHaveBeenCalled()
             coordinator.releaseDestructiveReplacementFence(fence)
             await vi.advanceTimersByTimeAsync(3_000)
             expect(publish).toHaveBeenCalledTimes(2)

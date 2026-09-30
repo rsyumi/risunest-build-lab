@@ -55,11 +55,8 @@ vi.mock('src/ts/process/coldstorage.svelte', () => ({
 }))
 vi.mock('src/ts/platform', () => ({ isTauri: false, isTauriDesktop: false }))
 vi.mock('@tauri-apps/plugin-fs', () => ({ BaseDirectory: {}, open: vi.fn(), readFile: vi.fn(), writeFile: vi.fn() }))
-vi.mock('@tauri-apps/plugin-process', () => ({ relaunch: vi.fn() }))
-vi.mock('src/ts/drive/legacyLocalBackupFileRouteProduction.svelte', () => ({
-    exportLegacyLocalBackupFromSystemPicker: vi.fn(),
-    importLegacyLocalBackupFromSystemPicker: vi.fn(),
-}))
+vi.mock('../desktopRelaunch', () => ({ relaunch: vi.fn() }))
+
 vi.mock('src/ts/util', () => ({
     decryptBuffer: vi.fn(), encryptBuffer: vi.fn(), sleep: vi.fn(async () => undefined),
 }))
@@ -88,7 +85,7 @@ function databaseEntry() {
     return entry('database.risudat', encodeRisuSaveLegacy(structuredClone(risuSaveFixtureDatabase), 'compression'))
 }
 
-async function restore(bytes: Uint8Array, controller = new AbortController()) {
+async function restore(bytes: Uint8Array, controller = new AbortController(), lifecycle: { beforeActivation?(): Promise<void>; onCommitted?(): void } = {}) {
     const { importLegacyBackupWithWebView } = await import('src/ts/drive/backuplocal')
     const input = {
         type: '', accept: '',
@@ -106,13 +103,14 @@ async function restore(bytes: Uint8Array, controller = new AbortController()) {
         signal: controller.signal,
         onStatus: vi.fn(), setSource: vi.fn(), setPartialWritesPossible: vi.fn(),
     }
-    const pending = importLegacyBackupWithWebView(context)
+    const pending = importLegacyBackupWithWebView(context, lifecycle)
     input.onchange!()
     return pending
 }
 
 afterEach(() => {
     vi.restoreAllMocks()
+    vi.unstubAllGlobals()
     state.blobs.clear()
     state.metadata.clear()
     state.afterPut.mockReset()
@@ -120,6 +118,48 @@ afterEach(() => {
 })
 
 describe('legacy WebView restore integrity', () => {
+    it('restores an extensionless PocketRisu JSON inlay after the replacement handshake', async () => {
+        const payload = new TextEncoder().encode(JSON.stringify({
+            name: 'old.png', data: 'data:image/png;base64,CQgH', ext: 'png', type: 'image', width: 3, height: 1,
+        }))
+        const events: string[] = []
+        state.replace.mockImplementationOnce(async () => {
+            events.push('commit')
+            return { kind: 'committed', revision: 2, projection: 'applied' }
+        })
+        await restore(archive(entry('inlay/legacy-image', payload), databaseEntry()), new AbortController(), {
+            beforeActivation: async () => { expect(state.blobs.size).toBe(0); events.push('handshake') },
+            onCommitted: () => { events.push('hold-sync') },
+        })
+        expect(events).toEqual(['handshake', 'commit', 'hold-sync'])
+        expect(state.blobs.get('legacy-image')).toEqual(new Uint8Array([9, 8, 7]))
+    })
+
+    it('decrypts a synthetic account-encrypted backup through the compatibility importer', async () => {
+        const { decryptBuffer } = await import('src/ts/util')
+        const encoded = encodeRisuSaveLegacy(structuredClone(risuSaveFixtureDatabase), 'compression')
+        vi.mocked(decryptBuffer).mockResolvedValueOnce(Uint8Array.from(encoded).buffer)
+        const fetchKey = vi.fn(async () => new Response(JSON.stringify({ key: 'synthetic-key' })))
+        vi.stubGlobal('fetch', fetchKey)
+        await restore(archive(
+            entry('encryption.risudat', new TextEncoder().encode(JSON.stringify({ type: 'account', time: 123 }))),
+            entry('database.risudat', new Uint8Array([1, 2, 3])),
+        ))
+        expect(fetchKey).toHaveBeenCalledWith('https://sv.risuai.xyz/cryptokey?key=123')
+        expect(decryptBuffer).toHaveBeenCalledWith(new Uint8Array([1, 2, 3]), 'synthetic-key')
+        expect(state.replace).toHaveBeenCalledOnce()
+    })
+
+    it('does not activate attachments or replace the library when the replacement handshake rejects', async () => {
+        const onCommitted = vi.fn()
+        await expect(restore(archive(entry('synthetic.png', new Uint8Array([1])), databaseEntry()), new AbortController(), {
+            beforeActivation: async () => { throw new Error('pending sync operation') }, onCommitted,
+        })).rejects.toThrow('pending sync operation')
+        expect(state.replace).not.toHaveBeenCalled()
+        expect(state.blobs.size).toBe(0)
+        expect(onCommitted).not.toHaveBeenCalled()
+    })
+
     it.each([1, 3, 6, 12, 15, 17])('rejects a trailing frame truncated at byte %s', async (length) => {
         const damaged = entry('file.png', new Uint8Array([1, 2, 3]))
         await expect(restore(archive(databaseEntry(), damaged.subarray(0, length))))

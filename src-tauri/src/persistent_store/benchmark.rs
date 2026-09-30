@@ -627,7 +627,7 @@ fn run_sample(database: &Value, root: &Value) -> Sample {
                     conversation: None,
                     configured_index: None,
                 }]),
-                delete_character_id: None,
+                delete_character_ids: None,
                 asset_owner_heads: None,
                 plugin_storage: None,
             })
@@ -903,7 +903,7 @@ fn run_post_lease_commit_benchmark(database: &Value) -> Vec<PostLeaseCommitSampl
                     replace_character: None,
                     add_character: None,
                     conversations: None,
-                    delete_character_id: None,
+                    delete_character_ids: None,
                     asset_owner_heads: None,
                     plugin_storage: Some(vec![PluginStorageMutation::Set {
                         owner: "synthetic-plugin".to_owned(),
@@ -929,7 +929,7 @@ fn run_post_lease_commit_benchmark(database: &Value) -> Vec<PostLeaseCommitSampl
                     replace_character: None,
                     add_character: None,
                     conversations: None,
-                    delete_character_id: None,
+                    delete_character_ids: None,
                     asset_owner_heads: None,
                     plugin_storage: None,
                 },
@@ -957,7 +957,7 @@ fn run_post_lease_commit_benchmark(database: &Value) -> Vec<PostLeaseCommitSampl
                         conversation: None,
                         configured_index: None,
                     }]),
-                    delete_character_id: None,
+                    delete_character_ids: None,
                     asset_owner_heads: None,
                     plugin_storage: None,
                 },
@@ -1345,3 +1345,5 @@ fn hypa_embedding_cache_measurements() {
     }
     println!("{encoded}");
 }
+
+mod lease_release;

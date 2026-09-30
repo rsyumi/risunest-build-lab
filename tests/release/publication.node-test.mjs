@@ -21,7 +21,8 @@ function setup({ latest = true, product = "app", version = "1.1.0" } = {}) {
   const events = [];
   const github = {
     latest: latest ? oldRelease : null,
-    async getByTag(tag) { return tag === nextRelease.tag_name ? nextRelease : oldRelease; },
+    async getByTag(tag) { return [nextRelease, oldRelease].find(release => release.tag_name === tag && !release.draft) ?? null; },
+    async getById(id) { return [nextRelease, oldRelease].find(release => release.id === id) ?? null; },
     async getLatest() { return this.latest; },
     async assertTagCommit() {},
     async hasPublishedStable() { return false; },
@@ -31,7 +32,7 @@ function setup({ latest = true, product = "app", version = "1.1.0" } = {}) {
     async publish() { events.push("publish"); nextRelease.draft = false; this.latest = nextRelease; },
     async makeLatest() { events.push("make-latest"); this.latest = nextRelease; },
   };
-  const options = { github, productBytes, productSignature: signer.sign(productBytes), publicKey: signer.key,
+  const options = { github, releaseId: nextRelease.id, productBytes, productSignature: signer.sign(productBytes), publicKey: signer.key,
     expectedProduct: product, expectedTag: release.tag, expectedCommit: release.sourceCommit,
     publishedAt: "2026-09-16T00:00:00Z", signCatalog: async bytes => signer.sign(bytes),
     verifyAssets: async () => { events.push("verify-assets"); } };
@@ -143,4 +144,23 @@ test("moving a tag after artifact upload prevents final publication", async () =
   await assert.rejects(publishRelease(t.options), /tag-commit-mismatch/);
   assert.equal(t.nextRelease.draft, true);
   assert.equal(t.events.includes("publish"), false);
+});
+
+test("publication requires the prepared release ID and rejects identity changes", async () => {
+  for (const mutate of [t => delete t.options.releaseId, t => t.options.releaseId = 9,
+    t => t.nextRelease.tag_name = "app-v9.0.0", t => t.nextRelease.prerelease = true]) {
+    const t = setup(); mutate(t);
+    await assert.rejects(publishRelease(t.options), /publication-release/);
+    assert.deepEqual(t.events, []);
+  }
+});
+
+test("draft identity is rechecked before publication and another published tag owner is rejected", async () => {
+  for (const mutate of [t => t.nextRelease.prerelease = true,
+    t => t.options.github.getByTag = async () => ({ id: 99, draft: false })]) {
+    const t = setup();
+    t.options.verifyAssets = async () => mutate(t);
+    await assert.rejects(publishRelease(t.options), /draft-changed-before-publish|publication-release-mismatch/);
+    assert.equal(t.events.includes("publish"), false);
+  }
 });

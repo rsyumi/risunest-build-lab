@@ -73,6 +73,7 @@ private const val MANAGED_SCREENSHOT_OWNERSHIP = "ownership"
 private const val MANAGED_SCREENSHOT_READY = "ready"
 
 internal interface SafInputSource {
+  val operationId: String? get() = null
   val displayName: String
   val totalBytes: Long?
   fun open(): InputStream
@@ -90,6 +91,7 @@ internal data class SafSpoolReady(
   val bytes: Long,
   val totalBytes: Long?,
   val importDestination: SafContentImportDestination? = null,
+  val operationId: String? = null,
 )
 
 internal enum class SafContentImportDestination(val wireName: String) {
@@ -159,8 +161,11 @@ internal class SafSpoolStore(
   ): SafSpoolBatch {
     root.mkdirs()
     val ready = mutableListOf<SafSpoolReady>()
+    val existing = listReady().filter { it.operationId != null }.associateBy { it.operationId }
     val failures = mutableListOf<SafSpoolFailure>()
     for (source in sources) {
+      val prior = source.operationId?.let { existing[it] }
+      if (prior != null) { ready.add(prior); continue }
       val displayName = safeSafDisplayName(source.displayName)
       val token = tokenFactory().toString()
       if (!CANONICAL_TOKEN.matches(token)) {
@@ -182,6 +187,7 @@ internal class SafSpoolStore(
           bytes = null,
           totalBytes = source.totalBytes,
           importDestination = importDestination,
+          operationId = source.operationId,
         )
         val copiedBytes = copySource(
           source,
@@ -198,6 +204,7 @@ internal class SafSpoolStore(
           bytes = copiedBytes,
           totalBytes = source.totalBytes,
           importDestination = importDestination,
+          operationId = source.operationId,
         )
         atomicPublisher.publish(stagingDirectory, ownedDirectory)
         ready.add(SafSpoolReady(
@@ -206,6 +213,7 @@ internal class SafSpoolStore(
           copiedBytes,
           source.totalBytes,
           importDestination,
+          source.operationId,
         ))
       } catch (error: SafSpoolException) {
         deleteGeneratedDirectory(stagingDirectory, token)
@@ -373,6 +381,7 @@ internal class SafSpoolStore(
     bytes: Long?,
     totalBytes: Long?,
     importDestination: SafContentImportDestination?,
+    operationId: String?,
   ) {
     val json = "{" +
       "\"token\":${jsonString(token)}," +
@@ -380,6 +389,7 @@ internal class SafSpoolStore(
       "\"displayName\":${jsonString(displayName)}," +
       "\"bytes\":${bytes ?: "null"}," +
       "\"totalBytes\":${totalBytes ?: "null"}," +
+      "\"operationId\":" + (operationId?.let { jsonString(it) } ?: "null") + "," +
       "\"importDestination\":" +
       (importDestination?.let { jsonString(it.wireName) } ?: "null") +
       "}"
@@ -710,17 +720,14 @@ private class SafSpoolException(
 
 internal fun safeSafDisplayName(name: String): String {
   val leaf = name.substringAfterLast('/').substringAfterLast('\\')
-  val safe = leaf.replace(Regex("[^A-Za-z0-9._-]"), "_")
-  if (safe.isBlank()) return "opened-file"
-  if (safe.length <= MAX_DISPLAY_NAME_CHARS) return safe
+  val safe = java.text.Normalizer.normalize(leaf, java.text.Normalizer.Form.NFC)
+    .filterNot { it.isISOControl() || it in '\u202a'..'\u202e' || it in '\u2066'..'\u2069' }
+  if (safe.isBlank() || safe == "." || safe == "..") return "opened-file"
+  if (safe.codePointCount(0, safe.length) <= MAX_DISPLAY_NAME_CHARS) return safe
   val suffix = NATIVE_FILE_JOB_SPOOL_SUFFIXES.firstOrNull { extension ->
     safe.endsWith(extension, ignoreCase = true)
-  }?.let { extension -> safe.takeLast(extension.length) }
-  return if (suffix == null) {
-    safe.take(MAX_DISPLAY_NAME_CHARS)
-  } else {
-    safe.take(MAX_DISPLAY_NAME_CHARS - suffix.length) + suffix
-  }
+  }?.let { extension -> safe.takeLast(extension.length) } ?: ""
+  return safe.substring(0, safe.offsetByCodePoints(0, MAX_DISPLAY_NAME_CHARS - suffix.length)) + suffix
 }
 
 internal fun safeSafDestinationName(name: String): String {
@@ -785,7 +792,9 @@ private fun readReadySpool(directory: File, token: String): SafSpoolReady? {
     !source.isFile ||
     source.length() != bytes
   ) return null
-  return SafSpoolReady(token, displayName, bytes, totalBytes, importDestination)
+  val operationId = stringField(json, "operationId")
+  if (operationId != null && !Regex("[0-9a-f]{64}").matches(operationId)) return null
+  return SafSpoolReady(token, displayName, bytes, totalBytes, importDestination, operationId)
 }
 
 private fun spoolReadyJson(ready: List<SafSpoolReady>): String = ready.joinToString(",") { source ->

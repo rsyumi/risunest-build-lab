@@ -241,13 +241,17 @@ pub(crate) async fn resume_existing(
     let had_descriptors = !descriptors.is_empty();
     let mut descriptor = None;
     for locator in descriptors {
-        if read(root, provider, repository, &locator, expected, root_key, cancel)
-            .await
-            .is_ok()
-        {
-            if descriptor.replace(locator).is_some() {
+        match read(root, provider, repository, &locator, expected, root_key, cancel).await {
+            Ok(_) => {
+                if descriptor.replace(locator).is_some() {
+                    return Err(ProviderError::new(ErrorKind::PreconditionFailed));
+                }
+            }
+            Err(error) if error.kind == ErrorKind::Corrupt => {}
+            Err(error) if error.kind == ErrorKind::NotFound => {
                 return Err(ProviderError::new(ErrorKind::PreconditionFailed));
             }
+            Err(error) => return Err(error),
         }
     }
     if descriptor.is_none() && had_descriptors {
@@ -261,6 +265,50 @@ pub(crate) async fn resume_existing(
 mod tests {
     use super::*;
     use crate::external_storage::fake;
+
+
+    #[test]
+    fn resume_preserves_operational_descriptor_errors_without_writes() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            for kind in [ErrorKind::Transient, ErrorKind::Cancelled, ErrorKind::RateLimited,
+                ErrorKind::Unauthorized, ErrorKind::NotFound, ErrorKind::Corrupt] {
+                let root = tempfile::tempdir().unwrap();
+                let provider = fake::FakeProvider::new(true);
+                let repository = fake::repository();
+                let expected = expected_descriptor();
+                let locator = upload(root.path(), &provider, &repository, &expected, &[7;32], &Cancellation::default()).await.unwrap();
+                let uploads = provider.uploaded_ids();
+                provider.fail_read(&locator.object, kind);
+                let error = resume_existing(root.path(), &provider, &repository, &expected, &[7;32], &Cancellation::default())
+                    .await.unwrap_err();
+                let expected = if kind == ErrorKind::NotFound { ErrorKind::PreconditionFailed } else { kind };
+                assert_eq!(error.kind, expected);
+                assert_eq!(provider.uploaded_ids(), uploads);
+                assert!(provider.deletion_order().is_empty());
+            }
+        });
+    }
+
+    #[test]
+    fn one_authenticated_descriptor_does_not_hide_an_unresolved_candidate() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let root = tempfile::tempdir().unwrap();
+            let provider = fake::FakeProvider::new(true);
+            let repository = fake::repository();
+            let expected = expected_descriptor();
+            provider.set_upload_locator(&expected.repository_id, "a-authenticated");
+            upload(root.path(), &provider, &repository, &expected, &[7;32], &Cancellation::default()).await.unwrap();
+            provider.seed("z-unresolved", ObjectRole::Descriptor, vec![1]);
+            provider.fail_read("z-unresolved", ErrorKind::RateLimited);
+            let uploads = provider.uploaded_ids();
+            assert_eq!(resume_existing(root.path(), &provider, &repository, &expected, &[7;32], &Cancellation::default())
+                .await.unwrap_err().kind, ErrorKind::RateLimited);
+            assert_eq!(provider.read_attempts("a-authenticated"), 1);
+            assert_eq!(provider.read_attempts("z-unresolved"), 1);
+            assert_eq!(provider.uploaded_ids(), uploads);
+            assert!(provider.deletion_order().is_empty());
+        });
+    }
 
     fn expected_descriptor() -> Descriptor {
         Descriptor::new("pending-descriptor-id".into(), None).unwrap()

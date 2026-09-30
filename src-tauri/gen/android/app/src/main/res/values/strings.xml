@@ -16,4 +16,10 @@
     <string name="background_import">Importing</string>
     <string name="background_export">Exporting</string>
     <string name="background_maintenance">Cleaning up</string>
+    <string name="exit_still_saving">Saving is still in progress</string>
+    <string name="exit_without_saving_warning">Exiting now may lose unsaved changes.</string>
+    <string name="exit_wait">Wait</string>
+    <string name="exit_now">Exit</string>
+    <string name="completion_notification_channel">Response completion</string>
+    <string name="opened_file_prepare_failed">The selected file could not be prepared for import. Open it again to retry.</string>
 </resources>

@@ -1,6 +1,8 @@
 // @vitest-environment happy-dom
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
+import ts from 'typescript'
 
 const { checkpointNativePersistentStore } = vi.hoisted(() => ({
     checkpointNativePersistentStore: vi.fn(async () => undefined),
@@ -13,6 +15,46 @@ vi.mock('./nativePersistentMaintenance', () => ({ checkpointNativePersistentStor
 vi.mock('../platform', () => ({ isTauri: false }))
 
 import { registerLifecycleCommitListeners } from './lifecycleCommit'
+import {
+    captureRoot,
+    deferred,
+    makeDatabase,
+    makeStore,
+    SaveCoordinator,
+} from './saveCoordinator.testSupport'
+
+type LifecycleFlush = NonNullable<Parameters<typeof registerLifecycleCommitListeners>[0]>
+
+function bootstrapLifecycleFlush(
+    runtime: Pick<SaveCoordinator, 'flushPendingData' | 'flushPendingDataLocally'>,
+    desktop: boolean,
+    platform: string,
+): LifecycleFlush {
+    const source = readFileSync('src/ts/bootstrap.ts', 'utf8')
+    const ast = ts.createSourceFile('bootstrap.ts', source, ts.ScriptTarget.Latest, true)
+    let lifecycleInitializer: ts.Expression | undefined
+    let flushArgument: ts.Expression | undefined
+    const visit = (node: ts.Node): void => {
+        if (ts.isVariableDeclaration(node) && node.name.getText(ast) === 'flushLifecycle') {
+            lifecycleInitializer = node.initializer
+        }
+        if (ts.isCallExpression(node) && node.expression.getText(ast) === 'registerLifecycleCommitListeners') {
+            flushArgument = node.arguments[0]
+        }
+        ts.forEachChild(node, visit)
+    }
+    visit(ast)
+    if (!lifecycleInitializer || !flushArgument) throw new Error('Missing bootstrap lifecycle flush injection')
+    const body = ts.transpileModule(
+        `const flushLifecycle = ${lifecycleInitializer.getText(ast)}; const flush = ${flushArgument.getText(ast)};`,
+        { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None } },
+    ).outputText
+    return new Function(
+        'runtime', 'isTauriDesktop', 'nativePlatform',
+        'forgetInlayProviderImages', 'releaseIdleTransformerModels',
+        `${body}\nreturn flush;`,
+    )(runtime, desktop, () => platform, vi.fn(), vi.fn(async () => undefined)) as LifecycleFlush
+}
 
 const originalVisibilityState = Object.getOwnPropertyDescriptor(document, 'visibilityState')
 
@@ -33,6 +75,94 @@ afterEach(() => {
 })
 
 describe('registerLifecycleCommitListeners', () => {
+    it.each([
+        [true, 'windows', 'stop', true],
+        [true, 'windows', 'exit', false],
+        [true, 'windows', 'trim-memory', false],
+        [true, 'windows', 'pagehide', false],
+        [true, 'windows', 'visibility-hidden', false],
+        [true, 'macos', 'stop', false],
+        [true, 'linux', 'stop', false],
+        [false, 'android', 'stop', false],
+        [false, 'ios', 'stop', false],
+        [false, 'windows', 'stop', false],
+    ] as const)('uses bootstrap lifecycle persistence policy (desktop=%s, platform=%s, reason=%s)', async (
+        desktop, platform, reason, locally,
+    ) => {
+        const runtime = {
+            flushPendingData: vi.fn(async () => undefined),
+            flushPendingDataLocally: vi.fn(async () => undefined),
+        }
+        await bootstrapLifecycleFlush(runtime, desktop, platform)(reason)
+        expect(runtime.flushPendingData.mock.calls).toEqual(locally ? [] : [[reason]])
+        expect(runtime.flushPendingDataLocally.mock.calls).toEqual(locally ? [[reason]] : [])
+    })
+
+    it('commits a newer Windows stop edit and acknowledges before a pending official publication settles', async () => {
+        const database = makeDatabase()
+        const publication = deferred<void>()
+        const checkpointDone = deferred<void>()
+        const order: string[] = []
+        const publish = vi.fn(() => publication.promise)
+        const pin = vi.fn(async () => ({ publish, dispose: vi.fn(async () => undefined) }))
+        const commit = vi.fn(async ({ expectedRevision }) => {
+            order.push(`commit-${expectedRevision + 1}`)
+            return { revision: expectedRevision + 1 }
+        })
+        const coordinator = new SaveCoordinator({
+            store: makeStore(commit),
+            captureRoot: () => captureRoot(database),
+            captureSelectedCharacter: () => database.characters[0],
+            replaceDatabase: () => undefined,
+            officialPublisher: { pin },
+            clock: { setTimeout: () => undefined, clearTimeout: () => undefined },
+        })
+        coordinator.initialize(1)
+        database.username = 'Synthetic published edit'
+        coordinator.markPersistentDataDirty(1)
+        const ordinaryFlush = coordinator.flushPendingData('ordinary-save')
+        await vi.waitFor(() => expect(publish).toHaveBeenCalledOnce())
+        database.username = 'Synthetic Windows shutdown edit'
+        coordinator.markPersistentDataDirty(1)
+        const onFlushComplete = vi.fn(() => { order.push('ack') })
+        const exitCoordinator = { requestExit: vi.fn(async () => 'exit' as const) }
+        ;(window as any).RisuLifecycleBridge = { onFlushComplete }
+        const checkpoint = vi.fn(() => {
+            order.push('checkpoint')
+            return checkpointDone.promise
+        })
+        const dispose = registerLifecycleCommitListeners(
+            bootstrapLifecycleFlush(coordinator, true, 'windows'),
+            exitCoordinator,
+            checkpoint,
+        )
+        try {
+            window.dispatchEvent(new CustomEvent('risu-native-lifecycle', {
+                detail: { reason: 'stop', ackToken: 'windows-session-end' },
+            }))
+            await vi.waitFor(() => expect(checkpoint).toHaveBeenCalledWith('truncate'))
+            expect(commit).toHaveBeenCalledTimes(2)
+            expect(commit).toHaveBeenNthCalledWith(2, expect.objectContaining({
+                expectedRevision: 2,
+                rootMutations: [{ type: 'set', key: 'username', value: 'Synthetic Windows shutdown edit' }],
+            }))
+            expect(coordinator.revision).toBe(3)
+            expect(onFlushComplete).not.toHaveBeenCalled()
+            checkpointDone.resolve()
+            await vi.waitFor(() => expect(onFlushComplete).toHaveBeenCalledExactlyOnceWith('windows-session-end'))
+            expect(order).toEqual(['commit-2', 'commit-3', 'checkpoint', 'ack'])
+            expect(coordinator.hasPendingOfficialPublication).toBe(true)
+            expect(pin).toHaveBeenCalledExactlyOnceWith(2)
+            expect(exitCoordinator.requestExit).not.toHaveBeenCalled()
+        } finally {
+            checkpointDone.resolve()
+            publication.reject(new Error('Synthetic publication teardown'))
+            await ordinaryFlush.catch(() => undefined)
+            dispose()
+            delete (window as any).RisuLifecycleBridge
+        }
+    })
+
     it('flushes every pagehide event', () => {
         const flush = vi.fn(async () => undefined)
         const dispose = registerLifecycleCommitListeners(flush)
@@ -604,8 +734,37 @@ describe('registerLifecycleCommitListeners', () => {
             expect(bridge.requestExit).not.toHaveBeenCalled()
             finish('exit')
             await vi.waitFor(() => expect(bridge.requestExit).toHaveBeenCalledOnce())
-            expect(bridge.onFlushHold).toHaveBeenCalledExactlyOnceWith('exit-first')
+            expect(bridge.onFlushHold.mock.calls).toEqual([['exit-first'], ['exit-duplicate']])
             dispose()
+        })
+
+        it('holds every repeated token while a cancelled decision and its timers settle', async () => {
+            vi.useFakeTimers()
+            const pending = new Set<string>()
+            const nativeFinish = vi.fn()
+            const bridge = {
+                onFlushHold: vi.fn((token: string) => pending.delete(token)),
+                requestExit: vi.fn(),
+                exitListenerReady: vi.fn(),
+            }
+            ;(window as any).RisuLifecycleBridge = bridge
+            let resolve!: (result: 'cancelled') => void
+            const coordinator = { requestExit: vi.fn(() => new Promise<'cancelled'>(r => { resolve = r })) }
+            const dispose = registerLifecycleCommitListeners(undefined, coordinator)
+            expect(bridge.exitListenerReady).toHaveBeenCalledWith(true)
+            for (const token of ['first', 'second']) {
+                pending.add(token)
+                setTimeout(() => { if (pending.delete(token)) nativeFinish() }, 1500)
+                window.dispatchEvent(new CustomEvent('risu-native-lifecycle', { detail: { reason: 'exit', ackToken: token } }))
+            }
+            resolve('cancelled')
+            await vi.runAllTimersAsync()
+            expect(coordinator.requestExit).toHaveBeenCalledOnce()
+            expect(nativeFinish).not.toHaveBeenCalled()
+            expect(bridge.requestExit).not.toHaveBeenCalled()
+            dispose()
+            expect(bridge.exitListenerReady).toHaveBeenLastCalledWith(false)
+            vi.useRealTimers()
         })
 
         it('keeps the native window open when the coordinated drain cancels exit', async () => {

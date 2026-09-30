@@ -129,9 +129,7 @@ fn settings(config: &ConnectionConfig) -> Result<Settings> {
         Some(_) => return Err(unsupported()),
     };
     let mut endpoint = Url::parse(&config.endpoint).map_err(|_| unsupported())?;
-    // The product transport allows plain HTTP only for the loopback fixture.
-    let loopback = endpoint.scheme() == "http" && endpoint.host_str() == Some("127.0.0.1");
-    if (endpoint.scheme() != "https" && !loopback)
+    if !super::super::http::user_endpoint_allowed(&endpoint)
         || endpoint.cannot_be_a_base()
         || !endpoint.username().is_empty()
         || endpoint.password().is_some()
@@ -398,21 +396,15 @@ fn capabilities(_profile: Profile) -> Capabilities {
     }
 }
 
-/// What a synthetic round trip proved about one deployment's conditional
-/// writes. Carries no credential and no server text, so the owner can persist
-/// it beside the connection.
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct ConditionalWriteProbe {
-    pub create_if_absent: bool,
-    pub exact_version_update: bool,
-    pub strong_version_token: bool,
-    pub probed_at_ms: u64,
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListingCursor {
+    identity: String,
+    folder: String,
+    after: String,
 }
 
 struct Listing {
-    identity: String,
-    folder: String,
     expires: u64,
     objects: std::collections::VecDeque<ObjectReceipt>,
 }
@@ -730,118 +722,6 @@ impl WebdavProvider {
         })
     }
 
-    async fn probe_write(
-        &self,
-        context: &RepositoryContext,
-        url: &Url,
-        condition: &str,
-        value: String,
-        body: &'static [u8],
-        cancel: &Cancellation,
-    ) -> Result<HttpResponse> {
-        let mut request = self.request(
-            context,
-            reqwest::Method::PUT,
-            url.clone(),
-            ProviderOperation::CompareExchangeHead,
-        );
-        request.headers.insert(condition.to_owned(), value);
-        request
-            .headers
-            .insert("content-type".to_owned(), OCTET_STREAM.to_owned());
-        request.body = Some(Box::pin(std::io::Cursor::new(body)) as _);
-        request.content_length = Some(body.len() as u64);
-        self.send(request, cancel).await
-    }
-    async fn run_probe(
-        &self,
-        context: &RepositoryContext,
-        url: &Url,
-        probe: &mut ConditionalWriteProbe,
-        cancel: &Cancellation,
-    ) -> Result<()> {
-        let accepted = [200, 201, 204];
-        let first = self
-            .probe_write(
-                context,
-                url,
-                "if-none-match",
-                "*".into(),
-                b"probe-1",
-                cancel,
-            )
-            .await?;
-        self.require(&first, &accepted)?;
-        let token = strong_etag(&first.headers);
-        probe.strong_version_token = token.is_some();
-        let second = self
-            .probe_write(
-                context,
-                url,
-                "if-none-match",
-                "*".into(),
-                b"probe-2",
-                cancel,
-            )
-            .await?;
-        self.require(&second, &[200, 201, 204, 412])?;
-        probe.create_if_absent = second.status == 412;
-        let Some(token) = token.filter(|_| probe.create_if_absent) else {
-            return Ok(());
-        };
-        let stale = self
-            .probe_write(
-                context,
-                url,
-                "if-match",
-                "\"risunest-probe-stale\"".into(),
-                b"probe-3",
-                cancel,
-            )
-            .await?;
-        self.require(&stale, &[200, 201, 204, 412])?;
-        if stale.status != 412 {
-            return Ok(());
-        }
-        // A deployment that refuses every `If-Match` is not doing CAS either,
-        // so the current tag has to be accepted before this counts.
-        let current = self
-            .probe_write(context, url, "if-match", token.0, b"probe-4", cancel)
-            .await?;
-        self.require(&current, &[200, 201, 204, 412])?;
-        probe.exact_version_update = current.status != 412;
-        Ok(())
-    }
-}
-
-/// A synthetic conditional-write round trip on a throwaway object below the
-/// root, for the owner to run once during connection setup and persist.
-/// `open_repository` never reports CAS on its own.
-pub(crate) async fn probe_conditional_writes(
-    dependencies: &Dependencies,
-    config: &ConnectionConfig,
-    secret: &SecretRef,
-    cancel: &Cancellation,
-) -> Result<ConditionalWriteProbe> {
-    cancel.check()?;
-    let settings = settings(config)?;
-    let password = dependencies.vault.read(secret).await?;
-    let context = RepositoryContext::new(&settings, &password)?;
-    let provider = WebdavProvider {
-        dependencies: dependencies.clone(),
-        listings: Mutex::new(BTreeMap::new()),
-    };
-    let object = vec![format!("probe-{}", uuid::Uuid::new_v4())];
-    let url = paths::object_url(&context.base, &object);
-    let mut probe = ConditionalWriteProbe {
-        probed_at_ms: dependencies.clock.now_ms(),
-        ..ConditionalWriteProbe::default()
-    };
-    let outcome = provider.run_probe(&context, &url, &mut probe, cancel).await;
-    let cleanup = provider.delete(&context, url, cancel).await;
-    outcome?;
-    cleanup?;
-    Ok(probe)
 }
 
 impl Provider for WebdavProvider {
@@ -1117,13 +997,23 @@ impl Provider for WebdavProvider {
                 return Err(unsupported());
             }
             let folder = collection_folder(collection).to_owned();
-            let mut listing = if let Some(cursor) = cursor {
-                let mut listings = self.listings.lock().map_err(|_| paths::corrupt())?;
-                listings.retain(|_, listing| listing.expires > self.now_ms());
-                let listing = listings.remove(cursor).ok_or_else(paths::corrupt)?;
-                if listing.identity != repository.connection_identity || listing.folder != folder {
+            let marker = cursor.map(|cursor| {
+                if cursor.len() > 4096 { return Err(paths::corrupt()); }
+                let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(cursor)
+                    .map_err(|_| paths::corrupt())?;
+                let marker: ListingCursor = serde_json::from_slice(&bytes).map_err(|_| paths::corrupt())?;
+                if marker.identity != repository.connection_identity || marker.folder != folder
+                    || marker.after.is_empty() {
                     return Err(paths::corrupt());
                 }
+                Ok(marker)
+            }).transpose()?;
+            let cached = {
+                let mut listings = self.listings.lock().map_err(|_| paths::corrupt())?;
+                listings.retain(|_, listing| listing.expires > self.now_ms());
+                cursor.and_then(|cursor| listings.remove(cursor))
+            };
+            let mut listing = if let Some(listing) = cached {
                 listing
             } else {
                 let url = paths::collection_url(&context.base, std::slice::from_ref(&folder));
@@ -1133,7 +1023,8 @@ impl Provider for WebdavProvider {
                 let all = strict_members(&url, &entries)?;
                 if all.windows(2).any(|pair| pair[0].name == pair[1].name) { return Err(paths::corrupt()); }
                 let mut objects = std::collections::VecDeque::new();
-                for member in all.into_iter().filter(|member| !member.collection) {
+                for member in all.into_iter().filter(|member| !member.collection && marker.as_ref().is_none_or(|marker| member.name > marker.after)) {
+                    if crate::external_storage::contract::role_member_name(collection, &member.name) == crate::external_storage::contract::RoleMemberName::Foreign { continue; }
                     objects.push_back(ObjectReceipt {
                         locator: RemoteLocator {
                             connection_identity: repository.connection_identity.clone(),
@@ -1146,16 +1037,26 @@ impl Provider for WebdavProvider {
                         complete: true,
                     });
                 }
-                Listing { identity: repository.connection_identity.clone(), folder,
-                    expires: self.now_ms().saturating_add(5 * 60 * 1000), objects }
+                Listing { expires: self.now_ms().saturating_add(5 * 60 * 1000), objects }
             };
             let count = usize::from(limit).min(listing.objects.len());
-            let objects = listing.objects.drain(..count).collect();
+            let objects: Vec<ObjectReceipt> = listing.objects.drain(..count).collect();
             let next_cursor = if listing.objects.is_empty() { None } else {
-                let cursor = uuid::Uuid::new_v4().to_string();
+                let after = objects.last().ok_or_else(paths::corrupt)?.locator.object
+                    .strip_prefix(&format!("{folder}/")).ok_or_else(paths::corrupt)?.to_owned();
+                let cursor = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(
+                    serde_json::to_vec(&ListingCursor {
+                        identity: repository.connection_identity.clone(), folder: folder.clone(), after,
+                    }).map_err(|_| paths::corrupt())?);
+                if cursor.len() > 4096 { return Err(paths::corrupt()); }
                 let mut listings = self.listings.lock().map_err(|_| paths::corrupt())?;
                 listings.retain(|_, listing| listing.expires > self.now_ms());
-                if listings.len() >= 4 { return Err(ProviderError::new(ErrorKind::Transient)); }
+                if listings.len() >= 4 {
+                    if let Some(oldest) = listings.iter().min_by_key(|(_, value)| value.expires)
+                        .map(|(key, _)| key.clone()) {
+                        listings.remove(&oldest);
+                    }
+                }
                 listings.insert(cursor.clone(), listing);
                 Some(cursor)
             };

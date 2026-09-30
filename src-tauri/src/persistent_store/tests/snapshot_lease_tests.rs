@@ -2,6 +2,55 @@ use super::super::snapshot_archive::Archive;
 use super::*;
 
 #[test]
+fn applied_restore_request_cannot_replay_when_pending_cleanup_failed() {
+    let (directory, mut store, _) = open_fixture();
+    let snapshot = store.snapshot_create("manual").unwrap();
+    store.snapshot_restore_request(&snapshot.id).unwrap();
+    let archive_path = store.snapshots_dir.join("snapshots.sqlite");
+    let archive = rusqlite::Connection::open(&archive_path).unwrap();
+    archive.execute_batch("CREATE TRIGGER fail_clear BEFORE DELETE ON pending_restore BEGIN SELECT RAISE(ABORT,'synthetic cleanup failure'); END;").unwrap();
+    drop(archive);
+    drop(store);
+    let mut restored = PersistentStore::open(directory.path()).unwrap();
+    assert!(restored.pending_restore_failure().is_some());
+    let revision = restored.revision().unwrap();
+    restored.commit(&WorkingSetCommit {
+        root: Some(json!({"username":"edit after activation"})),
+        ..empty_working_set_commit(revision)
+    }).unwrap();
+    drop(restored);
+    let archive = rusqlite::Connection::open(&archive_path).unwrap();
+    archive.execute_batch("DROP TRIGGER fail_clear").unwrap();
+    drop(archive);
+    let reopened = PersistentStore::open(directory.path()).unwrap();
+    assert_eq!(reopened.read_root(None).unwrap().value["username"], "edit after activation");
+    assert_eq!(reopened.revision().unwrap(), revision + 1);
+    assert!(reopened.pending_restore_failure().is_none());
+    assert!(Archive::open(&reopened.snapshots_dir).unwrap().pending_restore().unwrap().is_none());
+}
+
+#[test]
+fn interrupted_restore_starts_normally_until_explicit_retry() {
+    let (directory, mut store, _) = open_fixture();
+    let snapshot = store.snapshot_create("manual").unwrap();
+    store.commit(&WorkingSetCommit {
+        root: Some(json!({"username":"current"})),
+        ..empty_working_set_commit(1)
+    }).unwrap();
+    store.snapshot_restore_request(&snapshot.id).unwrap();
+    std::fs::write(store.snapshots_dir.join("restore-attempt"), b"").unwrap();
+    drop(store);
+    let mut reopened = PersistentStore::open(directory.path()).unwrap();
+    assert!(reopened.pending_restore_failure().unwrap().contains("interrupted"));
+    assert_eq!(reopened.read_root(None).unwrap().value["username"], "current");
+    reopened.snapshot_restore_request(&snapshot.id).unwrap();
+    drop(reopened);
+    let retried = PersistentStore::open(directory.path()).unwrap();
+    assert_eq!(retried.revision().unwrap(), 1);
+    assert!(retried.pending_restore_failure().is_none());
+}
+
+#[test]
 fn schema_configures_the_documented_sqlite_profile() {
     let directory = tempfile::tempdir().expect("create temporary directory");
     let store = PersistentStore::open(directory.path()).expect("open persistent store");
@@ -267,11 +316,7 @@ fn snapshot_creation_persists_asset_roots_before_returning() {
     assert_eq!(metadata.roots.object_hashes, [object_hash].into());
     assert_eq!(
         metadata.roots.legacy_asset_keys,
-        [
-            "assets/exact.bin".to_owned(),
-            "assets/missing.bin".to_owned()
-        ]
-        .into()
+        ["assets/missing.bin".to_owned()].into()
     );
     assert_eq!(metadata.roots.inlay_ids, ["kept-inlay".to_owned()].into());
     assert_eq!(metadata.roots.cold_keys, ["cold-chat".to_owned()].into());
@@ -661,7 +706,7 @@ fn attached_export_can_leave_the_store_lock_and_restore_the_same_lease() {
     ));
     assert_eq!(prepared.reader().unwrap().target.revision, 1);
     let exported = prepared
-        .create_attached_export(false)
+        .create_attached_export(false, None)
         .expect("export through detached attached reader");
 
     store

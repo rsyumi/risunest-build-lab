@@ -144,9 +144,7 @@ fn record_catalog(
     }
     cache.put_entries(format_repository_id, repository, kind, &plans)?;
     let objects = packs.values().chain(nodes.iter().map(|(object, _)| object));
-    for object in objects.clone() {
-        cache.put_object(repository, object)?;
-    }
+    cache.put_objects(repository, objects.clone())?;
     let mut members = BTreeMap::new();
     for object in objects {
         members.insert(

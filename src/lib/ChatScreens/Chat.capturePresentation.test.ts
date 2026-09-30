@@ -8,6 +8,9 @@ import { ActiveConversationSession } from 'src/ts/storage/activeConversationSess
 import type { character, Chat as ChatRecord, Message } from 'src/ts/storage/database.svelte'
 import type { ConversationViewportKey } from 'src/ts/conversationViewportSource'
 import type { SelectedConversationOperations } from 'src/ts/selectedConversationOperations'
+import { createSelectedConversationOperations } from 'src/ts/selectedConversationOperations'
+import { SynchronousSessionConversationViewportSource } from 'src/ts/conversationViewportSource'
+import type { SelectedConversationTarget } from 'src/ts/storage/activeWorkingSet.svelte'
 
 const live = vi.hoisted(() => ({
     db: {} as Record<string, any>,
@@ -60,11 +63,14 @@ vi.mock('src/ts/stores.svelte', () => ({
     ReloadChatPointer: writable([]),
     CurrentTriggerIdStore: writable(null),
     popupStore: writable(null),
+    alertStore: writable({ type: 'none', msg: '' }),
     selectedCharID: writable(0),
     HideIconStore: writable(false),
     ReloadGUIPointer: writable(0),
     selIdState: { selId: 0 },
+    createSimpleCharacter: (char: character) => ({ ...char, type: 'simple' }),
 }))
+vi.mock('src/ts/characters', () => ({ getCharImage: async () => '' }))
 vi.mock('src/ts/gui/colorscheme', () => ({ ColorSchemeTypeStore: writable('light') }))
 vi.mock('src/ts/globalApi.svelte', () => ({
     aiLawApplies: () => false,
@@ -120,6 +126,7 @@ vi.mock('../../lang', () => ({
         noMessage: 'No message',
         cancel: 'Cancel',
         confirm: 'Confirm',
+        chatMessageActionFailed: 'Message action failed',
         partialEdit: {
             cancel: 'Cancel',
             cancelShortcut: 'Cancel',
@@ -144,7 +151,7 @@ vi.mock('../../lang', () => ({
 }))
 vi.mock('../../ts/alert', () => ({
     alertClear: vi.fn(), alertConfirm: vi.fn(), alertError: vi.fn(), alertInput: vi.fn(), alertNormal: vi.fn(),
-    alertRequestData: vi.fn(), alertWait: vi.fn(),
+    alertRequestData: vi.fn(), alertWait: vi.fn(), alertToast: vi.fn(),
 }))
 vi.mock('../../ts/translator/translator', () => ({ getLLMCache: vi.fn(), setLLMCache: vi.fn() }))
 vi.mock('src/ts/process/files/inlayRenderSource', () => ({
@@ -160,6 +167,8 @@ vi.mock('../../ts/storage/persistentDataRuntime.svelte', () => ({
 
 import type { ProcessScriptCaptureContext } from 'src/ts/process/scripts'
 import Chat from './Chat.svelte'
+import Chats from './Chats.svelte'
+import { alertToast } from 'src/ts/alert'
 import ChatCaptureBatchHarness from './ChatCaptureBatchHarness.test.svelte'
 
 function context(overrides: Record<string, unknown> = {}) {
@@ -312,6 +321,8 @@ function makeWindowedEditHarness() {
     const withCompleteSelectedConversation = vi.fn()
     const operations = {
         captureMessageEditIntent,
+        rebindMessageEditIntent: (intent: unknown) => intent,
+        acquireMessageMutation: acquireTarget,
         acquireCompleteMessageTargetForIntent,
         acquireCompleteMessageTarget,
         withCompleteSelectedConversation,
@@ -857,6 +868,215 @@ describe('Chat frozen capture presentation', () => {
             'data-parser-projection',
         )).toBe('bounded')
         expect(target.querySelector('.button-icon-edit')).not.toBeNull()
+    })
+
+    test.each(['save-unchanged', 'save-conflict', 'delete'] as const)(
+        'keeps the actual retained editor addressed after an earlier insertion (%s)',
+        async (action) => {
+            const messages: Message[] = [
+                { role: 'user', data: 'Earlier row', chatId: 'earlier-row' },
+                { role: 'char', data: 'Original edited row', chatId: 'edited-row' },
+                { role: 'user', data: 'Later row', chatId: 'later-row' },
+            ]
+            const conversation = { id: 'retained-chat', message: messages, note: '', localLore: [], bookmarks: [] } as ChatRecord
+            const owner = {
+                type: 'character', chaId: 'retained-owner', name: 'Synthetic retained owner', chatPage: 0,
+                firstMessage: '', firstMsgIndex: -1, image: '', customscript: [], virtualscript: '',
+                additionalAssets: [], emotionImages: [], triggerscript: [], chats: [conversation], ttsMode: 'none',
+            } as unknown as character
+            const session = new ActiveConversationSession({
+                characterId: owner.chaId, conversationId: conversation.id!, conversation, storeRevision: 7,
+            })
+            const current = () => ({ character: owner, conversation })
+            const source = new SynchronousSessionConversationViewportSource({ session, captureCurrent: current })
+            const selection = {
+                characterId: owner.chaId, conversationId: conversation.id!, navigationGeneration: 1, storeRevision: 7,
+            } as SelectedConversationTarget
+            const release = vi.fn()
+            const operations = createSelectedConversationOperations({
+                captureCurrent: current,
+                captureSelectedConversationTarget: () => selection,
+                getCurrentSession: () => session,
+                getCurrentViewportSource: () => source,
+                acquireCompleteConversation: async (reason) => ({ reason, target: selection, session, release }),
+            })
+            const acquireEdit = vi.spyOn(operations, 'acquireCompleteMessageTargetForIntent')
+            const acquireAction = vi.spyOn(operations, 'acquireCompleteMessageTarget')
+            vi.mocked(alertToast).mockClear()
+            runtime.activeSession = session
+            live.db = { ...live.db, theme: 'cardboard', characters: [owner], translator: '', clickToEdit: false,
+                useChatCopy: false, enableBookmark: false, askRemoval: false, instantRemove: false }
+            vi.stubGlobal('ResizeObserver', class { observe() {} unobserve() {} disconnect() {} })
+            try {
+                mounted = mount(Chats, { target, props: {
+                    currentCharacter: owner, viewportSource: source, selectedConversationOperations: operations,
+                    onReroll: () => {}, unReroll: () => {}, currentUsername: 'User', userIcon: '',
+                } })
+                const row = await vi.waitFor(() => {
+                    const element = [...target.querySelectorAll<HTMLElement>('[data-chat-render-key]')]
+                        .find((node) => node.textContent?.includes('Original edited row'))
+                    expect(element?.querySelector('.button-icon-edit')).not.toBeNull()
+                    expect(element).toBeDefined()
+                    return element!
+                })
+                row.querySelector<HTMLButtonElement>('.button-icon-edit')!.click()
+                const editor = await vi.waitFor(() => {
+                    const element = row.querySelector<HTMLTextAreaElement>('.message-edit-area')
+                    expect(element).not.toBeNull()
+                    return element!
+                })
+                editor.value = 'Retained draft'
+                editor.dispatchEvent(new Event('input', { bubbles: true }))
+                editor.focus()
+                session.replaceRange(session.positionAt(0), 0, [{ role: 'user', data: 'Inserted above', chatId: 'inserted-row' }])
+                if (action === 'save-conflict') {
+                    session.edit(session.locate(2), { ...session.readMessage(session.locate(2)), data: 'Concurrent edited row' })
+                }
+                await vi.waitFor(() => expect(row.dataset.chatViewportIndex).toBe('3'))
+                expect(row.querySelector('.message-edit-area')).toBe(editor)
+                expect(editor.value).toBe('Retained draft')
+                expect(document.activeElement).toBe(editor)
+
+                if (action === 'delete') {
+                    row.querySelector<HTMLButtonElement>('.button-icon-remove')!.click()
+                    await vi.waitFor(() => expect(conversation.message.map((message) => message.chatId))
+                        .toEqual(['inserted-row', 'earlier-row', 'later-row']))
+                    expect(acquireAction).toHaveBeenCalledWith(2, 'remove-message')
+                } else {
+                    row.querySelector<HTMLButtonElement>('.button-icon-edit')!.click()
+                    if (action === 'save-unchanged') {
+                        await vi.waitFor(() => expect(conversation.message[2].data).toBe('Retained draft'))
+                        expect(acquireEdit).toHaveBeenCalledWith(expect.objectContaining({ absoluteIndex: 2,
+                            messageEvidence: expect.objectContaining({ data: 'Original edited row' }) }), 'edit-message')
+                        expect(row.querySelector('.message-edit-area')).toBeNull()
+                    } else {
+                        await vi.waitFor(() => expect(alertToast).toHaveBeenCalledWith('Message action failed'))
+                        expect(conversation.message[2].data).toBe('Concurrent edited row')
+                        expect(row.querySelector('.message-edit-area')).toBe(editor)
+                        expect(editor.value).toBe('Retained draft')
+                    }
+                    expect(conversation.message[1].data).toBe('Earlier row')
+                    expect(conversation.message[3].data).toBe('Later row')
+                }
+            } finally {
+                if (mounted) await unmount(mounted)
+                mounted = undefined
+                source.dispose()
+            }
+        },
+    )
+
+    test('refuses an actual partial save after a source handoff without reverting the external prefix or suffix', async () => {
+        const original = 'Original prefix\nSelected block\nOriginal suffix'
+        const external = 'External prefix\nSelected block\nExternal suffix'
+        const conversation = { id: 'partial-chat', message: [
+            { role: 'char', data: original, chatId: 'partial-row' },
+        ], note: '', localLore: [], bookmarks: [] } as ChatRecord
+        const owner = {
+            type: 'character', chaId: 'partial-owner', name: 'Synthetic partial owner', chatPage: 0,
+            firstMessage: '', firstMsgIndex: -1, image: '', customscript: [], virtualscript: '',
+            additionalAssets: [], emotionImages: [], triggerscript: [], chats: [conversation], ttsMode: 'none',
+        } as unknown as character
+        const session = new ActiveConversationSession({
+            characterId: owner.chaId, conversationId: conversation.id!, conversation, storeRevision: 7,
+        })
+        const current = () => ({ character: owner, conversation })
+        let source = new SynchronousSessionConversationViewportSource({ session, captureCurrent: current })
+        const initialSource = source
+        const selection = {
+            characterId: owner.chaId, conversationId: conversation.id!, navigationGeneration: 1, storeRevision: 7,
+        } as SelectedConversationTarget
+        const operations = createSelectedConversationOperations({
+            captureCurrent: current,
+            captureSelectedConversationTarget: () => selection,
+            getCurrentSession: () => session,
+            getCurrentViewportSource: () => source,
+            acquireCompleteConversation: async (reason) => ({ reason, target: selection, session, release: () => {} }),
+        })
+        const acquireEdit = vi.spyOn(operations, 'acquireCompleteMessageTargetForIntent')
+        const rebindEdit = vi.spyOn(operations, 'rebindMessageEditIntent')
+        vi.mocked(alertToast).mockClear()
+        runtime.activeSession = session
+        live.db = { ...live.db, theme: 'cardboard', characters: [owner], translator: '', clickToEdit: false,
+            useChatCopy: false, enableBookmark: false, enableBlockPartialEdit: false,
+            enableDragPartialEdit: true, swipe: false }
+        vi.stubGlobal('IntersectionObserver', TestIntersectionObserver)
+        try {
+            await source.ensureRange({ startIndex: 0, limit: 1, reason: 'viewport' })
+            const initial = source.snapshot()
+            mounted = mount(Chat, { target, props: {
+                message: original, name: owner.name, role: 'char', idx: 0, totalLength: 1, isLastMemory: false,
+                viewportRow: initial.rowAt(0)!, viewportSourceToken: initial.sourceToken,
+                selectedConversationOperations: operations, captureViewportTarget: () => null,
+            } })
+            const body = await vi.waitFor(() => {
+                const element = target.querySelector<HTMLElement>('[data-chat-body-probe]')
+                expect(element?.textContent).toBe(original)
+                return element!
+            })
+            const bodyRoot = target.querySelector<HTMLElement>('.chattext')!
+            TestIntersectionObserver.instance?.setVisible(bodyRoot)
+            await tick()
+            const range = document.createRange()
+            const start = original.indexOf('Selected block')
+            range.setStart(body.firstChild!, start)
+            range.setEnd(body.firstChild!, start + 'Selected block'.length)
+            const selected = window.getSelection()!
+            vi.spyOn(range, 'getBoundingClientRect').mockReturnValue({
+                x: 10, y: 10, top: 10, left: 10, bottom: 30, right: 130, width: 120, height: 20,
+                toJSON: () => ({}),
+            })
+            selected.removeAllRanges()
+            selected.addRange(range)
+            document.dispatchEvent(new Event('selectionchange'))
+            const partialButton = await vi.waitFor(() => {
+                const button = document.querySelector<HTMLButtonElement>('.partial-edit-drag-btn-wrapper .partial-edit-btn-edit')
+                expect(button?.closest<HTMLElement>('.partial-edit-drag-btn-wrapper')?.style.display).not.toBe('none')
+                expect(button).not.toBeNull()
+                return button!
+            })
+            partialButton.click()
+            const editor = await vi.waitFor(() => {
+                const input = document.querySelector<HTMLTextAreaElement>('.partial-edit-modal textarea')
+                expect(input?.value).toBe('Selected block')
+                return input!
+            })
+            editor.value = 'Recoverable partial draft'
+            editor.dispatchEvent(new Event('input', { bubbles: true }))
+            await tick()
+            editor.blur()
+            session.edit(session.locate(0), { ...session.readMessage(session.locate(0)), data: external })
+            source = new SynchronousSessionConversationViewportSource({ session, captureCurrent: current })
+            await source.ensureRange({ startIndex: 0, limit: 1, reason: 'viewport' })
+            const refreshed = source.snapshot()
+            expect(refreshed.sourceToken).not.toBe(initial.sourceToken)
+            ;(mounted as { updateViewportBinding(state: unknown): void }).updateViewportBinding({
+                viewportRow: refreshed.rowAt(0)!, viewportSourceToken: refreshed.sourceToken,
+                captureViewportTarget: () => null, totalMessages: refreshed.totalMessages,
+            })
+            await tick()
+            expect(rebindEdit).toHaveBeenCalledWith(expect.objectContaining({
+                messageEvidence: expect.objectContaining({ data: original }),
+            }), expect.objectContaining({ message: expect.objectContaining({ data: external }) }))
+            expect(document.querySelector('.partial-edit-modal textarea')).toBe(editor)
+            document.querySelector<HTMLButtonElement>('.partial-edit-save-btn')!.click()
+            await vi.waitFor(() => expect(alertToast).toHaveBeenCalledWith('Message action failed'))
+            expect(acquireEdit).toHaveBeenCalledWith(expect.objectContaining({
+                messageEvidence: expect.objectContaining({ data: original }),
+            }), 'partial-edit-message')
+            expect(conversation.message[0].data).toBe(external)
+            expect(conversation.message[0].data.startsWith('External prefix\n')).toBe(true)
+            expect(conversation.message[0].data.endsWith('\nExternal suffix')).toBe(true)
+            expect(document.querySelector('.partial-edit-modal textarea')).toBe(editor)
+            expect(editor.value).toBe('Recoverable partial draft')
+            expect((mounted as { takeEditorDraft(): string | null }).takeEditorDraft()).toBe('Recoverable partial draft')
+        } finally {
+            window.getSelection()?.removeAllRanges()
+            if (mounted) await unmount(mounted)
+            mounted = undefined
+            source.dispose()
+            initialSource.dispose()
+        }
     })
 
     test('delays windowed edit promotion until save and commits against the original row target', async () => {

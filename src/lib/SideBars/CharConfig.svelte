@@ -99,7 +99,7 @@
         assetFilePath = []
         const extensions: string[] = []
         const character = DBState.db.characters[$selectedCharID]
-        if (character.type === 'character' && DBState.db.useAdditionalAssetsPreview) {
+        if ($CharConfigSubMenu === 1 && character.type === 'character' && DBState.db.useAdditionalAssetsPreview) {
             for (const [i, asset] of (character.additionalAssets ?? []).entries()) {
                 extensions[i] = asset[2] || asset[1].split('.').pop()
                 void getFileSrc(asset[1]).then(path => {

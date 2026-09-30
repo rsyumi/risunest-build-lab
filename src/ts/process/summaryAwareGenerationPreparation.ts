@@ -12,13 +12,13 @@ import {
 } from './summaryAwarePromptHistory'
 
 const METADATA_PAGE_SIZE = 128
+const BODY_PAGE_SIZE = 64
 
 export interface SummaryAwareGenerationPreparationMetrics {
     metadataRows: number
     metadataPages: number
     bodyRows: number
     bodyPages: number
-    bodyBytes: number
     elapsedMs: number
 }
 
@@ -109,19 +109,18 @@ export async function prepareSummaryAwareGeneration(
         }
 
         const messages = []
-        let bodyBytes = 0
         let bodyPages = 0
         for (
             let startIndex = decision.plan.bodyStartIndex;
             startIndex < input.authority.totalMessages;
-            startIndex += 1
         ) {
             assertCurrent(input)
+            const limit = Math.min(BODY_PAGE_SIZE, input.authority.totalMessages - startIndex)
             const page = await lease.readConversationWindow({
                 characterId: input.authority.characterId,
                 conversationId: input.authority.conversationId,
                 startIndex,
-                limit: 1,
+                limit,
             })
             assertCurrent(input)
             if (
@@ -129,11 +128,11 @@ export async function prepareSummaryAwareGeneration(
                 || page.revision !== input.authority.storeRevision
                 || page.value.startIndex !== startIndex
                 || page.value.totalMessages !== input.authority.totalMessages
-                || page.value.messages.length !== 1
+                || page.value.messages.length !== limit
+                || page.value.endIndex !== startIndex + limit
             ) throw new Error('Summary-aware generation body page is incomplete')
-            const message = page.value.messages[0]
-            messages.push(message)
-            bodyBytes += new TextEncoder().encode(JSON.stringify(message)).byteLength
+            messages.push(...page.value.messages)
+            startIndex = page.value.endIndex
             bodyPages += 1
         }
         const chat = {
@@ -145,7 +144,6 @@ export async function prepareSummaryAwareGeneration(
             metadataPages,
             bodyRows: messages.length,
             bodyPages,
-            bodyBytes,
             elapsedMs: (input.now ?? performance.now.bind(performance))() - startedAt,
         }
         return {

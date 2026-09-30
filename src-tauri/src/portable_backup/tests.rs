@@ -16,6 +16,7 @@ fn preservation_keeps_distinct_source_paths_even_when_bytes_are_live() {
     let directory = tempfile::tempdir().unwrap();
     let catalog = fixture(directory.path());
     let hash = hex::encode(Sha256::digest(b"synthetic file bytes"));
+    catalog.db.execute("INSERT INTO asset_aliases VALUES('assets/a',?1,'asset',20,'application/octet-stream','','',NULL,NULL,NULL,'{}')", [&hash]).unwrap();
     for (key, metadata) in [
         (
             "assets/orphan.bin".to_owned(),
@@ -66,6 +67,33 @@ fn preservation_keeps_distinct_source_paths_even_when_bytes_are_live() {
         .unwrap(),
         b"synthetic file bytes"
     );
+}
+
+#[test]
+fn archived_payload_roots_are_installed_and_missing_payload_is_attributed_to_character() {
+    let directory = tempfile::tempdir().unwrap();
+    let catalog = fixture(directory.path());
+    let hash = hex::encode(Sha256::digest(b"synthetic file bytes"));
+    let archived = serde_json::json!({"objectHash":hash,"archivedAt":1,"conversationCount":1,"messageCount":1,"assetHashes":[]});
+    catalog.db.execute("INSERT INTO characters VALUES('archived',0,0,0,'Archived',NULL,0,'character',NULL,NULL,?1,?2)", rusqlite::params![r#"{"chaId":"archived","name":"Archived","type":"character"}"#,archived.to_string()]).unwrap();
+    let path = directory.path().join("archived.risunest");
+    catalog.write_candidate(&path, false, &Never).unwrap();
+    let archive = VerifiedArchive::open(File::open(path).unwrap(), directory.path(), &Never).unwrap();
+    let inventory = RestoreInventory::build(&archive, directory.path(), &Never).unwrap();
+    assert!(inventory.db.query_row("SELECT EXISTS(SELECT 1 FROM live_objects WHERE hash=?1)", [&hash], |row| row.get::<_,bool>(0)).unwrap());
+
+    let missing = "f".repeat(64);
+    let catalog = fixture(directory.path());
+    let archived = serde_json::json!({"objectHash":missing,"archivedAt":1,"conversationCount":1,"messageCount":1,"assetHashes":[]});
+    catalog.db.execute("INSERT INTO characters VALUES('archived',0,0,0,'Archived',NULL,0,'character',NULL,NULL,?1,?2)", rusqlite::params![r#"{"chaId":"archived","name":"Archived","type":"character"}"#,archived.to_string()]).unwrap();
+    let path = directory.path().join("missing.risunest");
+    catalog.write_candidate(&path, false, &Never).unwrap();
+    let archive = VerifiedArchive::open(File::open(path).unwrap(), directory.path(), &Never).unwrap();
+    assert!(RestoreInventory::build(&archive, directory.path(), &Never).is_err());
+    let mut findings = crate::data_health::Findings::new(100);
+    archive.scan_library(&mut findings, &Never).unwrap();
+    let preview = archive_inventory(&archive.db, &findings.items).unwrap();
+    assert!(preview.characters[0].damaged > 0);
 }
 
 fn fixture(directory: &std::path::Path) -> Catalog {
