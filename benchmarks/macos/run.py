@@ -35,8 +35,8 @@ def memory_sample(pid):
 
 
 def start_appearance_capture(directory, label, platform, capture_input, capture_size=None, display_owner_pid=None, experiment_codec=None, bgra_experiment=False):
-    if experiment_codec is not None and (platform != 'macos' or experiment_codec not in {'ffv1', 'copy'}):
-        raise RuntimeError('Paired capture experiment supports only Mac ffv1 and copy controls')
+    if experiment_codec is not None and (platform not in {'macos', 'linux'} or experiment_codec not in {'ffv1', 'copy'}):
+        raise RuntimeError('Paired capture experiment supports only Mac/Linux ffv1 and copy controls')
     if bgra_experiment and (platform != 'macos' or experiment_codec != 'copy'):
         raise RuntimeError('BGRA capture experiment supports only Mac stream-copy')
     if not shutil.which('ffmpeg') or not shutil.which('ffprobe'):
@@ -74,10 +74,13 @@ def start_appearance_capture(directory, label, platform, capture_input, capture_
     progress = directory / f'{label}-capture-progress.txt'
     if video.exists() or progress.exists():
         raise RuntimeError('Refusing to overwrite appearance capture')
+    timestamp_options = ['-debug_ts'] if platform == 'linux' and experiment_codec else []
+    ffmpeg_version = (subprocess.check_output(['ffmpeg', '-version'], text=True).splitlines()[0]
+                      if timestamp_options else None)
     log = (directory / f'{label}-capture.log').open('w')
     started = time.monotonic()
     experiment_options = ['-nostdin', '-benchmark', '-t', '6', '-f', 'nut'] if experiment_codec else []
-    process = subprocess.Popen(['ffmpeg', '-hide_banner', '-loglevel', 'info' if experiment_codec else 'warning', '-n', *source,
+    process = subprocess.Popen(['ffmpeg', '-hide_banner', '-loglevel', 'info' if experiment_codec else 'warning', '-n', *timestamp_options, *source,
         '-an', '-c:v', experiment_codec or 'ffv1', '-fps_mode', 'passthrough', '-progress', str(progress),
         *experiment_options, str(video)],
         stdin=subprocess.PIPE, stdout=log, stderr=subprocess.STDOUT)
@@ -90,7 +93,8 @@ def start_appearance_capture(directory, label, platform, capture_input, capture_
             if frames and int(frames[-1]) >= 2:
                 return {'process': process, 'log': log, 'video': video, 'started': started,
                         'launchOffsetSeconds': time.monotonic() - started, 'desktop': desktop,
-                        'experimentCodec': experiment_codec}
+                        'experimentCodec': experiment_codec, 'sourceTimestampDiagnostics': bool(timestamp_options),
+                        'ffmpegVersion': ffmpeg_version, 'progress': progress, 'logPath': Path(log.name)}
             time.sleep(0.05)
         raise RuntimeError('No prelaunch frames received from screen capture')
     except BaseException:
@@ -122,7 +126,32 @@ def finish_appearance_capture(capture):
               'launchOffsetSeconds': capture['launchOffsetSeconds'], 'desktop': capture['desktop'],
               'visualReview': 'required', 'contentBackgroundPass': None, 'titlebarPass': None,
               'scope': 'cold process launch, filesystem caches not reset'}
+    if capture.get('sourceTimestampDiagnostics'):
+        text = capture['logPath'].read_text()
+        input_video = re.search(r'Video: rawvideo[^\r\n]*', text)
+        statistics = re.search(r'bench: utime=([\d.]+)s stime=([\d.]+)s rtime=([\d.]+)s', text)
+        progress = capture['progress'].read_text()
+        duplicates = re.findall(r'^dup_frames=(\d+)$', progress, re.M)
+        drops = re.findall(r'^drop_frames=(\d+)$', progress, re.M)
+        result['diagnosticOnly'] = True
+        result['experimentCodec'] = capture['experimentCodec']
+        result['ffmpegVersion'] = capture['ffmpegVersion']
+        result['inputVideo'] = input_video.group() if input_video else None
+        result['benchmarkSeconds'] = (dict(zip(['user', 'system', 'elapsed'], map(float, statistics.groups())))
+                                      if statistics else None)
+        result['duplicateFrames'] = int(duplicates[-1]) if duplicates else None
+        result['droppedFrames'] = int(drops[-1]) if drops else None
+        result['timestampProvenance'] = {
+            'source': 'input demuxer packet timestamps in FFmpeg -debug_ts log',
+            'sourceLog': capture['logPath'].name,
+            'output': 'ffprobe decoded frame best_effort_timestamp_time',
+            'outputFrames': capture['video'].with_suffix('.frame-timestamps.json').name}
     capture['video'].with_suffix('.json').write_text(json.dumps(result, indent=2))
+    if capture.get('sourceTimestampDiagnostics'):
+        if not result['inputVideo'] or result['benchmarkSeconds'] is None:
+            raise RuntimeError('Capture input format or CPU timing unavailable')
+        if result['duplicateFrames'] != 0 or result['droppedFrames'] != 0:
+            raise RuntimeError('Capture output duplicated or dropped frames')
     if len(times) < 60 or not gaps or max(gaps) > 0.04:
         raise RuntimeError('Capture cadence insufficient to assess a one-frame startup flash')
     return result

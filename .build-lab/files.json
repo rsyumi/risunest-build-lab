@@ -279,8 +279,8 @@
     {
       "path": "benchmarks/linux/run.py",
       "mode": "100644",
-      "bytes": 14415,
-      "sha256": "26a25c14049700253beb348874a41b280c08edcffc7288e2a60d612a966c359c"
+      "bytes": 18613,
+      "sha256": "178a85fcb295c9709ea7ac9b76e10b8689ce63217181ade963394b3907913b42"
     },
     {
       "path": "benchmarks/linux/summarize.mjs",
@@ -351,8 +351,8 @@
     {
       "path": "benchmarks/macos/main.ts",
       "mode": "100644",
-      "bytes": 18265,
-      "sha256": "5acefccf1c8724c217db2b76970d26d4031481eadbc7eed3c12c5b43e65206d7"
+      "bytes": 18326,
+      "sha256": "cf83d72d6f85b6d8f8669317b6b1aea0713c7402603b632540c62378a0ae563f"
     },
     {
       "path": "benchmarks/macos/native/Cargo.lock",
@@ -381,14 +381,14 @@
     {
       "path": "benchmarks/macos/native/src/termination_probe.m",
       "mode": "100644",
-      "bytes": 1873,
-      "sha256": "2b84a9de00edf3f4f38a68594f2c988898268b42c7a77113a1eb113e34af586b"
+      "bytes": 2262,
+      "sha256": "4a9b31773eace484e2fbb2b719d2ef1ebb44bca004f4fd7f593324d5e075c268"
     },
     {
       "path": "benchmarks/macos/native/src/termination_probe.rs",
       "mode": "100644",
-      "bytes": 6582,
-      "sha256": "9fc1186808812c17fda30ff9b4cde28dc9bace753f1ea79451a73cb34ed562f1"
+      "bytes": 6875,
+      "sha256": "9047105eed6defd63be4d7c9d2b58a152364a93cad6e8750d5356f62400c6b40"
     },
     {
       "path": "benchmarks/macos/prepare.mjs",
@@ -399,8 +399,8 @@
     {
       "path": "benchmarks/macos/run.py",
       "mode": "100644",
-      "bytes": 19497,
-      "sha256": "b64dec7edb1650c1145e422c2bcfe6600e72d66bce9ac9b7e600a4c6ef24612f"
+      "bytes": 21643,
+      "sha256": "4bf82ac57e384741d6645b279334f65b70ab4088b87256bf692e69b4ef2d646e"
     },
     {
       "path": "benchmarks/macos/vite.config.ts",
@@ -6111,8 +6111,8 @@
     {
       "path": "src-tauri/src/native_file_jobs/restore.rs",
       "mode": "100644",
-      "bytes": 198938,
-      "sha256": "5ecbf1ce84d8252befe7b5e9bb7ed5aefedec8363af89d8d443bfe9e0695e139"
+      "bytes": 199018,
+      "sha256": "0fd7c8867ebf8be9b2adb30a9874805f88bde27ee9c0c398eeb38081790f3c8b"
     },
     {
       "path": "src-tauri/src/native_file_jobs/risum_export.rs",

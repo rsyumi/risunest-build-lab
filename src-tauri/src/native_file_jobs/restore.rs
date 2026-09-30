@@ -3007,6 +3007,7 @@ mod tests {
                 let mut durable = DurableCasJob::begin(self.directory, &self.job.id(), CasJobKind::LocalBackupRestore, 0).unwrap();
                 let payloads = super::super::legacy_backup::prepare_legacy_restore_payloads(entries, &cas, &mut durable, &NeverCancelled)?;
                 self.sink.cold_payloads = Some(payloads.cold_payloads);
+                durable.seal(&mut self.sink.store.lock().unwrap(), 0).unwrap();
                 self.result = Some(restore_block_risu_save_path(database.staged_path.as_ref().unwrap(), 1, self.job, self.sink)
                     .map_err(|error| LocalBackupError::database_restore(error.message))?);
                 durable.release(CasReleaseOutcome::Committed).unwrap();

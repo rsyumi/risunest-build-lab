@@ -319,17 +319,17 @@ async function main() {
     window.addEventListener("termination-probe", event => {
       const attempt = (event as CustomEvent<number>).detail;
       if (attempt === 2) {
-        sessionStorage.setItem("termination-probe-reloading", "true");
         location.reload();
       } else {
         void settle(attempt);
       }
     });
-    if (sessionStorage.getItem("termination-probe-reloading")) {
-      sessionStorage.removeItem("termination-probe-reloading");
-      await settle(2);
-    } else {
+    const state = await invoke<{ attempt: number; pending: boolean }>("macos_bench_modal_status");
+    if (state.attempt === 0 && !state.pending) {
       void invoke("macos_bench_modal_begin");
+    } else {
+      check(state.attempt === 2 && state.pending, "Reloaded document must resume native termination attempt 2");
+      await settle(2);
     }
   } else if (phase === "contracts") {
     if (sessionStorage.getItem("macos-contract-reload")) {
