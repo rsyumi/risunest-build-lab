@@ -1423,11 +1423,22 @@ impl DeviceStore {
                 keys.iter().map(|key| hypa_entry_key(key).map_err(section_format_error)).collect()
             }
             Section::LocalPlugins => {
-                let keys = unpublished_keys(&self.connection, section)?;
-                let mut encoded = keys.iter().map(|key| local_plugin_entry_key(&key.0, &key.1, &key.2).map_err(section_format_error))
-                    .collect::<StoreResult<Vec<_>>>()?;
-                encoded.sort();
-                Ok(encoded.into_iter().filter(|key| key.as_str() > after).take(limit).collect())
+                let after_key = if after.is_empty() { None } else {
+                    Some(decode_local_plugin_entry_key(after).map_err(section_format_error)?)
+                };
+                let lower = after_key.as_ref().map(|(owner, space, key)| (owner.as_str(), space.as_str(), key.as_str()))
+                    .unwrap_or(("", "", ""));
+                let lower_bound = if after_key.is_some() { "AND (owner,space,key)>(?1,?2,?3)" } else { "" };
+                let mut statement = self.connection.prepare(&format!(
+                    "SELECT owner,space,key FROM plugin_device_storage
+                     WHERE (published_clock IS NULL OR published_clock<>write_clock)
+                       {lower_bound}
+                     ORDER BY owner,space,key LIMIT ?4",
+                ))?;
+                let keys = statement.query_map(params![lower.0, lower.1, lower.2, limit as i64],
+                    |row| Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?, row.get::<_,String>(2)?)))?
+                    .collect::<Result<Vec<_>,_>>()?;
+                keys.iter().map(|key| local_plugin_entry_key(&key.0, &key.1, &key.2).map_err(section_format_error)).collect()
             }
         }
     }

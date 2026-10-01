@@ -190,7 +190,7 @@ pub fn router_with_shutdown(
             };
             let result = blocking(move || {
                 let result = store.run_pending_commit();
-                work.set_performed_work(!matches!(&result, Ok(false)));
+                work.set_performed_work(matches!(&result, Ok(true)));
                 result
             })
             .await;

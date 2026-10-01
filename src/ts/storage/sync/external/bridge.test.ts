@@ -14,12 +14,14 @@ describe('ExternalStorageBridge', () => {
         ])
     })
 
-    it('keeps pause commands separate from job admission', async () => {
+    it('keeps read-only head probes and pause commands separate from job admission', async () => {
         const invoke = vi.fn(async () => true)
         const bridge = new ExternalStorageBridge({ supported: () => true, invoke })
+        await bridge.probeHead('existing')
         await bridge.setSyncPaused(true, '4')
         await bridge.setAutomaticBackupPaused('existing', true)
         expect(invoke.mock.calls).toEqual([
+            ['external_storage_probe_head', { connectionId: 'existing' }],
             ['external_storage_set_sync_paused', { request: { paused: true, expectedSelectionEpoch: '4' } }],
             ['external_storage_set_automatic_backup_paused', { connectionId: 'existing', paused: true }],
         ])

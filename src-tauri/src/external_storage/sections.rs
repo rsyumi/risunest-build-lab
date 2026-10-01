@@ -973,6 +973,8 @@ fn prepare_section_source_rows(
                 })
             }).map_err(preparation_error)?;
         }
+        #[cfg(test)]
+        tests::observe_boundary();
     }
     // Extra catalog objects are not installed, but corrupt ones must not be
     // hidden merely because this section has no entry that references them.
@@ -1069,6 +1071,7 @@ pub(crate) fn apply_received_section(
     library_lineage: &str,
     arrival: SectionArrival,
     received: &CapturedSection,
+    cancel: &Cancellation,
 ) -> Result<()> {
     let section = section_of(received.kind).ok_or_else(|| corrupt("device-fixed section in a synchronized state"))?;
     let state = store.device_store_mut().map_err(device_error)?.section_state(section).map_err(device_error)?;
@@ -1076,7 +1079,7 @@ pub(crate) fn apply_received_section(
     let prepared = prepare_received_section(
         connection_id, library_lineage, arrival, &state.participation_generation,
         received,
-        &Cancellation::default(),
+        cancel,
     )?;
     apply_prepared_section(store, &prepared)
 }
@@ -1133,6 +1136,86 @@ mod scale_tests;
 mod tests {
     use super::*;
 
+    thread_local! {
+        static BOUNDARY_HOOK: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+            std::cell::RefCell::new(None);
+    }
+    struct BoundaryHook;
+    impl BoundaryHook {
+        fn install(callback: impl FnMut() + 'static) -> Self {
+            BOUNDARY_HOOK.with(|slot| {
+                assert!(slot.borrow().is_none());
+                *slot.borrow_mut() = Some(Box::new(callback));
+            });
+            Self
+        }
+    }
+    impl Drop for BoundaryHook {
+        fn drop(&mut self) {
+            BOUNDARY_HOOK.with(|slot| *slot.borrow_mut() = None);
+        }
+    }
+    pub(super) fn observe_boundary() {
+        BOUNDARY_HOOK.with(|slot| {
+            if let Some(callback) = slot.borrow_mut().as_mut() { callback(); }
+        });
+    }
+
+    #[test]
+    fn cancellation_during_rejoin_preparation_preserves_existing_rows_and_revision() {
+        use std::sync::{atomic::{AtomicUsize, Ordering}, mpsc, Arc};
+        use std::time::{Duration, Instant};
+        let root = tempfile::tempdir().unwrap();
+        let spool = tempfile::tempdir().unwrap();
+        let mut store = participating_plugin_store(root.path());
+        store.device_store_mut().unwrap().write_plugin_device_values("plugin", &[
+            PluginDeviceMutation::Set { space: "string".into(), key: "local".into(), value: "kept".into() },
+        ]).unwrap();
+        let received = capture_section(SectionKind::LocalPlugins, &[
+            plugin_row("remote-a", "incoming-a", 8, "remote"),
+            plugin_row("remote-b", "incoming-b", 8, "remote"),
+            plugin_row("remote-c", "incoming-c", 8, "remote"),
+        ], true, Sequence::from(1u64), Sequence::from(0u64), Sequence::from(8u64),
+            spool.path(), &Cancellation::default()).unwrap();
+        let before = store.device_store_mut().unwrap().section_state(Section::LocalPlugins).unwrap();
+        let before_rows = store.device_store_mut().unwrap().read_section_rows(Section::LocalPlugins).unwrap();
+        let before_revision = store.device_store_mut().unwrap().revision().unwrap();
+        let cancel = Cancellation::default();
+        let worker_cancel = cancel.clone();
+        let observed = Arc::new(AtomicUsize::new(0));
+        let worker_observed = observed.clone();
+        let (arrived, arrival) = mpsc::sync_channel(1);
+        let (release, released) = mpsc::sync_channel(1);
+        let (completed, completion) = mpsc::sync_channel(1);
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(move || {
+                let _hook = BoundaryHook::install(move || {
+                    if worker_observed.fetch_add(1, Ordering::SeqCst) == 0 {
+                        arrived.send(()).unwrap();
+                        released.recv_timeout(Duration::from_secs(10)).unwrap();
+                    }
+                });
+                let result = apply_received_section(&mut store, "connection", "lineage",
+                    SectionArrival::Rejoining, &received, &worker_cancel);
+                let device = store.device_store_mut().unwrap();
+                let unchanged = device.section_state(Section::LocalPlugins).unwrap() == before
+                    && device.read_section_rows(Section::LocalPlugins).unwrap() == before_rows
+                    && device.revision().unwrap() == before_revision;
+                completed.send((result.err().map(|error| error.kind), unchanged)).unwrap();
+            });
+            arrival.recv_timeout(Duration::from_secs(10)).expect("first prepared row did not finish");
+            let stopped_at = Instant::now();
+            cancel.cancel();
+            release.send(()).unwrap();
+            assert_eq!(completion.recv_timeout(Duration::from_secs(5)).expect("section preparation ignored cancellation"),
+                (Some(ErrorKind::Cancelled), true));
+            worker.join().unwrap();
+            assert_eq!(observed.load(Ordering::SeqCst), 1);
+            println!("prepared_rows=1 remaining_rows=2 cancellation_ms={}", stopped_at.elapsed().as_millis());
+        });
+    }
+
+
     #[test]
     fn ten_thousand_section_bodies_share_one_durable_file_and_exact_ranges() {
         let root = tempfile::tempdir().unwrap();
@@ -1170,6 +1253,23 @@ mod tests {
         };
         assert!(!path.exists());
         assert_eq!(fs::read_dir(root.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn cancelled_section_rejoin_preserves_all_device_rows() {
+        let root = tempfile::tempdir().unwrap();
+        let spool = tempfile::tempdir().unwrap();
+        let mut store = participating_plugin_store(root.path());
+        let received = capture_section(SectionKind::LocalPlugins, &[], true,
+            Sequence::from(1u64), Sequence::from(0u64), Sequence::from(0u64),
+            spool.path(), &Cancellation::default()).unwrap();
+        let before = store.device_store_mut().unwrap().section_state(Section::LocalPlugins).unwrap();
+        let cancel = Cancellation::default();
+        cancel.cancel();
+        assert_eq!(apply_received_section(&mut store, "connection", "lineage", SectionArrival::Rejoining,
+            &received, &cancel).unwrap_err().kind, ErrorKind::Cancelled);
+        assert_eq!(store.device_store_mut().unwrap().section_state(Section::LocalPlugins).unwrap(), before);
+        assert!(store.device_store_mut().unwrap().read_section_rows(Section::LocalPlugins).unwrap().is_empty());
     }
 
     #[test]
@@ -1625,6 +1725,7 @@ mod tests {
             "library",
             SectionArrival::Rejoining,
             &prepared(&remote),
+            &Cancellation::default(),
         )
         .expect("rejoin the plugin section");
 
@@ -1675,6 +1776,7 @@ mod tests {
             "library",
             SectionArrival::Rejoining,
             &prepared(&remote),
+            &Cancellation::default(),
         )
         .expect("rejoin the plugin section again");
         assert_eq!(
@@ -2052,6 +2154,7 @@ mod tests {
             "other-library",
             SectionArrival::Continuing,
             &prepared(&remote),
+            &Cancellation::default(),
         )
         .expect("apply the section of another lineage");
         assert!(held_plugin_keys(&mut store).contains(&("reclaimed".to_owned(), true)));
@@ -2062,6 +2165,7 @@ mod tests {
             "library",
             SectionArrival::Continuing,
             &prepared(&remote),
+            &Cancellation::default(),
         )
         .expect("apply the received section");
         assert_eq!(
@@ -2143,6 +2247,7 @@ mod tests {
             "library",
             SectionArrival::Continuing,
             &prepared(&remote),
+            &Cancellation::default(),
         )
         .expect("apply the received section");
         let held = store
@@ -2507,6 +2612,7 @@ mod tests {
             "library",
             SectionArrival::Rejoining,
             &prepared(&remote),
+            &Cancellation::default(),
         )
         .expect("rejoin the plugin section");
         assert_eq!(

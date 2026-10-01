@@ -123,9 +123,10 @@ impl Store {
         let Some((id, body)) = job else {
             return Ok(false);
         };
-        let intent: CommitIntent = parse(&body)?;
         let device = Device { id };
-        match self.commit(&device, &intent, &intent.expected_head.etag()) {
+        let result = parse::<CommitIntent>(&body)
+            .and_then(|intent| self.commit(&device, &intent, &intent.expected_head.etag()));
+        match result {
             Ok(_) => Ok(true),
             Err(error) if error.code == "unauthorized" => {
                 self.db()?
@@ -134,8 +135,8 @@ impl Store {
             }
             Err(error) => {
                 self.db()?.execute(
-                    "UPDATE commit_jobs SET retry_after=unixepoch()+1 WHERE device=?1",
-                    [&device.id],
+                    "UPDATE commit_jobs SET retry_after=unixepoch()+min(1 << min(attempts,9),300),attempts=attempts+1,error=?2 WHERE device=?1",
+                    params![device.id, error.code],
                 )?;
                 Err(error)
             }

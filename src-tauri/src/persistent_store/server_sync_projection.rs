@@ -64,6 +64,16 @@ pub(crate) fn project(
     generation: &str,
     key: &ServerDirtyKey,
 ) -> StoreResult<Option<ServerPayload>> {
+    project_with_residency(db, cas, generation, key, &std::cell::OnceCell::new())
+}
+
+pub(crate) fn project_with_residency(
+    db: &Connection,
+    cas: &PayloadCas,
+    generation: &str,
+    key: &ServerDirtyKey,
+    residency: &std::cell::OnceCell<crate::server_sync::Result<crate::server_sync::residency::Residency>>,
+) -> StoreResult<Option<ServerPayload>> {
     // Revision zero contains only the store's uncommitted root placeholder.
     // Advertising it as user content creates a false conflict on first receive.
     if key.kind == "root" && key.revision == 0 {
@@ -133,7 +143,6 @@ pub(crate) fn project(
         message: "Invalid server record key".into(),
     })?;
     let mut derived_objects = std::collections::BTreeMap::new();
-    let residency = std::cell::OnceCell::new();
     let bytes = super::record_projection::reconstruct_record_with_owner_objects(
         db,
         cas,

@@ -307,6 +307,9 @@ fn apply_job_connection_status(connection: &mut Value, jobs: &[Value]) {
 fn job_summary(root: &std::path::Path, mut job: DurableJob) -> Value {
     job.summary["reason"] = json!(job.request.reason);
     job.summary["targetRevision"] = json!(job.request.target_revision);
+    if job.request.kind == JobKind::ResolveConflict {
+        job.summary["resolveRequest"] = json!({"conflictId":job.request.conflict_id,"choice":job.request.choice});
+    }
     if job.request.kind == JobKind::PinHistory {
         job.summary["pinRequest"] = json!({"snapshotId":job.request.snapshot_id});
     }
@@ -449,8 +452,7 @@ pub(crate) async fn external_storage_start_job(
 ) -> Result<Value> {
     request.validate()?;
     if let Some(id) = &job_id {
-        if request.kind != JobKind::Restore
-            || uuid::Uuid::parse_str(id).ok().is_none_or(|parsed| parsed.to_string() != *id)
+        if uuid::Uuid::parse_str(id).ok().is_none_or(|parsed| parsed.to_string() != *id)
         {
             return Err(ProviderError::new(ErrorKind::PreconditionFailed));
         }
@@ -482,10 +484,34 @@ pub(crate) async fn external_storage_start_job(
         }
     }
     let store = JobStore::open(&root)?;
+    if matches!(request.kind, JobKind::Backup | JobKind::PinHistory) {
+        if let Some(mut unknown) = store.list_pending()?.into_iter().find(|job| {
+            job.request.connection_id == request.connection_id && job.summary["phase"] == "publication-unknown"
+        }) {
+            let (cancel, claim) = command_state.claim(&unknown)?;
+            unknown.request.session = request.session.clone();
+            unknown.request.session_id = request.session_id.clone();
+            store.put(&unknown)?;
+            let connected = super::connection_commands::open_connected_with_cancel(&app, &request.connection_id, &cancel).await?;
+            let result = super::sync_engine::reconcile_unknown(&app, &connected, &unknown, &cancel).await?;
+            match result {
+                Some(result) if result["publishedRevision"].is_string() => {
+                    settle_interrupted(&mut unknown, Some(result), false);
+                    store.put(&unknown)?;
+                }
+                result => {
+                    if let Some(result) = result { unknown.summary["result"] = result; }
+                    store.put(&unknown)?;
+                    return Ok(job_summary(&root, unknown));
+                }
+            }
+            drop(claim);
+        }
+    }
     let pending = if let Some(id) = &job_id {
         match store.read(id) {
             Ok(job) => {
-                if !same_requested_operation(&job.request, &request) {
+                if !same_explicit_retry(&job, &request) {
                     return Err(ProviderError::new(ErrorKind::PreconditionFailed));
                 }
                 Some(reconcile_job(&app, job)?)
@@ -536,7 +562,8 @@ pub(crate) async fn external_storage_start_job(
         if pending.request.kind != request.kind && !resolving {
             return Err(ProviderError::new(ErrorKind::PreconditionFailed));
         }
-        if !resolving && !same_requested_operation(&pending.request, &request) {
+        if !resolving && !(same_requested_operation(&pending.request, &request)
+            || (job_id.is_some() && same_explicit_retry(&pending, &request))) {
             return Err(ProviderError::new(ErrorKind::PreconditionFailed));
         }
         if pending.terminal() {
@@ -597,6 +624,15 @@ pub(crate) async fn external_storage_start_job(
     }
     Ok(job.summary)
 }
+fn same_explicit_retry(job: &DurableJob, request: &StartJobRequest) -> bool {
+    if same_requested_operation(&job.request, request) { return true; }
+    if job.summary["phase"] != "publication-unknown" || request.reason.as_deref() != Some("manual")
+        || job.request.target_revision != request.target_revision { return false; }
+    let mut exact = request.clone();
+    exact.reason = job.request.reason.clone();
+    same_requested_operation(&job.request, &exact)
+}
+
 fn pending_matches_request(job: &DurableJob, request: &StartJobRequest) -> bool {
     if job.request.connection_id != request.connection_id {
         return false;
@@ -787,7 +823,8 @@ fn reconcile_stopped_job(app: &AppHandle, mut job: DurableJob) -> Result<Durable
             let preserving = super::sync_engine::conflict_record(app, &job.id)?
                 .is_some_and(|record| !record.resolved && record.remote_point.is_some());
             settle_invalidated(&mut job, &intent.phase, preserving);
-            if super::sync_engine::discard_receive_preparation(app, &job.id).is_ok() {
+            if job.receive_staging_id.is_some()
+                && super::sync_engine::discard_receive_preparation(app, &job.id).is_ok() {
                 job.receive_staging_id = None;
             }
             let _ = persist_reconciled_job(&root(app)?, &before, &mut job);
@@ -894,7 +931,9 @@ fn settle_interrupted(job: &mut DurableJob, complete: Option<Value>, uncertain: 
         } else {
             "paused"
         });
-        job.summary.as_object_mut().unwrap().remove("result");
+        let decision = uncertain && job.summary["result"]["decisionRequired"] == true
+            && job.summary["result"]["reason"] == "publication-unknown";
+        if !decision { job.summary.as_object_mut().unwrap().remove("result"); }
         job.summary["error"] = error_dto(&ProviderError::new(ErrorKind::Transient));
         if uncertain {
             job.summary["error"]["reason"] = json!("publication-unknown");
@@ -903,11 +942,12 @@ fn settle_interrupted(job: &mut DurableJob, complete: Option<Value>, uncertain: 
     job.summary["updatedAtMs"] = json!(now_ms().to_string());
 }
 fn lease_context<'a>(
+    app: &AppHandle,
     root: &'a std::path::Path,
     connected: &'a ConnectedRepository,
     writer_id: &'a str,
-) -> leases::LeaseContext<'a> {
-    leases::LeaseContext {
+) -> Result<leases::LeaseContext<'a>> {
+    Ok(leases::LeaseContext {
         root,
         connection_id: &connected.stored.id,
         writer_id,
@@ -917,7 +957,8 @@ fn lease_context<'a>(
         repository: &connected.handle,
         clock: leases::system_clock(),
         protection_supported: connected.stored.capabilities.lease_operations,
-    }
+        ledger: Some(app.state::<JobCommandState>().lease_ledger()?),
+    })
 }
 
 pub(crate) struct RepositoryProtection<'a> {
@@ -963,7 +1004,7 @@ pub(crate) async fn recheck_preserved_conflict(
         .external_identity()
         .map_err(local_error)?
         .store_id;
-    let context = lease_context(&root, &connected, &writer_id);
+    let context = lease_context(&app, &root, &connected, &writer_id)?;
     match leases::admit(&context, id, LeaseKind::Work, cancel).await? {
         leases::Admission::Admitted(owner) => {
             let protection = RepositoryProtection {
@@ -986,9 +1027,7 @@ pub(crate) async fn recheck_preserved_conflict(
                 )
                 .await
         }
-        leases::Admission::Yield { .. } => {
-            Err(ProviderError::new(ErrorKind::Transient))
-        }
+        leases::Admission::Yield { reason } => Err(leases::yield_error(reason)),
         leases::Admission::UnsupportedProtection => {
             Err(ProviderError::new(ErrorKind::Unsupported))
         }
@@ -1463,7 +1502,7 @@ async fn run_job(app: &AppHandle, id: &str, cancel: &Cancellation) -> Result<Val
                 .external_identity()
                 .map_err(local_error)?
                 .store_id;
-            let context = lease_context(&root, &connected, &writer_id);
+            let context = lease_context(&app, &root, &connected, &writer_id)?;
             match leases::admit(&context, &job.id, LeaseKind::Work, cancel).await? {
                 leases::Admission::Admitted(owner) => {
                     let protection = RepositoryProtection { owner: &owner, context: &context };
@@ -1606,7 +1645,7 @@ async fn run_cleanup(
             .is_some())
     };
     let outcome = super::cleanup::run(
-        &lease_context(&root, connected, &writer_id),
+        &lease_context(&app, &root, connected, &writer_id)?,
         &super::cleanup::CleanupRequest {
             job_id: &job.id,
             cleanup_supported: connected.stored.capabilities.cleanup_supported(),
@@ -1636,7 +1675,7 @@ async fn run_repository_check(
         .external_identity()
         .map_err(local_error)?
         .store_id;
-    let context = lease_context(&root, connected, &writer_id);
+    let context = lease_context(&app, &root, connected, &writer_id)?;
     let _ = record_check_progress(&root, &job.id, "reading", None);
     let progress = |items: u64, total_items: u64, bytes: u64, total_bytes: u64| {
         let _ = record_check_progress(
@@ -2108,6 +2147,31 @@ pub(crate) async fn external_storage_get_quota(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn stopped_unknown_reconciliation_preserves_the_exhausted_head_decision() {
+        let mut job=automatic_job();
+        job.summary["result"]=json!({"stopReason":"uncertain","reason":"publication-unknown","decisionRequired":true});
+        settle_interrupted(&mut job,None,true);
+        assert_eq!(job.summary["result"]["decisionRequired"],true);
+        settle_interrupted(&mut job,Some(json!({"publishedRevision":"1"})),false);
+        assert!(job.summary["result"]["decisionRequired"].is_null());
+        assert_eq!(job.summary["state"],"succeeded");
+    }
+
+    #[test]
+    fn manual_unknown_recheck_preserves_exact_request_without_coalescing_new_sync() {
+        let mut job=automatic_job();
+        let mut manual=job.request.clone(); manual.reason=Some("manual".into());
+        assert!(!same_explicit_retry(&job,&manual));
+        job.summary["phase"]=json!("publication-unknown");
+        assert!(same_explicit_retry(&job,&manual));
+        assert!(!same_requested_operation(&job.request,&manual));
+        manual.target_revision=Some("2".into());
+        assert!(!same_explicit_retry(&job,&manual));
+        manual.target_revision=Some("1".into()); manual.connection_id="other".into();
+        assert!(!same_explicit_retry(&job,&manual));
+    }
+
     #[test]
     fn connection_recovery_status_survives_reload_and_clears_after_verified_repair() {
         let jobs=vec![json!({"connectionId":"x","state":"waiting","updatedAtMs":"20",

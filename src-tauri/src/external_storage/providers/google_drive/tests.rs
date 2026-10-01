@@ -1937,6 +1937,7 @@ fn cleanup_admission_aborts_on_incomplete_drive_listing_without_delete() {
             repository: &repository,
             clock: &clock,
             protection_supported: true,
+            ledger: None,
         };
         let available_time = |_: std::time::Instant| -> Result<bool> { Ok(true) };
         let request = CleanupRequest {

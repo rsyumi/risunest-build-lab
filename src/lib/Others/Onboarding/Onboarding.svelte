@@ -91,6 +91,7 @@
     } from 'src/lib/Setting/ExternalStorage/strings'
     import ServerSyncConnect from 'src/lib/Setting/ServerSync/ServerSyncConnect.svelte'
     import ServerSyncStages from 'src/lib/Setting/ServerSync/ServerSyncStages.svelte'
+    import ServerSyncConflictItems from 'src/lib/Setting/ServerSync/ServerSyncConflictItems.svelte'
     import { DBState } from 'src/ts/stores.svelte'
 
     import {
@@ -103,6 +104,7 @@
     } from './onboardingFlow'
     import {
         abandonExternalOnboardingSelection,
+        loadExternalOnboardingConflict,
         type ExternalOnboardingSelectionOwner,
         externalOnboardingAction,
         externalOnboardingConflictStep,
@@ -620,7 +622,7 @@
             return
         }
         if (outcome === 'conflict') {
-            await loadExternalConflict()
+            await loadExternalConflict(result.kind === 'blocked' ? result.job?.result?.conflictId : undefined)
             return
         }
         externalFailure(
@@ -657,12 +659,11 @@
         }
     }
 
-    async function loadExternalConflict(): Promise<void> {
+    async function loadExternalConflict(conflictId?: string): Promise<void> {
         const connection = externalConnection
         if (!externalBridge || !connection) return
         try {
-            externalConflict = (await externalBridge.listConflicts(undefined, 50)).conflicts
-                .find(conflict => conflict.connectionId === connection.id)
+            externalConflict = await loadExternalOnboardingConflict(connection.id, conflictId, externalBridge)
             externalStage = externalConflict ? 'conflict' : 'error'
         } catch (cause) {
             externalFailure(cause)
@@ -1257,6 +1258,8 @@
                                     )}
                                 </p>
                                 <p class="reason">{s.conflictHelp}</p>
+                                {#if syncSnapshot?.conflictRefreshed}<p class="reason">{s.conflictRefreshed}</p>{/if}
+                                <ServerSyncConflictItems preview={hubConflict} />
                                 <div class="actions">
                                     <button
                                         class="btn primary"

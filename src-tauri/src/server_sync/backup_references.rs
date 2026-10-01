@@ -130,6 +130,7 @@ impl Capture {
                 let metadata = std::fs::symlink_metadata(entry.path())?;
                 if !metadata.is_dir() || crate::trust_boundary::is_link_like(&metadata) { continue; }
                 let Some(id) = entry.file_name().to_str().map(str::to_owned) else { continue; };
+        if super::deletion_tombstone_id(&id).is_some() { continue; }
                 if entry.path().join("complete.json").try_exists()? { continue; }
                 if !entry.path().join("index.sqlite").try_exists()? { continue; }
                 if let Ok(capture) = Self::resume(root, &id, revision, generation, head) {
@@ -653,6 +654,14 @@ pub(crate) fn visit_source_objects(
 }
 
 pub(crate) fn side_requirements(root: &Path, db: &Connection, side: Side) -> Result<SideRequirements> {
+    side_requirements_with_availability(root, db, side, true)
+}
+#[cfg(test)]
+thread_local! {
+    pub(crate) static AVAILABILITY_CHECKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+pub(crate) fn side_requirements_with_availability(root: &Path, db: &Connection, side: Side, inspect_availability: bool) -> Result<SideRequirements> {
     let cas = PayloadCas::new(root)?;
     let (local, remote, invalid): (i64, i64, bool) = db.query_row(
         "SELECT coalesce(sum(CASE WHEN role='metadata' OR local_required=1 THEN byte_size ELSE 0 END),0),
@@ -672,6 +681,7 @@ pub(crate) fn side_requirements(root: &Path, db: &Connection, side: Side) -> Res
             .map_err(|_| SyncError::new("storage-size-overflow", 409))?,
         local_required_available: true,
     };
+    if !inspect_availability { return Ok(result); }
     let mut after = String::new();
     loop {
         let mut statement = db.prepare("SELECT hash,byte_size FROM objects WHERE side=?1
@@ -685,6 +695,8 @@ pub(crate) fn side_requirements(root: &Path, db: &Connection, side: Side) -> Res
             let size = u64::try_from(size)
                 .map_err(|_| SyncError::new("invalid-conflict-object-size", 409))?;
             after = hash.clone();
+            #[cfg(test)]
+            AVAILABILITY_CHECKS.with(|count| count.set(count.get() + 1));
             result.local_required_available &= cas.stat_object(&hash).ok().flatten() == Some(size);
         }
     }
@@ -782,6 +794,7 @@ pub(crate) fn visit_roots(root: &Path, mut visit: impl FnMut(Object) -> Result<(
         let metadata = std::fs::symlink_metadata(entry.path())?;
         if !metadata.is_dir() || crate::trust_boundary::is_link_like(&metadata) { continue; }
         let Some(id) = entry.file_name().to_str().map(str::to_owned) else { continue; };
+        if super::deletion_tombstone_id(&id).is_some() { continue; }
         // Other backup kinds have no reference index. Never use receipt presence
         // as a liveness gate: interrupted captures own their known references.
         match std::fs::symlink_metadata(entry.path().join("index.sqlite")) {

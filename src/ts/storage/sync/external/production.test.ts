@@ -196,6 +196,29 @@ describe('external storage production integration', () => {
         visibility.mockRestore()
     })
 
+    it('re-enters a paused automatic sync with the original reason, revision and job ID', async () => {
+        const { installExternalStorageProduction, resumeExternalStorageJob } = await import('./production')
+        await installExternalStorageProduction()
+        await resumeExternalStorageJob({ ...succeeded('old-sync', '8'), id: 'original', state: 'waiting',
+            phase: 'paused', reason: 'automatic', targetRevision: '8' })
+        expect(mocks.bridge.startJob).toHaveBeenCalledWith(expect.objectContaining({
+            kind: 'sync', reason: 'automatic', targetRevision: '8', connectionId: 'old-sync',
+        }), 'original')
+        expect(mocks.flush).not.toHaveBeenCalled()
+    })
+
+    it('explicitly rechecks an automatic unknown publication using the retained revision and ID', async () => {
+        const { installExternalStorageProduction, resumeExternalStorageJob } = await import('./production')
+        await installExternalStorageProduction()
+        await resumeExternalStorageJob({ ...succeeded('old-sync', '8'), id: 'uncertain-original', state: 'uncertain',
+            phase: 'publication-unknown', reason: 'automatic', targetRevision: '8',
+            result: { decisionRequired: true, reason: 'publication-unknown' } })
+        expect(mocks.bridge.startJob).toHaveBeenCalledWith(expect.objectContaining({
+            kind: 'sync', reason: 'manual', targetRevision: '8', connectionId: 'old-sync',
+        }), 'uncertain-original')
+        expect(mocks.flush).not.toHaveBeenCalled()
+    })
+
     it.each([
         ['pin-history', 'pinRequest', { snapshotId: 'snapshot-8' }],
         ['delete-history', 'deleteRequest', { pointId: 'point-8', pointObservation: 'observation-8', confirmOtherDevice: true, confirmLastRetained: true }],
@@ -265,6 +288,16 @@ describe('external storage production integration', () => {
             expect(calls[1]).toEqual(calls[0])
             expect(mocks.releaseFence).toHaveBeenCalledOnce()
         } finally { vi.useRealTimers() }
+    })
+
+    it('leaves an intervention-blocked conflict available instead of polling forever', async () => {
+        const { installExternalStorageProduction, requestExternalStorageResolveConflict } = await import('./production')
+        await installExternalStorageProduction()
+        mocks.bridge.startJob.mockResolvedValue({ ...succeeded('old-sync', '8'), kind: 'resolve-conflict', state: 'waiting',
+            phase: 'conflict-preservation-paused', error: { code: 'storageFull', message: 'Free space', action: 'free-space', retryable: false } })
+        await expect(requestExternalStorageResolveConflict('old-sync', 'conflict', 'remote')).rejects.toThrow('Free space')
+        expect(mocks.bridge.getJob).not.toHaveBeenCalled()
+        expect(mocks.bridge.cancelJob).not.toHaveBeenCalled()
     })
 
     it('reports deferred history deletion without polling a stopped manual job forever', async () => {

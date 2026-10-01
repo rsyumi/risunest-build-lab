@@ -1909,6 +1909,8 @@ fn prepare_packs(
             ));
             if let Some(stored) = placement {
                 chunks.push(PendingChunk::Carried(stored.clone()));
+                #[cfg(test)]
+                tests::observe_boundary();
             } else {
                 let mut encoded = Vec::new();
                 let stored_length =
@@ -3453,6 +3455,7 @@ pub(crate) async fn package_and_upload(
         } => parent_sections.clone(),
         SnapshotPurpose::BackupBundle { .. } => BTreeMap::new(),
     };
+    let mut built_sections = BTreeSet::new();
     for captured in sections {
         // An unchanged section keeps the reference the observed state carried,
         // so its commit number still names the publication that changed it.
@@ -3524,6 +3527,7 @@ pub(crate) async fn package_and_upload(
             &mut referenced,
         )
         .await?;
+        built_sections.insert(id.to_owned());
         published_sections.insert(
             id.to_owned(),
             wire::SectionSnapshotRef {
@@ -3539,11 +3543,17 @@ pub(crate) async fn package_and_upload(
     }
     // Carried, unselected sections are publication references too. Never
     // silently drop them, and never publish a cached reference with a hole.
-    for section in published_sections.values() {
+    for (id, section) in &published_sections {
+        if built_sections.contains(id) { continue; }
         let root = RemoteObject::from_stored(&section.entries_root, repository)?;
-        let objects = revalidate_cached_catalog(
-            &root, &mut cache, &mut evidence, journal, root_key, provider, repository, cancel,
-        ).await?.ok_or_else(|| ProviderError::new(ErrorKind::NotFound))?;
+        let objects = match admitted_catalog(
+            &root, members.as_ref(), &metadata.repository_id, &cache, &evidence, repository,
+        )? {
+            Some(objects) => objects,
+            None => revalidate_cached_catalog(
+                &root, &mut cache, &mut evidence, journal, root_key, provider, repository, cancel,
+            ).await?.ok_or_else(|| ProviderError::new(ErrorKind::NotFound))?,
+        };
         referenced.extend(objects);
     }
     let (bytes, fingerprint, sections, role) = match metadata.purpose {
@@ -3642,6 +3652,93 @@ pub(crate) async fn package_and_upload(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    thread_local! {
+        static BOUNDARY_HOOK: std::cell::RefCell<Option<Box<dyn FnMut()>>> =
+            std::cell::RefCell::new(None);
+    }
+    struct BoundaryHook;
+    impl BoundaryHook {
+        fn install(callback: impl FnMut() + 'static) -> Self {
+            BOUNDARY_HOOK.with(|slot| {
+                assert!(slot.borrow().is_none());
+                *slot.borrow_mut() = Some(Box::new(callback));
+            });
+            Self
+        }
+    }
+    impl Drop for BoundaryHook {
+        fn drop(&mut self) {
+            BOUNDARY_HOOK.with(|slot| *slot.borrow_mut() = None);
+        }
+    }
+    pub(super) fn observe_boundary() {
+        BOUNDARY_HOOK.with(|slot| {
+            if let Some(callback) = slot.borrow_mut().as_mut() { callback(); }
+        });
+    }
+
+    #[test]
+    fn cancellation_after_first_carried_chunk_stops_before_reading_the_remaining_source() {
+        use std::sync::{atomic::{AtomicUsize, Ordering}, mpsc};
+        use std::time::{Duration, Instant};
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("carried-source");
+        let chunk = vec![7u8; MAX_CHUNK_BYTES];
+        let bytes = chunk.repeat(8);
+        fs::write(&path, &bytes).unwrap();
+        let digest = hash(&chunk);
+        let compression = CompressionPolicy::AlreadyCompressed;
+        let placements = BTreeMap::from([((hex::encode(digest), chunk.len() as u64,
+            compression_tag(compression)), wire::StoredChunk {
+                pack_id: "parent-pack".into(), offset: 0,
+                stored_length: chunk.len() as u64 + ENTRY_OVERHEAD as u64 + 1,
+                plaintext_length: chunk.len() as u64, plaintext_sha256: digest,
+            })]);
+        let source = SourceEntry {
+            kind: wire::CatalogEntryKind::Object, key: "carried-source".into(),
+            content_sha256: hex::encode(hash(&bytes)), byte_length: bytes.len() as u64,
+            source: ObjectSource::File(path), file_offset: Some(0), compression,
+        };
+        let runtime = runtime();
+        let handle = runtime.handle().clone();
+        let directory = root.path().to_path_buf();
+        let cancel = Cancellation::default();
+        let worker_cancel = cancel.clone();
+        let observed = Arc::new(AtomicUsize::new(0));
+        let worker_observed = observed.clone();
+        let (arrived, arrival) = mpsc::sync_channel(1);
+        let (release, released) = mpsc::sync_channel(1);
+        let (completed, completion) = mpsc::sync_channel(1);
+        let (built, mut packs) = tokio::sync::mpsc::channel(2);
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(move || {
+                let _hook = BoundaryHook::install(move || {
+                    if worker_observed.fetch_add(1, Ordering::SeqCst) == 0 {
+                        arrived.send(()).unwrap();
+                        released.recv_timeout(Duration::from_secs(10)).unwrap();
+                    }
+                });
+                let outcome = prepare_packs(vec![source], &directory, &directory.join("external"),
+                    &directory.join("build"), DEFAULT_TARGET_BYTES, DEFAULT_MAX_STORED_BYTES,
+                    MAX_CHUNK_BYTES, &placements, &built, &handle, &PackFamilies::new(1),
+                    &PhaseProgress::silent(), &worker_cancel);
+                completed.send(outcome.err().map(|error| error.kind)).unwrap();
+            });
+            arrival.recv_timeout(Duration::from_secs(10)).expect("first carried chunk did not finish");
+            let stopped_at = Instant::now();
+            cancel.cancel();
+            release.send(()).unwrap();
+            assert_eq!(completion.recv_timeout(Duration::from_secs(5)).expect("carried source kept reading after cancellation"),
+                Some(ErrorKind::Cancelled));
+            worker.join().unwrap();
+            assert_eq!(observed.load(Ordering::SeqCst), 1);
+            assert!(packs.try_recv().is_err());
+            assert_eq!(build_files(&root.path().join("build")), 0);
+            println!("carried_chunks=1 remaining_chunks=7 cancellation_ms={}", stopped_at.elapsed().as_millis());
+        });
+    }
+
 
     #[test]
     fn local_file_and_envelope_errors_keep_their_remediation_kind() {
@@ -4307,6 +4404,7 @@ mod tests {
                 "library",
                 crate::external_storage::sections::SectionArrival::Continuing,
                 source,
+                &Cancellation::default(),
             )
             .unwrap();
         } else {
@@ -9021,6 +9119,114 @@ mod tests {
             );
         });
     }
+    #[test]
+    #[ignore = "bounded synthetic section request and body-byte measurement"]
+    fn measures_fresh_and_inherited_section_closure_requests_and_body_bytes() {
+        fn closure(completed: &CompletedSnapshot, id: &str, cache: &Path,
+            repository: &RepositoryHandle) -> Vec<RemoteObject> {
+            let root = RemoteObject::from_stored(&completed.sections[id].entries_root, repository).unwrap();
+            let identity = ObjectEvidence::identity(&root, repository).unwrap();
+            let objects = PackageCache::open(cache).unwrap()
+                .graph_of(&completed.repository_id, repository, &identity).unwrap();
+            assert!(objects.iter().any(|object| object.role == ObjectRole::Catalog));
+            assert!(objects.iter().any(|object| object.role == ObjectRole::Pack));
+            for object in &objects {
+                assert!(completed.referenced_objects.iter().any(|referenced|
+                    referenced.stored(repository).unwrap() == object.stored(repository).unwrap()));
+            }
+            objects
+        }
+        fn counts(provider: &FakeProvider, objects: &[RemoteObject]) -> (usize, usize) {
+            let requests = objects.iter().map(|object|
+                provider.read_attempts(&object.receipt.locator.object)).sum();
+            let state = provider.state.lock().unwrap();
+            let bytes = objects.iter().map(|object|
+                state.body_bytes.get(&object.receipt.locator.object).copied().unwrap_or(0)).sum();
+            (requests, bytes)
+        }
+        runtime().block_on(async {
+            for conditional in [true, false] {
+                for fault in ["none", "missing-child", "corrupt-child", "post-upload-corruption"] {
+                    let root = tempfile::tempdir().unwrap();
+                    let cache = root.path().join("cache");
+                    let spool = root.path().join("sections");
+                    let provider = FakeProvider::new(false);
+                    provider.state.lock().unwrap().ignore_unchanged = !conditional;
+                    let repository = fake::repository();
+                    let key = [71; 32];
+                    let cancel = Cancellation::default();
+                    let (capture, _) = captured(root.path(), "first", 1, b"record", b"asset");
+                    let mut meta = metadata("first", &capture);
+                    meta.purpose = SnapshotPurpose::SyncState { epoch: "epoch".into(),
+                        generation: Sequence::from(1u64), parent_sections: BTreeMap::new() };
+                    let mut first_journal = journal(&root.path().join("first-job"), "first-job", &capture);
+                    let first = package_and_upload(capture,
+                        vec![section(&spool, SectionKind::Hypa, "first", 1),
+                            section(&spool, SectionKind::LocalPlugins, "first", 1)],
+                        root.path(), &cache, meta, &key, limits(128 * 1024), None,
+                        &mut first_journal, &provider, &repository, &PhaseProgress::silent(), &cancel)
+                        .await.unwrap();
+                    assert_eq!(verify_publication(&first, root.path(), &cache, &mut first_journal,
+                        &key, &provider, &repository, &cancel).await.unwrap(), PublicationReadiness::Verified);
+                    let inherited = closure(&first, "local-plugins", &cache, &repository);
+                    let inherited_before = counts(&provider, &inherited);
+                    let parent = parent_graph(&first, &repository).unwrap();
+                    let reads_before = provider.read_count();
+                    let bytes_before = provider.state.lock().unwrap().body_bytes.clone();
+                    let (capture, _) = captured(root.path(), "second", 2, b"record", b"asset");
+                    let mut meta = metadata("second", &capture);
+                    meta.purpose = SnapshotPurpose::SyncState { epoch: "epoch".into(),
+                        generation: Sequence::from(2u64), parent_sections: first.sections.clone() };
+                    let mut transfer = journal(&root.path().join("second-job"), "second-job", &capture);
+                    let second = package_and_upload(capture,
+                        vec![section(&spool, SectionKind::Hypa, "second", 2)], root.path(), &cache,
+                        meta, &key, limits(128 * 1024), Some(&parent), &mut transfer, &provider,
+                        &repository, &PhaseProgress::silent(), &cancel).await.unwrap();
+                    let fresh = closure(&second, "hypa", &cache, &repository);
+                    assert_eq!(second.sections["local-plugins"], first.sections["local-plugins"]);
+                    assert_eq!(provider.read_count(), reads_before);
+                    assert_eq!(provider.state.lock().unwrap().body_bytes, bytes_before);
+                    assert_eq!(counts(&provider, &fresh), (0, 0));
+                    assert_eq!(counts(&provider, &inherited), inherited_before);
+                    if fault != "none" {
+                        let objects = if fault == "post-upload-corruption" { &fresh } else { &inherited };
+                        let child = objects.iter().find(|object| object.role == ObjectRole::Pack).unwrap();
+                        if fault == "missing-child" {
+                            provider.forget(&child.receipt.locator.object);
+                            assert_eq!(verify_publication(&second, root.path(), &cache, &mut transfer,
+                                &key, &provider, &repository, &cancel).await.unwrap(), PublicationReadiness::Repackage);
+                        } else {
+                            provider.seed(&child.receipt.locator.object, ObjectRole::Pack,
+                                vec![0; child.receipt.byte_length as usize]);
+                            assert_eq!(verify_publication(&second, root.path(), &cache, &mut transfer,
+                                &key, &provider, &repository, &cancel).await.unwrap_err().kind, ErrorKind::Corrupt);
+                        }
+                        continue;
+                    }
+                    for pass in 1..=2 {
+                        let before = [counts(&provider, &fresh), counts(&provider, &inherited)];
+                        assert_eq!(verify_publication(&second, root.path(), &cache, &mut transfer,
+                            &key, &provider, &repository, &cancel).await.unwrap(), PublicationReadiness::Verified);
+                        for (index, (label, objects)) in [("fresh", &fresh), ("inherited", &inherited)].into_iter().enumerate() {
+                            let after = counts(&provider, objects);
+                            let requests = after.0 - before[index].0;
+                            let body_bytes = after.1 - before[index].1;
+                            let expected_bytes = if pass == 2 && conditional { 0 } else {
+                                objects.iter().map(|object| object.receipt.byte_length as usize).sum()
+                            };
+                            assert_eq!(requests, objects.len());
+                            assert_eq!(body_bytes, expected_bytes);
+                            println!("section-closure provider={} phase=verify-{pass} kind={label} requests={requests} body_bytes={body_bytes}",
+                                if conditional { "conditional" } else { "unconditional" });
+                        }
+                    }
+                    println!("section-closure provider={} phase=packaging fresh_requests=0 fresh_body_bytes=0 inherited_requests=0 inherited_body_bytes=0",
+                        if conditional { "conditional" } else { "unconditional" });
+                }
+            }
+        });
+    }
+
     #[test]
     fn one_attempt_reuses_authenticated_catalogs_and_checks_fresh_versions_without_duplicate_bodies() {
         runtime().block_on(async {

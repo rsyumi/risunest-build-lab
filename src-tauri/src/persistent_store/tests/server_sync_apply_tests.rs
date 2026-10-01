@@ -416,6 +416,44 @@ fn server_sync_address_cache_changes_only_endpoint_and_preserves_replica_state()
 }
 
 #[test]
+fn committed_registration_and_endpoint_repair_derived_custody_after_ledger_failure() {
+    use crate::server_sync::residency::{Residency, RetainedObject};
+    let (root, mut store, _) = open_fixture();
+    bind(&mut store);
+    let previous = store.server_stored_config().unwrap().unwrap();
+    let hash = risunest_sync_wire::hash(b"synthetic custody");
+    let mut ledger = Residency::open(root.path()).unwrap();
+    ledger.confirm(&previous, &head(0), &[RetainedObject {
+        hash: hash.clone(), size: 17.into(), retention_id: "a".repeat(64),
+    }]).unwrap();
+    let db = rusqlite::Connection::open(Residency::path(root.path())).unwrap();
+    let fail = "CREATE TRIGGER synthetic_access_failure BEFORE UPDATE ON contexts BEGIN SELECT RAISE(ABORT,'synthetic'); END;";
+    db.execute_batch(fail).unwrap();
+    let config = store.server_config().unwrap().unwrap();
+    let mut moved = config.clone();
+    moved.endpoint = "https://synthetic-moved.example/".into();
+    store.server_cache_endpoint(&config, &moved).unwrap();
+    assert_eq!(store.server_stored_config().unwrap().unwrap().endpoint, moved.endpoint);
+    assert_eq!(ledger.object(&hash, None).unwrap().unwrap().config.endpoint, previous.endpoint);
+    db.execute_batch("DROP TRIGGER synthetic_access_failure").unwrap();
+    store.server_cache_endpoint(&moved, &moved).unwrap();
+    assert_eq!(ledger.object(&hash, None).unwrap().unwrap().config.endpoint, moved.endpoint);
+    db.execute_batch(fail).unwrap();
+    let mut replacement = moved.clone();
+    replacement.device_id = "replacement-device".into();
+    replacement.token = "b".repeat(64);
+    store.server_replace_registration(&replacement, store.revision().unwrap()).unwrap();
+    assert_eq!(store.server_stored_config().unwrap().unwrap().device_id, replacement.device_id);
+    assert_eq!(ledger.object(&hash, None).unwrap().unwrap().config.device_id, previous.device_id);
+    assert!(previous.resolve(root.path()).is_ok());
+    db.execute_batch("DROP TRIGGER synthetic_access_failure").unwrap();
+    drop(store);
+    let reopened = PersistentStore::open(root.path()).unwrap();
+    assert_eq!(ledger.object(&hash, None).unwrap().unwrap().config.device_id, replacement.device_id);
+    assert_eq!(reopened.server_config().unwrap().unwrap().token, replacement.token);
+}
+
+#[test]
 fn unconfigured_status_still_reports_pending_operation_for_management_protection() {
     let (_dir, mut store, _) = open_fixture();
     bind(&mut store);

@@ -181,6 +181,19 @@ describe("settings server connection", () => {
     finish({ ...inventory, completeCount: 1 }); await tick(); await tick();
     expect(target.textContent).toContain(text.backupCount.replace('{0}', '9'));
   });
+  it("shows changed conflict identities and catches a refused choice", async () => {
+    const snapshot = { ...bound(), conflictRefreshed: true, result: {
+      phase: 'conflict', endpoint: 'https://bound.test/', localRevision: 1, head: null, conflictCount: 1,
+      conflicts: ['plugin-storage:fixture-plugin'], appliedRecords: 0, proposedRecords: 0,
+    } } as unknown as ServerSyncSnapshot;
+    state.controller.snapshot.mockReturnValue(snapshot);
+    state.controller.synchronize.mockRejectedValueOnce({ code: 'library-operation-busy' });
+    component = mount(ServerSyncConnection, { target });
+    await vi.waitFor(() => expect(target.textContent).toContain('fixture-plugin'));
+    expect(target.textContent).toContain(text.conflictRefreshed);
+    button(text.keepRemote).click();
+    await vi.waitFor(() => expect(target.querySelector('[role="alert"]')?.textContent).toContain(text.busyHelp));
+  });
   it("renders synchronization admission refusal inline without an unhandled rejection", async () => {
     state.controller.snapshot.mockReturnValue(bound());
     state.controller.synchronize.mockRejectedValueOnce({ code: 'library-operation-busy' });

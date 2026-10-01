@@ -530,6 +530,12 @@ pub(crate) fn observation_json(value: &HeadObservation) -> Result<String> {
     }
     serde_json::to_string(&StoredHeadObservation::from(value)).map_err(corrupt)
 }
+pub(crate) fn head_observation(value: &str) -> Result<HeadObservation> {
+    let stored = parse_observation(value)?;
+    Ok(HeadObservation { commit_id: stored.commit_id,
+        authenticated_body_hash: stored.authenticated_body_hash, version: stored.version })
+}
+
 fn parse_observation(value: &str) -> Result<StoredHeadObservation> {
     if value.is_empty() || value.len() > 16 * 1024 {
         return Err(corrupt("invalid stored head observation"));
@@ -705,7 +711,9 @@ async fn capture_for_publication(
         .map(|head| observation_json(&head.observation))
         .transpose()?;
     let cancel = cancel.clone();
+    let completion = app.state::<super::job_store::JobCommandState>().track_blocking(&job.id)?;
     tokio::task::spawn_blocking(move || {
+        let _completion = completion;
         let probe = super::runtime::CancelProbe(cancel);
         let mut store = pds(&worker_app)?;
         if let Some(existing) = store
@@ -773,6 +781,7 @@ async fn capture_for_publication(
             expected_head: expected_head.as_deref(),
             commit_id: &worker_job.id,
         };
+        probe.0.check()?;
         store
             .external_prepare_publication(&intent, &publication_permit)
             .map_err(local_error)?;
@@ -867,7 +876,9 @@ async fn package_capture(
             .unwrap_or_default();
         let worker_connection = job.request.connection_id.clone();
         let worker_lineage = identity.library_epoch.clone();
+        let completion = app.state::<super::job_store::JobCommandState>().track_blocking(&job.id)?;
         tokio::task::spawn_blocking(move || -> Result<_> {
+            let _completion = completion;
             let mut store = pds(&worker_app)?;
             super::sections::capture_state_sections(
                 &mut store,
@@ -1040,7 +1051,9 @@ async fn receive_remote(
         let worker_cancel = cancel.clone();
         let worker_staging = super::runtime::preparation_progress(&root, &job.id);
         let worker_admission = admission.clone();
+        let completion = app.state::<super::job_store::JobCommandState>().track_blocking(&job.id)?;
         let preparation = tokio::task::spawn_blocking(move || {
+            let _completion = completion;
             worker_cancel.check()?;
             let _admission = worker_admission.file(false).map_err(local_error)?;
             super::runtime::read_job_session(&worker_app, &worker_job.id)?;
@@ -1260,17 +1273,29 @@ async fn rejoin_sections(
     )
     .await?;
     transferred.flush();
-    let mut store = pds(app)?;
-    for prepared in &received {
-        super::sections::apply_received_section(
-            &mut store,
-            &job.request.connection_id,
-            lineage,
-            super::sections::SectionArrival::Rejoining,
-            prepared,
-        )?;
-    }
-    Ok(())
+    let worker_app = app.clone();
+    let worker_connection = job.request.connection_id.clone();
+    let worker_lineage = lineage.clone();
+    let worker_cancel = cancel.clone();
+    let completion = app.state::<super::job_store::JobCommandState>().track_blocking(&job.id)?;
+    tokio::task::spawn_blocking(move || -> Result<()> {
+        let _completion = completion;
+        worker_cancel.check()?;
+        let mut store = pds(&worker_app)?;
+        for prepared in &received {
+            super::sections::apply_received_section(
+                &mut store,
+                &worker_connection,
+                &worker_lineage,
+                super::sections::SectionArrival::Rejoining,
+                prepared,
+                &worker_cancel,
+            )?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(local_error)?
 }
 
 fn receive_revision(request: &ApplyReceivedRequest) -> Result<i64> {
@@ -1445,7 +1470,7 @@ pub(crate) async fn external_storage_apply_received(
         .await.map_err(local_error)?
 }
 
-async fn reconcile_unknown(
+pub(crate) async fn reconcile_unknown(
     app: &AppHandle,
     connected: &ConnectedRepository,
     job: &DurableJob,
@@ -1528,7 +1553,7 @@ async fn reconcile_unknown(
         None => {}
     }
     Ok(Some(
-        json!({"stopReason":"uncertain","reason":"publication-unknown"}),
+        json!({"stopReason":"uncertain","reason":"publication-unknown","decisionRequired":true}),
     ))
 }
 
@@ -1643,7 +1668,9 @@ async fn complete_local_conflict(
     let app = app.clone();
     let capture_id = record.local.capture_id.clone();
     let probe = super::runtime::CancelProbe(cancel.clone());
+    let completion = app.state::<super::job_store::JobCommandState>().track_blocking(&record.id)?;
     tokio::task::spawn_blocking(move || {
+        let _completion = completion;
         pds(&app)?
             .complete_external_capture(&capture_id, &probe)
             .map_err(local_error)

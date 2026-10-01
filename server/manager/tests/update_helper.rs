@@ -6,7 +6,11 @@ use risunest_sync_manager::update::{
 #[cfg(windows)]
 use risunest_sync_manager::{client::Client, lifecycle, platform};
 #[cfg(windows)]
-use risunest_sync_server::{config::NetworkSettings, management::discovery::Discovery, PROTOCOL_ID, STORE_FORMAT_ID};
+use risunest_sync_server::{
+    config::NetworkSettings, management::discovery::Discovery, PROTOCOL_ID, STORE_FORMAT_ID,
+};
+#[cfg(unix)]
+use std::process::Command;
 use std::{
     fs::{self, OpenOptions},
     path::{Path, PathBuf},
@@ -14,8 +18,6 @@ use std::{
     sync::mpsc,
     time::Duration,
 };
-#[cfg(unix)]
-use std::process::Command;
 
 struct Fixture {
     _temp: tempfile::TempDir,
@@ -144,7 +146,9 @@ fn stopped_helper_rolls_back_when_the_replacement_cannot_be_started() {
 
     assert_eq!(error, "server-executable-or-data-path-invalid");
     assert_old_install(&fixture.install);
-    assert!(InstallTransaction::load(&fixture.root, &fixture.install).unwrap().is_none());
+    assert!(InstallTransaction::load(&fixture.root, &fixture.install)
+        .unwrap()
+        .is_none());
     let status = load_status(&fixture.root).unwrap();
     assert_eq!(status.phase, UpdatePhase::Failed);
     assert_eq!(
@@ -315,8 +319,12 @@ fn explicit_test_binaries() -> (PathBuf, PathBuf) {
 #[cfg(windows)]
 fn isolated_network(root: &Path) {
     let reserved = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    NetworkSettings { port: reserved.local_addr().unwrap().port(), ..Default::default() }
-        .save(root).unwrap();
+    NetworkSettings {
+        port: reserved.local_addr().unwrap().port(),
+        ..Default::default()
+    }
+    .save(root)
+    .unwrap();
 }
 
 #[cfg(windows)]
@@ -865,8 +873,13 @@ async fn live_helper_replacement(
     spawn_helper_from_scheduled_harness(root, install, server, manager, "apply-helper").await?;
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
-        let transaction = InstallTransaction::load(root, install)
-            .map_err(|error| format!("transaction-load:{error}:journalExists={}:diagnostic={}", root.join("manager-update/transaction.json").exists(), helper_failure_diagnostic(root)))?;
+        let transaction = InstallTransaction::load(root, install).map_err(|error| {
+            format!(
+                "transaction-load:{error}:journalExists={}:diagnostic={}",
+                root.join("manager-update/transaction.json").exists(),
+                helper_failure_diagnostic(root)
+            )
+        })?;
         let status = load_status(root).map_err(|error| format!("status-load:{error}"))?;
         let completed = transaction.is_none() && status.phase == UpdatePhase::Completed;
         if completed {
@@ -914,8 +927,14 @@ async fn live_helper_replacement(
     {
         return Err("synthetic-live-helper-cleanup-incomplete".into());
     }
-    wait_for_transient_helper_cleanup(root).await
-        .map_err(|error| format!("helper-cleanup:{error}:diagnostic={}", helper_failure_diagnostic(root)))?;
+    wait_for_transient_helper_cleanup(root)
+        .await
+        .map_err(|error| {
+            format!(
+                "helper-cleanup:{error}:diagnostic={}",
+                helper_failure_diagnostic(root)
+            )
+        })?;
     Ok(())
 }
 

@@ -528,6 +528,9 @@ fn builder_with_main_window(
                     .root
                     .set(app_data_dir.clone())
                     .map_err(|_| "external storage root is already configured".to_string())?;
+                app.state::<external_storage::job_store::JobCommandState>()
+                    .open_lease_ledger(&app.state::<app_paths::AppPaths>().cache)
+                    .map_err(|error| format!("external lease ownership unavailable: {error}"))?;
                 external_storage::leftovers::remove_at_startup(&app_data_dir);
                 let agent_build = app
                     .config()
@@ -636,6 +639,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         external_storage::connection_commands::external_storage_prepare_connection,
         external_storage::connection_commands::external_storage_prepare_renewal,
         external_storage::connection_commands::external_storage_unlock_connection,
+        external_storage::connection_commands::external_storage_probe_head,
         external_storage::connection_commands::external_storage_commit_connection,
         external_storage::connection_commands::external_storage_begin_authorization,
         external_storage::connection_commands::external_storage_complete_authorization,

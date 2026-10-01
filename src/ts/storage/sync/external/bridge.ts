@@ -88,6 +88,10 @@ export class ExternalStorageBridge {
         return listen('external-storage-job-started', listener)
     }
 
+    probeHead(connectionId: string): Promise<boolean> {
+        return this.native('external_storage_probe_head', { connectionId })
+    }
+
     prepareRenewal(connectionId: string): Promise<PreparedExternalConnection> {
         return this.native('external_storage_prepare_renewal', { connectionId })
     }

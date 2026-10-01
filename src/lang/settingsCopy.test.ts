@@ -15,9 +15,9 @@ it('keeps RisuNest Korean and English keys aligned', () => {
     expect(languageKorean.pluginProviderPermissionDenied).toBe('플러그인 모델 사용 권한이 거부되었습니다.')
 })
 it('uses the required question form for owned Korean confirmations', () => {
-    const inherited = new Set(['setup.finally', 'remindLaterQuestion', 'askLoadFirstMsg', 'risuNest.serverSync.management.restoreConfirm'])
+    const inherited = new Set(['setup.finally', 'remindLaterQuestion', 'askLoadFirstMsg'])
     expect(languageKorean.risuNest.serverSync.management.restoreConfirm).toBe(
-        '이 백업으로 되돌릴까요? 지금 라이브러리를 먼저 백업하며, 동기화는 일시 중지 상태로 둡니다.',
+        '이 백업으로 복원하시겠습니까? 현재 라이브러리는 이 백업의 내용으로 교체되며, 동기화는 일시 중지됩니다. 자동 백업은 만들지 않습니다.',
     )
     for (const [path, value] of leaves(languageKorean)) {
         let text: unknown = value

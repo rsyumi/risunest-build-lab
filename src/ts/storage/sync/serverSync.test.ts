@@ -92,6 +92,90 @@ function fixture(
   return { facade, native, runtime, fence, trace, progress };
 }
 describe("server sync activation boundary", () => {
+  it("keeps the fence and preparation when confirmation is still busy, then confirms without publishing", async () => {
+    const { native, runtime, fence } = fixture();
+    const original = native.getMockImplementation()!;
+    let attempt = 0;
+    native.mockImplementation(async command => {
+      if (command === "server_sync_activate" && attempt++ < 2) throw { code: "server-sync-busy" };
+      return original(command);
+    });
+    const onRecoveryRequired = vi.fn();
+    const facade = createServerSyncFacade({ runtime, invoke: native as never, onRecoveryRequired });
+    await expect(facade.cycle()).rejects.toMatchObject({ code: "activation-confirmation-pending" });
+    await expect(facade.recoverPending()).rejects.toMatchObject({ code: "activation-confirmation-pending" });
+    expect(fence.release).not.toHaveBeenCalled();
+    expect(native).not.toHaveBeenCalledWith("server_sync_cancel");
+    await facade.recoverPending();
+    expect(fence.refreshCommittedWorkingSet).toHaveBeenCalledOnce();
+    expect(fence.release).toHaveBeenCalledOnce();
+    expect(native.mock.calls.filter(([command]) => command === "server_sync_prepare")).toHaveLength(1);
+    expect(native.mock.calls.some(([command]) => command === "server_sync_publish")).toBe(false);
+    expect(onRecoveryRequired).toHaveBeenLastCalledWith(null);
+  });
+
+  it.each(["local-validation", "stale-server-preparation"])("settles an uncertain activation after %s only by authoritative refresh", async (code) => {
+    const { native, runtime, fence, trace } = fixture();
+    const original = native.getMockImplementation()!;
+    let attempts = 0;
+    native.mockImplementation(async command => {
+      if (command === "server_sync_activate") {
+        if (attempts++ === 0) throw new Error("lost IPC reply");
+        throw { code };
+      }
+      if (command === "server_sync_status") return { localRevision: 8 } as never;
+      return original(command);
+    });
+    const onRecoveryRequired = vi.fn();
+    const restorePlugins = vi.fn(async () => {});
+    const facade = createServerSyncFacade({ runtime, invoke: native as never, onRecoveryRequired, restorePlugins });
+    await expect(facade.cycle()).rejects.toMatchObject({ code: "activation-confirmation-pending" });
+    expect(onRecoveryRequired).toHaveBeenLastCalledWith(true);
+    expect(fence.release).not.toHaveBeenCalled();
+    await facade.recoverPending();
+    expect(fence.refreshCommittedWorkingSet).toHaveBeenCalledWith(8);
+    expect(restorePlugins).toHaveBeenCalledOnce();
+    expect(trace.indexOf("server_sync_cancel")).toBeLessThan(trace.indexOf("refresh"));
+    expect(trace.indexOf("refresh")).toBeLessThan(trace.indexOf("release"));
+    expect(trace).not.toContain("server_sync_publish");
+    expect(facade.needsRefresh()).toBe(false);
+    expect(onRecoveryRequired).toHaveBeenLastCalledWith(null);
+  });
+
+  it("settles retained projection recovery without publishing or keeping native admission", async () => {
+    const { native, runtime, fence } = fixture();
+    fence.refreshCommittedWorkingSet.mockResolvedValueOnce({ kind: "committed", revision: 8, projection: "refresh-required" });
+    const restorePlugins = vi.fn(async () => {});
+    const facade = createServerSyncFacade({ runtime, invoke: native as never, restorePlugins });
+    await expect(facade.cycle()).rejects.toMatchObject({ code: "committed-refresh-pending" });
+    await facade.recoverPending();
+    expect(fence.refreshCommittedWorkingSet).toHaveBeenCalledOnce();
+    expect(runtime.refreshActiveWorkingSetFromStore).toHaveBeenCalledOnce();
+    expect(restorePlugins).toHaveBeenCalledOnce();
+    expect(native).toHaveBeenCalledWith("server_sync_cancel");
+    expect(native.mock.calls.some(([command]) => command === "server_sync_publish")).toBe(false);
+    expect(facade.needsRefresh()).toBe(false);
+  });
+
+  it("defers cancellation during activation and omits publication after settlement", async () => {
+    const { facade, native, fence } = fixture();
+    const original = native.getMockImplementation()!;
+    let finish!: () => void;
+    native.mockImplementation(async command => {
+      if (command === "server_sync_activate") await new Promise<void>(resolve => { finish = resolve; });
+      return original(command);
+    });
+    const cycle = facade.cycle();
+    await vi.waitFor(() => expect(finish).toBeTypeOf("function"));
+    await expect(facade.cancel()).resolves.toBeUndefined();
+    expect(fence.release).not.toHaveBeenCalled();
+    finish();
+    await expect(cycle).rejects.toMatchObject({ code: "cancelled" });
+    expect(fence.refreshCommittedWorkingSet).toHaveBeenCalledOnce();
+    expect(native.mock.calls.some(([command]) => command === "server_sync_publish")).toBe(false);
+    expect(native).toHaveBeenCalledWith("server_sync_cancel");
+  });
+
   it("defers generation before preparing remote work", async () => {
     const { runtime, native } = fixture();
     const facade = createServerSyncFacade({ runtime, invoke: native as never, deferred: () => true });
