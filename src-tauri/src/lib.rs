@@ -492,9 +492,15 @@ fn builder_with_main_window(
                 setup_native_startup_state.record_failure(error, persistent_gate, native_file_gate);
             }
             if let Some((config, data_directory)) = &main_window {
-                tauri::WebviewWindowBuilder::from_config(app, config)?
-                    .data_directory(data_directory.clone())
-                    .build()?;
+                let window_builder = tauri::WebviewWindowBuilder::from_config(app, config)?
+                    .data_directory(data_directory.clone());
+                #[cfg(target_os = "linux")]
+                let window_builder = if config.background_color.is_none() {
+                    window_builder.background_color(tauri::window::Color(33, 34, 44, 255))
+                } else {
+                    window_builder
+                };
+                window_builder.build()?;
             }
             let setup_result = (|| -> Result<(), String> {
                 renderer_access?;

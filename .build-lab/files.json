@@ -111,8 +111,8 @@
     {
       "path": "benchmarks/ios/NativeUITests.swift",
       "mode": "100644",
-      "bytes": 29027,
-      "sha256": "378a1ad4cbcfa120d9cd8e31c3af469bf341ccc3f52150c96f79039401acb2bf"
+      "bytes": 29876,
+      "sha256": "e1255f7a2cbdf1dce40268e72a033a8f6f1e415c8ff8b8a18b6699df42d923e5"
     },
     {
       "path": "benchmarks/ios/buildTestLab.py",
@@ -351,8 +351,8 @@
     {
       "path": "benchmarks/macos/main.ts",
       "mode": "100644",
-      "bytes": 24578,
-      "sha256": "16eb3b7296451fa4282ff7c9c0ca734681a3141ce38deb5844ecf400f55777ec"
+      "bytes": 25276,
+      "sha256": "d607fe0c950f5c531c15fe17e9a1a0e89239183ed99ef01af2f7c4be247254e3"
     },
     {
       "path": "benchmarks/macos/native/Cargo.lock",
@@ -399,8 +399,8 @@
     {
       "path": "benchmarks/macos/run.py",
       "mode": "100644",
-      "bytes": 25524,
-      "sha256": "797b1b272838ef9b777714fa1cb1b71f0d69f5b72edd66616207adb3eb660e0e"
+      "bytes": 26372,
+      "sha256": "1375a64c4a7995f74dbbe3a284b47b5398f42ae45889b4ad18c6385b0db00f4f"
     },
     {
       "path": "benchmarks/macos/vite.config.ts",
@@ -435,8 +435,8 @@
     {
       "path": "benchmarks/plugin-review/android-smoke.mjs",
       "mode": "100644",
-      "bytes": 8529,
-      "sha256": "424bb14c21387a89c8624cfec2b031e3eb2bff3c131eedf9685557d2fc02c3a0"
+      "bytes": 9054,
+      "sha256": "19de9a576f6bd6629d3d2173eb4a1312fe2d78f29335c1d5f9a91c41e7265c42"
     },
     {
       "path": "benchmarks/plugin-review/index.html",
@@ -447,8 +447,8 @@
     {
       "path": "benchmarks/plugin-review/main.ts",
       "mode": "100644",
-      "bytes": 8219,
-      "sha256": "b546b1a3ae75b2cd58b732189aa303312d12d10e694ee586986fae3e57a7a1bc"
+      "bytes": 8235,
+      "sha256": "ccf2134aaaa2b5e9cb94dce20d7b3b968b84d3815da6044cffc82d242a00ac04"
     },
     {
       "path": "benchmarks/plugin-review/tauri.android.conf.json",
@@ -4033,6 +4033,12 @@
       "sha256": "68b25f736b295bbad19f8e21d7fe08ad5238dffb55021fec3a5f02b4e61899b0"
     },
     {
+      "path": "src-tauri/capabilities/macos-appearance.json",
+      "mode": "100644",
+      "bytes": 155,
+      "sha256": "39b35d31f3b6011e10133152d019b851579f1c862f9ebf22f65d825bee01206a"
+    },
+    {
       "path": "src-tauri/capabilities/migrated.json",
       "mode": "100644",
       "bytes": 2147,
@@ -4779,8 +4785,8 @@
     {
       "path": "src-tauri/gen/schemas/capabilities.json",
       "mode": "100644",
-      "bytes": 4120,
-      "sha256": "23ae15e0be8c11f852933b6711ad765ca9f36e4d4cf0df5600001fefc826f121"
+      "bytes": 4290,
+      "sha256": "1b99ea3d65c3926fa8f00158bc2802214a217461c43db0e87dec1a6e3a8fdd26"
     },
     {
       "path": "src-tauri/icons/128x128.png",
@@ -5877,8 +5883,8 @@
     {
       "path": "src-tauri/src/lib.rs",
       "mode": "100644",
-      "bytes": 49161,
-      "sha256": "4d35f506b35435f75a1b5bd413e4fcf7143261b28827d7dd7d1108f14d5cbab9"
+      "bytes": 49483,
+      "sha256": "b18f58283edfe314096d949b0fcea58c3a2a78cb1df9891e19b3a706edf49c9e"
     },
     {
       "path": "src-tauri/src/local_backup.rs",
@@ -10275,14 +10281,14 @@
     {
       "path": "src/ts/gui/windowsAppearance.test.ts",
       "mode": "100644",
-      "bytes": 9176,
-      "sha256": "f3c7a7a88ab218dad44ec044d0fe9753484bab80ed6883a11d902c043bb5cd87"
+      "bytes": 12221,
+      "sha256": "880d01e8911da3c1d8d6f26cf956252a620fc172e05db8bdcd075175acf0c931"
     },
     {
       "path": "src/ts/gui/windowsAppearance.ts",
       "mode": "100644",
-      "bytes": 4481,
-      "sha256": "6297786051ffa839b0c7157f74efb599db5517cf5188ec6d4331acc84b50c792"
+      "bytes": 5045,
+      "sha256": "0aa7bead838c638a8d191cee818da2c1e639477c3e6bb4160f3fe755717d7c4d"
     },
     {
       "path": "src/ts/horde/getModels.ts",

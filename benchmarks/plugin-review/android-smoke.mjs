@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { execFile, spawnSync } from 'node:child_process'
 import { readFile, writeFile, mkdir, stat } from 'node:fs/promises'
 import { randomBytes, createHash } from 'node:crypto'
+import { createServer } from 'node:net'
 import { promisify } from 'node:util'
 import path from 'node:path'
 import { cutDeviceNetwork } from '../../scripts/phase3AndroidSmoke.mjs'
@@ -12,7 +13,7 @@ const options = Object.fromEntries(process.argv.slice(2).map(arg => {
     assert.ok(arg.startsWith('--') && split > 2, 'Use --name=value')
     return [arg.slice(2, split), arg.slice(split + 1)]
 }))
-for (const key of Object.keys(options)) assert.ok(['adb', 'apk', 'health', 'output', 'device', 'serial'].includes(key), 'Unknown option')
+for (const key of Object.keys(options)) assert.ok(['adb', 'apk', 'health', 'output', 'device', 'serial', 'cdp-port'].includes(key), 'Unknown option')
 assert.ok(options.adb && options.apk && options.health, '--adb, --apk and --health are required')
 assert.ok(!options.device || ['api34', 'api35'].includes(options.device), 'Unknown synthetic device')
 assert.ok(!options.serial || options.serial === 'emulator-5640', 'Unexpected alternate synthetic serial')
@@ -21,7 +22,9 @@ const avd = options.device === 'api35' ? 'risunest_buffer_api35_synthetic' : 'ri
 const configuredIdentifier = 'io.github.rsyumi.risunest'
 const packageName = 'io.github.rsyumi.risunest.pluginreview'
 const title = 'RisuNest synthetic plugin review'
-const port = 19371
+assert.ok(options['cdp-port'] === undefined || /^\d+$/.test(options['cdp-port']), 'Invalid CDP port')
+const port = Number(options['cdp-port'] ?? 19371)
+assert.ok(Number.isInteger(port) && port >= 1024 && port <= 65535, 'Invalid CDP port')
 const execute = promisify(execFile)
 const delay = ms => new Promise(resolve => setTimeout(resolve, ms))
 const apk = path.resolve(options.apk)
@@ -108,7 +111,12 @@ async function main() {
         if (!/^\d+$/.test(pid)) await delay(250)
     }
     assert.match(pid, /^\d+$/)
-    await run(['forward', `tcp:${port}`, `localabstract:webview_devtools_remote_${pid}`]); forwarded = true
+    await new Promise((resolve, reject) => {
+        const server = createServer()
+        server.once('error', () => reject(new Error('CDP port unavailable')))
+        server.listen(port, '127.0.0.1', () => server.close(resolve))
+    })
+    await run(['forward', '--no-rebind', `tcp:${port}`, `localabstract:webview_devtools_remote_${pid}`]); forwarded = true
     client = await connect()
     assert.equal(await client.evaluate('window.__pluginReview?.marker'), 'synthetic-plugin-review-v1')
     const environment = await client.evaluate('({userAgent:navigator.userAgent,visible:document.visibilityState === "visible"})')
