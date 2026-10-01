@@ -3921,8 +3921,8 @@
     {
       "path": "server/sync/tests/maintenance.rs",
       "mode": "100644",
-      "bytes": 9999,
-      "sha256": "7f408172c231ccc26b3ae7be9fd0c7eba7a27f4c83343f9fe8be22615647efa3"
+      "bytes": 10023,
+      "sha256": "ebb8474c6da58e5ffe2f0bf4f7b8ebddb56e6559ae6c37e1add124525a317a33"
     },
     {
       "path": "server/sync/tests/publication.rs",
@@ -6519,8 +6519,8 @@
     {
       "path": "src-tauri/src/persistent_store/repair/tests.rs",
       "mode": "100644",
-      "bytes": 22784,
-      "sha256": "63da568dcf46b4ab1baa37da9f555f5bdc55a469971a1a11bf2e89addbca5d45"
+      "bytes": 23034,
+      "sha256": "e019ef37d5441ae6c284a417ad05a725d8348e963ff8a5d9dbf17ab9721734fd"
     },
     {
       "path": "src-tauri/src/persistent_store/schema.rs",

@@ -246,6 +246,6 @@ fn a_revoked_device_leaves_the_device_list_once_nothing_it_holds_remains() {
     assert_eq!(listed(&store), [kept.id.clone(), busy.id.clone()]);
     assert!(store.run_pending_commit().unwrap());
     store.maintain().unwrap();
-    assert_eq!(listed(&store), [kept.id.clone()]);
+    assert_eq!(listed(&store).as_slice(), std::slice::from_ref(&kept.id));
     assert_eq!(store.head().unwrap().seq, h.seq);
 }

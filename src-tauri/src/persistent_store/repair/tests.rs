@@ -444,7 +444,7 @@ fn measures_single_reference_repair_and_undo_on_a_large_library() {
             let entry = entry.unwrap();
             let kind = entry.file_type().unwrap();
             assert!(!kind.is_symlink());
-            if kind.is_dir() { directory_bytes(&entry.path()) } else { entry.metadata().unwrap().len() }
+            if kind.is_dir() { directory_bytes(&entry.path()) } else { file_bytes(&entry.path()) }
         }).sum()
     }
 
@@ -474,7 +474,13 @@ fn measures_single_reference_repair_and_undo_on_a_large_library() {
     store.connection.execute_batch("DELETE FROM content_changes; DELETE FROM server_sync_dirty; PRAGMA wal_autocheckpoint=0;").unwrap();
     let database = store.database_path.clone();
     let wal = std::path::PathBuf::from(format!("{}-wal", database.display()));
-    let footprint = || (directory_bytes(directory.path()), file_bytes(&database), file_bytes(&wal));
+    let footprint = || {
+        let database_bytes = file_bytes(&database);
+        let wal_bytes = file_bytes(&wal);
+        let total_bytes = directory_bytes(directory.path());
+        assert!(total_bytes >= database_bytes + wal_bytes, "synthetic fixture footprint omitted database or WAL bytes");
+        (total_bytes, database_bytes, wal_bytes)
+    };
     let assert_contract = |store: &PersistentStore, revision: i64| {
         let after = super::super::sync_selection::identity(&store.connection).unwrap();
         assert_eq!(after.library_epoch, identity.library_epoch);
@@ -526,5 +532,6 @@ fn measures_single_reference_repair_and_undo_on_a_large_library() {
         journal.records.len(), undo_before.0, undo_after.0, undo_after.0.saturating_sub(undo_before.0), undo_before.1, undo_after.1,
         undo_before.2, undo_after.2, undo_after.2.saturating_sub(undo_before.2));
     store.checkpoint(crate::persistent_store::CheckpointMode::Truncate).unwrap();
-    eprintln!("cr004 phase=checkpoint temporary_root_file_bytes={} database_bytes={} wal_bytes={}", directory_bytes(directory.path()), file_bytes(&database), file_bytes(&wal));
+    let checkpoint = footprint();
+    eprintln!("cr004 phase=checkpoint temporary_root_file_bytes={} database_bytes={} wal_bytes={}", checkpoint.0, checkpoint.1, checkpoint.2);
 }
