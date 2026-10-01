@@ -419,34 +419,37 @@ impl PersistentStore {
         snapshot: &str,
         observation: &str,
     ) -> StoreResult<()> {
-        // The catalog is a separate file reached through this connection, so
-        // what was published is collected before the transaction opens.
-        let records = self.published_records(permit.job_id());
-        let tx = self.connection.transaction()?;
-        jobs::confirm_publication(&tx, permit, commit, snapshot, observation, records.as_ref())?;
-        tx.commit()?;
-        Ok(())
+        let capture = self.published_capture(permit.job_id());
+        if let Some(capture) = &capture {
+            let path = capture.catalog.db.path().ok_or_else(|| super::StoreError::Validation {
+                message: "Published capture has no catalog file".into(),
+            })?;
+            let mut uri = url::Url::from_file_path(path).map_err(|_| super::StoreError::Validation {
+                message: "Published capture catalog path is invalid".into(),
+            })?;
+            uri.set_query(Some("mode=ro"));
+            self.connection.execute("ATTACH DATABASE ?1 AS publication_capture", [uri.as_str()])?;
+        }
+        let result = (|| {
+            let tx = self.connection.transaction()?;
+            jobs::confirm_captured_publication(&tx, permit, commit, snapshot, observation, capture.is_some())?;
+            tx.commit()?;
+            Ok(())
+        })();
+        if capture.is_some() {
+            let detached = self.connection.execute("DETACH DATABASE publication_capture", []);
+            result?;
+            detached?;
+            Ok(())
+        } else {
+            result
+        }
     }
-    /// What the retained capture named, or nothing when it can no longer be
-    /// read. A publication settled after a restart is the case that finds no
-    /// capture, and a confirmed remote commit must not be refused over it.
-    fn published_records(&self, job: &str) -> Option<std::collections::BTreeMap<String, String>> {
-        let capture: String = self
-            .connection
-            .query_row(
-                "SELECT capture_id FROM external_storage_jobs WHERE id=?1",
-                [job],
-                |row| row.get(0),
-            )
-            .ok()?;
-        let reopened = self.reopen_external_capture(&capture).ok()?;
-        let mut query = reopened
-            .catalog
-            .db
-            .prepare("SELECT key,hash FROM records")
-            .ok()?;
-        let rows = query.query_map([], |row| Ok((row.get(0)?, row.get(1)?))).ok()?;
-        rows.collect::<Result<_, _>>().ok()
+    fn published_capture(&self, job: &str) -> Option<super::external_capture::CapturedSnapshot> {
+        let capture: String = self.connection.query_row(
+            "SELECT capture_id FROM external_storage_jobs WHERE id=?1", [job], |row| row.get(0),
+        ).ok()?;
+        self.reopen_external_capture(&capture).ok()
     }
     pub(crate) fn external_cancel_prepared(&mut self, job: &str) -> StoreResult<()> {
         let tx = self.connection.transaction()?;

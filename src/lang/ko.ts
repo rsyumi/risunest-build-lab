@@ -2103,7 +2103,7 @@ export const languageKorean = {
                 },
                 blockedReasonUnknown: '지금은 사용할 수 없습니다',
                 restoreConfirm:
-                    '이 백업으로 되돌릴까요? 지금 라이브러리를 먼저 백업하며, 동기화는 일시 중지 상태로 둡니다.',
+                    '이 백업으로 복원하시겠습니까? 현재 라이브러리는 이 백업의 내용으로 교체되며, 동기화는 일시 중지됩니다. 자동 백업은 만들지 않습니다.',
                 deleteConfirm: '이 충돌 백업을 이 기기에서 삭제하시겠습니까?',
                 deleteCleanupPending:
                     '로컬 백업은 삭제됐으며, 서버 정리는 나중에 계속됩니다.',
@@ -2112,7 +2112,7 @@ export const languageKorean = {
             },
             backups: '충돌 백업',
             backupHelp:
-                '충돌이 났을 때 남겨 둔 이 기기 쪽이나 서버 쪽 데이터로 되돌립니다. 되돌리기 전에 지금 데이터도 백업해 둡니다. 되돌린 내용을 확인한 뒤 다시 동기화할 수 있도록 일시 중지 상태로 둡니다.',
+                '충돌이 발생하기 전의 백업으로 라이브러리를 복원할 수 있습니다. 복원하면 현재 라이브러리가 교체되며, 자동 백업은 만들지 않습니다.',
             backupCount: '충돌 백업 {0}개',
             noBackups: '충돌 백업이 없습니다.',
             restoreLocalBackup: '이 기기 백업 복원',
@@ -2179,7 +2179,7 @@ export const languageKorean = {
             conflict: '충돌 확인 필요',
             conflictCount: '충돌 항목 {0}개',
             conflictHelp:
-                '이 기기와 서버에서 같은 항목을 고쳤습니다. 어느 쪽을 남길지 고르세요. 적용하기 전에 양쪽 내용을 충돌 백업으로 남깁니다.',
+                '이 기기와 서버에서 같은 항목이 변경되었습니다. 모든 충돌 항목에 유지할 쪽을 선택하세요. 적용하기 전에 양쪽 내용이 충돌 백업으로 저장됩니다.',
             keepLocal: '이 기기 내용 유지',
             keepRemote: '서버 내용 유지',
             busyHelp: '다른 작업이 라이브러리를 사용하고 있습니다. 작업이 끝난 후 다시 시도하세요.',
@@ -2191,10 +2191,22 @@ export const languageKorean = {
             "retryStatus": '다시 시도',
             "waitingForLocal": '이 기기의 변경 사항이 완료되기를 기다리고 있습니다.',
             "storageFullHelp": '기기의 저장 공간이 부족합니다. 공간을 확보한 뒤 다시 동기화하세요.',
+            "conflictKinds": {
+                "root": '설정',
+                "preset": '프리셋',
+                "plugin": '플러그인 데이터',
+                "character": '캐릭터',
+                "conversation": '채팅',
+                "asset": '에셋',
+                "inlay": '인레이',
+                "cold": '콜드 스토리지',
+                "unknown": '항목',
+            },
             "statusUnknown": '동기화 상태를 확인할 수 없습니다',
             "downloadBeforeDisconnect": '서버에만 있는 파일을 이 기기에 다운로드한 뒤 연결을 해제할 수 있습니다. 에셋 보관 방식을 이 기기에 모두 보관으로 변경한 뒤 다시 시도하세요.',
             "registrationRefusedHelp": '서버가 이 기기의 등록을 받지 않습니다. 서버에서 새 등록 코드를 발급한 뒤 새 기기로 등록에 입력하세요. 서버를 새로 만든 경우 연결을 해제한 뒤 다시 연결하세요.',
             "revokeBeforeRegistration": '서버에서 기존 기기의 등록을 해제한 뒤 새 등록 코드를 입력하세요.',
+            "conflictRefreshed": '충돌 항목이 변경되었습니다. 유지할 쪽을 다시 선택하세요.',
             "continuingHelp": '남은 변경 사항은 다음 동기화에서 전송됩니다.',
             "cameraBlocked": '카메라 권한이 차단되었습니다. 설정에서 카메라 권한을 허용하거나 코드를 붙여넣으세요.',
             "cameraTimeout": 'QR 코드를 찾지 못했습니다. 다시 시도하거나 코드를 붙여넣으세요.',
@@ -2328,6 +2340,7 @@ export const languageKorean = {
             restoreSnapshot: '복원',
             snapshotReasons: {
             dataHealthRepair: "데이터 수정 전 보관",
+            serverSyncRecovery: "서버 비교 전 보관",
 
                 manual: '직접 만듦',
                 periodic: '자동',

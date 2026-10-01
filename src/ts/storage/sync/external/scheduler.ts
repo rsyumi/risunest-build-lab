@@ -20,6 +20,7 @@ export interface ExternalSchedulerDependencies {
     available(): boolean
     destinations(): ExternalScheduledDestination[]
     session(): ExternalExecutionSession
+    probeHead?(connectionId: string): Promise<boolean>
     maintenance?(): Array<{ connectionId: string; lastAttemptAt?: number }>
     now?(): number
     setTimer?(callback: () => void, delay: number): unknown
@@ -51,6 +52,8 @@ export function createExternalStorageScheduler(
     let timer: unknown
     let stopped = false
     let suspended = false
+    let latestRevision = 0n
+    const lastProbe = new Map<string, number>()
     const refusals = new Map<string, number>()
     const now = dependencies.now ?? Date.now
     const setTimer = dependencies.setTimer
@@ -80,7 +83,7 @@ export function createExternalStorageScheduler(
         clear()
         if (stopped || suspended || !dependencies.available()) return
         const next = Math.min(...[...pending.values()].map(item => item.dueAt),
-            dependencies.maintenance ? maintenanceAt : Number.POSITIVE_INFINITY)
+            (dependencies.maintenance || dependencies.probeHead) ? maintenanceAt : Number.POSITIVE_INFINITY)
         if (!Number.isFinite(next)) return
         timer = setTimer(runDue, Math.max(0, next - now()))
     }
@@ -181,7 +184,23 @@ export function createExternalStorageScheduler(
                 scheduleNext()
             }).finally(() => finished(destination.connectionId))
         }
-        if (dependencies.maintenance && currentTime >= maintenanceAt) {
+        if ((dependencies.maintenance || dependencies.probeHead) && currentTime >= maintenanceAt) {
+            if (dependencies.probeHead) {
+                for (const destination of destinations.values()) {
+                    if (destination.kind !== 'sync' || inFlight.has(destination.connectionId)
+                        || pending.has(destinationKey(destination))
+                        || currentTime - (lastProbe.get(destination.connectionId) ?? 0) < 180_000) continue
+                    lastProbe.set(destination.connectionId, currentTime)
+                    started(destination.connectionId)
+                    void dependencies.probeHead(destination.connectionId).then(changed => {
+                        if (changed && !stopped && !suspended && dependencies.available()
+                            && dependencies.destinations().some(item => destinationKey(item) === destinationKey(destination))) {
+                            merge(destination, latestRevision, 'generation-complete')
+                            scheduleNext()
+                        }
+                    }).catch(() => {}).finally(() => finished(destination.connectionId))
+                }
+            }
             maintenanceAt = currentTime + 60_000
             for (const candidate of dependencies.maintenance?.() ?? []) {
                 const last = Math.max(lastCleanup.get(candidate.connectionId) ?? -Infinity,
@@ -201,8 +220,15 @@ export function createExternalStorageScheduler(
     return {
         durableRevision(value: DecimalString, cause: ExternalRevisionCause = 'edit'): void {
             const target = parseRevision(value)
+            latestRevision = target
             refusals.clear()
             for (const destination of dependencies.destinations()) merge(destination, target, cause)
+            scheduleNext()
+        },
+        deviceChanged(): void {
+            for (const destination of dependencies.destinations()) {
+                if (destination.kind === 'sync') merge(destination, latestRevision, 'edit')
+            }
             scheduleNext()
         },
         requestNow(

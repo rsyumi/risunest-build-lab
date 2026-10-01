@@ -84,6 +84,11 @@ impl ReferenceSource {
     pub(crate) fn local_revision(&self) -> i64 { self.local_revision }
 }
 
+pub(super) fn deletion_tombstone_id(name: &str) -> Option<&str> {
+    let id = name.strip_prefix(".deleting-")?;
+    uuid::Uuid::parse_str(id).is_ok_and(|uuid| uuid.to_string() == id).then_some(id)
+}
+
 pub(super) fn directory(root: &Path, id: &str) -> Result<PathBuf> {
     let uuid = uuid::Uuid::parse_str(id).map_err(|_| SyncError::new("invalid-backup-id", 400))?;
     if uuid.to_string() != id {
@@ -105,8 +110,8 @@ pub(super) fn directory(root: &Path, id: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
-fn metrics(root: &Path, db: &rusqlite::Connection, side: Side) -> Result<SideMetrics> {
-    let requirements = references::side_requirements(root, db, side)?;
+fn metrics(root: &Path, db: &rusqlite::Connection, side: Side, inspect_availability: bool) -> Result<SideMetrics> {
+    let requirements = references::side_requirements_with_availability(root, db, side, inspect_availability)?;
     let availability = if !requirements.local_required_available {
         Availability::Unavailable
     } else if requirements.remote_dependent_bytes > 0 {
@@ -122,10 +127,16 @@ fn metrics(root: &Path, db: &rusqlite::Connection, side: Side) -> Result<SideMet
 }
 
 pub(super) fn inspect(root: &Path, id: &str) -> Result<Backup> {
+    inspect_with_availability(root, id, true)
+}
+pub(super) fn inspect_summary(root: &Path, id: &str) -> Result<Backup> {
+    inspect_with_availability(root, id, false)
+}
+fn inspect_with_availability(root: &Path, id: &str, inspect_availability: bool) -> Result<Backup> {
     let receipt = references::inspect(root, id)?;
     let db = references::open_for_inspection(root, id)?;
-    let local = metrics(root, &db, Side::Local)?;
-    let remote = metrics(root, &db, Side::Remote)?;
+    let local = metrics(root, &db, Side::Local, inspect_availability)?;
+    let remote = metrics(root, &db, Side::Remote, inspect_availability)?;
     let local_bytes = local.local_required_bytes.checked_add(local.remote_dependent_bytes)
         .ok_or_else(|| SyncError::new("storage-size-overflow", 409))?;
     let remote_bytes = remote.local_required_bytes.checked_add(remote.remote_dependent_bytes)
@@ -163,6 +174,7 @@ pub(crate) fn list(root: &Path, before: Option<&BackupCursor>) -> Result<BackupL
     for entry in entries {
         let entry = entry?;
         let Some(id) = entry.file_name().to_str().map(str::to_owned) else { continue; };
+        if deletion_tombstone_id(&id).is_some() { continue; }
         let Ok(backup) = inspect(root, &id) else { continue; };
         let key = (backup.created_at, id);
         if before.is_some_and(|cursor| key >= (cursor.created_at, cursor.id.clone())) {

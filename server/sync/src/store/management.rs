@@ -11,6 +11,7 @@ pub struct ManagedDevice {
     pub revoked: bool,
     pub pending: bool,
     pub registration_request: Option<String>,
+    pub last_ack: Option<i64>,
     pub retained: u64,
     pub pending_error: Option<String>,
 }
@@ -28,7 +29,7 @@ pub struct ManagementConnection {
 impl Store {
     pub fn managed_devices(&self) -> Result<Vec<ManagedDevice>> {
         let db = self.reader()?;
-        let mut query = db.prepare("SELECT id,name,revoked,EXISTS(SELECT 1 FROM commit_jobs WHERE device=devices.id),registration_request,(SELECT count(*) FROM object_custody WHERE device=devices.id),(SELECT j.error FROM upload_jobs j JOIN uploads u ON u.id=j.upload WHERE u.device=devices.id AND j.terminal=0 AND j.error IS NOT NULL LIMIT 1) FROM devices ORDER BY rowid")?;
+        let mut query = db.prepare("SELECT id,name,revoked,EXISTS(SELECT 1 FROM commit_jobs WHERE device=devices.id),registration_request,last_ack,(SELECT count(*) FROM object_custody WHERE device=devices.id),COALESCE((SELECT error FROM commit_jobs WHERE device=devices.id),(SELECT j.error FROM upload_jobs j JOIN uploads u ON u.id=j.upload WHERE u.device=devices.id AND j.terminal=0 AND j.error IS NOT NULL LIMIT 1)) FROM devices ORDER BY rowid")?;
         let rows = query.query_map([], |row| {
             Ok(ManagedDevice {
                 id: row.get(0)?,
@@ -36,8 +37,9 @@ impl Store {
                 revoked: row.get(2)?,
                 pending: row.get(3)?,
                 registration_request: row.get(4)?,
-                retained: row.get::<_, i64>(5)? as u64,
-                pending_error: row.get(6)?,
+                last_ack: row.get(5)?,
+                retained: row.get::<_, i64>(6)? as u64,
+                pending_error: row.get(7)?,
             })
         })?;
         Ok(rows.collect::<std::result::Result<Vec<_>, _>>()?)

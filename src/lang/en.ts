@@ -2289,7 +2289,7 @@ export const languageEnglish = {
                 },
                 blockedReasonUnknown: 'Unavailable right now',
                 restoreConfirm:
-                    'Go back to this backup? The current library is backed up first, and sync stays paused.',
+                    'Restore this backup? It replaces the current library and pauses synchronization. No automatic backup is created.',
                 deleteConfirm: 'Delete this conflict backup from this device?',
                 deleteCleanupPending:
                     'The local backup was deleted. Server cleanup will continue later.',
@@ -2298,7 +2298,7 @@ export const languageEnglish = {
             },
             backups: 'Conflict backups',
             backupHelp:
-                'Go back to the data kept from this device or from the server when a conflict happened. The current data is backed up first. Sync stays paused so you can check the restored contents before continuing.',
+                'Restore the library from a conflict backup. Restoring replaces the current library without creating an automatic backup.',
             backupCount: '{0} conflict backups',
             noBackups: 'No conflict backups.',
             restoreLocalBackup: 'Restore this device’s backup',
@@ -2365,7 +2365,7 @@ export const languageEnglish = {
             conflict: 'Conflicts need attention',
             conflictCount: '{0} conflicting items',
             conflictHelp:
-                'The same items were edited on this device and on the server. Choose which side to keep. Both sides are saved as conflict backups before applying.',
+                'The same items were edited on this device and on the server. Choose one side for all conflicting items. Both sides are saved as conflict backups before applying.',
             keepLocal: 'Keep this device',
             keepRemote: 'Keep server version',
             busyHelp: 'Another operation is using the library. Wait for it to finish and try again.',
@@ -2377,10 +2377,22 @@ export const languageEnglish = {
             "retryStatus": 'Retry',
             "waitingForLocal": 'Waiting for local changes to finish.',
             "storageFullHelp": 'This device has insufficient storage space. Free up space, then synchronize again.',
+            "conflictKinds": {
+                "root": 'Settings',
+                "preset": 'Presets',
+                "plugin": 'Plugin data',
+                "character": 'Characters',
+                "conversation": 'Chats',
+                "asset": 'Assets',
+                "inlay": 'Inlays',
+                "cold": 'Cold storage',
+                "unknown": 'Items',
+            },
             "statusUnknown": 'Sync status unavailable',
             "downloadBeforeDisconnect": 'Download server-only files to this device before disconnecting. Select Keep all on this device, then try again.',
             "registrationRefusedHelp": 'The server refused this registration. Create a new registration code on the server and enter it under Register as a new device. If you recreated the server, disconnect and connect again.',
             "revokeBeforeRegistration": 'Revoke the existing device on the server, then enter a new registration code.',
+            "conflictRefreshed": 'The conflicting items changed. Choose which version to keep again.',
             "continuingHelp": 'The remaining changes will be sent in the next synchronization.',
             "cameraBlocked": 'Camera access is blocked. Allow camera access in settings or paste the code.',
             "cameraTimeout": 'No QR code was found. Try again or paste the code.',
@@ -2515,6 +2527,7 @@ export const languageEnglish = {
             restoreSnapshot: 'Restore',
             snapshotReasons: {
             dataHealthRepair: "Before data repair",
+            serverSyncRecovery: "Before server comparison",
 
                 manual: 'Created manually',
                 periodic: 'Automatic',

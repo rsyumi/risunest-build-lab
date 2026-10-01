@@ -465,11 +465,17 @@ impl Store {
     /// Call only after restoring a stopped, complete server-directory backup.
     /// Old clients must reconcile against the restored checkpoint under a new epoch.
     pub fn rotate_restored_epoch(&self) -> Result<()> {
-        let _gate = self.objects_gate.lock().map_err(|_| Error::new("storage-unavailable", 503))?;
+        let _gate = self
+            .objects_gate
+            .lock()
+            .map_err(|_| Error::new("storage-unavailable", 503))?;
         let mut db = self.db()?;
         let tx = db.transaction()?;
         let head = RemoteHead::genesis(Self::read_head(&tx)?.library_id, random_id()?)?;
-        tx.execute("INSERT OR IGNORE INTO staging_trash SELECT upload,ordinal FROM upload_chunks", [])?;
+        tx.execute(
+            "INSERT OR IGNORE INTO staging_trash SELECT upload,ordinal FROM upload_chunks",
+            [],
+        )?;
         tx.execute_batch("DELETE FROM changes; DELETE FROM commits; DELETE FROM receipts; DELETE FROM commit_jobs; DELETE FROM staged_changes; DELETE FROM read_pins; DELETE FROM checkpoints; DELETE FROM uploads; DELETE FROM download_deltas; DELETE FROM object_leases; DELETE FROM scope_versions; DELETE FROM device_section_acks;")?;
         tx.execute("UPDATE library SET head=?1", [json(&head)?])?;
         tx.commit()?;

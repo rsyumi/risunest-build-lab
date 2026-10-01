@@ -18,6 +18,167 @@ fn local_entry(row: &SectionRow) -> LocalSectionEntry {
     }
 }
 
+#[test]
+fn pending_plugin_keys_page_by_tuple_with_escaped_identifiers_and_indexed_status() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut device = DeviceStore::open(directory.path()).unwrap();
+    let keys = ["a", "a\"", "a\\", "a/", "b"];
+    for key in keys {
+        device.write_plugin_device_values("plugin", &[PluginDeviceMutation::Set {
+            space: "string".into(), key: key.into(), value: "synthetic".into(),
+        }]).unwrap();
+    }
+    let mut after = String::new();
+    let mut collected = std::collections::BTreeSet::new();
+    loop {
+        let page = device.pending_section_entry_keys(Section::LocalPlugins, &after, 2).unwrap();
+        if page.is_empty() { break; }
+        for key in &page { assert!(collected.insert(key.clone()), "duplicate pending key"); }
+        after = page.last().unwrap().clone();
+    }
+    assert_eq!(collected.len(), keys.len());
+    for (table, index) in [("plugin_device_storage", "plugin_device_storage_pending"), ("hypa_embeddings", "hypa_embeddings_pending")] {
+        let plan: Vec<String> = device.connection.prepare(&format!(
+            "EXPLAIN QUERY PLAN SELECT EXISTS(SELECT 1 FROM {table} WHERE published_clock IS NULL OR published_clock<>write_clock)"
+        )).unwrap().query_map([], |row| row.get(3)).unwrap().collect::<Result<_,_>>().unwrap();
+        assert!(plan.iter().any(|line| line.contains(index)), "{plan:?}");
+    }
+}
+
+#[test]
+#[ignore = "synthetic 20k embedding pending-status measurement"]
+fn pending_status_vm_steps_stay_constant_with_20k_published_embeddings() {
+    use crate::persistent_store::device_store::hypa::HypaEmbeddingWrite;
+    use risunest_external_storage_format::section::hypa_entry_key;
+    use rusqlite::StatementStatus;
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut device = DeviceStore::open(directory.path()).unwrap();
+    device.set_section_participating(Section::Hypa, true).unwrap();
+    let sql = "SELECT EXISTS(SELECT 1 FROM hypa_embeddings WHERE published_clock IS NULL OR published_clock<>write_clock)";
+    let measure = |device: &DeviceStore| {
+        let mut statement = device.connection.prepare(sql).unwrap();
+        let pending: bool = statement.query_row([], |row| row.get(0)).unwrap();
+        assert_eq!(pending, device.has_pending_section_entries(Section::Hypa).unwrap());
+        let steps = statement.get_status(StatementStatus::VmStep);
+        assert!(steps > 0);
+        (pending, steps)
+    };
+    let baseline = measure(&device);
+    assert!(!baseline.0);
+    for start in (0..20_000).step_by(512) {
+        let end = (start + 512).min(20_000);
+        let entries: Vec<_> = (start..end).map(|index| HypaEmbeddingWrite {
+            cache_key: format!("{index:064x}"), producer: "synthetic".into(),
+            model: "synthetic-1536".into(), endpoint: None, preprocess_version: 1,
+            dimensions: 1536, vector: 1.0f32.to_le_bytes().repeat(1536), metadata: None,
+        }).collect();
+        device.write_hypa_embeddings(&entries).unwrap();
+        let published: Vec<_> = entries.iter().map(|entry| server::SectionWrite::Mark {
+            domain: Domain::Hypa, key: hypa_entry_key(&entry.cache_key).unwrap(),
+        }).collect();
+        server::write_sections(&mut device, &published).unwrap();
+    }
+    let shape: (i64, i64, i64) = device.connection.query_row(
+        "SELECT count(*),min(dimensions),sum(length(vector)) FROM hypa_embeddings",
+        [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).unwrap();
+    assert_eq!(shape, (20_000, 1536, 20_000 * 1536 * 4));
+    assert!(!server::has_pending(&device).unwrap());
+    assert!(device.pending_section_entry_keys(Section::Hypa, "", 256).unwrap().is_empty());
+    let full = measure(&device);
+    assert!(!full.0);
+    assert_eq!(full.1, baseline.1, "all-published status must not visit embedding rows");
+    let plan: Vec<String> = device.connection.prepare(&format!("EXPLAIN QUERY PLAN {sql}"))
+        .unwrap().query_map([], |row| row.get(3)).unwrap().collect::<Result<_,_>>().unwrap();
+    assert!(plan.iter().any(|line| line.contains("hypa_embeddings_pending")), "{plan:?}");
+    eprintln!("synthetic pending-status: rows=20000 dimensions=1536 baseline_vm_steps={} full_vm_steps={} plan={plan:?}", baseline.1, full.1);
+}
+
+#[test]
+#[ignore = "synthetic 10k plugin pending-page and publication measurement"]
+fn pending_plugin_scale_pages_complete_once_and_keep_writes_after_the_cursor() {
+    use risunest_external_storage_format::section::{decode_local_plugin_entry_key, local_plugin_entry_key};
+    use rusqlite::StatementStatus;
+    use std::collections::BTreeSet;
+
+    let directory = tempfile::tempdir().unwrap();
+    let mut device = DeviceStore::open(directory.path()).unwrap();
+    device.set_section_participating(Section::LocalPlugins, true).unwrap();
+    let raw_keys: Vec<_> = (0..10_000).map(|index| format!("key-{index:05}{}",
+        match index % 4 { 0 => "\"", 1 => "\\", 2 => "/", _ => "plain" })).collect();
+    for batch in raw_keys.chunks(512) {
+        let writes: Vec<_> = batch.iter().map(|key| PluginDeviceMutation::Set {
+            space: "string".into(), key: key.clone(), value: "synthetic".into(),
+        }).collect();
+        device.write_plugin_device_values("plugin", &writes).unwrap();
+    }
+    let expected: BTreeSet<_> = raw_keys.iter().map(|key|
+        local_plugin_entry_key("plugin", "string", key).unwrap()).collect();
+    assert_eq!(expected.len(), 10_000);
+    let first_sql = "SELECT owner,space,key FROM plugin_device_storage WHERE (published_clock IS NULL OR published_clock<>write_clock) ORDER BY owner,space,key LIMIT ?4";
+    let next_sql = "SELECT owner,space,key FROM plugin_device_storage WHERE (published_clock IS NULL OR published_clock<>write_clock) AND (owner,space,key)>(?1,?2,?3) ORDER BY owner,space,key LIMIT ?4";
+    let plan: Vec<String> = device.connection.prepare(&format!("EXPLAIN QUERY PLAN {next_sql}"))
+        .unwrap().query_map(rusqlite::params!["plugin", "string", "", 256], |row| row.get(3))
+        .unwrap().collect::<Result<_,_>>().unwrap();
+    assert!(plan.iter().any(|line| line.contains("plugin_device_storage_pending")), "{plan:?}");
+    let mut after = String::new();
+    let mut collected = BTreeSet::new();
+    let mut pages = 0;
+    let mut total_steps = 0;
+    let mut max_steps = 0;
+    let mut rewritten = None;
+    loop {
+        let page = device.pending_section_entry_keys(Section::LocalPlugins, &after, 256).unwrap();
+        let lower = if after.is_empty() { (String::new(), String::new(), String::new()) }
+            else { decode_local_plugin_entry_key(&after).unwrap() };
+        let mut statement = device.connection.prepare(if after.is_empty() { first_sql } else { next_sql }).unwrap();
+        let measured: Vec<_> = statement.query_map(rusqlite::params![lower.0, lower.1, lower.2, 256], |row|
+            Ok((row.get::<_,String>(0)?, row.get::<_,String>(1)?, row.get::<_,String>(2)?)))
+            .unwrap().collect::<Result<Vec<_>,_>>().unwrap().iter().map(|(owner, space, key)|
+                local_plugin_entry_key(owner, space, key).unwrap()).collect();
+        assert_eq!(measured, page);
+        let steps = statement.get_status(StatementStatus::VmStep);
+        total_steps += steps;
+        max_steps = max_steps.max(steps);
+        drop(statement);
+        if page.is_empty() { break; }
+        pages += 1;
+        assert!(page.len() <= 256);
+        assert!(pages <= 40, "pending pages did not advance");
+        for key in &page { assert!(collected.insert(key.clone()), "duplicate pending key"); }
+        let versions: Vec<_> = page.iter().map(|key| server::SectionWrite::MarkVersion {
+            domain: Domain::LocalPlugins, key: key.clone(),
+            version: device.read_section_entry(Section::LocalPlugins, key).unwrap().unwrap().version,
+        }).collect();
+        if rewritten.is_none() {
+            let key = page.first().unwrap().clone();
+            let (_, space, raw) = decode_local_plugin_entry_key(&key).unwrap();
+            device.write_plugin_device_values("plugin", &[PluginDeviceMutation::Set {
+                space, key: raw, value: "synthetic-newer".into(),
+            }]).unwrap();
+            rewritten = Some(key);
+        }
+        server::write_sections(&mut device, &versions).unwrap();
+        after = page.last().unwrap().clone();
+    }
+    assert_eq!(collected, expected);
+    assert_eq!(pages, 40);
+    assert!(max_steps < 256 * 64 + 128, "a page must not scan the pending tail: {max_steps}");
+    assert!(total_steps < 10_000 * 64 + 41 * 128, "page work must remain bounded by visited keys: {total_steps}");
+    let rewritten = rewritten.unwrap();
+    assert!(server::has_pending(&device).unwrap());
+    assert_eq!(device.pending_section_entry_keys(Section::LocalPlugins, "", 256).unwrap(), vec![rewritten.clone()]);
+    let latest = device.read_section_entry(Section::LocalPlugins, &rewritten).unwrap().unwrap();
+    assert!(!latest.published);
+    server::write_sections(&mut device, &[server::SectionWrite::MarkVersion {
+        domain: Domain::LocalPlugins, key: rewritten, version: latest.version,
+    }]).unwrap();
+    assert!(!server::has_pending(&device).unwrap());
+    assert!(device.pending_section_entry_keys(Section::LocalPlugins, "", 256).unwrap().is_empty());
+    eprintln!("synthetic plugin pending-pages: keys=10000 pages={pages} total_vm_steps={total_steps} max_page_vm_steps={max_steps} plan={plan:?}");
+}
+
 fn assert_both(local: &SectionRow, incoming: &SectionRow, decision: SectionMergeDecision, outcome: server::Outcome) {
     assert_eq!(resolve_section_row(Some(local), incoming).unwrap(), decision);
     assert_eq!(server::resolve(Some(&local_entry(local)), &local_entry(incoming).entry).unwrap(), outcome);

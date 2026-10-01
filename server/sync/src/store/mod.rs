@@ -493,6 +493,10 @@ impl Store {
             }
             tx.execute("INSERT INTO device_section_acks VALUES(?1,?2,?3) ON CONFLICT(device,domain) DO UPDATE SET ack=excluded.ack",params![device.id,domain.as_str(),seq.as_str()])?;
         }
+        tx.execute(
+            "UPDATE devices SET last_ack=unixepoch() WHERE id=?1",
+            [&device.id],
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -513,7 +517,8 @@ impl Store {
             None => 0.into(),
         })
     }
-    /// The oldest point every active device has applied for one section.
+    /// The oldest point acknowledged members have applied for one section.
+    /// Issued but unused registrations bootstrap from a checkpoint.
     pub fn section_ack_floor(&self, domain: Domain) -> Result<Sequence> {
         let db = self.reader()?;
         Self::read_section_ack_floor(&db, domain, &Self::read_head(&db)?.seq)
@@ -525,7 +530,7 @@ impl Store {
     ) -> Result<Sequence> {
         let mut floor = ceiling.clone();
         let mut statement = db.prepare(
-            "SELECT COALESCE((SELECT ack FROM device_section_acks WHERE device=devices.id AND domain=?1),'0') FROM devices WHERE revoked=0",
+            "SELECT COALESCE((SELECT ack FROM device_section_acks WHERE device=devices.id AND domain=?1),'0') FROM devices WHERE revoked=0 AND EXISTS(SELECT 1 FROM device_section_acks WHERE device=devices.id)",
         )?;
         for value in statement.query_map([domain.as_str()], |r| r.get::<_, String>(0))? {
             floor = floor.min(Sequence::try_from(value?)?);

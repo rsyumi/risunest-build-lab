@@ -76,6 +76,8 @@ pub(super) async fn prepare(app: &AppHandle) -> Result<(), String> {
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+    jobs.close_lease_ledger_for_cleanup()
+        .map_err(|_| "cleanup-background-work-busy")?;
     crate::server_sync::residency::release_anchor();
     if state
         .maintenance
@@ -152,6 +154,8 @@ pub(super) fn rebuild(app: &AppHandle) -> Result<(), String> {
             .set(state.paths.data.clone())
             .map_err(|_| "cleanup-state-unavailable")?;
     }
+    jobs.open_lease_ledger(&app.state::<crate::app_paths::AppPaths>().cache)
+        .map_err(|_| "cleanup-background-work-unavailable")?;
     if app
         .try_state::<crate::regex_shadow::RegexCancellationRegistry>()
         .is_none()

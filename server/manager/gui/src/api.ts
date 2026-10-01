@@ -12,6 +12,7 @@ export interface Device {
   revoked: boolean;
   pending: boolean;
   registrationRequest: string | null;
+  lastAck?: number | null;
   retained?: number;
   pendingError?: string | null;
 }

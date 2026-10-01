@@ -50,6 +50,15 @@ describe('external storage controller', () => {
             session: { kind: 'foreground', id: 'session' } })).resolves.toMatchObject({ kind: 'blocked', reason: 'preconditionFailed', cause })
     })
 
+    it('routes a retained conflict before its precondition error detail', async () => {
+        const conflict = { ...job('conflict', 'conflict'), result: { conflictId: 'retained' },
+            error: { code: 'preconditionFailed', message: '', action: 'none' as const, retryable: false } }
+        const controller = createExternalStorageController({ startJob: vi.fn().mockResolvedValue(conflict), getJob: vi.fn(), cancelJob: vi.fn() }, state)
+        await expect(controller.request({ connectionId: 'sync-1', kind: 'sync', targetRevision: '1', reason: 'manual',
+            session: { kind: 'foreground', id: 'session' } })).resolves.toMatchObject({ kind: 'blocked', reason: 'external-storage-conflict',
+            error: conflict.error, job: { result: { conflictId: 'retained' } } })
+    })
+
     it('finishes cleanup without inventing a published revision or applying received data', async () => {
         const applyReceived = vi.fn()
         const bridge: ExternalStorageJobBridge = {

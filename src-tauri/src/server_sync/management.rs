@@ -119,7 +119,8 @@ pub(crate) fn inventory(
         let bytes = tree_bytes(&entry.path())?;
         result.disk_bytes += bytes;
         let id = entry.file_name().to_string_lossy().into_owned();
-        match backups::inspect(root, &id) {
+        if backups::deletion_tombstone_id(&id).is_some() { continue; }
+        match backups::inspect_summary(root, &id) {
             Ok(backup) => {
                 result.complete_count += 1;
                 result.complete_bytes += backup.local_bytes + backup.remote_bytes;
@@ -156,7 +157,25 @@ pub(crate) fn inventory(
         });
     }
     result.items = page.into_values().rev().collect();
+    for item in &mut result.items {
+        item.backup = backups::inspect(root, &item.backup.id)?;
+    }
     Ok(result)
+}
+
+pub(crate) fn incomplete_count(root: &Path) -> Result<u64> {
+    let Some(server) = server_root(root)? else { return Ok(0); };
+    let Some(entries) = children(&server.join("backups"))? else { return Ok(0); };
+    let mut count = 0;
+    for entry in entries {
+        let entry = entry?;
+        checked_metadata(&entry.path())?;
+        let id = entry.file_name().to_string_lossy().into_owned();
+        if backups::deletion_tombstone_id(&id).is_none() && backups::inspect_summary(root, &id).is_err() {
+            count += 1;
+        }
+    }
+    Ok(count)
 }
 
 fn require_unblocked(blocked: Option<&str>) -> Result<()> {

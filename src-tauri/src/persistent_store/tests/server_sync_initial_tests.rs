@@ -103,7 +103,7 @@ fn empty_replicas_seed_and_receive_while_independent_libraries_require_compariso
     initialized.asset_residency_set_policy(crate::server_sync::residency::AssetPolicy::Remote, || Ok(())).unwrap();
 
     // A new install holds its defaults and one preset of its own; the server's
-    // library replaces them without a comparison or a backup.
+    // library replaces them with a recoverable local snapshot.
     let fresh_dir = tempfile::tempdir().unwrap();
     let mut fresh = PersistentStore::open(fresh_dir.path()).unwrap();
     let mut fresh_root = source.read_root(None).unwrap().value;
@@ -112,7 +112,7 @@ fn empty_replicas_seed_and_receive_while_independent_libraries_require_compariso
     own_preset["name"] = json!("Synthetic default preset");
     let staging = fresh.replace_begin().unwrap();
     fresh.replace_put_root(&staging.staging_id, &fresh_root).unwrap();
-    fresh.replace_put_presets(&staging.staging_id, &[own_preset]).unwrap();
+    fresh.replace_put_presets(&staging.staging_id, &[own_preset.clone()]).unwrap();
     fresh.replace_commit(&staging.staging_id, Some(0)).unwrap();
     assert!(fresh.revision().unwrap() > 0);
     bind(&mut fresh);
@@ -126,6 +126,13 @@ fn empty_replicas_seed_and_receive_while_independent_libraries_require_compariso
     assert_eq!(materialized["characters"], expected);
     let backups = fresh_dir.path().join("server-sync/backups");
     assert!(!backups.exists() || std::fs::read_dir(&backups).unwrap().next().is_none());
+    let safety = fresh.snapshot_list().unwrap().into_iter()
+        .find(|snapshot| snapshot.reason == "server-sync-initial-receive").unwrap();
+    fresh.snapshot_restore_request(&safety.id).unwrap();
+    drop(fresh);
+    let restored = PersistentStore::open(fresh_dir.path()).unwrap();
+    assert_eq!(restored.read_root(None).unwrap().value, fresh_root);
+    assert_eq!(restored.materialize(None).unwrap()["botPresets"], json!([own_preset]));
 
     let (_independent_dir, mut independent) = prepared();
     let mut root = independent.read_root(None).unwrap().value;

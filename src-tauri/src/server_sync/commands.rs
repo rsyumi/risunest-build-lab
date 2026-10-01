@@ -337,13 +337,10 @@ fn manage_cache(app: &AppHandle, clean: bool) -> Result<super::management::Cache
     {
         block = Some("server-sync-busy");
     }
-    let backups = super::management::inventory(
-        store.repository_root(),
-        None,
-        block,
-        &pinned_backups(&state)?,
-    )?;
-    if backups.incomplete_count > 0 {
+    if clean && block.is_none() {
+        super::management::cleanup_deleted_backups(store.repository_root(), block, &pinned_backups(&state)?)?;
+    }
+    if super::management::incomplete_count(store.repository_root())? > 0 {
         block = Some("incomplete-preservation");
     }
     if !pinned_backups(&state)?.is_empty() {
@@ -790,6 +787,7 @@ pub(crate) async fn server_sync_prepare(
             .map_err(|_| SyncError::new("server-sync-state-unavailable", 503))? = None;
         options.retryable_failure = Some(state.retryable_failure.clone());
         let mut store = job_store(&app)?;
+        crate::persistent_store::server_sync_apply::sweep_staging(store.repository_root())?;
         match store.server_prepare_cycle(&options)? {
             Preparation::Report(result) => Ok(PreparedReply::Report { result }),
             Preparation::Ready(cycle) => {

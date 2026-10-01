@@ -999,6 +999,7 @@ mod tests {
                 root: self.directory.path(), connection_id: "connection", writer_id: "writer",
                 descriptor: &self.descriptor, root_key: &[7; 32], provider: &self.provider,
                 repository: &self.repository, clock: &self.clock, protection_supported: true,
+                ledger: None,
             }
         }
         fn probes(&self, advance: u64) -> Probes<'_> {

@@ -190,8 +190,8 @@
 
     /** Re-enters the paused job instead of starting one beside it. */
     async function resumeJob(connection: ExternalConnectionSummary, job: ExternalJobSummary): Promise<void> {
-        if (job.kind === 'sync') {
-            await runJob(connection, 'sync')
+        if (job.kind === 'resolve-conflict' && job.resolveRequest) {
+            await runJob(connection, 'resolve-conflict', { ...job.resolveRequest, jobId: job.id })
             return
         }
         if (job.kind === 'restore' && job.restoreRequest) {
@@ -216,6 +216,7 @@
         job: 'backup' | 'sync' | 'restore' | 'pin-history' | 'resolve-conflict' | 'cleanup' | 'check-repository',
         details: {
             snapshotId?: string
+            jobId?: string
             conflictId?: string
             choice?: 'local' | 'remote'
             restoreAreas?: ExternalRestoreArea[]
@@ -251,6 +252,7 @@
                     connection.id,
                     details.conflictId,
                     details.choice,
+                    ...(details.jobId ? [details.jobId] as const : [] as const),
                 )
                 schedulePoll(true)
                 await operation
@@ -663,7 +665,6 @@
         if (!value) return strings.failed
         if (value.action === 'reauthenticate') return strings.reauthenticate
         if (value.action === 'unlock-key') return strings.unlockKey
-        if (value.action === 'resolve-conflict') return strings.resolveRequired
         return externalErrorMessage(strings, value)
     }
 
@@ -864,7 +865,10 @@
                     {#if connection.status === 'key-locked' || job?.error?.action === 'unlock-key'}
                         <SettingButton disabled={busy} onclick={() => unlockConnection = connection}>{strings.unlock}</SettingButton>
                     {/if}
-                    {#if job && ((job.state === 'waiting' && job.error?.action === 'retry' && job.kind === 'sync') || (externalJobIsPaused(job) && ['retry', 'wait', 'free-space'].includes(job.error?.action ?? '') && ['backup', 'cleanup', 'restore', 'check-repository', 'pin-history', 'delete-history'].includes(job.kind)))}
+                    {#if job?.state === 'uncertain' && (['sync', 'backup'].includes(job.kind) || (job.kind === 'resolve-conflict' && job.resolveRequest))}
+                        <SettingButton disabled={busy} onclick={() => resumeJob(connection, job)}>{strings.recheckPublication}</SettingButton>
+                    {/if}
+                    {#if job && externalJobIsPaused(job) && ['retry', 'wait', 'free-space'].includes(job.error?.action ?? '') && ['backup', 'sync', 'cleanup', 'restore', 'check-repository', 'resolve-conflict', 'pin-history', 'delete-history'].includes(job.kind)}
                         <SettingButton disabled={busy || Number(job.error?.retryAtMs ?? 0) > Date.now()} onclick={() => resumeJob(connection, job)}>{strings.retryAction}</SettingButton>
                     {/if}
                     <SettingButton busy={activeAction === `backup:${connection.id}`} disabled={busy || (job && externalJobIsActive(job))} onclick={() => runJob(connection, 'backup')}>{strings.runBackup}</SettingButton>
