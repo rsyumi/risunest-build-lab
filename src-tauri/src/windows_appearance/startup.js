@@ -1,6 +1,8 @@
-// Runs only in the main frame of the Windows app, before document scripts.
+// Runs before document scripts, from native Windows startup or product HTML.
 // This disposable color cache is independent of the device maintenance gate.
 (() => {
+  if (window.__risunestStartupAppearanceInitialized) return;
+  window.__risunestStartupAppearanceInitialized = true;
   let appearance;
   try {
     const raw = localStorage.getItem("risunest.windowsAppearance");

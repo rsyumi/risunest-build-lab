@@ -7,6 +7,32 @@ mod termination_probe;
 #[derive(Default)]
 struct Events(Mutex<Vec<&'static str>>);
 
+#[cfg(target_os = "macos")]
+static PRODUCT_APP: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
+
+#[cfg(target_os = "macos")]
+extern "C" fn observe_product_reply(approve: i32, main_thread: i32, modal: i32) {
+    let result = std::panic::catch_unwind(|| {
+        let app = PRODUCT_APP.get().ok_or("Product reply observer unavailable")?;
+        let state = app.state::<Events>();
+        let (reply_count, runtime_quits) = {
+            let mut events = state.0.lock().map_err(|_| "Product events unavailable")?;
+            events.push(if approve == 0 { "native-reply-no" } else { "native-reply-yes" });
+            (events.iter().filter(|event| event.starts_with("native-reply-")).count(),
+             events.iter().filter(|event| **event == "quit").count())
+        };
+        macos_bench_report("app-native-reply".into(), serde_json::json!({
+            "approve": approve != 0, "mainThread": main_thread == 1, "modal": modal == 1,
+            "replyCount": reply_count, "runtimeQuitRequests": runtime_quits,
+        }))
+    });
+    if !matches!(result, Ok(Ok(()))) {
+        let _ = macos_bench_report("failure".into(), serde_json::json!({
+            "passed": false, "message": "Unable to record product native termination reply",
+        }));
+    }
+}
+
 #[tauri::command]
 fn macos_bench_phase() -> String {
     std::env::var("RISUNEST_MACOS_PHASE").expect("controller phase")
@@ -36,12 +62,35 @@ fn macos_bench_quit(app: tauri::AppHandle) {
     app.exit(0);
 }
 
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn macos_bench_native_quit(app: tauri::AppHandle) -> Result<(), String> {
+    if macos_bench_phase() != "app" {
+        return Err("Native product quit belongs to the app phase".into());
+    }
+    unsafe extern "C" {
+        fn risunest_bench_queue_native_quit(observer: extern "C" fn(i32, i32, i32)) -> i32;
+    }
+    let handle = app.clone();
+    app.run_on_main_thread(move || {
+        let _ = PRODUCT_APP.set(handle.clone());
+        if unsafe { risunest_bench_queue_native_quit(observe_product_reply) } != 1 {
+            let _ = macos_bench_report("failure".into(), serde_json::json!({
+                "passed": false, "message": "Unable to queue product native termination",
+            }));
+            handle.exit(1);
+        }
+    }).map_err(|error| error.to_string())
+}
+
 fn benchmark_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync + 'static {
     tauri::generate_handler![
         macos_bench_phase,
         macos_bench_report,
         macos_bench_events,
         macos_bench_quit,
+        #[cfg(target_os = "macos")]
+        macos_bench_native_quit,
         #[cfg(target_os = "macos")]
         termination_probe::macos_bench_modal_begin,
         #[cfg(target_os = "macos")]
@@ -70,12 +119,14 @@ fn main() {
         "io.github.rsyumi.risunest.macos.bench"
     );
     app.run(|app, event| {
+        let product_exit = matches!(&event, tauri::RunEvent::Exit) && macos_bench_phase() == "app";
         let name = match &event {
             #[cfg(target_os = "macos")]
             tauri::RunEvent::Opened { .. } => Some("opened"),
             #[cfg(target_os = "macos")]
             tauri::RunEvent::Reopen { .. } => Some("reopen"),
             tauri::RunEvent::ExitRequested { .. } => Some("quit"),
+            tauri::RunEvent::Exit => Some("exit"),
             tauri::RunEvent::WindowEvent {
                 event: tauri::WindowEvent::CloseRequested { .. },
                 ..
@@ -88,5 +139,19 @@ fn main() {
         #[cfg(target_os = "macos")]
         termination_probe::record_run_event(&event);
         risunest_lib::handle_run_event(app, event);
+        if product_exit {
+            let state = app.state::<Events>();
+            let (replies, runtime_quits, exits) = {
+                let events = state.0.lock().unwrap();
+                (events.iter().filter(|event| event.starts_with("native-reply-")).count(),
+                 events.iter().filter(|event| **event == "quit").count(),
+                 events.iter().filter(|event| **event == "exit").count())
+            };
+            let _ = macos_bench_report("app-native-exit".into(), serde_json::json!({
+                "passed": replies == 2 && runtime_quits == 0 && exits == 1,
+                "nativeReplies": replies, "runtimeQuitRequests": runtime_quits,
+                "exitCount": exits, "productHandlerReturned": true,
+            }));
+        }
     });
 }

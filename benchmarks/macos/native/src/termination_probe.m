@@ -67,3 +67,34 @@ int risunest_probe_reply(int approve) {
     [NSApp replyToApplicationShouldTerminate:approve != 0];
     return 1;
 }
+
+static void (*productReplyObserver)(int, int, int);
+static IMP productReplyOriginal;
+static BOOL productBeginPending;
+
+static void observeProductReply(id application, SEL selector, BOOL approve) {
+    productReplyObserver(approve != 0, [NSThread isMainThread], risunest_probe_modal_mode());
+    ((void (*)(id, SEL, BOOL))productReplyOriginal)(application, selector, approve);
+}
+
+int risunest_bench_queue_native_quit(void (*observer)(int, int, int)) {
+    if (![NSThread isMainThread] || !NSApp.delegate || !observer || productBeginPending) return 0;
+    CFRunLoopRef loop = CFRunLoopGetMain();
+    if (!loop) return 0;
+    if (!productReplyOriginal) {
+        if (!class_getInstanceMethod(object_getClass(NSApp.delegate), @selector(applicationShouldTerminate:))) return 0;
+        Method method = class_getInstanceMethod(object_getClass(NSApp), @selector(replyToApplicationShouldTerminate:));
+        if (!method) return 0;
+        productReplyObserver = observer;
+        productReplyOriginal = method_setImplementation(method, (IMP)observeProductReply);
+    } else if (productReplyObserver != observer) {
+        return 0;
+    }
+    productBeginPending = YES;
+    CFRunLoopPerformBlock(loop, kCFRunLoopCommonModes, ^{
+        [NSApp terminate:nil];
+        productBeginPending = NO;
+    });
+    CFRunLoopWakeUp(loop);
+    return 1;
+}

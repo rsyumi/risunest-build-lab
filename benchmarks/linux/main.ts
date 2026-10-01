@@ -242,7 +242,39 @@ async function startupAppearance(seed: boolean, theme: "light" | "dark") {
     });
     localStorage.setItem("tos4", "true");
     localStorage.setItem("appearance-theme", theme);
-    return { seeded: true, theme };
+    const { resolveAppearance, WINDOWS_APPEARANCE_CACHE } = await import("../../src/ts/gui/windowsAppearance");
+    const app = await import("../../src/main");
+    await app.default;
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = 1;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    check(context, "appearance seed color conversion unavailable");
+    const rgba = (color: string): [number, number, number, number] | undefined => {
+      if (!color || !CSS.supports("color", color)) return undefined;
+      context.clearRect(0, 0, 1, 1);
+      context.fillStyle = color;
+      context.fillRect(0, 0, 1, 1);
+      const data = context.getImageData(0, 0, 1, 1).data;
+      return [data[0], data[1], data[2], data[3]];
+    };
+    const deadline = performance.now() + 60_000;
+    while (true) {
+      check(performance.now() < deadline, "product appearance seed bootstrap/hint timed out");
+      if (performance.getEntriesByName("boot:interactive").length) {
+        const style = getComputedStyle(document.documentElement);
+        const rendered = resolveAppearance({ ...colorScheme, type: theme }, name => style.getPropertyValue(name), rgba);
+        let cached: Record<string, unknown> | null = null;
+        try { cached = JSON.parse(localStorage.getItem(WINDOWS_APPEARANCE_CACHE) ?? "null"); } catch {}
+        if (cached && typeof cached === "object"
+          && cached.background === rendered.background && cached.caption === rendered.caption
+          && cached.text === rendered.text && cached.dark === rendered.dark && style.colorScheme === theme) break;
+      }
+      await pause(50);
+    }
+    return {
+      seeded: true, theme, startupHintMatchesRenderedPalette: true,
+      interactiveMs: performance.getEntriesByName("boot:interactive")[0].startTime,
+    };
   }
   check(localStorage.getItem("appearance-theme") === theme, "appearance theme seed mismatch");
   const preloaderBackground = getComputedStyle(document.getElementById("preloading")!).backgroundColor;
