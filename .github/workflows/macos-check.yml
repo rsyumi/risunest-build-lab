@@ -14,7 +14,7 @@ on:
       scope:
         type: choice
         default: full
-        options: [full, streaming, termination-probe, appearance-light, appearance-dark, appearance-codec-experiment, appearance-bgra-experiment]
+        options: [full, streaming, termination-probe, appearance-runtime, appearance-light, appearance-dark, appearance-codec-experiment, appearance-bgra-experiment]
 permissions:
   contents: read
 concurrency:
@@ -44,7 +44,7 @@ jobs:
           test "$GITHUB_REF" = refs/heads/main
           [[ "$SNAPSHOT_SHA" =~ ^[0-9a-f]{40}$ ]]
           case "$RUNNER_LABEL" in macos-15|macos-14|macos-15-intel|macos-26) ;; *) exit 1;; esac
-          case "$CHECK_SCOPE" in full|streaming|termination-probe|appearance-light|appearance-dark|appearance-codec-experiment|appearance-bgra-experiment) ;; *) exit 1;; esac
+          case "$CHECK_SCOPE" in full|streaming|termination-probe|appearance-runtime|appearance-light|appearance-dark|appearance-codec-experiment|appearance-bgra-experiment) ;; *) exit 1;; esac
       - uses: actions/checkout@v6
         with:
           ref: ${{ github.sha }}
@@ -184,7 +184,10 @@ jobs:
           if [[ "$CHECK_SCOPE" == termination-probe ]]; then
             export RISUNEST_MACOS_PHASES=termination-probe
           fi
-          if [[ "$CHECK_SCOPE" == appearance-* ]]; then
+          if [[ "$CHECK_SCOPE" == appearance-runtime ]]; then
+            export RISUNEST_MACOS_PHASES=appearance-seed-light,appearance-app-light,appearance-seed-dark,appearance-app-dark
+            python3 benchmarks/macos/run.py --app "$app" --artifacts artifacts/wkwebview 2>&1 | tee artifacts/wkwebview.log
+          elif [[ "$CHECK_SCOPE" == appearance-* ]]; then
             theme="${CHECK_SCOPE#appearance-}"
             capture_mode=--appearance
             if [[ "$CHECK_SCOPE" == appearance-codec-experiment ]]; then
