@@ -1,4 +1,5 @@
 import { defineConfig, type Plugin } from "vite";
+import { readFileSync } from "node:fs";
 import { svelte, vitePreprocess } from "@sveltejs/vite-plugin-svelte";
 import wasm from "vite-plugin-wasm";
 import strip from '@rollup/plugin-strip';
@@ -33,6 +34,21 @@ const realmEndpointBlockPlugin: Plugin = {
   },
 }
 
+const startupAppearancePlugin: Plugin = {
+  name: 'risunest-startup-appearance',
+  transformIndexHtml: {
+    order: 'post',
+    handler(html) {
+      if (!html.includes('id="preloading"')) return;
+      return [{
+        tag: 'script',
+        children: readFileSync(new URL('./src-tauri/src/windows_appearance/startup.js', import.meta.url), 'utf8'),
+        injectTo: 'head-prepend',
+      }];
+    },
+  },
+}
+
 // https://vitejs.dev/config/
 export default defineConfig(({command, mode}) => {
   // `pnpm tauribuild:android` runs with `--mode android`, and `tauri android
@@ -52,6 +68,7 @@ export default defineConfig(({command, mode}) => {
   return {
     plugins: [
       blockRealmEndpoints ? realmEndpointBlockPlugin : null,
+      startupAppearancePlugin,
       svelte({
         preprocess: vitePreprocess(),
         onwarn: (warning, handler) => {

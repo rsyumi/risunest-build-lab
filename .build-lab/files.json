@@ -273,8 +273,8 @@
     {
       "path": "benchmarks/linux/main.ts",
       "mode": "100644",
-      "bytes": 9932,
-      "sha256": "56bc7a7dba5ac755453cc24ca245a1481c223e4562c93d5b812c1445da025512"
+      "bytes": 11737,
+      "sha256": "48d3775d94087f7958272d477a636d77f5cfc3e19703502f5caff708f92f3fd0"
     },
     {
       "path": "benchmarks/linux/run.py",
@@ -351,8 +351,8 @@
     {
       "path": "benchmarks/macos/main.ts",
       "mode": "100644",
-      "bytes": 18326,
-      "sha256": "cf83d72d6f85b6d8f8669317b6b1aea0713c7402603b632540c62378a0ae563f"
+      "bytes": 24578,
+      "sha256": "16eb3b7296451fa4282ff7c9c0ca734681a3141ce38deb5844ecf400f55777ec"
     },
     {
       "path": "benchmarks/macos/native/Cargo.lock",
@@ -375,14 +375,14 @@
     {
       "path": "benchmarks/macos/native/src/main.rs",
       "mode": "100644",
-      "bytes": 3075,
-      "sha256": "5d0174cd6f63b54b4d68d0bb6076f17693c8278f6d12a475c12db1617713320d"
+      "bytes": 6173,
+      "sha256": "97aae1dd374cebeab25b9c1330675e6ef6cdb52a0d63d3f2e1c1dfc7d7c25185"
     },
     {
       "path": "benchmarks/macos/native/src/termination_probe.m",
       "mode": "100644",
-      "bytes": 2262,
-      "sha256": "4a9b31773eace484e2fbb2b719d2ef1ebb44bca004f4fd7f593324d5e075c268"
+      "bytes": 3599,
+      "sha256": "a791cfbdd3a956a03885a278c0edaf9bd1ea9f12ea3cb7f6a53c296e49154541"
     },
     {
       "path": "benchmarks/macos/native/src/termination_probe.rs",
@@ -399,8 +399,8 @@
     {
       "path": "benchmarks/macos/run.py",
       "mode": "100644",
-      "bytes": 21643,
-      "sha256": "4bf82ac57e384741d6645b279334f65b70ab4088b87256bf692e69b4ef2d646e"
+      "bytes": 25524,
+      "sha256": "797b1b272838ef9b777714fa1cb1b71f0d69f5b72edd66616207adb3eb660e0e"
     },
     {
       "path": "benchmarks/macos/vite.config.ts",
@@ -435,8 +435,8 @@
     {
       "path": "benchmarks/plugin-review/android-smoke.mjs",
       "mode": "100644",
-      "bytes": 8463,
-      "sha256": "70e19c59c228519b4603bcdb4b42bdaa5c940347cb62ac01efe651be8c2b2951"
+      "bytes": 8529,
+      "sha256": "424bb14c21387a89c8624cfec2b031e3eb2bff3c131eedf9685557d2fc02c3a0"
     },
     {
       "path": "benchmarks/plugin-review/index.html",
@@ -447,14 +447,14 @@
     {
       "path": "benchmarks/plugin-review/main.ts",
       "mode": "100644",
-      "bytes": 8152,
-      "sha256": "df643250fdedd80b64347044bbe334944be68adaf3bd78d105466ce2acebf720"
+      "bytes": 8219,
+      "sha256": "b546b1a3ae75b2cd58b732189aa303312d12d10e694ee586986fae3e57a7a1bc"
     },
     {
       "path": "benchmarks/plugin-review/tauri.android.conf.json",
       "mode": "100644",
-      "bytes": 354,
-      "sha256": "11bddebf2845afcd6e07235f2048e973129eec7cfb687022507f1d50772e796f"
+      "bytes": 341,
+      "sha256": "153e80010448334e1eb4e719e460cf50fb66fed12a84e7c6250d716cdfc16007"
     },
     {
       "path": "benchmarks/plugin-review/vite.config.ts",
@@ -5901,14 +5901,14 @@
     {
       "path": "src-tauri/src/macos_lifecycle.rs",
       "mode": "100644",
-      "bytes": 7035,
-      "sha256": "c86ce52bc710a296b652e10a25f2732ec6b1d4b3dc853713f13397c24a2e66ef"
+      "bytes": 16729,
+      "sha256": "469dff9d3a99bd19797f2509f32156fb330e1487bc2b427aa8dbc11ca8080ecc"
     },
     {
       "path": "src-tauri/src/macos_termination.m",
       "mode": "100644",
-      "bytes": 1119,
-      "sha256": "1809403147d59f62e3ce165b016f0c2316d90ea8848de00b380df607c87ae705"
+      "bytes": 1950,
+      "sha256": "04961820a3fbedc0e9cf7e524dc840fd554ddb83163ed534fb6dca5fd6d5efa1"
     },
     {
       "path": "src-tauri/src/main.rs",
@@ -7083,8 +7083,8 @@
     {
       "path": "src-tauri/src/windows_appearance/startup.js",
       "mode": "100644",
-      "bytes": 1364,
-      "sha256": "5d714d551e254e5e5963f043f4e83cc71ac961870afe0a779398b4e2abce93b4"
+      "bytes": 1483,
+      "sha256": "71660221a09d8c96d96c3de3469a1b1aba8847cc727bae1d4024542f4e24ca89"
     },
     {
       "path": "src-tauri/src/windows_lifecycle.js",
@@ -10275,14 +10275,14 @@
     {
       "path": "src/ts/gui/windowsAppearance.test.ts",
       "mode": "100644",
-      "bytes": 3376,
-      "sha256": "35765ad34fcfeaed4e9f70a517292c5acd60095a2a124795c2310d23850c0a7d"
+      "bytes": 9176,
+      "sha256": "f3c7a7a88ab218dad44ec044d0fe9753484bab80ed6883a11d902c043bb5cd87"
     },
     {
       "path": "src/ts/gui/windowsAppearance.ts",
       "mode": "100644",
-      "bytes": 4293,
-      "sha256": "08943bba07cb5ccccc2a1581970925c3ae2f0603cf7c3dff0bce217a14fa4726"
+      "bytes": 4481,
+      "sha256": "6297786051ffa839b0c7157f74efb599db5517cf5188ec6d4331acc84b50c792"
     },
     {
       "path": "src/ts/horde/getModels.ts",
@@ -15699,8 +15699,8 @@
     {
       "path": "vite.config.ts",
       "mode": "100644",
-      "bytes": 4372,
-      "sha256": "c70b6b30ee8311ef91a00213793cacee7b3d7f67816d16db2cc5ca99abc4551b"
+      "bytes": 4853,
+      "sha256": "0b6b8b7adac5b8dce05ea26d9d89c95136a0a3874e590f7ee3b7f5f35d106c40"
     },
     {
       "path": "vitest.config.ts",

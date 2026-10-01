@@ -1,35 +1,83 @@
 //! macOS window lifetime and an acknowledged, cancellable application quit.
 use std::sync::Mutex;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExitOrigin {
+    Native,
+    Runtime(i32),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ExitEffect {
+    NativeReply(bool),
+    RuntimeExit(i32),
+}
+
+#[derive(Clone)]
+struct PendingExit {
+    token: String,
+    origin: ExitOrigin,
+}
+
 #[derive(Default)]
 struct ExitDecision {
     ready: bool,
-    pending: Option<(String, i32)>,
+    pending: Option<PendingExit>,
     allowed: bool,
 }
 
 impl ExitDecision {
-    fn document_started(&mut self) {
+    fn document_started(&mut self) -> Option<ExitEffect> {
         self.ready = false;
-        self.pending = None;
+        self.pending.take().and_then(|pending| {
+            (pending.origin == ExitOrigin::Native).then_some(ExitEffect::NativeReply(false))
+        })
     }
 
     fn request(&mut self, code: i32) -> Option<String> {
         if !self.ready || self.allowed || self.pending.is_some() {
             return None;
         }
-        let token = uuid::Uuid::new_v4().to_string();
-        self.pending = Some((token.clone(), code));
-        Some(token)
+        Some(self.begin(ExitOrigin::Runtime(code)))
     }
 
-    fn respond(&mut self, token: &str, exit: bool) -> Result<Option<i32>, String> {
-        if self.pending.as_ref().map(|pending| pending.0.as_str()) != Some(token) {
-            return Err("No matching macOS quit request".into());
+    fn request_native(&mut self) -> Option<String> {
+        if !self.ready || self.allowed {
+            return None;
         }
-        let (_, code) = self.pending.take().unwrap();
+        if let Some(pending) = self.pending.as_mut() {
+            pending.origin = ExitOrigin::Native;
+            return None;
+        }
+        Some(self.begin(ExitOrigin::Native))
+    }
+
+    fn begin(&mut self, origin: ExitOrigin) -> String {
+        let token = uuid::Uuid::new_v4().to_string();
+        self.pending = Some(PendingExit { token: token.clone(), origin });
+        token
+    }
+
+    fn response_effect(&self, token: &str, exit: bool) -> Result<Option<ExitEffect>, String> {
+        let pending = self.pending.as_ref().filter(|pending| pending.token == token)
+            .ok_or("No matching macOS quit request")?;
+        Ok(match pending.origin {
+            ExitOrigin::Native => Some(ExitEffect::NativeReply(exit)),
+            ExitOrigin::Runtime(code) => exit.then_some(ExitEffect::RuntimeExit(code)),
+        })
+    }
+
+    fn respond(&mut self, token: &str, exit: bool) -> Result<Option<ExitEffect>, String> {
+        let effect = self.response_effect(token, exit)?;
+        self.pending = None;
         self.allowed = exit;
-        Ok(exit.then_some(code))
+        Ok(effect)
+    }
+
+    fn discard(&mut self, token: &str) {
+        if self.pending.as_ref().map(|pending| pending.token.as_str()) == Some(token) {
+            self.pending = None;
+        }
     }
 }
 
@@ -43,18 +91,43 @@ use tauri::{Emitter, Manager};
 static APP: std::sync::OnceLock<tauri::AppHandle> = std::sync::OnceLock::new();
 
 #[cfg(target_os = "macos")]
+unsafe extern "C" {
+    fn risunest_reply_termination(approve: std::ffi::c_int) -> std::ffi::c_int;
+    fn risunest_termination_pending() -> std::ffi::c_int;
+    fn risunest_queue_termination_response(
+        callback: extern "C" fn(*mut std::ffi::c_void),
+        context: *mut std::ffi::c_void,
+    ) -> std::ffi::c_int;
+}
+
+#[cfg(target_os = "macos")]
 extern "C" fn request_native_quit() -> std::ffi::c_int {
-    std::panic::catch_unwind(|| {
-        let Some(app) = APP.get() else { return 1; };
-        let state = app.state::<ExitState>();
-        let held = {
-            let decision = state.0.lock().unwrap_or_else(|error| error.into_inner());
-            decision.ready && !decision.allowed
+    let Some(app) = APP.get() else { return -1; };
+    let Some(state) = app.try_state::<ExitState>() else { return -1; };
+    let previous = state.0.lock().unwrap_or_else(|error| error.into_inner()).pending.clone();
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let request = {
+            let mut decision = state.0.lock().unwrap_or_else(|error| error.into_inner());
+            if !decision.ready || decision.allowed { None }
+            else { Some(decision.request_native()) }
         };
-        if held { app.exit(0); }
-        else { crate::cancel_incomplete_boot(app); }
-        i32::from(held)
-    }).unwrap_or(1)
+        match request {
+            None => { crate::cancel_incomplete_boot(app); 0 }
+            Some(token) => {
+                if let Some(token) = token {
+                    if let Err(error) = notify_quit(app, &token) {
+                        state.0.lock().unwrap_or_else(|error| error.into_inner()).discard(&token);
+                        crate::nlog!("warn", "macOS quit notification failed: {error}");
+                        return -1;
+                    }
+                }
+                1
+            }
+        }
+    })).unwrap_or_else(|_| {
+        state.0.lock().unwrap_or_else(|error| error.into_inner()).pending = previous;
+        -1
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -72,12 +145,18 @@ pub(crate) fn install_native_quit(app: &tauri::AppHandle) -> Result<(), String> 
 
 #[cfg(target_os = "macos")]
 pub(crate) fn document_started(app: &tauri::AppHandle) {
-    if let Some(state) = app.try_state::<ExitState>() {
-        state
-            .0
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .document_started();
+    let handle = app.clone();
+    if let Err(error) = app.run_on_main_thread(move || {
+        if let Some(state) = handle.try_state::<ExitState>() {
+            let effect = state.0.lock().unwrap_or_else(|error| error.into_inner()).document_started();
+            if let Some(ExitEffect::NativeReply(false)) = effect {
+                if unsafe { risunest_reply_termination(0) } != 1 {
+                    crate::nlog!("warn", "macOS reload quit cancellation failed");
+                }
+            }
+        }
+    }) {
+        crate::nlog!("warn", "macOS reload quit cancellation could not be scheduled: {error}");
     }
 }
 
@@ -96,24 +175,69 @@ pub(crate) fn macos_lifecycle_ready(
 
 #[cfg(target_os = "macos")]
 #[tauri::command]
-pub(crate) fn macos_exit_response(
+pub(crate) async fn macos_exit_response(
     window: tauri::WebviewWindow,
-    state: tauri::State<'_, ExitState>,
     token: String,
     exit: bool,
 ) -> Result<(), String> {
     if window.label() != "main" {
         return Err("macOS lifecycle belongs to the main window".into());
     }
-    let code = state
-        .0
-        .lock()
-        .map_err(|_| "Quit state unavailable")?
-        .respond(&token, exit)?;
-    if let Some(code) = code {
-        window.app_handle().exit(code);
-    }
-    Ok(())
+    let receiver = {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let context = Box::into_raw(Box::new(ExitResponse {
+            app: window.app_handle().clone(), token, exit, sender,
+        }));
+        if unsafe { risunest_queue_termination_response(settle_response, context.cast()) } != 1 {
+            unsafe { drop(Box::from_raw(context)); }
+            return Err("Unable to schedule macOS quit response".into());
+        }
+        receiver
+    };
+    receiver.await.map_err(|_| "macOS quit response was not completed")?
+}
+
+#[cfg(target_os = "macos")]
+struct ExitResponse {
+    app: tauri::AppHandle,
+    token: String,
+    exit: bool,
+    sender: tokio::sync::oneshot::Sender<Result<(), String>>,
+}
+
+#[cfg(target_os = "macos")]
+extern "C" fn settle_response(context: *mut std::ffi::c_void) {
+    // The queued native block calls this once with the Box it owns.
+    let ExitResponse { app, token, exit, sender } =
+        *unsafe { Box::from_raw(context.cast::<ExitResponse>()) };
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let state = app.state::<ExitState>();
+        let effect = state.0.lock().map_err(|_| "Quit state unavailable")?
+            .response_effect(&token, exit)?;
+        if matches!(effect, Some(ExitEffect::NativeReply(_)))
+            && unsafe { risunest_termination_pending() } != 1 {
+            return Err("No pending macOS native quit reply".into());
+        }
+        let effect = state.0.lock().map_err(|_| "Quit state unavailable")?
+            .respond(&token, exit)?;
+        match effect {
+            Some(ExitEffect::NativeReply(approve)) => {
+                if unsafe { risunest_reply_termination(i32::from(approve)) } != 1 {
+                    return Err("macOS native quit reply failed".into());
+                }
+            }
+            Some(ExitEffect::RuntimeExit(code)) => app.exit(code),
+            None => {}
+        }
+        Ok(())
+    })).unwrap_or_else(|_| Err("macOS quit response failed".into()));
+    let _ = sender.send(result);
+}
+
+#[cfg(target_os = "macos")]
+fn notify_quit(app: &tauri::AppHandle, token: &str) -> Result<(), tauri::Error> {
+    show_main(app);
+    app.emit_to("main", "risu-macos-exit-requested", token)
 }
 
 #[cfg(target_os = "macos")]
@@ -149,16 +273,15 @@ pub(crate) fn handle_run_event(app: &tauri::AppHandle, event: tauri::RunEvent) {
             if code != Some(tauri::RESTART_EXIT_CODE) =>
         {
             let state = app.state::<ExitState>();
-            let mut decision = state.0.lock().unwrap_or_else(|error| error.into_inner());
-            if !decision.ready || decision.allowed {
-                return;
-            }
-            api.prevent_exit();
-            if let Some(token) = decision.request(code.unwrap_or(0)) {
-                // A hidden window must become visible for save/sync confirmation.
-                show_main(app);
-                if let Err(error) = app.emit_to("main", "risu-macos-exit-requested", &token) {
-                    decision.pending = None;
+            let token = {
+                let mut decision = state.0.lock().unwrap_or_else(|error| error.into_inner());
+                if !decision.ready || decision.allowed { return; }
+                api.prevent_exit();
+                decision.request(code.unwrap_or(0))
+            };
+            if let Some(token) = token {
+                if let Err(error) = notify_quit(app, &token) {
+                    state.0.lock().unwrap_or_else(|error| error.into_inner()).discard(&token);
                     crate::nlog!("warn", "macOS quit notification failed: {error}");
                 }
             }
@@ -180,7 +303,7 @@ mod tests {
         assert!(state.request(0).is_none());
         assert!(state.respond("stale", true).is_err());
         assert!(!state.allowed);
-        assert_eq!(state.respond(&token, true).unwrap(), Some(7));
+        assert_eq!(state.respond(&token, true).unwrap(), Some(ExitEffect::RuntimeExit(7)));
         assert!(state.allowed);
         assert!(state.respond(&token, true).is_err());
     }
@@ -197,7 +320,7 @@ mod tests {
         let next = state.request(0).unwrap();
         assert_ne!(first, next);
         assert!(state.respond(&first, true).is_err());
-        assert_eq!(state.respond(&next, true).unwrap(), Some(0));
+        assert_eq!(state.respond(&next, true).unwrap(), Some(ExitEffect::RuntimeExit(0)));
     }
 
     #[test]
@@ -207,10 +330,112 @@ mod tests {
             ..Default::default()
         };
         let departed = state.request(0).unwrap();
-        state.document_started();
+        assert_eq!(state.document_started(), None);
         assert!(!state.ready);
         assert!(state.respond(&departed, true).is_err());
         state.ready = true;
         assert!(state.request(0).is_some());
+    }
+
+    #[test]
+    fn native_quit_requires_readiness_and_has_one_reply_effect() {
+        let mut state = ExitDecision::default();
+        assert_eq!(state.request_native(), None);
+        assert!(state.pending.is_none());
+        state.ready = true;
+        let token = state.request_native().unwrap();
+        assert_eq!(state.request_native(), None);
+        assert!(state.request(0).is_none());
+        assert!(state.respond("stale", true).is_err());
+        assert_eq!(state.respond(&token, true).unwrap(), Some(ExitEffect::NativeReply(true)));
+        assert!(state.allowed);
+        assert!(state.pending.is_none());
+        assert!(state.respond(&token, true).is_err());
+        assert_eq!(state.document_started(), None);
+        assert!(state.respond(&token, false).is_err());
+    }
+
+    #[test]
+    fn native_cancellation_allows_a_new_request() {
+        let mut state = ExitDecision { ready: true, ..Default::default() };
+        let first = state.request_native().unwrap();
+        assert_eq!(state.respond(&first, false).unwrap(), Some(ExitEffect::NativeReply(false)));
+        assert!(!state.allowed);
+        let next = state.request_native().unwrap();
+        assert_ne!(first, next);
+        assert!(state.respond(&first, true).is_err());
+        assert_eq!(state.respond(&next, true).unwrap(), Some(ExitEffect::NativeReply(true)));
+    }
+
+    #[test]
+    fn native_reload_cancels_once_and_invalidates_late_approval() {
+        let mut state = ExitDecision { ready: true, ..Default::default() };
+        let departed = state.request_native().unwrap();
+        assert_eq!(state.document_started(), Some(ExitEffect::NativeReply(false)));
+        assert!(!state.ready);
+        assert!(!state.allowed);
+        assert_eq!(state.document_started(), None);
+        assert!(state.respond(&departed, true).is_err());
+        state.ready = true;
+        let next = state.request_native().unwrap();
+        assert_ne!(departed, next);
+        assert_eq!(state.respond(&next, true).unwrap(), Some(ExitEffect::NativeReply(true)));
+    }
+
+    #[test]
+    fn cancellation_before_reload_does_not_reply_twice() {
+        let mut state = ExitDecision { ready: true, ..Default::default() };
+        let token = state.request_native().unwrap();
+        assert_eq!(state.respond(&token, false).unwrap(), Some(ExitEffect::NativeReply(false)));
+        assert_eq!(state.document_started(), None);
+        assert!(state.respond(&token, true).is_err());
+    }
+
+    #[test]
+    fn native_quit_coalesces_an_existing_zero_code_runtime_request() {
+        let mut state = ExitDecision { ready: true, ..Default::default() };
+        let token = state.request(0).unwrap();
+        assert_eq!(state.request_native(), None);
+        assert_eq!(state.respond(&token, true).unwrap(), Some(ExitEffect::NativeReply(true)));
+    }
+
+    #[test]
+    fn unconsumed_response_and_failed_notification_preserve_newer_work() {
+        let mut state = ExitDecision { ready: true, ..Default::default() };
+        let token = state.request_native().unwrap();
+        assert_eq!(state.response_effect(&token, true).unwrap(), Some(ExitEffect::NativeReply(true)));
+        assert!(!state.allowed);
+        assert_eq!(state.pending.as_ref().unwrap().token, token);
+        state.discard(&token);
+        assert!(state.pending.is_none());
+        let next = state.request_native().unwrap();
+        state.discard(&token);
+        assert_eq!(state.pending.as_ref().unwrap().token, next);
+        assert!(state.respond(&token, true).is_err());
+        assert_eq!(state.respond(&next, false).unwrap(), Some(ExitEffect::NativeReply(false)));
+    }
+
+    #[test]
+    fn native_quit_owns_a_simultaneous_nonzero_runtime_request() {
+        let mut state = ExitDecision { ready: true, ..Default::default() };
+        let token = state.request(7).unwrap();
+        assert_eq!(state.request_native(), None);
+        assert_eq!(state.pending.as_ref().unwrap().token, token);
+        assert_eq!(state.request_native(), None);
+        assert!(state.request(7).is_none());
+        assert_eq!(state.respond(&token, true).unwrap(), Some(ExitEffect::NativeReply(true)));
+        assert!(state.respond(&token, true).is_err());
+    }
+
+    #[test]
+    fn runtime_quit_during_native_pending_keeps_native_ownership() {
+        let mut state = ExitDecision { ready: true, ..Default::default() };
+        let token = state.request_native().unwrap();
+        assert!(state.request(7).is_none());
+        assert_eq!(state.pending.as_ref().unwrap().token, token);
+        assert_eq!(state.respond(&token, false).unwrap(), Some(ExitEffect::NativeReply(false)));
+        assert!(!state.allowed);
+        let retry = state.request(7).unwrap();
+        assert_eq!(state.respond(&retry, true).unwrap(), Some(ExitEffect::RuntimeExit(7)));
     }
 }

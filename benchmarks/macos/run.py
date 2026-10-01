@@ -190,10 +190,46 @@ def run_phase(app, phase, artifacts, fixtures):
             if process.returncode != 0:
                 raise RuntimeError(f'{phase}: app exited {process.returncode}')
             result = records(report)
-            required = {phase: {phase}}[phase] if phase.startswith('appearance-') else {'termination-probe': {'termination-probe-cancel', 'termination-probe-reload', 'termination-probe-approved'}, 'contracts': {'persistence', 'regex', 'tokenizer', 'reload', 'closed', 'reopened', 'finder', 'quit-cancelled', 'quit-saved'}, 'restart': {'restart'}, 'app': {'app'}, 'app-restart': {'app-restart'}, 'streaming': {'streaming'}}[phase]
+            required = {phase: {phase}}[phase] if phase.startswith('appearance-') else {'termination-probe': {'termination-probe-cancel', 'termination-probe-reload', 'termination-probe-approved'}, 'contracts': {'persistence', 'regex', 'tokenizer', 'reload', 'closed', 'reopened', 'finder', 'quit-cancelled', 'quit-saved'}, 'restart': {'restart'}, 'app': {'app', 'app-native-saving', 'app-native-reload-cancelled', 'app-native-stale-rejected', 'app-native-saved', 'app-native-exit'}, 'app-restart': {'app-restart'}, 'streaming': {'streaming'}}[phase]
             stages = {entry['stage'] for entry in result}
             if not required <= stages or 'failure' in stages:
                 raise RuntimeError(f'{phase}: incomplete results {stages}')
+            if phase == 'app':
+                replies = [(index, entry['result']) for index, entry in enumerate(result) if entry['stage'] == 'app-native-reply']
+                saving = [(index, entry['result']) for index, entry in enumerate(result) if entry['stage'] == 'app-native-saving']
+                if len(replies) != 2 or replies[0][1]['approve'] is not False or replies[1][1]['approve'] is not True:
+                    raise RuntimeError('Product native quit requires exactly NO then YES')
+                if [reply['replyCount'] for _, reply in replies] != [1, 2] or any(
+                    reply['mainThread'] is not True or reply['modal'] is not True or reply['runtimeQuitRequests'] != 0
+                    for _, reply in replies
+                ):
+                    raise RuntimeError('Product native replies must run on the modal AppKit thread without runtime quits')
+                if len(saving) != 2 or [entry['attempt'] for _, entry in saving] != [1, 2] or any(
+                    entry['passed'] is not True or entry['nativeRequests'] != 1 or entry['flushCalls'] != 1
+                    for _, entry in saving
+                ):
+                    raise RuntimeError('Both native product requests must reach one real saving UI and flush')
+                settled = {}
+                for stage in ['app-native-reload-cancelled', 'app-native-stale-rejected', 'app-native-saved', 'app-native-exit']:
+                    entries = [(index, entry['result']) for index, entry in enumerate(result) if entry['stage'] == stage]
+                    if len(entries) != 1 or entries[0][1]['passed'] is not True:
+                        raise RuntimeError(f'Product native quit requires one passing {stage}')
+                    settled[stage] = entries[0]
+                if settled['app-native-reload-cancelled'][1]['replyCount'] != 1 or settled['app-native-stale-rejected'][1]['replyCount'] != 1:
+                    raise RuntimeError('Reload and stale response must retain exactly one native reply')
+                saved_revision = settled['app-native-saved'][1]['revision']
+                exited = settled['app-native-exit'][1]
+                if type(saved_revision) is not int or saved_revision < 0 or exited['nativeReplies'] != 2 or exited['runtimeQuitRequests'] != 0 or exited['exitCount'] != 1 or exited['productHandlerReturned'] is not True:
+                    raise RuntimeError('Product native saved revision and forwarded Exit evidence required')
+                order = [saving[0][0], replies[0][0], settled['app-native-reload-cancelled'][0],
+                         settled['app-native-stale-rejected'][0], saving[1][0], settled['app-native-saved'][0],
+                         replies[1][0], settled['app-native-exit'][0]]
+                if order != sorted(set(order)):
+                    raise RuntimeError('Product native cancellation, save, approval and Exit occurred out of order')
+            if phase == 'app-restart':
+                restarted = [entry['result'] for entry in result if entry['stage'] == 'app-restart']
+                if len(restarted) != 1 or restarted[0]['passed'] is not True or type(restarted[0]['revision']) is not int or restarted[0]['revision'] < 0:
+                    raise RuntimeError('Product restart requires one exact saved revision readback')
             return result
         finally:
             if process.poll() is None:
@@ -336,6 +372,11 @@ def main():
     if not phases or any(phase not in allowed_phases for phase in phases):
         raise RuntimeError('invalid RISUNEST_MACOS_PHASES')
     results = {phase: run_phase(app, phase, artifacts, fixtures) for phase in phases}
+    if 'app' in results and 'app-restart' in results:
+        saved = next(entry['result']['revision'] for entry in results['app'] if entry['stage'] == 'app-native-saved')
+        restarted = next(entry['result']['revision'] for entry in results['app-restart'] if entry['stage'] == 'app-restart')
+        if saved != restarted:
+            raise RuntimeError('Product restart revision differs from the native-approved saved revision')
     (artifacts / 'result.json').write_text(json.dumps({'passed': True, 'phases': results}, indent=2))
     print('Mac WKWebView contracts, restart and product app passed', flush=True)
 
