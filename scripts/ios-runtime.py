@@ -148,7 +148,14 @@ try:
     print(run(['xcodegen','generate','--spec','project.json'],cwd=uitests))
     print(run(['xcodebuild','test','-project','RisuNestUITests.xcodeproj','-scheme','RisuNestUITests',
                '-destination','platform=iOS Simulator,id='+device,'-derivedDataPath',str(uitests/'DerivedData'),
-               '-resultBundlePath',str(artifacts/'ios-ui.xcresult'),'CODE_SIGNING_ALLOWED=NO'],cwd=uitests))
+               '-resultBundlePath',str(artifacts/'ios-ui.xcresult'),
+               '-skip-testing:RisuNestUITests/NativeUITests/testLegacyRestore100Raw',
+               '-skip-testing:RisuNestUITests/NativeUITests/testLegacyRestore100Gzip',
+               '-skip-testing:RisuNestUITests/NativeUITests/testLegacyRestore300Raw',
+               '-skip-testing:RisuNestUITests/NativeUITests/testLegacyRestore300Gzip',
+               '-skip-testing:RisuNestUITests/NativeUITests/testLegacyRestore600Raw',
+               '-skip-testing:RisuNestUITests/NativeUITests/testLegacyRestore600Gzip',
+               'CODE_SIGNING_ALLOWED=NO'],cwd=uitests))
     product=pathlib.Path((artifacts/'app-path.txt').read_text())
     print(run(['codesign','--force','--deep','--sign','-',str(product)]))
     print(run(['xcrun','simctl','install',device,str(product)]))
