@@ -55,7 +55,16 @@ pub struct Store {
     temporary_paths: Mutex<BTreeSet<PathBuf>>,
     media_signer: risunest_sync_connect::media::MediaSigner,
     heads: tokio::sync::watch::Sender<u64>,
-    _owner: File,
+    _owner: OwnerLock,
+}
+
+struct OwnerLock(File);
+
+impl Drop for OwnerLock {
+    fn drop(&mut self) {
+        // Duplicated or inherited descriptors must not retain ownership after close.
+        let _ = self.0.unlock();
+    }
 }
 
 struct StagingTemp<'a> {
@@ -214,6 +223,7 @@ impl Store {
         owner
             .try_lock()
             .map_err(|_| Error::new("data-dir-busy", 409))?;
+        let owner = OwnerLock(owner);
         // No publisher from this daemon exists while the owner is opening.
         for directory in [&root, &root.join("staging")] {
             let entries = match fs::read_dir(directory) {
@@ -536,6 +546,34 @@ impl Store {
             floor = floor.min(Sequence::try_from(value?)?);
         }
         Ok(floor)
+    }
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+
+    #[test]
+    fn closing_store_releases_ownership_while_a_duplicate_descriptor_remains() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::init(root.path()).unwrap();
+        let duplicate = store._owner.0.try_clone().unwrap();
+        let head = store.head().unwrap();
+        let error = Store::open(root.path())
+            .err()
+            .expect("active owner must be rejected");
+        assert_eq!((error.code, error.status), ("data-dir-busy", 409));
+        drop(store);
+
+        let reopened = Store::open(root.path()).unwrap();
+        assert_eq!(reopened.head().unwrap(), head);
+        drop(duplicate);
+        let error = Store::open(root.path())
+            .err()
+            .expect("new active owner must be rejected");
+        assert_eq!((error.code, error.status), ("data-dir-busy", 409));
+        drop(reopened);
+        assert_eq!(Store::open(root.path()).unwrap().head().unwrap(), head);
     }
 }
 

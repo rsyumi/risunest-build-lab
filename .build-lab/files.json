@@ -3771,8 +3771,8 @@
     {
       "path": "server/sync/src/store/mod.rs",
       "mode": "100644",
-      "bytes": 19655,
-      "sha256": "6237466616cf869a21e672627cb63fb03e199201042a2ffc078119019a89ca5b"
+      "bytes": 20907,
+      "sha256": "6ab063990024c89648434c67f6cbbcb556dc3d27e1fdbd5e41b3d9eb6220285d"
     },
     {
       "path": "server/sync/src/store/objects.rs",
@@ -3933,8 +3933,8 @@
     {
       "path": "server/sync/tests/review_recovery.rs",
       "mode": "100644",
-      "bytes": 11688,
-      "sha256": "ed4c747c3f5d6c291009c6ace0e274cd59213347ee8eff1936583d15c5c99001"
+      "bytes": 12373,
+      "sha256": "c9ac1b454987e92e8bbbb408275868f6ba66928b4e74a3e3a5c35c96fb079e1e"
     },
     {
       "path": "server/sync/tests/scopes.rs",

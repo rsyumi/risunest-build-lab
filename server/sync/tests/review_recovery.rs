@@ -173,6 +173,14 @@ fn persistent_commit_failure_is_visible_backed_off_and_still_reserved() {
     let device = common::device(&store);
     let db = Connection::open(dir.path().join("metadata.sqlite")).unwrap();
     db.execute("INSERT INTO commit_jobs(operation,device,digest,body,stage) VALUES('synthetic',?1,'synthetic','invalid','synthetic')", [&device.id]).unwrap();
+    // SQLite keeps unixepoch() fixed within the update and its trigger.
+    db.execute_batch(
+        "CREATE TABLE synthetic_retry_observations(attempt INTEGER PRIMARY KEY,delay INTEGER NOT NULL);
+         CREATE TRIGGER synthetic_retry_observation AFTER UPDATE OF attempts ON commit_jobs BEGIN
+         INSERT INTO synthetic_retry_observations(attempt,delay) VALUES(NEW.attempts,NEW.retry_after-unixepoch());
+         END;",
+    )
+    .unwrap();
     for attempt in 0..12 {
         db.execute("UPDATE commit_jobs SET retry_after=0", [])
             .unwrap();
@@ -181,11 +189,16 @@ fn persistent_commit_failure_is_visible_backed_off_and_still_reserved() {
             "corrupt-metadata"
         );
         let delay: i64 = db
-            .query_row("SELECT retry_after-unixepoch() FROM commit_jobs", [], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT delay FROM synthetic_retry_observations WHERE attempt=?1",
+                [attempt + 1],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(delay, (1i64 << attempt.min(9)).min(300));
+        // Keep eligibility independent of scheduling after the exact delay check.
+        db.execute("UPDATE commit_jobs SET retry_after=?1", [i64::MAX])
+            .unwrap();
         assert!(!store.run_pending_commit().unwrap());
     }
     let status = store.managed_devices().unwrap();
