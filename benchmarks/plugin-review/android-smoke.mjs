@@ -18,6 +18,7 @@ assert.ok(!options.device || ['api34', 'api35'].includes(options.device), 'Unkno
 assert.ok(!options.serial || options.serial === 'emulator-5640', 'Unexpected alternate synthetic serial')
 const serial = options.serial ?? (options.device === 'api35' ? 'emulator-5556' : 'emulator-5554')
 const avd = options.device === 'api35' ? 'risunest_buffer_api35_synthetic' : 'risunest_vm_retest'
+const configuredIdentifier = 'io.github.rsyumi.risunest'
 const packageName = 'io.github.rsyumi.risunest.pluginreview'
 const title = 'RisuNest synthetic plugin review'
 const port = 19371
@@ -72,7 +73,7 @@ async function connect() {
         await call('Network.enable')
         await call('Network.setBlockedURLs', { urls: [...REALM_BLOCKED_URL_PATTERNS, '*update.rsyumi.workers.dev/translator/prompt-presets.json*'] })
         assert.equal(await evaluate('document.title'), title)
-        assert.equal(await evaluate("window.__TAURI_INTERNALS__.invoke('plugin:app|identifier')"), packageName)
+        assert.equal(await evaluate("window.__TAURI_INTERNALS__.invoke('plugin:app|identifier')"), configuredIdentifier)
         return { call, evaluate, close }
     } catch (error) { close(); throw error }
 }

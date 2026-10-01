@@ -1,11 +1,40 @@
 #import <AppKit/AppKit.h>
+#import <CoreFoundation/CoreFoundation.h>
 #import <objc/runtime.h>
 
 static int (*requestQuit)(void);
+static BOOL pending;
 
 static NSApplicationTerminateReply shouldTerminate(id delegate, SEL command, NSApplication *sender) {
-    // Cancel this native request while the existing asynchronous save decision runs.
-    return requestQuit && requestQuit() ? NSTerminateCancel : NSTerminateNow;
+    if (pending) return NSTerminateLater;
+    pending = YES;
+    int disposition = requestQuit ? requestQuit() : 0;
+    if (disposition > 0) return NSTerminateLater;
+    pending = NO;
+    return disposition < 0 ? NSTerminateCancel : NSTerminateNow;
+}
+
+int risunest_reply_termination(int approve) {
+    if (![NSThread isMainThread] || !pending) return 0;
+    pending = NO;
+    [NSApp replyToApplicationShouldTerminate:approve != 0];
+    return 1;
+}
+
+int risunest_termination_pending(void) {
+    return [NSThread isMainThread] && pending;
+}
+
+int risunest_queue_termination_response(void (*callback)(void *), void *context) {
+    if (!callback || !context) return 0;
+    CFRunLoopRef loop = CFRunLoopGetMain();
+    if (!loop) return 0;
+    // A native YES reply must run outside Tao's event callback.
+    CFRunLoopPerformBlock(loop, kCFRunLoopCommonModes, ^{
+        callback(context);
+    });
+    CFRunLoopWakeUp(loop);
+    return 1;
 }
 
 int risunest_install_termination_handler(int (*callback)(void)) {

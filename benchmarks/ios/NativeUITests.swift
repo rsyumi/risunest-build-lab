@@ -1,6 +1,104 @@
 import XCTest
+import Foundation
 
 final class NativeUITests: XCTestCase {
+    private func legacyRestoreNumber(_ value: Any?) -> UInt64? {
+        guard let number = value as? NSNumber,
+              CFGetTypeID(number) != CFBooleanGetTypeID() else { return nil }
+        let value: UInt64
+        switch String(cString: number.objCType) {
+        case "s", "i", "l", "q":
+            guard number.int64Value >= 0 else { return nil }
+            value = UInt64(number.int64Value)
+        case "S", "I", "L", "Q":
+            value = number.uint64Value
+        default:
+            return nil
+        }
+        guard value <= 9_007_199_254_740_991 else { return nil }
+        return value
+    }
+
+    private func legacyRestoreBoolean(_ value: Any?) -> Bool? {
+        guard let number = value as? NSNumber,
+              CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
+        return number.boolValue
+    }
+
+    private func logLegacyRestoreNumbers(_ evidence: String, phase: String, megabytes: Int, encoding: String, invocation: Int) {
+        guard [100, 300, 600].contains(megabytes),
+              ["raw", "gzip"].contains(encoding),
+              [1, 2].contains(invocation),
+              ["prepared", "restore-terminal", "verified"].contains(phase) else {
+            print("RISUNEST_CR228_METRIC valid=0")
+            return
+        }
+        let prefix = phase == "prepared" ? "legacy-restore-ready:" : phase == "verified" ? "legacy-restore-result:" : "legacy-restore-event:"
+        guard evidence.hasPrefix(prefix),
+              let data = String(evidence.dropFirst(prefix.count)).data(using: .utf8),
+              let payload = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              payload["schema"] as? String == "risunest.synthetic-legacy-restore/v1",
+              legacyRestoreBoolean(payload["synthetic"]) == true,
+              payload["phase"] as? String == phase,
+              payload["encoding"] as? String == encoding,
+              let decodedBytes = legacyRestoreNumber(payload["decodedBytes"]), decodedBytes > 0,
+              let sourceBytes = legacyRestoreNumber(payload["sourceBytes"]), sourceBytes > 0,
+              let characterCount = legacyRestoreNumber(payload["characterCount"]),
+              let messageCount = legacyRestoreNumber(payload["messageCount"]) else {
+            print("RISUNEST_CR228_METRIC valid=0")
+            return
+        }
+        let fields = "phase=\(phase) case_mb=\(megabytes) encoding=\(encoding) invocation=\(invocation) decoded_bytes=\(decodedBytes) source_bytes=\(sourceBytes) character_count=\(characterCount) message_count=\(messageCount)"
+        if phase == "prepared" {
+            guard legacyRestoreBoolean(payload["resetVerified"]) == true,
+                  let memory = payload["memoryBefore"] as? [String: Any],
+                  memory["source"] as? String == "darwin-getrusage-process-lifetime-bytes",
+                  let beforePeak = legacyRestoreNumber(memory["peakRssBytes"]), beforePeak > 0 else {
+                print("RISUNEST_CR228_METRIC valid=0")
+                return
+            }
+            print("RISUNEST_CR228_METRIC valid=1 \(fields) reset_verified=1 before_lifetime_peak_bytes=\(beforePeak)")
+        } else {
+            guard payload["memorySource"] as? String == "darwin-getrusage-process-lifetime-bytes",
+                  payload["outcome"] as? String == "succeeded",
+                  let peak = legacyRestoreNumber(payload["peakRssBytes"]), peak > 0,
+                  let samples = legacyRestoreNumber(payload["memorySamples"]), samples > 0,
+                  let elapsed = legacyRestoreNumber(payload["elapsedMs"]),
+                  let aboveTwice = legacyRestoreBoolean(payload["aboveTwiceDecoded"]) else {
+                print("RISUNEST_CR228_METRIC valid=0")
+                return
+            }
+            let terminal = "succeeded=1 lifetime_peak_bytes=\(peak) memory_samples=\(samples) elapsed_ms=\(elapsed) above_twice_decoded=\(aboveTwice ? 1 : 0)"
+            if phase == "verified" {
+                guard let verifiedCharacters = legacyRestoreNumber(payload["verifiedCharacterCount"]),
+                      let verifiedMessages = legacyRestoreNumber(payload["verifiedMessageCount"]) else {
+                    print("RISUNEST_CR228_METRIC valid=0")
+                    return
+                }
+                print("RISUNEST_CR228_METRIC valid=1 \(fields) \(terminal) verified_character_count=\(verifiedCharacters) verified_message_count=\(verifiedMessages)")
+            } else {
+                print("RISUNEST_CR228_METRIC valid=1 \(fields) \(terminal)")
+            }
+        }
+    }
+
+    private func logSyntheticStep(_ app: XCUIApplication, step: Int, reached: Bool) {
+        let texts = app.webViews.staticTexts
+        let failure = texts.containing(NSPredicate(format: "label BEGINSWITH %@", "verification-error:")).firstMatch
+        let errorPrefixExists = failure.exists
+        let knownErrors = [
+            "Restore result counts differ from the generated fixture",
+            "Restored synthetic message hash mismatch",
+            "Restored synthetic message count mismatch",
+            "Legacy restore did not verify",
+        ]
+        var category = 0
+        if errorPrefixExists {
+            category = knownErrors.firstIndex { texts["verification-error:" + $0].exists }.map { $0 + 1 } ?? 5
+        }
+        print("RISUNEST_CR228_STEP step=\(step) reached=\(reached ? 1 : 0) app_state=\(app.state.rawValue) webview_exists=\(app.webViews.firstMatch.exists ? 1 : 0) failed_exists=\(texts["failed"].exists ? 1 : 0) error_prefix_exists=\(errorPrefixExists ? 1 : 0) error_category=\(category)")
+    }
+
     private func legacyRestoreMemory(_ megabytes: Int, _ encoding: String) throws {
         continueAfterFailure = false
         let app = XCUIApplication(bundleIdentifier: "io.github.rsyumi.risunest.ios.bench")
@@ -24,6 +122,7 @@ final class NativeUITests: XCTestCase {
             preparation.name = "legacy-restore-prepared-\(megabytes)-\(encoding)-\(invocations)"
             preparation.lifetime = .keepAlways
             add(preparation)
+            logLegacyRestoreNumbers(readyEvidence, phase: "prepared", megabytes: megabytes, encoding: encoding, invocation: invocations)
             startMeasuring()
             start.tap()
             let verify = app.webViews.buttons["Verify synthetic restore"]
@@ -35,15 +134,23 @@ final class NativeUITests: XCTestCase {
             restore.name = "legacy-restore-native-rss-\(megabytes)-\(encoding)-\(invocations)"
             restore.lifetime = .keepAlways
             add(restore)
+            logLegacyRestoreNumbers(terminalEvidence, phase: "restore-terminal", megabytes: megabytes, encoding: encoding, invocation: invocations)
             XCTAssertTrue(restored, "Collect native events and OS termination evidence before classifying a missing result as a memory kill")
+            logSyntheticStep(app, step: 100, reached: false)
             verify.tap()
             let result = app.webViews.staticTexts.containing(NSPredicate(format: "label BEGINSWITH %@", "legacy-restore-result:")).firstMatch
-            XCTAssertTrue(result.waitForExistence(timeout: 1200), "Synthetic readback verification failed")
+            let failure = app.webViews.staticTexts.containing(NSPredicate(format: "label BEGINSWITH %@", "verification-error:")).firstMatch
+            let failed = app.webViews.staticTexts["failed"]
+            let completed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in result.exists || failure.exists || failed.exists }, object: nil)
+            _ = XCTWaiter.wait(for: [completed], timeout: 1200)
+            logSyntheticStep(app, step: 101, reached: result.exists)
+            XCTAssertTrue(result.exists, "Synthetic readback verification failed")
             let evidence = result.label
             let attachment = XCTAttachment(string: evidence)
             attachment.name = "legacy-restore-verified-\(megabytes)-\(encoding)-\(invocations)"
             attachment.lifetime = .keepAlways
             add(attachment)
+            logLegacyRestoreNumbers(evidence, phase: "verified", megabytes: megabytes, encoding: encoding, invocation: invocations)
             XCTAssertTrue(evidence.contains("\"phase\":\"verified\""))
             app.terminate()
         }
@@ -211,9 +318,7 @@ final class NativeUITests: XCTestCase {
             guard back.waitForExistence(timeout: 15) else { break }
             back.tap()
         }
-        let hierarchy = XCTAttachment(string: app.debugDescription)
-        hierarchy.lifetime = .keepAlways
-        add(hierarchy)
+        logSyntheticStep(app, step: 207, reached: false)
         XCTFail("The native file picker has no reachable Cancel action")
     }
 
@@ -361,25 +466,43 @@ final class NativeUITests: XCTestCase {
         let app = XCUIApplication(bundleIdentifier: "io.github.rsyumi.risunest.ios.bench")
         app.launchEnvironment["RISUNEST_IOS_PHASE"] = "ui"
         app.launch()
-        XCTAssertTrue(app.webViews.staticTexts["ui-ready"].waitForExistence(timeout: 30))
+        logSyntheticStep(app, step: 201, reached: false)
+        let ready = app.webViews.staticTexts["ui-ready"].waitForExistence(timeout: 30)
+        logSyntheticStep(app, step: 201, reached: ready)
+        XCTAssertTrue(ready)
 
+        logSyntheticStep(app, step: 202, reached: false)
         app.webViews.buttons["Import synthetic file"].tap()
         cancelPicker(app)
-        XCTAssertTrue(app.webViews.staticTexts["import-cancelled"].waitForExistence(timeout: 10))
+        let imported = app.webViews.staticTexts["import-cancelled"].waitForExistence(timeout: 10)
+        logSyntheticStep(app, step: 202, reached: imported)
+        XCTAssertTrue(imported)
 
+        logSyntheticStep(app, step: 203, reached: false)
         app.webViews.buttons["Export synthetic file"].tap()
         cancelPicker(app)
-        XCTAssertTrue(app.webViews.staticTexts["export-cancelled"].waitForExistence(timeout: 10))
+        let exported = app.webViews.staticTexts["export-cancelled"].waitForExistence(timeout: 10)
+        logSyntheticStep(app, step: 203, reached: exported)
+        XCTAssertTrue(exported)
 
+        logSyntheticStep(app, step: 204, reached: false)
         app.webViews.buttons["Allow notifications"].tap()
         let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
         let allow = springboard.alerts.buttons["Allow"]
-        XCTAssertTrue(allow.waitForExistence(timeout: 15))
+        let prompted = allow.waitForExistence(timeout: 15)
+        logSyntheticStep(app, step: 204, reached: prompted)
+        XCTAssertTrue(prompted)
         allow.tap()
-        XCTAssertTrue(app.webViews.staticTexts["notifications-allowed"].waitForExistence(timeout: 10))
+        logSyntheticStep(app, step: 205, reached: false)
+        let permitted = app.webViews.staticTexts["notifications-allowed"].waitForExistence(timeout: 10)
+        logSyntheticStep(app, step: 205, reached: permitted)
+        XCTAssertTrue(permitted)
+        logSyntheticStep(app, step: 206, reached: false)
         app.webViews.buttons["Open synthetic link"].tap()
         let safari = XCUIApplication(bundleIdentifier: "com.apple.mobilesafari")
-        XCTAssertTrue(safari.wait(for: .runningForeground, timeout: 15))
+        let opened = safari.wait(for: .runningForeground, timeout: 15)
+        logSyntheticStep(app, step: 206, reached: opened)
+        XCTAssertTrue(opened)
         app.activate()
         let attachment = XCTAttachment(screenshot: app.screenshot())
         attachment.lifetime = .keepAlways

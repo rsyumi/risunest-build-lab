@@ -98,7 +98,6 @@ let updates = Promise.resolve();
 
 /** Run after both the palette and custom CSS have been applied in this turn. */
 export function scheduleWindowsAppearance(palette?: WindowPalette): void {
-  if (!isTauriDesktop || osType() !== "windows") return;
   if (palette) latest = { ...palette };
   if (!latest) return;
   clearTimeout(pending);
@@ -114,6 +113,14 @@ export function scheduleWindowsAppearance(palette?: WindowPalette): void {
       return;
     }
     const serialized = JSON.stringify(appearance);
+    if (!isTauriDesktop || osType() !== "windows") {
+      try {
+        localStorage.setItem(WINDOWS_APPEARANCE_CACHE, serialized);
+      } catch {
+        console.warn("Could not cache the Windows startup colors");
+      }
+      return;
+    }
     updates = updates.then(async () => {
       if (serialized === lastApplied) return;
       try {

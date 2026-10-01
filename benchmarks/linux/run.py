@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -21,11 +22,74 @@ parser.add_argument('--app-theme', choices=['light', 'dark'])
 parser.add_argument('--system-theme', choices=['light', 'dark'])
 parser.add_argument('--capture-size')
 parser.add_argument('--display-owner-pid', type=int)
+parser.add_argument('--capture-codec-experiment', action='store_true',
+                    help='Run diagnostic-only six-second FFV1/NUT and stream-copy/NUT controls')
+parser.add_argument('--capture-codec-control', choices=['ffv1', 'copy'], help=argparse.SUPPRESS)
 args = parser.parse_args()
+if args.capture_codec_experiment and args.capture_codec_control:
+    parser.error('Select the paired experiment without an individual control')
+if args.capture_codec_experiment or args.capture_codec_control:
+    if args.phase != 'appearance-app' or args.app_theme != 'light' or args.system_theme != 'light':
+        parser.error('Codec diagnostics require appearance-app with light app and system themes')
+    if not args.capture_size or not args.display_owner_pid:
+        parser.error('Codec diagnostics require capture size and the owned Xvfb PID')
 if args.phase.startswith('appearance-') and (not args.app_theme or not args.system_theme):
     raise RuntimeError('Appearance phase requires app and system theme labels')
 out = Path(args.output).resolve()
 out.mkdir(parents=True, exist_ok=True)
+if args.capture_codec_experiment:
+    if any(out.iterdir()):
+        raise RuntimeError('Paired codec diagnostic requires an empty output directory')
+    observations = []
+    for codec in ['ffv1', 'copy']:
+        directory = out / codec
+        directory.mkdir()
+        outcome = {'diagnosticOnly': True, 'codec': codec, 'container': 'nut',
+                   'captureSeconds': 6, 'runnerPassed': False,
+                   'visualReview': 'required', 'contentBackgroundPass': None, 'titlebarPass': None}
+        command = [sys.executable, str(Path(__file__).resolve()), '--binary', args.binary,
+                   '--output', str(directory), '--app-theme', args.app_theme,
+                   '--system-theme', args.system_theme, '--capture-size', args.capture_size,
+                   '--display-owner-pid', str(args.display_owner_pid)]
+        try:
+            with (directory / 'seed-runner.log').open('w') as log:
+                seed = subprocess.run([*command, '--phase', 'appearance-seed'], stdout=log, stderr=subprocess.STDOUT)
+            outcome['seedReturncode'] = seed.returncode
+            if seed.returncode == 0:
+                with (directory / 'app-runner.log').open('w') as log:
+                    app = subprocess.run([*command, '--phase', 'appearance-app', '--capture-codec-control', codec],
+                                         stdout=log, stderr=subprocess.STDOUT)
+                outcome['appReturncode'] = app.returncode
+                outcome['runnerPassed'] = app.returncode == 0
+        except OSError as error:
+            outcome['preparationError'] = {'type': type(error).__name__}
+        label = f'appearance-{args.system_theme}-{args.app_theme}'
+        for name, key in [('appearance-app-runtime-observation.json', 'runtimeObservation'),
+                          (f'{label}.json', 'capture')]:
+            path = directory / name
+            try:
+                if path.exists():
+                    outcome[key] = json.loads(path.read_text())
+            except (OSError, ValueError) as error:
+                outcome.setdefault('artifactErrors', []).append({'artifact': name, 'type': type(error).__name__})
+                outcome['runnerPassed'] = False
+        diagnostics = directory / 'appearance-app-diagnostics.jsonl'
+        try:
+            if diagnostics.exists():
+                events = [json.loads(line) for line in diagnostics.read_text().splitlines() if line]
+                outcome['errors'] = [event for event in events if event['event'] in
+                                     {'primary-error', 'cleanup-capture-error'}]
+        except (OSError, ValueError) as error:
+            outcome.setdefault('artifactErrors', []).append({'artifact': diagnostics.name, 'type': type(error).__name__})
+            outcome['runnerPassed'] = False
+        observations.append(outcome)
+        (out / 'capture-codec-experiment.json').write_text(json.dumps({
+            'diagnosticOnly': True, 'systemTheme': args.system_theme, 'appTheme': args.app_theme,
+            'observations': observations}, indent=2))
+    print(json.dumps({'diagnosticOnly': True, 'captureCodecExperiment': observations}), flush=True)
+    if not all(item['runnerPassed'] for item in observations):
+        raise RuntimeError('Paired capture diagnostic failed one or more controls')
+    sys.exit(0)
 marker = out / 'synthetic-profile.txt'
 if marker.exists():
     profile = Path(marker.read_text().strip())
@@ -184,7 +248,7 @@ try:
         specification.loader.exec_module(appearance_capture)
         capture = appearance_capture.start_appearance_capture(out,
             f'appearance-{args.system_theme}-{args.app_theme}', 'linux', os.environ.get('DISPLAY'),
-            args.capture_size, args.display_owner_pid)
+            args.capture_size, args.display_owner_pid, experiment_codec=args.capture_codec_control)
         diagnostic('capture-started')
     current_stage = 'session-create'
     process_snapshot('session-create-enter')

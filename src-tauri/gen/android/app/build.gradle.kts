@@ -1,5 +1,6 @@
 import java.util.Properties
 import java.net.URI
+import java.io.ByteArrayOutputStream
 import org.jetbrains.kotlin.gradle.tasks.KotlinCompile
 
 plugins {
@@ -193,15 +194,33 @@ tasks.matching { it.name.startsWith("minify") && it.name.endsWith("ReleaseWithR8
         val mapping = layout.buildDirectory.file("outputs/mapping/$variant/mapping.txt").get().asFile
         check(mapping.isFile) { "Missing R8 mapping for JNI retention verification: $variant" }
         val lines = mapping.readLines()
+        val dexDumpName = if (System.getProperty("os.name").startsWith("Windows")) "dexdump.exe" else "dexdump"
+        val dexDumpTool = android.sdkDirectory.resolve("build-tools/${android.buildToolsVersion}/$dexDumpName")
+        check(dexDumpTool.isFile) { "Missing SDK dexdump for JNI retention verification: $dexDumpTool" }
+        val dexFiles = outputs.files.asFileTree.matching { include("**/*.dex") }.files
+        check(dexFiles.isNotEmpty()) { "Missing optimized DEX for JNI retention verification: $variant" }
+        val nativeInitializers = mutableSetOf<String>()
+        for (dex in dexFiles) {
+            val dump = ByteArrayOutputStream()
+            project.exec {
+                executable(dexDumpTool)
+                args(dex)
+                standardOutput = dump
+            }.assertNormalExitValue()
+            nativeInitializers += retainedJniNativeInitializers(dump.toString(Charsets.UTF_8.name()))
+        }
         for (owner in listOf("ExternalStorageSecrets", "ServerSyncSecrets")) {
             val className = "io.github.rsyumi.risunest.$owner"
             val classIndex = lines.indexOf("$className -> $className:")
             check(classIndex >= 0) { "R8 renamed or removed JNI class: $className" }
             val members = lines.drop(classIndex + 1).takeWhile { it.startsWith(" ") || it.startsWith("#") }
-            for (method in listOf("initialize", "seal", "open", "removeKeys")) {
+            for (method in listOf("seal", "open", "removeKeys")) {
                 check(members.any { it.contains(" $method(") && it.endsWith(" -> $method") }) {
                     "R8 renamed or removed JNI method: $className.$method"
                 }
+            }
+            check(owner in nativeInitializers) {
+                "R8 renamed or removed static native JNI method: $className.initialize()V"
             }
         }
     }
