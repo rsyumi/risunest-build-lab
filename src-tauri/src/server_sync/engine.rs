@@ -3,6 +3,9 @@
 #[cfg(test)]
 #[path = "engine_promotion_tests.rs"]
 mod promotion_tests;
+#[cfg(test)]
+#[path = "engine_order_tests.rs"]
+mod order_tests;
 
 use super::{
     asset_object_catalog::{AssetObjectCatalog, AssetObjectRegistration},
@@ -301,6 +304,7 @@ pub(crate) struct PreparedCycle {
     /// True when preparation enumerated every key, not only the outbox. Its
     /// activation is what releases the pending full comparison.
     whole_set: bool,
+    receive_library: bool,
     applied_keys: Vec<String>,
     previous: Option<RemoteHead>,
     pub through: RemoteHead,
@@ -1357,7 +1361,7 @@ impl PersistentStore {
             .ok_or_else(|| SyncError::new("server-not-bound", 409))?;
         let custody_context =
             crate::server_sync::residency::Residency::context_id(&stored_config, &through.epoch);
-        let mut records = ValidatedRecords::new()?;
+        let mut records = ValidatedRecords::new(&self.repository_root)?;
         let mut bases = Vec::new();
         let mut acknowledged = Vec::new();
         let mut publish_keys = Vec::new();
@@ -1581,6 +1585,7 @@ impl PersistentStore {
         Ok(Preparation::Ready(PreparedCycle {
             revision,
             whole_set,
+            receive_library,
             applied_keys,
             previous: status.head,
             through,
@@ -1618,6 +1623,9 @@ impl PersistentStore {
         }
         if self.revision()? != ready.revision {
             return Err(SyncError::new("local-revision-changed", 409));
+        }
+        if ready.receive_library && !ready.records.is_empty() {
+            self.snapshot_create("server-sync-initial-receive")?;
         }
         // A participation choice made after this cycle was planned cancels the
         // section work rather than applying the previous choice.
@@ -2165,6 +2173,8 @@ impl PersistentStore {
             let mut prepared: Vec<(String, String, Option<String>)> = Vec::new();
             let mut reused: Vec<(String, String, Option<String>)> = Vec::new();
             let mut objects = BTreeSet::new();
+            let residency = std::cell::OnceCell::new();
+            let config = self.server_stored_config()?.ok_or_else(|| SyncError::new("server-not-bound", 409))?;
             for key in keys {
                 client.ensure_active()?;
                 after = key.clone();
@@ -2186,7 +2196,7 @@ impl PersistentStore {
                 }
                 let (base, base_hash) = self.effective_server_base(Domain::Library, &key, committed)?;
                 let (version, local_hash) = if let Some(payload) =
-                    projection::project(db, &cas, &target.generation, &dirty)?
+                    projection::project_with_residency(db, &cas, &target.generation, &dirty, &residency)?
                 {
                     let bytes = serde_json::to_vec(&payload)
                         .map_err(|_| SyncError::new("invalid-local-payload", 409))?;
@@ -2206,8 +2216,8 @@ impl PersistentStore {
                             if cache.stat_object(hash)?.is_some() {
                                 cache.verify(hash, || client.ensure_active())?;
                             } else {
-                                let residency = crate::server_sync::residency::Residency::open(&self.repository_root)?;
-                                let config = self.server_stored_config()?.ok_or_else(|| SyncError::new("server-not-bound", 409))?;
+                                let residency = residency.get_or_init(|| crate::server_sync::residency::Residency::open(&self.repository_root))
+                                    .as_ref().map_err(|_| SyncError::new("residency-unavailable", 503))?;
                                 let proof = residency.object(hash, None)?;
                                 if !proof.is_some_and(|proof| proof.config.library_id == config.library_id && proof.config.device_id == config.device_id) {
                                     return Err(SyncError::new("missing-local-payload", 409));
@@ -2278,16 +2288,31 @@ impl PersistentStore {
             [], |r| r.get(0))?;
         CycleItemCounter::start(counter, 7, count as u64);
         let generation = super::active_generation(&self.connection)?;
+        self.connection.execute_batch("CREATE TEMP TABLE IF NOT EXISTS server_cycle_order_scopes(kind TEXT NOT NULL,parent TEXT NOT NULL,PRIMARY KEY(kind,parent)); DELETE FROM server_cycle_order_scopes;")?;
+        let mut changed = self.connection.prepare("SELECT key FROM server_cycle_records WHERE action='apply'")?;
+        for key in changed.query_map([], |row| row.get::<_, String>(0))? {
+            let key = key_parts(&key?, revision)?;
+            if ["plugin", "preset", "character", "conversation"].contains(&key.kind.as_str()) {
+                self.connection.execute("INSERT OR IGNORE INTO server_cycle_order_scopes VALUES(?1,?2)",
+                    params![key.kind, if key.kind == "conversation" { key.key1.as_str() } else { "" }])?;
+                if key.kind == "character" {
+                    self.connection.execute("INSERT OR IGNORE INTO server_cycle_order_scopes VALUES('conversation',?1)", [&key.key1])?;
+                }
+            }
+        }
+        drop(changed);
         let mut characters = {
             let mut stmt = self
                 .connection
-                .prepare("SELECT character_id FROM characters WHERE generation=?1")?;
+                .prepare("SELECT character_id FROM characters WHERE generation=?1 AND character_id IN (SELECT parent FROM server_cycle_order_scopes WHERE kind='conversation')")?;
             let ids = stmt
                 .query_map([&generation], |r| r.get::<_, String>(0))?
                 .collect::<std::result::Result<BTreeSet<_>, _>>()?;
             ids
         };
         self.connection.execute_batch("CREATE TEMP TABLE IF NOT EXISTS server_cycle_order(key TEXT PRIMARY KEY,scope TEXT NOT NULL,position INTEGER NOT NULL); DELETE FROM server_cycle_order;")?;
+        let copy = self.connection.unchecked_transaction()?;
+        let mut insert = copy.prepare_cached("INSERT INTO server_cycle_order VALUES(?1,?2,?3)")?;
         // Only index columns are copied, never plugin values or chat payloads.
         for (kind, table, id, parent, position) in [
             ("plugin", "plugin_storage", "storage_key", "owner", "ordinal"),
@@ -2313,8 +2338,11 @@ impl PersistentStore {
                 "configured_index",
             ),
         ] {
+            let included: bool = copy.query_row("SELECT EXISTS(SELECT 1 FROM server_cycle_order_scopes WHERE kind=?1)", [kind], |row| row.get(0))?;
+            if !included { continue; }
+            let filter = if kind == "conversation" { " AND character_id IN (SELECT parent FROM server_cycle_order_scopes WHERE kind='conversation')" } else { "" };
             let mut stmt = self.connection.prepare(&format!(
-                "SELECT {id},{parent},{position} FROM {table} WHERE generation=?1"
+                "SELECT {id},{parent},{position} FROM {table} WHERE generation=?1{filter}"
             ))?;
             let mut rows = stmt.query([&generation])?;
             while let Some(row) = rows.next()? {
@@ -2340,12 +2368,11 @@ impl PersistentStore {
                 } else {
                     kind.into()
                 };
-                self.connection.execute(
-                    "INSERT INTO server_cycle_order VALUES(?1,?2,?3)",
-                    params![projection::wire_key(&key)?, scope, position],
-                )?;
+                insert.execute(params![projection::wire_key(&key)?, scope, position])?;
             }
         }
+        drop(insert);
+        copy.commit()?;
         let mut after = String::new();
         loop {
             let page = cycle_page(&self.connection, &after)?;
@@ -2753,6 +2780,25 @@ impl PersistentStore {
         let source_native = PayloadCas::new(source_root)?;
         let target_native = PayloadCas::new(&target_root)?;
         let residency = crate::server_sync::residency::Residency::open(source_root)?;
+        if mode.hydrates_all() {
+            let mut hydration = crate::server_sync::residency::HydrationSession::new(source_root, None)?;
+            let mut pending = Vec::new();
+            let mut flush = |pending: &mut Vec<String>| -> Result<()> {
+                if !hydration.hydrate_many(pending, check)?.is_empty() {
+                    return Err(SyncError::new("conflict-custody-unavailable", 409));
+                }
+                pending.clear();
+                Ok(())
+            };
+            crate::server_sync::backups::visit_reference_objects(source_root, source, check, |object| {
+                if !object.metadata && !object.local_required {
+                    pending.push(object.hash);
+                    if pending.len() == 64 { flush(&mut pending)?; }
+                }
+                Ok(())
+            })?;
+            flush(&mut pending)?;
+        }
         let mut objects = BTreeMap::new();
         crate::server_sync::backups::visit_reference_objects(
             source_root,
@@ -2768,12 +2814,6 @@ impl PersistentStore {
                 }
                 let available = if object.metadata || object.local_required {
                     source_native.open_object(&object.hash)?
-                } else if mode.hydrates_all() {
-                    crate::server_sync::residency::open_or_hydrate_with_check(
-                        source_root,
-                        &object.hash,
-                        check,
-                    )?
                 } else {
                     source_native.open_object(&object.hash)?
                 };
@@ -2805,7 +2845,7 @@ impl PersistentStore {
         )?;
 
         let cache = Cache::open(&target_root)?;
-        let mut records = ValidatedRecords::new()?;
+        let mut records = ValidatedRecords::new(&self.repository_root)?;
         crate::server_sync::backups::visit_reference_records(
             source_root,
             source,

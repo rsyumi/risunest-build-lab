@@ -6,7 +6,7 @@ CREATE TABLE media_secret(singleton INTEGER PRIMARY KEY CHECK(singleton=1),key B
 CREATE TABLE devices (
  id TEXT PRIMARY KEY, verifier TEXT NOT NULL UNIQUE, revoked INTEGER NOT NULL DEFAULT 0,
  watermark TEXT NOT NULL DEFAULT '0',
- name TEXT NOT NULL DEFAULT '', registration_request TEXT UNIQUE
+ name TEXT NOT NULL DEFAULT '', registration_request TEXT UNIQUE, last_ack INTEGER
 );
 CREATE TABLE device_section_acks(device TEXT NOT NULL REFERENCES devices(id),domain TEXT NOT NULL,ack TEXT NOT NULL,PRIMARY KEY(device,domain));
 CREATE TABLE objects (hash TEXT PRIMARY KEY, size INTEGER NOT NULL CHECK(size>=0), storage TEXT NOT NULL CHECK(storage IN ('file','inline')));
@@ -51,7 +51,7 @@ CREATE TABLE receipts (
  operation TEXT PRIMARY KEY, device TEXT NOT NULL REFERENCES devices(id), seq TEXT NOT NULL,
  digest TEXT NOT NULL, body TEXT NOT NULL, created INTEGER NOT NULL DEFAULT (unixepoch()), UNIQUE(device,seq)
 );
-CREATE TABLE commit_jobs (operation TEXT PRIMARY KEY,device TEXT NOT NULL UNIQUE REFERENCES devices(id),digest TEXT NOT NULL,body TEXT NOT NULL,stage TEXT NOT NULL,retry_after INTEGER NOT NULL DEFAULT 0);
+CREATE TABLE commit_jobs (operation TEXT PRIMARY KEY,device TEXT NOT NULL UNIQUE REFERENCES devices(id),digest TEXT NOT NULL,body TEXT NOT NULL,stage TEXT NOT NULL,retry_after INTEGER NOT NULL DEFAULT 0,attempts INTEGER NOT NULL DEFAULT 0,error TEXT);
 CREATE TABLE commits (seq TEXT PRIMARY KEY, head TEXT NOT NULL, operation TEXT NOT NULL UNIQUE);
 CREATE TABLE changes (
  seq TEXT NOT NULL REFERENCES commits(seq), ordinal INTEGER NOT NULL, domain TEXT NOT NULL, body TEXT NOT NULL,
@@ -63,11 +63,18 @@ PRAGMA user_version=1;
 "#;
 
 pub fn verify(db: &rusqlite::Connection) -> crate::Result<()> {
-    fn structure(db: &rusqlite::Connection) -> rusqlite::Result<Vec<(String, String, String, String)>> {
+    fn structure(
+        db: &rusqlite::Connection,
+    ) -> rusqlite::Result<Vec<(String, String, String, String)>> {
         let mut query = db.prepare("SELECT type,name,tbl_name,COALESCE(sql,'') FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name")?;
         let rows = query.query_map([], |row| {
             let sql: String = row.get(3)?;
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, sql.split_whitespace().collect::<Vec<_>>().join(" ")))
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                sql.split_whitespace().collect::<Vec<_>>().join(" "),
+            ))
         })?;
         rows.collect()
     }

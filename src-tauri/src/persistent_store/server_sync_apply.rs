@@ -23,7 +23,7 @@ use serde_json::Value;
 use std::collections::BTreeSet;
 
 mod staging;
-pub(crate) use staging::ValidatedRecords;
+pub(crate) use staging::{ValidatedRecords, sweep_staging};
 
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct RemoteRecord {
@@ -299,7 +299,7 @@ impl PersistentStore {
         acknowledged: &[ServerDirtyKey],
         scopes: &[(String, String)],
     ) -> StoreResult<i64> {
-        let mut staged = ValidatedRecords::new()?;
+        let mut staged = ValidatedRecords::new(&self.repository_root)?;
         for record in records {
             staged.push(record)?;
         }

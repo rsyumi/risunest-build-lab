@@ -208,10 +208,15 @@ impl Store {
             return Err(Error::new("checkpoint-expired", 410));
         }
         let total_records = if after.is_none() {
-            let count: i64 = db.query_row("SELECT count(*) FROM checkpoint_records WHERE checkpoint=?1",
-                [id], |r| r.get(0))?;
+            let count: i64 = db.query_row(
+                "SELECT count(*) FROM checkpoint_records WHERE checkpoint=?1",
+                [id],
+                |r| r.get(0),
+            )?;
             Some(Sequence::from(count as u64))
-        } else { None };
+        } else {
+            None
+        };
         let (after_domain, after_key) = match after {
             Some(cursor) => (cursor.domain.as_str(), cursor.key.as_str()),
             None => ("", ""),

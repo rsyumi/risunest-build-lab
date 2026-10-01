@@ -34,7 +34,9 @@ fn inventory_counts_all_files_and_pages_beyond_one_hundred() {
     }
     let incomplete = backup(root.path(), false).1;
     disk_bytes += incomplete;
+    crate::server_sync::backups::references::AVAILABILITY_CHECKS.with(|count| count.set(0));
     let first = inventory(root.path(), None, None, &BTreeSet::new()).unwrap();
+    crate::server_sync::backups::references::AVAILABILITY_CHECKS.with(|count| assert_eq!(count.get(), 200));
     assert_eq!(first.items.len(), 100);
     assert_eq!(first.complete_count, 105);
     assert_eq!(first.complete_bytes, 105 * (15 + 16));
@@ -45,7 +47,9 @@ fn inventory_counts_all_files_and_pages_beyond_one_hundred() {
         .items
         .iter()
         .all(|item| item.deletable && item.backup.preservation_scope == "library"));
+    crate::server_sync::backups::references::AVAILABILITY_CHECKS.with(|count| count.set(0));
     let second = inventory(root.path(), first.next.as_ref(), None, &BTreeSet::new()).unwrap();
+    crate::server_sync::backups::references::AVAILABILITY_CHECKS.with(|count| assert_eq!(count.get(), 10));
     assert_eq!(second.items.len(), 5);
     assert!(second.next.is_none());
     assert_eq!(second.disk_bytes, disk_bytes);
@@ -56,6 +60,9 @@ fn inventory_counts_all_files_and_pages_beyond_one_hundred() {
         .map(|item| &item.backup.id)
         .collect();
     assert_eq!(ids.len(), 105);
+    crate::server_sync::backups::references::AVAILABILITY_CHECKS.with(|count| count.set(0));
+    assert_eq!(incomplete_count(root.path()).unwrap(), 1);
+    crate::server_sync::backups::references::AVAILABILITY_CHECKS.with(|count| assert_eq!(count.get(), 0));
 }
 
 #[test]
@@ -127,8 +134,9 @@ fn interrupted_explicit_deletion_resumes_only_its_id() {
         inventory(root.path(), None, None, &BTreeSet::new())
             .unwrap()
             .incomplete_count,
-        1
+        0
     );
+    backups::references::visit_roots(root.path(), |_| Ok(())).unwrap();
     delete_backup(root.path(), &id, None, &BTreeSet::new()).unwrap();
     assert_eq!(tree_bytes(&base.join(other)).unwrap(), other_size);
     assert!(!deleting.exists());

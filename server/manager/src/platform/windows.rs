@@ -77,7 +77,14 @@ pub(super) fn spawn_update_helper(root: &Path, command: &mut Command) -> Result<
         ])
         .env("RISUNEST_HELPER_TASK", task_name)
         .env("RISUNEST_HELPER_PROGRAM", program)
-        .env("RISUNEST_HELPER_LIMIT", if command.get_args().any(|arg| arg == "--owner") { "PT0S" } else { "PT10M" })
+        .env(
+            "RISUNEST_HELPER_LIMIT",
+            if command.get_args().any(|arg| arg == "--owner") {
+                "PT0S"
+            } else {
+                "PT10M"
+            },
+        )
         .env("RISUNEST_HELPER_ARGUMENTS", arguments)
         .stdin(Stdio::null())
         .output()
@@ -121,12 +128,25 @@ pub(super) fn finish_update_helper(root: &Path, task_name: &str) -> Result<()> {
 pub(super) fn sweep_stale_update_helpers(root: &Path) -> Result<()> {
     const SWEEP: &str = r#"$ErrorActionPreference='Stop';$s=New-Object -ComObject 'Schedule.Service';$s.Connect();$f=$s.GetFolder('\');foreach($t in @($f.GetTasks(1))){$n=$t.Name;if(!$n.StartsWith($env:RISUNEST_HELPER_PREFIX,[StringComparison]::Ordinal)){continue};$x=$n.Substring($env:RISUNEST_HELPER_PREFIX.Length);if($x -cnotmatch '^[0-9a-f]{64}$'){continue};if($t.Definition.RegistrationInfo.Description -ne $env:RISUNEST_HELPER_DESCRIPTION){continue};if($t.State -eq 4 -or $t.GetInstances(0).Count -ne 0){continue};$date=[DateTime]::MinValue;if(![DateTime]::TryParse($t.Definition.RegistrationInfo.Date,[ref]$date)){continue};if($date.ToUniversalTime() -gt [DateTime]::UtcNow.AddMinutes(-15)){continue};$f.DeleteTask($n,0)}"#;
     let status = process("powershell.exe")
-        .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-Command", SWEEP])
+        .args([
+            "-NoLogo",
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            SWEEP,
+        ])
         .env("RISUNEST_HELPER_PREFIX", helper_task_prefix(root))
         .env("RISUNEST_HELPER_DESCRIPTION", HELPER_TASK_DESCRIPTION)
-        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
-        .status().map_err(|_| "update-helper-task-cleanup-failed")?;
-    if status.success() { Ok(()) } else { Err("update-helper-task-cleanup-failed".into()) }
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|_| "update-helper-task-cleanup-failed")?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err("update-helper-task-cleanup-failed".into())
+    }
 }
 
 pub(super) fn cleanup_update_helpers(root: &Path) -> Result<()> {

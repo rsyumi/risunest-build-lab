@@ -709,7 +709,9 @@ async fn acquire_helper_update_lock(root: &Path) -> Result<UpdateLock> {
 
 async fn run_inner_locked(root: &Path, server: &Path, mode: RunMode) -> Result<RunOutcome> {
     #[cfg(windows)]
-    if let Err(error) = platform::sweep_stale_update_helpers(root) { eprintln!("{error}"); }
+    if let Err(error) = platform::sweep_stale_update_helpers(root) {
+        eprintln!("{error}");
+    }
     let install = install_path(server)?;
     #[cfg(windows)]
     if let Some(transaction) = InstallTransaction::load(root, &install)? {
@@ -1183,9 +1185,14 @@ pub async fn run_helper(
         return Err(error);
     }
     let startup_snapshot = if !transaction.was_running {
-        super::installer_startup_snapshot(root, server).map(|enabled| transaction.set_prior_startup_enabled(enabled))
-    } else { Ok(()) };
-    if startup_snapshot.is_ok() { transaction.mark_restarting(root)?; }
+        super::installer_startup_snapshot(root, server)
+            .map(|enabled| transaction.set_prior_startup_enabled(enabled))
+    } else {
+        Ok(())
+    };
+    if startup_snapshot.is_ok() {
+        transaction.mark_restarting(root)?;
+    }
     transition(root, &mut status, UpdatePhase::Restarting, None)?;
     let mut temporary_registration = false;
     let registration = if let Err(error) = startup_snapshot {
@@ -1267,18 +1274,28 @@ pub async fn run_helper(
 }
 
 fn finish_update_state(root: &Path, server: &Path) -> Result<()> {
-    let manager = server.with_file_name(if cfg!(windows) { "risunest-sync-manager.exe" } else { "risunest-sync-manager" });
-    finish_update_state_with(|| super::relaunch_gui(root, server), || {
-        if super::load_settings(root)?.policy == UpdatePolicy::Off {
-            if let Err(error) = super::reconcile_schedule_while_locked(root, &manager, server) {
-                eprintln!("{error}");
+    let manager = server.with_file_name(if cfg!(windows) {
+        "risunest-sync-manager.exe"
+    } else {
+        "risunest-sync-manager"
+    });
+    finish_update_state_with(
+        || super::relaunch_gui(root, server),
+        || {
+            if super::load_settings(root)?.policy == UpdatePolicy::Off {
+                if let Err(error) = super::reconcile_schedule_while_locked(root, &manager, server) {
+                    eprintln!("{error}");
+                }
             }
-        }
-        Ok(())
-    })
+            Ok(())
+        },
+    )
 }
 
-fn finish_update_state_with(relaunch: impl FnOnce() -> Result<()>, remove_schedule: impl FnOnce() -> Result<()>) -> Result<()> {
+fn finish_update_state_with(
+    relaunch: impl FnOnce() -> Result<()>,
+    remove_schedule: impl FnOnce() -> Result<()>,
+) -> Result<()> {
     relaunch()?;
     remove_schedule()
 }
@@ -1307,11 +1324,25 @@ mod tests {
     #[test]
     fn gui_relaunch_precedes_potentially_self_terminating_schedule_cleanup() {
         let relaunched = std::cell::Cell::new(false);
-        finish_update_state_with(|| { relaunched.set(true); Ok(()) }, || {
-            assert!(relaunched.get());
-            Ok(())
-        }).unwrap();
-        assert_eq!(finish_update_state_with(|| Err("synthetic-relaunch-failure".into()), || panic!("keep recovery schedule for retry")).unwrap_err(), "synthetic-relaunch-failure");
+        finish_update_state_with(
+            || {
+                relaunched.set(true);
+                Ok(())
+            },
+            || {
+                assert!(relaunched.get());
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            finish_update_state_with(
+                || Err("synthetic-relaunch-failure".into()),
+                || panic!("keep recovery schedule for retry")
+            )
+            .unwrap_err(),
+            "synthetic-relaunch-failure"
+        );
     }
 
     #[tokio::test]
@@ -1701,7 +1732,9 @@ mod tests {
 
         assert_eq!(error, "server-executable-or-data-path-invalid");
         assert_eq!(fs::read_to_string(install.join("version")).unwrap(), "old");
-        assert!(InstallTransaction::load(temp.path(), &install).unwrap().is_none());
+        assert!(InstallTransaction::load(temp.path(), &install)
+            .unwrap()
+            .is_none());
         assert_eq!(load_status(temp.path()).unwrap().phase, UpdatePhase::Failed);
     }
 

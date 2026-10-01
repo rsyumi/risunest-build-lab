@@ -65,6 +65,17 @@ function fixture() {
 }
 afterEach(() => vi.useRealTimers());
 describe("server sync controller", () => {
+  it("refreshes a stale conflict without replaying the destructive choice", async () => {
+    const { controller, facade, status } = fixture();
+    facade.cycle.mockRejectedValueOnce(new ServerSyncError("conflict-preview-stale", false));
+    facade.cycle.mockResolvedValueOnce({ phase: "conflict", conflictCount: 1, localRevision: 4, head: status.head });
+    await controller.synchronize({ resolution: "keep-remote", expectedRevision: 3 });
+    expect(facade.cycle.mock.calls).toEqual([
+      [{ resolution: "keep-remote", expectedRevision: 3 }, undefined], [{}, undefined],
+    ]);
+    expect(controller.snapshot()).toMatchObject({ error: "", conflictRefreshed: true, result: { phase: "conflict" } });
+  });
+
   it("recovers an unknown binding on a status retry without registration", async () => {
     const { controller, facade } = fixture();
     facade.status.mockRejectedValueOnce(new ServerSyncError("local-storage-unavailable"));

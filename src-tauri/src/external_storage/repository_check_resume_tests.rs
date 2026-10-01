@@ -115,6 +115,7 @@ impl World {
             repository: &device.connected.handle,
             clock: &self.clock,
             protection_supported: true,
+            ledger: None,
         }
     }
 

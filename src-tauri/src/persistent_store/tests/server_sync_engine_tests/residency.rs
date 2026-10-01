@@ -5,6 +5,7 @@ use crate::server_sync::residency::{open_or_hydrate, AssetPolicy, Residency};
 mod media_admission;
 mod regressions;
 mod references;
+mod recovery;
 mod release_interleaving;
 mod classification_proposal;
 
@@ -545,6 +546,18 @@ fn owner_manifests_stay_local_while_the_owner_binary_stays_remote() {
     let cas = PayloadCas::new(second.repository_root()).unwrap();
     assert!(cas.stat_object(&manifest).unwrap().is_some());
     assert_eq!(cas.stat_object(&binary.content_hash).unwrap(), None);
+    let key = crate::persistent_store::server_sync_outbox::ServerDirtyKey {
+        kind: "character".into(), key1: "char-a".into(), key2: String::new(), revision: second.revision().unwrap(),
+    };
+    let generation = active_generation(&second.connection).unwrap();
+    let expected = crate::persistent_store::server_sync_projection::project(&second.connection, &cas, &generation, &key).unwrap();
+    let reader = std::cell::OnceCell::new();
+    crate::server_sync::residency::OPEN_COUNT.with(|count| count.set(0));
+    for _ in 0..256 {
+        let projected = crate::persistent_store::server_sync_projection::project_with_residency(&second.connection, &cas, &generation, &key, &reader).unwrap();
+        assert_eq!(serde_json::to_vec(&projected).unwrap(), serde_json::to_vec(&expected).unwrap());
+    }
+    assert_eq!(crate::server_sync::residency::OPEN_COUNT.with(|count| count.get()), 1);
     // Editing the owning record must not pull all of its media back to disk.
     entries[0].tuple[0] = "edited synthetic".into();
     let edited = commit_owner(&mut second, &entries);

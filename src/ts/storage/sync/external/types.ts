@@ -224,6 +224,10 @@ export interface ExternalJobSummary {
         targetRevision: DecimalString
         restoreAreas: ExternalRestoreArea[]
     }
+    resolveRequest?: {
+        conflictId: string
+        choice: 'local' | 'remote'
+    }
     pinRequest?: { snapshotId: string }
     deleteRequest?: {
         pointId: string

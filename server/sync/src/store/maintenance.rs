@@ -54,9 +54,15 @@ pub(super) struct OrphanScan {
 }
 impl Store {
     fn reconcile_orphans(&self, db: &Connection) -> Result<()> {
-        let mut scan = self.orphan_cursor.lock().map_err(|_| Error::new("storage-unavailable", 503))?;
+        let mut scan = self
+            .orphan_cursor
+            .lock()
+            .map_err(|_| Error::new("storage-unavailable", 503))?;
         if scan.objects.is_none() {
-            let path = self.root.join("objects").join(format!("{:02x}", scan.shard));
+            let path = self
+                .root
+                .join("objects")
+                .join(format!("{:02x}", scan.shard));
             super::objects::check_path(&path)?;
             scan.objects = match std::fs::read_dir(path) {
                 Ok(entries) => Some(entries),
@@ -64,59 +70,129 @@ impl Store {
                 Err(error) => return Err(error.into()),
             };
         }
-        let entries = scan.objects.as_mut().map(|entries| entries.by_ref().take(1024).collect::<Vec<_>>()).unwrap_or_default();
-        if entries.len() < 1024 { scan.objects = None; scan.shard = scan.shard.wrapping_add(1); }
+        let entries = scan
+            .objects
+            .as_mut()
+            .map(|entries| entries.by_ref().take(1024).collect::<Vec<_>>())
+            .unwrap_or_default();
+        if entries.len() < 1024 {
+            scan.objects = None;
+            scan.shard = scan.shard.wrapping_add(1);
+        }
         for entry in entries {
             let entry = entry?;
             let hash = entry.file_name().to_string_lossy().into_owned();
-            if risunest_sync_wire::validate_hash(&hash).is_err() || entry.path() != self.object_path(&hash)? { continue; }
-            if !entry.file_type()?.is_file() { continue; }
+            if risunest_sync_wire::validate_hash(&hash).is_err()
+                || entry.path() != self.object_path(&hash)?
+            {
+                continue;
+            }
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
             db.execute("INSERT OR IGNORE INTO object_trash SELECT ?1 WHERE NOT EXISTS(SELECT 1 FROM objects WHERE hash=?1)", [&hash])?;
         }
-        if scan.staging.is_none() { scan.staging = Some(std::fs::read_dir(self.root.join("staging"))?); }
-        let entries = scan.staging.as_mut().unwrap().by_ref().take(1024).collect::<Vec<_>>();
-        if entries.len() < 1024 { scan.staging = None; }
+        if scan.staging.is_none() {
+            scan.staging = Some(std::fs::read_dir(self.root.join("staging"))?);
+        }
+        let entries = scan
+            .staging
+            .as_mut()
+            .unwrap()
+            .by_ref()
+            .take(1024)
+            .collect::<Vec<_>>();
+        if entries.len() < 1024 {
+            scan.staging = None;
+        }
         let mut staging_changed = false;
         for entry in entries {
             let entry = entry?;
             let name = entry.file_name().to_string_lossy().into_owned();
             if name.starts_with(".risunest-tmp-") {
-                let paths = self.temporary_paths.lock().map_err(|_| Error::new("storage-unavailable", 503))?;
-                if paths.contains(&entry.path()) { continue; }
+                let paths = self
+                    .temporary_paths
+                    .lock()
+                    .map_err(|_| Error::new("storage-unavailable", 503))?;
+                if paths.contains(&entry.path()) {
+                    continue;
+                }
                 let meta = match entry.metadata() {
                     Ok(meta) => meta,
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
                     Err(error) => return Err(error.into()),
                 };
-                if meta.is_file() && meta.modified()?.elapsed().is_ok_and(|age| age.as_secs() >= 3600) {
+                if meta.is_file()
+                    && meta
+                        .modified()?
+                        .elapsed()
+                        .is_ok_and(|age| age.as_secs() >= 3600)
+                {
                     std::fs::remove_file(entry.path())?;
                     staging_changed = true;
                 }
                 continue;
             }
-            let Some((upload, ordinal)) = name.strip_suffix(".chunk").and_then(|name| name.rsplit_once('-')) else { continue; };
-            if risunest_sync_wire::validate_id(upload).is_err() { continue; }
-            let Ok(ordinal) = ordinal.parse::<i64>() else { continue; };
-            if ordinal < 0 || !entry.file_type()?.is_file() { continue; }
+            let Some((upload, ordinal)) = name
+                .strip_suffix(".chunk")
+                .and_then(|name| name.rsplit_once('-'))
+            else {
+                continue;
+            };
+            if risunest_sync_wire::validate_id(upload).is_err() {
+                continue;
+            }
+            let Ok(ordinal) = ordinal.parse::<i64>() else {
+                continue;
+            };
+            if ordinal < 0 || !entry.file_type()?.is_file() {
+                continue;
+            }
             db.execute("INSERT OR IGNORE INTO staging_trash SELECT ?1,?2 WHERE NOT EXISTS(SELECT 1 FROM upload_chunks WHERE upload=?1 AND ordinal=?2)", params![upload, ordinal])?;
         }
-        if staging_changed { super::objects::sync_directory(&self.root.join("staging"))?; }
+        if staging_changed {
+            super::objects::sync_directory(&self.root.join("staging"))?;
+        }
         Ok(())
     }
-    pub(super) fn drain_staging_trash(&self, db: &Connection, only: Option<&str>) -> Result<TrashPass> {
-        let mut cursors = self.trash_cursors.lock().map_err(|_| Error::new("storage-unavailable", 503))?;
+    pub(super) fn drain_staging_trash(
+        &self,
+        db: &Connection,
+        only: Option<&str>,
+    ) -> Result<TrashPass> {
+        let mut cursors = self
+            .trash_cursors
+            .lock()
+            .map_err(|_| Error::new("storage-unavailable", 503))?;
         let rows = {
             let mut statement = db.prepare("SELECT rowid,upload,ordinal FROM staging_trash WHERE (?1 IS NULL AND rowid>?2) OR upload=?1 ORDER BY rowid LIMIT 1024")?;
-            let rows = statement.query_map(params![only, cursors.0], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?)))?
+            let rows = statement
+                .query_map(params![only, cursors.0], |r| {
+                    Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, i64>(2)?,
+                    ))
+                })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             rows
         };
-        if only.is_none() { cursors.0 = if rows.len() < 1024 { 0 } else { rows.last().unwrap().0 }; }
+        if only.is_none() {
+            cursors.0 = if rows.len() < 1024 {
+                0
+            } else {
+                rows.last().unwrap().0
+            };
+        }
         drop(cursors);
-        let mut pass = TrashPass { selected: rows.len() as u64, ..Default::default() };
+        let mut pass = TrashPass {
+            selected: rows.len() as u64,
+            ..Default::default()
+        };
         let mut removed = Vec::new();
         for (row, upload, ordinal) in rows {
-            let index = u64::try_from(ordinal).map_err(|_| Error::new("corrupt-staging-trash", 503))?;
+            let index =
+                u64::try_from(ordinal).map_err(|_| Error::new("corrupt-staging-trash", 503))?;
             match std::fs::remove_file(self.chunk_path(&upload, index)?) {
                 Ok(()) => removed.push(row),
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => removed.push(row),
@@ -126,57 +202,102 @@ impl Store {
         if !removed.is_empty() {
             super::objects::sync_directory(&self.root.join("staging"))?;
             let tx = db.unchecked_transaction()?;
-            for row in &removed { tx.execute("DELETE FROM staging_trash WHERE rowid=?1", [row])?; }
+            for row in &removed {
+                tx.execute("DELETE FROM staging_trash WHERE rowid=?1", [row])?;
+            }
             tx.commit()?;
         }
         pass.removed = removed.len() as u64;
         Ok(pass)
     }
     pub fn drain_trash(&self) -> Result<TrashPass> {
-        let _gate = self.objects_gate.lock().map_err(|_| Error::new("storage-unavailable", 503))?;
+        let _gate = self
+            .objects_gate
+            .lock()
+            .map_err(|_| Error::new("storage-unavailable", 503))?;
         self.drain_trash_locked(&mut *self.db()?)
     }
     fn drain_trash_locked(&self, db: &mut Connection) -> Result<TrashPass> {
         let mut pass = self.drain_staging_trash(db, None)?;
-        let mut cursors = self.trash_cursors.lock().map_err(|_| Error::new("storage-unavailable", 503))?;
+        let mut cursors = self
+            .trash_cursors
+            .lock()
+            .map_err(|_| Error::new("storage-unavailable", 503))?;
         let rows = {
-            let mut statement = db.prepare("SELECT rowid,hash FROM object_trash WHERE rowid>?1 ORDER BY rowid LIMIT 1024")?;
-            let rows = statement.query_map([cursors.1], |r| Ok((r.get::<_, i64>(0)?,r.get::<_, String>(1)?)))?
+            let mut statement = db.prepare(
+                "SELECT rowid,hash FROM object_trash WHERE rowid>?1 ORDER BY rowid LIMIT 1024",
+            )?;
+            let rows = statement
+                .query_map([cursors.1], |r| {
+                    Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+                })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             rows
         };
-        cursors.1 = if rows.len() < 1024 { 0 } else { rows.last().unwrap().0 };
+        cursors.1 = if rows.len() < 1024 {
+            0
+        } else {
+            rows.last().unwrap().0
+        };
         drop(cursors);
         pass.selected += rows.len() as u64;
         let mut removed = Vec::new();
         let mut directories = std::collections::BTreeSet::new();
         let mut obsolete = Vec::new();
         for (row, digest) in rows {
-            let exists: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM objects WHERE hash=?1)", [&digest], |r| r.get(0))?;
-            if exists { obsolete.push(row); continue; }
+            let exists: bool = db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM objects WHERE hash=?1)",
+                [&digest],
+                |r| r.get(0),
+            )?;
+            if exists {
+                obsolete.push(row);
+                continue;
+            }
             let path = self.object_path(&digest)?;
             match std::fs::remove_file(&path) {
-                Ok(()) => { directories.insert(path.parent().unwrap().to_owned()); },
+                Ok(()) => {
+                    directories.insert(path.parent().unwrap().to_owned());
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                     let parent = path.parent().unwrap();
-                    directories.insert(if parent.is_dir() { parent.to_owned() } else { self.root.join("objects") });
-                },
-                Err(_) => { pass.failed += 1; continue; },
+                    directories.insert(if parent.is_dir() {
+                        parent.to_owned()
+                    } else {
+                        self.root.join("objects")
+                    });
+                }
+                Err(_) => {
+                    pass.failed += 1;
+                    continue;
+                }
             }
             removed.push((row, digest));
         }
-        for directory in directories { super::objects::sync_directory(&directory)?; }
-        let hashes = removed.iter().map(|(_, hash)| hash.as_str()).collect::<Vec<_>>();
+        for directory in directories {
+            super::objects::sync_directory(&directory)?;
+        }
+        let hashes = removed
+            .iter()
+            .map(|(_, hash)| hash.as_str())
+            .collect::<Vec<_>>();
         let tx = db.transaction()?;
-        risunest_small_object_store::delete_batch(&tx, &hashes).map_err(super::objects::body_error)?;
+        risunest_small_object_store::delete_batch(&tx, &hashes)
+            .map_err(super::objects::body_error)?;
         for row in obsolete.iter().chain(removed.iter().map(|(row, _)| row)) {
             tx.execute("DELETE FROM object_trash WHERE rowid=?1", [row])?;
         }
         tx.commit()?;
         pass.objects_removed = removed.len() as u64;
         pass.removed += pass.objects_removed;
-        pass.backlog = db.query_row("SELECT (SELECT count(*) FROM object_trash)+(SELECT count(*) FROM staging_trash)", [], |r| r.get::<_, i64>(0))? as u64;
-        if !removed.is_empty() { db.execute_batch("PRAGMA incremental_vacuum;")?; }
+        pass.backlog = db.query_row(
+            "SELECT (SELECT count(*) FROM object_trash)+(SELECT count(*) FROM staging_trash)",
+            [],
+            |r| r.get::<_, i64>(0),
+        )? as u64;
+        if !removed.is_empty() {
+            db.execute_batch("PRAGMA incremental_vacuum;")?;
+        }
         Ok(pass)
     }
     pub(super) fn lease_object(db: &Connection, device: &Device, digest: &str) -> Result<()> {
@@ -344,11 +465,17 @@ impl Store {
     /// Call only after restoring a stopped, complete server-directory backup.
     /// Old clients must reconcile against the restored checkpoint under a new epoch.
     pub fn rotate_restored_epoch(&self) -> Result<()> {
-        let _gate = self.objects_gate.lock().map_err(|_| Error::new("storage-unavailable", 503))?;
+        let _gate = self
+            .objects_gate
+            .lock()
+            .map_err(|_| Error::new("storage-unavailable", 503))?;
         let mut db = self.db()?;
         let tx = db.transaction()?;
         let head = RemoteHead::genesis(Self::read_head(&tx)?.library_id, random_id()?)?;
-        tx.execute("INSERT OR IGNORE INTO staging_trash SELECT upload,ordinal FROM upload_chunks", [])?;
+        tx.execute(
+            "INSERT OR IGNORE INTO staging_trash SELECT upload,ordinal FROM upload_chunks",
+            [],
+        )?;
         tx.execute_batch("DELETE FROM changes; DELETE FROM commits; DELETE FROM receipts; DELETE FROM commit_jobs; DELETE FROM staged_changes; DELETE FROM read_pins; DELETE FROM checkpoints; DELETE FROM uploads; DELETE FROM download_deltas; DELETE FROM object_leases; DELETE FROM scope_versions; DELETE FROM device_section_acks;")?;
         tx.execute("UPDATE library SET head=?1", [json(&head)?])?;
         tx.commit()?;
@@ -376,7 +503,11 @@ mod recovery_tests {
         {
             let db = store.db().unwrap();
             db.execute("INSERT INTO uploads(id,device,hash,size,expires) VALUES(?1,?2,?3,6,unixepoch()+3600)", params![live, device.device_id, digest]).unwrap();
-            db.execute("INSERT INTO upload_chunks VALUES(?1,0,?2,6)", params![live, digest]).unwrap();
+            db.execute(
+                "INSERT INTO upload_chunks VALUES(?1,0,?2,6)",
+                params![live, digest],
+            )
+            .unwrap();
         }
         std::fs::write(store.chunk_path(&live, 0).unwrap(), b"resume").unwrap();
         std::fs::write(store.chunk_path(&orphan, 0).unwrap(), b"orphan").unwrap();
@@ -391,11 +522,17 @@ mod recovery_tests {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::init(dir.path()).unwrap();
         let active = store.staging_temp().unwrap();
-        let times = std::fs::FileTimes::new().set_modified(std::time::SystemTime::now()-std::time::Duration::from_secs(7200));
+        let times = std::fs::FileTimes::new()
+            .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(7200));
         active.as_file().set_times(times).unwrap();
         let orphan = store.root.join("staging/.risunest-tmp-abandoned");
         std::fs::write(&orphan, b"partial").unwrap();
-        std::fs::OpenOptions::new().write(true).open(&orphan).unwrap().set_times(times).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&orphan)
+            .unwrap()
+            .set_times(times)
+            .unwrap();
         store.maintain().unwrap();
         assert!(active.path().exists());
         assert!(!orphan.exists());
@@ -408,15 +545,24 @@ mod recovery_tests {
         for folder in [dir.path().to_owned(), dir.path().join("staging")] {
             let old = folder.join(".risunest-tmp-old");
             std::fs::write(&old, b"abandoned").unwrap();
-            let times = std::fs::FileTimes::new().set_modified(std::time::SystemTime::now()-std::time::Duration::from_secs(7200));
-            std::fs::OpenOptions::new().write(true).open(&old).unwrap().set_times(times).unwrap();
+            let times = std::fs::FileTimes::new()
+                .set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(7200));
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&old)
+                .unwrap()
+                .set_times(times)
+                .unwrap();
             std::fs::write(folder.join(".risunest-tmp-recent"), b"recent").unwrap();
             std::fs::write(folder.join("unrelated"), b"keep").unwrap();
         }
         drop(Store::open(dir.path()).unwrap());
         for folder in [dir.path().to_owned(), dir.path().join("staging")] {
             assert!(!folder.join(".risunest-tmp-old").exists());
-            assert_eq!(folder.join(".risunest-tmp-recent").exists(), folder == dir.path());
+            assert_eq!(
+                folder.join(".risunest-tmp-recent").exists(),
+                folder == dir.path()
+            );
             assert!(folder.join("unrelated").exists());
         }
     }

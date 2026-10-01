@@ -181,7 +181,7 @@ describe('the storage usage tab', () => {
         expect(target.querySelector('[role="progressbar"]')).toBeNull()
         const backup = [...target.querySelectorAll('button')].find(button => button.textContent?.trim() === strings.runBackup)
         expect(backup?.disabled).toBe(true)
-        expect([...target.querySelectorAll('button')].some(button => button.textContent?.trim() === strings.retryAction)).toBe(kind !== 'sync')
+        expect([...target.querySelectorAll('button')].some(button => button.textContent?.trim() === strings.retryAction)).toBe(true)
     })
 
     it('shows a structured start refusal after refreshing native state', async () => {
@@ -208,6 +208,30 @@ describe('the storage usage tab', () => {
         labelled(strings.automaticBackup).click()
         await settle()
         expect(state.setAutomaticBackupPaused).toHaveBeenCalledWith('connection-1', true)
+    })
+
+    it('offers an explicit recheck for an uncertain publication without claiming completion', async () => {
+        const job = { id: 'uncertain-operation', connectionId: 'connection-1', kind: 'sync', state: 'uncertain',
+            phase: 'publication-unknown', reason: 'automatic', targetRevision: '8', completedBytes: '0',
+            completedItems: '0', startedAtMs: '1', updatedAtMs: '1',
+            result: { decisionRequired: true, reason: 'publication-unknown' } }
+        state.getState.mockResolvedValue({ supported: true, selection: { kind: 'none', selectionEpoch: '0' },
+            connections: [connection(10, 30)], jobs: [job] })
+        vi.mocked(resumeExternalStorageJob).mockResolvedValue({ kind: 'blocked', reason: 'publication-unknown', job } as never)
+        state.jobStarted?.()
+        await settle()
+        expect(target.textContent).toContain(strings.publicationDecision)
+        expect(target.textContent).toContain(strings.statusError)
+        expect(target.querySelector('[role="progressbar"]')).toBeNull()
+        const recheck = [...target.querySelectorAll('button')].find(button => button.textContent?.trim() === strings.recheckPublication)!
+        expect(recheck.disabled).toBe(false)
+        recheck.click()
+        await settle()
+        expect(resumeExternalStorageJob).toHaveBeenCalledWith(job)
+        expect(requestExternalStorageNow).not.toHaveBeenCalled()
+        expect(target.textContent).not.toContain(strings.completed)
+        expect(labelled(strings.automaticBackup).disabled).toBe(false)
+        expect([...target.querySelectorAll('button')].find(button => button.textContent?.trim() === strings.remove)?.disabled).toBe(false)
     })
 
     it('owns one snapshot export, reports progress and cancels that export ID', async () => {

@@ -1,5 +1,7 @@
-import { isTauriDesktop } from '../../../platform'
 import { externalJobIsPaused } from './connection'
+import { isTauri, isTauriDesktop } from '../../../platform'
+import { listen } from '@tauri-apps/api/event'
+import { SERVER_SYNC_DEVICE_CHANGED_EVENT } from '../serverSyncNativeSignals'
 import { flushDeviceStateBeforeRestore, refreshDeviceStateAfterRestore } from '../../deviceStateRestore'
 import { hasMobileBackgroundTasks, subscribeMobileBackgroundTasks, runWithMobileBackgroundTask, measuredTaskPercent, type MobileBackgroundTask } from '../../../mobileBackgroundTask'
 import {
@@ -224,6 +226,7 @@ export function installExternalStorageProduction(): Promise<() => void> {
                 && document.visibilityState !== 'hidden' && navigator.onLine,
             destinations: () => destinations(holder.current?.state ?? state),
             session: () => holder.current?.session ?? session,
+            probeHead: connectionId => bridge.probeHead(connectionId),
             maintenance: () => {
                 const current = holder.current?.state ?? state
                 return destinations(current).filter(destination => {
@@ -259,6 +262,7 @@ export function installExternalStorageProduction(): Promise<() => void> {
                     connection.id === connectionId ? { ...connection, status: job.error?.action === 'reauthenticate' ? 'reauth-required' as const : 'key-locked' as const, lastError: job.error } : connection) }
             }
         }))
+        if (isTauri) disposers.push(await listen(SERVER_SYNC_DEVICE_CHANGED_EVENT, () => scheduler.deviceChanged()))
         disposers.push(subscribeLocalPersistentRevision((value, cause) => {
             scheduler.durableRevision(String(value) as DecimalString, cause)
         }))
@@ -382,7 +386,7 @@ export async function resumeExternalStorageJob(job: ExternalJobSummary): Promise
                 error: resumed.error, job: resumed }
         }, undefined, true)
     }
-    if (!['backup', 'cleanup'].includes(job.kind) || job.state === 'uncertain') throw new Error('Unsupported resume operation')
+    if (!['sync', 'backup', 'cleanup'].includes(job.kind)) throw new Error('Unsupported resume operation')
     if (!job.reason || (job.kind !== 'cleanup' && job.targetRevision === undefined)) {
         throw new Error('The pending operation has no admission request')
     }
@@ -392,7 +396,7 @@ export async function resumeExternalStorageJob(job: ExternalJobSummary): Promise
         assertNoPendingApplication()
         const result = await current.controller.request({
             connectionId: job.connectionId, kind: job.kind as 'sync' | 'backup' | 'cleanup',
-            targetRevision: job.targetRevision ?? '0', reason: job.reason!,
+            targetRevision: job.targetRevision ?? '0', reason: job.state === 'uncertain' ? 'manual' : job.reason!,
             session: current.session, backgroundTask: background, jobId: job.id,
         })
         if (result.kind !== 'complete') await background.dispose(false)
@@ -449,6 +453,7 @@ export async function requestExternalStorageResolveConflict(
     connectionId: string,
     conflictId: string,
     choice: 'local' | 'remote',
+    jobId?: string,
 ): Promise<ExternalJobSummary> {
     return runWithMobileBackgroundTask('sync', async (background) => {
         assertNoPendingApplication()
@@ -458,7 +463,7 @@ export async function requestExternalStorageResolveConflict(
         await current.scheduler.suspend(destination =>
             destination.kind === 'sync' && destination.connectionId === connectionId)
         try {
-            let job = await getExternalStorageBridge().startJob({
+            const request: StartExternalJobRequest = {
                 connectionId,
                 kind: 'resolve-conflict',
                 conflictId,
@@ -466,8 +471,16 @@ export async function requestExternalStorageResolveConflict(
                 reason: 'manual',
                 session: current.session.kind,
                 sessionId: current.session.id,
-            })
+            }
+            let job = await getExternalStorageBridge().startJob(request, ...(jobId ? [jobId] as const : [] as const))
+            let retries = 0
             while (true) {
+                if (externalJobIsPaused(job)) {
+                    const resumed = await retryPausedJob(job, request, retries++, background)
+                    if (!resumed) throw restoreFailure(job)
+                    job = resumed
+                    continue
+                }
                 if (job.state === 'waiting' && job.phase === 'remote-apply') {
                     await applyReceivedSync(current, job)
                     job = await readBackgroundJob(job.id, background)
@@ -489,7 +502,7 @@ export async function requestExternalStorageResolveConflict(
         } finally {
             current.scheduler.resume()
         }
-    })
+    }, undefined, true)
 }
 
 async function retryPausedJob(

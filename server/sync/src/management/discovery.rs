@@ -66,7 +66,9 @@ impl Discovery {
             serde_json::to_vec(self).map_err(|_| Error::new("invalid-management-session", 409))?;
         let bytes = crate::store::management::protect(&bytes, true)?;
         let root = crate::resolve_data_root(root)?;
-        let mut file = tempfile::Builder::new().prefix(".risunest-tmp-").tempfile_in(&root)?;
+        let mut file = tempfile::Builder::new()
+            .prefix(".risunest-tmp-")
+            .tempfile_in(&root)?;
         file.write_all(&bytes)?;
         file.as_file().sync_all()?;
         file.persist(root.join("management-session"))

@@ -1,39 +1,100 @@
 #import <AppKit/AppKit.h>
+#import <CoreFoundation/CoreFoundation.h>
 #import <objc/runtime.h>
 
 static void (*requestProbe)(void);
+static void (*diagnosticProbe)(int);
 static BOOL pending;
 static unsigned replies;
+static unsigned beginDepth;
+static unsigned delegateDepth;
+
+enum ProbeDiagnostic { ProbeBeginEnter = 1, ProbeBeginReturn, ProbeDelegateEnter, ProbeDelegateLater };
 
 static NSApplicationTerminateReply probeShouldTerminate(id delegate, SEL selector, NSApplication *sender) {
+    delegateDepth++;
+    diagnosticProbe(ProbeDelegateEnter);
     if (!pending) {
         pending = YES;
         requestProbe();
     }
+    diagnosticProbe(ProbeDelegateLater);
+    delegateDepth--;
     return NSTerminateLater;
 }
 
-int risunest_probe_install(void (*callback)(void)) {
-    if (![NSThread isMainThread] || !NSApp.delegate || !callback) return 0;
+int risunest_probe_install(void (*callback)(void), void (*diagnostic)(int)) {
+    if (![NSThread isMainThread] || !NSApp.delegate || !callback || !diagnostic) return 0;
     Method method = class_getInstanceMethod(object_getClass(NSApp.delegate), @selector(applicationShouldTerminate:));
     if (!method) return 0;
     requestProbe = callback;
+    diagnosticProbe = diagnostic;
     method_setImplementation(method, (IMP)probeShouldTerminate);
     return 1;
 }
 
-void risunest_probe_begin(void) { [NSApp terminate:nil]; }
+void risunest_probe_begin(void) {
+    beginDepth++;
+    diagnosticProbe(ProbeBeginEnter);
+    [NSApp terminate:nil];
+    diagnosticProbe(ProbeBeginReturn);
+    beginDepth--;
+}
+
+int risunest_probe_queue_begin(void) {
+    if (![NSThread isMainThread] || pending) return 0;
+    CFRunLoopRef loop = CFRunLoopGetMain();
+    // Native termination must start outside Tao's event callback.
+    CFRunLoopPerformBlock(loop, kCFRunLoopCommonModes, ^{
+        risunest_probe_begin();
+    });
+    CFRunLoopWakeUp(loop);
+    return 1;
+}
 
 int risunest_probe_modal_mode(void) {
     return [NSThread isMainThread] && [[NSRunLoop currentRunLoop].currentMode isEqualToString:NSModalPanelRunLoopMode];
 }
 
 unsigned risunest_probe_reply_count(void) { return replies; }
+unsigned risunest_probe_begin_depth(void) { return beginDepth; }
+unsigned risunest_probe_delegate_depth(void) { return delegateDepth; }
 
 int risunest_probe_reply(int approve) {
     if (![NSThread isMainThread] || !pending) return 0;
     pending = NO;
     replies++;
     [NSApp replyToApplicationShouldTerminate:approve != 0];
+    return 1;
+}
+
+static void (*productReplyObserver)(int, int, int);
+static IMP productReplyOriginal;
+static BOOL productBeginPending;
+
+static void observeProductReply(id application, SEL selector, BOOL approve) {
+    productReplyObserver(approve != 0, [NSThread isMainThread], risunest_probe_modal_mode());
+    ((void (*)(id, SEL, BOOL))productReplyOriginal)(application, selector, approve);
+}
+
+int risunest_bench_queue_native_quit(void (*observer)(int, int, int)) {
+    if (![NSThread isMainThread] || !NSApp.delegate || !observer || productBeginPending) return 0;
+    CFRunLoopRef loop = CFRunLoopGetMain();
+    if (!loop) return 0;
+    if (!productReplyOriginal) {
+        if (!class_getInstanceMethod(object_getClass(NSApp.delegate), @selector(applicationShouldTerminate:))) return 0;
+        Method method = class_getInstanceMethod(object_getClass(NSApp), @selector(replyToApplicationShouldTerminate:));
+        if (!method) return 0;
+        productReplyObserver = observer;
+        productReplyOriginal = method_setImplementation(method, (IMP)observeProductReply);
+    } else if (productReplyObserver != observer) {
+        return 0;
+    }
+    productBeginPending = YES;
+    CFRunLoopPerformBlock(loop, kCFRunLoopCommonModes, ^{
+        [NSApp terminate:nil];
+        productBeginPending = NO;
+    });
+    CFRunLoopWakeUp(loop);
     return 1;
 }

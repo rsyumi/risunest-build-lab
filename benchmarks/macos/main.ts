@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { listen } from "@tauri-apps/api/event";
 import { registerMacosLifecycle } from "../../src/ts/storage/macosLifecycle";
 import {
   invokeNativeTokenizerBatch,
@@ -229,6 +230,41 @@ async function lifecycle() {
 async function startupAppearance(seed: boolean, theme: "light" | "dark") {
   await guard();
   check(Boolean(document.getElementById("preloading")), "appearance probe requires product HTML build");
+  const nativeThemeReadback = async () => {
+    let nativeTheme: string | null = null;
+    await until(async () => {
+      nativeTheme = await getCurrentWindow().theme();
+      return nativeTheme === theme;
+    }, "product native appearance theme timed out");
+    const colorScheme = getComputedStyle(document.documentElement).colorScheme;
+    check(colorScheme === theme, "product color scheme must match the expected app theme");
+    return { nativeTheme, nativeThemeScope: "app", nativeThemeMatchesApp: true, colorScheme };
+  };
+  const seedReadback = async () => {
+    const marker = localStorage.getItem("appearance-theme");
+    const metadata = {
+      expectedTheme: theme,
+      markerTheme: marker === "light" || marker === "dark" ? marker : null,
+      markerPresent: marker !== null, markerLength: marker?.length ?? 0,
+      originMatches: location.protocol === "tauri:" && location.hostname === "localhost",
+    };
+    try {
+      const opened = await invoke<{ revision: number }>("pds_open");
+      const root = await invoke<{ revision: number; value: {
+        colorScheme?: { type?: unknown }; didFirstSetup?: unknown;
+      } }>("pds_read_root");
+      const schemeType = root.value.colorScheme?.type;
+      return {
+        ...metadata, readSucceeded: true,
+        openedRevision: Number.isSafeInteger(opened.revision) ? opened.revision : null,
+        storedSchemeType: schemeType === "light" || schemeType === "dark" ? schemeType : null,
+        didFirstSetup: typeof root.value.didFirstSetup === "boolean" ? root.value.didFirstSetup : null,
+        readRevision: Number.isSafeInteger(root.revision) ? root.revision : null,
+      };
+    } catch {
+      return { ...metadata, readSucceeded: false, storeReadError: "unavailable" };
+    }
+  };
   if (seed) {
     const { defaultColorScheme } = await import("../../src/ts/gui/colorscheme");
     const colorScheme = theme === "dark" ? defaultColorScheme : {
@@ -237,7 +273,7 @@ async function startupAppearance(seed: boolean, theme: "light" | "dark") {
       darkBorderc: "#d1d5db", darkbutton: "#e5e7eb", type: "light",
     };
     const opened = await invoke<{ revision: number }>("pds_open");
-    await invoke("pds_commit", {
+    const committed = await invoke<{ revision: number }>("pds_commit", {
       commit: { expectedRevision: opened.revision, rootMutations: [
         { type: "set", key: "didFirstSetup", value: true },
         { type: "set", key: "colorScheme", value: colorScheme },
@@ -245,8 +281,46 @@ async function startupAppearance(seed: boolean, theme: "light" | "dark") {
     });
     localStorage.setItem("tos4", "true");
     localStorage.setItem("appearance-theme", theme);
-    return { seeded: true, theme };
+    const { resolveAppearance, WINDOWS_APPEARANCE_CACHE } = await import("../../src/ts/gui/windowsAppearance");
+    const app = await import("../../src/main");
+    await app.default;
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = 1;
+    const context = canvas.getContext("2d", { willReadFrequently: true });
+    check(context, "appearance seed color conversion unavailable");
+    const rgba = (color: string): [number, number, number, number] | undefined => {
+      if (!color || !CSS.supports("color", color)) return undefined;
+      context.clearRect(0, 0, 1, 1);
+      context.fillStyle = color;
+      context.fillRect(0, 0, 1, 1);
+      const data = context.getImageData(0, 0, 1, 1).data;
+      return [data[0], data[1], data[2], data[3]];
+    };
+    const deadline = performance.now() + 60_000;
+    while (true) {
+      check(performance.now() < deadline, "product appearance seed bootstrap/hint timed out");
+      if (performance.getEntriesByName("boot:interactive").length) {
+        const style = getComputedStyle(document.documentElement);
+        const rendered = resolveAppearance({ ...colorScheme, type: theme }, name => style.getPropertyValue(name), rgba);
+        let cached: Record<string, unknown> | null = null;
+        try { cached = JSON.parse(localStorage.getItem(WINDOWS_APPEARANCE_CACHE) ?? "null"); } catch {}
+        if (cached && typeof cached === "object"
+          && cached.background === rendered.background && cached.caption === rendered.caption
+          && cached.text === rendered.text && cached.dark === rendered.dark && style.colorScheme === theme) break;
+      }
+      await pause(50);
+    }
+    const nativeAppearance = await nativeThemeReadback();
+    return {
+      seeded: true, theme, startupHintMatchesRenderedPalette: true,
+      ...nativeAppearance,
+      interactiveMs: performance.getEntriesByName("boot:interactive")[0].startTime,
+      openedRevision: Number.isSafeInteger(opened.revision) ? opened.revision : null,
+      committedRevision: Number.isSafeInteger(committed.revision) ? committed.revision : null,
+      seedReadback: await seedReadback(),
+    };
   }
+  await report("appearance-app-readback", await seedReadback());
   check(localStorage.getItem("appearance-theme") === theme, "appearance theme seed mismatch");
   const preloaderBackground = getComputedStyle(document.getElementById("preloading")!).backgroundColor;
   const app = await import("../../src/main");
@@ -259,7 +333,9 @@ async function startupAppearance(seed: boolean, theme: "light" | "dark") {
   const style = getComputedStyle(document.documentElement);
   const bounds = document.getElementById("app")!.getBoundingClientRect();
   await pause(1500);
+  const nativeAppearance = await nativeThemeReadback();
   return {
+    ...nativeAppearance,
     theme, systemDark: matchMedia("(prefers-color-scheme: dark)").matches,
     preloaderBackground, colorScheme: style.colorScheme,
     appBackground: style.getPropertyValue("--risu-theme-bgcolor"),
@@ -288,17 +364,17 @@ async function main() {
     window.addEventListener("termination-probe", event => {
       const attempt = (event as CustomEvent<number>).detail;
       if (attempt === 2) {
-        sessionStorage.setItem("termination-probe-reloading", "true");
         location.reload();
       } else {
         void settle(attempt);
       }
     });
-    if (sessionStorage.getItem("termination-probe-reloading")) {
-      sessionStorage.removeItem("termination-probe-reloading");
-      await settle(2);
-    } else {
+    const state = await invoke<{ attempt: number; pending: boolean }>("macos_bench_modal_status");
+    if (state.attempt === 0 && !state.pending) {
       void invoke("macos_bench_modal_begin");
+    } else {
+      check(state.attempt === 2 && state.pending, "Reloaded document must resume native termination attempt 2");
+      await settle(2);
     }
   } else if (phase === "contracts") {
     if (sessionStorage.getItem("macos-contract-reload")) {
@@ -356,34 +432,36 @@ async function main() {
     );
     const marker = "macos-synthetic-ui-edit 🐿️";
     const runtime = getPersistentDataRuntime();
-    const lease = await runtime.acquireCompleteConversation("edit-message");
-    let conversationId: string;
-    try {
-      const { captureChatMessageTarget, saveCapturedChatMessage } =
-        await import("../../src/ts/chatMessageUi");
-      const context = {
-        captureCurrent: () => {
-          const character = DBState.db.characters[index];
-          return {
-            character,
-            conversation: character.chats[character.chatPage],
-          };
-        },
-        getCurrentSession: () => runtime.getActiveConversationSession(),
-      };
-      conversationId = lease.session.conversationId;
-      const target = captureChatMessageTarget({
-        ...context,
-        absoluteIndex: lease.session.totalMessages - 1,
-      });
-      check(target, "capture product message edit target");
-      check(
-        saveCapturedChatMessage(target, context, marker).saved,
-        "product message edit accepted",
-      );
-    } finally {
-      lease.release();
-    }
+    const editLastMessage = async (value: string) => {
+      const lease = await runtime.acquireCompleteConversation("edit-message");
+      try {
+        const { captureChatMessageTarget, saveCapturedChatMessage } =
+          await import("../../src/ts/chatMessageUi");
+        const context = {
+          captureCurrent: () => {
+            const character = DBState.db.characters[index];
+            return {
+              character,
+              conversation: character.chats[character.chatPage],
+            };
+          },
+          getCurrentSession: () => runtime.getActiveConversationSession(),
+        };
+        const target = captureChatMessageTarget({
+          ...context,
+          absoluteIndex: lease.session.totalMessages - 1,
+        });
+        check(target, "capture product message edit target");
+        check(
+          saveCapturedChatMessage(target, context, value).saved,
+          "product message edit accepted",
+        );
+        return lease.session.conversationId;
+      } finally {
+        lease.release();
+      }
+    };
+    const conversationId = await editLastMessage(marker);
     await tick();
     await getPersistentDataRuntime().flushPendingData("macos-ui-smoke");
     await until(
@@ -411,11 +489,89 @@ async function main() {
       revision: persisted.revision,
     });
     await pause(2000);
-    await invoke("macos_bench_quit");
+    const nativeEvents = await invoke<string[]>("macos_bench_events");
+    const replies = nativeEvents.filter(event => event.startsWith("native-reply-"));
+    check(
+      replies.length === 0 || (replies.length === 1 && replies[0] === "native-reply-no"),
+      "product document must start or resume after one native reload cancellation",
+    );
+    check(!nativeEvents.includes("quit"), "native product quit must not request a runtime exit");
+    const attempt = replies.length + 1;
+    if (attempt === 2) {
+      await report("app-native-reload-cancelled", { passed: true, replyCount: 1 });
+      const token = localStorage.getItem("macos-app-departed-token");
+      check(token, "departed product request token was observed");
+      let rejected = false;
+      try {
+        await invoke("macos_exit_response", { token, exit: true });
+      } catch (error) {
+        rejected = String(error) === "No matching macOS quit request";
+      }
+      check(rejected, "departed product token must reject late approval");
+      const after = await invoke<string[]>("macos_bench_events");
+      check(
+        after.filter(event => event.startsWith("native-reply-")).length === 1 && !after.includes("quit"),
+        "stale product response must not reply or request runtime exit",
+      );
+      await report("app-native-stale-rejected", { passed: true, replyCount: 1 });
+    }
+    const { get } = await import("svelte/store");
+    const { syncExitDialogState } = await import("../../src/ts/storage/syncExitProduction");
+    const flush = runtime.flushPendingDataLocally.bind(runtime);
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let flushEntered = false;
+    let flushCalls = 0;
+    const nativeMarker = "macos-synthetic-native-quit-saved 🐿️";
+    runtime.flushPendingDataLocally = async reason => {
+      if (reason !== "normal-exit") return flush(reason);
+      try {
+        check(++flushCalls === 1, "one coordinated local flush per native product request");
+        flushEntered = true;
+        await gate;
+        await flush(reason);
+        const saved = await invoke<{
+          revision: number;
+          value: { message: { data: string }[] };
+        }>("pds_read_conversation", { characterId: "char-a", conversationId });
+        check(saved.value.message.at(-1)?.data === nativeMarker, "native quit saves the fresh product edit");
+        check(Number.isSafeInteger(saved.revision) && saved.revision > persisted.revision,
+          "native quit advances the saved revision");
+        localStorage.setItem("macos-app-expected", JSON.stringify({
+          conversationId, marker: nativeMarker, revision: saved.revision,
+        }));
+        await report("app-native-saved", { passed: true, revision: saved.revision });
+      } catch (error) {
+        await report("failure", { passed: false, message: String(error) });
+        throw error;
+      }
+    };
+    let nativeRequests = 0;
+    const unlisten = await listen<string>("risu-macos-exit-requested", ({ payload }) => {
+      nativeRequests++;
+      if (attempt === 1) localStorage.setItem("macos-app-departed-token", payload);
+    });
+    await invoke("macos_bench_native_quit");
+    await until(async () => flushEntered && get(syncExitDialogState).phase === "saving"
+      && !!document.querySelector('[data-testid="sync-exit-dialog"]'),
+      "real product saving decision UI did not render during native termination");
+    check(nativeRequests === 1, "one product event per native termination transaction");
+    check(await getCurrentWindow().isVisible(), "native decision UI keeps the main window visible");
+    await report("app-native-saving", { passed: true, attempt, nativeRequests, flushCalls });
+    if (attempt === 1) {
+      unlisten();
+      location.reload();
+      return;
+    }
+    check(await editLastMessage(nativeMarker) === conversationId, "native save uses the same synthetic conversation");
+    await tick();
+    await until(async () => document.getElementById("app")!.textContent!.includes(nativeMarker),
+      "fresh native quit edit did not render");
+    release();
   } else if (phase === "app-restart") {
     await invoke("pds_open");
     const expected = JSON.parse(localStorage.getItem("macos-app-expected")!);
-    const saved = await invoke<{ value: { message: { data: string }[] } }>(
+    const saved = await invoke<{ revision: number; value: { message: { data: string }[] } }>(
       "pds_read_conversation",
       { characterId: "char-a", conversationId: expected.conversationId },
     );
@@ -423,7 +579,9 @@ async function main() {
       saved.value.message.at(-1)?.data === expected.marker,
       "product UI edit survives quit and restart",
     );
-    await report("app-restart", { passed: true });
+    check(Number.isSafeInteger(expected.revision) && saved.revision === expected.revision,
+      "native quit saved revision survives restart exactly");
+    await report("app-restart", { passed: true, revision: saved.revision });
     await invoke("macos_bench_quit");
   } else if (phase === "streaming") {
     document.getElementById("benchmark")!.remove();

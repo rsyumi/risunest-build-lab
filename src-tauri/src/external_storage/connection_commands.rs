@@ -2110,8 +2110,27 @@ pub(crate) async fn open_connected_with_cancel(
     })
 }
 
-/// Changes what a backup connection captures. The new policy applies to work
-/// started afterwards; a job already running keeps the one it fixed.
+#[tauri::command]
+pub(crate) async fn external_storage_probe_head(
+    app: AppHandle,
+    state: State<'_, ConnectionCommandState>,
+    connection_id: String,
+) -> Result<bool> {
+    let _cleanup_guard = state.admit()?;
+    let cancel = Cancellation::default();
+    let operation = async {
+        let connected = open_connected_with_cancel(&app, &connection_id, &cancel).await?;
+        let base = runtime::native_store(&app)?.external_base(&connection_id).map_err(runtime::local_error)?;
+        let known = base.as_ref().map(|base| super::sync_engine::head_observation(&base.head_observation)).transpose()?;
+        super::control::head_changed(connected.provider.as_ref(), &connected.handle,
+            &connected.stored.descriptor, &connected.root_key, known.as_ref(), &cancel).await
+    };
+    match tokio::time::timeout(std::time::Duration::from_secs(60), operation).await {
+        Ok(result) => result,
+        Err(_) => { cancel.cancel(); Err(ProviderError::new(ErrorKind::Transient)) }
+    }
+}
+
 #[tauri::command]
 pub(crate) fn external_storage_set_capture_policy(
     app: AppHandle,

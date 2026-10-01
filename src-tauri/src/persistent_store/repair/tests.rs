@@ -37,10 +37,31 @@ fn root_of(store: &PersistentStore) -> Value {
     store.read_root(None).unwrap().value
 }
 
+fn bind_server_capture(store: &PersistentStore) {
+    store.connection.execute_batch(
+        "INSERT INTO server_sync_state(singleton,config,full_scan) VALUES(1,'{}',0);
+         UPDATE library_sync_selection SET target='server',connection_id='synthetic',decision_required=0;"
+    ).unwrap();
+}
+
 #[test]
 fn repair_and_undo_keep_sync_identity_and_emit_only_changed_records() {
+    check_repair_and_undo_sync_identity(false);
+}
+
+#[test]
+fn externally_selected_repair_and_undo_keep_identity_and_precise_capture() {
+    check_repair_and_undo_sync_identity(true);
+}
+
+fn check_repair_and_undo_sync_identity(external: bool) {
     let (_directory, mut store) = fixture();
-    store.connection.execute("UPDATE library_sync_selection SET target='external',connection_id='synthetic',decision_required=0", []).unwrap();
+    bind_server_capture(&store);
+    if external {
+        let epoch = super::super::sync_selection::read(&store.connection).unwrap().epoch;
+        store.external_select(&epoch, &super::super::sync_selection::SyncTarget::External("synthetic-external".into())).unwrap();
+    }
+    let selected = super::super::sync_selection::read(&store.connection).unwrap();
     let before = super::super::sync_selection::identity(&store.connection).unwrap();
     store.connection.execute_batch("DELETE FROM content_changes; DELETE FROM server_sync_dirty;").unwrap();
     let (_, journal) = store.apply_repair(1, &[candidate(RepairAction::DropReference {
@@ -53,7 +74,9 @@ fn repair_and_undo_keep_sync_identity_and_emit_only_changed_records() {
         assert_eq!(after.library_epoch, before.library_epoch);
         assert_eq!(after.selection_epoch, before.selection_epoch);
         assert_eq!(after.generation, before.generation);
-        assert!(!super::super::sync_selection::read(&store.connection).unwrap().decision_required);
+        let after_selection = super::super::sync_selection::read(&store.connection).unwrap();
+        assert!(!after_selection.decision_required);
+        assert_eq!(after_selection.target, selected.target);
         for table in ["content_changes", "server_sync_dirty"] {
             let entries: Vec<(String, String, String, i64)> = store.connection.prepare(&format!("SELECT kind,key1,key2,revision FROM {table}")).unwrap()
                 .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).unwrap().collect::<Result<_,_>>().unwrap();
@@ -183,6 +206,7 @@ fn an_undo_restores_the_previous_image_and_raises_the_revision() {
 #[test]
 fn an_undo_leaves_a_record_the_reader_changed_after_the_repair() {
     let (_directory, mut store) = fixture();
+    bind_server_capture(&store);
     let (_, journal) = store
         .apply_repair(
             1,
@@ -375,4 +399,132 @@ fn parse_path_reads_the_shapes_the_reference_graph_emits() {
     );
     assert_eq!(parse_path("userIcon"), None);
     assert_eq!(parse_path("$.a[x]"), None);
+}
+
+#[test]
+fn a_failure_during_repair_activation_preserves_live_data_identity_and_capture() {
+    let (_directory, mut store) = fixture();
+    bind_server_capture(&store);
+    let epoch = super::super::sync_selection::read(&store.connection).unwrap().epoch;
+    store.external_select(&epoch, &super::super::sync_selection::SyncTarget::External("synthetic-external".into())).unwrap();
+    let before = super::super::sync_selection::identity(&store.connection).unwrap();
+    let root = root_of(&store);
+    store.connection.execute_batch("DELETE FROM content_changes; DELETE FROM server_sync_dirty;
+        CREATE TRIGGER synthetic_repair_activation_failure BEFORE UPDATE ON meta
+        WHEN NEW.key='currentRevision' BEGIN SELECT RAISE(ABORT,'synthetic activation failure'); END;").unwrap();
+    assert!(store.apply_repair(1, &[candidate(RepairAction::DropReference {
+        owner: crate::data_health::Owner { kind: "root".into(), id: "database".into() },
+        source_path: "$.userIcon".into(), occurrence: 0,
+    })], 10).is_err());
+    let after = super::super::sync_selection::identity(&store.connection).unwrap();
+    assert_eq!(after.library_epoch, before.library_epoch);
+    assert_eq!(after.selection_epoch, before.selection_epoch);
+    assert_eq!(after.generation, before.generation);
+    assert_eq!(store.revision().unwrap(), 1);
+    assert_eq!(root_of(&store), root);
+    assert!(!super::super::sync_selection::read(&store.connection).unwrap().decision_required);
+    for table in ["content_changes", "server_sync_dirty", "server_sync_context"] {
+        let count: i64 = store.connection.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0)).unwrap();
+        assert_eq!(count, 0, "failed activation must not publish {table}");
+    }
+}
+
+#[test]
+#[ignore = "explicit synthetic repair/undo disk and time measurement"]
+fn measures_single_reference_repair_and_undo_on_a_large_library() {
+    fn file_bytes(path: &std::path::Path) -> u64 {
+        match std::fs::metadata(path) {
+            Ok(metadata) => metadata.len(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => panic!("read synthetic fixture file size: {error}"),
+        }
+    }
+    fn directory_bytes(path: &std::path::Path) -> u64 {
+        std::fs::read_dir(path).unwrap().map(|entry| {
+            let entry = entry.unwrap();
+            let kind = entry.file_type().unwrap();
+            assert!(!kind.is_symlink());
+            if kind.is_dir() { directory_bytes(&entry.path()) } else { entry.metadata().unwrap().len() }
+        }).sum()
+    }
+
+    const MESSAGES: usize = 10_000;
+    const MESSAGE_BYTES: usize = 1024;
+    let (directory, mut store) = fixture();
+    let original = root_of(&store);
+    let staging = store.replace_begin().unwrap().staging_id;
+    store.replace_put_root(&staging, &original).unwrap();
+    let messages: Vec<Value> = (0..MESSAGES).map(|index| json!({
+        "chatId": format!("synthetic-message-{index}"), "role": "user", "data": "x".repeat(MESSAGE_BYTES),
+    })).collect();
+    store.replace_add_characters(&staging, &[json!({
+        "chaId": "synthetic-large-character", "name": "Synthetic", "type": "character", "chatPage": 0,
+        "chats": [{"id": "synthetic-large-chat", "name": "Synthetic", "message": messages}],
+    })]).unwrap();
+    store.replace_commit(&staging, Some(1)).unwrap();
+    bind_server_capture(&store);
+    let epoch = super::super::sync_selection::read(&store.connection).unwrap().epoch;
+    store.external_select(&epoch, &super::super::sync_selection::SyncTarget::External("synthetic-external".into())).unwrap();
+    let selected = super::super::sync_selection::read(&store.connection).unwrap();
+    let identity = super::super::sync_selection::identity(&store.connection).unwrap();
+    let (actual_messages, message_json_bytes): (i64, i64) = store.connection.query_row(
+        "SELECT COUNT(*),SUM(LENGTH(CAST(value AS BLOB))) FROM messages", [], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).unwrap();
+    assert_eq!(actual_messages, MESSAGES as i64);
+    store.connection.execute_batch("DELETE FROM content_changes; DELETE FROM server_sync_dirty; PRAGMA wal_autocheckpoint=0;").unwrap();
+    let database = store.database_path.clone();
+    let wal = std::path::PathBuf::from(format!("{}-wal", database.display()));
+    let footprint = || (directory_bytes(directory.path()), file_bytes(&database), file_bytes(&wal));
+    let assert_contract = |store: &PersistentStore, revision: i64| {
+        let after = super::super::sync_selection::identity(&store.connection).unwrap();
+        assert_eq!(after.library_epoch, identity.library_epoch);
+        assert_eq!(after.selection_epoch, identity.selection_epoch);
+        assert_eq!(after.generation, identity.generation);
+        let selection = super::super::sync_selection::read(&store.connection).unwrap();
+        assert_eq!(selection.target, selected.target);
+        assert!(!selection.decision_required);
+        let retained: (i64, i64) = store.connection.query_row(
+            "SELECT COUNT(*),SUM(LENGTH(CAST(value AS BLOB))) FROM messages", [], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!(retained, (actual_messages, message_json_bytes));
+        for table in ["content_changes", "server_sync_dirty"] {
+            let entries: Vec<(String, String, String, i64)> = store.connection.prepare(&format!("SELECT kind,key1,key2,revision FROM {table}")).unwrap()
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).unwrap().collect::<Result<_,_>>().unwrap();
+            assert_eq!(entries, vec![("root".into(), String::new(), String::new(), revision)]);
+        }
+    };
+
+    store.checkpoint(crate::persistent_store::CheckpointMode::Truncate).unwrap();
+    let repair_before = footprint();
+    let started = std::time::Instant::now();
+    let (repaired, journal) = store.apply_repair(identity.revision, &[candidate(RepairAction::DropReference {
+        owner: crate::data_health::Owner { kind: "root".into(), id: "database".into() },
+        source_path: "$.userIcon".into(), occurrence: 0,
+    })], 10).unwrap();
+    let repair_ms = started.elapsed().as_millis();
+    let repair_after = footprint();
+    assert_eq!(journal.records.len(), 1);
+    assert_eq!(journal.records[0].table, "root");
+    assert!(root_of(&store).get("userIcon").is_none());
+    assert_contract(&store, repaired.revision);
+    assert!(repair_after.2 > repair_before.2);
+    eprintln!("cr004 phase=repair messages={actual_messages} message_json_bytes={message_json_bytes} changed_records={} elapsed_ms={repair_ms} temporary_root_file_bytes_before={} temporary_root_file_bytes_after={} temporary_root_file_growth_bytes={} database_bytes_before={} database_bytes_after={} wal_bytes_before={} wal_bytes_after={} wal_growth_bytes={}",
+        journal.records.len(), repair_before.0, repair_after.0, repair_after.0.saturating_sub(repair_before.0), repair_before.1, repair_after.1,
+        repair_before.2, repair_after.2, repair_after.2.saturating_sub(repair_before.2));
+
+    store.checkpoint(crate::persistent_store::CheckpointMode::Truncate).unwrap();
+    let undo_before = footprint();
+    let started = std::time::Instant::now();
+    let (undone, skipped) = store.undo_repair(&journal, repaired.revision).unwrap();
+    let undo_ms = started.elapsed().as_millis();
+    let undo_after = footprint();
+    assert!(skipped.is_empty());
+    assert_eq!(root_of(&store), original);
+    assert_contract(&store, undone.revision);
+    assert!(undo_after.2 > undo_before.2);
+    eprintln!("cr004 phase=undo messages={actual_messages} message_json_bytes={message_json_bytes} changed_records={} elapsed_ms={undo_ms} temporary_root_file_bytes_before={} temporary_root_file_bytes_after={} temporary_root_file_growth_bytes={} database_bytes_before={} database_bytes_after={} wal_bytes_before={} wal_bytes_after={} wal_growth_bytes={}",
+        journal.records.len(), undo_before.0, undo_after.0, undo_after.0.saturating_sub(undo_before.0), undo_before.1, undo_after.1,
+        undo_before.2, undo_after.2, undo_after.2.saturating_sub(undo_before.2));
+    store.checkpoint(crate::persistent_store::CheckpointMode::Truncate).unwrap();
+    eprintln!("cr004 phase=checkpoint temporary_root_file_bytes={} database_bytes={} wal_bytes={}", directory_bytes(directory.path()), file_bytes(&database), file_bytes(&wal));
 }

@@ -492,9 +492,15 @@ fn builder_with_main_window(
                 setup_native_startup_state.record_failure(error, persistent_gate, native_file_gate);
             }
             if let Some((config, data_directory)) = &main_window {
-                tauri::WebviewWindowBuilder::from_config(app, config)?
-                    .data_directory(data_directory.clone())
-                    .build()?;
+                let window_builder = tauri::WebviewWindowBuilder::from_config(app, config)?
+                    .data_directory(data_directory.clone());
+                #[cfg(target_os = "linux")]
+                let window_builder = if config.background_color.is_none() {
+                    window_builder.background_color(tauri::window::Color(33, 34, 44, 255))
+                } else {
+                    window_builder
+                };
+                window_builder.build()?;
             }
             let setup_result = (|| -> Result<(), String> {
                 renderer_access?;
@@ -522,6 +528,9 @@ fn builder_with_main_window(
                     .root
                     .set(app_data_dir.clone())
                     .map_err(|_| "external storage root is already configured".to_string())?;
+                app.state::<external_storage::job_store::JobCommandState>()
+                    .open_lease_ledger(&app.state::<app_paths::AppPaths>().cache)
+                    .map_err(|error| format!("external lease ownership unavailable: {error}"))?;
                 external_storage::leftovers::remove_at_startup(&app_data_dir);
                 let agent_build = app
                     .config()
@@ -630,6 +639,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         external_storage::connection_commands::external_storage_prepare_connection,
         external_storage::connection_commands::external_storage_prepare_renewal,
         external_storage::connection_commands::external_storage_unlock_connection,
+        external_storage::connection_commands::external_storage_probe_head,
         external_storage::connection_commands::external_storage_commit_connection,
         external_storage::connection_commands::external_storage_begin_authorization,
         external_storage::connection_commands::external_storage_complete_authorization,

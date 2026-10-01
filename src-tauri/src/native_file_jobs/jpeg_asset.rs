@@ -422,6 +422,10 @@ mod tests {
     }
 
     fn open_fixture() -> (tempfile::TempDir, PersistentStore, String, AssetOwnerHead) {
+        open_fixture_inner(false)
+    }
+
+    fn open_fixture_inner(native_assets: bool) -> (tempfile::TempDir, PersistentStore, String, AssetOwnerHead) {
         let directory = tempfile::tempdir().expect("create temp directory");
         let mut store = PersistentStore::open(directory.path()).expect("open persistent store");
         let database = fixture();
@@ -440,6 +444,37 @@ mod tests {
         let root_object = root.as_object_mut().expect("fixture root");
         root_object.remove("characters");
         root_object.remove("botPresets");
+        let mut aliases = Vec::new();
+        let mut existing_asset_hash = None;
+        if native_assets {
+            let mut portrait = Cursor::new(Vec::new());
+            image::DynamicImage::new_rgba8(1, 1)
+                .write_to(&mut portrait, image::ImageFormat::Png)
+                .expect("encode previous portrait");
+            let cas = PayloadCas::new(directory.path()).expect("open fixture assets");
+            for (key, bytes, mime, ext) in [
+                ("assets/previous.png", portrait.into_inner(), "image/png", "png"),
+                ("assets/existing.bin", b"synthetic existing additional asset".to_vec(), "application/octet-stream", "bin"),
+            ] {
+                let prepared = cas.prepare_bytes(&bytes).expect("prepare fixture asset");
+                if key == "assets/existing.bin" {
+                    existing_asset_hash = Some(Sha256::digest(&bytes).into());
+                }
+                aliases.push(AssetAlias {
+                    key: key.to_owned(),
+                    object_hash: Some(prepared.content_hash),
+                    kind: "asset".to_owned(),
+                    size: prepared.byte_size as i64,
+                    mime: mime.to_owned(),
+                    name: key.to_owned(),
+                    ext: ext.to_owned(),
+                    inlay_type: None,
+                    width: None,
+                    height: None,
+                    metadata: json!({}),
+                });
+            }
+        }
         let staging = store.replace_begin().expect("begin replacement");
         store
             .replace_put_root(&staging.staging_id, &root)
@@ -453,6 +488,10 @@ mod tests {
         store
             .replace_add_characters(&staging.staging_id, &characters)
             .expect("stage characters");
+        if !aliases.is_empty() {
+            store.replace_put_asset_aliases(&staging.staging_id, &aliases)
+                .expect("stage fixture aliases");
+        }
         store
             .replace_commit(&staging.staging_id, Some(0))
             .expect("activate fixture");
@@ -463,7 +502,7 @@ mod tests {
                 "assets/existing.bin".to_owned(),
                 "bin".to_owned(),
             ],
-            payload_hash: None,
+            payload_hash: existing_asset_hash,
         }])
         .expect("encode owner manifest");
         let prepared_manifest = PayloadCas::new(directory.path())
@@ -809,7 +848,20 @@ mod tests {
 
     #[test]
     fn final_revision_race_preserves_destination_and_releases_durable_cas_root() {
-        let (directory, store, character_id, owner_head) = open_fixture();
+        let (directory, store, character_id, owner_head) = open_fixture_inner(true);
+        let cas = PayloadCas::new(directory.path()).expect("open destination CAS");
+        let previous_alias = store.read_asset_alias("asset", "assets/previous.png", None)
+            .expect("read previous portrait alias").expect("previous portrait alias").value;
+        let previous_hash = previous_alias.object_hash.as_ref().expect("previous portrait hash");
+        let previous_bytes = cas.read_object(previous_hash).expect("read previous portrait")
+            .expect("previous portrait bytes");
+        assert_eq!(previous_alias.size, previous_bytes.len() as i64);
+        let existing_alias = store.read_asset_alias("asset", "assets/existing.bin", None)
+            .expect("read existing asset alias").expect("existing asset alias").value;
+        let existing_hash = existing_alias.object_hash.as_ref().expect("existing asset hash");
+        let existing_bytes = cas.read_object(existing_hash).expect("read existing asset")
+            .expect("existing asset bytes");
+        assert_eq!(existing_alias.size, existing_bytes.len() as i64);
         let bytes = [0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 0xff, 0xd9];
         let object_hash = hex::encode(Sha256::digest(bytes));
         let source_path = directory.path().join("portrait.jpeg");
@@ -875,6 +927,16 @@ mod tests {
                 .value,
             owner_head
         );
+        assert_eq!(reopened.read_asset_alias("asset", "assets/previous.png", None)
+            .expect("read preserved portrait alias").expect("preserved portrait alias").value,
+            previous_alias);
+        assert_eq!(cas.read_object(previous_hash).expect("read preserved portrait")
+            .expect("preserved portrait bytes"), previous_bytes);
+        assert_eq!(reopened.read_asset_alias("asset", "assets/existing.bin", None)
+            .expect("read preserved asset alias").expect("preserved asset alias").value,
+            existing_alias);
+        assert_eq!(cas.read_object(existing_hash).expect("read preserved asset")
+            .expect("preserved asset bytes"), existing_bytes);
         assert!(!directory
             .path()
             .join("assets")
@@ -887,6 +949,7 @@ mod tests {
             .asset_gc_dry_run(16, None, i64::MAX, 0)
             .expect("classify abandoned JPEG object")
             .report;
+        assert!(gc.blockers.is_empty(), "native fixture assets must be fully resolved: {:?}", gc.blockers);
         assert!(gc.potential_delete_hashes.contains(&object_hash));
     }
 }

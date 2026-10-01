@@ -97,6 +97,7 @@ CREATE TABLE plugin_device_storage(
   CHECK((first_published_generation IS NULL)=(first_published_at_ms IS NULL))
 );
 CREATE INDEX plugin_device_storage_clock ON plugin_device_storage(write_clock);
+CREATE INDEX plugin_device_storage_pending ON plugin_device_storage(owner,space,key) WHERE published_clock IS NULL OR published_clock<>write_clock;
 
 CREATE TABLE hypa_embeddings(
   cache_key TEXT PRIMARY KEY,
@@ -116,6 +117,7 @@ CREATE TABLE hypa_embeddings(
   CHECK((first_published_generation IS NULL)=(first_published_at_ms IS NULL))
 );
 CREATE INDEX hypa_embeddings_clock ON hypa_embeddings(write_clock);
+CREATE INDEX hypa_embeddings_pending ON hypa_embeddings(cache_key) WHERE published_clock IS NULL OR published_clock<>write_clock;
 
 CREATE TABLE device_changes(
   section TEXT NOT NULL,

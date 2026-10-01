@@ -2,13 +2,14 @@ import '../../src/ts/polyfill'
 import { invoke } from '@tauri-apps/api/core'
 import { join } from '@tauri-apps/api/path'
 import { nativeDataPath } from '../../src/ts/storage/nativePaths'
-import { exists, mkdir, readTextFile, remove } from '@tauri-apps/plugin-fs'
+import { exists, mkdir, readFile, remove } from '@tauri-apps/plugin-fs'
 import { SandboxHost } from '../../src/ts/plugins/apiV3/factory'
 import { createPluginStorageStore } from '../../src/ts/plugins/pluginStorageStore'
 import { SqlitePersistentDataStore } from '../../src/ts/storage/sqlitePersistentDataStore'
 import type { Database } from '../../src/ts/storage/database.svelte'
 import fixture from '../../src-tauri/fixtures/persistent-fixture.json'
 
+const configuredIdentifier = 'io.github.rsyumi.risunest'
 const identifier = 'io.github.rsyumi.risunest.pluginreview'
 const title = 'RisuNest synthetic plugin review'
 const owner = 'synthetic-plugin-page-owner'
@@ -115,10 +116,10 @@ Object.assign(window, { __pluginReview: {
     async run(token: string) {
         check(!running && /^[a-f0-9]{32}$/.test(token), 'Invalid synthetic ownership token')
         running = true
-        check(document.title === title && await invoke('plugin:app|identifier') === identifier, 'Wrong synthetic native profile')
+        check(document.title === title && await invoke('plugin:app|identifier') === configuredIdentifier, 'Wrong synthetic native profile')
         const root = await nativeDataPath()
         check(new RegExp('/' + identifier.replaceAll('.', '\\.') + '/files/?$').test(root), 'Native root is not the isolated plugin profile')
-        check((await readTextFile(await join(root, 'risunest-plugin-review-owner'))).trim() === token, 'Synthetic ownership marker mismatch')
+        check(new TextDecoder().decode(await readFile(await join(root, 'risunest-plugin-review-owner'))).trim() === token, 'Synthetic ownership marker mismatch')
         const directory = await join(root, `plugin-review-${token}`)
         check(!(await exists(directory)), 'Synthetic probe directory already exists')
         await mkdir(directory)

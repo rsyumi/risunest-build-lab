@@ -9,6 +9,7 @@ use super::{
 };
 use risunest_external_storage_format::snapshot::StoredObject;
 use serde::{Deserialize, Serialize};
+use tauri::Manager;
 use serde_json::{json, Value};
 
 #[derive(Clone, Deserialize)]
@@ -132,6 +133,7 @@ pub(crate) async fn run_delete_history(
         repository: &connected.handle,
         clock: leases::system_clock(),
         protection_supported: connected.stored.capabilities.lease_operations,
+        ledger: Some(app.state::<super::job_store::JobCommandState>().lease_ledger()?),
     };
     let owner = match leases::admit(&context, &job.id, LeaseKind::Cleanup, cancel).await? {
         Admission::Admitted(owner) => owner,

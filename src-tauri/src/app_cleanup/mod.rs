@@ -399,6 +399,58 @@ mod tests {
         Paths { data: root.join("data"), roots: vec![root.join("data"), root.join("webview")], control: root.join("control"), install_conflict: None }
     }
     #[test]
+    fn cleanup_closes_the_lease_owner_before_erasing_and_reopens_the_new_cache() {
+        use crate::external_storage::{contract::ErrorKind, job_store::JobCommandState, lease_ledger::LocalLeaseLedger};
+        use risunest_external_storage_format::control::{LeaseDocument, LeaseKind};
+        let root = tempfile::tempdir().unwrap();
+        let mut paths = paths(root.path());
+        let cache = root.path().join("cache");
+        paths.roots.push(cache.clone());
+        let state = JobCommandState::default();
+        assert!(state.lease_ledger().is_err());
+        state.open_lease_ledger(&cache).unwrap();
+        let held = state.lease_ledger().unwrap();
+        let document = LeaseDocument::new("writer".into(), "operation".into(), LeaseKind::Work, 0, 1_700_000_000_000).unwrap();
+        held.record("repository", "connection", "old", &document).unwrap();
+        assert!(matches!(LocalLeaseLedger::open(&cache), Err(error) if error.kind == ErrorKind::RepositoryBusy));
+        assert!(state.close_lease_ledger_for_cleanup().is_err());
+        let worker = state.track_worker();
+        state.begin_cleanup().unwrap();
+        assert!(state.close_lease_ledger_for_cleanup().is_err());
+        assert!(state.lease_ledger().is_err());
+        drop(worker);
+        assert!(state.cleanup_drained().unwrap());
+        assert!(state.close_lease_ledger_for_cleanup().is_err());
+        assert!(matches!(LocalLeaseLedger::open(&cache), Err(error) if error.kind == ErrorKind::RepositoryBusy));
+        drop(held);
+        state.close_lease_ledger_for_cleanup().unwrap();
+        erase_with(&paths, &mut request(), |_| Ok(()), files::remove).unwrap();
+        assert!(!cache.exists());
+        state.open_lease_ledger(&cache).unwrap();
+        assert!(state.lease_ledger().is_err());
+        state.finish_cleanup().unwrap();
+        let current = state.lease_ledger().unwrap();
+        assert!(!current.abandoned("repository", "connection", "old", &document).unwrap());
+        current.record("repository", "connection", "new", &document).unwrap();
+        current.record("repository", "connection", "released", &document).unwrap();
+        current.released("repository", "connection", "released").unwrap();
+        assert!(matches!(LocalLeaseLedger::open(&cache), Err(error) if error.kind == ErrorKind::RepositoryBusy));
+        drop(current);
+        state.begin_cleanup().unwrap();
+        state.close_lease_ledger_for_cleanup().unwrap();
+        state.open_lease_ledger(&cache).unwrap();
+        state.finish_cleanup().unwrap();
+        let reopened = state.lease_ledger().unwrap();
+        assert!(reopened.abandoned("repository", "connection", "new", &document).unwrap());
+        assert!(!reopened.abandoned("repository", "connection", "old", &document).unwrap());
+        assert!(!reopened.abandoned("repository", "connection", "released", &document).unwrap());
+        let mut changed = document.clone();
+        changed.seq += 1;
+        assert!(!reopened.abandoned("repository", "connection", "new", &changed).unwrap());
+        assert!(matches!(LocalLeaseLedger::open(&cache), Err(error) if error.kind == ErrorKind::RepositoryBusy));
+    }
+
+    #[test]
     fn cold_cleanup_removes_all_owned_roots_but_preserves_exports_and_other_product() {
         let root = tempfile::tempdir().unwrap();
         let paths = paths(root.path());

@@ -15,6 +15,8 @@ fn all_live_tables_have_an_explicit_preservation_owner() {
     let local_operations = [
         "meta",
         "app_kv",
+        // Process-bound import claims are cleared on eligibility closure or store reopen.
+        "plugin_claim_eligibility",
         "snapshot_leases",
         "asset_objects",
         "asset_gc_maintenance_state",
@@ -81,6 +83,7 @@ fn all_live_tables_have_an_explicit_preservation_owner() {
         "Update preservation ownership when adding or removing a table"
     );
     assert!(!portable.contains(&"asset_alias_replacement_candidates"));
+    assert!(!portable.contains(&"plugin_claim_eligibility"));
     assert!(!portable.contains(&"server_sync_operation"));
 }
 

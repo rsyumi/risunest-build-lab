@@ -685,6 +685,20 @@ pub(crate) fn publication_unknown(tx: &Transaction<'_>, job: &str) -> StoreResul
 
 /// Call only after verifying the remote commit and authenticated head, never on
 /// the strength of a local receipt file alone. Capture revision preserves R+1.
+enum PublicationRecords<'a> {
+    Map(&'a BTreeMap<String, String>),
+    Attached,
+    Missing,
+}
+
+pub(crate) fn confirm_captured_publication(
+    tx: &Transaction<'_>, permit: &PublicationPermit, commit: &str,
+    snapshot: &str, observation: &str, attached: bool,
+) -> StoreResult<()> {
+    confirm_publication_records(tx, permit, commit, snapshot, observation,
+        if attached { PublicationRecords::Attached } else { PublicationRecords::Missing })
+}
+
 pub(crate) fn confirm_publication(
     tx: &Transaction<'_>,
     permit: &PublicationPermit,
@@ -692,6 +706,14 @@ pub(crate) fn confirm_publication(
     snapshot: &str,
     observation: &str,
     records: Option<&BTreeMap<String, String>>,
+) -> StoreResult<()> {
+    confirm_publication_records(tx, permit, commit, snapshot, observation,
+        records.map(PublicationRecords::Map).unwrap_or(PublicationRecords::Missing))
+}
+
+fn confirm_publication_records(
+    tx: &Transaction<'_>, permit: &PublicationPermit, commit: &str,
+    snapshot: &str, observation: &str, records: PublicationRecords<'_>,
 ) -> StoreResult<()> {
     let job = permit.job_id();
     let (connection,repository,identity,expected,phase):(String,String,String,String,String)=tx.query_row("SELECT connection_id,repository_id,identity,commit_id,phase FROM external_storage_jobs WHERE id=?1",[job],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
@@ -708,8 +730,9 @@ pub(crate) fn confirm_publication(
     // pass through the replace path; keeping rows that describe another
     // snapshot costs correctness.
     match records {
-        Some(records) => replace_base_records(tx, &connection, snapshot, records)?,
-        None => clear_base_records(tx, &connection)?,
+        PublicationRecords::Map(records) => replace_base_records(tx, &connection, snapshot, records)?,
+        PublicationRecords::Attached => update_base_from_capture(tx, &connection, snapshot)?,
+        PublicationRecords::Missing => clear_base_records(tx, &connection)?,
     }
     tx.execute(
         "UPDATE external_storage_jobs SET phase='complete' WHERE id=?1",
@@ -718,6 +741,26 @@ pub(crate) fn confirm_publication(
     tx.execute(
         "DELETE FROM external_storage_capture_refs WHERE job_id=?1",
         [job],
+    )?;
+    Ok(())
+}
+
+fn update_base_from_capture(tx: &Transaction<'_>, connection: &str, snapshot: &str) -> StoreResult<()> {
+    tx.execute(
+        "DELETE FROM external_storage_base_records WHERE connection_id=?1
+         AND NOT EXISTS(SELECT 1 FROM publication_capture.records captured
+                        WHERE captured.key=external_storage_base_records.key)", [connection],
+    )?;
+    tx.execute(
+        "INSERT INTO external_storage_base_records(connection_id,key,content_hash)
+         SELECT ?1,key,hash FROM publication_capture.records WHERE true
+         ON CONFLICT(connection_id,key) DO UPDATE SET content_hash=excluded.content_hash
+         WHERE external_storage_base_records.content_hash<>excluded.content_hash", [connection],
+    )?;
+    tx.execute(
+        "INSERT INTO external_storage_base_record_state VALUES(?1,?2)
+         ON CONFLICT(connection_id) DO UPDATE SET snapshot_id=excluded.snapshot_id",
+        params![connection, snapshot],
     )?;
     Ok(())
 }
@@ -736,5 +779,42 @@ fn require_publication_permit(
         PublicationMode::ExitDrain => {
             sync_selection::require_publish_exit_drain(db, capture, connection)
         }
+    }
+}
+
+#[cfg(test)]
+mod publication_delta_tests {
+    use super::*;
+
+    #[test]
+    fn publication_updates_only_changed_base_rows() {
+        let mut db = Connection::open_in_memory().unwrap();
+        create_schema(&db).unwrap();
+        db.execute_batch("ATTACH DATABASE ':memory:' AS publication_capture;
+            CREATE TABLE publication_capture.records(key TEXT PRIMARY KEY,hash TEXT NOT NULL);").unwrap();
+        {
+            let tx = db.transaction().unwrap();
+            for index in 0..10_000 {
+                let key = format!("record-{index:05}");
+                let hash = "a".repeat(64);
+                tx.execute("INSERT INTO publication_capture.records VALUES(?1,?2)", params![key,hash]).unwrap();
+                tx.execute("INSERT INTO external_storage_base_records VALUES('connection',?1,?2)", params![key,hash]).unwrap();
+            }
+            tx.execute("INSERT INTO external_storage_base_record_state VALUES('connection','old')", []).unwrap();
+            tx.commit().unwrap();
+        }
+        db.execute("UPDATE publication_capture.records SET hash=?1 WHERE key='record-00005'", ["b".repeat(64)]).unwrap();
+        db.execute("DELETE FROM publication_capture.records WHERE key='record-00006'", []).unwrap();
+        let before = db.total_changes();
+        let started = std::time::Instant::now();
+        let tx = db.transaction().unwrap();
+        update_base_from_capture(&tx, "connection", "new").unwrap();
+        tx.commit().unwrap();
+        assert_eq!(db.total_changes()-before, 3);
+        assert_eq!(db.query_row::<i64,_,_>(
+            "SELECT count(*) FROM (SELECT key,hash FROM publication_capture.records EXCEPT SELECT key,content_hash FROM external_storage_base_records WHERE connection_id='connection')", [], |row| row.get(0),
+        ).unwrap(), 0);
+        assert_eq!(db.query_row::<i64,_,_>("SELECT count(*) FROM external_storage_base_records", [], |row| row.get(0)).unwrap(), 9999);
+        eprintln!("10k publication delta: {:?}, 3 changed rows", started.elapsed());
     }
 }

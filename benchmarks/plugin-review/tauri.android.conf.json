@@ -1,5 +1,5 @@
 {
-  "identifier": "io.github.rsyumi.risunest.pluginreview",
+  "identifier": "io.github.rsyumi.risunest",
   "build": {
     "beforeBuildCommand": "pnpm exec vite build --mode agent --config benchmarks/plugin-review/vite.config.ts",
     "frontendDist": "../benchmarks/plugin-review/dist"

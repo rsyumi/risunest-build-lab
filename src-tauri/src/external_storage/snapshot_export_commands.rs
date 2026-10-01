@@ -350,6 +350,7 @@ async fn download_remote_conflict_source(
         repository: &connected.handle,
         clock: leases::system_clock(),
         protection_supported: connected.stored.capabilities.lease_operations,
+        ledger: Some(app.state::<super::job_store::JobCommandState>().lease_ledger()?),
     };
     with_export_lease(
         &context,
@@ -518,6 +519,7 @@ pub(crate) async fn external_storage_export_snapshot(
         repository: &connected.handle,
         clock: leases::system_clock(),
         protection_supported: connected.stored.capabilities.lease_operations,
+        ledger: Some(app.state::<super::job_store::JobCommandState>().lease_ledger()?),
     };
     let prepared = with_export_lease(
         &context,
@@ -637,6 +639,7 @@ mod tests {
                 repository: &self.repository,
                 clock: &self.clock,
                 protection_supported: true,
+                ledger: None,
             }
         }
         /// The work leases the repository shows, whoever placed them.
