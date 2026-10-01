@@ -2,7 +2,7 @@ import '../../src/ts/polyfill'
 import { invoke } from '@tauri-apps/api/core'
 import { join } from '@tauri-apps/api/path'
 import { nativeDataPath } from '../../src/ts/storage/nativePaths'
-import { exists, mkdir, readTextFile, remove } from '@tauri-apps/plugin-fs'
+import { exists, mkdir, readFile, remove } from '@tauri-apps/plugin-fs'
 import { SandboxHost } from '../../src/ts/plugins/apiV3/factory'
 import { createPluginStorageStore } from '../../src/ts/plugins/pluginStorageStore'
 import { SqlitePersistentDataStore } from '../../src/ts/storage/sqlitePersistentDataStore'
@@ -119,7 +119,7 @@ Object.assign(window, { __pluginReview: {
         check(document.title === title && await invoke('plugin:app|identifier') === configuredIdentifier, 'Wrong synthetic native profile')
         const root = await nativeDataPath()
         check(new RegExp('/' + identifier.replaceAll('.', '\\.') + '/files/?$').test(root), 'Native root is not the isolated plugin profile')
-        check((await readTextFile(await join(root, 'risunest-plugin-review-owner'))).trim() === token, 'Synthetic ownership marker mismatch')
+        check(new TextDecoder().decode(await readFile(await join(root, 'risunest-plugin-review-owner'))).trim() === token, 'Synthetic ownership marker mismatch')
         const directory = await join(root, `plugin-review-${token}`)
         check(!(await exists(directory)), 'Synthetic probe directory already exists')
         await mkdir(directory)

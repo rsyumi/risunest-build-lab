@@ -230,6 +230,16 @@ async function lifecycle() {
 async function startupAppearance(seed: boolean, theme: "light" | "dark") {
   await guard();
   check(Boolean(document.getElementById("preloading")), "appearance probe requires product HTML build");
+  const nativeThemeReadback = async () => {
+    let nativeTheme: string | null = null;
+    await until(async () => {
+      nativeTheme = await getCurrentWindow().theme();
+      return nativeTheme === theme;
+    }, "product native appearance theme timed out");
+    const colorScheme = getComputedStyle(document.documentElement).colorScheme;
+    check(colorScheme === theme, "product color scheme must match the expected app theme");
+    return { nativeTheme, nativeThemeScope: "app", nativeThemeMatchesApp: true, colorScheme };
+  };
   const seedReadback = async () => {
     const marker = localStorage.getItem("appearance-theme");
     const metadata = {
@@ -300,8 +310,10 @@ async function startupAppearance(seed: boolean, theme: "light" | "dark") {
       }
       await pause(50);
     }
+    const nativeAppearance = await nativeThemeReadback();
     return {
       seeded: true, theme, startupHintMatchesRenderedPalette: true,
+      ...nativeAppearance,
       interactiveMs: performance.getEntriesByName("boot:interactive")[0].startTime,
       openedRevision: Number.isSafeInteger(opened.revision) ? opened.revision : null,
       committedRevision: Number.isSafeInteger(committed.revision) ? committed.revision : null,
@@ -321,7 +333,9 @@ async function startupAppearance(seed: boolean, theme: "light" | "dark") {
   const style = getComputedStyle(document.documentElement);
   const bounds = document.getElementById("app")!.getBoundingClientRect();
   await pause(1500);
+  const nativeAppearance = await nativeThemeReadback();
   return {
+    ...nativeAppearance,
     theme, systemDark: matchMedia("(prefers-color-scheme: dark)").matches,
     preloaderBackground, colorScheme: style.colorScheme,
     appBackground: style.getPropertyValue("--risu-theme-bgcolor"),

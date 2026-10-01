@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { type as osType } from "@tauri-apps/plugin-os";
 import { isTauriDesktop } from "../platform";
 
@@ -95,6 +96,8 @@ let pending: ReturnType<typeof setTimeout> | undefined;
 let latest: WindowPalette | undefined;
 let lastApplied = "";
 let updates = Promise.resolve();
+let macThemeUpdates = Promise.resolve();
+let lastMacTheme = "";
 
 /** Run after both the palette and custom CSS have been applied in this turn. */
 export function scheduleWindowsAppearance(palette?: WindowPalette): void {
@@ -118,6 +121,18 @@ export function scheduleWindowsAppearance(palette?: WindowPalette): void {
         localStorage.setItem(WINDOWS_APPEARANCE_CACHE, serialized);
       } catch {
         console.warn("Could not cache the Windows startup colors");
+      }
+      if (isTauriDesktop && osType() === "macos") {
+        const theme = appearance.dark ? "dark" : "light";
+        macThemeUpdates = macThemeUpdates.then(async () => {
+          if (theme === lastMacTheme) return;
+          try {
+            await getCurrentWindow().setTheme(theme);
+            lastMacTheme = theme;
+          } catch {
+            console.warn("Could not apply the macOS window theme");
+          }
+        });
       }
       return;
     }
