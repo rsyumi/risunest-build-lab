@@ -157,6 +157,7 @@ export function createServerSyncFacade(options: {
    * so native admission does not turn the next claim away as busy. */
   awaitLibrary?: () => Promise<void>;
   deferred?: () => boolean;
+  onRecoveryRequired?: (confirmationPending: boolean | null) => void;
 }) {
   const native = options.invoke ?? invoke;
   const transfer = async <T>(
@@ -238,10 +239,21 @@ export function createServerSyncFacade(options: {
     | {
         prepared: Extract<Prepared, { kind: "ready" }>;
         fence: PersistentDestructiveReplacementFence;
+        confirmationPending?: boolean;
+        failureCode?: string;
       }
     | undefined;
   let active: Promise<ServerCycle> | undefined;
   let cancelled = false;
+  const publish = async (preparationId: string): Promise<ServerCycle> => {
+    options.onRecoveryRequired?.(null);
+    if (cancelled) {
+      await native("server_sync_cancel");
+      throw new ServerSyncError("cancelled");
+    }
+    options.onProgress?.("publishing");
+    return transfer<ServerCycle>("server_sync_publish", { preparationId });
+  };
   const refresh = async (): Promise<string> => {
     const pending = pendingRefresh;
     if (!pending) throw new ServerSyncError("refresh-not-pending");
@@ -274,6 +286,7 @@ export function createServerSyncFacade(options: {
       }
       if (pending.pluginsChanged) await options.restorePlugins?.();
     } catch {
+      options.onRecoveryRequired?.(false);
       throw new ServerSyncError("committed-refresh-pending");
     }
     pendingRefresh = undefined;
@@ -291,7 +304,7 @@ export function createServerSyncFacade(options: {
     } catch (cause) {
       const error = serverSyncError(cause);
       if (
-        ["local-revision-changed", "stale-server-preparation"].includes(
+        !pending.confirmationPending && ["local-revision-changed", "stale-server-preparation"].includes(
           error.code,
         )
       ) {
@@ -302,6 +315,9 @@ export function createServerSyncFacade(options: {
       }
       // The IPC reply may be lost after native COMMIT. Keep editing fenced
       // until the idempotent activation confirms the committed revision.
+      pending.confirmationPending = true;
+      pending.failureCode = error.code;
+      options.onRecoveryRequired?.(true);
       throw new ServerSyncError("activation-confirmation-pending");
     }
     pendingActivation = undefined;
@@ -328,13 +344,11 @@ export function createServerSyncFacade(options: {
     if (cancelled) throw new ServerSyncError("cancelled");
     if (pendingActivation) {
       const preparationId = await activate();
-      options.onProgress?.("publishing");
-      return transfer<ServerCycle>("server_sync_publish", { preparationId });
+      return publish(preparationId);
     }
     if (pendingRefresh) {
       const preparationId = await refresh();
-      options.onProgress?.("publishing");
-      return transfer<ServerCycle>("server_sync_publish", { preparationId });
+      return publish(preparationId);
     }
     // A held fence has already saved local data and refuses further writes.
     if (options.deferred?.()) throw new ServerSyncError("generation-active");
@@ -380,10 +394,7 @@ export function createServerSyncFacade(options: {
     }
     // The mutation fence has been released before any upload or server job
     // wait. New local edits become the durable outbox tail for the next run.
-    options.onProgress?.("publishing");
-    return transfer<ServerCycle>("server_sync_publish", {
-      preparationId: prepared.preparationId,
-    });
+    return publish(prepared.preparationId);
   };
   const recover = async (
     command: string,
@@ -404,6 +415,30 @@ export function createServerSyncFacade(options: {
     });
   };
   return {
+    async recoverPending(): Promise<void> {
+      await active?.catch(() => {});
+      if (pendingActivation) {
+        const pending = pendingActivation;
+        try {
+          await activate();
+        } catch (cause) {
+          if (!pendingActivation) throw cause;
+          if (["server-sync-busy", "server-sync-failed"].includes(pending.failureCode ?? "")) throw cause;
+          // A coded activation rejection has settled its native claim. Drop its
+          // preparation, then read the revision whose reply may have been lost.
+          await native("server_sync_cancel");
+          const status = await native<ServerStatus>("server_sync_status");
+          const outcome = await pending.fence.refreshCommittedWorkingSet(status.localRevision);
+          if (outcome.projection !== "applied") throw cause;
+          await options.restorePlugins?.();
+          pending.fence.release();
+          pendingActivation = undefined;
+        }
+      }
+      if (pendingRefresh) await refresh();
+      await native("server_sync_cancel");
+      options.onRecoveryRequired?.(null);
+    },
     status: () => native<ServerStatus>("server_sync_status"),
     bind: async (config: ServerConfig, residency?: "full" | "remote") => {
       await options.awaitLibrary?.();
@@ -435,6 +470,10 @@ export function createServerSyncFacade(options: {
       return active;
     },
     async cancel(): Promise<void> {
+      if (active && (pendingRefresh || pendingActivation)) {
+        cancelled = true;
+        return;
+      }
       if (pendingRefresh)
         throw new ServerSyncError("committed-refresh-pending");
       if (pendingActivation)

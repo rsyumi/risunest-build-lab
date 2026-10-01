@@ -469,6 +469,40 @@ async fn download_control(
     }
 }
 
+pub(crate) async fn head_changed(
+    provider: &dyn Provider,
+    repository: &RepositoryHandle,
+    descriptor: &Descriptor,
+    root_key: &[u8; 32],
+    known: Option<&HeadObservation>,
+    cancel: &Cancellation,
+) -> Result<bool> {
+    let locator = provider.head_locator(repository)?;
+    let response = download_control(provider, repository, &locator,
+        known.and_then(|head| head.version.as_ref()), HeadBytes::MAX_BYTES as u64, cancel).await;
+    let (receipt, bytes) = match response {
+        Err(error) if error.kind == ErrorKind::NotFound => return Ok(known.is_some()),
+        other => other?,
+    };
+    match (receipt, bytes) {
+        (ReadReceipt::NotModified(version), None) => {
+            if known.and_then(|head| head.version.as_ref()) != Some(&version) {
+                return Err(corrupt("head version changed in not-modified response"));
+            }
+            Ok(false)
+        }
+        (ReadReceipt::Body(_), Some(bytes)) => {
+            let (plaintext, _, _, body_hash) = open(descriptor, root_key, Some(HEAD_OBJECT_ID),
+                wire::ObjectRole::Head, &bytes, MAX_CONTROL_PLAINTEXT)?;
+            let wire = wire_control::HeadDocument::decode(&plaintext, MAX_CONTROL_PLAINTEXT).map_err(corrupt)?;
+            let document = HeadDocument::from_wire(wire, descriptor, repository)?;
+            Ok(known.is_none_or(|head| head.commit_id != document.commit_id
+                || head.authenticated_body_hash != body_hash))
+        }
+        _ => Err(corrupt("invalid control download state")),
+    }
+}
+
 pub(crate) async fn read_head(
     provider: &dyn Provider,
     repository: &RepositoryHandle,
@@ -2802,4 +2836,26 @@ mod tests {
             assert_eq!(provider.upload_attempts("snapshot-conflict-remote"), 1);
         });
     }
+    #[test]
+    fn a_head_probe_observes_peer_changes_without_creating_any_remote_object() {
+        runtime().block_on(async {
+            let provider = fake::FakeProvider::new(true);
+            let repository = fake::repository();
+            let descriptor = descriptor(Strategy::Cas);
+            let cancel = Cancellation::default();
+            let first = prepare_head(&descriptor, &[9; 32], &repository, head(Strategy::Cas, &repository, "c1")).unwrap();
+            provider.seed(HEAD_OBJECT_ID, ObjectRole::SyncState, first.bytes.as_bytes().to_vec());
+            let observed = read_head(&provider, &repository, &descriptor, &[9; 32], None, &cancel).await.unwrap().unwrap();
+            let before = provider.state.lock().unwrap().objects.clone();
+            assert!(!head_changed(&provider, &repository, &descriptor, &[9; 32], Some(&observed.observation), &cancel).await.unwrap());
+            assert_eq!(provider.state.lock().unwrap().objects, before);
+            let second = prepare_head(&descriptor, &[9; 32], &repository, head(Strategy::Cas, &repository, "c2")).unwrap();
+            provider.seed(HEAD_OBJECT_ID, ObjectRole::SyncState, second.bytes.as_bytes().to_vec());
+            let after_peer = provider.state.lock().unwrap().objects.clone();
+            assert!(head_changed(&provider, &repository, &descriptor, &[9; 32], Some(&observed.observation), &cancel).await.unwrap());
+            assert_eq!(provider.state.lock().unwrap().objects, after_peer);
+            assert_eq!(provider.state.lock().unwrap().objects.len(), 1);
+        });
+    }
+
 }

@@ -1,6 +1,6 @@
 //! Persisted, resumable remote metadata mirror. This never activates PDS data.
 use super::{
-    client::{response_error, ServerClient},
+    client::ServerClient,
     Result, SyncError,
 };
 use reqwest::Method;
@@ -146,12 +146,14 @@ pub(crate) fn refresh(
     match refresh_once(db, client, observed, domains) {
         Err(error)
             if error.status == 410
+                || error.code == "journal-base-mismatch"
                 || (error.status == 404
                     && matches!(
                         error.code.as_str(),
                         "checkpoint-not-found" | "pin-not-found"
                     )) =>
         {
+            crate::nlog!("warn", "server sync rebuilding remote metadata: {}", error.code);
             // An expired metadata lease invalidates only the staging cursor.
             // Rebuild a fixed checkpoint while preserving PDS, bases and outbox.
             db.execute("DELETE FROM server_sync_remote_cursor", [])?;
@@ -422,10 +424,11 @@ fn refresh_once(
         tx.commit()?;
         client.progress();
         if done {
-            let reply =
-                client.request(Method::DELETE, &path, &[], None, &[], MAX_METADATA_BYTES)?;
-            if reply.status != 204 && reply.status != 404 && reply.status != 410 {
-                return Err(response_error(reply));
+            // The committed mirror is complete; the server also expires this lease.
+            match client.request(Method::DELETE, &path, &[], None, &[], MAX_METADATA_BYTES) {
+                Ok(reply) if (200..300).contains(&reply.status) => (),
+                Ok(reply) => crate::nlog!("warn", "server sync metadata lease cleanup pending: status {}", reply.status),
+                Err(error) => crate::nlog!("warn", "server sync metadata lease cleanup pending: {}", error.code),
             }
             return Ok(through);
         }

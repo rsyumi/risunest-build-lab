@@ -449,7 +449,7 @@
               <div>
                 <strong>{device.name || device.id.slice(0, 12)}</strong><small
                   >{device.id}</small
-                >{#if device.pendingError}<small>{message(device.pendingError)}</small>{/if}{#if device.pending}<small>처리 중인 작업이 있습니다.</small
+                ><small>{device.lastAck == null ? "동기화 기록 없음" : `마지막 동기화: ${new Date(device.lastAck * 1000).toLocaleString()}`}</small>{#if device.pendingError}<small>{message(device.pendingError)}</small>{/if}{#if device.pending}<small>처리 중인 작업이 있습니다.</small
                   >{/if}
               </div>
               {#if device.revoked}<span class="pill neutral">해제됨</span>

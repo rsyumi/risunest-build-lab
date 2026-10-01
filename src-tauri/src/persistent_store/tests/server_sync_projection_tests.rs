@@ -3,6 +3,33 @@ use super::*;
 use crate::asset_repository::PayloadCas;
 
 #[test]
+fn accepted_owner_tuples_project_and_invalid_mutations_leave_revision_unchanged() {
+    let (directory, mut store, _) = open_fixture();
+    let cas = PayloadCas::new(directory.path()).unwrap();
+    for tuple in [json!(["name", "path"]), json!(["name", 4, "type"]), json!(["name", "path", "type", "extra"])] {
+        let mut character = store.read_character("char-a", None).unwrap().unwrap().value;
+        character["additionalAssets"] = json!([tuple]);
+        assert!(matches!(store.commit(&WorkingSetCommit {
+            character: Some(character), ..empty_working_set_commit(1)
+        }), Err(StoreError::Validation { .. })));
+        assert_eq!(store.revision().unwrap(), 1);
+    }
+    let mut character = store.read_character("char-a", None).unwrap().unwrap().value;
+    character["additionalAssets"] = json!([["name", "assets/missing", "type"]]);
+    store.commit(&WorkingSetCommit {
+        character: Some(character),
+        root: Some(json!({"modules":[{"id":"module","assets":[["name","assets/missing","type",{"retained":true}]]}]})),
+        ..empty_working_set_commit(1)
+    }).unwrap();
+    let generation = active_generation(&store.connection).unwrap();
+    for (kind, key1) in [("root", ""), ("character", "char-a")] {
+        assert!(projection::project(&store.connection, &cas, &generation, &ServerDirtyKey {
+            kind: kind.into(), key1: key1.into(), key2: "".into(), revision: 2,
+        }).unwrap().is_some());
+    }
+}
+
+#[test]
 fn a_stored_account_cannot_change_published_root_content() {
     let (directory, store, _) = open_fixture();
     let cas = PayloadCas::new(directory.path()).unwrap();

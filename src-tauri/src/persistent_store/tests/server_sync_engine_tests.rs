@@ -246,7 +246,17 @@ fn two_native_replicas_seed_publish_pull_and_preserve_same_key_conflicts() {
         .connection
         .execute_batch("DROP TRIGGER synthetic_server_activation_failure;")
         .unwrap();
-    let activated = second.server_activate_cycle(&mut ready).unwrap();
+    let staged_body = b"synthetic retained activation dependency";
+    let staged = crate::asset_repository::PayloadCas::new(second.repository_root()).unwrap().prepare_bytes(staged_body).unwrap();
+    second.connection.execute("INSERT INTO server_sync_objects VALUES(?1,?2,?3)", params![
+        staged.content_hash, staged_body.len() as i64,
+        crate::asset_repository::object_physical_key(&staged.content_hash),
+    ]).unwrap();
+    second.connection.execute_batch("CREATE TRIGGER synthetic_postcommit_cleanup_failure BEFORE DELETE ON server_sync_objects BEGIN SELECT RAISE(ABORT,'synthetic'); END;").unwrap();
+    assert!(second.server_activate_cycle(&mut ready).is_err());
+    let activated = second.revision().unwrap();
+    assert!(activated > previous_revision);
+    second.connection.execute_batch("DROP TRIGGER synthetic_postcommit_cleanup_failure;").unwrap();
     assert_eq!(second.server_activate_cycle(&mut ready).unwrap(), activated);
     assert_eq!(second.revision().unwrap(), activated);
     assert_eq!(second.server_publish_cycle(&ready).unwrap().phase, "idle");

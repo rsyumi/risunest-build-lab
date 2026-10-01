@@ -1,6 +1,7 @@
 import { hasMobileBackgroundTasks, subscribeMobileBackgroundTasks } from "../../mobileBackgroundTask";
 import { get } from "svelte/store";
 import { doingChat } from "../../process/generationState";
+import { setServerSyncRecovery } from "./serverSyncRecovery";
 import { isTauri, isTauriDesktop } from "../../platform";
 import { invalidatePluginDeviceKeyspaces } from "../../plugins/pluginDeviceKeyspace";
 import { registerLibraryFileOperationGate, subscribeLibraryFileOperationReleased } from "../libraryFileOperation";
@@ -32,6 +33,7 @@ export function getServerSyncController() {
       onRetryableFailure: (code) => controller?.reportRetryableFailure(code),
       onCycleItems: (items) => controller?.reportCycleItems(items),
       deferred: () => get(doingChat),
+      onRecoveryRequired: (pending) => setServerSyncRecovery(pending, () => getServerSyncController().recoverPending()),
       runtime: {
         flushPendingData,
         capturePersistentMutationToken,

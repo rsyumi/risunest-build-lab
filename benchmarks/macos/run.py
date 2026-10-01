@@ -194,6 +194,17 @@ def run_phase(app, phase, artifacts, fixtures):
             stages = {entry['stage'] for entry in result}
             if not required <= stages or 'failure' in stages:
                 raise RuntimeError(f'{phase}: incomplete results {stages}')
+            if phase.startswith('appearance-'):
+                appearance = [entry['result'] for entry in result if entry['stage'] == phase]
+                theme = phase.rsplit('-', 1)[1]
+                if len(appearance) != 1 or not isinstance(appearance[0], dict) or (
+                    appearance[0].get('theme') != theme
+                    or appearance[0].get('nativeTheme') != theme
+                    or appearance[0].get('nativeThemeScope') != 'app'
+                    or appearance[0].get('nativeThemeMatchesApp') is not True
+                    or appearance[0].get('colorScheme') != theme
+                ):
+                    raise RuntimeError(f'{phase}: matching public native app theme readback required')
             if phase == 'app':
                 replies = [(index, entry['result']) for index, entry in enumerate(result) if entry['stage'] == 'app-native-reply']
                 saving = [(index, entry['result']) for index, entry in enumerate(result) if entry['stage'] == 'app-native-saving']
@@ -368,7 +379,8 @@ def main():
         fixture.write_text('synthetic file association fixture')
     configured_phases = os.environ.get('RISUNEST_MACOS_PHASES')
     phases = configured_phases.split(',') if configured_phases else ['contracts', 'restart', 'app', 'app-restart', 'streaming']
-    allowed_phases = {'termination-probe', 'contracts', 'restart', 'app', 'app-restart', 'streaming'}
+    allowed_phases = {'termination-probe', 'contracts', 'restart', 'app', 'app-restart', 'streaming',
+                      'appearance-seed-light', 'appearance-app-light', 'appearance-seed-dark', 'appearance-app-dark'}
     if not phases or any(phase not in allowed_phases for phase in phases):
         raise RuntimeError('invalid RISUNEST_MACOS_PHASES')
     results = {phase: run_phase(app, phase, artifacts, fixtures) for phase in phases}

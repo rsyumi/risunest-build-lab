@@ -274,6 +274,7 @@ pub(crate) struct LeaseContext<'a> {
     pub repository: &'a RepositoryHandle,
     pub clock: &'a dyn LeaseClock,
     pub protection_supported: bool,
+    pub ledger: Option<std::sync::Arc<super::lease_ledger::LocalLeaseLedger>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -461,6 +462,9 @@ async fn create_lease(
     file.sync_all().map_err(|_| transient())?;
     drop(file);
     let source = SpoolSource::verified(&path, intent.byte_length, &intent.sha256)?;
+    if let Some(ledger) = &context.ledger {
+        ledger.record(&context.descriptor.repository_id, context.connection_id, &object_id, &document)?;
+    }
     let resume = control_request(cancel, context.provider.begin_upload(context.repository, &intent, cancel)).await?;
     let receipt = match control_request(cancel, context.provider.create_object(
         context.repository, &intent, &source, resume.as_ref(), cancel,
@@ -497,10 +501,15 @@ async fn create_lease(
 async fn release(context: &LeaseContext<'_>, lease: &LeaseHandle, cancel: &Cancellation) -> Result<()> {
     lease.locator.validate_for(context.repository)?;
     match control_request(cancel, context.provider.delete_object(context.repository, &lease.locator, cancel)).await {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind == ErrorKind::NotFound || error.http_status == Some(404) => Ok(()),
+        Ok(()) => release_record(context, &lease.object_id),
+        Err(error) if error.kind == ErrorKind::NotFound || error.http_status == Some(404) => release_record(context, &lease.object_id),
         Err(error) => Err(error),
     }
+}
+
+fn release_record(context: &LeaseContext<'_>, object: &str) -> Result<()> {
+    if let Some(ledger) = &context.ledger { ledger.released(&context.descriptor.repository_id, context.connection_id, object)?; }
+    Ok(())
 }
 
 pub(crate) async fn admit(
@@ -512,11 +521,37 @@ pub(crate) async fn admit(
     if !context.clock.reading().foreground {
         return Ok(Admission::Yield { reason: YieldReason::Suspended });
     }
-    let before = match survey(context, cancel).await {
+    let mut before = match survey(context, cancel).await {
         Ok(before) => before,
         Err(error) if error.kind == ErrorKind::Unsupported => return Ok(Admission::UnsupportedProtection),
         Err(error) => return Err(error),
     };
+    if let Some(ledger) = &context.ledger {
+        let present = before.leases.iter().filter_map(|lease| lease.object_id.clone()).collect();
+        // An unauthenticated object may be the recorded receipt. Keep its local
+        // proof until a later complete, authenticated survey can identify it.
+        if before.leases.iter().all(|lease| lease.object_id.is_some()) {
+            ledger.retire_absent(&context.descriptor.repository_id, context.connection_id, &present)?;
+        }
+        let mut retained = Vec::new();
+        for observed in before.leases {
+            let abandoned = match (&observed.object_id, &observed.document) {
+                (Some(object), Some(document)) if document.writer_id == context.writer_id =>
+                    ledger.abandoned(&context.descriptor.repository_id, context.connection_id, object, document)?,
+                _ => false,
+            };
+            if abandoned {
+                observed.locator.validate_for(context.repository)?;
+                match control_request(cancel, context.provider.delete_object(context.repository, &observed.locator, cancel)).await {
+                    Ok(()) => {},
+                    Err(error) if error.kind == ErrorKind::NotFound || error.http_status == Some(404) => {},
+                    Err(error) => return Err(error),
+                }
+                release_record(context, observed.object_id.as_deref().ok_or_else(corrupt)?)?;
+            } else { retained.push(observed); }
+        }
+        before.leases = retained;
+    }
     if let Some(reason) = before.blocker(&BTreeSet::new(), context.clock.reading()) {
         return Ok(Admission::Yield { reason });
     }
@@ -767,6 +802,7 @@ mod tests {
                 descriptor: &self.descriptor, root_key: &self.key,
                 provider: &self.provider, repository: &self.repository,
                 clock: &self.clock, protection_supported: true,
+                ledger: None,
             }
         }
         fn foreign(&self, kind: LeaseKind, index: u64, now: u64) -> (String, Vec<u8>) {
@@ -781,6 +817,35 @@ mod tests {
                 _ => panic!("expected admission"),
             }
         }
+    }
+
+    #[test]
+    fn recorded_abandoned_work_and_export_recover_without_clock_trust_but_live_clones_block() {
+        runtime().block_on(async {
+            for job in ["ordinary-job", "export-ephemeral-job"] {
+                for trusted in [false, true] {
+                    let h=Harness::new();
+                    h.clock.set_trusted(trusted);
+                    let local=tempfile::tempdir().unwrap();
+                    let ledger=std::sync::Arc::new(super::super::lease_ledger::LocalLeaseLedger::open(local.path()).unwrap());
+                    let mut context=h.context(); context.ledger=Some(ledger.clone());
+                    let abandoned=create_lease(&context,job,LeaseKind::Work,0,&Cancellation::default()).await.unwrap();
+                    assert!(matches!(admit(&context,"concurrent",LeaseKind::Work,&Cancellation::default()).await.unwrap(),Admission::Yield { .. }));
+                    drop(context); drop(ledger);
+                    let ledger=std::sync::Arc::new(super::super::lease_ledger::LocalLeaseLedger::open(local.path()).unwrap());
+                    let mut context=h.context(); context.ledger=Some(ledger);
+                    // Same writer without this installation's receipt remains a live foreign owner.
+                    let foreign=create_lease(&h.context(),"cloned-device",LeaseKind::Work,0,&Cancellation::default()).await.unwrap();
+                    assert!(matches!(admit(&context,"retry",LeaseKind::Work,&Cancellation::default()).await.unwrap(),Admission::Yield { reason:YieldReason::ForeignWork }));
+                    let observed=survey(&context,&Cancellation::default()).await.unwrap();
+                    assert!(!observed.leases.iter().any(|lease| lease.object_id.as_ref()==Some(&abandoned.object_id)));
+                    assert!(observed.leases.iter().any(|lease| lease.object_id.as_ref()==Some(&foreign.object_id)));
+                    release(&h.context(),&foreign,&Cancellation::default()).await.unwrap();
+                    let owner=match admit(&context,"retry",LeaseKind::Work,&Cancellation::default()).await.unwrap() { Admission::Admitted(owner)=>owner,_=>panic!("abandoned lease should be recovered") };
+                    owner.release_all(&context).await;
+                }
+            }
+        });
     }
 
     #[test]

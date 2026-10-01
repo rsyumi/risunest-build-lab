@@ -11,6 +11,7 @@ import {
 } from 'src/ts/storage/sync/external/restoreScope'
 import type {
     ExternalConflictSummary,
+    ExternalConflictCursor,
     ExternalConnectionSummary,
     ExternalHistoryItem,
     ExternalRestoreArea,
@@ -116,4 +117,20 @@ export async function abandonExternalOnboardingSelection(
         }
     }
     await bridge.setSyncTarget(null, owner.selectionEpoch)
+}
+
+export async function loadExternalOnboardingConflict(
+    connectionId: string,
+    conflictId: string | undefined,
+    bridge: Pick<import('src/ts/storage/sync/external/bridge').ExternalStorageBridge, 'listConflicts'>,
+): Promise<ExternalConflictSummary | undefined> {
+    if (!conflictId) throw { kind: 'corrupt' }
+    let cursor: ExternalConflictCursor | undefined
+    do {
+        const page = await bridge.listConflicts(cursor, 50)
+        const conflict = page.conflicts.find(item => item.connectionId === connectionId && item.id === conflictId)
+        if (conflict) return conflict
+        cursor = page.nextCursor
+    } while (cursor)
+    return undefined
 }

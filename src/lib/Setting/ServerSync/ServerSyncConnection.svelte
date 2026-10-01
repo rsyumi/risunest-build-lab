@@ -10,6 +10,7 @@
   import ServerSyncRegistrationInput from "./ServerSyncRegistrationInput.svelte";
   import ServerSyncStorage from "./ServerSyncStorage.svelte";
   import ServerSyncStages from "./ServerSyncStages.svelte";
+  import ServerSyncConflictItems from "./ServerSyncConflictItems.svelte";
   import { formatRisuNestStorageBytes as bytes } from "src/ts/storage/risuNestStorageDashboard";
   import { canScanServerRegistration } from "src/ts/storage/sync/serverSyncQr";
   import type { ServerSyncBackupInventory } from "src/ts/storage/sync/serverSyncProduction";
@@ -249,6 +250,8 @@
         {text.conflictCount.replace("{0}", String(conflict.conflictCount))}
       </h3>
       <p class="text-sm text-textcolor2">{text.conflictHelp}</p>
+      {#if snapshot.conflictRefreshed}<p class="text-sm">{text.conflictRefreshed}</p>{/if}
+      <ServerSyncConflictItems preview={conflict} />
       <div class="flex flex-wrap gap-2">
         <SettingButton disabled={busy} onclick={() => resolve("keep-local")}
           >{text.keepLocal}</SettingButton

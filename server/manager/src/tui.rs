@@ -428,7 +428,8 @@ async fn connection(root: &Path, client: &Client, status: &Value, executable: &P
             } else {
                 None
             };
-            if menu("연결 설정을 적용하시겠습니까?", &["적용", "취소"])? != Some(0) {
+            if menu("연결 설정을 적용하시겠습니까?", &["적용", "취소"])? != Some(0)
+            {
                 return Ok(());
             }
             client.mutate("connection",json!({"revision":status["revision"],"options":{"endpoint":endpoint,"cloudflared":cloudflared,"registryUrl":registry}})).await?;
@@ -539,13 +540,16 @@ pub async fn run(root: &Path, executable: &Path) -> Result<()> {
                                 ready = true;
                                 break;
                             }
-                            if platform::startup_error(root).is_some() { break; }
+                            if platform::startup_error(root).is_some() {
+                                break;
+                            }
                             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                         }
                         if ready {
                             Ok(())
                         } else {
-                            Err(platform::startup_error(root).unwrap_or_else(|| "server-not-ready".into()))
+                            Err(platform::startup_error(root)
+                                .unwrap_or_else(|| "server-not-ready".into()))
                         }
                     }
                 }

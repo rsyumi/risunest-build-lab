@@ -43,6 +43,7 @@ export interface ServerSyncSnapshot {
   replacing?: boolean;
   connecting?: boolean;
   draining?: boolean;
+  conflictRefreshed?: boolean;
 }
 /** The state an error leaves when repeating the same attempt cannot change its
  * outcome. Automatic synchronization stops until an explicit action clears it. */
@@ -96,6 +97,7 @@ export function createServerSyncController(
     error: "",
   };
   let active: Promise<void> | undefined;
+  let recoveryActive: Promise<void> | undefined;
   let attemptSequence = 0;
   let statusFresh = false;
   let statusRead: Promise<void> | undefined;
@@ -157,6 +159,7 @@ export function createServerSyncController(
     state.attemptStartedAt = Date.now();
     state.attemptIdentity = undefined;
     state.initialSyncComplete = false;
+    state.conflictRefreshed = false;
     state.result = undefined;
     state.progress = undefined;
     state.verifiedBytes = undefined;
@@ -187,7 +190,16 @@ export function createServerSyncController(
         // Progress publishes replace the snapshot while this promise is pending.
         // Resolve first, then assign to the current snapshot, not the old object
         // captured by the left-hand side of an assignment containing await.
-        const result = await facade.cycle(attempt === 0 ? options : {}, exitFence);
+        let result: ServerCycle;
+        try {
+          result = await facade.cycle(attempt === 0 ? options : {}, exitFence);
+        } catch (cause) {
+          if (attempt === 0 && options.resolution && serverSyncError(cause).code === "conflict-preview-stale") {
+            state.conflictRefreshed = true;
+            continue;
+          }
+          throw cause;
+        }
         state.result = result;
         publish();
         if (result.phase !== "pending" || state.paused) break;
@@ -247,6 +259,7 @@ export function createServerSyncController(
     explicitResume: boolean,
   ): Promise<void> => {
     if (active) return active;
+    if (recoveryActive) return Promise.reject(new ServerSyncError("resolve-pending-operation-first"));
     if (state.connecting || state.replacing || isLibraryFileOperationReserved())
       return Promise.reject(new ServerSyncError("library-operation-busy"));
     if (!explicitResume && state.paused) return Promise.resolve();
@@ -425,7 +438,7 @@ export function createServerSyncController(
       publish();
     },
     snapshot: () => state,
-    waitForIdle: () => active ?? Promise.resolve(),
+    waitForIdle: () => active ?? recoveryActive ?? Promise.resolve(),
     canRestore: () =>
       !state.running &&
       !state.connecting &&
@@ -453,6 +466,27 @@ export function createServerSyncController(
       publish();
     },
     ensureStatus,
+    recoverPending(): Promise<void> {
+      if (recoveryActive) return recoveryActive;
+      recoveryActive = (async () => {
+        await active;
+        state.running = true;
+        publish();
+        try {
+          await facade.recoverPending();
+          await refreshStatus();
+          clearError();
+        } catch (cause) {
+          recordError(cause);
+          throw cause;
+        } finally {
+          state.running = false;
+          state.progress = undefined;
+          publish();
+        }
+      })().finally(() => { recoveryActive = undefined; });
+      return recoveryActive;
+    },
     bind(config: ServerConfig, residency?: "full" | "remote"): Promise<void> {
       return register(config, false, residency);
     },

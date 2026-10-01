@@ -11,12 +11,15 @@ const platform = vi.hoisted(() => ({
   os: "linux",
   invoke: vi.fn(),
   osType: vi.fn(),
+  currentWindow: vi.fn(),
+  setTheme: vi.fn(),
 }));
 vi.mock("../platform", () => ({
   get isTauriDesktop() { return platform.desktop; },
 }));
 vi.mock("@tauri-apps/api/core", () => ({ invoke: platform.invoke }));
 vi.mock("@tauri-apps/plugin-os", () => ({ type: platform.osType }));
+vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: platform.currentWindow }));
 
 const startup = readFileSync(
   "src-tauri/src/windows_appearance/startup.js",
@@ -166,6 +169,8 @@ describe("rendered palette startup hint", () => {
     platform.os = "linux";
     platform.invoke.mockReset().mockResolvedValue(undefined);
     platform.osType.mockReset().mockImplementation(() => platform.os);
+    platform.setTheme.mockReset().mockResolvedValue(undefined);
+    platform.currentWindow.mockReset().mockReturnValue({ setTheme: platform.setTheme });
     localStorage.clear();
     document.documentElement.removeAttribute("style");
     document.documentElement.style.setProperty("--risu-theme-darkbg", "#776655");
@@ -201,7 +206,64 @@ describe("rendered palette startup hint", () => {
     await vi.runAllTimersAsync();
     expect(JSON.parse(localStorage.getItem(WINDOWS_APPEARANCE_CACHE)!)).toEqual(expected);
     expect(platform.invoke).not.toHaveBeenCalled();
+    if (os === "macos") {
+      expect(platform.setTheme).toHaveBeenCalledExactlyOnceWith("light");
+    } else {
+      expect(platform.currentWindow).not.toHaveBeenCalled();
+    }
     if (!desktop) expect(platform.osType).not.toHaveBeenCalled();
+  });
+
+  it("caches macOS colors while native theme application is pending and deduplicates after success", async () => {
+    platform.desktop = true;
+    platform.os = "macos";
+    let reply!: () => void;
+    platform.setTheme.mockImplementationOnce(() => new Promise<void>(resolve => { reply = resolve; }));
+    const { scheduleWindowsAppearance } = await import("./windowsAppearance");
+    scheduleWindowsAppearance(palette);
+    await vi.runAllTimersAsync();
+    expect(JSON.parse(localStorage.getItem(WINDOWS_APPEARANCE_CACHE)!)).toEqual(expected);
+    expect(platform.setTheme).toHaveBeenCalledExactlyOnceWith("light");
+    scheduleWindowsAppearance(palette);
+    await vi.runAllTimersAsync();
+    expect(platform.setTheme).toHaveBeenCalledOnce();
+    reply();
+    await vi.runAllTimersAsync();
+    expect(platform.setTheme).toHaveBeenCalledOnce();
+    expect(platform.invoke).not.toHaveBeenCalled();
+  });
+
+  it("keeps the macOS startup hint after native failure and retries the same theme", async () => {
+    platform.desktop = true;
+    platform.os = "macos";
+    platform.setTheme.mockRejectedValueOnce(new Error("unavailable"));
+    const warning = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { scheduleWindowsAppearance } = await import("./windowsAppearance");
+    scheduleWindowsAppearance(palette);
+    await vi.runAllTimersAsync();
+    expect(JSON.parse(localStorage.getItem(WINDOWS_APPEARANCE_CACHE)!)).toEqual(expected);
+    expect(warning).toHaveBeenCalledExactlyOnceWith("Could not apply the macOS window theme");
+    scheduleWindowsAppearance(palette);
+    await vi.runAllTimersAsync();
+    expect(platform.setTheme.mock.calls).toEqual([["light"], ["light"]]);
+    expect(platform.invoke).not.toHaveBeenCalled();
+  });
+
+  it("orders macOS theme updates while keeping the newest rendered startup hint", async () => {
+    platform.desktop = true;
+    platform.os = "macos";
+    let reply!: () => void;
+    platform.setTheme.mockImplementationOnce(() => new Promise<void>(resolve => { reply = resolve; }));
+    const { scheduleWindowsAppearance } = await import("./windowsAppearance");
+    scheduleWindowsAppearance({ ...palette, type: "dark" });
+    await vi.runAllTimersAsync();
+    scheduleWindowsAppearance(palette);
+    await vi.runAllTimersAsync();
+    expect(platform.setTheme).toHaveBeenCalledExactlyOnceWith("dark");
+    expect(JSON.parse(localStorage.getItem(WINDOWS_APPEARANCE_CACHE)!)).toEqual(expected);
+    reply();
+    await vi.runAllTimersAsync();
+    expect(platform.setTheme.mock.calls).toEqual([["dark"], ["light"]]);
   });
 
   it("keeps Windows persistence after native success and skips an unchanged palette", async () => {

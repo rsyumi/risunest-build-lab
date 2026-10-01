@@ -4,7 +4,11 @@ import { mount, tick, unmount } from 'svelte'
 import type { Writable } from 'svelte/store'
 import type { CommittedApplyOutcome } from 'src/ts/storage/persistentDataRuntime'
 
-const mocks = vi.hoisted(() => ({ retry: vi.fn(), retryExternal: vi.fn() }))
+const mocks = vi.hoisted(() => ({ retry: vi.fn(), retryExternal: vi.fn(), retryServer: vi.fn() }))
+vi.mock('src/ts/storage/sync/serverSyncRecovery', async () => {
+    const { writable } = await import('svelte/store')
+    return { serverSyncRecovery: writable(null), retryServerSyncRecovery: mocks.retryServer }
+})
 vi.mock('src/ts/storage/sync/external/applicationRecovery', async () => {
     const { writable } = await import('svelte/store')
     return {
@@ -24,12 +28,14 @@ vi.mock('src/lang', async () => ({
 }))
 
 import { externalApplicationRecovery } from 'src/ts/storage/sync/external/applicationRecovery'
+import { serverSyncRecovery } from 'src/ts/storage/sync/serverSyncRecovery'
 import Recovery from './PersistentWorkingSetRecovery.svelte'
 import { persistentWorkingSetRefreshRevision } from 'src/ts/storage/persistentDataRuntime.svelte'
 import { languageEnglish } from 'src/lang/en'
 import { languageKorean } from 'src/lang/ko'
 
 const external = externalApplicationRecovery as Writable<{ jobId: string; confirmationPending: boolean } | null>
+const server = serverSyncRecovery as Writable<{ confirmationPending: boolean } | null>
 const revision = persistentWorkingSetRefreshRevision as Writable<number | null>
 const copy = languageEnglish.risuNest.persistentData
 
@@ -40,6 +46,8 @@ describe('committed working-set recovery', () => {
     beforeEach(() => {
         mocks.retry.mockReset()
         mocks.retryExternal.mockReset()
+        mocks.retryServer.mockReset()
+        server.set(null)
         external.set(null)
         revision.set(null)
         target = document.createElement('div')
@@ -61,6 +69,22 @@ describe('committed working-set recovery', () => {
         await setup(null)
         expect(target.querySelector('[role="dialog"]')).toBeNull()
         expect(mocks.retry).not.toHaveBeenCalled()
+    })
+
+    it.each([true, false])('keeps server recovery reachable outside the working set for confirmation=%s', async confirmationPending => {
+        server.set({ confirmationPending })
+        mocks.retryServer.mockRejectedValueOnce(new Error('native unavailable'))
+        await setup(null)
+        expect(target.textContent).toContain(confirmationPending ? copy.confirmApplicationTitle : copy.refreshTitle)
+        expect(document.activeElement).toBe(target.querySelector('[role="dialog"]'))
+        target.querySelector('button')!.click()
+        await vi.waitFor(() => expect(target.querySelector('[role="alert"]')).not.toBeNull())
+        expect(mocks.retry).not.toHaveBeenCalled()
+        expect(mocks.retryExternal).not.toHaveBeenCalled()
+        mocks.retryServer.mockImplementationOnce(async () => { server.set(null) })
+        target.querySelector('button')!.click()
+        await vi.waitFor(() => expect(target.querySelector('[role="dialog"]')).toBeNull())
+        expect(mocks.retryServer).toHaveBeenCalledTimes(2)
     })
 
     it('explains the committed result and focuses the recovery dialog', async () => {

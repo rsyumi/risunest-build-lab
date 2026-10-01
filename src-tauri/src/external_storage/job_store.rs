@@ -592,6 +592,7 @@ pub(crate) struct JobCommandState {
     cleanup_closed: std::sync::atomic::AtomicBool,
     background_workers: Arc<std::sync::atomic::AtomicUsize>,
     pub root: std::sync::OnceLock<std::path::PathBuf>,
+    lease_ledger: Mutex<Option<Arc<super::lease_ledger::LocalLeaseLedger>>>,
     pub active: ActiveJobs,
     pub session: Mutex<Session>,
     pub automatic_targets: Mutex<HashMap<String, AutomaticTarget>>,
@@ -604,6 +605,33 @@ impl Drop for BackgroundWorker {
 }
 
 impl JobCommandState {
+    pub(crate) fn open_lease_ledger(&self, cache: &std::path::Path) -> Result<()> {
+        let mut slot = self.lease_ledger.lock().map_err(failure)?;
+        if slot.is_some() { return Err(ProviderError::new(ErrorKind::PreconditionFailed)); }
+        *slot = Some(Arc::new(super::lease_ledger::LocalLeaseLedger::open(cache)?));
+        Ok(())
+    }
+
+    pub(crate) fn lease_ledger(&self) -> Result<Arc<super::lease_ledger::LocalLeaseLedger>> {
+        let slot = self.lease_ledger.lock().map_err(failure)?;
+        if self.cleanup_closed.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(ProviderError::new(ErrorKind::Cancelled));
+        }
+        slot.clone().ok_or_else(|| ProviderError::new(ErrorKind::PreconditionFailed))
+    }
+
+    pub(crate) fn close_lease_ledger_for_cleanup(&self) -> Result<()> {
+        if !self.cleanup_closed.load(std::sync::atomic::Ordering::Acquire) || !self.cleanup_drained()? {
+            return Err(ProviderError::new(ErrorKind::PreconditionFailed));
+        }
+        let mut slot = self.lease_ledger.lock().map_err(failure)?;
+        if slot.as_ref().is_some_and(|ledger| Arc::strong_count(ledger) != 1) {
+            return Err(ProviderError::new(ErrorKind::PreconditionFailed));
+        }
+        slot.take();
+        Ok(())
+    }
+
     pub(crate) fn track_blocking(&self, job: &str) -> Result<tokio::sync::oneshot::Sender<()>> {
         let (send, receive) = tokio::sync::oneshot::channel();
         self.blocking_tasks.lock().map_err(failure)?.entry(job.to_owned()).or_default().push(receive);
@@ -720,6 +748,49 @@ pub(crate) fn requested_revision(request: &StartJobRequest, fallback: i64) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detached_blocking_caller_keeps_admission_until_cancelled_worker_settles() {
+        use crate::native_file_jobs::admission::Admission;
+        use std::time::Duration;
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let state = JobCommandState::default();
+            let job = DurableJob::new(request(), false, 1, identity());
+            let (cancel, claim) = state.claim(&job).unwrap();
+            let completion = state.track_blocking(&job.id).unwrap();
+            let admission = Arc::new(Admission::default());
+            let worker_admission = admission.clone();
+            let worker_cancel = cancel.clone();
+            let (arrived, arrival) = tokio::sync::oneshot::channel();
+            let (release, released) = std::sync::mpsc::sync_channel(1);
+            let (completed, mut outcome) = tokio::sync::oneshot::channel();
+            let caller = tokio::task::spawn_blocking(move || {
+                let _completion = completion;
+                let _permit = worker_admission.file(true).unwrap();
+                arrived.send(()).unwrap();
+                released.recv_timeout(Duration::from_secs(10)).unwrap();
+                completed.send(worker_cancel.check().err().map(|error| error.kind)).unwrap();
+            });
+            tokio::time::timeout(Duration::from_secs(10), arrival).await.unwrap().unwrap();
+            // Dropping a JoinHandle detaches the running worker; it does not cancel it.
+            drop(caller);
+            assert_eq!(admission.file(false).err(), Some("library-operation-busy"));
+            assert!(state.claim(&job).is_err());
+            cancel.cancel();
+            let wait = state.settle_blocking(&job.id);
+            tokio::pin!(wait);
+            assert!(tokio::time::timeout(Duration::from_millis(20), &mut wait).await.is_err());
+            assert_eq!(admission.file(false).err(), Some("library-operation-busy"));
+            assert!(matches!(outcome.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Empty)));
+            release.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(5), &mut wait).await.unwrap().unwrap();
+            assert_eq!(outcome.await.unwrap(), Some(ErrorKind::Cancelled));
+            assert!(admission.file(false).is_ok());
+            drop(claim);
+            assert!(state.claim(&job).is_ok());
+        });
+    }
+
     fn request() -> StartJobRequest {
         serde_json::from_value(json!({"connectionId":"synthetic","kind":"backup"})).unwrap()
     }

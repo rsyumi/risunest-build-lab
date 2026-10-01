@@ -582,6 +582,27 @@ it("renders registration conflicts and publication failures as actionable messag
   expect(target.textContent).toContain("레지스트리 서버의 저장 공간이 부족합니다.");
 });
 
+it("shows the last successful device sync and refreshes it without inventing a missing history", async () => {
+  snapshot.devices = [
+    { id: "synthetic-synced", name: "Synced", revoked: false, pending: false, registrationRequest: null, lastAck: 1790771696 },
+    { id: "synthetic-unused", name: "Unused", revoked: false, pending: false, registrationRequest: null, lastAck: null },
+  ];
+  await open();
+  button("기기").click();
+  await settle();
+  const rows = target.querySelectorAll(".device-row");
+  expect(rows[0].textContent).toContain(`마지막 동기화: ${new Date("2026-09-30T12:34:56Z").toLocaleString()}`);
+  expect(rows[0].textContent).not.toContain("동기화 기록 없음");
+  expect(rows[1].textContent).toContain("동기화 기록 없음");
+  expect(rows[1].textContent).not.toContain("마지막 동기화:");
+
+  snapshot.devices[0].lastAck = 1790858096;
+  await vi.advanceTimersByTimeAsync(3000);
+  await settle();
+  expect(target.querySelector(".device-row")?.textContent).toContain(`마지막 동기화: ${new Date("2026-10-01T12:34:56Z").toLocaleString()}`);
+  expect(backend.mutate).not.toHaveBeenCalled();
+});
+
 it("requires confirmation before releasing revoked device custody", async () => {
   snapshot.devices = [{ id: "synthetic-device", name: "Synthetic", revoked: true, pending: false, registrationRequest: null, retained: 2, pendingError: "incompatible-store" }];
   await open();

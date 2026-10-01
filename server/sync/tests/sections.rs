@@ -196,7 +196,9 @@ fn checkpoints_carry_only_the_requested_sections() {
     let store = Store::init(dir.path()).unwrap();
     let a = device(&store);
     let empty = store.create_checkpoint(&a, &[Domain::Library]).unwrap();
-    let empty_page = store.checkpoint_page(&a, &empty.checkpoint_id, None, 128).unwrap();
+    let empty_page = store
+        .checkpoint_page(&a, &empty.checkpoint_id, None, 128)
+        .unwrap();
     assert_eq!(empty_page.total_records, Some(0.into()));
     assert!(empty_page.records.is_empty() && empty_page.next.is_none());
     store.release_checkpoint(&a, &empty.checkpoint_id).unwrap();
@@ -241,7 +243,10 @@ fn checkpoints_carry_only_the_requested_sections() {
         .unwrap();
     assert_eq!(second.records.len(), 1);
     assert_eq!(second.total_records, None);
-    assert!(serde_json::to_value(&second).unwrap().get("totalRecords").is_none());
+    assert!(serde_json::to_value(&second)
+        .unwrap()
+        .get("totalRecords")
+        .is_none());
     assert_eq!(second.records[0].domain, Domain::LocalPlugins);
     assert_eq!(
         store.create_checkpoint(&a, &[]).err().unwrap().code,

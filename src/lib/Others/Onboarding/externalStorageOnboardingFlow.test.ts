@@ -7,6 +7,7 @@ import type {
 } from 'src/ts/storage/sync/external/types'
 import {
     abandonExternalOnboardingSelection,
+    loadExternalOnboardingConflict,
     externalOnboardingAction,
     externalOnboardingConflictStep,
     externalOnboardingRestorable,
@@ -181,5 +182,22 @@ describe('onboarding selection ownership', () => {
         const native = bridge()
         native.setSyncTarget.mockRejectedValue({ kind: 'preconditionFailed' })
         await expect(abandonExternalOnboardingSelection(owner, native)).rejects.toMatchObject({ kind: 'preconditionFailed' })
+    })
+})
+
+describe('onboarding conflict identity', () => {
+    it('loads the exact conflict from later pages instead of another conflict on the connection', async () => {
+        const wanted = conflict({ id: 'wanted', connectionId: 'connection-1' })
+        const bridge = { listConflicts: vi.fn()
+            .mockResolvedValueOnce({ conflicts: [conflict({ id: 'other', connectionId: 'connection-1' })], nextCursor: { createdAtMs: 1, id: 'other' } })
+            .mockResolvedValueOnce({ conflicts: [wanted] }) }
+        await expect(loadExternalOnboardingConflict('connection-1', 'wanted', bridge)).resolves.toEqual(wanted)
+        expect(bridge.listConflicts).toHaveBeenCalledTimes(2)
+        expect(bridge.listConflicts.mock.calls[1]).toEqual([{ createdAtMs: 1, id: 'other' }, 50])
+    })
+    it('does not infer a conflict when the completed job omitted its identity', async () => {
+        const bridge = { listConflicts: vi.fn() }
+        await expect(loadExternalOnboardingConflict('connection-1', undefined, bridge)).rejects.toMatchObject({ kind: 'corrupt' })
+        expect(bridge.listConflicts).not.toHaveBeenCalled()
     })
 })

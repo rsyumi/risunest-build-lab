@@ -417,7 +417,6 @@ mod tests {
             stream.write_all(&response).unwrap();
             stream.flush().unwrap();
             stream.shutdown(Shutdown::Write).unwrap();
-            while stream.read(&mut buffer).unwrap() != 0 {}
             request
         });
         (format!("http://{address}"), handle)
