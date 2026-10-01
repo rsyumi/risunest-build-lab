@@ -111,8 +111,8 @@
     {
       "path": "benchmarks/ios/NativeUITests.swift",
       "mode": "100644",
-      "bytes": 29027,
-      "sha256": "378a1ad4cbcfa120d9cd8e31c3af469bf341ccc3f52150c96f79039401acb2bf"
+      "bytes": 29876,
+      "sha256": "e1255f7a2cbdf1dce40268e72a033a8f6f1e415c8ff8b8a18b6699df42d923e5"
     },
     {
       "path": "benchmarks/ios/buildTestLab.py",
@@ -435,8 +435,8 @@
     {
       "path": "benchmarks/plugin-review/android-smoke.mjs",
       "mode": "100644",
-      "bytes": 8529,
-      "sha256": "424bb14c21387a89c8624cfec2b031e3eb2bff3c131eedf9685557d2fc02c3a0"
+      "bytes": 9054,
+      "sha256": "19de9a576f6bd6629d3d2173eb4a1312fe2d78f29335c1d5f9a91c41e7265c42"
     },
     {
       "path": "benchmarks/plugin-review/index.html",

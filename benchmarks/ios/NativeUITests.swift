@@ -306,7 +306,7 @@ final class NativeUITests: XCTestCase {
         XCTAssertTrue(app.webViews.staticTexts["passed"].waitForExistence(timeout: 10))
     }
 
-    private func cancelPicker(_ app: XCUIApplication) {
+    private func cancelPicker(_ app: XCUIApplication, step: Int) {
         // On iOS 26, export subfolders show a Back button; Cancel is at the root.
         let cancel = app.buttons["Cancel"]
         for _ in 0..<4 {
@@ -317,6 +317,19 @@ final class NativeUITests: XCTestCase {
             let back = app.navigationBars.buttons.matching(identifier: "BackButton").firstMatch
             guard back.waitForExistence(timeout: 15) else { break }
             back.tap()
+        }
+        let back = app.navigationBars.buttons.matching(identifier: "BackButton").firstMatch
+        let close = app.buttons["Close"]
+        let cancelExists = cancel.exists
+        let cancelHittable = cancelExists && cancel.isHittable
+        let backExists = back.exists
+        let backHittable = backExists && back.isHittable
+        let closeExists = close.exists
+        let closeHittable = closeExists && close.isHittable
+        print("RISUNEST_CR228_PICKER_CAPABILITY step=\(step) cancel_exists=\(cancelExists ? 1 : 0) cancel_hittable=\(cancelHittable ? 1 : 0) back_exists=\(backExists ? 1 : 0) back_hittable=\(backHittable ? 1 : 0) close_exists=\(closeExists ? 1 : 0) close_hittable=\(closeHittable ? 1 : 0)")
+        if closeExists && closeHittable {
+            close.tap()
+            return
         }
         logSyntheticStep(app, step: 207, reached: false)
         XCTFail("The native file picker has no reachable Cancel action")
@@ -473,14 +486,14 @@ final class NativeUITests: XCTestCase {
 
         logSyntheticStep(app, step: 202, reached: false)
         app.webViews.buttons["Import synthetic file"].tap()
-        cancelPicker(app)
+        cancelPicker(app, step: 202)
         let imported = app.webViews.staticTexts["import-cancelled"].waitForExistence(timeout: 10)
         logSyntheticStep(app, step: 202, reached: imported)
         XCTAssertTrue(imported)
 
         logSyntheticStep(app, step: 203, reached: false)
         app.webViews.buttons["Export synthetic file"].tap()
-        cancelPicker(app)
+        cancelPicker(app, step: 203)
         let exported = app.webViews.staticTexts["export-cancelled"].waitForExistence(timeout: 10)
         logSyntheticStep(app, step: 203, reached: exported)
         XCTAssertTrue(exported)
