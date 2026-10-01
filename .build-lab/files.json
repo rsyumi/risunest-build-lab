@@ -111,8 +111,8 @@
     {
       "path": "benchmarks/ios/NativeUITests.swift",
       "mode": "100644",
-      "bytes": 26663,
-      "sha256": "120570826c9d1eef31e0562ab7d4262a95fceab94decfb149924a75c0034bb6c"
+      "bytes": 29027,
+      "sha256": "378a1ad4cbcfa120d9cd8e31c3af469bf341ccc3f52150c96f79039401acb2bf"
     },
     {
       "path": "benchmarks/ios/buildTestLab.py",
@@ -4119,8 +4119,8 @@
     {
       "path": "src-tauri/gen/android/app/build.gradle.kts",
       "mode": "100644",
-      "bytes": 8336,
-      "sha256": "d99dfe684ae095944e4a6e25477f12071aa531fb01dd3db636df2c9bf2733457"
+      "bytes": 9451,
+      "sha256": "d771ced5ad49af586cd1dcfed16a3bcd7ebee8316ede252323b51f731402e3e1"
     },
     {
       "path": "src-tauri/gen/android/app/proguard-rules.pro",
@@ -4531,10 +4531,16 @@
       "sha256": "3488450f755ee6ed9eeaaad99e7adcc27de827f98f4657d9a4fb4af47c2f8663"
     },
     {
+      "path": "src-tauri/gen/android/buildSrc/src/main/java/io/github/rsyumi/risunest/kotlin/VerifyJniNativeInitialization.kt",
+      "mode": "100644",
+      "bytes": 530,
+      "sha256": "8ffab394d8f46d1549ffd409aadd12483809b074b25dbb330d5c8df614e86290"
+    },
+    {
       "path": "src-tauri/gen/android/buildSrc/src/test/kotlin/PrepareWryRendererRecoveryTest.kt",
       "mode": "100644",
-      "bytes": 2495,
-      "sha256": "aab008c32787e853fb6fc0ca968c85665762e55ed9c15f3a74f3e03666b499ed"
+      "bytes": 4553,
+      "sha256": "42af34bb3d4fba228dde6a408a310a1e0dba58d79a5c4751a90a45d94d3f35f8"
     },
     {
       "path": "src-tauri/gen/android/gradle.properties",

@@ -54,4 +54,41 @@ class RustWebViewClient {
         assertFalse(patched.contains("::mWebView.isInitialized"))
         assertEquals(patched, patchRendererActivity(patched))
     }
+
+    private fun nativeInitializer(owner: String, method: String = "initialize", signature: String = "()V", access: String = "0119") = """
+    #1              : (in Lio/github/rsyumi/risunest/$owner;)
+      name          : '$method'
+      type          : '$signature'
+      access        : 0x$access (PUBLIC STATIC FINAL NATIVE)
+""".trimStart('\n')
+
+    @Test fun nativeInitializersRemainVerifiedWhenR8OmitsTheirMappingLines() {
+        val mapping = """
+io.github.rsyumi.risunest.ExternalStorageSecrets -> io.github.rsyumi.risunest.ExternalStorageSecrets:
+    11:20:byte[] open(java.lang.String,byte[]):83:83 -> open
+io.github.rsyumi.risunest.ServerSyncSecrets -> io.github.rsyumi.risunest.ServerSyncSecrets:
+    6:11:byte[] open(byte[]):61:61 -> open
+""".trimIndent()
+        assertFalse(mapping.contains("initialize"))
+        val dump = nativeInitializer("ExternalStorageSecrets") + nativeInitializer("ServerSyncSecrets").replace("#1", "#2")
+        assertEquals(setOf("ExternalStorageSecrets", "ServerSyncSecrets"), retainedJniNativeInitializers(dump))
+        assertEquals(retainedJniNativeInitializers(dump), retainedJniNativeInitializers(dump.replace("\n", "\r\n")))
+    }
+
+    @Test fun nativeInitializerRequiresExactOwnerNameDescriptorAndFlags() {
+        for (dump in listOf(
+            "",
+            nativeInitializer("OtherSecrets"),
+            nativeInitializer("ExternalStorageSecrets", method = "renamed"),
+            nativeInitializer("ExternalStorageSecrets", signature = "([B)V"),
+            nativeInitializer("ExternalStorageSecrets", signature = "()I"),
+            nativeInitializer("ExternalStorageSecrets", access = "0111"),
+            nativeInitializer("ExternalStorageSecrets", access = "0019"),
+        )) {
+            assertTrue(retainedJniNativeInitializers(dump).isEmpty())
+        }
+        val missingServer = retainedJniNativeInitializers(nativeInitializer("ExternalStorageSecrets"))
+        assertEquals(setOf("ExternalStorageSecrets"), missingServer)
+        assertFalse("ServerSyncSecrets" in missingServer)
+    }
 }
