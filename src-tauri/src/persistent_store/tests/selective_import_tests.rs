@@ -9,7 +9,7 @@ fn archive() -> rusqlite::Connection {
     let db = rusqlite::Connection::open_in_memory().unwrap();
     create_raw_tables(&db).unwrap();
     db.execute(
-        "INSERT INTO root (value) VALUES ('{\"botPresetsId\":1,\"characterOrder\":[\"char-a\",\"char-b\"]}')",
+        "INSERT INTO root (value) VALUES ('{\"botPresetsId\":\"preset-studio\",\"characterOrder\":[\"char-a\",\"char-b\"]}')",
         [],
     )
     .unwrap();
@@ -42,14 +42,14 @@ fn archive() -> rusqlite::Connection {
         )
         .unwrap();
     }
-    for (index, name) in ["default", "studio"].into_iter().enumerate() {
+    for (index, (id, name)) in [("preset-default", "default"), ("preset-studio", "studio")].into_iter().enumerate() {
         db.execute(
             "INSERT INTO bot_presets (preset_id,configured_index,name,image,value) VALUES (?1,?2,?3,NULL,?4)",
             params![
-                index.to_string(),
+                id,
                 index as i64,
                 name,
-                format!("{{\"name\":\"{name}\"}}")
+                format!("{{\"id\":\"{id}\",\"name\":\"{name}\"}}")
             ],
         )
         .unwrap();
@@ -93,7 +93,7 @@ fn a_partial_import_stages_only_what_was_chosen_and_activates() {
     let directory = tempfile::tempdir().unwrap();
     let mut store = PersistentStore::open(directory.path()).unwrap();
     let source = archive();
-    let staging = stage(&mut store, &source, selection(&["char-b"], &["1"]));
+    let staging = stage(&mut store, &source, selection(&["char-b"], &["preset-studio"]));
 
     assert_eq!(
         ids(
@@ -136,11 +136,11 @@ fn a_partial_import_stages_only_what_was_chosen_and_activates() {
 }
 
 #[test]
-fn the_records_that_stay_are_renumbered_and_the_chosen_preset_follows_them() {
+fn retained_record_positions_are_compacted_without_changing_the_selected_preset_identity() {
     let directory = tempfile::tempdir().unwrap();
     let mut store = PersistentStore::open(directory.path()).unwrap();
     let source = archive();
-    let staging = stage(&mut store, &source, selection(&["char-b"], &["1"]));
+    let staging = stage(&mut store, &source, selection(&["char-b"], &["preset-studio"]));
 
     let index: i64 = store
         .connection
@@ -159,8 +159,12 @@ fn the_records_that_stay_are_renumbered_and_the_chosen_preset_follows_them() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(preset, "0", "a preset is named by its own position");
-    let selected: i64 = store
+    assert_eq!(preset, "preset-studio", "compacting the order keeps the preset's identity");
+    let preset_index: i64 = store.connection.query_row(
+        "SELECT configured_index FROM bot_presets WHERE generation=?1", [&staging], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(preset_index, 0, "the retained preset's configured order has no gap");
+    let selected: String = store
         .connection
         .query_row(
             "SELECT json_extract(value,'$.botPresetsId') FROM root WHERE generation=?1",
@@ -168,7 +172,7 @@ fn the_records_that_stay_are_renumbered_and_the_chosen_preset_follows_them() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(selected, 0, "the chosen preset is still the chosen one");
+    assert_eq!(selected, "preset-studio", "the chosen preset is still the chosen one");
 }
 
 #[test]
@@ -245,7 +249,7 @@ fn a_partial_import_never_writes_to_the_archive_it_read() {
     let before = crate::persistent_store::portable::digest_raw_tables(&source, &NeverCancelled)
         .unwrap();
 
-    let staging = stage(&mut store, &source, selection(&["char-b"], &["1"]));
+    let staging = stage(&mut store, &source, selection(&["char-b"], &["preset-studio"]));
     store.replace_commit(&staging, Some(0)).unwrap();
 
     // Discard the reader's TEMP projection to compare the underlying archive tables.
