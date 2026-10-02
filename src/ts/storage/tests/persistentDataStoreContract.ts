@@ -121,7 +121,7 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
                 const database = structuredClone(fixtureDatabase)
                 database.modules = [
                     {
-                        id: 'duplicate-module',
+                        id: 'module-1',
                         name: 'First duplicate',
                         description: '',
                         assets: [
@@ -130,7 +130,7 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
                         ],
                     },
                     {
-                        id: 'duplicate-module',
+                        id: 'module-2',
                         name: 'Second duplicate',
                         description: '',
                         assets: [],
@@ -138,21 +138,25 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
                 ]
                 database.personas = [
                     {
-                        name: 'Missing ID and absent assets',
+                        id: 'persona-1',
+
+                        name: 'Stable ID and absent assets',
                         personaPrompt: '',
                         icon: '',
                         embeddedModule: {
-                            id: '',
+                            id: 'embedded-1',
                             name: 'Absent assets',
                             description: '',
                         },
                     },
                     {
-                        name: 'Missing ID and present assets',
+                        id: 'persona-2',
+
+                        name: 'Stable ID and present assets',
                         personaPrompt: '',
                         icon: '',
                         embeddedModule: {
-                            id: '',
+                            id: 'embedded-2',
                             name: 'Present assets',
                             description: '',
                             assets: [['persona', 'assets/persona.bin', 'OddExt']],
@@ -163,25 +167,25 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
                 const root = (await store.readRoot()).value
                 const originalHeads: AssetOwnerHead[] = [
                     {
-                        owner: { kind: 'root-module-assets', index: 0 },
+                        owner: { kind: 'root-module-assets', moduleId: database.modules?.[0 ]?.id ?? 'missing-module' },
                         present: true,
                         manifestHash: '11'.repeat(32),
                         entryCount: 2,
                     },
                     {
-                        owner: { kind: 'root-module-assets', index: 1 },
+                        owner: { kind: 'root-module-assets', moduleId: database.modules?.[1 ]?.id ?? 'missing-module' },
                         present: true,
                         manifestHash: '22'.repeat(32),
                         entryCount: 0,
                     },
                     {
-                        owner: { kind: 'persona-embedded-module-assets', index: 0 },
+                        owner: { kind: 'persona-embedded-module-assets', personaId: database.personas?.[0]?.id ?? 'missing-persona', moduleId: database.personas?.[0]?.embeddedModule?.id ?? 'missing-module' },
                         present: false,
                         manifestHash: null,
                         entryCount: 0,
                     },
                     {
-                        owner: { kind: 'persona-embedded-module-assets', index: 1 },
+                        owner: { kind: 'persona-embedded-module-assets', personaId: database.personas?.[1]?.id ?? 'missing-persona', moduleId: database.personas?.[1]?.embeddedModule?.id ?? 'missing-module' },
                         present: true,
                         manifestHash: '33'.repeat(32),
                         entryCount: 1,
@@ -197,13 +201,13 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
                 reorderedRoot.modules.reverse()
                 const reorderedHeads: AssetOwnerHead[] = [
                     {
-                        owner: { kind: 'root-module-assets', index: 0 },
+                        owner: { kind: 'root-module-assets', moduleId: reorderedRoot.modules?.[0 ]?.id ?? 'missing-module' },
                         present: true,
                         manifestHash: '22'.repeat(32),
                         entryCount: 0,
                     },
                     {
-                        owner: { kind: 'root-module-assets', index: 1 },
+                        owner: { kind: 'root-module-assets', moduleId: reorderedRoot.modules?.[1 ]?.id ?? 'missing-module' },
                         present: true,
                         manifestHash: '11'.repeat(32),
                         entryCount: 2,
@@ -228,26 +232,22 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
 
                 expect(
                     await store.readAssetOwnerHead({
-                        kind: 'root-module-assets',
-                        index: 0,
+                        kind: 'root-module-assets', moduleId: database.modules?.[0 ]?.id ?? 'missing-module',
                     }),
-                ).toEqual({ revision: reordered.revision, value: reorderedHeads[0] })
+                ).toEqual({ revision: reordered.revision, value: reorderedHeads[1] })
                 expect(
                     await store.readAssetOwnerHead({
-                        kind: 'persona-embedded-module-assets',
-                        index: 0,
+                        kind: 'persona-embedded-module-assets', personaId: database.personas?.[0]?.id ?? 'missing-persona', moduleId: database.personas?.[0]?.embeddedModule?.id ?? 'missing-module',
                     }),
                 ).toEqual({ revision: reordered.revision, value: originalHeads[2] })
                 expect(
                     await lease.readAssetOwnerHead({
-                        kind: 'root-module-assets',
-                        index: 0,
+                        kind: 'root-module-assets', moduleId: database.modules?.[0 ]?.id ?? 'missing-module',
                     }),
                 ).toEqual({ revision: shadowed.revision, value: originalHeads[0] })
                 expect(
                     await lease.readAssetOwnerHead({
-                        kind: 'persona-embedded-module-assets',
-                        index: 0,
+                        kind: 'persona-embedded-module-assets', personaId: database.personas?.[0]?.id ?? 'missing-persona', moduleId: database.personas?.[0]?.embeddedModule?.id ?? 'missing-module',
                     }),
                 ).toEqual({ revision: shadowed.revision, value: originalHeads[2] })
                 await lease.release()
@@ -266,7 +266,7 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
             const imported = await store.replaceFromDatabase(database)
             const originalRoot = (await store.readRoot()).value
             const validHead: AssetOwnerHead = {
-                owner: { kind: 'root-module-assets', index: 0 },
+                owner: { kind: 'root-module-assets', moduleId: database.modules?.[0 ]?.id ?? 'missing-module' },
                 present: true,
                 manifestHash: '44'.repeat(32),
                 entryCount: 1,
@@ -368,7 +368,7 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
             const imported = await store.replaceFromDatabase(database)
             const root = (await store.readRoot()).value
             const head: AssetOwnerHead = {
-                owner: { kind: 'root-module-assets', index: 0 },
+                owner: { kind: 'root-module-assets', moduleId: database.modules?.[0 ]?.id ?? 'missing-module' },
                 present: true,
                 manifestHash: '56'.repeat(32),
                 entryCount: 1,
@@ -399,7 +399,7 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
             expect(await store.readAssetOwnerHead(head.owner)).toBeNull()
         })
 
-        it('moves omitted root owner heads with uniquely identified modules', async () => {
+        it('preserves omitted owner heads by stable module IDs during reorder', async () => {
             const { store } = await createHarness()
             const database = structuredClone(fixtureDatabase)
             database.modules = [
@@ -420,13 +420,13 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
             const root = (await store.readRoot()).value
             const heads: AssetOwnerHead[] = [
                 {
-                    owner: { kind: 'root-module-assets', index: 0 },
+                    owner: { kind: 'root-module-assets', moduleId: database.modules?.[0 ]?.id ?? 'missing-module' },
                     present: true,
                     manifestHash: '57'.repeat(32),
                     entryCount: 1,
                 },
                 {
-                    owner: { kind: 'root-module-assets', index: 1 },
+                    owner: { kind: 'root-module-assets', moduleId: database.modules?.[1 ]?.id ?? 'missing-module' },
                     present: true,
                     manifestHash: '58'.repeat(32),
                     entryCount: 1,
@@ -446,18 +446,16 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
             })
 
             expect(await store.readAssetOwnerHead({
-                kind: 'root-module-assets',
-                index: 0,
+                kind: 'root-module-assets', moduleId: database.modules?.[0 ]?.id ?? 'missing-module',
             })).toEqual({
                 revision: reordered.revision,
-                value: { ...heads[1], owner: { kind: 'root-module-assets', index: 0 } },
+                value: heads[0],
             })
             expect(await store.readAssetOwnerHead({
-                kind: 'root-module-assets',
-                index: 1,
+                kind: 'root-module-assets', moduleId: database.modules?.[1 ]?.id ?? 'missing-module',
             })).toEqual({
                 revision: reordered.revision,
-                value: { ...heads[0], owner: { kind: 'root-module-assets', index: 1 } },
+                value: heads[1],
             })
         })
 
@@ -690,7 +688,7 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
                     entryCount: 1,
                 },
                 {
-                    owner: { kind: 'root-module-assets', index: 0 },
+                    owner: { kind: 'root-module-assets', moduleId: root.modules?.[0 ]?.id ?? 'missing-module' },
                     present: true,
                     manifestHash: '94'.repeat(32),
                     entryCount: 1,
@@ -952,7 +950,7 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
                 ext: 'BIN',
             }
             const head: AssetOwnerHead = {
-                owner: { kind: 'root-module-assets', index: 0 },
+                owner: { kind: 'root-module-assets', moduleId: database.modules?.[0 ]?.id ?? 'missing-module' },
                 present: true,
                 manifestHash: '78'.repeat(32),
                 entryCount: 1,
@@ -988,7 +986,7 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
             const database = structuredClone(fixtureDatabase)
             const initial = await store.replaceFromDatabase(database)
             const invalidHead = {
-                owner: { kind: 'root-module-assets', index: 0 },
+                owner: { kind: 'root-module-assets', moduleId: database.modules?.[0 ]?.id ?? 'missing-module' },
                 present: true,
                 manifestHash: 'invalid',
                 entryCount: 0,
@@ -1032,6 +1030,7 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
                 ['character', 'assets/character.bin', 'BIN'],
             ]
             database.personas = [{
+                id: 'persona-owner',
                 name: 'Absent module assets',
                 personaPrompt: '',
                 icon: '',
@@ -1064,13 +1063,13 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
             ]
             const heads: AssetOwnerHead[] = [
                 {
-                    owner: { kind: 'root-module-assets', index: 0 },
+                    owner: { kind: 'root-module-assets', moduleId: database.modules?.[0 ]?.id ?? 'missing-module' },
                     present: true,
                     manifestHash: '63'.repeat(32),
                     entryCount: 1,
                 },
                 {
-                    owner: { kind: 'root-module-assets', index: 1 },
+                    owner: { kind: 'root-module-assets', moduleId: database.modules?.[1 ]?.id ?? 'missing-module' },
                     present: true,
                     manifestHash: '64'.repeat(32),
                     entryCount: 1,
@@ -1085,7 +1084,7 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
                     entryCount: 1,
                 },
                 {
-                    owner: { kind: 'persona-embedded-module-assets', index: 0 },
+                    owner: { kind: 'persona-embedded-module-assets', personaId: database.personas?.[0]?.id ?? 'missing-persona', moduleId: database.personas?.[0]?.embeddedModule?.id ?? 'missing-module' },
                     present: false,
                     manifestHash: null,
                     entryCount: 0,
@@ -1146,7 +1145,7 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
             }]
             const imported = await store.replaceFromDatabase(database)
             const head: AssetOwnerHead = {
-                owner: { kind: 'root-module-assets', index: 0 },
+                owner: { kind: 'root-module-assets', moduleId: database.modules?.[0 ]?.id ?? 'missing-module' },
                 present: true,
                 manifestHash: '69'.repeat(32),
                 entryCount: 1,
@@ -1179,6 +1178,7 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
                 assets: [['kept', 'assets/kept.bin', 'BIN']],
             }]
             database.personas = [{
+                id: 'persona-owner',
                 name: 'Persona',
                 personaPrompt: '',
                 icon: '',
@@ -1201,13 +1201,13 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
             }
             const heads: AssetOwnerHead[] = [
                 {
-                    owner: { kind: 'root-module-assets', index: 0 },
+                    owner: { kind: 'root-module-assets', moduleId: database.modules?.[0 ]?.id ?? 'missing-module' },
                     present: true,
                     manifestHash: '72'.repeat(32),
                     entryCount: 1,
                 },
                 {
-                    owner: { kind: 'persona-embedded-module-assets', index: 0 },
+                    owner: { kind: 'persona-embedded-module-assets', personaId: database.personas?.[0]?.id ?? 'missing-persona', moduleId: database.personas?.[0]?.embeddedModule?.id ?? 'missing-module' },
                     present: true,
                     manifestHash: '73'.repeat(32),
                     entryCount: 1,
@@ -1557,11 +1557,11 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
             expect(await store.queryPresets()).toEqual({
                 revision: imported.revision,
                 items: [
-                    { id: '0', name: 'Preset Beta', image: 'preset-beta.png', configuredIndex: 0 },
-                    { id: '1', name: 'Preset Alpha', configuredIndex: 1 },
+                    { id: 'preset-beta', name: 'Preset Beta', image: 'preset-beta.png', configuredIndex: 0 },
+                    { id: 'preset-alpha', name: 'Preset Alpha', configuredIndex: 1 },
                 ],
             })
-            expect((await store.readPreset('1'))?.value).toEqual(fixtureDatabase.botPresets[1])
+            expect((await store.readPreset('preset-alpha'))?.value).toEqual(fixtureDatabase.botPresets[1])
             expect(await store.readPreset('missing')).toBeNull()
             expect((await store.materializeDatabase()).botPresets).toEqual(fixtureDatabase.botPresets)
         })
@@ -1607,7 +1607,7 @@ export function persistentDataStoreContract(createHarness: () => Promise<Persist
                 'Preset Beta',
                 'Preset Alpha',
             ])
-            expect((await lease.readPreset('0'))?.value.name).toBe('Preset Beta')
+            expect((await lease.readPreset('preset-beta'))?.value.name).toBe('Preset Beta')
             await lease.release()
             await expect(lease.queryPresets()).rejects.toBeInstanceOf(SnapshotReleasedError)
         })

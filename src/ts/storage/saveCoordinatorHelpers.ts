@@ -31,6 +31,18 @@ export function canonicalClone<T>(value: T): T {
     return JSON.parse(canonicalJson(value)) as T
 }
 
+export function clonePersistentRootFields(root: PersistentRoot): PersistentRoot {
+    const result: Record<string, unknown> = {}
+    for (const key of Object.keys(root)) {
+        const value = (root as unknown as Record<string, unknown>)[key]
+        if (value === undefined || typeof value === 'function' || typeof value === 'symbol') continue
+        defineOwnEnumerableProperty(result, key, value !== null && typeof value === 'object'
+            ? canonicalClone(value)
+            : typeof value === 'number' && !Number.isFinite(value) ? null : value)
+    }
+    return result as PersistentRoot
+}
+
 export function pluginStorageJson(storage: Database['pluginCustomStorage']): string {
     const normalized: Database['pluginCustomStorage'] = {}
     for (const key of Object.keys(storage)) {

@@ -83,6 +83,7 @@ pub(crate) struct PreparedContentCapture {
     consumer: String,
     capture_id: String,
     reader: RevisionReadLease,
+    full: bool,
     repository_root: PathBuf,
     _inventory: super::snapshot::DeferredAssetInventory,
 }
@@ -122,6 +123,45 @@ impl PersistentStore {
             consumer: consumer.into(),
             capture_id: capture_id.into(),
             reader,
+            full: false,
+            repository_root: self.repository_root.clone(),
+            _inventory: inventory,
+        })
+    }
+}
+
+impl PersistentStore {
+    /// Consume the caller's pinned lease without opening a second snapshot.
+    pub(crate) fn prepare_content_capture_from_lease(
+        &mut self,
+        capture_id: &str,
+        consumer: &str,
+        lease: &str,
+    ) -> StoreResult<PreparedContentCapture> {
+        if capture_id.is_empty() || consumer.is_empty() {
+            return Err(missing_source("capture identity"));
+        }
+        let reader = self.revision_leases.get(lease)
+            .ok_or_else(|| missing_source("capture lease"))?;
+        let identity = sync_selection::identity(&reader.connection)?;
+        let current = sync_selection::identity(&self.connection)?;
+        if identity.store_id != current.store_id
+            || identity.library_epoch != current.library_epoch
+            || identity.generation != current.generation
+            || identity.selection_epoch != current.selection_epoch
+            || identity.revision > current.revision
+        {
+            return Err(missing_source("matching capture lease authority"));
+        }
+        let inventory = self.active_readers.defer_asset_inventory();
+        let reader = self.revision_leases.remove(lease)
+            .ok_or_else(|| missing_source("capture lease"))?;
+        Ok(PreparedContentCapture {
+            identity,
+            consumer: consumer.into(),
+            capture_id: capture_id.into(),
+            reader,
+            full: true,
             repository_root: self.repository_root.clone(),
             _inventory: inventory,
         })
@@ -139,10 +179,22 @@ impl PreparedContentCapture {
         scope_id: &[u8; 32],
         codec: &str,
     ) -> StoreResult<String> {
+        self.register_with_device_capture_id(store,catalog,scope_id,codec,"")
+    }
+
+    pub(crate) fn register_with_device_capture_id(
+        self,
+        store: &mut PersistentStore,
+        catalog: &crate::external_storage::capture::CaptureCatalog,
+        scope_id: &[u8; 32],
+        codec: &str,
+        device_capture_id: &str,
+    ) -> StoreResult<String> {
         let (file_hash, path, identity) = catalog.manifest()?;
         if identity != &self.identity
             || store.repository_root != self.repository_root
             || codec.is_empty()
+            || (!device_capture_id.is_empty() && device_capture_id != hex::encode(file_hash))
         {
             return Err(missing_source("matching capture identity"));
         }
@@ -162,7 +214,7 @@ impl PreparedContentCapture {
             &self.identity,
             &hex::encode(scope_id),
             codec,
-            "",
+            device_capture_id,
             &hex::encode(fingerprint),
             &self.consumer,
         )?;
@@ -187,7 +239,12 @@ impl PreparedContentCapture {
         let db = &self.reader.connection;
         let cas = PayloadCas::new(&self.repository_root)?;
         let sizes = PayloadSizes::open(&self.repository_root)?;
-        let after = match content_change_index::window(&self.reader, &self.consumer)? {
+        let window = if self.full {
+            ChangeWindow::Rebuild
+        } else {
+            content_change_index::window(&self.reader, &self.consumer)?
+        };
+        let after = match window {
             ChangeWindow::Rebuild => None,
             ChangeWindow::Incremental { after_revision } => {
                 // Authority transitions can change alias interpretation without
@@ -386,31 +443,40 @@ fn project_record(
         conversation_id,
     } = &locator
     {
-        let mut query = db.prepare("SELECT value FROM messages WHERE generation=?1 AND character_id=?2 AND conversation_id=?3 ORDER BY message_index")?;
-        let mut rows = query.query(params![generation, character_id, conversation_id])?;
-        let mut messages = Vec::new();
-        let mut bytes = 0usize;
-        while let Some(row) = rows.next()? {
-            check(probe)?;
-            let value: String = row.get(0)?;
-            if !messages.is_empty()
-                && (messages.len() == LOGICAL_MESSAGE_PAGE_SIZE || bytes + value.len() > 256 * 1024)
-            {
-                let page = encode_message_page(&messages).map_err(codec_error)?;
+        let cached = super::message_pages::load_pages(db, generation, character_id, conversation_id)?;
+        if cached.is_empty() {
+            let mut query = db.prepare("SELECT value FROM messages WHERE generation=?1 AND character_id=?2 AND conversation_id=?3 ORDER BY message_index")?;
+            let mut rows = query.query(params![generation, character_id, conversation_id])?;
+            let mut bodies = Vec::new();
+            while let Some(row) = rows.next()? {
+                check(probe)?;
+                let value: String = row.get(0)?;
+                bodies.push(risunest_sync_wire::payload_value::canonicalize(value.as_bytes()).map_err(codec_error)?);
+            }
+            let hashes = bodies.iter().map(|body| risunest_external_storage_format::message_pages::MessageHash::from_bytes(body)).collect();
+            let result = risunest_external_storage_format::message_pages::repage::<StoreError>(
+                &Default::default(), hashes, 0..0, bodies.len(), |index| {
+                    check(probe)?;
+                    Ok(bodies[index].clone())
+                })?;
+            for page in result.objects {
                 sink.object(&page.hash, &page.bytes)?;
                 sink.reference(&wire_key, &page.hash, page.size)?;
                 pages.push(page.hash);
-                messages.clear();
-                bytes = 0;
             }
-            bytes += value.len();
-            messages.push(serde_json::from_str(&value)?);
-        }
-        if !messages.is_empty() {
-            let page = encode_message_page(&messages).map_err(codec_error)?;
-            sink.object(&page.hash, &page.bytes)?;
-            sink.reference(&wire_key, &page.hash, page.size)?;
-            pages.push(page.hash);
+        } else {
+            for boundary in cached {
+                check(probe)?;
+                let page = boundary.page;
+                let bytes = super::message_pages::object_body(db, &page.hash)?
+                    .ok_or_else(|| missing_source("cached message page"))?;
+                if bytes.len() as u64 != page.byte_length.0 {
+                    return Err(missing_source("cached message page length"));
+                }
+                sink.object(&page.hash, &bytes)?;
+                sink.reference(&wire_key, &page.hash, page.byte_length.0)?;
+                pages.push(page.hash);
+            }
         }
     }
     let record = super::record_projection::reconstruct_record_with_owner_objects(

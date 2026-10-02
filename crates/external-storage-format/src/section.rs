@@ -108,6 +108,7 @@ pub enum PluginSpace {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ObjectReference {
     pub content_sha256: [u8; 32],
+    #[serde(with = "crate::control_integer")]
     pub byte_length: u64,
 }
 
@@ -199,6 +200,7 @@ pub enum SectionValue {
     #[serde(rename = "tombstone")]
     Tombstone {
         first_published_generation: Sequence,
+        #[serde(with = "crate::control_integer")]
         first_published_at_ms: u64,
     },
 }
@@ -604,7 +606,7 @@ mod tests {
         .unwrap();
         let encoded = entry.encode().unwrap();
         assert!(String::from_utf8_lossy(&encoded).contains(
-            "\"value\":{\"tombstone\":{\"firstPublishedGeneration\":\"12\",\"firstPublishedAtMs\":1760000000000}}"
+            "\"value\":{\"tombstone\":{\"firstPublishedGeneration\":\"12\",\"firstPublishedAtMs\":\"1760000000000\"}}"
         ));
         assert_eq!(SectionEntry::decode(&encoded).unwrap(), entry);
         assert_eq!(

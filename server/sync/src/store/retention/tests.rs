@@ -171,14 +171,8 @@ fn revocation_and_restored_epoch_do_not_silently_discard_snapshot_custody() {
     store.rotate_restored_epoch().unwrap();
     assert!(store.retained_objects(&device, &epoch, None).is_err());
     let restored = store.head().unwrap().epoch;
-    assert_eq!(
-        store
-            .retained_objects(&device, &restored, None)
-            .unwrap()
-            .objects
-            .len(),
-        1
-    );
+    assert!(store.retained_objects(&device, &restored, None).is_err());
+    assert_eq!(store.managed_devices().unwrap()[0].retained, 1);
     store.revoke_device(&device.id).unwrap();
     store.maintain().unwrap();
     assert!(store.object_size(&digest).unwrap().is_some());

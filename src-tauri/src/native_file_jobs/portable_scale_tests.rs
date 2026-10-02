@@ -198,6 +198,7 @@ fn native_portable_scale_acceptance() {
         restore_portable(
             OpenedJobSource {
                 file: File::open(archive_path).unwrap(),
+                custody: None,
                 total_bytes: exported.source_bytes,
             },
             true,

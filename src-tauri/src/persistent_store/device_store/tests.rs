@@ -59,10 +59,30 @@ fn every_live_device_table_is_listed_here() {
         "device_remote_cursors",
         "device_sections",
         "device_settings",
-        "external_conflicts",
+        "external_lww_objects",
+        "external_lww_receives",
+        "external_lww_seen",
+        "external_lww_segments",
+        "external_lww_sequences",
+        "external_lww_versions",
         "hypa_embeddings",
+        "lww_clock",
+        "lww_device_context",
+        "lww_initialization_scopes",
+        "lww_intents",
+        "lww_new_device_authorizations",
+        "lww_outbox",
+        "lww_progress",
+        "lww_publications",
+        "lww_receive",
+        "lww_receive_rows",
+        "lww_requests",
+        "lww_retired",
+        "lww_units",
+        "lww_unpublished_proofs",
         "plugin_claim_sessions",
         "plugin_device_storage",
+        "plugin_gc_state",
         "plugin_permission_grants",
         "plugin_permissions",
     ];
@@ -464,7 +484,7 @@ fn an_embedding_batch_commits_one_write_clock_and_one_change_row_per_key() {
         ])
         .expect("write embedding batch");
 
-    assert_eq!(clock(store.connection(), "hypa"), "3");
+    assert_eq!(clock(store.connection(), "hypa"), "1");
     assert_eq!(clock(store.connection(), "local-plugins"), "0");
     let writer_id = store.writer_id().expect("read writer identity");
     let mut statement = store
@@ -487,8 +507,8 @@ fn an_embedding_batch_commits_one_write_clock_and_one_change_row_per_key() {
         rows,
         vec![
             ("key-a".to_owned(), "1".to_owned(), writer_id.clone(), None),
-            ("key-b".to_owned(), "2".to_owned(), writer_id.clone(), None),
-            ("key-c".to_owned(), "3".to_owned(), writer_id, None),
+            ("key-b".to_owned(), "1".to_owned(), writer_id.clone(), None),
+            ("key-c".to_owned(), "1".to_owned(), writer_id, None),
         ]
     );
     assert_eq!(
@@ -499,6 +519,15 @@ fn an_embedding_batch_commits_one_write_clock_and_one_change_row_per_key() {
             ("hypa".to_owned(), "key-c".to_owned(), String::new(), String::new(), 1),
         ]
     );
+    let stamps = store.connection().prepare("SELECT key,stamp FROM lww_units ORDER BY key").unwrap()
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).unwrap()
+        .collect::<Result<Vec<_>, _>>().unwrap();
+    assert_eq!(stamps.len(), 3);
+    assert!(stamps.iter().all(|(_, stamp)| stamp == &stamps[0].1));
+    let pending = store.connection().prepare("SELECT key,stamp FROM lww_outbox ORDER BY key").unwrap()
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).unwrap()
+        .collect::<Result<Vec<_>, _>>().unwrap();
+    assert_eq!(pending, stamps);
     assert_eq!(
         store
             .connection()

@@ -1,5 +1,5 @@
 import { Mutex } from "src/ts/mutex";
-import { allowedDbKeys, applyPreparedPluginDatabaseUpdate, customProviderStore, getV2PluginAPIs, handlePluginInstallViaPlugin, pluginStorageStore, pluginV2, type PluginV2ProviderArgument, type PluginV2ProviderOptions, type RisuPlugin } from "../plugins.svelte";
+import { allowedDbKeys, customProviderStore, getV2PluginAPIs, handlePluginInstallViaPlugin, pluginStorageStore, pluginV2, type PluginV2ProviderArgument, type PluginV2ProviderOptions, type RisuPlugin } from "../plugins.svelte";
 import { SandboxHost } from "./factory";
 import versionData from "../../../../version.json";
 import { getDatabase } from "src/ts/storage/database.svelte";
@@ -48,13 +48,11 @@ import {
     getActiveConversationSession,
     getPersistentNavigationGeneration,
     invalidateActiveConversationSession,
-    materializePersistentDatabaseSnapshotWithRevision,
     refreshSelectedConversationAfterReplacement,
-    replacePersistentCompleteCharacter,
-    replacePersistentConversation,
-    replacePersistentDatabase,
 } from "src/ts/storage/persistentDataRuntime.svelte";
 import type { CompleteConversationLease } from "src/ts/storage/activeWorkingSet.svelte";
+import { getPersistentRevision, commitPersistentUnitIntent } from "src/ts/storage/persistentDataRuntime.svelte";
+import { invalidatePluginDeviceKeyspaces } from '../pluginDeviceKeyspace';
 import { appendCurrentConversationMessage } from "src/ts/conversationMutations";
 import {
     registerChatOutputListener,
@@ -106,6 +104,8 @@ function getPluginDatabaseAccess(owner: string): PluginDatabaseAccess {
     if (existing) return existing
     const access = createProductionPluginDatabaseAccess({
         owner,
+        getPersistentRevision,
+        commitPersistentUnitIntent,
         flushPendingData: flushPendingDataLocally,
         assertPersistentMutationAllowed,
         getStorageAuthorityEpoch: getPersistentStorageAuthorityEpoch,
@@ -116,20 +116,11 @@ function getPluginDatabaseAccess(owner: string): PluginDatabaseAccess {
         acquireCompleteConversation,
         refreshSelectedConversationAfterReplacement,
         invalidateActiveConversationSession,
-        replacePersistentCompleteCharacter,
-        replacePersistentConversation,
         reportIdentityReplacementRejected: (diagnostic) => {
             console.warn('Plugin full-object identity replacement rejected', diagnostic)
         },
         getNavigationGeneration: getPersistentNavigationGeneration,
-        applyCompatibilityDatabaseLite: (database) =>
-            applyPreparedPluginDatabaseUpdate(database, true),
         readPluginStorageSnapshot: () => pluginStorageStore.forOwner(owner).snapshot(),
-        mutatePluginStorage: (mutations) =>
-            pluginStorageStore.forOwner(owner).mutate(mutations),
-        invalidatePluginStorage: () => pluginStorageStore.invalidateOwner(owner),
-        materializeDatabaseSnapshot: materializePersistentDatabaseSnapshotWithRevision,
-        replacePersistentDatabase,
         prepareAuthoritativeDatabaseUpdate: async (database) => {
             if (!Object.prototype.hasOwnProperty.call(database, 'plugins')) return database
             return {
@@ -616,6 +607,8 @@ const removePluginChatPanels = (pluginName: string) => {
 }
 
 const unloadV3Plugin = async (pluginName: string) => {
+    pluginDatabaseAccessByOwner.get(pluginName)?.closeReadBaselines?.()
+    pluginDatabaseAccessByOwner.delete(pluginName)
     const callbacks = pluginUnloadCallbacks.get(pluginName);
     const instance = v3PluginInstances.find(p => p.name === pluginName);
     if(instance){
@@ -641,6 +634,7 @@ const unloadV3Plugin = async (pluginName: string) => {
     }
     try {
         instance?.host?.terminate();        
+        await instance?.host?.drainStorageMutations?.()
     } catch (error) {
         console.error(`Error terminating plugin ${pluginName}:`, error);
     }
@@ -762,6 +756,7 @@ const makeRisuaiAPIV3 = (
     const ownedPluginStorage = pluginStorageStore.forOwner(plugin.name)
     const ownedSafeLocalStorage = new SafeLocalStorage(plugin.name)
     const pluginLifetime = new AbortController()
+    const databaseAccess = getPluginDatabaseAccess(plugin.name)
     const permissionContext: PluginPermissionContext = {
         name: plugin.name,
         hash: hasher(new TextEncoder().encode(plugin.script)),
@@ -774,13 +769,16 @@ const makeRisuaiAPIV3 = (
         signal: pluginLifetime.signal,
     })
     const getCompleteCurrentCharacter = () =>
-        getPluginDatabaseAccess(plugin.name).getFullObjectSnapshotStream({}, fullObjectContext())
+        databaseAccess.getFullObjectSnapshotStream({}, fullObjectContext())
     const setCompleteCurrentCharacter = (character: unknown) =>
-        getPluginDatabaseAccess(plugin.name).setCurrentCharacter(
+        databaseAccess.setCurrentCharacter(
             character as any,
             fullObjectContext(),
         )
-    addPluginUnloadCallback(plugin.name, () => pluginLifetime.abort())
+    addPluginUnloadCallback(plugin.name, () => {
+        pluginLifetime.abort()
+        databaseAccess.closeReadBaselines?.()
+    })
     return {
 
         //Old APIs from v2.1
@@ -895,9 +893,9 @@ const makeRisuaiAPIV3 = (
             removeChatOutputListener(pluginV2.chatOutput, func as ChatOutputListener)
         },
         setDatabaseLite: (database: Record<string, unknown>) =>
-            getPluginDatabaseAccess(plugin.name).setDatabaseLite(database, allowedDbKeys),
+            databaseAccess.setDatabaseLite(database, allowedDbKeys),
         setDatabase: (database: Record<string, unknown>) =>
-            getPluginDatabaseAccess(plugin.name).setDatabase(database, allowedDbKeys),
+            databaseAccess.setDatabase(database, allowedDbKeys),
         loadPlugins: oldApis.loadPlugins,
         readImage: oldApis.readImage,
         readInlay: async (id: string) => {
@@ -914,7 +912,7 @@ const makeRisuaiAPIV3 = (
             if(!conf){
                 return null;
             }
-            const access = getPluginDatabaseAccess(plugin.name)
+            const access = databaseAccess
             const needsCharacters = includeOnly === 'all' || includeOnly.includes('characters')
             if (!needsCharacters) return access.getDatabaseSnapshot(includeOnly, allowedDbKeys)
             return {
@@ -924,11 +922,11 @@ const makeRisuaiAPIV3 = (
         },
         queryCharacters: async (input?: PluginCharacterQuery) => {
             const allowed = await getPluginPermission(permissionContext, 'db', 'periodically')
-            return allowed ? getPluginDatabaseAccess(plugin.name).queryCharacters(input) : null
+            return allowed ? databaseAccess.queryCharacters(input) : null
         },
         queryConversations: async (input: PluginConversationQuery) => {
             const allowed = await getPluginPermission(permissionContext, 'db', 'periodically')
-            return allowed ? getPluginDatabaseAccess(plugin.name).queryConversations(input) : null
+            return allowed ? databaseAccess.queryConversations(input) : null
         },
         queryConversationMessages: async (input: PluginConversationMessageQuery) => {
             const linked = linkPluginQueryAbortSignals(input.signal, pluginLifetime.signal)
@@ -937,7 +935,7 @@ const makeRisuaiAPIV3 = (
                 const allowed = await getPluginPermission(permissionContext, 'db', 'periodically')
                 throwIfPluginReadAborted(linked.signal)
                 if (!allowed) return null
-                const result = await getPluginDatabaseAccess(plugin.name).queryConversationMessages({
+                const result = await databaseAccess.queryConversationMessages({
                     ...input,
                     signal: linked.signal,
                 })
@@ -1056,25 +1054,25 @@ const makeRisuaiAPIV3 = (
             }
         },
         getCharacterFromIndex: (index:number) => {
-            return getPluginDatabaseAccess(plugin.name).getFullObjectSnapshotStream(
+            return databaseAccess.getFullObjectSnapshotStream(
                 { characterIndex: index }, fullObjectContext(),
             )
         },
         setCharacterToIndex: (index:number, char:any) => {
-            return getPluginDatabaseAccess(plugin.name).setCharacterToIndex(
+            return databaseAccess.setCharacterToIndex(
                 index,
                 char,
                 fullObjectContext(),
             )
         },
         getChatFromIndex: (characterIndex:number, chatIndex:number) => {
-            return getPluginDatabaseAccess(plugin.name).getFullObjectSnapshotStream(
+            return databaseAccess.getFullObjectSnapshotStream(
                 { characterIndex, chatIndex },
                 fullObjectContext(),
             )
         },
         setChatToIndex: (characterIndex:number, chatIndex:number, chat:any) => {
-            return getPluginDatabaseAccess(plugin.name).setChatToIndex(
+            return databaseAccess.setChatToIndex(
                 characterIndex,
                 chatIndex,
                 chat,
@@ -1685,6 +1683,24 @@ type V3PluginInstance = {
 }
 
 const v3PluginInstances: V3PluginInstance[] = [];
+
+export async function fencePluginExecutionForAuthorityReplacement(): Promise<void> {
+    for (const access of pluginDatabaseAccessByOwner.values()) access.expireReadBaselines?.()
+    await loadV3Plugins([])
+    for (const access of pluginDatabaseAccessByOwner.values()) access.closeReadBaselines?.()
+    pluginDatabaseAccessByOwner.clear()
+}
+
+export async function invalidatePluginCachesAfterAuthorityReplacement(): Promise<void> {
+    for (const access of pluginDatabaseAccessByOwner.values()) access.expireReadBaselines?.()
+    pluginStorageStore.invalidate()
+    invalidatePluginDeviceKeyspaces()
+}
+
+export async function restartPluginsAfterAuthorityReplacement(): Promise<void> {
+    const {loadPluginsAfterAuthoritativeRestore} = await import('../plugins.svelte')
+    await loadPluginsAfterAuthoritativeRestore()
+}
 
 export async function loadV3Plugins(plugins:RisuPlugin[]){
     const instancesToUnload = [...v3PluginInstances];

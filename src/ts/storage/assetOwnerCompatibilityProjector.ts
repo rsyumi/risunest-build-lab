@@ -119,21 +119,21 @@ export async function projectPinnedCompatibilityDatabase(
     const rootRecord = await reader.readRoot()
     assertPinnedRevision(reader.revision, rootRecord.revision, 'Root')
     const root = structuredClone(rootRecord.value)
-    for (const [index, module] of (root.modules ?? []).entries()) {
+    for (const module of root.modules ?? []) {
         await applyOwnerHead(
             reader,
             repository,
-            { kind: 'root-module-assets', index },
+            { kind: 'root-module-assets', moduleId: module.id },
             module as unknown as Record<string, unknown>,
             'assets',
         )
     }
-    for (const [index, persona] of (root.personas ?? []).entries()) {
+    for (const persona of root.personas ?? []) {
         if (!persona.embeddedModule) continue
         await applyOwnerHead(
             reader,
             repository,
-            { kind: 'persona-embedded-module-assets', index },
+            { kind: 'persona-embedded-module-assets', personaId: persona.id!, moduleId: persona.embeddedModule.id },
             persona.embeddedModule as unknown as Record<string, unknown>,
             'assets',
         )

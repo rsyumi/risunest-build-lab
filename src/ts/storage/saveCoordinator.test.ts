@@ -1689,7 +1689,7 @@ describe('SaveCoordinator', () => {
         expect(commit.mock.calls[0][0].addCharacter).toMatchObject({ chaId: 'char-added' })
     })
 
-    it('surfaces the pending conflict to a later import instead of blocking it', async () => {
+    it('retries a revision conflict once and preserves a failed addition when the conflict cannot advance', async () => {
         const { database, added } = makeAdditionDatabase()
         const gate = deferred<{ revision: number }>()
         const conflict = new RevisionConflictError(1, 2)
@@ -1711,7 +1711,7 @@ describe('SaveCoordinator', () => {
 
         gate.reject(conflict)
         await expect(first).rejects.toBe(conflict)
-        expect(commit).toHaveBeenCalledOnce()
+        expect(commit).toHaveBeenCalledTimes(2)
 
         const secondInstall = vi.fn()
         await expect(coordinator.commitCharacterAddition({
@@ -1721,8 +1721,8 @@ describe('SaveCoordinator', () => {
         }, 'other-character')).rejects.toBe(conflict)
 
         expect(secondInstall).not.toHaveBeenCalled()
-        expect(commit).toHaveBeenCalledTimes(2)
-        expect(coordinator.revision).toBe(1)
+        expect(commit).toHaveBeenCalledTimes(3)
+        expect(coordinator.revision).toBe(2)
         expect(coordinator.pendingBytes).toBe(9)
     })
 
@@ -2093,8 +2093,7 @@ describe('SaveCoordinator', () => {
         database.username = 'two'
         coordinator.markPersistentDataDirty(1)
         first.resolve({ revision: 2 })
-        await Promise.resolve()
-        await Promise.resolve()
+        await vi.waitFor(() => expect(commit).toHaveBeenCalledTimes(2))
         database.username = 'three'
         coordinator.markPersistentDataDirty(1)
         second.resolve({ revision: 3 })
@@ -2109,7 +2108,6 @@ describe('SaveCoordinator', () => {
 
     it.each([
         new Error('write failed'),
-        new RevisionConflictError(1, 2),
     ])('keeps failed work dirty without retrying for %s', async (error) => {
         const database = makeDatabase()
         const commit = vi.fn().mockRejectedValue(error)

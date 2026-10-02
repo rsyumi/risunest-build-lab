@@ -38,6 +38,23 @@ function root(state: ReturnType<typeof fixture>) {
 }
 
 describe('production reactive persistence captures', () => {
+    it('reuses unchanged message encoding and decoded values when resident chat metadata changes', () => {
+        const state=fixture()
+        state.database.characters[0].chats[0].id='conversation'
+        const cached=createPersistenceCanonicalCapture({root:()=>state.database,pluginStorage:()=>state.database.pluginCustomStorage,
+            presets:()=>state.database.botPresets,character:()=>state.database.characters[0],characters:()=>state.database.characters})
+        const before=cached.materializedCharacters!().get('synthetic')!
+        cached.characters!()
+        const stringify=vi.spyOn(JSON,'stringify')
+        try {
+            state.database.characters[0].chats[0].note='metadata only'
+            const after=cached.materializedCharacters!().get('synthetic')!
+            expect(after.chats[0].note).toBe('metadata only')
+            expect(after.chats[0].message).toBe(before.chats[0].message)
+            expect(stringify.mock.calls.some(([value])=>Array.isArray(value))).toBe(false)
+        } finally { stringify.mockRestore() }
+    })
+
     it('keeps plugin storage ownership metadata out of the persistent root', () => {
         const state = fixture()
         state.database.pluginStorageMeta = {

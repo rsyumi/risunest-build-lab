@@ -1,7 +1,7 @@
 //! Reclaims external capture content that no durable owner names. A pass
 //! recomputes its owners every time, so an interrupted or capped pass leaves
 //! only garbage the next one removes.
-use super::{external_conflicts, PersistentStore, StoreError, StoreResult};
+use super::{PersistentStore, StoreError, StoreResult};
 use crate::external_storage::{
     capture::{registered_capture_roots, registered_references, DurableCaptureReference},
     content_store::ContentStore,
@@ -40,7 +40,6 @@ pub(crate) enum CollectionOutcome {
 #[derive(PartialEq, Eq)]
 struct Owners {
     captures: Vec<DurableCaptureReference>,
-    conflicts: Vec<DurableCaptureReference>,
 }
 
 /// The bodies and catalogs the owners name.
@@ -103,9 +102,6 @@ impl PersistentStore {
     fn content_owners(&self) -> StoreResult<Owners> {
         Ok(Owners {
             captures: registered_references(&self.connection, &self.repository_root)?,
-            conflicts: external_conflicts::conflict_capture_references(
-                self.device_store()?.connection(),
-            )?,
         })
     }
 }
@@ -117,7 +113,7 @@ fn deferred(error: StoreError) -> StoreResult<CollectionOutcome> {
 
 fn mark(owners: &Owners, repository_root: &Path) -> StoreResult<Marked> {
     let roots = registered_capture_roots(
-        owners.captures.iter().chain(&owners.conflicts),
+        owners.captures.iter(),
         repository_root,
     )?;
     let files = roots

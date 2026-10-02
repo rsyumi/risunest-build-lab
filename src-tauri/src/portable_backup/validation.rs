@@ -270,7 +270,7 @@ pub(crate) fn validate_live_library(
 }
 
 trait LibraryObjects {
-    fn read_object(&self, hash: &str) -> Result<(std::io::Take<std::fs::File>, u64)>;
+    fn read_object(&self, hash: &str) -> Result<(Box<dyn Read>, u64)>;
     /// Every registered alias needs an exact payload binding, independently of reference scans.
     fn validate_registered_payloads(
         &self,
@@ -282,8 +282,8 @@ trait LibraryObjects {
     fn has_object(&self, db: &rusqlite::Connection, hash: &[u8]) -> Result<bool>;
 }
 impl LibraryObjects for VerifiedArchive {
-    fn read_object(&self, hash: &str) -> Result<(std::io::Take<std::fs::File>, u64)> {
-        self.open_object(hash)
+    fn read_object(&self, hash: &str) -> Result<(Box<dyn Read>, u64)> {
+        self.open_object(hash).map(|(reader,size)|(Box::new(reader) as Box<dyn Read>,size))
     }
     fn validate_registered_payloads(
         &self,
@@ -298,10 +298,10 @@ impl LibraryObjects for VerifiedArchive {
     }
 }
 impl LibraryObjects for Catalog {
-    fn read_object(&self, hash: &str) -> Result<(std::io::Take<std::fs::File>, u64)> {
+    fn read_object(&self, hash: &str) -> Result<(Box<dyn Read>, u64)> {
         let (path,size):(String,i64)=self.db.query_row("SELECT s.path,o.byte_length FROM sources s JOIN objects o ON o.sha256=s.sha256 WHERE o.sha256=?1",[hex::decode(hash).map_err(|_|Error::Invalid("invalid object hash"))?],|r|Ok((r.get(0)?,r.get(1)?)))?;
         let size = sql_u64(size)?;
-        Ok((std::fs::File::open(path)?.take(size), size))
+        Ok((Box::new(std::fs::File::open(path)?.take(size)), size))
     }
     fn validate_registered_payloads(
         &self,
@@ -316,12 +316,12 @@ impl LibraryObjects for Catalog {
     }
 }
 impl LibraryObjects for PayloadCas {
-    fn read_object(&self, hash: &str) -> Result<(std::io::Take<std::fs::File>, u64)> {
+    fn read_object(&self, hash: &str) -> Result<(Box<dyn Read>, u64)> {
         let file = self
             .open_object(hash)?
             .ok_or(Error::Invalid("library object is missing"))?;
         let size = file.metadata()?.len();
-        Ok((file.take(size), size))
+        Ok((Box::new(file.take(size)), size))
     }
     fn validate_registered_payloads(
         &self,
@@ -432,7 +432,7 @@ struct LibraryView<'a> {
     objects: &'a dyn LibraryObjects,
 }
 impl LibraryView<'_> {
-    fn open_object(&self, hash: &str) -> Result<(std::io::Take<std::fs::File>, u64)> {
+    fn open_object(&self, hash: &str) -> Result<(Box<dyn Read>, u64)> {
         self.objects.read_object(hash)
     }
     /// A record the scan cannot parse is reported and skipped, leaving the rest scannable.
@@ -790,23 +790,11 @@ impl LibraryView<'_> {
         } else {
             None
         };
-        let index = locator.parse::<usize>().ok();
-        let (parent, property) = match kind {
-            "character-additional-assets" => (character.as_ref(), "additionalAssets"),
-            "root-module-assets" => (
-                index.and_then(|i| root.get("modules")?.as_array()?.get(i)),
-                "assets",
-            ),
-            "persona-embedded-module-assets" => (
-                index.and_then(|i| {
-                    root.get("personas")?
-                        .as_array()?
-                        .get(i)?
-                        .get("embeddedModule")
-                }),
-                "assets",
-            ),
-            _ => return Err(Error::Invalid("invalid owner kind")),
+        let owner = crate::persistent_store::AssetOwnerLocator::from_storage(kind, locator)
+            .map_err(|_| Error::Invalid("invalid owner identity"))?;
+        let (parent, property) = match &owner {
+            crate::persistent_store::AssetOwnerLocator::CharacterAdditionalAssets { .. } => (character.as_ref(), "additionalAssets"),
+            _ => (owner.root_parent(root), "assets"),
         };
         let parent = parent
             .and_then(Value::as_object)
@@ -824,6 +812,9 @@ impl LibraryView<'_> {
         }
         let mut bytes = Vec::with_capacity(size as usize);
         input.read_to_end(&mut bytes)?;
+        if bytes.len() as u64 != size || hex::encode(Sha256::digest(&bytes)) != hash {
+            return Err(Error::Invalid("owner manifest identity differs"));
+        }
         let entries = crate::asset_repository::owner_manifest_codec::decode_owner_manifest(&bytes)
             .map_err(|_| Error::Invalid("invalid owner manifest"))?;
         let tuples = parent

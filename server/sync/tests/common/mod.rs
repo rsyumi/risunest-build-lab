@@ -1,55 +1,47 @@
 #![allow(dead_code)]
 use risunest_sync_server::store::{Device, Store};
 use risunest_sync_wire::{
-    hash, ChangeSet, CommitIntent, Domain, RecordChange, RecordVersion, RemoteHead, Sequence,
+    lww::{PushRequest, UnitChange},
+    stamp::Stamp,
+    unit::{UnitKey, UnitValue},
 };
-use std::collections::BTreeMap;
-
-pub const LIBRARY: [Domain; 1] = [Domain::Library];
-
-/// Acknowledge every section at one point. Section isolation has its own tests.
-pub fn acks(seq: &Sequence) -> BTreeMap<Domain, Sequence> {
-    Domain::ALL
-        .into_iter()
-        .map(|domain| (domain, seq.clone()))
-        .collect()
-}
-pub fn section_ack(domain: Domain, seq: &Sequence) -> BTreeMap<Domain, Sequence> {
-    BTreeMap::from([(domain, seq.clone())])
-}
+pub const WRITER_A: &str = "00000000-0000-4000-8000-000000000001";
+pub const WRITER_B: &str = "00000000-0000-4000-8000-000000000002";
 pub fn device(store: &Store) -> Device {
     let credential = store.add_device().unwrap();
     store
         .authenticate(&credential.library_id, &credential.token)
         .unwrap()
 }
-pub fn changes(key: &str, body: &[u8]) -> ChangeSet {
-    ChangeSet {
-        changes: vec![RecordChange {
-            domain: Domain::Library,
-            key: key.into(),
-            before: RecordVersion::Absent,
-            after: RecordVersion::Live {
-                object_hash: hash(body),
-                descriptor_hash: None,
-            },
-        }],
-        read_fences: vec![],
-        scope_fences: vec![],
+pub fn inline(key: &str, writer: &str, physical: u64, value: &str) -> UnitChange {
+    unit(
+        &["root", key],
+        writer,
+        physical,
+        UnitValue::inline(&serde_json::to_vec(value).unwrap()).unwrap(),
+    )
+}
+pub fn unit(key: &[&str], writer: &str, physical: u64, value: UnitValue) -> UnitChange {
+    UnitChange {
+        key: UnitKey::new(key).unwrap(),
+        stamp: Stamp {
+            physical_ms: physical.into(),
+            logical: 0,
+            writer_id: writer.into(),
+        },
+        value,
     }
 }
-pub fn stage(
+pub fn request(
     store: &Store,
-    device: &Device,
-    head: &RemoteHead,
-    seq: u64,
-    changes: &ChangeSet,
-) -> CommitIntent {
-    let staged = store.stage_changes(device, changes).unwrap();
-    CommitIntent {
-        device_operation_seq: seq.into(),
-        expected_head: head.clone(),
-        changes_digest: staged.changes_digest,
-        staged_changes_id: staged.staged_changes_id,
+    writer: &str,
+    operation: &str,
+    changes: Vec<UnitChange>,
+) -> PushRequest {
+    PushRequest {
+        library_id: store.head().unwrap().library_id,
+        writer_id: writer.into(),
+        operation_id: operation.into(),
+        changes,
     }
 }

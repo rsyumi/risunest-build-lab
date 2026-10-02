@@ -1,11 +1,33 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke }))
-import { exportIOSFile, pickIOSFile, getIOSPublication } from './iosFiles'
+import { exportIOSFile, pickIOSFile, getIOSPublication, pickIOSBackupSource, materializeIOSBackupSource } from './iosFiles'
 beforeEach(() => {
     invoke.mockReset()
 })
 describe('iOS file publication', () => {
+    it('returns native custody without an app-owned copy or a descriptor in JavaScript', async () => {
+        invoke.mockResolvedValue({cancelled:false, token:'selected-token', name:'synthetic.risunest', bytes:4_294_967_296})
+        await expect(pickIOSBackupSource()).resolves.toEqual({token:'selected-token', name:'synthetic.risunest', bytes:4_294_967_296})
+        expect(invoke.mock.calls.map(call => call[0])).toEqual(['native_portable_source_cleanup_orphans','plugin:ios-native|pick_backup_source'])
+    })
+    it('releases native and scoped custody after cancellation during selection', async () => {
+        const controller = new AbortController()
+        invoke.mockImplementation(async command => {
+            if (command === 'plugin:ios-native|pick_backup_source') {
+                controller.abort()
+                return {cancelled:false, token:'selected-token', name:'synthetic.risunest', bytes:42}
+            }
+            return true
+        })
+        await expect(pickIOSBackupSource(controller.signal)).rejects.toMatchObject({name:'AbortError'})
+        expect(invoke).toHaveBeenLastCalledWith('native_portable_source_discard', {source:{type:'iosScoped', token:'selected-token'}})
+    })
+    it('requests an upstream compatibility copy by token, never reopening a selected URL', async () => {
+        invoke.mockResolvedValue({path:'/owned/synthetic.risudat',name:'synthetic.risudat',bytes:42})
+        await expect(materializeIOSBackupSource('selected-token')).resolves.toEqual({path:'/owned/synthetic.risudat',name:'synthetic.risudat',bytes:42})
+        expect(invoke).toHaveBeenCalledExactlyOnceWith('plugin:ios-native|materialize_backup_source',{token:'selected-token'})
+    })
     it('reports picker cancellation without publishing success', async () => {
         invoke.mockResolvedValue({ cancelled: true })
         await expect(

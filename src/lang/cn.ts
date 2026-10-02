@@ -1,4 +1,28 @@
 export const languageChinese = {
+    risuNest: {
+        importDialog: {
+            warningUpstreamRestoreLosses: '部分冷存储或内嵌数据无法恢复。请检查恢复的数据。',
+        },
+        plugins: {
+            "removeTitle": "删除此插件吗？",
+            "removeDescription": "同时删除插件数据后，即使重新安装插件也无法恢复设置和保存的内容。保留插件数据可在重新安装后继续使用。",
+            "removeDataOption": "同时删除插件数据",
+            "removeAction": "删除"
+        },
+    },
+
+    checkboxConfirmation: {
+        "characterDeletion": "删除角色",
+        "dataReplacement": "替换当前数据",
+        "hypaReset": "重置 HypaV3 数据",
+        "hypaDeletion": "删除后续摘要",
+        "pluginDataDeletion": "删除插件数据",
+        "lorebookDeletion": "删除世界书文件夹及条目",
+        "partialBackup": "备份不包含其他资源",
+        "incompleteRestore": "恢复不包含缺失数据",
+        "onlySelectedMessage": "仅删除此消息"
+    },
+
     "formating": {
         "main": "主提示词",
         "jailbreak": "越狱提示词",
@@ -29,8 +53,8 @@ export const languageChinese = {
         "requestLogRemoved": "该请求记录已被删除。",
         "requestLogRemovedDesc": "当客户端刷新或加载时，该请求记录会被删除。",
         "vertexAuthError": "Vertex AI 身份验证详情缺失。",
-        "coldStorageIncompleteRestoreConfirm": (characterNames: string, unavailableCount: number, unresolvedCount: number) =>
-            `无法恢复 ${characterNames || "未知角色"}的冷存储数据。${unresolvedCount > 0 ? `有 ${unresolvedCount} 个项目无法关联到角色。` : ""}\n\n如果继续，${unavailableCount} 个冷存储项目将不可用，受影响的角色或聊天数据可能会永久丢失。\n\n仍要继续不完整的恢复吗？`
+        "coldStorageIncompleteRestoreConfirm": (characterNames: string, unavailableCount: number, unresolvedCount: number, includeQuestion = true) =>
+            `无法恢复 ${characterNames || "未知角色"}的冷存储数据。${unresolvedCount > 0 ? `有 ${unresolvedCount} 个项目无法关联到角色。` : ""}\n\n如果继续，${unavailableCount} 个冷存储项目将不可用，受影响的角色或聊天数据可能会永久丢失。${includeQuestion ? "\n\n仍要继续不完整的恢复吗？" : ""}`
     },
     "showHelp": "显示帮助",
     "help": {
@@ -1468,4 +1492,21 @@ export const languageChinese = {
     nanoGPTSelectFromList: "从列表中选择",
     nanoGPTManualInput: "手动输入",
     nanoGPTManualModelSelect: "手动模式选择",
+    lwwSync: {
+        concurrentEditNotice: "同时在多台设备上修改同一项时，将保留最后一次修改。修改内容或消息可能会丢失，请勿同时使用多台设备。",
+        replaceTitle: "是否替换此设备的数据？",
+        replaceDescription: "为进行同步，将清除此设备的数据并替换为远程数据。如需备份，请手动备份。",
+        replaceAcknowledge: "清除此设备的数据",
+        replaceAction: "替换",
+        cancelAction: "取消",
+        clockBlocked: "设备与远程时间存在差异，同步已停止。请校正时间后重试。",
+        writerCollision: "设备标识重复，同步已停止。请作为新设备重新连接。",
+        newDeviceAction: "作为新设备连接",
+        restoreTitle: "是否恢复备份？",
+        restoreDescriptionBound: "将清除当前数据并恢复所选备份，恢复的数据将同步到远程。如需备份，请手动备份。",
+        restoreDescription: "将清除当前数据并恢复所选备份。如需备份，请手动备份。",
+        restoreAcknowledge: "清除当前数据",
+        restoreAction: "恢复",
+        myboxSyncUnavailable: "MYBOX 无法用于同步。",
+    },
 } satisfies DeepPartial<typeof import('./en').languageEnglish>;

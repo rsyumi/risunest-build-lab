@@ -164,7 +164,6 @@ fn repository_bootstrap_opens_and_applies_a_real_snapshot_without_the_source_vau
                 credential_ref: "unavailable-source-credential".into(),
                 root_key_ref: "unavailable-source-root-key".into(),
                 recovery_key_ref: "unavailable-source-recovery-key".into(),
-                capture_policy: None,
                 retention_policy: None,
                 capabilities: Capabilities::default(),
                 created_at_ms: 1,

@@ -10,9 +10,24 @@ pub mod screenshot_output;
 
 mod backup_source;
 mod legacy_backup;
+pub(crate) mod snapshot_bodies;
+#[cfg(test)]
+pub(crate) mod portable;
+#[cfg(not(test))]
 mod portable;
+pub(crate) mod portable_source_custody;
+
+#[tauri::command(async)]
+pub(crate) fn native_portable_source_discard(app:AppHandle,source:JobSource)->Result<bool,NativeJobError> {
+    portable_source_custody::ensure_platform_source(&app,&source)?;
+    portable_source_custody::discard(&source)
+}
+
+#[tauri::command(async)]
+pub(crate) fn native_portable_source_cleanup_orphans(app:AppHandle)->Result<(),NativeJobError> {
+    portable_source_custody::cleanup_orphans(&app)
+}
 pub(crate) mod raw_recovery;
-pub(crate) mod reference_source;
 pub(crate) use backup_source::*;
 mod official_snapshot;
 mod risum_export;
@@ -81,7 +96,8 @@ impl std::error::Error for NativeJobError {}
 pub(crate) enum JobSource {
     DesktopPath { path: String },
     AndroidSpool { token: String },
-    ConflictReference { token: String },
+    AndroidSeekable { token: String },
+    IosScoped { token: String },
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -313,49 +329,27 @@ pub(crate) enum NativeFileJobStartRequest {
     },
 }
 
-fn portable_export_uses_reference_source(
-    source: &Option<JobSource>,
-    expected_revision: Option<i64>,
-    selection: &portable::PortableSelection,
-) -> Result<bool, NativeJobError> {
-    match (source, expected_revision) {
-        (None, Some(_)) => Ok(false),
-        (Some(JobSource::ConflictReference { .. }), None)
-            if selection.library
-                && selection.device_sections.is_empty()
-                && selection.items.is_none() =>
-        {
-            Ok(true)
-        }
-        (Some(JobSource::ConflictReference { .. }), None) => Err(NativeJobError::new(
-            "invalid-input",
-            "Conflict source export must include the complete library only",
-        )),
-        _ => Err(NativeJobError::new(
-            "invalid-input",
-            "Portable export requires either a revision or a conflict source",
-        )),
-    }
+fn portable_export_requires_revision(source: &Option<JobSource>, expected_revision: Option<i64>, _selection: &portable::PortableSelection) -> Result<bool, NativeJobError> {
+    if source.is_none() && expected_revision.is_some() { Ok(false) }
+    else { Err(NativeJobError::new("invalid-input", "Portable export requires an active revision")) }
 }
 
-fn validate_portable_restore_selection(
-    source: &JobSource,
-    selection: &Option<portable::PortableSelection>,
-) -> Result<(), NativeJobError> {
-    if matches!(source, JobSource::ConflictReference { .. }) && selection.is_some() {
-        return Err(NativeJobError::new(
-            "invalid-input",
-            "Conflict source restore always replaces the complete library",
-        ));
-    }
-    Ok(())
-}
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct NativeFileJobStarted {
     pub(crate) job_id: String,
     pub(crate) warning_codes: Vec<String>,
+}
+
+#[derive(Clone,Debug,Serialize)]
+#[serde(rename_all="camelCase")]
+pub(crate) struct NativeSnapshotBodiesStarted {
+    pub(crate) job_id:String,
+    pub(crate) kind:JobKind,
+    pub(crate) staging_id:String,
+    pub(crate) activation_revision:String,
+    pub(crate) binding_authority:String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -421,6 +415,7 @@ pub(crate) struct PreparedContent {
 pub(crate) struct OpenedJobSource {
     pub(crate) file: File,
     pub(crate) total_bytes: u64,
+    pub(crate) custody: Option<portable_source_custody::PortableSourceCustodyLease>,
 }
 
 #[derive(Debug)]
@@ -471,7 +466,7 @@ fn open_source_file(path: &Path, _allow_cloud_source: bool) -> Result<OpenedJobS
         if !metadata.is_file() || metadata.file_type().is_symlink() {
             return Err(invalid_source_error("source must be a regular file"));
         }
-        return Ok(OpenedJobSource { file, total_bytes: metadata.len() });
+        return Ok(OpenedJobSource { file, total_bytes: metadata.len(), custody: None });
     }
     if metadata.file_type().is_symlink() || is_reparse_point || !metadata.is_file() {
         return Err(invalid_source_error("source must be a regular file"));
@@ -479,6 +474,7 @@ fn open_source_file(path: &Path, _allow_cloud_source: bool) -> Result<OpenedJobS
     Ok(OpenedJobSource {
         file,
         total_bytes: metadata.len(),
+        custody: None,
     })
 }
 
@@ -500,9 +496,7 @@ pub(crate) fn open_job_source(
             let path = resolve_spool_source(job_root, token)?;
             open_regular_file_no_follow(&path)
         }
-        JobSource::ConflictReference { .. } => Err(invalid_source_error(
-            "conflict references are not filesystem sources",
-        )),
+        JobSource::AndroidSeekable { .. } | JobSource::IosScoped { .. } => Err(invalid_source_error("Portable custody requires its bounded probe or exact job claim")),
     }
 }
 
@@ -527,9 +521,7 @@ fn resolve_source(job_root: &Path, source: &JobSource) -> Result<PathBuf, Native
     match source {
         JobSource::DesktopPath { path } => resolve_desktop_source(path),
         JobSource::AndroidSpool { token } => resolve_spool_source(job_root, token),
-        JobSource::ConflictReference { .. } => Err(invalid_source_error(
-            "conflict references are not filesystem sources",
-        )),
+        JobSource::AndroidSeekable { .. } | JobSource::IosScoped { .. } => Err(invalid_source_error("Portable custody has no path authority")),
     }
 }
 
@@ -1237,6 +1229,7 @@ fn cleanup_errors_result(errors: Vec<String>) -> Result<(), String> {
 
 #[derive(Clone)]
 pub(crate) struct NativeFileJobState {
+    snapshot_body_start: Arc<Mutex<()>>,
     cleanup_closed: Arc<std::sync::RwLock<bool>>,
     root: PathBuf,
     registry: Arc<JobRegistry>,
@@ -1245,10 +1238,60 @@ pub(crate) struct NativeFileJobState {
     max_concurrent_jobs: usize,
     startup_warnings: Vec<NativeJobError>,
     capability_error: Arc<Mutex<Option<NativeJobError>>>,
-    external_reference_sources: Arc<reference_source::ExternalReferenceSources>,
 }
 
 impl NativeFileJobState {
+    pub(crate) fn prepare_snapshot_bodies(&self,store:&mut crate::persistent_store::PersistentStore,stage:&str,revision:i64,authority:&str)->Result<(crate::persistent_store::PersistentStore,snapshot_bodies::BodyPlan,Arc<JobControl>),NativeJobError> {
+        let plan=store.snapshot_restore_body_plan(stage,revision,authority).map_err(error::store_error)?;
+        let worker_store=store.open_native_job_store().map_err(error::store_error)?;
+        let job=self.registry.create_internal(JobKind::SnapshotBodies,Some(revision),Vec::new(),false).map_err(|error|NativeJobError::new("store-error",error))?;
+        {
+            let mut status=job.status.lock().map_err(|_|NativeJobError::new("store-error","Snapshot job status is unavailable"))?;
+            status.snapshot_staging_id=Some(stage.to_owned());
+            status.activation_revision=Some(revision);
+            status.activation_authority=Some(authority.to_owned());
+        }
+        Ok((worker_store,plan,job))
+    }
+    #[cfg(test)]
+    pub(crate) fn create_portable_restore_fixture(&self,revision:i64)->Result<(Arc<JobControl>,Arc<Mutex<Option<admission::Permit>>>),NativeJobError> {
+        let permit=self.admission.file(true).map_err(|error|NativeJobError::new("library-operation-busy",error))?;
+        let slot=Arc::new(Mutex::new(Some(permit)));
+        let job=self.registry.create_with_context(JobKind::RestorePortableBackup,Some(revision),Vec::new()).map_err(|error|NativeJobError::new("store-error",error))?;
+        job.set_activation_permit(Arc::downgrade(&slot)).map_err(|error|NativeJobError::new("store-error",error))?;
+        Ok((job,slot))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn select_portable_restore_fixture(&self,id:&str,selection:portable::PortableSelection)->Result<(),NativeJobError> {
+        let job=self.registry.lookup(id).map_err(|error|NativeJobError::new("store-error",error))?.ok_or_else(||NativeJobError::new("job-not-found","Portable restore owner is unavailable"))?;
+        job.select_portable_sections(selection).map_err(|error|NativeJobError::new("invalid-selection",error))
+    }
+
+    pub(crate) fn confirm_portable_restore_adoption(&self,device:&crate::device_backup::DeviceBackupState,id:&str,revision:&str,authority:&str,session:&str)->Result<(),NativeJobError> {
+        let job=self.registry.lookup(id).map_err(|error|NativeJobError::new("store-error",error))?.ok_or_else(||NativeJobError::new("job-not-found","Portable restore owner is unavailable"))?;
+        job.confirm_portable_adoption(revision,authority,session,||device.verify_portable_adoption_complete(session,id,revision,authority).map_err(|error|error.message))
+            .map_err(|error|NativeJobError::new("invalid-activation-receipt",error))
+    }
+    pub(crate) fn retry_portable_restore_bodies(&self,request:&PortableBodyRetryRequest)->Result<NativeFileJobStarted,NativeJobError> {
+        let _cleanup=self.admit_cleanup_operation()?;
+        let repository=self.root.parent().ok_or_else(||NativeJobError::new("store-error","Native repository is unavailable"))?;
+        verify_portable_body_receipt(repository,request)?;
+        let job=self.registry.lookup(&request.job_id).map_err(|error|NativeJobError::new("store-error",error))?
+            .ok_or_else(||NativeJobError::new("portable-body-source-required","Portable library is restored, but the backup source is required"))?;
+        let status=job.status();
+        if status.kind!=JobKind::RestorePortableBackup || !status.restore_adoption_confirmed
+            || status.activation_revision.map(|revision|revision.to_string()).as_deref()!=Some(request.activation_revision.as_str())
+            || status.activation_authority.as_deref()!=Some(request.binding_authority.as_str())
+            || status.device_session_id.as_deref()!=Some(request.device_session_id.as_str())
+            || !status.portable_body_retry.as_ref().is_some_and(|receipt|receipt.staging_id==request.staging_id && receipt.catalog_sha256==request.catalog_sha256)
+        {return Err(NativeJobError::new("invalid-activation-receipt","Portable body retry receipt differs"));}
+        let receipt=status.portable_body_retry.as_ref().expect("validated receipt");
+        if receipt.source_required {return Err(NativeJobError::new("portable-body-source-required","Portable library is restored, but the backup source is required"));}
+        if receipt.available {job.retry_portable_bodies(&status).map_err(|error|NativeJobError::new(if error=="portable-body-source-required" {"portable-body-source-required"} else {"portable-body-retry-refused"},error))?;}
+        Ok(NativeFileJobStarted {job_id:request.job_id.clone(),warning_codes:status.warning_codes})
+    }
+
     fn admit_cleanup_operation(&self) -> Result<std::sync::RwLockReadGuard<'_, bool>, NativeJobError> {
         let guard = self.cleanup_closed.read().map_err(|_| NativeJobError::new("store-error", "Native cleanup state is unavailable"))?;
         if *guard { return Err(NativeJobError::new("cleanup-pending", "Application cleanup is pending")); }
@@ -1262,7 +1305,12 @@ impl NativeFileJobState {
 
     pub(crate) fn begin_cleanup(&self) -> Result<(), String> {
         *self.cleanup_closed.try_write().map_err(|_| "cleanup-native-jobs-busy")? = true;
-        for job in self.registry.list()? { self.registry.cancel(&job.job_id)?; }
+        for job in self.registry.list()? {
+            if job.kind==JobKind::RestorePortableBackup {
+                if let Some(owner)=self.registry.lookup(&job.job_id)? {owner.retire_portable_body_owner()?;}
+            }
+            self.registry.cancel(&job.job_id)?;
+        }
         Ok(())
     }
 
@@ -1272,7 +1320,6 @@ impl NativeFileJobState {
 
     pub(crate) fn close_for_cleanup(&self) -> Result<(), String> {
         if self.active_workers.load(Ordering::Acquire) != 0 { return Err("cleanup-native-jobs-busy".into()); }
-        self.external_reference_sources.clear_for_cleanup()?;
         self.registry.jobs.lock().map_err(|_| "cleanup-native-jobs-busy")?.clear();
         Ok(())
     }
@@ -1326,6 +1373,7 @@ impl NativeFileJobState {
         }
         startup_warnings.truncate(MAX_WARNING_CODES);
         Self {
+            snapshot_body_start: Arc::new(Mutex::new(())),
             cleanup_closed: Arc::new(std::sync::RwLock::new(false)),
             root,
             registry: Arc::new(JobRegistry::default()),
@@ -1334,7 +1382,6 @@ impl NativeFileJobState {
             max_concurrent_jobs,
             startup_warnings,
             capability_error: Arc::new(Mutex::new(capability_error)),
-            external_reference_sources: Arc::new(reference_source::ExternalReferenceSources::default()),
         }
     }
 
@@ -1358,11 +1405,7 @@ impl NativeFileJobState {
                         parse_android_spool_token(token)?;
                         None
                     }
-                    JobSource::ConflictReference { .. } => {
-                        return Err(invalid_source_error(
-                            "conflict references require portable restore",
-                        ));
-                    }
+                    JobSource::AndroidSeekable { .. } | JobSource::IosScoped { .. } => return Err(invalid_source_error("Portable custody is not an upstream/content source")),
                 };
                 NativeFileJobTask::Restore {
                     opened_source,
@@ -1418,11 +1461,7 @@ impl NativeFileJobState {
                         parse_android_spool_token(token)?;
                         None
                     }
-                    JobSource::ConflictReference { .. } => {
-                        return Err(invalid_source_error(
-                            "conflict references require portable restore",
-                        ));
-                    }
+                    JobSource::AndroidSeekable { .. } | JobSource::IosScoped { .. } => return Err(invalid_source_error("Portable custody is not an upstream/content source")),
                 };
                 let repository_root =
                     crate::persistent_store::commands::with_store_mut(app.state(), |store| {
@@ -1447,7 +1486,7 @@ impl NativeFileJobState {
                 if let Some(path) = destination.as_deref() {
                     validate_desktop_destination(path)?;
                 }
-                let store = if portable_export_uses_reference_source(
+                let store = if portable_export_requires_revision(
                     &source,
                     expected_revision,
                     &selection,
@@ -1467,7 +1506,6 @@ impl NativeFileJobState {
                     expected_revision,
                     store,
                     source,
-                    claimed_source: None,
                     selection,
                     app,
                 }
@@ -1496,14 +1534,13 @@ impl NativeFileJobState {
                 expected_revision,
                 selection,
             } => {
-                validate_portable_restore_selection(&source, &selection)?;
                 let opened_source = match &source {
                     JobSource::DesktopPath { .. } => Some(open_job_source(&self.root, &source)?),
                     JobSource::AndroidSpool { token } => {
                         parse_android_spool_token(token)?;
                         None
                     }
-                    JobSource::ConflictReference { .. } => None,
+                    JobSource::AndroidSeekable { .. } | JobSource::IosScoped { .. } => { portable_source_custody::ensure_platform_source(&app, &source)?; None },
                 };
                 let store =
                     crate::persistent_store::commands::with_store_mut(app.state(), |store| {
@@ -1516,7 +1553,6 @@ impl NativeFileJobState {
                     expected_revision,
                     store,
                     selection,
-                    claimed_source: None,
                     app,
                 }
             }
@@ -1672,11 +1708,7 @@ impl NativeFileJobState {
                         parse_android_spool_token(token)?;
                         None
                     }
-                    JobSource::ConflictReference { .. } => {
-                        return Err(invalid_source_error(
-                            "conflict references cannot import JPEG assets",
-                        ));
-                    }
+                    JobSource::AndroidSeekable { .. } | JobSource::IosScoped { .. } => return Err(invalid_source_error("Portable custody is not an upstream/content source")),
                 };
                 let store =
                     crate::persistent_store::commands::with_store_mut(app.state(), |store| {
@@ -1844,9 +1876,7 @@ impl NativeFileJobState {
                 claim_spool_content_source(&self.root, token, &owned_directory, &display_name)
                     .map(|source| source.opened)
             }
-            JobSource::ConflictReference { .. } => Err(invalid_source_error(
-                "conflict references cannot import content",
-            )),
+            JobSource::AndroidSeekable { .. } | JobSource::IosScoped { .. } => Err(invalid_source_error("Portable custody is not a content source")),
         };
         let opened_source = match opened_source {
             Ok(source) => source,
@@ -1923,11 +1953,7 @@ impl NativeFileJobState {
                 parse_android_spool_token(token)?;
                 None
             }
-            JobSource::ConflictReference { .. } => {
-                return Err(invalid_source_error(
-                    "conflict references require portable restore",
-                ));
-            }
+            JobSource::AndroidSeekable { .. } | JobSource::IosScoped { .. } => return Err(invalid_source_error("Portable custody is not an upstream source")),
         };
         self.spawn(
             NativeFileJobTask::Restore {
@@ -1954,10 +1980,15 @@ impl NativeFileJobState {
                 | JobKind::RestoreLegacyLocalBackup
                 | JobKind::RestoreOfficialAccountSnapshot
         );
-        let admission = self
-            .admission
-            .file(exclusive)
-            .map_err(|code| NativeJobError::new(code, "Another library operation is running"))?;
+        let upstream_staging = require_restore_finalization
+            && matches!(task.kind(), JobKind::RestorePortableBackup | JobKind::RestoreBlockRisuSave
+                | JobKind::RestoreLegacyLocalBackup | JobKind::RestoreOfficialAccountSnapshot);
+        let admission = if upstream_staging {
+            self.admission.staging()
+        } else {
+            self.admission.file(exclusive)
+        }.map_err(|code| NativeJobError::new(code, "Another library operation is running"))?;
+        let admission = Arc::new(Mutex::new(Some(admission)));
         if let NativeFileJobTask::ExportRawRecovery { app, .. } = &task {
             app.state::<crate::NativeStartupState>()
                 .ensure_ready()
@@ -1971,21 +2002,6 @@ impl NativeFileJobState {
                 .map_err(native_store_error)?;
             if let NativeFileJobTask::ExportRawRecovery { capture_guard: slot, .. } = &mut task {
                 *slot = Some(capture_guard);
-            }
-        }
-        // Admission prevents a new server operation between this check and activation.
-        if let NativeFileJobTask::RestorePortable { store, .. } = &task {
-            let status = store.server_status().map_err(|_| {
-                NativeJobError::new(
-                    "server-status-unavailable",
-                    "Cannot verify server operation state",
-                )
-            })?;
-            if status.operation_pending {
-                return Err(NativeJobError::new(
-                    "resolve-pending-operation-first",
-                    "Resolve the pending server operation before restoring",
-                ));
             }
         }
         let worker_permit =
@@ -2012,6 +2028,10 @@ impl NativeFileJobState {
                     ),
             )
             .map_err(|error| NativeJobError::new("store-error", error))?;
+        if upstream_staging {
+            job.set_activation_permit(Arc::downgrade(&admission))
+                .map_err(|error| NativeJobError::new("store-error", error))?;
+        }
         let job_id = job.id();
         let owned_directory = match create_owned_directory(&self.root.join("jobs"), &job_id) {
             Ok(path) => path,
@@ -2022,26 +2042,7 @@ impl NativeFileJobState {
             }
         };
         let source_preparation = (|| -> Result<(), NativeJobError> {
-            match &mut task {
-                NativeFileJobTask::ExportPortable {
-                    source: Some(JobSource::ConflictReference { token }),
-                    claimed_source,
-                    app,
-                    ..
-                }
-                | NativeFileJobTask::RestorePortable {
-                    source: JobSource::ConflictReference { token },
-                    claimed_source,
-                    app,
-                    ..
-                } => {
-                    *claimed_source = Some(reference_source::claim_reference_source(
-                        app, self, token,
-                    )?);
-                    return Ok(());
-                }
-                _ => {}
-            }
+
             let (opened_source, source, expected_display_name) = match &mut task {
                 NativeFileJobTask::Restore {
                     opened_source,
@@ -2078,10 +2079,10 @@ impl NativeFileJobState {
                     *opened_source = Some(source.opened);
                     Ok(())
                 }
-                JobSource::ConflictReference { .. } => Err(NativeJobError::new(
-                    "store-error",
-                    "conflict source claim was not retained by the native job",
-                )),
+                JobSource::AndroidSeekable { .. } | JobSource::IosScoped { .. } if opened_source.is_none() => {
+                    *opened_source = Some(portable_source_custody::claim(source, &job_id)?);
+                    Ok(())
+                }
                 _ => Err(NativeJobError::new(
                     "store-error",
                     "native job source resolution is inconsistent",
@@ -2101,17 +2102,10 @@ impl NativeFileJobState {
                 )),
             };
         };
-        let terminal_reference_source = match &task {
-            NativeFileJobTask::ExportPortable { claimed_source, .. }
-            | NativeFileJobTask::RestorePortable { claimed_source, .. } => {
-                claimed_source.clone()
-            }
-            _ => None,
-        };
+
         let root = self.root.clone();
         let registry = Arc::clone(&self.registry);
         std::thread::spawn(move || {
-            let mut admission = Some(admission);
             let _worker_permit = worker_permit;
             let outcome = run_worker(
                 || match task {
@@ -2119,20 +2113,11 @@ impl NativeFileJobState {
                         destination,
                         expected_revision,
                         store,
-                        claimed_source,
                         selection,
                         app,
                         ..
-                    } => match (claimed_source, expected_revision, store) {
-                        (Some(source), None, None) => reference_source::export_reference_source(
-                            source,
-                            destination.as_deref(),
-                            &owned_directory,
-                            &root.join("handoffs"),
-                            &job,
-                            &app,
-                        ),
-                        (None, Some(revision), Some(store)) => portable::export_portable(
+                    } => match (expected_revision, store) {
+                        (Some(revision), Some(store)) => portable::export_portable(
                             destination.as_deref(),
                             revision,
                             &owned_directory,
@@ -2161,7 +2146,9 @@ impl NativeFileJobState {
                             &job,
                         );
                         drop(capture_guard);
-                        drop(admission.take());
+                        drop(admission.lock().map_err(|_| NativeJobError::new(
+                            "store-error", "Native admission slot is unavailable",
+                        ))?.take());
                         captured.and_then(|captured| {
                             raw_recovery::publish(
                                 captured,
@@ -2178,18 +2165,9 @@ impl NativeFileJobState {
                         expected_revision,
                         store,
                         selection,
-                        claimed_source,
                         app,
-                    } => match (claimed_source, opened_source) {
-                        (Some(source), None) => reference_source::restore_reference_source(
-                            source,
-                            expected_revision,
-                            &owned_directory,
-                            store,
-                            &job,
-                            &app,
-                        ),
-                        (None, Some(input)) => portable::restore_portable(
+                    } => match opened_source {
+                        Some(input) => portable::restore_portable(
                             input,
                             matches!(source, JobSource::AndroidSpool { .. }),
                             expected_revision,
@@ -2242,6 +2220,7 @@ impl NativeFileJobState {
                         let prepared = crate::persistent_store::commands::with_store_mut(app.state(), |store| {
                             store.prepare_risu_save_export(expected_revision)
                         }).map_err(native_store_error)?;
+                        job.publish_export_capture(expected_revision).map_err(|message| NativeJobError::new("store-error", message))?;
                         export::export_block_risu_save(prepared, &destination, omit_account, account.as_ref(), &job)
                     }),
                     NativeFileJobTask::RestoreOfficialSnapshot {
@@ -2391,9 +2370,9 @@ impl NativeFileJobState {
             {
                 cleanup_errors.push(error);
             }
+            release_worker_admission(&admission);
             finish_worker_outcome(&job, kind, outcome, cleanup_errors);
             let _ = registry.prune();
-            drop(terminal_reference_source);
         });
         Ok(NativeFileJobStarted {
             job_id,
@@ -2498,7 +2477,14 @@ impl NativeFileJobState {
     ) -> Result<FinalizeOutcome, NativeJobError> {
         self.registry
             .finalize(job_id, expected_revision)
-            .map_err(|error| NativeJobError::new("store-error", error))
+            .map_err(|error| {
+                let code = if error == "library-operation-busy" {
+                    "library-operation-busy"
+                } else {
+                    "store-error"
+                };
+                NativeJobError::new(code, error)
+            })
     }
 
     pub(crate) fn cancel(&self, job_id: &str) -> Result<CancelOutcome, NativeJobError> {
@@ -2648,7 +2634,6 @@ enum NativeFileJobTask {
         expected_revision: Option<i64>,
         store: Option<crate::persistent_store::PersistentStore>,
         source: Option<JobSource>,
-        claimed_source: Option<reference_source::ClaimedReferenceSource>,
         selection: portable::PortableSelection,
         app: AppHandle,
     },
@@ -2665,7 +2650,6 @@ enum NativeFileJobTask {
         expected_revision: i64,
         store: crate::persistent_store::PersistentStore,
         selection: Option<portable::PortableSelection>,
-        claimed_source: Option<reference_source::ClaimedReferenceSource>,
         app: AppHandle,
     },
     Restore {
@@ -2891,6 +2875,11 @@ fn create_owned_directory(jobs_root: &Path, job_id: &str) -> Result<PathBuf, Str
     }
 }
 
+fn release_worker_admission(slot: &Mutex<Option<admission::Permit>>) {
+    let mut owned = slot.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    drop(owned.take());
+}
+
 fn finish_worker_outcome(
     job: &JobControl,
     kind: JobKind,
@@ -2984,7 +2973,7 @@ impl restore::ReplacementSink for PersistentReplacementSink {
         root: &serde_json::Value,
     ) -> crate::persistent_store::StoreResult<()> {
         crate::persistent_store::commands::with_store_mut(self.app.state(), |store| {
-            store.replace_put_root(staging_id, root)
+            store.replace_put_upstream_root(staging_id, root)
         })
     }
 
@@ -3004,7 +2993,7 @@ impl restore::ReplacementSink for PersistentReplacementSink {
         presets: &[serde_json::Value],
     ) -> crate::persistent_store::StoreResult<()> {
         crate::persistent_store::commands::with_store_mut(self.app.state(), |store| {
-            store.replace_put_presets(staging_id, presets)
+            store.replace_put_upstream_presets(staging_id, presets)
         })
     }
 
@@ -3150,6 +3139,66 @@ pub(crate) fn native_file_job_list(
 }
 
 #[tauri::command(async)]
+pub(crate) fn native_snapshot_restore_bodies_start(
+    app: AppHandle,
+    state: State<'_, NativeFileJobState>,
+    staging_id: String,
+    activation_revision: String,
+    binding_authority: String,
+) -> Result<NativeSnapshotBodiesStarted,NativeJobError> {
+    let _cleanup=state.admit_cleanup_operation()?;
+    let _start=state.snapshot_body_start.lock().map_err(|_|NativeJobError::new("store-error","Snapshot body start is unavailable"))?;
+    let revision:i64=activation_revision.parse().map_err(|_|NativeJobError::new("invalid-activation-receipt","Snapshot revision is invalid"))?;
+    if revision<0 || revision.to_string()!=activation_revision {return Err(NativeJobError::new("invalid-activation-receipt","Snapshot revision is not canonical"));}
+    for status in state.registry.list().map_err(|error|NativeJobError::new("store-error",error))? {
+        if status.kind==JobKind::SnapshotBodies && status.snapshot_staging_id.as_deref()==Some(staging_id.as_str())
+            && !status.state.is_terminal() {
+            if status.activation_revision!=Some(revision) || status.activation_authority.as_deref()!=Some(binding_authority.as_str()) {
+                return Err(NativeJobError::new("invalid-activation-receipt","Snapshot body operation identity differs"));
+            }
+            return Ok(NativeSnapshotBodiesStarted {job_id:status.job_id,kind:JobKind::SnapshotBodies,staging_id,activation_revision,binding_authority});
+        }
+    }
+    let permit=WorkerPermit::acquire(Arc::clone(&state.active_workers),state.max_concurrent_jobs)?;
+    let (mut store,plan,job)=crate::persistent_store::commands::with_store_mut(app.state(),|store|Ok(state.prepare_snapshot_bodies(store,&staging_id,revision,&binding_authority)))
+        .map_err(error::store_error)??;
+    let directory=snapshot_bodies::prepare_directory(&state.root.join("jobs"),&job)?;
+    let started=NativeSnapshotBodiesStarted {job_id:job.id(),kind:JobKind::SnapshotBodies,staging_id,activation_revision,binding_authority};
+    #[cfg(test)] let body_scope=crate::asset_repository::body_io::capture_body_io_scope();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _permit=permit;
+        let mut operation=|| {
+            #[cfg(test)] let _source_scope=crate::portable_backup::source_io::attach(&job.source_io_scope);
+            let mut outcome=run_worker(||snapshot_bodies::run(&mut store,&plan,&job,&directory),"Snapshot body worker panicked");
+            if let Err(failure)=cleanup_one_owned_directory(directory.parent().expect("owned job directory has a parent"),&directory,&job.id()) {
+                outcome=Err(NativeJobError::new("cleanup-failed",failure));
+            }
+            let _=snapshot_bodies::finish(&job,outcome);
+        };
+        #[cfg(test)] crate::asset_repository::body_io::with_body_io_scope(body_scope,operation);
+        #[cfg(not(test))] operation();
+    });
+    Ok(started)
+}
+
+#[tauri::command(async)]
+pub(crate) fn native_portable_confirm_restore_adoption(
+    state: State<'_, NativeFileJobState>,
+    device: State<'_, crate::device_backup::DeviceBackupState>,
+    job_id: String,
+    activation_revision: String,
+    binding_authority: String,
+    device_session_id: String,
+) -> Result<(), NativeJobError> {
+    state.confirm_portable_restore_adoption(&device,&job_id,&activation_revision,&binding_authority,&device_session_id)
+}
+
+#[tauri::command(async)]
+pub(crate) fn native_portable_retry_restore_bodies(state:State<'_,NativeFileJobState>,request:PortableBodyRetryRequest)->Result<NativeFileJobStarted,NativeJobError> {
+    state.retry_portable_restore_bodies(&request)
+}
+
+#[tauri::command(async)]
 pub(crate) fn native_portable_select_sections(
     state: State<'_, NativeFileJobState>,
     job_id: String,
@@ -3242,6 +3291,9 @@ fn forget_device_session(
         return Ok(());
     };
     let status = job.status();
+    if status.portable_body_retry.as_ref().is_some_and(|receipt|receipt.pending) {
+        return Err(NativeJobError::new("portable-bodies-pending","Portable body retry ownership is still retained"));
+    }
     if !status.state.is_terminal() {
         return Err(NativeJobError::new(
             "job-active",
@@ -3319,6 +3371,7 @@ pub(crate) fn native_risu_module_handoff_cleanup(
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum JobKind {
+    SnapshotBodies,
     ExportPortableBackup,
     ExportRawRecovery,
     RestorePortableBackup,
@@ -3352,6 +3405,7 @@ pub(crate) enum JobState {
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum JobPhase {
+    CopyingMissingBodies,
     AwaitingBackupSelection,
     Queued,
     ReadingSource,
@@ -3547,7 +3601,54 @@ fn validate_detail_transition(
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct PortableBodyRetry {
+    pub(crate) staging_id:String,
+    pub(crate) catalog_sha256:String,
+    pub(crate) pending:bool,
+    pub(crate) available:bool,
+    pub(crate) source_required:bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all="camelCase",deny_unknown_fields)]
+pub(crate) struct PortableBodyRetryRequest {
+    pub(crate) job_id:String,
+    pub(crate) staging_id:String,
+    pub(crate) catalog_sha256:String,
+    pub(crate) activation_revision:String,
+    pub(crate) binding_authority:String,
+    pub(crate) device_session_id:String,
+}
+
+fn verify_portable_body_receipt(repository:&Path,request:&PortableBodyRetryRequest)->Result<(),NativeJobError> {
+    let valid=(||->crate::persistent_store::StoreResult<bool> {
+        let flags=rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY|rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX;
+        let persistent=repository.join("persistent");
+        let library=rusqlite::Connection::open_with_flags(persistent.join(crate::persistent_store::DATABASE_FILE),flags)?;
+        let device=rusqlite::Connection::open_with_flags(persistent.join(crate::persistent_store::device_store::DEVICE_DATABASE_FILE),flags)?;
+        library.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA query_only=ON;")?;
+        device.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA query_only=ON;")?;
+        let generation:String=library.query_row("SELECT value FROM meta WHERE key='activeGeneration'",[],|row|row.get(0))?;
+        let generation:String=serde_json::from_str(&generation)?;
+        let authority:String=device.query_row("SELECT binding_authority FROM lww_clock WHERE singleton=1",[],|row|row.get(0))?;
+        if authority!=request.binding_authority {return Ok(false);}
+        let header=crate::persistent_store::lww::Header {request_id:request.job_id.clone(),binding_authority:serde_json::from_value(serde_json::json!(request.binding_authority))?};
+        let receipt=crate::persistent_store::lww::completed_device_replacement_receipt(&library,&device,&header,&request.staging_id)?;
+        Ok(receipt.is_some_and(|receipt|receipt.revision.to_string()==request.activation_revision && generation==format!("revision-{}",receipt.revision)))
+    })().map_err(native_store_error)?;
+    if !valid {return Err(NativeJobError::new("invalid-activation-receipt","Portable activated library identity differs"));}
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct JobStatus {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) portable_body_retry:Option<PortableBodyRetry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) snapshot_staging_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) snapshot_bodies: Option<snapshot_bodies::BodyResult>,
     pub(crate) job_id: String,
     pub(crate) kind: JobKind,
     pub(crate) state: JobState,
@@ -3557,6 +3658,11 @@ pub(crate) struct JobStatus {
     pub(crate) detail: Option<JobDetail>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) expected_revision: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) export_capture_revision: Option<i64>,
+    pub(crate) activation_revision: Option<i64>,
+    pub(crate) activation_authority: Option<String>,
+    pub(crate) restore_adoption_confirmed: bool,
     pub(crate) warning_codes: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) result: Option<JobResultSummary>,
@@ -3610,6 +3716,13 @@ pub(crate) struct ExportExclusions {
     pub(crate) colliding_plugin_values: u64,
 }
 
+#[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum SourceFingerprintKind {
+    WholeFileSha256,
+    PortableCatalogSha256,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct JobResultSummary {
@@ -3618,6 +3731,7 @@ pub(crate) struct JobResultSummary {
     pub(crate) revision: i64,
     pub(crate) source_bytes: u64,
     pub(crate) source_sha256: String,
+    pub(crate) source_fingerprint_kind: SourceFingerprintKind,
     pub(crate) character_count: u64,
     pub(crate) preset_count: u64,
     pub(crate) warning_codes: Vec<String>,
@@ -3662,9 +3776,14 @@ pub(crate) struct JobRegistry {
 
 #[derive(Default)]
 struct JobWaitState {
+    portable_adoption_confirmed: bool,
+    portable_body_retry_requested:bool,
+    portable_body_retired:bool,
+    portable_body_source:Option<(File,crate::asset_repository::ExactFileIdentity)>,
     inline_asset_upload: Option<content::InlineAssetUpload>,
     portable_selection: Option<portable::PortableSelection>,
     restore_finalized: bool,
+    activation_permit: Option<std::sync::Weak<Mutex<Option<admission::Permit>>>>,
     /// Revision the renderer holds its replacement fence at. The renderer is
     /// free to commit while this job reads and stages, so activation, not the
     /// start request, decides which revision the replacement applies to.
@@ -3727,12 +3846,16 @@ impl JobRegistry {
         validate_warning_codes(&warning_codes)?;
         let id = Uuid::new_v4().to_string();
         let job = Arc::new(JobControl {
+            #[cfg(test)] source_io_scope: crate::portable_backup::source_io::capture_scope(),
             cancel_requested: Arc::new(AtomicBool::new(false)),
             requires_restore_finalization,
             wait_state: Mutex::new(JobWaitState::default()),
             wait_changed: Condvar::new(),
             terminal_at: Mutex::new(None),
             status: Mutex::new(JobStatus {
+                portable_body_retry:None,
+                snapshot_staging_id: None,
+                snapshot_bodies: None,
                 job_id: id.clone(),
                 kind,
                 state: JobState::Queued,
@@ -3740,6 +3863,10 @@ impl JobRegistry {
                 progress: JobProgress::default(),
                 detail: None,
                 expected_revision,
+                export_capture_revision: None,
+                activation_revision: None,
+                activation_authority: None,
+                restore_adoption_confirmed: false,
                 warning_codes,
                 result: None,
                 error: None,
@@ -3826,6 +3953,9 @@ impl JobRegistry {
         if !job.status().state.is_terminal() {
             return Err("native job cannot be forgotten before it is terminal".to_owned());
         }
+        if job.status().portable_body_retry.is_some_and(|receipt|receipt.pending) {
+            return Err("portable body retry ownership is still retained".into());
+        }
         jobs.remove(id);
         Ok(true)
     }
@@ -3870,6 +4000,7 @@ impl JobRegistry {
 }
 
 pub(crate) struct JobControl {
+    #[cfg(test)] pub(super) source_io_scope: crate::portable_backup::source_io::Scope,
     cancel_requested: Arc<AtomicBool>,
     requires_restore_finalization: bool,
     wait_state: Mutex<JobWaitState>,
@@ -3879,6 +4010,16 @@ pub(crate) struct JobControl {
 }
 
 impl JobControl {
+    pub(crate) fn publish_export_capture(&self, revision: i64) -> Result<(), String> {
+        let mut status = self.status.lock().map_err(|_| "native job mutex poisoned".to_owned())?;
+        if !matches!(status.kind, JobKind::ExportBlockRisuSave | JobKind::ExportPortableBackup)
+            || status.state.is_terminal() || status.expected_revision != Some(revision)
+            || status.export_capture_revision.is_some_and(|previous| previous != revision) {
+            return Err("native export capture receipt differs".into());
+        }
+        status.export_capture_revision = Some(revision);
+        Ok(())
+    }
     pub(crate) fn set_incomplete_restore_preview(&self, preview: IncompleteRestorePreview) -> Result<(), String> {
         let mut status = self.status.lock().map_err(|_| "native job mutex poisoned".to_owned())?;
         status.incomplete_restore_preview = if preview.warning_codes().is_empty() { None } else { Some(preview) };
@@ -3938,6 +4079,141 @@ impl JobControl {
         status.preservation_report = Some(report);
         Ok(())
     }
+    pub(crate) fn publish_portable_activation(&self, revision: i64, authority: String) -> Result<(), String> {
+        let mut status = self.status.lock().map_err(|_| "native job mutex poisoned".to_owned())?;
+        if status.kind != JobKind::RestorePortableBackup || revision < 0 || status.state.is_terminal() {
+            return Err("invalid portable activation receipt".into());
+        }
+        if status.activation_revision.is_some_and(|old| old != revision) {
+            return Err("portable activation receipt changed".into());
+        }
+        if status.activation_authority.as_ref().is_some_and(|old| old != &authority) {
+            return Err("portable activation authority changed".into());
+        }
+        status.activation_revision = Some(revision);
+        status.activation_authority = Some(authority);
+        Ok(())
+    }
+
+    pub(crate) fn set_snapshot_bodies(&self,result:snapshot_bodies::BodyResult)->Result<(),String> {
+        let mut status=self.status.lock().map_err(|_|"native job mutex poisoned".to_owned())?;
+        if status.kind!=JobKind::SnapshotBodies || status.state.is_terminal()
+            || status.snapshot_staging_id.as_deref()!=Some(result.stage_id.as_str())
+            || status.activation_revision!=Some(result.activated_revision)
+            || status.activation_authority.as_deref()!=Some(result.binding_authority.as_str()) {
+            return Err("snapshot body receipt differs".into());
+        }
+        status.snapshot_bodies=Some(result);
+        Ok(())
+    }
+
+    fn confirm_portable_adoption(&self, revision: &str, authority: &str, session: &str, verify_completed:impl FnOnce()->Result<(),String>) -> Result<(), String> {
+        let mut status = self.status.lock().map_err(|_| "native job mutex poisoned".to_owned())?;
+        if status.kind != JobKind::RestorePortableBackup
+            || status.activation_revision.map(|value| value.to_string()).as_deref() != Some(revision)
+            || status.activation_authority.as_deref() != Some(authority)
+            || status.device_session_id.as_deref() != Some(session) {
+            return Err("portable adoption receipt does not match the activated operation".into());
+        }
+        let mut wait = self.wait_state.lock().map_err(|_| "native job wait mutex poisoned".to_owned())?;
+        if wait.portable_adoption_confirmed { return Ok(()); }
+        verify_completed()?;
+        let slot = wait.activation_permit.as_ref().and_then(std::sync::Weak::upgrade)
+            .ok_or_else(|| "portable activation owner is unavailable".to_owned())?;
+        release_worker_admission(&slot);
+        wait.portable_adoption_confirmed = true;
+        status.restore_adoption_confirmed = true;
+        self.wait_changed.notify_all();
+        Ok(())
+    }
+
+    pub(crate) fn wait_for_portable_adoption(&self) -> Result<(), String> {
+        let mut wait = self.wait_state.lock().map_err(|_| "native job wait mutex poisoned".to_owned())?;
+        if wait.activation_permit.is_none() { return Ok(()); }
+        while !wait.portable_adoption_confirmed {
+            if wait.portable_body_retired {return Err("portable-body-source-required".into());}
+            wait = self.wait_changed.wait(wait).map_err(|_| "native job wait mutex poisoned".to_owned())?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn prepare_portable_body_retry(&self,stage:&str,catalog:&str,source:(File,crate::asset_repository::ExactFileIdentity))->Result<(),String> {
+        let mut status=self.status.lock().map_err(|_|"native job mutex poisoned")?;
+        if !status.restore_adoption_confirmed || status.device_session_id.is_none() {return Err("portable adoption has not been confirmed".into());}
+        let mut wait=self.wait_state.lock().map_err(|_|"native job wait mutex poisoned")?;
+        status.portable_body_retry=Some(PortableBodyRetry {staging_id:stage.into(),catalog_sha256:catalog.into(),pending:true,available:false,source_required:false});
+        wait.portable_body_source=Some(source);
+        Ok(())
+    }
+
+    pub(crate) fn wait_for_portable_body_retry(&self,failure:&NativeJobError)->Result<bool,String> {
+        let mut status=self.status.lock().map_err(|_|"native job mutex poisoned")?;
+        let mut wait=self.wait_state.lock().map_err(|_|"native job wait mutex poisoned")?;
+        let receipt=status.portable_body_retry.as_mut().ok_or("portable body owner is missing")?;
+        receipt.available=!wait.portable_body_retired;
+        status.state=if self.is_cancel_requested() {JobState::Cancelled} else {JobState::Failed};
+        status.error=Some(JobFailure {code:failure.code.clone(),message:bounded_message(&failure.message)});
+        drop(status);
+        while !wait.portable_body_retry_requested && !wait.portable_body_retired {
+            wait=self.wait_changed.wait(wait).map_err(|_|"native job wait mutex poisoned")?;
+        }
+        let retry=!wait.portable_body_retired;
+        wait.portable_body_retry_requested=false;
+        drop(wait);
+        if !retry {self.portable_body_source_required()?;}
+        Ok(retry)
+    }
+
+    fn retire_portable_body_owner(&self)->Result<(),String> {
+        let mut wait=self.wait_state.lock().map_err(|_|"native job wait mutex poisoned")?;
+        wait.portable_body_retired=true;
+        drop(wait);
+        self.wait_changed.notify_all();
+        Ok(())
+    }
+
+    pub(crate) fn portable_body_source_required(&self)->Result<(),String> {
+        let mut status=self.status.lock().map_err(|_|"native job mutex poisoned")?;
+        if let Some(receipt)=status.portable_body_retry.as_mut() {receipt.available=false;receipt.source_required=true;}
+        status.state=JobState::Running;
+        self.wait_state.lock().map_err(|_|"native job wait mutex poisoned")?.portable_body_source.take();
+        Ok(())
+    }
+
+    pub(crate) fn portable_bodies_completed(&self)->Result<(),String> {
+        let mut status=self.status.lock().map_err(|_|"native job mutex poisoned")?;
+        if let Some(receipt)=status.portable_body_retry.as_mut() {receipt.pending=false;receipt.available=false;}
+        self.wait_state.lock().map_err(|_|"native job wait mutex poisoned")?.portable_body_source.take();
+        Ok(())
+    }
+
+    fn retry_portable_bodies(&self,expected:&JobStatus)->Result<(),String> {
+        let mut status=self.status.lock().map_err(|_|"native job mutex poisoned")?;
+        if status.activation_revision!=expected.activation_revision || status.activation_authority!=expected.activation_authority || status.device_session_id!=expected.device_session_id || status.portable_body_retry!=expected.portable_body_retry {return Err("portable body receipt changed".into());}
+        let mut wait=self.wait_state.lock().map_err(|_|"native job wait mutex poisoned")?;
+        if wait.portable_body_retired {return Err("portable-body-source-required".into());}
+        let receipt=status.portable_body_retry.as_mut().ok_or("portable body owner is missing")?;
+        if !receipt.pending || !receipt.available || receipt.source_required {return Err("portable body retry is unavailable".into());}
+        let (file,identity)=wait.portable_body_source.as_ref().ok_or("portable-body-source-required")?;
+        if !crate::asset_repository::exact_file_identity(file).is_ok_and(|actual|actual==*identity) {
+            receipt.available=false;
+            receipt.source_required=true;
+            wait.portable_body_retired=true;
+            drop(wait);drop(status);
+            self.wait_changed.notify_all();
+            return Err("portable-body-source-required".into());
+        }
+        receipt.available=false;
+        self.cancel_requested.store(false,Ordering::Release);
+        wait.portable_body_retry_requested=true;
+        status.state=JobState::Running;
+        status.phase=JobPhase::CopyingMissingBodies;
+        status.error=None;
+        drop(wait);drop(status);
+        self.wait_changed.notify_all();
+        Ok(())
+    }
+
     pub(crate) fn set_replaces_library(&self, replaces_library: bool) -> Result<(), String> {
         let mut status = self.status.lock().map_err(|_| "native job mutex poisoned".to_owned())?;
         if status.state.is_terminal() {
@@ -4121,6 +4397,21 @@ impl JobControl {
         Ok(CancelOutcome::Requested)
     }
 
+    fn set_activation_permit(
+        &self,
+        permit: std::sync::Weak<Mutex<Option<admission::Permit>>>,
+    ) -> Result<(), String> {
+        let mut wait = self
+            .wait_state
+            .lock()
+            .map_err(|_| "native job mutex poisoned".to_owned())?;
+        if wait.activation_permit.is_some() || wait.restore_finalized {
+            return Err("native activation permit is already assigned".into());
+        }
+        wait.activation_permit = Some(permit);
+        Ok(())
+    }
+
     fn request_finalize(
         &self,
         expected_revision: Option<i64>,
@@ -4160,6 +4451,12 @@ impl JobControl {
             .map_err(|error| format!("native restore finalization mutex poisoned: {error}"))?;
         if wait.restore_finalized {
             return Ok(FinalizeOutcome::AlreadyRequested);
+        }
+        if let Some(slot) = &wait.activation_permit {
+            let slot = slot.upgrade().ok_or_else(|| "native activation worker exited".to_owned())?;
+            let mut owned = slot.lock().map_err(|_| "native activation permit is unavailable".to_owned())?;
+            owned.as_mut().ok_or_else(|| "native activation permit was released".to_owned())?
+                .upgrade_staging().map_err(|code| code.to_owned())?;
         }
         if expected_revision.is_some() {
             wait.activation_expected_revision = expected_revision;
@@ -4373,6 +4670,7 @@ impl JobControl {
             .lock()
             .map_err(|error| format!("native job status mutex poisoned: {error}"))?;
         let expected = match status.kind {
+            JobKind::SnapshotBodies => JobPhase::CopyingMissingBodies,
             JobKind::RestorePortableBackup => JobPhase::ReadingSource,
             JobKind::ExportPortableBackup => JobPhase::WritingExport,
             JobKind::ExportRawRecovery => JobPhase::ReadingSource,
@@ -4872,7 +5170,8 @@ impl JobPhase {
             | Self::AwaitingPublicationRetry
             | Self::FinalizingPublication => 3,
             Self::ActivatingDatabase => 4,
-            Self::Complete => 5,
+            Self::CopyingMissingBodies => 5,
+            Self::Complete => 6,
         }
     }
 }
@@ -4902,6 +5201,7 @@ mod tests {
             revision,
             source_bytes: 1,
             source_sha256: "a".repeat(64),
+            source_fingerprint_kind: crate::native_file_jobs::SourceFingerprintKind::WholeFileSha256,
             character_count: 0,
             preset_count: 0,
             warning_codes: Vec::new(),
@@ -5801,6 +6101,169 @@ mod tests {
                 .state,
             JobState::Succeeded,
         );
+    }
+
+    #[test]
+    fn portable_adoption_retains_exclusion_until_exact_idempotent_receipt() {
+        let registry = JobRegistry::default();
+        let admission = Arc::new(admission::Admission::default());
+        let permit = Arc::new(Mutex::new(Some(admission.file(true).unwrap())));
+        let job = registry.create(JobKind::RestorePortableBackup).unwrap();
+        job.set_activation_permit(Arc::downgrade(&permit)).unwrap();
+        job.start(JobPhase::ReadingSource).unwrap();
+        job.set_device_session("synthetic-device-session").unwrap();
+        job.publish_portable_activation(7, "3".into()).unwrap();
+        assert!(admission.server().is_err());
+        assert!(job.confirm_portable_adoption("07", "3", "synthetic-device-session", ||Ok(())).is_err());
+        assert!(job.confirm_portable_adoption("8", "3", "synthetic-device-session", ||Ok(())).is_err());
+        assert!(job.confirm_portable_adoption("7", "4", "synthetic-device-session", ||Ok(())).is_err());
+        assert!(job.confirm_portable_adoption("7", "3", "other-session", ||Ok(())).is_err());
+        assert!(job.confirm_portable_adoption("7", "3", "synthetic-device-session", ||Err("Device recovery has not completed".into())).is_err());
+        assert!(admission.server().is_err());
+        let worker = Arc::clone(&job);
+        let (done, completed) = std::sync::mpsc::channel();
+        let joined = std::thread::spawn(move || {
+            worker.wait_for_portable_adoption().unwrap();
+            done.send(()).unwrap();
+        });
+        assert!(completed.try_recv().is_err());
+        job.confirm_portable_adoption("7", "3", "synthetic-device-session", ||Ok(())).unwrap();
+        completed.recv().unwrap();
+        joined.join().unwrap();
+        assert!(admission.server().is_ok());
+        job.confirm_portable_adoption("7", "3", "synthetic-device-session", ||panic!("matching completed ACK must be idempotent after session cleanup")).unwrap();
+        assert!(job.confirm_portable_adoption("9", "3", "synthetic-device-session", ||Ok(())).is_err());
+    }
+
+    #[test]
+    fn portable_adoption_fixture_keeps_mandatory_finalization_and_actual_exclusion() {
+        let root=tempfile::tempdir().unwrap();
+        let state=NativeFileJobState::initialize(root.path().join("native-file-jobs"));
+        let (job,slot)=state.create_portable_restore_fixture(7).unwrap();
+        assert!(job.requires_restore_finalization);
+        assert_eq!(job.status().expected_revision,Some(7));
+        assert!(state.admission.server().is_err());
+        assert!(slot.lock().unwrap().is_some());
+        drop(slot);
+        assert!(state.admission.server().is_ok());
+    }
+
+    #[test]
+    fn upstream_finalize_upgrades_owned_staging_and_retains_exclusion_after_lost_response() {
+        let directory = TempDir::new().unwrap();
+        let state = NativeFileJobState::initialize(directory.path().join("native-file-jobs"));
+        let registry = Arc::clone(&state.registry);
+        let admission = Arc::clone(&state.admission);
+        let permit = Arc::new(Mutex::new(Some(admission.staging().unwrap())));
+        let job = registry
+            .create_with_context(JobKind::RestoreBlockRisuSave, Some(3), Vec::new())
+            .unwrap();
+        job.set_activation_permit(Arc::downgrade(&permit)).unwrap();
+        job.start(JobPhase::ReadingSource).unwrap();
+        job.set_phase(JobPhase::StagingDatabase).unwrap();
+        let waiter = Arc::clone(&job);
+        let waited = std::thread::spawn(move || waiter.wait_for_restore_finalization());
+        while job.status().state != JobState::WaitingForInput {
+            std::thread::yield_now();
+        }
+        let receive = admission.server().unwrap();
+        assert_eq!(state.finalize(&job.id(), Some(9)).unwrap_err().code, "library-operation-busy");
+        assert_eq!(state.finalize("missing-synthetic-job", Some(9)).unwrap(), FinalizeOutcome::Missing);
+        assert_eq!(job.status().state, JobState::WaitingForInput);
+        assert_eq!(job.activation_expected_revision().unwrap(), None);
+        drop(receive);
+        assert_eq!(
+            registry.finalize(&job.id(), Some(9)).unwrap(),
+            FinalizeOutcome::Requested
+        );
+        // Losing the renderer's response neither releases admission nor activates twice.
+        assert!(admission.server().is_err());
+        assert_eq!(
+            registry.finalize(&job.id(), Some(99)).unwrap(),
+            FinalizeOutcome::AlreadyRequested
+        );
+        assert_eq!(waited.join().unwrap(), Ok(Some(9)));
+        assert_eq!(registry.cancel(&job.id()).unwrap(), CancelOutcome::TooLate);
+        assert!(admission.server().is_err());
+        job.finish_success(result(10)).unwrap();
+        drop(permit);
+        assert!(admission.server().is_ok());
+        assert_eq!(
+            registry.finalize(&job.id(), Some(99)).unwrap(),
+            FinalizeOutcome::Terminal
+        );
+    }
+
+    #[test]
+    fn upstream_terminal_receipt_follows_cleanup_and_released_admission() {
+        let registry = Arc::new(JobRegistry::default());
+        let admission = Arc::new(admission::Admission::default());
+        let permit = Arc::new(Mutex::new(Some(admission.staging().unwrap())));
+        permit
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .upgrade_staging()
+            .unwrap();
+        let job = registry
+            .create_with_context(JobKind::RestoreBlockRisuSave, Some(3), Vec::new())
+            .unwrap();
+        job.start(JobPhase::ReadingSource).unwrap();
+        job.set_phase(JobPhase::StagingDatabase).unwrap();
+        let (cleanup_done, allow_cleanup) = std::sync::mpsc::channel();
+        let (released, admission_released) = std::sync::mpsc::channel();
+        let (publish, allow_publish) = std::sync::mpsc::channel();
+        let worker_job = Arc::clone(&job);
+        let worker = std::thread::spawn(move || {
+            allow_cleanup.recv().unwrap();
+            release_worker_admission(&permit);
+            released.send(()).unwrap();
+            allow_publish.recv().unwrap();
+            finish_worker_outcome(
+                &worker_job,
+                JobKind::RestoreBlockRisuSave,
+                Ok(result(4)),
+                Vec::new(),
+            );
+        });
+        assert!(admission.server().is_err());
+        assert_eq!(job.status().state, JobState::Running);
+        cleanup_done.send(()).unwrap();
+        admission_released.recv().unwrap();
+        assert_eq!(job.status().state, JobState::Running);
+        assert!(admission.server().is_ok());
+        publish.send(()).unwrap();
+        worker.join().unwrap();
+        assert_eq!(job.status().state, JobState::Succeeded);
+        assert!(admission.server().is_ok());
+    }
+
+    #[test]
+    fn upstream_cancelled_staging_releases_worker_permit_without_finalizing() {
+        let registry = Arc::new(JobRegistry::default());
+        let admission = Arc::new(admission::Admission::default());
+        let permit = Arc::new(Mutex::new(Some(admission.staging().unwrap())));
+        let job = registry
+            .create_with_context(JobKind::RestoreBlockRisuSave, Some(3), Vec::new())
+            .unwrap();
+        job.set_activation_permit(Arc::downgrade(&permit)).unwrap();
+        job.start(JobPhase::ReadingSource).unwrap();
+        job.set_phase(JobPhase::StagingDatabase).unwrap();
+        let waiter = Arc::clone(&job);
+        let waited = std::thread::spawn(move || waiter.wait_for_restore_finalization());
+        while job.status().state != JobState::WaitingForInput {
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            registry.cancel(&job.id()).unwrap(),
+            CancelOutcome::Requested
+        );
+        assert!(waited.join().unwrap().is_err());
+        job.finish_failure("cancelled", "Synthetic cancellation")
+            .unwrap();
+        drop(permit);
+        assert!(admission.file(true).is_ok());
     }
 
     #[test]
@@ -7010,79 +7473,13 @@ mod tests {
     }
 
     #[test]
-    fn portable_export_requires_exactly_one_active_or_reference_source() {
+    fn portable_export_requires_an_active_revision() {
         let selection = portable::PortableSelection::default();
-        assert!(!portable_export_uses_reference_source(&None, Some(7), &selection).unwrap());
-
-        let reference = Some(JobSource::ConflictReference {
-            token: "server:00000000-0000-4000-8000-000000000000".into(),
-        });
-        assert!(portable_export_uses_reference_source(&reference, None, &selection).unwrap());
-        assert_eq!(
-            portable_export_uses_reference_source(&reference, Some(7), &selection)
-                .unwrap_err()
-                .code,
-            "invalid-input"
-        );
-        assert_eq!(
-            portable_export_uses_reference_source(&None, None, &selection)
-                .unwrap_err()
-                .code,
-            "invalid-input"
-        );
-
-        let with_device_section = portable::PortableSelection {
-            library: true,
-            device_sections: vec!["hypa".into()],
-            items: None,
-            allow_source_preservation: false,
-        };
-        assert_eq!(
-            portable_export_uses_reference_source(&reference, None, &with_device_section)
-                .unwrap_err()
-                .code,
-            "invalid-input"
-        );
-
-        let request: NativeFileJobStartRequest = serde_json::from_value(json!({
-            "kind": "export-portable-backup",
-            "source": {
-                "type": "conflictReference",
-                "token": "external:00000000-0000-4000-8000-000000000000"
-            },
-            "selection": {"library": true, "deviceSections": []},
-            "destination": null
-        }))
-        .unwrap();
-        assert!(matches!(
-            request,
-            NativeFileJobStartRequest::ExportPortableBackup {
-                expected_revision: None,
-                source: Some(JobSource::ConflictReference { token }),
-                ..
-            } if token == "external:00000000-0000-4000-8000-000000000000"
-        ));
+        assert!(!portable_export_requires_revision(&None, Some(7), &selection).unwrap());
+        assert!(portable_export_requires_revision(&None, None, &selection).is_err());
+        assert!(portable_export_requires_revision(&Some(JobSource::DesktopPath { path: "synthetic".into() }), Some(7), &selection).is_err());
     }
 
-    #[test]
-    fn conflict_reference_restore_rejects_partial_or_device_selection() {
-        let source = JobSource::ConflictReference {
-            token: "server:00000000-0000-4000-8000-000000000000".into(),
-        };
-        assert!(validate_portable_restore_selection(&source, &None).is_ok());
-        let selected = Some(portable::PortableSelection {
-            library: true,
-            device_sections: vec!["hypa".into()],
-            items: None,
-            allow_source_preservation: false,
-        });
-        assert_eq!(
-            validate_portable_restore_selection(&source, &selected)
-                .unwrap_err()
-                .code,
-            "invalid-input"
-        );
-    }
 
     #[test]
     fn native_content_export_requests_are_descriptor_only_and_recovery_kinds_stay_exact() {
@@ -7411,6 +7808,7 @@ mod tests {
                 revision: 2,
                 source_bytes: 128,
                 source_sha256: "a".repeat(64),
+                source_fingerprint_kind: crate::native_file_jobs::SourceFingerprintKind::WholeFileSha256,
                 character_count: 1,
                 preset_count: 1,
                 warning_codes: (0..=MAX_WARNING_CODES)

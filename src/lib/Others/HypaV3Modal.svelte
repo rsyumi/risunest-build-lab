@@ -9,7 +9,7 @@
   import { DBState, selectedCharID, hypaV3ModalOpen } from "src/ts/stores.svelte";
   import { language } from "src/lang";
   import { translateHTML } from "src/ts/translator/translator";
-  import { alertConfirmTwice } from "./HypaV3Modal/utils";
+  import { alertCheckboxConfirm } from "src/ts/alert";
   import ModalHeader from "./HypaV3Modal/modal-header.svelte";
   import ModalSummaryItem from "./HypaV3Modal/modal-summary-item.svelte";
   import ModalFooter from "./HypaV3Modal/modal-footer.svelte";
@@ -353,10 +353,14 @@
 
   async function handleResetData() {
     if (
-      await alertConfirmTwice(
-        language.hypaV3Modal.resetConfirmMessage,
-        language.hypaV3Modal.resetConfirmSecondMessage
-      )
+      (await alertCheckboxConfirm({
+          title: language.hypaV3Modal.resetConfirmMessage,
+          description: language.hypaV3Modal.resetConfirmSecondMessage,
+          checkboxLabel: language.checkboxConfirmation.hypaReset,
+          actionLabel: language.confirm,
+          cancelLabel: language.cancel,
+          requireChecked: true,
+      })).confirmed
     ) {
       DBState.db.characters[$selectedCharID].chats[
         DBState.db.characters[$selectedCharID].chatPage

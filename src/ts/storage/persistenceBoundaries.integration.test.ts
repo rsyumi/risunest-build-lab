@@ -14,7 +14,6 @@ import {
     capturePersistentPresets,
     type PersistentDataRuntimeStateAdapter,
 } from 'src/ts/storage/persistentDataRuntime'
-import { createServerSyncFacade } from 'src/ts/storage/sync/serverSync'
 import { SaveCoordinator } from 'src/ts/storage/saveCoordinator'
 import {
     NativeCommitTransport, LARGE_COMMIT_BYTES,
@@ -197,82 +196,4 @@ describe('persistence boundary regressions', () => {
         expect(await other.getItem('old-key')).toBe('other-value')
     })
 
-    it.each([
-        ['full', false], ['full', true], ['targeted', false], ['targeted', true],
-    ] as const)('keeps later edits after plugin reload failure with %s projection, autosave=%s', async (mode, autosave) => {
-        const initial = database()
-        const storeName = `sync-retry-${crypto.randomUUID()}`
-        const store = new IndexedDbPersistentDataStore(storeName)
-        await store.open()
-        await store.replaceFromDatabase(initial, 0)
-        if (mode === 'targeted') {
-            const acquire = store.acquireRevision.bind(store)
-            vi.spyOn(store, 'acquireRevision').mockImplementation(async (revision) => {
-                const lease = await acquire(revision)
-                return {
-                    ...lease,
-                    readWorkingSetChangeWindow: async () => ({ revision, afterRevision: revision }),
-                    readWorkingSetChangePage: async () => [],
-                }
-            })
-        }
-        const state = stateAdapter(initial, mode === 'targeted')
-        const runtime = createPersistentDataRuntime({ store, state, prepareDatabase: async (value) => value })
-        await runtime.initializeActiveWorkingSet(initial)
-        const head = {
-            libraryId: 'synthetic-library', epoch: 'synthetic-epoch', seq: '1',
-            headId: 'a'.repeat(64), minRetainedSeq: '0', sections: {},
-        }
-        const invoke = vi.fn(async (command: string) => {
-            if (command === 'server_sync_prepare') return {
-                kind: 'ready', preparationId: 'synthetic-preparation', localRevision: 1,
-                head, appliedRecords: 1,
-            }
-            if (command === 'server_sync_activate') {
-                return {
-                    revision: (await store.replaceFromDatabase(database('Remote committed'), 1)).revision,
-                    pluginsChanged: true, devicePluginsChanged: false,
-                }
-            }
-            if (command === 'server_sync_publish') return {
-                endpoint: 'https://synthetic.invalid', phase: 'idle', localRevision: 2,
-                head, conflictCount: 0, conflicts: [], appliedRecords: 1, proposedRecords: 0,
-            }
-            throw new Error(`Unexpected synthetic command ${command}`)
-        })
-        const restorePlugins = vi.fn()
-            .mockRejectedValueOnce(new Error('Synthetic plugin reload failure'))
-            .mockResolvedValue(undefined)
-        const facade = createServerSyncFacade({ runtime, invoke: invoke as never, restorePlugins })
-        await expect(facade.cycle()).rejects.toMatchObject({ code: 'committed-refresh-pending' })
-        expect(runtime.pendingWorkingSetRefreshRevision).toBeNull()
-        expect(state.current().username).toBe('Remote committed')
-        state.current().username = 'New edit after successful projection'
-        state.current().characters[0].name = 'Edited after projection'
-        state.current().characters[0].chats[0].message.push({
-            role: 'user', data: 'Later local turn', chatId: 'later-turn',
-        })
-        runtime.markPersistentDataDirty(1)
-        if (autosave) {
-            await vi.waitFor(async () => {
-                expect((await store.readRoot()).value.username).toBe('New edit after successful projection')
-            }, { timeout: 3000 })
-        }
-        await facade.cycle()
-        const afterRetry = state.current().username
-        await runtime.flushPendingData('probe-cleanup')
-        expect({ live: afterRetry, durable: (await store.readRoot()).value.username }).toEqual({
-            live: 'New edit after successful projection',
-            durable: 'New edit after successful projection',
-        })
-        const reopened = new IndexedDbPersistentDataStore(storeName)
-        await reopened.open()
-        const durable = await reopened.materializeDatabase()
-        expect(durable.username).toBe('New edit after successful projection')
-        expect(state.current().characters[0].name).toBe('Edited after projection')
-        expect(durable.characters[0].name).toBe('Edited after projection')
-        expect(durable.characters[0].chats[0].message).toEqual(state.current().characters[0].chats[0].message)
-        expect(durable.characters[0].chats[0].message.at(-1)?.data).toBe('Later local turn')
-        expect(invoke.mock.calls.filter(([command]) => command === 'server_sync_activate')).toHaveLength(1)
-    })
 })

@@ -149,6 +149,8 @@ vi.mock('src/ts/process/ttsHooks', () => ({
     registerTTSPostprocessor: vi.fn(), unregisterTTSPostprocessor: vi.fn(),
 }))
 vi.mock('src/ts/storage/persistentDataRuntime.svelte', () => ({
+    getPersistentRevision: () => 0,
+    commitPersistentUnitIntent: vi.fn(),
     acquireCompleteConversation: vi.fn(),
     captureSelectedConversationTarget: vi.fn(() => null),
     flushPendingDataLocally: vi.fn(),

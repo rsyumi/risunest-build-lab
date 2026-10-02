@@ -271,6 +271,78 @@ impl PersistentStore {
         }).ok_or_else(|| invalid("portable export size overflow"))
     }
 
+    pub(crate) fn capture_portable_units(&self, lease: &str, destination: &Connection, probe: &dyn CancellationProbe) -> StoreResult<super::external_capture::BackupDependencyInventory> {
+        use super::external_capture::BackupBodyRole;
+        let units = self.lww_backup_unit_values(lease)?;
+        destination.execute_batch("CREATE TEMP TABLE backup_payload_spool(hash TEXT PRIMARY KEY,body BLOB NOT NULL)")?;
+        let inventory = self.lww_backup_dependency_inventory(lease, &units, probe, true, &mut |hash,body,role| {
+            cancelled(probe)?;
+            match role {
+                BackupBodyRole::Control=>{destination.execute("INSERT INTO backup_controls VALUES(?1,?2)",rusqlite::params![hash,body])?;},
+                BackupBodyRole::Payload=>{destination.execute("INSERT INTO backup_payload_spool VALUES(?1,?2)",rusqlite::params![hash,body])?;},
+            }
+            Ok(())
+        })?;
+        for (key, value) in units {
+            cancelled(probe)?;
+            destination.execute("INSERT INTO backup_units VALUES(?1,?2)",rusqlite::params![String::from(key),serde_json::to_string(&value)?])?;
+        }
+        for (hash, size) in &inventory.payloads {
+            let size=size.ok_or_else(||invalid("original payload size is unavailable"))?;
+            destination.execute("INSERT INTO backup_payloads VALUES(?1,?2,?3)",rusqlite::params![hash,i64::try_from(size).map_err(|_|invalid("original payload size exceeds SQLite limit"))?,inventory.record_payloads.contains(hash)])?;
+        }
+        Ok(inventory)
+    }
+
+    pub(crate) fn stage_portable_units(&self, source: &Connection, probe: &dyn CancellationProbe) -> StoreResult<std::collections::BTreeMap<risunest_sync_wire::unit::UnitKey,risunest_sync_wire::unit::UnitValue>> {
+        let mut units = std::collections::BTreeMap::new();
+        let mut statement = source.prepare("SELECT key,value FROM backup_units ORDER BY key")?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            cancelled(probe)?;
+            let key = row.get::<_,String>(0)?.try_into().map_err(|_|invalid("invalid original unit key"))?;
+            let value: risunest_sync_wire::unit::UnitValue = serde_json::from_str(&row.get::<_,String>(1)?)?;
+            value.validate().map_err(|e| invalid(&e.to_string()))?;
+            units.insert(key,value);
+        }
+        let temporary=tempfile::tempdir_in(&self.snapshots_dir)?;
+        let certified=Connection::open(temporary.path().join("certified.sqlite"))?;
+        certified.execute_batch("PRAGMA cache_size=-16384; PRAGMA temp_store=FILE; CREATE TABLE controls(hash TEXT PRIMARY KEY,body BLOB NOT NULL)")?;
+        let inventory = super::external_capture::original_unit_dependency_inventory(&units,
+            &|hash| Ok(source.query_row("SELECT body FROM backup_controls WHERE hash=?1 AND length(body)<=?2",rusqlite::params![hash,risunest_sync_wire::MAX_METADATA_BYTES as i64],|row|row.get(0)).optional()?),
+            &|hash| {
+                let size:Option<i64>=source.query_row("SELECT byte_length FROM backup_payloads WHERE hash=?1",[hash],|row|row.get(0)).optional()?;
+                size.map(|size|u64::try_from(size).map_err(|_|invalid("invalid original payload size"))).transpose()
+            },probe,true,&mut |hash,body,role| {
+                if role!=super::external_capture::BackupBodyRole::Control {return Err(invalid("payload body is misclassified as an original control"));}
+                certified.execute("INSERT INTO controls VALUES(?1,?2)",rusqlite::params![hash,body])?;
+                Ok(())
+            })?;
+        let controls:i64=source.query_row("SELECT COUNT(*) FROM backup_controls",[],|row|row.get(0))?;
+        if usize::try_from(controls).ok()!=Some(inventory.controls.len()) {return Err(invalid("unreferenced original control"));}
+        for hash in inventory.controls.keys() {
+            let present:bool=source.query_row("SELECT EXISTS(SELECT 1 FROM backup_controls WHERE hash=?1)",[hash],|row|row.get(0))?;
+            if !present {return Err(invalid("missing original control"));}
+        }
+        let payloads:i64=source.query_row("SELECT COUNT(*) FROM backup_payloads",[],|row|row.get(0))?;
+        if usize::try_from(payloads).ok()!=Some(inventory.payloads.len()) {return Err(invalid("unreferenced original payload"));}
+        for (hash,size) in &inventory.payloads {
+            let row:Option<(i64,bool)>=source.query_row("SELECT byte_length,record FROM backup_payloads WHERE hash=?1",[hash],|row|Ok((row.get(0)?,row.get(1)?))).optional()?;
+            let expected_size=size.ok_or_else(||invalid("original payload size is unavailable"))?;
+            if row!=Some((i64::try_from(expected_size).map_err(|_|invalid("original payload size exceeds SQLite limit"))?,inventory.record_payloads.contains(hash))) {return Err(invalid("original payload metadata differs"));}
+        }
+        let mut statement=certified.prepare("SELECT hash,body FROM controls ORDER BY hash")?;
+        let mut rows=statement.query([])?;
+        while let Some(row)=rows.next()? {
+            cancelled(probe)?;
+            super::message_pages::put_object(&self.connection,&row.get::<_,String>(0)?,&row.get::<_,Vec<u8>>(1)?)?;
+        }
+        for (key,value) in &units {
+            super::lww::validate_received(&self.connection,key,value)?;
+        }
+        Ok(units)
+    }
+
     pub(crate) fn capture_portable_records(
         &self,
         lease: &str,
@@ -284,6 +356,15 @@ impl PersistentStore {
     /// Prepare raw rows without activating them. The file restore coordinator must additionally
     /// validate payloads, owner manifests and the F0 reference contract, publish recovery, and
     /// obtain the existing replacement fence before using the normal commit API.
+    pub(crate) fn portable_object_present(&self, hash: &str, expected_size:u64) -> StoreResult<bool> {
+        risunest_sync_wire::validate_hash(hash).map_err(|e| super::StoreError::Validation { message: e.to_string() })?;
+        match crate::asset_repository::PayloadCas::new(&self.repository_root)?.stat_object(hash)? {
+            None=>Ok(false),
+            Some(size) if size==expected_size=>Ok(true),
+            Some(_)=>Err(invalid("existing portable payload size mismatch")),
+        }
+    }
+
     pub(crate) fn stage_portable_records(
         &mut self,
         source: &Connection,
@@ -662,13 +743,14 @@ fn validate_live_columns(source: &Connection) -> StoreResult<()> {
             && !matches!(
                 name.as_str(),
                 "asset_alias_replacement_candidates"
+                    | "snapshot_original_meta"
                     | "snapshot_leases"
-                    | "server_sync_context"
-                    | "server_sync_prepared"
                     | "content_change_context"
                     | "content_changes"
                     | "content_change_consumers"
                     | "content_change_floor"
+                    | "message_page_indexes"
+                    | "message_page_manifests"
             )
         {
             return Err(invalid(&format!(
@@ -683,10 +765,13 @@ fn validate_live_columns(source: &Connection) -> StoreResult<()> {
                 Ok((row.get::<_, String>(1)?, row.get::<_, String>(2)?))
             })?
             .collect::<Result<Vec<_>, _>>()?;
-        let expected = std::iter::once(("generation", "TEXT"))
+        let mut expected = std::iter::once(("generation", "TEXT"))
             .chain(table.columns.iter().copied())
             .map(|(name, kind)| (name.to_owned(), kind.to_owned()))
             .collect::<Vec<_>>();
+        if table.name=="messages" {
+            expected.extend([("canonical_hash".to_owned(),"TEXT".to_owned()),("canonical_size".to_owned(),"INTEGER".to_owned())]);
+        }
         if actual != expected {
             return Err(invalid(
                 "portable source columns differ from the reviewed schema",
@@ -751,6 +836,26 @@ mod tests {
     }
 
     #[test]
+    fn portable_presence_checks_physical_metadata_without_hashing_present_bodies() {
+        let directory=tempfile::tempdir().unwrap();
+        let mut store=PersistentStore::open(directory.path()).unwrap();
+        let bytes=b"synthetic physically present payload";
+        let hash=risunest_sync_wire::hash(bytes);
+        store.asset_object_catalog().register(&[super::super::asset_object_catalog::AssetObjectRegistration {object_hash:hash.clone(),byte_size:bytes.len() as u64}],0).unwrap();
+        assert!(!store.portable_object_present(&hash,bytes.len() as u64).unwrap());
+        let cas=crate::asset_repository::PayloadCas::new(directory.path()).unwrap();
+        cas.prepare_bytes(bytes).unwrap();
+        crate::asset_repository::body_io::reset_body_io();
+        assert!(store.portable_object_present(&hash,bytes.len() as u64).unwrap());
+        let observed=crate::asset_repository::body_io::take_body_io();
+        assert!(observed.complete());
+        assert_eq!(observed.asset_work().opens,0);
+        assert_eq!(observed.asset_work().read_bytes,0);
+        assert!(observed.asset_work().body_sha.values().all(|work|work.bytes==0));
+        assert!(store.portable_object_present(&hash,bytes.len() as u64+1).is_err());
+    }
+
+    #[test]
     fn portable_capture_excludes_root_account_but_keeps_other_values() {
         let source = rusqlite::Connection::open_in_memory().unwrap();
         source.execute_batch("CREATE TABLE root(generation TEXT,value TEXT)").unwrap();
@@ -759,6 +864,7 @@ mod tests {
             let columns = table.columns.iter().map(|(name, kind)| format!("{name} {kind}")).collect::<Vec<_>>().join(",");
             source.execute_batch(&format!("CREATE TABLE {} (generation TEXT,{columns})", table.name)).unwrap();
         }
+        source.execute_batch("ALTER TABLE messages ADD COLUMN canonical_hash TEXT; ALTER TABLE messages ADD COLUMN canonical_size INTEGER").unwrap();
         let mut output = rusqlite::Connection::open_in_memory().unwrap();
         create_raw_tables(&output).unwrap();
         copy_generation(&source, "chosen", &mut output, &Never).unwrap();
@@ -820,7 +926,7 @@ mod tests {
             .unwrap();
         source
             .execute(
-                "INSERT INTO messages VALUES('chosen','orphan','chat',9,NULL,?1)",
+                "INSERT INTO messages VALUES('chosen','orphan','chat',9,NULL,?1,'',0)",
                 ["{\"data\":\"合成\"}"],
             )
             .unwrap();

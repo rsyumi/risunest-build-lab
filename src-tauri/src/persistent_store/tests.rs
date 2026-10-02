@@ -88,6 +88,7 @@ fn empty_working_set_commit(expected_revision: i64) -> WorkingSetCommit {
         delete_character_ids: None,
         plugin_storage: None,
         asset_owner_heads: None,
+    ..Default::default()
     }
 }
 
@@ -144,12 +145,6 @@ mod plugin_owner_tests;
 mod replacement_tests;
 #[path = "tests/schema_tests.rs"]
 mod schema_tests;
-mod server_sync_apply_tests;
-mod server_sync_engine_tests;
-#[path = "tests/server_sync_outbox_tests.rs"]
-mod server_sync_outbox_tests;
-#[path = "tests/server_sync_projection_tests.rs"]
-mod server_sync_projection_tests;
 #[path = "tests/snapshot_lease_tests.rs"]
 mod snapshot_lease_tests;
 #[path = "tests/storage_stats_tests.rs"]

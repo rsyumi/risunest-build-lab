@@ -3,6 +3,22 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 
 pub(crate) const SCHEMA_VERSION: u32 = 1;
 
+const PLUGIN_GC_REVISION_TABLE_SQL: &str = r#"
+CREATE TABLE plugin_gc_revision (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    revision INTEGER NOT NULL CHECK (typeof(revision) = 'integer' AND revision >= 0)
+)
+"#;
+
+fn plugin_gc_revision_trigger_sql(event: &str) -> String {
+    format!("CREATE TRIGGER plugin_gc_revision_{} AFTER {event} ON plugin_storage
+        BEGIN
+            SELECT CASE WHEN (SELECT COUNT(*) FROM plugin_gc_revision WHERE singleton = 1) != 1
+                THEN RAISE(ABORT, 'plugin GC revision is unavailable') END;
+            UPDATE plugin_gc_revision SET revision = revision + 1 WHERE singleton = 1;
+        END", event.to_ascii_lowercase())
+}
+
 const PLUGIN_CLAIM_ELIGIBILITY_TABLE_SQL: &str = r#"
 CREATE TABLE plugin_claim_eligibility (
     import_batch_id TEXT NOT NULL,
@@ -158,6 +174,8 @@ fn create_schema(connection: &mut Connection) -> StoreResult<()> {
             message_index INTEGER NOT NULL,
             message_id TEXT,
             value TEXT NOT NULL,
+            canonical_hash TEXT NOT NULL DEFAULT '',
+            canonical_size INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (generation, character_id, conversation_id, message_index)
         );
         CREATE INDEX messages_by_id
@@ -212,6 +230,12 @@ fn create_schema(connection: &mut Connection) -> StoreResult<()> {
             PRIMARY KEY (generation, owner_kind, owner_locator)
         );
         CREATE INDEX asset_owner_heads_generation ON asset_owner_heads (generation);
+        CREATE TABLE snapshot_restore_stages (stage_id TEXT PRIMARY KEY,request_id TEXT NOT NULL UNIQUE,snapshot_id TEXT NOT NULL,authority TEXT NOT NULL,state TEXT NOT NULL CHECK(state IN ('staged','committed')),revision INTEGER);
+        CREATE TABLE snapshot_original_meta (singleton INTEGER PRIMARY KEY CHECK(singleton=1),revision INTEGER NOT NULL CHECK(revision>=0),generation TEXT NOT NULL);
+        CREATE TABLE snapshot_original_units (key TEXT PRIMARY KEY,value TEXT NOT NULL);
+        CREATE TABLE snapshot_restore_units (stage_id TEXT NOT NULL REFERENCES snapshot_restore_stages(stage_id) ON DELETE CASCADE,key TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(stage_id,key));
+        CREATE TABLE snapshot_restore_payloads (stage_id TEXT NOT NULL REFERENCES snapshot_restore_stages(stage_id) ON DELETE CASCADE,hash TEXT NOT NULL,byte_size INTEGER NOT NULL CHECK(byte_size>=0),owner INTEGER NOT NULL CHECK(owner IN (0,1)),cached INTEGER NOT NULL CHECK(cached IN (0,1)),PRIMARY KEY(stage_id,hash));
+        CREATE TABLE snapshot_restore_body_jobs (stage_id TEXT PRIMARY KEY REFERENCES snapshot_restore_stages(stage_id) ON DELETE CASCADE,protection_job_id TEXT NOT NULL,complete INTEGER NOT NULL CHECK(complete IN (0,1)));
         CREATE TABLE asset_objects (
             object_hash TEXT PRIMARY KEY CHECK (
                 length(object_hash) = 64
@@ -228,14 +252,22 @@ fn create_schema(connection: &mut Connection) -> StoreResult<()> {
     transaction.execute_batch(ASSET_OBJECT_DELETION_INDEX_SQL)?;
     transaction.execute_batch(ASSET_ALIAS_REPLACEMENT_CANDIDATE_TABLE_SQL)?;
     transaction.execute_batch(ASSET_GC_MAINTENANCE_STATE_TABLE_SQL)?;
+    transaction.execute_batch(PLUGIN_GC_REVISION_TABLE_SQL)?;
+    transaction.execute("INSERT INTO plugin_gc_revision (singleton, revision) VALUES (1, 0)", [])?;
+    for event in ["INSERT", "UPDATE", "DELETE"] {
+        transaction.execute_batch(&plugin_gc_revision_trigger_sql(event))?;
+    }
     transaction.execute(
         "INSERT INTO asset_gc_maintenance_state (singleton, catalog_cursor) VALUES (1, NULL)",
         [],
     )?;
-    super::server_sync_outbox::create_schema(&transaction)?;
+    super::server_sync_journal::create_schema(&transaction)?;
     super::content_change_index::create_schema(&transaction)?;
     super::sync_selection::create_schema(&transaction)?;
     super::external_storage_state::create_schema(&transaction)?;
+    transaction.execute_batch(super::lww::UNIT_SCHEMA)?;
+    transaction.execute_batch(super::lww::BINDING_STAGE_SCHEMA)?;
+    transaction.execute_batch(super::message_pages::SCHEMA)?;
     transaction.execute_batch(PLUGIN_CLAIM_ELIGIBILITY_TABLE_SQL)?;
     validate_schema(&transaction)?;
     transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -244,9 +276,20 @@ fn create_schema(connection: &mut Connection) -> StoreResult<()> {
 }
 
 fn validate_schema(connection: &Connection) -> StoreResult<()> {
+    validate_object_sql(connection, "table", "plugin_gc_revision", PLUGIN_GC_REVISION_TABLE_SQL,
+        "plugin GC revision table definition is invalid")?;
+    for event in ["INSERT", "UPDATE", "DELETE"] {
+        validate_object_sql(connection, "trigger", &format!("plugin_gc_revision_{}", event.to_ascii_lowercase()),
+            &plugin_gc_revision_trigger_sql(event), "plugin GC revision trigger definition is invalid")?;
+    }
+    let rows: i64 = connection.query_row("SELECT COUNT(*) FROM plugin_gc_revision WHERE singleton = 1 AND typeof(revision) = 'integer' AND revision >= 0", [], |row| row.get(0))?;
+    if rows != 1 {
+        return Err(StoreError::Validation { message: "plugin GC revision row is invalid".to_owned() });
+    }
+    super::lww::validate_schema(connection)?;
     validate_object_sql(connection, "table", "plugin_claim_eligibility",
         PLUGIN_CLAIM_ELIGIBILITY_TABLE_SQL, "plugin claim eligibility table definition is invalid")?;
-    super::server_sync_outbox::validate_schema(connection)?;
+    super::server_sync_journal::validate_schema(connection)?;
     super::content_change_index::validate_schema(connection)?;
     super::external_storage_state::validate_schema(connection)?;
     validate_object_sql(

@@ -2,9 +2,11 @@
 pub mod catalog;
 pub mod content_identity;
 pub mod control;
+mod control_integer;
 pub mod crypto;
 pub mod format;
 pub mod logical_records;
+pub mod message_pages;
 pub mod pack;
 pub mod section;
 pub mod snapshot;

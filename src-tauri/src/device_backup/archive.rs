@@ -37,7 +37,7 @@ pub(crate) enum PreparedDeviceSection {
 }
 
 impl PreparedDeviceSection {
-    fn rows(&self) -> &PreparedSectionRows {
+    pub(crate) fn rows(&self) -> &PreparedSectionRows {
         match self {
             Self::Hypa(rows) | Self::LocalPlugins(rows) | Self::LocalSettings(rows) => rows,
         }
@@ -367,7 +367,7 @@ fn prepared_section(rows: PreparedSectionRows) -> PreparedDeviceSection {
     }
 }
 
-fn write_native_section(
+pub(crate) fn write_native_section(
     catalog: &Catalog,
     section: &PreparedSectionRows,
     probe: &dyn CancellationProbe,
@@ -916,84 +916,27 @@ pub(crate) fn resume_journaled_native_restore(
                 .all(|section| SectionKind::parse(section).is_ok()),
         "Native recovery requires a native restore session",
     )?;
-    if matches!(session.phase.as_str(), "prepared" | "applying-device") {
-        let pending = state.pending_source_sections(id)?;
-        if !pending.is_empty() {
-            let prepared =
-                prepare_journaled_native_sections(state, id, Spool::Source, &pending)?;
-            let manifests = state
-                .section_list(id, Spool::Source)?
-                .into_iter()
-                .map(|manifest| (manifest.section_id.clone(), manifest))
-                .collect::<BTreeMap<_, _>>();
-            for section_id in pending {
-                let section = prepared
-                    .iter()
-                    .find(|section| section.rows().kind().id() == section_id)
-                    .ok_or_else(|| {
-                        error(
-                            "device-section-missing",
-                            "Native recovery source section is absent",
-                        )
-                    })?;
-                let manifest = manifests.get(&section_id).ok_or_else(|| {
-                    error(
-                        "device-section-missing",
-                        "Native recovery source manifest is absent",
-                    )
-                })?;
-                state.section_intent(id, &section_id)?;
-                store
-                    .device_store_mut()
-                    .map_err(device_store_error)?
-                    .restore_prepared_backup_section(section.rows())
-                    .map_err(device_store_error)?;
-                state.section_complete(id, &section_id, &manifest.sha256)?;
-            }
-        }
-        if state.session(id)?.phase == "applying-device" {
-            state.finish_device(id)?;
-        }
+    require(session.includes_library, "Native full restore requires its library stage")?;
+    let stage = session.stage_id.as_deref().ok_or_else(|| error("device-invalid-state", "Native recovery library stage is absent"))?;
+    let prepared = prepare_journaled_native_sections(state,id,Spool::Source,&session.selected_sections)?;
+    let rows = prepared.iter().map(PreparedDeviceSection::rows).collect::<Vec<_>>();
+    let (header,units) = state.library_replacement(id)?;
+    let pending = state.pending_source_sections(id)?;
+    if matches!(session.phase.as_str(),"prepared"|"applying-device") {
+        for section in &pending { state.section_intent(id,section)?; }
     }
-    let session = state.session(id)?;
-    if session.phase == "committing-library" {
-        if state.library_commit_marker_exists(id)? {
-            state.mark_library_committed(id)?;
-        } else {
-            let stage = session.stage_id.as_deref().ok_or_else(|| {
-                error(
-                    "device-invalid-state",
-                    "Native recovery library stage is absent",
-                )
-            })?;
-            let revision = session.expected_revision.ok_or_else(|| {
-                error(
-                    "device-invalid-state",
-                    "Native recovery revision is absent",
-                )
-            })?;
-            let prepared = store
-                .prepare_replace_commit(stage, Some(revision))
-                .map_err(device_store_error)?;
-            let (key, marker) = state.commit_marker(id)?;
-            store
-                .finish_prepared_replace_with_app_kv(
-                    prepared,
-                    &key,
-                    &serde_json::to_value(marker).map_err(|_| {
-                        error(
-                            "device-metadata-invalid",
-                            "Native recovery marker could not be encoded",
-                        )
-                    })?,
-                )
-                .map_err(device_store_error)?;
-            state.mark_library_committed(id)?;
+    let committed = store.lww_commit_replacement_with_device_sections(&header,stage,Some(&units),&rows).map_err(device_store_error)?;
+    let phase = state.session(id)?.phase;
+    if matches!(phase.as_str(), "applying-device" | "committed") {
+        let manifests = state.section_list(id,Spool::Source)?.into_iter().map(|manifest|(manifest.section_id.clone(),manifest)).collect::<BTreeMap<_,_>>();
+        for section in pending {
+            let manifest=manifests.get(&section).ok_or_else(||error("device-section-missing","Native recovery source manifest is absent"))?;
+            if phase == "committed" { state.section_intent(id,&section)?; }
+            state.section_complete(id,&section,&manifest.sha256)?;
         }
+        if phase == "applying-device" { state.finish_device(id)?; }
     }
-    require(
-        state.session(id)?.phase == "committed",
-        "Native recovery did not reach its committed state",
-    )?;
-    store.revision().map_err(device_store_error)
+    if state.session(id)?.phase=="committing-library" { state.mark_library_committed(id)?; }
+    require(state.session(id)?.phase=="committed", "Native recovery did not reach its committed state")?;
+    Ok(committed.revision)
 }

@@ -246,6 +246,7 @@ pub(crate) async fn upload_wave(
             ObjectRole::Pack
                 | ObjectRole::Catalog
                 | ObjectRole::SyncState
+                | ObjectRole::Snapshot
                 | ObjectRole::BackupBundle
                 | ObjectRole::BackupPoint
         ) {

@@ -1,6 +1,6 @@
 <script lang="ts">
     import { language } from 'src/lang'
-    import { alertConfirm, alertNormal } from 'src/ts/alert'
+    import { alertCheckboxConfirm, alertConfirm, alertNormal } from 'src/ts/alert'
     import { isTauri } from 'src/ts/platform'
     import { LoadLocalBackup } from 'src/ts/drive/backuplocal'
     import { openSyncConflictBackups } from 'src/ts/storage/sync/syncConflictRestore'
@@ -45,8 +45,14 @@
         if (
             kind === 'import' &&
             !isTauri &&
-            (!(await alertConfirm(language.risuSaveImportConfirm)) ||
-                !(await alertConfirm(language.backupLoadConfirm2)))
+            !(await alertCheckboxConfirm({
+                title: language.risuSaveImportConfirm,
+                description: language.backupLoadConfirm2,
+                checkboxLabel: language.checkboxConfirmation.dataReplacement,
+                actionLabel: language.confirm,
+                cancelLabel: language.cancel,
+                requireChecked: true,
+            })).confirmed
         )
             return
         if (kind === 'import') {
@@ -86,27 +92,11 @@
 
     async function loadPocketRisuBackup(): Promise<void> {
         if (isTauri) return runRisuSaveOperation('import')
-        if (
-            (await alertConfirm(language.pocketRisuImportConfirm)) &&
-            (await alertConfirm(language.backupLoadConfirm2))
-        )
-            LoadLocalBackup()
+        await LoadLocalBackup(language.pocketRisuImportConfirm)
     }
 
     function restoreOfficialBackup(): Promise<void | undefined> {
         return runNativeAccountOperation(async () => {
-            if (
-                !(await alertConfirm(
-                    language.risuNest.backup.officialRestoreConfirm,
-                ))
-            )
-                return
-            if (
-                !(await alertConfirm(
-                    language.risuNest.backup.officialRestoreInlayWarning,
-                ))
-            )
-                return
             const startedAt = Date.now()
             try {
                 const result = await restoreNativeOfficialAccountBackup()

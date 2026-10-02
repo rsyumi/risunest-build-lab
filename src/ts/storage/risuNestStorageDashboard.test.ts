@@ -39,15 +39,6 @@ const conflictBackups = [
         scope: 'database-only' as const,
     },
 ]
-const serverBackups = {
-    items: [],
-    next: null,
-    completeCount: 105,
-    completeBytes: 2 * 1024 * 1024,
-    incompleteCount: 1,
-    incompleteBytes: 1024 * 1024,
-    diskBytes: 3 * 1024 * 1024,
-}
 const cacheUsage = (totalBytes: number) => ({
     totalBytes,
     cacheBytes: totalBytes,
@@ -81,11 +72,10 @@ describe('RisuNest storage dashboard view model', () => {
             stats,
             snapshots,
             conflictBackups,
-            serverBackups,
         )
 
         expect(rollup.cards).toEqual([
-            { id: 'total', bytes: 11 * 1024 * 1024 },
+            { id: 'total', bytes: 8 * 1024 * 1024 },
             { id: 'media', bytes: 3 * 1024 * 1024 },
             { id: 'inlays', bytes: 3 * 1024 * 1024 },
             { id: 'plugins', bytes: 512 * 1024 },
@@ -98,7 +88,7 @@ describe('RisuNest storage dashboard view model', () => {
     })
 
     it('keeps the asset storage records apart from the temporary files but in the total', () => {
-        const rollup = storageDashboardRollup(stats, [], [], null, {
+        const rollup = storageDashboardRollup(stats, [], [], {
             ...cacheUsage(3072),
             totalBytes: 3072 + 1024,
             ledgerBytes: 1024,
@@ -121,16 +111,12 @@ describe('RisuNest storage dashboard view model', () => {
             getStats,
             listSnapshots: vi.fn().mockResolvedValue(snapshots),
             listConflictBackups: vi.fn().mockResolvedValue(conflictBackups),
-            getServerBackups: vi.fn().mockResolvedValue(serverBackups),
             getTemp,
             cleanupTemp: vi.fn(),
             previewGc: vi.fn(),
             executeGc: vi.fn(),
             deleteSnapshot: vi.fn(),
             deleteConflictBackup: vi.fn(),
-            deleteServerBackup: vi.fn(),
-            exportServerBackup: vi.fn(),
-            restoreServerBackup: vi.fn(),
             createSnapshot: vi.fn(),
         })
 
@@ -146,7 +132,6 @@ describe('RisuNest storage dashboard view model', () => {
             loadFailed: false,
             snapshots,
             conflictBackups,
-            serverBackups,
         })
 
         await dashboard.calculateTempSize()
@@ -161,16 +146,12 @@ describe('RisuNest storage dashboard view model', () => {
             getStats,
             listSnapshots: vi.fn().mockResolvedValue(snapshots),
             listConflictBackups: vi.fn().mockResolvedValue(conflictBackups),
-            getServerBackups: vi.fn().mockResolvedValue(serverBackups),
             getTemp,
             cleanupTemp: vi.fn(),
             previewGc: vi.fn(),
             executeGc: vi.fn(),
             deleteSnapshot: vi.fn(),
             deleteConflictBackup: vi.fn(),
-            deleteServerBackup: vi.fn(),
-            exportServerBackup: vi.fn(),
-            restoreServerBackup: vi.fn(),
             createSnapshot: vi.fn(),
         })
 
@@ -211,11 +192,6 @@ describe('RisuNest storage dashboard view model', () => {
             getStats: vi.fn().mockResolvedValue(stats),
             listSnapshots: vi.fn().mockResolvedValue([]),
             listConflictBackups: vi.fn().mockResolvedValue([]),
-            getServerBackups: vi.fn().mockResolvedValue({
-                ...serverBackups,
-                diskBytes: 0,
-                items: [],
-            }),
             getTemp: vi
                 .fn()
                 .mockResolvedValueOnce(cacheUsage(1024))
@@ -225,9 +201,6 @@ describe('RisuNest storage dashboard view model', () => {
             executeGc,
             deleteSnapshot: vi.fn(),
             deleteConflictBackup: vi.fn(),
-            deleteServerBackup: vi.fn(),
-            exportServerBackup: vi.fn(),
-            restoreServerBackup: vi.fn(),
             createSnapshot: vi.fn(),
         })
         await dashboard.load()
@@ -260,20 +233,12 @@ describe('RisuNest storage dashboard view model', () => {
             getStats: vi.fn().mockResolvedValue(stats),
             listSnapshots: vi.fn().mockResolvedValue([]),
             listConflictBackups: vi.fn().mockResolvedValue([]),
-            getServerBackups: vi.fn().mockResolvedValue({
-                ...serverBackups,
-                diskBytes: 0,
-                items: [],
-            }),
             getTemp,
             cleanupTemp,
             previewGc: vi.fn(),
             executeGc: vi.fn(),
             deleteSnapshot: vi.fn(),
             deleteConflictBackup: vi.fn(),
-            deleteServerBackup: vi.fn(),
-            exportServerBackup: vi.fn(),
-            restoreServerBackup: vi.fn(),
             createSnapshot: vi.fn(),
         })
 
@@ -294,20 +259,12 @@ describe('RisuNest storage dashboard view model', () => {
             getStats: vi.fn().mockResolvedValue(stats),
             listSnapshots: vi.fn().mockResolvedValue([]),
             listConflictBackups: vi.fn().mockResolvedValue([]),
-            getServerBackups: vi.fn().mockResolvedValue({
-                ...serverBackups,
-                diskBytes: 0,
-                items: [],
-            }),
             getTemp,
             cleanupTemp: vi.fn().mockResolvedValue(cacheUsage(4096)),
             previewGc: vi.fn(),
             executeGc: vi.fn(),
             deleteSnapshot: vi.fn(),
             deleteConflictBackup: vi.fn(),
-            deleteServerBackup: vi.fn(),
-            exportServerBackup: vi.fn(),
-            restoreServerBackup: vi.fn(),
             createSnapshot: vi.fn(),
         })
 
@@ -322,11 +279,6 @@ describe('RisuNest storage dashboard view model', () => {
             getStats: vi.fn().mockResolvedValue(stats),
             listSnapshots: vi.fn().mockResolvedValue([]),
             listConflictBackups: vi.fn().mockResolvedValue([]),
-            getServerBackups: vi.fn().mockResolvedValue({
-                ...serverBackups,
-                diskBytes: 0,
-                items: [],
-            }),
             getTemp: vi.fn().mockResolvedValue(cacheUsage(4096)),
             cleanupTemp: vi
                 .fn()
@@ -335,9 +287,6 @@ describe('RisuNest storage dashboard view model', () => {
             executeGc: vi.fn(),
             deleteSnapshot: vi.fn(),
             deleteConflictBackup: vi.fn(),
-            deleteServerBackup: vi.fn(),
-            exportServerBackup: vi.fn(),
-            restoreServerBackup: vi.fn(),
             createSnapshot: vi.fn(),
         })
 
@@ -368,20 +317,12 @@ describe('RisuNest storage dashboard view model', () => {
             getStats: vi.fn().mockResolvedValue(stats),
             listSnapshots: vi.fn().mockResolvedValue([]),
             listConflictBackups: vi.fn().mockResolvedValue([]),
-            getServerBackups: vi.fn().mockResolvedValue({
-                ...serverBackups,
-                diskBytes: 0,
-                items: [],
-            }),
             getTemp,
             cleanupTemp: vi.fn(),
             previewGc,
             executeGc: vi.fn(),
             deleteSnapshot: vi.fn(),
             deleteConflictBackup: vi.fn(),
-            deleteServerBackup: vi.fn(),
-            exportServerBackup: vi.fn(),
-            restoreServerBackup: vi.fn(),
             createSnapshot: vi.fn(),
         })
 
@@ -403,20 +344,12 @@ describe('RisuNest storage dashboard view model', () => {
             getStats,
             listSnapshots: vi.fn().mockResolvedValue([]),
             listConflictBackups: vi.fn().mockResolvedValue([]),
-            getServerBackups: vi.fn().mockResolvedValue({
-                ...serverBackups,
-                diskBytes: 0,
-                items: [],
-            }),
             getTemp: vi.fn(),
             cleanupTemp: vi.fn(),
             previewGc: vi.fn(),
             executeGc: vi.fn(),
             deleteSnapshot: vi.fn(),
             deleteConflictBackup: vi.fn(),
-            deleteServerBackup: vi.fn(),
-            exportServerBackup: vi.fn(),
-            restoreServerBackup: vi.fn(),
             createSnapshot: vi.fn().mockResolvedValue({}),
         })
         await dashboard.load()
@@ -435,20 +368,12 @@ describe('RisuNest storage dashboard view model', () => {
             getStats,
             listSnapshots: vi.fn().mockResolvedValue([]),
             listConflictBackups: vi.fn().mockResolvedValue([]),
-            getServerBackups: vi.fn().mockResolvedValue({
-                ...serverBackups,
-                diskBytes: 0,
-                items: [],
-            }),
             getTemp: vi.fn(),
             cleanupTemp: vi.fn(),
             previewGc: vi.fn(),
             executeGc: vi.fn(),
             deleteSnapshot: vi.fn(),
             deleteConflictBackup: vi.fn(),
-            deleteServerBackup: vi.fn(),
-            exportServerBackup: vi.fn(),
-            restoreServerBackup: vi.fn(),
             createSnapshot: vi.fn().mockResolvedValue({}),
         })
         await dashboard.load()
@@ -472,20 +397,12 @@ describe('RisuNest storage dashboard view model', () => {
             getStats,
             listSnapshots: vi.fn().mockResolvedValue([]),
             listConflictBackups: vi.fn().mockResolvedValue([]),
-            getServerBackups: vi.fn().mockResolvedValue({
-                ...serverBackups,
-                diskBytes: 0,
-                items: [],
-            }),
             getTemp: vi.fn(),
             cleanupTemp: vi.fn(),
             previewGc: vi.fn(),
             executeGc: vi.fn().mockResolvedValue({}),
             deleteSnapshot: vi.fn(),
             deleteConflictBackup: vi.fn(),
-            deleteServerBackup: vi.fn(),
-            exportServerBackup: vi.fn(),
-            restoreServerBackup: vi.fn(),
             createSnapshot: vi.fn().mockResolvedValue({}),
         })
         await dashboard.load()
@@ -518,20 +435,12 @@ describe('RisuNest storage dashboard view model', () => {
                 .mockResolvedValueOnce(snapshots)
                 .mockResolvedValue([]),
             listConflictBackups: vi.fn().mockResolvedValue([]),
-            getServerBackups: vi.fn().mockResolvedValue({
-                ...serverBackups,
-                diskBytes: 0,
-                items: [],
-            }),
             getTemp: vi.fn(),
             cleanupTemp: vi.fn(),
             previewGc: vi.fn(),
             executeGc: vi.fn(),
             deleteSnapshot,
             deleteConflictBackup: vi.fn(),
-            deleteServerBackup: vi.fn(),
-            exportServerBackup: vi.fn(),
-            restoreServerBackup: vi.fn(),
             createSnapshot: vi.fn(),
         })
         await dashboard.load()

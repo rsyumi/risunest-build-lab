@@ -13,6 +13,8 @@ const m = vi.hoisted(() => ({
     status: vi.fn(),
     export: vi.fn(),
     discard: vi.fn(),
+    materializeAndroid: vi.fn(),
+    materializeIOS: vi.fn(),
     beginReplacement: vi.fn(),
     releaseReplacement: vi.fn(),
     confirmReplacement: vi.fn(),
@@ -37,8 +39,10 @@ vi.mock('../plugins/plugins.svelte', () => ({
 }))
 vi.mock('./androidSafBridge', () => ({
     discardAndroidSafSource: m.discard,
-    pickAndroidBackupSource: vi.fn(),
+    pickAndroidPortableBackupSource: vi.fn(),
+    materializeAndroidBackupSource: m.materializeAndroid,
 }))
+vi.mock('./iosFiles', async (original) => ({...(await original<object>()),pickIOSBackupSource:vi.fn(),materializeIOSBackupSource:m.materializeIOS,discardIOSFile:vi.fn()}))
 vi.mock('./deviceBackup/selectionDialog', () => ({
     selectPortableBackupExport: m.chooseExport,
     selectPortableBackupRestore: m.chooseRestore,
@@ -80,6 +84,7 @@ const result = {
     characterCount: 1,
     presetCount: 1,
     warningCodes: [],
+    sourceFingerprintKind: 'portable-catalog-sha256' as const,
 }
 describe('common backup file production route', () => {
     beforeEach(() => {
@@ -104,6 +109,30 @@ describe('common backup file production route', () => {
             deviceSections: ['local-storage', 'localforage'],
         })
         m.save.mockResolvedValue('C:\\synthetic\\backup.risunest')
+    })
+    it.each(['androidSeekable','iosScoped'] as const)('keeps fresh %s source seekable without materialization', async (type) => {
+        const source={type,token:'synthetic-custody'}
+        await expect(restoreBackupFromNativeSource(source)).resolves.toEqual(result)
+        expect(m.portable.mock.calls[0][1]).toEqual(source)
+        expect(m.materializeAndroid).not.toHaveBeenCalled()
+        expect(m.materializeIOS).not.toHaveBeenCalled()
+        expect(m.invoke).toHaveBeenLastCalledWith('native_portable_source_discard',{source})
+    })
+    it('materializes confirmed upstream Android source after format probe',async()=>{
+        m.invoke.mockResolvedValue('local-backup')
+        m.materializeAndroid.mockImplementation(async()=>{
+            expect(m.invoke).toHaveBeenCalledWith('native_backup_source_format',{source:{type:'androidSeekable',token:'synthetic-custody'}})
+            return {type:'androidSpool',token:'synthetic-materialized'}
+        })
+        await restoreBackupFromNativeSource({type:'androidSeekable',token:'synthetic-custody'})
+        expect(m.legacy.mock.calls[0][1]).toEqual({type:'androidSpool',token:'synthetic-materialized'})
+        expect(m.discard).toHaveBeenCalledWith('synthetic-materialized')
+    })
+    it('discards invalid seekable custody without materializing',async()=>{
+        m.invoke.mockImplementation(async(command)=>{if(command==='native_backup_source_format')throw new Error('invalid-catalog');return true})
+        await expect(restoreBackupFromNativeSource({type:'iosScoped',token:'synthetic-invalid'})).rejects.toThrow('invalid-catalog')
+        expect(m.materializeIOS).not.toHaveBeenCalled()
+        expect(m.invoke).toHaveBeenLastCalledWith('native_portable_source_discard',{source:{type:'iosScoped',token:'synthetic-invalid'}})
     })
     it.each(['portable', 'block-risu-save', 'local-backup'])(
         'uses detected %s independently of filename',
@@ -136,12 +165,12 @@ describe('common backup file production route', () => {
                 })
                 expect(m.chooseRestore).toHaveBeenCalledOnce()
             }
-            await options.onNativeStatus({ state: 'succeeded', result })
-            expect(m.hold).toHaveBeenCalledOnce()
+            await options.onNativeStatus?.({ state: 'succeeded', result })
+            expect(m.hold).not.toHaveBeenCalled()
             expect(m.after).not.toHaveBeenCalled()
             await options.afterRefresh()
             expect(m.after).toHaveBeenCalledOnce()
-            expect(m.hold).toHaveBeenCalledOnce()
+            expect(m.hold).not.toHaveBeenCalled()
             expect(m.resume).not.toHaveBeenCalled()
         },
     )
@@ -153,7 +182,7 @@ describe('common backup file production route', () => {
             expect(context.signal.aborted).toBe(false)
             expect(m.beginReplacement).not.toHaveBeenCalled()
             await lifecycle.beforeActivation()
-            expect(m.confirmReplacement).toHaveBeenCalledOnce()
+            expect(m.confirmReplacement).not.toHaveBeenCalled()
             lifecycle.onCommitted()
             return { warningCodes: [] }
         })
@@ -162,7 +191,7 @@ describe('common backup file production route', () => {
         expect(m.fallback).toHaveBeenCalledOnce()
         expect(m.status).toHaveBeenCalledWith(expect.objectContaining({ detail: expect.objectContaining({ stage: 'awaiting-reselect' }) }))
         expect(m.hold).toHaveBeenCalledOnce()
-        expect(m.releaseReplacement).toHaveBeenCalledOnce()
+        expect(m.releaseReplacement).not.toHaveBeenCalled()
         expect(m.discard).toHaveBeenCalledWith('synthetic')
     })
     it.each(['unsupported-format', 'corrupt-input'])('does not reselect for %s input', async (code) => {
@@ -183,9 +212,9 @@ describe('common backup file production route', () => {
         expect(m.hold).not.toHaveBeenCalled()
     })
 
-    it('declined foreign replacement discards the unclaimed Android source', async () => {
+    it('native cancellation discards the unclaimed Android source', async () => {
         m.invoke.mockResolvedValue('local-backup')
-        m.confirm.mockResolvedValue(false)
+        m.legacy.mockResolvedValueOnce(null)
         expect(
             await restoreBackupFromNativeSource({
                 type: 'androidSpool',
@@ -193,23 +222,16 @@ describe('common backup file production route', () => {
             }),
         ).toBeNull()
         expect(m.discard).toHaveBeenCalledWith('synthetic-token')
-        expect(m.legacy).not.toHaveBeenCalled()
+        expect(m.legacy).toHaveBeenCalledOnce()
     })
-    it('reserves server replacement only after native preparation reaches activation', async () => {
+    it('passes lifecycle callbacks to the native guard without reserving server replacement', async () => {
         m.invoke.mockResolvedValue('block-risu-save')
-        m.block.mockImplementationOnce(async (_runtime, _source, options) => {
-            expect(m.beginReplacement).not.toHaveBeenCalled()
-            await options.beforeActivation()
-            expect(m.beginReplacement).toHaveBeenCalledOnce()
-            return result
-        })
-
-        await expect(restoreBackupFromNativeSource({
-            type: 'desktopPath',
-            path: 'C:\\synthetic\\prepared.risudat',
-        })).resolves.toEqual(result)
-
-        expect(m.releaseReplacement).toHaveBeenCalledOnce()
+        const beforeActivation=vi.fn()
+        const onNativeStatus=vi.fn()
+        await expect(restoreBackupFromNativeSource({type:'desktopPath',path:'synthetic.risudat'},{beforeActivation,onNativeStatus})).resolves.toEqual(result)
+        expect(m.block.mock.calls[0][2]).toMatchObject({beforeActivation,onNativeStatus})
+        expect(m.beginReplacement).not.toHaveBeenCalled()
+        expect(m.releaseReplacement).not.toHaveBeenCalled()
     })
     it('a first run skips the replacement confirmation and asks for sections as an import', async () => {
         m.invoke.mockResolvedValue('local-backup')
@@ -238,22 +260,22 @@ describe('common backup file production route', () => {
             firstRun: true,
         })
     })
-    it('device-only restoration leaves automatic sync intent unchanged', async () => {
+    it('full native restoration delegates sync lifecycle to the shared guard', async () => {
         await restoreBackupFromNativeSource({
             type: 'desktopPath',
             path: 'C:\\synthetic\\device.risunest',
         })
         const options = m.portable.mock.calls[0][2]
         m.chooseRestore.mockResolvedValue({
-            library: false,
-            deviceSections: ['local-storage'],
+            library: true,
+            deviceSections: ['hypa','local-plugins','local-settings'],
         })
         await options.choosePortableSections({
             libraryIncluded: true,
             repairRequired: false,
             deviceSections: ['local-storage'],
         })
-        await options.onNativeStatus({ state: 'succeeded', result })
+        await options.onNativeStatus?.({ state: 'succeeded', result })
         await options.afterRefresh()
         expect(m.hold).not.toHaveBeenCalled()
         expect(m.resume).not.toHaveBeenCalled()

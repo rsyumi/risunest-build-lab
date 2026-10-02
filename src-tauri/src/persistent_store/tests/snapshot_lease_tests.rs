@@ -2,52 +2,72 @@ use super::super::snapshot_archive::Archive;
 use super::*;
 
 #[test]
-fn applied_restore_request_cannot_replay_when_pending_cleanup_failed() {
-    let (directory, mut store, _) = open_fixture();
-    let snapshot = store.snapshot_create("manual").unwrap();
-    store.snapshot_restore_request(&snapshot.id).unwrap();
-    let archive_path = store.snapshots_dir.join("snapshots.sqlite");
-    let archive = rusqlite::Connection::open(&archive_path).unwrap();
-    archive.execute_batch("CREATE TRIGGER fail_clear BEFORE DELETE ON pending_restore BEGIN SELECT RAISE(ABORT,'synthetic cleanup failure'); END;").unwrap();
-    drop(archive);
-    drop(store);
-    let mut restored = PersistentStore::open(directory.path()).unwrap();
-    assert!(restored.pending_restore_failure().is_some());
-    let revision = restored.revision().unwrap();
-    restored.commit(&WorkingSetCommit {
-        root: Some(json!({"username":"edit after activation"})),
-        ..empty_working_set_commit(revision)
-    }).unwrap();
-    drop(restored);
-    let archive = rusqlite::Connection::open(&archive_path).unwrap();
-    archive.execute_batch("DROP TRIGGER fail_clear").unwrap();
-    drop(archive);
-    let reopened = PersistentStore::open(directory.path()).unwrap();
-    assert_eq!(reopened.read_root(None).unwrap().value["username"], "edit after activation");
-    assert_eq!(reopened.revision().unwrap(), revision + 1);
-    assert!(reopened.pending_restore_failure().is_none());
-    assert!(Archive::open(&reopened.snapshots_dir).unwrap().pending_restore().unwrap().is_none());
+fn snapshot_restore_freezes_finished_held_and_deferred_original_values_without_device_progress() {
+    use crate::persistent_store::lww::{Header,Change,StageReceive,ApplyReceive,Progress,MessageLocator};
+    use risunest_sync_wire::{stamp::Stamp,unit::{UnitKey,UnitValue}};
+    let (_directory,mut store,_)=open_fixture();
+    let (_source_dir,mut source,_)=open_fixture();
+    source.commit(&WorkingSetCommit {expected_revision:source.revision().unwrap(),conversations:Some(vec![ConversationMutation::ReplaceRange {
+        character_id:"char-b".into(),conversation_id:"conv-beta".into(),start:0,delete_count:3,
+        messages:vec![json!({"role":"user","data":"synthetic deferred snapshot message","chatId":"snapshot-deferred"})],conversation:None,configured_index:None,
+    }]),..Default::default()}).unwrap();
+    let message_key=UnitKey::new(&["messages","char-b","conv-beta"]).unwrap();
+    let message:UnitValue=serde_json::from_str(&source.connection.query_row("SELECT value FROM lww_units WHERE key=?1",[message_key.as_str()],|row|row.get::<_,String>(0)).unwrap()).unwrap();
+    let mut controls=source.connection.prepare("SELECT hash,body FROM message_page_objects").unwrap();
+    for row in controls.query_map([],|row|Ok((row.get::<_,String>(0)?,row.get::<_,Vec<u8>>(1)?))).unwrap() {
+        let (hash,body)=row.unwrap();store.lww_put_object(&hash,&body).unwrap();
+    }
+    let held_key=UnitKey::new(&["character","missing","name"]).unwrap();
+    let held=UnitValue::inline(br#""synthetic held snapshot name""#).unwrap();
+    let stamp=Stamp {physical_ms:(store.lww_clock_state().unwrap().issued.unwrap().physical_ms.0+1).into(),logical:0,writer_id:"00000000-0000-4000-8000-000000000001".into()};
+    let header=Header {binding_authority:store.lww_binding_authority().unwrap(),request_id:"snapshot-held-deferred".into()};
+    store.lww_stage_receive(&StageReceive {header:header.clone(),changes:vec![Change {key:message_key.clone(),stamp:stamp.clone(),value:message.clone()},Change {key:held_key.clone(),stamp,value:held.clone()}],progress:Progress {kind:"server".into(),cursor:1.into(),writer_id:None},admitted_time_upper_ms:u64::MAX.into()}).unwrap();
+    let applied=store.lww_apply_receive(&ApplyReceive {header:header.clone(),generating:vec![MessageLocator {character_id:"char-b".into(),conversation_id:"conv-beta".into(),start:None}]}).unwrap();
+    assert_eq!(applied.held_keys,vec![held_key.clone()]);
+    assert_eq!(applied.deferred_keys,vec![message_key.clone()]);
+    store.lww_finish_receive(&header).unwrap();
+    let progress=serde_json::to_value(store.lww_receive_progress(header.binding_authority.clone()).unwrap()).unwrap();
+    let snapshot=store.snapshot_create("held-deferred").unwrap();
+    let stage=store.snapshot_restore_stage(&snapshot.id,"restore-held-deferred").unwrap();
+    for (key,value) in [(&message_key,&message),(&held_key,&held)] {
+        let stored:String=store.connection.query_row("SELECT value FROM snapshot_restore_units WHERE stage_id=?1 AND key=?2",params![stage.staging_id,key.as_str()],|row|row.get(0)).unwrap();
+        assert_eq!(serde_json::from_str::<UnitValue>(&stored).unwrap(),*value);
+    }
+    store.snapshot_restore_activate(&stage.staging_id,store.revision().unwrap(),header.binding_authority.clone()).unwrap();
+    assert_eq!(serde_json::to_value(store.lww_receive_progress(header.binding_authority).unwrap()).unwrap(),progress);
+    assert_eq!(store.materialize(None).unwrap()["characters"][0]["chats"][0]["message"][0]["data"],"synthetic deferred snapshot message");
 }
 
 #[test]
-fn interrupted_restore_starts_normally_until_explicit_retry() {
+fn committed_snapshot_receipt_does_not_replay_after_later_edit() {
     let (directory, mut store, _) = open_fixture();
-    let snapshot = store.snapshot_create("manual").unwrap();
-    store.commit(&WorkingSetCommit {
-        root: Some(json!({"username":"current"})),
-        ..empty_working_set_commit(1)
-    }).unwrap();
-    store.snapshot_restore_request(&snapshot.id).unwrap();
-    std::fs::write(store.snapshots_dir.join("restore-attempt"), b"").unwrap();
+    let snapshot=store.snapshot_create("manual").unwrap();
+    let stage=store.snapshot_restore_stage(&snapshot.id,"receipt-replay").unwrap();
+    let authority=store.lww_binding_authority().unwrap();
+    let expected=store.revision().unwrap();
+    let receipt=store.snapshot_restore_activate(&stage.staging_id,expected,authority.clone()).unwrap();
+    store.commit(&WorkingSetCommit {root:Some(json!({"username":"edit after activation"})),..empty_working_set_commit(receipt.revision)}).unwrap();
     drop(store);
-    let mut reopened = PersistentStore::open(directory.path()).unwrap();
-    assert!(reopened.pending_restore_failure().unwrap().contains("interrupted"));
-    assert_eq!(reopened.read_root(None).unwrap().value["username"], "current");
-    reopened.snapshot_restore_request(&snapshot.id).unwrap();
-    drop(reopened);
-    let retried = PersistentStore::open(directory.path()).unwrap();
-    assert_eq!(retried.revision().unwrap(), 1);
-    assert!(retried.pending_restore_failure().is_none());
+    let mut reopened=PersistentStore::open(directory.path()).unwrap();
+    assert_eq!(reopened.snapshot_restore_activate(&stage.staging_id,expected,authority).unwrap().revision,receipt.revision);
+    assert_eq!(reopened.read_root(None).unwrap().value["username"],"edit after activation");
+    assert_eq!(reopened.revision().unwrap(),receipt.revision+1);
+}
+
+#[test]
+fn staged_snapshot_does_not_activate_on_reopen_and_explicit_retry_is_live() {
+    let (directory, mut store, _) = open_fixture();
+    let snapshot=store.snapshot_create("manual").unwrap();
+    store.commit(&WorkingSetCommit {root:Some(json!({"username":"current"})),..empty_working_set_commit(1)}).unwrap();
+    let stage=store.snapshot_restore_stage(&snapshot.id,"staged-reopen").unwrap();
+    drop(store);
+    let mut reopened=PersistentStore::open(directory.path()).unwrap();
+    assert_eq!(reopened.read_root(None).unwrap().value["username"],"current");
+    assert_eq!(reopened.snapshot_restore_stage(&snapshot.id,"staged-reopen").unwrap().staging_id,stage.staging_id);
+    let revision=reopened.revision().unwrap();
+    let authority=reopened.lww_binding_authority().unwrap();
+    let receipt=reopened.snapshot_restore_activate(&stage.staging_id,revision,authority).unwrap();
+    assert_eq!(receipt.revision,revision+1);
 }
 
 #[test]
@@ -80,55 +100,27 @@ fn schema_configures_the_documented_sqlite_profile() {
 }
 
 #[test]
-fn snapshots_create_list_and_restore_on_reopen() {
+fn snapshots_create_list_and_restore_before_reopen() {
     let (directory, mut store, database) = open_fixture();
-    let snapshot = store
-        .snapshot_create("contract-test")
-        .expect("create snapshot");
-    assert!(store
-        .snapshot_list()
-        .unwrap()
-        .iter()
-        .any(|s| s.id == snapshot.id));
-    assert!(snapshot.bytes > 0);
-    assert_eq!(store.snapshot_list().expect("list snapshots").len(), 1);
-
-    store
-        .commit(&WorkingSetCommit {
-            root: Some(json!({ "username": "Changed after snapshot" })),
-            ..empty_working_set_commit(1)
-        })
-        .expect("change database after snapshot");
-    store
-        .snapshot_restore_request(&snapshot.id)
-        .expect("request snapshot restore");
+    let snapshot=store.snapshot_create("contract-test").unwrap();
+    assert!(snapshot.bytes>0);
+    assert_eq!(store.snapshot_list().unwrap().len(),1);
+    store.commit(&WorkingSetCommit {root:Some(json!({"username":"Changed after snapshot"})),..empty_working_set_commit(1)}).unwrap();
+    let stage=store.snapshot_restore_stage(&snapshot.id,"contract-restore").unwrap();
+    let authority=store.lww_binding_authority().unwrap();
+    let receipt=store.snapshot_restore_activate(&stage.staging_id,2,authority).unwrap();
+    assert_eq!(receipt.revision,3);
+    assert_eq!(store.materialize(None).unwrap(),database);
     drop(store);
-
-    let restored = PersistentStore::open(directory.path()).expect("restore snapshot on reopen");
-    assert_eq!(restored.revision().expect("read restored revision"), 1);
-    assert_eq!(
-        restored
-            .materialize(None)
-            .expect("materialize restored data"),
-        database
-    );
-    assert!(restored
-        .snapshot_list()
-        .unwrap()
-        .iter()
-        .any(|s| s.id == snapshot.id));
-    assert_eq!(
-        Archive::open(&restored.snapshots_dir)
-            .unwrap()
-            .pending_restore()
-            .unwrap(),
-        None
-    );
+    let restored=PersistentStore::open(directory.path()).unwrap();
+    assert_eq!(restored.revision().unwrap(),receipt.revision);
+    assert_eq!(restored.materialize(None).unwrap(),database);
+    assert!(restored.snapshot_list().unwrap().iter().any(|s|s.id==snapshot.id));
 }
 
 #[test]
 fn source_preservation_snapshot_keeps_invalid_json_and_retains_objects() {
-    let (_directory, store, _) = open_fixture();
+    let (_directory, mut store, _) = open_fixture();
     store
         .connection
         .execute("UPDATE root SET value='synthetic invalid JSON'", [])
@@ -157,7 +149,7 @@ fn source_preservation_snapshot_survives_damaged_storage_classes() {
         "UPDATE conversations SET detail=x'00'",
         "UPDATE messages SET value=x'00'",
     ] {
-        let (_directory, store, _) = open_fixture();
+        let (_directory, mut store, _) = open_fixture();
         assert!(
             store.connection.execute(sql, []).unwrap() > 0,
             "synthetic damage did not exercise its target: {sql}"
@@ -173,7 +165,7 @@ fn source_preservation_snapshot_survives_damaged_storage_classes() {
             "{sql}"
         );
     }
-    let (_directory, store, _) = open_fixture();
+    let (_directory, mut store, _) = open_fixture();
     store
         .connection
         .execute("UPDATE root SET value=x'0001'", [])
@@ -188,7 +180,7 @@ fn source_preservation_snapshot_survives_damaged_storage_classes() {
 
 #[test]
 fn snapshot_delete_requires_a_listed_id_and_removes_its_roots() {
-    let (_directory, store, _) = open_fixture();
+    let (_directory, mut store, _) = open_fixture();
     let created = store.snapshot_create("delete-test").unwrap();
     store.snapshot_delete(&created.id).unwrap();
     assert!(store.snapshot_list().unwrap().is_empty());
@@ -199,30 +191,23 @@ fn snapshot_delete_requires_a_listed_id_and_removes_its_roots() {
         .is_empty());
     assert!(store.snapshot_delete("../not-a-snapshot.db").is_err());
     assert!(store
-        .snapshot_restore_request("../not-a-snapshot.db")
+        .snapshot_restore_stage("../not-a-snapshot.db","invalid-id")
         .is_err());
     assert!(store.snapshot_delete(&created.id).is_err());
 }
 
 #[test]
-fn snapshot_delete_rejects_a_pending_restore_target_without_removing_it() {
-    let (_directory, store, _) = open_fixture();
-    let created = store.snapshot_create("pending-delete").unwrap();
-    store.snapshot_restore_request(&created.id).unwrap();
-    let error = store.snapshot_delete(&created.id).unwrap_err();
-    assert!(error.to_string().contains("pending restore"));
-    assert_eq!(store.snapshot_list().unwrap().len(), 1);
-    assert_eq!(
-        Archive::open(&store.snapshots_dir)
-            .unwrap()
-            .pending_restore()
-            .unwrap()
-            .as_deref(),
-        Some(created.id.as_str())
-    );
+fn staged_snapshot_owns_source_after_archive_deletion() {
+    let (_directory, mut store, database)=open_fixture();
+    let created=store.snapshot_create("staged-delete").unwrap();
+    let stage=store.snapshot_restore_stage(&created.id,"staged-delete").unwrap();
+    store.snapshot_delete(&created.id).unwrap();
+    assert!(store.snapshot_list().unwrap().is_empty());
+    let authority=store.lww_binding_authority().unwrap();
+    store.snapshot_restore_activate(&stage.staging_id,1,authority).unwrap();
+    assert_eq!(store.materialize(None).unwrap(),database);
 }
 
-#[cfg(any(windows, unix))]
 #[test]
 fn snapshot_archive_rejects_linked_database() {
     let (directory, store, _) = open_fixture();
@@ -246,7 +231,7 @@ fn snapshot_archive_rejects_linked_database() {
 
 #[test]
 fn snapshot_creation_persists_asset_roots_before_returning() {
-    let (directory, store, _) = open_fixture();
+    let (directory, mut store, _) = open_fixture();
     let generation = super::active_generation(&store.connection).expect("read active generation");
     let manifest_hash = "a".repeat(64);
     let object_hash = "b".repeat(64);
@@ -322,11 +307,7 @@ fn snapshot_creation_persists_asset_roots_before_returning() {
     assert_eq!(metadata.roots.cold_keys, ["cold-chat".to_owned()].into());
     assert_eq!(
         metadata.roots.blockers,
-        [
-            "cold-payload-unscanned".to_owned(),
-            "plugin-storage-opaque".to_owned()
-        ]
-        .into()
+        ["cold-payload-unscanned".to_owned()].into()
     );
     assert!(metadata.roots.retain_all_objects);
     drop(directory);
@@ -420,7 +401,7 @@ fn asset_gc_dry_run_keeps_leased_generation_roots_until_release() {
 }
 
 #[test]
-fn asset_gc_dry_run_retains_every_catalog_object_for_opaque_plugin_storage() {
+fn asset_gc_dry_run_scans_plugin_references_without_retaining_unreferenced_objects() {
     use super::asset_object_catalog::AssetObjectRegistration;
 
     let directory = tempfile::tempdir().expect("create temporary directory");
@@ -437,7 +418,7 @@ fn asset_gc_dry_run_retains_every_catalog_object_for_opaque_plugin_storage() {
             rusqlite::params![
                 generation,
                 serde_json::to_string(&json!({
-                    "privateEncoding": "cGx1Z2luLWRlZmluZWQtcmVmZXJlbmNl"
+                    "asset": first.content_hash
                 }))
                 .unwrap()
             ],
@@ -471,20 +452,15 @@ fn asset_gc_dry_run_retains_every_catalog_object_for_opaque_plugin_storage() {
 
     assert_eq!(
         marked,
-        [first.content_hash, second.content_hash]
-            .into_iter()
-            .collect::<std::collections::BTreeSet<_>>()
-            .into_iter()
-            .collect::<Vec<_>>()
+        vec![first.content_hash.clone()]
     );
-    assert!(first_page.report.potential_delete_hashes.is_empty());
-    assert!(second_page.report.potential_delete_hashes.is_empty());
+    let mut candidates = first_page.report.potential_delete_hashes.clone();
+    candidates.extend(second_page.report.potential_delete_hashes.clone());
+    assert_eq!(candidates, vec![second.content_hash]);
     assert!(first_page.next_cursor.is_some());
     assert!(second_page.next_cursor.is_none());
     for report in [first_page.report, second_page.report] {
-        assert!(report
-            .blockers
-            .contains(&"plugin-storage-opaque".to_owned()));
+        assert!(!report.blockers.contains(&"plugin-storage-opaque".to_owned()));
         assert!(!report.deletion_enabled);
     }
 }
@@ -854,7 +830,7 @@ fn dropping_store_with_active_lease_reopens_latest_state_and_truncates_recovered
 
 #[test]
 fn ninth_snapshot_removes_the_oldest_and_leaves_eight() {
-    let (_directory, store, _) = open_fixture();
+    let (_directory, mut store, _) = open_fixture();
     let mut ids = Vec::new();
     for index in 0..9 {
         ids.push(
@@ -879,19 +855,19 @@ fn ninth_snapshot_removes_the_oldest_and_leaves_eight() {
 }
 
 #[test]
-fn byte_rotation_counts_shared_storage_and_preserves_pending_and_newest() {
-    let (_directory, store, _) = open_fixture();
-    let target = store.snapshot_create("target").unwrap();
-    store.snapshot_restore_request(&target.id).unwrap();
-    let middle = store.snapshot_create("middle").unwrap();
-    let latest = store.snapshot_create("latest").unwrap();
-    let mut archive = Archive::open(&store.snapshots_dir).unwrap();
-    archive.rotate(0, &latest.id).unwrap();
-    let ids: Vec<_> = archive.list().unwrap().into_iter().map(|s| s.id).collect();
-    assert_eq!(ids.len(), 2);
-    assert!(ids.contains(&target.id));
-    assert!(ids.contains(&latest.id));
-    assert!(!ids.contains(&middle.id));
+fn byte_rotation_keeps_newest_and_durable_stage_owns_rotated_source() {
+    let (_directory, mut store, database)=open_fixture();
+    let target=store.snapshot_create("target").unwrap();
+    let stage=store.snapshot_restore_stage(&target.id,"rotated-stage").unwrap();
+    store.snapshot_create("middle").unwrap();
+    let latest=store.snapshot_create("latest").unwrap();
+    let mut archive=Archive::open(&store.snapshots_dir).unwrap();
+    archive.rotate(0,&latest.id).unwrap();
+    let ids:Vec<_>=archive.list().unwrap().into_iter().map(|s|s.id).collect();
+    assert_eq!(ids,vec![latest.id]);
+    let authority=store.lww_binding_authority().unwrap();
+    store.snapshot_restore_activate(&stage.staging_id,1,authority).unwrap();
+    assert_eq!(store.materialize(None).unwrap(),database);
 }
 
 #[test]
@@ -1033,144 +1009,121 @@ fn snapshot_deduplication_actual_schema_measurements() {
 }
 
 #[test]
-fn pending_restore_reopens_cleanly_after_the_store_drops_an_active_lease() {
-    let (directory, mut store, database) = open_fixture();
-    let lease = store
-        .acquire_revision(1)
-        .expect("acquire pre-restore lease");
-    let snapshot = store
-        .snapshot_create("lease-restore")
-        .expect("create snapshot while lease is active");
-    store
-        .commit(&WorkingSetCommit {
-            root: Some(json!({ "username": "Writer after restore snapshot" })),
-            ..empty_working_set_commit(1)
-        })
-        .expect("commit after restore snapshot");
-    store
-        .snapshot_restore_request(&snapshot.id)
-        .expect("prepare restore while lease is active");
-    drop(store);
-
-    let restored = PersistentStore::open(directory.path()).expect("apply pending restore");
-    assert_eq!(restored.revision().expect("read restored revision"), 1);
-    assert_eq!(
-        restored
-            .materialize(None)
-            .expect("materialize restored data"),
-        database
-    );
-    assert!(matches!(
-        restored.read_root(Some(&lease.lease)),
-        Err(StoreError::SnapshotReleased)
-    ));
+fn live_snapshot_restore_preserves_old_pinned_revision_until_release() {
+    let (_directory, mut store, database)=open_fixture();
+    let lease=store.acquire_revision(1).unwrap();
+    let snapshot=store.snapshot_create("lease-restore").unwrap();
+    store.commit(&WorkingSetCommit {root:Some(json!({"username":"Writer after restore snapshot"})),..empty_working_set_commit(1)}).unwrap();
+    let stage=store.snapshot_restore_stage(&snapshot.id,"lease-restore").unwrap();
+    let authority=store.lww_binding_authority().unwrap();
+    store.snapshot_restore_activate(&stage.staging_id,2,authority).unwrap();
+    assert_eq!(store.materialize(None).unwrap(),database);
+    assert!(store.read_root(Some(&lease.lease)).is_ok());
+    store.release_revision(&lease.lease).unwrap();
+    assert!(matches!(store.read_root(Some(&lease.lease)),Err(StoreError::SnapshotReleased)));
 }
 
 #[test]
-fn pending_restore_target_and_pre_restore_snapshot_survive_rotation() {
-    let (directory, mut store, database) = open_fixture();
-    let target = store
-        .snapshot_create("restore-target")
-        .expect("create restore target");
-    for index in 0..7 {
-        store
-            .snapshot_create(&format!("fill-{index}"))
-            .expect("fill snapshot rotation");
-        thread::sleep(Duration::from_millis(10));
-    }
-    store
-        .commit(&WorkingSetCommit {
-            root: Some(json!({ "username": "Current before restore" })),
-            ..empty_working_set_commit(1)
-        })
-        .expect("change current data");
-    store
-        .snapshot_restore_request(&target.id)
-        .expect("request restore");
-    drop(store);
-
-    let restored = PersistentStore::open(directory.path()).expect("apply pending restore");
-    assert_eq!(
-        restored
-            .materialize(None)
-            .expect("materialize restored data"),
-        database
-    );
-    assert!(restored
-        .snapshot_list()
-        .unwrap()
-        .iter()
-        .any(|s| s.id == target.id));
-    assert_eq!(
-        Archive::open(&restored.snapshots_dir)
-            .unwrap()
-            .pending_restore()
-            .unwrap(),
-        None
-    );
-    assert!(
-        restored
-            .snapshot_list()
-            .expect("list rotated restore snapshots")
-            .len()
-            <= 8
-    );
-
-    let pre_restore = restored
-        .snapshot_list()
-        .expect("list restore snapshots")
-        .into_iter()
-        .find(|snapshot| snapshot.reason == "pre-restore")
-        .expect("pre-restore snapshot remains after rotation");
-    let (_capture, connection) = reconstruct_snapshot(&restored, &pre_restore.id);
-    let value: String = connection
-        .query_row(
-            "SELECT value FROM root WHERE generation = 'revision-1'",
-            [],
-            |row| row.get(0),
-        )
-        .expect("read pre-restore root");
-    assert_eq!(
-        serde_json::from_str::<Value>(&value).expect("parse root")["username"],
-        "Current before restore"
-    );
+fn live_restore_creates_no_extra_snapshot_and_periodic_snapshots_remain() {
+    let (_directory, mut store, database)=open_fixture();
+    let target=store.snapshot_create("restore-target").unwrap();
+    store.snapshot_create("periodic").unwrap();
+    store.commit(&WorkingSetCommit {root:Some(json!({"username":"Current before restore"})),..empty_working_set_commit(1)}).unwrap();
+    let before=store.snapshot_list().unwrap().len();
+    let stage=store.snapshot_restore_stage(&target.id,"no-pre-restore").unwrap();
+    let authority=store.lww_binding_authority().unwrap();
+    store.snapshot_restore_activate(&stage.staging_id,2,authority).unwrap();
+    assert_eq!(store.materialize(None).unwrap(),database);
+    let snapshots=store.snapshot_list().unwrap();
+    assert_eq!(snapshots.len(),before);
+    assert!(snapshots.iter().any(|s|s.reason=="periodic"));
+    assert!(snapshots.iter().all(|s|s.reason!="pre-restore"));
 }
 
 #[test]
-fn invalid_restore_candidates_preserve_current_data_and_marker() {
-    for wrong_version in [false, true] {
-        let (directory, mut store, _) = open_fixture();
-        store
-            .commit(&WorkingSetCommit {
-                root: Some(json!({"username":"Current protected data"})),
-                ..empty_working_set_commit(1)
-            })
-            .unwrap();
-        let expected = store.materialize(None).unwrap();
-        let id = {
-            let mut archive = Archive::open(&store.snapshots_dir).unwrap();
-            let scratch = archive.scratch().unwrap();
-            if wrong_version {
-                let connection = Connection::open(&scratch.path).unwrap();
-                connection.execute_batch("PRAGMA user_version=17;").unwrap();
-            } else {
-                fs::write(&scratch.path, b"not a sqlite database").unwrap();
-            }
-            let metadata = archive
-                .insert(&scratch.path, 1, "invalid", Default::default())
-                .unwrap();
-            archive.request_restore(&metadata.id).unwrap();
-            metadata.id
+fn invalid_snapshot_candidates_preserve_current_data_and_operation_state() {
+    for wrong_version in [false,true] {
+        let (directory,mut store,_)=open_fixture();
+        store.commit(&WorkingSetCommit {root:Some(json!({"username":"Current protected data"})),..empty_working_set_commit(1)}).unwrap();
+        let expected=store.materialize(None).unwrap();
+        let clock=serde_json::to_value(store.lww_clock_state().unwrap()).unwrap();
+        let id={
+            let mut archive=Archive::open(&store.snapshots_dir).unwrap();
+            let scratch=archive.scratch().unwrap();
+            if wrong_version {Connection::open(&scratch.path).unwrap().execute_batch("PRAGMA user_version=17;").unwrap();}
+            else {fs::write(&scratch.path,b"not a sqlite database").unwrap();}
+            archive.insert(&scratch.path,1,"invalid",Default::default()).unwrap().id
         };
+        assert!(store.snapshot_restore_stage(&id,"invalid-candidate").is_err());
+        assert_eq!(store.materialize(None).unwrap(),expected);
+        assert_eq!(serde_json::to_value(store.lww_clock_state().unwrap()).unwrap(),clock);
         drop(store);
-        let reopened = PersistentStore::open(directory.path()).unwrap();
-        assert_eq!(reopened.materialize(None).unwrap(), expected);
-        assert_eq!(
-            Archive::open(&reopened.snapshots_dir)
-                .unwrap()
-                .pending_restore()
-                .unwrap(),
-            Some(id)
-        );
+        let reopened=PersistentStore::open(directory.path()).unwrap();
+        assert_eq!(reopened.materialize(None).unwrap(),expected);
     }
+}
+
+#[test]
+fn exact_schema_snapshot_with_forged_message_cache_is_rejected_before_activation() {
+    let (_directory, mut store, _) = open_fixture();
+    for table in ["messages", "message_page_manifests", "message_page_indexes", "message_page_proofs", "message_page_verified_objects"] {
+        let count:i64=store.connection.query_row(&format!("SELECT COUNT(*) FROM {table}"),[],|r|r.get(0)).unwrap();
+        assert!(count>0,"fixture must contain actual {table} before forgery");
+    }
+    store.connection.execute("UPDATE messages SET canonical_hash=?1,canonical_size=1",["0".repeat(64)]).unwrap();
+    let snapshot = store.snapshot_create("forged-cache").unwrap();
+    store.commit(&WorkingSetCommit {
+        root: Some(json!({"username":"keep-current"})),
+        ..empty_working_set_commit(1)
+    }).unwrap();
+    let revision = store.revision().unwrap();
+    let clock = serde_json::to_value(store.lww_clock_state().unwrap()).unwrap();
+    let generation = active_generation(&store.connection).unwrap();
+    let error = store.snapshot_restore_stage(&snapshot.id,"forged-snapshot").unwrap_err();
+    assert!(error.to_string().contains("identity mismatch"));
+    assert_eq!(store.read_root(None).unwrap().value["username"],"keep-current");
+    assert_eq!(store.revision().unwrap(),revision);
+    assert_eq!(active_generation(&store.connection).unwrap(),generation);
+    assert_eq!(serde_json::to_value(store.lww_clock_state().unwrap()).unwrap(),clock);
+}
+
+#[test]
+fn exact_schema_snapshot_with_forged_page_index_is_rejected_before_activation() {
+    let (_directory, mut store, _) = open_fixture();
+    let proof_count:i64=store.connection.query_row("SELECT COUNT(*) FROM message_page_proofs",[],|r|r.get(0)).unwrap();
+    assert!(proof_count>0);
+    store.connection.execute("UPDATE message_page_indexes SET page_start=page_start+1",[]).unwrap();
+    let snapshot=store.snapshot_create("forged-index").unwrap();
+    let revision=store.revision().unwrap();
+    let generation=active_generation(&store.connection).unwrap();
+    let clock=serde_json::to_value(store.lww_clock_state().unwrap()).unwrap();
+    let library=store.materialize(None).unwrap();
+    assert!(store.snapshot_restore_stage(&snapshot.id,"forged-index-stage").is_err());
+    assert_eq!(store.revision().unwrap(),revision);
+    assert_eq!(active_generation(&store.connection).unwrap(),generation);
+    assert_eq!(serde_json::to_value(store.lww_clock_state().unwrap()).unwrap(),clock);
+    assert_eq!(store.materialize(None).unwrap(),library);
+}
+
+#[test]
+fn live_snapshot_restore_recertifies_then_reopens_without_replaying() {
+    let (directory, mut store, _) = open_fixture();
+    let snapshot = store.snapshot_create("manual").unwrap();
+    let stage = store.snapshot_restore_stage(&snapshot.id,"live-snapshot").unwrap();
+    let writer = store.lww_clock_state().unwrap().writer_id;
+    let authority = store.lww_binding_authority().unwrap();
+    let revision = store.revision().unwrap();
+    let activated = store.snapshot_restore_activate(&stage.staging_id,revision,authority.clone()).unwrap();
+    assert!(activated.revision>revision);
+    assert_eq!(store.lww_clock_state().unwrap().writer_id,writer);
+    assert_eq!(store.lww_binding_authority().unwrap(),authority);
+    let verified:i64 = store.connection.query_row("SELECT COUNT(*) FROM message_page_verified_objects",[],|r|r.get(0)).unwrap();
+    assert!(verified>0);
+    drop(store);
+    let mut reopened = PersistentStore::open(directory.path()).unwrap();
+    let replay = reopened.snapshot_restore_activate(&stage.staging_id,revision,authority).unwrap();
+    assert_eq!(replay.revision,activated.revision);
+    assert_eq!(reopened.revision().unwrap(),activated.revision);
+    assert_eq!(reopened.lww_clock_state().unwrap().writer_id,writer);
+    assert!(reopened.snapshot_list().unwrap().iter().all(|entry|entry.reason!="pre-restore"));
 }

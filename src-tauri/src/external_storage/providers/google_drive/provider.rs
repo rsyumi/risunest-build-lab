@@ -31,19 +31,44 @@ const HEAD_ROLE: &str = "head";
 const DESCRIPTOR_ROLE: &str = "descriptor";
 const FOLDER_MIME: &str = "application/vnd.google-apps.folder";
 const OCTET_STREAM: &str = "application/octet-stream";
-const FILE_FIELDS: &str = "id,size,version,sha256Checksum,appProperties";
+const FILE_FIELDS: &str = "id,name,size,version,sha256Checksum,appProperties";
 const LIST_FIELDS: &str =
-    "nextPageToken,incompleteSearch,files(id,size,version,sha256Checksum,appProperties)";
+    "nextPageToken,incompleteSearch,files(id,name,size,version,sha256Checksum,appProperties)";
 const UPLOAD_ALIGNMENT: u64 = 256 * 1024;
 const UPLOAD_CHUNK_BYTES: u64 = 32 * UPLOAD_ALIGNMENT;
 /// Documented ceiling of a single multipart or simple upload request.
 const MULTIPART_MAX_BYTES: u64 = 5_000_000;
 const MAX_STORED_BYTES: u64 = 5_000_000_000_000;
-const SESSION_LIFETIME_MS: u64 = 7 * 24 * 60 * 60 * 1000;
 const CONTROL_PAGE_SIZE: &str = "100";
 
 fn corrupt() -> ProviderError {
     ProviderError::new(ErrorKind::Corrupt)
+}
+
+fn segment_file_name(file: &DriveFile) -> Result<&str> {
+    if file.property(ROLE_KEY) != Some("segment") { return Err(corrupt()); }
+    let name = file.name.as_deref().and_then(|name| name.strip_prefix("segments/")).ok_or_else(corrupt)?;
+    crate::external_storage::contract::parse_segment_object_id(name)?;
+    Ok(name)
+}
+
+fn segment_locator_object(file_id: &str, name: &str) -> Result<String> {
+    if !config::is_drive_id(file_id) { return Err(corrupt()); }
+    crate::external_storage::contract::parse_segment_object_id(name)?;
+    Ok(format!("{file_id}/{name}"))
+}
+
+fn segment_locator_parts(locator: &RemoteLocator) -> Result<Option<(&str, &str)>> {
+    if locator.collection.as_deref() != Some("segments") { return Ok(None); }
+    let (file_id, name) = locator.object.split_once('/').ok_or_else(corrupt)?;
+    if !config::is_drive_id(file_id) { return Err(corrupt()); }
+    crate::external_storage::contract::parse_segment_object_id(name)?;
+    Ok(Some((file_id, name)))
+}
+
+fn validate_segment_file(file: &DriveFile, file_id: &str, name: &str) -> Result<()> {
+    if file.file_id()? != file_id || segment_file_name(file)? != name { return Err(corrupt()); }
+    Ok(())
 }
 
 fn role_token(role: ObjectRole) -> &'static str {
@@ -52,6 +77,8 @@ fn role_token(role: ObjectRole) -> &'static str {
         ObjectRole::Pack => "pack",
         ObjectRole::Catalog => "catalog",
         ObjectRole::SyncState => "state",
+        ObjectRole::Segment => "segment",
+        ObjectRole::Snapshot => "snapshot",
         ObjectRole::BackupBundle => "bundle",
         ObjectRole::BackupPoint => "backupPoint",
         ObjectRole::InventoryPage => "inventoryPage",
@@ -63,7 +90,8 @@ fn role_token(role: ObjectRole) -> &'static str {
 /// authenticated envelope header does that.
 fn collection_role(collection: Collection) -> ObjectRole {
     match collection {
-        Collection::Snapshots => ObjectRole::SyncState,
+        Collection::Segments => ObjectRole::Segment,
+        Collection::Snapshots => ObjectRole::Snapshot,
         Collection::BackupPoints => ObjectRole::BackupPoint,
         Collection::InventoryPages => ObjectRole::InventoryPage,
         Collection::Descriptors => ObjectRole::Descriptor,
@@ -72,7 +100,8 @@ fn collection_role(collection: Collection) -> ObjectRole {
 }
 fn collection_token(role: ObjectRole) -> Option<&'static str> {
     match role {
-        ObjectRole::SyncState | ObjectRole::BackupBundle => Some("snapshots"),
+        ObjectRole::SyncState | ObjectRole::Snapshot | ObjectRole::BackupBundle => Some("snapshots"),
+        ObjectRole::Segment => Some("segments"),
         ObjectRole::BackupPoint => Some("backupPoints"),
         ObjectRole::InventoryPage => Some("inventory"),
         ObjectRole::Descriptor => Some("descriptors"),
@@ -125,13 +154,15 @@ pub(crate) struct SetupFolder {
 /// credential, so it never reaches a journal, a locator or a log.
 struct SealedUpload {
     file_id: String,
-    session_uri: url::Url,
+    session_uri: Option<url::Url>,
+    intent: ObjectIntent,
 }
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct StoredUpload {
     file_id: String,
-    session_uri: String,
+    session_uri: Option<String>,
+    intent: ObjectIntent,
 }
 
 enum SessionStatus {
@@ -501,18 +532,19 @@ impl GoogleDrive {
 
     fn object_metadata(&self, settings: &Settings, intent: &ObjectIntent, file_id: &str) -> String {
         let role = role_token(intent.role);
-        serde_json::json!({
-            "id": file_id,
-            "name": format!("{role}-{}", intent.object_id),
-            "mimeType": OCTET_STREAM,
-            "parents": [settings.folder_id.clone()],
-            "appProperties": {
-                ROLE_KEY: role,
-                OBJECT_KEY: intent.object_id.clone(),
-                JOB_KEY: intent.job_id.clone(),
-            },
-        })
-        .to_string()
+        let mut properties = serde_json::json!({ ROLE_KEY: role, JOB_KEY: intent.job_id });
+        let name = if intent.role == ObjectRole::Segment {
+            let (writer, seq, _) = crate::external_storage::contract::parse_segment_object_id(&intent.object_id).unwrap();
+            properties["writerId"] = writer.into();
+            properties["seq"] = seq.to_string().into();
+            format!("segments/{}", intent.object_id)
+        } else {
+            properties[OBJECT_KEY] = intent.object_id.clone().into();
+            if intent.role == ObjectRole::Snapshot { format!("snapshots/{}", intent.object_id) }
+            else { format!("{role}-{}", intent.object_id) }
+        };
+        serde_json::json!({ "id": file_id, "name": name, "mimeType": OCTET_STREAM,
+            "parents": [settings.folder_id], "appProperties": properties }).to_string()
     }
 
     fn check_intent(&self, intent: &ObjectIntent) -> Result<()> {
@@ -523,7 +555,7 @@ impl GoogleDrive {
             return Err(ProviderError::new(ErrorKind::FileTooLarge));
         }
         let fits = |key: &str, value: &str| key.len() + value.len() <= config::MAX_PROPERTY_BYTES;
-        if !fits(OBJECT_KEY, &intent.object_id)
+        if (intent.role != ObjectRole::Segment && !fits(OBJECT_KEY, &intent.object_id))
             || !fits(JOB_KEY, &intent.job_id)
             || !fits(ROLE_KEY, role_token(intent.role))
         {
@@ -591,7 +623,8 @@ impl GoogleDrive {
     async fn seal_upload(&self, upload: &SealedUpload) -> Result<SecretRef> {
         let payload = serde_json::json!({
             "fileId": upload.file_id.clone(),
-            "sessionUri": upload.session_uri.as_str(),
+            "sessionUri": upload.session_uri.as_ref().map(|uri| uri.as_str()),
+            "intent": upload.intent,
         })
         .to_string();
         let bytes = SecretBytes(zeroize::Zeroizing::new(payload.into_bytes()));
@@ -604,13 +637,14 @@ impl GoogleDrive {
     ) -> Result<SealedUpload> {
         let bytes = self.dependencies.vault.read(reference).await?;
         let stored: StoredUpload = serde_json::from_slice(&bytes.0).map_err(|_| corrupt())?;
-        let session_uri = url::Url::parse(&stored.session_uri).map_err(|_| corrupt())?;
-        if !config::is_drive_id(&stored.file_id) || !settings.same_origin(&session_uri) {
+        let session_uri = stored.session_uri.as_deref().map(url::Url::parse).transpose().map_err(|_| corrupt())?;
+        if !config::is_drive_id(&stored.file_id) || session_uri.as_ref().is_some_and(|uri| !settings.same_origin(uri)) {
             return Err(corrupt());
         }
         Ok(SealedUpload {
             file_id: stored.file_id,
             session_uri,
+            intent: stored.intent,
         })
     }
 
@@ -660,6 +694,7 @@ impl GoogleDrive {
         start_offset: u64,
         cancel: &Cancellation,
     ) -> Result<ObjectReceipt> {
+        let session_uri = upload.session_uri.as_ref().ok_or_else(corrupt)?;
         let total = intent.byte_length;
         let mut offset = start_offset;
         let mut refreshed = false;
@@ -679,7 +714,7 @@ impl GoogleDrive {
             headers.insert("content-type".to_owned(), OCTET_STREAM.to_owned());
             let request = HttpRequest {
                 method: reqwest::Method::PUT,
-                url: upload.session_uri.clone(),
+                url: session_uri.clone(),
                 headers,
                 body: Some(reader),
                 content_length: Some(length),
@@ -693,7 +728,7 @@ impl GoogleDrive {
             if response.status == 401 && !refreshed {
                 refreshed = true;
                 self.token(session, true, cancel).await?;
-                match self.session_status(session, &upload.session_uri, total, cancel).await? {
+                match self.session_status(session, session_uri, total, cancel).await? {
                     SessionStatus::Complete(file) => return self.completed_receipt(
                         session.settings, intent, &file, Some(&upload.file_id)),
                     SessionStatus::Incomplete(confirmed) if confirmed <= total => offset = confirmed,
@@ -730,7 +765,7 @@ impl GoogleDrive {
             }
         }
         match self
-            .session_status(session, &upload.session_uri, total, cancel)
+            .session_status(session, session_uri, total, cancel)
             .await?
         {
             SessionStatus::Complete(file) => {
@@ -764,51 +799,69 @@ impl GoogleDrive {
         {
             return Err(corrupt());
         }
+        let object = if intent.role == ObjectRole::Segment {
+            if segment_file_name(file)? != intent.object_id { return Err(corrupt()); }
+            segment_locator_object(file_id, &intent.object_id)?
+        } else { file_id.to_owned() };
         Ok(ObjectReceipt {
             locator: RemoteLocator {
                 connection_identity: settings.connection_identity.clone(),
                 collection: collection_token(intent.role).map(str::to_owned),
-                object: file_id.to_owned(),
+                object,
             },
             byte_length: intent.byte_length,
             version: file.version_token(),
-            checksum,
+            checksum: checksum.or_else(|| Some(Checksum { algorithm: "sha256".into(), value: intent.sha256.clone(), provider_verified: false })),
             complete: true,
         })
     }
 
     /// An earlier attempt may have stored the object before its response was
     /// lost. Identical bytes converge; different bytes never overwrite.
-    async fn existing_object(
-        &self,
-        session: Session<'_>,
-        intent: &ObjectIntent,
-        cancel: &Cancellation,
-    ) -> Result<Option<DriveFile>> {
-        let query = format!(
-            "'{}' in parents and trashed = false and appProperties has {{ key='{OBJECT_KEY}' and value='{}' }}",
-            session.settings.folder_id,
-            config::escape_query_literal(&intent.object_id)?
-        );
-        let mut files = self
-            .list_control_files(session, &query, 2, ErrorKind::Corrupt, cancel)
-            .await?
-            .into_iter();
-        let Some(file) = files.next() else {
-            return Ok(None);
-        };
-        if files.next().is_some() {
-            return Err(corrupt());
-        }
-        if file.property(ROLE_KEY) != Some(role_token(intent.role))
-            || file.byte_length()? != intent.byte_length
-            || file
-                .checksum(Some(&intent.sha256))
-                .is_some_and(|checksum| !checksum.provider_verified)
-        {
+    async fn verify_file(&self, session: Session<'_>, intent: &ObjectIntent, file: &DriveFile,
+        cancel: &Cancellation) -> Result<()> {
+        if file.byte_length()? != intent.byte_length || file.property(ROLE_KEY) != Some(role_token(intent.role)) {
             return Err(ProviderError::new(ErrorKind::PreconditionFailed));
         }
-        Ok(Some(file))
+        if intent.role == ObjectRole::Segment {
+            segment_locator_object(file.file_id()?, &intent.object_id)?;
+            if file.name.as_deref() != Some(format!("segments/{}", intent.object_id).as_str()) {
+                return Err(ProviderError::new(ErrorKind::PreconditionFailed));
+            }
+        }
+        let token = self.token(session, false, cancel).await?;
+        let mut response = self.dispatch(HttpRequest {
+            method: reqwest::Method::GET,
+            url: with_query(session.settings.api(&format!("/files/{}", file.file_id()?))?, &[("alt", "media")]),
+            headers: authorized_headers(&token), body: None, content_length: None,
+            operation: ProviderOperation::Get, account: session.account.clone(), api_request: true,
+            mybox_charge: None, control: false,
+        }, cancel).await?;
+        self.require_status(&mut response, &[200], session.account, cancel).await?;
+        let mut sink = crate::external_storage::contract::IdentitySink { intent };
+        common::stream_to_sink(&mut response.body, &mut sink, Some(intent.byte_length), intent.byte_length, cancel).await?;
+        Ok(())
+    }
+
+    async fn existing_object(&self, session: Session<'_>, intent: &ObjectIntent,
+        cancel: &Cancellation) -> Result<Option<DriveFile>> {
+        let selector = if intent.role == ObjectRole::Segment {
+            let (writer, seq, _) = crate::external_storage::contract::parse_segment_object_id(&intent.object_id)?;
+            format!("name contains 'segments/{writer}-{seq}-'")
+        } else {
+            format!("appProperties has {{ key='{OBJECT_KEY}' and value='{}' }}", config::escape_query_literal(&intent.object_id)?)
+        };
+        let query = format!("'{}' in parents and trashed = false and {selector}", session.settings.folder_id);
+        let mut files = self.list_control_files(session, &query, usize::MAX, ErrorKind::Corrupt, cancel).await?;
+        files.sort_by(|left, right| left.id.cmp(&right.id));
+        for file in &files { self.verify_file(session, intent, file, cancel).await?; }
+        Ok(files.into_iter().next())
+    }
+
+    async fn file_by_id(&self, session: Session<'_>, file_id: &str, cancel: &Cancellation) -> Result<Option<DriveFile>> {
+        let result = self.control(session, &with_query(session.settings.api(&format!("/files/{file_id}"))?,
+            &[("fields", FILE_FIELDS)]), ProviderOperation::Metadata, cancel).await;
+        match result { Ok(file) => Ok(Some(file)), Err(error) if error.kind == ErrorKind::NotFound => Ok(None), Err(error) => Err(error) }
     }
 
     async fn multipart_create(
@@ -862,7 +915,7 @@ fn multipart_body(
     content: Pin<Box<dyn AsyncRead + Send>>,
     content_length: u64,
 ) -> (Pin<Box<dyn AsyncRead + Send>>, u64, String) {
-    let boundary = format!("risunest-{}", uuid::Uuid::new_v4().simple());
+    let boundary = format!("risunest-{}", risunest_sync_wire::hash(metadata.as_bytes()));
     let prefix = format!(
         "--{boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n{metadata}\r\n--{boundary}\r\nContent-Type: {OCTET_STREAM}\r\n\r\n"
     );
@@ -890,6 +943,7 @@ fn context(repository: &RepositoryHandle) -> Result<&Context> {
 }
 
 fn resolve_file_id(context: &Context, locator: &RemoteLocator) -> Result<String> {
+    if let Some((file_id, _)) = segment_locator_parts(locator)? { return Ok(file_id.to_owned()); }
     if locator.object == HEAD_OBJECT {
         let head = context.head.lock().unwrap();
         return if head.present {
@@ -914,6 +968,8 @@ fn removable(settings: &Settings, file: &DriveFile) -> bool {
     parented
         && file.property(ROLE_KEY).is_some_and(|role| {
             [
+                ObjectRole::Segment,
+                ObjectRole::Snapshot,
                 ObjectRole::Pack,
                 ObjectRole::Catalog,
                 ObjectRole::SyncState,
@@ -1122,18 +1178,20 @@ impl Provider for GoogleDrive {
             let context = context(repository)?;
             locator.validate_for(repository)?;
             let file_id = resolve_file_id(context, locator)?;
+            let segment_name = segment_locator_parts(locator)?.map(|(_, name)| name);
             let session = context.session();
             let metadata: DriveFile = self
                 .control(
                     session,
                     &with_query(
                         context.settings.api(&format!("/files/{file_id}"))?,
-                        &[("fields", "id,size,version,sha256Checksum")],
+                        &[("fields", if segment_name.is_some() { FILE_FIELDS } else { "id,size,version,sha256Checksum" })],
                     ),
                     ProviderOperation::Metadata,
                     cancel,
                 )
                 .await?;
+            if let Some(name) = segment_name { validate_segment_file(&metadata, &file_id, name)?; }
             let version = metadata.version_token();
             if let (Some(unchanged), Some(current)) = (unchanged, version.as_ref()) {
                 if unchanged == current {
@@ -1176,6 +1234,9 @@ impl Provider for GoogleDrive {
             let (received, hash) =
                 common::stream_to_sink(&mut response.body, sink, Some(length), length, cancel)
                     .await?;
+            if let Some(name) = segment_name {
+                if crate::external_storage::contract::parse_segment_object_id(name)?.2 != hash { return Err(corrupt()); }
+            }
             let checksum = metadata.checksum(Some(&hash));
             if checksum
                 .as_ref()
@@ -1194,103 +1255,61 @@ impl Provider for GoogleDrive {
         })
     }
 
-    fn begin_upload<'a>(
-        &'a self,
-        repository: &'a RepositoryHandle,
-        intent: &'a ObjectIntent,
-        cancel: &'a Cancellation,
-    ) -> ProviderFuture<'a, Option<ResumeState>> {
+    fn begin_upload<'a>(&'a self, repository: &'a RepositoryHandle, intent: &'a ObjectIntent,
+        cancel: &'a Cancellation) -> ProviderFuture<'a, Option<ResumeState>> {
         Box::pin(async move {
             cancel.check()?;
             let context = context(repository)?;
             intent.validate(repository)?;
             self.check_intent(intent)?;
-            let session = context.session();
-            if intent.role == ObjectRole::Descriptor
-                && self
-                    .existing_object(session, intent, cancel)
-                    .await?
-                    .is_some()
-            {
-                // Descriptor retries must converge before opening a new upload
-                // session, otherwise a lost completion can create a duplicate.
+            if intent.role == ObjectRole::Descriptor && self.existing_object(context.session(), intent, cancel).await?.is_some() {
                 return Ok(None);
             }
-            let file_id = self.generate_id(session, cancel).await?;
-            let session_uri = self.open_session(session, intent, &file_id, cancel).await?;
-            let sealed_state = self
-                .seal_upload(&SealedUpload {
-                    file_id,
-                    session_uri,
-                })
-                .await?;
-            Ok(Some(ResumeState {
-                sealed_state,
-                confirmed_offset: 0,
-                expires_at_ms: Some(self.now_ms().saturating_add(SESSION_LIFETIME_MS)),
-            }))
+            let file_id = self.generate_id(context.session(), cancel).await?;
+            let sealed_state = self.seal_upload(&SealedUpload { file_id, session_uri: None, intent: intent.clone() }).await?;
+            Ok(Some(ResumeState { sealed_state, confirmed_offset: 0, expires_at_ms: None }))
         })
     }
 
-    fn create_object<'a>(
-        &'a self,
-        repository: &'a RepositoryHandle,
-        intent: &'a ObjectIntent,
-        source: &'a dyn TransferSource,
-        resume: Option<&'a ResumeState>,
-        cancel: &'a Cancellation,
-    ) -> ProviderFuture<'a, ObjectReceipt> {
+    fn create_object<'a>(&'a self, repository: &'a RepositoryHandle, intent: &'a ObjectIntent,
+        source: &'a dyn TransferSource, resume: Option<&'a ResumeState>, cancel: &'a Cancellation)
+        -> ProviderFuture<'a, ObjectReceipt> {
         Box::pin(async move {
             cancel.check()?;
             let context = context(repository)?;
             intent.validate(repository)?;
             self.check_intent(intent)?;
-            if source.byte_length() != intent.byte_length {
-                return Err(corrupt());
-            }
+            crate::external_storage::contract::verify_source(source, intent, cancel).await?;
             let session = context.session();
-            if let Some(resume) = resume {
-                let upload = self
-                    .open_sealed(&resume.sealed_state, &context.settings)
-                    .await?;
-                return self
-                    .upload_chunks(
-                        session,
-                        intent,
-                        source,
-                        &upload,
-                        resume.confirmed_offset,
-                        cancel,
-                    )
-                    .await;
+            let Some(resume) = resume else {
+                return match self.existing_object(session, intent, cancel).await? {
+                    Some(file) => self.completed_receipt(&context.settings, intent, &file, None),
+                    None => Err(ProviderError::new(ErrorKind::Unsupported)),
+                };
+            };
+            let mut upload = self.open_sealed(&resume.sealed_state, &context.settings).await?;
+            if upload.intent != *intent { return Err(corrupt()); }
+            if upload.session_uri.is_none() && intent.byte_length <= MULTIPART_MAX_BYTES {
+                return match self.multipart_create(session, intent, source, &upload.file_id, cancel).await {
+                    Err(error) if error.kind == ErrorKind::PreconditionFailed => {
+                        let file = self.file_by_id(session, &upload.file_id, cancel).await?.ok_or(error)?;
+                        self.verify_file(session, intent, &file, cancel).await?;
+                        self.completed_receipt(&context.settings, intent, &file, Some(&upload.file_id))
+                    }
+                    result => result,
+                };
             }
-            if let Some(existing) = self.existing_object(session, intent, cancel).await? {
-                return self.completed_receipt(&context.settings, intent, &existing, None);
+            if upload.session_uri.is_none() {
+                upload.session_uri = Some(self.open_session(session, intent, &upload.file_id, cancel).await?);
+                let bytes = SecretBytes(zeroize::Zeroizing::new(serde_json::json!({
+                    "fileId": upload.file_id, "sessionUri": upload.session_uri.as_ref().map(|uri| uri.as_str()),
+                    "intent": upload.intent }).to_string().into_bytes()));
+                self.dependencies.vault.replace(&resume.sealed_state, &bytes).await?;
             }
-            let file_id = self.generate_id(session, cancel).await?;
-            if intent.byte_length <= MULTIPART_MAX_BYTES {
-                return self
-                    .multipart_create(session, intent, source, &file_id, cancel)
-                    .await;
-            }
-            let session_uri = self.open_session(session, intent, &file_id, cancel).await?;
-            self.upload_chunks(
-                session,
-                intent,
-                source,
-                &SealedUpload {
-                    file_id,
-                    session_uri,
-                },
-                0,
-                cancel,
-            )
-            .await
+            self.upload_chunks(session, intent, source, &upload, resume.confirmed_offset, cancel).await
         })
     }
 
-    /// Drive v3 documents no precondition on the path that replaces file
-    /// content, so no compare and exchange is offered instead of emulating one.
     fn compare_exchange_head<'a>(
         &'a self,
         repository: &'a RepositoryHandle,
@@ -1405,17 +1424,19 @@ impl Provider for GoogleDrive {
             cancel.check()?;
             let context = context(repository)?;
             locator.validate_for(repository)?;
-            if locator.object == HEAD_OBJECT || !config::is_drive_id(&locator.object) {
+            if locator.object == HEAD_OBJECT
+                || (locator.collection.as_deref() != Some("segments") && !config::is_drive_id(&locator.object)) {
                 return Err(ProviderError::new(ErrorKind::Unsupported));
             }
-            let file_id = &locator.object;
+            let file_id = resolve_file_id(context, locator)?;
+            let segment_name = segment_locator_parts(locator)?.map(|(_, name)| name);
             let session = context.session();
             let metadata: DriveFile = match self
                 .control(
                     session,
                     &with_query(
                         context.settings.api(&format!("/files/{file_id}"))?,
-                        &[("fields", "id,parents,appProperties")],
+                        &[("fields", if segment_name.is_some() { "id,name,parents,appProperties" } else { "id,parents,appProperties" })],
                     ),
                     ProviderOperation::Metadata,
                     cancel,
@@ -1426,6 +1447,7 @@ impl Provider for GoogleDrive {
                 Err(error) if error.kind == ErrorKind::NotFound => return Ok(()),
                 Err(error) => return Err(error),
             };
+            if let Some(name) = segment_name { validate_segment_file(&metadata, &file_id, name)?; }
             if !removable(&context.settings, &metadata) {
                 return Err(ProviderError::new(ErrorKind::Unsupported));
             }
@@ -1466,22 +1488,24 @@ impl Provider for GoogleDrive {
                 }
                 parameters.push(("pageToken", cursor));
             }
-            let url = self.list_url(
-                &context.settings,
-                &self.role_query(&context.settings, role_token(role)),
-                &parameters,
-            )?;
+            let query = if collection == Collection::Snapshots {
+                format!("'{}' in parents and trashed = false and (appProperties has {{ key='{ROLE_KEY}' and value='state' }} or appProperties has {{ key='{ROLE_KEY}' and value='snapshot' }} or appProperties has {{ key='{ROLE_KEY}' and value='bundle' }})", context.settings.folder_id)
+            } else { self.role_query(&context.settings, role_token(role)) };
+            let url = self.list_url(&context.settings, &query, &parameters)?;
             let page: FileList = self
                 .control(context.session(), &url, ProviderOperation::List, cancel)
                 .await?;
             page.validate_page(cursor)?;
             let mut objects = Vec::with_capacity(page.files.len());
             for file in &page.files {
+                let object = if collection == Collection::Segments {
+                    segment_locator_object(file.file_id()?, segment_file_name(file)?)?
+                } else { file.file_id()?.to_owned() };
                 objects.push(ObjectReceipt {
                     locator: RemoteLocator {
                         connection_identity: context.settings.connection_identity.clone(),
                         collection: collection_token(role).map(str::to_owned),
-                        object: file.file_id()?.to_owned(),
+                        object,
                     },
                     byte_length: file.byte_length()?,
                     version: file.version_token(),
@@ -1498,13 +1522,8 @@ impl Provider for GoogleDrive {
         })
     }
 
-    fn reconcile_upload<'a>(
-        &'a self,
-        repository: &'a RepositoryHandle,
-        intent: &'a ObjectIntent,
-        resume: Option<&'a ResumeState>,
-        cancel: &'a Cancellation,
-    ) -> ProviderFuture<'a, UploadResolution> {
+    fn reconcile_upload<'a>(&'a self, repository: &'a RepositoryHandle, intent: &'a ObjectIntent,
+        resume: Option<&'a ResumeState>, cancel: &'a Cancellation) -> ProviderFuture<'a, UploadResolution> {
         Box::pin(async move {
             cancel.check()?;
             let context = context(repository)?;
@@ -1512,80 +1531,39 @@ impl Provider for GoogleDrive {
             let session = context.session();
             let Some(resume) = resume else {
                 return match self.existing_object(session, intent, cancel).await? {
-                    Some(file) => {
-                        match self.completed_receipt(&context.settings, intent, &file, None) {
-                            Ok(receipt) => Ok(UploadResolution::Complete(receipt)),
-                            Err(error) if error.kind == ErrorKind::PreconditionFailed => {
-                                Ok(UploadResolution::Conflict)
-                            }
-                            Err(error) => Err(error),
-                        }
-                    }
+                    Some(file) => Ok(UploadResolution::Complete(self.completed_receipt(&context.settings, intent, &file, None)?)),
                     None => Ok(UploadResolution::RestartRequired),
                 };
             };
-            let upload = self
-                .open_sealed(&resume.sealed_state, &context.settings)
-                .await?;
-            let status = self
-                .session_status(session, &upload.session_uri, intent.byte_length, cancel)
-                .await?;
-            let file = match status {
-                SessionStatus::Incomplete(confirmed_offset) => {
-                    if confirmed_offset > intent.byte_length {
-                        return Err(corrupt());
+            let mut upload = self.open_sealed(&resume.sealed_state, &context.settings).await?;
+            if upload.intent != *intent { return Err(corrupt()); }
+            let found = if let Some(uri) = upload.session_uri.as_ref() {
+                match self.session_status(session, uri, intent.byte_length, cancel).await? {
+                    SessionStatus::Incomplete(confirmed_offset) if confirmed_offset <= intent.byte_length => {
+                        return Ok(UploadResolution::Resumable(ResumeState { sealed_state: resume.sealed_state.clone(),
+                            confirmed_offset, expires_at_ms: resume.expires_at_ms }));
                     }
-                    return Ok(UploadResolution::Resumable(ResumeState {
-                        sealed_state: resume.sealed_state.clone(),
-                        confirmed_offset,
-                        expires_at_ms: resume.expires_at_ms,
-                    }));
+                    SessionStatus::Incomplete(_) => return Err(corrupt()),
+                    SessionStatus::Complete(file) => Some(file),
+                    SessionStatus::Gone => self.file_by_id(session, &upload.file_id, cancel).await?,
                 }
-                SessionStatus::Complete(file) => file,
-                SessionStatus::Gone => {
-                    // The session is gone; only the file itself can say whether
-                    // the object was stored before it expired.
-                    let found: Result<DriveFile> = self
-                        .control(
-                            session,
-                            &with_query(
-                                context
-                                    .settings
-                                    .api(&format!("/files/{}", upload.file_id))?,
-                                &[("fields", FILE_FIELDS)],
-                            ),
-                            ProviderOperation::Metadata,
-                            cancel,
-                        )
-                        .await;
-                    match found {
-                        Ok(file) => file,
-                        Err(error) if error.kind == ErrorKind::NotFound => {
-                            return Ok(UploadResolution::RestartRequired)
-                        }
-                        Err(error) => return Err(error),
-                    }
-                }
+            } else { self.file_by_id(session, &upload.file_id, cancel).await? };
+            let Some(file) = found else {
+                upload.session_uri = None;
+                let bytes = SecretBytes(zeroize::Zeroizing::new(serde_json::json!({ "fileId": upload.file_id,
+                    "sessionUri": null, "intent": upload.intent }).to_string().into_bytes()));
+                self.dependencies.vault.replace(&resume.sealed_state, &bytes).await?;
+                return Ok(UploadResolution::Resumable(ResumeState { sealed_state: resume.sealed_state.clone(), confirmed_offset: 0, expires_at_ms: None }));
             };
-            let same_object = file.file_id().ok() == Some(upload.file_id.as_str())
-                && file.byte_length().ok() == Some(intent.byte_length)
-                && !file
-                    .checksum(Some(&intent.sha256))
-                    .is_some_and(|checksum| !checksum.provider_verified);
-            if !same_object {
-                return Ok(UploadResolution::Conflict);
+            match self.verify_file(session, intent, &file, cancel).await {
+                Ok(()) => (),
+                Err(error) if error.kind == ErrorKind::PreconditionFailed => return Ok(UploadResolution::Conflict),
+                Err(error) => return Err(error),
             }
-            Ok(UploadResolution::Complete(self.completed_receipt(
-                &context.settings,
-                intent,
-                &file,
-                Some(&upload.file_id),
-            )?))
+            Ok(UploadResolution::Complete(self.completed_receipt(&context.settings, intent, &file, Some(&upload.file_id))?))
         })
     }
 
-    /// The reserved control name resolves to the stable head file id held by
-    /// the handle, so the same locator works before and after the first write.
     fn head_locator(&self, repository: &RepositoryHandle) -> Result<RemoteLocator> {
         context(repository)?;
         Ok(RemoteLocator {

@@ -2,6 +2,7 @@ import { isBackgroundExpiryReason } from '../iosNative'
 import { measuredTaskPercent, runWithMobileBackgroundTask } from '../mobileBackgroundTask'
 import { Mutex } from '../mutex'
 import { get, writable } from 'svelte/store'
+import { invoke } from '@tauri-apps/api/core'
 import { doingChat } from '../process/generationState'
 import { reserveLibraryFileOperation, waitForLibraryFileOperation } from './libraryFileOperation'
 
@@ -9,10 +10,14 @@ import {
     NativeFileJobActivationCommittedError,
     NativeFileJobError,
     resolveNativeFileJobStage,
+    portableBodyRetryRequest,
+    retryNativePortableRestoreBodies,
     type NativeFileJobResult,
     type NativeFileJobStage,
     type NativeFileJobStatus,
     type NativeFileOperationFormat,
+    type NativeSnapshotBodiesStarted,
+    type NativePortableBodyRetryRequest,
 } from './nativeFileJobs'
 
 export type { NativeFileOperationFormat } from './nativeFileJobs'
@@ -77,12 +82,15 @@ export interface SharedNativeFileOperationContext {
     setBlocking(blocking: boolean): void
     setSource(source: NativeFileOperationSource): void
     setPartialWritesPossible(value: boolean): void
+    releaseLibraryAfterPortableAdoption(receipt: NativeFileJobStatus): Promise<void>
 }
 
 export interface SharedNativeFileOperationOptions {
     userInitiated?: boolean
     presentation?: NativeFileOperationPresentation
     format?: NativeFileOperationFormat
+    snapshotBodyOwner?: NativeSnapshotBodiesStarted
+    portableBodyOwner?: NativePortableBodyRetryRequest
 }
 
 export const nativeFileOperation = writable<NativeFileOperationState | null>(null)
@@ -218,13 +226,46 @@ export function runSharedNativeFileOperation<T>(
     operation: (context: SharedNativeFileOperationContext) => Promise<T>,
     options: SharedNativeFileOperationOptions = {},
 ): Promise<T> {
+    if (options.portableBodyOwner) {
+        const receipt = options.portableBodyOwner
+        return invoke<NativeFileJobStatus>('native_file_job_status', {jobId: receipt.jobId}).then(status => {
+            const actual = portableBodyRetryRequest(status)
+            if (kind !== 'import' || !status.portableBodyRetry?.available
+                || Object.keys(receipt).some(key => receipt[key as keyof typeof receipt] !== actual[key as keyof typeof actual])) {
+                throw new NativeFileJobError('portable-body-receipt-mismatch', 'Portable body retry receipt differs')
+            }
+            return runSharedNativeFileOperationWithAdmission(kind, operationKey, operation, options, true)
+        })
+    }
+    if (options.snapshotBodyOwner) {
+        const receipt = options.snapshotBodyOwner
+        return invoke<NativeFileJobStatus>('native_file_job_status', {jobId: receipt.jobId}).then(status => {
+            if (kind !== 'import' || receipt.kind !== 'snapshot-bodies' || status.kind !== 'snapshot-bodies'
+                || status.jobId !== receipt.jobId || status.snapshotStagingId !== receipt.stagingId
+                || String(status.activationRevision) !== receipt.activationRevision
+                || status.activationAuthority !== receipt.bindingAuthority) {
+                throw new NativeFileJobError('snapshot-body-receipt-mismatch', 'Snapshot body transfer receipt differs')
+            }
+            return runSharedNativeFileOperationWithAdmission(kind, operationKey, operation, options, true)
+        })
+    }
+    return runSharedNativeFileOperationWithAdmission(kind, operationKey, operation, options, false)
+}
+
+function runSharedNativeFileOperationWithAdmission<T>(
+    kind: NativeFileOperationKind,
+    operationKey: string,
+    operation: (context: SharedNativeFileOperationContext) => Promise<T>,
+    options: SharedNativeFileOperationOptions,
+    bodyOnly: boolean,
+): Promise<T> {
     if (activeOperation) {
         return activeOperationKey === operationKey
             ? activeOperation as Promise<T>
             : Promise.reject(new NativeFileOperationBusyError())
     }
 
-    if (options.format === 'library-backup' && get(doingChat)) {
+    if (!bodyOnly && options.format === 'library-backup' && get(doingChat)) {
         return Promise.reject(
             new NativeFileJobError(
                 'generation-active',
@@ -232,7 +273,11 @@ export function runSharedNativeFileOperation<T>(
             ),
         )
     }
-    const releaseAdmission = reserveLibraryFileOperation()
+    const releaseReservation = bodyOnly ? () => {} : reserveLibraryFileOperation()
+    let reservationReleased=false
+    const releaseAdmission=()=> {
+        if (!reservationReleased) {reservationReleased=true;releaseReservation()}
+    }
 
     const controller = new AbortController()
     const presentation = options.presentation ?? 'inline'
@@ -276,12 +321,23 @@ export function runSharedNativeFileOperation<T>(
         setBlocking: (blocking) => updateActiveState({ blocking }),
         setSource: (source) => updateActiveState({ source }),
         setPartialWritesPossible: (value) => updateActiveState({ partialWritesPossible: value }),
+        async releaseLibraryAfterPortableAdoption(receipt) {
+            const status=await invoke<NativeFileJobStatus>('native_file_job_status',{jobId:receipt.jobId})
+            if (receipt.kind!=='restore-portable-backup' || status.kind!==receipt.kind || status.jobId!==receipt.jobId
+                || status.activationRevision!==receipt.activationRevision || !Number.isSafeInteger(status.activationRevision)
+                || status.activationAuthority!==receipt.activationAuthority || !status.activationAuthority
+                || status.deviceSessionId!==receipt.deviceSessionId || !status.deviceSessionId
+                || status.restoreAdoptionConfirmed!==true) {
+                throw new NativeFileJobError('portable-adoption-receipt-mismatch','Portable restore adoption could not be confirmed')
+            }
+            releaseAdmission()
+        },
     }
     try {
         const taskKind = options.format === 'library-backup' || options.format === 'risu-save'
             ? (kind === 'export' ? 'backup' : 'restore') : kind
         runWithMobileBackgroundTask(taskKind, async task => {
-            const waiting = waitForLibraryFileOperation(task.signal ?? context.signal)
+            const waiting = bodyOnly ? null : waitForLibraryFileOperation(task.signal ?? context.signal)
             if (waiting) {
                 updateActiveState({ waitingForSync: true })
                 await waiting
@@ -342,6 +398,16 @@ export function cancelActiveNativeFileOperation(): void {
 
 export function dismissNativeFileOperationOutcome(): void {
     nativeFileOperationOutcome.set(null)
+}
+
+export async function retryPortableRestoreBodiesFromOutcome(): Promise<NativeFileJobResult> {
+    const outcome = get(nativeFileOperationOutcome)
+    if (!outcome?.status) return Promise.reject(new NativeFileJobError('portable-body-retry-refused', 'Portable body retry is unavailable'))
+    const receipt = portableBodyRetryRequest(outcome.status)
+    return runSharedNativeFileOperation('import', `portable-bodies:${receipt.jobId}`, context => {
+        context.setBlocking(false)
+        return retryNativePortableRestoreBodies(receipt, {signal: context.signal, onStatus: context.onStatus})
+    }, {presentation: 'dialog', format: 'library-backup', portableBodyOwner: receipt})
 }
 
 /**

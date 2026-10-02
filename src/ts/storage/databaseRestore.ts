@@ -1,6 +1,6 @@
-import { safeStructuredClone } from '../polyfill'
 import type { Database } from './database.svelte'
 import type { CommittedApplyOutcome, PersistentDataRuntime } from './persistentDataRuntime'
+import { prepareUpstreamImport } from './importedIdentity'
 
 type RestoreFollowupDependencies = {
     onPostCommitError?(error: unknown): void | Promise<void>
@@ -34,8 +34,13 @@ async function installPluginRestore(
     reason: string,
     dependencies: PluginRestoreDependencies,
 ): Promise<CommittedApplyOutcome> {
-    const outcome = await dependencies.replaceDatabase(database, reason)
+    let pluginsRestarted = false
+    const outcome = await dependencies.replaceDatabase(prepareUpstreamImport(database), reason, {
+        upstreamImport:true,
+        onPluginsRestarted: () => { pluginsRestarted = true },
+    })
     if (outcome.projection === 'refresh-required') return outcome
+    if (pluginsRestarted) return outcome
     return finishCommittedRestore(outcome, dependencies.loadPlugins, dependencies)
 }
 
@@ -104,9 +109,13 @@ export async function installLocalBackup(
         replaceDatabase: PersistentDataRuntime['replacePersistentDatabase']
         publishAcceptedRevision: () => Promise<void>
         relaunch: () => void | Promise<void>
+        upstreamImportWarnings?: string[]
     },
 ): Promise<CommittedApplyOutcome> {
-    const outcome = await dependencies.replaceDatabase(database, 'local-backup', { publishOfficial: true })
+    const outcome = await dependencies.replaceDatabase(prepareUpstreamImport(database), 'local-backup', {
+        publishOfficial: true, upstreamImport:true,
+        ...(dependencies.upstreamImportWarnings ? {upstreamImportWarnings:dependencies.upstreamImportWarnings} : {}),
+    })
     if (outcome.projection === 'refresh-required') return outcome
     return finishCommittedRestore(outcome, async () => {
         await dependencies.publishAcceptedRevision()
@@ -122,11 +131,11 @@ export async function completeAccountUnmigration(
         finalize: () => void | Promise<void>
     },
 ): Promise<CommittedApplyOutcome> {
-    const candidate = safeStructuredClone(database)
+    const candidate = prepareUpstreamImport(database)
     candidate.account = null
 
     await dependencies.prepareResources(candidate)
-    const outcome = await dependencies.replaceDatabase(candidate, 'account-unmigration')
+    const outcome = await dependencies.replaceDatabase(candidate, 'account-unmigration', {upstreamImport:true})
     // Device account markers must follow the committed authority even if projection failed.
     return finishCommittedRestore(outcome, dependencies.finalize, dependencies)
 }

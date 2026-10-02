@@ -25,51 +25,12 @@ pub(super) fn incremental_commit<T>(
     let prepared = prepare(&transaction, &active)?;
     let revision = actual_revision + 1;
     let generation = active;
-    super::server_sync_outbox::begin_mutation(&transaction, &generation, revision)?;
     super::content_change_index::begin_mutation(&transaction, &generation, revision, "local")?;
     body(&transaction, &generation, prepared)?;
     super::content_change_index::finish_mutation(&transaction)?;
-    super::server_sync_outbox::finish_mutation(&transaction)?;
     set_active(&transaction, revision, &generation)?;
     transaction.commit()?;
     Ok(RevisionResult { revision })
-}
-
-pub(super) fn commit_asset_alias(
-    connection: &mut Connection,
-    alias: &AssetAlias,
-    expected_revision: i64,
-) -> StoreResult<RevisionResult> {
-    incremental_commit(
-        connection,
-        expected_revision,
-        |_, _| alias.validate(),
-        |transaction, generation, ()| {
-            put_asset_alias(transaction, generation, alias)?;
-            Ok(())
-        },
-    )
-}
-
-pub(super) fn delete_asset_alias(
-    connection: &mut Connection,
-    kind: &str,
-    key: &str,
-    expected_revision: i64,
-) -> StoreResult<RevisionResult> {
-    super::query::validate_asset_kind(kind)?;
-    incremental_commit(
-        connection,
-        expected_revision,
-        |_, _| Ok(()),
-        |transaction, generation, ()| {
-            transaction.execute(
-                "DELETE FROM asset_aliases WHERE generation = ?1 AND kind = ?2 AND logical_key = ?3",
-                params![generation, kind, key],
-            )?;
-            Ok(())
-        },
-    )
 }
 
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
@@ -108,10 +69,29 @@ pub(super) fn apply_root_mutations(
     Ok(root)
 }
 
-pub(super) fn commit(
+pub(super) fn commit_lww(
     connection: &mut Connection,
     input: &WorkingSetCommit,
     asset_aliases: &[AssetAlias],
+    header: &super::lww::Header,
+    stamp: &risunest_sync_wire::stamp::Stamp,
+    digest: &str,
+) -> StoreResult<RevisionResult> {
+    if let Some((previous, revision)) = connection.query_row(
+        "SELECT digest,revision FROM lww_requests WHERE request_id=?1", [&header.request_id],
+        |row| Ok((row.get::<_,String>(0)?,row.get::<_,i64>(1)?)),
+    ).optional()? {
+        if previous != digest { return Err(validation("request-id-integrity")); }
+        return Ok(RevisionResult { revision });
+    }
+    commit_inner(connection, input, asset_aliases, Some((header, stamp, digest)))
+}
+
+fn commit_inner(
+    connection: &mut Connection,
+    input: &WorkingSetCommit,
+    asset_aliases: &[AssetAlias],
+    lww: Option<(&super::lww::Header,&risunest_sync_wire::stamp::Stamp,&str)>,
 ) -> StoreResult<RevisionResult> {
     incremental_commit(
         connection,
@@ -147,12 +127,40 @@ pub(super) fn commit(
                     return Err(validation("Character deletion requires at most 128 unique nonempty IDs"));
                 }
             }
+            super::lww::validate_local_targets(transaction,input)?;
             validate_changed_owner_shapes(transaction, active, input)?;
             reject_archived_targets(transaction, active, input)?;
             validate_owner_heads_for_commit(input)?;
-            retained_commit_owner_heads(transaction, active, input)
+            let retained = retained_commit_owner_heads(transaction, active, input)?;
+            let mut conversation_orders = BTreeSet::new();
+            for mutation in input.conversations.iter().flatten() {
+                match mutation {
+                    ConversationMutation::Delete { character_id, .. }
+                    | ConversationMutation::Reorder { character_id, .. } => {
+                        conversation_orders.insert(character_id.clone());
+                    }
+                    ConversationMutation::ReplaceRange { character_id, conversation_id, .. } => {
+                        let exists: bool = transaction.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM conversations WHERE generation=?1 AND character_id=?2 AND conversation_id=?3)",
+                            params![active, character_id, conversation_id], |row| row.get(0),
+                        )?;
+                        let created_by_unit = input.unit_mutations.iter().flatten().any(|mutation| {
+                            if let super::lww::UnitMutation::Set { key, .. } = mutation {
+                                let parts = key.components();
+                                parts.len() == 4 && parts[0] == "exists" && parts[1] == "conversation"
+                                    && parts[2] == *character_id && parts[3] == *conversation_id
+                            } else { false }
+                        });
+                        if !exists && !created_by_unit {
+                            conversation_orders.insert(character_id.clone());
+                        }
+                    }
+                }
+            }
+            let before = super::lww::capture_targets(transaction, active, input, asset_aliases, true, &conversation_orders)?;
+            Ok((retained, before, conversation_orders))
         },
-        |transaction, generation, retained| {
+        |transaction, generation, (retained, before, conversation_orders)| {
             if let Some(root) = &input.root {
                 put_root(transaction, generation, root)?;
             }
@@ -180,6 +188,9 @@ pub(super) fn commit(
                 }
                 replace_character(transaction, generation, character)?;
             }
+            for mutation in input.unit_mutations.as_deref().unwrap_or_default() {
+                super::lww::apply_mutation(transaction, generation, mutation)?;
+            }
             for mutation in input.conversations.as_deref().unwrap_or_default() {
                 apply_conversation_mutation(transaction, generation, mutation)?;
             }
@@ -190,6 +201,13 @@ pub(super) fn commit(
                 put_asset_alias(transaction, generation, alias)?;
             }
             replace_changed_owner_heads(transaction, generation, input, &retained)?;
+            if let Some((header, stamp, digest)) = lww {
+                let after = super::lww::capture_targets(transaction, generation, input, asset_aliases, false, &conversation_orders)?;
+                let changed=before.keys().chain(after.keys()).cloned().collect::<Vec<_>>();
+                super::lww::record_changes(transaction, before, after, stamp, header.binding_authority, &header.request_id)?;
+                super::lww::refresh_orders(transaction, generation,&changed)?;
+                transaction.execute("INSERT INTO lww_requests VALUES(?1,?2,?3)", params![header.request_id, digest, current_revision(transaction)?+1])?;
+            }
             Ok(())
         },
     )
@@ -234,8 +252,8 @@ fn reject_archived_targets(
 
 fn validate_changed_owner_shapes(connection: &Connection, generation: &str, input: &WorkingSetCommit) -> StoreResult<()> {
     let validate = |next: &Value, previous: &Value, character_id: Option<&str>| -> StoreResult<()> {
-        let old_parents = super::record_projection::owner_parents(previous, character_id);
-        for (owner, parent, property) in super::record_projection::owner_parents(next, character_id) {
+        let old_parents = super::record_projection::owner_parents(previous, character_id)?;
+        for (owner, parent, property) in super::record_projection::owner_parents(next, character_id)? {
             let value = parent.get(property);
             let old = old_parents.iter().find(|(old_owner, _, _)| old_owner == &owner)
                 .and_then(|(_, parent, _)| parent.get(property));
@@ -285,24 +303,24 @@ fn owner_entries<'a>(
                     validation("Character asset owner head requires its parent mutation")
                 })?
         }
-        AssetOwnerLocator::RootModuleAssets { index } => input
+        AssetOwnerLocator::RootModuleAssets { module_id } => input
             .root
             .as_ref()
             .and_then(Value::as_object)
             .and_then(|root| root.get("modules"))
             .and_then(Value::as_array)
-            .and_then(|modules| modules.get(*index as usize))
+            .and_then(|modules| modules.iter().find(|m|m.get("id").and_then(Value::as_str)==Some(module_id)))
             .and_then(Value::as_object)
             .ok_or_else(|| validation("Root module asset owner occurrence does not exist"))?,
-        AssetOwnerLocator::PersonaEmbeddedModuleAssets { index } => input
+        AssetOwnerLocator::PersonaEmbeddedModuleAssets { persona_id, module_id } => input
             .root
             .as_ref()
             .and_then(Value::as_object)
             .and_then(|root| root.get("personas"))
             .and_then(Value::as_array)
-            .and_then(|personas| personas.get(*index as usize))
+            .and_then(|personas| personas.iter().find(|p|p.get("id").and_then(Value::as_str)==Some(persona_id)))
             .and_then(Value::as_object)
-            .and_then(|persona| persona.get("embeddedModule"))
+            .and_then(|persona| persona.get("embeddedModule")).filter(|m|m.get("id").and_then(Value::as_str)==Some(module_id))
             .and_then(Value::as_object)
             .ok_or_else(|| validation("Persona module asset owner occurrence does not exist"))?,
     };
@@ -369,7 +387,7 @@ fn retained_commit_owner_heads(
         .filter_map(|value| value.get("chaId").and_then(Value::as_str))
         .collect::<Vec<_>>();
     let mut retained = Vec::new();
-    for mut head in selected_replacement_owner_heads(
+    for head in selected_replacement_owner_heads(
         connection,
         generation,
         Some(input.root.is_some()),
@@ -382,25 +400,8 @@ fn retained_commit_owner_heads(
                     continue;
                 }
             }
-            AssetOwnerLocator::RootModuleAssets { index } => {
-                let Some(root) = &input.root else {
-                    continue;
-                };
-                let Some(index) = retained_module_index(&old_root, root, "modules", *index, false)
-                else {
-                    continue;
-                };
-                head.owner = AssetOwnerLocator::RootModuleAssets { index };
-            }
-            AssetOwnerLocator::PersonaEmbeddedModuleAssets { index } => {
-                let Some(root) = &input.root else {
-                    continue;
-                };
-                let Some(index) = retained_module_index(&old_root, root, "personas", *index, true)
-                else {
-                    continue;
-                };
-                head.owner = AssetOwnerLocator::PersonaEmbeddedModuleAssets { index };
+            AssetOwnerLocator::RootModuleAssets { .. } | AssetOwnerLocator::PersonaEmbeddedModuleAssets { .. } => {
+                if input.root.as_ref().and_then(|root|head.owner.root_parent(root)).is_none() {continue;}
             }
         }
         let Ok(entries) = owner_entries(input, &head.owner) else {
@@ -418,56 +419,6 @@ fn retained_commit_owner_heads(
     Ok(retained)
 }
 
-fn retained_module_index(
-    old: &Value,
-    new: &Value,
-    property: &str,
-    index: i64,
-    embedded: bool,
-) -> Option<i64> {
-    let old = old.get(property)?.as_array()?;
-    let new = new.get(property)?.as_array()?;
-    let source = old.get(usize::try_from(index).ok()?)?;
-    fn module(value: &Value, embedded: bool) -> Option<&Value> {
-        if embedded {
-            value.get("embeddedModule")
-        } else {
-            Some(value)
-        }
-    }
-    let source_module = module(source, embedded)?;
-    let id = source_module
-        .get("id")
-        .and_then(Value::as_str)
-        .filter(|id| !id.is_empty());
-    if let Some(id) = id {
-        let matches_id = |value: &&Value| {
-            module(value, embedded)
-                .and_then(|m| m.get("id"))
-                .and_then(Value::as_str)
-                == Some(id)
-        };
-        if old.iter().filter(matches_id).count() == 1 && new.iter().filter(matches_id).count() == 1
-        {
-            return new
-                .iter()
-                .position(|value| matches_id(&value))
-                .map(|index| index as i64);
-        }
-    }
-    // Duplicate or missing IDs still have occurrence identity. Exact parent
-    // matches can move, but ambiguous duplicates must not borrow another head.
-    if new.get(index as usize) == Some(source) {
-        return Some(index);
-    }
-    let matches = new
-        .iter()
-        .enumerate()
-        .filter(|(_, value)| *value == source)
-        .collect::<Vec<_>>();
-    (matches.len() == 1 && old.iter().filter(|value| *value == source).count() == 1)
-        .then(|| matches[0].0 as i64)
-}
 
 fn replace_changed_owner_heads(
     transaction: &Transaction<'_>,
@@ -1160,18 +1111,18 @@ pub(super) fn staged_owner_entries<'a>(
                 })
             })
             .ok_or_else(|| validation("Character asset owner occurrence does not exist"))?,
-        AssetOwnerLocator::RootModuleAssets { index } => root
+        AssetOwnerLocator::RootModuleAssets { module_id } => root
             .get("modules")
             .and_then(Value::as_array)
-            .and_then(|modules| modules.get(*index as usize))
+            .and_then(|modules| modules.iter().find(|m|m.get("id").and_then(Value::as_str)==Some(module_id)))
             .and_then(Value::as_object)
             .ok_or_else(|| validation("Root module asset owner occurrence does not exist"))?,
-        AssetOwnerLocator::PersonaEmbeddedModuleAssets { index } => root
+        AssetOwnerLocator::PersonaEmbeddedModuleAssets { persona_id, module_id } => root
             .get("personas")
             .and_then(Value::as_array)
-            .and_then(|personas| personas.get(*index as usize))
+            .and_then(|personas| personas.iter().find(|p|p.get("id").and_then(Value::as_str)==Some(persona_id)))
             .and_then(Value::as_object)
-            .and_then(|persona| persona.get("embeddedModule"))
+            .and_then(|persona| persona.get("embeddedModule")).filter(|m|m.get("id").and_then(Value::as_str)==Some(module_id))
             .and_then(Value::as_object)
             .ok_or_else(|| validation("Persona module asset owner occurrence does not exist"))?,
     };
@@ -1249,20 +1200,7 @@ fn selected_replacement_owner_heads(
     rows.into_iter()
         .map(
             |(owner_kind, owner_locator, present, manifest_hash, entry_count)| {
-                let owner = match owner_kind.as_str() {
-                    "character-additional-assets" => AssetOwnerLocator::CharacterAdditionalAssets {
-                        character_id: owner_locator,
-                    },
-                    "root-module-assets" => AssetOwnerLocator::RootModuleAssets {
-                        index: replacement_owner_index(&owner_locator)?,
-                    },
-                    "persona-embedded-module-assets" => {
-                        AssetOwnerLocator::PersonaEmbeddedModuleAssets {
-                            index: replacement_owner_index(&owner_locator)?,
-                        }
-                    }
-                    _ => return Err(validation("Stored asset owner kind is invalid")),
-                };
+                let owner = AssetOwnerLocator::from_storage(&owner_kind,&owner_locator)?;
                 let head = AssetOwnerHead {
                     owner,
                     present,
@@ -1274,16 +1212,6 @@ fn selected_replacement_owner_heads(
             },
         )
         .collect()
-}
-
-fn replacement_owner_index(value: &str) -> StoreResult<i64> {
-    let index = value
-        .parse::<i64>()
-        .map_err(|_| validation("Stored asset owner locator is invalid"))?;
-    if index.to_string() != value {
-        return Err(validation("Stored asset owner locator is noncanonical"));
-    }
-    Ok(index)
 }
 
 fn replacement_owner_tuple(
@@ -1310,35 +1238,10 @@ fn replacement_owner_tuple(
             };
             replacement_owner_tuple_from_parent(&serde_json::from_str(&detail)?, "additionalAssets")
         }
-        AssetOwnerLocator::RootModuleAssets { index } => {
-            let Some(module) = root
-                .get("modules")
-                .and_then(Value::as_array)
-                .and_then(|modules| {
-                    usize::try_from(*index)
-                        .ok()
-                        .and_then(|index| modules.get(index))
-                })
-            else {
-                return Ok(None);
-            };
-            replacement_owner_tuple_from_parent(module, "assets")
-        }
-        AssetOwnerLocator::PersonaEmbeddedModuleAssets { index } => {
-            let Some(module) = root
-                .get("personas")
-                .and_then(Value::as_array)
-                .and_then(|personas| {
-                    usize::try_from(*index)
-                        .ok()
-                        .and_then(|index| personas.get(index))
-                })
-                .and_then(Value::as_object)
-                .and_then(|persona| persona.get("embeddedModule"))
-            else {
-                return Ok(None);
-            };
-            replacement_owner_tuple_from_parent(module, "assets")
+        AssetOwnerLocator::RootModuleAssets { .. } | AssetOwnerLocator::PersonaEmbeddedModuleAssets { .. } => {
+            let root=Value::Object(root.clone());
+            let Some(module)=owner.root_parent(&root) else{return Ok(None)};
+            replacement_owner_tuple_from_parent(module,"assets")
         }
     }
 }
@@ -1361,7 +1264,7 @@ fn replacement_owner_tuple_from_parent(
     }
 }
 
-fn put_asset_alias(
+pub(super) fn put_asset_alias(
     transaction: &Transaction<'_>,
     generation: &str,
     alias: &AssetAlias,
@@ -1406,6 +1309,76 @@ pub(super) fn replace_commit(
     expected_revision: Option<i64>,
 ) -> StoreResult<RevisionResult> {
     replace_commit_with_app_kv(connection, staging_id, expected_revision, None)
+}
+
+pub(super) fn replace_commit_lww(
+    connection: &mut Connection,
+    staging_id: &str,
+    header: &super::lww::Header,
+    stamp: &risunest_sync_wire::stamp::Stamp,
+    digest: &str,
+    changes: &[(risunest_sync_wire::unit::UnitKey, risunest_sync_wire::unit::UnitValue)],
+    target: bool,
+    received: &[super::lww::Change],
+    received_authority: Option<risunest_sync_wire::stamp::DecimalU64>,
+    selection_change: Option<&super::sync_selection::BindingSelectionChange>,
+    replacement_proof: Option<(i64, &str)>,
+) -> StoreResult<RevisionResult> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let completed: Option<(String,i64)> = transaction.query_row(
+        "SELECT digest,revision FROM lww_requests WHERE request_id=?1", [&header.request_id],
+        |row| Ok((row.get(0)?,row.get(1)?)),
+    ).optional()?;
+    if let Some((old,revision)) = completed {
+        if old!=digest {return Err(validation("request-id-integrity"));}
+        return Ok(RevisionResult {revision});
+    }
+    if let Some(change)=selection_change {super::sync_selection::apply_binding_selection(&transaction,change)?;}
+    require_staging(&transaction, staging_id)?;
+    if let Some((base_revision, expected_digest)) = replacement_proof {
+        let actual = current_revision(&transaction)?;
+        if actual != base_revision {
+            return Err(StoreError::RevisionConflict { expected: base_revision, actual });
+        }
+        if super::lww::catalog_digest(&transaction, staging_id)? != expected_digest {
+            return Err(validation("replacement-stage-changed"));
+        }
+    }
+    if target {
+        super::sync_selection::validate_binding_stage_content(&transaction,staging_id)?;
+        super::lww::validate_binding_source(&transaction,staging_id,header,received)?;
+    }
+    let active=active_generation(&transaction)?;
+    if target {super::lww::preserve_local_root(&transaction,&active,staging_id)?;}
+    let revision=current_revision(&transaction)?+1;
+    let generation=format!("revision-{revision}");
+    super::plugin_claim_eligibility::capture(&transaction, staging_id)?;
+    delete_generation(&transaction,&active)?;
+    move_generation(&transaction,staging_id,&generation)?;
+    super::content_change_index::full_replacement(&transaction,&generation,revision)?;
+    if target {
+        transaction.execute("DELETE FROM lww_units",[])?;
+        transaction.execute("DELETE FROM lww_retired",[])?;
+        transaction.execute("DELETE FROM lww_outbox",[])?;
+        transaction.execute("DELETE FROM lww_receive_rows",[])?;
+        for change in received {if !super::lww::is_device(&change.key) {
+            super::lww::put_unit(&transaction,&change.key,&change.stamp,&change.value,&header.request_id,None)?;
+            super::lww::witness_received(&transaction,change,received_authority.unwrap_or(header.binding_authority))?;
+        }}
+        super::lww::seed_binding_holds(&transaction,staging_id,header)?;
+    } else {
+        for (key,value) in changes {
+            if super::lww::parent_status(&transaction,key)?=="retired"&&!(key.components()[0]=="exists"&&matches!(value,risunest_sync_wire::unit::UnitValue::Deleted)){continue;}
+            super::lww::put_unit(&transaction,key,stamp,value,&header.request_id,Some(header.binding_authority))?;
+        }
+        super::lww::project_replacement_units(&transaction,&generation,header,stamp,changes)?;
+    }
+    if !target {for (key,_) in changes{super::lww::ensure_publishable_parents(&transaction,key,header.binding_authority)?;}}
+    let changed=if target {received.iter().map(|c|c.key.clone()).collect::<Vec<_>>()}else{changes.iter().map(|(k,_)|k.clone()).collect::<Vec<_>>()};
+    super::lww::refresh_orders(&transaction,&generation,&changed)?;
+    set_active(&transaction,revision,&generation)?;
+    transaction.execute("INSERT INTO lww_requests VALUES(?1,?2,?3)",params![header.request_id,digest,revision])?;
+    transaction.commit()?;Ok(RevisionResult{revision})
 }
 
 pub(super) fn replace_commit_with_app_kv(
@@ -1467,7 +1440,6 @@ fn replace_commit_transaction(
     super::plugin_claim_eligibility::capture(&transaction, staging_id)?;
     delete_generation(&transaction, &active)?;
     move_generation(&transaction, staging_id, &generation)?;
-    super::server_sync_outbox::full_replacement(&transaction)?;
     super::content_change_index::full_replacement(&transaction, &generation, revision)?;
     if external_job.is_none() {
         super::sync_selection::replaced(&transaction)?;
@@ -1637,7 +1609,7 @@ fn put_plugin_storage(
     Ok(())
 }
 
-fn apply_plugin_storage_mutation(
+pub(super) fn apply_plugin_storage_mutation(
     transaction: &Transaction<'_>,
     generation: &str,
     mutation: &PluginStorageMutation,
@@ -1655,7 +1627,6 @@ fn apply_plugin_storage_mutation(
             Ok(())
         }
         PluginStorageMutation::Clear { owner } => {
-            super::server_sync_outbox::capture_clear(transaction, generation, owner)?;
             transaction.execute(
                 "DELETE FROM plugin_storage WHERE generation = ?1 AND owner = ?2",
                 params![generation, owner],
@@ -1665,23 +1636,34 @@ fn apply_plugin_storage_mutation(
     }
 }
 
-fn replace_presets(
+pub(super) fn replace_presets(
     transaction: &Transaction<'_>,
     generation: &str,
     presets: &[Value],
 ) -> StoreResult<()> {
-    transaction.execute(
-        "DELETE FROM bot_presets WHERE generation = ?1",
-        [generation],
-    )?;
+    let mut ids = HashSet::new();
+    for preset in presets {
+        let id = required_string(preset, "id", "Preset")?;
+        if !ids.insert(id) { return Err(validation("Duplicate preset ID")); }
+    }
+    let existing: Vec<String> = {
+        let mut statement = transaction.prepare("SELECT preset_id FROM bot_presets WHERE generation=?1")?;
+        let rows = statement.query_map([generation], |row| row.get(0))?.collect::<Result<_, _>>()?;
+        rows
+    };
+    for id in existing { if !ids.contains(id.as_str()) {
+        transaction.execute("DELETE FROM bot_presets WHERE generation=?1 AND preset_id=?2", params![generation,id])?;
+    }}
     let mut statement = transaction.prepare_cached(
         "INSERT INTO bot_presets (generation, preset_id, configured_index, name, image, value)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(generation,preset_id) DO UPDATE SET configured_index=excluded.configured_index,
+             name=excluded.name,image=excluded.image,value=excluded.value",
     )?;
     for (configured_index, preset) in presets.iter().enumerate() {
         statement.execute(params![
             generation,
-            configured_index.to_string(),
+            required_string(preset, "id", "Preset")?,
             configured_index as i64,
             preset
                 .get("name")
@@ -1767,7 +1749,7 @@ fn validate_character_details(
     Ok(())
 }
 
-fn put_character_detail(
+pub(super) fn put_character_detail(
     transaction: &Transaction<'_>,
     generation: &str,
     detail: &Value,
@@ -2010,10 +1992,11 @@ fn insert_messages(
 ) -> StoreResult<()> {
     let mut statement = transaction.prepare_cached(
         "INSERT INTO messages (
-            generation, character_id, conversation_id, message_index, message_id, value
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            generation, character_id, conversation_id, message_index, message_id, value, canonical_hash, canonical_size
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
     )?;
     for (offset, message) in messages.iter().enumerate() {
+        let canonical = risunest_sync_wire::payload_value::encode(message).map_err(super::lww::error)?;
         let message_id = message.get("chatId").and_then(Value::as_str);
         statement.execute(params![
             generation,
@@ -2022,12 +2005,18 @@ fn insert_messages(
             start + offset as i64,
             message_id,
             serde_json::to_string(message)?,
+            {
+                #[cfg(test)]
+                crate::persistent_store::hash_work::observe("native_message_insert", canonical.len());
+                risunest_sync_wire::hash(&canonical)
+            },
+            canonical.len() as i64,
         ])?;
     }
     Ok(())
 }
 
-fn apply_conversation_mutation(
+pub(super) fn apply_conversation_mutation(
     transaction: &Transaction<'_>,
     generation: &str,
     mutation: &ConversationMutation,
@@ -2276,7 +2265,7 @@ fn character_exists(
         .is_some())
 }
 
-fn delete_character(
+pub(super) fn delete_character(
     transaction: &Transaction<'_>,
     generation: &str,
     character_id: &str,
@@ -2489,7 +2478,6 @@ pub(super) fn claim_unowned_plugin_value(
     };
     let value: Value = serde_json::from_str(&serialized)?;
     let revision = actual_revision + 1;
-    super::server_sync_outbox::begin_mutation(&transaction, &generation, revision)?;
     super::content_change_index::begin_mutation(&transaction, &generation, revision, "local")?;
     // A delete and an insert, so both sides of the move reach the change index.
     transaction.execute(
@@ -2515,7 +2503,6 @@ pub(super) fn claim_unowned_plugin_value(
         ],
     )?;
     super::content_change_index::finish_mutation(&transaction)?;
-    super::server_sync_outbox::finish_mutation(&transaction)?;
     set_active(&transaction, revision, &generation)?;
     transaction.commit()?;
     Ok((Some(value), revision))
@@ -2590,7 +2577,6 @@ pub(super) fn assign_plugin_storage(
     }
     let generation = active_generation(&transaction)?;
     let revision = actual_revision + 1;
-    super::server_sync_outbox::begin_mutation(&transaction, &generation, revision)?;
     super::content_change_index::begin_mutation(&transaction, &generation, revision, "local")?;
     for (from_owner, key) in sources {
         if from_owner == to_owner {
@@ -2653,7 +2639,6 @@ pub(super) fn assign_plugin_storage(
         outcome.moved += 1;
     }
     super::content_change_index::finish_mutation(&transaction)?;
-    super::server_sync_outbox::finish_mutation(&transaction)?;
     set_active(&transaction, revision, &generation)?;
     transaction.commit()?;
     Ok((outcome, revision))

@@ -54,6 +54,8 @@ pub(super) fn credential(bytes: &[u8]) -> Result<Credential> {
 
 pub(super) fn role_name(role: ObjectRole) -> &'static str {
     match role {
+        ObjectRole::Segment => "segments",
+        ObjectRole::Snapshot => "snapshots",
         ObjectRole::Descriptor => "descriptor",
         ObjectRole::Pack => "pack",
         ObjectRole::Catalog => "catalog",
@@ -83,6 +85,7 @@ pub(super) fn role_from_name(name: &str) -> Option<ObjectRole> {
 /// does that.
 pub(super) fn collection_roles(collection: Collection) -> &'static [ObjectRole] {
     match collection {
+        Collection::Segments => &[ObjectRole::Segment],
         Collection::Snapshots => &[ObjectRole::SyncState, ObjectRole::BackupBundle],
         Collection::BackupPoints => &[ObjectRole::BackupPoint],
         Collection::InventoryPages => &[ObjectRole::InventoryPage],

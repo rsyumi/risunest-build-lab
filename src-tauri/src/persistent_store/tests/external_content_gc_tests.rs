@@ -5,16 +5,11 @@ use crate::external_storage::{
 };
 use crate::persistent_store::{
     content_capture::ContentCaptureSink,
-    external_conflicts::{
-        delete_external_conflict, preserve_local_conflict, ExternalConflictRecord,
-        PreservedHeadObservation, PreservedRemoteState,
-    },
     external_content_gc::{CollectionOutcome, ContentCollection},
     sync_selection, RootMutation,
 };
 use risunest_external_storage_format::{
     content_identity::hash,
-    snapshot::{envelope_length, ObjectRole, PublicObjectHeader, StoredObject, WireLocator},
 };
 
 struct Never;
@@ -87,18 +82,6 @@ fn register(store: &PersistentStore, reference: &DurableCaptureReference, path: 
         .unwrap();
 }
 
-fn unregister(store: &PersistentStore, reference: &DurableCaptureReference) {
-    for table in ["external_storage_capture_files", "external_storage_captures"] {
-        let column = if table == "external_storage_captures" { "id" } else { "capture_id" };
-        store
-            .connection
-            .execute(
-                &format!("DELETE FROM {table} WHERE {column}=?1"),
-                [&reference.capture_id],
-            )
-            .unwrap();
-    }
-}
 
 fn held(store: &PersistentStore, body: &[u8]) -> bool {
     ContentStore::open_existing(&store.repository_root.join("external-storage"))
@@ -195,55 +178,6 @@ fn an_owner_that_cannot_be_read_defers_the_pass() {
     }
 }
 
-#[test]
-fn a_conflict_keeps_its_capture_bodies_after_the_registration_is_gone() {
-    let (_directory, mut store) = empty_store();
-    let (reference, path) = written(&store, "conflicted", &[b"conflict source"]);
-    register(&store, &reference, &path);
-    let header =
-        PublicObjectHeader::new("repository".into(), "snapshot-remote".into(), ObjectRole::SyncState, 1)
-            .unwrap();
-    preserve_local_conflict(
-        store.device_store().unwrap().connection(),
-        &ExternalConflictRecord {
-            id: "conflict".into(),
-            created_at_ms: 1,
-            connection_id: "connection".into(),
-            repository_id: "repository".into(),
-            local: reference.clone(),
-            remote: PreservedRemoteState {
-                snapshot: StoredObject {
-                    ciphertext_length: envelope_length(&header).unwrap(),
-                    header,
-                    locator: WireLocator {
-                        connection_identity: "synthetic/root".into(),
-                        collection: None,
-                        object: "snapshot-remote".into(),
-                    },
-                    ciphertext_sha256: [2; 32],
-                    plaintext_length: 1,
-                    plaintext_sha256: [1; 32],
-                },
-                logical_revision: 8,
-                commit_id: "remote-commit".into(),
-                head: PreservedHeadObservation {
-                    commit_id: "remote-commit".into(),
-                    authenticated_body_hash: "02".repeat(32),
-                },
-            },
-            remote_point: None,
-            resolved: false,
-        },
-    )
-    .unwrap();
-    unregister(&store, &reference);
-    assert_eq!(collected(&mut store), ContentCollection::default());
-    assert!(held(&store, b"conflict source"));
-
-    delete_external_conflict(store.device_store().unwrap().connection(), "conflict").unwrap();
-    assert_eq!(collected(&mut store).database_bodies, 1);
-    assert!(!held(&store, b"conflict source"));
-}
 
 #[test]
 fn a_pass_stops_at_its_removal_bound_and_the_next_one_finishes() {

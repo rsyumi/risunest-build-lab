@@ -171,10 +171,13 @@ export async function applyTargetedWorkingSetInvalidation(
     }
 
     const botPresetsId = rootValue?.botPresetsId ?? previous.botPresetsId
+    const selectedPresetIndex = typeof botPresetsId === 'string'
+        ? previous.botPresets.findIndex((preset) => preset?.['id'] === botPresetsId)
+        : botPresetsId
     let botPresets: Database['botPresets']
-    if (plan.presets || botPresetsId !== previous.botPresetsId ||
+    if (plan.presets || selectedPresetIndex !== previous.botPresetsId ||
         (getCatalogPresetMetadata(previous.botPresets)?.activeConfiguredIndex ?? null) !==
-            (previous.botPresets[botPresetsId] ? botPresetsId : null)) {
+            (previous.botPresets[selectedPresetIndex] ? selectedPresetIndex : null)) {
         const presets = await readPinnedActivePreset(reader, botPresetsId)
         botPresets = createCatalogPresetWorkingSet(presets.catalog, presets.active)
     } else {
@@ -291,7 +294,7 @@ export async function applyTargetedWorkingSetInvalidation(
         pluginCustomStorage: _pluginCustomStorage,
         ...carriedRoot
     } = previous
-    const projectedRoot = { ...carriedRoot } as Database
+    const projectedRoot = { ...carriedRoot, botPresets } as Database
     if (rootValue) patchWorkingSetRoot(projectedRoot, rootValue)
     return {
         database: {

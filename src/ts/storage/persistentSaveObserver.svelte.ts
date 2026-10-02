@@ -1,5 +1,6 @@
 import { untrack } from 'svelte'
 import type { Database, character, groupChat } from './database.svelte'
+import { isWorkingSetCharacterStub } from './workingSetCatalog'
 import { PersistentMutationFencedError } from './saveCoordinator'
 
 interface PersistentSaveObserverDependencies {
@@ -61,44 +62,36 @@ export function observePersistentSaveChanges(
             untrack(markDirty)
         })
         $effect(() => {
-            const character = dependencies.readSelectedCharacter()
-            if (character) {
-                for (const key of enumerableKeys(character)) {
-                    if (key !== 'chats') subscribeDeep(character[key])
-                }
-            }
-            // Coordinator reads must not expand either observer's dependencies.
-            untrack(markDirty)
-        })
-        $effect(() => {
-            const chats = dependencies.readSelectedCharacter()?.chats ?? []
-            // The parent observes collection identity/length. Per-slot effects
-            // follow replacements and reorders without walking sibling history
-            // when one conversation changes.
-            for (let index = 0; index < chats.length; index++) {
+            const characters = dependencies.readDatabase().characters
+            for (let characterIndex = 0; characterIndex < characters.length; characterIndex++) {
                 $effect(() => {
-                    const chat = chats[index]
-                    for (const key of enumerableKeys(chat)) {
-                        if (key !== 'message') subscribeDeep(chat[key])
+                    const character = characters[characterIndex]
+                    if (!character || isWorkingSetCharacterStub(character)) return
+                    for (const key of enumerableKeys(character)) {
+                        if (key !== 'chats') {
+                            $effect(() => { subscribeDeep(character[key]); untrack(markDirty) })
+                        }
                     }
-                    untrack(markDirty)
-                })
-                $effect(() => {
-                    const chat = chats[index]
-                    // Metadata-only selected shells deliberately expose a
-                    // non-enumerable message getter which must not be invoked.
-                    for (const key of enumerableKeys(chat)) {
-                        if (key === 'message') {
+                    const chats = character.chats
+                    for (let index = 0; index < chats.length; index++) {
+                        $effect(() => {
+                            const chat = chats[index]
+                            for (const key of enumerableKeys(chat)) {
+                                if (key !== 'message') subscribeDeep(chat[key])
+                            }
+                            untrack(markDirty)
+                        })
+                        $effect(() => {
+                            const chat = chats[index]
+                            if (!enumerableKeys(chat).includes('message')) return
                             const messages = chat.message
                             if (Array.isArray(messages)) {
-                                for (let index = 0; index < messages.length; index++) {
-                                    $effect(() => {
-                                        subscribeDeep(messages[index])
-                                        untrack(markDirty)
-                                    })
+                                for (let messageIndex = 0; messageIndex < messages.length; messageIndex++) {
+                                    $effect(() => { subscribeDeep(messages[messageIndex]); untrack(markDirty) })
                                 }
                             } else subscribeDeep(messages)
-                        }
+                            untrack(markDirty)
+                        })
                     }
                     untrack(markDirty)
                 })

@@ -204,7 +204,7 @@ fn create_verified_snapshot_backup(
             .unwrap_or(i64::MAX),
     )?;
     let outcome = (|| {
-        let captured = crate::portable_backup::capture_library(
+        let captured = crate::portable_backup::capture_library_only(
             store, revision, scratch, &mut pins, false, probe, source_build,
         )?;
         if captured.repair_required {

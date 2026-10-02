@@ -24,7 +24,29 @@ vi.mock('../model/modellist', () => ({
     LLMFormat: { OpenAICompatible: 'openai-compatible' },
     LLMTokenizer: {},
 }))
-import { normalizeDatabaseDefaults, type Database } from './database.svelte'
+import { normalizeDatabaseDefaults, deriveEffectivePresetMirrors, flushEffectivePresetEdits, type Database } from './database.svelte'
+
+it('derives missing preset fields from current defaults instead of another preset mirror', () => {
+    const database = normalizeDatabaseDefaults({ characters: [] } as Database)
+    database.botPresets = [{ id: 'a', name: 'A', mainPrompt: 'A' }, { id: 'b', name: 'B' }] as Database['botPresets']
+    database.botPresetsId = 0
+    deriveEffectivePresetMirrors(database)
+    expect(database.mainPrompt).toBe('A')
+    database.botPresetsId = 1
+    deriveEffectivePresetMirrors(database)
+    expect(database.mainPrompt).toBe(normalizeDatabaseDefaults({ characters: [] } as Database).mainPrompt)
+    flushEffectivePresetEdits(database)
+    expect(database.botPresets[1]).toEqual({ id: 'b', name: 'B' })
+})
+
+it('creates IDs for new defaults without adding IDs to existing records during normalization', () => {
+    const fresh = normalizeDatabaseDefaults({ characters: [] } as Database)
+    expect(fresh.botPresets[0].id).toMatch(/^[0-9a-f-]{36}$/)
+    expect(fresh.personas[0].id).toMatch(/^[0-9a-f-]{36}$/)
+    const existing = normalizeDatabaseDefaults({ characters: [], botPresets: [{ name: 'Existing' }], personas: [{ name: 'Existing' }] } as Database)
+    expect(existing.botPresets[0].id).toBeUndefined()
+    expect(existing.personas[0].id).toBeUndefined()
+})
 
 describe('streaming display defaults', () => {
     it('enables compact thoughts by default and preserves an explicit opt-out', () => {

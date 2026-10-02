@@ -35,8 +35,8 @@ function fixtureDatabase(): Database {
         username: 'Pinned profile',
         botPresetsId: 1,
         botPresets: [
-            { name: 'Inactive', mainPrompt: 'inactive preset body' },
-            { name: 'Active', mainPrompt: 'active preset body' },
+            { id: 'preset-inactive', name: 'Inactive', mainPrompt: 'inactive preset body' },
+            { id: 'preset-active', name: 'Active', mainPrompt: 'active preset body' },
         ],
         pluginCustomStorage: JSON.parse(
             '{"0":0,"zeta":{"memory":"last string key inserted first"},' +
@@ -123,7 +123,7 @@ function createReader(
     const presetCatalog: PresetCatalog = {
         revision,
         items: botPresets.map((preset, configuredIndex) => ({
-            id: String(configuredIndex),
+            id: preset['id'] as string,
             name: preset.name ?? '',
             image: preset.image,
             configuredIndex,
@@ -149,7 +149,7 @@ function createReader(
         readRoot: async () => ({ revision, value: clone(root) as PersistentRoot }),
         queryPresets: async () => clone(presetCatalog),
         readPreset: vi.fn(async (id) => {
-            const preset = botPresets[Number(id)]
+            const preset = botPresets.find((value) => value['id'] === id)
             return preset ? { revision, value: clone(preset) } : null
         }),
         queryCharacters: async (query: CharacterQuery): Promise<CharacterPage> => {
@@ -256,7 +256,7 @@ describe('paged profile projections', () => {
         expect(result.username).toBe('Pinned profile')
         expect(result.pluginCustomStorage).toEqual({})
         expect(isCatalogPresetWorkingSet(result.botPresets)).toBe(true)
-        expect(result.botPresets[0]).toEqual({ name: 'Inactive' })
+        expect(result.botPresets[0]).toEqual({ id: 'preset-inactive', name: 'Inactive' })
         expect(result.botPresets[1].mainPrompt).toBe('active preset body')
         expect(result.characters[0].personality).toBe('alpha detail')
         expect(result.characters[0].chats).toEqual([])
@@ -274,7 +274,7 @@ describe('paged profile projections', () => {
         expect(isCatalogCharacterStub(result.characters[3])).toBe(true)
         expect(result.characters[3]).not.toHaveProperty('personality')
         expect(reader.readPreset).toHaveBeenCalledTimes(1)
-        expect(reader.readPreset).toHaveBeenCalledWith('1')
+        expect(reader.readPreset).toHaveBeenCalledWith('preset-active')
         expect(reader.queryPluginStorage).not.toHaveBeenCalled()
         expect(vi.mocked(reader.queryConversations).mock.calls.filter(
             ([query]) => query.characterId === 'member-a' || query.characterId === 'member-b',

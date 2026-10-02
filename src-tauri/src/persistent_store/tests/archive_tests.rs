@@ -1,7 +1,5 @@
 use super::*;
 use crate::asset_repository::PayloadCas;
-use crate::logical_records::{LogicalRecordEnvelope, LogicalRecordLocator};
-use crate::persistent_store::record_apply::apply_materialized_record;
 use std::cell::Cell;
 
 fn archive_store() -> (tempfile::TempDir, PersistentStore, PayloadCas) {
@@ -772,73 +770,4 @@ fn a_full_database_read_leaves_archived_characters_out() {
         .map(|character| character["chaId"].as_str().expect("character id"))
         .collect::<Vec<_>>();
     assert_eq!(ids, ["first-active", "last-active"]);
-}
-
-#[test]
-fn risunest_sync_projects_and_applies_archive_state_with_referenced_payloads() {
-    let (_source_directory, mut source, source_cas) = archive_store();
-    let archived_asset = seed_character_asset(&source, &source_cas, "middle-asset-key");
-    let revision = source.revision().expect("read source revision");
-    source
-        .archive_character("middle-archived", revision, 10)
-        .expect("archive the source character");
-    let expected = archived_object(&source, "middle-archived");
-    let generation = active_generation(&source.connection).expect("read source generation");
-    let key = super::super::server_sync_outbox::ServerDirtyKey {
-        kind: "character".into(),
-        key1: "middle-archived".into(),
-        key2: String::new(),
-        revision: source.revision().expect("read archived revision"),
-    };
-    let projected = super::super::server_sync_projection::project(
-        &source.connection,
-        &source_cas,
-        &generation,
-        &key,
-    )
-    .expect("project archived character")
-    .expect("archived character exists");
-    let dependencies = super::super::server_sync_projection::dependencies(
-        &projected,
-        &source_cas,
-    )
-    .expect("collect archive dependencies");
-    assert!(dependencies.contains(&expected.object_hash));
-    assert!(dependencies.contains(&archived_asset.content_hash));
-    assert!(matches!(
-        &projected.record,
-        LogicalRecordEnvelope::ArchivedCharacter {
-            configured_index: 1,
-            archived_at: 10,
-            conversation_count: 2,
-            message_count: 3,
-            ..
-        }
-    ));
-
-    let (_target_directory, mut target, _target_cas) = archive_store();
-    let target_generation =
-        active_generation(&target.connection).expect("read target generation");
-    let transaction = target.connection.transaction().expect("open target transaction");
-    apply_materialized_record(
-        &transaction,
-        &target_generation,
-        LogicalRecordLocator::Character {
-            character_id: "middle-archived".into(),
-        },
-        projected.record,
-        None,
-    )
-    .expect("apply archived character");
-    transaction.commit().expect("commit archived character");
-    assert_eq!(archived_object(&target, "middle-archived"), expected);
-    let conversations: i64 = target
-        .connection
-        .query_row(
-            "SELECT COUNT(*) FROM conversations WHERE generation=?1 AND character_id=?2",
-            params![target_generation, "middle-archived"],
-            |row| row.get(0),
-        )
-        .expect("count target conversations");
-    assert_eq!(conversations, 0);
 }

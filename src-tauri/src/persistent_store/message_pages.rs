@@ -1,0 +1,1148 @@
+use super::{record_projection::codec_error, StoreError, StoreResult};
+use risunest_external_storage_format::{
+    logical_records::{decode_message_page, encoded_object, LOGICAL_MESSAGE_PAGE_SIZE},
+    message_pages::{
+        ManifestPage, MessageHash, MessageManifest, PageBoundary, MANIFEST_SCHEMA, MAX_PAGE_BYTES,
+        MIN_PAGE_MESSAGES, PAGE_PREFIX, PAGE_SUFFIX,
+    },
+};
+use risunest_sync_wire::{
+    descriptor::{build_reference_tree, inline_references, RecordDescriptor},
+    payload_value,
+    stamp::DecimalU64,
+    unit::UnitValue,
+};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use serde_json::Value;
+
+pub(super) const SCHEMA: &str = "
+CREATE TABLE message_page_indexes (
+    generation TEXT NOT NULL, character_id TEXT NOT NULL, conversation_id TEXT NOT NULL,
+    page_start INTEGER NOT NULL, message_count INTEGER NOT NULL,
+    hash TEXT NOT NULL, byte_length INTEGER NOT NULL,
+    PRIMARY KEY (generation,character_id,conversation_id,page_start)
+);
+CREATE TABLE message_page_manifests (
+    generation TEXT NOT NULL, character_id TEXT NOT NULL, conversation_id TEXT NOT NULL,
+    body BLOB NOT NULL, PRIMARY KEY(generation,character_id,conversation_id)
+);
+CREATE TABLE message_page_objects (hash TEXT PRIMARY KEY, body BLOB NOT NULL);
+CREATE TABLE message_page_verified_objects (
+    hash TEXT PRIMARY KEY REFERENCES message_page_objects(hash) ON DELETE CASCADE
+);
+CREATE TABLE message_page_proofs (
+    hash TEXT PRIMARY KEY REFERENCES message_page_objects(hash) ON DELETE CASCADE,
+    message_count INTEGER NOT NULL, byte_length INTEGER NOT NULL,
+    first_length INTEGER NOT NULL, ends_cut INTEGER NOT NULL, message_hashes TEXT NOT NULL
+);
+CREATE TRIGGER message_page_objects_immutable_update BEFORE UPDATE ON message_page_objects
+BEGIN SELECT RAISE(ABORT,'message object is immutable'); END;
+CREATE TRIGGER message_page_objects_immutable_replace BEFORE INSERT ON message_page_objects
+WHEN EXISTS(SELECT 1 FROM message_page_objects WHERE hash=NEW.hash)
+BEGIN SELECT RAISE(ABORT,'message object is immutable'); END;
+CREATE TRIGGER message_page_objects_invalidate AFTER DELETE ON message_page_objects
+BEGIN
+    DELETE FROM message_page_verified_objects WHERE hash=OLD.hash;
+    DELETE FROM message_page_proofs WHERE hash=OLD.hash;
+END;
+CREATE TRIGGER message_page_verified_objects_immutable BEFORE UPDATE ON message_page_verified_objects
+BEGIN SELECT RAISE(ABORT,'message verification is immutable'); END;
+CREATE TRIGGER message_page_verified_objects_parent BEFORE INSERT ON message_page_verified_objects
+WHEN NOT EXISTS(SELECT 1 FROM message_page_objects WHERE hash=NEW.hash)
+BEGIN SELECT RAISE(ABORT,'message object is missing'); END;
+CREATE TRIGGER message_page_verified_objects_no_replace BEFORE INSERT ON message_page_verified_objects
+WHEN EXISTS(SELECT 1 FROM message_page_verified_objects WHERE hash=NEW.hash)
+BEGIN SELECT RAISE(ABORT,'message verification is immutable'); END;
+CREATE TRIGGER message_page_proofs_immutable BEFORE UPDATE ON message_page_proofs
+BEGIN SELECT RAISE(ABORT,'message page proof is immutable'); END;
+CREATE TRIGGER message_page_proofs_parent BEFORE INSERT ON message_page_proofs
+WHEN NOT EXISTS(SELECT 1 FROM message_page_objects o
+    JOIN message_page_verified_objects v ON v.hash=o.hash WHERE o.hash=NEW.hash)
+BEGIN SELECT RAISE(ABORT,'message object is not verified'); END;
+CREATE TRIGGER message_page_proofs_no_replace BEFORE INSERT ON message_page_proofs
+WHEN EXISTS(SELECT 1 FROM message_page_proofs WHERE hash=NEW.hash)
+BEGIN SELECT RAISE(ABORT,'message page proof is immutable'); END;
+";
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct MessageEdit {
+    pub start: i64,
+    pub delete_count: i64,
+    pub insert_count: i64,
+}
+
+pub(super) fn object_body(db: &Connection, hash: &str) -> StoreResult<Option<Vec<u8>>> {
+    let body: Option<Vec<u8>> = db
+        .query_row(
+            "SELECT body FROM message_page_objects WHERE hash=?1",
+            [hash],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(body) = &body {
+        if {
+            let hash_input = body;
+            #[cfg(test)]
+            crate::persistent_store::hash_work::observe("native_page_object_verify", hash_input.len());
+            risunest_sync_wire::hash(hash_input)
+        } != hash {
+            return Err(codec_error("message object hash mismatch"));
+        }
+    }
+    Ok(body)
+}
+
+pub(super) fn put_object(db: &Connection, hash: &str, body: &[u8]) -> StoreResult<()> {
+    risunest_sync_wire::validate_hash(hash).map_err(codec_error)?;
+    if {
+        let hash_input = body;
+        #[cfg(test)]
+        crate::persistent_store::hash_work::observe("native_page_object_verify", hash_input.len());
+        risunest_sync_wire::hash(hash_input)
+    } != hash {
+        return Err(codec_error("message object hash mismatch"));
+    }
+    let exists: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM message_page_objects WHERE hash=?1)",
+        [hash], |row| row.get(0))?;
+    if !exists {
+        db.execute("INSERT INTO message_page_objects(hash,body) VALUES(?1,?2)", params![hash, body])?;
+    }
+    if object_body(db, hash)?.as_deref() != Some(body) {
+        return Err(codec_error("message object identity collision"));
+    }
+    if !verified_object_present(db, hash)? {
+        db.execute("INSERT INTO message_page_verified_objects(hash) VALUES(?1)", [hash])?;
+    }
+    Ok(())
+}
+
+// Only successful hash verification certifies presence. Deleting an immutable
+// object invalidates its proofs, including when foreign keys are disabled.
+pub(super) fn verified_object_present(db: &Connection, hash: &str) -> StoreResult<bool> {
+    risunest_sync_wire::validate_hash(hash).map_err(codec_error)?;
+    Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM message_page_verified_objects v
+        JOIN message_page_objects o ON o.hash=v.hash WHERE v.hash=?1)", [hash], |row| row.get(0))?)
+}
+
+fn require_object(db: &Connection, hash: &str) -> StoreResult<Vec<u8>> {
+    object_body(db, hash)?.ok_or_else(|| codec_error("message object body is missing"))
+}
+
+fn descriptor(
+    manifest: &MessageManifest,
+) -> StoreResult<(RecordDescriptor, Vec<(String, Vec<u8>)>)> {
+    let object = {
+        let result = manifest.encode();
+        #[cfg(test)]
+        crate::persistent_store::hash_work::encoded_object("native_manifest_identity", &result);
+        result
+    }.map_err(codec_error)?;
+    let mut descriptor = RecordDescriptor::content(object.hash);
+    let mut hashes = manifest
+        .pages
+        .iter()
+        .map(|p| p.hash.clone())
+        .collect::<Vec<_>>();
+    hashes.sort();
+    hashes.dedup();
+    let objects = if inline_references(&hashes).map_err(codec_error)? {
+        descriptor.dependencies = hashes;
+        Vec::new()
+    } else {
+        let (root, objects) = {
+            let result = build_reference_tree(&hashes, false);
+            #[cfg(test)]
+            crate::persistent_store::hash_work::reference_creation(&result);
+            result
+        }.map_err(codec_error)?;
+        descriptor.dependency_root = root;
+        objects
+    };
+    descriptor.validate().map_err(codec_error)?;
+    Ok((descriptor, objects))
+}
+
+fn unit_value(db: &Connection, manifest: &MessageManifest) -> StoreResult<UnitValue> {
+    let object = {
+        let result = manifest.encode();
+        #[cfg(test)]
+        crate::persistent_store::hash_work::encoded_object("native_manifest_identity", &result);
+        result
+    }.map_err(codec_error)?;
+    put_object(db, &object.hash, &object.bytes)?;
+    let (descriptor, references) = descriptor(manifest)?;
+    for (hash, body) in references {
+        put_object(db, &hash, &body)?;
+    }
+    let body = descriptor.bytes().map_err(codec_error)?;
+    put_object(db, &{
+        let hash_input = &body;
+        #[cfg(test)]
+        crate::persistent_store::hash_work::observe("native_descriptor_object_identity", hash_input.len());
+        risunest_sync_wire::hash(hash_input)
+    }, &body)?;
+    {
+        let result = UnitValue::object(descriptor);
+        #[cfg(test)]
+        crate::persistent_store::hash_work::descriptor_creation(&result);
+        result
+    }.map_err(codec_error)
+}
+
+pub(super) fn load_pages(
+    db: &Connection,
+    generation: &str,
+    character: &str,
+    conversation: &str,
+) -> StoreResult<Vec<PageBoundary>> {
+    let mut statement = db.prepare(
+        "SELECT page_start,message_count,hash,byte_length FROM message_page_indexes
+        WHERE generation=?1 AND character_id=?2 AND conversation_id=?3 ORDER BY page_start",
+    )?;
+    let rows = statement.query_map(params![generation, character, conversation], |r| {
+        Ok(PageBoundary {
+            start: sql_usize(r.get::<_, i64>(0)?, 0)?,
+            page: ManifestPage {
+                message_count: r.get::<_, u32>(1)?,
+                hash: r.get(2)?,
+                byte_length: DecimalU64(sql_u64(r.get::<_, i64>(3)?, 3)?),
+            },
+        })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+pub(super) fn capture_manifest(
+    tx: &Transaction<'_>,
+    generation: &str,
+    character: &str,
+    conversation: &str,
+    edit: Option<MessageEdit>,
+) -> StoreResult<UnitValue> {
+    #[cfg(not(test))]
+    {
+        capture(tx, generation, character, conversation, edit)
+    }
+    #[cfg(test)]
+    {
+        let mut work = PageWork::default();
+        let result = capture(tx, generation, character, conversation, edit, &mut work);
+        record_capture_work(&work, result.is_ok());
+        result
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Default, Eq, PartialEq)]
+pub(super) struct PageWork {
+    pub messages_read: usize,
+    pub hash_rows_read: usize,
+    pub bytes_read: u64,
+    pub pages_written: usize,
+    pub prefix_reused: usize,
+    pub suffix_reused: usize,
+}
+
+#[cfg(test)]
+#[derive(Debug, Default, Eq, PartialEq)]
+pub(super) struct CaptureWork {
+    pub capture_calls: usize,
+    pub successful_captures: usize,
+    pub failed_captures: usize,
+    pub work: PageWork,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static CAPTURE_WORK: std::cell::RefCell<CaptureWork> = std::cell::RefCell::new(CaptureWork::default());
+}
+
+#[cfg(test)]
+pub(super) fn reset_capture_work() {
+    CAPTURE_WORK.with(|slot| *slot.borrow_mut() = CaptureWork::default());
+}
+
+#[cfg(test)]
+pub(super) fn take_capture_work() -> CaptureWork {
+    CAPTURE_WORK.with(|slot| std::mem::take(&mut *slot.borrow_mut()))
+}
+
+#[cfg(test)]
+fn record_capture_work(work: &PageWork, succeeded: bool) {
+    CAPTURE_WORK.with(|slot| {
+        let mut totals = slot.borrow_mut();
+        totals.capture_calls += 1;
+        totals.successful_captures += usize::from(succeeded);
+        totals.failed_captures += usize::from(!succeeded);
+        totals.work.messages_read += work.messages_read;
+        totals.work.hash_rows_read += work.hash_rows_read;
+        totals.work.bytes_read += work.bytes_read;
+        totals.work.pages_written += work.pages_written;
+        totals.work.prefix_reused += work.prefix_reused;
+        totals.work.suffix_reused += work.suffix_reused;
+    });
+}
+
+#[cfg(test)]
+pub(super) fn capture_with_work(
+    tx: &Transaction<'_>,
+    generation: &str,
+    character: &str,
+    conversation: &str,
+    edit: Option<MessageEdit>,
+) -> StoreResult<(UnitValue, PageWork)> {
+    let mut work = PageWork::default();
+    let value = capture(tx, generation, character, conversation, edit, &mut work)?;
+    Ok((value, work))
+}
+
+pub(super) fn current_manifest(
+    tx: &Transaction<'_>,
+    generation: &str,
+    character: &str,
+    conversation: &str,
+) -> StoreResult<UnitValue> {
+    let body: Option<Vec<u8>> = tx
+        .query_row(
+            "SELECT body FROM message_page_manifests WHERE generation=?1 AND character_id=?2
+        AND conversation_id=?3",
+            params![generation, character, conversation],
+            |r| r.get(0),
+        )
+        .optional()?;
+    match body {
+        Some(body) => unit_value(tx, &{
+            let result = MessageManifest::decode(&body);
+            #[cfg(test)]
+            crate::persistent_store::hash_work::decoded("native_manifest_decode_identity", &body, &result);
+            result
+        }.map_err(codec_error)?),
+        None => capture_manifest(tx, generation, character, conversation, None),
+    }
+}
+
+fn capture(
+    tx: &Transaction<'_>,
+    generation: &str,
+    character: &str,
+    conversation: &str,
+    edit: Option<MessageEdit>,
+    #[cfg(test)] work: &mut PageWork,
+) -> StoreResult<UnitValue> {
+    let count: Option<i64> = tx
+        .query_row(
+            "SELECT message_count FROM conversations WHERE generation=?1 AND character_id=?2
+        AND conversation_id=?3",
+            params![generation, character, conversation],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(count) = count else {
+        tx.execute("DELETE FROM message_page_indexes WHERE generation=?1 AND character_id=?2 AND conversation_id=?3",params![generation,character,conversation])?;
+        tx.execute("DELETE FROM message_page_manifests WHERE generation=?1 AND character_id=?2 AND conversation_id=?3",params![generation,character,conversation])?;
+        return Ok(UnitValue::Deleted);
+    };
+    if count < 0 {
+        return Err(codec_error("negative conversation message count"));
+    }
+    let count_usize = usize::try_from(count).map_err(codec_error)?;
+    let previous = load_pages(tx, generation, character, conversation)?;
+    let edit = edit.filter(|_| !previous.is_empty());
+    if let Some(edit) = edit {
+        let old_count = previous
+            .iter()
+            .try_fold(0i64, |count, p| {
+                count.checked_add(p.page.message_count as i64)
+            })
+            .ok_or_else(|| codec_error("message page count overflow"))?;
+        if edit.start < 0
+            || edit.delete_count < 0
+            || edit.insert_count < 0
+            || edit.start > old_count
+            || edit.delete_count > old_count - edit.start
+            || Some(count)
+                != old_count
+                    .checked_sub(edit.delete_count)
+                    .and_then(|v| v.checked_add(edit.insert_count))
+        {
+            return Err(codec_error("invalid message page edit range"));
+        }
+    }
+    let prefix = edit.map_or(0, |e| {
+        previous
+            .partition_point(|p| p.start < e.start as usize)
+            .saturating_sub(1)
+    });
+    let mut pages = previous[..prefix].to_vec();
+    #[cfg(test)]
+    {
+        work.prefix_reused = prefix;
+    }
+    let mut position = if edit.is_some() {
+        previous.get(prefix).map_or(0, |p| p.start)
+    } else {
+        0
+    };
+    let mut statement = tx.prepare("SELECT message_index,canonical_hash,canonical_size FROM messages
+        WHERE generation=?1 AND character_id=?2 AND conversation_id=?3 AND message_index>=?4 ORDER BY message_index")?;
+    let mut rows = statement.query(params![
+        generation,
+        character,
+        conversation,
+        position as i64
+    ])?;
+    let mut next = next_hash(tx, &mut rows, generation, character, conversation)?;
+    #[cfg(test)]
+    {
+        work.hash_rows_read += usize::from(next.is_some());
+    }
+    while let Some((_, _)) = &next {
+        let start = position;
+        let mut bytes = PAGE_PREFIX.to_vec();
+        let mut page_hashes = Vec::new();
+        loop {
+            let (index, hash) = next
+                .take()
+                .ok_or_else(|| codec_error("message page index is incomplete"))?;
+            if index != position {
+                return Err(codec_error("noncontiguous conversation messages"));
+            }
+            let body: String = tx.query_row(
+                "SELECT value FROM messages WHERE generation=?1 AND character_id=?2
+                AND conversation_id=?3 AND message_index=?4",
+                params![generation, character, conversation, position as i64],
+                |r| r.get(0),
+            )?;
+            let body = payload_value::canonicalize(body.as_bytes()).map_err(codec_error)?;
+            if {
+                #[cfg(test)]
+                crate::persistent_store::hash_work::observe("native_message_verify", body.len());
+                MessageHash::from_bytes(&body)
+            } != hash {
+                return Err(codec_error("cached message hash mismatch"));
+            }
+            if position > start {
+                bytes.push(b',');
+            }
+            bytes.extend(&body);
+            page_hashes.push(hash.clone());
+            #[cfg(test)]
+            {
+                work.messages_read += 1;
+            }
+            #[cfg(test)]
+            {
+                work.bytes_read += body.len() as u64;
+            }
+            position += 1;
+            next = next_hash(tx, &mut rows, generation, character, conversation)?;
+            #[cfg(test)]
+            {
+                work.hash_rows_read += usize::from(next.is_some());
+            }
+            let page_count = position - start;
+            if page_count == LOGICAL_MESSAGE_PAGE_SIZE
+                || (page_count >= MIN_PAGE_MESSAGES && hash.boundary().map_err(codec_error)?)
+                || bytes.len() + PAGE_SUFFIX.len() > MAX_PAGE_BYTES
+                || next.is_none()
+                || next.as_ref().is_some_and(|(_, h)| {
+                    bytes.len() as u64 + 1 + h.byte_length + PAGE_SUFFIX.len() as u64
+                        > MAX_PAGE_BYTES as u64
+                })
+            {
+                break;
+            }
+        }
+        bytes.extend(PAGE_SUFFIX);
+        let object = {
+            let result = encoded_object(bytes);
+            #[cfg(test)]
+            crate::persistent_store::hash_work::encoded_object("native_page_identity", &result);
+            result
+        }.map_err(codec_error)?;
+        let boundary = PageBoundary {
+            start,
+            page: ManifestPage {
+                hash: object.hash.clone(),
+                message_count: (position - start) as u32,
+                byte_length: DecimalU64(object.size),
+            },
+        };
+        if let Some(edit) = edit {
+            let end = (edit.start + edit.insert_count) as usize;
+            if start >= end {
+                let old_start = (start as i64 - edit.insert_count + edit.delete_count) as usize;
+                if let Ok(old_page) = previous.binary_search_by_key(&old_start, |p| p.start) {
+                    if boundary.page == previous[old_page].page {
+                        for old in &previous[old_page..] {
+                            let mut page = old.clone();
+                            page.start = (page.start as i64 + edit.insert_count - edit.delete_count)
+                                as usize;
+                            pages.push(page);
+                            #[cfg(test)]
+                            {
+                                work.suffix_reused += 1;
+                            }
+                        }
+                        position = count_usize;
+                        break;
+                    }
+                }
+            }
+        }
+        put_object(tx, &object.hash, &object.bytes)?;
+        store_page_proof(tx, &boundary.page, &page_hashes)?;
+        pages.push(boundary);
+        #[cfg(test)]
+        {
+            work.pages_written += 1;
+        }
+    }
+    if position != count_usize {
+        return Err(codec_error("conversation message count mismatch"));
+    }
+    let manifest = MessageManifest {
+        schema: MANIFEST_SCHEMA.into(),
+        message_count: DecimalU64(count as u64),
+        pages: pages.iter().map(|p| p.page.clone()).collect(),
+    };
+    save_index(tx, generation, character, conversation, &pages, &manifest)?;
+    unit_value(tx, &manifest)
+}
+
+fn next_hash(
+    tx: &Transaction<'_>,
+    rows: &mut rusqlite::Rows<'_>,
+    generation: &str,
+    character: &str,
+    conversation: &str,
+) -> StoreResult<Option<(usize, MessageHash)>> {
+    let Some(row) = rows.next()? else {
+        return Ok(None);
+    };
+    let index: i64 = row.get(0)?;
+    let hash: String = row.get(1)?;
+    let size = sql_u64(row.get::<_, i64>(2)?, 2)?;
+    if index < 0 {
+        return Err(codec_error("negative message index"));
+    }
+    if !hash.is_empty() {
+        return Ok(Some((
+            index as usize,
+            MessageHash {
+                hash,
+                byte_length: size,
+            },
+        )));
+    }
+    // Upstream import staging may have inserted messages without a computed cache.
+    let body: String = tx.query_row(
+        "SELECT value FROM messages WHERE generation=?1 AND character_id=?2
+        AND conversation_id=?3 AND message_index=?4",
+        params![generation, character, conversation, index],
+        |r| r.get(0),
+    )?;
+    let bytes = payload_value::canonicalize(body.as_bytes()).map_err(codec_error)?;
+    let cached = {
+        #[cfg(test)]
+        crate::persistent_store::hash_work::observe("native_message_verify", bytes.len());
+        MessageHash::from_bytes(&bytes)
+    };
+    tx.execute("UPDATE messages SET canonical_hash=?5,canonical_size=?6 WHERE generation=?1 AND character_id=?2
+        AND conversation_id=?3 AND message_index=?4",params![generation,character,conversation,index,cached.hash,sql_i64(cached.byte_length)?])?;
+    Ok(Some((index as usize, cached)))
+}
+
+fn save_index(
+    tx: &Transaction<'_>,
+    generation: &str,
+    character: &str,
+    conversation: &str,
+    pages: &[PageBoundary],
+    manifest: &MessageManifest,
+) -> StoreResult<()> {
+    manifest.validate().map_err(codec_error)?;
+    let old = load_pages(tx, generation, character, conversation)?;
+    for page in &old {
+        if pages
+            .binary_search_by_key(&page.start, |p| p.start)
+            .is_err()
+        {
+            tx.execute("DELETE FROM message_page_indexes WHERE generation=?1 AND character_id=?2 AND conversation_id=?3 AND page_start=?4",
+                params![generation,character,conversation,page.start as i64])?;
+        }
+    }
+    for page in pages {
+        if old
+            .binary_search_by_key(&page.start, |p| p.start)
+            .is_ok_and(|i| old[i] == *page)
+        {
+            continue;
+        }
+        tx.execute(
+            "INSERT OR REPLACE INTO message_page_indexes VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            params![
+                generation,
+                character,
+                conversation,
+                page.start as i64,
+                page.page.message_count,
+                page.page.hash,
+                sql_i64(page.page.byte_length.0)?
+            ],
+        )?;
+    }
+    tx.execute(
+        "INSERT OR REPLACE INTO message_page_manifests VALUES(?1,?2,?3,?4)",
+        params![
+            generation,
+            character,
+            conversation,
+            {
+                let result = manifest.encode();
+                #[cfg(test)]
+                crate::persistent_store::hash_work::encoded_object("native_manifest_identity", &result);
+                result
+            }.map_err(codec_error)?.bytes
+        ],
+    )?;
+    Ok(())
+}
+
+#[derive(Debug, PartialEq)]
+struct PageProof {
+    message_count: u32,
+    byte_length: u64,
+    first_length: u64,
+    ends_cut: bool,
+}
+
+fn derive_page_proof(page: &ManifestPage, hashes: &[MessageHash]) -> StoreResult<PageProof> {
+    if hashes.is_empty() || hashes.len() != page.message_count as usize {
+        return Err(codec_error("message page manifest length mismatch"));
+    }
+    let mut length = (PAGE_PREFIX.len() + PAGE_SUFFIX.len()) as u64;
+    let mut ends_cut = false;
+    for (offset, hash) in hashes.iter().enumerate() {
+        length = length.checked_add(hash.byte_length)
+            .and_then(|v| v.checked_add(u64::from(offset != 0)))
+            .ok_or_else(|| codec_error("message page length overflow"))?;
+        let count = offset + 1;
+        ends_cut = count == LOGICAL_MESSAGE_PAGE_SIZE
+            || (count >= MIN_PAGE_MESSAGES && hash.boundary().map_err(codec_error)?)
+            || length > MAX_PAGE_BYTES as u64;
+        if let Some(next) = hashes.get(offset + 1) {
+            if ends_cut || length.checked_add(1).and_then(|v| v.checked_add(next.byte_length))
+                .is_none_or(|v| v > MAX_PAGE_BYTES as u64) {
+                return Err(codec_error("message page boundaries are not deterministic"));
+            }
+        }
+    }
+    if length != page.byte_length.0 {
+        return Err(codec_error("message page manifest length mismatch"));
+    }
+    Ok(PageProof { message_count: page.message_count, byte_length: length,
+        first_length: hashes[0].byte_length, ends_cut })
+}
+
+fn cached_page_proof(db: &Connection, hash: &str) -> StoreResult<Option<PageProof>> {
+    Ok(db.query_row("SELECT p.message_count,p.byte_length,p.first_length,p.ends_cut
+        FROM message_page_proofs p JOIN message_page_verified_objects v ON v.hash=p.hash
+        JOIN message_page_objects o ON o.hash=p.hash WHERE p.hash=?1", [hash], |r| {
+        Ok(PageProof { message_count: r.get(0)?, byte_length: sql_u64(r.get(1)?, 1)?,
+            first_length: sql_u64(r.get(2)?, 2)?, ends_cut: r.get(3)? })
+    }).optional()?)
+}
+
+// A proof certifies canonical bytes and every internal cut, not a page's
+// position. The next page's first message still determines a size cut.
+fn store_page_proof(db: &Connection, page: &ManifestPage, hashes: &[MessageHash]) -> StoreResult<PageProof> {
+    let proof = derive_page_proof(page, hashes)?;
+    if !verified_object_present(db, &page.hash)? {
+        return Err(codec_error("message object is not verified"));
+    }
+    if let Some(existing) = cached_page_proof(db, &page.hash)? {
+        if existing != proof {
+            return Err(codec_error("message page proof mismatch"));
+        }
+        return Ok(existing);
+    }
+    db.execute("INSERT INTO message_page_proofs VALUES(?1,?2,?3,?4,?5,?6)", params![
+        page.hash, proof.message_count, sql_i64(proof.byte_length)?, sql_i64(proof.first_length)?,
+        proof.ends_cut, serde_json::to_string(hashes)?])?;
+    Ok(proof)
+}
+
+fn ensure_page_proof(db: &Connection, page: &ManifestPage) -> StoreResult<PageProof> {
+    if let Some(proof) = cached_page_proof(db, &page.hash)? {
+        if proof.message_count != page.message_count || proof.byte_length != page.byte_length.0 {
+            return Err(codec_error("message page manifest length mismatch"));
+        }
+        return Ok(proof);
+    }
+    let body = require_object(db, &page.hash)?;
+    let decoded = {
+        let result = decode_message_page(&body);
+        #[cfg(test)]
+        crate::persistent_store::hash_work::decoded("native_page_decode_identity", &body, &result);
+        result
+    }.map_err(codec_error)?;
+    if decoded.len() != page.message_count as usize || body.len() as u64 != page.byte_length.0 {
+        return Err(codec_error("message page manifest length mismatch"));
+    }
+    let hashes = decoded.iter().map(|value| {
+        let body = payload_value::encode(value).map_err(codec_error)?;
+        #[cfg(test)]
+        crate::persistent_store::hash_work::observe("native_message_verify", body.len());
+        Ok(MessageHash::from_bytes(&body))
+    }).collect::<StoreResult<Vec<_>>>()?;
+    derive_page_proof(page, &hashes)?;
+    if !verified_object_present(db, &page.hash)? {
+        db.execute("INSERT INTO message_page_verified_objects(hash) VALUES(?1)", [&page.hash])?;
+    }
+    store_page_proof(db, page, &hashes)
+}
+
+fn validated_manifest(
+    db: &Connection,
+    value: &UnitValue,
+) -> StoreResult<(MessageManifest, Vec<PageBoundary>)> {
+    {
+        let result = value.validate();
+        #[cfg(test)]
+        crate::persistent_store::hash_work::validation(&value);
+        result
+    }.map_err(codec_error)?;
+    let UnitValue::Object {
+        descriptor: received,
+        ..
+    } = value
+    else {
+        return Err(codec_error("messages require an object manifest"));
+    };
+    let body = require_object(db, &received.object_hash)?;
+    let manifest = {
+        let result = MessageManifest::decode(&body);
+        #[cfg(test)]
+        crate::persistent_store::hash_work::decoded("native_manifest_decode_identity", &body, &result);
+        result
+    }.map_err(codec_error)?;
+    let (expected, references) = descriptor(&manifest)?;
+    if received != &expected {
+        return Err(codec_error("message manifest dependencies mismatch"));
+    }
+    for (hash, body) in references {
+        if require_object(db, &hash)? != body {
+            return Err(codec_error("message reference tree mismatch"));
+        }
+    }
+    let mut pages = Vec::new();
+    let mut previous: Option<PageProof> = None;
+    let mut position = 0usize;
+    for page in &manifest.pages {
+        let proof = ensure_page_proof(db, page)?;
+        if let Some(previous) = previous {
+            if !previous.ends_cut && previous.byte_length.checked_add(1)
+                .and_then(|v| v.checked_add(proof.first_length))
+                .is_some_and(|v| v <= MAX_PAGE_BYTES as u64) {
+                return Err(codec_error("message page boundaries are not deterministic"));
+            }
+        }
+        pages.push(PageBoundary {
+            start: position,
+            page: page.clone(),
+        });
+        position = position.checked_add(page.message_count as usize)
+            .ok_or_else(|| codec_error("message count overflow"))?;
+        previous = Some(proof);
+    }
+    Ok((manifest, pages))
+}
+
+pub(super) fn validate_manifest(db: &Connection, value: &UnitValue) -> StoreResult<()> {
+    validated_manifest(db, value).map(|_| ())
+}
+
+// Copied SQLite files cannot supply certificates for their own contents.
+pub(super) fn accept_copied_database(tx: &Transaction<'_>) -> StoreResult<()> {
+    tx.execute_batch("DELETE FROM message_page_proofs; DELETE FROM message_page_verified_objects;")?;
+    let mut messages = tx.prepare("SELECT generation,character_id,conversation_id,message_index,value,canonical_hash,canonical_size FROM messages")?;
+    let mut rows = messages.query([])?;
+    while let Some(row) = rows.next()? {
+        let text: String = row.get(4)?;
+        let value: Value = serde_json::from_str(&text)?;
+        let bytes = payload_value::encode(&value).map_err(codec_error)?;
+        let hash = MessageHash::from_bytes(&bytes);
+        let imported_hash: String = row.get(5)?;
+        let imported_size: i64 = row.get(6)?;
+        if !imported_hash.is_empty() && (imported_hash != hash.hash || imported_size != sql_i64(hash.byte_length)?) {
+            return Err(codec_error("copied native message identity mismatch"));
+        }
+        tx.execute("UPDATE messages SET canonical_hash=?5,canonical_size=?6 WHERE generation=?1 AND character_id=?2 AND conversation_id=?3 AND message_index=?4",
+            params![row.get::<_,String>(0)?,row.get::<_,String>(1)?,row.get::<_,String>(2)?,row.get::<_,i64>(3)?,hash.hash,sql_i64(hash.byte_length)?])?;
+    }
+    drop(rows);
+    drop(messages);
+    let invalid_parent: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM messages m LEFT JOIN conversations c ON c.generation=m.generation AND c.character_id=m.character_id AND c.conversation_id=m.conversation_id WHERE c.conversation_id IS NULL)",[],|r|r.get(0))?;
+    if invalid_parent { return Err(codec_error("copied native message parent is missing")); }
+    let invalid_order: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM conversations c WHERE c.message_count!=(SELECT COUNT(*) FROM messages m WHERE m.generation=c.generation AND m.character_id=c.character_id AND m.conversation_id=c.conversation_id) OR (c.message_count>0 AND ((SELECT MIN(message_index) FROM messages m WHERE m.generation=c.generation AND m.character_id=c.character_id AND m.conversation_id=c.conversation_id)!=0 OR (SELECT MAX(message_index) FROM messages m WHERE m.generation=c.generation AND m.character_id=c.character_id AND m.conversation_id=c.conversation_id)!=c.message_count-1)))",[],|r|r.get(0))?;
+    if invalid_order { return Err(codec_error("copied native message indices or count mismatch")); }
+    let invalid_id: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM messages WHERE message_id IS NOT json_extract(value,'$.chatId'))",[],|r|r.get(0))?;
+    if invalid_id { return Err(codec_error("copied native message chatId mismatch")); }
+    let orphan: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM message_page_indexes i LEFT JOIN message_page_manifests m
+        ON m.generation=i.generation AND m.character_id=i.character_id AND m.conversation_id=i.conversation_id WHERE m.body IS NULL)",[],|r|r.get(0))?;
+    if orphan { return Err(codec_error("copied page index has no manifest")); }
+    let mut manifests = tx.prepare("SELECT generation,character_id,conversation_id,body FROM message_page_manifests")?;
+    let entries = manifests.query_map([],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,r.get::<_,String>(2)?,r.get::<_,Vec<u8>>(3)?)))?
+        .collect::<Result<Vec<_>,_>>()?;
+    drop(manifests);
+    for (generation,character,conversation,body) in entries {
+        let original = MessageManifest::decode(&body).map_err(codec_error)?;
+        let original_pages = load_pages(tx,&generation,&character,&conversation)?;
+        let original_value = unit_value(tx,&original)?;
+        let (_, expected_pages) = validated_manifest(tx,&original_value)?;
+        if original_pages != expected_pages { return Err(codec_error("copied page index mismatch")); }
+        tx.execute("DELETE FROM message_page_indexes WHERE generation=?1 AND character_id=?2 AND conversation_id=?3",params![generation,character,conversation])?;
+        tx.execute("DELETE FROM message_page_manifests WHERE generation=?1 AND character_id=?2 AND conversation_id=?3",params![generation,character,conversation])?;
+        let actual = capture_manifest(tx,&generation,&character,&conversation,None)?;
+        if actual != original_value { return Err(codec_error("copied message manifest differs from native messages")); }
+    }
+    for table in ["lww_units", "lww_outbox", "lww_receive_rows", "lww_binding_source_units"] {
+        let identity_column = if matches!(table,"lww_units"|"lww_outbox") { "identity" } else { "NULL" };
+        let mut statement = tx.prepare(&format!("SELECT key,value,stamp,{identity_column} FROM {table}"))?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let key: risunest_sync_wire::unit::UnitKey = row.get::<_,String>(0)?.try_into().map_err(codec_error)?;
+            let value: UnitValue = serde_json::from_str(&row.get::<_,String>(1)?)?;
+            value.validate().map_err(codec_error)?;
+            let stamp: risunest_sync_wire::stamp::Stamp = serde_json::from_str(&row.get::<_,String>(2)?)?;
+            stamp.validate().map_err(codec_error)?;
+            if let Some(identity) = row.get::<_,Option<String>>(3)? {
+                let bytes = risunest_sync_wire::canonical::encode(&value).map_err(codec_error)?;
+                if risunest_sync_wire::hash(&bytes)!=identity { return Err(codec_error("copied native unit identity mismatch")); }
+            }
+            super::lww::validate_received(tx,&key,&value)?;
+            if key.components()[0]=="messages" && !matches!(value,UnitValue::Deleted) {
+                let (manifest,_) = validated_manifest(tx,&value)?;
+                unit_value(tx,&manifest)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn apply_manifest(
+    tx: &Transaction<'_>,
+    generation: &str,
+    character: &str,
+    conversation: &str,
+    value: &UnitValue,
+) -> StoreResult<()> {
+    let (manifest, pages) = validated_manifest(tx, value)?;
+    let exists: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM conversations WHERE generation=?1 AND character_id=?2 AND conversation_id=?3)",
+        params![generation,character,conversation],|r|r.get(0))?;
+    if !exists {
+        return Err(codec_error("message manifest parent is missing"));
+    }
+    let old = load_pages(tx, generation, character, conversation)?;
+    let prefix = old.iter().zip(&pages).take_while(|(a,b)| a == b).count();
+    let suffix = old[prefix..].iter().rev().zip(pages[prefix..].iter().rev())
+        .take_while(|(a,b)| a.page == b.page).count();
+    let mut start = pages.get(prefix).map_or(manifest.message_count.0, |p| p.start as u64);
+    let old_count = if let Some(last) = old.last() {
+        last.start as u64 + last.page.message_count as u64
+    } else {
+        sql_u64(tx.query_row("SELECT message_count FROM conversations WHERE generation=?1
+            AND character_id=?2 AND conversation_id=?3", params![generation,character,conversation],
+            |r| r.get(0))?, 0)?
+    };
+    let mut old_end = old.get(old.len()-suffix).map_or(old_count, |p| p.start as u64);
+    let mut new_end = pages.get(pages.len()-suffix).map_or(manifest.message_count.0, |p| p.start as u64);
+    let mut replacement = Vec::new();
+    for page in &pages[prefix..pages.len()-suffix] {
+        let (body, hashes): (Vec<u8>, String) = tx.query_row("SELECT o.body,p.message_hashes
+            FROM message_page_objects o JOIN message_page_proofs p ON p.hash=o.hash
+            JOIN message_page_verified_objects v ON v.hash=o.hash WHERE o.hash=?1", [&page.page.hash],
+            |r| Ok((r.get(0)?, r.get(1)?)))?;
+        // These exact immutable bytes already passed canonical decoding and hash
+        // verification. Only changed pages are materialized into native rows.
+        let document: Value = serde_json::from_slice(&body)?;
+        let messages = document["messages"].as_array().ok_or_else(|| codec_error("invalid verified page"))?;
+        let hashes: Vec<MessageHash> = serde_json::from_str(&hashes)?;
+        if messages.len() != hashes.len() || messages.len() != page.page.message_count as usize {
+            return Err(codec_error("message page proof mismatch"));
+        }
+        for (value, hash) in messages.iter().zip(hashes) {
+            let body = payload_value::encode(value).map_err(codec_error)?;
+            replacement.push((value.get("chatId").and_then(Value::as_str).map(str::to_owned),
+                String::from_utf8(body).map_err(codec_error)?, hash));
+        }
+    }
+    // A changed page can contain unchanged messages. Compare only the affected
+    // native range's stored identities to preserve its leading/trailing rows.
+    let mut leading = 0;
+    while leading < replacement.len() && start < old_end {
+        if native_message_hash(tx, generation, character, conversation, start)? != replacement[leading].2 {
+            break;
+        }
+        start += 1;
+        leading += 1;
+    }
+    let mut trailing = 0;
+    while trailing < replacement.len()-leading && old_end > start {
+        if native_message_hash(tx, generation, character, conversation, old_end-1)?
+            != replacement[replacement.len()-trailing-1].2 {
+            break;
+        }
+        old_end -= 1;
+        new_end -= 1;
+        trailing += 1;
+    }
+    tx.execute("DELETE FROM messages WHERE generation=?1 AND character_id=?2 AND conversation_id=?3
+        AND message_index>=?4 AND message_index<?5",
+        params![generation,character,conversation,sql_i64(start)?,sql_i64(old_end)?])?;
+    let delta = sql_i64(new_end)? - sql_i64(old_end)?;
+    if delta != 0 {
+        tx.execute("UPDATE messages SET message_index=-(message_index+?4)-1
+            WHERE generation=?1 AND character_id=?2 AND conversation_id=?3 AND message_index>=?5",
+            params![generation,character,conversation,delta,sql_i64(old_end)?])?;
+        tx.execute("UPDATE messages SET message_index=-message_index-1
+            WHERE generation=?1 AND character_id=?2 AND conversation_id=?3 AND message_index<0",
+            params![generation,character,conversation])?;
+    }
+    for (offset, (id, body, hash)) in replacement[leading..replacement.len()-trailing].iter().enumerate() {
+        tx.execute("INSERT INTO messages(generation,character_id,conversation_id,message_index,message_id,value,canonical_hash,canonical_size)
+            VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",params![generation,character,conversation,
+                sql_i64(start+offset as u64)?,id,body,hash.hash,sql_i64(hash.byte_length)?])?;
+    }
+    tx.execute("UPDATE conversations SET message_count=?4 WHERE generation=?1 AND character_id=?2 AND conversation_id=?3",
+        params![generation,character,conversation,sql_i64(manifest.message_count.0)?])?;
+    save_index(tx, generation, character, conversation, &pages, &manifest)
+}
+
+fn native_message_hash(db: &Connection, generation: &str, character: &str,
+    conversation: &str, index: u64) -> StoreResult<MessageHash> {
+    Ok(db.query_row("SELECT canonical_hash,canonical_size FROM messages WHERE generation=?1
+        AND character_id=?2 AND conversation_id=?3 AND message_index=?4",
+        params![generation,character,conversation,sql_i64(index)?], |r| {
+            Ok(MessageHash { hash: r.get(0)?, byte_length: sql_u64(r.get(1)?, 1)? })
+        })?)
+}
+
+impl From<risunest_external_storage_format::logical_records::LogicalRecordError> for StoreError {
+    fn from(error: risunest_external_storage_format::logical_records::LogicalRecordError) -> Self {
+        codec_error(error)
+    }
+}
+
+fn sql_i64(value: u64) -> StoreResult<i64> {
+    i64::try_from(value).map_err(|_| codec_error("message size exceeds database integer range"))
+}
+fn sql_u64(value: i64, index: usize) -> rusqlite::Result<u64> {
+    u64::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(index, value))
+}
+fn sql_usize(value: i64, index: usize) -> rusqlite::Result<usize> {
+    usize::try_from(value).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(index, value))
+}
+
+#[cfg(test)]
+mod capture_work_tests {
+    use super::*;
+
+    fn fixture() -> Connection {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE messages(generation TEXT,character_id TEXT,conversation_id TEXT,message_index INTEGER,
+            message_id TEXT,value TEXT,canonical_hash TEXT NOT NULL DEFAULT '',canonical_size INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(generation,character_id,conversation_id,message_index));
+            CREATE TABLE conversations(generation TEXT,character_id TEXT,conversation_id TEXT,message_count INTEGER,
+            PRIMARY KEY(generation,character_id,conversation_id));
+            INSERT INTO conversations VALUES('g','c','chat',2);
+            INSERT INTO messages VALUES('g','c','chat',0,'first','{\"chatId\":\"first\"}','','0');
+            INSERT INTO messages VALUES('g','c','chat',1,'second','{\"chatId\":\"second\"}','','0');").unwrap();
+        db.execute_batch(SCHEMA).unwrap();
+        db
+    }
+
+    #[test]
+    fn hash_work_counts_fallback_reverification_pages_and_manifest_passes() {
+        use crate::persistent_store::hash_work::{reset_hash_work, take_hash_work, DomainWork};
+        let mut db = fixture(); let tx = db.transaction().unwrap();
+        let bodies = [b"{\"chatId\":\"first\"}".to_vec(), b"{\"chatId\":\"second\"}".to_vec()];
+        let message_bytes = bodies.iter().map(|body| body.len() as u64).sum::<u64>();
+        let page_bytes = PAGE_PREFIX.len() as u64 + message_bytes + 1 + PAGE_SUFFIX.len() as u64;
+        reset_hash_work();
+        let value = capture_manifest(&tx, "g", "c", "chat", None).unwrap();
+        let manifest_bytes: Vec<u8> = tx.query_row("SELECT body FROM message_page_manifests", [], |row| row.get(0)).unwrap();
+        let work = take_hash_work();
+        assert_eq!(work.domains["native_message_verify"], DomainWork { calls: 4, bytes: 2 * message_bytes });
+        assert_eq!(work.domains["native_page_identity"], DomainWork { calls: 1, bytes: page_bytes });
+        assert_eq!(work.domains["native_manifest_identity"], DomainWork { calls: 3, bytes: 3 * manifest_bytes.len() as u64 });
+        assert!(work.incomplete.is_empty());
+        reset_hash_work();
+        validate_manifest(&tx, &value).unwrap();
+        let work = take_hash_work();
+        assert_eq!(work.domains["native_manifest_decode_identity"], DomainWork { calls: 1, bytes: manifest_bytes.len() as u64 });
+        for domain in ["native_page_decode_identity", "native_message_verify", "native_repage_message_verify", "native_repage_page_identity"] {
+            assert!(!work.domains.contains_key(domain), "persisted proof must skip {domain}");
+        }
+        assert!(work.incomplete.is_empty());
+        // Removing the proof forces real canonical decoding and message hashes.
+        tx.execute("DELETE FROM message_page_proofs", []).unwrap();
+        reset_hash_work();
+        validate_manifest(&tx, &value).unwrap();
+        let work = take_hash_work();
+        assert_eq!(work.domains["native_page_decode_identity"], DomainWork { calls: 1, bytes: page_bytes });
+        assert_eq!(work.domains["native_message_verify"], DomainWork { calls: 2, bytes: message_bytes });
+        assert!(!work.domains.contains_key("native_repage_message_verify"));
+        assert!(!work.domains.contains_key("native_repage_page_identity"));
+        assert!(work.incomplete.is_empty());
+    }
+
+    #[test]
+    fn verified_object_put_counts_both_passes_and_failed_hash_exactly() {
+        use crate::persistent_store::hash_work::{reset_hash_work, take_hash_work, DomainWork};
+        let db = fixture(); let body = b"synthetic control"; let hash = risunest_sync_wire::hash(body);
+        reset_hash_work();
+        put_object(&db, &hash, body).unwrap(); object_body(&db, &hash).unwrap();
+        assert!(put_object(&db, &hash, b"wrong").is_err());
+        let work = take_hash_work();
+        assert_eq!(work.domains["native_page_object_verify"], DomainWork { calls: 4, bytes: (3 * body.len() + 5) as u64 });
+        assert!(work.incomplete.is_empty());
+    }
+
+    #[test]
+    fn failed_delegated_decode_marks_unknown_partial_work_incomplete() {
+        use crate::persistent_store::hash_work::{reset_hash_work, take_hash_work};
+        let db = fixture();
+        let body = b"{ \"schema\":\"risunest.message-manifest/v1\",\"messageCount\":\"0\",\"pages\":[]}";
+        let hash = risunest_sync_wire::hash(body); put_object(&db, &hash, body).unwrap();
+        let value = UnitValue::object(RecordDescriptor::content(hash)).unwrap();
+        reset_hash_work();
+        assert!(validate_manifest(&db, &value).is_err());
+        let work = take_hash_work();
+        assert_eq!(work.incomplete["native_manifest_decode_identity"], 1);
+        assert!(!work.domains.contains_key("native_manifest_decode_identity"));
+        assert_eq!(work.domains["native_page_object_verify"].bytes, body.len() as u64);
+    }
+
+    #[test]
+    fn reference_creation_counts_returned_pages_without_rehashing() {
+        use crate::persistent_store::hash_work::{reset_hash_work, take_hash_work, DomainWork};
+        let manifest = MessageManifest { schema: MANIFEST_SCHEMA.into(), message_count: 65.into(), pages: (0..65).map(|index| ManifestPage {
+            hash: format!("{index:064x}"), message_count: 1, byte_length: 80.into()
+        }).collect() };
+        reset_hash_work();
+        let (_, objects) = descriptor(&manifest).unwrap();
+        let work = take_hash_work();
+        assert_eq!(work.domains["native_reference_create"], DomainWork { calls: objects.len() as u64, bytes: objects.iter().map(|(_, body)| body.len() as u64).sum() });
+        assert!(!work.domains.contains_key("native_reference_relation_boundary"));
+        assert!(work.incomplete.is_empty());
+    }
+
+    #[test]
+    fn captures_are_counted_once_and_take_clears_the_actual_work() {
+        let mut db = fixture();
+        let tx = db.transaction().unwrap();
+        capture_manifest(&tx, "g", "c", "chat", None).unwrap();
+        reset_capture_work();
+        current_manifest(&tx, "g", "c", "chat").unwrap();
+        assert_eq!(take_capture_work(), CaptureWork::default());
+        let value = serde_json::json!({"chatId":"third"});
+        let body = payload_value::encode(&value).unwrap();
+        let hash = MessageHash::from_bytes(&body);
+        tx.execute(
+            "INSERT INTO messages VALUES('g','c','chat',2,'third',?1,?2,?3)",
+            params![
+                String::from_utf8(body).unwrap(),
+                hash.hash,
+                hash.byte_length as i64
+            ],
+        )
+        .unwrap();
+        tx.execute("UPDATE conversations SET message_count=3", [])
+            .unwrap();
+        capture_manifest(
+            &tx,
+            "g",
+            "c",
+            "chat",
+            Some(MessageEdit {
+                start: 2,
+                delete_count: 0,
+                insert_count: 1,
+            }),
+        )
+        .unwrap();
+        let totals = take_capture_work();
+        assert_eq!(totals.capture_calls, 1);
+        assert_eq!(totals.successful_captures, 1);
+        assert_eq!(totals.failed_captures, 0);
+        assert_eq!(totals.work.messages_read, 3);
+        assert_eq!(totals.work.hash_rows_read, 3);
+        assert_eq!(
+            totals.work.bytes_read,
+            b"{\"chatId\":\"first\"}".len() as u64
+                + b"{\"chatId\":\"second\"}".len() as u64
+                + b"{\"chatId\":\"third\"}".len() as u64
+        );
+        assert_eq!(totals.work.pages_written, 1);
+        assert_eq!(totals.work.prefix_reused + totals.work.suffix_reused, 0);
+        assert_eq!(take_capture_work(), CaptureWork::default());
+        assert!(capture_manifest(
+            &tx,
+            "g",
+            "c",
+            "chat",
+            Some(MessageEdit {
+                start: 4,
+                delete_count: 0,
+                insert_count: 1
+            })
+        )
+        .is_err());
+        let totals = take_capture_work();
+        assert_eq!(totals.capture_calls, 1);
+        assert_eq!(totals.successful_captures, 0);
+        assert_eq!(totals.failed_captures, 1);
+        assert_eq!(totals.work, PageWork::default());
+    }
+
+    #[test]
+    fn accumulator_is_thread_local_and_explicit_probes_are_not_double_counted() {
+        reset_capture_work();
+        record_capture_work(
+            &PageWork {
+                messages_read: 7,
+                bytes_read: 70,
+                ..Default::default()
+            },
+            true,
+        );
+        std::thread::spawn(|| {
+            assert_eq!(take_capture_work(), CaptureWork::default());
+            record_capture_work(
+                &PageWork {
+                    messages_read: 2,
+                    bytes_read: 20,
+                    ..Default::default()
+                },
+                false,
+            );
+            let totals = take_capture_work();
+            assert_eq!(totals.capture_calls, 1);
+            assert_eq!(totals.failed_captures, 1);
+            assert_eq!(totals.work.messages_read, 2);
+        })
+        .join()
+        .unwrap();
+        let totals = take_capture_work();
+        assert_eq!(totals.capture_calls, 1);
+        assert_eq!(totals.successful_captures, 1);
+        assert_eq!(totals.work.messages_read, 7);
+        let mut db = fixture();
+        let tx = db.transaction().unwrap();
+        let (_, work) = capture_with_work(&tx, "g", "c", "chat", None).unwrap();
+        assert_eq!(work.messages_read, 2);
+        assert_eq!(take_capture_work(), CaptureWork::default());
+    }
+}

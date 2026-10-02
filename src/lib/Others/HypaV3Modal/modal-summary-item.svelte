@@ -22,7 +22,7 @@
   import { type OpenAIChat } from "src/ts/process/index.svelte";
   import { type Message } from "src/ts/storage/database.svelte";
   import { translateHTML } from "src/ts/translator/translator";
-  import { alertConfirm } from "src/ts/alert";
+  import { alertCheckboxConfirm, alertConfirm } from "src/ts/alert";
   import { DBState, selectedCharID } from "src/ts/stores.svelte";
   import type {
     SummaryItemState,
@@ -33,7 +33,6 @@
     UIState,
   } from "./types";
   import {
-    alertConfirmTwice,
     handleDualAction,
     getFirstMessage,
     captureCurrentHypaMessageById,
@@ -234,10 +233,14 @@
 
   async function deleteAfter(): Promise<void> {
     if (
-      await alertConfirmTwice(
-        language.hypaV3Modal.deleteAfterConfirmMessage,
-        language.hypaV3Modal.deleteAfterConfirmSecondMessage
-      )
+      (await alertCheckboxConfirm({
+          title: language.hypaV3Modal.deleteAfterConfirmMessage,
+          description: language.hypaV3Modal.deleteAfterConfirmSecondMessage,
+          checkboxLabel: language.checkboxConfirmation.hypaDeletion,
+          actionLabel: language.confirm,
+          cancelLabel: language.cancel,
+          requireChecked: true,
+      })).confirmed
     ) {
       hypaV3Data.summaries.splice(summaryIndex + 1);
     }

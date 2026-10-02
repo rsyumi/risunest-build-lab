@@ -13,6 +13,7 @@ vi.mock('src/ts/platform', async (importOriginal) => ({
 vi.mock('src/ts/stores.svelte', () => ({ DBState: { db: { account: undefined } } }))
 vi.mock('src/ts/alert', () => ({
     alertConfirm: vi.fn(),
+    alertCheckboxConfirm: vi.fn(async () => ({ confirmed: true, checked: true })),
     alertError: vi.fn(),
     alertNormal: vi.fn(),
     alertSelect: vi.fn(),
@@ -136,5 +137,6 @@ it('preserves the distinct web PocketRisu importer', async () => {
     const button = [...target.querySelectorAll('button')].find(button => button.textContent?.trim() === language.loadPocketRisuBackup)!
     button.click()
     await vi.waitFor(() => expect(LoadLocalBackup).toHaveBeenCalledOnce())
+    expect(LoadLocalBackup).toHaveBeenCalledWith(language.pocketRisuImportConfirm)
     expect(restoreBackupFromSystemPicker).not.toHaveBeenCalled()
 })

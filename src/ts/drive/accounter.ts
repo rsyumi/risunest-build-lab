@@ -1,12 +1,13 @@
 import { hubURL } from "../characterCards"
 import { getDatabase } from "../storage/database.svelte"
-import { alertConfirm, alertError, alertMd, alertNormal, alertSelect, alertWait } from "../alert"
+import { alertCheckboxConfirm, alertConfirm, alertError, alertMd, alertNormal, alertSelect, alertWait } from "../alert"
 import { AppendableBuffer } from "../globalApi.svelte"
 import { decodeRisuSave } from "../storage/risuSave"
 import { language } from "src/lang"
 import { fetchProtectedResource } from "../sionyw"
 import { replacePersistentDatabase } from "../storage/persistentDataRuntime.svelte"
 import { installAccountBackup } from "../storage/databaseRestore"
+import { isTauri } from "../platform"
 
 export function risuLogin() {
     const win = window.open(hubURL + '/hub/login')
@@ -98,12 +99,14 @@ export async function loadRisuAccountBackup() {
         alertError("Invalid backup id")
         return
     }
-    if(!await alertConfirm(language.backupLoadConfirm)){
-        return
-    }
-    if(!await alertConfirm(language.backupLoadConfirm2)){
-        return
-    }
+    if (!isTauri && !(await alertCheckboxConfirm({
+        title: language.backupLoadConfirm,
+        description: language.backupLoadConfirm2,
+        checkboxLabel: language.checkboxConfirmation.dataReplacement,
+        actionLabel: language.confirm,
+        cancelLabel: language.cancel,
+        requireChecked: true,
+    })).confirmed) return
 
     const backupId = backups[backupIdNum]
 

@@ -27,7 +27,7 @@ export function defaultNativePortableExportChoices(): DeviceSectionChoice<Native
     sectionId,
     label: "",
     included: true,
-    selected: sectionId !== "local-settings",
+    selected: true,
   }));
 }
 

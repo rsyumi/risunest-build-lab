@@ -6,15 +6,8 @@ import type {
 } from './nativePersistentMaintenance'
 import type { SyncConflictBackupEntry } from './sync/syncConflictBackup'
 import type {
-    ServerSyncBackupCursor,
-    ServerSyncBackupInventory,
     ServerSyncCacheUsage,
 } from './sync/serverSyncProduction'
-
-export interface ServerSyncBackupDeleteResult {
-    localDeleted: true
-    cleanup: 'complete' | 'pending'
-}
 
 export type RisuNestStorageCardId =
     | 'total'
@@ -24,7 +17,7 @@ export type RisuNestStorageCardId =
     | 'snapshots'
     | 'conflictBackups'
 
-export type StorageDashboardSource = 'stats' | 'snapshots' | 'conflictBackups' | 'serverBackups' | 'tempUsage'
+export type StorageDashboardSource = 'stats' | 'snapshots' | 'conflictBackups' | 'tempUsage'
 
 export interface RisuNestStorageDashboardSnapshot {
     failedSources: StorageDashboardSource[]
@@ -35,7 +28,6 @@ export interface RisuNestStorageDashboardSnapshot {
     stats: NativePersistentStorageStats | null
     snapshots: NativeSnapshotInfo[]
     conflictBackups: SyncConflictBackupEntry[]
-    serverBackups: ServerSyncBackupInventory | null
     tempUsage: ServerSyncCacheUsage | null
     gcPreview: NativeAssetGcResult | null
     gcResult: NativeAssetGcResult | null
@@ -45,17 +37,12 @@ export interface RisuNestStorageDashboardDependencies {
     getStats(): Promise<NativePersistentStorageStats>
     listSnapshots(): Promise<NativeSnapshotInfo[]>
     listConflictBackups(): Promise<SyncConflictBackupEntry[]>
-    /** The newest page, or the page before `before` when a cursor is given. */
-    getServerBackups(before?: ServerSyncBackupCursor): Promise<ServerSyncBackupInventory>
     getTemp(): Promise<ServerSyncCacheUsage>
     cleanupTemp(): Promise<ServerSyncCacheUsage>
     previewGc(): Promise<NativeAssetGcResult>
     executeGc(): Promise<NativeAssetGcResult>
     deleteSnapshot(id: string): Promise<void>
     deleteConflictBackup(id: string): Promise<void>
-    deleteServerBackup(id: string): Promise<ServerSyncBackupDeleteResult>
-    exportServerBackup(id: string, side: 'local' | 'remote'): Promise<void>
-    restoreServerBackup(id: string, side: 'local' | 'remote'): Promise<void>
     createSnapshot(reason: string): Promise<NativeSnapshotCreated>
 }
 
@@ -80,7 +67,6 @@ export function storageDashboardRollup(
     stats: NativePersistentStorageStats,
     _snapshots: readonly NativeSnapshotInfo[],
     conflictBackups: readonly SyncConflictBackupEntry[],
-    serverBackups: ServerSyncBackupInventory | null,
     cache: ServerSyncCacheUsage | null = null,
 ): {
     cards: { id: RisuNestStorageCardId; bytes: number }[]
@@ -92,7 +78,6 @@ export function storageDashboardRollup(
     }
     snapshotBytes: number
     conflictBackupBytes: number
-    serverBackupBytes: number
     cacheBytes: number
     ledgerBytes: number
 } {
@@ -101,7 +86,6 @@ export function storageDashboardRollup(
         (total, backup) => total + backup.byteLength,
         0,
     )
-    const serverBackupBytes = serverBackups?.diskBytes ?? 0
     const cacheBytes = cache?.cacheBytes ?? 0
     const ledgerBytes = cache?.ledgerBytes ?? 0
     const inlayBytes = stats.assetAliases
@@ -116,7 +100,6 @@ export function storageDashboardRollup(
                     stats.assetObjects.bytes +
                     snapshotBytes +
                     conflictBackupBytes +
-                    serverBackupBytes +
                     cacheBytes +
                     ledgerBytes,
             },
@@ -134,7 +117,6 @@ export function storageDashboardRollup(
         },
         snapshotBytes,
         conflictBackupBytes,
-        serverBackupBytes,
         cacheBytes,
         ledgerBytes,
     }
@@ -152,7 +134,6 @@ export function createRisuNestStorageDashboard(
         stats: null,
         snapshots: [],
         conflictBackups: [],
-        serverBackups: null,
         tempUsage: null,
         gcPreview: null,
         gcResult: null,
@@ -194,9 +175,9 @@ export function createRisuNestStorageDashboard(
         pendingReloads += 1
         update({ loading: true })
         try {
-            const sources: StorageDashboardSource[] = ['stats', 'snapshots', 'conflictBackups', 'serverBackups', 'tempUsage']
+            const sources: StorageDashboardSource[] = ['stats', 'snapshots', 'conflictBackups', 'tempUsage']
             const results = await Promise.allSettled([
-                deps.getStats(), deps.listSnapshots(), deps.listConflictBackups(), deps.getServerBackups(), deps.getTemp(),
+                deps.getStats(), deps.listSnapshots(), deps.listConflictBackups(), deps.getTemp(),
             ])
             if (reloadId === latestReload) {
                 const next: Partial<RisuNestStorageDashboardSnapshot> = {}
@@ -283,41 +264,6 @@ export function createRisuNestStorageDashboard(
                     conflictBackups: state.conflictBackups.filter(
                         (backup) => backup.id !== id,
                     ),
-                })
-            })
-        },
-        async deleteServerBackup(id: string) {
-            return run(`delete-server-backup:${id}`, async () => {
-                const result = await deps.deleteServerBackup(id)
-                invalidatePendingReloads()
-                await reload()
-                return result
-            })
-        },
-        async restoreServerBackup(id: string, side: 'local' | 'remote') {
-            return run(`restore-server-backup:${id}:${side}`, async () => {
-                await deps.restoreServerBackup(id, side)
-                invalidatePendingReloads()
-                await reload()
-            })
-        },
-        async exportServerBackup(id: string, side: 'local' | 'remote') {
-            return run(`export-server-backup:${id}:${side}`, () =>
-                deps.exportServerBackup(id, side),
-            )
-        },
-        /** Appends the page before the last loaded one to the server backup list. */
-        async loadMoreServerBackups() {
-            return run('more-server-backups', async () => {
-                const current = state.serverBackups
-                if (!current?.next) return
-                const older = await deps.getServerBackups(current.next)
-                if (state.serverBackups !== current) return
-                update({
-                    serverBackups: {
-                        ...older,
-                        items: [...current.items, ...older.items],
-                    },
                 })
             })
         },

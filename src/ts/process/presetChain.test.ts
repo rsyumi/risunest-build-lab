@@ -24,7 +24,7 @@ describe('preset chain activation', () => {
         const pending = run()
         await Promise.resolve()
 
-        expect(changePreset).toHaveBeenCalledWith(0, true)
+        expect(changePreset).toHaveBeenCalledWith(0)
         expect(events).toEqual([])
 
         finish()
@@ -44,7 +44,7 @@ describe('preset chain activation', () => {
             onMissing,
         )
 
-        expect(changePreset).not.toHaveBeenCalled()
+        expect(changePreset).toHaveBeenCalledWith(null)
         expect(onMissing).toHaveBeenCalledWith('Missing')
     })
 

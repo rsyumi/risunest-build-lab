@@ -32,7 +32,7 @@ impl RestoreInventory {
             .tempdir_in(owned)?;
         let db = Connection::open(directory.path().join("inventory.sqlite"))?;
         db.execute_batch("PRAGMA cache_size=-16384; PRAGMA temp_store=FILE; CREATE TABLE live_objects (hash TEXT PRIMARY KEY, owner INTEGER NOT NULL); BEGIN IMMEDIATE;")?;
-        let mut statement=archive.db.prepare("SELECT object_hash,0 FROM asset_aliases WHERE object_hash IS NOT NULL UNION SELECT manifest_hash,1 FROM asset_owner_heads WHERE present=1")?;
+        let mut statement=archive.db.prepare("SELECT object_hash,0 FROM asset_aliases WHERE object_hash IS NOT NULL UNION SELECT manifest_hash,1 FROM asset_owner_heads WHERE present=1 UNION SELECT hash,0 FROM backup_payloads")?;
         let mut rows = statement.query([])?;
         while let Some(row) = rows.next()? {
             check(probe)?;
@@ -47,7 +47,9 @@ impl RestoreInventory {
             let archived: crate::persistent_store::archive::ArchivedObject =
                 serde_json::from_str(&row.get::<_, String>(0)?)?;
             for hash in archived.object_roots() {
-                archive.open_object(hash)?;
+                let binary=hex::decode(hash).map_err(|_|Error::Invalid("invalid archived payload hash"))?;
+                let present:bool=archive.db.query_row("SELECT EXISTS(SELECT 1 FROM objects WHERE sha256=?1)",[binary],|row|row.get(0))?;
+                if !hash_valid(hash) || !present {return Err(Error::Invalid("archived payload is absent from catalog"));}
                 db.execute("INSERT OR IGNORE INTO live_objects VALUES(?1,0)", [hash])?;
             }
         }
@@ -84,14 +86,17 @@ impl RestoreInventory {
     pub(crate) fn preserve(
         &self,
         archive: &VerifiedArchive,
-        repository: &Path,
+        store: &crate::persistent_store::PersistentStore,
+        pins: &mut crate::asset_repository::job_pins::DurableCasJob,
         probe: &dyn CancellationProbe,
     ) -> Result<Option<PreservationReport>> {
+        let repository=store.repository_root();
+        let cas=crate::asset_repository::PayloadCas::new(repository)?;
         let stage = self.directory.path().join("preserved");
         fs::create_dir(&stage)?;
         fs::create_dir(stage.join("objects"))?;
         let index = Connection::open(stage.join("index.sqlite"))?;
-        index.execute_batch("PRAGMA synchronous=FULL; CREATE TABLE source_files (logical_key TEXT PRIMARY KEY,object_hash TEXT NOT NULL,metadata TEXT NOT NULL,byte_length INTEGER NOT NULL,reason TEXT NOT NULL); BEGIN IMMEDIATE;")?;
+        index.execute_batch("PRAGMA synchronous=FULL; CREATE TABLE source_files (logical_key TEXT PRIMARY KEY,object_hash TEXT NOT NULL,metadata TEXT NOT NULL,byte_length INTEGER NOT NULL,reason TEXT NOT NULL,storage_kind TEXT NOT NULL CHECK(storage_kind IN ('cas','owned'))); BEGIN IMMEDIATE;")?;
         let mut statement=archive.db.prepare("SELECT f.logical_key,lower(hex(f.object_hash)),f.metadata,o.byte_length FROM files f JOIN objects o ON o.sha256=f.object_hash WHERE f.kind='preserved' AND f.state='present' ORDER BY f.logical_key")?;
         let mut rows = statement.query([])?;
         let mut count = 0_u64;
@@ -122,7 +127,11 @@ impl RestoreInventory {
                 )
             };
             let object = stage.join("objects").join(&hash);
-            if !object.try_exists()? {
+            let present=store.portable_object_present(&hash,size)?;
+            if present {
+                let owner:bool=self.db.query_row("SELECT EXISTS(SELECT 1 FROM live_objects WHERE hash=?1 AND owner=1)",[&hash],|row|row.get(0))?;
+                pins.pin_existing(&cas,&hash,size,if owner {crate::asset_repository::job_pins::CasObjectRole::OwnerManifest} else {crate::asset_repository::job_pins::CasObjectRole::DirectObject})?;
+            } else if !object.try_exists()? {
                 let mut output = fs::OpenOptions::new()
                     .create_new(true)
                     .write(true)
@@ -134,8 +143,8 @@ impl RestoreInventory {
                     .ok_or(Error::Invalid("preserved byte count overflow"))?;
             }
             index.execute(
-                "INSERT INTO source_files VALUES(?1,?2,?3,?4,'not-required-by-library')",
-                params![key, hash, metadata, size as i64],
+                "INSERT INTO source_files VALUES(?1,?2,?3,?4,'not-required-by-library',?5)",
+                params![key, hash, metadata, size as i64,if present {"cas"} else {"owned"}],
             )?;
             count += 1;
         }
@@ -202,7 +211,7 @@ impl Catalog {
             index.execute_batch(
                 "PRAGMA trusted_schema=OFF; PRAGMA query_only=ON; PRAGMA cache_size=-16384",
             )?;
-            let mut statement=index.prepare("SELECT logical_key,object_hash,metadata,byte_length FROM source_files ORDER BY logical_key")?;
+            let mut statement=index.prepare("SELECT logical_key,object_hash,metadata,byte_length,storage_kind FROM source_files ORDER BY logical_key")?;
             let mut rows = statement.query([])?;
             while let Some(row) = rows.next()? {
                 check(probe)?;
@@ -220,9 +229,12 @@ impl Catalog {
                     }
                     continue;
                 }
-                let objects = directory.join("objects");
-                ensure_directory(&objects)?;
-                let path: PathBuf = objects.join(&hash);
+                let storage:String=row.get(4)?;
+                let path: PathBuf = match storage.as_str() {
+                    "owned"=>{let objects=directory.join("objects");ensure_directory(&objects)?;objects.join(&hash)},
+                    "cas"=>crate::asset_repository::PayloadCas::new(repository)?.object_path(&hash)?.ok_or(Error::Invalid("preserved CAS body is missing"))?,
+                    _=>return Err(Error::Invalid("invalid preserved storage kind")),
+                };
                 check_regular(&path)?;
                 self.add_pinned_file("preserved", &key, &metadata, &path, size, &hash, probe)?;
             }

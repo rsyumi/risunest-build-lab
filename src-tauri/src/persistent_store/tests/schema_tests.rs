@@ -1,5 +1,24 @@
 use super::*;
 
+#[test]
+fn plugin_gc_revision_tracks_generic_own_and_second_connection_writes() {
+    let directory = tempfile::tempdir().unwrap();
+    let store = PersistentStore::open(directory.path()).unwrap();
+    let revision = || store.connection.query_row("SELECT revision FROM plugin_gc_revision WHERE singleton = 1", [], |row| row.get::<_, i64>(0)).unwrap();
+    let initial = revision();
+    store.connection.execute("INSERT INTO plugin_storage (generation,owner,storage_key,byte_size,ordinal,value) VALUES ('synthetic','synthetic','key',2,0,'{}')", []).unwrap();
+    assert_eq!(revision(), initial + 1);
+    store.connection.execute("UPDATE plugin_storage SET value = '[]' WHERE generation = 'synthetic'", []).unwrap();
+    assert_eq!(revision(), initial + 2);
+    let second = rusqlite::Connection::open(database_path(directory.path())).unwrap();
+    second.execute("DELETE FROM plugin_storage WHERE generation = 'synthetic'", []).unwrap();
+    assert_eq!(revision(), initial + 3);
+    drop(second);
+    drop(store);
+    let reopened = PersistentStore::open(directory.path()).unwrap();
+    assert_eq!(reopened.connection.query_row("SELECT revision FROM plugin_gc_revision WHERE singleton = 1", [], |row| row.get::<_, i64>(0)).unwrap(), initial + 3);
+}
+
 fn database_path(directory: &Path) -> PathBuf {
     directory.join("persistent").join("persistent.sqlite")
 }
@@ -191,13 +210,15 @@ fn existing_current_database_revalidates_on_reopen() {
 #[test]
 fn a_broken_device_store_is_reported_without_blocking_the_library() {
     let directory = tempfile::tempdir().expect("create device failure directory");
-    let store = PersistentStore::open(directory.path()).expect("create current store");
+    let mut store = PersistentStore::open(directory.path()).expect("create current store");
     assert!(store.device_store().is_ok());
     assert!(store
         .open_native_job_store()
         .expect("open native job store")
         .device_store()
         .is_ok());
+    let stage = store.replace_begin().unwrap().staging_id;
+    store.replace_put_root(&stage, &json!({"username":"protected stage"})).unwrap();
     drop(store);
 
     let device_path = directory
@@ -210,7 +231,7 @@ fn a_broken_device_store_is_reported_without_blocking_the_library() {
         .expect("stamp unknown device schema version");
     drop(connection);
 
-    let store =
+    let mut store =
         PersistentStore::open(directory.path()).expect("library opens without the device store");
     assert_eq!(store.revision().expect("read library revision"), 0);
     let Err(error) = store.device_store() else {
@@ -222,6 +243,14 @@ fn a_broken_device_store_is_reported_without_blocking_the_library() {
             message: "device store is unavailable: unsupported device schema version 17".to_owned(),
         }
     );
+    assert_eq!(store.connection.query_row(
+        "SELECT count(*) FROM root WHERE generation=?1", [&stage], |row| row.get::<_, i64>(0),
+    ).unwrap(), 1);
+    assert!(store.commit(&WorkingSetCommit {
+        root: Some(json!({"username":"must not commit"})),
+        ..empty_working_set_commit(0)
+    }).is_err());
+    assert_eq!(store.revision().unwrap(), 0);
 }
 
 #[test]

@@ -19,6 +19,14 @@ describe.each([
     ['account backup', installAccountBackup, 'account-backup'],
     ['Risu-Kei backup', installRisuKeiBackup, 'risu-kei-backup'],
 ] as const)('%s restore', (_name, install, expectedReason) => {
+    it('skips the duplicate loader only with this successful replacement restart receipt',async()=>{
+        const loadPlugins=vi.fn()
+        await expect(install(database,{
+            replaceDatabase:async(_candidate,_reason,options)=>{options?.onPluginsRestarted?.();return committed},
+            loadPlugins,
+        })).resolves.toEqual(committed)
+        expect(loadPlugins).not.toHaveBeenCalled()
+    })
     it('loads plugins only after persistent replacement succeeds', async () => {
         const events: string[] = []
 
@@ -175,7 +183,7 @@ describe.each([
         await expect(install(database, {
             replaceDatabase, publishAcceptedRevision, relaunch,
         })).resolves.toEqual(refreshRequired)
-        expect(replaceDatabase).toHaveBeenCalledExactlyOnceWith(database, reason, { publishOfficial: true })
+        expect(replaceDatabase).toHaveBeenCalledExactlyOnceWith({ ...database, explicitGlobalChatVariables: {} }, reason, { publishOfficial: true, upstreamImport:true })
         expect(publishAcceptedRevision).not.toHaveBeenCalled()
         expect(relaunch).not.toHaveBeenCalled()
     })

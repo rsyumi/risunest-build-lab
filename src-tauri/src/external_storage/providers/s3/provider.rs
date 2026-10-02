@@ -527,9 +527,12 @@ impl S3Provider {
 
     /// An object that is already in place converges only when the remote
     /// evidence matches this intent; different bytes are never replaced.
-    fn converge(
+    async fn converge(
         &self,
-        profile: &Profile,
+        context: &RepositoryContext,
+        credentials: &Credentials,
+        key: &str,
+        cancel: &Cancellation,
         existing: &RemoteObject,
         intent: &ObjectIntent,
         locator: RemoteLocator,
@@ -537,12 +540,19 @@ impl S3Provider {
         if existing.byte_length != intent.byte_length {
             return Err(precondition(None));
         }
+        let profile = context.profile;
         let expected = base64_sha256(&intent.sha256)?;
         let verified = match (&existing.checksum_sha256, profile.checksum_header) {
             (Some(remote), true) if *remote != expected => return Err(precondition(None)),
             (Some(_), true) => true,
             _ => false,
         };
+        if !verified {
+            let (mut response, _) = self.get_object(context, credentials, key, None, cancel).await?;
+            self.require(profile, &response, &[200])?;
+            let mut sink = crate::external_storage::contract::IdentitySink { intent };
+            common::stream_to_sink(&mut response.body, &mut sink, Some(intent.byte_length), intent.byte_length, cancel).await?;
+        }
         Ok(ObjectReceipt {
             locator,
             byte_length: intent.byte_length,
@@ -570,11 +580,9 @@ impl S3Provider {
         if intent.byte_length > profile.max_single_put_bytes {
             return Err(ProviderError::new(ErrorKind::FileTooLarge));
         }
-        if !profile.conditional_put {
-            // Without a create-if-absent precondition the only way to keep an
-            // existing object from being replaced is to look before writing.
+        if !profile.conditional_put && intent.role != ObjectRole::Segment {
             if let Some(existing) = self.head_object(context, credentials, key, cancel).await? {
-                return self.converge(profile, &existing, intent, locator);
+                return self.converge(context, credentials, key, cancel, &existing, intent, locator).await;
             }
         }
         let expected_checksum = base64_sha256(&intent.sha256)?;
@@ -594,11 +602,14 @@ impl S3Provider {
                 .head_object(context, credentials, key, cancel)
                 .await?
                 .ok_or_else(|| precondition(Some(response.status)))?;
-            return self.converge(profile, &existing, intent, locator);
+            return self.converge(context, credentials, key, cancel, &existing, intent, locator).await;
         }
         self.require(profile, &response, &[200])?;
-        let verified =
-            checksum_of(&response.headers).is_some_and(|value| value == expected_checksum);
+        let remote_checksum = checksum_of(&response.headers);
+        if remote_checksum.as_ref().is_some_and(|value| *value != expected_checksum) {
+            return Err(corrupt());
+        }
+        let verified = remote_checksum.is_some();
         Ok(ObjectReceipt {
             locator,
             byte_length: intent.byte_length,
@@ -682,7 +693,7 @@ impl S3Provider {
             offset += length;
         }
         let document = xml::complete_multipart_body(&parts);
-        let call = Call::object(
+        let mut call = Call::object(
             reqwest::Method::POST,
             key,
             ProviderOperation::CompleteUpload,
@@ -694,7 +705,13 @@ impl S3Provider {
             Box::pin(std::io::Cursor::new(document.clone().into_bytes())),
             document.len() as u64,
         );
+        if profile.conditional_put { call = call.header("if-none-match", "*"); }
         let mut response = self.dispatch(context, credentials, call, cancel).await?;
+        if matches!(response.status, 409 | 412) {
+            let existing = self.head_object(context, credentials, key, cancel).await?
+                .ok_or_else(|| precondition(Some(response.status)))?;
+            return self.converge(context, credentials, key, cancel, &existing, intent, locator).await;
+        }
         self.require(profile, &response, &[200])?;
         let body =
             common::read_bounded(&mut response.body, common::MAX_CONTROL_BODY, cancel).await?;
@@ -908,6 +925,7 @@ impl Provider for S3Provider {
             cancel.check()?;
             let context = context_of(repository)?;
             intent.validate(repository)?;
+            crate::external_storage::contract::verify_source(source, intent, cancel).await?;
             if source.byte_length() != intent.byte_length {
                 return Err(corrupt());
             }
@@ -1121,7 +1139,7 @@ impl Provider for S3Provider {
                 .await?
             {
                 return Ok(
-                    match self.converge(context.profile, &existing, intent, locator) {
+                    match self.converge(context, &credentials, &key, cancel, &existing, intent, locator).await {
                         Ok(receipt) => UploadResolution::Complete(receipt),
                         Err(error) if error.kind == ErrorKind::PreconditionFailed => {
                             UploadResolution::Conflict

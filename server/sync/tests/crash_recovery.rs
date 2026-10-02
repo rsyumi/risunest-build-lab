@@ -1,132 +1,54 @@
 mod common;
 use common::*;
 use risunest_sync_server::store::Store;
-use risunest_sync_wire::{hash, Domain, TerminalStatus};
+use risunest_sync_wire::hash;
 
 #[test]
-#[ignore = "child process fixture, invoked by abrupt_process_exit_reopens_wal"]
+#[ignore]
 fn child_exit_without_destructors() {
-    let dir =
-        std::env::var_os("RISUNEST_SYNTHETIC_CRASH_DIR").expect("synthetic directory required");
-    let store = Store::init(std::path::Path::new(&dir)).unwrap();
-    let a = device(&store);
-    let head = store.head().unwrap();
+    let path = std::env::var_os("RISUNEST_SYNTHETIC_CRASH_ROOT").unwrap();
+    let store = Store::open(std::path::Path::new(&path)).unwrap();
+    let actor = device(&store);
     store
-        .put_object(&a, &hash(b"crash fixture"), b"crash fixture")
+        .push(
+            &actor,
+            &request(
+                &store,
+                WRITER_A,
+                "abrupt",
+                vec![inline("key", WRITER_A, 1, "synthetic")],
+            ),
+        )
         .unwrap();
-    let intent = stage(&store, &a, &head, 1, &changes("crash", b"crash fixture"));
-    if std::env::var("RISUNEST_SYNTHETIC_CRASH_PHASE").unwrap() == "committed" {
-        store.commit(&a, &intent, &head.etag()).unwrap();
-    }
-    // No Store/SQLite/tempfile destructor, matching process loss after durable publish.
-    std::process::exit(77);
+    std::process::exit(0);
 }
 #[test]
-fn abrupt_process_exit_reopens_wal() {
-    for phase in ["published", "committed"] {
-        let dir = tempfile::tempdir().unwrap();
-        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            command.creation_flags(0x08000000);
-        }
-        let output = command
-            .args(["--exact", "child_exit_without_destructors", "--ignored"])
-            .env("RISUNEST_SYNTHETIC_CRASH_DIR", dir.path())
-            .env("RISUNEST_SYNTHETIC_CRASH_PHASE", phase)
-            .output()
-            .unwrap();
-        assert_eq!(output.status.code(), Some(77));
-        let store = Store::open(dir.path()).unwrap();
-        assert_eq!(
-            store.head().unwrap().seq.as_str(),
-            if phase == "committed" { "1" } else { "0" }
-        );
-        assert_eq!(
-            store.get_object(&hash(b"crash fixture")).unwrap(),
-            b"crash fixture"
-        );
-    }
-}
-
-#[test]
-fn published_orphan_and_staged_intent_survive_restart_without_advancing_head() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::init(dir.path()).unwrap();
-    let a = device(&store);
-    let head = store.head().unwrap();
-    store.put_object(&a, &hash(b"object"), b"object").unwrap();
-    let intent = stage(&store, &a, &head, 1, &changes("a", b"object"));
-    drop(store);
-    let store = Store::open(dir.path()).unwrap();
-    assert_eq!(store.head().unwrap(), head);
-    assert_eq!(store.get_object(&hash(b"object")).unwrap(), b"object");
-    assert_eq!(
-        store.commit(&a, &intent, &head.etag()).unwrap().status,
-        TerminalStatus::Committed
-    );
-}
-#[test]
-fn lost_response_retry_after_restart_returns_exact_receipt_without_duplicate_commit() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::init(dir.path()).unwrap();
-    let a = device(&store);
-    let head = store.head().unwrap();
-    store.put_object(&a, &hash(b"object"), b"object").unwrap();
-    let intent = stage(&store, &a, &head, 1, &changes("a", b"object"));
-    let receipt = store.commit(&a, &intent, &head.etag()).unwrap();
-    drop(store);
-    let store = Store::open(dir.path()).unwrap();
-    assert_eq!(store.commit(&a, &intent, &head.etag()).unwrap(), receipt);
+fn abrupt_process_exit_recovers_atomic_lww_state_journal_and_receipt() {
+    let root = tempfile::tempdir().unwrap();
+    drop(Store::init(root.path()).unwrap());
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "child_exit_without_destructors", "--ignored"])
+        .env("RISUNEST_SYNTHETIC_CRASH_ROOT", root.path())
+        .output()
+        .unwrap();
+    assert!(child.status.success());
+    let store = Store::open(root.path()).unwrap();
     assert_eq!(store.head().unwrap().seq.as_str(), "1");
-}
-#[test]
-fn sqlite_failure_rolls_back_records_head_receipt_and_watermark_together() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::init(dir.path()).unwrap();
-    let a = device(&store);
-    let head = store.head().unwrap();
-    store.put_object(&a, &hash(b"object"), b"object").unwrap();
-    let intent = stage(&store, &a, &head, 1, &changes("a", b"object"));
-    let db = rusqlite::Connection::open(dir.path().join("metadata.sqlite")).unwrap();
-    db.execute_batch("CREATE TRIGGER injected_failure BEFORE INSERT ON receipts BEGIN SELECT RAISE(ABORT,'synthetic storage failure'); END;").unwrap();
-    assert!(store.commit(&a, &intent, &head.etag()).is_err());
-    assert_eq!(store.head().unwrap(), head);
-    assert_eq!(
-        store.record(Domain::Library, "a").unwrap(),
-        risunest_sync_wire::RecordVersion::Absent
-    );
-    db.execute_batch("DROP TRIGGER injected_failure").unwrap();
-    drop(db);
-    drop(store);
-    let store = Store::open(dir.path()).unwrap();
-    assert_eq!(
-        store.commit(&a, &intent, &head.etag()).unwrap().status,
-        TerminalStatus::Committed
-    );
-}
-#[test]
-fn pruned_terminal_receipt_cannot_reexecute_below_durable_watermark() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::init(dir.path()).unwrap();
-    let a = device(&store);
-    let head = store.head().unwrap();
-    let intent = stage(&store, &a, &head, 42, &changes("a", b"missing"));
-    assert_eq!(
-        store.commit(&a, &intent, &head.etag()).unwrap().status,
-        TerminalStatus::Failed
-    );
-    drop(store);
-    let db = rusqlite::Connection::open(dir.path().join("metadata.sqlite")).unwrap();
-    db.execute("DELETE FROM receipts", []).unwrap();
-    drop(db);
-    let store = Store::open(dir.path()).unwrap();
-    assert_eq!(
-        store.commit(&a, &intent, &head.etag()).unwrap_err().code,
-        "operation-history-expired"
-    );
-    assert_eq!(store.head().unwrap(), head);
+    let db = rusqlite::Connection::open(root.path().join("metadata.sqlite")).unwrap();
+    for table in [
+        "units",
+        "journal",
+        "operations",
+        "writers",
+        "writer_versions",
+    ] {
+        assert_eq!(
+            db.query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
 }
 #[test]
 fn corrupt_or_unregistered_object_is_never_served() {

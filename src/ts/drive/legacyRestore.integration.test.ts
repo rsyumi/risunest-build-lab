@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { BlobStore, BlobMetadata, BlobWriteMetadata } from 'src/ts/storage/blobStore'
 import type { Database } from 'src/ts/storage/database.svelte'
 import type { CommittedApplyOutcome } from 'src/ts/storage/persistentDataRuntime'
+import { File } from 'node:buffer'
 import { encodeRisuSaveLegacy } from 'src/ts/storage/risuSave'
 import { risuSaveFixtureDatabase } from 'src/ts/storage/tests/risuSaveFixtures'
 import { encodeBackupInlayEntry, getBackupInlayName } from 'src/ts/drive/backupAssets'
@@ -16,7 +17,7 @@ const state = vi.hoisted(() => ({
     } as const)),
 }))
 vi.mock('src/ts/alert', () => ({
-    alertConfirm: vi.fn(async () => true), alertError: vi.fn(), alertMd: vi.fn(),
+    alertConfirm: vi.fn(async () => true), alertCheckboxConfirm: vi.fn(async () => ({ confirmed: true, checked: true })), alertError: vi.fn(), alertMd: vi.fn(),
     alertNormal: vi.fn(), alertStore: { set: vi.fn() }, alertWait: vi.fn(),
 }))
 vi.mock('src/ts/nativeLog', () => ({ recordNativeLogError: vi.fn(async () => undefined) }))
@@ -61,7 +62,7 @@ vi.mock('src/ts/util', () => ({
     decryptBuffer: vi.fn(), encryptBuffer: vi.fn(), sleep: vi.fn(async () => undefined),
 }))
 vi.mock('src/ts/characterCards', () => ({ hubURL: 'https://synthetic.invalid' }))
-vi.mock('src/lang', () => ({ language: {} }))
+vi.mock('src/lang', async () => ({ language: (await import('src/lang/en')).languageEnglish }))
 
 function entry(name: string, data: Uint8Array): Uint8Array {
     const nameBytes = new TextEncoder().encode(name)
@@ -89,12 +90,7 @@ async function restore(bytes: Uint8Array, controller = new AbortController(), li
     const { importLegacyBackupWithWebView } = await import('src/ts/drive/backuplocal')
     const input = {
         type: '', accept: '',
-        files: [{
-            name: 'synthetic.bin', size: bytes.length,
-            stream: () => new ReadableStream<Uint8Array>({
-                start(controller) { controller.enqueue(bytes); controller.close() },
-            }),
-        }],
+        files: [new File([Buffer.from(bytes)], 'synthetic.bin')],
         onchange: null as null | (() => void),
         click: vi.fn(), remove: vi.fn(),
     }
@@ -194,7 +190,7 @@ describe('legacy WebView restore integrity', () => {
         const attachment = kind === 'asset' ? entry('existing.png', newBytes)
             : kind === 'pocket' ? entry('inlay/existing.png', newBytes)
             : entry(getBackupInlayName(key), encodeBackupInlayEntry({ ...metadata, kind: 'inlay', inlayType: 'image' }, newBytes))
-        for (const failure of ['missing', 'invalid', 'truncated', 'cancel', 'activation', 'write'] as const) {
+        for (const failure of ['missing', 'invalid', 'truncated', 'cancel', 'activation'] as const) {
             state.blobs.set(key, oldBytes.slice())
             state.metadata.set(key, structuredClone(metadata))
             state.replace.mockClear()
@@ -204,9 +200,9 @@ describe('legacy WebView restore integrity', () => {
             if (failure === 'invalid') bytes = archive(attachment, entry('database.risudat', new Uint8Array([0xff, 0xff, 0xff, 0xff])))
             if (failure === 'truncated') bytes = bytes.subarray(0, -1)
             if (failure === 'activation') state.replace.mockRejectedValueOnce(new Error('activation rejected'))
-            if (failure === 'cancel') state.afterPut.mockImplementationOnce(() => controller.abort())
-            if (failure === 'write') state.afterPut.mockImplementationOnce(() => { throw new Error('write failed after payload') })
-            const error = await restore(bytes, controller).then(() => null, (error: unknown) => error)
+            const error = await restore(bytes, controller, {
+                beforeActivation: async () => { if (failure === 'cancel') controller.abort() },
+            }).then(() => null, (error: unknown) => error)
             expect(error, failure).not.toBeNull()
             expect(state.blobs.get(key), failure).toEqual(oldBytes)
             expect(state.metadata.get(key), failure).toEqual(metadata)
@@ -224,23 +220,27 @@ describe('legacy WebView restore integrity', () => {
         expect(state.metadata.size).toBe(0)
     })
 
-    it('keeps attachments after a committed replacement that still needs projection', async () => {
+    it('reports the committed revision without adopting bodies when projection needs recovery', async () => {
         state.replace.mockResolvedValueOnce({ kind: 'committed', revision: 2, projection: 'refresh-required' })
-        await restore(archive(entry('new.png', new Uint8Array([1])), databaseEntry()))
-        expect(state.blobs.get('assets/new.png')).toEqual(new Uint8Array([1]))
+        await expect(restore(archive(entry('new.png', new Uint8Array([1])), databaseEntry())))
+            .rejects.toMatchObject({ committedRevision: 2, cause: {message: 'Committed backup projection requires recovery'} })
+        expect(state.replace).toHaveBeenCalledOnce()
+        expect(state.blobs.size).toBe(0)
+        expect(state.afterPut).not.toHaveBeenCalled()
     })
 
-    it('rolls back every published attachment if a later write fails', async () => {
+    it('retains the committed database and completed physical writes if a later body write fails', async () => {
         state.afterPut.mockImplementationOnce(() => undefined)
             .mockImplementationOnce(() => { throw new Error('second write failed') })
         await expect(restore(archive(
             entry('first.png', new Uint8Array([1])),
             entry('second.png', new Uint8Array([2])),
             databaseEntry(),
-        ))).rejects.toThrow('second write failed')
-        expect(state.blobs.size).toBe(0)
-        expect(state.metadata.size).toBe(0)
-        expect(state.replace).not.toHaveBeenCalled()
+        ))).rejects.toMatchObject({ committedRevision: 2, cause: {message: 'second write failed'} })
+        expect(state.blobs.get('assets/first.png')).toEqual(new Uint8Array([1]))
+        expect(state.blobs.get('assets/second.png')).toEqual(new Uint8Array([2]))
+        expect(state.metadata.get('assets/first.png')).toMatchObject({key: 'assets/first.png', size: 1})
+        expect(state.replace).toHaveBeenCalledOnce()
     })
     it('rejects a truncated trailing asset instead of activating the earlier database', async () => {
         const db = entry('database.risudat', encodeRisuSaveLegacy(structuredClone(risuSaveFixtureDatabase), 'compression'))

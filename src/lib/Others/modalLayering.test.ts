@@ -92,7 +92,16 @@ describe('modal layering', () => {
             expect(count(source, 'z-modal'), name).toBeGreaterThan(0)
             expect(/\bz-50\b/.test(source), `${name} still uses z-50`).toBe(false)
         }
-        expect(count(alertComp, 'z-modal')).toBe(6)
+        expect(count(alertComp, 'z-modal')).toBe(7)
+        const checkboxDialog = alertComp.slice(
+            alertComp.indexOf("{#if $alertStore.type === 'checkboxConfirm'"),
+            alertComp.indexOf("{:else if $alertStore.type !== 'none'"),
+        )
+        expect(count(checkboxDialog, 'z-modal')).toBe(1)
+        expect(checkboxDialog).toContain('role="dialog"')
+        expect(checkboxDialog).toContain('aria-modal="true"')
+        expect(checkboxDialog).toContain('aria-labelledby="checkbox-confirm-title"')
+        expect(checkboxDialog).toContain('aria-describedby="checkbox-confirm-description"')
     })
 
     it('leaves in-screen layers on their local z-index', () => {

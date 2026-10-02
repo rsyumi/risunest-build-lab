@@ -113,18 +113,15 @@ async function measureScopedConversationWrites(characterCount: number): Promise<
     const targetReads: Array<[string, string]> = []
     const commit = vi.fn(async (input: WorkingSetCommit) => {
         sampleHeap()
-        expect(input.conversations).toHaveLength(1)
-        const replacement = input.conversations![0]
-        expect(replacement).toMatchObject({
-            type: 'replace-range',
-            characterId: targetCharacterId,
-            conversationId: targetConversationId,
-        })
-        if (replacement.type !== 'replace-range') throw new Error('Expected conversation replacement')
-        durableConversation = {
-            ...structuredClone(replacement.conversation),
-            message: structuredClone(replacement.messages),
-        } as Chat
+        expect(input.conversations).toBeUndefined()
+        expect(input.unitMutations).toHaveLength(1)
+        for (const mutation of input.unitMutations ?? []) {
+            const key = JSON.parse(mutation.key)
+            expect(key).toEqual(['conversation', targetCharacterId, targetConversationId, 'name'])
+            expect(mutation.type).toBe('set')
+            if (mutation.type === 'delete') delete (durableConversation as unknown as Record<string, unknown>)[key[3]]
+            else Object.defineProperty(durableConversation, key[3], {value: structuredClone(mutation.value), enumerable: true, configurable: true, writable: true})
+        }
         return { revision: ++revision }
     })
     const store = {

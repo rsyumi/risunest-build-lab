@@ -6,6 +6,8 @@ import {
     type PersistentRoot,
 } from './persistentDataStore'
 import { safeStructuredClone } from '../polyfill'
+import { v4 } from 'uuid'
+import { presetMirrorMap, protectedPresetGroups, type ProtectedPresetField } from './effectiveIdentityState'
 
 export class PresetListChangedError extends Error {
     constructor() { super('Preset list changed'); this.name = 'PresetListChangedError' }
@@ -33,7 +35,7 @@ export function assertPresetNames(presets: readonly Pick<botPreset, 'name'>[], e
 }
 
 export interface PresetWorkingSetMutationState {
-    root: PersistentRoot
+    root: Omit<PersistentRoot, 'botPresetsId' | 'selectedPersona'> & Pick<Database, 'botPresetsId' | 'selectedPersona'>
     presets: botPreset[]
 }
 
@@ -41,6 +43,8 @@ export interface PresetWorkingSetControllerDependencies {
     getDatabase(): Database
     captureCurrentPreset(database: Database): botPreset | null
     applyPreset(root: PersistentRoot, preset: botPreset): void
+    getEffectivePresetId?(): string | undefined
+    clearEffectivePresetOverride?(): void
     mutatePersistentPresets(
         reason: string,
         mutate: (state: PresetWorkingSetMutationState) => void | Promise<void>,
@@ -102,11 +106,21 @@ export function createPresetWorkingSetController(
 ): PresetWorkingSetController {
     const saveActive = (state: PresetWorkingSetMutationState): void => {
         const database = dependencies.getDatabase()
-        const activeIndex = database.botPresetsId
+        const effectiveId = dependencies.getEffectivePresetId?.()
+        const activeIndex = effectiveId ? state.presets.findIndex(preset => preset.id === effectiveId) : database.botPresetsId
         if (!Number.isInteger(activeIndex) || activeIndex < 0) return
         assertPresetIndex(state.presets, activeIndex)
         const captured = dependencies.captureCurrentPreset(database)
-        if (captured) state.presets[activeIndex] = clonePreset(captured)
+        if (captured) {
+            const record = state.presets[activeIndex] as unknown as Record<string, unknown>
+            const value = captured as unknown as Record<string, unknown>
+            for (const field of Object.values(presetMirrorMap)) {
+                const flag = protectedPresetGroups[field as ProtectedPresetField]
+                if (flag && database[flag]) continue
+                if (Object.hasOwn(value, field)) record[field] = safeStructuredClone(value[field])
+                else delete record[field]
+            }
+        }
     }
 
     const select = (state: PresetWorkingSetMutationState, id: number): void => {
@@ -123,24 +137,26 @@ export function createPresetWorkingSetController(
                 saveActive(state)
             },
         ),
-        changeToPreset(id = 0, saveCurrent = true, expectedNames = capturePresetNames(dependencies.getDatabase().botPresets)) {
+        async changeToPreset(id = 0, saveCurrent = true, expectedNames = capturePresetNames(dependencies.getDatabase().botPresets)) {
             const before = capturePresetNames(dependencies.getDatabase().botPresets)
-            return dependencies.mutatePersistentPresets('change-preset', (state) => {
+            await dependencies.mutatePersistentPresets('change-preset', (state) => {
                 assertPresetNames(dependencies.getDatabase().botPresets, before)
                 assertPresetNames(dependencies.getDatabase().botPresets, expectedNames)
                 assertPresetNames(state.presets, presetNames(expectedNames))
                 if (saveCurrent) saveActive(state)
                 select(state, id)
             })
+            dependencies.clearEffectivePresetOverride?.()
         },
         async addPreset(preset, activate = false) {
             let addedIndex = -1
             await dependencies.mutatePersistentPresets('add-preset', (state) => {
                 saveActive(state)
                 addedIndex = state.presets.length
-                state.presets.push(clonePreset(preset))
+                state.presets.push({ ...clonePreset(preset), id: v4() })
                 if (activate) select(state, addedIndex)
             })
+            if (activate) dependencies.clearEffectivePresetOverride?.()
             return addedIndex
         },
         async copyPreset(id, expectedNames = capturePresetNames(dependencies.getDatabase().botPresets)) {
@@ -153,15 +169,16 @@ export function createPresetWorkingSetController(
                 saveActive(state)
                 assertPresetIndex(state.presets, id)
                 const copied = clonePreset(state.presets[id])
+                copied.id = v4()
                 copied.name = `${copied.name} Copy`
                 addedIndex = state.presets.length
                 state.presets.push(copied)
             })
             return addedIndex
         },
-        removePreset(id, expectedNames = capturePresetNames(dependencies.getDatabase().botPresets)) {
+        async removePreset(id, expectedNames = capturePresetNames(dependencies.getDatabase().botPresets)) {
             const before = capturePresetNames(dependencies.getDatabase().botPresets)
-            return dependencies.mutatePersistentPresets('remove-preset', (state) => {
+            await dependencies.mutatePersistentPresets('remove-preset', (state) => {
                 assertPresetNames(dependencies.getDatabase().botPresets, before)
                 assertPresetNames(dependencies.getDatabase().botPresets, expectedNames)
                 assertPresetNames(state.presets, presetNames(expectedNames))
@@ -173,6 +190,7 @@ export function createPresetWorkingSetController(
                 state.presets.splice(id, 1)
                 select(state, 0)
             })
+            dependencies.clearEffectivePresetOverride?.()
         },
         movePreset(fromIndex, toIndex, expectedNames = capturePresetNames(dependencies.getDatabase().botPresets)) {
             const before = capturePresetNames(dependencies.getDatabase().botPresets)
@@ -211,7 +229,8 @@ export function createPresetWorkingSetController(
         updateActivePresetImage(image) {
             return dependencies.mutatePersistentPresets('update-preset-image', (state) => {
                 saveActive(state)
-                const activeIndex = state.root.botPresetsId
+                const effectiveId = dependencies.getEffectivePresetId?.()
+                const activeIndex = effectiveId ? state.presets.findIndex(preset => preset.id === effectiveId) : state.root.botPresetsId
                 assertPresetIndex(state.presets, activeIndex)
                 state.presets[activeIndex].image = image
             })

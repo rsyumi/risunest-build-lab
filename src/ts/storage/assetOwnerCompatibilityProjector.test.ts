@@ -67,23 +67,27 @@ describe('pinned asset-owner compatibility projector', () => {
             ['missing', 'assets/missing.bin', 'unknown'],
         ]
         database.modules = [
-            { id: 'duplicate', name: 'Absent', description: '' },
-            { id: 'duplicate', name: 'Empty', description: '', assets: [] },
-            { id: 'duplicate', name: 'Ordered', description: '', assets: moduleTuples },
+            { id: 'module-1', name: 'Absent', description: '' },
+            { id: 'module-2', name: 'Empty', description: '', assets: [] },
+            { id: 'module-3', name: 'Ordered', description: '', assets: moduleTuples },
         ]
         database.personas = [
             {
-                name: 'No ID and absent assets',
+                id: 'persona-1',
+
+                name: 'Stable ID and absent assets',
                 personaPrompt: '',
                 icon: '',
-                embeddedModule: { id: '', name: 'Absent', description: '' },
+                embeddedModule: { id: 'embedded-1', name: 'Absent', description: '' },
             },
             {
-                name: 'No ID and duplicate assets',
+                id: 'persona-2',
+
+                name: 'Stable ID and duplicate assets',
                 personaPrompt: '',
                 icon: '',
                 embeddedModule: {
-                    id: '',
+                    id: 'embedded-2',
                     name: 'Present',
                     description: '',
                     assets: personaTuples,
@@ -114,29 +118,29 @@ describe('pinned asset-owner compatibility projector', () => {
             heads.push({ owner, ...manifest.head } as AssetOwnerHead)
         }
         heads.push({
-            owner: { kind: 'root-module-assets', index: 0 },
+            owner: { kind: 'root-module-assets', moduleId: root.modules?.[0 ]?.id ?? 'missing-module' },
             present: false,
             manifestHash: null,
             entryCount: 0,
         })
         await addPresentHead(
-            { kind: 'root-module-assets', index: 1 },
+            { kind: 'root-module-assets', moduleId: root.modules?.[1 ]?.id ?? 'missing-module' },
             [],
             [],
         )
         await addPresentHead(
-            { kind: 'root-module-assets', index: 2 },
+            { kind: 'root-module-assets', moduleId: root.modules?.[2 ]?.id ?? 'missing-module' },
             moduleManifestTuples,
             [new Uint8Array(32).fill(1), null, new Uint8Array(32).fill(1)],
         )
         heads.push({
-            owner: { kind: 'persona-embedded-module-assets', index: 0 },
+            owner: { kind: 'persona-embedded-module-assets', personaId: root.personas?.[0]?.id ?? 'missing-persona', moduleId: root.personas?.[0]?.embeddedModule?.id ?? 'missing-module' },
             present: false,
             manifestHash: null,
             entryCount: 0,
         })
         await addPresentHead(
-            { kind: 'persona-embedded-module-assets', index: 1 },
+            { kind: 'persona-embedded-module-assets', personaId: root.personas?.[1]?.id ?? 'missing-persona', moduleId: root.personas?.[1]?.embeddedModule?.id ?? 'missing-module' },
             personaTuples,
             [new Uint8Array(32).fill(2), new Uint8Array(32).fill(2)],
         )
@@ -199,7 +203,7 @@ describe('pinned asset-owner compatibility projector', () => {
             [null],
         )
         const head: AssetOwnerHead = {
-            owner: { kind: 'root-module-assets', index: 0 },
+            owner: { kind: 'root-module-assets', moduleId: root.modules?.[0 ]?.id ?? 'missing-module' },
             ...mismatched.head,
         } as AssetOwnerHead
         const shadowed = await store.commit({
@@ -279,7 +283,7 @@ describe('pinned asset-owner compatibility projector', () => {
             expectedRevision: imported.revision,
             root,
             assetOwnerHeads: [{
-                owner: { kind: 'root-module-assets', index: 0 },
+                owner: { kind: 'root-module-assets', moduleId: root.modules?.[0 ]?.id ?? 'missing-module' },
                 ...manifest.head,
             }],
         })

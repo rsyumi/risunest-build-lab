@@ -124,7 +124,10 @@ describe('coordinator review regressions', () => {
         const commit = vi.spyOn(store, 'commit')
         expect(await coordinator.expirePersistentTrash(now)).toBe(200)
         expect(commit).toHaveBeenCalledTimes(2)
-        expect(commit.mock.calls.map(([input]) => input.deleteCharacterIds?.length)).toEqual([128, 72])
+        const deletionBatches = commit.mock.calls.map(([input]) => input.unitMutations?.filter((mutation) =>
+            mutation.type === 'delete').map((mutation) => JSON.parse(mutation.key)))
+        expect(deletionBatches.map((batch) => batch?.length)).toEqual([128, 72])
+        expect(deletionBatches.flat()).toEqual(expired.map((value) => ['exists', 'character', value.chaId]))
         const restored = await store.materializeDatabase(coordinator.revision)
         expect(restored.characters.map((value) => value.chaId)).toEqual(['char-a', 'group', 'trashed-group'])
         for (const id of ['group', 'trashed-group']) {
@@ -147,7 +150,10 @@ describe('coordinator review regressions', () => {
         const before = await store.materializeDatabase(coordinator.revision)
         const commit = vi.spyOn(store, 'commit').mockRejectedValueOnce(new Error('synthetic expiry failure'))
         await expect(coordinator.expirePersistentTrash(10 * 24 * 60 * 60 * 1000)).rejects.toThrow('synthetic expiry failure')
-        expect(commit.mock.calls[0][0].deleteCharacterIds).toEqual(['char-a', 'char-b'])
+        expect(commit.mock.calls[0][0].unitMutations?.filter((mutation) => mutation.type === 'delete')
+            .map((mutation) => JSON.parse(mutation.key))).toEqual([
+                ['exists', 'character', 'char-a'], ['exists', 'character', 'char-b'],
+            ])
         expect(await store.materializeDatabase(coordinator.revision)).toEqual(before)
         expect(database.characters).toHaveLength(3)
         expect(database.characters.find((value) => value.chaId === 'group')).toMatchObject({
@@ -224,6 +230,7 @@ describe('coordinator review regressions', () => {
         database.characters.push({ ...structuredClone(database.characters[0]), chaId: 'delete-me' })
         database.characterOrder = ['char-a', 'delete-me']
         const { coordinator, store } = await durableHarness(database, 'char-a')
+        const commit = vi.spyOn(store, 'commit')
         const entered = deferred<void>()
         const resume = deferred<void>()
         const acquire = store.acquireRevision.bind(store)
@@ -245,6 +252,10 @@ describe('coordinator review regressions', () => {
         coordinator.markPersistentDataDirty(0)
         resume.resolve()
         await expect(deleting).resolves.toBe(true)
+        expect((await store.readRoot()).value.username).toBe('Fixture')
+        expect(database.username).toBe('Concurrent root edit')
+        expect(commit.mock.calls[0][0].rootMutations).toBeUndefined()
+        expect(commit.mock.calls[0][0].root).toBeUndefined()
         await coordinator.flushPendingDataLocally('preserve-concurrent-edits')
         expect((await store.readRoot()).value.username).toBe('Concurrent root edit')
         expect((await store.readConversation('char-a', 'chat'))?.value.message[0].data).toBe('Concurrent chat edit')

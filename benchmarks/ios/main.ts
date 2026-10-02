@@ -33,8 +33,7 @@ async function resetLegacyMeasurementProfile() {
   const profile = await nativeDataPath();
   const ownershipPath = await join(profile, "legacy-restore-profile-owner.json");
   const owner = "io.github.rsyumi.risunest.ios.bench:legacy-restore-v1";
-  const opened = await invoke<{ revision: number; restoreFailure?: string }>("pds_open");
-  check(!opened.restoreFailure, "Fresh synthetic profile required after restore failure");
+  const opened = await invoke<{ revision: number }>("pds_open");
   if (await exists(ownershipPath)) {
     check(new TextDecoder().decode(await readFile(ownershipPath)) === owner, "Synthetic profile ownership mismatch");
   } else {

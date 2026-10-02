@@ -29,7 +29,7 @@ pub struct ManagementConnection {
 impl Store {
     pub fn managed_devices(&self) -> Result<Vec<ManagedDevice>> {
         let db = self.reader()?;
-        let mut query = db.prepare("SELECT id,name,revoked,EXISTS(SELECT 1 FROM commit_jobs WHERE device=devices.id),registration_request,last_ack,(SELECT count(*) FROM object_custody WHERE device=devices.id),COALESCE((SELECT error FROM commit_jobs WHERE device=devices.id),(SELECT j.error FROM upload_jobs j JOIN uploads u ON u.id=j.upload WHERE u.device=devices.id AND j.terminal=0 AND j.error IS NOT NULL LIMIT 1)) FROM devices ORDER BY rowid")?;
+        let mut query = db.prepare("SELECT id,name,revoked,EXISTS(SELECT 1 FROM upload_jobs j JOIN uploads u ON u.id=j.upload WHERE u.device=devices.id AND j.terminal=0),registration_request,last_ack,(SELECT count(*) FROM object_custody WHERE device=devices.id),(SELECT j.error FROM upload_jobs j JOIN uploads u ON u.id=j.upload WHERE u.device=devices.id AND j.terminal=0 AND j.error IS NOT NULL LIMIT 1) FROM devices ORDER BY rowid")?;
         let rows = query.query_map([], |row| {
             Ok(ManagedDevice {
                 id: row.get(0)?,

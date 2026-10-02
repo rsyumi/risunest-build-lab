@@ -25,7 +25,7 @@ export interface RemoveChatMessageOptions {
     getCurrentSession(): ActiveConversationSession | null
     mutationBlocked?(): boolean
     confirmRemoval(): Promise<boolean>
-    confirmInstantRemoval(): Promise<boolean>
+    confirmInstantRemoval(): Promise<{ confirmed: boolean; checked: boolean }>
 }
 
 export async function removeChatMessage(options: RemoveChatMessageOptions): Promise<'removed' | 'cancelled' | 'stale' | 'blocked'> {
@@ -40,18 +40,14 @@ export async function removeChatMessage(options: RemoveChatMessageOptions): Prom
 
     if (options.shiftKey) return mutateCapturedTarget(options, target, 'truncate')
 
+    if (options.instantRemove || options.recursive) {
+        const result = await options.confirmInstantRemoval()
+        if (!result.confirmed) return 'cancelled'
+        if (!isCurrentTarget(options, target)) return 'stale'
+        return mutateCapturedTarget(options, target, result.checked ? 'delete' : 'truncate')
+    }
     if (options.askRemoval && !await options.confirmRemoval()) return 'cancelled'
     if (!isCurrentTarget(options, target)) return 'stale'
-
-    if (options.instantRemove || options.recursive) {
-        const removeOnlySelected = await options.confirmInstantRemoval()
-        if (!isCurrentTarget(options, target)) return 'stale'
-        return mutateCapturedTarget(
-            options,
-            target,
-            removeOnlySelected ? 'delete' : 'truncate',
-        )
-    }
     return mutateCapturedTarget(options, target, 'delete')
 }
 

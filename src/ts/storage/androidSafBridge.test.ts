@@ -10,10 +10,43 @@ import {
     pickAndroidLegacyBackupSource,
     pickAndroidContentSource,
     pickAndroidBackupSource,
+    pickAndroidPortableBackupSource,
     type AndroidSafDestinationEvent,
 } from './androidSafBridge'
 
 describe('Android SAF bridge', () => {
+    it.each(['androidSeekable', 'androidSpool'] as const)('keeps the portable selector custody receipt typed as %s', async (sourceType) => {
+        const listeners = new Map<string, (event: Event) => void>()
+        const picker = vi.fn((requestId: string) => queueMicrotask(() => listeners.get('risu-android-portable-source-picked')?.(
+            new CustomEvent('risu-android-portable-source-picked', {detail: {requestId, ready: [{sourceType, token: '11111111-1111-4111-8111-111111111111', displayName: 'synthetic.risunest', bytes: 4_294_967_296}], failures: []}}),
+        )))
+        const copy = vi.fn()
+        await expect(pickAndroidPortableBackupSource({}, {
+            createRequestId: () => 'custody-picker', bridge: {copyExport: copy, pickPortableBackupSource: picker},
+            addEventListener: (name, listener) => {listeners.set(name, listener)},
+            removeEventListener: name => {listeners.delete(name)},
+        })).resolves.toEqual({type: sourceType, token: '11111111-1111-4111-8111-111111111111'})
+        expect(copy).not.toHaveBeenCalled()
+        expect(picker).toHaveBeenCalledExactlyOnceWith('custody-picker')
+        expect(listeners.size).toBe(0)
+    })
+    it('cancels selected custody with the custody authority and never deletes a spool substitute', async () => {
+        const listeners = new Map<string, (event: Event) => void>()
+        const controller = new AbortController()
+        const discard = vi.fn(() => true)
+        const discardSpool = vi.fn(() => true)
+        const picked = pickAndroidPortableBackupSource({signal: controller.signal}, {
+            createRequestId: () => 'custody-cancel', bridge: {copyExport: vi.fn(), pickPortableBackupSource: vi.fn(), cancelSource: vi.fn(), discardPortableSource: discard, discardSource: discardSpool},
+            addEventListener: (name, listener) => {listeners.set(name, listener)},
+            removeEventListener: name => {listeners.delete(name)},
+        })
+        const rejected = expect(picked).rejects.toMatchObject({name: 'AbortError'})
+        controller.abort()
+        listeners.get('risu-android-portable-source-picked')?.(new CustomEvent('risu-android-portable-source-picked', {detail: {requestId:'custody-cancel', ready:[{sourceType:'androidSeekable', token:'owned-token', displayName:'synthetic.risunest', bytes:42}], failures:[]}}))
+        await rejected
+        expect(discard).toHaveBeenCalledExactlyOnceWith('owned-token')
+        expect(discardSpool).not.toHaveBeenCalled()
+    })
     it.each(['complete.RISUNEST', 'compatible.BIN', 'block.RISUDAT'])(
         'picks %s through the common backup picker without transferring bytes to JavaScript',
         async (displayName) => {

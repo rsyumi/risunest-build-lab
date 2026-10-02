@@ -37,7 +37,6 @@ pub(super) async fn prepare(app: &AppHandle) -> Result<(), String> {
     if let Some(media) = app.try_state::<crate::native_media::streaming::MediaServerState>() {
         media.begin_cleanup()?;
     }
-    crate::server_sync::events::server_sync_events_stop(app.clone());
     let connections =
         app.state::<crate::external_storage::connection_commands::ConnectionCommandState>();
     let jobs = app.state::<crate::external_storage::job_store::JobCommandState>();

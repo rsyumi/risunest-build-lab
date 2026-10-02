@@ -13,7 +13,6 @@
     import { getExternalStorageBridge } from 'src/ts/storage/sync/external/bridge'
     import {
         buildPrepareConnectionRequest,
-        defaultExternalCapturePolicy,
         requiredConnectionAcknowledgements,
     } from 'src/ts/storage/sync/external/connection'
     import {
@@ -82,9 +81,6 @@
             oauthRedirectUri: 'https://update.rsyumi.workers.dev/oauth/google-drive-callback',
         } : {}),
     })
-    let hypa = $state(true)
-    let localPlugins = $state(true)
-    let localSettings = $state(true)
     let accepted = $state<string[]>([])
     let prepared = $state<PreparedExternalConnection | null>(null)
     let endpointConfirmed = $state(false)
@@ -139,21 +135,17 @@
         providerDescriptors.find(provider => provider.id === providerId)?.authorizationAvailable ?? true,
     )
     const providerStrings = $derived(strings.providers[providerId])
-    const supportsSync = $derived(definition.supportsSync)
+    const supportsSync = $derived(definition.supportsSync && bridge.supported)
     const providerOptions = $derived(externalProviderDefinitions.map(provider => ({
         value: provider.id,
         label: externalProviderName(strings, provider.id),
         disabled: providerDescriptors.find(item => item.id === provider.id)?.authorizationAvailable === false,
     })))
-    const purposeOptions = $derived([
-        { value: 'backup' as const, label: strings.backup },
-        ...(supportsSync ? [{ value: 'sync' as const, label: strings.sync }] : []),
-    ])
     const scopeSummary = $derived([
         strings.library,
-        ...(hypa ? [strings.hypa] : []),
-        ...(localPlugins ? [strings.devicePlugins] : []),
-        ...(localSettings ? [strings.deviceSettings] : []),
+        strings.hypa,
+        strings.devicePlugins,
+        strings.deviceSettings,
     ].join(', '))
     const providerWarning = $derived('warningTitle' in providerStrings
         ? { title: providerStrings.warningTitle, body: providerStrings.warning }
@@ -363,9 +355,6 @@
             request = buildPrepareConnectionRequest({
                 providerId, values: locationValues(), platform, mode, purpose,
                 recoveryKey: mode === 'existing' ? recoveryKey.trim() : undefined,
-                capturePolicy: purpose === 'backup'
-                    ? { hypa, localPlugins, localSettings }
-                    : defaultExternalCapturePolicy(purpose),
                 acknowledgements: accepted,
             })
         } catch {
@@ -374,6 +363,7 @@
             return
         }
         try {
+            if (purpose === 'sync' && (!definition.oauth || request.config.location.folderId || request.config.location.syncRootPath)) await bridge.validateSyncRoot(request.config)
             prepared = await bridge.prepareConnection(request)
         } catch (reason) {
             error = externalErrorMessage(strings, reason)
@@ -649,6 +639,10 @@
                 <SegmentedButtons value={mode} label={strings.mode} role="radiogroup" disabled={prepared !== null} onchange={selectMode} options={[{ value: 'create', label: strings.create }, { value: 'existing', label: strings.existing }]} />
                 {#if mode === 'existing'}<small>{strings.existingHelp}</small>{/if}
             </div>{/if}
+            {#if supportsSync && !restoreOnly}<div class="field">
+                <span>{strings.purposeReview}</span>
+                <SegmentedButtons value={purpose} label={strings.purposeReview} role="radiogroup" disabled={prepared !== null} onchange={selectPurpose} options={[{ value: 'backup', label: strings.backup }, { value: 'sync', label: strings.sync }]} />
+            </div>{/if}
         </div>
         {#if !authorizationAvailable}<p class="note danger"><span>{strings.authorizationUnavailable}</span></p>{/if}
         {#if googleAndroid}<p class="note"><span>{strings.googleAndroidSetup}</span></p>{/if}
@@ -656,22 +650,6 @@
         {#if isTauriIOS && providerId === 'google_drive'}<p class="note"><span>{strings.googleIOSSetup}</span></p>{/if}
         {#if isTauriIOS && providerId === 'onedrive'}<p class="note"><span>{strings.oneDriveIOSSetup}</span></p>{/if}
     </section>
-
-    {#if mode === 'create'}
-    <section class="sub">
-        <h3 class="sub-title">{strings.purpose}</h3>
-        <div class="field">
-            <SegmentedButtons value={purpose} label={strings.purpose} role="radiogroup" disabled={prepared !== null} onchange={selectPurpose} options={purposeOptions} />
-            {#if !supportsSync}<small>{strings.backupOnlyProvider}</small>{/if}
-            <small>{strings.purposeHelp}</small>
-        </div>
-        {#if purpose === 'sync'}
-            <div class="field">
-                <small>{strings.sequentialWarning}</small>
-            </div>
-        {/if}
-    </section>
-    {/if}
 
     {#if providerWarning}
         <div class="warning">
@@ -743,20 +721,7 @@
         </div>
     </section>
 
-    {#if mode === 'create' && purpose === 'backup'}
-    <fieldset class="sub">
-        <legend class="sub-title">{strings.scope}</legend>
-        <p class="note"><span>{strings.scopeHelp}</span></p>
-        <p class="always"><span>{strings.library}</span><span class="value">{strings.included}</span></p>
-        <p class="note"><span>{strings.libraryHelp}</span></p>
-        <SettingToggle showLabel label={strings.hypa} bind:checked={hypa} onchange={resetPrepared} />
-        <p class="note"><span>{strings.hypaHelp}</span></p>
-        <SettingToggle showLabel label={strings.devicePlugins} bind:checked={localPlugins} onchange={resetPrepared} />
-        <p class="note"><span>{strings.devicePluginsHelp}</span></p>
-        <SettingToggle showLabel label={strings.deviceSettings} bind:checked={localSettings} onchange={resetPrepared} />
-        <p class="note"><span>{strings.deviceSettingsHelp}</span></p>
-    </fieldset>
-    {/if}
+
     </fieldset>
     {/if}
 
@@ -789,9 +754,6 @@
                 {/if}
                 {#if prepared.requiresPlatformOAuthClient && prepared.oauthProjectHint}<dt>{strings.oauthProjectHint}</dt><dd>{prepared.oauthProjectHint}</dd>{/if}
             </dl>
-            {#if mode === 'create' && purpose === 'sync'}
-                <p class="note"><span>{strings.syncPurposeLocalDataNotice}</span></p>
-            {/if}
             {#each prepared.endpoint.warnings as warning (warning)}<p class="note"><span>{externalEndpointWarning(strings, warning)}</span></p>{/each}
 
             {#if folderSelection}
@@ -930,17 +892,6 @@
         line-height: 1.45;
         color: var(--risu-theme-textcolor2);
     }
-    .always {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 0.35rem;
-        margin: 0;
-        font-size: 0.8125rem;
-        color: var(--risu-theme-textcolor2);
-    }
-    .always .value {
-        font-weight: 600;
-    }
     .actions {
         display: flex;
         flex-wrap: wrap;
@@ -1044,7 +995,8 @@
         min-width: 0;
         font: inherit;
     }
-    .textarea {
+    .textarea,
+    .datetime {
         min-height: 6rem;
         resize: vertical;
     }

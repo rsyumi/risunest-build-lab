@@ -43,8 +43,10 @@ fn preservation_keeps_distinct_source_paths_even_when_bytes_are_live() {
     let archive =
         VerifiedArchive::open(File::open(path).unwrap(), directory.path(), &Never).unwrap();
     let inventory = RestoreInventory::build(&archive, directory.path(), &Never).unwrap();
+    let store=crate::persistent_store::PersistentStore::open(directory.path()).unwrap();
+    let mut pins=crate::asset_repository::job_pins::DurableCasJob::begin(directory.path(),"preserve-distinct",crate::asset_repository::job_pins::CasJobKind::LocalBackupRestore,0).unwrap();
     let report = inventory
-        .preserve(&archive, directory.path(), &Never)
+        .preserve(&archive, &store, &mut pins, &Never)
         .unwrap()
         .unwrap();
     assert_eq!(report.files, "1");
@@ -70,11 +72,101 @@ fn preservation_keeps_distinct_source_paths_even_when_bytes_are_live() {
 }
 
 #[test]
+fn present_unreferenced_preservation_reuses_cas_without_archive_body_io_and_rebacks_up() {
+    let directory=tempfile::tempdir().unwrap();
+    let catalog=fixture(directory.path());
+    let hash=hex::encode(Sha256::digest(b"synthetic file bytes"));
+    catalog.add_file("preserved","assets/unreferenced.bin","{}",Some((&directory.path().join("payload"),20)),Some(&hash),&Never).unwrap();
+    let archive_path=directory.path().join("preserved.risunest");
+    catalog.write_candidate(&archive_path,false,&Never).unwrap();
+    let mut store=crate::persistent_store::PersistentStore::open(directory.path()).unwrap();
+    let cas=crate::asset_repository::PayloadCas::new(directory.path()).unwrap();
+    let object=cas.prepare_bytes(b"synthetic file bytes").unwrap();
+    store.asset_object_catalog().register(&[crate::persistent_store::asset_object_catalog::AssetObjectRegistration {object_hash:object.content_hash.clone(),byte_size:object.byte_size}],0).unwrap();
+    let mut pins=crate::asset_repository::job_pins::DurableCasJob::begin(directory.path(),"preserve-present",crate::asset_repository::job_pins::CasJobKind::LocalBackupRestore,0).unwrap();
+    source_io::reset_source_io();
+    let archive=VerifiedArchive::open_for_restore(File::open(archive_path).unwrap(),directory.path(),&Never).unwrap();
+    let inventory=RestoreInventory::build(&archive,directory.path(),&Never).unwrap();
+    crate::asset_repository::body_io::reset_body_io();
+    let report=inventory.preserve(&archive,&store,&mut pins,&Never).unwrap().unwrap();
+    let observed=source_io::take_source_io();
+    assert!(observed.complete());
+    assert!(observed.objects.is_empty());
+    let destination=crate::asset_repository::body_io::take_body_io();
+    assert!(destination.complete());
+    let assets=destination.asset_work();
+    assert_eq!(assets.opens,0);
+    assert_eq!(assets.read_bytes,0);
+    assert_eq!(assets.staging_write_attempts,0);
+    assert_eq!(assets.publication_attempts,0);
+    assert!(assets.body_sha.values().all(|work|work.bytes==0));
+    assert_eq!(report.bytes,"0");
+    let index=rusqlite::Connection::open(std::path::Path::new(&report.path).join("index.sqlite")).unwrap();
+    let storage:String=index.query_row("SELECT storage_kind FROM source_files",[],|row|row.get(0)).unwrap();
+    assert_eq!(storage,"cas");
+    assert!(fs::read_dir(std::path::Path::new(&report.path).join("objects")).unwrap().next().is_none());
+    let recapture=Catalog::create(directory.path(),"synthetic-recapture",0).unwrap();
+    recapture.capture_preserved_sources(directory.path(),&Never).unwrap();
+    let copied:String=recapture.db.query_row("SELECT lower(hex(object_hash)) FROM files",[],|row|row.get(0)).unwrap();
+    assert_eq!(copied,hash);
+    let roots=store.asset_gc_dry_run(10,None,100,0).unwrap();
+    assert!(roots.report.marked_hashes.contains(&hash));
+}
+
+#[test]
+fn independent_backup_reads_server_held_body_without_source_promotion_or_outbox_ack() {
+    use crate::server_sync::lww_tests::{LocalServerFixture, local, put_asset, save};
+    let server=LocalServerFixture::new();
+    let (root,mut store)=local();
+    let initial=store.replace_begin().unwrap();
+    store.replace_put_root(&initial.staging_id,&serde_json::json!({"language":"ko"})).unwrap();
+    store.replace_commit(&initial.staging_id,Some(0)).unwrap();
+    let client=server.client(&store);
+    let body=vec![73;128*1024+1];
+    let hash=put_asset(&mut store,"assets/synthetic-held.bin",&body).object_hash.unwrap();
+    let request=crate::server_sync::lww_tests::header(&store);
+    client.push(&mut store,&request,&[]).unwrap();
+    store.asset_residency_set_policy(crate::server_sync::residency::AssetPolicy::Remote,||Ok(())).unwrap();
+    store.asset_residency_evict(||Ok(())).unwrap();
+    let cas=crate::asset_repository::PayloadCas::new(root.path()).unwrap();
+    assert!(cas.stat_object(&hash).unwrap().is_none());
+    save(&mut store,&["root","language"],serde_json::json!("en"));
+    assert_eq!(store.read_root(None).unwrap().value["language"],serde_json::json!("en"),"native fixture must contain a real projected root before capture");
+    let authority=store.lww_binding_authority().unwrap();
+    let before_outbox=serde_json::to_value(store.lww_read_outbox(authority,100).unwrap()).unwrap();
+    let before_clock=serde_json::to_value(store.lww_clock_state().unwrap()).unwrap();
+    let before_progress=serde_json::to_value(store.lww_receive_progress(authority).unwrap()).unwrap();
+    assert!(!before_outbox["entries"].as_array().unwrap().is_empty());
+    let revision=store.revision().unwrap();
+    let job=tempfile::tempdir_in(root.path()).unwrap();
+    let mut pins=crate::asset_repository::job_pins::DurableCasJob::begin(root.path(),"synthetic-held-backup",crate::asset_repository::job_pins::CasJobKind::OfficialPublicationOrExportPreparation,0).unwrap();
+    source_io::reset_source_io();
+    let capture=capture_library(&mut store,revision,job.path(),&mut pins,false,&Never,"synthetic").unwrap();
+    assert!(!capture.repair_required,"synthetic validation: {:?}",capture.catalog.validate_library(&Never));
+    assert_eq!(source_io::snapshot_source_io().captures.len(),1);
+    assert_eq!(source_io::snapshot_source_io().captures[0].revision,revision);
+    let path=job.path().join("held.risunest");
+    capture.catalog.write_candidate(&path,false,&Never).unwrap();
+    assert_eq!(serde_json::to_value(store.lww_read_outbox(authority,100).unwrap()).unwrap(),before_outbox);
+    assert_eq!(serde_json::to_value(store.lww_clock_state().unwrap()).unwrap(),before_clock);
+    assert_eq!(serde_json::to_value(store.lww_receive_progress(authority).unwrap()).unwrap(),before_progress);
+    assert!(cas.stat_object(&hash).unwrap().is_none());
+    assert!(crate::server_sync::residency::Residency::open(root.path()).unwrap().object(&hash,None).unwrap().is_some());
+    drop(server);
+    let archive=VerifiedArchive::open_for_restore(File::open(path).unwrap(),job.path(),&Never).unwrap();
+    let (mut input,size)=archive.open_object(&hash).unwrap();
+    let mut copied=Vec::new();
+    input.read_to_end(&mut copied).unwrap();
+    assert_eq!(size,body.len() as u64);
+    assert_eq!(copied,body);
+}
+
+#[test]
 fn archived_payload_roots_are_installed_and_missing_payload_is_attributed_to_character() {
     let directory = tempfile::tempdir().unwrap();
     let catalog = fixture(directory.path());
     let hash = hex::encode(Sha256::digest(b"synthetic file bytes"));
-    let archived = serde_json::json!({"objectHash":hash,"archivedAt":1,"conversationCount":1,"messageCount":1,"assetHashes":[]});
+    let archived = serde_json::json!({"objectHash":hash,"archivedAt":1,"conversationCount":1,"messageCount":1,"assetHashes":[],"sharedObjectHash":hash,"sharedAssetHashes":[],"identityRemap":[]});
     catalog.db.execute("INSERT INTO characters VALUES('archived',0,0,0,'Archived',NULL,0,'character',NULL,NULL,?1,?2)", rusqlite::params![r#"{"chaId":"archived","name":"Archived","type":"character"}"#,archived.to_string()]).unwrap();
     let path = directory.path().join("archived.risunest");
     catalog.write_candidate(&path, false, &Never).unwrap();
@@ -84,7 +176,7 @@ fn archived_payload_roots_are_installed_and_missing_payload_is_attributed_to_cha
 
     let missing = "f".repeat(64);
     let catalog = fixture(directory.path());
-    let archived = serde_json::json!({"objectHash":missing,"archivedAt":1,"conversationCount":1,"messageCount":1,"assetHashes":[]});
+    let archived = serde_json::json!({"objectHash":missing,"archivedAt":1,"conversationCount":1,"messageCount":1,"assetHashes":[],"sharedObjectHash":hash,"sharedAssetHashes":[],"identityRemap":[]});
     catalog.db.execute("INSERT INTO characters VALUES('archived',0,0,0,'Archived',NULL,0,'character',NULL,NULL,?1,?2)", rusqlite::params![r#"{"chaId":"archived","name":"Archived","type":"character"}"#,archived.to_string()]).unwrap();
     let path = directory.path().join("missing.risunest");
     catalog.write_candidate(&path, false, &Never).unwrap();
@@ -498,4 +590,68 @@ fn cancellation_during_archive_construction_cannot_produce_a_valid_backup() {
         Err(Error::Cancelled)
     ));
     assert!(VerifiedArchive::open(File::open(path).unwrap(), directory.path(), &Never).is_err());
+}
+#[test]
+fn restore_metadata_reader_observes_real_ranges_without_opening_asset_bodies() {
+    let directory=tempfile::tempdir().unwrap();
+    let path=directory.path().join("observed.risunest");
+    fixture(directory.path()).write_candidate(&path,false,&Never).unwrap();
+    source_io::reset_source_io();
+    let archive=VerifiedArchive::open_for_restore(File::open(&path).unwrap(),directory.path(),&Never).unwrap();
+    let work=source_io::take_source_io();
+    assert!(work.complete());
+    assert!(work.objects.is_empty());
+    assert!(work.catalog_hashed_bytes>0);
+    assert!(!work.metadata_ranges.is_empty());
+    assert!(!work.declared_ranges.is_empty());
+    for metadata in &work.metadata_ranges {
+        for body in work.declared_ranges.values() {
+            assert!(metadata.bytes==0 || body.bytes==0 || metadata.offset+metadata.bytes<=body.offset || body.offset+body.bytes<=metadata.offset,"metadata reader consumed object bytes");
+        }
+    }
+    source_io::reset_source_io();
+    let hash=hex::encode(Sha256::digest(b"synthetic file bytes"));
+    let (mut body,size)=archive.open_object(&hash).unwrap();
+    let mut bytes=Vec::new();
+    body.read_to_end(&mut bytes).unwrap();
+    drop(body);
+    assert_eq!(bytes,b"synthetic file bytes");
+    let work=source_io::take_source_io();
+    assert!(work.complete());
+    let row=&work.objects[&hash];
+    assert_eq!(row.opens,1);
+    assert_eq!(row.bytes,size);
+    assert_eq!(row.hashed_bytes,size);
+    assert_eq!(row.hash_checks,1);
+    assert!(row.ranges.iter().any(|range|range.bytes==size));
+}
+
+#[test]
+fn portable_source_observer_marks_partial_reads_incomplete_and_attaches_worker_scope() {
+    let directory=tempfile::tempdir().unwrap();
+    let path=directory.path().join("partial.risunest");
+    fixture(directory.path()).write_candidate(&path,false,&Never).unwrap();
+    source_io::reset_source_io();
+    let scope=source_io::capture_scope();
+    let hash=hex::encode(Sha256::digest(b"synthetic file bytes"));
+    let observed=std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let calls=observed.clone();
+    let expected=hash.clone();
+    source_io::on_object_read(move |hash| {assert_eq!(hash,expected);calls.fetch_add(1,std::sync::atomic::Ordering::SeqCst);});
+    std::thread::spawn(move|| {
+        let _attachment=source_io::attach(&scope);
+        let archive=VerifiedArchive::open_for_restore(File::open(path).unwrap(),directory.path(),&Never).unwrap();
+        let (mut body,_)=archive.open_object(&hash).unwrap();
+        body.read_exact(&mut [0;3]).unwrap();
+    }).join().unwrap();
+    let work=source_io::take_source_io();
+    assert!(!work.complete());
+    assert_eq!(work.workers.len(),1);
+    let row=work.objects.values().next().unwrap();
+    assert_eq!(row.bytes,3);
+    assert_eq!(row.hashed_bytes,3);
+    assert_eq!(row.incomplete,1);
+    assert_eq!(row.outstanding,0);
+    assert_eq!(row.hash_checks,0);
+    assert_eq!(observed.load(std::sync::atomic::Ordering::SeqCst),1);
 }

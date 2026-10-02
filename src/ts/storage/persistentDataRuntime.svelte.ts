@@ -1,3 +1,6 @@
+import { generatingConversations } from './generatingConversationRegistry'
+import type { LwwStageReceive, LwwApplyResult, PersistentUnitMutation, ConversationMutation, WholeMessageIntent } from './persistentDataStore'
+import { flushPersistentIdentityEdits, derivePersistentIdentityMirrors } from './persistentIdentityHooks'
 import { isConversationStreaming } from './streamingConversationRegistry'
 import { createPersistenceCanonicalCapture } from './reactivePersistenceCapture.svelte'
 import { isTauri } from '../platform'
@@ -65,6 +68,7 @@ import {
     patchWorkingSetRoot,
     isArchivedCharacter,
     isCatalogCharacterStub,
+    isWorkingSetCharacterStub,
     isCatalogPresetWorkingSet,
 } from './workingSetCatalog'
 import {
@@ -74,6 +78,7 @@ import {
     resolveLifecyclePluginStorageOwner,
 } from '../plugins/pluginStorageStore'
 import {
+    canonicalClone,
     applyPluginStorageMutationsInPlace,
     orderPluginStorageKeys,
 } from './saveCoordinatorHelpers'
@@ -96,19 +101,38 @@ export { createPersistentDataRuntime } from './persistentDataRuntime'
 type CompleteCharacter = character | groupChat
 
 export function createProductionStateAdapter(): PersistentDataRuntimeStateAdapter {
+    const characterIndex = $derived.by(() => new Map(getDatabase().characters.map((value) => [value.chaId,value])))
+    const residentIndex = $derived.by(() => new Map([...characterIndex].filter(([,value]) => !isWorkingSetCharacterStub(value))))
+    const residentCharacters = () => [...residentIndex.values()].filter((value) => !workingSetResidency.isCharacterReleased(value.chaId))
+    const residentPresets = $derived.by(() => {
+        const presets = getDatabase().botPresets ?? []
+        return isCatalogPresetWorkingSet(presets) ? presets.filter((value) => value && Object.keys(value).some((key) => !['id','name','image'].includes(key))) : []
+    })
     const readSelectedCharacter = () => {
-        const database = getDatabase()
-        const selected = captureSelectedPersistentCharacter(database, selIdState.selId)
-        return selected ? captureResidentPersistentCharacter(database, selected.chaId) : null
+        const selected = getDatabase().characters[selIdState.selId]
+        return selected && !isWorkingSetCharacterStub(selected) && !workingSetResidency.isCharacterReleased(selected.chaId) ? selected : null
     }
     const canonicalCapture = createPersistenceCanonicalCapture({
         root: getDatabase,
+        rootField(key, value) {
+            const database = getDatabase()
+            if (key === 'botPresetsId') return database.botPresets?.[database.botPresetsId]?.['id'] ?? value
+            if (key === 'selectedPersona') return database.personas?.[database.selectedPersona]?.id ?? value
+            return value
+        },
+        characters: residentCharacters,
         pluginStorage: () => capturePersistentPluginStorage(getDatabase()),
         presets: () => capturePersistentPresets(getDatabase()),
         character: readSelectedCharacter,
     })
     return {
         canonicalCapture,
+        beforeCapture: flushPersistentIdentityEdits,
+        afterRemoteApply: derivePersistentIdentityMirrors,
+        captureCharacterIndex: () => characterIndex,
+        captureCharacters() {
+            return residentCharacters()
+        },
         captureRoot() {
             return capturePersistentRoot(getDatabase())
         },
@@ -132,6 +156,9 @@ export function createProductionStateAdapter(): PersistentDataRuntimeStateAdapte
                 notifyPluginStorageCompatibilityMutation(mutation)
             }
         },
+        capturePresetRecords() {
+            return residentPresets
+        },
         capturePresets() {
             return capturePersistentPresets(getDatabase())
         },
@@ -139,7 +166,7 @@ export function createProductionStateAdapter(): PersistentDataRuntimeStateAdapte
             return readSelectedCharacter()
         },
         captureCharacter(id) {
-            return captureResidentPersistentCharacter(getDatabase(), id)
+            return workingSetResidency.isCharacterReleased(id) ? null : residentIndex.get(id) ?? null
         },
         getSelectedCharacterId() {
             return getDatabase().characters[get(selectedCharID)]?.chaId
@@ -178,9 +205,11 @@ export function createProductionStateAdapter(): PersistentDataRuntimeStateAdapte
         publishPresetWorkingSet({ revision, root, presets }) {
             const database = getDatabase()
             const scalable = isCatalogPresetWorkingSet(database.botPresets)
-            patchWorkingSetRoot(database, root)
+            const loadedIds = new Set(database.botPresets.filter((value) => Object.keys(value).some((key) => !['id','name','image'].includes(key))).map((value) => value['id']))
             if (!scalable) {
                 database.botPresets = presets
+                patchWorkingSetRoot(database, root)
+                derivePersistentIdentityMirrors()
                 return
             }
             database.botPresets = createPresetCatalogWorkingSetFromValues(
@@ -188,6 +217,12 @@ export function createProductionStateAdapter(): PersistentDataRuntimeStateAdapte
                 revision,
                 root.botPresetsId,
             )
+            for (let index = 0; index < database.botPresets.length; index++) {
+                const id = database.botPresets[index]?.['id']
+                if (loadedIds.has(id)) database.botPresets[index] = canonicalClone(presets.find((value) => value['id'] === id)!)
+            }
+            patchWorkingSetRoot(database, root)
+            derivePersistentIdentityMirrors()
         },
         publishRootWorkingSet(root) {
             patchWorkingSetRoot(getDatabase(), root)
@@ -370,6 +405,7 @@ export function createProductionStateAdapter(): PersistentDataRuntimeStateAdapte
         onPluginStorageChanged(owner) {
             notifyPluginStorageOwnerChanged(owner)
         },
+        getGeneratingConversations: () => generatingConversations.snapshot(),
         getGeneratingConversation() {
             const database = getDatabase()
             const character = database.characters[get(selectedCharID)]
@@ -480,6 +516,12 @@ export const acknowledgeGenerationCompletion = async (expectedAuthorityEpoch?: n
     await runtime.acknowledgeGenerationCompletion(authorityEpoch)
     runtime.assertPersistentMutationAllowed(authorityEpoch)
     notifyLocalPersistentRevision(runtime.revision, 'generation-complete')
+}
+export const drainDeferredLwwReceives = async (expectedAuthorityEpoch?: number): Promise<void> => {
+    const runtime = getPersistentDataRuntime()
+    const authorityEpoch = expectedAuthorityEpoch ?? runtime.getStorageAuthorityEpoch()
+    await runtime.drainLwwDeferred(authorityEpoch)
+    runtime.assertPersistentMutationAllowed(authorityEpoch)
 }
 export const commitCharacterAddition = (
     request: CharacterAdditionRequest,
@@ -743,3 +785,13 @@ export const publishCurrentOfficialRevision = (): Promise<void> =>
 
 export const hasPendingOfficialPublication = (): boolean =>
     getPersistentDataRuntime().hasPendingOfficialPublication()
+
+export const getPersistentRevision = (): DataRevision => getPersistentDataRuntime().revision
+export const applyPersistentLwwReceive = (request: LwwStageReceive): Promise<LwwApplyResult> => getPersistentDataRuntime().applyLwwReceive(request)
+export const commitPersistentUnitIntent = (reason: string, mutations: readonly PersistentUnitMutation[], conversations?: readonly ConversationMutation[], wholeMessages?: readonly WholeMessageIntent[]): Promise<void> =>
+    getPersistentDataRuntime().commitPersistentUnitIntent(reason, mutations, conversations, wholeMessages)
+export const withPausedPersistentWrites = <T>(reason: string, operation: (token: PersistentMutationToken) => Promise<T>): Promise<T> => getPersistentDataRuntime().withPausedPersistentWrites(reason, operation)
+
+export const beginActivatedLibraryGuard = (token: PersistentMutationToken) => getPersistentDataRuntime().beginActivatedLibraryGuard(token)
+
+export const refreshActivatedLibraryUnderPause = (token: import("./saveCoordinator").PersistentMutationToken) => getPersistentDataRuntime().refreshActivatedLibraryUnderPause(token)

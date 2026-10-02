@@ -146,7 +146,7 @@ import {
     registerWindowCloseDrain,
 } from './storage/syncExitProduction'
 import { getExternalStorageBridge } from './storage/sync/external/bridge'
-import { createServerSyncExitDrainAdapter, holdServerSyncAfterRestore, getServerSyncController } from './storage/sync/serverSyncProduction'
+import { createServerSyncExitDrainAdapter, holdServerSyncAfterRestore, getServerSyncController, initializeNativeSyncBindings, installServerSyncProduction, disposeNativeSyncBindings } from './storage/sync/serverSyncProduction'
 import {
     retainableReplacementFence,
     type RetainableReplacementFence,
@@ -587,7 +587,12 @@ export async function loadData() {
             configureNativeOfficialAccountFlow(null)
         }
         performance.mark('boot:account-ready')
+        if (isTauri) {
+            initializeNativeSyncBindings()
+            window.addEventListener('pagehide', disposeNativeSyncBindings, { once: true })
+        }
         if (isTauri && !excluded('sync')) {
+            await installServerSyncProduction()
             await transition('drive-sync', language.risuNest.startup.account)
             try {
                 const { installExternalStorageProduction } = await import(

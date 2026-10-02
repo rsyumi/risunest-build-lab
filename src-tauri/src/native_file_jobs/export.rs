@@ -181,6 +181,7 @@ pub(crate) fn export_block_risu_save(
             revision: prepared.revision,
             source_bytes: result.bytes,
             source_sha256: result.sha256,
+            source_fingerprint_kind: crate::native_file_jobs::SourceFingerprintKind::WholeFileSha256,
             character_count: encoded.character_count,
             preset_count: encoded.preset_count,
             warning_codes: Vec::new(),
@@ -262,9 +263,11 @@ mod tests {
     use crate::native_file_jobs::{JobKind, JobRegistry};
     use crate::persistent_store::PersistentStore;
     use base64::{engine::general_purpose::STANDARD, Engine as _};
-    use serde_json::json;
+    use flate2::bufread::GzDecoder;
+    use serde_json::{json, Value};
     use sha2::{Digest, Sha256};
     use std::fs;
+    use std::io::Read;
     use tempfile::TempDir;
 
     fn fixture() -> (TempDir, PersistentStore, i64) {
@@ -272,7 +275,7 @@ mod tests {
         let mut store = PersistentStore::open(directory.path()).unwrap();
         let staging = store.replace_begin().unwrap().staging_id;
         store
-            .replace_put_root(
+            .replace_put_upstream_root(
                 &staging,
                 &json!({
                     "username": "Native Export",
@@ -285,7 +288,7 @@ mod tests {
             )
             .unwrap();
         store
-            .replace_put_presets(
+            .replace_put_upstream_presets(
                 &staging,
                 &[json!({ "name": "Preset A" }), json!({ "name": "Preset B" })],
             )
@@ -343,6 +346,30 @@ mod tests {
         }
     }
 
+    fn decoded_blocks(bytes: &[u8]) -> Vec<(u8, String, Value)> {
+        assert_eq!(&bytes[..9], b"RISUSAVE\0");
+        let mut offset = 9;
+        let mut blocks = Vec::new();
+        while offset < bytes.len() {
+            let block_type = bytes[offset];
+            assert_eq!(bytes[offset + 1], 1);
+            let name_length = bytes[offset + 2] as usize;
+            offset += 3;
+            let name = String::from_utf8(bytes[offset..offset + name_length].to_vec()).unwrap();
+            offset += name_length;
+            let length = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
+            offset += 4;
+            let mut decoder = GzDecoder::new(&bytes[offset..offset + length]);
+            let mut payload = Vec::new();
+            decoder.read_to_end(&mut payload).unwrap();
+            assert!(decoder.get_ref().is_empty());
+            offset += length;
+            blocks.push((block_type, name, serde_json::from_slice(&payload).unwrap()));
+        }
+        assert_eq!(offset, bytes.len());
+        blocks
+    }
+
     #[test]
     fn desktop_job_preserves_current_block_bytes_and_omit_account_semantics() {
         for omit_account in [false, true] {
@@ -363,13 +390,37 @@ mod tests {
             let result =
                 export_block_risu_save(prepared, &destination, omit_account, Some(&json!({"token":"secret"})), &job).unwrap();
 
-            assert_eq!(fs::read(&destination).unwrap(), expected);
+            let actual = fs::read(&destination).unwrap();
+            let actual_blocks = decoded_blocks(&actual);
+            let mut expected_blocks = decoded_blocks(&expected);
+            let materialized = store.materialize(Some(revision)).unwrap();
+            assert_eq!(materialized["botPresetsId"], materialized["botPresets"][0]["id"]);
+            expected_blocks[0].2["botPresetsId"] = json!(0);
+            for (block_name, field) in [("preset", "botPresets"), ("modules", "modules"), ("loadouts", "loadouts")] {
+                let block = expected_blocks.iter_mut().find(|block| block.1 == block_name).unwrap();
+                let records = block.2.as_array_mut().unwrap();
+                let imported = materialized[field].as_array().unwrap();
+                assert_eq!(records.len(), imported.len());
+                let mut ids = std::collections::HashSet::new();
+                for (record, imported_record) in records.iter_mut().zip(imported) {
+                    let id = imported_record["id"].as_str().unwrap();
+                    assert!(uuid::Uuid::parse_str(id).is_ok());
+                    assert!(ids.insert(id));
+                    record["id"] = json!(id);
+                }
+            }
+            assert_eq!(actual_blocks, expected_blocks);
             assert_eq!(result.revision, revision);
-            assert_eq!(result.source_bytes, expected.len() as u64);
-            assert_eq!(result.source_sha256, expected_sha256);
+            assert_eq!(result.source_bytes, actual.len() as u64);
+            assert_eq!(result.source_sha256, hex::encode(Sha256::digest(&actual)));
             assert_eq!(result.character_count, 2);
             assert_eq!(result.preset_count, 2);
             assert_eq!(job.status().phase, JobPhase::FinalizingExport);
+            let repeated = directory.path().join("repeated.risudat");
+            let repeated_job = JobRegistry::default().create(JobKind::ExportBlockRisuSave).unwrap();
+            let prepared = store.prepare_risu_save_export(revision).unwrap();
+            export_block_risu_save(prepared, &repeated, omit_account, Some(&json!({"token":"secret"})), &repeated_job).unwrap();
+            assert_eq!(fs::read(repeated).unwrap(), actual);
             let exports = directory.path().join("persistent").join("exports");
             assert!(fs::read_dir(exports).unwrap().next().is_none());
         }

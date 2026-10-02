@@ -1,13 +1,25 @@
-// payload_cas.rs reaches its shared trust-boundary helpers through
-// crate::trust_boundary, so this standalone compilation provides the same
-// module at the test-crate root.
+// Include the actual source modules under their production paths so the
+// standalone harness exercises the same observers and repository coordinator.
 #[path = "../src/trust_boundary.rs"]
 mod trust_boundary;
 
-#[path = "../src/asset_repository/payload_cas.rs"]
-mod payload_cas;
+#[path = "../src/asset_repository"]
+mod asset_repository {
+    #[path = "body_io.rs"]
+    pub(crate) mod body_io;
+    #[path = "coordinator.rs"]
+    pub(crate) mod coordinator;
+    #[path = "payload_cas.rs"]
+    pub(crate) mod payload_cas;
+}
 
-use payload_cas::{PayloadCas, PreparedPayload};
+#[path = "../src/persistent_store"]
+mod persistent_store {
+    #[path = "hash_work.rs"]
+    pub(crate) mod hash_work;
+}
+
+use asset_repository::payload_cas::{PayloadCas, PreparedPayload};
 use std::ffi::OsString;
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};

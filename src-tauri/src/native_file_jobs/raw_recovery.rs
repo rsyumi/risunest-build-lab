@@ -362,6 +362,7 @@ pub(super) fn publish(
         revision: 0,
         source_bytes: captured.bytes,
         source_sha256: captured.sha256,
+        source_fingerprint_kind: crate::native_file_jobs::SourceFingerprintKind::WholeFileSha256,
         character_count: 0,
         preset_count: 0,
         warning_codes: if captured.partial {

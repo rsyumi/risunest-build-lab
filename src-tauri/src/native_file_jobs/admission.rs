@@ -5,6 +5,7 @@ pub(crate) struct Admission(Mutex<State>);
 #[derive(Default, Debug)]
 struct State {
     files: usize,
+    staging: usize,
     exclusive: bool,
     server: bool,
 }
@@ -16,6 +17,7 @@ pub(crate) struct Permit {
 #[derive(Debug)]
 enum Kind {
     File(bool),
+    Staging,
     Server,
 }
 impl Admission {
@@ -24,7 +26,10 @@ impl Admission {
             .0
             .lock()
             .map_err(|_| "library-operation-state-unavailable")?;
-        if state.server || state.exclusive || (exclusive && state.files != 0) {
+        if state.server
+            || state.exclusive
+            || (exclusive && (state.files != 0 || state.staging != 0))
+        {
             return Err("library-operation-busy");
         }
         state.files += 1;
@@ -32,6 +37,20 @@ impl Admission {
         Ok(Permit {
             admission: self.clone(),
             kind: Kind::File(exclusive),
+        })
+    }
+    pub(crate) fn staging(self: &Arc<Self>) -> Result<Permit, &'static str> {
+        let mut state = self
+            .0
+            .lock()
+            .map_err(|_| "library-operation-state-unavailable")?;
+        if state.exclusive {
+            return Err("library-operation-busy");
+        }
+        state.staging += 1;
+        Ok(Permit {
+            admission: self.clone(),
+            kind: Kind::Staging,
         })
     }
     pub(crate) fn server(self: &Arc<Self>) -> Result<Permit, &'static str> {
@@ -49,6 +68,29 @@ impl Admission {
         })
     }
 }
+impl Permit {
+    pub(crate) fn upgrade_staging(&mut self) -> Result<(), &'static str> {
+        if matches!(self.kind, Kind::File(true)) {
+            return Ok(());
+        }
+        if !matches!(self.kind, Kind::Staging) {
+            return Err("library-operation-state-unavailable");
+        }
+        let mut state = self
+            .admission
+            .0
+            .lock()
+            .map_err(|_| "library-operation-state-unavailable")?;
+        if state.server || state.files != 0 || state.staging != 1 {
+            return Err("library-operation-busy");
+        }
+        state.staging -= 1;
+        state.files += 1;
+        state.exclusive = true;
+        self.kind = Kind::File(true);
+        Ok(())
+    }
+}
 impl Drop for Permit {
     fn drop(&mut self) {
         if let Ok(mut state) = self.admission.0.lock() {
@@ -59,6 +101,7 @@ impl Drop for Permit {
                         state.exclusive = false;
                     }
                 }
+                Kind::Staging => state.staging -= 1,
                 Kind::Server => state.server = false,
             }
         }
@@ -67,6 +110,29 @@ impl Drop for Permit {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn isolated_upstream_staging_overlaps_receive_and_upgrades_only_when_lanes_are_idle() {
+        let admission = Arc::new(Admission::default());
+        let mut staging = admission.staging().unwrap();
+        let receive = admission.server().unwrap();
+        assert!(staging.upgrade_staging().is_err());
+        assert!(admission.file(true).is_err());
+        drop(receive);
+        let ordinary = admission.file(false).unwrap();
+        assert!(staging.upgrade_staging().is_err());
+        drop(ordinary);
+        let other_stage = admission.staging().unwrap();
+        assert!(staging.upgrade_staging().is_err());
+        drop(other_stage);
+        staging.upgrade_staging().unwrap();
+        staging.upgrade_staging().unwrap();
+        assert!(admission.server().is_err());
+        assert!(admission.file(false).is_err());
+        assert!(admission.staging().is_err());
+        drop(staging);
+        assert!(admission.server().is_ok());
+    }
+
     #[test]
     fn server_and_backup_exclude_each_other_until_owner_settles() {
         let admission = Arc::new(Admission::default());

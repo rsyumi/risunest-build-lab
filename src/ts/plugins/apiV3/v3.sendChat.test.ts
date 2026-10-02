@@ -5,6 +5,7 @@ import { ActiveConversationSession } from '../../storage/activeConversationSessi
 import { doingChat as generationDoingChat } from '../../process/generationState'
 
 const mocks = vi.hoisted(() => ({
+    authoritativeLoad: vi.fn(async()=>{}),
     api: null as any,
     database: null as any,
     selectedId: 0,
@@ -25,6 +26,7 @@ const ownedStorageStub = {
 vi.mock('../plugins.svelte', () => {
     const oldApis = new Proxy({}, { get: () => vi.fn() })
     return {
+        loadPluginsAfterAuthoritativeRestore: mocks.authoritativeLoad,
         allowedDbKeys: [],
         applyPreparedPluginDatabaseUpdate: vi.fn(),
         customProviderStore: { subscribe: (run: (value: string[]) => void) => { run([]); return () => undefined }, set: vi.fn() },
@@ -93,6 +95,9 @@ vi.mock('src/ts/process/ttsHooks', () => ({
     registerTTSPostprocessor: vi.fn(), unregisterTTSPostprocessor: vi.fn(),
 }))
 vi.mock('src/ts/storage/persistentDataRuntime.svelte', () => ({
+    refreshSelectedConversationAfterReplacement: vi.fn(),
+    getPersistentRevision: () => 1,
+    commitPersistentUnitIntent: vi.fn(async()=>{}),
     acquireCompleteConversation: mocks.acquireCompleteConversation,
     captureSelectedConversationTarget: () => mocks.selectedTarget,
     flushPendingDataLocally: vi.fn(),
@@ -279,4 +284,12 @@ describe('Plugin v3 sendChat complete mutation gateway', () => {
         expect(mocks.processSendChat).not.toHaveBeenCalled()
         expect(releaseCount).toBe(1)
     })
+})
+
+
+it('restarts authority replacements through the full fresh plugin loader once',async()=>{
+    const {restartPluginsAfterAuthorityReplacement}=await import('./v3.svelte')
+    mocks.authoritativeLoad.mockClear()
+    await restartPluginsAfterAuthorityReplacement()
+    expect(mocks.authoritativeLoad).toHaveBeenCalledExactlyOnceWith()
 })

@@ -1,5 +1,5 @@
 mod common;
-use common::changes;
+use common::{inline, request, WRITER_A, WRITER_B};
 use reqwest::{Client, RequestBuilder, StatusCode};
 use risunest_sync_server::{
     http,
@@ -7,8 +7,9 @@ use risunest_sync_server::{
 };
 use risunest_sync_wire::{
     hash,
+    lww::{PushReceipt, PushRequest},
     transfer::{self, Frame},
-    CommitIntent, Receipt, RemoteHead, TerminalStatus,
+    RemoteHead,
 };
 use std::{sync::Arc, time::Duration};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -29,6 +30,179 @@ struct Server {
     b: DeviceCredential,
     task: tokio::task::JoinHandle<()>,
     _dir: tempfile::TempDir,
+}
+
+#[tokio::test]
+async fn removed_coordination_endpoints_have_no_aliases() {
+    let server = Server::start().await;
+    for (method, path) in [
+        (reqwest::Method::POST, "/read-pins"),
+        (reqwest::Method::GET, "/read-pins/synthetic"),
+        (reqwest::Method::POST, "/checkpoints"),
+        (reqwest::Method::GET, "/checkpoints/synthetic"),
+        (reqwest::Method::GET, "/scopes"),
+        (reqwest::Method::POST, "/staged-changes"),
+        (reqwest::Method::POST, "/staged-changes/start"),
+        (reqwest::Method::POST, "/staged-changes/synthetic/seal"),
+        (reqwest::Method::PUT, "/staged-changes/synthetic/pages/0"),
+        (reqwest::Method::POST, "/commits"),
+        (reqwest::Method::POST, "/acks"),
+        (reqwest::Method::GET, "/events"),
+    ] {
+        let response = server
+            .auth(
+                server
+                    .client
+                    .request(method, format!("{}{path}", server.base)),
+                &server.a,
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
+    }
+}
+
+#[tokio::test]
+async fn bootstrap_paging_and_restored_cursor_errors_are_structured() {
+    use risunest_sync_wire::lww::{StatePage, StatePin, TimeSample};
+    let server = Server::start().await;
+    let actor = server
+        .store
+        .authenticate(&server.a.library_id, &server.a.token)
+        .unwrap();
+    server
+        .store
+        .push(
+            &actor,
+            &request(
+                &server.store,
+                WRITER_A,
+                "bootstrap",
+                vec![inline("a", WRITER_A, 1, "a"), inline("b", WRITER_A, 2, "b")],
+            ),
+        )
+        .unwrap();
+    let sample: TimeSample = server
+        .auth(
+            server.client.get(format!("{}/time", server.base)),
+            &server.a,
+        )
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(sample.precision_ms.0, 1);
+    let pin: StatePin = server
+        .auth(
+            server.client.post(format!("{}/state/pins", server.base)),
+            &server.a,
+        )
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(pin.start_seq.0, 2);
+    let first: StatePage = server
+        .auth(
+            server.client.get(format!("{}/state", server.base)),
+            &server.a,
+        )
+        .query(&[("pin", pin.pin_id.as_str()), ("limit", "1")])
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(first.items.len(), 1);
+    let after = first.next_key.unwrap();
+    let last: StatePage = server
+        .auth(
+            server.client.get(format!("{}/state", server.base)),
+            &server.a,
+        )
+        .query(&[
+            ("pin", pin.pin_id.as_str()),
+            ("limit", "1"),
+            ("afterKey", after.as_str()),
+        ])
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(last.items.len(), 1);
+    assert!(last.next_key.is_none());
+    assert_ne!(first.items[0].key, last.items[0].key);
+    for cursor in ["3", "9007199254740993"] {
+        let response = server
+            .auth(
+                server.client.get(format!("{}/changes", server.base)),
+                &server.a,
+            )
+            .query(&[("after", cursor)])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::GONE);
+        let error: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(error["error"], "journal-floor");
+        assert_eq!(error["journalFloor"], "0");
+        assert_eq!(error["latestSeq"], "2");
+    }
+    for query in [
+        "after=01",
+        "after=-1",
+        "after=0&limit=0",
+        "after=0&limit=1025",
+    ] {
+        let response = server
+            .auth(
+                server
+                    .client
+                    .get(format!("{}/changes?{query}", server.base)),
+                &server.a,
+            )
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query}");
+    }
+    let response = server
+        .auth(
+            server
+                .client
+                .delete(format!("{}/state/pins/{}", server.base, pin.pin_id)),
+            &server.a,
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let response = server
+        .auth(
+            server.client.get(format!("{}/state", server.base)),
+            &server.a,
+        )
+        .query(&[("pin", pin.pin_id.as_str())])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::GONE);
 }
 
 #[tokio::test]
@@ -260,24 +434,6 @@ async fn session_identity_and_previous_device_status_are_authenticated_and_revoc
         session,
         serde_json::json!({"head":server.store.head().unwrap(),"deviceId":server.a.device_id,"operationWatermark":"0","operationPending":false,"protocolId":risunest_sync_server::PROTOCOL_ID})
     );
-    let scope: serde_json::Value = server
-        .auth(
-            server
-                .client
-                .get(format!("{}/scopes?scope=plugin-storage", server.base)),
-            &server.a,
-        )
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
-    let (version, clear) = server.store.scope_state("plugin-storage").unwrap();
-    assert_eq!(
-        scope,
-        serde_json::json!({"head":server.store.head().unwrap(),"scope":"plugin-storage","version":version,"clearVersion":clear})
-    );
     let url = format!("{}/devices/{}/status", server.base, server.a.device_id);
     let before: serde_json::Value = server
         .auth(server.client.get(&url), &server.b)
@@ -397,41 +553,14 @@ impl Server {
         assert_eq!(bytes, expected);
         fallback
     }
-    async fn stage(
+    async fn push(
         &self,
         device: &DeviceCredential,
-        head: RemoteHead,
-        seq: u64,
-        key: &str,
-        body: &[u8],
-    ) -> CommitIntent {
+        request: &PushRequest,
+    ) -> (StatusCode, PushReceipt) {
         let response = self
-            .auth(
-                self.client.post(format!("{}/staged-changes", self.base)),
-                device,
-            )
-            .json(&changes(key, body))
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::CREATED);
-        let value: serde_json::Value = response.json().await.unwrap();
-        CommitIntent {
-            device_operation_seq: seq.into(),
-            expected_head: head,
-            changes_digest: value["changesDigest"].as_str().unwrap().into(),
-            staged_changes_id: value["stagedChangesId"].as_str().unwrap().into(),
-        }
-    }
-    async fn commit(
-        &self,
-        device: &DeviceCredential,
-        intent: &CommitIntent,
-    ) -> (StatusCode, Receipt) {
-        let response = self
-            .auth(self.client.post(format!("{}/commits", self.base)), device)
-            .header("if-match", intent.expected_head.etag())
-            .json(intent)
+            .auth(self.client.post(format!("{}/push", self.base)), device)
+            .json(request)
             .send()
             .await
             .unwrap();
@@ -439,110 +568,6 @@ impl Server {
     }
 }
 
-#[tokio::test]
-async fn tcp_vertical_slice_conditional_head_exact_bytes_receipt_and_revoke() {
-    let s = Server::start().await;
-    let head = s.head(&s.a).await;
-    let response = s
-        .auth(s.client.get(format!("{}/head", s.base)), &s.a)
-        .header("if-none-match", head.etag())
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
-    assert!(response.bytes().await.unwrap().is_empty());
-    assert!(serde_json::to_vec(&head).unwrap().len() <= 1024);
-    let body = br#"{ "opaque":1.0, "other":9007199254740993 }"#;
-    s.upload(&s.a, body).await;
-    assert_eq!(s.head(&s.a).await, head);
-    let intent = s
-        .stage(&s.a, head.clone(), 1, "character/synthetic", body)
-        .await;
-    let (status, receipt) = s.commit(&s.a, &intent).await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(s.commit(&s.a, &intent).await.1, receipt);
-    let response = s
-        .auth(s.client.get(format!("{}/changes", s.base)), &s.b)
-        .query(&[
-            ("epoch", head.epoch.as_str()),
-            ("afterSeq", "0"),
-            ("afterOrdinal", "1024"),
-            ("throughSeq", "1"),
-            ("domains", "library"),
-            ("limit", "1"),
-        ])
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let page: risunest_sync_server::store::ChangePage = response.json().await.unwrap();
-    assert_eq!(page.through, receipt.head);
-    assert_eq!(page.entries[0].change.key, "character/synthetic");
-    let downloaded = s
-        .auth(
-            s.client.get(format!("{}/objects/{}", s.base, hash(body))),
-            &s.b,
-        )
-        .send()
-        .await
-        .unwrap()
-        .bytes()
-        .await
-        .unwrap();
-    assert_eq!(downloaded.as_ref(), body);
-    let response = s
-        .auth(
-            s.client
-                .get(format!("{}/operations/{}", s.base, receipt.operation_id)),
-            &s.b,
-        )
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    s.store.revoke_device(&s.a.device_id).unwrap();
-    let response = s
-        .auth(s.client.get(format!("{}/head", s.base)), &s.a)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
-    assert_eq!(s.head(&s.b).await, receipt.head);
-}
-#[tokio::test]
-async fn two_tcp_clients_race_then_reconcile_with_new_operation() {
-    let s = Server::start().await;
-    let head = s.head(&s.a).await;
-    tokio::join!(s.upload(&s.a, b"a"), s.upload(&s.b, b"b"));
-    let ia = s.stage(&s.a, head.clone(), 1, "a", b"a").await;
-    let ib = s.stage(&s.b, head, 1, "b", b"b").await;
-    let (ra, rb) = tokio::join!(s.commit(&s.a, &ia), s.commit(&s.b, &ib));
-    assert_eq!(
-        [ra.0, rb.0]
-            .iter()
-            .filter(|&&v| v == StatusCode::OK)
-            .count(),
-        1
-    );
-    assert_eq!(
-        [ra.0, rb.0]
-            .iter()
-            .filter(|&&v| v == StatusCode::PRECONDITION_FAILED)
-            .count(),
-        1
-    );
-    let (device, key, body) = if ra.0 == StatusCode::PRECONDITION_FAILED {
-        (&s.a, "a", b"a")
-    } else {
-        (&s.b, "b", b"b")
-    };
-    let next = s.stage(device, s.head(device).await, 2, key, body).await;
-    assert_eq!(
-        s.commit(device, &next).await.1.status,
-        TerminalStatus::Committed
-    );
-    assert_eq!(s.head(device).await.seq.as_str(), "2");
-}
 #[tokio::test]
 async fn unauthorized_large_unfinished_body_is_rejected_before_reading_it() {
     let s = Server::start().await;
@@ -589,10 +614,13 @@ async fn stalled_upload_does_not_hold_library_writer_or_another_device_slot() {
     tcp.write_all(&frame[..10]).await.unwrap();
     tokio::time::timeout(Duration::from_secs(2), async {
         s.upload(&s.b, b"concurrent").await;
-        let intent = s
-            .stage(&s.b, s.head(&s.b).await, 1, "b", b"concurrent")
-            .await;
-        assert_eq!(s.commit(&s.b, &intent).await.0, StatusCode::OK);
+        let request = request(
+            &s.store,
+            WRITER_B,
+            "concurrent",
+            vec![inline("b", WRITER_B, 1, "concurrent")],
+        );
+        assert_eq!(s.push(&s.b, &request).await.0, StatusCode::OK);
     })
     .await
     .unwrap();
@@ -680,7 +708,7 @@ async fn malformed_metadata_and_frame_fail_without_mutation() {
     let s = Server::start().await;
     let head = s.head(&s.a).await;
     let response = s
-        .auth(s.client.post(format!("{}/staged-changes", s.base)), &s.a)
+        .auth(s.client.post(format!("{}/push", s.base)), &s.a)
         .body(r#"{"changes":[],"changes":[],"readFences":[]}"#)
         .send()
         .await
@@ -775,11 +803,28 @@ async fn truncated_frames_never_publish_objects_or_allow_a_commit() {
         "invalid-upload-frame"
     );
     assert!(s.store.object_size(&hash(first)).unwrap().is_none());
-    let intent = s.stage(&s.a, head.clone(), 1, "incomplete", first).await;
+    let descriptor = risunest_sync_wire::descriptor::RecordDescriptor {
+        object_hash: hash(first),
+        dependencies: vec![],
+        dependency_root: None,
+        relations: vec![],
+        relation_root: None,
+        scopes: vec![],
+    };
+    let request = request(
+        &s.store,
+        WRITER_A,
+        "incomplete",
+        vec![common::unit(
+            &["root", "incomplete"],
+            WRITER_A,
+            1,
+            risunest_sync_wire::unit::UnitValue::object(descriptor).unwrap(),
+        )],
+    );
     let response = s
-        .auth(s.client.post(format!("{}/commits", s.base)), &s.a)
-        .header("if-match", head.etag())
-        .json(&intent)
+        .auth(s.client.post(format!("{}/push", s.base)), &s.a)
+        .json(&request)
         .send()
         .await
         .unwrap();
@@ -867,7 +912,7 @@ async fn transfer_and_full_required_get_reject_other_libraries_and_revoked_devic
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn chunk_upload_delta_download_checkpoint_and_durable_job_over_tcp() {
+async fn chunk_upload_delta_download_and_state_pin_over_tcp() {
     use risunest_sync_wire::{
         delta,
         transfer::{self, Frame},
@@ -955,205 +1000,56 @@ async fn chunk_upload_delta_download_checkpoint_and_durable_job_over_tcp() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
     assert_eq!(&response.bytes().await.unwrap()[..], b"new-content");
-    let head = s.head(&s.a).await;
-    let response = s
-        .auth(
-            s.client.post(format!("{}/staged-changes/start", s.base)),
-            &s.a,
-        )
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap();
-    let id = response.json::<serde_json::Value>().await.unwrap()["stagedChangesId"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    for index in 0..2 {
-        let page = changes(&format!("key-{index}"), &target);
-        s.auth(
-            s.client
-                .put(format!("{}/staged-changes/{id}/pages/{index}", s.base)),
-            &s.a,
-        )
-        .json(&page)
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap();
-    }
-    let sealed = s
+    let request = request(
+        &s.store,
+        WRITER_A,
+        "transferred",
+        vec![
+            inline("one", WRITER_A, 1, "one"),
+            inline("two", WRITER_A, 1, "two"),
+        ],
+    );
+    let (status, receipt) = s.push(&s.a, &request).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(receipt.seq.0, 2);
+    let operation = s
         .auth(
             s.client
-                .post(format!("{}/staged-changes/{id}/seal", s.base)),
+                .get(format!("{}/operations/{}", s.base, request.operation_id)),
             &s.a,
         )
         .send()
         .await
-        .unwrap()
-        .error_for_status()
         .unwrap()
         .json::<serde_json::Value>()
         .await
         .unwrap();
-    let intent = CommitIntent {
-        device_operation_seq: 1.into(),
-        expected_head: head.clone(),
-        staged_changes_id: id,
-        changes_digest: sealed["changesDigest"].as_str().unwrap().into(),
-    };
-    let response = s
-        .auth(s.client.post(format!("{}/commits", s.base)), &s.a)
-        .header("if-match", head.etag())
-        .json(&intent)
+    assert_eq!(operation["status"], "accepted");
+    let pin = s
+        .auth(s.client.post(format!("{}/state/pins", s.base)), &s.b)
         .send()
         .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
-    let operation = response.json::<serde_json::Value>().await.unwrap()["operationId"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    loop {
-        let status = s
-            .auth(
-                s.client.get(format!("{}/operations/{operation}", s.base)),
-                &s.a,
-            )
-            .send()
-            .await
-            .unwrap()
-            .error_for_status()
-            .unwrap()
-            .json::<serde_json::Value>()
-            .await
-            .unwrap();
-        if status["status"] == "committed" {
-            break;
-        }
-        assert!(tokio::time::Instant::now() < deadline);
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    assert_eq!(s.head(&s.a).await.seq.as_str(), "1");
-    let checkpoint = s
-        .auth(s.client.post(format!("{}/checkpoints", s.base)), &s.b)
-        .json(&serde_json::json!({"domains":["library"]}))
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
         .unwrap()
         .json::<serde_json::Value>()
         .await
         .unwrap();
-    let id = checkpoint["checkpointId"].as_str().unwrap();
     let page = s
         .auth(
-            s.client.get(format!("{}/checkpoints/{id}?limit=1", s.base)),
+            s.client.get(format!(
+                "{}/state?pin={}&limit=1",
+                s.base,
+                pin["pinId"].as_str().unwrap()
+            )),
             &s.b,
         )
         .send()
         .await
         .unwrap()
-        .error_for_status()
-        .unwrap()
         .json::<serde_json::Value>()
         .await
         .unwrap();
-    assert_eq!(page["records"].as_array().unwrap().len(), 1);
-    assert_eq!(
-        page["checkpoint"]["domains"],
-        serde_json::json!(["library"])
-    );
-    assert_eq!(page["records"][0]["domain"], "library");
-    assert!(
-        page["totalRecords"]
-            .as_str()
-            .unwrap()
-            .parse::<u64>()
-            .unwrap()
-            > 1
-    );
-    assert_eq!(page["next"]["domain"], "library");
-    assert!(page["next"]["key"].is_string());
-}
-
-#[tokio::test]
-async fn a_page_rejection_names_the_record_it_failed_on() {
-    use risunest_sync_wire::{
-        descriptor::RecordDescriptor, ChangeSet, Domain, RecordChange, RecordVersion,
-    };
-    let s = Server::start().await;
-    let body = b"synthetic page body";
-    s.upload(&s.a, body).await;
-    let descriptor = RecordDescriptor {
-        dependencies: vec![hash(b"synthetic dependency the server never received")],
-        ..RecordDescriptor::content(hash(body))
-    };
-    let bytes = descriptor.bytes().unwrap();
-    s.upload(&s.a, &bytes).await;
-    let id = s
-        .auth(
-            s.client.post(format!("{}/staged-changes/start", s.base)),
-            &s.a,
-        )
-        .send()
-        .await
-        .unwrap()
-        .error_for_status()
-        .unwrap()
-        .json::<serde_json::Value>()
-        .await
-        .unwrap()["stagedChangesId"]
-        .as_str()
-        .unwrap()
-        .to_owned();
-    let page = ChangeSet {
-        changes: vec![RecordChange {
-            domain: Domain::Library,
-            key: "synthetic-rejected-key".into(),
-            before: RecordVersion::Absent,
-            after: RecordVersion::Live {
-                object_hash: hash(body),
-                descriptor_hash: Some(hash(&bytes)),
-            },
-        }],
-        read_fences: vec![],
-        scope_fences: vec![],
-    };
-    let response = s
-        .auth(
-            s.client
-                .put(format!("{}/staged-changes/{id}/pages/0", s.base)),
-            &s.a,
-        )
-        .json(&page)
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    assert_eq!(
-        response.json::<serde_json::Value>().await.unwrap(),
-        serde_json::json!({"error":"missing-dependency","key":"synthetic-rejected-key"})
-    );
-    // A rejection with no single record keeps the body it always had.
-    let response = s
-        .auth(
-            s.client
-                .post(format!("{}/staged-changes/{id}/seal", s.base)),
-            &s.a,
-        )
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    assert_eq!(
-        response.json::<serde_json::Value>().await.unwrap(),
-        serde_json::json!({"error":"empty-staged-changes"})
-    );
+    assert_eq!(page["items"].as_array().unwrap().len(), 1);
+    assert!(page["nextKey"].is_string());
 }
 
 #[tokio::test]

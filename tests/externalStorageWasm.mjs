@@ -153,7 +153,7 @@ const sectionEntries = [
     },
   }, { writeClock: "1", writerId: "writer-a" }),
   section("hypa", "0".repeat(64), {
-    tombstone: { firstPublishedGeneration: "9", firstPublishedAtMs: 1760000000000 },
+    tombstone: { firstPublishedGeneration: "9", firstPublishedAtMs: "1760000000000" },
   }, { writeClock: "18446744073709551615", writerId: "writer-b" }),
   section("local-plugins", JSON.stringify(["provider-manager", "json", "settings"]), {
     localPlugin: { space: "json", value: { zeta: [1, 2], alpha: null } },
