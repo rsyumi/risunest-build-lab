@@ -17,10 +17,10 @@ impl restore::ReplacementSink for StoreSink {
         self.store.lock().unwrap().replace_begin()
     }
     fn put_root(&self, id: &str, root: &Value) -> StoreResult<()> {
-        self.store.lock().unwrap().replace_put_root(id, root)
+        self.store.lock().unwrap().replace_put_upstream_root(id, root)
     }
     fn put_presets(&self, id: &str, presets: &[Value]) -> StoreResult<()> {
-        self.store.lock().unwrap().replace_put_presets(id, presets)
+        self.store.lock().unwrap().replace_put_upstream_presets(id, presets)
     }
     fn add_characters(&self, id: &str, characters: &[Value]) -> StoreResult<()> {
         let mut unavailable = Vec::new();
@@ -98,6 +98,7 @@ impl StrictLocalBackupDatabaseRestore for Import<'_> {
             OpenedJobSource {
                 file: open_staged(database)?,
                 total_bytes: database.byte_length,
+                custody: None,
             },
             1,
             self.job,
@@ -151,7 +152,14 @@ fn both_pocket_versions_restore_database_and_media_into_the_persistent_store() {
         .unwrap();
         let store = PersistentStore::open(directory.path()).unwrap();
         let actual = store.materialize(None).unwrap();
-        let expected: Value = serde_json::from_str(include_str!("fixtures/expected.json")).unwrap();
+        let mut expected: Value = serde_json::from_str(include_str!("fixtures/expected.json")).unwrap();
+        let imported_username = expected["username"].clone();
+        expected["personas"][0]["name"] = imported_username;
+        expected["selectedPersona"] = expected["personas"][0]["id"].clone();
+        expected["botPresetsId"] = expected["botPresets"][0]["id"].clone();
+        let archived = expected["characters"].as_array_mut().unwrap().remove(1);
+        expected["characters"].as_array_mut().unwrap().push(archived);
+        expected["characterOrder"].as_array_mut().unwrap().push(serde_json::json!("synthetic-archived-inline"));
         for (key, expected_value) in expected.as_object().unwrap() {
             assert_eq!(&actual[key], expected_value, "lost database field: {key}");
         }

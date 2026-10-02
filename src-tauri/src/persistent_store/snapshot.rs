@@ -145,94 +145,6 @@ impl Drop for RevisionReadLease {
     }
 }
 
-// Returns `Some(message)` when a pending restore existed but was skipped, so
-// the caller can surface the failure instead of silently opening the old
-// database. The marker is intentionally kept on failure so the restore retries
-// on the next open (pinned by the restore-marker preservation tests).
-pub(super) fn apply_pending_restore(
-    persistent_dir: &Path,
-    snapshots_dir: &Path,
-) -> StoreResult<Option<String>> {
-    if !snapshots_dir.join("snapshots.sqlite").exists()
-        && !snapshots_dir.join("pending-restore.json").exists()
-    {
-        return Ok(None);
-    }
-    let attempt_path = snapshots_dir.join("restore-attempt");
-    let mut attempt_started = false;
-    let result = (|| -> StoreResult<()> {
-        let mut archive = Archive::open(snapshots_dir)?;
-        let Some(id) = archive.pending_restore()? else {
-            return Ok(());
-        };
-        let token = archive.pending_restore_token()?
-            .ok_or_else(|| validation("snapshot restore request has no identity"))?;
-        let database_path = persistent_dir.join(DATABASE_FILE);
-        if database_path.is_file() {
-            let connection = Connection::open(&database_path)?;
-            let applied: Option<String> = connection.query_row(
-                "SELECT value FROM meta WHERE key='appliedRestoreRequest'", [], |row| row.get(0),
-            ).optional()?;
-            if applied.as_deref() == Some(&token) {
-                archive.clear_pending_restore(&id)?;
-                remove_file_if_exists(&attempt_path)?;
-                return Ok(());
-            }
-        }
-        if attempt_path.exists() {
-            return Err(validation("snapshot restore was interrupted; select the snapshot again to retry"));
-        }
-        let attempt = fs::OpenOptions::new().write(true).create_new(true).open(&attempt_path)?;
-        attempt.sync_all()?;
-        attempt_started = true;
-        let reconstructed = archive.scratch()?;
-        let metadata = archive.restore(&id, &reconstructed.path)?;
-        validate_restore_database(&reconstructed.path)?;
-        let connection = Connection::open(&reconstructed.path)?;
-        if current_revision(&connection)? != metadata.revision {
-            return Err(validation("restored snapshot revision mismatch"));
-        }
-        drop(connection);
-        let candidate = prepare_restore_candidate(persistent_dir, &reconstructed.path)?;
-        let replacement = (|| -> StoreResult<()> {
-            let connection = Connection::open(&candidate)?;
-            connection.execute(
-                "INSERT INTO meta(key,value) VALUES('appliedRestoreRequest',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                [&token],
-            )?;
-            checkpoint(&connection, CheckpointMode::Truncate)?;
-            drop(connection);
-            if database_path.is_file() {
-                let connection = Connection::open(&database_path)?;
-                create_in_archive(&connection, &mut archive, "pre-restore")?;
-            }
-            replace_database(&database_path, &candidate)
-        })();
-        if let Err(error) = remove_database_files(&candidate) {
-            crate::nlog!(
-                "warn",
-                "persistent restore candidate cleanup skipped: {error}"
-            );
-        }
-        replacement?;
-        archive.clear_pending_restore(&id)?;
-        Ok(())
-    })();
-    if attempt_started {
-        if let Err(error) = remove_file_if_exists(&attempt_path) {
-            crate::nlog!("warn", "snapshot restore attempt cleanup failed: {error}");
-        }
-    }
-    match result {
-        Ok(()) => Ok(None),
-        Err(error) => {
-            let message = format!("persistent snapshot restore skipped: {error}");
-            crate::nlog!("warn", "{message}");
-            Ok(Some(message))
-        }
-    }
-}
-
 fn prepare_restore_candidate(persistent_dir: &Path, target: &Path) -> StoreResult<PathBuf> {
     let candidate = persistent_dir.join(format!(
         "{DATABASE_FILE}.restore-candidate-{}",
@@ -245,8 +157,7 @@ fn prepare_restore_candidate(persistent_dir: &Path, target: &Path) -> StoreResul
         let mut connection = Connection::open(&candidate)?;
         super::schema::initialize(&mut connection)?;
         let transaction = connection.transaction()?;
-        super::server_sync_outbox::restored_copy(&transaction)?;
-        super::sync_selection::restored_copy(&transaction)?;
+        super::message_pages::accept_copied_database(&transaction)?;
         transaction.commit()?;
         let generation = active_generation(&connection)?;
         let reader = open_generation_reader(&candidate, &generation)?;
@@ -318,7 +229,14 @@ pub(super) fn sweep_temporary_generations(
     stale.sort();
     stale.dedup();
     for generation in stale {
-        if generation != active && retained_stage != Some(generation.as_str()) {
+        let binding_stage: bool = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM lww_binding_sources s JOIN lww_binding_stages b
+             ON b.staging_id=s.staging_id AND b.receive_id=s.request_id AND b.inspection_id=s.inspection_id
+             WHERE s.staging_id=?1)",
+            [&generation], |row| row.get(0),
+        )?;
+        let snapshot_stage: bool = transaction.query_row("SELECT EXISTS(SELECT 1 FROM snapshot_restore_stages WHERE stage_id=?1 AND state='staged')",[&generation],|row|row.get(0))?;
+        if generation != active && retained_stage != Some(generation.as_str()) && !binding_stage && !snapshot_stage {
             delete_generation(&transaction, &generation)?;
         }
     }
@@ -477,31 +395,58 @@ pub(super) fn checkpoint(connection: &Connection, mode: CheckpointMode) -> Store
 }
 
 pub(super) fn create(
-    connection: &Connection,
-    snapshots_dir: &Path,
+    store: &mut super::PersistentStore,
     reason: &str,
 ) -> StoreResult<SnapshotCreated> {
-    let mut archive = Archive::open(snapshots_dir)?;
-    create_in_archive(connection, &mut archive, reason)
+    let mut archive = Archive::open(&store.snapshots_dir)?;
+    create_in_archive(store, &mut archive, reason)
 }
 
 fn create_in_archive(
-    connection: &Connection,
+    store: &mut super::PersistentStore,
     archive: &mut Archive,
     reason: &str,
 ) -> StoreResult<SnapshotCreated> {
     let started = Instant::now();
-    let (scratch, current_bytes) = capture_scratch(connection, archive)?;
+    let (scratch, current_bytes) = capture_scratch(store, archive)?;
     archive_scratch(archive, scratch, current_bytes, reason, started)
 }
 
 pub(super) fn capture_scratch(
-    connection: &Connection,
+    store: &mut super::PersistentStore,
     archive: &Archive,
 ) -> StoreResult<(super::snapshot_archive::Scratch, u64)> {
-    let current_bytes = logical_database_bytes(connection)?;
     let scratch = archive.scratch()?;
-    connection.execute("VACUUM INTO ?1", [scratch.path.to_string_lossy().as_ref()])?;
+    let revision = store.revision()?;
+    let lease = store.lww_acquire_library_backup_capture(revision)?;
+    let result = (|| {
+        let units = store.lww_backup_unit_values(&lease.lease)?;
+        let (connection, target) = store.read_view(Some(&lease.lease))?;
+        let current_bytes = logical_database_bytes(connection)?;
+        let mut output = Connection::open(&scratch.path)?;
+        {
+            let backup = rusqlite::backup::Backup::new(connection, &mut output)?;
+            loop {
+                match backup.step(128)? {
+                    rusqlite::backup::StepResult::Done => break,
+                    rusqlite::backup::StepResult::More => (),
+                    _ => return Err(validation("snapshot source is busy")),
+                }
+            }
+        }
+        let tx = output.transaction()?;
+        tx.execute("DELETE FROM snapshot_original_meta", [])?;
+        tx.execute("DELETE FROM snapshot_original_units", [])?;
+        tx.execute("INSERT INTO snapshot_original_meta VALUES(1,?1,?2)", rusqlite::params![target.revision,target.generation])?;
+        for (key,value) in units {
+            tx.execute("INSERT INTO snapshot_original_units VALUES(?1,?2)", rusqlite::params![key.as_str(),serde_json::to_string(&value)?])?;
+        }
+        tx.commit()?;
+        Ok(current_bytes)
+    })();
+    let release = store.release_revision(&lease.lease);
+    let current_bytes = result?;
+    release?;
     Ok((scratch, current_bytes))
 }
 
@@ -573,7 +518,100 @@ pub(super) fn collect_asset_roots(
 ) -> StoreResult<AssetRootSet> {
     #[cfg(test)]
     ASSET_ROOT_SCANS.with(|count| count.set(count.get() + 1));
-    collect_asset_roots_scoped(connection, None)
+    collect_asset_roots_scoped(connection, None, None)
+}
+
+pub(super) fn collect_plugin_asset_roots(connection: &Connection) -> StoreResult<AssetRootSet> {
+    #[cfg(test)] PLUGIN_ROOT_SCANS.with(|count| count.set(count.get()+1));
+    let mut roots = AssetRootSet::default();
+    scan_json_column(connection, "SELECT value FROM plugin_storage", [], &mut roots)?;
+    Ok(roots)
+}
+
+#[cfg(test)]
+thread_local! { pub(super) static PLUGIN_ROOT_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) }; }
+
+pub(super) fn collect_device_plugin_asset_roots(store: &super::PersistentStore) -> StoreResult<(super::device_store::plugin_gc::PluginGcFence, AssetRootSet)> {
+    use base64::Engine;
+    use risunest_sync_wire::unit::UnitValue;
+    let roots = std::cell::RefCell::new(AssetRootSet::default());
+    let mut units = std::collections::BTreeMap::new();
+    let fence = store.device_store()?.visit_plugin_gc_values(|_, _, _, raw| {
+        let value = serde_json::from_str(raw).unwrap_or_else(|_| serde_json::Value::String(raw.to_owned()));
+        observe_json_value(&value, None, &mut roots.borrow_mut());
+        Ok(())
+    }, |key, value| {
+        match value {
+            UnitValue::Inline { bytes, .. } => {
+                let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(bytes)
+                    .map_err(|error| validation(error.to_string()))?;
+                let value = serde_json::from_slice(&bytes)?;
+                observe_json_value(&value, None, &mut roots.borrow_mut());
+            }
+            UnitValue::Object { .. } => { units.insert(key.clone(), value.clone()); }
+            UnitValue::Deleted => {}
+        }
+        Ok(())
+    })?;
+    let mut roots = roots.into_inner();
+    if !units.is_empty() {
+        let inventory = super::external_capture::original_unit_dependency_inventory(&units, &|hash| {
+            let length: Option<i64> = store.connection.query_row("SELECT length(body) FROM message_page_objects WHERE hash=?1", [hash], |row| row.get(0)).optional()?;
+            if length.is_some_and(|length| length < 0 || length as u64 > risunest_sync_wire::MAX_METADATA_BYTES as u64) { return Err(validation("plugin control exceeds its byte limit")); }
+            Ok(store.connection.query_row("SELECT body FROM message_page_objects WHERE hash=?1", [hash], |row| row.get(0)).optional()?)
+        }, &|hash| {
+            let size: Option<i64> = store.connection.query_row("SELECT byte_size FROM asset_objects WHERE object_hash=?1", [hash], |row| row.get(0)).optional()?;
+            size.map(|size| u64::try_from(size).map_err(|_| validation("plugin payload size is invalid"))).transpose()
+        }, &crate::local_backup::NeverCancelled, false, &mut |_, _, _| Ok(()));
+        match inventory {
+            Ok(inventory) => roots.object_hashes.extend(inventory.payloads.into_keys()),
+            Err(_) => { roots.retain_all_objects = true; roots.blockers.insert("plugin-local-unscannable".into()); }
+        }
+    }
+    Ok((fence, roots))
+}
+
+pub(super) fn merge_asset_roots(target: &mut AssetRootSet, source: AssetRootSet) {
+    target.manifest_hashes.extend(source.manifest_hashes);
+    target.object_hashes.extend(source.object_hashes);
+    target.legacy_asset_keys.extend(source.legacy_asset_keys);
+    target.inlay_ids.extend(source.inlay_ids);
+    target.cold_keys.extend(source.cold_keys);
+    target.blockers.extend(source.blockers);
+    target.retain_all_objects |= source.retain_all_objects;
+}
+
+pub(super) fn collect_asset_roots_with_plugin_cache(connection: &Connection, plugins: &AssetRootSet) -> StoreResult<AssetRootSet> {
+    collect_asset_roots_scoped(connection, None, Some(plugins))
+}
+
+pub(super) fn collect_preserved_source_roots(repository:&Path)->AssetRootSet {
+    let mut roots=AssetRootSet::default();
+    let result=(||->StoreResult<()> {
+        let directory=repository.join("source-preservation");
+        let metadata=match fs::symlink_metadata(&directory) {Ok(value)=>value,Err(error) if error.kind()==std::io::ErrorKind::NotFound=>return Ok(()),Err(error)=>return Err(error.into())};
+        if !metadata.is_dir() || crate::trust_boundary::is_link_like(&metadata) {return Err(validation("invalid source preservation directory"));}
+        for entry in fs::read_dir(directory)? {
+            let path=entry?.path();
+            let metadata=fs::symlink_metadata(&path)?;
+            if !metadata.is_dir() || crate::trust_boundary::is_link_like(&metadata) {return Err(validation("invalid source preservation entry"));}
+            let path=path.join("index.sqlite");
+            let metadata=fs::symlink_metadata(&path)?;
+            if !metadata.is_file() || crate::trust_boundary::is_link_like(&metadata) {return Err(validation("invalid source preservation index"));}
+            let index=Connection::open_with_flags(path,OpenFlags::SQLITE_OPEN_READ_ONLY|OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+            index.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA query_only=ON;")?;
+            let mut statement=index.prepare("SELECT object_hash,storage_kind FROM source_files")?;
+            let mut rows=statement.query([])?;
+            while let Some(row)=rows.next()? {
+                let hash:String=row.get(0)?;
+                if hash.len()!=64 || !hash.bytes().all(|value|value.is_ascii_hexdigit()&&!value.is_ascii_uppercase()) {return Err(validation("invalid preserved object hash"));}
+                match row.get::<_,String>(1)?.as_str() {"cas"=>{roots.object_hashes.insert(hash);},"owned"=>{},_=>return Err(validation("invalid preserved storage kind"))}
+            }
+        }
+        Ok(())
+    })();
+    if result.is_err() {roots.retain_all_objects=true;roots.blockers.insert("source-preservation-unscannable".into());}
+    roots
 }
 
 #[cfg(feature = "native-official-publication")]
@@ -581,7 +619,7 @@ fn collect_asset_roots_for_generation(
     connection: &Connection,
     generation: &str,
 ) -> StoreResult<AssetRootSet> {
-    collect_asset_roots_scoped(connection, Some(generation))
+    collect_asset_roots_scoped(connection, Some(generation), None)
 }
 
 // One scanner serves both the global GC-root collection and the per-generation
@@ -591,6 +629,7 @@ fn collect_asset_roots_for_generation(
 fn collect_asset_roots_scoped(
     connection: &Connection,
     generation: Option<&str>,
+    plugins: Option<&AssetRootSet>,
 ) -> StoreResult<AssetRootSet> {
     let mut roots = AssetRootSet::default();
     if generation.is_none() {
@@ -602,7 +641,7 @@ fn collect_asset_roots_scoped(
         let generations = statement.query_map([], |row| row.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()?;
         for generation in generations {
-            let scoped = collect_asset_roots_scoped(connection, Some(&generation))?;
+            let scoped = collect_asset_roots_scoped(connection, Some(&generation), plugins)?;
             roots.manifest_hashes.extend(scoped.manifest_hashes);
             roots.object_hashes.extend(scoped.object_hashes);
             roots.legacy_asset_keys.extend(scoped.legacy_asset_keys);
@@ -615,6 +654,7 @@ fn collect_asset_roots_scoped(
             scan_optional_hash_column(connection, "SELECT hash FROM server_sync_objects", [],
                 HashTarget::Object, &mut roots)?;
         }
+        merge_asset_roots(&mut roots, collect_lww_asset_roots(connection)?);
         return Ok(roots);
     }
     let scope_params: Vec<&dyn rusqlite::ToSql> = generation
@@ -679,12 +719,22 @@ fn collect_asset_roots_scoped(
         ("messages", "value"),
         ("plugin_storage", "value"),
     ] {
+        if table == "plugin_storage" && plugins.is_some() { continue; }
         let query = if scoped {
             format!("SELECT {column} FROM {table} WHERE generation = ?1")
         } else {
             format!("SELECT {column} FROM {table}")
         };
         scan_json_column(connection, &query, scope_params, &mut roots)?;
+    }
+    if let Some(plugins) = plugins {
+        roots.manifest_hashes.extend(plugins.manifest_hashes.iter().cloned());
+        roots.object_hashes.extend(plugins.object_hashes.iter().cloned());
+        roots.legacy_asset_keys.extend(plugins.legacy_asset_keys.iter().cloned());
+        roots.inlay_ids.extend(plugins.inlay_ids.iter().cloned());
+        roots.cold_keys.extend(plugins.cold_keys.iter().cloned());
+        roots.blockers.extend(plugins.blockers.iter().cloned());
+        roots.retain_all_objects |= plugins.retain_all_objects;
     }
     for table in ["bot_presets", "characters"] {
         let query = if scoped {
@@ -710,19 +760,6 @@ fn collect_asset_roots_scoped(
             _ => retain_unscannable_record(&mut roots),
         }
     }
-    let plugin_rows: i64 = connection.query_row(
-        if scoped {
-            "SELECT COUNT(*) FROM plugin_storage WHERE generation = ?1"
-        } else {
-            "SELECT COUNT(*) FROM plugin_storage"
-        },
-        scope_params,
-        |row| row.get(0),
-    )?;
-    if plugin_rows > 0 {
-        roots.blockers.insert("plugin-storage-opaque".to_owned());
-        roots.retain_all_objects = true;
-    }
     // Nothing stores a cold payload any more, so a record that still references
     // one hides an unknowable set of attachments. Keep every object instead.
     if !roots.cold_keys.is_empty() {
@@ -732,13 +769,64 @@ fn collect_asset_roots_scoped(
     Ok(roots)
 }
 
+fn collect_lww_asset_roots(connection: &Connection) -> StoreResult<AssetRootSet> {
+    use base64::Engine;
+    use risunest_sync_wire::unit::{UnitKey, UnitValue};
+    let mut roots = AssetRootSet::default();
+    for table in ["lww_units", "lww_receive_rows", "snapshot_original_units"] {
+        let predicate = if table == "lww_receive_rows" { " WHERE status IN ('held','deferred')" } else { "" };
+        let mut statement = connection.prepare(&format!("SELECT key,value FROM {table}{predicate}"))?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let result = (|| -> StoreResult<()> {
+                let key:UnitKey=row.get::<_,String>(0)?.try_into().map_err(|error:risunest_sync_wire::WireError|validation(error.to_string()))?;
+                let value:UnitValue=serde_json::from_str(&row.get::<_,String>(1)?)?;
+                value.validate().map_err(|error|validation(error.to_string()))?;
+                match &value {
+                    UnitValue::Inline {bytes} => {
+                        let decoded=base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(bytes).map_err(|error|validation(error.to_string()))?;
+                        observe_json_value(&serde_json::from_slice(&decoded)?,None,&mut roots);
+                    }
+                    UnitValue::Object {..} => {
+                        let inventory=super::external_capture::original_unit_dependency_inventory(&[(key,value)].into_iter().collect(),&|hash| {
+                            let length:Option<i64>=connection.query_row("SELECT length(body) FROM message_page_objects WHERE hash=?1",[hash],|row|row.get(0)).optional()?;
+                            if length.is_some_and(|length|length<0 || length as u64>risunest_sync_wire::MAX_METADATA_BYTES as u64) {return Err(validation("GC control exceeds its byte limit"));}
+                            Ok(connection.query_row("SELECT body FROM message_page_objects WHERE hash=?1",[hash],|row|row.get(0)).optional()?)
+                        },&|hash| {
+                            let size:Option<i64>=connection.query_row("SELECT byte_size FROM asset_objects WHERE object_hash=?1",[hash],|row|row.get(0)).optional()?;
+                            size.map(|size|u64::try_from(size).map_err(|_|validation("GC payload size is invalid"))).transpose()
+                        },&crate::local_backup::NeverCancelled,false,&mut |_,_,_|Ok(()))?;
+                        roots.object_hashes.extend(inventory.payloads.into_keys());
+                    }
+                    UnitValue::Deleted => {}
+                }
+                Ok(())
+            })();
+            if result.is_err() {roots.retain_all_objects=true;roots.blockers.insert("lww-source-unscannable".into());}
+        }
+    }
+    let mut statement=connection.prepare("SELECT logical_key,kind FROM asset_aliases WHERE object_hash IS NOT NULL")?;
+    let mut rows=statement.query([])?;
+    while let Some(row)=rows.next()? {
+        let key:String=row.get(0)?;
+        match row.get::<_,String>(1)?.as_str() {"asset"=>{roots.legacy_asset_keys.remove(&key);},"inlay"=>{roots.inlay_ids.remove(&key);},_=>{}}
+    }
+    let mut statement=connection.prepare("SELECT hash FROM snapshot_restore_payloads p WHERE NOT EXISTS(SELECT 1 FROM snapshot_restore_body_jobs j WHERE j.stage_id=p.stage_id AND j.complete=1)")?;
+    let hashes=statement.query_map([],|row|row.get::<_,String>(0))?.collect::<Result<Vec<_>,_>>()?;
+    roots.object_hashes.extend(hashes);
+    Ok(roots)
+}
+
 /// Every CAS object one character's records reach, so archiving can record them
 /// and keep them out of the sweep while the character has no scannable detail.
-pub(super) fn collect_character_asset_hashes(
+pub(super) fn collect_character_asset_hashes(connection:&Connection,cas:&PayloadCas,generation:&str,character_id:&str)->StoreResult<Vec<String>> {collect_character_asset_hashes_inner(connection,cas,generation,character_id,false)}
+pub(super) fn collect_shared_character_asset_hashes(connection:&Connection,cas:&PayloadCas,generation:&str,character_id:&str)->StoreResult<Vec<String>> {collect_character_asset_hashes_inner(connection,cas,generation,character_id,true)}
+fn collect_character_asset_hashes_inner(
     connection: &Connection,
     cas: &PayloadCas,
     generation: &str,
     character_id: &str,
+    shared: bool,
 ) -> StoreResult<Vec<String>> {
     let mut roots = AssetRootSet::default();
     let scope: [&dyn rusqlite::ToSql; 2] = [&generation, &character_id];
@@ -747,7 +835,8 @@ pub(super) fn collect_character_asset_hashes(
         "SELECT detail FROM conversations WHERE generation = ?1 AND character_id = ?2",
         "SELECT value FROM messages WHERE generation = ?1 AND character_id = ?2",
     ] {
-        scan_json_column(connection, query, scope.as_slice(), &mut roots)?;
+        if shared {let mut statement=connection.prepare(query)?;let mut rows=statement.query(scope.as_slice())?;while let Some(row)=rows.next()?{let raw:String=row.get(0)?;let value=serde_json::from_str(&raw)?;let value=if query.contains("FROM characters"){super::lww::shared_archive_character(value)}else if query.contains("FROM conversations"){super::lww::shared_archive_conversation(value)}else{value};observe_json_value(&value,None,&mut roots);}}else{scan_json_column(connection, query, scope.as_slice(), &mut roots)?;}
+
     }
     scan_text_column(
         connection,
@@ -789,7 +878,7 @@ pub(super) fn collect_character_asset_hashes(
         .chain(&roots.inlay_ids)
         .cloned()
         .collect();
-    collect_alias_key_candidates(connection, generation, character_id, &mut candidates)?;
+    collect_alias_key_candidates(connection, generation, character_id, &mut candidates,shared)?;
     for candidate in candidates {
         let mut statement = connection.prepare_cached(
             "SELECT object_hash FROM asset_aliases
@@ -807,11 +896,12 @@ pub(super) fn collect_character_asset_hashes(
 
 /// String leaves of the character detail are the only place an alias logical key
 /// can appear without a recognizable prefix, so they are looked up directly.
-fn collect_alias_key_candidates(
+pub(super) fn collect_alias_key_candidates(
     connection: &Connection,
     generation: &str,
     character_id: &str,
     candidates: &mut BTreeSet<String>,
+    shared: bool,
 ) -> StoreResult<()> {
     const MAX_CANDIDATE_BYTES: usize = 512;
     let detail: Option<String> = connection
@@ -827,6 +917,7 @@ fn collect_alias_key_candidates(
     let Ok(value) = serde_json::from_str::<serde_json::Value>(&detail) else {
         return Ok(());
     };
+    let value=if shared{super::lww::shared_archive_character(value)}else{value};
     let mut pending = vec![value];
     while let Some(value) = pending.pop() {
         match value {
@@ -1009,7 +1100,7 @@ fn scan_text_column<P: rusqlite::Params>(
     Ok(())
 }
 
-fn observe_json_value(
+pub(super) fn observe_json_value(
     value: &serde_json::Value,
     parent_key: Option<&str>,
     roots: &mut AssetRootSet,
@@ -1017,6 +1108,9 @@ fn observe_json_value(
     match value {
         serde_json::Value::String(value) => {
             observe_text(value, roots);
+            if crate::trust_boundary::is_lower_hex_256(value) {
+                roots.object_hashes.insert(value.clone());
+            }
             if parent_key == Some("coldstorage") && !value.is_empty() {
                 roots.cold_keys.insert(value.clone());
             } else if parent_key == Some("coldStoragedChats") {
@@ -1165,66 +1259,6 @@ fn remove_database_files(database_path: &Path) -> StoreResult<()> {
     Ok(())
 }
 
-fn replace_database(database_path: &Path, target: &Path) -> StoreResult<()> {
-    let next = database_path.with_extension(format!("sqlite.restore-next-{}", Uuid::new_v4()));
-    fs::copy(target, &next).map_err(|error| path_error("copy restore candidate", &next, error))?;
-    fs::OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&next)?
-        .sync_all()?;
-
-    if !database_path.exists() {
-        fs::rename(&next, database_path)
-            .map_err(|error| path_error("activate restore candidate", database_path, error))?;
-        return Ok(());
-    }
-
-    let previous = database_path.with_extension("sqlite.restore-previous");
-    if previous.exists() {
-        fs::remove_file(&previous)?;
-    }
-    let mut sidecars = Vec::new();
-    for suffix in ["-wal", "-shm"] {
-        let source = PathBuf::from(format!("{}{suffix}", database_path.display()));
-        if !source.exists() { continue; }
-        let destination = PathBuf::from(format!("{}{suffix}", previous.display()));
-        let moved = remove_file_if_exists(&destination)
-            .and_then(|()| fs::rename(&source, &destination).map_err(StoreError::from));
-        if let Err(error) = moved {
-            for (source, destination) in sidecars.iter().rev() {
-                fs::rename(destination, source)?;
-            }
-            return Err(error);
-        }
-        sidecars.push((source, destination));
-    }
-    if let Err(error) = fs::rename(database_path, &previous) {
-        for (source, destination) in sidecars.iter().rev() {
-            fs::rename(destination, source)?;
-        }
-        return Err(path_error("preserve current database", &previous, error));
-    }
-    if let Err(error) = fs::rename(&next, database_path) {
-        fs::rename(&previous, database_path).map_err(|rollback| {
-            path_error("roll back current database", database_path, rollback)
-        })?;
-        for (source, destination) in sidecars.iter().rev() {
-            fs::rename(destination, source)?;
-        }
-        remove_file_if_exists(&next)?;
-        return Err(path_error(
-            "activate restore candidate",
-            database_path,
-            error,
-        ));
-    }
-    if let Err(error) = remove_database_files(&previous) {
-        crate::nlog!("warn", "activated snapshot previous-file cleanup failed: {error}");
-    }
-    Ok(())
-}
-
 fn path_error(context: &str, path: &Path, error: std::io::Error) -> StoreError {
     StoreError::Store {
         message: format!("{context} at {}: {error}", path.display()),
@@ -1241,5 +1275,164 @@ fn remove_file_if_exists(path: &Path) -> StoreResult<()> {
 fn validation(message: impl Into<String>) -> StoreError {
     StoreError::Validation {
         message: message.into(),
+    }
+}
+
+impl super::PersistentStore {
+    pub(crate) fn snapshot_restore_body_plan(&mut self, stage_id: &str, revision: i64, authority: &str) -> StoreResult<crate::native_file_jobs::snapshot_bodies::BodyPlan> {
+        let (request, stored_authority, state, committed):(String,String,String,Option<i64>) = self.connection.query_row("SELECT request_id,authority,state,revision FROM snapshot_restore_stages WHERE stage_id=?1",[stage_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)))?;
+        let request_revision:Option<i64> = self.connection.query_row("SELECT revision FROM lww_requests WHERE request_id=?1",[request],|row|row.get(0)).optional()?;
+        if state != "committed" || committed != Some(revision) || request_revision != Some(revision)
+            || stored_authority != authority || self.lww_binding_authority()?.0.to_string() != authority {
+            return Err(validation("snapshot body job activation receipt differs"));
+        }
+        let protection:Option<String>=self.connection.query_row("SELECT protection_job_id FROM snapshot_restore_body_jobs WHERE stage_id=?1",[stage_id],|row|row.get(0)).optional()?;
+        let protection_id=match protection {
+            Some(id)=>id,
+            None=>{
+                let id=Uuid::new_v4().to_string();
+                self.connection.execute("INSERT INTO snapshot_restore_body_jobs VALUES(?1,?2,0)",rusqlite::params![stage_id,id])?;
+                id
+            }
+        };
+        let mut statement=self.connection.prepare("SELECT hash,byte_size,owner,cached FROM snapshot_restore_payloads WHERE stage_id=?1 ORDER BY hash")?;
+        let mut rows=statement.query([stage_id])?;
+        let mut objects=Vec::new();
+        while let Some(row)=rows.next()? {
+            objects.push(crate::native_file_jobs::snapshot_bodies::BodyObject {
+                hash:row.get(0)?, size:u64::try_from(row.get::<_,i64>(1)?).map_err(|_|validation("snapshot body size is invalid"))?, owner:row.get(2)?, cached:row.get(3)?,
+            });
+        }
+        Ok(crate::native_file_jobs::snapshot_bodies::BodyPlan {
+            stage_id:stage_id.to_owned(),revision,authority:authority.to_owned(),protection_id,objects,
+            source:self.snapshot_restore_source_path(stage_id)?,policy:self.server_asset_policy().map_err(|error|validation(&error.code))?,
+        })
+    }
+
+    pub(crate) fn snapshot_restore_bodies_completed(&self,stage_id:&str)->StoreResult<()> {
+        self.connection.execute("UPDATE snapshot_restore_body_jobs SET complete=1 WHERE stage_id=?1",[stage_id])?;
+        remove_database_files(&self.snapshot_restore_source_path(stage_id)?)?;
+        Ok(())
+    }
+
+    pub(crate) fn snapshot_restore_stage(&mut self, id: &str, request_id: &str) -> StoreResult<super::StagingResult> {
+        if request_id.is_empty() || request_id.len()>256 { return Err(validation("invalid snapshot restore request identity")); }
+        let existing:Option<(String,String,String)> = self.connection.query_row("SELECT stage_id,snapshot_id,authority FROM snapshot_restore_stages WHERE request_id=?1",[request_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).optional()?;
+        if let Some((staging_id,snapshot_id,authority)) = existing {
+            if snapshot_id!=id || authority!=self.lww_binding_authority()?.0.to_string() { return Err(validation("snapshot restore request identity mismatch")); }
+            return Ok(super::StagingResult {staging_id});
+        }
+        let archive = Archive::open(&self.snapshots_dir)?;
+        let scratch = archive.scratch()?;
+        archive.restore(id,&scratch.path)?;
+        validate_restore_database(&scratch.path)?;
+        let candidate = prepare_restore_candidate(&self.snapshots_dir,&scratch.path)?;
+        let outcome = (|| {
+            let source = Connection::open(&candidate)?;
+            let generation = active_generation(&source)?;
+            let (source_revision, source_generation): (i64,String) = source.query_row("SELECT revision,generation FROM snapshot_original_meta WHERE singleton=1", [], |row|Ok((row.get(0)?,row.get(1)?)))?;
+            if source_revision != current_revision(&source)? || source_generation != generation { return Err(validation("snapshot original source identity differs")); }
+            let reader = open_generation_reader(&candidate,&generation)?;
+            let stage = self.stage_portable_records(&reader,&crate::local_backup::NeverCancelled)?;
+            let result = (|| {
+                let mut original_units=std::collections::BTreeMap::new();
+                {
+                    let mut rows=source.prepare("SELECT key,value FROM snapshot_original_units ORDER BY key")?;
+                    let mut cursor=rows.query([])?;
+                    while let Some(row)=cursor.next()? {
+                        let key:risunest_sync_wire::unit::UnitKey=row.get::<_,String>(0)?.try_into().map_err(|error:risunest_sync_wire::WireError|validation(error.to_string()))?;
+                        let value:risunest_sync_wire::unit::UnitValue=serde_json::from_str(&row.get::<_,String>(1)?)?;
+                        value.validate().map_err(|error|validation(error.to_string()))?;
+                        if matches!(key.components().first().map(String::as_str),Some("hypa"|"plugin-local")) {return Err(validation("snapshot source contains device units"));}
+                        super::lww::validate_received(&source,&key,&value)?;
+                        original_units.insert(key,value);
+                    }
+                }
+                let inventory=super::external_capture::original_unit_dependency_inventory(&original_units,&|hash| {
+                    let length:Option<i64>=source.query_row("SELECT length(body) FROM message_page_objects WHERE hash=?1",[hash],|row|row.get(0)).optional()?;
+                    if length.is_some_and(|length|length<0 || length as u64>risunest_sync_wire::MAX_METADATA_BYTES as u64) {return Err(validation("snapshot control exceeds its byte limit"));}
+                    Ok(source.query_row("SELECT body FROM message_page_objects WHERE hash=?1",[hash],|row|row.get(0)).optional()?)
+                },&|hash| {
+                    let size:Option<i64>=source.query_row("SELECT byte_size FROM asset_objects WHERE object_hash=?1 UNION ALL SELECT length(body) FROM message_page_objects WHERE hash=?1 LIMIT 1",[hash],|row|row.get(0)).optional()?;
+                    size.map(|size|u64::try_from(size).map_err(|_|validation("snapshot payload size is invalid"))).transpose()
+                },&crate::local_backup::NeverCancelled,false,&mut |_,_,_|Ok(()))?;
+                let authority = self.lww_binding_authority()?;
+                let tx = self.connection.transaction()?;
+                tx.execute("INSERT INTO snapshot_restore_stages VALUES(?1,?2,?3,?4,'staged',NULL)",rusqlite::params![stage.staging_id,request_id,id,authority.0.to_string()])?;
+                let mut payloads=source.prepare("SELECT object_hash,byte_size FROM asset_objects ORDER BY object_hash")?;
+                let mut payload_rows=payloads.query([])?;
+                while let Some(row)=payload_rows.next()? {
+                    let hash:String=row.get(0)?;
+                    let size:i64=row.get(1)?;
+                    let owner:bool=source.query_row("SELECT EXISTS(SELECT 1 FROM asset_owner_heads WHERE manifest_hash=?1 AND present=1)",[&hash],|row|row.get(0))?;
+                    tx.execute("INSERT INTO snapshot_restore_payloads VALUES(?1,?2,?3,?4,0)",rusqlite::params![stage.staging_id,hash,size,owner])?;
+                }
+                for (hash,size) in inventory.payloads {
+                    let size=size.ok_or_else(||validation("snapshot payload metadata is unavailable"))?;
+                    let previous:Option<i64>=tx.query_row("SELECT byte_size FROM snapshot_restore_payloads WHERE stage_id=?1 AND hash=?2",rusqlite::params![stage.staging_id,hash],|row|row.get(0)).optional()?;
+                    if previous.is_some_and(|previous|previous as u64!=size) {return Err(validation("snapshot payload metadata differs"));}
+                    let cached:bool=source.query_row("SELECT EXISTS(SELECT 1 FROM message_page_objects WHERE hash=?1)",[&hash],|row|row.get(0))?;
+                    tx.execute("INSERT OR IGNORE INTO snapshot_restore_payloads VALUES(?1,?2,?3,0,?4)",rusqlite::params![stage.staging_id,hash,i64::try_from(size).map_err(|_|validation("snapshot payload size exceeds SQLite range"))?,cached])?;
+                    if cached {tx.execute("UPDATE snapshot_restore_payloads SET cached=1 WHERE stage_id=?1 AND hash=?2",rusqlite::params![stage.staging_id,hash])?;}
+                }
+                for (key,value) in &original_units {
+                    tx.execute("INSERT INTO snapshot_restore_units VALUES(?1,?2,?3)",rusqlite::params![stage.staging_id,key.as_str(),serde_json::to_string(value)?])?;
+                }
+                let mut statement = source.prepare("SELECT o.hash,o.body FROM message_page_objects o JOIN message_page_verified_objects v ON v.hash=o.hash")?;
+                let mut rows = statement.query([])?;
+                while let Some(row) = rows.next()? {
+                    super::message_pages::put_object(&tx,&row.get::<_,String>(0)?,&row.get::<_,Vec<u8>>(1)?)?;
+                }
+                tx.commit()?;
+                Ok(super::StagingResult {staging_id:stage.staging_id.clone()})
+            })();
+            if result.is_err() { self.replace_abort(&stage.staging_id)?; }
+            result
+        })();
+        if let Ok(stage)=&outcome {
+            if let Err(failure)=fs::rename(&candidate,self.snapshot_restore_source_path(&stage.staging_id)?) {
+                self.snapshot_restore_abort(&stage.staging_id)?;
+                remove_database_files(&candidate)?;
+                return Err(failure.into());
+            }
+        } else { remove_database_files(&candidate)?; }
+        outcome
+    }
+
+    pub(crate) fn snapshot_restore_activate(&mut self,stage_id:&str,expected_revision:i64,binding_authority:risunest_sync_wire::stamp::DecimalU64) -> StoreResult<super::RevisionResult> {
+        let (request_id,authority,state,revision):(String,String,String,Option<i64>) = self.connection.query_row("SELECT request_id,authority,state,revision FROM snapshot_restore_stages WHERE stage_id=?1",[stage_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
+        if authority != binding_authority.0.to_string() || self.lww_binding_authority()? != binding_authority { return Err(validation("snapshot replacement authority changed")); }
+        if state == "committed" { return Ok(super::RevisionResult {revision:revision.ok_or_else(||validation("snapshot commit receipt missing"))?}); }
+        let request_completed:bool = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM lww_requests WHERE request_id=?1)",[&request_id],|r|r.get(0))?;
+        if !request_completed && self.revision()? != expected_revision { return Err(super::StoreError::RevisionConflict {expected:expected_revision,actual:self.revision()?}); }
+        let mut units = std::collections::BTreeMap::new();
+        {
+            let mut statement = self.connection.prepare("SELECT key,value FROM snapshot_restore_units WHERE stage_id=?1 ORDER BY key")?;
+            let mut rows = statement.query([stage_id])?;
+            while let Some(row) = rows.next()? { units.insert(row.get::<_,String>(0)?.try_into().map_err(|error:risunest_sync_wire::WireError|validation(error.to_string()))?,serde_json::from_str(&row.get::<_,String>(1)?)?); }
+        }
+        let header = super::lww::Header {binding_authority,request_id};
+        let result = self.lww_commit_replacement_units(&header,stage_id,Some(&units))?;
+        self.connection.execute("UPDATE snapshot_restore_stages SET state='committed',revision=?2 WHERE stage_id=?1",rusqlite::params![stage_id,result.revision])?;
+        Ok(result)
+    }
+
+    pub(crate) fn snapshot_restore_abort(&mut self,stage_id:&str) -> StoreResult<()> {
+        let request:Option<String> = self.connection.query_row("SELECT request_id FROM snapshot_restore_stages WHERE stage_id=?1 AND state='staged'",[stage_id],|r|r.get(0)).optional()?;
+        if let Some(request) = request {
+            let issued:bool = self.device_store()?.connection().query_row("SELECT EXISTS(SELECT 1 FROM lww_intents WHERE request_id=?1)",[request],|r|r.get(0))?;
+            if issued { return Err(validation("snapshot activation has already been submitted")); }
+            self.replace_abort(stage_id)?;
+            self.connection.execute("DELETE FROM snapshot_restore_stages WHERE stage_id=?1",[stage_id])?;
+            remove_database_files(&self.snapshot_restore_source_path(stage_id)?)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn snapshot_restore_source_path(&self,stage_id:&str)->StoreResult<PathBuf> {
+        let id=stage_id.strip_prefix("staging-").ok_or_else(||validation("invalid snapshot stage identity"))?;
+        let parsed=Uuid::parse_str(id).map_err(|_|validation("invalid snapshot stage identity"))?;
+        if parsed.to_string()!=id {return Err(validation("invalid snapshot stage identity"));}
+        Ok(self.snapshots_dir.join(format!("restore-source-{stage_id}.sqlite")))
     }
 }

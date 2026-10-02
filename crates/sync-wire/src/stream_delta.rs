@@ -1,6 +1,6 @@
 //! File-backed RNSL COPY/INSERT profile. No output references, patch chains, or
 //! application semantics. The in-memory RNSD profile retains its smaller limits.
-use crate::{
+use super::{
     delta::{Base, Op, Recipe, MAX_BASES, MAX_OPS, MAX_PATCH_BYTES},
     Result, WireError,
 };
@@ -41,6 +41,9 @@ pub fn verify<R: Read + Seek>(
     io(source.seek(SeekFrom::Start(0)))?;
     let mut buffer = vec![0; BUFFER];
     let mut digest = Sha256::new();
+    #[cfg(test)]
+    let mut observed =
+        super::delta::source_test_observer::Scope::new(&expected.hash, "stream-verify-sha256");
     let mut size = 0u64;
     loop {
         check()?;
@@ -53,10 +56,19 @@ pub fn verify<R: Read + Seek>(
             return Err(WireError("base-size-mismatch"));
         }
         digest.update(&buffer[..n]);
+        #[cfg(test)]
+        observed.input(n);
     }
-    if size != expected.size || hex::encode(digest.finalize()) != expected.hash {
+    if size != expected.size || {
+        let actual = hex::encode(digest.finalize());
+        #[cfg(test)]
+        observed.finalized();
+        actual != expected.hash
+    } {
         return Err(WireError("base-hash-mismatch"));
     }
+    #[cfg(test)]
+    observed.finish();
     Ok(())
 }
 /// Output is private until this function and the caller's durable CAS publish
@@ -76,12 +88,19 @@ pub fn apply<R: Read + Seek, W: Write>(
     }
     let mut buffer = vec![0; BUFFER];
     let mut digest = Sha256::new();
+    #[cfg(test)]
+    let mut observed = super::delta::source_test_observer::Scope::new(
+        &recipe.target_hash,
+        "stream-apply-target-sha256",
+    );
     for op in &recipe.ops {
         check()?;
         match op {
             Op::Insert(bytes) => {
                 io(output.write_all(bytes))?;
                 digest.update(bytes);
+                #[cfg(test)]
+                observed.input(bytes.len());
             }
             Op::Copy {
                 base,
@@ -97,14 +116,24 @@ pub fn apply<R: Read + Seek, W: Write>(
                     io(source.read_exact(&mut buffer[..n]))?;
                     io(output.write_all(&buffer[..n]))?;
                     digest.update(&buffer[..n]);
+                    #[cfg(test)]
+                    observed.input(n);
                     left -= n;
                 }
             }
         }
     }
-    if hex::encode(digest.finalize()) != recipe.target_hash {
+    if {
+        let actual = hex::encode(digest.finalize());
+        #[cfg(test)]
+        observed.finalized();
+        actual
+    } != recipe.target_hash
+    {
         return Err(WireError("target-hash-mismatch"));
     }
+    #[cfg(test)]
+    observed.finish();
     Ok(())
 }
 struct Window<'a, R> {
@@ -164,9 +193,12 @@ pub fn create<R: Read + Seek>(
     let mut index = Vec::<(u64, u8, u64)>::new();
     let mut buffer = vec![0; BUFFER];
     for (id, (source, base)) in sources.iter_mut().zip(identities).enumerate() {
-        crate::validate_hash(&base.hash)?;
+        super::validate_hash(&base.hash)?;
         io(source.seek(SeekFrom::Start(0)))?;
         let mut digest = Sha256::new();
+        #[cfg(test)]
+        let mut observed =
+            super::delta::source_test_observer::Scope::new(&base.hash, "stream-create-base-sha256");
         let mut position = 0;
         let mut next_anchor = 0;
         while position < base.size {
@@ -174,6 +206,8 @@ pub fn create<R: Read + Seek>(
             let n = (base.size - position).min(BUFFER as u64) as usize;
             io(source.read_exact(&mut buffer[..n]))?;
             digest.update(&buffer[..n]);
+            #[cfg(test)]
+            observed.input(n);
             while next_anchor + ANCHOR as u64 <= position + n as u64 {
                 let start = (next_anchor - position) as usize;
                 index.push((
@@ -185,11 +219,16 @@ pub fn create<R: Read + Seek>(
             }
             position += n as u64;
         }
-        if io(source.read(&mut buffer[..1]))? != 0
-            || hex::encode(digest.finalize()) != base.hash
-        {
+        if io(source.read(&mut buffer[..1]))? != 0 || {
+            let actual = hex::encode(digest.finalize());
+            #[cfg(test)]
+            observed.finalized();
+            actual != base.hash
+        } {
             return Err(WireError("base-hash-mismatch"));
         }
+        #[cfg(test)]
+        observed.finish();
     }
     verify(target, &identity, &mut check)?;
     index.sort_unstable();

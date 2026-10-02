@@ -296,27 +296,21 @@
         if (generation === loadGeneration && openItem === item) openValue = value
     }
 
-    /**
-     * Every deletion is confirmed. Deleting the whole list or everything shown asks a second
-     * time, since one filter change away it is the plugin's entire store.
-     */
     async function confirmRemoval(
         targets: readonly PluginDataItem[],
         bulk: 'all' | 'visible' | null,
     ): Promise<boolean> {
-        const { alertConfirm } = await import('src/ts/alert')
+        const { alertConfirm, alertCheckboxConfirm } = await import('src/ts/alert')
         const count = String(targets.length)
-        if (bulk === 'all') {
-            return (
-                (await alertConfirm(strings.deleteAllConfirm.replace('{0}', count))) &&
-                (await alertConfirm(strings.deleteAllConfirmFinal))
-            )
-        }
-        if (bulk === 'visible') {
-            return (
-                (await alertConfirm(strings.deleteVisibleConfirm.replace('{0}', count))) &&
-                (await alertConfirm(strings.deleteVisibleConfirmFinal))
-            )
+        if (bulk) {
+            return (await alertCheckboxConfirm({
+                title: (bulk === 'all' ? strings.deleteAllConfirm : strings.deleteVisibleConfirm).replace('{0}', count),
+                description: bulk === 'all' ? strings.deleteAllConfirmFinal : strings.deleteVisibleConfirmFinal,
+                checkboxLabel: language.checkboxConfirmation.pluginDataDeletion,
+                actionLabel: language.risuNest.plugins.removeAction,
+                cancelLabel: language.cancel,
+                requireChecked: true,
+            })).confirmed
         }
         return alertConfirm(
             targets.length === 1

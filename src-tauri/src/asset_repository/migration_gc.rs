@@ -109,9 +109,17 @@ pub(crate) fn dry_run_mark_and_sweep_with_remote(
 }
 
 pub(crate) struct AssetGcMarks {
+    pub(crate) plugin_cache: Option<PluginGcCache>,
     marked_hashes: BTreeSet<String>,
     blockers: BTreeSet<String>,
     retain_all_objects: bool,
+}
+
+pub(crate) struct PluginGcCache {
+    pub(crate) instance: String,
+    pub(crate) library_revision: i64,
+    pub(crate) device_fence: crate::persistent_store::device_store::plugin_gc::PluginGcFence,
+    pub(crate) roots: AssetRootSet,
 }
 
 pub(crate) fn mark_asset_roots_with_remote(
@@ -175,7 +183,6 @@ fn collect_asset_root_marks_with(
     for roots in roots {
         validate_root_set(&roots)?;
         retain_all_objects |= roots.retain_all_objects
-            || roots.blockers.contains("plugin-storage-opaque")
             || roots.blockers.contains("cold-payload-unscanned");
         manifest_hashes.extend(roots.manifest_hashes);
         marked_hashes.extend(roots.object_hashes);
@@ -206,6 +213,7 @@ fn collect_asset_root_marks_with(
         }
     }
     Ok(AssetGcMarks {
+        plugin_cache: None,
         marked_hashes,
         blockers,
         retain_all_objects,

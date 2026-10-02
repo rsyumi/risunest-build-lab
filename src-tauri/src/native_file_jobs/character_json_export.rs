@@ -693,6 +693,7 @@ where
         revision: prepared.revision,
         source_bytes: published.bytes,
         source_sha256: published.sha256,
+        source_fingerprint_kind: crate::native_file_jobs::SourceFingerprintKind::WholeFileSha256,
         character_count: 1,
         preset_count: 0,
         warning_codes: Vec::new(),

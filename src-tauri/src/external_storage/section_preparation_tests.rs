@@ -153,7 +153,7 @@ fn e3_a_late_conflicting_row_rolls_back_values_clocks_and_the_cursor() {
 }
 
 #[test]
-fn e3_rejoin_keeps_unpublished_edits_without_reviving_floor_reclaimed_values() {
+fn e3_rejoin_keeps_unpublished_edits_and_original_removal_evidence() {
     let (_root, mut store) = store();
     let files = tempfile::tempdir().unwrap();
     let device = store.device_store_mut().unwrap();
@@ -164,14 +164,16 @@ fn e3_rejoin_keeps_unpublished_edits_without_reviving_floor_reclaimed_values() {
     removed.value = SectionValueRow::Tombstone { first_published: Some(TombstonePublication {
         generation: Sequence::from(1u64), at_ms: 1,
     }) };
-    device.apply_section_rows(Section::LocalPlugins, &[row("stale", "old", 2), removed]).unwrap();
+    device.apply_section_rows(Section::LocalPlugins, &[row("stale", "old", 2), removed.clone()]).unwrap();
     cursor(&mut store, 1, 3);
     let source = capture(&[row("offline", "theirs", 100), row("remote-only", "remote", 100)], files.path(), 5, 3, 100);
     let prepared = prepare(&mut store, &source, SectionArrival::Continuing);
     apply_prepared_section(&mut store, &prepared).unwrap();
     let device = store.device_store_mut().unwrap();
     let rows = device.read_section_rows(Section::LocalPlugins).unwrap();
-    assert_eq!(rows.len(), 2);
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows.iter().find(|row| row.key3 == "removed"), Some(&removed));
+    assert!(!rows.iter().any(|row| row.key3 == "stale"));
     let local = rows.iter().find(|row| row.key3 == "offline").unwrap();
     assert_eq!(local.value, SectionValueRow::Plugin { space: "string".into(), value: "mine".into() });
     assert!(local.write_clock > Sequence::from(100u64));

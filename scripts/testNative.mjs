@@ -63,11 +63,16 @@ export function nativeCommands(group, platform = process.platform) {
   for (const manifest of group === 'protocol' ? protocolManifests : hostManifests) {
     if (manifest === 'src-tauri/Cargo.toml' && platform === 'linux') {
       commands.push(['dbus-run-session', '--', 'bash', 'scripts/linux-native-tests.sh', '--release'])
+    } else if (manifest === 'server/sync/Cargo.toml') {
+      commands.push(['cargo', 'test', '--manifest-path', manifest, '--release', '--locked', '--', '--skip', 'source_observer'])
     } else {
       commands.push(['cargo', 'test', '--manifest-path', manifest, '--release', '--locked'])
     }
   }
   if (group === 'host') {
+    const server = ['cargo', 'test', '--manifest-path', 'server/sync/Cargo.toml', '--release', '--locked', '--lib']
+    commands.push([...server, 'source_observer', '--', '--skip', 'source_observer::small_object_store::tests'])
+    commands.push([...server, 'source_observer::small_object_store::tests'])
     for (const entry of packageCrateTests.filter(entry => entry.platforms.includes(platform))) {
       commands.push([
         'cargo', 'test', '--manifest-path', entry.runnerManifest,

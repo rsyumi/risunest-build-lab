@@ -346,7 +346,7 @@ fn import_jpeg_asset_with_before_commit(
                     delete_character_ids: None,
                     plugin_storage: None,
                     asset_owner_heads: owner_head.map(|head| vec![head]),
-                },
+                ..Default::default()},
                 &[alias],
             )
             .map_err(super::native_store_error)?;
@@ -355,6 +355,7 @@ fn import_jpeg_asset_with_before_commit(
             revision: committed.revision,
             source_bytes: prepared.byte_size,
             source_sha256: prepared.content_hash,
+            source_fingerprint_kind: crate::native_file_jobs::SourceFingerprintKind::WholeFileSha256,
             character_count: 1,
             preset_count: 0,
             warning_codes: Vec::new(),
@@ -535,7 +536,7 @@ mod tests {
                 delete_character_ids: None,
                 plugin_storage: None,
                 asset_owner_heads: Some(vec![owner_head.clone()]),
-            })
+            ..Default::default()})
             .expect("seed owner head");
         (directory, store, character_id, owner_head)
     }
@@ -543,6 +544,7 @@ mod tests {
     fn opened_source(path: &std::path::Path, total_bytes: u64) -> OpenedJobSource {
         OpenedJobSource {
             file: std::fs::File::open(path).expect("open JPEG source"),
+            custody: None,
             total_bytes,
         }
     }
@@ -901,7 +903,7 @@ mod tests {
                         delete_character_ids: None,
                         plugin_storage: None,
                         asset_owner_heads: None,
-                    })
+                    ..Default::default()})
                     .expect("win final revision race");
                 Ok(())
             },

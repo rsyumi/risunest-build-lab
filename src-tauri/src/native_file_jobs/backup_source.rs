@@ -2,16 +2,15 @@
 use super::*;
 use std::io::{Read, Seek, SeekFrom};
 
-#[derive(Debug, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum BackupSourceFormat {
     Portable,
     BlockRisuSave,
     LocalBackup,
-    ConflictReference,
 }
 
-fn detect(mut file: File) -> Result<BackupSourceFormat, NativeJobError> {
+pub(crate) fn detect(mut file: File) -> Result<BackupSourceFormat, NativeJobError> {
     let unsupported = || {
         NativeJobError::new(
             "unsupported-format",
@@ -68,21 +67,18 @@ fn detect(mut file: File) -> Result<BackupSourceFormat, NativeJobError> {
     Ok(BackupSourceFormat::LocalBackup)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub(crate) fn native_backup_source_format(
     app: AppHandle,
     state: State<'_, NativeFileJobState>,
     source: JobSource,
 ) -> Result<BackupSourceFormat, NativeJobError> {
-    match source {
-        JobSource::ConflictReference { token } => {
-            drop(super::reference_source::claim_reference_source(
-                &app, &state, &token,
-            )?);
-            Ok(BackupSourceFormat::ConflictReference)
-        }
-        source => detect(open_job_source(&state.root, &source)?.file),
-    }
+    if matches!(source,JobSource::AndroidSeekable{..}|JobSource::IosScoped{..}) {
+        portable_source_custody::ensure_platform_source(&app,&source)?;
+        let detected=portable_source_custody::probe_format(&source)?;
+        portable_source_custody::confirm_platform_probe(&app,&source,detected)?;
+        Ok(detected)
+    } else { detect(open_job_source(&state.root,&source)?.file) }
 }
 
 #[cfg(test)]

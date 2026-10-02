@@ -12,6 +12,9 @@ private struct ProgressArgs: Decodable { let id: String; let completed: Int64; l
 private struct TaskProgress { let completed: Int64; let total: Int64 }
 private struct OpenedArgs: Decodable { let urls: [String] }
 private struct PathArgs: Decodable { let path: String }
+private struct PortableSourceArgs: Decodable { let token: String; let jobId: String? }
+private struct PortableSourceFormatArgs: Decodable { let token: String; let format: String }
+private struct PortableSourceProbeArgs: Decodable { let token: String; let probeId: String }
 private struct DataRootArgs: Decodable { let dataRoot: String }
 private struct ExportArgs: Decodable { let sourcePath: String; let suggestedName: String; let requestId: String }
 private struct NotificationArgs: Decodable { let body: String }
@@ -30,6 +33,10 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
     private var stagingSweepStarted = false
     private var openedFiles: [[String: String]] = []
     private var pickerCall: Invoke?
+    private var portablePicker = false
+    private let portableSources = PortableSourceCustody.shared
+    private var sourceOwner = UUID().uuidString
+    private var sourceOwnerLoaded = false
     private var exportCopy: URL?
     private var exporting = false
     private var publicationId: String?
@@ -47,6 +54,11 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
     private var staging: URL? { dataRoot?.appendingPathComponent("ios-file-staging", isDirectory: true) }
 
     override func load(webview: WKWebView) {
+        if sourceOwnerLoaded && webView !== webview {
+            portableSources.retireUnclaimed(owner: sourceOwner)
+            sourceOwner = UUID().uuidString
+        }
+        sourceOwnerLoaded = true
         webView = webview
         #if compiler(>=6.2)
         if #available(iOS 26.0, *) {
@@ -450,7 +462,65 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
         DispatchQueue.main.async {
             guard self.pickerCall == nil else { invoke.reject("A file picker is already open"); return }
             self.exporting = false
+            self.portablePicker = false
             self.present(UIDocumentPickerViewController(forOpeningContentTypes: [.data], asCopy: false), invoke: invoke)
+        }
+    }
+
+    @objc func pickBackupSource(_ invoke: Invoke) {
+        DispatchQueue.main.async {
+            guard self.pickerCall == nil else { invoke.reject("A file picker is already open"); return }
+            self.exporting = false
+            self.portablePicker = true
+            self.present(UIDocumentPickerViewController(forOpeningContentTypes: [.data], asCopy: false), invoke: invoke)
+        }
+    }
+
+    @objc func portableSourceDescriptor(_ invoke: Invoke) throws {
+        let args = try invoke.parseArgs(PortableSourceArgs.self)
+        do { invoke.resolve(try portableSources.descriptor(token: args.token, jobId: args.jobId)) }
+        catch { invoke.reject("Portable source is unavailable") }
+    }
+
+    @objc func releasePortableSource(_ invoke: Invoke) throws {
+        let args = try invoke.parseArgs(PortableSourceArgs.self)
+        fileQueue.async { invoke.resolve(self.portableSources.release(token: args.token, jobId: args.jobId)) }
+    }
+
+    @objc func portableSourceOrphans(_ invoke: Invoke) {
+        fileQueue.async { invoke.resolve(self.portableSources.orphanTokens()) }
+    }
+    @objc func acknowledgePortableSourceOrphan(_ invoke: Invoke) throws {
+        let args = try invoke.parseArgs(PortableSourceArgs.self)
+        invoke.resolve(portableSources.acknowledgeOrphan(token: args.token))
+    }
+    @objc func beginPortableSourceProbe(_ invoke: Invoke) throws {
+        let args = try invoke.parseArgs(PortableSourceProbeArgs.self)
+        do { try portableSources.beginProbe(token: args.token, probeId: args.probeId); invoke.resolve(true) }
+        catch { invoke.resolve(false) }
+    }
+    @objc func endPortableSourceProbe(_ invoke: Invoke) throws {
+        let args = try invoke.parseArgs(PortableSourceProbeArgs.self)
+        invoke.resolve(portableSources.endProbe(token: args.token, probeId: args.probeId))
+    }
+
+    @objc func discardBackupSource(_ invoke: Invoke) throws {
+        let args = try invoke.parseArgs(PortableSourceArgs.self)
+        fileQueue.async { invoke.resolve(self.portableSources.release(token: args.token, jobId: nil)) }
+    }
+
+    @objc func confirmPortableSourceFormat(_ invoke: Invoke) throws {
+        let args = try invoke.parseArgs(PortableSourceFormatArgs.self)
+        do { try portableSources.confirm(token: args.token, format: args.format); invoke.resolve() }
+        catch { invoke.reject("Portable source ownership changed") }
+    }
+
+    @objc func materializeBackupSource(_ invoke: Invoke) throws {
+        let args = try invoke.parseArgs(PortableSourceArgs.self)
+        guard let staging = staging else { invoke.reject(rootUnavailable().localizedDescription); return }
+        fileQueue.async {
+            do { invoke.resolve(try self.portableSources.materialize(token: args.token, staging: staging)) }
+            catch { invoke.reject("Backup source could not be copied") }
         }
     }
 
@@ -564,6 +634,17 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
             finishPicker(["cancelled": false, "bytes": size])
             return
         }
+        if portablePicker {
+            portableSources.select(url, owner: sourceOwner) { result in
+                DispatchQueue.main.async {
+                    switch result {
+                    case .success(let value): self.finishPicker(value)
+                    case .failure: self.pickerCall = nil; call.reject("Portable source must be a seekable file")
+                    }
+                }
+            }
+            return
+        }
         fileQueue.async {
             do {
                 let result = try self.stageFile(url)
@@ -605,6 +686,7 @@ final class IosNativePlugin: Plugin, UIDocumentPickerDelegate, ASWebAuthenticati
     }
 
     deinit {
+        portableSources.retireUnclaimed(owner: sourceOwner)
         for observer in observers { NotificationCenter.default.removeObserver(observer) }
     }
 }

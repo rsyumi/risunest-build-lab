@@ -143,7 +143,6 @@ fn remember_item(items: &mut BTreeMap<String, Value>, id: String, mut next: Valu
     if let Some(previous) = items.get(&id) {
         next["pinned"] = json!(previous["pinned"] == true || next["pinned"] == true);
         let rank = |value: &Value| match value.as_str() {
-            Some("conflict") => 2,
             Some("backup-point") => 1,
             _ => 0,
         };
@@ -152,13 +151,6 @@ fn remember_item(items: &mut BTreeMap<String, Value>, id: String, mut next: Valu
         }
     }
     items.insert(id, next);
-}
-fn point_row_id(kind: control::BackupPointKind, point_id: &str, snapshot_id: &str) -> Result<String> {
-    if kind == control::BackupPointKind::Conflict {
-        serde_json::to_string(&(point_id, snapshot_id)).map_err(runtime::local_error)
-    } else {
-        Ok(point_id.to_owned())
-    }
 }
 
 #[tauri::command]
@@ -187,7 +179,6 @@ pub(crate) async fn external_storage_list_history(
         .await?;
         for point in page.points {
             let kind = match point.document.kind {
-                control::BackupPointKind::Conflict => "conflict",
                 control::BackupPointKind::RecoveryCandidate => "recovery-candidate",
                 _ => "backup-point",
             };
@@ -201,9 +192,7 @@ pub(crate) async fn external_storage_list_history(
                     &reference,
                 )?;
                 let mut value = item(&document, &reference, kind, pinned, &store_id);
-                let row_id = point_row_id(
-                    point.document.kind, &point.document.point_id, &document.snapshot_id,
-                )?;
+                let row_id = point.document.point_id.clone();
                 value["id"] = json!(row_id);
                 value["pointId"] = json!(point.document.point_id.clone());
                 value["pointObservation"] = json!(serde_json::to_string(
@@ -264,21 +253,7 @@ pub(crate) async fn external_storage_list_history(
 mod tests {
     use super::*;
     #[test]
-    fn history_rows_preserve_both_conflict_bundles_and_separate_retention_points() {
-        use control::BackupPointKind::{Automatic, Conflict, Manual};
-        let mut rows = BTreeMap::new();
-        for (kind, point, snapshot) in [
-            (Conflict, "conflict", "local"), (Conflict, "conflict", "remote"),
-            (Automatic, "automatic", "local"), (Manual, "manual", "local"),
-        ] {
-            rows.insert(point_row_id(kind, point, snapshot).unwrap(), snapshot);
-        }
-        assert_eq!(rows.len(), 4);
-        assert_eq!(rows.values().filter(|id| **id == "local").count(), 3);
-        assert_eq!(rows.values().filter(|id| **id == "remote").count(), 1);
-    }
-    #[test]
-    fn duplicate_snapshot_keeps_pinning_and_conflict_evidence() {
+    fn duplicate_snapshot_keeps_pinning_and_backup_point_evidence() {
         let mut items = BTreeMap::new();
         remember_item(
             &mut items,
@@ -288,14 +263,9 @@ mod tests {
         remember_item(
             &mut items,
             "snapshot".into(),
-            json!({"kind":"conflict","pinned":false}),
-        );
-        remember_item(
-            &mut items,
-            "snapshot".into(),
             json!({"kind":"recovery-candidate","pinned":false}),
         );
-        assert_eq!(items["snapshot"]["kind"], "conflict");
+        assert_eq!(items["snapshot"]["kind"], "backup-point");
         assert_eq!(items["snapshot"]["pinned"], true);
     }
     #[test]

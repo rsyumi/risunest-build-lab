@@ -450,6 +450,7 @@ pub(crate) fn run_job(
                     revision,
                     source_bytes: payload.bytes,
                     source_sha256: payload.sha256.clone(),
+                    source_fingerprint_kind: crate::native_file_jobs::SourceFingerprintKind::WholeFileSha256,
                     character_count: payload.character_count,
                     preset_count: payload.preset_count,
                     warning_codes: Vec::new(),
@@ -1123,7 +1124,7 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    const EXPECTED_PAYLOAD: &str = "{\"token\":\"secret-token\",\"database\":{\"account\":{\"data\":{},\"id\":\"account-1\",\"kei\":true,\"token\":\"secret-token\"},\"botPresets\":[{\"a\":1,\"name\":\"preset\",\"z\":2}],\"characters\":[{\"a\":1,\"chaId\":\"char-1\",\"chats\":[{\"id\":\"chat-1\",\"message\":[{\"chatId\":\"message-1\",\"data\":\"hello\",\"role\":\"user\"}],\"name\":\"Chat\",\"note\":\"\"}],\"name\":\"Char\",\"type\":\"character\",\"z\":2}],\"pluginCustomStorage\":{\"2\":\"index\",\"beta\":{\"a\":1,\"z\":2},\"alpha\":\"first\"},\"z\":{\"2\":\"two\",\"10\":\"ten\",\"a\":\"line\\n\",\"b\":2}}}";
+    const EXPECTED_PAYLOAD: &str = "{\"token\":\"secret-token\",\"database\":{\"account\":{\"data\":{},\"id\":\"account-1\",\"kei\":true,\"token\":\"secret-token\"},\"botPresets\":[{\"a\":1,\"id\":\"kei-preset\",\"name\":\"preset\",\"z\":2}],\"characters\":[{\"a\":1,\"chaId\":\"char-1\",\"chats\":[{\"id\":\"chat-1\",\"message\":[{\"chatId\":\"message-1\",\"data\":\"hello\",\"role\":\"user\"}],\"name\":\"Chat\",\"note\":\"\"}],\"name\":\"Char\",\"type\":\"character\",\"z\":2}],\"pluginCustomStorage\":{\"2\":\"index\",\"beta\":{\"a\":1,\"z\":2},\"alpha\":\"first\"},\"z\":{\"2\":\"two\",\"10\":\"ten\",\"a\":\"line\\n\",\"b\":2}}}";
 
     #[test]
     fn kei_projection_excludes_archived_shells_and_every_colliding_owner() {
@@ -1191,7 +1192,7 @@ mod tests {
                 "id": "account-1",
                 "data": {}
             },
-            "botPresets": [{ "name": "preset", "z": 2, "a": 1 }],
+            "botPresets": [{ "id": "kei-preset", "name": "preset", "z": 2, "a": 1 }],
             "pluginCustomStorage": {
                 "beta": { "z": 2, "a": 1 },
                 "2": "index",
@@ -1474,7 +1475,7 @@ mod tests {
                 delete_character_ids: None,
                 asset_owner_heads: None,
                 plugin_storage: None,
-            })
+            ..Default::default()})
             .expect("commit later revision");
 
         let prepared = store
@@ -1640,7 +1641,7 @@ mod tests {
                 delete_character_ids: None,
                 asset_owner_heads: None,
                 plugin_storage: None,
-            })
+            ..Default::default()})
             .expect("advance live revision");
         let registry = JobRegistry::default();
         let job = registry

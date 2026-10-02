@@ -42,6 +42,8 @@ pub struct PreparedPayload {
 }
 
 pub(crate) struct StagedPayload {
+    #[cfg(test)]
+    body_identity: super::body_io::OwnedIdentity,
     verified_file: File,
     staging: StagingFile,
     repository_root: PathBuf,
@@ -171,6 +173,8 @@ impl PayloadCas {
         {
             return invalid_owned_path(path, "only private import payloads may be adopted");
         }
+        #[cfg(test)]
+        let mut observed_identity = super::body_io::PendingOwnedIdentity::new();
         let mut file = self.open_exact_owned_file(&canonical)?;
         let identity = exact_file_identity(&file)?;
         #[cfg(any(unix, windows))]
@@ -181,21 +185,35 @@ impl PayloadCas {
             return collision_or_corruption(expected_hash);
         }
         let mut hash = Sha256::new();
+        #[cfg(test)]
+        crate::persistent_store::hash_work::begin("cas_import_adopt");
+        #[cfg(test)]
+        super::body_io::body_sha_begin("owned", "cas_import_adopt");
         let mut buffer = [0_u8; COPY_BUFFER_BYTES];
         loop {
             if cancelled() {
                 return Err(io::Error::other("import cancelled"));
             }
-            let length = file.read(&mut buffer)?;
+            let read = file.read(&mut buffer);
+            #[cfg(test)]
+            super::body_io::read_result("owned", &read);
+            let length = read?;
             if length == 0 {
                 break;
             }
             hash.update(&buffer[..length]);
+            #[cfg(test)]
+            crate::persistent_store::hash_work::update("cas_import_adopt", length);
+            #[cfg(test)]
+            super::body_io::body_sha_update("owned", "cas_import_adopt", length);
         }
-        if hex::encode(hash.finalize()) != expected_hash || exact_file_identity(&file)? != identity
+        let content_hash = hex::encode(hash.finalize());
+        if content_hash != expected_hash || exact_file_identity(&file)? != identity
         {
             return collision_or_corruption(expected_hash);
         }
+        #[cfg(test)]
+        observed_identity.verified(&content_hash);
         // Check the path still names the held, verified file before publishing.
         let path_file = self.open_exact_owned_file(&canonical)?;
         if exact_file_identity(&path_file)? != identity {
@@ -219,6 +237,10 @@ impl PayloadCas {
         let published = crate::trust_boundary::rename_without_replace(&canonical, &object_path);
         #[cfg(not(any(target_os = "android", windows)))]
         let published = fs::hard_link(&canonical, &object_path);
+        #[cfg(all(test, any(target_os = "android", windows)))]
+        super::body_io::publication_result("rename", &published, expected_size);
+        #[cfg(all(test, not(any(target_os = "android", windows))))]
+        super::body_io::publication_result("hard-link", &published, expected_size);
         let deduplicated = match published {
             Ok(()) => false,
             Err(error) if error.kind() == ErrorKind::AlreadyExists => {
@@ -288,7 +310,13 @@ impl PayloadCas {
             self.ensure_directory(&assets_directory, "staging", &mut directory_entries_synced)?;
         let staging_path = staging_directory.join(format!("{}.tmp", uuid::Uuid::new_v4()));
         let (mut file, staging) = create_staging_file(&staging_path, &staging_directory)?;
+        #[cfg(test)]
+        let mut observed_identity = super::body_io::PendingOwnedIdentity::new();
         let mut hasher = Sha256::new();
+        #[cfg(test)]
+        crate::persistent_store::hash_work::begin("cas_stage");
+        #[cfg(test)]
+        super::body_io::body_sha_begin("owned", "cas_stage");
         let mut byte_size = 0_u64;
         let mut buffer = [0_u8; COPY_BUFFER_BYTES];
         loop {
@@ -296,8 +324,19 @@ impl PayloadCas {
             if read == 0 {
                 break;
             }
+            #[cfg(not(test))]
             file.write_all(&buffer[..read])?;
+            #[cfg(test)]
+            {
+                let written = file.write_all(&buffer[..read]);
+                super::body_io::staging_write_result(&written, read);
+                written?;
+            }
             hasher.update(&buffer[..read]);
+            #[cfg(test)]
+            crate::persistent_store::hash_work::update("cas_stage", read);
+            #[cfg(test)]
+            super::body_io::body_sha_update("owned", "cas_stage", read);
             byte_size = byte_size
                 .checked_add(read as u64)
                 .ok_or_else(|| io::Error::new(ErrorKind::InvalidData, "payload size overflow"))?;
@@ -306,10 +345,15 @@ impl PayloadCas {
         file.sync_all()?;
         let identity = exact_file_identity(&file)?;
         drop(file);
-        let verified_file = self.open_exact_owned_file(&staging_path)?;
+        let opened = self.open_exact_owned_file(&staging_path);
+        #[cfg(test)]
+        super::body_io::identity_metadata_open_result(&opened);
+        let verified_file = opened?;
         if exact_file_identity(&verified_file)? != identity {
             return exact_object_changed();
         }
+        #[cfg(test)]
+        super::body_io::verified_identity_metadata_open();
         directory_entries_synced &= sync_directory(&staging_directory)?;
 
         let content_hash = hex::encode(hasher.finalize());
@@ -321,7 +365,11 @@ impl PayloadCas {
                 ));
             }
         }
+        #[cfg(test)]
+        observed_identity.verified(&content_hash);
         Ok(StagedPayload {
+            #[cfg(test)]
+            body_identity: super::body_io::OwnedIdentity::new(&content_hash),
             verified_file,
             staging,
             repository_root: self.repository_root.clone(),
@@ -333,6 +381,8 @@ impl PayloadCas {
     }
 
     pub(crate) fn publish_staged(&self, staged: StagedPayload) -> io::Result<PreparedPayload> {
+        #[cfg(test)]
+        staged.body_identity.check_scope();
         if staged.repository_root != self.repository_root {
             return Err(io::Error::new(
                 ErrorKind::InvalidInput,
@@ -341,6 +391,8 @@ impl PayloadCas {
         }
         self.ensure_repository_root()?;
         let StagedPayload {
+            #[cfg(test)]
+            body_identity: _body_identity,
             verified_file,
             mut staging,
             identity,
@@ -349,12 +401,19 @@ impl PayloadCas {
             mut directory_entries_synced,
             ..
         } = staged;
-        let path_file = self.open_exact_owned_file(&staging.path)?;
+        #[cfg(test)]
+        let _body_scope = super::body_io::object_scope(&content_hash);
+        let opened = self.open_exact_owned_file(&staging.path);
+        #[cfg(test)]
+        super::body_io::identity_metadata_open_result(&opened);
+        let path_file = opened?;
         if exact_file_identity(&verified_file)? != identity
             || exact_file_identity(&path_file)? != identity
         {
             return exact_object_changed();
         }
+        #[cfg(test)]
+        super::body_io::verified_identity_metadata_open();
         let staging_path = staging.path.clone();
         let assets_directory = self.ensure_directory(
             &self.repository_root,
@@ -376,6 +435,10 @@ impl PayloadCas {
             crate::trust_boundary::rename_without_replace(&staging_path, &object_path);
         #[cfg(not(target_os = "android"))]
         let publication = fs::hard_link(&staging_path, &object_path);
+        #[cfg(all(test, target_os = "android"))]
+        super::body_io::publication_result("rename", &publication, byte_size);
+        #[cfg(all(test, not(target_os = "android")))]
+        super::body_io::publication_result("hard-link", &publication, byte_size);
         let deduplicated = match publication {
             Ok(()) => {
                 directory_entries_synced &= sync_directory(&object_directory)?;
@@ -407,6 +470,8 @@ impl PayloadCas {
     }
 
     pub fn stat_object(&self, content_hash: &str) -> io::Result<Option<u64>> {
+        #[cfg(test)]
+        super::body_io::stat_request();
         let Some(path) = self.existing_object_path(content_hash)? else {
             return Ok(None);
         };
@@ -414,10 +479,15 @@ impl PayloadCas {
     }
 
     pub fn read_object(&self, content_hash: &str) -> io::Result<Option<Vec<u8>>> {
+        #[cfg(test)]
+        let _body_scope = super::body_io::object_scope(content_hash);
         let Some(path) = self.existing_object_path(content_hash)? else {
             return Ok(None);
         };
-        Ok(Some(fs::read(path)?))
+        let body = fs::read(path);
+        #[cfg(test)]
+        super::body_io::read_file_result(&body);
+        Ok(Some(body?))
     }
 
     pub fn read_object_range(
@@ -426,6 +496,8 @@ impl PayloadCas {
         start: u64,
         end_exclusive: u64,
     ) -> io::Result<Option<Vec<u8>>> {
+        #[cfg(test)]
+        let _body_scope = super::body_io::object_scope(content_hash);
         if end_exclusive < start {
             return Err(io::Error::new(
                 ErrorKind::InvalidInput,
@@ -435,7 +507,10 @@ impl PayloadCas {
         let Some(path) = self.existing_object_path(content_hash)? else {
             return Ok(None);
         };
-        let mut file = File::open(path)?;
+        let file = File::open(path);
+        #[cfg(test)]
+        super::body_io::open_result("managed", &file);
+        let mut file = file?;
         let size = file.metadata()?.len();
         let bounded_start = start.min(size);
         let bounded_end = end_exclusive.min(size);
@@ -443,19 +518,46 @@ impl PayloadCas {
             .map_err(|_| io::Error::new(ErrorKind::InvalidInput, "payload range is too large"))?;
         file.seek(SeekFrom::Start(bounded_start))?;
         let mut data = vec![0; length];
-        file.read_exact(&mut data)?;
+        let read = file.read_exact(&mut data);
+        #[cfg(test)]
+        super::body_io::read_exact_result("managed", &read, data.len());
+        read?;
         Ok(Some(data))
     }
 
     pub fn open_object(&self, content_hash: &str) -> io::Result<Option<File>> {
+        #[cfg(test)]
+        let _body_scope = super::body_io::object_scope(content_hash);
         let Some(path) = self.existing_object_path(content_hash)? else {
             return Ok(None);
         };
-        Ok(Some(File::open(path)?))
+        let file = File::open(path);
+        #[cfg(test)]
+        super::body_io::open_result("managed", &file);
+        let file = file?;
+        #[cfg(test)]
+        super::body_io::escaped_handle("managed");
+        Ok(Some(file))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn open_object_tracked(&self, content_hash: &str) -> io::Result<Option<super::body_io::TrackedBodyFile>> {
+        let _body_scope = super::body_io::object_scope(content_hash);
+        let Some(path) = self.existing_object_path(content_hash)? else { return Ok(None); };
+        let file = File::open(path);
+        super::body_io::open_result("managed", &file);
+        Ok(Some(super::body_io::TrackedBodyFile::new(file?, content_hash)))
     }
 
     pub fn object_path(&self, content_hash: &str) -> io::Result<Option<PathBuf>> {
-        self.existing_object_path(content_hash)
+        #[cfg(test)]
+        let _body_scope = super::body_io::object_scope(content_hash);
+        let path = self.existing_object_path(content_hash);
+        #[cfg(test)]
+        if path.as_ref().is_ok_and(Option::is_some) {
+            super::body_io::escaped_path("managed");
+        }
+        path
     }
 
     /// Whether the object is held here at `expected_size` and its bytes hash
@@ -467,6 +569,8 @@ impl PayloadCas {
         expected_size: u64,
         cancelled: &dyn Fn() -> bool,
     ) -> io::Result<bool> {
+        #[cfg(test)]
+        let _body_scope = super::body_io::object_scope(content_hash);
         let Some(path) = self.existing_object_path(content_hash)? else {
             return Ok(false);
         };
@@ -514,6 +618,8 @@ impl PayloadCas {
         expected_physical_key: &str,
         after_hash: impl FnOnce(&Path) -> io::Result<()>,
     ) -> io::Result<ExactObjectUnlink> {
+        #[cfg(test)]
+        let _body_scope = super::body_io::object_scope(content_hash);
         validate_content_hash(content_hash)?;
         let physical_key = object_physical_key(content_hash);
         if expected_physical_key != physical_key {
@@ -607,6 +713,8 @@ impl PayloadCas {
     }
 
     fn existing_object_path(&self, content_hash: &str) -> io::Result<Option<PathBuf>> {
+        #[cfg(test)]
+        super::body_io::presence_query();
         validate_content_hash(content_hash)?;
         self.ensure_repository_root()?;
         let assets_directory = self.repository_root.join("assets");
@@ -662,6 +770,15 @@ impl PayloadCas {
     }
 
     fn open_exact_owned_file(&self, path: &Path) -> io::Result<File> {
+        #[cfg(test)]
+        let _body_scope = {
+            let hash = path.parent().and_then(Path::file_name).and_then(|name| name.to_str())
+                .zip(path.file_name().and_then(|name| name.to_str()))
+                .map(|(prefix, tail)| format!("{prefix}{tail}"))
+                .filter(|hash| validate_content_hash(hash).is_ok()
+                    && path == self.repository_root.join(object_physical_key(hash)));
+            hash.as_deref().map(super::body_io::object_scope)
+        };
         let mut options = OpenOptions::new();
         options.read(true);
         #[cfg(unix)]
@@ -675,7 +792,13 @@ impl PayloadCas {
                 .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
                 .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE);
         }
-        let file = options.open(path)?;
+        let file = options.open(path);
+        #[cfg(test)]
+        super::body_io::open_result(
+            if path.starts_with(self.repository_root.join("assets").join("objects")) { "managed" } else { "owned" },
+            &file,
+        );
+        let file = file?;
         let metadata = file.metadata()?;
         self.validate_owned_file(path, &metadata)?;
         Ok(file)
@@ -696,6 +819,8 @@ impl PayloadCas {
         expected_size: u64,
         physical_key: &str,
     ) -> io::Result<()> {
+        #[cfg(test)]
+        let _body_scope = super::body_io::object_scope(expected_hash);
         let mut file = self.open_exact_owned_file(path)?;
         if file.metadata()?.len() != expected_size {
             return collision_or_corruption(physical_key);
@@ -717,6 +842,8 @@ impl PayloadCasReadScan {
         &self,
         content_hashes: impl IntoIterator<Item = &'a str>,
     ) -> io::Result<Vec<Option<u64>>> {
+        #[cfg(test)]
+        super::body_io::batch_stat_request();
         let content_hashes = content_hashes.into_iter().collect::<Vec<_>>();
         for content_hash in &content_hashes {
             validate_content_hash(content_hash)?;
@@ -874,18 +1001,32 @@ fn collision_or_corruption<T>(physical_key: &str) -> io::Result<T> {
 
 fn hash_open_file(file: &mut File, cancelled: &dyn Fn() -> bool) -> io::Result<String> {
     let mut hasher = Sha256::new();
+    #[cfg(test)]
+    crate::persistent_store::hash_work::begin("cas_existing_verify");
+    #[cfg(test)]
+    let mut observed_hash = super::body_io::PendingBodyHash::new("cas_existing_verify");
     let mut buffer = [0_u8; COPY_BUFFER_BYTES];
     loop {
         if cancelled() {
             return Err(io::Error::other("payload verification cancelled"));
         }
-        let read = file.read(&mut buffer)?;
+        let read = file.read(&mut buffer);
+        #[cfg(test)]
+        super::body_io::read_result("managed", &read);
+        let read = read?;
         if read == 0 {
             break;
         }
         hasher.update(&buffer[..read]);
+        #[cfg(test)]
+        crate::persistent_store::hash_work::update("cas_existing_verify", read);
+        #[cfg(test)]
+        observed_hash.update(read);
     }
-    Ok(hex::encode(hasher.finalize()))
+    let content_hash = hex::encode(hasher.finalize());
+    #[cfg(test)]
+    observed_hash.verified(&content_hash);
+    Ok(content_hash)
 }
 
 fn exact_object_changed<T>() -> io::Result<T> {
@@ -1520,5 +1661,580 @@ mod tests {
         assert!(cas
             .holds_exact_object(&prepared.content_hash, prepared.byte_size, &|| false)
             .unwrap());
+    }
+}
+
+#[cfg(test)]
+mod hash_work_tests {
+    use super::*;
+    use crate::persistent_store::hash_work::{reset_hash_work, take_hash_work, DomainWork};
+
+    #[test]
+    fn stream_accounting_counts_only_executed_updates_on_read_failure() {
+        struct FailingReader { first: bool }
+        impl Read for FailingReader {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                if !self.first { return Err(io::Error::other("synthetic failure")); }
+                self.first = false; buffer[..7].copy_from_slice(b"partial"); Ok(7)
+            }
+        }
+        let directory = tempfile::tempdir().unwrap(); let cas = PayloadCas::new(directory.path()).unwrap();
+        reset_hash_work();
+        assert!(cas.prepare_reader(&mut FailingReader { first: true }).is_err());
+        let work = take_hash_work();
+        assert_eq!(work.domains["cas_stage"], DomainWork { calls: 1, bytes: 7 });
+        assert!(work.incomplete.is_empty());
+    }
+
+    #[test]
+    fn adoption_and_existing_file_verification_are_separate_hash_passes() {
+        let directory = tempfile::tempdir().unwrap(); let cas = PayloadCas::new(directory.path()).unwrap();
+        let staging = directory.path().join("native-file-jobs/jobs/synthetic"); fs::create_dir_all(&staging).unwrap();
+        let path = staging.join("body.payload"); let bytes = vec![7; COPY_BUFFER_BYTES + 13]; fs::write(&path, &bytes).unwrap();
+        let expected = hex::encode(Sha256::digest(&bytes));
+        reset_hash_work();
+        let prepared = cas.adopt_import_payload(&path, &expected, bytes.len() as u64, &|| false).unwrap();
+        let work = take_hash_work();
+        assert_eq!(work.domains["cas_import_adopt"], DomainWork { calls: 1, bytes: bytes.len() as u64 });
+        assert!(!work.domains.contains_key("cas_stage"));
+        let mut file = File::open(directory.path().join(&prepared.physical_key)).unwrap();
+        reset_hash_work();
+        hash_open_file(&mut file, &|| false).unwrap();
+        assert_eq!(take_hash_work().domains["cas_existing_verify"], DomainWork { calls: 1, bytes: bytes.len() as u64 });
+        reset_hash_work();
+        cas.stat_object(&expected).unwrap();
+        assert!(take_hash_work().domains.is_empty());
+    }
+}
+
+
+#[cfg(test)]
+mod body_io_tests {
+    use super::*;
+    use std::collections::BTreeMap;
+    use crate::asset_repository::body_io::{register_object_purpose, reset_body_io, take_body_io, BodyPurpose, BodyWork};
+
+    fn fixture(bytes: &[u8]) -> (tempfile::TempDir, PayloadCas, PreparedPayload) {
+        let directory = tempfile::tempdir().unwrap();
+        let cas = PayloadCas::new(directory.path()).unwrap();
+        let prepared = cas.prepare_bytes(bytes).unwrap();
+        (directory, cas, prepared)
+    }
+
+    #[test]
+    fn actual_destination_writes_links_and_sha_conserve_control_asset_and_mixed_roles() {
+        use crate::asset_repository::body_io::{BodyShaWork, BodyWork};
+        let directory=tempfile::tempdir().unwrap(); let cas=PayloadCas::new(directory.path()).unwrap();
+        let bodies=[vec![31;13],vec![32;COPY_BUFFER_BYTES+17],vec![33;5]];
+        let hashes=bodies.iter().map(|body|hex::encode(Sha256::digest(body))).collect::<Vec<_>>();
+        reset_body_io(); crate::persistent_store::hash_work::reset_hash_work();
+        register_object_purpose(&hashes[0],BodyPurpose::Control);
+        register_object_purpose(&hashes[1],BodyPurpose::Asset);
+        register_object_purpose(&hashes[2],BodyPurpose::Control); register_object_purpose(&hashes[2],BodyPurpose::Asset);
+        for (body,hash) in bodies.iter().zip(&hashes) {
+            cas.prepare_reader_expected(&mut body.as_slice(),hash,body.len() as u64).unwrap();
+        }
+        let work=take_body_io(); let native=crate::persistent_store::hash_work::take_hash_work();
+        assert!(work.complete()); assert!(native.incomplete.is_empty());
+        let mut sum=BodyWork::default();
+        for (body,hash) in bodies.iter().zip(&hashes) {
+            let object=&work.objects[hash]; assert_eq!(object.work,BodyWork::default());
+            sum.add(&object.owned_work);
+            assert_eq!(object.owned_work.staging_written_bytes,body.len() as u64);
+            assert_eq!(object.owned_work.staging_requested_bytes,body.len() as u64);
+            assert_eq!(object.owned_work.publication_attempts,1); assert_eq!(object.owned_work.publications,1);
+            assert_eq!(object.owned_work.publication_object_bytes,body.len() as u64);
+            assert_eq!(object.owned_work.body_sha["cas_stage"],BodyShaWork{calls:1,bytes:body.len() as u64});
+            #[cfg(not(target_os="android"))]
+            assert_eq!(object.owned_work.publication_kinds["hard-link"].successes,1);
+            #[cfg(target_os="android")]
+            assert_eq!(object.owned_work.publication_kinds["rename"].successes,1);
+        }
+        assert_eq!(sum,work.domains["owned"]);
+        assert_eq!(sum.body_sha["cas_stage"].calls,native.domains["cas_stage"].calls);
+        assert_eq!(sum.body_sha["cas_stage"].bytes,native.domains["cas_stage"].bytes);
+        assert_eq!(work.control_work(),work.objects[&hashes[0]].owned_work);
+        let mut assets=work.objects[&hashes[1]].owned_work.clone(); assets.add(&work.objects[&hashes[2]].owned_work);
+        assert_eq!(work.asset_work(),assets); assert_eq!(work.unknown_work(),BodyWork::default());
+    }
+
+    #[test]
+    fn existing_destination_reports_actual_link_result_and_separate_verified_sha() {
+        let bytes=b"synthetic deduplicated destination";
+        let (_directory,cas,prepared)=fixture(bytes);
+        reset_body_io(); register_object_purpose(&prepared.content_hash,BodyPurpose::Asset);
+        crate::persistent_store::hash_work::reset_hash_work();
+        assert!(cas.prepare_reader_expected(&mut bytes.as_slice(),&prepared.content_hash,bytes.len() as u64).unwrap().deduplicated);
+        let work=take_body_io(); let native=crate::persistent_store::hash_work::take_hash_work();
+        assert!(work.complete()); let object=&work.objects[&prepared.content_hash];
+        assert_eq!(object.owned_work.staging_written_bytes,bytes.len() as u64);
+        assert_eq!(object.owned_work.publication_attempts,1); assert_eq!(object.owned_work.publications,0);
+        assert_eq!(object.owned_work.publication_already_exists,1); assert_eq!(object.owned_work.publication_failures,0);
+        assert_eq!(object.owned_work.publication_object_bytes,0);
+        assert_eq!(object.work.body_sha["cas_existing_verify"].calls,1);
+        assert_eq!(object.work.body_sha["cas_existing_verify"].bytes,bytes.len() as u64);
+        assert_eq!(object.work.body_sha["cas_existing_verify"].bytes,native.domains["cas_existing_verify"].bytes);
+        assert_eq!(object.owned_work.body_sha["cas_stage"].bytes,native.domains["cas_stage"].bytes);
+    }
+
+    #[test]
+    fn actual_import_adoption_attributes_sha_only_after_computed_identity_validation() {
+        let bytes=b"synthetic private import asset";
+        let hash=hex::encode(Sha256::digest(bytes));
+        for valid in [true,false] {
+            let directory=tempfile::tempdir().unwrap(); let cas=PayloadCas::new(directory.path()).unwrap();
+            let jobs=directory.path().join("native-file-jobs").join("jobs").join("synthetic-import");
+            fs::create_dir_all(&jobs).unwrap(); let path=jobs.join("asset.payload"); fs::write(&path,bytes).unwrap();
+            let expected=if valid {hash.clone()} else {"ad".repeat(32)};
+            reset_body_io(); register_object_purpose(&expected,BodyPurpose::Asset);
+            crate::persistent_store::hash_work::reset_hash_work();
+            let result=cas.adopt_import_payload(&path,&expected,bytes.len() as u64,&||false);
+            assert_eq!(result.is_ok(),valid);
+            let work=take_body_io(); let native=crate::persistent_store::hash_work::take_hash_work();
+            assert_eq!(work.complete(),valid);
+            assert_eq!(work.domains["owned"].body_sha["cas_import_adopt"].bytes,native.domains["cas_import_adopt"].bytes);
+            if valid {
+                let object=&work.objects[&hash].owned_work;
+                assert_eq!(object.body_sha["cas_import_adopt"].bytes,bytes.len() as u64);
+                assert_eq!(object.publication_attempts,1); assert_eq!(object.publications,1);
+                assert_eq!(object.staging_write_attempts,0); assert_eq!(*object,work.asset_work());
+                #[cfg(any(target_os="android",windows))]
+                assert_eq!(object.publication_kinds["rename"].successes,1);
+                #[cfg(not(any(target_os="android",windows)))]
+                assert_eq!(object.publication_kinds["hard-link"].successes,1);
+            } else {
+                assert_eq!(work.unattributed_owned.body_sha["cas_import_adopt"].bytes,bytes.len() as u64);
+                assert_eq!(work.unattributed_owned.publication_attempts,0);
+                assert!(path.exists()); assert!(cas.stat_object(&expected).unwrap().is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn failed_stream_retains_actual_copy_and_sha_prefix_without_claiming_identity() {
+        struct Prefix(bool);
+        impl Read for Prefix { fn read(&mut self,buffer:&mut[u8])->io::Result<usize> {
+            if self.0 { return Err(io::Error::other("synthetic reader failure")); }
+            self.0=true; buffer[..3].copy_from_slice(b"abc"); Ok(3)
+        }}
+        let directory=tempfile::tempdir().unwrap(); let cas=PayloadCas::new(directory.path()).unwrap();
+        reset_body_io(); crate::persistent_store::hash_work::reset_hash_work();
+        assert!(cas.prepare_reader(&mut Prefix(false)).is_err());
+        let work=take_body_io(); let native=crate::persistent_store::hash_work::take_hash_work();
+        assert!(!work.complete()); assert!(work.objects.is_empty());
+        assert_eq!(work.unattributed_owned.staging_write_attempts,1);
+        assert_eq!(work.unattributed_owned.staging_written_bytes,3);
+        assert_eq!(work.unattributed_owned.body_sha["cas_stage"].bytes,3);
+        assert_eq!(work.unattributed_owned.body_sha["cas_stage"].bytes,native.domains["cas_stage"].bytes);
+        assert_eq!(work.unattributed_owned,work.domains["owned"]);
+        assert_eq!(work.unattributed_owned.publication_attempts,0);
+    }
+
+    #[test]
+    fn explicit_worker_scope_aggregates_actual_cas_work_and_native_worker_receipt() {
+        use crate::asset_repository::body_io::{capture_body_io_scope,with_body_io_scope};
+        let directory=tempfile::tempdir().unwrap(); let cas=PayloadCas::new(directory.path()).unwrap();
+        let bytes=b"synthetic worker destination"; let hash=hex::encode(Sha256::digest(bytes));
+        reset_body_io(); register_object_purpose(&hash,BodyPurpose::Asset);
+        crate::persistent_store::hash_work::reset_hash_work();
+        let scope=capture_body_io_scope();
+        let native=std::thread::spawn(move ||with_body_io_scope(scope,|| {
+            crate::persistent_store::hash_work::reset_hash_work();
+            cas.prepare_reader_expected(&mut bytes.as_slice(),&hash,bytes.len() as u64).unwrap();
+            crate::persistent_store::hash_work::take_hash_work()
+        })).join().unwrap();
+        let work=take_body_io(); assert!(work.complete());
+        assert_eq!(work.worker_scopes_started,1); assert_eq!(work.worker_scopes_settled,1);
+        assert_eq!(work.pending_worker_scopes,0); assert_eq!(work.worker_threads.len(),1);
+        assert_eq!(work.asset_work().staging_written_bytes,bytes.len() as u64);
+        assert_eq!(work.asset_work().body_sha["cas_stage"].bytes,native.domains["cas_stage"].bytes);
+        assert!(native.incomplete.is_empty());
+        assert!(crate::persistent_store::hash_work::take_hash_work().domains.is_empty());
+    }
+
+    #[test]
+    fn outstanding_worker_scope_reset_and_late_work_cannot_report_complete_zero() {
+        use crate::asset_repository::body_io::{capture_body_io_scope,with_body_io_scope};
+        let directory=tempfile::tempdir().unwrap(); let cas=PayloadCas::new(directory.path()).unwrap();
+        let bytes=b"synthetic late worker"; let hash=hex::encode(Sha256::digest(bytes));
+        reset_body_io(); register_object_purpose(&hash,BodyPurpose::Asset);
+        let scope=capture_body_io_scope(); let old=scope.scope.clone();
+        let before=take_body_io(); assert!(!before.complete()); assert_eq!(before.pending_worker_scopes,1);
+        std::thread::spawn(move ||with_body_io_scope(scope,|| {
+            cas.prepare_reader_expected(&mut bytes.as_slice(),&hash,bytes.len() as u64).unwrap();
+        })).join().unwrap();
+        assert!(!take_body_io().complete());
+        let late=old.lock().unwrap(); assert!(!late.complete()); assert!(late.scope_violations>0);
+        assert_eq!(late.asset_work().staging_written_bytes,bytes.len() as u64);
+        assert_eq!(late.worker_scopes_started,late.worker_scopes_settled);
+    }
+
+    #[test]
+    fn staging_provenance_conserves_owned_opens_and_asset_classification() {
+        for purpose in [BodyPurpose::Control, BodyPurpose::Asset] {
+            let directory = tempfile::tempdir().unwrap();
+            let cas = PayloadCas::new(directory.path()).unwrap();
+            let bytes = b"synthetic staged body";
+            let hash = risunest_sync_wire::hash(bytes);
+            reset_body_io(); register_object_purpose(&hash, purpose);
+            let staged = cas.stage_reader_expected(&mut bytes.as_slice(), &hash, bytes.len() as u64).unwrap();
+            cas.publish_staged(staged).unwrap();
+            let work = take_body_io(); assert!(work.complete());
+            assert_eq!(work.domains["owned"], BodyWork { open_attempts: 2, opens: 2,
+                identity_metadata_open_attempts: 2, identity_metadata_opens: 2,
+                verified_identity_metadata_opens: 2,
+                staging_write_attempts: 1, staging_writes: 1, staging_requested_bytes: bytes.len() as u64,
+                staging_written_bytes: bytes.len() as u64, publication_attempts: 1, publications: 1,
+                publication_object_bytes: bytes.len() as u64,
+                publication_kinds: BTreeMap::from([(if cfg!(target_os="android") {"rename"} else {"hard-link"}, crate::asset_repository::body_io::PublicationWork {
+                    attempts:1,successes:1,object_bytes:bytes.len() as u64,..Default::default()
+                })]),
+                body_sha: BTreeMap::from([("cas_stage",crate::asset_repository::body_io::BodyShaWork {calls:1,bytes:bytes.len() as u64})]),
+                ..Default::default() });
+            assert_eq!(work.objects[&hash].owned_work, work.domains["owned"]);
+            assert_eq!(work.objects[&hash].work, BodyWork::default());
+            assert_eq!(work.unknown_work(), BodyWork::default());
+            let classified = if purpose == BodyPurpose::Control { work.control_work() } else { work.asset_work() };
+            assert_eq!(classified, work.domains["owned"]);
+        }
+    }
+
+    #[test]
+    fn two_control_stagings_conserve_four_verified_identity_metadata_opens() {
+        let directory = tempfile::tempdir().unwrap();
+        let cas = PayloadCas::new(directory.path()).unwrap();
+        let bodies = [b"first synthetic control".as_slice(), b"second synthetic control".as_slice()];
+        let hashes = bodies.map(risunest_sync_wire::hash);
+        reset_body_io();
+        for (bytes, hash) in bodies.into_iter().zip(&hashes) {
+            register_object_purpose(hash, BodyPurpose::Control);
+            let mut reader = bytes;
+            let staged = cas.stage_reader_expected(&mut reader, hash, bytes.len() as u64).unwrap();
+            cas.publish_staged(staged).unwrap();
+        }
+        let work = take_body_io(); assert!(work.complete());
+        let owned = work.domains["owned"].clone();
+        assert_eq!(owned, BodyWork { open_attempts: 4, opens: 4,
+            identity_metadata_open_attempts: 4, identity_metadata_opens: 4,
+            verified_identity_metadata_opens: 4,
+            staging_write_attempts: 2, staging_writes: 2, staging_requested_bytes: bodies.iter().map(|body|body.len() as u64).sum(),
+            staging_written_bytes: bodies.iter().map(|body|body.len() as u64).sum(), publication_attempts: 2, publications: 2,
+            publication_object_bytes: bodies.iter().map(|body|body.len() as u64).sum(),
+            publication_kinds: BTreeMap::from([(if cfg!(target_os="android") {"rename"} else {"hard-link"}, crate::asset_repository::body_io::PublicationWork {
+                attempts:2,successes:2,object_bytes:bodies.iter().map(|body|body.len() as u64).sum(),..Default::default()
+            })]),
+            body_sha: BTreeMap::from([("cas_stage",crate::asset_repository::body_io::BodyShaWork {calls:2,bytes:bodies.iter().map(|body|body.len() as u64).sum()})]),
+            ..Default::default() });
+        assert_eq!(work.control_work(), owned); assert_eq!(work.asset_work(), BodyWork::default());
+        for hash in hashes { assert_eq!(work.objects[&hash].owned_work.verified_identity_metadata_opens, 2); }
+    }
+
+    #[test]
+    fn failed_or_unclassified_staging_never_acquires_a_control_default() {
+        let directory = tempfile::tempdir().unwrap();
+        let cas = PayloadCas::new(directory.path()).unwrap();
+        let bytes = b"synthetic staged body";
+        let hash = risunest_sync_wire::hash(bytes);
+        reset_body_io();
+        cas.prepare_bytes(bytes).unwrap();
+        let unknown = take_body_io(); assert!(!unknown.complete());
+        assert_eq!(unknown.unknown_work(), unknown.domains["owned"]);
+        assert_eq!(unknown.control_work(), BodyWork::default());
+        assert_eq!(unknown.unknown_work().verified_identity_metadata_opens, 2);
+        register_object_purpose(&hash, BodyPurpose::Control);
+        assert!(cas.stage_reader_expected(&mut bytes.as_slice(), &hash, 0).is_err());
+        let failed = take_body_io(); assert!(!failed.complete());
+        assert_eq!(failed.unattributed_owned.opens, 1);
+        assert_eq!(failed.unattributed_owned, failed.domains["owned"]);
+        assert_eq!(failed.unattributed_owned.verified_identity_metadata_opens, 1);
+        reset_body_io();
+        assert!(cas.open_exact_owned_file(&directory.path().join("missing.tmp")).is_err());
+        let missing = take_body_io(); assert!(!missing.complete());
+        assert_eq!(missing.unattributed_owned.failed_opens, 1);
+        assert_eq!(missing.unattributed_owned.identity_metadata_open_attempts, 0);
+    }
+
+    #[test]
+    fn identity_metadata_proof_excludes_nonidentity_owned_opens_and_mixed_assets() {
+        let directory = tempfile::tempdir().unwrap();
+        let cas = PayloadCas::new(directory.path()).unwrap();
+        let bytes = b"synthetic owned identity discriminator";
+        let hash = risunest_sync_wire::hash(bytes);
+        let path = directory.path().join("known-control.tmp");
+        std::fs::write(&path, bytes).unwrap();
+        reset_body_io(); register_object_purpose(&hash, BodyPurpose::Control);
+        {
+            let _scope = super::super::body_io::object_scope(&hash);
+            drop(cas.open_exact_owned_file(&path).unwrap());
+        }
+        let work = take_body_io(); assert!(work.complete());
+        assert_eq!(work.control_work().opens, 1);
+        assert_eq!(work.control_work().identity_metadata_open_attempts, 0);
+        assert_eq!(work.control_work().verified_identity_metadata_opens, 0);
+        assert_eq!(work.objects[&hash].owned_work, work.domains["owned"]);
+        register_object_purpose(&hash, BodyPurpose::Control);
+        register_object_purpose(&hash, BodyPurpose::Asset);
+        cas.prepare_bytes(bytes).unwrap();
+        let mixed = take_body_io(); assert!(mixed.complete());
+        assert_eq!(mixed.control_work(), BodyWork::default());
+        assert_eq!(mixed.asset_work(), mixed.domains["owned"]);
+        assert_eq!(mixed.asset_work().verified_identity_metadata_opens, 2);
+        register_object_purpose(&hash, BodyPurpose::Control);
+        drop(cas.open_object(&hash).unwrap().unwrap());
+        let raw = take_body_io(); assert!(!raw.complete());
+        assert_eq!(raw.domains["managed"].escaped_handles, 1);
+        assert_eq!(raw.domains["managed"].verified_identity_metadata_opens, 0);
+    }
+
+    #[test]
+    fn identity_metadata_open_failure_and_identity_mismatch_never_become_verified() {
+        for missing in [true, false] {
+            let directory = tempfile::tempdir().unwrap();
+            let cas = PayloadCas::new(directory.path()).unwrap();
+            let bytes = b"synthetic rejected staging identity";
+            let hash = risunest_sync_wire::hash(bytes);
+            reset_body_io(); register_object_purpose(&hash, BodyPurpose::Control);
+            let staged = cas.stage_reader_expected(&mut bytes.as_slice(), &hash, bytes.len() as u64).unwrap();
+            let path = staged.staging.path.clone();
+            std::fs::remove_file(&path).unwrap();
+            if !missing { std::fs::write(&path, b"replacement has a different identity and length").unwrap(); }
+            assert!(cas.publish_staged(staged).is_err());
+            let work = take_body_io(); assert!(work.complete());
+            let owned = work.domains["owned"].clone();
+            assert_eq!(owned.identity_metadata_open_attempts, 2);
+            assert_eq!(owned.verified_identity_metadata_opens, 1);
+            assert_eq!(owned.identity_metadata_opens, if missing { 1 } else { 2 });
+            assert_eq!(owned.identity_metadata_failed_opens, if missing { 1 } else { 0 });
+            assert_eq!(owned.open_attempts, owned.identity_metadata_open_attempts);
+            assert_eq!(owned.opens, owned.identity_metadata_opens);
+            assert_eq!(owned.failed_opens, owned.identity_metadata_failed_opens);
+            assert_eq!(work.objects[&hash].owned_work, owned);
+            assert_eq!(work.control_work(), owned);
+        }
+    }
+
+    #[test]
+    fn staged_owned_identity_cannot_cross_reset_or_worker_boundaries() {
+        let directory = tempfile::tempdir().unwrap();
+        let cas = PayloadCas::new(directory.path()).unwrap();
+        let bytes = b"synthetic staged body";
+        let hash = risunest_sync_wire::hash(bytes);
+        reset_body_io(); register_object_purpose(&hash, BodyPurpose::Control);
+        let staged = cas.stage_reader_expected(&mut bytes.as_slice(), &hash, bytes.len() as u64).unwrap();
+        let live = take_body_io(); assert!(!live.complete());
+        assert_eq!(live.control_work().outstanding_readers, 1);
+        assert_eq!(live.control_work().verified_identity_metadata_opens, 1);
+        drop(staged); assert!(!take_body_io().complete());
+        reset_body_io(); register_object_purpose(&hash, BodyPurpose::Control);
+        let staged = cas.stage_reader_expected(&mut bytes.as_slice(), &hash, bytes.len() as u64).unwrap();
+        let worker = std::thread::spawn(move || {
+            reset_body_io(); cas.publish_staged(staged).unwrap(); take_body_io()
+        }).join().unwrap();
+        let owner = take_body_io(); assert!(!owner.complete()); assert!(!worker.complete());
+        assert_eq!(owner.control_work().opens, 1); assert_eq!(worker.unknown_work().opens, 1);
+        assert_eq!(owner.control_work().verified_identity_metadata_opens, 1);
+        assert_eq!(worker.unknown_work().verified_identity_metadata_opens, 1);
+        assert_eq!(owner.domains["owned"].outstanding_readers, 0);
+    }
+
+    #[test]
+    fn catalog_and_missing_body_checks_do_not_open_payloads() {
+        let (directory, cas, prepared) = fixture(b"synthetic body");
+        let missing = "a".repeat(64);
+        let scan = PayloadCas::new(directory.path()).unwrap().into_read_scan();
+        reset_body_io();
+        assert_eq!(cas.stat_object(&prepared.content_hash).unwrap(), Some(14));
+        assert_eq!(cas.stat_object(&missing).unwrap(), None);
+        assert!(cas.read_object(&missing).unwrap().is_none());
+        assert!(cas.open_object(&missing).unwrap().is_none());
+        assert_eq!(scan.stat_objects([prepared.content_hash.as_str(),missing.as_str()]).unwrap(), vec![Some(14),None]);
+        let work = take_body_io();
+        assert!(work.domains.is_empty());
+        assert_eq!(work.stat_requests, 2);
+        assert_eq!(work.batch_stat_requests, 1);
+        assert_eq!(work.presence_queries, 4);
+        assert!(work.complete());
+    }
+
+    #[test]
+    fn full_and_range_reads_record_actual_opens_and_exact_bytes() {
+        let body = b"synthetic body";
+        let (_directory, cas, prepared) = fixture(body);
+        reset_body_io();
+        register_object_purpose(&prepared.content_hash, BodyPurpose::Asset);
+        assert_eq!(cas.read_object(&prepared.content_hash).unwrap().unwrap(), body);
+        assert_eq!(cas.read_object_range(&prepared.content_hash, 2, 7).unwrap().unwrap(), &body[2..7]);
+        let work = take_body_io();
+        assert_eq!(work.domains["managed"], BodyWork {
+            open_attempts: 2, opens: 2, read_operations: 2, read_bytes: body.len() as u64 + 5,
+            ..Default::default()
+        });
+        assert!(work.complete());
+        assert_eq!(take_body_io().domains.len(), 0);
+        reset_body_io();
+        assert!(take_body_io().domains.is_empty());
+    }
+
+    #[test]
+    fn failed_actual_open_is_counted_without_inventing_a_body_read() {
+        let (_directory, cas, _prepared) = fixture(b"synthetic body");
+        let missing = cas.repository_root.join(object_physical_key(&"a".repeat(64)));
+        reset_body_io();
+        register_object_purpose(&"a".repeat(64), BodyPurpose::Asset);
+        assert!(cas.open_exact_owned_file(&missing).is_err());
+        assert!(cas.read_object_range(&"a".repeat(64), 3, 2).is_err());
+        let work = take_body_io();
+        assert_eq!(work.domains["managed"], BodyWork { open_attempts: 1, failed_opens: 1, ..Default::default() });
+        assert_eq!(work.presence_queries, 0);
+        assert!(work.complete());
+    }
+
+    #[test]
+    fn escaped_handles_mark_later_external_read_bytes_incomplete() {
+        let (_directory, cas, prepared) = fixture(b"synthetic body");
+        reset_body_io();
+        register_object_purpose(&prepared.content_hash, BodyPurpose::Asset);
+        let mut file = cas.open_object(&prepared.content_hash).unwrap().unwrap();
+        let mut bytes = Vec::new(); file.read_to_end(&mut bytes).unwrap();
+        assert_eq!(bytes, b"synthetic body");
+        let work = take_body_io();
+        assert_eq!(work.domains["managed"], BodyWork { open_attempts: 1, opens: 1, escaped_handles: 1, ..Default::default() });
+        assert!(!work.complete());
+        reset_body_io();
+        register_object_purpose(&prepared.content_hash, BodyPurpose::Asset);
+        let path = cas.object_path(&prepared.content_hash).unwrap().unwrap();
+        assert_eq!(fs::read(path).unwrap(), b"synthetic body");
+        let work = take_body_io();
+        assert_eq!(work.domains["managed"], BodyWork { escaped_paths: 1, ..Default::default() });
+        assert!(!work.complete());
+    }
+
+    #[test]
+    fn verification_reads_count_only_executed_bytes_before_cancellation() {
+        let bytes = vec![7; COPY_BUFFER_BYTES * 2 + 13];
+        let (_directory, cas, prepared) = fixture(&bytes);
+        let checks = std::cell::Cell::new(0);
+        reset_body_io();
+        register_object_purpose(&prepared.content_hash, BodyPurpose::Asset);
+        assert!(cas.holds_exact_object(&prepared.content_hash, bytes.len() as u64, &|| {
+            let count = checks.get(); checks.set(count + 1); count > 0
+        }).is_err());
+        let work = take_body_io();
+        assert_eq!(work.domains["managed"], BodyWork {
+            open_attempts: 1, opens: 1, read_operations: 1, read_bytes: COPY_BUFFER_BYTES as u64,
+            body_sha:BTreeMap::from([("cas_existing_verify",crate::asset_repository::body_io::BodyShaWork {calls:1,bytes:COPY_BUFFER_BYTES as u64})]),
+            ..Default::default()
+        });
+        assert_eq!(work.asset_work().read_bytes,COPY_BUFFER_BYTES as u64);
+        assert_eq!(work.unattributed_managed.body_sha["cas_existing_verify"].bytes,COPY_BUFFER_BYTES as u64);
+        assert!(!work.complete());
+    }
+
+    #[test]
+    fn worker_io_is_collected_on_that_thread_and_never_inferred_on_caller() {
+        let (_directory, cas, prepared) = fixture(b"synthetic body");
+        let cas = std::sync::Arc::new(cas);
+        reset_body_io();
+        let caller = std::thread::current().id();
+        let worker = std::thread::spawn(move || {
+            reset_body_io();
+            register_object_purpose(&prepared.content_hash, BodyPurpose::Asset);
+            cas.read_object(&prepared.content_hash).unwrap().unwrap();
+            take_body_io()
+        }).join().unwrap();
+        assert_ne!(worker.thread, caller);
+        assert_eq!(worker.domains["managed"].opens, 1);
+        assert_eq!(worker.domains["managed"].read_bytes, 14);
+        assert!(worker.complete());
+        let parent = take_body_io();
+        assert_eq!(parent.thread, caller);
+        assert!(parent.domains.is_empty());
+        assert!(parent.complete());
+    }
+
+    #[test]
+    fn tracked_reads_classify_actual_objects_and_count_exact_bytes() {
+        let bytes = b"synthetic body";
+        let (_directory, cas, prepared) = fixture(bytes);
+        reset_body_io();
+        register_object_purpose(&prepared.content_hash, BodyPurpose::Control);
+        let mut reader = cas.open_object_tracked(&prepared.content_hash).unwrap().unwrap();
+        assert_eq!(reader.len().unwrap(), bytes.len() as u64);
+        reader.seek(SeekFrom::Start(2)).unwrap();
+        let mut part = [0; 5]; reader.read_exact(&mut part).unwrap();
+        assert_eq!(&part, &bytes[2..7]);
+        drop(reader);
+        let work = take_body_io();
+        assert!(work.complete());
+        assert_eq!(work.control_work(), BodyWork { open_attempts: 1, opens: 1, read_operations: 1, read_bytes: 5, ..Default::default() });
+        assert_eq!(work.asset_work(), BodyWork::default());
+        assert_eq!(work.unknown_work(), BodyWork::default());
+        assert_eq!(work.objects[&prepared.content_hash].work, work.domains["managed"]);
+    }
+
+    #[test]
+    fn tracked_unread_drop_and_full_read_are_observed_without_guessed_bytes() {
+        let bytes = b"synthetic body";
+        let (_directory, cas, prepared) = fixture(bytes);
+        reset_body_io(); register_object_purpose(&prepared.content_hash, BodyPurpose::Asset);
+        drop(cas.open_object_tracked(&prepared.content_hash).unwrap().unwrap());
+        let work = take_body_io(); assert!(work.complete());
+        assert_eq!(work.asset_work(), BodyWork { open_attempts: 1, opens: 1, ..Default::default() });
+        register_object_purpose(&prepared.content_hash, BodyPurpose::Asset);
+        let mut reader = cas.open_object_tracked(&prepared.content_hash).unwrap().unwrap();
+        let mut result = Vec::new(); reader.read_to_end(&mut result).unwrap(); drop(reader);
+        let work = take_body_io(); assert!(work.complete()); assert_eq!(result, bytes);
+        assert_eq!(work.asset_work().read_bytes, bytes.len() as u64);
+        assert!(work.asset_work().read_operations >= 2);
+        assert_eq!(work.asset_work().escaped_handles, 0);
+    }
+
+    #[test]
+    fn unknown_role_is_incomplete_and_mixed_roles_count_as_assets_across_roots() {
+        let (_directory, cas, prepared) = fixture(b"synthetic body");
+        let (_other_directory, other, other_prepared) = fixture(b"synthetic body");
+        assert_eq!(prepared.content_hash, other_prepared.content_hash);
+        reset_body_io(); drop(cas.open_object_tracked(&prepared.content_hash).unwrap());
+        let unknown = take_body_io(); assert!(!unknown.complete());
+        assert_eq!(unknown.unknown_work().opens, 1); assert_eq!(unknown.asset_work().opens, 0);
+        register_object_purpose(&prepared.content_hash, BodyPurpose::Control);
+        drop(cas.open_object_tracked(&prepared.content_hash).unwrap());
+        register_object_purpose(&prepared.content_hash, BodyPurpose::Asset);
+        drop(other.open_object_tracked(&prepared.content_hash).unwrap());
+        let mixed = take_body_io(); assert!(mixed.complete());
+        assert_eq!(mixed.asset_work().opens, 2); assert_eq!(mixed.control_work(), BodyWork::default());
+        assert_eq!(mixed.objects[&prepared.content_hash].purposes.len(), 2);
+    }
+
+    #[test]
+    fn live_reader_and_reset_boundary_fail_closed_without_erasing_old_scope() {
+        let (_directory, cas, prepared) = fixture(b"synthetic body");
+        reset_body_io(); register_object_purpose(&prepared.content_hash, BodyPurpose::Control);
+        let mut reader = cas.open_object_tracked(&prepared.content_hash).unwrap().unwrap();
+        let live = take_body_io(); assert!(!live.complete());
+        assert_eq!(live.control_work().outstanding_readers, 1);
+        let mut byte = [0]; assert_eq!(reader.read(&mut byte).unwrap(), 1); drop(reader);
+        let stale = take_body_io(); assert!(!stale.complete()); assert!(stale.scope_violations > 0);
+        assert_eq!(stale.asset_work().read_bytes, 0);
+        reset_body_io(); assert!(take_body_io().complete());
+        register_object_purpose(&prepared.content_hash, BodyPurpose::Control);
+        let reader = cas.open_object_tracked(&prepared.content_hash).unwrap().unwrap();
+        reset_body_io(); drop(reader); assert!(!take_body_io().complete());
+    }
+
+    #[test]
+    fn tracked_reader_cross_thread_use_invalidates_owner_and_worker_scopes() {
+        let (_directory, cas, prepared) = fixture(b"synthetic body");
+        reset_body_io(); register_object_purpose(&prepared.content_hash, BodyPurpose::Asset);
+        let mut reader = cas.open_object_tracked(&prepared.content_hash).unwrap().unwrap();
+        let worker = std::thread::spawn(move || {
+            reset_body_io(); let mut bytes = [0; 3]; reader.read_exact(&mut bytes).unwrap(); drop(reader);
+            take_body_io()
+        }).join().unwrap();
+        let owner = take_body_io();
+        assert!(!owner.complete()); assert!(!worker.complete());
+        assert_eq!(owner.asset_work().read_bytes, 3); assert_eq!(owner.asset_work().outstanding_readers, 0);
+        assert!(owner.scope_violations > 0); assert!(worker.scope_violations > 0);
+        assert_eq!(worker.asset_work().read_bytes, 0);
     }
 }

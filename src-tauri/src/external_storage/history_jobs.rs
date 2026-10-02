@@ -118,6 +118,7 @@ async fn upload_prepared(
             record.created_at_ms,
             view.library,
             view.sections,
+            None,
             &mut journal,
             connected.provider.as_ref(),
             &connected.handle,
@@ -398,7 +399,6 @@ mod tests {
                 credential_ref: "credential".into(),
                 root_key_ref: "key".into(),
                 recovery_key_ref: "recovery-key".into(),
-                capture_policy: None,
                 retention_policy: None,
                 capabilities: fake::capabilities(true),
                 created_at_ms: 1_000,
@@ -432,7 +432,7 @@ mod tests {
                 delete_character_ids: None,
                 plugin_storage: None,
                 asset_owner_heads: None,
-            })
+            ..Default::default()})
             .unwrap();
     }
 

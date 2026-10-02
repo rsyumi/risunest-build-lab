@@ -61,11 +61,13 @@ function makeAdapter(database: Database): PersistentDataRuntimeStateAdapter & {
     residency.setEvictionAllowed(false)
     return {
         current: () => workingCopy,
+        captureWorkingSetDatabase: () => workingCopy,
+        captureCharacters: () => workingCopy.characters,
         captureRoot: () => {
-            const { characters: _characters, botPresets: _botPresets, ...root } = structuredClone(workingCopy)
-            return root
+            return capturePersistentRoot(workingCopy)
         },
         capturePresets: () => capturePersistentPresets(workingCopy),
+        capturePluginStorage: () => workingCopy.pluginCustomStorage ?? {},
         captureSelectedCharacter: () => structuredClone(workingCopy.characters[0] ?? null),
         captureCharacter: (id) => {
             const character = workingCopy.characters.find((item) => item.chaId === id)
@@ -77,16 +79,17 @@ function makeAdapter(database: Database): PersistentDataRuntimeStateAdapter & {
         },
         publishPresetWorkingSet: ({ revision, root, presets }) => {
             Object.assign(workingCopy, root)
+            if (typeof root.botPresetsId === "string") workingCopy.botPresetsId = Math.max(0, presets.findIndex((value) => value["id"] === root.botPresetsId))
             const catalog = {
                 revision,
                 items: presets.map((preset, configuredIndex) => ({
-                    id: String(configuredIndex),
+                    id: preset['id'] as string,
                     configuredIndex,
                     name: preset.name ?? '',
                     image: preset.image,
                 })),
             }
-            const active = catalog.items[root.botPresetsId]
+            const active = catalog.items.find((item) => typeof root.botPresetsId === 'string' ? item.id === root.botPresetsId : item.configuredIndex === root.botPresetsId)
             workingCopy.botPresets = createCatalogPresetWorkingSet(catalog, active ? {
                 summary: active,
                 value: presets[active.configuredIndex],
@@ -177,31 +180,13 @@ describe('persistent production runtime', () => {
                 runtime.acquireCompleteConversation(reason, target),
             refreshSelectedConversationAfterReplacement: (target, expectedSession) =>
                 runtime.refreshSelectedConversationAfterReplacement(target, expectedSession),
-            replacePersistentCompleteCharacter: (characterId, reason, mutate, options) =>
-                runtime.replacePersistentCompleteCharacter(characterId, reason, mutate, options),
-            replacePersistentConversation: (
-                characterId,
-                conversationId,
-                reason,
-                replacement,
-                options,
-            ) => runtime.replacePersistentConversation(
-                characterId,
-                conversationId,
-                reason,
-                replacement,
-                options,
-            ),
+            getPersistentRevision: () => runtime.revision,
+            commitPersistentUnitIntent: (reason, units, conversations, wholeMessages) => runtime.commitPersistentUnitIntent(reason, units, conversations, wholeMessages),
             reportIdentityReplacementRejected: vi.fn(),
             getNavigationGeneration: () => runtime.getNavigationGeneration(),
-            applyCompatibilityDatabaseLite: vi.fn(),
             readPluginStorageSnapshot: vi.fn(async () => ({})),
-            mutatePluginStorage: vi.fn(),
-            invalidatePluginStorage: vi.fn(),
             getStorageAuthorityEpoch: () => runtime.getStorageAuthorityEpoch(),
             assertPersistentMutationAllowed: (epoch) => runtime.assertPersistentMutationAllowed(epoch),
-            materializeDatabaseSnapshot: vi.fn(),
-            replacePersistentDatabase: vi.fn(),
             snapshot: structuredClone,
         })
         const replacement = structuredClone(adapter.current().characters[0])
@@ -287,31 +272,13 @@ describe('persistent production runtime', () => {
                 runtime.acquireCompleteConversation(reason, target),
             refreshSelectedConversationAfterReplacement: (target, expectedSession) =>
                 runtime.refreshSelectedConversationAfterReplacement(target, expectedSession),
-            replacePersistentCompleteCharacter: (characterId, reason, mutate, options) =>
-                runtime.replacePersistentCompleteCharacter(characterId, reason, mutate, options),
-            replacePersistentConversation: (
-                characterId,
-                conversationId,
-                reason,
-                replacement,
-                options,
-            ) => runtime.replacePersistentConversation(
-                characterId,
-                conversationId,
-                reason,
-                replacement,
-                options,
-            ),
+            getPersistentRevision: () => runtime.revision,
+            commitPersistentUnitIntent: (reason, units, conversations, wholeMessages) => runtime.commitPersistentUnitIntent(reason, units, conversations, wholeMessages),
             reportIdentityReplacementRejected: vi.fn(),
             getNavigationGeneration: () => runtime.getNavigationGeneration(),
-            applyCompatibilityDatabaseLite: vi.fn(),
             readPluginStorageSnapshot: vi.fn(async () => ({})),
-            mutatePluginStorage: vi.fn(),
-            invalidatePluginStorage: vi.fn(),
             getStorageAuthorityEpoch: () => runtime.getStorageAuthorityEpoch(),
             assertPersistentMutationAllowed: (epoch) => runtime.assertPersistentMutationAllowed(epoch),
-            materializeDatabaseSnapshot,
-            replacePersistentDatabase,
             snapshot: structuredClone,
         })
         const context = {
@@ -571,7 +538,7 @@ describe('persistent production runtime', () => {
         )
     })
 
-    it('rejects completion acknowledgement on revision conflict without exposing the generation', async () => {
+    it('rebases completion over a revision conflict and preserves unrelated remote root values', async () => {
         const databaseName = `runtime-generation-conflict-${crypto.randomUUID()}`
         const database = makeDatabase()
         const store = makeStore(databaseName)
@@ -603,27 +570,23 @@ describe('persistent production runtime', () => {
         })
         runtime.markPersistentDataDirty(64)
 
-        await expect(runtime.acknowledgeGenerationCompletion()).rejects.toBeInstanceOf(
-            RevisionConflictError,
-        )
-        await expect(runtime.acknowledgeGenerationCompletion()).rejects.toBeInstanceOf(
-            RevisionConflictError,
-        )
+        await expect(runtime.acknowledgeGenerationCompletion()).resolves.toBeUndefined()
+        await expect(runtime.acknowledgeGenerationCompletion()).resolves.toBeUndefined()
 
         const reopened = makeStore(databaseName)
         await reopened.open()
         const persisted = await reopened.materializeDatabase()
         expect(persisted.username).toBe('Competing renderer')
-        expect(persisted.characters[0].chats[0].message).toEqual([])
+        expect(persisted.characters[0].chats[0].message).toEqual([{ role:'char', data:'conflicted completed response', chatId:'generation-conflict' }])
     })
 
     it('preserves inactive preset rows across scalable root flushes and active switches', async () => {
         const complete = makeDatabase()
         complete.botPresetsId = 0
         complete.botPresets = [
-            { name: 'First', mainPrompt: 'complete first' },
-            { name: 'Second', mainPrompt: 'complete second' },
-        ] as Database['botPresets']
+            { id: 'preset-first', name: 'First', mainPrompt: 'complete first' },
+            { id: 'preset-second', name: 'Second', mainPrompt: 'complete second' },
+        ] as unknown as Database['botPresets']
         const store = makeStore(`runtime-scalable-presets-${crypto.randomUUID()}`)
         await store.open()
         await store.replaceFromDatabase(complete)
@@ -631,12 +594,12 @@ describe('persistent production runtime', () => {
         live.botPresets = createCatalogPresetWorkingSet({
             revision: 1,
             items: complete.botPresets.map((preset, configuredIndex) => ({
-                id: String(configuredIndex),
+                id: preset['id'] as string,
                 configuredIndex,
                 name: preset.name,
             })),
         }, {
-            summary: { id: '0', configuredIndex: 0, name: 'First' },
+            summary: { id: 'preset-first', configuredIndex: 0, name: 'First' },
             value: structuredClone(complete.botPresets[0]),
         })
         const adapter = makeAdapter(live)
@@ -650,7 +613,7 @@ describe('persistent production runtime', () => {
         adapter.current().username = 'Scalable root edit'
         runtime.markPersistentDataDirty(1)
         await runtime.flushPendingData('scalable-root')
-        expect((await store.readPreset('1'))?.value.mainPrompt).toBe('complete second')
+        expect((await store.readPreset('preset-second'))?.value.mainPrompt).toBe('complete second')
 
         await runtime.mutatePersistentPresets('switch-preset', ({ root }) => {
             root.botPresetsId = 1
@@ -661,7 +624,7 @@ describe('persistent production runtime', () => {
             'complete first',
             'complete second',
         ])
-        expect(adapter.current().botPresets[0]).toEqual({ name: 'First' })
+        expect(adapter.current().botPresets[0]).toEqual({id:'preset-first', name:'First', mainPrompt:'complete first'})
         expect(adapter.current().botPresets[1].mainPrompt).toBe('complete second')
     })
 

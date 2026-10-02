@@ -1,4 +1,4 @@
-import { getDatabase, saveImage, setDatabase } from "./storage/database.svelte"
+import { getDatabase, saveImage, flushEffectivePersonaEdits, deriveEffectivePersonaMirrors } from "./storage/database.svelte"
 import { selectSingleFile, sleep } from "./util"
 import { alertError, alertNormal, alertStore } from "./alert"
 import { AppendableBuffer, downloadFile, readImage } from "./globalApi.svelte"
@@ -29,22 +29,16 @@ export async function selectUserImg() {
 }
 
 export function saveUserPersona() {
-    DBState.db.personas[DBState.db.selectedPersona].name = DBState.db.username
-    DBState.db.personas[DBState.db.selectedPersona].icon = DBState.db.userIcon
-    DBState.db.personas[DBState.db.selectedPersona].personaPrompt = DBState.db.personaPrompt
-    DBState.db.personas[DBState.db.selectedPersona].note = DBState.db.userNote
+    flushEffectivePersonaEdits(DBState.db)
 }
 
 export function changeUserPersona(id: number, save: 'save' | 'noSave' = 'save') {
     if (save === 'save') {
         saveUserPersona()
     }
-    const pr = DBState.db.personas[id]
-    DBState.db.personaPrompt = pr.personaPrompt
-    DBState.db.username = pr.name
-    DBState.db.userIcon = pr.icon
-    DBState.db.userNote = pr.note
+    if (!DBState.db.personas[id]) throw new Error('Persona was not found')
     DBState.db.selectedPersona = id
+    deriveEffectivePersonaMirrors(DBState.db)
 }
 
 interface PersonaCard {

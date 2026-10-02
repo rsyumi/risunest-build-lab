@@ -37,6 +37,34 @@ function makeStore() {
 }
 
 describe('createMutationGatedPersistentDataStore', () => {
+    it('forwards optional current binding reads without acquiring a mutation gate', async () => {
+        const store = makeStore()
+        store.lwwBindingState = vi.fn(async () => ({targetAuthority:'17'}))
+        const gate = {runWrite:vi.fn(),runTransition:vi.fn()} as unknown as StorageMutationGate
+        const gated = createMutationGatedPersistentDataStore(store, gate)
+        expect(await gated.lwwBindingState!()).toEqual({targetAuthority:'17'})
+        expect(store.lwwBindingState).toHaveBeenCalledOnce()
+        expect(gate.runWrite).not.toHaveBeenCalled()
+        expect(gate.runTransition).not.toHaveBeenCalled()
+        expect(createMutationGatedPersistentDataStore(makeStore(), gate).lwwBindingState).toBeUndefined()
+    })
+    it('gates activation on exposed native stages without nesting the normal replacement gate',async()=>{
+        const store=makeStore()
+        const activate=vi.fn(async()=>({revision:2})),abort=vi.fn(async()=>{})
+        store.stageDatabaseReplacement=vi.fn(async()=>({activate,abort}))
+        let held=false
+        const gate={runWrite:async<T>(operation:()=>Promise<T>)=>operation(),runKeyedWrite:async<T>(_key:string,operation:()=>Promise<T>)=>operation(),
+            runTransition:vi.fn(async<T>(operation:()=>Promise<T>)=>{expect(held).toBe(false);held=true;try{return await operation()}finally{held=false}})}
+        activate.mockImplementation(async()=>{expect(held).toBe(true);return {revision:2}})
+        const gated=createMutationGatedPersistentDataStore(store,gate as StorageMutationGate)
+        const stage=await gated.stageDatabaseReplacement!({characters:[]} as unknown as Database,1)
+        expect(gate.runTransition).not.toHaveBeenCalled()
+        await stage.activate();expect(gate.runTransition).toHaveBeenCalledOnce()
+        await gated.replaceFromDatabase({characters:[]} as unknown as Database,1)
+        expect(gate.runTransition).toHaveBeenCalledTimes(2)
+        expect(store.replaceFromDatabase).not.toHaveBeenCalled()
+    })
+
     it('forwards optional metadata reads with the original receiver without taking a mutation gate', async () => {
         const store = makeStore()
         const query = { characterId: 'char-a', conversationId: 'chat-a', startIndex: 0, limit: 64 }

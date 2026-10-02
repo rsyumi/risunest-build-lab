@@ -20,7 +20,7 @@ pub(super) const FRAGMENT_ALIGNMENT: u64 = 320 * 1024;
 /// transfers above 10 MiB, so the single request body stays small.
 pub(super) const SIMPLE_UPLOAD_MAX_BYTES: u64 = 4 * 1024 * 1024;
 
-const ITEM_FIELDS: &str = "$select=id,name,size,eTag,file,folder,parentReference";
+const ITEM_FIELDS: &str = "$select=id,name,size,eTag,file,folder,root,parentReference";
 
 fn corrupt() -> ProviderError {
     ProviderError::new(ErrorKind::Corrupt)
@@ -42,6 +42,8 @@ pub(super) struct Item {
     #[serde(default)]
     pub folder: Option<serde::de::IgnoredAny>,
     #[serde(default)]
+    pub root: Option<serde::de::IgnoredAny>,
+    #[serde(default)]
     pub parent_reference: Option<ParentReference>,
 }
 
@@ -49,6 +51,7 @@ pub(super) struct Item {
 #[serde(rename_all = "camelCase")]
 pub(super) struct ParentReference {
     pub drive_id: Option<String>,
+    pub path: Option<String>,
 }
 
 #[derive(serde::Deserialize)]

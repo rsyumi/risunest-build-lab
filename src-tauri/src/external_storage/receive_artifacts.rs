@@ -13,7 +13,7 @@ use super::{
 };
 use crate::{
     native_file_jobs::admission::Admission,
-    persistent_store::{external_conflicts, PersistentStore},
+    persistent_store::PersistentStore,
     trust_boundary::{is_link_like, sync_directory},
 };
 use std::{
@@ -57,8 +57,8 @@ pub(crate) fn hold(root: &Path, job_id: &str) -> Result<()> {
     Ok(())
 }
 
-/// Whether no worker, prepared apply, pause, unknown outcome, preserved
-/// conflict or later resolution of `job` can read its downloaded bodies again.
+/// Whether no worker, prepared apply, pause or unknown outcome of `job` can
+/// read its downloaded bodies again.
 /// Only the authoritative job row decides; the cached summary can only hold
 /// bodies back, never release them.
 pub(crate) fn reclaimable(
@@ -68,14 +68,6 @@ pub(crate) fn reclaimable(
     prepared: bool,
 ) -> Result<bool> {
     if prepared || !matches!(job.request.kind, JobKind::Sync | JobKind::ResolveConflict) {
-        return Ok(false);
-    }
-    let conflict = external_conflicts::external_conflict(
-        store.device_store().map_err(local_error)?.connection(),
-        &job.id,
-    )
-    .map_err(local_error)?;
-    if conflict.is_some_and(|record| !record.resolved) {
         return Ok(false);
     }
     let Some(intent) = store.external_job(&job.id).map_err(local_error)? else {
@@ -168,14 +160,8 @@ pub(crate) fn detach_connection(
 /// `None` while something still owns the job's bodies, otherwise whether any
 /// of them moved aside now.
 fn detach(owners: &Owners<'_>, job: &DurableJob) -> Result<Option<bool>> {
-    let prepared = owners
-        .state
-        .prepared_receives
-        .lock()
-        .map_err(local_error)?
-        .contains_key(&job.id);
     let _admission = owners.admission.file(false).map_err(local_error)?;
-    if !reclaimable(owners.store, job, owners.repository_id, prepared)? {
+    if !reclaimable(owners.store, job, owners.repository_id, false)? {
         return Ok(None);
     }
     let directory = job_directory(owners.root, &job.request.connection_id, &job.id);
@@ -413,4 +399,36 @@ pub(crate) fn remove_detached_later(app: &AppHandle, job_ids: Vec<String>) {
         let _worker = worker;
         remove_detached(&root, &job_ids);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn artifact_detach_keeps_transfer_journal_and_other_job_files() {
+        let root = tempfile::tempdir().unwrap();
+        let directory = job_directory(root.path(), "connection", "job");
+        fs::create_dir_all(directory.join("receive")).unwrap();
+        fs::create_dir_all(directory.join("rejoin")).unwrap();
+        fs::write(directory.join("receive/body"), b"synthetic body").unwrap();
+        fs::write(directory.join("transfer.json"), b"synthetic journal").unwrap();
+        assert!(managed_directory(root.path(), &directory).unwrap());
+        assert!(move_aside(&directory).unwrap());
+        assert!(!directory.join("receive").exists());
+        assert!(!directory.join("rejoin").exists());
+        assert!(directory.join("transfer.json").exists());
+        remove_tree(&directory.join(".reclaim-receive")).unwrap();
+        remove_tree(&directory.join(".reclaim-rejoin")).unwrap();
+        assert_eq!(fs::read(directory.join("transfer.json")).unwrap(), b"synthetic journal");
+    }
+    #[test]
+    fn outside_or_non_directory_artifact_paths_are_never_removed() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(managed_directory(root.path(), &root.path().join("outside")).is_err());
+        let directory = job_directory(root.path(), "connection", "job");
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(directory.join("receive"), b"synthetic file").unwrap();
+        assert!(move_aside(&directory).is_err());
+        assert_eq!(fs::read(directory.join("receive")).unwrap(), b"synthetic file");
+    }
 }

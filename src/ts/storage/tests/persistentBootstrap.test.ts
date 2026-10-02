@@ -11,7 +11,8 @@ import {
     isCatalogCharacterStub,
     projectCatalogWorkingSet,
 } from '../workingSetCatalog'
-import { canonicalJson } from '../saveCoordinator'
+import { canonicalJson, SaveCoordinator } from '../saveCoordinator'
+import { capturePersistentRoot } from '../persistentDataRuntime'
 import { fixtureDatabase } from './persistentDataFixtures'
 
 const scheduling = vi.hoisted(() => ({
@@ -158,7 +159,35 @@ describe('bootstrapPersistentDatabase', () => {
         ])
     })
 
-    it('stores exactly one preparation change to persistent data', async () => {
+    it('projects a defaulted shared root on existing storage without writing any units', async () => {
+        const store = new IndexedDbPersistentDataStore('bootstrap-no-default-write-'+crypto.randomUUID(),new IDBFactory(),IDBKeyRange)
+        await store.open()
+        const database = structuredClone(fixtureDatabase)
+        delete (database as Partial<Database>).askRemoval
+        const initialized = await store.replaceFromDatabase(database)
+        const commit = vi.spyOn(store,'commit')
+        const replace = vi.spyOn(store,'replaceFromDatabase')
+        const result = await bootstrapPersistentDatabase({store,
+            prepareDatabase:async(value)=>preparedResult(value,value),
+            prepareRoot:async(root)=>({...root,askRemoval:true}),
+            projectScalableWorkingSet:(input)=>projectCatalogWorkingSet(input.root,input.characters,createCatalogPresetWorkingSet(input.presetCatalog,input.activePreset)),
+        })
+        expect(result.database.askRemoval).toBe(true)
+        expect(result.revision).toBe(initialized.revision)
+        expect(commit).not.toHaveBeenCalled()
+        expect(replace).not.toHaveBeenCalled()
+        expect((await store.readRoot()).value).not.toHaveProperty('askRemoval')
+        const coordinator = new SaveCoordinator({store,captureRoot:()=>capturePersistentRoot(result.database),capturePresets:()=>result.database.botPresets,captureSelectedCharacter:()=>null,captureCharacter:()=>null,replaceDatabase:()=>undefined})
+        coordinator.initialize(result.revision,result.database)
+        await coordinator.flushPendingDataLocally('projected-startup')
+        expect(commit).not.toHaveBeenCalled()
+        result.database.askRemoval = false
+        await coordinator.flushPendingDataLocally('explicit-user-edit')
+        expect(commit).toHaveBeenCalledOnce()
+        expect((await store.readRoot()).value.askRemoval).toBe(false)
+    })
+
+    it('projects preparation changes without replacing existing persistent data', async () => {
         const persistent = structuredClone(fixtureDatabase)
         persistent.plugins = [plugin('2.1', true)]
         const changed = structuredClone(persistent)
@@ -171,11 +200,11 @@ describe('bootstrapPersistentDatabase', () => {
                 preparedResult(database, changed),
         })
 
-        expect(store.replaceFromDatabase).toHaveBeenCalledTimes(1)
-        expect(store.replaceFromDatabase).toHaveBeenCalledWith(changed, 4)
+        expect(store.replaceFromDatabase).not.toHaveBeenCalled()
+        expect(store.commit).not.toHaveBeenCalled()
         expect(result).toEqual({
             database: changed,
-            revision: 5,
+            revision: 4,
         })
     })
 
@@ -215,21 +244,22 @@ describe('bootstrapPersistentDatabase', () => {
         expect(materializeDatabase).not.toHaveBeenCalled()
         expect(prepareDatabase).not.toHaveBeenCalled()
         expect(readPreset).toHaveBeenCalledOnce()
-        expect(readPreset).toHaveBeenCalledWith('1')
+        expect(readPreset).toHaveBeenCalledWith('preset-alpha')
         expect(projectScalableWorkingSet).toHaveBeenCalledWith(expect.objectContaining({
             activePreset: {
-                summary: expect.objectContaining({ id: '1', configuredIndex: 1 }),
+                summary: expect.objectContaining({ id: 'preset-alpha', configuredIndex: 1 }),
                 value: persistent.botPresets[1],
             },
             presetCatalog: expect.objectContaining({
                 items: expect.arrayContaining([
-                    expect.objectContaining({ id: '0', configuredIndex: 0 }),
-                    expect.objectContaining({ id: '1', configuredIndex: 1 }),
+                    expect.objectContaining({ id: 'preset-beta', configuredIndex: 0 }),
+                    expect.objectContaining({ id: 'preset-alpha', configuredIndex: 1 }),
                 ]),
             }),
         }))
         expect(result.revision).toBe(1)
         expect(result.database.botPresets[0]).toEqual({
+            id: persistent.botPresets[0]['id'],
             name: persistent.botPresets[0].name,
             image: persistent.botPresets[0].image,
         })
@@ -252,7 +282,7 @@ describe('bootstrapPersistentDatabase', () => {
         )
     })
 
-    it('fully migrates pre-v3 characters once before projecting a scalable working set', async () => {
+    it('does not run upstream character conversion against an existing active library', async () => {
         const indexedDB = new IDBFactory()
         const store = new IndexedDbPersistentDataStore(
             `bootstrap-scalable-migration-${crypto.randomUUID()}`,
@@ -290,14 +320,13 @@ describe('bootstrapPersistentDatabase', () => {
             ),
         })
 
-        expect(materializeDatabase).toHaveBeenCalledOnce()
+        expect(materializeDatabase).not.toHaveBeenCalled()
+        expect(result.revision).toBe(1)
         expect(result.database.characters.every(isCatalogCharacterStub)).toBe(true)
         const stored = await store.materializeDatabase(result.revision)
-        expect(stored.formatversion).toBe(5)
-        expect(stored.characters[0].image).toBe('assets/avatar.png')
-        expect(stored.characters[0].emotionImages).toEqual([
-            ['happy', 'assets/happy.png'],
-        ])
+        expect(stored).not.toHaveProperty('formatversion')
+        expect(stored.characters[0].image).toBe(persistent.characters[0].image)
+        expect(stored.characters[0].emotionImages).toEqual(persistent.characters[0].emotionImages)
     })
 
     it('yields between character catalog pages without delaying every summary', async () => {
@@ -388,16 +417,35 @@ describe('bootstrapPersistentDatabase', () => {
             ),
         })
 
-        expect(result.revision).toBe(2)
+        expect(result.revision).toBe(1)
         expect(result.database.botPresetsId).toBe(0)
         expect(result.database.botPresets[0]).toEqual(persistent.botPresets[0])
         expect(result.database.botPresets[1]).toEqual({
+            id: persistent.botPresets[1]['id'],
             name: persistent.botPresets[1].name,
             image: persistent.botPresets[1].image,
         })
         expect(readPreset).toHaveBeenCalledOnce()
-        expect(readPreset).toHaveBeenCalledWith('0')
-        expect((await store.readRoot()).value.botPresetsId).toBe(0)
+        expect(readPreset).toHaveBeenCalledWith('preset-beta')
+        expect((await store.readRoot()).value.botPresetsId).toBe('')
+    })
+
+    it.each([1, 'preset-alpha'] as const)('projects selection %s without rewriting the stored boundary value', async (selection) => {
+        const database = structuredClone(fixtureDatabase)
+        const store = createStore({revision:7,database})
+        vi.mocked(store.readRoot).mockResolvedValue({revision:7,value:{...capturePersistentRoot(database),botPresetsId:selection}})
+        vi.mocked(store.queryPresets).mockResolvedValue({revision:7,items:database.botPresets.map((preset,configuredIndex)=>({id:preset['id'] as string,name:preset.name,configuredIndex}))})
+        vi.mocked(store.readPreset).mockImplementation(async(id)=>({revision:7,value:database.botPresets.find((value)=>value['id']===id)!}))
+        vi.mocked(store.queryCharacters).mockResolvedValue({revision:7,items:[]})
+        const result = await bootstrapPersistentDatabase({store,prepareDatabase:async(value)=>preparedResult(value,value),prepareRoot:async(root)=>root,
+            projectScalableWorkingSet:(input)=>projectCatalogWorkingSet(input.root,input.characters,createCatalogPresetWorkingSet(input.presetCatalog,input.activePreset)),
+        })
+        expect(result.database.botPresetsId).toBe(1)
+        expect(result.database.botPresets[1]['id']).toBe('preset-alpha')
+        expect(result.revision).toBe(7)
+        expect(store.commit).not.toHaveBeenCalled()
+        expect(store.replaceFromDatabase).not.toHaveBeenCalled()
+        expect((await store.readRoot()).value.botPresetsId).toBe(selection)
     })
 
     it('projects a newly prepared scalable database after committing the complete import', async () => {
@@ -407,6 +455,8 @@ describe('bootstrapPersistentDatabase', () => {
         const prepared = structuredClone(fixtureDatabase)
         prepared.plugins = [plugin('2.1', false)]
         prepared.botPresetsId = 1
+        const replacement = vi.spyOn(store,'replaceFromDatabase')
+        const commit = vi.spyOn(store,'commit')
 
         const result = await bootstrapPersistentDatabase({
             store,
@@ -420,8 +470,12 @@ describe('bootstrapPersistentDatabase', () => {
             ),
         })
 
+        expect(replacement).toHaveBeenCalledOnce()
+        expect(commit).not.toHaveBeenCalled()
+        expect(result.revision).toBe(1)
         expect(await store.materializeDatabase(result.revision)).toEqual(prepared)
         expect(result.database.botPresets[0]).toEqual({
+            id: prepared.botPresets[0]['id'],
             name: prepared.botPresets[0].name,
             image: prepared.botPresets[0].image,
         })

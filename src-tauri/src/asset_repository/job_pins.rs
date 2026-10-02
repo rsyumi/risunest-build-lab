@@ -12,9 +12,8 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 
-const DURABLE_CAS_JOB_VERSION: u32 = 2;
+const DURABLE_CAS_JOB_VERSION: u32 = 1;
 const MAX_DURABLE_CAS_JOB_JOURNALS: usize = 4_096;
-pub(crate) const MAX_DURABLE_CAS_JOB_PINS: usize = 100_000;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
@@ -272,15 +271,6 @@ impl DurableCasJob {
                 return invalid_data("CAS job batch contains a conflicting object pin");
             }
         }
-        if self
-            .state
-            .pins
-            .len()
-            .checked_add(pending.len())
-            .is_none_or(|count| count > MAX_DURABLE_CAS_JOB_PINS)
-        {
-            return invalid_data("CAS job exceeds the bounded pin limit");
-        }
         for (object_hash, pin) in &pending {
             match cas.stat_object(object_hash)? {
                 Some(actual_size) if actual_size == pin.byte_size => {}
@@ -537,9 +527,6 @@ impl DurableCasJob {
                 return Ok(());
             }
             return invalid_data("CAS job contains a conflicting object pin");
-        }
-        if self.state.pins.len() >= MAX_DURABLE_CAS_JOB_PINS {
-            return invalid_data("CAS job exceeds the bounded pin limit");
         }
         let record = JobJournalRecord::Pin {
             sequence: self.state.next_sequence,
@@ -931,7 +918,7 @@ fn apply_record(
             published_by_job,
         } => {
             let state = current_state(state, sequence, &job_id, expected_job_id)?;
-            if state.sealed || state.released || state.pins.len() >= MAX_DURABLE_CAS_JOB_PINS {
+            if state.sealed || state.released {
                 return invalid_data("CAS job journal pin is out of order");
             }
             validate_hash(&object_hash)?;
@@ -1015,7 +1002,7 @@ mod tests {
     use super::{
         collect_durable_cas_job_roots, collect_durable_cas_job_roots_read_only, write_record,
         CasJobKind, CasObjectRole, CasReleaseOutcome, DurableCasJob, JobJournalRecord,
-        DURABLE_CAS_JOB_VERSION, MAX_DURABLE_CAS_JOB_JOURNALS, MAX_DURABLE_CAS_JOB_PINS,
+        DURABLE_CAS_JOB_VERSION, MAX_DURABLE_CAS_JOB_JOURNALS, read_job_state, root_set_from_state,
     };
     use crate::asset_repository::owner_manifest_codec::{
         encode_owner_manifest, OwnerManifestEntry,
@@ -1023,7 +1010,7 @@ mod tests {
     use crate::asset_repository::PayloadCas;
     use crate::persistent_store::PersistentStore;
     use std::fs::OpenOptions;
-    use std::io::Write;
+    use std::io::{Write,Seek,SeekFrom};
     use std::sync::mpsc;
     use std::time::Duration;
 
@@ -1290,11 +1277,6 @@ mod tests {
         assert!(!directory.path().join("persistent/persistent.sqlite").exists());
         assert!(journal_path.is_file());
         assert!(!job.is_released());
-    }
-
-    #[test]
-    fn durable_job_supports_normal_fifty_thousand_asset_packages() {
-        assert!(MAX_DURABLE_CAS_JOB_PINS >= 50_000);
     }
 
     #[test]
@@ -1730,6 +1712,23 @@ mod tests {
         assert!(roots
             .blockers
             .contains("job-pin-corrupt:future-version-job"));
+    }
+
+    #[test]
+    fn metadata_only_pin_journal_accepts_more_than_one_hundred_thousand_unique_objects() {
+        let mut journal=tempfile::tempfile().unwrap();
+        let id="synthetic-uncapped-pins";
+        write_record(&mut journal,&JobJournalRecord::Begin {version:1,sequence:0,job_id:id.into(),job_kind:CasJobKind::LocalBackupRestore,created_at_ms:0},false).unwrap();
+        for position in 1..=100_001u64 {
+            write_record(&mut journal,&JobJournalRecord::Pin {sequence:position,job_id:id.into(),object_hash:format!("{position:064x}"),byte_size:position,object_role:CasObjectRole::DirectObject,published_by_job:false},false).unwrap();
+        }
+        write_record(&mut journal,&JobJournalRecord::Seal {sequence:100_002,job_id:id.into(),pin_count:100_001},false).unwrap();
+        journal.sync_all().unwrap();
+        journal.seek(SeekFrom::Start(0)).unwrap();
+        let state=read_job_state(&mut journal,Some(id)).unwrap();
+        assert!(state.sealed);
+        assert_eq!(state.pins.len(),100_001);
+        assert_eq!(root_set_from_state(&state).object_hashes.len(),100_001);
     }
 
     #[test]

@@ -10,6 +10,7 @@ const storageSource = readFileSync('src/lib/Setting/Pages/RisuNestStorageDashboa
 const accountOperationsSource = readFileSync('src/ts/storage/sync/nativeOfficialAccountOperations.ts', 'utf8')
 const errorPresentationSource = readFileSync('src/ts/storage/fileOperationErrorPresentation.ts', 'utf8')
 const fileJobManagerSource = readFileSync('src/ts/storage/nativeFileJobManager.ts', 'utf8')
+const fileJobsSource = readFileSync('src/ts/storage/nativeFileJobs.ts', 'utf8')
 
 describe('UserSettings local backup route', () => {
     it('makes the existing backup import action reachable on Android and uses the common native picker', () => {
@@ -112,12 +113,13 @@ describe('UserSettings local backup route', () => {
     it('uses localized safe copy for official backup actions and native failures', () => {
 
         for (const key of [
-            'officialRestoreConfirm',
-            'officialRestoreInlayWarning',
             'officialMissing',
             'officialPublishConfirm',
         ])
             expect(backupSource).toContain(`language.risuNest.backup.${key}`)
+        expect(fileJobsSource).toContain('language.risuNest.backup.officialRestoreInlayWarning')
+        expect(backupSource.slice(backupSource.indexOf('async function loadPocketRisuBackup'), backupSource.indexOf('function restoreOfficialBackup'))).not.toContain('alertCheckboxConfirm')
+        expect(backupSource.slice(backupSource.indexOf('function restoreOfficialBackup'), backupSource.indexOf('async function publishOfficialBackup'))).not.toContain('alertCheckboxConfirm')
 
         expect(backupSource).toContain("presentFileOperationError('export', error, startedAt)")
         expect(errorPresentationSource).toContain('const text = language.risuNest.backup')

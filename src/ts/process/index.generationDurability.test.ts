@@ -1,4 +1,5 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { generatingConversations } from '../storage/generatingConversationRegistry'
 
 const harness = vi.hoisted(() => {
     function store<T>(initial: T, onSet?: (value: T) => void) {
@@ -35,6 +36,7 @@ const harness = vi.hoisted(() => {
     const peerSync = vi.fn(async () => {
         events.push('peer')
     })
+    const drainDeferredReceives = vi.fn(async () => undefined)
     const requestChatData = vi.fn(async () => {
         events.push('request')
         const next = requests.shift()
@@ -83,6 +85,7 @@ const harness = vi.hoisted(() => {
         characters,
         acknowledge,
         peerSync,
+        drainDeferredReceives,
         requestChatData,
         tokenize,
         tokenizeNum,
@@ -107,7 +110,7 @@ const harness = vi.hoisted(() => {
 })
 
 vi.mock('../storage/database.svelte', () => ({
-    changeToPreset: vi.fn(async () => undefined),
+    activatePresetOverride: vi.fn(async () => undefined),
     setCurrentChat: vi.fn(),
 }))
 
@@ -203,6 +206,7 @@ vi.mock('../storage/persistentDataRuntime.svelte', () => ({
     getPersistentStorageAuthorityEpoch: () => 0,
     getPersistentNavigationGeneration: () => 0,
     acknowledgeGenerationCompletion: harness.acknowledge,
+    drainDeferredLwwReceives: harness.drainDeferredReceives,
     captureSelectedConversationTarget: () => null,
     acquireCompleteConversation: vi.fn(),
     getActiveConversationSession: () => null,
@@ -343,6 +347,7 @@ beforeEach(() => {
     harness.doingChat.set(false)
     harness.events.length = 0
     harness.tokenize.mockResolvedValue(8)
+    harness.drainDeferredReceives.mockResolvedValue(undefined)
     harness.isLastCharPunctuation.mockReturnValue(true)
     harness.acknowledge.mockImplementation(async () => {
         harness.events.push('ack')
@@ -482,6 +487,9 @@ describe('sendChat generation durability control flow', () => {
     })
 
     it('does not acknowledge preview, abort, or provider failure paths', async () => {
+        harness.drainDeferredReceives.mockImplementation(async () => {
+            expect(generatingConversations.snapshot()).toEqual([])
+        })
         await expect(sendChat(-1, { preview: true })).resolves.toBe(true)
 
         harness.doingChat.set(false)
@@ -497,6 +505,7 @@ describe('sendChat generation durability control flow', () => {
         await expect(sendChat()).resolves.toBe(false)
 
         expect(harness.acknowledge).not.toHaveBeenCalled()
+        expect(harness.drainDeferredReceives.mock.calls).toEqual([[0], [0], [0]])
     })
 
     it('acknowledges a partially committed streaming response when the stream is aborted', async () => {
@@ -771,12 +780,17 @@ describe('sendChat generation durability control flow', () => {
         }
         harness.DBState.db = makeDatabase(group as any)
         harness.requests.push(success('Member A'), success('Member B'))
+        harness.drainDeferredReceives.mockImplementation(async () => {
+            expect(generatingConversations.snapshot()).toEqual([])
+        })
 
         await expect(sendChat()).resolves.toBe(true)
 
         expect(harness.requestChatData).toHaveBeenCalledTimes(2)
         expect(harness.acknowledge).toHaveBeenCalledTimes(2)
         expect(group.chats[0].message.filter((message) => message.role === 'char')).toHaveLength(2)
+        expect(harness.drainDeferredReceives).toHaveBeenCalledExactlyOnceWith(0)
+        expect(generatingConversations.snapshot()).toEqual([])
     })
 
     it('does not publish terminal side effects when local acknowledgement fails', async () => {

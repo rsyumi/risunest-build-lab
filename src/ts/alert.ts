@@ -10,12 +10,14 @@ export interface alertData{
     type: 'error'|'normal'|'none'|'ask'|'wait'|'selectChar'
             |'input'|'toast'|'wait2'|'markdown'|'select'|'login'
             |'tos'|'risu-tos'|'cardexport'|'requestdata'|'addchar'|'hypaV2'|'selectModule'
-            |'chatOptions'|'pukmakkurit'|'branches'|'progress'|'pluginconfirm'|'requestlogs',
+            |'chatOptions'|'pukmakkurit'|'branches'|'progress'|'pluginconfirm'|'requestlogs'|'checkboxConfirm',
     msg: string,
     submsg?: string
     datalist?: [string, string][],
     stackTrace?: string;
     defaultValue?: string
+    checkboxConfirm?: AlertCheckboxConfirmOptions
+    onCheckboxConfirm?: (result: AlertCheckboxConfirmResult) => void
     onSelect?: (index: number) => void
 }
 
@@ -200,6 +202,44 @@ export async function alertSelectChar(){
     await waitAlert()
 
     return get(alertStoreImported).msg
+}
+
+export interface AlertCheckboxConfirmOptions {
+    title: string
+    description: string
+    checkboxLabel: string
+    actionLabel: string
+    cancelLabel: string
+    requireChecked: boolean
+}
+
+export interface AlertCheckboxConfirmResult {
+    confirmed: boolean
+    checked: boolean
+}
+
+export function alertCheckboxConfirm(options: AlertCheckboxConfirmOptions): Promise<AlertCheckboxConfirmResult> {
+    return new Promise((resolve) => {
+        let settled = false
+        let unsubscribe: (() => void) | undefined
+        const finish = (result: AlertCheckboxConfirmResult) => {
+            if (settled) return
+            settled = true
+            unsubscribe?.()
+            resolve(result.confirmed && options.requireChecked && !result.checked
+                ? { confirmed: false, checked: false }
+                : result)
+        }
+        const dialog: alertData = {
+            type: 'checkboxConfirm', msg: options.title,
+            checkboxConfirm: { ...options }, onCheckboxConfirm: finish,
+        }
+        alertStoreImported.set(dialog)
+        unsubscribe = alertStoreImported.subscribe((current) => {
+            if (current.onCheckboxConfirm !== finish) finish({ confirmed: false, checked: false })
+        })
+        if (settled) unsubscribe()
+    })
 }
 
 export async function alertConfirm(msg:string){

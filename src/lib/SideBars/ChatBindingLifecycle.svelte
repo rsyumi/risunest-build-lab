@@ -1,10 +1,8 @@
 <script lang="ts">
     import { untrack } from 'svelte'
     import { DBState, selectedCharID } from 'src/ts/stores.svelte'
-    import { getModuleToggles } from 'src/ts/process/modules'
-    import { parseToggleSyntax } from 'src/ts/util'
+    import { flushEffectiveToggleEdits, deriveEffectiveToggleVariables } from 'src/ts/storage/database.svelte'
     import { isConversationSummaryStub } from 'src/ts/storage/conversationResidency'
-    import { createToggleBindingRestorer } from 'src/ts/toggleBindings'
     import { activeRerollConversations, recoverInterruptedReroll } from 'src/ts/durableReroll'
     import {
         acquireCompleteConversation,
@@ -38,25 +36,16 @@
             }
         })()
     })
-    const toggleBinding = createToggleBindingRestorer()
     $effect(() => {
         const db = DBState.db
         const character = db?.characters?.[$selectedCharID]
         const chat = character?.chats?.[character.chatPage]
-        if (!chat || isConversationSummaryStub(chat)) {
-            toggleBinding.reset()
-            return
-        }
-        const definitions = `${db.customPromptTemplateToggle ?? ''}\n${getModuleToggles()}\n${character.type === 'character' ? (character.customModuleToggle ?? '') : ''}`
-        const disabled = db.disableToggleBinding
+        void db?.disableToggleBinding
+        void chat?.savedToggleValues
+        if (!db) return
         untrack(() => {
-            const keys = parseToggleSyntax(definitions).map((toggle) => `toggle_${toggle.key}`)
-            toggleBinding.restore(
-                [db, character.chaId, chat.id, disabled],
-                db.globalChatVariables,
-                disabled ? undefined : chat.savedToggleValues,
-                keys,
-            )
+            flushEffectiveToggleEdits(db)
+            deriveEffectiveToggleVariables(db, chat && !isConversationSummaryStub(chat) ? chat : undefined)
         })
     })
 </script>

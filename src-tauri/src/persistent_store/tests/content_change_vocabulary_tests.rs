@@ -262,12 +262,12 @@ fn owner_head_changes_always_accompany_their_parent_record() {
     let (_directory, mut store, database) = open_fixture();
     let before = store.revision().unwrap();
     let mut value = root(&database);
-    value["modules"] = json!([{ "id": "one", "assets": [["a", "assets/a", "bin"]] }]);
+    value["modules"] = json!([{ "id": "module-0", "assets": [["a", "assets/a", "bin"]] }]);
     store
         .commit(&WorkingSetCommit {
             root: Some(value),
             asset_owner_heads: Some(vec![AssetOwnerHead::present(
-                AssetOwnerLocator::RootModuleAssets { index: 0 },
+                AssetOwnerLocator::RootModuleAssets { module_id: "module-0".to_owned() },
                 "11".repeat(32),
                 1,
             )]),
@@ -276,7 +276,7 @@ fn owner_head_changes_always_accompany_their_parent_record() {
         .unwrap();
     assert_eq!(
         recorded(&store, before),
-        vec![key("owner", "root-module-assets", "0"), key("root", "", "")]
+        vec![key("owner", "root-module-assets", "module-0"), key("root", "", "")]
     );
 
     let before = store.revision().unwrap();
@@ -373,12 +373,12 @@ fn the_recorded_kinds_stay_inside_the_published_vocabulary() {
         )
         .unwrap();
     let mut value = root(&database);
-    value["modules"] = json!([{ "id": "one", "assets": [["a", "assets/a", "bin"]] }]);
+    value["modules"] = json!([{ "id": "module-0", "assets": [["a", "assets/a", "bin"]] }]);
     store
         .commit(&WorkingSetCommit {
             root: Some(value),
             asset_owner_heads: Some(vec![AssetOwnerHead::present(
-                AssetOwnerLocator::RootModuleAssets { index: 0 },
+                AssetOwnerLocator::RootModuleAssets { module_id: "module-0".to_owned() },
                 "11".repeat(32),
                 1,
             )]),

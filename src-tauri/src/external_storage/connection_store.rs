@@ -22,10 +22,6 @@ pub(crate) struct StoredConnection {
     pub verified_at_ms: u64,
     pub last_sync_at_ms: Option<u64>,
     pub last_backup_at_ms: Option<u64>,
-    /// Backup connections only. Changing it applies to work started
-    /// afterwards and never rewrites an existing point.
-    #[serde(default)]
-    pub capture_policy: Option<super::connection::CapturePolicy>,
     /// All connections. `None` means `RetentionPolicy::DEFAULT`; it is the
     /// default for a connection that never set one.
     #[serde(default)]
@@ -41,8 +37,6 @@ pub(crate) struct PendingStoredConnection {
     pub repository_id: String,
     pub descriptor: Option<Descriptor>,
     pub create: bool,
-    #[serde(default)]
-    pub capture_policy: Option<super::connection::CapturePolicy>,
     pub provider_repository_id: Option<String>,
     pub credential_ref: String,
     pub root_key_ref: String,
@@ -204,20 +198,6 @@ impl ConnectionStore {
             .map_err(storage)?;
         Ok(())
     }
-    /// Replaces a backup connection's capture policy. Work already started
-    /// keeps the policy it fixed, and no existing point is rewritten.
-    pub fn set_capture_policy(
-        &mut self,
-        id: &str,
-        policy: super::connection::CapturePolicy,
-    ) -> Result<StoredConnection> {
-        let mut connection = self.read(id)?;
-        if connection.capture_policy.is_none() {
-            return Err(ProviderError::new(ErrorKind::Unsupported));
-        }
-        connection.capture_policy = Some(policy);
-        self.write(id, connection)
-    }
     /// Replaces how long a connection keeps the automatic backup points this
     /// device made. A cleanup already running keeps the policy it fixed.
     pub fn set_retention_policy(
@@ -301,7 +281,6 @@ impl ConnectionStore {
                 || pinned.create != connection.create
                 || pinned.root_key_ref != connection.root_key_ref
                 || pinned.recovery_key_ref != connection.recovery_key_ref
-                || pinned.capture_policy != connection.capture_policy
                 || pinned.created_at_ms != connection.created_at_ms;
             let descriptor_changed = match (&pinned.descriptor, &connection.descriptor) {
                 (Some(previous), Some(proposed)) => previous != proposed,
@@ -347,7 +326,6 @@ impl ConnectionStore {
     pub fn pending_create_for(
         &self,
         config: &ConnectionConfig,
-        capture_policy: Option<super::connection::CapturePolicy>,
     ) -> Result<Option<PendingStoredConnection>> {
         let mut query = self
             .0
@@ -361,7 +339,6 @@ impl ConnectionStore {
             let pending = decode_pending(&row.map_err(storage)?)?;
             if pending.create
                 && pending.config == *config
-                && pending.capture_policy == capture_policy
             {
                 if matched.is_some() {
                     return Err(corrupt());
@@ -387,7 +364,6 @@ impl ConnectionStore {
             descriptor_locator,
             provider_repository_id,
             credential_ref: pending.credential_ref,
-            capture_policy: pending.capture_policy,
             retention_policy: None,
             root_key_ref: pending.root_key_ref,
             recovery_key_ref: pending.recovery_key_ref,
@@ -687,7 +663,6 @@ mod tests {
             credential_ref: "provider-v1:00000000-0000-4000-8000-000000000001".into(),
             root_key_ref: "repository-key-v1:00000000-0000-4000-8000-000000000002".into(),
             recovery_key_ref: "repository-key-v1:00000000-0000-4000-8000-000000000003".into(),
-            capture_policy: None,
             created_at_ms: 1,
         }
     }
@@ -771,7 +746,7 @@ mod tests {
         value.provider_repository_id = None;
         store.put_pending(&value).unwrap();
         let matched = store
-            .pending_create_for(&value.config, value.capture_policy)
+            .pending_create_for(&value.config)
             .unwrap()
             .unwrap();
         assert_eq!(matched.id, value.id);
@@ -784,7 +759,7 @@ mod tests {
         store.put_pending(&duplicate).unwrap();
         assert_eq!(
             store
-                .pending_create_for(&value.config, value.capture_policy)
+                .pending_create_for(&value.config)
                 .err()
                 .unwrap()
                 .kind,
@@ -815,12 +790,12 @@ mod tests {
             b"synthetic-pat-b",
         );
         assert!(store
-            .pending_create_for(&second_config, first.capture_policy)
+            .pending_create_for(&second_config)
             .unwrap()
             .is_none());
         assert_eq!(
             store
-                .pending_create_for(&first.config, first.capture_policy)
+                .pending_create_for(&first.config)
                 .unwrap()
                 .unwrap()
                 .id,
@@ -1056,50 +1031,6 @@ mod tests {
             store.read(&sync.id).unwrap().retention_policy,
             Some(narrowed)
         );
-    }
-    /// Changing a backup connection's policy applies to work started later. A
-    /// synchronization connection has none to change.
-    #[test]
-    fn a_backup_policy_changes_in_place_and_a_sync_connection_has_none() {
-        let root = tempfile::tempdir().unwrap();
-        let mut store = ConnectionStore::open(root.path()).unwrap();
-        let mut backup = pending();
-        backup.capture_policy = Some(super::super::connection::CapturePolicy::default());
-        store.put_pending(&backup).unwrap();
-        store
-            .promote_pending(
-                &backup.id,
-                locator("synthetic-backup"),
-                Capabilities::default(),
-            )
-            .unwrap();
-
-        let narrowed = super::super::connection::CapturePolicy {
-            hypa: false,
-            local_plugins: true,
-            local_settings: false,
-        };
-        let updated = store.set_capture_policy(&backup.id, narrowed).unwrap();
-        assert_eq!(updated.capture_policy, Some(narrowed));
-        assert_eq!(
-            store.read(&backup.id).unwrap().capture_policy,
-            Some(narrowed)
-        );
-
-        let mut sync = pending();
-        sync.id = "synthetic-sync".into();
-        sync.capture_policy = None;
-        store.put_pending(&sync).unwrap();
-        store
-            .promote_pending(&sync.id, locator("synthetic-sync"), Capabilities::default())
-            .unwrap();
-        assert!(matches!(
-            store.set_capture_policy(&sync.id, narrowed),
-            Err(ProviderError {
-                kind: ErrorKind::Unsupported,
-                ..
-            })
-        ));
     }
     #[test]
     fn credential_replacement_preserves_connection_and_rejects_a_stale_owner() {

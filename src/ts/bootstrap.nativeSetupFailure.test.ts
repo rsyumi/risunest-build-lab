@@ -12,7 +12,7 @@ vi.mock('@tauri-apps/plugin-fs', () => ({
     remove: vi.fn(), writeFile: vi.fn(),
 }))
 vi.mock('@tauri-apps/api/webviewWindow', () => ({ getCurrentWebviewWindow: () => ({ maximize: vi.fn() }) }))
-vi.mock('@tauri-apps/api/core', () => ({ convertFileSrc: vi.fn() }))
+vi.mock('@tauri-apps/api/core', () => ({ convertFileSrc: vi.fn(), invoke: vi.fn() }))
 vi.mock('@tauri-apps/api/path', () => ({ join: vi.fn() }))
 vi.mock('./util', () => ({ changeFullscreen: vi.fn(), sleep: vi.fn() }))
 vi.mock('./update', () => ({ checkRisuUpdate: vi.fn() }))
@@ -127,15 +127,22 @@ vi.mock('./alert', () => ({
 vi.mock('./characterCards', () => ({ characterURLImport: vi.fn(), hubURL: 'https://hub.invalid' }))
 vi.mock('./storage/androidSafBridge', () => ({ isAndroidSafFileJobsEnabled: vi.fn(() => false) }))
 vi.mock('./storage/lifecycleCommit', () => ({ registerLifecycleCommitListeners: vi.fn() }))
+vi.mock('./storage/sync/serverSyncProduction', () => ({
+    createServerSyncExitDrainAdapter: vi.fn(), holdServerSyncAfterRestore: vi.fn(),
+    getServerSyncController: vi.fn(), initializeNativeSyncBindings: vi.fn(),
+    installServerSyncProduction: vi.fn(), disposeNativeSyncBindings: vi.fn(),
+}))
 vi.mock('./nativeStartup', () => startupMocks)
 
 import { alertError } from './alert'
+import { invoke } from '@tauri-apps/api/core'
 import { loadData } from './bootstrap'
 import { setNativeLogFileEnabled } from './nativeLog'
 import { bootFailure } from './stores.svelte'
 import { initializePersistentStorage } from './storage/persistentStorageRuntime'
 import { bootstrapPersistentDatabase } from './storage/persistentBootstrap'
 import { loadPlugins } from './plugins/plugins.svelte'
+import { initializeNativeSyncBindings, installServerSyncProduction } from './storage/sync/serverSyncProduction'
 
 describe('native setup failure', () => {
     it('stops bootstrap before diagnostics and exposes the existing failure panel state', async () => {
@@ -146,10 +153,13 @@ describe('native setup failure', () => {
         await loadData()
 
         expect(startupMocks.checkNativeStartupStatus).toHaveBeenCalledOnce()
+        expect(invoke).not.toHaveBeenCalled()
         expect(setNativeLogFileEnabled).not.toHaveBeenCalled()
         expect(initializePersistentStorage).not.toHaveBeenCalled()
         expect(bootstrapPersistentDatabase).not.toHaveBeenCalled()
         expect(loadPlugins).not.toHaveBeenCalled()
+        expect(initializeNativeSyncBindings).not.toHaveBeenCalled()
+        expect(installServerSyncProduction).not.toHaveBeenCalled()
         expect(bootFailure.set).toHaveBeenLastCalledWith({
             kind: 'unknown',
             message: failure.message,

@@ -1,4 +1,28 @@
 export const languageSpanish = {
+    risuNest: {
+        importDialog: {
+            warningUpstreamRestoreLosses: 'No se pudieron restaurar algunos datos del almacenamiento frío o de los inlays. Revise los datos restaurados.',
+        },
+        plugins: {
+            "removeTitle": "¿Eliminar este plugin?",
+            "removeDescription": "Si eliminas los datos del plugin, sus ajustes y contenido guardado no se recuperarán al reinstalarlo. Si conservas los datos, podrás usarlos tras reinstalarlo.",
+            "removeDataOption": "Eliminar también los datos del plugin",
+            "removeAction": "Eliminar"
+        },
+    },
+
+    checkboxConfirmation: {
+        "characterDeletion": "Eliminar personaje",
+        "dataReplacement": "Reemplazar los datos actuales",
+        "hypaReset": "Restablecer datos de HypaV3",
+        "hypaDeletion": "Eliminar resúmenes siguientes",
+        "pluginDataDeletion": "Eliminar datos del plugin",
+        "lorebookDeletion": "Eliminar carpeta y entradas del lorebook",
+        "partialBackup": "Copia sin otros recursos",
+        "incompleteRestore": "Restaurar sin los datos ausentes",
+        "onlySelectedMessage": "Eliminar solo este mensaje"
+    },
+
     "formating": {
         "main": "Prompt Principal",
         "jailbreak": "Prompt Jailbreak",
@@ -29,8 +53,8 @@ export const languageSpanish = {
         "requestLogRemoved": "Este registro de solicitud ha sido eliminado.",
         "requestLogRemovedDesc": "Este registro de solicitud se elimina cuando el cliente se actualiza o recarga.",
         "vertexAuthError": "Faltan los detalles de autenticación de Vertex AI.",
-        "coldStorageIncompleteRestoreConfirm": (characterNames: string, unavailableCount: number, unresolvedCount: number) =>
-            `No se pudieron restaurar los datos del almacenamiento frío de ${characterNames || "personajes desconocidos"}.${unresolvedCount > 0 ? ` No se pudieron asociar ${unresolvedCount} elemento(s) con un personaje.` : ""}\n\nSi continúa, ${unavailableCount} elemento(s) del almacenamiento frío seguirán sin estar disponibles y los datos de los personajes o chats afectados podrían perderse permanentemente.\n\n¿Continuar de todos modos con la restauración incompleta?`
+        "coldStorageIncompleteRestoreConfirm": (characterNames: string, unavailableCount: number, unresolvedCount: number, includeQuestion = true) =>
+            `No se pudieron restaurar los datos del almacenamiento frío de ${characterNames || "personajes desconocidos"}.${unresolvedCount > 0 ? ` No se pudieron asociar ${unresolvedCount} elemento(s) con un personaje.` : ""}\n\nSi continúa, ${unavailableCount} elemento(s) del almacenamiento frío seguirán sin estar disponibles y los datos de los personajes o chats afectados podrían perderse permanentemente.${includeQuestion ? "\n\n¿Continuar de todos modos con la restauración incompleta?" : ""}`
     },
     "showHelp": "Mostrar Ayuda",
     "help": {
@@ -1467,4 +1491,21 @@ export const languageSpanish = {
     nanoGPTSelectFromList: "Seleccionar de la lista",
     nanoGPTManualInput: "Entrada manual",
     nanoGPTManualModelSelect: "Selección manual de modelo",
+    lwwSync: {
+        concurrentEditNotice: "Si se edita el mismo elemento en varios dispositivos a la vez, se conserva la última edición. Los cambios o mensajes pueden perderse. Evite usar varios dispositivos a la vez.",
+        replaceTitle: "¿Reemplazar los datos de este dispositivo?",
+        replaceDescription: "Para sincronizar, se borrarán los datos de este dispositivo y se reemplazarán por los datos remotos. Si necesita una copia de seguridad, créela manualmente.",
+        replaceAcknowledge: "Borrar los datos de este dispositivo",
+        replaceAction: "Reemplazar",
+        cancelAction: "Cancelar",
+        clockBlocked: "La sincronización se detuvo porque la hora del dispositivo y la remota son distintas. Corrija la hora y vuelva a intentarlo.",
+        writerCollision: "La sincronización se detuvo por una identidad de dispositivo duplicada. Vuelva a conectarse como un dispositivo nuevo.",
+        newDeviceAction: "Conectar como dispositivo nuevo",
+        restoreTitle: "¿Restaurar la copia de seguridad?",
+        restoreDescriptionBound: "Se borrarán los datos actuales y se restaurará la copia seleccionada. Los datos restaurados se sincronizarán. Si necesita una copia de seguridad, créela manualmente.",
+        restoreDescription: "Se borrarán los datos actuales y se restaurará la copia seleccionada. Si necesita una copia de seguridad, créela manualmente.",
+        restoreAcknowledge: "Borrar los datos actuales",
+        restoreAction: "Restaurar",
+        myboxSyncUnavailable: "MYBOX no se puede usar para sincronizar.",
+    },
 } satisfies DeepPartial<typeof import('./en').languageEnglish>;

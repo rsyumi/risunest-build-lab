@@ -1,0 +1,779 @@
+use super::{PersistentStore, StoreResult};
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use risunest_sync_wire::unit::{UnitKey, UnitValue};
+use rusqlite::{params, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use std::collections::BTreeMap;
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct IdentityRemap {
+    pub(crate) records: BTreeMap<String, BTreeMap<String, String>>,
+    pub(crate) conversations: BTreeMap<String, BTreeMap<String, String>>,
+}
+
+impl IdentityRemap {
+    fn id(&self, kind: &str, id: &str) -> String {
+        self.records
+            .get(kind)
+            .and_then(|m| m.get(id))
+            .cloned()
+            .unwrap_or_else(|| id.to_owned())
+    }
+    pub(crate) fn conversation(&self, owner: &str, id: &str) -> String {
+        self.conversations
+            .get(owner)
+            .and_then(|m| m.get(id))
+            .cloned()
+            .unwrap_or_else(|| id.to_owned())
+    }
+    fn field(&self, value: &mut Value, field: &str, kind: &str) {
+        if let Some(id) = value.get(field).and_then(Value::as_str).map(str::to_owned) {
+            value[field] = Value::String(self.id(kind, &id));
+        }
+    }
+    fn list(&self, value: &mut Value, field: &str, kind: &str) {
+        if let Some(values) = value.get_mut(field).and_then(Value::as_array_mut) {
+            for value in values {
+                if let Some(id) = value.as_str() {
+                    *value = Value::String(self.id(kind, id));
+                }
+            }
+        }
+    }
+    fn order(&self, value: &mut Value, kind: &str, owner: Option<&str>) {
+        if let Some(values) = value.as_array_mut() {
+            for value in values {
+                if let Some(id) = value.as_str() {
+                    *value =
+                        Value::String(owner.map_or_else(
+                            || self.id(kind, id),
+                            |owner| self.conversation(owner, id),
+                        ));
+                } else if let Some(data) = value.get_mut("data") {
+                    self.order(data, kind, owner);
+                }
+            }
+        }
+    }
+    pub(crate) fn character(&self, value: &mut Value) {
+        self.field(value, "chaId", "character");
+        self.list(value, "characters", "character");
+        self.list(value, "modules", "modules");
+    }
+    pub(crate) fn chat(&self, owner: &str, value: &mut Value) {
+        if let Some(id) = value.get("id").and_then(Value::as_str) {
+            value["id"] = Value::String(self.conversation(owner, id));
+        }
+        self.field(value, "bindedPersona", "persona");
+        self.list(value, "modules", "modules");
+    }
+    fn root(&self, value: &mut Value) {
+        self.field(value, "botPresetsId", "preset");
+        self.field(value, "selectedPersona", "persona");
+        self.list(value, "enabledModules", "modules");
+        self.models(value);
+        if let Some(order) = value.get_mut("characterOrder") {
+            self.order(order, "character", None);
+        }
+        for (field, kind) in [
+            ("personas", "persona"),
+            ("modules", "modules"),
+            ("loadouts", "loadouts"),
+            ("customModels", "customModels"),
+        ] {
+            if let Some(records) = value.get_mut(field).and_then(Value::as_array_mut) {
+                for record in records {
+                    self.field(record, "id", kind);
+                    if kind == "loadouts" {
+                        self.list(record, "characterIds", "character");
+                        self.list(record, "modules", "modules");
+                        self.field(record, "personaId", "persona");
+                    }
+                    if kind == "persona" {
+                        if let Some(module) = record.get_mut("embeddedModule") {
+                            self.field(module, "id", "modules");
+                        }
+                    }
+                }
+            }
+        }
+    }
+    fn models(&self, value: &mut Value) {
+        for field in ["aiModel", "subModel"] {
+            self.field(value, field, "customModels");
+        }
+        for field in [
+            "seperateModels",
+            "seperateModelsForAxModels",
+            "fallbackModels",
+        ] {
+            if let Some(models) = value.get_mut(field) {
+                if let Some(values) = models.as_array_mut() {
+                    for v in values {
+                        if let Some(id) = v.as_str() {
+                            *v = Value::String(self.id("customModels", id));
+                        }
+                    }
+                } else if let Some(values) = models.as_object_mut() {
+                    for v in values.values_mut() {
+                        if let Some(id) = v.as_str() {
+                            *v = Value::String(self.id("customModels", id));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    fn key(&self, key: &UnitKey) -> StoreResult<UnitKey> {
+        let mut p = key.components();
+        match p[0].as_str() {
+            "exists" if p[1] == "conversation" => {
+                let owner = p[2].clone();
+                p[2] = self.id("character", &owner);
+                p[3] = self.conversation(&owner, &p[3]);
+            }
+            "exists" => p[2] = self.id(&p[1], &p[2]),
+            "character" | "group-members" | "archive" => p[1] = self.id("character", &p[1]),
+            "conversation" | "messages" => {
+                let owner = p[1].clone();
+                p[1] = self.id("character", &owner);
+                p[2] = self.conversation(&owner, &p[2]);
+            }
+            "preset" | "persona" => p[1] = self.id(&p[0], &p[1]),
+            "record" => p[2] = self.id(&p[1], &p[2]),
+            "order" if p[1] == "conversations" => p[2] = self.id("character", &p[2]),
+            _ => (),
+        }
+        UnitKey::new(&p.iter().map(String::as_str).collect::<Vec<_>>()).map_err(|e| {
+            super::StoreError::Validation {
+                message: e.to_string(),
+            }
+        })
+    }
+    fn unit(&self, key: &UnitKey, value: &mut Value) {
+        let p = key.components();
+        match p[0].as_str() {
+            "root" => {
+                let mut root = serde_json::json!({p[1].clone():value.clone()});
+                self.root(&mut root);
+                *value = root[&p[1]].take();
+            }
+            "group-members" => self.list(value, "characters", "character"),
+            "character" | "conversation" => {
+                let field = p.last().unwrap();
+                let mut detail = serde_json::json!({field.clone():value.clone()});
+                if p[0] == "character" {
+                    self.character(&mut detail);
+                } else {
+                    self.chat(&p[1], &mut detail);
+                }
+                *value = detail[field].take();
+            }
+            "preset-protected" => self.models(value),
+            "preset" => {
+                let field = p.last().unwrap();
+                let mut detail = serde_json::json!({field.clone():value.clone()});
+                self.models(&mut detail);
+                *value = detail[field].take();
+            }
+            "persona" if p[2] == "embeddedModule" => self.field(value, "id", "modules"),
+            "record" => {
+                self.field(value, "id", &p[1]);
+                if p[1] == "loadouts" {
+                    self.list(value, "characterIds", "character");
+                    self.list(value, "modules", "modules");
+                    self.field(value, "personaId", "persona");
+                }
+            }
+            "order" => self.order(
+                value,
+                match p[1].as_str() {
+                    "characters" => "character",
+                    "presets" => "preset",
+                    "personas" => "persona",
+                    kind => kind,
+                },
+                if p[1] == "conversations" {
+                    Some(&p[2])
+                } else {
+                    None
+                },
+            ),
+            _ => (),
+        }
+    }
+}
+
+impl PersistentStore {
+    pub(crate) fn remap_retired_staging(
+        &mut self,
+        staging: &str,
+        source: Option<&BTreeMap<UnitKey, UnitValue>>,
+    ) -> StoreResult<Option<BTreeMap<UnitKey, UnitValue>>> {
+        let tx = self.connection.transaction()?;
+        super::commit::validate_replace_commit(&tx, staging, None)?;
+        let prior: Option<String> = tx
+            .query_row(
+                "SELECT value FROM app_kv WHERE key=?1",
+                [format!("lww-import-remap:{staging}")],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(prior) = prior {
+            let map: IdentityRemap = serde_json::from_str(&prior)?;
+            let remapped = remap_source(&tx, &map, source)?;
+            tx.commit()?;
+            return Ok(remapped);
+        }
+        let mut candidates = std::collections::BTreeSet::new();
+        let chars = identity_rows(
+            &tx,
+            "SELECT character_id FROM characters WHERE generation=?1",
+            staging,
+        )?;
+        for id in &chars {
+            candidates.insert(("character".to_owned(), id.clone()));
+        }
+        let presets = identity_rows(
+            &tx,
+            "SELECT preset_id FROM bot_presets WHERE generation=?1",
+            staging,
+        )?;
+        for id in &presets {
+            candidates.insert(("preset".to_owned(), id.clone()));
+        }
+        for (_, root) in json_rows(&tx, "SELECT value FROM root WHERE generation=?1", staging)? {
+            for (field, kind) in [
+                ("personas", "persona"),
+                ("modules", "modules"),
+                ("loadouts", "loadouts"),
+                ("customModels", "customModels"),
+            ] {
+                for record in root
+                    .get(field)
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    if let Some(id) = record.get("id").and_then(Value::as_str) {
+                        candidates.insert((kind.to_owned(), id.to_owned()));
+                    }
+                    if let Some(id) = record
+                        .get("embeddedModule")
+                        .and_then(|m| m.get("id"))
+                        .and_then(Value::as_str)
+                    {
+                        candidates.insert(("modules".to_owned(), id.to_owned()));
+                    }
+                }
+            }
+        }
+        if let Some(source) = source {
+            for (key, value) in source {
+                let p = key.components();
+                if p[0] == "exists"
+                    && p[1] != "conversation"
+                    && !matches!(value, UnitValue::Deleted)
+                {
+                    candidates.insert((p[1].clone(), p[2].clone()));
+                }
+            }
+        }
+        let raw = {
+            let mut q = tx.prepare("SELECT key FROM lww_retired")?;
+            let rows = q
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        let mut map = IdentityRemap::default();
+        for raw in raw {
+            let key: UnitKey = raw.try_into().map_err(|e: risunest_sync_wire::WireError| {
+                super::StoreError::Validation {
+                    message: e.to_string(),
+                }
+            })?;
+            let p = key.components();
+            let fresh = uuid::Uuid::new_v4().to_string();
+            if p[1] == "conversation" {
+                if candidates.contains(&("character".to_owned(), p[2].clone())) {
+                    map.conversations
+                        .entry(p[2].clone())
+                        .or_default()
+                        .insert(p[3].clone(), fresh);
+                }
+            } else if candidates.contains(&(p[1].clone(), p[2].clone())) {
+                map.records
+                    .entry(p[1].clone())
+                    .or_default()
+                    .insert(p[2].clone(), fresh);
+            }
+        }
+        if map.records.is_empty() && map.conversations.is_empty() {
+            tx.commit()?;
+            return Ok(source.cloned());
+        }
+        let rows = json_rows(&tx, "SELECT value FROM root WHERE generation=?1", staging)?;
+        for (_, mut value) in rows {
+            map.root(&mut value);
+            tx.execute(
+                "UPDATE root SET value=?2 WHERE generation=?1",
+                params![staging, serde_json::to_string(&value)?],
+            )?;
+        }
+        for id in presets {
+            let raw: String = tx.query_row(
+                "SELECT value FROM bot_presets WHERE generation=?1 AND preset_id=?2",
+                params![staging, id],
+                |r| r.get(0),
+            )?;
+            let mut value: Value = serde_json::from_str(&raw)?;
+            map.field(&mut value, "id", "preset");
+            map.models(&mut value);
+            tx.execute(
+                "UPDATE bot_presets SET preset_id=?3,value=?4 WHERE generation=?1 AND preset_id=?2",
+                params![
+                    staging,
+                    id,
+                    map.id("preset", &id),
+                    serde_json::to_string(&value)?
+                ],
+            )?;
+        }
+        for id in chars {
+            let raw: String = tx.query_row(
+                "SELECT detail FROM characters WHERE generation=?1 AND character_id=?2",
+                params![staging, id],
+                |r| r.get(0),
+            )?;
+            let mut value: Value = serde_json::from_str(&raw)?;
+            map.character(&mut value);
+            let archive: Option<String> = tx.query_row(
+                "SELECT archived_object FROM characters WHERE generation=?1 AND character_id=?2",
+                params![staging, id],
+                |r| r.get(0),
+            )?;
+            let archive = archive
+                .map(|raw| -> StoreResult<String> {
+                    let mut archived: super::archive::ArchivedObject = serde_json::from_str(&raw)?;
+                    archived.identity_remap.push(map.clone());
+                    Ok(serde_json::to_string(&archived)?)
+                })
+                .transpose()?;
+            tx.execute("UPDATE characters SET character_id=?3,detail=?4,archived_object=?5 WHERE generation=?1 AND character_id=?2",params![staging,id,map.id("character",&id),serde_json::to_string(&value)?,archive])?;
+        }
+        let chats = {
+            let mut q = tx.prepare(
+                "SELECT character_id,conversation_id FROM conversations WHERE generation=?1",
+            )?;
+            let rows = q
+                .query_map([staging], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        for (owner, id) in chats {
+            let raw: String = tx.query_row("SELECT detail FROM conversations WHERE generation=?1 AND character_id=?2 AND conversation_id=?3",params![staging,owner,id],|r|r.get(0))?;
+            let mut value = serde_json::from_str(&raw)?;
+            map.chat(&owner, &mut value);
+            tx.execute("UPDATE conversations SET character_id=?4,conversation_id=?5,detail=?6 WHERE generation=?1 AND character_id=?2 AND conversation_id=?3",params![staging,owner,id,map.id("character",&owner),map.conversation(&owner,&id),serde_json::to_string(&value)?])?;
+        }
+        let message_owners = {
+            let mut q = tx.prepare(
+                "SELECT DISTINCT character_id,conversation_id FROM messages WHERE generation=?1",
+            )?;
+            let rows = q
+                .query_map([staging], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        for (owner, id) in message_owners {
+            tx.execute("UPDATE messages SET character_id=?4,conversation_id=?5 WHERE generation=?1 AND character_id=?2 AND conversation_id=?3",params![staging,owner,id,map.id("character",&owner),map.conversation(&owner,&id)])?;
+        }
+        let heads = json_rows(
+            &tx,
+            "SELECT owner_locator,owner_locator FROM asset_owner_heads WHERE generation=?1",
+            staging,
+        )?;
+        for (raw, mut locator) in heads {
+            if let Some(owner) = locator
+                .get("characterId")
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+            {
+                if let Some(id) = locator.get("conversationId").and_then(Value::as_str) {
+                    locator["conversationId"] = Value::String(map.conversation(&owner, id));
+                }
+            }
+            map.field(&mut locator, "characterId", "character");
+            map.field(&mut locator, "moduleId", "modules");
+            map.field(&mut locator, "personaId", "persona");
+            tx.execute("UPDATE asset_owner_heads SET owner_locator=?3 WHERE generation=?1 AND owner_locator=?2",params![staging,raw,serde_json::to_string(&locator)?])?;
+        }
+        tx.execute(
+            "INSERT INTO app_kv(key,value) VALUES(?1,?2)",
+            params![
+                format!("lww-import-remap:{staging}"),
+                serde_json::to_string(&map)?
+            ],
+        )?;
+        let remapped = remap_source(&tx, &map, source)?;
+        tx.commit()?;
+        Ok(remapped)
+    }
+}
+
+fn identity_rows(db: &Connection, sql: &str, generation: &str) -> StoreResult<Vec<String>> {
+    let mut query = db.prepare(sql)?;
+    let rows = query
+        .query_map([generation], |row| row.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+fn json_rows(db: &Connection, sql: &str, generation: &str) -> StoreResult<Vec<(String, Value)>> {
+    let mut q = db.prepare(sql)?;
+    let count = q.column_count();
+    let rows = q
+        .query_map([generation], |r| {
+            Ok((
+                if count == 1 { String::new() } else { r.get(0)? },
+                r.get::<_, String>(count - 1)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    rows.into_iter()
+        .map(|(id, raw)| Ok((id, serde_json::from_str(&raw)?)))
+        .collect()
+}
+
+fn remap_source(
+    db: &Connection,
+    map: &IdentityRemap,
+    source: Option<&BTreeMap<UnitKey, UnitValue>>,
+) -> StoreResult<Option<BTreeMap<UnitKey, UnitValue>>> {
+    source
+        .map(|source| -> StoreResult<BTreeMap<UnitKey, UnitValue>> {
+            let mut result = BTreeMap::new();
+            for (key, value) in source {
+                let mut value = value.clone();
+                if key.components()[0] == "archive" && !matches!(value, UnitValue::Deleted) {
+                    let mut archive = super::lww::archive_metadata(db, &value)?;
+                    archive.identity_remap.push(map.clone());
+                    value = super::lww::archive_value(db, &archive)?;
+                } else if let UnitValue::Inline { bytes } = &value {
+                    let mut payload: Value =
+                        serde_json::from_slice(&URL_SAFE_NO_PAD.decode(bytes).map_err(|e| {
+                            super::StoreError::Validation {
+                                message: e.to_string(),
+                            }
+                        })?)?;
+                    map.unit(key, &mut payload);
+                    value = UnitValue::inline(&serde_json::to_vec(&payload)?).map_err(|e| {
+                        super::StoreError::Validation {
+                            message: e.to_string(),
+                        }
+                    })?;
+                }
+                result.insert(map.key(key)?, value);
+            }
+            Ok(result)
+        })
+        .transpose()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::{
+        lww::{Header, UnitMutation},
+        WorkingSetCommit,
+    };
+    use super::*;
+    use serde_json::json;
+    fn key(p: &[&str]) -> UnitKey {
+        UnitKey::new(p).unwrap()
+    }
+    fn stage(store: &mut PersistentStore) -> String {
+        let id = store.replace_begin().unwrap().staging_id;
+        store.replace_put_root(&id,&json!({"botPresetsId":"preset","selectedPersona":"persona","personas":[{"id":"persona"}],"modules":[{"id":"module"}],"enabledModules":["module"],"loadouts":[{"id":"loadout","characterIds":["char"],"modules":["module"],"personaId":"persona","presetName":"kept upstream name"}],"customModels":[{"id":"model"}],"characterOrder":[{"name":"folder","data":["char"]},"group"]})).unwrap();
+        store
+            .replace_put_presets(
+                &id,
+                &[json!({"id":"preset","name":"kept upstream name","aiModel":"model"})],
+            )
+            .unwrap();
+        store.replace_add_characters(&id,&[json!({"chaId":"char","type":"character","name":"synthetic","modules":["module"],"chats":[{"id":"chat","name":"synthetic chat","bindedPersona":"persona","modules":["module"],"message":[{"role":"user","data":"synthetic","chatId":"message"}],"bookmarks":["message"],"bookmarkNames":{"message":"kept"},"hypaV3Data":{"memos":["message"]}}]}),json!({"chaId":"group","type":"group","name":"group","characters":["char"],"characterTalks":[1],"characterActive":[true],"chats":[]})]).unwrap();
+        id
+    }
+    fn retire(store: &mut PersistentStore, p: &[&str]) {
+        store
+            .commit(&WorkingSetCommit {
+                expected_revision: store.revision().unwrap(),
+                unit_mutations: Some(vec![UnitMutation::Delete { key: key(p) }]),
+                ..Default::default()
+            })
+            .unwrap();
+    }
+    #[test]
+    fn native_trash_summary_uses_the_unit_stamp_and_never_mutable_time_fallback() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = PersistentStore::open(dir.path()).unwrap();
+        let initial = stage(&mut store);
+        store.replace_commit(&initial, None).unwrap();
+        let trash_key = key(&["character", "char", "trashTime"]);
+        store
+            .commit(&WorkingSetCommit {
+                expected_revision: store.revision().unwrap(),
+                unit_mutations: Some(vec![UnitMutation::Set {
+                    key: trash_key.clone(),
+                    value: json!(1),
+                }]),
+                ..Default::default()
+            })
+            .unwrap();
+        let raw: String = store
+            .connection
+            .query_row(
+                "SELECT stamp FROM lww_units WHERE key=?1",
+                [trash_key.as_str()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let stamp: risunest_sync_wire::stamp::Stamp = serde_json::from_str(&raw).unwrap();
+        let summary = store.read_character_summary("char", None).unwrap().unwrap();
+        assert_eq!(summary.trash_time, Some(1));
+        assert_eq!(
+            summary.trash_stamp_ms,
+            Some(stamp.physical_ms.0.to_string())
+        );
+        assert_ne!(stamp.physical_ms.0, 1);
+        store
+            .connection
+            .execute("DELETE FROM lww_units WHERE key=?1", [trash_key.as_str()])
+            .unwrap();
+        let missing = store.read_character_summary("char", None).unwrap().unwrap();
+        assert_eq!(missing.trash_time, Some(1));
+        assert_eq!(missing.trash_stamp_ms, None);
+    }
+
+    #[test]
+    fn upstream_retired_entities_remap_references_without_touching_message_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = PersistentStore::open(dir.path()).unwrap();
+        let original = stage(&mut store);
+        store.replace_commit(&original, None).unwrap();
+        for p in [
+            vec!["exists", "conversation", "char", "chat"],
+            vec!["exists", "character", "char"],
+            vec!["exists", "preset", "preset"],
+            vec!["exists", "persona", "persona"],
+            vec!["exists", "modules", "module"],
+            vec!["exists", "loadouts", "loadout"],
+            vec!["exists", "customModels", "model"],
+        ] {
+            retire(&mut store, &p);
+        }
+        let incoming = stage(&mut store);
+        store.replace_commit(&incoming, None).unwrap();
+        let db = store.materialize(None).unwrap();
+        let char = &db["characters"][0];
+        let id = char["chaId"].as_str().unwrap();
+        assert_ne!(id, "char");
+        assert_eq!(db["characters"][1]["characters"][0], id);
+        assert_eq!(db["loadouts"][0]["characterIds"][0], id);
+        assert_eq!(db["characterOrder"][0]["data"][0], id);
+        assert_eq!(db["loadouts"][0]["presetName"], "kept upstream name");
+        assert_eq!(db["enabledModules"][0], db["modules"][0]["id"]);
+        assert_eq!(db["botPresetsId"], db["botPresets"][0]["id"]);
+        assert_eq!(db["botPresets"][0]["aiModel"], db["customModels"][0]["id"]);
+        let chat = &char["chats"][0];
+        assert_ne!(chat["id"], "chat");
+        assert_eq!(chat["bindedPersona"], db["personas"][0]["id"]);
+        assert_eq!(chat["message"][0]["chatId"], "message");
+        assert_eq!(chat["bookmarks"], json!(["message"]));
+        assert_eq!(chat["bookmarkNames"], json!({"message":"kept"}));
+        assert_eq!(chat["hypaV3Data"], json!({"memos":["message"]}));
+    }
+    #[test]
+    fn remapping_stage_and_source_units_is_idempotent_before_intent_reservation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = PersistentStore::open(dir.path()).unwrap();
+        let initial = stage(&mut store);
+        store.replace_commit(&initial, None).unwrap();
+        retire(&mut store, &["exists", "character", "char"]);
+        let incoming = stage(&mut store);
+        let source = BTreeMap::from([
+            (
+                key(&["exists", "character", "char"]),
+                UnitValue::inline(br#"{"type":"character"}"#).unwrap(),
+            ),
+            (
+                key(&["group-members", "group"]),
+                UnitValue::inline(
+                    br#"{"characters":["char"],"characterTalks":[1],"characterActive":[true]}"#,
+                )
+                .unwrap(),
+            ),
+        ]);
+        let first = store
+            .remap_retired_staging(&incoming, Some(&source))
+            .unwrap();
+        let projection = store.materialize_staging(&incoming).unwrap();
+        let second = store
+            .remap_retired_staging(&incoming, Some(&source))
+            .unwrap();
+        assert_eq!(first, second);
+        assert_eq!(projection, store.materialize_staging(&incoming).unwrap());
+        let header = Header {
+            binding_authority: store.lww_binding_authority().unwrap(),
+            request_id: "source-remap".into(),
+        };
+        let result = store
+            .lww_commit_replacement_units(&header, &incoming, Some(&source))
+            .unwrap();
+        assert_eq!(
+            store
+                .lww_commit_replacement_units(&header, &incoming, Some(&source))
+                .unwrap()
+                .revision,
+            result.revision
+        );
+        let mut altered = source.clone();
+        altered.insert(
+            key(&["root", "language"]),
+            UnitValue::inline(br#""en""#).unwrap(),
+        );
+        assert!(store
+            .lww_commit_replacement_units(&header, &incoming, Some(&altered))
+            .is_err());
+    }
+    #[test]
+    fn archive_remap_survives_a_second_backup_without_opening_compressed_bodies() {
+        use crate::logical_records::{
+            decode_logical_record, encode_logical_record_key, LogicalRecordLocator,
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = PersistentStore::open(dir.path()).unwrap();
+        let initial = stage(&mut store);
+        store.replace_commit(&initial, None).unwrap();
+        let revision = store.revision().unwrap();
+        store.archive_character("char", revision, 10).unwrap();
+        let generation = super::super::active_generation(&store.connection).unwrap();
+        let archived =
+            super::super::archive::read_archived_object(&store.connection, &generation, "char")
+                .unwrap()
+                .unwrap();
+        let incoming = store.replace_begin().unwrap().staging_id;
+        let cas = crate::asset_repository::PayloadCas::new(dir.path()).unwrap();
+        let locator = LogicalRecordLocator::Character {
+            character_id: "char".into(),
+        };
+        let key = encode_logical_record_key(&locator).unwrap();
+        let encoded = super::super::record_projection::reconstruct_record_with_owner_objects(
+            &store.connection,
+            &cas,
+            &generation,
+            &key,
+            vec![],
+            |_| Ok(()),
+            &|hash| Ok(cas.stat_object(hash)?.unwrap()),
+        )
+        .unwrap();
+        let envelope = decode_logical_record(&encoded).unwrap();
+        store
+            .replace_put_root(&incoming, &json!({"characterOrder":["char"]}))
+            .unwrap();
+        store.replace_put_presets(&incoming, &[]).unwrap();
+        let tx = store.connection.transaction().unwrap();
+        super::super::record_apply::apply_record_rows(&tx, &incoming, &key, &locator, &envelope, 0)
+            .unwrap();
+        tx.commit().unwrap();
+        retire(&mut store, &["exists", "character", "char"]);
+        let local = cas.read_object(&archived.object_hash).unwrap().unwrap();
+        let shared = cas
+            .read_object(&archived.shared_object_hash)
+            .unwrap()
+            .unwrap();
+        // The body catalog retains both roots, while neither immutable body is readable during activation.
+        let local_path = dir
+            .path()
+            .join("assets/objects")
+            .join(&archived.object_hash[..2])
+            .join(&archived.object_hash[2..]);
+        let shared_path = dir
+            .path()
+            .join("assets/objects")
+            .join(&archived.shared_object_hash[..2])
+            .join(&archived.shared_object_hash[2..]);
+        std::fs::remove_file(&local_path).unwrap();
+        if shared_path != local_path {
+            std::fs::remove_file(&shared_path).unwrap();
+        }
+        store.replace_commit(&incoming, None).unwrap();
+        let page = store
+            .query_characters(
+                &super::super::CharacterQuery {
+                    search: None,
+                    order: super::super::QueryOrder::Configured,
+                    trash: false,
+                    limit: 20,
+                    cursor: None,
+                },
+                None,
+            )
+            .unwrap();
+        let fresh = page.items[0].id.clone();
+        assert_ne!(fresh, "char");
+        let generation = super::super::active_generation(&store.connection).unwrap();
+        let archived2 =
+            super::super::archive::read_archived_object(&store.connection, &generation, &fresh)
+                .unwrap()
+                .unwrap();
+        assert_eq!(archived2.object_hash, archived.object_hash);
+        assert_eq!(archived2.shared_object_hash, archived.shared_object_hash);
+        let locator = LogicalRecordLocator::Character {
+            character_id: fresh.clone(),
+        };
+        let key = encode_logical_record_key(&locator).unwrap();
+        let encoded = super::super::record_projection::reconstruct_record_with_owner_objects(
+            &store.connection,
+            &cas,
+            &generation,
+            &key,
+            vec![],
+            |_| Ok(()),
+            &|_| Ok(local.len() as u64),
+        )
+        .unwrap();
+        let envelope = decode_logical_record(&encoded).unwrap();
+        let second = store.replace_begin().unwrap().staging_id;
+        store
+            .replace_put_root(&second, &json!({"characterOrder":[fresh]}))
+            .unwrap();
+        store.replace_put_presets(&second, &[]).unwrap();
+        let tx = store.connection.transaction().unwrap();
+        super::super::record_apply::apply_record_rows(&tx, &second, &key, &locator, &envelope, 0)
+            .unwrap();
+        tx.commit().unwrap();
+        store.replace_commit(&second, None).unwrap();
+        cas.prepare_bytes(&local).unwrap();
+        cas.prepare_bytes(&shared).unwrap();
+        let revision = store.revision().unwrap();
+        store.restore_character(&fresh, revision).unwrap();
+        let db = store.materialize(None).unwrap();
+        assert_eq!(db["characters"][0]["chaId"], fresh);
+        assert_eq!(
+            db["characters"][0]["chats"][0]["message"][0]["chatId"],
+            "message"
+        );
+        assert_eq!(
+            db["characters"][0]["chats"][0]["bookmarks"],
+            json!(["message"])
+        );
+    }
+}

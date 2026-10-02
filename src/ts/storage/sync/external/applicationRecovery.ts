@@ -15,7 +15,7 @@ interface Application {
     refreshReleased(revision: number): Promise<CommittedApplyOutcome>
     refreshDeviceState?(): Promise<void>
     afterRefresh(): Promise<void>
-    settled(): void
+    settled(): void | Promise<void>
 }
 
 interface PendingApplication {
@@ -34,13 +34,13 @@ export function hasPendingExternalApplication(): boolean {
     return pending !== undefined
 }
 
-function settle(current: PendingApplication): void {
+async function settle(current: PendingApplication): Promise<void> {
     current.fence?.release()
     current.fence = undefined
     if (pending !== current) return
+    await current.application.settled()
     pending = undefined
     recovery.set(null)
-    current.application.settled()
 }
 
 async function resume(current: PendingApplication): Promise<void> {
@@ -48,7 +48,7 @@ async function resume(current: PendingApplication): Promise<void> {
         if (current.revision === undefined) {
             const confirmation = await current.application.confirm()
             if (confirmation.kind === 'not-applied') {
-                settle(current)
+                await settle(current)
                 throw confirmation.error
             }
             if (!Number.isSafeInteger(confirmation.revision) || confirmation.revision < 0) {
@@ -61,8 +61,6 @@ async function resume(current: PendingApplication): Promise<void> {
             if (current.fence) {
                 outcome = await current.fence.refreshCommittedWorkingSet(current.revision)
                 await current.application.refreshDeviceState?.()
-                current.fence.release()
-                current.fence = undefined
             } else {
                 outcome = await current.application.refreshReleased(current.revision)
                 await current.application.refreshDeviceState?.()
@@ -73,7 +71,7 @@ async function resume(current: PendingApplication): Promise<void> {
             current.projected = true
         }
         await current.application.afterRefresh()
-        settle(current)
+        await settle(current)
     } catch (error) {
         if (pending === current) {
             recovery.set({

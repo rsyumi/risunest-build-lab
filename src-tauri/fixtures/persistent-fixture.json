@@ -3,8 +3,17 @@
   "username": "Fixture User",
   "formatversion": 4,
   "botPresets": [
-    { "name": "Preset Beta", "image": "preset-beta.png", "mainPrompt": "second" },
-    { "name": "Preset Alpha", "mainPrompt": "first" }
+    {
+      "id": "preset-beta",
+      "name": "Preset Beta",
+      "image": "preset-beta.png",
+      "mainPrompt": "second"
+    },
+    {
+      "id": "preset-alpha",
+      "name": "Preset Alpha",
+      "mainPrompt": "first"
+    }
   ],
   "pluginCustomStorage": {},
   "characters": [

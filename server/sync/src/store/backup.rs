@@ -3,7 +3,11 @@ use super::{
     objects::{check_path, sync_directory},
     Store,
 };
+#[cfg(test)]
+use crate::source_observer::small_object_store;
 use crate::{Error, Result};
+#[cfg(not(test))]
+use risunest_small_object_store as small_object_store;
 use risunest_sync_wire::{canonical, RemoteHead, Sequence};
 use rusqlite::{Connection, OpenFlags};
 use serde::{Deserialize, Serialize};
@@ -84,7 +88,7 @@ fn copy_objects(db: &Connection, source: &Path, target: &Path) -> Result<u64> {
             // verified whole against its hash. Checking that it is there at
             // the recorded size keeps the count honest without writing out
             // thousands of files a restore would only read back.
-            let present = risunest_small_object_store::size(db, &hash)
+            let present = small_object_store::size(db, &hash)
                 .map_err(|_| Error::new("corrupt-backup-object", 409))?;
             if present != Some(size as u64) {
                 return Err(Error::new("corrupt-backup-object", 409));
@@ -111,7 +115,7 @@ fn verify_inline(db: &Connection) -> Result<()> {
     while let Some(row) = rows.next()? {
         let hash: String = row.get(0)?;
         let size: i64 = row.get(1)?;
-        let body = risunest_small_object_store::read(db, &hash, super::objects::SMALL_OBJECT_BYTES)
+        let body = small_object_store::read(db, &hash, super::objects::SMALL_OBJECT_BYTES)
             .map_err(|_| Error::new("corrupt-backup-object", 409))?
             .ok_or(Error::new("corrupt-backup-object", 409))?;
         if size < 0 || body.len() as u64 != size as u64 {
@@ -122,6 +126,8 @@ fn verify_inline(db: &Connection) -> Result<()> {
 }
 impl Store {
     pub fn backup(&self, destination: &Path) -> Result<BackupManifest> {
+        #[cfg(test)]
+        crate::source_observer::unsupported(&self.root, "administration-backup");
         if !destination.is_absolute() {
             return Err(Error::new("absolute-backup-dir-required", 400));
         }
@@ -175,6 +181,8 @@ impl Store {
         Ok(manifest)
     }
     pub fn restore_backup(source: &Path, destination: &Path) -> Result<Self> {
+        #[cfg(test)]
+        crate::source_observer::unsupported(source, "administration-restore");
         if !source.is_absolute() || !destination.is_absolute() {
             return Err(Error::new("absolute-backup-dir-required", 400));
         }

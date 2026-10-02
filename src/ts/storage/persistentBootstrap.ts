@@ -9,7 +9,6 @@ import {
     type PresetCatalog,
     type PresetSummary,
 } from './persistentDataStore'
-import { canonicalJson } from './saveCoordinator'
 import { yieldToMainThread } from '../ui/yieldToUi'
 
 const BOOTSTRAP_CATALOG_PAGE_SIZE = 200
@@ -72,68 +71,18 @@ export async function bootstrapPersistentDatabase(
                 revision,
                 storedRoot,
             )
-            const projectedRevision = canonicalJson(root) === canonicalJson(storedRoot)
-                ? revision
-                : (await dependencies.store.commit({
-                    expectedRevision: revision,
-                    root,
-                })).revision
-            const projected = await projectScalableRevision(
-                dependencies,
-                root,
-                projectedRevision,
-            )
+            const projected = await projectScalableRevision(dependencies, root, revision)
             return projected
         }
         return { database, revision }
     }
 
-    const needsCharacterMigration = !active.value.formatversion
-        || active.value.formatversion < 3
-    const prepareScalableMigration = needsCharacterMigration
-        && dependencies.prepareRoot !== undefined
-        && dependencies.projectScalableWorkingSet !== undefined
-    if (
-        !dependencies.prepareRoot ||
-        !dependencies.projectScalableWorkingSet ||
-        prepareScalableMigration
-    ) {
+    if (!dependencies.prepareRoot || !dependencies.projectScalableWorkingSet) {
         await dependencies.onPhase?.('compatibility', active.value.language)
         const persistent = await dependencies.store.materializeDatabase(active.revision)
-        const { database, changed } = await dependencies.prepareDatabase(persistent)
-        const revision = changed
-            ? (await dependencies.store.replaceFromDatabase(
-                  database,
-                  active.revision,
-              )).revision
-            : active.revision
-        if (prepareScalableMigration) {
-            const {
-                characters: _characters,
-                botPresets: _botPresets,
-                pluginCustomStorage: _pluginCustomStorage,
-                pluginStorageMeta: _pluginStorageMeta,
-                ...storedRoot
-            } = database
-            const root = await canonicalizePresetSelection(
-                dependencies.store,
-                revision,
-                storedRoot,
-            )
-            const projectedRevision = canonicalJson(root) === canonicalJson(storedRoot)
-                ? revision
-                : (await dependencies.store.commit({
-                    expectedRevision: revision,
-                    root,
-                })).revision
-            const projected = await projectScalableRevision(
-                dependencies,
-                root,
-                projectedRevision,
-            )
-            return projected
-        }
-        return { database, revision }
+        const { database } = await dependencies.prepareDatabase(persistent)
+        assertRevision(active.revision, (await dependencies.store.readRoot()).revision)
+        return { database, revision: active.revision }
     }
 
     const preparedRoot = await dependencies.prepareRoot(active.value)
@@ -142,15 +91,7 @@ export async function bootstrapPersistentDatabase(
         active.revision,
         preparedRoot,
     )
-    let revision = active.revision
-    if (canonicalJson(root) !== canonicalJson(active.value)) {
-        revision = (await dependencies.store.commit({
-            expectedRevision: revision,
-            root,
-        })).revision
-    }
-
-    return await projectScalableRevision(dependencies, root, revision)
+    return await projectScalableRevision(dependencies, root, active.revision)
 }
 
 async function canonicalizePresetSelection(
@@ -161,8 +102,8 @@ async function canonicalizePresetSelection(
     const catalog = await store.queryPresets()
     assertRevision(revision, catalog.revision)
     if (
-        root.botPresetsId < 0 ||
-        catalog.items.some((item) => item.configuredIndex === root.botPresetsId)
+        (typeof root.botPresetsId === 'number' && root.botPresetsId < 0) ||
+        catalog.items.some((item) => typeof root.botPresetsId === 'string' ? item.id === root.botPresetsId : item.configuredIndex === root.botPresetsId)
     ) {
         return root
     }
@@ -171,7 +112,7 @@ async function canonicalizePresetSelection(
     )[0]
     return {
         ...root,
-        botPresetsId: first?.configuredIndex ?? 0,
+        botPresetsId: first?.id ?? '',
     }
 }
 
@@ -228,14 +169,14 @@ async function queryAllCharacterSummaries(
 async function readSelectedPreset(
     store: PersistentDataStore,
     revision: DataRevision,
-    configuredIndex: number,
+    configuredIndex: number | string,
 ): Promise<{
     catalog: PresetCatalog
     active: ScalableBootstrapProjection['activePreset']
 }> {
     const catalog = await store.queryPresets()
     assertRevision(revision, catalog.revision)
-    const summary = catalog.items.find((item) => item.configuredIndex === configuredIndex)
+    const summary = catalog.items.find((item) => typeof configuredIndex === 'string' ? item.id === configuredIndex : item.configuredIndex === configuredIndex)
     if (!summary) return { catalog, active: null }
     const preset = await store.readPreset(summary.id)
     if (!preset) throw new Error(`Preset ${summary.id} was not found`)

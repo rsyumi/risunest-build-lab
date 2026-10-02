@@ -8,12 +8,8 @@
     import SettingButton from '../RisuNest/SettingButton.svelte'
     import SettingProgress from '../RisuNest/SettingProgress.svelte'
     import {
-        getServerSyncBackupInventory,
         getServerSyncCacheUsage,
         cleanupServerSyncCache,
-        deleteServerSyncBackup,
-        exportServerSyncBackup,
-        restoreServerSyncBackup,
     } from 'src/ts/storage/sync/serverSyncProduction'
     import {
         createNativePersistentSnapshot,
@@ -23,7 +19,6 @@
         listNativePersistentSnapshots,
         previewNativePersistentAssetGc,
         restoreNativePersistentSnapshot,
-        restartNativeApp,
     } from 'src/ts/storage/nativePersistentMaintenance'
     import { getSyncConflictBackupStore } from 'src/ts/storage/sync/syncConflictBackup'
     import { describeBlockedReason } from 'src/ts/storage/sync/blockedReasonText'
@@ -41,28 +36,23 @@
         getStats: getNativePersistentStorageStats,
         listSnapshots: listNativePersistentSnapshots,
         listConflictBackups: () => conflictStore.list(),
-        getServerBackups: getServerSyncBackupInventory,
         getTemp: getServerSyncCacheUsage,
         cleanupTemp: cleanupServerSyncCache,
         previewGc: previewNativePersistentAssetGc,
         executeGc: executeNativePersistentAssetGc,
         deleteSnapshot: deleteNativePersistentSnapshot,
         deleteConflictBackup: (id) => conflictStore.remove(id),
-        deleteServerBackup: deleteServerSyncBackup,
-        exportServerBackup: exportServerSyncBackup,
-        restoreServerBackup: restoreServerSyncBackup,
         createSnapshot: createNativePersistentSnapshot,
     })
     let view = $state(dashboard.snapshot())
     // Restoring restarts the app, so the flag only ever clears on cancel or failure.
     let restoringSnapshot: string | null = $state(null)
     let rollup = $derived(
-        view.stats && view.loadedSources.length === 5
+        view.stats && view.loadedSources.length === 4
             ? storageDashboardRollup(
                   view.stats,
                   view.snapshots,
                   view.conflictBackups,
-                  view.serverBackups,
                   view.tempUsage,
               )
             : null,
@@ -76,11 +66,6 @@
         .replace('{1}', formatRisuNestStorageBytes(bytes))
     const cardBytes = (id: RisuNestStorageCardId): number => rollup?.cards.find((card) => card.id === id)?.bytes ?? 0
     let totalBytes = $derived(cardBytes('total'))
-    let serverBackupCount = $derived(
-        (view.serverBackups?.completeCount ?? 0) + (view.serverBackups?.incompleteCount ?? 0),
-    )
-    // The bar partitions the total: media, database, the three backup kinds, and
-    // what sync keeps beside its backups.
     let segments = $derived(
         rollup && view.stats
             ? [
@@ -95,12 +80,6 @@
                       label: strings.database,
                       bytes: view.stats.databaseBytes,
                       color: 'bg-secondary-400',
-                  },
-                  {
-                      id: 'syncBackups',
-                      label: strings.syncBackups,
-                      bytes: rollup.serverBackupBytes,
-                      color: 'bg-primary-300',
                   },
                   {
                       id: 'cache',
@@ -223,8 +202,6 @@
                     listed = snapshots.some((snapshot) => snapshot.id === id)
                     return listed ? id : null
                 },
-                confirm: () => alertConfirm(language.restoreLocalSnapshotConfirm),
-                restart: restartNativeApp,
                 onEmpty: () => { listed = false },
             })
         } catch (error) {
@@ -239,27 +216,6 @@
     async function deleteConflictBackup(id: string): Promise<void> {
         if (!await alertConfirm(strings.deleteConflictBackupConfirm)) return
         try { await dashboard.deleteConflictBackup(id) } catch (error) { showActionError(error) }
-    }
-
-    async function restoreServerBackup(id: string, side: 'local' | 'remote'): Promise<void> {
-        if (!await alertConfirm(syncLabels.restoreConfirm)) return
-        try { await dashboard.restoreServerBackup(id, side) } catch (error) { showActionError(error) }
-    }
-
-    async function deleteServerBackup(id: string): Promise<void> {
-        if (!await alertConfirm(syncLabels.deleteConfirm)) return
-        try {
-            const result = await dashboard.deleteServerBackup(id)
-            if (result.cleanup === 'pending') alertNormal(syncLabels.deleteCleanupPending)
-        } catch (error) { showActionError(error) }
-    }
-
-    async function exportServerBackup(id: string, side: 'local' | 'remote'): Promise<void> {
-        try { await dashboard.exportServerBackup(id, side) } catch (error) { showActionError(error) }
-    }
-
-    async function loadMoreServerBackups(): Promise<void> {
-        try { await dashboard.loadMoreServerBackups() } catch (error) { showActionError(error) }
     }
 
     async function cleanupTemp(): Promise<void> {
@@ -373,36 +329,6 @@
             {:else}
                 <p class={listEmptyClass}>{strings.emptyList}</p>
             {/each}
-        </details>
-        {/if}
-        {#if view.loadedSources.includes('serverBackups')}
-        <details data-storage-backup-list="sync-backups" class="group">
-            {@render listHeader(strings.syncBackups, serverBackupCount > 0 ? listSummary(serverBackupCount, view.serverBackups?.diskBytes ?? 0) : '')}
-            {#if view.serverBackups && view.serverBackups.incompleteCount > 0}
-                <p class="{listNoteClass} tabular-nums">{syncLabels.incomplete} ({formatCount(view.serverBackups.incompleteCount)}) · {formatRisuNestStorageBytes(view.serverBackups.incompleteBytes)}</p>
-            {/if}
-            {#if view.failedSources.includes('serverBackups')}<p role="alert" class={listNoteClass}>{strings.loadFailed}</p>{/if}
-            {#each view.serverBackups?.items ?? [] as backup (backup.id)}
-                {@const localBytes = backup.local.localRequiredBytes + backup.local.remoteDependentBytes}
-                {@const remoteBytes = backup.remote.localRequiredBytes + backup.remote.remoteDependentBytes}
-                <div data-storage-backup-row class={listRowClass}>
-                    <span class="min-w-0 flex-1 break-words tabular-nums">{new Date(backup.createdAt).toLocaleString()}</span>
-                    <span class="text-textcolor2 tabular-nums">{formatRisuNestStorageBytes(localBytes + remoteBytes)}</span>
-                    <SettingButton variant="secondary" busy={isBusy(`restore-server-backup:${backup.id}:local`)} disabled={serverBackupBusy || backup.local.availability === 'unavailable' || Boolean(backup.blockedReason)} onclick={() => restoreServerBackup(backup.id, 'local')}>{syncText.restoreLocalBackup} ({formatRisuNestStorageBytes(localBytes)})</SettingButton>
-                    <SettingButton variant="secondary" busy={isBusy(`restore-server-backup:${backup.id}:remote`)} disabled={serverBackupBusy || backup.remote.availability === 'unavailable' || Boolean(backup.blockedReason)} onclick={() => restoreServerBackup(backup.id, 'remote')}>{syncText.restoreRemoteBackup} ({formatRisuNestStorageBytes(remoteBytes)})</SettingButton>
-                    <SettingButton variant="secondary" busy={isBusy(`export-server-backup:${backup.id}:local`)} disabled={serverBackupBusy || backup.local.availability === 'unavailable' || Boolean(backup.blockedReason)} onclick={() => exportServerBackup(backup.id, 'local')}>{syncText.exportLocalBackup}</SettingButton>
-                    <SettingButton variant="secondary" busy={isBusy(`export-server-backup:${backup.id}:remote`)} disabled={serverBackupBusy || backup.remote.availability === 'unavailable' || Boolean(backup.blockedReason)} onclick={() => exportServerBackup(backup.id, 'remote')}>{syncText.exportRemoteBackup}</SettingButton>
-                    <SettingButton variant="secondary" busy={isBusy(`delete-server-backup:${backup.id}`)} disabled={serverBackupBusy || !backup.deletable} onclick={() => deleteServerBackup(backup.id)}>{language.remove}</SettingButton>
-                    {#if backup.blockedReason}<p class="basis-full text-xs text-textcolor2">{describeBlockedReason(backup.blockedReason)}</p>{/if}
-                </div>
-            {:else}
-                <p class={listEmptyClass}>{strings.emptyList}</p>
-            {/each}
-            {#if view.serverBackups?.next}
-                <div class="border-t border-darkborderc/55 py-2 pr-4 pl-10">
-                    <SettingButton variant="secondary" busy={isBusy('more-server-backups')} onclick={loadMoreServerBackups}>{syncLabels.more}</SettingButton>
-                </div>
-            {/if}
         </details>
         {/if}
         {#if view.loadedSources.includes('tempUsage')}

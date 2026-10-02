@@ -636,6 +636,121 @@ pub(crate) struct PreparedSectionRows {
     max_write_clock: Sequence,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct FrozenBackupSections {
+    pub(crate) hypa: Vec<SectionRow>,
+    pub(crate) local_plugins: Vec<SectionRow>,
+    local_settings: Vec<SectionRow>,
+}
+
+pub(crate) fn freeze_backup_sections(sections: &[&PreparedSectionRows]) -> StoreResult<FrozenBackupSections> {
+    let mut frozen = FrozenBackupSections { hypa: vec![], local_plugins: vec![], local_settings: vec![] };
+    let mut seen = BTreeSet::new();
+    for prepared in sections {
+        if prepared.versioned || !seen.insert(prepared.kind.id()) {
+            return Err(invalid("Replacement device sections are repeated or versioned"));
+        }
+        let rows = match prepared.kind {
+            SectionKind::Hypa => &mut frozen.hypa,
+            SectionKind::LocalPlugins => &mut frozen.local_plugins,
+            SectionKind::LocalSettings => &mut frozen.local_settings,
+        };
+        prepared.visit(|mut row| {
+            if row.value.is_tombstone() { return Err(invalid("Replacement device row has no value")); }
+            row.write_clock = Sequence::from(0u64);
+            row.writer_id.clear();
+            rows.push(row);
+            Ok(())
+        })?;
+    }
+    if sections.len() != 3 { return Err(invalid("Replacement device sections are incomplete")); }
+    Ok(frozen)
+}
+
+pub(crate) fn capture_replacement_device_rows(db: &Connection) -> StoreResult<FrozenBackupSections> {
+    Ok(FrozenBackupSections {
+        hypa: read_rows(db, Section::Hypa)?,
+        local_plugins: read_rows(db, Section::LocalPlugins)?,
+        local_settings: vec![],
+    })
+}
+
+pub(crate) fn restore_frozen_backup_sections(
+    tx: &Transaction<'_>,
+    frozen: &FrozenBackupSections,
+    stamp: &risunest_sync_wire::stamp::Stamp,
+) -> StoreResult<()> {
+    let mut clock: Option<Sequence> = None;
+    let mut next_clock = || -> StoreResult<Sequence> {
+        if let Some(clock) = &clock { return Ok(clock.clone()); }
+        let previous: String = tx.query_row(
+            "SELECT max_write_clock FROM device_sections ORDER BY length(max_write_clock) DESC,max_write_clock DESC LIMIT 1",
+            [], |row| row.get(0),
+        )?;
+        let next = sequence(&previous)?.next().map_err(|_| invalid("device write clock is exhausted"))?;
+        clock = Some(next.clone());
+        Ok(next)
+    };
+    for (section, incoming) in [(Section::Hypa, &frozen.hypa), (Section::LocalPlugins, &frozen.local_plugins)] {
+        let desired: BTreeMap<_, _> = incoming.iter().map(|row| (row.key(), row)).collect();
+        let mut changed = false;
+        for row in incoming {
+            if read_row(tx, section, &row.key())?.is_some_and(|(old, _)| old.value.same_content(&row.value)) { continue; }
+            let mut row = row.clone();
+            row.write_clock = next_clock()?;
+            row.writer_id = stamp.writer_id.clone();
+            write_row(tx, section, &row, false)?;
+            changed = true;
+        }
+        let mut after = (String::new(), String::new(), String::new());
+        loop {
+            let page = local_key_page(tx, section, &after, false)?;
+            if page.is_empty() { break; }
+            for key in page {
+                let (mut row, _) = read_row(tx, section, &key)?.ok_or_else(|| invalid("Device replacement row disappeared"))?;
+                after = key;
+                if row.value.is_tombstone() || desired.contains_key(&after) { continue; }
+                row.value = SectionValueRow::Tombstone { first_published: None };
+                row.write_clock = next_clock()?;
+                row.writer_id = stamp.writer_id.clone();
+                write_row(tx, section, &row, false)?;
+                changed = true;
+            }
+        }
+        if changed { tx.execute("UPDATE device_sections SET max_write_clock=?1 WHERE section=?2", params![next_clock()?.as_str(),section.as_str()])?; }
+    }
+    let mut settings = BTreeSet::new();
+    let mut permissions = BTreeSet::new();
+    for row in &frozen.local_settings {
+        match &row.value {
+            SectionValueRow::Setting { value } if row.key1 == "setting" && setting_is_local(&row.key2) && row.key3.is_empty() => {
+                tx.execute("INSERT INTO device_settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![row.key2,value])?;
+                settings.insert(row.key2.as_str());
+            }
+            SectionValueRow::PluginPermission { granted } if row.key1 == "pluginPermission" && !row.key2.is_empty() && !row.key3.is_empty() => {
+                tx.execute("INSERT INTO plugin_permissions(code_hash,permission,granted) VALUES(?1,?2,?3) ON CONFLICT(code_hash,permission) DO UPDATE SET granted=excluded.granted", params![row.key2,row.key3,i64::from(*granted)])?;
+                permissions.insert(row.key());
+            }
+            _ => return Err(invalid("Replacement device setting has the wrong shape")),
+        }
+    }
+    for key in LOCAL_SETTING_KEYS {
+        if !settings.contains(key) { tx.execute("DELETE FROM device_settings WHERE key=?1", [key])?; }
+    }
+    let mut after = (String::new(), String::new(), String::new());
+    loop {
+        let page = local_permission_key_page(tx, &after)?;
+        if page.is_empty() { break; }
+        for key in page {
+            after = key;
+            if !permissions.contains(&after) {
+                tx.execute("DELETE FROM plugin_permissions WHERE code_hash=?1 AND permission=?2", params![after.1,after.2])?;
+            }
+        }
+    }
+    Ok(())
+}
+
 impl SectionSpoolBuilder {
     pub(crate) fn new(section: Section) -> StoreResult<Self> {
         Self::open(kind_of_section(section), true)
@@ -1120,25 +1235,6 @@ fn delete_current_row(tx: &Transaction<'_>, section: Section, row: &SectionRow) 
     Ok(())
 }
 
-fn reclaim_prepared(tx: &Transaction<'_>, prepared: &PreparedSectionRows, floor: &Sequence) -> StoreResult<()> {
-    if *floor == Sequence::from(0u64) { return Ok(()); }
-    let section = prepared.synchronized_section()?;
-    let mut after = (String::new(), String::new(), String::new());
-    loop {
-        let page = local_key_page(tx, section, &after, true)?;
-        if page.is_empty() { break; }
-        for key in page {
-            let (row, _) = read_row(tx, section, &key)?.ok_or_else(|| invalid("Section row disappeared"))?;
-            if row.value.first_published().is_some_and(|marker| marker.generation <= *floor)
-                && !prepared.contains(&key, true)? {
-                delete_current_row(tx, section, &row)?;
-            }
-            after = key;
-        }
-    }
-    Ok(())
-}
-
 fn rejoin_prepared(tx: &Transaction<'_>, prepared: &PreparedSectionRows, observed: &Sequence, behind_floor: bool) -> StoreResult<()> {
     let section = prepared.synchronized_section()?;
     let writer_id: String = tx.query_row("SELECT writer_id FROM device_meta WHERE singleton=1", [], |row| row.get(0))?;
@@ -1224,6 +1320,20 @@ fn capture_backup_rows(
     Ok(())
 }
 
+pub(crate) fn capture_backup_sections_snapshot(
+    snapshot: &Connection,
+    kinds: &[SectionKind],
+) -> StoreResult<Vec<PreparedSectionRows>> {
+    let mut seen = BTreeSet::new();
+    let mut spools = Vec::with_capacity(kinds.len());
+    for kind in kinds {
+        if !seen.insert(kind.id()) { return Err(invalid("Backup section kind is repeated")); }
+        spools.push((*kind, SectionSpoolBuilder::new_backup(*kind)?));
+    }
+    for (kind, spool) in &mut spools { capture_backup_rows(snapshot, *kind, spool)?; }
+    spools.into_iter().map(|(_, spool)| spool.finish_captured()).collect()
+}
+
 fn read_section_state(db: &Connection, section: Section) -> StoreResult<SectionState> {
     let (participating, max_write_clock, gc_floor, participation_generation): (
         i64,
@@ -1251,13 +1361,7 @@ impl DeviceStore {
         &mut self,
         kinds: &[SectionKind],
     ) -> StoreResult<Vec<PreparedSectionRows>> {
-        let mut seen = BTreeSet::new();
-        let mut spools = Vec::with_capacity(kinds.len());
-        for kind in kinds {
-            if !seen.insert(kind.id()) { return Err(invalid("Backup section kind is repeated")); }
-            spools.push((*kind, SectionSpoolBuilder::new_backup(*kind)?));
-        }
-        if spools.is_empty() { return Ok(Vec::new()); }
+        if kinds.is_empty() { return Ok(Vec::new()); }
         let path: String = self.connection.query_row(
             "SELECT file FROM pragma_database_list WHERE name='main'", [], |row| row.get(0),
         )?;
@@ -1269,9 +1373,9 @@ impl DeviceStore {
         snapshot.execute_batch(
             "PRAGMA busy_timeout=5000; PRAGMA query_only=ON; PRAGMA mmap_size=0; BEGIN;",
         )?;
-        for (kind, spool) in &mut spools { capture_backup_rows(&snapshot, *kind, spool)?; }
+        let sections = capture_backup_sections_snapshot(&snapshot, kinds)?;
         snapshot.execute_batch("COMMIT;")?;
-        spools.into_iter().map(|(_, spool)| spool.finish_captured()).collect()
+        Ok(sections)
     }
 
     /// Visits participating synchronized rows from one read-only SQLite
@@ -1351,7 +1455,7 @@ impl DeviceStore {
         let floor = if current.is_some() { cursor.applied_gc_floor.clone() } else { Sequence::from(0u64) };
         observe_remote_clock(&tx, section, &cursor.observed_max_write_clock)?;
         if rejoining {
-            reclaim_prepared(&tx, prepared, &floor)?;
+
             rejoin_prepared(&tx, prepared, &cursor.observed_max_write_clock, behind_floor)?;
         }
         let mut outcome = SectionApplyOutcome::default();
@@ -1360,7 +1464,7 @@ impl DeviceStore {
             else { outcome.kept += 1; }
             Ok(())
         })?;
-        if !rejoining { reclaim_prepared(&tx, prepared, &floor)?; }
+
         record_cursor(&tx, connection_id, library_lineage, section, cursor)?;
         tx.commit()?;
         Ok(outcome)
@@ -1486,6 +1590,7 @@ impl DeviceStore {
         section: Section,
         participating: bool,
     ) -> StoreResult<()> {
+        if section==Section::Hypa&&!participating {return Err(invalid("Hypa participation is required"));}
         let transaction = self.transaction()?;
         let current: i64 = transaction.query_row(
             "SELECT participating FROM device_sections WHERE section=?1",
@@ -1510,6 +1615,9 @@ impl DeviceStore {
                 ],
             )?;
             if participating {
+                super::begin_mutation_remote(&transaction)?;
+                super::super::lww::activate_plugin_local_units(&transaction)?;
+                super::finish_mutation_remote(&transaction)?;
                 // Keep lineage identity for removal markers, but require a
                 // rejoin before exchanging values again after a pause.
                 transaction.execute(
@@ -1523,8 +1631,7 @@ impl DeviceStore {
         Ok(())
     }
 
-    /// Every row of a synchronized section, tombstones included. A removal only
-    /// travels while its tombstone does.
+    /// Every section value, including permanent removal markers.
     pub(crate) fn read_section_rows(&mut self, section: Section) -> StoreResult<Vec<SectionRow>> {
         let transaction = self.transaction()?;
         let rows = read_rows(&transaction, section)?;
@@ -1635,7 +1742,7 @@ impl DeviceStore {
         published: &[(SectionKey, SectionEntryVersion)],
         stamped: &[(SectionKey, SectionEntryVersion)],
         first_published: &TombstonePublication,
-        reclaimed: &ReclaimedRows,
+        _reclaimed: &ReclaimedRows,
         gc_floor: &Sequence,
         cursor: Option<(&str, &str, &Sequence, &SectionCursor)>,
     ) -> StoreResult<bool> {
@@ -1649,34 +1756,6 @@ impl DeviceStore {
             if !participating || sequence(&generation)? != *expected_generation {
                 transaction.commit()?;
                 return Ok(false);
-            }
-        }
-        // The removals this publication stopped carrying go with the floor it
-        // published, in the transaction that records the publication, so a
-        // publication that never finished reclaims nothing.
-        for ((key1, key2, key3), version) in reclaimed {
-            let at_ms = i64::try_from(version.first_published.at_ms)
-                .map_err(|_| invalid("device removal marker time is out of range"))?;
-            match section {
-                Section::Hypa => {
-                    transaction.execute(
-                        "DELETE FROM hypa_embeddings WHERE cache_key=?1 AND tombstone=1
-                            AND write_clock=?2 AND writer_id=?3
-                            AND first_published_generation=?4 AND first_published_at_ms=?5",
-                        params![key1, version.write_clock.as_str(), version.writer_id,
-                            version.first_published.generation.as_str(), at_ms],
-                    )?;
-                }
-                Section::LocalPlugins => {
-                    transaction.execute(
-                        "DELETE FROM plugin_device_storage
-                            WHERE owner=?1 AND space=?2 AND key=?3 AND tombstone=1
-                              AND write_clock=?4 AND writer_id=?5
-                              AND first_published_generation=?6 AND first_published_at_ms=?7",
-                        params![key1, key2, key3, version.write_clock.as_str(), version.writer_id,
-                            version.first_published.generation.as_str(), at_ms],
-                    )?;
-                }
             }
         }
         let current = sequence(&transaction.query_row(
@@ -1782,27 +1861,7 @@ impl DeviceStore {
             let evidence = evidence?;
             let (key1, key2, key3) = evidence.key;
             match evidence.disposition {
-                SectionPublicationDisposition::Reclaimed { first_published } => {
-                    let at_ms = i64::try_from(first_published.at_ms)
-                        .map_err(|_| invalid("device removal marker time is out of range"))?;
-                    match section {
-                        Section::Hypa => transaction.execute(
-                            "DELETE FROM hypa_embeddings WHERE cache_key=?1 AND tombstone=1
-                                AND write_clock=?2 AND writer_id=?3
-                                AND first_published_generation=?4 AND first_published_at_ms=?5",
-                            params![key1, evidence.version.write_clock.as_str(), evidence.version.writer_id,
-                                first_published.generation.as_str(), at_ms],
-                        )?,
-                        Section::LocalPlugins => transaction.execute(
-                            "DELETE FROM plugin_device_storage
-                                WHERE owner=?1 AND space=?2 AND key=?3 AND tombstone=1
-                                  AND write_clock=?4 AND writer_id=?5
-                                  AND first_published_generation=?6 AND first_published_at_ms=?7",
-                            params![key1, key2, key3, evidence.version.write_clock.as_str(),
-                                evidence.version.writer_id, first_published.generation.as_str(), at_ms],
-                        )?,
-                    };
-                }
+                SectionPublicationDisposition::Reclaimed { .. } => {}
                 SectionPublicationDisposition::Published { first_published: stamp } => {
                     if let Some(stamp) = stamp {
                         if stamp != *first_published {
@@ -2174,7 +2233,3 @@ fn write_row(
     }
     Ok(())
 }
-
-#[cfg(test)]
-#[path = "section_merge_tests.rs"]
-mod merge_tests;

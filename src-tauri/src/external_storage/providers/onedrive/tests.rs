@@ -928,6 +928,7 @@ fn an_immutable_create_uses_one_conditional_put_and_converges_after_a_lost_respo
         replies.push(Reply::Lost);
         replies.push(json(409, "{\"error\":{\"code\":\"nameAlreadyExists\"}}"));
         replies.push(json(200, &file_item("pack-1", 1_024, "etag-1")));
+        replies.push(Reply::Http { status: 200, headers: vec![], body: bytes.clone() });
         let server = WireServer::start(replies);
         let harness = harness(NOW_MS);
         let provider = create(harness.dependencies.clone()).unwrap();
@@ -962,10 +963,10 @@ fn an_immutable_create_uses_one_conditional_put_and_converges_after_a_lost_respo
         assert_eq!(receipt.byte_length, 1_024);
         assert_eq!(receipt.locator.object, "packs/pack-1");
         assert_eq!(receipt.version, Some(VersionToken("etag-1".to_owned())));
-        assert!(receipt.checksum.is_none());
+        assert_eq!(receipt.checksum.unwrap().value, intent.sha256);
 
         let records = server.requests.lock().unwrap();
-        assert_eq!(records.len(), 5);
+        assert_eq!(records.len(), 6);
         for index in [2, 3] {
             assert!(line(&records[index]).starts_with(&format!(
                 "PUT /synthetic/drives/drive-1/items/{ROOT_ITEM}:/packs/pack-1:/content?@microsoft.graph.conflictBehavior=fail"
@@ -1232,6 +1233,7 @@ fn an_expired_session_restarts_completes_or_conflicts_on_the_remote_truth() {
                 Some(body) => json(200, body),
                 None => json(404, "{\"error\":{\"code\":\"itemNotFound\"}}"),
             });
+            if expected == "complete" { replies.push(Reply::Http { status: 200, headers: vec![], body: vec![b'x'; 2048] }); }
             let server = WireServer::start(replies);
             let harness = harness(NOW_MS);
             let provider = create(harness.dependencies.clone()).unwrap();
@@ -1246,7 +1248,7 @@ fn an_expired_session_restarts_completes_or_conflicts_on_the_remote_truth() {
             .unwrap();
             let intent = ObjectIntent {
                 byte_length: 2_048,
-                ..intent_for(&repository, "pack-x", ObjectRole::Pack, b"x")
+                ..intent_for(&repository, "pack-x", ObjectRole::Pack, &vec![b'x'; 2048])
             };
             let sealed = tokens::encode_session(&tokens::SealedSession {
                 upload_url: zeroize::Zeroizing::new(upload_url),
@@ -2100,4 +2102,95 @@ fn a_preauthorized_request_never_receives_an_account_token_after_401() {
         assert_eq!(requests.len(), 1);
         assert!(!head(&requests[0]).contains("authorization:"));
     });
+}
+
+
+#[test]
+fn longest_sync_names_fit_the_longest_accepted_root() {
+    use crate::external_storage::contract::{MAX_SEGMENT_NAME_BYTES, MAX_SNAPSHOT_NAME_BYTES, segment_object_id};
+    let root = format!("{}/{}", "r".repeat(200), "r".repeat(67));
+    super::validate_sync_root(&root).unwrap();
+    let name = segment_object_id("00000000-0000-4000-8000-000000000001", u64::MAX, &"f".repeat(64)).unwrap();
+    assert_eq!(name.len(), MAX_SEGMENT_NAME_BYTES);
+    let snapshot = "00000000-0000-4000-8000-000000000002";
+    assert_eq!(snapshot.len(), MAX_SNAPSHOT_NAME_BYTES);
+    assert!(format!("{root}/segments/{name}").len() <= 400);
+    assert!(format!("{root}/snapshots/{snapshot}").len() <= 400);
+    assert!(super::validate_sync_root(&(root + "r")).is_err());
+}
+
+
+#[test]
+fn equal_length_collision_requires_the_complete_sha256_and_never_replaces() {
+    runtime().block_on(async {
+        let bytes = b"sealed-a";
+        let mut replies = existing_open();
+        replies.extend([json(409, "{\"error\":{\"code\":\"nameAlreadyExists\"}}"), json(200, &file_item("pack-1", 8, "etag-1")),
+            Reply::Http { status: 200, headers: vec![], body: b"sealed-b".to_vec() }]);
+        let server = WireServer::start(replies);
+        let harness = harness(NOW_MS);
+        let provider = create(harness.dependencies.clone()).unwrap();
+        let cancel = Cancellation::default();
+        let (repository, _) = open(&provider, &config_for(&server, "personal"), OpenMode::Existing, &cancel).await.unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let source = source_of(directory.path(), "sealed", bytes);
+        let intent = intent_for(&repository, "pack-1", ObjectRole::Pack, bytes);
+        assert_eq!(provider.create_object(&repository, &intent, &source, None, &cancel).await.unwrap_err().kind, ErrorKind::PreconditionFailed);
+        let records = server.requests.lock().unwrap();
+        assert_eq!(records.len(), 5);
+        assert!(line(&records[2]).contains("conflictBehavior=fail"));
+        assert_eq!(records[2].body, bytes);
+        assert!(records[3..].iter().all(|record| line(record).starts_with("GET ")));
+    });
+}
+
+
+#[test]
+fn segment_and_snapshot_listings_use_the_uniform_names() {
+    runtime().block_on(async {
+        let segment = crate::external_storage::contract::segment_object_id("00000000-0000-4000-8000-000000000001", 1, &"a".repeat(64)).unwrap();
+        let snapshot = "00000000-0000-4000-8000-000000000002";
+        let mut replies = existing_open();
+        replies.extend([json(200, &children_page(&[file_item(&segment, 8, "etag")])),
+            json(200, &children_page(&[file_item(snapshot, 8, "etag")]))]);
+        let server = WireServer::start(replies);
+        let harness = harness(NOW_MS);
+        let provider = create(harness.dependencies.clone()).unwrap();
+        let cancel = Cancellation::default();
+        let (repository, _) = open(&provider, &config_for(&server, "personal"), OpenMode::Existing, &cancel).await.unwrap();
+        let page = provider.list_objects(&repository, Collection::Segments, None, 10, &cancel).await.unwrap();
+        assert_eq!(page.objects[0].locator.object, format!("segments/{segment}"));
+        let page = provider.list_objects(&repository, Collection::Snapshots, None, 10, &cancel).await.unwrap();
+        assert_eq!(page.objects[0].locator.object, format!("snapshots/{snapshot}"));
+        assert_eq!(config::object_path(ObjectRole::Segment, &segment).unwrap(), format!("segments/{segment}"));
+        assert_eq!(config::object_path(ObjectRole::Snapshot, snapshot).unwrap(), format!("snapshots/{snapshot}"));
+    });
+}
+
+#[test]
+fn setup_folder_exposes_decoded_path_once_and_sync_fails_closed_without_it() {
+    let folder = |value: serde_json::Value| OneDrive::setup_folder(serde_json::from_value(value).unwrap(), "drive-1").unwrap();
+    let selected = folder(serde_json::json!({"id":"item-1","name":"Selected name","folder":{},
+        "parentReference":{"driveId":"drive-1","path":"/drive/root:/Projects/%EC%83%88%20%ED%8F%B4%EB%8D%94"}}));
+    assert_eq!(selected.sync_root_path().unwrap(), "Projects/새 폴더/Selected name");
+    let root = folder(serde_json::json!({"id":"root-id","name":"root","folder":{},"root":{}}));
+    assert_eq!(root.sync_root_path().unwrap(), "");
+    let unknown = folder(serde_json::json!({"id":"short-item-id","name":"folder","folder":{}}));
+    assert!(unknown.decoded_path.is_none());
+    assert_eq!(unknown.sync_root_path().unwrap_err().kind, ErrorKind::Unsupported);
+    let encoded = folder(serde_json::json!({"id":"item-1","name":"folder","folder":{},
+        "parentReference":{"path":"/drives/drive-1/root:/literal%2520"}}));
+    assert_eq!(encoded.decoded_path.as_deref(), Some("literal%20/folder"));
+    assert!(encoded.sync_root_path().is_err());
+    for path in ["/drive/root:/bad%", "/drive/root:/bad%FF", "/drive/root:/bad%2Fpart", "/unexpected/root:/folder"] {
+        let invalid = folder(serde_json::json!({"id":"item-1","name":"folder","folder":{},"parentReference":{"path":path}}));
+        assert!(invalid.decoded_path.is_none());
+        assert!(invalid.sync_root_path().is_err());
+    }
+    let parent = "r".repeat(200);
+    for (length, accepted) in [(67, true), (68, false)] {
+        let selected = folder(serde_json::json!({"id":"tiny-id","name":"r".repeat(length),"folder":{},
+            "parentReference":{"path":format!("/drive/root:/{parent}")}}));
+        assert_eq!(selected.sync_root_path().is_ok(), accepted);
+    }
 }

@@ -11,7 +11,7 @@ function writtenReceipt(
         result: {
             revision: 7,
             sourceBytes: 128,
-            sourceSha256: 'a'.repeat(64),
+            sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'a'.repeat(64),
             characterCount: 1,
             presetCount: 0,
             warningCodes: [],
@@ -120,7 +120,7 @@ describe('native official publication recovery', () => {
             result: {
                 ...notModifiedBase.result,
                 revision: 8,
-                sourceSha256: 'b'.repeat(64),
+                sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'b'.repeat(64),
                 publication: {
                     kind: 'not-modified',
                     accountId: 'account-2',

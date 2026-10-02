@@ -8,6 +8,23 @@ export interface IOSPickedFile {
     name: string
     bytes: number
 }
+export interface IOSPickedBackupSource { token: string; name: string; bytes: number }
+export async function pickIOSBackupSource(signal?: AbortSignal): Promise<IOSPickedBackupSource | null> {
+    if (signal?.aborted) throw cancelled()
+    await invoke('native_portable_source_cleanup_orphans')
+    if (signal?.aborted) throw cancelled()
+    const selected = await invoke<IOSPickedBackupSource & { cancelled: boolean }>('plugin:ios-native|pick_backup_source')
+    if (selected.cancelled) return null
+    if (signal?.aborted) {
+        if (!await discardIOSBackupSource(selected.token)) throw new Error('Backup source cleanup failed')
+        throw cancelled()
+    }
+    return { token: selected.token, name: selected.name, bytes: selected.bytes }
+}
+export const discardIOSBackupSource = (token: string) => invoke<boolean>('native_portable_source_discard', { source: { type: 'iosScoped', token } })
+export async function materializeIOSBackupSource(token: string): Promise<IOSPickedFile> {
+    return invoke<IOSPickedFile>('plugin:ios-native|materialize_backup_source', { token })
+}
 const cancelled = () =>
     new DOMException('File operation cancelled', 'AbortError')
 

@@ -657,6 +657,7 @@ impl Provider for GithubReleases {
         cancel: &'a Cancellation,
     ) -> ProviderFuture<'a, Option<ResumeState>> {
         Box::pin(async move {
+            if matches!(intent.role, ObjectRole::Segment | ObjectRole::Snapshot) { return Err(ProviderError::new(ErrorKind::Unsupported)); }
             cancel.check()?;
             self.context(repository)?;
             intent.validate(repository)?;
@@ -673,6 +674,7 @@ impl Provider for GithubReleases {
         cancel: &'a Cancellation,
     ) -> ProviderFuture<'a, ObjectReceipt> {
         Box::pin(async move {
+            if matches!(intent.role, ObjectRole::Segment | ObjectRole::Snapshot) { return Err(ProviderError::new(ErrorKind::Unsupported)); }
             cancel.check()?;
             let context = self.context(repository)?;
             intent.validate(repository)?;
@@ -829,6 +831,7 @@ impl Provider for GithubReleases {
         cancel: &'a Cancellation,
     ) -> ProviderFuture<'a, ObjectPage> {
         Box::pin(async move {
+            if collection == Collection::Segments { return Err(ProviderError::new(ErrorKind::Unsupported)); }
             cancel.check()?;
             let context = self.context(repository)?;
             if limit == 0 || limit > 1000 {
@@ -999,6 +1002,7 @@ impl Provider for GithubReleases {
         cancel: &'a Cancellation,
     ) -> ProviderFuture<'a, UploadResolution> {
         Box::pin(async move {
+            if matches!(intent.role, ObjectRole::Segment | ObjectRole::Snapshot) { return Err(ProviderError::new(ErrorKind::Unsupported)); }
             cancel.check()?;
             let context = self.context(repository)?;
             intent.validate(repository)?;
@@ -1060,4 +1064,31 @@ fn parse_cursor(cursor: Option<&str>) -> Result<(u32, usize, u32, usize)> {
         return Err(corrupt());
     }
     Ok((release_page, release_index, asset_page, asset_index))
+}
+
+
+#[cfg(test)]
+#[test]
+fn sync_roles_are_refused_before_any_request_or_mutation() {
+    use crate::external_storage::{contract::*, fake::{loopback_dependencies, MemoryVault}, quota::AccountKey, transfer::SpoolSource};
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let test = loopback_dependencies(MemoryVault::default(), 1);
+        let provider = create(test.dependencies.clone()).unwrap();
+        let repository = RepositoryHandle { repository_id: "synthetic".into(), connection_identity: "synthetic".into(),
+            account: AccountKey::new("github_releases", &url::Url::parse("http://127.0.0.1:1/").unwrap(), "synthetic").unwrap(), context: Box::new(()) };
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("sealed");
+        std::fs::write(&path, b"sealed").unwrap();
+        let digest = risunest_sync_wire::hash(b"sealed");
+        let source = SpoolSource::verified(&path, 6, &digest).unwrap();
+        let cancel = Cancellation::default();
+        for role in [ObjectRole::Segment, ObjectRole::Snapshot] {
+            let intent = ObjectIntent { repository_id: "synthetic".into(), job_id: "job".into(), object_id: "object".into(), role, byte_length: 6, sha256: digest.clone() };
+            assert_eq!(provider.begin_upload(&repository, &intent, &cancel).await.err().unwrap().kind, ErrorKind::Unsupported);
+            assert_eq!(provider.create_object(&repository, &intent, &source, None, &cancel).await.unwrap_err().kind, ErrorKind::Unsupported);
+            assert_eq!(provider.reconcile_upload(&repository, &intent, None, &cancel).await.err().unwrap().kind, ErrorKind::Unsupported);
+        }
+        assert_eq!(provider.list_objects(&repository, Collection::Segments, None, 10, &cancel).await.unwrap_err().kind, ErrorKind::Unsupported);
+
+    });
 }

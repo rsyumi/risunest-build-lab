@@ -248,8 +248,8 @@ describe('working-set catalog', () => {
         )
 
         expect(presets).toHaveLength(2)
-        expect(presets[0]).toEqual({ name: 'Inactive', image: 'inactive.png' })
-        expect(Object.keys(presets[0]).sort()).toEqual(['image', 'name'])
+        expect(presets[0]).toEqual({ id: 'preset-a', name: 'Inactive', image: 'inactive.png' })
+        expect(Object.keys(presets[0]).sort()).toEqual(['id', 'image', 'name'])
         expect(presets[1]).toBe(active)
         expect(isCatalogPresetWorkingSet(presets)).toBe(true)
         expect(getCatalogPresetMetadata(presets)).toEqual({

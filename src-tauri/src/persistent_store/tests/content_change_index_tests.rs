@@ -345,11 +345,9 @@ fn content_capture_rechecks_the_floor_after_projecting_its_pinned_body() {
 }
 
 #[test]
-fn content_capture_registration_prunes_atomically_without_acknowledging_the_server() {
+fn content_capture_registration_prunes_atomically() {
     let (directory, mut store) = capture_fixture();
-    store.connection.execute("INSERT INTO server_sync_state(singleton,config,full_scan) VALUES(1,'{}',0)", []).unwrap();
     edit_root(&mut store, 2);
-    let outbox_before: i64 = store.connection.query_row("SELECT revision FROM server_sync_dirty WHERE kind='root'", [], |row| row.get(0)).unwrap();
     let prepared = store.prepare_content_capture("capture", "backup", 2).unwrap();
     let mut capture = catalog(directory.path(), "capture");
     prepared.project(&mut capture, &Never).unwrap();
@@ -369,9 +367,6 @@ fn content_capture_registration_prunes_atomically_without_acknowledging_the_serv
     prepared.register(&mut store, &capture, &[1; 32], "logical-v1").unwrap();
     assert_eq!(floor(&store), 2);
     assert!(revisions(&store).is_empty());
-    let outbox_after: i64 = store.connection.query_row("SELECT revision FROM server_sync_dirty WHERE kind='root'", [], |row| row.get(0)).unwrap();
-    assert_eq!(outbox_after, outbox_before);
-    assert_eq!(count(&store, "server_sync_dirty"), 1);
 }
 
 #[test]

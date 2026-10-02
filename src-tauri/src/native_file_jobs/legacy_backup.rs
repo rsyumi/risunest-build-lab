@@ -397,6 +397,7 @@ impl StrictLocalBackupDatabaseRestore for LegacyDatabaseRestore<'_> {
             OpenedJobSource {
                 file,
                 total_bytes: database.byte_length,
+                custody: None,
             },
             self.expected_revision,
             self.job,
@@ -436,13 +437,13 @@ impl restore::ReplacementSink for LegacyReplacementSink {
 
     fn put_root(&self, staging_id: &str, root: &Value) -> StoreResult<()> {
         crate::persistent_store::commands::with_store_mut(self.app.state(), |store| {
-            store.replace_put_root(staging_id, root)
+            store.replace_put_upstream_root(staging_id, root)
         })
     }
 
     fn put_presets(&self, staging_id: &str, presets: &[Value]) -> StoreResult<()> {
         crate::persistent_store::commands::with_store_mut(self.app.state(), |store| {
-            store.replace_put_presets(staging_id, presets)
+            store.replace_put_upstream_presets(staging_id, presets)
         })
     }
 

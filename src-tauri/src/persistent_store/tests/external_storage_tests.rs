@@ -4,17 +4,6 @@ use super::super::{
 };
 use super::*;
 
-fn publication_permit(
-    job: &str,
-    identity: &selection::CaptureIdentity,
-    mode: crate::external_storage::publication::PublicationMode,
-) -> crate::external_storage::publication::PublicationPermit {
-    crate::external_storage::publication::test_publication_permit(
-        job,
-        &identity.selection_epoch,
-        mode,
-    )
-}
 
 fn count(store: &PersistentStore, table: &str) -> i64 {
     store
@@ -46,7 +35,6 @@ fn external_changes_coalesce_and_rollback_without_server_binding() {
     edit(&mut store, 1);
     edit(&mut store, 2);
     assert_eq!(count(&store, "content_changes"), 1);
-    assert_eq!(count(&store, "server_sync_dirty"), 0);
     let revision = store.revision().unwrap();
     store.connection.execute_batch("CREATE TRIGGER synthetic_failure BEFORE UPDATE ON meta WHEN NEW.key='currentRevision' BEGIN SELECT RAISE(ABORT,'synthetic'); END").unwrap();
     assert!(store
@@ -187,25 +175,7 @@ fn capture(store: &mut PersistentStore, job: &str) -> selection::CaptureIdentity
         "synthetic-consumer",
     )
     .unwrap();
-    external::prepare_publication(
-        &tx,
-        &external::PublishIntent {
-            job_id: job,
-            connection_id: "synthetic-connection",
-            repository_id: "synthetic-repository",
-            capture_id: &id,
-            identity: &identity,
-            strategy: "sequential",
-            expected_head: None,
-            commit_id: "synthetic-commit",
-        },
-        &publication_permit(
-            job,
-            &identity,
-            crate::external_storage::publication::PublicationMode::Foreground,
-        ),
-    )
-    .unwrap();
+    external::prepare_backup(&tx, job, "synthetic-connection", "synthetic-repository", &id, "synthetic-point").unwrap();
     tx.commit().unwrap();
     identity
 }
@@ -260,159 +230,6 @@ fn ordinary_receive_reuses_only_the_same_terminal_job() {
     assert!(external::prepare_receive(&tx, &receive).is_err());
 }
 
-#[test]
-fn ordinary_publication_reuses_only_the_same_terminal_job_and_capture_ref() {
-    let (_dir, mut store, _) = open_fixture();
-    select_external(&mut store);
-    let identity = capture(&mut store, "reused-publication");
-    let tx = store.connection.transaction().unwrap();
-    let replacement_capture = external::register_capture(
-        &tx,
-        "replacement-capture",
-        &identity,
-        "library",
-        "codec-2",
-        "",
-        &"b".repeat(64),
-        "replacement-consumer",
-    )
-    .unwrap();
-    tx.commit().unwrap();
-    store
-        .connection
-        .execute(
-            "UPDATE external_storage_jobs SET phase='cancelled' WHERE id='reused-publication'",
-            [],
-        )
-        .unwrap();
-    let intent = external::PublishIntent {
-        job_id: "reused-publication",
-        connection_id: "synthetic-connection",
-        repository_id: "updated-repository",
-        capture_id: &replacement_capture,
-        identity: &identity,
-        strategy: "cas",
-        expected_head: Some("updated-head"),
-        commit_id: "updated-commit",
-    };
-    let permit = publication_permit(
-        "reused-publication",
-        &identity,
-        crate::external_storage::publication::PublicationMode::Foreground,
-    );
-    let tx = store.connection.transaction().unwrap();
-    external::prepare_publication(&tx, &intent, &permit).unwrap();
-    tx.commit().unwrap();
-    let job = store.external_job("reused-publication").unwrap().unwrap();
-    assert_eq!((job.role.as_str(), job.phase.as_str()), ("sync", "ready"));
-    assert_eq!(job.repository_id, "updated-repository");
-    assert_eq!(count(&store, "external_storage_capture_refs"), 1);
-    let capture_ref: String = store
-        .connection
-        .query_row(
-            "SELECT capture_id FROM external_storage_capture_refs WHERE job_id='reused-publication'",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(capture_ref, replacement_capture);
-
-    store
-        .connection
-        .execute(
-            "UPDATE external_storage_jobs SET connection_id='other',phase='stale' WHERE id='reused-publication'",
-            [],
-        )
-        .unwrap();
-    let tx = store.connection.transaction().unwrap();
-    assert!(external::prepare_publication(&tx, &intent, &permit).is_err());
-    tx.rollback().unwrap();
-    store
-        .connection
-        .execute(
-            "UPDATE external_storage_jobs SET connection_id='synthetic-connection',phase='ready' WHERE id='reused-publication'",
-            [],
-        )
-        .unwrap();
-    let tx = store.connection.transaction().unwrap();
-    assert!(external::prepare_publication(&tx, &intent, &permit).is_err());
-}
-
-#[test]
-fn paused_target_allows_only_live_exit_drain_publication_paths() {
-    let (_dir, mut store, _) = open_fixture();
-    select_external(&mut store);
-    let identity = selection::identity(&store.connection).unwrap();
-    let tx = store.connection.transaction().unwrap();
-    let capture_id = external::register_capture(
-        &tx,
-        "exit-capture",
-        &identity,
-        "library",
-        "codec-1",
-        "",
-        &"b".repeat(64),
-        "exit-consumer",
-    )
-    .unwrap();
-    tx.commit().unwrap();
-    store
-        .connection
-        .execute(
-            "UPDATE library_sync_selection SET paused=1 WHERE singleton=1",
-            [],
-        )
-        .unwrap();
-    let intent = external::PublishIntent {
-        job_id: "exit-job",
-        connection_id: "synthetic-connection",
-        repository_id: "synthetic-repository",
-        capture_id: &capture_id,
-        identity: &identity,
-        strategy: "cas",
-        expected_head: None,
-        commit_id: "exit-commit",
-    };
-    let foreground = publication_permit(
-        "exit-job",
-        &identity,
-        crate::external_storage::publication::PublicationMode::Foreground,
-    );
-    let exit = publication_permit(
-        "exit-job",
-        &identity,
-        crate::external_storage::publication::PublicationMode::ExitDrain,
-    );
-    let tx = store.connection.transaction().unwrap();
-    assert!(external::prepare_publication(&tx, &intent, &foreground).is_err());
-    external::prepare_publication(&tx, &intent, &exit).unwrap();
-    tx.commit().unwrap();
-    let tx = store.connection.transaction().unwrap();
-    assert!(external::begin_publication(&tx, &foreground).is_err());
-    external::begin_publication(&tx, &exit).unwrap();
-    assert!(external::begin_publication(&tx, &exit).is_err());
-    external::publication_unknown(&tx, "exit-job").unwrap();
-    assert!(external::confirm_publication(
-        &tx,
-        &foreground,
-        "exit-commit",
-        "snapshot",
-        "observation",
-        None,
-    )
-    .is_err());
-    external::confirm_publication(
-        &tx,
-        &exit,
-        "exit-commit",
-        "snapshot",
-        "observation",
-        None,
-    )
-    .unwrap();
-    tx.commit().unwrap();
-    assert!(selection::read(&store.connection).unwrap().paused);
-}
 
 #[test]
 fn set_paused_preserves_selection_epoch_and_rejects_stale_selection() {
@@ -429,54 +246,6 @@ fn set_paused_preserves_selection_epoch_and_rejects_stale_selection() {
     assert!(!store.external_selection().unwrap().paused);
 }
 
-#[test]
-fn equivalent_remote_advances_only_the_retained_capture_revision() {
-    let (_dir, mut store, _) = open_fixture();
-    select_external(&mut store);
-    let retained = selection::identity(&store.connection).unwrap();
-    store
-        .connection
-        .execute(
-            "INSERT INTO external_storage_bases VALUES(?1,?2,?3,?4,?5,?6)",
-            rusqlite::params![
-                "synthetic-connection",
-                "synthetic-repository",
-                "old-snapshot",
-                "old-commit",
-                "old-observation",
-                serde_json::to_string(&retained).unwrap()
-            ],
-        )
-        .unwrap();
-    edit(&mut store, 10);
-    let current = selection::identity(&store.connection).unwrap();
-    assert!(current.revision > retained.revision);
-    store
-        .external_accept_equivalent(
-            &publication_permit(
-                "equivalent",
-                &retained,
-                crate::external_storage::publication::PublicationMode::Foreground,
-            ),
-            "synthetic-connection",
-            "synthetic-repository",
-            "old-commit",
-            "old-observation",
-            "remote-snapshot",
-            "remote-commit",
-            "remote-observation",
-            &retained,
-        )
-        .unwrap();
-    let base = store
-        .external_base("synthetic-connection")
-        .unwrap()
-        .unwrap();
-    assert_eq!(base.identity, retained);
-    assert_eq!(base.commit_id, "remote-commit");
-    assert_eq!(selection::identity(&store.connection).unwrap(), current);
-    assert_ne!(base.identity.revision, current.revision);
-}
 
 #[test]
 fn only_an_untouched_empty_library_is_a_pristine_first_attach_target() {
@@ -487,121 +256,29 @@ fn only_an_untouched_empty_library_is_a_pristine_first_attach_target() {
     assert!(!store.external_library_is_pristine().unwrap());
 }
 
-#[test]
-fn external_intent_prevents_blind_retries_and_blocks_replacement_until_settlement() {
-    let (_dir, mut store, _) = open_fixture();
-    select_external(&mut store);
-    let identity = capture(&mut store, "job");
-    let permit = publication_permit(
-        "job",
-        &identity,
-        crate::external_storage::publication::PublicationMode::Foreground,
-    );
-    let tx = store.connection.transaction().unwrap();
-    external::begin_publication(&tx, &permit).unwrap();
-    external::publication_unknown(&tx, "job").unwrap();
-    assert!(external::begin_publication(&tx, &permit).is_err());
-    assert!(selection::require_no_pending_publication(&tx).is_ok());
-    tx.commit().unwrap();
-    edit(&mut store, 1);
-    let tx = store.connection.transaction().unwrap();
-    assert!(external::confirm_publication(
-        &tx,
-        &permit,
-        "wrong-commit",
-        "snapshot",
-        "observation",
-        None,
-    )
-    .is_err());
-    external::confirm_publication(
-        &tx,
-        &permit,
-        "synthetic-commit",
-        "snapshot",
-        "observation",
-        None,
-    )
-    .unwrap();
-    tx.commit().unwrap();
-    let base: String = store
-        .connection
-        .query_row("SELECT identity FROM external_storage_bases", [], |r| {
-            r.get(0)
-        })
-        .unwrap();
-    assert_eq!(
-        serde_json::from_str::<selection::CaptureIdentity>(&base).unwrap(),
-        identity
-    );
-    assert_eq!(store.revision().unwrap(), identity.revision + 1);
-    assert_eq!(count(&store, "external_storage_capture_refs"), 0);
-    let tx = store.connection.transaction().unwrap();
-    assert!(external::begin_publication(&tx, &permit).is_err());
-    tx.commit().unwrap();
-    assert_eq!(count(&store, "external_storage_capture_refs"), 0);
-}
-
-#[test]
-fn external_base_and_job_phase_commit_atomically() {
-    let (dir, mut store, _) = open_fixture();
-    select_external(&mut store);
-    let identity = capture(&mut store, "job");
-    let permit = publication_permit(
-        "job",
-        &identity,
-        crate::external_storage::publication::PublicationMode::Foreground,
-    );
-    let tx = store.connection.transaction().unwrap();
-    external::begin_publication(&tx, &permit).unwrap();
-    tx.commit().unwrap();
-    let tx = store.connection.transaction().unwrap();
-    external::confirm_publication(
-        &tx,
-        &permit,
-        "synthetic-commit",
-        "snapshot",
-        "observation",
-        None,
-    )
-    .unwrap();
-    tx.rollback().unwrap();
-    drop(store);
-    let mut store = PersistentStore::open(dir.path()).unwrap();
-    assert_eq!(count(&store, "external_storage_bases"), 0);
-    assert!(selection::require_no_pending_publication(&store.connection).is_ok());
-    let tx = store.connection.transaction().unwrap();
-    external::confirm_publication(
-        &tx,
-        &permit,
-        "synthetic-commit",
-        "snapshot",
-        "observation",
-        None,
-    )
-    .unwrap();
-    tx.commit().unwrap();
-    drop(store);
-    let store = PersistentStore::open(dir.path()).unwrap();
-    assert_eq!(count(&store, "external_storage_bases"), 1);
-    assert!(selection::require_no_pending_publication(&store.connection).is_ok());
-}
 
 #[test]
 fn external_replacement_and_physical_copy_invalidate_old_identity() {
     let (_dir, mut store, _) = open_fixture();
     select_external(&mut store);
     let old = capture(&mut store, "job");
+    let selected = selection::read(&store.connection).unwrap();
+    let clock = store.lww_clock_state().unwrap();
     let staging = stage_root(&mut store, "synthetic-replacement");
     store.replace_commit(&staging, Some(old.revision)).unwrap();
     let next = selection::identity(&store.connection).unwrap();
-    assert_ne!(old.library_epoch, next.library_epoch);
+    assert_eq!(old.library_epoch, next.library_epoch);
+    assert_eq!(old.store_id, next.store_id);
+    assert_eq!(old.selection_epoch, next.selection_epoch);
     assert_ne!(old.generation, next.generation);
-    assert!(
-        selection::read(&store.connection)
-            .unwrap()
-            .decision_required
-    );
+    assert_eq!(old.revision + 1, next.revision);
+    let current_selection = selection::read(&store.connection).unwrap();
+    assert_eq!(current_selection.target, selected.target);
+    assert_eq!(current_selection.epoch, selected.epoch);
+    assert_eq!(current_selection.decision_required, selected.decision_required);
+    let current_clock = store.lww_clock_state().unwrap();
+    assert_eq!(current_clock.writer_id, clock.writer_id);
+    assert_eq!(current_clock.binding_authority, clock.binding_authority);
     assert!(selection::require_publish(&store.connection, &old, "synthetic-connection").is_err());
     let tx = store.connection.transaction().unwrap();
     selection::restored_copy(&tx).unwrap();
@@ -1600,154 +1277,14 @@ fn external_backup_consumers_share_capture_but_cancel_and_device_identity_are_in
     tx.commit().unwrap();
 }
 
-fn catalog_records(
-    store: &PersistentStore,
-    capture: &str,
-) -> std::collections::BTreeMap<String, String> {
-    let reopened = store.reopen_external_capture(capture).unwrap();
-    let mut query = reopened
-        .catalog
-        .db
-        .prepare("SELECT key,hash FROM records")
-        .unwrap();
-    let rows = query
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-        .unwrap();
-    rows.map(|row| row.unwrap()).collect()
-}
-
-fn publish_real_capture(
-    store: &mut PersistentStore,
-    job: &str,
-    snapshot: &str,
-) -> std::collections::BTreeMap<String, String> {
-    struct Never;
-    impl crate::local_backup::CancellationProbe for Never {
-        fn is_cancelled(&self) -> bool {
-            false
-        }
-    }
-    let captured = capture_library(store, "synthetic-connection", &Never).unwrap();
-    let permit = publication_permit(
-        job,
-        &captured.identity,
-        crate::external_storage::publication::PublicationMode::Foreground,
-    );
-    let tx = store.connection.transaction().unwrap();
-    external::prepare_publication(
-        &tx,
-        &external::PublishIntent {
-            job_id: job,
-            connection_id: "synthetic-connection",
-            repository_id: "synthetic-repository",
-            capture_id: &captured.id,
-            identity: &captured.identity,
-            strategy: "sequential",
-            expected_head: None,
-            commit_id: "synthetic-commit",
-        },
-        &permit,
-    )
-    .unwrap();
-    external::begin_publication(&tx, &permit).unwrap();
-    tx.commit().unwrap();
-    // The confirmation releases the capture, so what it published is read
-    // while the reference that pins it still exists.
-    let published = catalog_records(store, &captured.id);
-    store
-        .external_confirm_publication(&permit, "synthetic-commit", snapshot, "observation")
-        .unwrap();
-    published
-}
-
-#[test]
-fn a_publication_leaves_behind_the_records_it_published() {
-    let (_dir, mut store, _) = open_fixture();
-    select_external(&mut store);
-    let published = publish_real_capture(&mut store, "publish", "snapshot");
-    assert!(!published.is_empty());
-    assert_eq!(
-        store.external_base_records("synthetic-connection").unwrap(),
-        Some(published)
-    );
-}
 
 /// A publication settled without its capture still has to be settled. The rows
 /// are dropped rather than left describing the snapshot before this one.
-#[test]
-fn a_publication_whose_capture_cannot_be_read_keeps_no_view() {
-    let (_dir, mut store, _) = open_fixture();
-    select_external(&mut store);
-    publish_real_capture(&mut store, "publish", "snapshot");
-    assert!(store
-        .external_base_records("synthetic-connection")
-        .unwrap()
-        .is_some());
-    let identity = capture(&mut store, "second");
-    let permit = publication_permit(
-        "second",
-        &identity,
-        crate::external_storage::publication::PublicationMode::Foreground,
-    );
-    let tx = store.connection.transaction().unwrap();
-    external::begin_publication(&tx, &permit).unwrap();
-    tx.commit().unwrap();
-    store
-        .external_confirm_publication(&permit, "synthetic-commit", "second-snapshot", "observation")
-        .unwrap();
-    assert_eq!(
-        store.external_base_records("synthetic-connection").unwrap(),
-        None
-    );
-}
+
 
 /// The head moved without its content moving, so the same records describe it
 /// and only what they are bound to follows the base.
-#[test]
-fn an_equivalent_head_carries_the_view_to_the_snapshot_it_names() {
-    let (_dir, mut store, _) = open_fixture();
-    select_external(&mut store);
-    let published = publish_real_capture(&mut store, "publish", "snapshot");
-    let identity = selection::identity(&store.connection).unwrap();
-    let permit = publication_permit(
-        "equivalent",
-        &identity,
-        crate::external_storage::publication::PublicationMode::Foreground,
-    );
-    store
-        .external_accept_equivalent(
-            &permit,
-            "synthetic-connection",
-            "synthetic-repository",
-            "synthetic-commit",
-            "observation",
-            "equivalent-snapshot",
-            "equivalent-commit",
-            "observation",
-            &identity,
-        )
-        .unwrap();
-    assert_eq!(
-        store.external_base("synthetic-connection").unwrap().unwrap().snapshot_id,
-        "equivalent-snapshot"
-    );
-    assert_eq!(
-        store.external_base_records("synthetic-connection").unwrap(),
-        Some(published)
-    );
-}
 
-#[test]
-fn removing_a_connection_removes_the_view_with_its_base() {
-    let (_dir, mut store, _) = open_fixture();
-    select_external(&mut store);
-    publish_real_capture(&mut store, "publish", "snapshot");
-    store
-        .external_prepare_connection_removal("synthetic-connection")
-        .unwrap();
-    assert_eq!(count(&store, "external_storage_base_records"), 0);
-    assert_eq!(count(&store, "external_storage_base_record_state"), 0);
-}
 
 /// Says "cancelled" from its `at`th question on and counts the questions it
 /// answered that way.

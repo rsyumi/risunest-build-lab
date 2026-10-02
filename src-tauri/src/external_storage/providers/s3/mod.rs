@@ -62,3 +62,11 @@ pub(crate) fn configured_origin(config: &crate::external_storage::contract::Conn
     let context = config::validate(config, &crate::external_storage::contract::SecretRef(String::new()))?;
     context.url(config::Target::Bucket, &[])
 }
+
+
+pub(crate) fn validate_sync_root(root: &str) -> Result<()> {
+    let prefix = config::normalize_prefix(Some(root))?;
+    let joined = prefix.len() + usize::from(!prefix.is_empty()) + "segments/".len() + crate::external_storage::contract::MAX_SEGMENT_NAME_BYTES;
+    if joined > 1024 { return Err(crate::external_storage::contract::ProviderError::new(crate::external_storage::contract::ErrorKind::Unsupported)); }
+    Ok(())
+}

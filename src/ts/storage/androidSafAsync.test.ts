@@ -94,7 +94,7 @@ describe('asynchronous Android file ownership', () => {
             requestId, suggestedName: 'backup.risunest',
         }
         const result = {
-            revision: 1, sourceBytes: 3, sourceSha256: 'a'.repeat(64),
+            revision: 1, sourceBytes: 3, sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'a'.repeat(64),
             characterCount: 1, presetCount: 1, warningCodes: [],
             handoffPath: `/synthetic/owned/${exportId}/backup.risunest`,
         }

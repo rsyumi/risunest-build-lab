@@ -15,7 +15,7 @@ vi.mock('src/ts/plugins/plugins.svelte', () => ({
 vi.mock('src/ts/storage/localDataSections', () => ({
     readLocalDataParticipation: async () => [],
 }))
-const alerts = vi.hoisted(() => ({ alertConfirm: vi.fn(), alertSelect: vi.fn() }))
+const alerts = vi.hoisted(() => ({ alertConfirm: vi.fn(), alertCheckboxConfirm: vi.fn(), alertSelect: vi.fn() }))
 vi.mock('src/ts/alert', () => alerts)
 const inventory = vi.hoisted(() => ({
     listPluginDataItems: vi.fn(),
@@ -217,44 +217,37 @@ describe('plugin data manager deletions', () => {
         )
     })
 
-    it('asks twice before deleting everything and stops after the first no', async () => {
-        const root = await open()
-        alerts.alertConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(false)
-        button(root, strings.deleteAll.replace('{0}', '3'))?.click()
-        await vi.waitFor(() =>
-            expect(alerts.alertConfirm.mock.calls.map(([message]) => message)).toEqual([
-                strings.deleteAllConfirm.replace('{0}', '3'),
-                strings.deleteAllConfirmFinal,
-            ]),
-        )
-        await settle()
+    it('asks once with acknowledgement before deleting orphaned plugin data', async () => {
+        const root = await open(true, [])
+        expect(root.querySelector('[data-plugin-data-row="pm_store"]')).not.toBeNull()
+        alerts.alertCheckboxConfirm.mockResolvedValueOnce({ confirmed: false, checked: false })
+        button(root, strings.deleteAll.replace('{0}', '3'))!.click()
+        await vi.waitFor(() => expect(alerts.alertCheckboxConfirm).toHaveBeenCalledOnce())
+        expect(alerts.alertCheckboxConfirm).toHaveBeenCalledWith(expect.objectContaining({
+            title: strings.deleteAllConfirm.replace('{0}', '3'),
+            description: strings.deleteAllConfirmFinal,
+            requireChecked: true,
+        }))
         expect(inventory.deletePluginDataItems).not.toHaveBeenCalled()
-
-        alerts.alertConfirm.mockReset()
-        alerts.alertConfirm.mockResolvedValue(true)
-        button(root, strings.deleteAll.replace('{0}', '3'))?.click()
-        await vi.waitFor(() =>
-            expect(inventory.deletePluginDataItems).toHaveBeenCalledWith(items, 'library'),
-        )
-        expect(alerts.alertConfirm).toHaveBeenCalledTimes(2)
+        alerts.alertCheckboxConfirm.mockResolvedValue({ confirmed: true, checked: true })
+        button(root, strings.deleteAll.replace('{0}', '3'))!.click()
+        await vi.waitFor(() => expect(inventory.deletePluginDataItems).toHaveBeenCalledWith(items, 'library'))
+        expect(alerts.alertConfirm).not.toHaveBeenCalled()
     })
 
-    it('asks twice with the shown-values wording when a filter narrows the list', async () => {
+    it('acknowledges only the shown values when a filter narrows the list', async () => {
         const root = await open()
-        const search = [...root.querySelectorAll<HTMLInputElement>('input')]
-            .find((input) => input.placeholder === strings.searchKey)!
+        const search = [...root.querySelectorAll<HTMLInputElement>('input')].find(input => input.placeholder === strings.searchKey)!
         search.value = 'pm_'
         search.dispatchEvent(new Event('input', { bubbles: true }))
         await settle()
-        expect(root.querySelectorAll('[data-plugin-data-row]')).toHaveLength(2)
-        alerts.alertConfirm.mockResolvedValue(true)
-        button(root, strings.deleteVisible.replace('{0}', '2'))?.click()
-        await vi.waitFor(() =>
-            expect(inventory.deletePluginDataItems).toHaveBeenCalledWith(items.slice(0, 2), 'library'),
-        )
-        expect(alerts.alertConfirm.mock.calls.map(([message]) => message)).toEqual([
-            strings.deleteVisibleConfirm.replace('{0}', '2'),
-            strings.deleteVisibleConfirmFinal,
-        ])
+        alerts.alertCheckboxConfirm.mockResolvedValue({ confirmed: true, checked: true })
+        button(root, strings.deleteVisible.replace('{0}', '2'))!.click()
+        await vi.waitFor(() => expect(inventory.deletePluginDataItems).toHaveBeenCalledWith(items.slice(0, 2), 'library'))
+        expect(alerts.alertCheckboxConfirm).toHaveBeenCalledWith(expect.objectContaining({
+            title: strings.deleteVisibleConfirm.replace('{0}', '2'), description: strings.deleteVisibleConfirmFinal, requireChecked: true,
+        }))
+        expect(alerts.alertConfirm).not.toHaveBeenCalled()
     })
+
 })

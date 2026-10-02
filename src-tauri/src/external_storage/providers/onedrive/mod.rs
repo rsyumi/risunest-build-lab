@@ -99,6 +99,16 @@ pub(crate) struct SetupDrive {
 pub(crate) struct SetupFolder {
     pub id: String,
     pub name: String,
+    pub decoded_path: Option<String>,
+}
+
+impl SetupFolder {
+    pub(crate) fn sync_root_path(&self) -> Result<&str> {
+        let path = self.decoded_path.as_deref()
+            .ok_or_else(|| ProviderError::new(ErrorKind::Unsupported))?;
+        validate_sync_root(path)?;
+        Ok(path)
+    }
 }
 
 pub(crate) struct SetupFolderPage {
@@ -246,7 +256,14 @@ impl OneDrive {
             .name
             .filter(|value| !value.is_empty() && value.len() <= 255)
             .ok_or_else(|| ProviderError::new(ErrorKind::FolderInaccessible))?;
-        Ok(SetupFolder { id, name })
+        let decoded_path = if item.root.is_some() {
+            Some(String::new())
+        } else {
+            item.parent_reference.as_ref().and_then(|parent| parent.path.as_deref())
+                .and_then(decode_parent_path)
+                .map(|parent| if parent.is_empty() { name.clone() } else { format!("{parent}/{name}") })
+        };
+        Ok(SetupFolder { id, name, decoded_path })
     }
 
     pub(crate) async fn resolve_setup_drive(
@@ -765,19 +782,44 @@ impl OneDrive {
         item.file.is_some() && item.size == Some(byte_length)
     }
 
-    /// Converges an interrupted immutable create: the same identity and length
-    /// completes, anything else is a precondition failure. Graph publishes no
-    /// SHA-256, so the remote length is the strongest available evidence.
-    async fn converge(
+    async fn verify_existing(
         &self,
         context: &Context,
         intent: &ObjectIntent,
         path: &str,
         cancel: &Cancellation,
-    ) -> Result<ObjectReceipt> {
+    ) -> Result<()> {
+        let token = self.access_token(context, cancel).await?;
+        let url = graph::item_url(&context.settings, &context.root_item_id, path, "/content", None)?;
+        let request = self.request(reqwest::Method::GET, url.clone(), ProviderOperation::DownloadUrl,
+            &context.account, Some(token.as_str()));
+        let first = self.send_authenticated_read(context, request, cancel).await?;
+        let mut response = match first.status {
+            200 => first,
+            302 | 303 | 307 => {
+                let hop = self.request(reqwest::Method::GET, graph::redirect_target(&first, &url)?,
+                    ProviderOperation::Get, &context.account, None);
+                self.send(hop, cancel).await?
+            }
+            status => return Err(graph::classify(status, &first.headers, self.now())),
+        };
+        graph::require(&response, &[200], self.now())?;
+        if common::content_length(&response.headers)?.is_some_and(|length| length != intent.byte_length) {
+            return Err(common::error(ErrorKind::PreconditionFailed, 409));
+        }
+        let mut sink = crate::external_storage::contract::IdentitySink { intent };
+        common::stream_to_sink(&mut response.body, &mut sink, Some(intent.byte_length), intent.byte_length, cancel).await?;
+        Ok(())
+    }
+
+    async fn converge(&self, context: &Context, intent: &ObjectIntent, path: &str,
+        cancel: &Cancellation) -> Result<ObjectReceipt> {
         match self.fetch_item(context, path, cancel).await? {
             Some((item, headers)) if Self::stores(&item, intent.byte_length) => {
-                self.object_receipt(context, intent, path, &item, &headers)
+                self.verify_existing(context, intent, path, cancel).await?;
+                let mut receipt = self.object_receipt(context, intent, path, &item, &headers)?;
+                receipt.checksum = Some(Checksum { algorithm: "sha256".into(), value: intent.sha256.clone(), provider_verified: false });
+                Ok(receipt)
             }
             _ => Err(common::error(ErrorKind::PreconditionFailed, 409)),
         }
@@ -1209,6 +1251,7 @@ impl Provider for OneDrive {
             cancel.check()?;
             let context = self.context(repository)?;
             intent.validate(repository)?;
+            crate::external_storage::contract::verify_source(source, intent, cancel).await?;
             if source.byte_length() != intent.byte_length {
                 return Err(corrupt());
             }
@@ -1410,6 +1453,11 @@ impl Provider for OneDrive {
             match self.fetch_item(context, &path, cancel).await? {
                 None => Ok(UploadResolution::RestartRequired),
                 Some((item, headers)) if Self::stores(&item, intent.byte_length) => {
+                    match self.verify_existing(context, intent, &path, cancel).await {
+                        Ok(()) => (),
+                        Err(error) if error.kind == ErrorKind::PreconditionFailed => return Ok(UploadResolution::Conflict),
+                        Err(error) => return Err(error),
+                    }
                     Ok(UploadResolution::Complete(
                         self.object_receipt(context, intent, &path, &item, &headers)?,
                     ))
@@ -1428,4 +1476,33 @@ impl Provider for OneDrive {
             object: HEAD_OBJECT.to_owned(),
         })
     }
+}
+
+
+fn decode_parent_path(encoded: &str) -> Option<String> {
+    let (prefix, path) = encoded.split_once("/root:")?;
+    if prefix != "/drive" && !prefix.strip_prefix("/drives/").is_some_and(|id| !id.is_empty() && !id.contains('/')) {
+        return None;
+    }
+    if !path.is_empty() && !path.starts_with('/') { return None; }
+    let bytes = path.as_bytes();
+    let mut offset = 0;
+    while offset < bytes.len() {
+        if bytes[offset] == b'%' {
+            let pair = bytes.get(offset + 1..offset + 3)?;
+            if !pair.iter().all(u8::is_ascii_hexdigit) { return None; }
+            // Encoded separators cannot be interpreted as path boundaries.
+            if pair.eq_ignore_ascii_case(b"2f") || pair.eq_ignore_ascii_case(b"5c") { return None; }
+            offset += 3;
+        } else { offset += 1; }
+    }
+    Some(percent_encoding::percent_decode_str(path).decode_utf8().ok()?.trim_matches('/').to_owned())
+}
+
+pub(crate) fn validate_sync_root(root: &str) -> Result<()> {
+    let path = root.trim_matches('/');
+    if !path.is_empty() { config::validate_relative_path(path)?; }
+    let joined = path.len() + usize::from(!path.is_empty()) + "segments/".len() + crate::external_storage::contract::MAX_SEGMENT_NAME_BYTES;
+    if joined > 400 { return Err(ProviderError::new(ErrorKind::Unsupported)); }
+    Ok(())
 }

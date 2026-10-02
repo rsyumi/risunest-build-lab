@@ -649,9 +649,6 @@ fn finalize_content_job(
     if owner_manifest.len() > OWNER_MANIFEST_V1_MAX_CANONICAL_BYTES {
         return invalid_content_finalization("owner manifest exceeds its canonical byte limit");
     }
-    if direct_objects.len() > super::job_pins::MAX_DURABLE_CAS_JOB_PINS {
-        return invalid_content_finalization("content import direct object list exceeds its limit");
-    }
     let decoded = decode_owner_manifest(owner_manifest)
         .map_err(|error| io::Error::new(ErrorKind::InvalidData, error.to_string()))?;
     if encode_owner_manifest(&decoded)
@@ -707,9 +704,6 @@ fn finalize_content_job(
         owner_hash.clone(),
         (owner_size, CasObjectRole::OwnerManifest),
     );
-    if complete.len() > super::job_pins::MAX_DURABLE_CAS_JOB_PINS {
-        return invalid_content_finalization("content import CAS pin set exceeds its limit");
-    }
     for (object_hash, (byte_size, role)) in &complete {
         if *role == CasObjectRole::OwnerManifest {
             continue;

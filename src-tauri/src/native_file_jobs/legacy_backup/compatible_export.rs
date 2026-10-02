@@ -306,6 +306,7 @@ pub(crate) fn export_compatible_local_backup(
             revision: expected_revision,
             source_bytes: published.bytes,
             source_sha256: published.sha256,
+            source_fingerprint_kind: crate::native_file_jobs::SourceFingerprintKind::WholeFileSha256,
             character_count: counts.0,
             preset_count: counts.1,
             warning_codes: if projector.losses.0.is_empty() && attachments.warning_codes.is_empty()
@@ -443,6 +444,8 @@ fn write_database(
             )
             .map_err(sql)?,
     )?;
+    export::derive_identity_root(connection, generation, object(&mut root)?)
+        .map_err(store_job_error)?;
     owner
         .project_root(object(&mut root)?)
         .map_err(store_job_error)?;
@@ -1043,11 +1046,11 @@ mod tests {
                     ],
                 )
                 .unwrap();
-            let mut root = json!({"account":{"token":"synthetic-token"},"characterOrder":["synthetic",{"name":"Folder","data":["group","synthetic"],"id":"folder","color":"red","img":"assets/nested/icon.webp"},"group"],"plugins":[],"modules":[],"personas":[],"loadouts":[],"disableToggleBinding":true,"defaultToggleValues":{"test":"1"},"risunestInlayMode":"unsupported","streamingThoughtMode":"unsupported","unknownRoot":true});
+            let mut root = json!({"account":{"token":"synthetic-token"},"characterOrder":["synthetic",{"name":"Folder","data":["group","synthetic"],"id":"folder","color":"red","img":"assets/nested/icon.webp"},"group"],"plugins":[],"modules":[],"personas":[{"id":"persona-first","name":"First persona"},{"id":"persona-selected","name":"Stale persona"}],"selectedPersona":1,"username":"Current persona","mainPrompt":"Current preset prompt","loadouts":[],"disableToggleBinding":true,"defaultToggleValues":{"test":"1"},"risunestInlayMode":"unsupported","streamingThoughtMode":"unsupported","unknownRoot":true});
             root["pluginCustomStorage"] = json!({"10":null,"2":true,"01":"leading zero","z":{"exact":"assets/nested/icon.webp","opaque":"prefix assets/nested/icon.webp suffix","large":"큰".repeat(65536)},"4294967295":9007199254740991u64});
-            store.replace_put_root(&staging, &root).unwrap();
+            store.replace_put_upstream_root(&staging, &root).unwrap();
             store
-                .replace_put_presets(
+                .replace_put_upstream_presets(
                     &staging,
                     &[json!({"name":"Synthetic Preset","image":"assets/nested/icon.webp"})],
                 )
@@ -1108,7 +1111,7 @@ mod tests {
                         },
                     ]),
                     asset_owner_heads: None,
-                })
+                ..Default::default()})
                 .unwrap()
                 .revision;
             let owned = directory.path().join("owned");
@@ -1119,6 +1122,9 @@ mod tests {
             let job = JobRegistry::default()
                 .create(JobKind::ExportCompatibleLocalBackup)
                 .unwrap();
+            let durable_root = store.read_root(None).unwrap().value;
+            assert!(durable_root["botPresetsId"].is_string());
+            assert_eq!(durable_root["selectedPersona"], "persona-selected");
             export_compatible_local_backup(
                 target,
                 Some(&output),
@@ -1159,6 +1165,12 @@ mod tests {
                 assert_eq!(group.affected_conversations.as_deref(), Some("0"));
             }
             let db = decode(&output);
+            assert_eq!(db["botPresetsId"], 0);
+            assert_eq!(db["selectedPersona"], 1);
+            assert_eq!(db["username"], "Current persona");
+            assert_eq!(db["personas"][1]["name"], "Current persona");
+            assert_eq!(db["mainPrompt"], "Current preset prompt");
+            assert_eq!(db["botPresets"][0]["mainPrompt"], "Current preset prompt");
             assert_eq!(db["botPresets"][0]["image"], db["characterOrder"][1]["img"]);
             let owner_assets = db["characters"][0]["additionalAssets"].as_array().unwrap();
             assert_eq!(owner_assets.len(), 1);

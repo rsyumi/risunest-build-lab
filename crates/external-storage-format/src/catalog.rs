@@ -8,7 +8,9 @@ use std::collections::BTreeMap;
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct ChunkReference {
     pub pack_id: String,
+    #[serde(with = "crate::control_integer")]
     pub offset: u64,
+    #[serde(with = "crate::control_integer")]
     pub length: u64,
     pub hash: [u8; 32],
 }
@@ -17,6 +19,7 @@ pub struct ChunkReference {
 pub struct Entry {
     pub key: String,
     pub content_hash: [u8; 32],
+    #[serde(with = "crate::control_integer")]
     pub byte_length: u64,
     pub chunks: Vec<ChunkReference>,
 }

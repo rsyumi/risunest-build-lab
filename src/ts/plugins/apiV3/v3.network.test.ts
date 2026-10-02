@@ -167,6 +167,8 @@ vi.mock('src/ts/process/ttsHooks', () => ({
     unregisterTTSPostprocessor: vi.fn(),
 }))
 vi.mock('src/ts/storage/persistentDataRuntime.svelte', () => ({
+    getPersistentRevision: () => 0,
+    commitPersistentUnitIntent: vi.fn(),
     acquireCompleteConversation: mocks.acquireCompleteConversation,
     captureSelectedConversationTarget: () => mocks.selectedTarget,
     flushPendingDataLocally: vi.fn(),
@@ -177,6 +179,7 @@ vi.mock('src/ts/storage/persistentDataRuntime.svelte', () => ({
     getPersistentDataRuntime: vi.fn(),
     getPersistentDataStore: vi.fn(),
     invalidateActiveConversationSession: vi.fn(),
+    refreshSelectedConversationAfterReplacement: vi.fn(),
     materializePersistentDatabaseSnapshotWithRevision: vi.fn(),
     replacePersistentDatabase: vi.fn(),
 }))
@@ -219,6 +222,7 @@ describe('Plugin v3 runtime information', () => {
                 expect(response).toEqual({
                     type: 'RESPONSE',
                     reqId,
+                    provenance: [],
                     result: {
                         app: { id: 'risunest', version: versionData.version },
                         apiVersion: '3.0',

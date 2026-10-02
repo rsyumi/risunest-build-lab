@@ -38,6 +38,8 @@ const SUFFIX: &str = ".bin";
 
 pub(super) fn role_folder(role: ObjectRole) -> &'static str {
     match role {
+        ObjectRole::Segment => "segments",
+        ObjectRole::Snapshot => "snapshots",
         ObjectRole::Descriptor => DESCRIPTORS,
         ObjectRole::Pack => PACKS,
         ObjectRole::Catalog => CATALOGS,
@@ -51,6 +53,7 @@ pub(super) fn role_folder(role: ObjectRole) -> &'static str {
 }
 pub(super) fn collection_folder(collection: Collection) -> &'static str {
     match collection {
+        Collection::Segments => "segments",
         Collection::Snapshots => SNAPSHOTS,
         Collection::BackupPoints => BACKUPS,
         Collection::InventoryPages => INVENTORY,

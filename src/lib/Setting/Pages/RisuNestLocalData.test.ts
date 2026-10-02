@@ -74,7 +74,7 @@ describe('RisuNestLocalData', () => {
     it('shows the stored participation as the starting state', async () => {
         component = mount(RisuNestLocalData, { target })
         await settle()
-        expect(toggle('hypa').checked).toBe(true)
+        expect(target.querySelector('#local-data-hypa')).toBeNull()
         expect(toggle('local-plugins').checked).toBe(false)
         expect(dialog()).toBeNull()
     })
@@ -110,19 +110,20 @@ describe('RisuNestLocalData', () => {
         expect(toggle('local-plugins').checked).toBe(false)
     })
 
-    it('turning a section off writes without confirming', async () => {
+    it('turning plugin-local participation off writes without confirming', async () => {
+        sections.readLocalDataParticipation.mockResolvedValue([{ section: 'hypa', participating: true }, { section: 'local-plugins', participating: true }])
         component = mount(RisuNestLocalData, { target })
         await settle()
 
-        toggle('hypa').click()
+        toggle('local-plugins').click()
         await settle()
 
         expect(dialog()).toBeNull()
-        expect(sections.setLocalDataParticipating).toHaveBeenCalledWith('hypa', false)
-        expect(toggle('hypa').checked).toBe(false)
+        expect(sections.setLocalDataParticipating).toHaveBeenCalledWith('local-plugins', false)
+        expect(toggle('local-plugins').checked).toBe(false)
     })
 
-    it('only offers the plugin note when the plugin section is the one turning on', async () => {
+    it('offers the plugin note for the single plugin-local opt-in', async () => {
         sections.readLocalDataParticipation.mockResolvedValue([
             { section: 'hypa', participating: false },
             { section: 'local-plugins', participating: false },
@@ -130,10 +131,10 @@ describe('RisuNestLocalData', () => {
         component = mount(RisuNestLocalData, { target })
         await settle()
 
-        toggle('hypa').click()
+        toggle('local-plugins').click()
         await settle()
-        expect(dialog()?.textContent).toContain(strings.enableBody)
-        expect(dialog()?.textContent).not.toContain(strings.enableBodyPlugin)
+        expect(dialog()?.textContent).toContain(strings.enableBodyPlugin)
+        expect(target.querySelector('#local-data-hypa')).toBeNull()
     })
 
     it('says nothing is connected only once both remotes answered with none', async () => {
@@ -159,10 +160,12 @@ describe('RisuNestLocalData', () => {
         await settle()
 
         sections.setLocalDataParticipating.mockRejectedValueOnce(new Error('store is closed'))
-        toggle('hypa').click()
+        toggle('local-plugins').click()
+        await settle()
+        dialogButton(strings.enableConfirm).click()
         await settle()
 
-        expect(toggle('hypa').checked).toBe(true)
+        expect(toggle('local-plugins').checked).toBe(false)
     })
 })
 

@@ -34,7 +34,6 @@
         buildNativeFileJobDialogModel,
         type NativeFileJobDialogStageState,
     } from 'src/ts/gui/nativeFileJobDialogModel'
-    import { canScanServerRegistration } from 'src/ts/storage/sync/serverSyncQr'
     import { isTauri, isTauriAndroid } from 'src/ts/platform'
     import { prebuiltPresets } from 'src/ts/process/templates/templates'
     import { setPreset } from 'src/ts/storage/database.svelte'
@@ -57,41 +56,23 @@
         externalJobProgress,
         mergeExternalHistoryItems,
     } from 'src/ts/storage/sync/external/connection'
-    import type { ExternalControllerResult } from 'src/ts/storage/sync/external/controller'
     import {
         refreshExternalStorageProductionState,
-        requestExternalStorageNow,
-        requestExternalStorageResolveConflict,
         requestExternalStorageRestore,
     } from 'src/ts/storage/sync/external/production'
     import type {
-        ExternalConflictSummary,
         ExternalConnectionResult,
         ExternalConnectionSummary,
         ExternalHistoryItem,
         ExternalJobSummary,
     } from 'src/ts/storage/sync/external/types'
     import { getNativeOfficialAccountFlow } from 'src/ts/storage/sync/nativeOfficialAccountFlow'
-    import { serverSyncError } from 'src/ts/storage/sync/serverSync'
-    import {
-        connectServerSync,
-        serverSyncErrorHelp,
-        serverSyncWaiting,
-        serverSyncRegistrationRequired,
-        serverSyncHostLabel,
-        serverSyncProgressView,
-        type ServerSyncConnectRequest,
-    } from 'src/ts/storage/sync/serverSyncConnectFlow'
-    import { getServerSyncController } from 'src/ts/storage/sync/serverSyncProduction'
     import ConnectionForm from 'src/lib/Setting/ExternalStorage/ConnectionForm.svelte'
     import {
         externalConnectionTitle,
         externalErrorMessage,
         externalStorageStrings,
     } from 'src/lib/Setting/ExternalStorage/strings'
-    import ServerSyncConnect from 'src/lib/Setting/ServerSync/ServerSyncConnect.svelte'
-    import ServerSyncStages from 'src/lib/Setting/ServerSync/ServerSyncStages.svelte'
-    import ServerSyncConflictItems from 'src/lib/Setting/ServerSync/ServerSyncConflictItems.svelte'
     import { DBState } from 'src/ts/stores.svelte'
 
     import {
@@ -103,25 +84,13 @@
         type OnboardingState,
     } from './onboardingFlow'
     import {
-        abandonExternalOnboardingSelection,
-        loadExternalOnboardingConflict,
-        type ExternalOnboardingSelectionOwner,
-        externalOnboardingAction,
-        externalOnboardingConflictStep,
+        bindExternalOnboardingTarget,
         externalOnboardingRestorable,
         externalOnboardingRestoreAreas,
         externalOnboardingRestoreRestarts,
-        externalOnboardingSyncOutcome,
     } from './externalStorageOnboardingFlow'
     import { onboardingHold } from './onboardingGate'
     import { observeOnboardingWeave } from './onboardingWeave'
-    import {
-        serverSyncOnboardingNext,
-        serverSyncOnboardingOpening,
-        serverSyncOnboardingOutcome,
-        serverSyncOnboardingResume,
-        createServerSyncOnboardingContinuation,
-    } from './serverSyncOnboardingFlow'
 
     const UI_LANGUAGES = [
         { value: 'de', label: 'Deutsch' },
@@ -149,19 +118,6 @@
             DBState.db.language = browserLangShort
         }
     }
-
-    import { serverSyncScreenRequest } from 'src/ts/storage/sync/serverSyncDeepLink'
-    let lastServerRequest: unknown
-    $effect(() => {
-        if (
-            !isTauri ||
-            !$serverSyncScreenRequest ||
-            lastServerRequest === $serverSyncScreenRequest
-        )
-            return
-        lastServerRequest = $serverSyncScreenRequest
-        void goTo('sync-hub')
-    })
 
     let flow = $state(INITIAL_ONBOARDING_FLOW)
     const step = $derived(onboardingStep(flow.state))
@@ -195,24 +151,6 @@
         detail: string
     }
 
-    // The sync server screen. The shared connect part collects the code and
-    // the check; this component runs the connection and draws the attempt
-    // with the same progress panel as a backup import.
-    const syncController = isTauri ? getServerSyncController() : undefined
-    let syncSnapshot = $state(syncController?.snapshot())
-    let hubStage = $state<'code' | 'review'>('code')
-    let hubStarted = $state(false)
-    let hubConnecting = $state(false)
-    let hubPausing = $state(false)
-    let hubError = $state('')
-    let hubErrorRetryable = $state(true)
-    let hubReplacing = $state(false)
-    let hubKey = $state(0)
-    let hubServer = $state<{ endpoint: string; libraryId: string; deviceId: string }>()
-    // Kept only while this screen is up, so a failed registration can be retried.
-    let hubRequest: ServerSyncConnectRequest | undefined
-    const s = $derived(strings.risuNest.serverSync)
-
     // The external storage screen. The shared connection form collects the
     // recovery key; this component runs what the repository is opened for.
     const externalBridge = isTauri ? getExternalStorageBridge() : undefined
@@ -221,68 +159,19 @@
     const ex = $derived(t.external)
     const externalStrings = $derived(externalStorageStrings(DBState.db.language))
     let externalConnection = $state<ExternalConnectionSummary | undefined>()
-    let externalStage = $state<'connect' | 'choose' | 'working' | 'conflict' | 'error'>('connect')
+    let externalStage = $state<'connect' | 'choose' | 'working' | 'error'>('connect')
     let externalWorking = $state(false)
     let externalError = $state('')
     let externalHistory = $state<ExternalHistoryItem[]>([])
     let externalCursor = $state<string | undefined>()
     let externalSelected = $state('')
-    let externalConflict = $state<ExternalConflictSummary | undefined>()
     let externalJob = $state<ExternalJobSummary | undefined>()
-    let externalSelectionOwner: ExternalOnboardingSelectionOwner | undefined
     let externalKey = $state(0)
     const externalRestorable = $derived(externalOnboardingRestorable(externalHistory))
     const externalPercent = $derived.by(() => {
         const progress = externalJob ? externalJobProgress(externalJob) : null
         return progress === null ? null : Math.round(progress * 100)
     })
-    const hubOutcome = $derived(
-        hubStarted && syncSnapshot ? serverSyncOnboardingOutcome(syncSnapshot) : undefined,
-    )
-    const hubSyncing = $derived(hubStarted && (hubConnecting || hubOutcome === 'syncing'))
-    const hubView = $derived(
-        syncSnapshot?.running ? serverSyncProgressView(syncSnapshot, s, now) : undefined,
-    )
-    const hubConflict = $derived(
-        syncSnapshot?.result?.phase === 'conflict' ? syncSnapshot.result : undefined,
-    )
-    const hubErrorCode = $derived(hubError || syncSnapshot?.error || '')
-    const hubTicking = $derived(hubSyncing && Boolean(syncSnapshot?.running))
-
-    $effect(() => {
-        if (!hubStarted || hubConnecting || !hubOutcome) return
-        if (serverSyncOnboardingNext(hubOutcome) === 'done') {
-            resetHub()
-            goTo('done')
-        }
-    })
-
-    // Decided once, when the status first arrives, so going back to the first
-    // screen afterwards stays possible.
-    let continueHub = createServerSyncOnboardingContinuation()
-    $effect(() => {
-        if (!hubStarted || hubConnecting || hubOutcome !== 'continuing' || !syncSnapshot) return
-        if (!continueHub(syncSnapshot)) return
-        void retryHub()
-    })
-    let openingDecided = false
-    $effect(() => {
-        if (openingDecided || !syncSnapshot?.status) return
-        openingDecided = true
-        const opening = serverSyncOnboardingOpening(untrack(() => flow.state), syncSnapshot)
-        if (opening) flow = goToOnboardingState(untrack(() => flow), opening)
-    })
-
-    // A device connected before the app started again continues here; its
-    // registration code would be refused.
-    $effect(() => {
-        if (flow.state !== 'sync-hub' || hubStarted || hubReplacing) return
-        const resume = serverSyncOnboardingResume(syncSnapshot)
-        if (!resume) return
-        hubStarted = true
-        if (resume === 'retry') untrack(() => void retryHub())
-    })
-
     // The native side owns the job; this reads its progress while it runs.
     $effect(() => {
         if (externalStage !== 'working' || !externalBridge) return
@@ -308,7 +197,7 @@
     })
 
     $effect(() => {
-        if (!jobTicking && !hubTicking) return
+        if (!jobTicking) return
         now = Date.now()
         const timer = setInterval(() => {
             now = Date.now()
@@ -333,22 +222,14 @@
         const stopWeave = weaveCanvas
             ? observeOnboardingWeave(weaveCanvas)
             : () => {}
-        const stopSync = syncController
-            ? syncController.subscribe((value) => {
-                  syncSnapshot = value
-              })
-            : () => {}
         return () => {
             stopWeave()
-            stopSync()
-            hubRequest = undefined
             nativeFileJobHost.set('dialog')
             onboardingHold.set(false)
         }
     })
 
     async function goTo(state: OnboardingState): Promise<void> {
-        if (flow.state === 'sync-external' && state !== 'sync-external' && !(await abandonExternal())) return
         flow = goToOnboardingState(flow, state)
     }
 
@@ -360,7 +241,6 @@
 
     /** The defaults a reader who skips setup would otherwise have to choose. */
     async function startFresh(): Promise<void> {
-        if (!(await abandonExternal())) return
         // Data that arrived outside this screen, such as a backup opened from
         // a file manager, already carries its own settings.
         if (DBState.db.didFirstSetup) {
@@ -421,105 +301,6 @@
         }
     }
 
-    function showHubError(cause: unknown): void {
-        const failure = serverSyncError(cause)
-        hubError = failure.code
-        hubErrorRetryable = failure.retryable
-    }
-
-    function resetHub(): void {
-        continueHub = createServerSyncOnboardingContinuation()
-        hubRequest = undefined
-        hubServer = undefined
-        hubStarted = false
-        hubReplacing = false
-        hubError = ''
-        hubStage = 'code'
-        hubKey += 1
-    }
-
-    async function startHub(request: ServerSyncConnectRequest): Promise<void> {
-        if (!syncController || hubConnecting) return
-        hubRequest = request
-        hubServer = {
-            endpoint: request.config.endpoint,
-            libraryId: request.config.libraryId,
-            deviceId: request.config.deviceId,
-        }
-        hubStarted = true
-        hubConnecting = true
-        hubError = ''
-        try {
-            await connectServerSync(syncController, request)
-        } catch (cause) {
-            showHubError(cause)
-        } finally {
-            hubConnecting = false
-        }
-    }
-
-    async function retryHubStatus(): Promise<void> {
-        if (!syncController || hubConnecting) return
-        hubConnecting = true
-        hubError = ''
-        try { await syncController.ensureStatus() }
-        catch (cause) { showHubError(cause) }
-        finally { hubConnecting = false }
-    }
-
-    /** Bound already: run the attempt again. Not bound: register again. */
-    async function retryHub(): Promise<void> {
-        if (!syncController || hubConnecting) return
-        if (!syncSnapshot?.status) {
-            await retryHubStatus()
-            return
-        }
-        if (!syncSnapshot?.status?.configured) {
-            if (hubRequest) await startHub(hubRequest)
-            else resetHub()
-            return
-        }
-        hubConnecting = true
-        hubError = ''
-        try {
-            await syncController.synchronize()
-        } catch (cause) {
-            showHubError(cause)
-        } finally {
-            hubConnecting = false
-        }
-    }
-
-    async function resolveHub(resolution: 'keep-local' | 'keep-remote'): Promise<void> {
-        if (!syncController || !hubConflict || hubConnecting) return
-        hubConnecting = true
-        hubError = ''
-        try {
-            await syncController.synchronize({
-                resolution,
-                expectedRevision: hubConflict.localRevision,
-                expectedHead: hubConflict.head,
-            })
-        } catch (cause) {
-            showHubError(cause)
-        } finally {
-            hubConnecting = false
-        }
-    }
-
-    async function pauseHub(): Promise<void> {
-        if (!syncController || hubPausing) return
-        hubPausing = true
-        try {
-            await syncController.pause()
-            await syncController.waitForIdle()
-        } catch (cause) {
-            showHubError(cause)
-        } finally {
-            hubPausing = false
-        }
-    }
-
     function externalWhen(value: string): string {
         const time = Number(value)
         return Number.isFinite(time) ? new Date(time).toLocaleString() : '—'
@@ -538,19 +319,6 @@
         return `${index === 0 ? amount : Math.round(amount * 10) / 10} ${units[index]}`
     }
 
-    async function abandonExternal(): Promise<boolean> {
-        if (!externalSelectionOwner || !externalBridge) return true
-        externalWorking = true
-        try {
-            await abandonExternalOnboardingSelection(externalSelectionOwner, externalBridge)
-            externalSelectionOwner = undefined
-            await refreshExternalStorageProductionState()
-            return true
-        } catch (cause) {
-            externalFailure(cause)
-            return false
-        } finally { externalWorking = false }
-    }
 
     function resetExternal(): void {
         externalConnection = undefined
@@ -560,7 +328,6 @@
         externalHistory = []
         externalCursor = undefined
         externalSelected = ''
-        externalConflict = undefined
         externalJob = undefined
         externalKey += 1
     }
@@ -575,9 +342,18 @@
             externalFailure(cause)
             return
         }
-        if (externalOnboardingAction(result.connection) === 'restore') {
-            await loadExternalHistory(false)
+        if (result.connection.purpose === 'sync') {
+            externalWorking = true
+            externalStage = 'working'
+            try {
+                const outcome = await bindExternalOnboardingTarget(result.connection.id)
+                if (outcome.kind === 'bound') flow = goToOnboardingState(flow, 'done', 'external')
+                else externalStage = 'connect'
+            } catch (cause) { externalFailure(cause) }
+            finally { externalWorking = false }
+            return
         }
+        await loadExternalHistory(false)
     }
 
     async function loadExternalHistory(append: boolean): Promise<void> {
@@ -612,87 +388,6 @@
     function externalFailure(cause: unknown): void {
         externalError = externalErrorMessage(externalStrings, cause)
         externalStage = 'error'
-    }
-
-    /** Where a finished synchronization attempt leaves the screen. */
-    async function readExternalSync(result: ExternalControllerResult): Promise<void> {
-        const outcome = externalOnboardingSyncOutcome(result)
-        if (outcome === 'complete') {
-            flow = goToOnboardingState(flow, 'done', 'external')
-            return
-        }
-        if (outcome === 'conflict') {
-            await loadExternalConflict(result.kind === 'blocked' ? result.job?.result?.conflictId : undefined)
-            return
-        }
-        externalFailure(
-            result.kind === 'blocked'
-                ? result.error ?? { code: result.reason }
-                : { code: 'cancelled' },
-        )
-    }
-
-    async function startExternalSync(): Promise<void> {
-        const connection = externalConnection
-        if (!externalBridge || !connection || externalWorking) return
-        externalWorking = true
-        externalError = ''
-        externalStage = 'working'
-        try {
-            const state = await externalBridge.getState()
-            if (
-                state.selection.kind !== 'external'
-                || state.selection.connectionId !== connection.id
-            ) {
-                const selection = await externalBridge.setSyncTarget(
-                    connection.id,
-                    state.selection.selectionEpoch,
-                )
-                externalSelectionOwner = { connectionId: connection.id, selectionEpoch: selection.selectionEpoch }
-                await refreshExternalStorageProductionState()
-            }
-            await readExternalSync(await requestExternalStorageNow(connection.id, 'sync'))
-        } catch (cause) {
-            externalFailure(cause)
-        } finally {
-            externalWorking = false
-        }
-    }
-
-    async function loadExternalConflict(conflictId?: string): Promise<void> {
-        const connection = externalConnection
-        if (!externalBridge || !connection) return
-        try {
-            externalConflict = await loadExternalOnboardingConflict(connection.id, conflictId, externalBridge)
-            externalStage = externalConflict ? 'conflict' : 'error'
-        } catch (cause) {
-            externalFailure(cause)
-        }
-    }
-
-    /**
-     * Only the repository side is offered. Keeping this device would publish
-     * the starting library of a first run to every other device.
-     */
-    async function takeExternalRepository(): Promise<void> {
-        const connection = externalConnection
-        const conflict = externalConflict
-        if (!connection || !conflict || externalWorking) return
-        externalWorking = true
-        externalError = ''
-        externalStage = 'working'
-        try {
-            if (externalOnboardingConflictStep(conflict) === 'receive-repository') {
-                await readExternalSync(await requestExternalStorageNow(connection.id, 'sync'))
-                return
-            }
-            await requestExternalStorageResolveConflict(connection.id, conflict.id, 'remote')
-            flow = goToOnboardingState(flow, 'done', 'external')
-        } catch (cause) {
-            externalFailure(cause)
-        } finally {
-            externalWorking = false
-        }
     }
 
     async function restoreExternalBackup(): Promise<void> {
@@ -813,24 +508,6 @@
     <button class="back" type="button" onclick={() => goTo(target)}>
         <ChevronLeft />{label}
     </button>
-{/snippet}
-
-{#snippet hubServerChip()}
-    {@const server = syncSnapshot?.status?.configured
-        ? {
-              endpoint: syncSnapshot.status.endpoint ?? '',
-              libraryId: syncSnapshot.status.libraryId ?? '',
-              deviceId: syncSnapshot.status.deviceId ?? '',
-          }
-        : hubServer}
-    {#if server}
-        <div class="file">
-            <Server />
-            <span class="name">{serverSyncHostLabel(server.endpoint)}</span>
-            <span class="dim">{server.libraryId} · {server.deviceId}</span>
-            <span class="tag">{t.hub.serverTag}</span>
-        </div>
-    {/if}
 {/snippet}
 
 {#snippet externalRepositoryChip()}
@@ -1156,19 +833,7 @@
                             <h1>{t.sync.title}</h1>
                             <p class="lead">{t.sync.lead}</p>
                             <div class="rows">
-                                <button
-                                    class="row"
-                                    type="button"
-                                    onclick={() => goTo('sync-hub')}
-                                >
-                                    <span class="ic"><Server /></span>
-                                    <span class="tx"
-                                        ><b>{t.sync.hubTitle}</b><small
-                                            >{t.sync.hubDesc}</small
-                                        ></span
-                                    >
-                                    <span class="chev"><ChevronRight /></span>
-                                </button>
+
                                 <button
                                     class="row"
                                     type="button"
@@ -1196,179 +861,6 @@
                                     <span class="chev"><ChevronRight /></span>
                                 </button>
                             </div>
-                        {:else if flow.state === 'sync-hub'}
-                            {#if !isTauri}
-                                {@render back('sync', t.back)}
-                                <h1>{t.hub.title}</h1>
-                                <p class="lead">{t.hub.unsupported}</p>
-                            {:else if hubSyncing}
-                                <h1>{s.running}</h1>
-                                <p class="lead">{t.hub.syncingLead}</p>
-                                {@render hubServerChip()}
-                                {@render bar(hubView?.percent ?? null, s.running)}
-                                <p class="meta">
-                                    <span
-                                        >{hubView?.percent !== null &&
-                                        hubView?.percent !== undefined
-                                            ? `${hubView.percent}%`
-                                            : strings.risuNest.importDialog
-                                                  .preparing}</span
-                                    >
-                                    <span>{hubView?.current ?? s.running}</span>
-                                    <span class="dim">{hubView?.elapsed ?? ''}</span>
-                                </p>
-                                {#if hubView}
-                                    <ServerSyncStages stages={hubView.stages} />
-                                    <dl
-                                        class="counts"
-                                        style:--cards={hubView.counters.length}
-                                    >
-                                        {#each hubView.counters as counter (counter.key)}
-                                            <div>
-                                                <dt>{counter.label}</dt>
-                                                <dd>{counter.value}</dd>
-                                            </div>
-                                        {/each}
-                                    </dl>
-                                {/if}
-                                <div class="actions">
-                                    <button
-                                        class="btn ghost"
-                                        type="button"
-                                        disabled={hubPausing ||
-                                            !syncSnapshot?.running ||
-                                            syncSnapshot.paused}
-                                        onclick={() => void pauseHub()}
-                                    >
-                                        <Pause />{s.pause}
-                                    </button>
-                                    <span class="dim">{t.hub.pauseNote}</span>
-                                </div>
-                            {:else if !syncSnapshot?.status}
-                                <h1>{t.hub.title}</h1>
-                                <p class="lead">{s.statusUnknown}</p>
-                                <button class="btn" type="button" disabled={hubConnecting} onclick={() => void retryHubStatus()}>{s.retryStatus}</button>
-                            {:else if hubStarted && hubOutcome === 'conflict' && hubConflict}
-                                <h1>{t.hub.title}</h1>
-                                {@render hubServerChip()}
-                                <p class="result failed" role="status">
-                                    {s.conflictCount.replace(
-                                        '{0}',
-                                        String(hubConflict.conflictCount),
-                                    )}
-                                </p>
-                                <p class="reason">{s.conflictHelp}</p>
-                                {#if syncSnapshot?.conflictRefreshed}<p class="reason">{s.conflictRefreshed}</p>{/if}
-                                <ServerSyncConflictItems preview={hubConflict} />
-                                <div class="actions">
-                                    <button
-                                        class="btn primary"
-                                        type="button"
-                                        onclick={() => void resolveHub('keep-local')}
-                                    >
-                                        {s.keepLocal}
-                                    </button>
-                                    <button
-                                        class="btn"
-                                        type="button"
-                                        onclick={() => void resolveHub('keep-remote')}
-                                    >
-                                        {s.keepRemote}
-                                    </button>
-                                </div>
-                            {:else if hubStarted && hubOutcome === 'paused'}
-                                <h1>{t.hub.title}</h1>
-                                {@render hubServerChip()}
-                                <p class="result cancelled" role="status">
-                                    {t.hub.pausedSummary}
-                                </p>
-                                <p class="reason">{t.hub.pausedReason}</p>
-                                <div class="actions">
-                                    <button
-                                        class="btn primary"
-                                        type="button"
-                                        onclick={() => void retryHub()}
-                                    >
-                                        {t.hub.resume}
-                                    </button>
-                                    <button class="btn ghost" type="button" onclick={finish}>
-                                        {t.done.start}
-                                    </button>
-                                </div>
-                            {:else if hubStarted}
-                                <h1>{t.hub.title}</h1>
-                                {@render hubServerChip()}
-                                <p class:failed={hubOutcome === 'error' && !serverSyncWaiting(hubErrorCode)} class="result" role="status">
-                                    {serverSyncWaiting(hubErrorCode) ? s.waitingForLocal : hubOutcome === 'continuing' || hubOutcome === 'pending' ? s.pending : t.hub.errorSummary}
-                                </p>
-                                <p class="reason">
-                                    {hubOutcome === 'pending'
-                                        ? t.hub.pendingReason
-                                        : hubOutcome === 'continuing' ? s.continuingHelp
-                                        : serverSyncErrorHelp(hubErrorCode, s, hubError ? hubErrorRetryable : syncSnapshot?.errorRetryable !== false)}
-                                    {#if hubErrorCode && hubErrorCode !== 'cancelled' && !serverSyncWaiting(hubErrorCode)}<span
-                                            class="dim">({hubErrorCode})</span
-                                        >{/if}
-                                </p>
-                                <div class="actions">
-                                    <button
-                                        class="btn primary"
-                                        type="button"
-                                        onclick={() => void retryHub()}
-                                    >
-                                        {t.hub.retry}
-                                    </button>
-                                    {#if !syncSnapshot?.status?.configured || serverSyncRegistrationRequired(hubErrorCode) || syncSnapshot.status.registrationRequired}
-                                        <button class="btn ghost" type="button" onclick={() => { const replacing = Boolean(syncSnapshot?.status?.configured); resetHub(); hubReplacing = replacing; }}>
-                                            {s.otherCode}
-                                        </button>
-                                    {/if}
-                                    <button
-                                        class="btn ghost"
-                                        type="button"
-                                        onclick={() => {
-                                            resetHub()
-                                            goTo('home')
-                                        }}
-                                    >
-                                        {t.backHome}
-                                    </button>
-                                </div>
-                            {:else}
-                                {#if hubStage === 'review'}
-                                    <button class="back" type="button" onclick={resetHub}>
-                                        <ChevronLeft />{s.otherCode}
-                                    </button>
-                                    <h1>{s.reviewTitle}</h1>
-                                    <p class="lead">{t.hub.reviewLead}</p>
-                                {:else}
-                                    {@render back('sync', t.back)}
-                                    <h1>{t.hub.title}</h1>
-                                    <p class="lead">
-                                        {canScanServerRegistration ? t.hub.leadScan : t.hub.lead}
-                                    </p>
-                                    <ol class="howto">
-                                        <li>{t.hub.stepLink}</li>
-                                        <li>{t.hub.stepPaste}</li>
-                                        <li>{t.hub.stepReview}</li>
-                                    </ol>
-                                {/if}
-                                {#key hubKey}
-                                    <ServerSyncConnect
-                                        bind:stage={hubStage}
-                                        initialNavigation={$serverSyncScreenRequest}
-                                        tone="onboarding"
-                                        replacing={hubReplacing}
-                                        busy={hubConnecting}
-                                        onSubmit={(request) => void startHub(request)}
-                                    />
-                                {/key}
-                                {#if isTauriAndroid && hubStage === 'code'}
-                                    <p class="hint spaced">
-                                        <Smartphone /><span>{t.hub.linkHint}</span>
-                                    </p>
-                                {/if}
-                            {/if}
                         {:else if flow.state === 'sync-external'}
                             {#if !isTauri}
                                 {@render back('sync', t.back)}
@@ -1376,19 +868,13 @@
                                 <p class="lead">{ex.unsupported}</p>
                             {:else if externalStage === 'working'}
                                 <h1>
-                                    {externalConnection
-                                        && externalOnboardingAction(externalConnection) === 'sync'
-                                        ? ex.syncTitle
-                                        : ex.restoring}
+                                    {ex.restoring}
                                 </h1>
                                 <p class="lead">{ex.syncingLead}</p>
                                 {@render externalRepositoryChip()}
                                 {@render bar(
                                     externalPercent,
-                                    externalConnection
-                                        && externalOnboardingAction(externalConnection) === 'sync'
-                                        ? ex.syncTitle
-                                        : ex.restoring,
+                                    ex.restoring,
                                 )}
                                 {#if externalJob}
                                     <p class="meta">
@@ -1402,35 +888,6 @@
                                         >
                                     </p>
                                 {/if}
-                            {:else if externalStage === 'conflict'}
-                                <h1>{ex.conflictTitle}</h1>
-                                <p class="lead">{ex.conflictLead}</p>
-                                {@render externalRepositoryChip()}
-                                <div class="actions">
-                                    <button
-                                        class="btn primary"
-                                        type="button"
-                                        disabled={externalWorking}
-                                        onclick={() => void takeExternalRepository()}
-                                    >
-                                        {externalConflict
-                                            && externalOnboardingConflictStep(externalConflict)
-                                                === 'receive-repository'
-                                            ? ex.conflictReceive
-                                            : ex.conflictTake}
-                                    </button>
-                                    <button
-                                        class="btn ghost"
-                                        type="button"
-                                        disabled={externalWorking}
-                                        onclick={async () => {
-                                            await goTo('home')
-                                            if (flow.state === 'home') resetExternal()
-                                        }}
-                                    >
-                                        {ex.other}
-                                    </button>
-                                </div>
                             {:else if externalStage === 'error'}
                                 <h1>{ex.title}</h1>
                                 {@render externalRepositoryChip()}
@@ -1446,8 +903,6 @@
                                             externalStage = externalConnection ? 'choose' : 'connect'
                                             if (
                                                 externalConnection
-                                                && externalOnboardingAction(externalConnection)
-                                                    === 'restore'
                                                 && externalHistory.length === 0
                                             ) {
                                                 void loadExternalHistory(false)
@@ -1470,35 +925,10 @@
                             {:else if externalStage === 'choose' && externalConnection}
                                 {@const connection = externalConnection}
                                 <h1>
-                                    {externalOnboardingAction(connection) === 'sync'
-                                        ? ex.syncTitle
-                                        : ex.restoreTitle}
+                                    {ex.restoreTitle}
                                 </h1>
                                 {@render externalRepositoryChip()}
-                                {#if externalOnboardingAction(connection) === 'sync'}
-                                    <p class="lead">{ex.syncDesc}</p>
-                                    <div class="actions">
-                                        <button
-                                            class="btn primary big"
-                                            type="button"
-                                            disabled={externalWorking}
-                                            onclick={() => void startExternalSync()}
-                                        >
-                                            {ex.syncStart}
-                                        </button>
-                                        <button
-                                            class="btn ghost"
-                                            type="button"
-                                            disabled={externalWorking}
-                                            onclick={async () => {
-                                            await goTo('home')
-                                            if (flow.state === 'home') resetExternal()
-                                        }}
-                                        >
-                                            {ex.other}
-                                        </button>
-                                    </div>
-                                {:else if externalRestorable.length === 0}
+                                {#if externalRestorable.length === 0}
                                     <p class="lead">{ex.restoreEmpty}</p>
                                     <div class="actions">
                                         <button class="btn primary" type="button" onclick={startFresh}>

@@ -11,9 +11,9 @@ use risunest_external_storage_format::{
         SectionValue, SECTION_CODEC,
     },
     snapshot::{
-        envelope_length, keyed_object_id, open_envelope, seal_envelope, LibrarySnapshotRef,
-        ObjectRole, PublicObjectHeader, SectionSnapshotRef, StoredObject, SyncStateDocument,
-        WireLocator,
+        envelope_length, keyed_object_id, open_envelope, seal_envelope, CatalogDocument,
+        CatalogKind, LibrarySnapshotRef, ObjectRole, PublicObjectHeader, SectionSnapshotRef,
+        StoredObject, SyncStateDocument, WireLocator,
     },
 };
 use risunest_sync_wire::head::Sequence;
@@ -48,6 +48,40 @@ fn stored(role: ObjectRole, object_id: &str, plaintext: &[u8]) -> StoredObject {
         },
         header,
     }
+}
+
+fn original_catalog() -> StoredObject {
+    let plaintext = CatalogDocument::leaf(CatalogKind::Records, vec![], vec![])
+        .unwrap()
+        .encode(MAX_DOCUMENT_BYTES)
+        .unwrap();
+    let mut root = stored(ObjectRole::Catalog, "original-units-empty", &plaintext);
+    // A fixed synthetic envelope keeps document goldens reproducible.
+    let sealed = hex::decode(concat!(
+        "524e5831990000007b22736368656d61223a22726973756e6573742e65787465726e616c2d6f626a6563742f7631222c2272",
+        "65706f7369746f72794964223a2273796e7468657469632d7265706f7369746f7279222c226f626a6563744964223a226f72",
+        "6967696e616c2d756e6974732d656d707479222c22726f6c65223a22636174616c6f67222c22706c61696e746578744c656e",
+        "677468223a22313335227d524e45318700000000000000a1d987d309fee22d2aaf68ba15c14f34645abb2a4f2e4146980000",
+        "00e1b796584a9a9b7c2259cf30dec312c8d2b43ceb2eff2ed271aecef52f58d523fa0304438493731c32e27a46b4d275acc3",
+        "2e1f248725e5fa38c039aca25646fe636b6efac78d6373ecb65cbcd4365b4a8d179e98bc01974a3dfeccff70d8189b49f948",
+        "5dc7c8a5391670cac057fdb217a46471616c0279d725628eacb203e9b72b0fa623bb0e0e572b627ef7e24165a605720ee5ee",
+        "274a8911000000c0e554fd295e14d511f3ae552d7515106c",
+    )).unwrap();
+    let mut opened = Vec::new();
+    assert_eq!(
+        open_envelope(
+            &mut sealed.as_slice(),
+            &mut opened,
+            &[7; 32],
+            MAX_DOCUMENT_BYTES as u64
+        )
+        .unwrap(),
+        root.header
+    );
+    assert_eq!(opened, plaintext);
+    assert_eq!(root.ciphertext_length, sealed.len() as u64);
+    root.ciphertext_sha256 = hash(&sealed);
+    root
 }
 
 const HYPA_KEY: &str = "3f2a1b0c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8";
@@ -202,6 +236,7 @@ fn documents() -> (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>) {
                 section_reference(SectionKind::LocalSettings, 3, 3),
             ),
         ]),
+        Some(original_catalog()),
     )
     .unwrap();
     let bundle = bundle_document.encode(MAX_DOCUMENT_BYTES).unwrap();

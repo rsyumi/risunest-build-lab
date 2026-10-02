@@ -5,7 +5,7 @@ use super::{
 };
 use reqwest::Method;
 use risunest_sync_wire::{
-    canonical, delta, hash,
+    canonical, delta,
     transfer::{self, Frame},
     Sequence, MAX_METADATA_BYTES,
 };
@@ -460,7 +460,7 @@ impl<'a> Transfer<'a> {
                     }
                 }
                 let frame = frame.unwrap_or(Frame::Full(bytes));
-                let encoded = transfer::encode(std::slice::from_ref(&frame));
+                let encoded = encode_frames(std::slice::from_ref(&frame));
                 let length = match encoded {
                     Ok(bytes) => bytes.len() - 8,
                     Err(_) if size >= CHUNK as u64 => {
@@ -501,9 +501,9 @@ impl<'a> Transfer<'a> {
         // on the coordinator only after both workers have joined.
         let mut remaining = frames;
         while !remaining.is_empty() {
-            if transfer::encode(&remaining[..1])?.len() > self.frame_limit.get() {
+            if encode_frames(&remaining[..1])?.len() > self.frame_limit.get() {
                 let (target, size) = match &remaining[0] {
-                    Frame::Full(bytes) => (hash(bytes), bytes.len() as u64),
+                    Frame::Full(bytes) => (transfer_hash(bytes), bytes.len() as u64),
                     Frame::Delta(recipe) => (recipe.target_hash.clone(), recipe.target_size),
                     Frame::FullRequired { .. } => {
                         return Err(SyncError::new("invalid-upload-frame", 400))
@@ -526,7 +526,7 @@ impl<'a> Transfer<'a> {
                 let mut split = 0;
                 let mut used = 8;
                 while split < remaining.len() {
-                    let size = transfer::encode(&remaining[split..split + 1])?.len() - 8;
+                    let size = encode_frames(&remaining[split..split + 1])?.len() - 8;
                     if used + size > self.frame_limit.get() {
                         break;
                     }
@@ -545,8 +545,12 @@ impl<'a> Transfer<'a> {
                     .into_iter()
                     .filter(|group| !group.is_empty())
                     .map(|group| {
+                        #[cfg(test)]
+                        let hash_scope = super::hash_metrics::capture();
                         scope.spawn(move || {
-                            let bytes = transfer::encode(group)?;
+                            #[cfg(test)]
+                            let _hash_scope = super::hash_metrics::enter(hash_scope);
+                            let bytes = encode_frames(group)?;
                             let length = bytes.len();
                             let started = std::time::Instant::now();
                             let result = client.frame_request(bytes);
@@ -608,7 +612,7 @@ impl<'a> Transfer<'a> {
                     .set((self.frame_limit.get() / 2).max(64 * 1024));
                 if group.len() == 1 {
                     let (target, size) = match &group[0] {
-                        Frame::Full(bytes) => (hash(bytes), bytes.len() as u64),
+                        Frame::Full(bytes) => (transfer_hash(bytes), bytes.len() as u64),
                         Frame::Delta(recipe) => (recipe.target_hash.clone(), recipe.target_size),
                         Frame::FullRequired { .. } => {
                             return Err(SyncError::new("invalid-upload-frame", 400))
@@ -734,7 +738,7 @@ impl<'a> Transfer<'a> {
         // The encoded reply has no reader once its frames are owned, and
         // holding both keeps two copies of a batch alive until the last
         // body is stored.
-        let frames = transfer::decode(&reply.body)?;
+        let frames = decode_frames(&reply.body)?;
         drop(reply);
         if frames.len() != targets.len() {
             return Err(SyncError::new("transfer-count-mismatch", 502));
@@ -746,7 +750,7 @@ impl<'a> Transfer<'a> {
             self.ensure_active()?;
             match frame {
                 Frame::Full(bytes) => {
-                    if hash(&bytes) != *target {
+                    if transfer_hash(&bytes) != *target {
                         return Err(SyncError::new("transfer-target-mismatch", 502));
                     }
                     self.store_download(target, &bytes)?;
@@ -1203,8 +1207,12 @@ impl<'a> Transfer<'a> {
                 let workers: Vec<_> = batch
                     .into_iter()
                     .map(|(path, bytes)| {
+                        #[cfg(test)]
+                        let hash_scope = super::hash_metrics::capture();
                         scope.spawn(move || {
-                            let digest = risunest_sync_wire::hash(&bytes);
+                            #[cfg(test)]
+                            let _hash_scope = super::hash_metrics::enter(hash_scope);
+                            let digest = transfer_hash(&bytes);
                             let reply = client.request(
                                 Method::PUT,
                                 &path,
@@ -1352,7 +1360,11 @@ impl<'a> Transfer<'a> {
                 let workers: Vec<_> = batch
                     .into_iter()
                     .map(|(index, offset, length)| {
+                        #[cfg(test)]
+                        let hash_scope = super::hash_metrics::capture();
                         scope.spawn(move || {
+                            #[cfg(test)]
+                            let _hash_scope = super::hash_metrics::enter(hash_scope);
                             let end = offset + length - 1;
                             let reply = client.request(
                                 Method::GET,
@@ -1390,7 +1402,7 @@ impl<'a> Transfer<'a> {
             let mut failure = None;
             for result in results {
                 let stored = result.and_then(|(index, length, bytes)| {
-                    let hash = risunest_sync_wire::hash(&bytes);
+                    let hash = transfer_hash(&bytes);
                     let directory = self.chunk_directory(target)?;
                     let mut file = tempfile::NamedTempFile::new_in(&directory)?;
                     std::io::Write::write_all(&mut file, &bytes)?;
@@ -1461,7 +1473,7 @@ impl<'a> Transfer<'a> {
         }
         let mut bytes = Vec::new();
         std::fs::File::open(path)?.take(CHUNK as u64 + 1).read_to_end(&mut bytes)?;
-        if bytes.len() > CHUNK || risunest_sync_wire::hash(&bytes) != hash {
+        if bytes.len() > CHUNK || transfer_hash(&bytes) != hash {
             return Err(SyncError::new("invalid-verified-chunk", 409));
         }
         Ok(bytes)
@@ -1585,5 +1597,30 @@ mod transfer_policy_tests {
         for status in [400, 401, 403, 404, 500, 503] {
             assert!(!delta_job_falls_back(status), "status {status}");
         }
+    }
+}
+
+fn transfer_hash(bytes: &[u8]) -> String {
+    #[cfg(test)]
+    super::hash_metrics::record("c_transfer_verify", bytes.len());
+    risunest_sync_wire::hash(bytes)
+}
+fn encode_frames(frames: &[Frame]) -> risunest_sync_wire::Result<Vec<u8>> {
+    let result = transfer::encode(frames);
+    #[cfg(test)]
+    observe_frames(frames, "c_transfer_identity", result.is_ok());
+    result
+}
+fn decode_frames(bytes: &[u8]) -> risunest_sync_wire::Result<Vec<Frame>> {
+    let result = transfer::decode(bytes);
+    #[cfg(test)]
+    match &result { Ok(frames) => observe_frames(frames, "c_transfer_decode_verify", true), Err(_) => super::hash_metrics::incomplete() }
+    result
+}
+#[cfg(test)]
+fn observe_frames(frames: &[Frame], domain: &str, succeeded: bool) {
+    if !succeeded {super::hash_metrics::incomplete(); return;}
+    for frame in frames {
+        match frame { Frame::Full(bytes) => super::hash_metrics::record(domain, bytes.len()), Frame::Delta(_) => super::hash_metrics::incomplete(), Frame::FullRequired{..} => () }
     }
 }

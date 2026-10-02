@@ -58,7 +58,8 @@ const KOOFR_HOST: &str = "app.koofr.net";
 const KOOFR_DAV_PREFIX: &str = "/dav/";
 const ROOT_KEY: &str = "root";
 const DESCRIPTOR_FOLDER: &str = "descriptors";
-const ROLE_FOLDERS: [&str; 7] = [
+const ROLE_FOLDERS: [&str; 8] = [
+    "segments",
     "catalogs",
     DESCRIPTOR_FOLDER,
     "inventory",
@@ -80,11 +81,12 @@ pub(crate) fn create(dependencies: Dependencies) -> Result<Arc<dyn Provider>> {
 fn role_folder(role: ObjectRole) -> &'static str {
     match role {
         ObjectRole::Descriptor => DESCRIPTOR_FOLDER,
+        ObjectRole::Segment => "segments",
         ObjectRole::Pack => "packs",
         ObjectRole::Catalog => "catalogs",
         // A published state and a backup bundle share one collection. The
         // authenticated envelope header, not the path, tells them apart.
-        ObjectRole::SyncState | ObjectRole::BackupBundle => "snapshots",
+        ObjectRole::SyncState | ObjectRole::Snapshot | ObjectRole::BackupBundle => "snapshots",
         ObjectRole::BackupPoint => "points",
         ObjectRole::InventoryPage => "inventory",
         ObjectRole::Lease => "leases",
@@ -92,6 +94,7 @@ fn role_folder(role: ObjectRole) -> &'static str {
 }
 fn collection_folder(collection: Collection) -> &'static str {
     match collection {
+        Collection::Segments => "segments",
         Collection::Snapshots => role_folder(ObjectRole::SyncState),
         Collection::BackupPoints => role_folder(ObjectRole::BackupPoint),
         Collection::InventoryPages => role_folder(ObjectRole::InventoryPage),
@@ -694,32 +697,25 @@ impl WebdavProvider {
         })
     }
 
-    /// A name already taken by an earlier attempt. DAV exposes no content
-    /// digest, so an equal stored length is the only convergence evidence
-    /// available; a different length is a conflict and is never overwritten.
+    /// DAV exposes no SHA-256, so an existing object is read in full before
+    /// completing an immutable retry.
     async fn converged(
         &self,
-        context: &RepositoryContext,
+        repository: &RepositoryHandle,
         object: &[String],
         intent: &ObjectIntent,
         locator: RemoteLocator,
         cancel: &Cancellation,
     ) -> Result<ObjectReceipt> {
+        let context = context_of(repository)?;
         let conflict = || common::error(ErrorKind::PreconditionFailed, 412);
-        let stored = self
-            .stored(context, object, cancel)
-            .await?
-            .ok_or_else(conflict)?;
-        if stored.collection || stored.content_length != Some(intent.byte_length) {
-            return Err(conflict());
+        let stored = self.stored(context, object, cancel).await?.ok_or_else(conflict)?;
+        if stored.collection || stored.content_length != Some(intent.byte_length) { return Err(conflict()); }
+        let mut sink = crate::external_storage::contract::IdentitySink { intent };
+        match self.read_object(repository, &locator, None, &mut sink, cancel).await? {
+            ReadReceipt::Body(mut receipt) => { receipt.version = receipt.version.or(stored.version); Ok(receipt) },
+            _ => Err(conflict()),
         }
-        Ok(ObjectReceipt {
-            locator,
-            byte_length: intent.byte_length,
-            version: stored.version,
-            checksum: declared_checksum(&intent.sha256),
-            complete: true,
-        })
     }
 
 }
@@ -856,6 +852,7 @@ impl Provider for WebdavProvider {
             cancel.check()?;
             let context = context_of(repository)?;
             intent.validate(repository)?;
+            crate::external_storage::contract::verify_source(source, intent, cancel).await?;
             if resume.is_some() {
                 return Err(unsupported());
             }
@@ -881,7 +878,7 @@ impl Provider for WebdavProvider {
             let response = self.send(request, cancel).await?;
             if response.status == 412 {
                 return self
-                    .converged(context, &object, intent, locator, cancel)
+                    .converged(repository, &object, intent, locator, cancel)
                     .await;
             }
             self.require(&response, &[200, 201, 204])?;
@@ -1086,13 +1083,16 @@ impl Provider for WebdavProvider {
             if stored.collection || stored.content_length != Some(intent.byte_length) {
                 return Ok(UploadResolution::Conflict);
             }
-            Ok(UploadResolution::Complete(ObjectReceipt {
-                locator,
-                byte_length: intent.byte_length,
-                version: stored.version,
-                checksum: declared_checksum(&intent.sha256),
-                complete: true,
-            }))
+            let mut sink = crate::external_storage::contract::IdentitySink { intent };
+            match self.read_object(repository, &locator, None, &mut sink, cancel).await {
+                Ok(ReadReceipt::Body(mut receipt)) => {
+                    receipt.version = receipt.version.or(stored.version);
+                    Ok(UploadResolution::Complete(receipt))
+                }
+                Ok(_) => Err(paths::corrupt()),
+                Err(error) if error.kind == ErrorKind::PreconditionFailed => Ok(UploadResolution::Conflict),
+                Err(error) => Err(error),
+            }
         })
     }
 
@@ -1105,4 +1105,13 @@ impl Provider for WebdavProvider {
         })
     }
 
+}
+
+
+pub(crate) fn validate_sync_root(root: &str) -> Result<()> {
+    let path = root.trim_matches('/');
+    let parts = paths::split_path(path).ok_or_else(unsupported)?;
+    let joined = path.len() + 1 + "segments/".len() + crate::external_storage::contract::MAX_SEGMENT_NAME_BYTES;
+    if parts.len() + 2 > 32 || joined > 1023 { return Err(unsupported()); }
+    Ok(())
 }

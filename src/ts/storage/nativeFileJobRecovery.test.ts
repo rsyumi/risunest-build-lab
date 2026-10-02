@@ -29,7 +29,7 @@ function restoreStatus(
         result: state === 'succeeded' ? {
             revision: 2,
             sourceBytes: 128,
-            sourceSha256: 'a'.repeat(64),
+            sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'a'.repeat(64),
             characterCount: 1,
             presetCount: 0,
             warningCodes: [],
@@ -38,6 +38,30 @@ function restoreStatus(
 }
 
 describe('native file job bootstrap reconciliation', () => {
+    it('retains adopted portable body retry ownership without cancelling or reconciling the library', async () => {
+        for (const state of ['failed', 'cancelled'] as const) {
+            const invoke = vi.fn(async (command: string) => {
+                if (command === 'native_file_job_list') return [{...restoreStatus('portable', state, 'copying-missing-bodies'), kind: 'restore-portable-backup', restoreAdoptionConfirmed: true, activationRevision: 8, activationAuthority: '2', deviceSessionId: 'session', portableBodyRetry: {stagingId: 'stage', catalogSha256: 'a'.repeat(64), pending: true, available: true, sourceRequired: false}}]
+                throw new Error(`Unexpected command: ${command}`)
+            })
+            const result = await reconcileNativeFileJobsBeforeBootstrap({invoke, wait: async () => {}})
+            expect(result.libraryRestoreCommitted).toBe(false)
+            expect(result.pendingRestoreAcknowledgements).toEqual([])
+            expect(result.interruptedRestores).toEqual([])
+            expect(invoke.mock.calls).toEqual([['native_file_job_list']])
+        }
+    })
+    it('retains committed snapshot body ownership without replacement reconciliation or cleanup', async () => {
+        const invoke=vi.fn(async(command:string)=> {
+            if (command==='native_file_job_list') return [{...restoreStatus('bodies','running','copying-missing-bodies'),kind:'snapshot-bodies',snapshotStagingId:'stage',activationRevision:8,activationAuthority:'2'}]
+            throw new Error(`Unexpected command: ${command}`)
+        })
+        const result=await reconcileNativeFileJobsBeforeBootstrap({invoke,wait:async()=>{}})
+        expect(result.libraryRestoreCommitted).toBe(false)
+        expect(result.pendingRestoreAcknowledgements).toEqual([])
+        expect(result.interruptedRestores).toEqual([])
+        expect(invoke.mock.calls).toEqual([['native_file_job_list']])
+    })
     it('reconciles restore jobs on every Tauri target, including iOS', () => {
         expect(shouldReconcileNativeFileJobs(true)).toBe(true)
         expect(shouldReconcileNativeFileJobs(false)).toBe(false)

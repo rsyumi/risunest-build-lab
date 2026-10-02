@@ -1,4 +1,28 @@
 export const languageVietnamese = {
+    risuNest: {
+        importDialog: {
+            warningUpstreamRestoreLosses: 'Không thể khôi phục một phần dữ liệu bộ nhớ lạnh hoặc Inlay. Vui lòng kiểm tra dữ liệu đã khôi phục.',
+        },
+        plugins: {
+            "removeTitle": "Xóa plugin này?",
+            "removeDescription": "Nếu xóa dữ liệu plugin, cài đặt và nội dung đã lưu sẽ không được khôi phục khi cài lại. Giữ dữ liệu cho phép tiếp tục sử dụng sau khi cài lại.",
+            "removeDataOption": "Xóa cả dữ liệu plugin",
+            "removeAction": "Xóa"
+        },
+    },
+
+    checkboxConfirmation: {
+        "characterDeletion": "Xóa nhân vật",
+        "dataReplacement": "Thay thế dữ liệu hiện tại",
+        "hypaReset": "Đặt lại dữ liệu HypaV3",
+        "hypaDeletion": "Xóa các bản tóm tắt tiếp theo",
+        "pluginDataDeletion": "Xóa dữ liệu plugin",
+        "lorebookDeletion": "Xóa thư mục và mục lorebook",
+        "partialBackup": "Sao lưu không gồm tài nguyên khác",
+        "incompleteRestore": "Khôi phục không gồm dữ liệu thiếu",
+        "onlySelectedMessage": "Chỉ xóa tin nhắn này"
+    },
+
     "formating": {
         "main": "Lời nhắc chính",
         "jailbreak": "Lời nhắc bẻ khóa",
@@ -29,8 +53,8 @@ export const languageVietnamese = {
         "requestLogRemoved": "This request log is removed.",
         "requestLogRemovedDesc": "This request log removes when client is refreshed or reloaded.",
         "vertexAuthError": "Thiếu thông tin xác thực Vertex AI.",
-        "coldStorageIncompleteRestoreConfirm": (characterNames: string, unavailableCount: number, unresolvedCount: number) =>
-            `Không thể khôi phục dữ liệu bộ nhớ lạnh của ${characterNames || "nhân vật không xác định"}.${unresolvedCount > 0 ? ` Có ${unresolvedCount} mục không thể liên kết với nhân vật.` : ""}\n\nNếu tiếp tục, ${unavailableCount} mục bộ nhớ lạnh sẽ vẫn không khả dụng và dữ liệu nhân vật hoặc cuộc trò chuyện bị ảnh hưởng có thể bị mất vĩnh viễn.\n\nVẫn tiếp tục khôi phục không đầy đủ?`
+        "coldStorageIncompleteRestoreConfirm": (characterNames: string, unavailableCount: number, unresolvedCount: number, includeQuestion = true) =>
+            `Không thể khôi phục dữ liệu bộ nhớ lạnh của ${characterNames || "nhân vật không xác định"}.${unresolvedCount > 0 ? ` Có ${unresolvedCount} mục không thể liên kết với nhân vật.` : ""}\n\nNếu tiếp tục, ${unavailableCount} mục bộ nhớ lạnh sẽ vẫn không khả dụng và dữ liệu nhân vật hoặc cuộc trò chuyện bị ảnh hưởng có thể bị mất vĩnh viễn.${includeQuestion ? "\n\nVẫn tiếp tục khôi phục không đầy đủ?" : ""}`
     },
     "showHelp": "Hiển thị trợ giúp",
     "help": {
@@ -1468,4 +1492,21 @@ export const languageVietnamese = {
     nanoGPTSelectFromList: "Chọn từ danh sách",
     nanoGPTManualInput: "Nhập thủ công",
     nanoGPTManualModelSelect: "Chọn mô hình thủ công",
+    lwwSync: {
+        concurrentEditNotice: "Khi chỉnh sửa cùng một mục trên nhiều thiết bị đồng thời, bản chỉnh sửa cuối cùng được giữ lại. Nội dung chỉnh sửa hoặc tin nhắn có thể bị mất. Không sử dụng nhiều thiết bị đồng thời.",
+        replaceTitle: "Thay thế dữ liệu trên thiết bị này?",
+        replaceDescription: "Để đồng bộ, dữ liệu trên thiết bị này sẽ bị xóa và thay thế bằng dữ liệu từ xa. Hãy sao lưu thủ công nếu cần.",
+        replaceAcknowledge: "Xóa dữ liệu trên thiết bị này",
+        replaceAction: "Thay thế",
+        cancelAction: "Hủy",
+        clockBlocked: "Đồng bộ đã dừng do thời gian thiết bị và từ xa khác nhau. Hãy chỉnh lại thời gian và thử lại.",
+        writerCollision: "Đồng bộ đã dừng do trùng danh tính thiết bị. Hãy kết nối lại dưới dạng thiết bị mới.",
+        newDeviceAction: "Kết nối dưới dạng thiết bị mới",
+        restoreTitle: "Khôi phục bản sao lưu?",
+        restoreDescriptionBound: "Dữ liệu hiện tại sẽ bị xóa và thay thế bằng bản sao lưu đã chọn. Dữ liệu khôi phục sẽ được đồng bộ từ xa. Hãy sao lưu thủ công nếu cần.",
+        restoreDescription: "Dữ liệu hiện tại sẽ bị xóa và thay thế bằng bản sao lưu đã chọn. Hãy sao lưu thủ công nếu cần.",
+        restoreAcknowledge: "Xóa dữ liệu hiện tại",
+        restoreAction: "Khôi phục",
+        myboxSyncUnavailable: "Không thể sử dụng MYBOX để đồng bộ.",
+    },
 } satisfies DeepPartial<typeof import('./en').languageEnglish>;

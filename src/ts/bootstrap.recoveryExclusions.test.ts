@@ -148,7 +148,10 @@ vi.mock('./iosNative', () => ({ initializeIOSNative: vi.fn(), installIOSPersiste
 vi.mock('./storage/sync/external/production', () => ({ installExternalStorageProduction: startup.external }))
 vi.mock('./storage/syncExitCoordinator', () => ({ createSyncExitCoordinator: vi.fn(() => ({})) }))
 vi.mock('./storage/syncExitProduction', () => ({ configureSyncExitCoordinator: vi.fn(), registerWindowCloseDrain: vi.fn() }))
-vi.mock('./storage/sync/serverSyncProduction', () => ({ createServerSyncExitDrainAdapter: vi.fn() }))
+vi.mock('./storage/sync/serverSyncProduction', () => ({
+    createServerSyncExitDrainAdapter: vi.fn(), initializeNativeSyncBindings: vi.fn(),
+    installServerSyncProduction: vi.fn(), disposeNativeSyncBindings: vi.fn(),
+}))
 vi.mock('./storage/sync/external/bridge', () => ({ getExternalStorageBridge: vi.fn() }))
 vi.mock('./process/transformers', () => ({ releaseIdleTransformerModels: vi.fn() }))
 vi.mock('./process/files/inlayProviderImage', () => ({ forgetInlayProviderImages: vi.fn() }))
@@ -157,6 +160,7 @@ import { loadData } from './bootstrap'
 import { bootFailure } from './stores.svelte'
 import { loadRisuAccountData } from './drive/accounter'
 import { initializeOfficialAccountBootstrap } from './storage/sync/officialAccountBootstrap'
+import { initializeNativeSyncBindings, installServerSyncProduction } from './storage/sync/serverSyncProduction'
 
 beforeEach(() => {
     vi.clearAllMocks()
@@ -183,13 +187,17 @@ describe('bootstrap recovery exclusions', () => {
         expect(initializeOfficialAccountBootstrap).not.toHaveBeenCalled()
         expect(loadRisuAccountData).not.toHaveBeenCalled()
         expect(startup.reconcile).not.toHaveBeenCalled()
+        expect(installServerSyncProduction).not.toHaveBeenCalled()
         expect(startup.external).not.toHaveBeenCalled()
         expect(startup.stages.mock.calls.flat()).not.toContain('account-bootstrap')
         expect(startup.stages.mock.calls.flat()).not.toContain('drive-sync')
         expect(startup.stages.mock.calls.flat()).not.toContain('service-worker')
         if (native) {
+            expect(initializeNativeSyncBindings).toHaveBeenCalledOnce()
             expect(startup.readVault).toHaveBeenCalledOnce()
             expect(startup.database.account).toBe(startup.credential)
+        } else {
+            expect(initializeNativeSyncBindings).not.toHaveBeenCalled()
         }
     })
 
@@ -203,10 +211,14 @@ describe('bootstrap recovery exclusions', () => {
         expect(initializeOfficialAccountBootstrap).toHaveBeenCalledOnce()
         expect(startup.stages.mock.calls.flat()).toContain('account-bootstrap')
         if (native) {
+            expect(initializeNativeSyncBindings).toHaveBeenCalledOnce()
+            expect(installServerSyncProduction).toHaveBeenCalledOnce()
             expect(startup.reconcile).toHaveBeenCalledOnce()
             expect(startup.external).toHaveBeenCalledOnce()
             expect(startup.stages.mock.calls.flat()).toContain('drive-sync')
         } else {
+            expect(initializeNativeSyncBindings).not.toHaveBeenCalled()
+            expect(installServerSyncProduction).not.toHaveBeenCalled()
             expect(loadRisuAccountData).toHaveBeenCalledOnce()
             expect(startup.stages.mock.calls.flat()).toContain('service-worker')
         }

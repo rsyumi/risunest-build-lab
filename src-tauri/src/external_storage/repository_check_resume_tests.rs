@@ -6,13 +6,12 @@ use super::*;
 use crate::external_storage::{
     cleanup::{self, CleanupLimits, CleanupOutcome, CleanupRequest, ConnectedDocuments},
     connection_store::StoredConnection,
-    contract::{ConnectionConfig, RemoteLocator},
-    control::{BackupPointDocument, BackupPointKind, HeadDocument, ObservedHead, PublicationResult},
+    contract::{ConnectionConfig, ExpectedHead, RemoteLocator},
+    control::{BackupPointDocument, BackupPointKind, HeadDocument, ObservedHead},
     fake::{self, FakeLeaseClock, FakeProvider},
     journal::{JobIdentity, TransferJournal},
     leases::LeaseClock,
     packaging::CompletedSnapshot,
-    publication::PublicationMode,
 };
 use crate::persistent_store::sync_selection::CaptureIdentity;
 use risunest_external_storage_format::{
@@ -59,7 +58,6 @@ fn connected(provider: Arc<FakeProvider>) -> ConnectedRepository {
             credential_ref: "credential".into(),
             root_key_ref: "key".into(),
             recovery_key_ref: "recovery-key".into(),
-            capture_policy: None,
             retention_policy: None,
             capabilities: fake::capabilities(true),
             created_at_ms: 1_000,
@@ -145,24 +143,20 @@ impl World {
         )
         .unwrap();
         let prepared = control::prepare_head(&descriptor(), &KEY, repository, document).unwrap();
-        let head = match control::publish_head(
-            self.provider.as_ref(),
+        let expected = expected
+            .map(|head| ExpectedHead::Exact(head.observation.version.clone().unwrap()))
+            .unwrap_or(ExpectedHead::Absent);
+        self.provider.compare_exchange_head(
             repository,
-            &fake::capabilities(true),
-            &descriptor(),
-            &KEY,
-            Strategy::Cas,
-            expected,
-            &prepared,
-            PublicationMode::Foreground,
+            &self.provider.head_locator(repository).unwrap(),
+            &expected,
+            &prepared.bytes,
             &Cancellation::default(),
-        )
-        .await
-        .unwrap()
-        {
-            PublicationResult::Confirmed(head) => head,
-            other => panic!("the head did not move: {other:?}"),
-        };
+        ).await.unwrap();
+        let head = control::read_head(
+            self.provider.as_ref(), repository, &descriptor(), &KEY, None,
+            &Cancellation::default(),
+        ).await.unwrap().unwrap();
         (completed, head)
     }
 
@@ -198,6 +192,7 @@ impl World {
             NOW,
             view.library,
             view.sections,
+            None,
             &mut journal,
             self.provider.as_ref(),
             &connected.handle,

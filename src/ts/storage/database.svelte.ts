@@ -27,6 +27,10 @@ import {
     type PresetListExpectation,
 } from './presetWorkingSetOperations';
 import { normalizeInlayEncodeOptions } from './blobStore';
+import { v4 } from 'uuid';
+import * as identity from './effectiveIdentityState';
+import { configurePersistentIdentityHooks } from './persistentIdentityHooks';
+export { presetMirrorMap, protectedPresetGroups } from './effectiveIdentityState';
 
 //APP_VERSION_POINT is to locate the app version in the database file for version bumping
 //appVer is the last RisuAI version this build stays compatible with, and it is what CBS
@@ -163,7 +167,7 @@ export function normalizeDatabaseDefaults(data:Database): Database {
         data.proxyKey = ""
     }
     if(checkNullish(data.botPresets)){
-        let defaultPreset = presetTemplate
+        let defaultPreset = { ...safeStructuredClone(presetTemplate), id: v4() }
         defaultPreset.name = "Default"
         data.botPresets = [defaultPreset]
     }
@@ -372,6 +376,7 @@ export function normalizeDatabaseDefaults(data:Database): Database {
     data.selectedPersona ??= 0
     data.personaPrompt ??= ''
     data.personas ??= [{
+        id: v4(),
         name: data.username,
         personaPrompt: "",
         icon: data.userIcon,
@@ -880,6 +885,8 @@ export interface Database{
     waifuWidth2:number
     botPresets:botPreset[]
     botPresetsId:number
+    protectedPresetValues?: Partial<Record<identity.ProtectedPresetField, unknown>>
+    explicitGlobalChatVariables?: Record<string, string>
     sdProvider: string
     webUiUrl:string
     sdSteps:number
@@ -1624,6 +1631,7 @@ export interface groupChat{
 }
 
 export interface botPreset{
+    id?:string
     name?:string
     apiType?: string
     openAIKey?: string
@@ -2092,99 +2100,114 @@ export const defaultSdDataFunc = () =>{
     return safeStructuredClone(defaultSdData)
 }
 
-export function captureCurrentPreset(db: Database = getDatabase()): botPreset | null {
-    const pres = db.botPresets
+export function getEffectivePresetId(db: Database = getDatabase()): string | undefined {
+    return identity.getEffectivePresetId(db)
+}
 
-    if(db.botPresetsId === -1){
-        return null
+export function flushEffectivePresetEdits(db: Database = getDatabase()): void {
+    identity.flushEffectivePresetEdits(db)
+}
+
+export function deriveEffectivePresetMirrors(db: Database = getDatabase()): void {
+    identity.deriveEffectivePresetMirrors(db, applyEffectivePreset)
+}
+
+export function setEffectivePresetOverride(id: string | null, db: Database = getDatabase()): void {
+    identity.setEffectivePresetOverride(db, id, applyEffectivePreset)
+}
+
+let presetMirrorDefaults: Record<string, unknown> | undefined
+function applyEffectivePreset(db: Database, preset: botPreset): void {
+    if (!presetMirrorDefaults) {
+        const defaults = normalizeDatabaseDefaults({} as Database) as unknown as Record<string, unknown>
+        presetMirrorDefaults = Object.fromEntries(Object.keys(identity.presetMirrorMap)
+            .map(field => [field, defaults[field]]))
     }
-    const savedPreset:botPreset =  {
-        name: pres[db.botPresetsId].name,
-        apiType: db.apiType,
-        openAIKey: db.openAIKey,
-        localNetworkMode: db.localNetworkMode,
-        localNetworkTimeoutSec: db.localNetworkTimeoutSec,
-        mainPrompt:db.mainPrompt,
-        jailbreak: db.jailbreak,
-        globalNote: db.globalNote,
-        temperature: db.temperature,
-        maxContext: db.maxContext,
-        maxResponse: db.maxResponse,
-        frequencyPenalty: db.frequencyPenalty,
-        PresensePenalty: db.PresensePenalty,
-        formatingOrder: db.formatingOrder,
-        aiModel: db.aiModel,
-        subModel: db.subModel,
-        currentPluginProvider: db.currentPluginProvider,
-        textgenWebUIStreamURL: db.textgenWebUIStreamURL,
-        textgenWebUIBlockingURL: db.textgenWebUIBlockingURL,
-        forceReplaceUrl: db.forceReplaceUrl,
-        promptPreprocess: db.promptPreprocess,
-        bias: db.bias,
-        koboldURL: db.koboldURL,
-        proxyKey: db.proxyKey,
-        ooba: safeStructuredClone(db.ooba),
-        ainconfig: safeStructuredClone(db.ainconfig),
-        proxyRequestModel: db.proxyRequestModel,
-        openrouterRequestModel: db.openrouterRequestModel,
-        NAISettings: safeStructuredClone(db.NAIsettings),
-        promptTemplate: normalizePromptTemplate(db.promptTemplate) ?? null,
-        NAIadventure: db.NAIadventure ?? false,
-        NAIappendName: db.NAIappendName ?? false,
-        localStopStrings: db.localStopStrings,
-        autoSuggestPrompt: db.autoSuggestPrompt,
-        customProxyRequestModel: db.customProxyRequestModel,
-        reverseProxyOobaArgs: safeStructuredClone(db.reverseProxyOobaArgs) ?? null,
-        top_p: db.top_p ?? 1,
-        promptSettings: safeStructuredClone(db.promptSettings) ?? null,
-        repetition_penalty: db.repetition_penalty,
-        min_p: db.min_p,
-        top_a: db.top_a,
-        openrouterProvider: db.openrouterProvider,
-        useInstructPrompt: db.useInstructPrompt,
-        customPromptTemplateToggle: db.customPromptTemplateToggle ?? "",
-        templateDefaultVariables: db.templateDefaultVariables ?? "",
-        moduleIntergration: db.moduleIntergration ?? "",
-        top_k: db.top_k,
-        instructChatTemplate: db.instructChatTemplate,
-        JinjaTemplate: db.JinjaTemplate ?? '',
-        jsonSchemaEnabled:db.jsonSchemaEnabled??false,
-        jsonSchema:db.jsonSchema ?? '',
-        strictJsonSchema:db.strictJsonSchema ?? true,
-        extractJson:db.extractJson ?? '',
-        groupOtherBotRole: db.groupOtherBotRole ?? 'user',
-        groupTemplate: db.groupTemplate ?? '',
-        seperateParametersEnabled: db.seperateParametersEnabled ?? false,
-        seperateParameters: safeStructuredClone(db.seperateParameters),
-        customAPIFormat: safeStructuredClone(db.customAPIFormat),
-        systemContentReplacement: db.systemContentReplacement,
-        systemRoleReplacement: db.systemRoleReplacement,
-        customFlags: safeStructuredClone(db.customFlags),
-        enableCustomFlags: db.enableCustomFlags,
-        regex: db.presetRegex,
-        image: pres?.[db.botPresetsId]?.image ?? '',
-        reasonEffort: db.reasoningEffort ?? 0,
-        thinkingTokens: db.thinkingTokens ?? null,
-        thinkingType: db.thinkingType ?? 'budget',
-        deepseekThinkingType: db.deepseekThinkingType ?? 'off',
-        adaptiveThinkingEffort: db.adaptiveThinkingEffort ?? 'high',
-        deepseekReasoningEffort: db.deepseekReasoningEffort ?? 'high',
-        outputImageModal: db.outputImageModal ?? false,
-        seperateModelsForAxModels: db.doNotChangeSeperateModels ? false : db.seperateModelsForAxModels ?? false,
-        seperateModels: db.doNotChangeSeperateModels ? null : safeStructuredClone(db.seperateModels),
-        modelTools: safeStructuredClone(db.modelTools),
-        fallbackModels: safeStructuredClone(db.fallbackModels),
-        fallbackWhenBlankResponse: db.fallbackWhenBlankResponse ?? false,
-        verbosity: db.verbosity ?? 1,
-        dynamicOutput: db.dynamicOutput ?? null
+    const fields = db as unknown as Record<string, unknown>
+    for (const [field, value] of Object.entries(presetMirrorDefaults)) {
+        const flag = identity.protectedPresetGroups[field as identity.ProtectedPresetField]
+        if (flag && db[flag]) continue
+        if (value === undefined) delete fields[field]
+        else fields[field] = safeStructuredClone(value)
     }
-    
-    return savedPreset
+    setPreset(db, preset)
+}
+
+export async function activatePresetOverride(index: number | null): Promise<void> {
+    const runtime = await import('./persistentDataRuntime.svelte')
+    await runtime.flushPendingData('preset-chain')
+    if (index === null) {
+        setEffectivePresetOverride(null)
+        return
+    }
+    const id = getDatabase().botPresets[index]?.id
+    if (!id) throw new Error('Preset was not found')
+    const value = await runtime.getPersistentDataRuntime().store.readPreset(id)
+    if (!value) throw new Error('Preset was not found')
+    const db = getDatabase()
+    const currentIndex = db.botPresets.findIndex(preset => preset.id === id)
+    if (currentIndex < 0) throw new Error('Preset was not found')
+    db.botPresets[currentIndex] = value.value
+    setEffectivePresetOverride(id, db)
+}
+
+export function flushEffectivePersonaEdits(db: Database = getDatabase()): void {
+    identity.flushEffectivePersonaEdits(db)
+}
+
+export function deriveEffectivePersonaMirrors(db: Database = getDatabase()): void {
+    identity.deriveEffectivePersonaMirrors(db)
+}
+
+export function flushEffectiveToggleEdits(db: Database = getDatabase()): void {
+    identity.flushEffectiveToggleEdits(db)
+}
+
+export function deriveEffectiveToggleVariables(db: Database = getDatabase(), chat?: Chat): void {
+    identity.deriveEffectiveToggleVariables(db, chat)
+}
+
+export function getExplicitGlobalChatVariables(db: Database = getDatabase()): Record<string, string> {
+    return identity.getExplicitGlobalChatVariables(db)
+}
+
+export function prepareImportedIdentityState(db: Database): void {
+    identity.prepareImportedIdentityState(db)
+}
+
+configurePersistentIdentityHooks({
+    beforeCapture() {
+        const db = DBState.db
+        flushEffectivePresetEdits(db)
+        flushEffectivePersonaEdits(db)
+        flushEffectiveToggleEdits(db)
+    },
+    afterRemoteApply() {
+        const db = DBState.db
+        deriveEffectivePresetMirrors(db)
+        deriveEffectivePersonaMirrors(db)
+        const character = db.characters?.[get(selectedCharID)]
+        deriveEffectiveToggleVariables(db, character?.chats?.[character.chatPage])
+    },
+    translateRootUnitIntents(mutations) {
+        return identity.translateRootUnitIntents(DBState.db, mutations)
+    },
+})
+
+export function captureCurrentPreset(db: Database = getDatabase()): botPreset | null {
+    flushEffectivePresetEdits(db)
+    const id = getEffectivePresetId(db)
+    const preset = id ? db.botPresets?.find(preset => preset.id === id) : undefined
+    return preset ? safeStructuredClone(preset) : null
 }
 
 const presetWorkingSetController = createPresetWorkingSetController({
     getDatabase,
     captureCurrentPreset,
+    getEffectivePresetId,
+    clearEffectivePresetOverride() {
+        identity.adoptEffectivePresetSelection(getDatabase(), applyEffectivePreset)
+    },
     applyPreset(root, preset) {
         setPreset(root as Database, preset)
     },
@@ -2227,6 +2250,9 @@ export function updateActivePresetImage(image: string): Promise<void> {
 }
 
 export function setPreset(db:Database, newPres: botPreset){
+    newPres = Object.fromEntries(Object.values(identity.presetMirrorMap)
+        .filter(field => Object.hasOwn(newPres, field))
+        .map(field => [field, (newPres as unknown as Record<string, unknown>)[field]])) as unknown as botPreset
     db.apiType = newPres.apiType ?? db.apiType
     db.localNetworkMode = newPres.localNetworkMode ?? db.localNetworkMode
     db.localNetworkTimeoutSec = newPres.localNetworkTimeoutSec ?? db.localNetworkTimeoutSec
@@ -2253,7 +2279,7 @@ export function setPreset(db:Database, newPres: botPreset){
     db.ainconfig = safeStructuredClone(newPres.ainconfig ?? db.ainconfig)
     db.openrouterRequestModel = newPres.openrouterRequestModel ?? db.openrouterRequestModel
     db.proxyRequestModel = newPres.proxyRequestModel ?? db.proxyRequestModel
-    db.NAIsettings = newPres.NAISettings ?? db.NAIsettings
+    db.NAIsettings = safeStructuredClone(newPres.NAISettings ?? db.NAIsettings)
     db.autoSuggestPrompt = newPres.autoSuggestPrompt ?? db.autoSuggestPrompt
     db.autoSuggestPrefix = newPres.autoSuggestPrefix ?? db.autoSuggestPrefix
     db.autoSuggestClean = newPres.autoSuggestClean ?? db.autoSuggestClean

@@ -6,6 +6,7 @@ export const DBState = $state({ db: {} as Database })
 export const selectedCharID = writable(0)
 export const ReloadGUIPointer = writable(0)
 export const alertConfirm = async () => true
+export const alertCheckboxConfirm = async () => ({ confirmed: false, checked: false })
 export const alertError = (message: string) => { throw new Error(message) }
 export const alertMd = () => {}
 export const tokenizeAccurate = async () => 0

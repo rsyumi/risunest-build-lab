@@ -116,6 +116,175 @@ pub(crate) fn pinned_asset_alias(
         .map(|versioned| versioned.value)
 }
 
+pub(super) const PRESET_MIRRORS: &[(&str, &str)] = &[
+    ("apiType", "apiType"),
+    ("localNetworkMode", "localNetworkMode"),
+    ("localNetworkTimeoutSec", "localNetworkTimeoutSec"),
+    ("mainPrompt", "mainPrompt"),
+    ("jailbreak", "jailbreak"),
+    ("globalNote", "globalNote"),
+    ("temperature", "temperature"),
+    ("maxContext", "maxContext"),
+    ("maxResponse", "maxResponse"),
+    ("frequencyPenalty", "frequencyPenalty"),
+    ("PresensePenalty", "PresensePenalty"),
+    ("formatingOrder", "formatingOrder"),
+    ("aiModel", "aiModel"),
+    ("subModel", "subModel"),
+    ("currentPluginProvider", "currentPluginProvider"),
+    ("textgenWebUIStreamURL", "textgenWebUIStreamURL"),
+    ("textgenWebUIBlockingURL", "textgenWebUIBlockingURL"),
+    ("forceReplaceUrl", "forceReplaceUrl"),
+    ("promptPreprocess", "promptPreprocess"),
+    ("bias", "bias"),
+    ("koboldURL", "koboldURL"),
+    ("proxyKey", "proxyKey"),
+    ("ooba", "ooba"),
+    ("ainconfig", "ainconfig"),
+    ("proxyRequestModel", "proxyRequestModel"),
+    ("openrouterRequestModel", "openrouterRequestModel"),
+    ("promptTemplate", "promptTemplate"),
+    ("NAIadventure", "NAIadventure"),
+    ("NAIappendName", "NAIappendName"),
+    ("localStopStrings", "localStopStrings"),
+    ("autoSuggestPrompt", "autoSuggestPrompt"),
+    ("autoSuggestPrefix", "autoSuggestPrefix"),
+    ("autoSuggestClean", "autoSuggestClean"),
+    ("customProxyRequestModel", "customProxyRequestModel"),
+    ("reverseProxyOobaArgs", "reverseProxyOobaArgs"),
+    ("top_p", "top_p"),
+    ("promptSettings", "promptSettings"),
+    ("repetition_penalty", "repetition_penalty"),
+    ("min_p", "min_p"),
+    ("top_a", "top_a"),
+    ("openrouterProvider", "openrouterProvider"),
+    ("useInstructPrompt", "useInstructPrompt"),
+    ("customPromptTemplateToggle", "customPromptTemplateToggle"),
+    ("templateDefaultVariables", "templateDefaultVariables"),
+    ("moduleIntergration", "moduleIntergration"),
+    ("top_k", "top_k"),
+    ("instructChatTemplate", "instructChatTemplate"),
+    ("JinjaTemplate", "JinjaTemplate"),
+    ("jsonSchemaEnabled", "jsonSchemaEnabled"),
+    ("jsonSchema", "jsonSchema"),
+    ("strictJsonSchema", "strictJsonSchema"),
+    ("extractJson", "extractJson"),
+    ("groupOtherBotRole", "groupOtherBotRole"),
+    ("groupTemplate", "groupTemplate"),
+    ("seperateParametersEnabled", "seperateParametersEnabled"),
+    ("seperateParameters", "seperateParameters"),
+    ("customAPIFormat", "customAPIFormat"),
+    ("systemContentReplacement", "systemContentReplacement"),
+    ("systemRoleReplacement", "systemRoleReplacement"),
+    ("customFlags", "customFlags"),
+    ("enableCustomFlags", "enableCustomFlags"),
+    ("thinkingTokens", "thinkingTokens"),
+    ("thinkingType", "thinkingType"),
+    ("deepseekThinkingType", "deepseekThinkingType"),
+    ("adaptiveThinkingEffort", "adaptiveThinkingEffort"),
+    ("deepseekReasoningEffort", "deepseekReasoningEffort"),
+    ("outputImageModal", "outputImageModal"),
+    ("seperateModelsForAxModels", "seperateModelsForAxModels"),
+    ("seperateModels", "seperateModels"),
+    ("modelTools", "modelTools"),
+    ("fallbackModels", "fallbackModels"),
+    ("fallbackWhenBlankResponse", "fallbackWhenBlankResponse"),
+    ("verbosity", "verbosity"),
+    ("dynamicOutput", "dynamicOutput"),
+    ("NAIsettings", "NAISettings"),
+    ("presetRegex", "regex"),
+    ("reasoningEffort", "reasonEffort"),
+];
+pub(super) fn protected_preset_flag(key: &str) -> Option<&'static str> {
+    match key {
+        "seperateModelsForAxModels" | "seperateModels" => Some("doNotChangeSeperateModels"),
+        "fallbackModels" | "fallbackWhenBlankResponse" => Some("doNotChangeFallbackModels"),
+        "seperateParameters" => Some("disableSeperateParameterChangeOnPresetChange"),
+        _ => None,
+    }
+}
+pub(crate) fn derive_identity_root(
+    connection: &Connection,
+    generation: &str,
+    root: &mut Map<String, Value>,
+) -> StoreResult<()> {
+    let presets: Vec<Value> = {
+        let mut q = connection.prepare(
+            "SELECT value FROM bot_presets WHERE generation=?1 ORDER BY configured_index,preset_id",
+        )?;
+        let records = q
+            .query_map([generation], |r| r.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        records
+            .into_iter()
+            .map(|record| serde_json::from_str(&record).map_err(Into::into))
+            .collect::<StoreResult<_>>()?
+    };
+    let selected = match root.get("botPresetsId") {
+        Some(Value::String(id)) => presets
+            .iter()
+            .position(|p| p.get("id").and_then(Value::as_str) == Some(id.as_str()))
+            .unwrap_or(0),
+        Some(value) => value.as_u64().unwrap_or(0) as usize,
+        None => 0,
+    };
+    if root.contains_key("botPresetsId"){root.insert("botPresetsId".into(), Value::from(selected));}
+    if let Some(preset) = presets.get(selected) {
+        for &(key, field) in PRESET_MIRRORS {
+            let flag = match key {
+                "seperateModelsForAxModels" | "seperateModels" => Some("doNotChangeSeperateModels"),
+                "fallbackModels" | "fallbackWhenBlankResponse" => Some("doNotChangeFallbackModels"),
+                "seperateParameters" => Some("disableSeperateParameterChangeOnPresetChange"),
+                _ => None,
+            };
+            let protected =
+                flag.is_some_and(|f| root.get(f).and_then(Value::as_bool).unwrap_or(false));
+            let value = if protected {
+                root.get("protectedPresetValues").and_then(|v| v.get(key))
+            } else {
+                preset.get(field)
+            }
+            .cloned();
+            if let Some(value) = value {
+                root.insert(key.into(), value);
+            } else {
+                root.shift_remove(key);
+            }
+        }
+    }
+    let personas = root.get("personas").and_then(Value::as_array);
+    let selected = match root.get("selectedPersona") {
+        Some(Value::String(id)) => personas
+            .and_then(|p| {
+                p.iter()
+                    .position(|v| v.get("id").and_then(Value::as_str) == Some(id.as_str()))
+            })
+            .unwrap_or(0),
+        Some(value) => value.as_u64().unwrap_or(0) as usize,
+        None => 0,
+    };
+    let persona = personas.and_then(|p| p.get(selected)).cloned();
+    if root.contains_key("selectedPersona"){root.insert("selectedPersona".into(), Value::from(selected));}
+    if let Some(persona) = persona {
+        for (key, field) in [
+            ("username", "name"),
+            ("userIcon", "icon"),
+            ("personaPrompt", "personaPrompt"),
+            ("userNote", "note"),
+        ] {
+            if let Some(value) = persona.get(field) {
+                root.insert(key.into(), value.clone());
+            } else {
+                root.shift_remove(key);
+            }
+        }
+    }
+    if let Some(value) = root.get("explicitGlobalChatVariables").cloned() {
+        root.insert("globalChatVariables".into(), value);
+    }
+    Ok(())
+}
+
 const RISU_SAVE_HEADER: &[u8] = b"RISUSAVE\0";
 
 const CONFIG: u8 = 0;
@@ -309,6 +478,7 @@ fn create_controlled_inner(
         serde_json::from_str(&root)?,
         "Persistent root must be an object",
     )?;
+    derive_identity_root(connection,&target.generation,&mut root)?;
     root.shift_remove("account");
     if !omit_account {
         if let Some(account) = account {
@@ -1545,15 +1715,15 @@ mod tests {
                 &staging,
                 &json!({
                     "modules": [
-                        {
+                        {"id": "module-0",
                             "name": "Leased Module",
                             "assets": [
                                 ["first", "assets/shared.bin", "PNG", {"tail": 1}],
                                 ["second", "assets/shared.bin", "pNg", "tuple-tail"]
                             ]
                         },
-                        {"name": "Missing Assets"},
-                        {"name": "Empty Assets", "assets": []}
+                        {"id": "module-1", "name": "Missing Assets"},
+                        {"id": "module-2", "name": "Empty Assets", "assets": []}
                     ]
                 }),
             )
@@ -1586,13 +1756,13 @@ mod tests {
                         2,
                     ),
                     AssetOwnerHead::present(
-                        AssetOwnerLocator::RootModuleAssets { index: 0 },
+                        AssetOwnerLocator::RootModuleAssets { module_id: "module-0".to_owned() },
                         manifest.content_hash,
                         2,
                     ),
-                    AssetOwnerHead::absent(AssetOwnerLocator::RootModuleAssets { index: 1 }),
+                    AssetOwnerHead::absent(AssetOwnerLocator::RootModuleAssets { module_id: "module-1".to_owned() }),
                     AssetOwnerHead::present(
-                        AssetOwnerLocator::RootModuleAssets { index: 2 },
+                        AssetOwnerLocator::RootModuleAssets { module_id: "module-2".to_owned() },
                         cas.prepare_bytes(
                             &owner_manifest_codec::encode_owner_manifest(&[]).unwrap(),
                         )
@@ -1608,7 +1778,7 @@ mod tests {
 
         let current = store.replace_begin().unwrap().staging_id;
         store
-            .replace_put_root(&current, &json!({"modules": [{"name": "Current Module"}]}))
+            .replace_put_root(&current, &json!({"modules": [{"id": "module-0", "name": "Current Module"}]}))
             .unwrap();
         store.replace_put_presets(&current, &[]).unwrap();
         store
@@ -1683,7 +1853,8 @@ mod tests {
             fixture["moduleIndex"].as_u64().unwrap(),
         )
         .unwrap();
-        assert_semantically_equal(&projected.value, &fixture["expected"]);
+        let mut expected=fixture["expected"].clone();expected["id"]=serde_json::json!("module-0");
+        assert_semantically_equal(&projected.value, &expected);
         let occurrences = projected.asset_entries.unwrap();
         assert_eq!(
             occurrences
@@ -1723,8 +1894,8 @@ mod tests {
                 &json!({
                     "username": "Native Export",
                     "account": { "token": "secret" },
-                    "modules": [{ "name": "Module" }],
-                    "loadouts": [{ "name": "Loadout" }],
+                    "modules": [{"id": "module-0",  "name": "Module" }],
+                    "loadouts": [{ "id":"loadout-0", "name": "Loadout" }],
                     "plugins": [{ "name": "Plugin" }],
                     "pluginCustomStorage": { "plugin": { "enabled": true } }
                 }),
@@ -1733,7 +1904,7 @@ mod tests {
         store
             .replace_put_presets(
                 &staging,
-                &[json!({ "name": "Preset A" }), json!({ "name": "Preset B" })],
+                &[json!({ "id":"preset-a", "name": "Preset A" }), json!({ "id":"preset-b", "name": "Preset B" })],
             )
             .unwrap();
         store
@@ -1789,22 +1960,22 @@ mod tests {
                     "customBackground": resource,
                     "userIcon": resource,
                     "unrelated": "old",
-                    "modules": [{
+                    "modules": [{"id": "module-0",
                         "assets": [["module", resource, "png"]],
                         "icon": resource,
                         "unrelated": "old"
                     }],
-                    "personas": [{
+                    "personas": [{"id": "persona-0",
                         "icon": resource,
-                        "embeddedModule": {
+                        "embeddedModule": {"id": "embedded-0",
                             "assets": [["persona", resource, "png"]],
                             "icon": resource,
                             "unrelated": "old"
                         }
                     }],
                     "characterOrder": [{ "imgFile": resource, "unrelated": "old" }],
-                    "loadouts": [{ "resource": "old" }],
-                    "plugins": [{ "resource": "old" }],
+                    "loadouts": [{ "id":"loadout-0", "resource": "old" }],
+                    "plugins": [{ "name":"synthetic-plugin", "resource": "old" }],
                     "pluginCustomStorage": {
                         "resource": plugin_resource,
                         "prose": "prefix assets/plugin.bin"
@@ -1884,7 +2055,7 @@ mod tests {
                 "unrelated": "old",
                 "nested": { "icon": "old" },
                 "modules": [
-                    {
+                    {"id": "module-0",
                         "assets": [
                             ["first", "old", "png"],
                             ["second", "chain-start"],
@@ -1901,15 +2072,15 @@ mod tests {
                     "malformed"
                 ],
                 "personas": [
-                    {
+                    {"id": "persona-0",
                         "icon": "old",
-                        "embeddedModule": {
+                        "embeddedModule": {"id": "embedded-0",
                             "assets": [["embedded", "old"], null],
                             "icon": "old",
                             "unrelated": "old"
                         }
                     },
-                    { "icon": null, "embeddedModule": null },
+                    {"id": "persona-1",  "icon": null, "embeddedModule": null },
                     null
                 ],
                 "characterOrder": [
@@ -1933,7 +2104,7 @@ mod tests {
                 "unrelated": "old",
                 "nested": { "icon": "old" },
                 "modules": [
-                    {
+                    {"id": "module-0",
                         "assets": [
                             ["first", "new", "png"],
                             ["second", "chain-middle"],
@@ -1950,15 +2121,15 @@ mod tests {
                     "malformed"
                 ],
                 "personas": [
-                    {
+                    {"id": "persona-0",
                         "icon": "new",
-                        "embeddedModule": {
+                        "embeddedModule": {"id": "embedded-0",
                             "assets": [["embedded", "new"], null],
                             "icon": "new",
                             "unrelated": "old"
                         }
                     },
-                    { "icon": null, "embeddedModule": null },
+                    {"id": "persona-1",  "icon": null, "embeddedModule": null },
                     null
                 ],
                 "characterOrder": [
@@ -2422,7 +2593,7 @@ mod tests {
         );
         assert_eq!(
             blocks[1].value,
-            json!([{ "name": "Preset A" }, { "name": "Preset B" }])
+            json!([{ "id":"preset-a", "name": "Preset A" }, { "id":"preset-b", "name": "Preset B" }])
         );
         assert_eq!(blocks[5].value, json!({ "plugin": { "enabled": true } }));
         assert_eq!(blocks[7].value["chats"][0]["message"][0]["data"], "trash");
@@ -2434,7 +2605,7 @@ mod tests {
     fn moves_large_owned_root_and_block_values_without_recursive_clones() {
         let parsed = json!({
             "before": { "payload": "r".repeat(2 * 1024 * 1024) },
-            "modules": [{ "payload": "m".repeat(2 * 1024 * 1024) }],
+            "modules": [{"id": "module-0",  "payload": "m".repeat(2 * 1024 * 1024) }],
             "loadouts": [{ "payload": "l".repeat(2 * 1024 * 1024) }],
             "plugins": [{ "payload": "p".repeat(2 * 1024 * 1024) }],
             "after": 2,
@@ -2629,7 +2800,7 @@ mod tests {
                         value: json!("unicode"),
                     },
                 ]),
-            })
+            ..Default::default()})
             .unwrap();
         let lease = store.acquire_revision(committed.revision).unwrap().lease;
 

@@ -1,13 +1,7 @@
 import type { PluginStorageValueCursor } from "../storage/persistentDataStore"
-import { reconcilePluginListUpdate } from "./pluginListUpdate"
+import { reconcilePluginListUpdate } from './pluginListUpdate'
 import type { RisuPlugin } from "./plugins.svelte"
 import type { Chat, Database } from '../storage/database.svelte'
-import type { CommittedApplyOutcome } from '../storage/persistentDataRuntime'
-import type {
-    PersistentCompleteCharacterMutation,
-    PersistentReplacementOptions,
-    PersistentScopedReplacementOptions,
-} from '../storage/saveCoordinator'
 import type {
     CompleteConversationLease,
     SelectedConversationTarget,
@@ -22,8 +16,8 @@ import type {
     DataRevision,
     PersistentDataStore,
     PersistentRevisionLease,
-    PluginStorageMutation,
     PluginStorageValue,
+    ConversationMutation,
 } from '../storage/persistentDataStore'
 import {
     acquireCurrentRevisionWithRetry,
@@ -36,9 +30,10 @@ import {
 } from '../storage/persistentRecordIterator'
 import { defineOwnEnumerableProperty } from '../storage/ownEnumerableProperty'
 import { isConversationSummaryStub } from '../storage/conversationResidency'
-import type { OwnerScopedStorageMutation } from './pluginStorageStore'
 import { resolveLifecyclePluginStorageOwner } from './pluginStorageStore'
 import type { PluginStorageMeta } from './pluginOwner'
+import { attachPluginReadProvenance, PluginReadBaselineError, PluginReadBaselines, collectPluginReadProvenance, type PluginReadProvenance } from './pluginReadBaselines'
+import { pluginUnitIntents, type PluginUnitMutation, type PluginWholeMessageIntent } from './pluginUnitIntents'
 
 export const PLUGIN_SUMMARY_QUERY_DEFAULT_LIMIT = 50
 export const PLUGIN_SUMMARY_QUERY_MAX_LIMIT = 100
@@ -145,6 +140,13 @@ export interface PluginDatabaseAccessDependencies {
     /** The plugin every call in this instance is confined to. */
     owner: string
     store: PersistentDataStore
+    getPersistentRevision(): DataRevision
+    commitPersistentUnitIntent(
+        reason: string,
+        units: readonly PluginUnitMutation[],
+        conversations?: readonly ConversationMutation[],
+        wholeMessages?: readonly PluginWholeMessageIntent[],
+    ): Promise<void>
     flushPendingData(reason: string): Promise<void>
     getCompatibilityDatabase(): Database
     getSelectedCharacterId(): string | null
@@ -158,43 +160,13 @@ export interface PluginDatabaseAccessDependencies {
         expectedSession: ActiveConversationSession,
     ): boolean
     invalidateActiveConversationSession?(): void
-    replacePersistentCompleteCharacter(
-        characterId: string,
-        reason: string,
-        mutate: PersistentCompleteCharacterMutation,
-        options?: PersistentScopedReplacementOptions,
-    ): Promise<boolean>
-    replacePersistentConversation(
-        characterId: string,
-        conversationId: string,
-        reason: string,
-        replacement: Chat,
-        options?: PersistentScopedReplacementOptions,
-    ): Promise<boolean>
     reportIdentityReplacementRejected(
         diagnostic: PluginIdentityReplacementDiagnostic,
     ): void
     getNavigationGeneration(): number
     getStorageAuthorityEpoch(): number
     assertPersistentMutationAllowed(expectedAuthorityEpoch?: number): void
-    applyCompatibilityDatabaseLite(database: Record<string, unknown>): void
     readPluginStorageSnapshot(): Promise<Record<string, unknown>>
-    mutatePluginStorage(mutations: readonly OwnerScopedStorageMutation[]): Promise<void>
-    invalidatePluginStorage(): void
-    materializeDatabaseSnapshot(
-        reason: string,
-        options?: { includePluginStorageValues?: boolean },
-    ): Promise<{
-        database: Database
-        revision: DataRevision
-        mutationGeneration: number
-        pluginStorageValues?: PluginStorageValue[]
-    }>
-    replacePersistentDatabase(
-        database: Database,
-        reason: string,
-        options: PersistentReplacementOptions,
-    ): Promise<CommittedApplyOutcome>
     prepareAuthoritativeDatabaseUpdate?(
         database: Record<string, unknown>,
     ): Promise<Record<string, unknown>>
@@ -202,6 +174,8 @@ export interface PluginDatabaseAccessDependencies {
 }
 
 export interface PluginDatabaseAccess {
+    expireReadBaselines(): void
+    closeReadBaselines(): void
     getFullObjectSnapshotStream(
         target: { characterIndex?: number; chatIndex?: number },
         context: PluginFullObjectCallContext,
@@ -263,6 +237,7 @@ export interface PluginIframeSnapshot {
 }
 
 export type PluginDatabaseSnapshotChunk =
+    | { type: 'provenance'; entries: PluginReadProvenance[] }
     | { type: 'set'; key: string; value: unknown }
     | { type: 'arrayStart'; key: string }
     | { type: 'arrayPush'; key: string; value: unknown }
@@ -271,6 +246,18 @@ export type PluginDatabaseSnapshotChunk =
     | { type: 'characterStart'; key: 'characters'; value: unknown }
     | { type: 'conversationStart'; key: 'characters'; value: unknown }
     | { type: 'message'; key: 'characters'; value: unknown }
+
+function accumulatePluginSnapshotChunk(result: Record<string, any>, chunk: PluginDatabaseSnapshotChunk): void {
+    if (chunk.type === 'provenance') return
+    if (chunk.type === 'set') defineOwnEnumerableProperty(result, chunk.key, structuredClone(chunk.value))
+    else if (chunk.type === 'arrayStart') defineOwnEnumerableProperty(result, chunk.key, [])
+    else if (chunk.type === 'arrayPush') result[chunk.key].push(structuredClone(chunk.value))
+    else if (chunk.type === 'recordStart') defineOwnEnumerableProperty(result, chunk.key, {})
+    else if (chunk.type === 'recordSet') defineOwnEnumerableProperty(result[chunk.key], chunk.entryKey, structuredClone(chunk.value))
+    else if (chunk.type === 'characterStart') result.characters.push({ ...structuredClone(chunk.value as object), chats: [] })
+    else if (chunk.type === 'conversationStart') result.characters.at(-1).chats.push({ ...structuredClone(chunk.value as object), message: [] })
+    else if (chunk.type === 'message') result.characters.at(-1).chats.at(-1).message.push(structuredClone(chunk.value))
+}
 
 async function* streamPinnedPluginValues(reader: PersistentRevisionLease, owner: string): AsyncGenerator<PluginStorageValue> {
     let afterKey: PluginStorageValueCursor | undefined
@@ -461,69 +448,6 @@ function hasCharacterUpdate(database: Record<string, unknown>): boolean {
     return Object.prototype.hasOwnProperty.call(database, 'characters')
 }
 
-function pluginStorageMutations(
-    update: Record<string, unknown>,
-    allowedKeys: readonly string[],
-): OwnerScopedStorageMutation[] {
-    const allowedKeySet = new Set(allowedKeys)
-    const hasExplicitStorage =
-        allowedKeySet.has('pluginCustomStorage') &&
-        Object.prototype.hasOwnProperty.call(update, 'pluginCustomStorage')
-    const mutations: OwnerScopedStorageMutation[] = []
-    if (hasExplicitStorage) {
-        mutations.push({ type: 'clear' })
-        const storage = { ...(update.pluginCustomStorage as Record<string, unknown>) }
-        for (const key of Object.keys(update).filter((key) => !allowedKeySet.has(key)).sort()) {
-            storage[key] = update[key]
-        }
-        for (const key of Object.keys(storage)) {
-            mutations.push({ type: 'set', key, value: storage[key] })
-        }
-        return mutations
-    }
-    for (const key of Object.keys(update).filter((key) => !allowedKeySet.has(key)).sort()) {
-        mutations.push({ type: 'set', key, value: update[key] })
-    }
-    return mutations
-}
-
-function applyOwnerScopedStorageMutations(
-    values: readonly PluginStorageValue[],
-    owner: string,
-    mutations: readonly OwnerScopedStorageMutation[],
-): PluginStorageValue[] {
-    const result = values.map((value) => ({ ...value }))
-    for (const mutation of mutations) {
-        if (mutation.type === 'clear') {
-            for (let index = result.length - 1; index >= 0; index--) {
-                if (result[index].owner === owner) result.splice(index, 1)
-            }
-            continue
-        }
-        const index = result.findIndex(
-            (value) => value.owner === owner && value.key === mutation.key,
-        )
-        if (mutation.type === 'delete') {
-            if (index >= 0) result.splice(index, 1)
-            continue
-        }
-        const value = { owner, key: mutation.key, value: mutation.value }
-        if (index >= 0) result[index] = value
-        else result.push(value)
-    }
-    return result
-}
-
-function compatibilityOnlyUpdate(
-    update: Record<string, unknown>,
-    allowedKeys: readonly string[],
-): Record<string, unknown> {
-    const allowedKeySet = new Set(allowedKeys)
-    return Object.fromEntries(Object.entries(update).filter(([key]) =>
-        key !== 'pluginCustomStorage' && allowedKeySet.has(key),
-    ))
-}
-
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
     if (value === null || typeof value !== 'object') return false
     const prototype = Object.getPrototypeOf(value)
@@ -682,6 +606,100 @@ export function applyPluginDatabaseUpdate(
 export function createPluginDatabaseAccess(
     dependencies: PluginDatabaseAccessDependencies,
 ): PluginDatabaseAccess {
+    const readBaselines = new PluginReadBaselines(dependencies.owner, dependencies.getStorageAuthorityEpoch)
+    const admissionDatabase = () => dependencies.snapshot(dependencies.getCompatibilityDatabase())
+    const snapshotWithProvenance = <T>(value: T): T => {
+        const detached = dependencies.snapshot(value)
+        attachPluginReadProvenance(detached, collectPluginReadProvenance(value))
+        return detached
+    }
+    const databaseUnitChanges = (intents: ReturnType<PluginReadBaselines['intent']>, submitted: Record<string, unknown>, allowedKeys: readonly string[]) => {
+        const normalized = intents.map(intent => allowedKeys.includes(String(intent.path[0])) || intent.path[0] === 'pluginCustomStorage'
+            ? intent
+            : { ...intent, path: ['pluginCustomStorage', ...intent.path] })
+        return pluginUnitIntents(normalized, 'database', dependencies.owner, submitted)
+    }
+    const captureCharacterAdmission = (characterId: string, characterIndex?: number): Promise<unknown> => {
+        const live = dependencies.getCompatibilityDatabase().characters?.find(value => value.chaId === characterId)
+        const hydratedDetail = Boolean(live && !isWorkingSetCharacterStub(live))
+        const hydratedChats = new Set(live?.chats.filter(chat => !isConversationSummaryStub(chat)).map(chat => chat.id))
+        const admission = live ? dependencies.snapshot(live) : undefined
+        if (admission && hydratedDetail && admission.chats.every(chat => hydratedChats.has(chat.id))) return Promise.resolve(admission)
+        const revision = dependencies.getPersistentRevision()
+        const authority = dependencies.getStorageAuthorityEpoch()
+        const pin = dependencies.store.acquireRevision(revision)
+        return pin.then(reader => withPersistentRevisionLease(reader, async reader => {
+            assertPinnedRevision(revision, reader.revision, 'Plugin admission')
+            dependencies.assertPersistentMutationAllowed(authority)
+            const target = characterIndex === undefined ? { characterId } : await resolvePinnedCharacterTarget(reader, characterIndex)
+            if (!target) return {}
+            const persisted = await readPinnedCompleteCharacter(reader, target.characterId)
+            dependencies.assertPersistentMutationAllowed(authority)
+            if (!persisted) throw new PluginReadBaselineError('target')
+            if (!admission || !hydratedDetail) return dependencies.snapshot(persisted)
+            const { chats, ...detail } = admission
+            return {
+                ...dependencies.snapshot(persisted), ...detail,
+                chats: persisted.chats.map(chat => {
+                    const captured = chats.find(value => value.id === chat.id)
+                    return captured && hydratedChats.has(captured.id) ? captured : dependencies.snapshot(chat)
+                }),
+            }
+        })).catch(error => {
+            if (error instanceof PluginReadBaselineError) throw error
+            throw new PluginReadBaselineError('stale')
+        })
+    }
+    const captureDatabaseAdmission = (submitted: Record<string, unknown>): Promise<Record<string, unknown>> => {
+        const liveHydration = new Map(dependencies.getCompatibilityDatabase().characters?.map(character => [character.chaId, { detail: !isWorkingSetCharacterStub(character), chats: new Set(character.chats.filter(chat => !isConversationSummaryStub(chat)).map(chat => chat.id)) }]))
+        const captured = admissionDatabase() as unknown as Record<string, any>
+        const needsPinned = ['characters', 'botPresets', 'pluginCustomStorage'].some(key => Object.hasOwn(submitted, key))
+        if (!needsPinned) return Promise.resolve(captured)
+        const revision = dependencies.getPersistentRevision()
+        const authority = dependencies.getStorageAuthorityEpoch()
+        const pin = dependencies.store.acquireRevision(revision)
+        return pin.then(reader => withPersistentRevisionLease(reader, async reader => {
+            assertPinnedRevision(revision, reader.revision, 'Plugin database admission')
+            dependencies.assertPersistentMutationAllowed(authority)
+            if (Object.hasOwn(submitted, 'characters')) {
+                const characters: PluginCompleteCharacter[] = []
+                for await (const item of iteratePinnedCharacters(reader)) {
+                    const character = await readPinnedCompleteCharacter(reader, item.summary.id)
+                    if (!character) throw new PluginReadBaselineError('target')
+                    const live = (captured.characters as PluginCompleteCharacter[] | undefined)?.find(value => value.chaId === item.summary.id)
+                    const hydration = live && liveHydration.get(live.chaId)
+                    const complete = dependencies.snapshot(character)
+                    if (live && hydration) {
+                        const chats = complete.chats.map(chat => hydration.chats.has(chat.id) ? live.chats.find(value => value.id === chat.id)! : chat)
+                        characters.push(hydration.detail ? { ...live, chats } : { ...complete, chats })
+                    } else characters.push(complete)
+                }
+                captured.characters = characters
+            }
+            if (Object.hasOwn(submitted, 'botPresets')) {
+                const catalog = await reader.queryPresets()
+                assertPinnedRevision(revision, catalog.revision, 'Plugin preset admission')
+                const presets: unknown[] = []
+                for (const item of catalog.items) {
+                    const preset = await reader.readPreset(item.id)
+                    if (!preset) throw new PluginReadBaselineError('target')
+                    assertPinnedRevision(revision, preset.revision, 'Plugin preset admission')
+                    presets.push(dependencies.snapshot(preset.value))
+                }
+                captured.botPresets = presets
+            }
+            if (Object.hasOwn(submitted, 'pluginCustomStorage')) {
+                const storage: Record<string, unknown> = {}
+                for await (const item of streamPinnedPluginValues(reader, dependencies.owner)) defineOwnEnumerableProperty(storage, item.key, dependencies.snapshot(item.value))
+                captured.pluginCustomStorage = storage
+            }
+            dependencies.assertPersistentMutationAllowed(authority)
+            return captured
+        })).catch(error => {
+            if (error instanceof PluginReadBaselineError) throw error
+            throw new PluginReadBaselineError('stale')
+        })
+    }
     let openPromise: Promise<void> | undefined
     const openStore = () => (openPromise ??= dependencies.store.open().finally(() => {
         openPromise = undefined
@@ -774,7 +792,10 @@ export function createPluginDatabaseAccess(
     }
 
     return {
+        expireReadBaselines: () => readBaselines.expire(),
+        closeReadBaselines: () => readBaselines.close(),
         async getFullObjectSnapshotStream(target, context) {
+            const readAuthority = dependencies.getStorageAuthorityEpoch()
             throwIfFullObjectCallAborted(context.signal)
             await dependencies.flushPendingData('plugin-full-object-read')
             throwIfFullObjectCallAborted(context.signal)
@@ -795,13 +816,25 @@ export function createPluginDatabaseAccess(
                 if (!detail) return target.characterIndex === undefined ? undefined : null
                 assertPinnedRevision(reader.revision, detail.revision, 'Character')
                 const chunks = (async function* (): AsyncGenerator<PluginDatabaseSnapshotChunk> {
+                    const baseline = { characters: [] } as unknown as Record<string, any>
                     yield { type: 'arrayStart', key: 'characters' }
                     if ('conversationId' in resolved) {
+                        baseline.characters.push({ ...structuredClone(detail.value as object), chats: [] })
                         yield { type: 'characterStart', key: 'characters', value: detail.value }
-                        yield* streamPinnedConversation(reader, resolved.characterId, String(resolved.conversationId))
+                        for await (const chunk of streamPinnedConversation(reader, resolved.characterId, String(resolved.conversationId))) {
+                            accumulatePluginSnapshotChunk(baseline, chunk)
+                            yield chunk
+                        }
                     } else {
-                        yield* streamPinnedCharacter(reader, resolved.characterId, detail.value)
+                        for await (const chunk of streamPinnedCharacter(reader, resolved.characterId, detail.value)) {
+                            accumulatePluginSnapshotChunk(baseline, chunk)
+                            yield chunk
+                        }
                     }
+                    const character = baseline.characters[0]
+                    if ('conversationId' in resolved) readBaselines.track(character.chats[0], 'conversation', JSON.stringify([resolved.characterId, resolved.conversationId]), reader.revision, readAuthority)
+                    else readBaselines.track(character, 'character', resolved.characterId, reader.revision, readAuthority)
+                    yield { type: 'provenance', entries: collectPluginReadProvenance(baseline) }
                 })()
                 let closed = false
                 const close = async () => {
@@ -841,6 +874,7 @@ export function createPluginDatabaseAccess(
         },
 
         async getCurrentCharacter(context) {
+            const readAuthority = dependencies.getStorageAuthorityEpoch()
             throwIfFullObjectCallAborted(context.signal)
             await dependencies.flushPendingData('plugin-full-object-read')
             throwIfFullObjectCallAborted(context.signal)
@@ -854,11 +888,12 @@ export function createPluginDatabaseAccess(
                 throwIfFullObjectCallAborted(context.signal)
                 const value = await readPinnedCompleteCharacter(reader, characterId)
                 throwIfFullObjectCallAborted(context.signal)
-                return value === null ? undefined : dependencies.snapshot(value)
+                return value === null ? undefined : readBaselines.track(dependencies.snapshot(value), 'character', characterId, reader.revision, readAuthority)
             })
         },
 
         async getCharacterFromIndex(index, context) {
+            const readAuthority = dependencies.getStorageAuthorityEpoch()
             throwIfFullObjectCallAborted(context.signal)
             await dependencies.flushPendingData('plugin-full-object-read')
             throwIfFullObjectCallAborted(context.signal)
@@ -871,11 +906,12 @@ export function createPluginDatabaseAccess(
                     ? await readPinnedCompleteCharacter(reader, target.characterId)
                     : null
                 throwIfFullObjectCallAborted(context.signal)
-                return value === null ? null : dependencies.snapshot(value)
+                return value === null ? null : readBaselines.track(dependencies.snapshot(value), 'character', target!.characterId, reader.revision, readAuthority)
             })
         },
 
         async getChatFromIndex(characterIndex, chatIndex, context) {
+            const readAuthority = dependencies.getStorageAuthorityEpoch()
             throwIfFullObjectCallAborted(context.signal)
             await dependencies.flushPendingData('plugin-full-object-read')
             throwIfFullObjectCallAborted(context.signal)
@@ -899,15 +935,17 @@ export function createPluginDatabaseAccess(
                     )
                 }
                 throwIfFullObjectCallAborted(context.signal)
-                return found === null ? null : dependencies.snapshot(found.value)
+                return found === null ? null : readBaselines.track(dependencies.snapshot(found.value), 'conversation', JSON.stringify([target!.characterId, target!.conversationId]), reader.revision, readAuthority)
             })
         },
 
         async setCurrentCharacter(character, context) {
             validatePluginCompleteCharacter(character)
-            const candidate = dependencies.snapshot(character)
+            const admission = readBaselines.hasRead('character', character.chaId) ? undefined : captureCharacterAdmission(dependencies.getSelectedCharacterId() ?? character.chaId)
+            const candidate = snapshotWithProvenance(character)
             const selectedBoundary = captureSelectedCallBoundary()
             throwIfFullObjectCallAborted(context.signal)
+            const intents = readBaselines.intent(candidate, 'character', candidate.chaId, admission ? await admission : {})
             await dependencies.flushPendingData('plugin-full-object-write')
             throwIfFullObjectCallAborted(context.signal)
             dependencies.assertPersistentMutationAllowed(selectedBoundary.authorityEpoch)
@@ -939,13 +977,9 @@ export function createPluginDatabaseAccess(
                 )
                 throwIfFullObjectCallAborted(context.signal)
                 dependencies.assertPersistentMutationAllowed(selectedBoundary.authorityEpoch)
-                const replaced = await dependencies.replacePersistentCompleteCharacter(
-                    target.characterId,
-                    'plugin-setCharacter',
-                    async () => dependencies.snapshot(candidate),
-                    { expectedRevision: target.revision },
-                )
-                if (!replaced) throw new PluginFullObjectTargetStaleError(target.characterId)
+                readBaselines.assertOpen()
+                const changes = pluginUnitIntents(intents, 'character', dependencies.owner, candidate, target.characterId)
+                await dependencies.commitPersistentUnitIntent('plugin-setCharacter', changes.units, [], changes.wholeMessages)
                 if (!completeLease) invalidateLeaselessSelectedWrite(target.characterId)
             } finally {
                 if (completeLease) {
@@ -960,9 +994,11 @@ export function createPluginDatabaseAccess(
 
         async setCharacterToIndex(index, character, context) {
             validatePluginCompleteCharacter(character)
-            const candidate = dependencies.snapshot(character)
+            const admission = readBaselines.hasRead('character', character.chaId) ? undefined : captureCharacterAdmission(character.chaId, index)
+            const candidate = snapshotWithProvenance(character)
             const selectedBoundary = captureSelectedCallBoundary()
             throwIfFullObjectCallAborted(context.signal)
+            const intents = readBaselines.intent(candidate, 'character', candidate.chaId, admission ? await admission : {})
             await dependencies.flushPendingData('plugin-full-object-write')
             throwIfFullObjectCallAborted(context.signal)
             dependencies.assertPersistentMutationAllowed(selectedBoundary.authorityEpoch)
@@ -988,13 +1024,9 @@ export function createPluginDatabaseAccess(
                 )
                 throwIfFullObjectCallAborted(context.signal)
                 dependencies.assertPersistentMutationAllowed(selectedBoundary.authorityEpoch)
-                const replaced = await dependencies.replacePersistentCompleteCharacter(
-                    target.characterId,
-                    'plugin-setCharacterToIndex',
-                    async () => dependencies.snapshot(candidate),
-                    { expectedRevision: target.revision },
-                )
-                if (!replaced) throw new PluginFullObjectTargetStaleError(target.characterId)
+                readBaselines.assertOpen()
+                const changes = pluginUnitIntents(intents, 'character', dependencies.owner, candidate, target.characterId)
+                await dependencies.commitPersistentUnitIntent('plugin-setCharacterToIndex', changes.units, [], changes.wholeMessages)
                 if (!completeLease) invalidateLeaselessSelectedWrite(target.characterId)
             } finally {
                 if (completeLease) {
@@ -1009,9 +1041,12 @@ export function createPluginDatabaseAccess(
 
         async setChatToIndex(characterIndex, chatIndex, chat, context) {
             validatePluginCompleteChat(chat)
-            const candidate = dependencies.snapshot(chat)
+            const characterId = dependencies.getCompatibilityDatabase().characters?.[characterIndex]?.chaId
+            const admission = characterId && readBaselines.hasRead('conversation', JSON.stringify([characterId, chat.id])) ? undefined : captureCharacterAdmission(characterId ?? '', characterIndex)
+            const candidate = snapshotWithProvenance(chat)
             const selectedBoundary = captureSelectedCallBoundary()
             throwIfFullObjectCallAborted(context.signal)
+            const admissionCharacter = admission ? await admission as PluginCompleteCharacter : undefined
             await dependencies.flushPendingData('plugin-full-object-write')
             throwIfFullObjectCallAborted(context.signal)
             dependencies.assertPersistentMutationAllowed(selectedBoundary.authorityEpoch)
@@ -1029,6 +1064,7 @@ export function createPluginDatabaseAccess(
                     candidate.id!,
                 )
             }
+            const intents = readBaselines.intent(candidate, 'conversation', JSON.stringify([target.characterId, target.conversationId]), admissionCharacter?.chats?.find(value => value.id === candidate.id) ?? {})
             let completeLease: CompleteConversationLease | null = null
             try {
                 completeLease = await acquireSelectedLease(
@@ -1038,19 +1074,9 @@ export function createPluginDatabaseAccess(
                 )
                 throwIfFullObjectCallAborted(context.signal)
                 dependencies.assertPersistentMutationAllowed(selectedBoundary.authorityEpoch)
-                const replaced = await dependencies.replacePersistentConversation(
-                    target.characterId,
-                    target.conversationId,
-                    'plugin-setChatToIndex',
-                    candidate,
-                    { expectedRevision: target.revision },
-                )
-                if (!replaced) {
-                    throw new PluginFullObjectTargetStaleError(
-                        target.characterId,
-                        target.conversationId,
-                    )
-                }
+                readBaselines.assertOpen()
+                const changes = pluginUnitIntents(intents, 'conversation', dependencies.owner, candidate, target.characterId, target.conversationId)
+                await dependencies.commitPersistentUnitIntent('plugin-setChatToIndex', changes.units, [], changes.wholeMessages)
                 if (!completeLease) {
                     invalidateLeaselessSelectedWrite(
                         target.characterId,
@@ -1173,6 +1199,7 @@ export function createPluginDatabaseAccess(
         },
 
         async getDatabaseSnapshotStream(includeOnly, allowedKeys) {
+            const readAuthority = dependencies.getStorageAuthorityEpoch()
             const requestedKeys =
                 includeOnly === 'all'
                     ? [...allowedKeys]
@@ -1235,12 +1262,23 @@ export function createPluginDatabaseAccess(
                     }
                 }
             })()
+            const baseline: Record<string, any> = {}
+            let emittedProvenance = false
             return new ReadableStream<PluginDatabaseSnapshotChunk>({
                 async pull(controller) {
                     try {
                         const next = await iterator.next()
-                        if (next.done) controller.close()
-                        else controller.enqueue(next.value)
+                        if (next.done) {
+                            if (!emittedProvenance) {
+                                readBaselines.track(baseline, 'database', 'database', reader.revision, readAuthority)
+                                emittedProvenance = true
+                                controller.enqueue({ type: 'provenance', entries: collectPluginReadProvenance(baseline) })
+                            }
+                            controller.close()
+                        } else {
+                            accumulatePluginSnapshotChunk(baseline, next.value)
+                            controller.enqueue(next.value)
+                        }
                     } catch (error) {
                         controller.error(error)
                     }
@@ -1256,6 +1294,7 @@ export function createPluginDatabaseAccess(
         },
 
         async getDatabaseSnapshot(includeOnly, allowedKeys) {
+            const readAuthority = dependencies.getStorageAuthorityEpoch()
             const requestedKeys =
                 includeOnly === 'all'
                     ? [...allowedKeys]
@@ -1275,7 +1314,7 @@ export function createPluginDatabaseAccess(
                         )
                     }
                 }
-                return result
+                return readBaselines.track(result, 'database', 'database', dependencies.getPersistentRevision(), readAuthority)
             }
             await dependencies.flushPendingData('plugin-full-database-snapshot')
             await openStore()
@@ -1336,47 +1375,47 @@ export function createPluginDatabaseAccess(
                         (pinnedRoot.value as unknown as Record<string, unknown>)[key],
                     )
                 }
-                return result
+                return readBaselines.track(result, 'database', 'database', reader.revision, readAuthority)
             })
         },
 
         setDatabaseLite(database, allowedKeys) {
-            dependencies.assertPersistentMutationAllowed()
+            const authority = dependencies.getStorageAuthorityEpoch()
+            dependencies.assertPersistentMutationAllowed(authority)
             validatePluginDatabaseUpdate(database)
-            if (hasCharacterUpdate(database)) {
-                throw new Error(SYNCHRONOUS_CHARACTER_SET_ERROR)
+            if (hasCharacterUpdate(database)) throw new Error(SYNCHRONOUS_CHARACTER_SET_ERROR)
+            const submitted = snapshotWithProvenance(database)
+            const commit = (baseline: unknown) => {
+                dependencies.assertPersistentMutationAllowed(authority)
+                const intents = readBaselines.intent(submitted, 'database', 'database', baseline)
+                const changes = databaseUnitChanges(intents.filter(intent => intent.path[0] !== 'plugins'), submitted, allowedKeys)
+                return dependencies.commitPersistentUnitIntent('plugin-setDatabaseLite', changes.units, [], changes.wholeMessages)
             }
-            const prepared = dependencies.snapshot(database)
-            if (Object.prototype.hasOwnProperty.call(prepared, 'plugins')) {
-                const reconciled = reconcilePluginListUpdate(
-                    dependencies.getCompatibilityDatabase().plugins,
-                    prepared.plugins as RisuPlugin[],
-                )
-                if (reconciled.additions.length) console.warn('setDatabaseLite: install plugins with setDatabase instead')
-                delete prepared.plugins
-            }
-            const compatibilityUpdate = compatibilityOnlyUpdate(prepared, allowedKeys)
-            if (Object.keys(compatibilityUpdate).length > 0) {
-                dependencies.applyCompatibilityDatabaseLite(compatibilityUpdate)
-            }
-            const mutations = pluginStorageMutations(prepared, allowedKeys)
-            if (mutations.length > 0) return dependencies.mutatePluginStorage(mutations)
+            if (Object.hasOwn(submitted, 'pluginCustomStorage') && !readBaselines.hasRead('database', 'database')) return captureDatabaseAdmission(submitted).then(commit)
+            return commit(admissionDatabase())
         },
 
         async setDatabase(database, allowedKeys) {
             const authorityEpoch = dependencies.getStorageAuthorityEpoch()
             dependencies.assertPersistentMutationAllowed(authorityEpoch)
             validatePluginDatabaseUpdate(database)
+            if (hasCharacterUpdate(database)) validateCompleteCharacters(database.characters)
             allowedKeys = [...allowedKeys]
             const initialNavigationGeneration = dependencies.getNavigationGeneration()
-            if (hasCharacterUpdate(database)) {
-                validateCompleteCharacters(database.characters)
+            const detachedSubmission = snapshotWithProvenance(database)
+            const admission = readBaselines.hasRead('database', 'database') ? undefined : captureDatabaseAdmission(detachedSubmission)
+            const intents = readBaselines.intent(detachedSubmission, 'database', 'database', admission ? await admission : {})
+            readBaselines.assertOpen()
+            if (hasCharacterUpdate(detachedSubmission)) {
+                validateCompleteCharacters(detachedSubmission.characters)
             }
-            const detachedUpdate = dependencies.snapshot(database)
+            const changedKeys = new Set(intents.map(intent => String(intent.path[0])))
+            const detachedUpdate = Object.fromEntries(Object.entries(detachedSubmission).filter(([key]) => changedKeys.has(key)))
             const preparedUpdate = dependencies.prepareAuthoritativeDatabaseUpdate
                 ? await dependencies.prepareAuthoritativeDatabaseUpdate(detachedUpdate)
                 : detachedUpdate
             dependencies.assertPersistentMutationAllowed(authorityEpoch)
+            readBaselines.assertOpen()
             validatePluginDatabaseUpdate(preparedUpdate)
             if (dependencies.getNavigationGeneration() !== initialNavigationGeneration) {
                 throw new Error(STALE_DATABASE_SET_ERROR)
@@ -1384,51 +1423,24 @@ export function createPluginDatabaseAccess(
             if (hasCharacterUpdate(preparedUpdate)) {
                 validateCompleteCharacters(preparedUpdate.characters)
             }
-            const compatibilityUpdate = compatibilityOnlyUpdate(preparedUpdate, allowedKeys)
-            const storageMutations = pluginStorageMutations(preparedUpdate, allowedKeys)
-            if (Object.keys(compatibilityUpdate).length === 0) {
-                await dependencies.mutatePluginStorage(storageMutations)
-                return
+            let acceptedIntents = intents
+            if (Object.hasOwn(detachedUpdate, 'plugins')) {
+                const installed = dependencies.getCompatibilityDatabase().plugins ?? []
+                const installedNames = new Set(installed.map(plugin => plugin.name))
+                const approved = new Map((preparedUpdate.plugins as RisuPlugin[] | undefined ?? []).map(plugin => [plugin.name, plugin]))
+                const additions = intents.filter(intent => intent.path[0] === 'plugins' && intent.path.length === 2 && intent.path[1] !== '$order' && intent.type === 'set' && !installedNames.has(String(intent.path[1])) && approved.has(String(intent.path[1])))
+                    .map(intent => ({ ...intent, value: approved.get(String(intent.path[1]))! }))
+                // Whole-list API submissions request installation, while addressed storage deletes remain independent.
+                acceptedIntents = [...intents.filter(intent => intent.path[0] !== 'plugins'), ...additions]
+                if (additions.length) {
+                    const addedNames = new Set(additions.map(intent => String(intent.path[1])))
+                    acceptedIntents.push({ path: ['plugins', '$order'], type: 'set', value: [...installed.map(plugin => plugin.name), ...[...approved.keys()].filter(name => addedNames.has(name))] })
+                }
             }
-            if (!hasCharacterUpdate(compatibilityUpdate)) {
-                dependencies.applyCompatibilityDatabaseLite(compatibilityUpdate)
-                if (storageMutations.length > 0)
-                    await dependencies.mutatePluginStorage(storageMutations)
-                dependencies.assertPersistentMutationAllowed(authorityEpoch)
-                await dependencies.flushPendingData('plugin-root-update')
-                return
-            }
-            const materialized = await dependencies.materializeDatabaseSnapshot(
-                'plugin-database-set',
-                { includePluginStorageValues: true },
-            )
+            const changes = databaseUnitChanges(acceptedIntents, preparedUpdate, allowedKeys)
+            await dependencies.commitPersistentUnitIntent('plugin-setDatabase', changes.units, [], changes.wholeMessages)
             dependencies.assertPersistentMutationAllowed(authorityEpoch)
-            if (dependencies.getNavigationGeneration() !== initialNavigationGeneration) {
-                throw new Error(STALE_DATABASE_SET_ERROR)
-            }
-            const candidate = dependencies.snapshot(materialized.database)
-            applyPluginDatabaseUpdate(
-                candidate,
-                dependencies.snapshot(preparedUpdate),
-                allowedKeys,
-                dependencies.owner,
-            )
-            await dependencies.replacePersistentDatabase(candidate, 'plugin-database-set', {
-                authoritative: true,
-                publishOfficial: true,
-                expectedRevision: materialized.revision,
-                expectedMutationGeneration: materialized.mutationGeneration,
-                ...(materialized.pluginStorageValues
-                    ? {
-                          pluginStorageValues: applyOwnerScopedStorageMutations(
-                              materialized.pluginStorageValues,
-                              dependencies.owner,
-                              storageMutations,
-                          ),
-                      }
-                    : {}),
-            })
-            dependencies.invalidatePluginStorage()
+
         },
     }
 }
