@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { deriveEffectivePersonaMirrors } from './storage/effectiveIdentityState'
 import { DBState } from './stores.svelte'
 import { selectSingleFile } from './util'
 import { saveImage } from './storage/database.svelte'
@@ -6,7 +7,10 @@ import { changeUserPersona, selectUserImg } from './persona'
 
 vi.mock('./stores.svelte', () => ({ DBState: { db: {} } }))
 vi.mock('./util', () => ({ selectSingleFile: vi.fn() }))
-vi.mock('./storage/database.svelte', () => ({ saveImage: vi.fn() }))
+vi.mock('./storage/database.svelte', async () => {
+    const identity = await import('./storage/effectiveIdentityState')
+    return { saveImage: vi.fn(), flushEffectivePersonaEdits: identity.flushEffectivePersonaEdits, deriveEffectivePersonaMirrors: identity.deriveEffectivePersonaMirrors }
+})
 vi.mock('./alert', () => ({}))
 vi.mock('./globalApi.svelte', () => ({}))
 vi.mock('src/lang', () => ({ language: {} }))
@@ -23,6 +27,7 @@ beforeEach(() => {
         ], selectedPersona: 0, username: 'A', userIcon: 'a.png', personaPrompt: 'A prompt', userNote: '',
         characters: [{ chatPage: 0, chats: [{ bindedPersona: 'persona-a' }] }],
     } as any
+    deriveEffectivePersonaMirrors(DBState.db)
 })
 
 describe('persona image edits', () => {

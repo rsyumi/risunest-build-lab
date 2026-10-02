@@ -6,14 +6,114 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('@tauri-apps/api/core', () => ({ invoke: mocks.invoke }))
 
+import { createMutationGatedPersistentDataStore } from './mutationGatedPersistentDataStore'
+import { createStorageMutationGate, createInRealmStorageLockManager } from './storageMutationGate'
 import { SqlitePersistentDataStore } from './sqlitePersistentDataStore'
 import { nativePersistentRevisionLease } from './nativePersistentExport'
 import { RevisionConflictError, SnapshotReleasedError } from './persistentDataStore'
 import { fixtureDatabase } from './tests/persistentDataFixtures'
 
 describe('SqlitePersistentDataStore', () => {
+    it('activates a bound upstream staging generation through an immutable LWW replacement request', async () => {
+        const header={bindingAuthority:'9007199254740993',requestId:'synthetic-import'}
+        mocks.invoke.mockImplementation(async (command: string) => {
+            if(command==='pds_replace_begin') return {stagingId:'upstream-stage'}
+            if(command==='pds_replace_preserve_repositories') return {revision:7}
+            if(command==='pds_lww_commit_replacement') return {revision:8}
+            return undefined
+        })
+        await expect(new SqlitePersistentDataStore().replaceFromDatabase(structuredClone(fixtureDatabase),7,[],undefined,header)).resolves.toEqual({revision:8})
+        expect(mocks.invoke).toHaveBeenLastCalledWith('pds_lww_commit_replacement',{request:{...header,stagingId:'upstream-stage'}})
+        expect(mocks.invoke.mock.calls.some(([command])=>command==='pds_replace_commit')).toBe(false)
+        expect(mocks.invoke).toHaveBeenCalledWith('pds_replace_preserve_repositories',{stagingId:'upstream-stage',expectedRevision:7})
+    })
+
+    it('preserves the canonical native trash stamp beyond the safe integer range', async () => {
+        const summary={id:'synthetic',name:'Synthetic',trashed:true,trashTime:1,trashStampMs:'9007199254740993'}
+        mocks.invoke.mockResolvedValueOnce({revision:7,items:[summary]})
+        await expect(new SqlitePersistentDataStore().queryCharacters({trash:true,order:'configured',limit:200})).resolves.toEqual({revision:7,items:[summary]})
+    })
+
+    it('stages outside admission and gates only final native activation, with an immutable bound header',async()=>{
+        const latch=()=>{let resolve!:()=>void;const promise=new Promise<void>(done=>{resolve=done});return {promise,resolve}}
+        const stagingStarted=latch(),continueStaging=latch(),writeStarted=latch(),continueWrite=latch(),activationStarted=latch(),continueActivation=latch()
+        let commits=0
+        mocks.invoke.mockImplementation(async(command:string)=>{
+            if(command==='pds_replace_begin')return {stagingId:'isolated-native-stage'}
+            if(command==='pds_replace_put_root'){stagingStarted.resolve();await continueStaging.promise;return}
+            if(command==='pds_replace_preserve_repositories')return {revision:3}
+            if(command==='pds_commit'){
+                commits++
+                if(commits===2){writeStarted.resolve();await continueWrite.promise}
+                return {revision:commits===1?2:commits===2?3:5}
+            }
+            if(command==='pds_lww_commit_replacement'){activationStarted.resolve();await continueActivation.promise;return {revision:4}}
+        })
+        const gated=createMutationGatedPersistentDataStore(new SqlitePersistentDataStore(),createStorageMutationGate({locks:createInRealmStorageLockManager()}))
+        const header={bindingAuthority:'synthetic-authority',requestId:'immutable-native-request'}
+        const replacement=gated.replaceFromDatabase(structuredClone(fixtureDatabase),undefined,[],undefined,header)
+        await stagingStarted.promise
+        header.requestId='mutated-caller-request'
+        await expect(gated.commit({expectedRevision:1})).resolves.toEqual({revision:2})
+        const earlierWrite=gated.commit({expectedRevision:2})
+        await writeStarted.promise
+        continueStaging.resolve()
+        await vi.waitFor(()=>expect(mocks.invoke).toHaveBeenCalledWith('pds_replace_preserve_repositories',{stagingId:'isolated-native-stage'}))
+        expect(mocks.invoke.mock.calls.some(([command])=>command==='pds_lww_commit_replacement')).toBe(false)
+        continueWrite.resolve();await earlierWrite;await activationStarted.promise
+        const laterWrite=gated.commit({expectedRevision:4})
+        await Promise.resolve();expect(commits).toBe(2)
+        continueActivation.resolve()
+        await expect(replacement).resolves.toEqual({revision:4})
+        await expect(laterWrite).resolves.toEqual({revision:5})
+        expect(mocks.invoke).toHaveBeenCalledWith('pds_lww_commit_replacement',{request:{bindingAuthority:'synthetic-authority',requestId:'immutable-native-request',stagingId:'isolated-native-stage'}})
+        expect(mocks.invoke.mock.calls.some(([command])=>command==='pds_replace_abort')).toBe(false)
+    })
+
+    it('does not abort or submit activation twice after an uncertain native activation response',async()=>{
+        mocks.invoke.mockImplementation(async(command:string)=>{
+            if(command==='pds_replace_begin')return {stagingId:'uncertain-stage'}
+            if(command==='pds_replace_preserve_repositories')return {revision:7}
+            if(command==='pds_lww_commit_replacement')throw new Error('response unavailable')
+        })
+        const store=new SqlitePersistentDataStore()
+        const stage=await store.stageDatabaseReplacement(structuredClone(fixtureDatabase),7,[],undefined,{bindingAuthority:'authority',requestId:'request'})
+        await expect(stage.activate()).rejects.toThrow('response unavailable')
+        await stage.abort()
+        await expect(stage.activate()).rejects.toThrow('already submitted')
+        expect(mocks.invoke.mock.calls.filter(([command])=>command==='pds_lww_commit_replacement')).toHaveLength(1)
+        expect(mocks.invoke.mock.calls.some(([command])=>command==='pds_replace_abort')).toBe(false)
+    })
+
     beforeEach(() => {
         mocks.invoke.mockReset()
+    })
+
+    it('reads current binding authority through the existing native state command', async () => {
+        mocks.invoke.mockResolvedValue({targetAuthority:'9007199254740993'})
+        expect(await new SqlitePersistentDataStore().lwwBindingState()).toEqual({targetAuthority:'9007199254740993'})
+        expect(mocks.invoke).toHaveBeenCalledWith('pds_lww_binding_state', {})
+    })
+
+    it('forwards LWW commands with decimal controls and the exact shared request envelope', async () => {
+        const store = new SqlitePersistentDataStore()
+        const header = {bindingAuthority:'authority', requestId:'request'}
+        mocks.invoke.mockResolvedValue(undefined)
+        await store.lwwReadOutbox({...header, limit:'64'})
+        await store.lwwAckOutbox({...header, entries:[]})
+        await store.lwwClockState(header)
+        await store.lwwRetryUnpublished({...header, proofId:'native-proof', correctedTimeMs:'9007199254740993'})
+        await store.lwwStageReceive({...header, changes:[], progress:{kind:'external',cursor:'9007199254740993',writerId:'writer'}, admittedTimeUpperMs:'9007199254740993'})
+        await store.lwwApplyReceive({...header, generating:[{characterId:'a',conversationId:'same'},{characterId:'b',conversationId:'same'}]})
+        await store.lwwFinishReceive(header)
+        await store.lwwDrainDeferred({...header,generating:[]})
+        await store.lwwCommitReplacement({...header,stagingId:'staged'})
+        expect(mocks.invoke.mock.calls.map(([command,args]) => [command,Object.keys(args)])).toEqual([
+            'pds_lww_read_outbox','pds_lww_ack_outbox','pds_lww_clock_state','pds_lww_retry_unpublished','pds_lww_stage_receive',
+            'pds_lww_apply_receive','pds_lww_finish_receive','pds_lww_drain_deferred','pds_lww_commit_replacement',
+        ].map((command) => [command,['request']]))
+        expect(mocks.invoke.mock.calls[3][1]).toEqual({request:{...header,proofId:'native-proof',correctedTimeMs:'9007199254740993'}})
+        expect(mocks.invoke.mock.calls[5][1]).toEqual({request:{...header,generating:[{characterId:'a',conversationId:'same'},{characterId:'b',conversationId:'same'}]}})
     })
 
     it('reads owner pages with one native call per page and a pinned lease', async () => {
@@ -76,7 +176,7 @@ describe('SqlitePersistentDataStore', () => {
             characterDetails: [characterDetail],
             assetAliases: [alias],
         }
-        const owner = { kind: 'root-module-assets' as const, index: 0 }
+        const owner = { kind: 'root-module-assets' as const, moduleId: 'module-0' }
 
         await store.open()
         await store.readRoot()
@@ -478,7 +578,7 @@ describe('SqlitePersistentDataStore', () => {
         await lease.readPluginStorage('test-plugin', 'memory')
         await lease.readAssetAlias({ kind: 'asset', key: 'assets/pinned.bin' })
         await lease.listAssetAliases({ kind: 'asset', limit: 2 })
-        await lease.readAssetOwnerHead({ kind: 'root-module-assets', index: 0 })
+        await lease.readAssetOwnerHead({ kind: 'root-module-assets', moduleId: 'module-0' })
         await lease.release()
         await lease.release()
 
@@ -526,7 +626,7 @@ describe('SqlitePersistentDataStore', () => {
             ],
             [
                 'pds_read_asset_owner_head',
-                { owner: { kind: 'root-module-assets', index: 0 }, lease: 'lease-7' },
+                { owner: { kind: 'root-module-assets', moduleId: 'module-0' }, lease: 'lease-7' },
             ],
             ['pds_release_revision', { lease: 'lease-7' }],
         ])
@@ -537,25 +637,8 @@ describe('SqlitePersistentDataStore', () => {
         expect(mocks.invoke).toHaveBeenCalledTimes(16)
     })
 
-    it('retains the native open report and warns when a snapshot restore was skipped', async () => {
-        const openResult = {
-            revision: 12,
-            restoreFailure: 'persistent snapshot restore skipped: integrity check failed',
-        }
-        mocks.invoke.mockResolvedValue(openResult)
-        const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
-        const store = new SqlitePersistentDataStore()
 
-        expect(store.lastOpenResult).toBeNull()
-        await store.open()
-
-        expect(store.lastOpenResult).toEqual(openResult)
-        expect(warn).toHaveBeenCalledOnce()
-        expect(warn.mock.calls[0][0]).toContain(openResult.restoreFailure)
-        warn.mockRestore()
-    })
-
-    it('keeps the open report without warning when no snapshot restore was skipped', async () => {
+    it('keeps each native revision report without warning', async () => {
         const openResult = { revision: 3 }
         mocks.invoke.mockResolvedValue(openResult)
         const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
@@ -565,7 +648,6 @@ describe('SqlitePersistentDataStore', () => {
 
         expect(mocks.invoke).toHaveBeenCalledWith('pds_open')
         expect(store.lastOpenResult).toEqual(openResult)
-        expect(store.lastOpenResult?.restoreFailure).toBeUndefined()
         mocks.invoke.mockResolvedValueOnce({ revision: 4 })
         await store.open()
         expect(store.lastOpenResult).toEqual({ revision: 4 })

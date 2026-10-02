@@ -112,7 +112,7 @@ impl ObservedRoots {
         Ok(self.identities(repository)? == earlier.identities(repository)?)
     }
     fn removed(&mut self, object: &RemoteObject) {
-        if object.role == ObjectRole::BackupPoint {
+        if matches!(object.role,ObjectRole::BackupPoint|ObjectRole::Snapshot|ObjectRole::Segment|ObjectRole::SyncState) {
             self.points.retain(|_, point| point.receipt.locator != object.receipt.locator);
             self.retired_points.retain(|point| point.point.receipt.locator != object.receipt.locator);
         }
@@ -277,6 +277,17 @@ pub(crate) async fn run(
     result?;
     bookkeeping?;
     Ok(outcome)
+}
+
+pub(crate) async fn run_lww(
+    context:&LeaseContext<'_>,request:&CleanupRequest<'_>,engine:&super::lww_engine::ExternalLwwEngine,
+    base:ConnectedRepositoryView<'_>,scratch:&Path,cancel:&Cancellation,
+)->Result<CleanupOutcome> {
+    if engine.connection_id!=context.connection_id || engine.repository.repository_id!=context.repository.repository_id || engine.repository.connection_identity!=context.repository.connection_identity
+        || engine.library!=context.descriptor.repository_id {return Err(ProviderError::new(ErrorKind::Corrupt))}
+    let documents=ConnectedDocuments{connected:base.connected,cancel,scratch};
+    let view=LwwRepositoryView::new(engine,base,documents);
+    run(context,request,&view,&view,cancel).await
 }
 
 async fn run_owned(
@@ -573,6 +584,47 @@ fn job_roots_of(unfinished: &[UnfinishedJob], repository: &RepositoryHandle) -> 
 }
 
 impl ConnectedRepositoryView<'_> {
+    async fn roots_with_head(&self, cancel:&Cancellation, include_head:bool)->Result<ObservedRoots> {
+            let head = if include_head && self.connected.stored.descriptor.publication_strategy.is_some() {
+                leases::control_request(cancel, control::read_head(
+                    self.connected.provider.as_ref(), &self.connected.handle,
+                    &self.connected.stored.descriptor, &self.connected.root_key, None, cancel,
+                )).await?.map(|observed| observed.document.state)
+            } else {
+                // Backup-only repositories have authenticated points, not a
+                // mutable synchronization head. Do not probe a fictitious one.
+                None
+            };
+            let points = self.read_points(cancel).await?;
+            let sources = self.bundle_sources(&points, cancel).await?;
+            let decided = points.iter().map(|point| {
+                let bundles = point.document.bundles().into_iter().map(|bundle| {
+                    Ok(RetentionBundle {
+                        object_id: bundle.object_id.clone(),
+                        source: sources.get(&bundle.object_id).cloned()
+                            .ok_or_else(|| ProviderError::new(ErrorKind::Corrupt))?,
+                    })
+                }).collect::<Result<Vec<_>>>()?;
+                Ok(RetentionPoint {
+                    point_id: point.document.point_id.clone(), kind: point.document.kind,
+                    created_at_ms: point.document.created_at_ms, bundles,
+                })
+            }).collect::<Result<Vec<_>>>()?;
+            let decision = decide_retention(&decided, self.writer_id, self.policy, self.now_ms);
+            let removed: BTreeSet<_> = decision.remove.iter().map(String::as_str).collect();
+            let mut roots = ObservedRoots { head, ..ObservedRoots::default() };
+            for point in points {
+                roots.points.insert(point.document.point_id.clone(), point.reference.clone());
+                let bundles = point.document.bundles().into_iter().cloned().collect();
+                if removed.contains(point.document.point_id.as_str()) {
+                    roots.retired_points.push(RetiredPoint { point: point.reference, bundles });
+                } else {
+                    roots.kept_points.push(point.reference);
+                    roots.kept_bundles.extend(bundles);
+                }
+            }
+            Ok(roots)
+    }
     async fn read_points(&self, cancel: &Cancellation) -> Result<Vec<control::ListedBackupPoint>> {
         let mut points = Vec::new();
         let mut cursor: Option<String> = None;
@@ -623,6 +675,9 @@ impl ConnectedRepositoryView<'_> {
     }
 
     async fn read_inventory(&self, cancel: &Cancellation) -> Result<InventorySurvey> {
+        self.read_inventory_in_scope(cancel,None).await
+    }
+    async fn read_inventory_in_scope(&self,cancel:&Cancellation,extra_repository_id:Option<&str>)->Result<InventorySurvey> {
         let mut survey = InventorySurvey::default();
         let mut cursor: Option<String> = None;
         let mut tracker = PageTracker::default();
@@ -630,7 +685,7 @@ impl ConnectedRepositoryView<'_> {
         loop {
             let page = leases::control_request(
                 cancel,
-                control::list_inventory_pages_page(
+                control::list_inventory_pages_page_in_scope(
                     &self.connected.stored.descriptor,
                     &self.connected.root_key,
                     self.connected.provider.as_ref(),
@@ -638,6 +693,7 @@ impl ConnectedRepositoryView<'_> {
                     cursor.as_deref(),
                     100,
                     cancel,
+                    extra_repository_id,
                 ),
             )
             .await?;
@@ -657,7 +713,13 @@ impl ConnectedRepositoryView<'_> {
                 }
                 let mut present = 0usize;
                 for entry in &listed.document.objects {
-                    let role = packaging::native_role(entry.role)?;
+                    let role = if entry.role == risunest_external_storage_format::snapshot::ObjectRole::SyncState
+                        && uuid::Uuid::parse_str(&entry.object_id).is_ok_and(|id| id.to_string()==entry.object_id)
+                    {
+                        ObjectRole::Snapshot
+                    } else {
+                        packaging::native_role(entry.role)?
+                    };
                     let intent = ObjectIntent {
                         repository_id: self.connected.handle.repository_id.clone(),
                         job_id: listed.document.operation_id.clone(),
@@ -709,47 +771,7 @@ impl ConnectedRepositoryView<'_> {
 }
 impl RepositoryView for ConnectedRepositoryView<'_> {
     fn roots<'a>(&'a self, cancel: &'a Cancellation) -> ProviderFuture<'a, ObservedRoots> {
-        Box::pin(async move {
-            let head = if self.connected.stored.descriptor.publication_strategy.is_some() {
-                leases::control_request(cancel, control::read_head(
-                    self.connected.provider.as_ref(), &self.connected.handle,
-                    &self.connected.stored.descriptor, &self.connected.root_key, None, cancel,
-                )).await?.map(|observed| observed.document.state)
-            } else {
-                // Backup-only repositories have authenticated points, not a
-                // mutable synchronization head. Do not probe a fictitious one.
-                None
-            };
-            let points = self.read_points(cancel).await?;
-            let sources = self.bundle_sources(&points, cancel).await?;
-            let decided = points.iter().map(|point| {
-                let bundles = point.document.bundles().into_iter().map(|bundle| {
-                    Ok(RetentionBundle {
-                        object_id: bundle.object_id.clone(),
-                        source: sources.get(&bundle.object_id).cloned()
-                            .ok_or_else(|| ProviderError::new(ErrorKind::Corrupt))?,
-                    })
-                }).collect::<Result<Vec<_>>>()?;
-                Ok(RetentionPoint {
-                    point_id: point.document.point_id.clone(), kind: point.document.kind,
-                    created_at_ms: point.document.created_at_ms, bundles,
-                })
-            }).collect::<Result<Vec<_>>>()?;
-            let decision = decide_retention(&decided, self.writer_id, self.policy, self.now_ms);
-            let removed: BTreeSet<_> = decision.remove.iter().map(String::as_str).collect();
-            let mut roots = ObservedRoots { head, ..ObservedRoots::default() };
-            for point in points {
-                roots.points.insert(point.document.point_id.clone(), point.reference.clone());
-                let bundles = point.document.bundles().into_iter().cloned().collect();
-                if removed.contains(point.document.point_id.as_str()) {
-                    roots.retired_points.push(RetiredPoint { point: point.reference, bundles });
-                } else {
-                    roots.kept_points.push(point.reference);
-                    roots.kept_bundles.extend(bundles);
-                }
-            }
-            Ok(roots)
-        })
+        Box::pin(self.roots_with_head(cancel,true))
     }
     fn snapshots<'a>(&'a self, cancel: &'a Cancellation) -> ProviderFuture<'a, Vec<ObjectReceipt>> {
         Box::pin(async move {
@@ -804,7 +826,188 @@ pub(crate) struct ConnectedDocuments<'a> {
     pub cancel: &'a Cancellation,
     pub scratch: &'a Path,
 }
+
+pub(crate) struct LwwRepositoryView<'a> {
+    pub engine:&'a super::lww_engine::ExternalLwwEngine,
+    pub base:ConnectedRepositoryView<'a>,
+    pub documents:ConnectedDocuments<'a>,
+    native_bodies:std::sync::Mutex<BTreeMap<String,RemoteObject>>,
+    known:std::sync::Mutex<Vec<RemoteObject>>,
+}
+impl<'a> LwwRepositoryView<'a> {
+    pub(crate) fn new(engine:&'a super::lww_engine::ExternalLwwEngine,base:ConnectedRepositoryView<'a>,documents:ConnectedDocuments<'a>)->Self {
+        Self{engine,base,documents,native_bodies:Default::default(),known:Default::default()}
+    }
+    fn standalone(&self,hash:&str,body:&super::lww_segment::LargeBody)->Result<RemoteObject> {
+        let locator=body.locator.clone().ok_or_else(||ProviderError::new(ErrorKind::Corrupt))?;
+        locator.validate_for(&self.engine.repository)?;
+        risunest_sync_wire::validate_hash(hash).map_err(|_|ProviderError::new(ErrorKind::Corrupt))?;
+        let object=RemoteObject{repository_id:self.engine.repository.repository_id.clone(),object_id:body.object_id.clone(),
+            role:ObjectRole::Pack,receipt:ObjectReceipt{locator,byte_length:body.byte_length.0,version:None,checksum:None,complete:true},
+            ciphertext_sha256:body.sha256.clone(),plaintext_length:body.plaintext_byte_length.0,plaintext_sha256:hash.into()};
+        let key=locator_key(&object.receipt.locator)?;
+        let mut bodies=self.native_bodies.lock().map_err(|_|ProviderError::new(ErrorKind::Transient))?;
+        if let Some(previous)=bodies.insert(key,object.clone()) {
+            if reachability::native_identity(&previous,&self.engine.repository)?!=reachability::native_identity(&object,&self.engine.repository)? {
+                return Err(ProviderError::new(ErrorKind::Corrupt));
+            }
+        }
+        Ok(object)
+    }
+    fn checkpoint_node(&self,checkpoint:&super::lww_checkpoint::Checkpoint)->Result<DocumentNode> {
+        let references=std::iter::once(&checkpoint.library.record_catalog).chain(std::iter::once(&checkpoint.library.asset_catalog))
+            .chain(checkpoint.asset_catalogs.iter()).map(|object|RemoteObject::from_stored(object,&self.engine.repository))
+            .collect::<Result<Vec<_>>>()?;
+        let mut node=DocumentNode{snapshot_id:checkpoint.snapshot_id.clone(),parent_snapshot_id:None,references};
+        for (hash,body) in &checkpoint.standalone_bodies {node.references.push(self.standalone(hash,body)?);}
+        Ok(node)
+    }
+    async fn segment_node(&self,receipt:&ObjectReceipt)->Result<(RemoteObject,DocumentNode)> {
+        let name=receipt.locator.object.rsplit('/').next().ok_or_else(||ProviderError::new(ErrorKind::Corrupt))?;
+        let (writer,seq,hash)=super::contract::parse_segment_object_id(name)?;
+        let bytes=super::lww_engine::read_bytes(self.engine.provider.as_ref(),&self.engine.repository,&receipt.locator,self.documents.cancel).await?;
+        if !receipt.complete || bytes.len() as u64!=receipt.byte_length || super::lww_segment::digest(&bytes)!=hash {return Err(ProviderError::new(ErrorKind::Corrupt))}
+        let document=super::lww_segment::open(&bytes,&self.engine.library,writer,seq,&self.engine.root_key)?;
+        let upper=self.engine.admitted_upper()?.checked_add(300_000).ok_or_else(||ProviderError::new(ErrorKind::Corrupt))?;
+        if document.changes.iter().any(|change|change.stamp.physical_ms.0>upper) {return Err(ProviderError::new(ErrorKind::ClockSkew))}
+        let plaintext=document.encode()?;
+        let object=RemoteObject{repository_id:self.engine.repository.repository_id.clone(),object_id:name.into(),role:ObjectRole::Segment,
+            receipt:receipt.clone(),ciphertext_sha256:hash.into(),plaintext_length:plaintext.len() as u64,
+            plaintext_sha256:super::lww_segment::digest(&plaintext)};
+        let mut references=document.asset_catalogs.iter().chain(&document.data_catalogs).map(|object|RemoteObject::from_stored(object,&self.engine.repository)).collect::<Result<Vec<_>>>()?;
+        for (hash,body) in &document.large_bodies {references.push(self.standalone(hash,body)?);}
+        Ok((object,DocumentNode{snapshot_id:name.into(),parent_snapshot_id:None,references}))
+    }
+}
+impl RepositoryView for LwwRepositoryView<'_> {
+    fn roots<'a>(&'a self,cancel:&'a Cancellation)->ProviderFuture<'a,ObservedRoots> {
+        Box::pin(async move {
+            let mut roots=self.base.roots_with_head(cancel,false).await?;
+            std::fs::create_dir_all(self.documents.scratch).map_err(|_|ProviderError::new(ErrorKind::Transient))?;
+            let metadata=std::fs::symlink_metadata(self.documents.scratch).map_err(|_|ProviderError::new(ErrorKind::Transient))?;
+            if !metadata.is_dir() || crate::trust_boundary::is_link_like(&metadata) {return Err(ProviderError::new(ErrorKind::Corrupt))}
+            let scratch=tempfile::tempdir_in(self.documents.scratch).map_err(|_|ProviderError::new(ErrorKind::Transient))?;
+            let state=self.engine.published_state(scratch.path(),cancel).await?;
+            let retained=super::lww_checkpoint::retained(&state.snapshots.iter().map(|(_,doc)|doc.clone()).collect::<Vec<_>>())?;
+            let mut coverage=super::lww_checkpoint::Coverage::new();let mut known=Vec::new();
+            for (object,document) in &state.snapshots {
+                self.checkpoint_node(document)?;
+                if roots.points.insert(format!("lww/{}",object.object_id),object.clone()).is_some() {return Err(ProviderError::new(ErrorKind::Corrupt))}
+                if retained.contains(&document.snapshot_id) {
+                    roots.kept_bundles.push(object.clone());
+                    for (writer,prefix) in &document.covered_prefixes {coverage.entry(writer.clone()).and_modify(|old|*old=(*old).max(*prefix)).or_insert(*prefix);}
+                }
+                known.push(object.clone());
+            }
+            for (receipt,document) in state.segments {
+                let (object,_)=self.segment_node(&receipt).await?;
+                roots.points.insert(format!("lww/{}",object.object_id),object.clone());
+                if document.seq>coverage.get(&document.writer_id).copied().unwrap_or(risunest_sync_wire::stamp::DecimalU64(0)) {roots.kept_bundles.push(object.clone());}
+                known.push(object);
+            }
+            known.extend(self.native_bodies.lock().map_err(|_|ProviderError::new(ErrorKind::Transient))?.values().cloned());
+            *self.known.lock().map_err(|_|ProviderError::new(ErrorKind::Transient))?=known;
+            Ok(roots)
+        })
+    }
+    fn snapshots<'a>(&'a self,cancel:&'a Cancellation)->ProviderFuture<'a,Vec<ObjectReceipt>> {
+        Box::pin(async move {let mut listed=self.base.snapshots(cancel).await?;listed.extend(self.engine.listing(cancel).await?);Ok(listed)})
+    }
+    fn job_roots(&self)->Result<JobRoots> {self.base.job_roots()}
+    fn known_objects(&self)->Result<Vec<RemoteObject>> {
+        let mut known=self.base.known_objects()?;known.extend(self.known.lock().map_err(|_|ProviderError::new(ErrorKind::Transient))?.clone());Ok(known)
+    }
+    fn inventory<'a>(&'a self,cancel:&'a Cancellation)->ProviderFuture<'a,InventorySurvey> {Box::pin(self.base.read_inventory_in_scope(cancel,Some(&self.engine.repository.repository_id)))}
+    fn delete_inventory_page<'a>(&'a self,expected:&'a risunest_external_storage_format::snapshot::StoredObject,cancel:&'a Cancellation)->ProviderFuture<'a,control::RemoteInventoryPageDeleteOutcome> {
+        if expected.header.repository_id==self.engine.repository.repository_id {
+            Box::pin(control::delete_authenticated_inventory_page_for_repository(self.base.connected,expected,&self.engine.repository.repository_id,cancel))
+        } else {self.base.delete_inventory_page(expected,cancel)}
+    }
+    fn prepare_removals(&self,objects:&[RemoteObject])->Result<()> {self.base.prepare_removals(objects)}
+    fn confirmed_removed(&self,object:&RemoteObject)->Result<()> {self.base.confirmed_removed(object)}
+    fn protected_jobs(&self)->Vec<String> {self.base.protected_jobs()}
+}
+impl DocumentSource for LwwRepositoryView<'_> {
+    fn format_repository_id(&self,object:&RemoteObject)->Option<&str> {
+        (object.repository_id==self.engine.repository.repository_id).then_some(self.engine.repository.repository_id.as_str())
+    }
+    fn native_body(&self,object:&RemoteObject)->Result<bool> {
+        if object.role!=ObjectRole::Pack {return Ok(false)}
+        let bodies=self.native_bodies.lock().map_err(|_|ProviderError::new(ErrorKind::Transient))?;
+        let Some(proof)=bodies.get(&locator_key(&object.receipt.locator)?) else {return Ok(false)};
+        if reachability::native_identity(proof,&self.engine.repository)?!=reachability::native_identity(object,&self.engine.repository)? {return Err(ProviderError::new(ErrorKind::Corrupt))}
+        Ok(true)
+    }
+    fn document<'a>(&'a self,object:&'a RemoteObject)->ProviderFuture<'a,DocumentNode> {
+        Box::pin(async move {
+            match object.role {
+                ObjectRole::Snapshot|ObjectRole::SyncState if !object.object_id.starts_with("snapshot-")=>{let (current,document)=self.engine.checkpoint(&object.receipt,self.documents.cancel).await?;
+                    if reachability::object_identity(&current,&self.engine.repository)?!=reachability::object_identity(object,&self.engine.repository)? {return Err(ProviderError::new(ErrorKind::Corrupt))}self.checkpoint_node(&document)},
+                ObjectRole::Segment=>{let (current,document)=self.segment_node(&object.receipt).await?;
+                    if reachability::object_identity(&current,&self.engine.repository)?!=reachability::object_identity(object,&self.engine.repository)? {return Err(ProviderError::new(ErrorKind::Corrupt))}Ok(document)},
+                _=>self.documents.document(object).await,
+            }
+        })
+    }
+    fn listed<'a>(&'a self,receipt:&'a ObjectReceipt)->ProviderFuture<'a,(RemoteObject,DocumentNode)> {
+        Box::pin(async move {
+            let segment=self.known.lock().map_err(|_|ProviderError::new(ErrorKind::Transient))?.iter()
+                .any(|object|object.role==ObjectRole::Segment && object.receipt.locator==receipt.locator);
+            if segment {return self.segment_node(receipt).await}
+            if let Some((object,document))=self.engine.classified_checkpoint(receipt,self.documents.cancel).await? {
+                return Ok((object,self.checkpoint_node(&document)?));
+            }
+            self.documents.listed(receipt).await
+        })
+    }
+    fn catalog<'a>(&'a self,object:&'a RemoteObject)->ProviderFuture<'a,Vec<RemoteObject>> {
+        if object.repository_id==self.engine.repository.repository_id {
+            Box::pin(control::read_catalog_children_for_repository(self.base.connected,object,&self.engine.repository.repository_id,self.documents.cancel))
+        } else {self.documents.catalog(object)}
+    }
+    fn probe<'a>(&'a self,object:&'a RemoteObject)->ProviderFuture<'a,Option<ObjectReceipt>> {
+        Box::pin(async move {
+            if object.role!=ObjectRole::Segment && !self.native_body(object)? {
+                return if object.repository_id==self.engine.repository.repository_id {
+                    self.documents.probe_for_repository(object,&self.engine.repository.repository_id).await
+                } else {self.documents.probe(object).await};
+            }
+            let intent=ObjectIntent{repository_id:self.engine.repository.repository_id.clone(),job_id:"cleanup-probe".into(),object_id:object.object_id.clone(),
+                role:object.role,byte_length:object.receipt.byte_length,sha256:object.ciphertext_sha256.clone()};
+            let mut receipt=object.receipt.clone();receipt.checksum=None;
+            super::transfer_job::verify_remote_receipt(self.documents.scratch,&intent,self.engine.provider.as_ref(),&self.engine.repository,
+                receipt,self.documents.cancel).await
+        })
+    }
+}
 impl ConnectedDocuments<'_> {
+    fn probe_for_repository<'a>(&'a self, object: &'a RemoteObject,repository_id:&'a str) -> ProviderFuture<'a, Option<ObjectReceipt>> {
+        Box::pin(async move {
+            object.stored(&self.connected.handle)?;
+            if object.repository_id != repository_id {
+                return Err(ProviderError::new(ErrorKind::Corrupt));
+            }
+            std::fs::create_dir_all(self.scratch)
+                .map_err(|_| ProviderError::new(ErrorKind::Transient))?;
+            if crate::trust_boundary::is_link_like(
+                &std::fs::symlink_metadata(self.scratch)
+                    .map_err(|_| ProviderError::new(ErrorKind::Transient))?,
+            ) {
+                return Err(ProviderError::new(ErrorKind::Corrupt));
+            }
+            let intent = ObjectIntent {
+                repository_id: self.connected.handle.repository_id.clone(), job_id: "cleanup-probe".into(),
+                object_id: object.object_id.clone(), role: object.role,
+                byte_length: object.receipt.byte_length, sha256: object.ciphertext_sha256.clone(),
+            };
+            let mut receipt = object.receipt.clone();
+            receipt.checksum = None;
+            super::transfer_job::verify_remote_receipt(
+                self.scratch, &intent, self.connected.provider.as_ref(), &self.connected.handle,
+                receipt, self.cancel,
+            ).await
+        })
+    }
     fn node(&self, view: &control::SnapshotView) -> Result<DocumentNode> {
         let references = reachability::document_references(view).into_iter()
             .map(|stored| RemoteObject::from_stored(stored, &self.connected.handle))
@@ -831,31 +1034,7 @@ impl DocumentSource for ConnectedDocuments<'_> {
         Box::pin(async move { control::read_catalog_children(self.connected, object, self.cancel).await })
     }
     fn probe<'a>(&'a self, object: &'a RemoteObject) -> ProviderFuture<'a, Option<ObjectReceipt>> {
-        Box::pin(async move {
-            object.stored(&self.connected.handle)?;
-            if object.repository_id != self.connected.stored.descriptor.repository_id {
-                return Err(ProviderError::new(ErrorKind::Corrupt));
-            }
-            std::fs::create_dir_all(self.scratch)
-                .map_err(|_| ProviderError::new(ErrorKind::Transient))?;
-            if crate::trust_boundary::is_link_like(
-                &std::fs::symlink_metadata(self.scratch)
-                    .map_err(|_| ProviderError::new(ErrorKind::Transient))?,
-            ) {
-                return Err(ProviderError::new(ErrorKind::Corrupt));
-            }
-            let intent = ObjectIntent {
-                repository_id: self.connected.handle.repository_id.clone(), job_id: "cleanup-probe".into(),
-                object_id: object.object_id.clone(), role: object.role,
-                byte_length: object.receipt.byte_length, sha256: object.ciphertext_sha256.clone(),
-            };
-            let mut receipt = object.receipt.clone();
-            receipt.checksum = None;
-            super::transfer_job::verify_remote_receipt(
-                self.scratch, &intent, self.connected.provider.as_ref(), &self.connected.handle,
-                receipt, self.cancel,
-            ).await
-        })
+        self.probe_for_repository(object,&self.connected.stored.descriptor.repository_id)
     }
 }
 
@@ -871,6 +1050,151 @@ mod tests {
     use crate::persistent_store::sync_selection::CaptureIdentity;
     use risunest_external_storage_format::format::{Descriptor, Strategy};
     use std::{io::Write, sync::{atomic::{AtomicUsize, Ordering}, Arc, Mutex}};
+
+    #[test]
+    fn lww_gc_retires_native_body_before_its_signed_discovery_parent() {
+        runtime().block_on(async {
+            use super::super::{lww_tests::{CycleFixture,small_asset},fake,contract::{ConnectionConfig,RemoteLocator}};
+            let mut f=CycleFixture::new();let cancel=Cancellation::default();
+            small_asset(&mut f.a,"obsolete-large",&vec![31;5*1024*1024]);
+            let mut small=Vec::new();
+            for n in 0..4 {small.push(small_asset(&mut f.a,&format!("small-{n}"),format!("synthetic retained pack entry {n}").as_bytes()));}
+            f.publish_a().await;
+            f.a.delete_asset_alias("asset","obsolete-large",f.a.revision().unwrap()).unwrap();
+            for n in 1..4 {f.a.delete_asset_alias("asset",&format!("small-{n}"),f.a.revision().unwrap()).unwrap();}
+            f.publish_a().await;
+            let directory=tempfile::tempdir().unwrap();
+            let baseline=f.receiver.compact_published(&directory.path().join("remote-baseline"),"ffffffff-ffff-4fff-8fff-ffffffffffff",&f.a.lww_clock_state().unwrap().writer_id,
+                &f.receiver.capabilities,&cancel,None).await.unwrap();
+            assert!(f.receive_b().await>0);
+            let saved=super::super::lww_residency::packed_source(f.directory_b.path(),&small[0]).unwrap().unwrap();
+            let old_pack=saved.packs[0].header.object_id.clone();
+            assert!(crate::asset_repository::PayloadCas::new(f.directory_b.path()).unwrap().stat_object(&small[0]).unwrap().is_none());
+            let id="00000000-0000-4000-8000-000000000090".to_owned();
+            let checkpoint=f.sender.compact_published(directory.path(),&id,&f.a.lww_clock_state().unwrap().writer_id,
+                &f.sender.capabilities,&cancel,None).await.unwrap();
+            let old=f.sender.checkpoint(&baseline.reference.receipt,&cancel).await.unwrap().1;
+            let current=f.sender.checkpoint(&checkpoint.reference.receipt,&cancel).await.unwrap().1;
+            assert_eq!(old.covered_prefixes,current.covered_prefixes);
+            assert_eq!(checkpoint.reference.role,ObjectRole::Snapshot);
+            assert_eq!(checkpoint.reference.object_id,id);
+            let connected=ConnectedRepository {
+                stored:super::super::connection_store::StoredConnection {
+                    id:"sender".into(),config:ConnectionConfig{provider:"synthetic".into(),profile:None,
+                        endpoint:"https://synthetic.invalid".into(),account_id:"fixture".into(),location:BTreeMap::new(),oauth_profile:None},
+                    descriptor:f.sender.descriptor.clone(),descriptor_locator:RemoteLocator{connection_identity:f.sender.repository.connection_identity.clone(),collection:None,object:"descriptor".into()},
+                    provider_repository_id:f.sender.repository.repository_id.clone(),credential_ref:"credential".into(),root_key_ref:"key".into(),recovery_key_ref:"recovery".into(),
+                    retention_policy:None,capabilities:f.sender.capabilities.clone(),created_at_ms:1,verified_at_ms:1,last_sync_at_ms:None,last_backup_at_ms:None,
+                },provider:f.provider.clone(),handle:fake::repository(),
+                dependencies:fake::loopback_dependencies(fake::MemoryVault::default(),1).dependencies,root_key:zeroize::Zeroizing::new([7;32]),
+            };
+            let cache=directory.path().join("cache");let scratch=directory.path().join("probe");
+            let source_root=f.directory_a.path().to_path_buf();let backup_spool=directory.path().join("backup-sections");
+            let (capture,sections,original_units,writer)=super::super::worker_observation::spawn_blocking(move || {
+                let mut source=crate::persistent_store::PersistentStore::open(&source_root).unwrap();
+                let probe=super::super::runtime::CancelProbe(Cancellation::default());
+                let hydration=source.hydrate_external_capture_dependencies("sender",&probe).unwrap();
+                let (lease,prepared)=source.lww_acquire_backup_capture(source.revision().unwrap()).unwrap();
+                let sections=super::super::sections::capture_prepared_backup_sections(&prepared,&backup_spool,&probe.0).unwrap();
+                let capture=source.capture_external_library_from_lease_with_sections("sender",&hydration,&lease.lease,sections,&probe).unwrap();
+                let sections=capture.catalog.backup_sections().unwrap();let original=capture.catalog.original_backup_units().unwrap();
+                (capture,sections,original,source.lww_clock_state().unwrap().writer_id)
+            }).await.unwrap();
+            let backup_id=uuid::Uuid::new_v4().to_string();
+            let mut journal=TransferJournal::open(&directory.path().join("backup-journal"),super::super::journal::JobIdentity{
+                job_id:backup_id.clone(),connection_id:"sender".into(),repository_id:connected.handle.repository_id.clone(),
+                capture_id:capture.id.clone(),capture:capture.identity.clone(),
+            }).unwrap();
+            let metadata=packaging::SnapshotMetadata{snapshot_id:backup_id.clone(),repository_id:connected.stored.descriptor.repository_id.clone(),
+                library_id:capture.identity.library_epoch.clone(),author_device_id:capture.identity.store_id.clone(),created_at_ms:super::super::runtime::now_ms(),
+                logical_revision:capture.identity.revision as u64,parent_snapshot_id:None,
+                content_fingerprint:capture.catalog.content_fingerprint(&risunest_external_storage_format::format::library_fingerprint_domain()).unwrap(),
+                purpose:packaging::SnapshotPurpose::BackupBundle{source:BundleSource::Device{writer_id:writer},remote_generation:None,original_units},
+            };
+            let backup=packaging::package_and_upload(capture,sections,f.directory_a.path(),&cache,metadata,&connected.root_key,
+                packaging::PackageLimits::from_capabilities(&connected.stored.capabilities).unwrap(),None,&mut journal,
+                connected.provider.as_ref(),&connected.handle,&super::super::phase_progress::PhaseProgress::silent(),&cancel).await.unwrap();
+            assert_ne!(backup.reference.repository_id,f.sender.repository.repository_id);
+            assert_eq!(f.sender.snapshot_listing(&cancel).await.unwrap().len(),2,"ordinary logical-scope backup coexists with the physical checkpoints");
+            let view=LwwRepositoryView::new(&f.sender,ConnectedRepositoryView{connected:&connected,writer_id:"sender",policy:RetentionPolicy::DEFAULT,
+                now_ms:1000,unfinished:vec![],cache_root:&cache},ConnectedDocuments{connected:&connected,cancel:&cancel,scratch:&scratch});
+            let observed=view.roots(&cancel).await.unwrap();let listed=view.snapshots(&cancel).await.unwrap();let known=view.known_objects().unwrap();
+            let inventory=view.inventory(&cancel).await.unwrap();
+            assert!(inventory.pages.iter().any(|page|page.reference.repository_id==f.sender.repository.repository_id));
+            assert!(inventory.pages.iter().any(|page|page.reference.repository_id==connected.stored.descriptor.repository_id));
+            assert!(inventory.objects.iter().any(|object|object.object_id==id && object.role==ObjectRole::Snapshot));
+            assert_eq!(backup.reference.role,ObjectRole::BackupBundle);
+            assert_eq!(backup.reference.object_id,format!("snapshot-{backup_id}"));
+            let body=known.iter().find(|object|view.native_body(object).unwrap()).unwrap().clone();
+            assert!(body.stored(&connected.handle).is_err(),"native ciphertext is not a generic StoredObject envelope");
+            assert!(validate_generic_body(&body,&connected.handle).is_err());
+            let roots=Roots{head:observed.head,kept_points:observed.kept_points,kept_bundles:observed.kept_bundles,..Default::default()};
+            let gc=GcStore::open(f.directory_a.path()).unwrap();
+            gc.begin_observation("sender").unwrap();
+            let first=reachability::mark(f.directory_a.path(),&view,reachability::MarkRequest{connection_id:"sender",repository:&connected.handle,
+                format_repository_id:&connected.stored.descriptor.repository_id,now_ms:1000,roots:roots.clone(),listed:listed.clone(),known_objects:known.clone(),retired_points:vec![]},&cancel).await.unwrap();
+            assert!(first.candidates.is_empty());gc.finish_observation("sender").unwrap();
+            gc.begin_observation("sender").unwrap();
+            let marked=reachability::mark(f.directory_a.path(),&view,reachability::MarkRequest{connection_id:"sender",repository:&connected.handle,
+                format_repository_id:&connected.stored.descriptor.repository_id,now_ms:1000+leases::UNREACHABLE_GRACE_MS,roots:roots.clone(),listed:listed.clone(),known_objects:known.clone(),retired_points:vec![]},&cancel).await.unwrap();
+            assert_eq!(marked.candidates.first().unwrap().object_id,body.object_id);
+            assert!(marked.candidates.iter().skip(1).any(|object|object.role==ObjectRole::Segment));
+            gc.finish_observation("sender").unwrap();gc.begin_observation("sender").unwrap();
+            let mut protected=roots;protected.job_references.push(body.clone());
+            let retained=reachability::mark(f.directory_a.path(),&view,reachability::MarkRequest{connection_id:"sender",repository:&connected.handle,
+                format_repository_id:&connected.stored.descriptor.repository_id,now_ms:1000+leases::UNREACHABLE_GRACE_MS,
+                roots:protected,listed,known_objects:known,retired_points:vec![]},&cancel).await.unwrap();
+            assert!(!retained.candidates.iter().any(|object|object.object_id==body.object_id));
+            assert!(retained.candidates.iter().any(|object|object.role==ObjectRole::Segment),"a live body does not pin obsolete discovery parents");
+            gc.finish_observation("sender").unwrap();
+            let clock=fake::FakeLeaseClock::new(1000+leases::UNREACHABLE_GRACE_MS);
+            let context=LeaseContext{root:f.directory_a.path(),connection_id:"sender",writer_id:"collector",descriptor:&connected.stored.descriptor,
+                root_key:&connected.root_key,provider:connected.provider.as_ref(),repository:&connected.handle,clock:&clock,protection_supported:true,ledger:None};
+            let request=CleanupRequest{job_id:"first-finite-gc",cleanup_supported:true,limits:CleanupLimits{batch:1,per_run:1},connection_time:&available_time};
+            let first=run_lww(&context,&request,&f.sender,ConnectedRepositoryView{connected:&connected,writer_id:"collector",policy:RetentionPolicy::DEFAULT,
+                now_ms:1000+leases::UNREACHABLE_GRACE_MS,unfinished:vec![],cache_root:&cache},&scratch,&cancel).await.unwrap();
+            assert!(first.deleted_objects<=1);assert!(f.provider.holds(&body.object_id),"a newly unmarked protected body retains its grace period");
+            clock.advance(leases::UNREACHABLE_GRACE_MS);
+            let request=CleanupRequest{job_id:"second-finite-gc",..request};
+            let settled=run_lww(&context,&request,&f.sender,ConnectedRepositoryView{connected:&connected,writer_id:"collector",policy:RetentionPolicy::DEFAULT,
+                now_ms:1000+2*leases::UNREACHABLE_GRACE_MS,unfinished:vec![],cache_root:&cache},&scratch,&cancel).await.unwrap();
+            assert_eq!(settled.deleted_objects,1);assert!(!f.provider.holds(&body.object_id));
+            assert!(view.snapshots(&cancel).await.unwrap().len()>=3,"partial deletion keeps signed discovery parents");
+            let request=CleanupRequest{job_id:"retire-covered-pack",limits:CleanupLimits{batch:100,per_run:100},..request};
+            run_lww(&context,&request,&f.sender,ConnectedRepositoryView{connected:&connected,writer_id:"collector",policy:RetentionPolicy::DEFAULT,
+                now_ms:1000+2*leases::UNREACHABLE_GRACE_MS,unfinished:vec![],cache_root:&cache},&scratch,&cancel).await.unwrap();
+            assert!(!f.provider.holds(&old_pack),"finite aged GC retires the saved equal-coverage pack");
+            let mut receiver_connection=ConnectedRepository{stored:connected.stored.clone(),provider:connected.provider.clone(),handle:fake::repository(),
+                dependencies:fake::loopback_dependencies(fake::MemoryVault::default(),1).dependencies,root_key:zeroize::Zeroizing::new(*connected.root_key)};
+            receiver_connection.stored.id="receiver".into();
+            super::super::connection_store::ConnectionStore::open(f.directory_b.path()).unwrap().insert(&receiver_connection.stored).unwrap();
+            let _resolver=super::super::lww_residency::install_test_source_connection(f.directory_b.path(),Arc::new(receiver_connection)).unwrap();
+            let catalog_id=&current.asset_catalogs[0].header.object_id;
+            let authentic=f.provider.state.lock().unwrap().objects[catalog_id].0.clone();
+            let mut corrupt=authentic.clone();let last=corrupt.len()-1;corrupt[last]^=1;
+            f.provider.seed(catalog_id,ObjectRole::Catalog,corrupt);
+            let root=f.directory_b.path().to_path_buf();let hash=small[0].clone();
+            super::super::worker_observation::spawn_blocking(move || {
+                assert!(super::super::lww_residency::hydrate_registered(&root,&hash,&||Ok(())).is_err());
+                assert!(crate::asset_repository::PayloadCas::new(&root).unwrap().stat_object(&hash).unwrap().is_none());
+            }).await.unwrap();
+            assert_eq!(super::super::lww_residency::packed_source(f.directory_b.path(),&small[0]).unwrap().unwrap().packs,saved.packs);
+            f.provider.seed(catalog_id,ObjectRole::Catalog,authentic);
+            let frozen=super::super::lww_residency::FrozenBodySource::Packed(saved.clone());
+            let spool=super::super::lww_residency::spool_frozen_remote_body(&frozen,&scratch.join("frozen-destination"),&cancel).await.unwrap();
+            assert_eq!(super::super::lww_residency::read_frozen_body_spool(&frozen,&spool,&cancel).unwrap(),b"synthetic retained pack entry 0");
+            assert!(crate::asset_repository::PayloadCas::new(f.directory_b.path()).unwrap().stat_object(&small[0]).unwrap().is_none());
+            assert_eq!(super::super::lww_residency::packed_source(f.directory_b.path(),&small[0]).unwrap().unwrap().packs,saved.packs,"frozen backup custody never switches its saved source identity");
+            let root=f.directory_b.path().to_path_buf();let hash=small[0].clone();
+            super::super::worker_observation::spawn_blocking(move || {
+                assert!(super::super::lww_residency::hydrate_registered(&root,&hash,&||Ok(())).unwrap());
+                assert_eq!(crate::asset_repository::PayloadCas::new(&root).unwrap().read_object(&hash).unwrap().unwrap(),b"synthetic retained pack entry 0");
+            }).await.unwrap();
+            let refreshed=super::super::lww_residency::packed_source(f.directory_b.path(),&small[0]).unwrap().unwrap();
+            assert_eq!(refreshed.protected_snapshot,id);assert_ne!(refreshed.packs[0].header.object_id,old_pack);
+        });
+    }
+    fn validate_generic_body(object:&RemoteObject,repository:&RepositoryHandle)->Result<()> {object.stored(repository).map(|_|())}
 
     const NOW: u64 = 1000 * 24 * 60 * leases::MINUTE_MS;
     fn available_time(_: Instant) -> Result<bool> { Ok(true) }
@@ -1181,7 +1505,6 @@ mod tests {
                     credential_ref: "credential".into(),
                     root_key_ref: "key".into(),
                     recovery_key_ref: "recovery-key".into(),
-                    capture_policy: None,
                     retention_policy: None,
                     capabilities: fake::capabilities(true),
                     created_at_ms: 1_000,

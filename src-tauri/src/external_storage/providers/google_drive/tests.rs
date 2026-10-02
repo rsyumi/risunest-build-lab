@@ -630,6 +630,7 @@ fn resume_create_accepts_only_an_empty_or_bootstrap_descriptor_control_layout() 
             control_reply(vec![descriptor_file("desc-1")]),
             ids_reply("reserved-head"),
             control_reply(vec![descriptor_file("desc-1")]),
+            Reply::Http { status: 200, headers: vec![], body: vec![3u8; 20] },
         ]);
         let (published_repository, _) = provider
             .open_repository(
@@ -646,7 +647,7 @@ fn resume_create_accepts_only_an_empty_or_bootstrap_descriptor_control_layout() 
             object_id: "d1".to_owned(),
             role: ObjectRole::Descriptor,
             byte_length: 20,
-            sha256: "00".repeat(32),
+            sha256: hash(&vec![3u8; 20]),
         };
         assert!(provider
             .begin_upload(&published_repository, &descriptor_intent, &cancel)
@@ -1187,35 +1188,13 @@ fn a_foreign_handle_or_locator_is_refused() {
 fn an_immutable_create_converges_after_a_conflict_and_refuses_different_bytes() {
     runtime().block_on(async {
         let payload = vec![3u8; 2048];
-        let digest = hash(&payload);
-        let stored = json!({
-            "id": "pack-generated",
-            "size": payload.len().to_string(),
-            "version": "4",
-            "sha256Checksum": digest,
-            "appProperties": { "risunestRole": "pack", "risunestObjectId": "object-1" }
-        });
+        let stored = json!({ "id": "pack-generated", "size": "2048", "version": "4",
+            "sha256Checksum": hash(&payload), "appProperties": { "risunestRole": "pack", "risunestObjectId": "object-1" } });
         let mut replies = open_existing_replies();
-        // First attempt: nothing stored yet, the create response is lost.
-        replies.push(json_reply(200, json!({ "files": [] })));
-        replies.push(ids_reply("pack-generated"));
-        replies.push(Reply::Lost);
-        // Second attempt: the identifier is taken by the earlier attempt.
-        replies.push(json_reply(200, json!({ "files": [] })));
-        replies.push(ids_reply("pack-generated"));
-        replies.push(error_reply(409, "alreadyExists"));
-        // Third attempt: the stored object is found and converges.
-        replies.push(json_reply(200, json!({ "files": [stored.clone()] })));
-        // Fourth: a different length under the same identity never overwrites.
-        replies.push(json_reply(
-            200,
-            json!({ "files": [json!({
-                "id": "pack-generated",
-                "size": "99",
-                "version": "4",
-                "appProperties": { "risunestRole": "pack", "risunestObjectId": "object-1" }
-            })] }),
-        ));
+        replies.extend([ids_reply("pack-generated"), Reply::Lost, error_reply(409, "alreadyExists"),
+            json_reply(200, stored.clone()), Reply::Http { status: 200, headers: vec![], body: payload.clone() },
+            json_reply(200, json!({ "files": [stored.clone()] })), Reply::Http { status: 200, headers: vec![], body: payload.clone() },
+            json_reply(200, json!({ "files": [stored] })), Reply::Http { status: 200, headers: vec![], body: vec![4u8; 2048] }]);
         let server = WireServer::start(replies);
         let test = deps_with(Some(stored_secret(NOW_MS + 3_600_000)));
         let cancel = Cancellation::default();
@@ -1223,54 +1202,22 @@ fn an_immutable_create_converges_after_a_conflict_and_refuses_different_bytes() 
         let directory = tempfile::tempdir().unwrap();
         let source = spool(directory.path(), "pack", &payload);
         let intent = intent(&repository, "object-1", ObjectRole::Pack, &payload);
-
-        assert_eq!(
-            provider
-                .create_object(&repository, &intent, &source, None, &cancel)
-                .await
-                .err()
-                .unwrap()
-                .kind,
-            ErrorKind::Transient
-        );
-        assert_eq!(
-            provider
-                .create_object(&repository, &intent, &source, None, &cancel)
-                .await
-                .err()
-                .unwrap()
-                .kind,
-            ErrorKind::PreconditionFailed
-        );
-        let receipt = provider
-            .create_object(&repository, &intent, &source, None, &cancel)
-            .await
-            .unwrap();
+        let resume = provider.begin_upload(&repository, &intent, &cancel).await.unwrap().unwrap();
+        assert_eq!(request_lines(&server).len(), 4);
+        assert_eq!(provider.create_object(&repository, &intent, &source, Some(&resume), &cancel).await.unwrap_err().kind, ErrorKind::Transient);
+        let receipt = provider.create_object(&repository, &intent, &source, Some(&resume), &cancel).await.unwrap();
         assert_eq!(receipt.locator.object, "pack-generated");
-        assert_eq!(receipt.locator.collection, None);
-        assert_eq!(receipt.byte_length, payload.len() as u64);
+        let receipt = provider.create_object(&repository, &intent, &source, None, &cancel).await.unwrap();
         assert!(receipt.complete);
         assert!(receipt.checksum.unwrap().provider_verified);
-        assert_eq!(
-            provider
-                .create_object(&repository, &intent, &source, None, &cancel)
-                .await
-                .err()
-                .unwrap()
-                .kind,
-            ErrorKind::PreconditionFailed
-        );
-        let lines = request_lines(&server);
-        assert_eq!(lines.len(), 11);
-        assert!(lines[3].contains("risunestObjectId"));
-        assert!(lines[4].contains("/drive/v3/files/generateIds"));
-        assert!(lines[5].contains("/upload/drive/v3/files?uploadType=multipart"));
+        assert_eq!(provider.create_object(&repository, &intent, &source, None, &cancel).await.unwrap_err().kind, ErrorKind::PreconditionFailed);
         let records = server.requests.lock().unwrap();
-        let body = String::from_utf8_lossy(&records[5].body).to_string();
+        assert_eq!(records.iter().filter(|record| record.headers.contains("/files/generateIds")).count(), 1);
+        assert_eq!(records[4].body, records[5].body);
+        let body = String::from_utf8_lossy(&records[4].body);
+        assert!(body.contains("\"id\":\"pack-generated\""));
         assert!(body.contains("\"risunestObjectId\":\"object-1\""));
         assert!(body.contains("\"risunestJobId\":\"job-1\""));
-        assert!(body.contains("\"name\":\"pack-object-1\""));
-        assert!(records[5].body.windows(8).any(|window| window == [3u8; 8]));
     });
 }
 
@@ -1281,11 +1228,6 @@ fn a_resumable_session_continues_from_the_offset_the_service_confirmed() {
         let digest = hash(&payload);
         let mut replies = open_existing_replies();
         replies.push(ids_reply("pack-session"));
-        replies.push(json_reply_with(
-            200,
-            &[("Location", "/synthetic/upload/session/one")],
-            json!({}),
-        ));
         replies.push(json_reply_with(
             308,
             &[("Range", "bytes=0-524287")],
@@ -1313,16 +1255,18 @@ fn a_resumable_session_continues_from_the_offset_the_service_confirmed() {
             .unwrap()
             .unwrap();
         assert_eq!(resume.confirmed_offset, 0);
-        assert_eq!(resume.expires_at_ms, Some(NOW_MS + 7 * 24 * 60 * 60 * 1000));
+        assert_eq!(resume.expires_at_ms, None);
         let sealed = String::from_utf8(
             test.vault
                 .contents(&resume.sealed_state.0)
                 .expect("sealed upload state"),
         )
         .unwrap();
-        assert!(sealed.contains("/upload/session/one"));
+        assert!(sealed.contains("\"sessionUri\":null"));
+        assert_eq!(request_lines(&server).len(), 4);
         assert!(sealed.contains("pack-session"));
 
+        set_synthetic_session(&test, &resume, &intent, "pack-session", server.url.join("/synthetic/upload/session/one").unwrap().as_str()).await;
         let receipt = provider
             .create_object(&repository, &intent, &source, Some(&resume), &cancel)
             .await
@@ -1331,22 +1275,18 @@ fn a_resumable_session_continues_from_the_offset_the_service_confirmed() {
         assert_eq!(receipt.locator.collection.as_deref(), Some("snapshots"));
         assert!(receipt.complete);
         let records = server.requests.lock().unwrap();
-        assert_eq!(records.len(), 7);
+        assert_eq!(records.len(), 6);
         assert!(records[4]
             .headers
             .to_lowercase()
-            .contains("x-upload-content-length: 1048576"));
-        assert!(records[5]
-            .headers
-            .to_lowercase()
             .contains("content-range: bytes 0-1048575/1048576"));
-        assert_eq!(records[5].body.len(), 1024 * 1024);
-        assert!(records[6]
+        assert_eq!(records[4].body.len(), 1024 * 1024);
+        assert!(records[5]
             .headers
             .to_lowercase()
             .contains("content-range: bytes 524288-1048575/1048576"));
-        assert_eq!(records[6].body.len(), 524_288);
-        assert!(records[5]
+        assert_eq!(records[5].body.len(), 1024 * 1024 - 524_288);
+        assert!(records[4]
             .headers
             .to_lowercase()
             .contains("/synthetic/upload/session/one"));
@@ -1355,78 +1295,34 @@ fn a_resumable_session_continues_from_the_offset_the_service_confirmed() {
 }
 
 #[test]
-fn an_expired_session_restarts_and_a_confirmed_one_completes() {
+fn an_expired_session_retains_its_file_id_and_a_confirmed_one_completes() {
     runtime().block_on(async {
         let payload = vec![7u8; 4096];
-        let digest = hash(&payload);
+        let stored = json!({ "id": "pack-expired", "size": "4096", "version": "8", "sha256Checksum": hash(&payload),
+            "appProperties": { "risunestRole": "pack", "risunestObjectId": "object-3" } });
         let mut replies = open_existing_replies();
-        replies.push(ids_reply("pack-expired"));
-        replies.push(json_reply_with(200, &[("Location", "self")], json!({})));
-        // Reconcile: the session is gone and the file was never stored.
-        replies.push(json_reply(404, json!({})));
-        replies.push(error_reply(404, "notFound"));
-        // A second reconcile finds a confirmed offset.
-        replies.push(json_reply_with(
-            308,
-            &[("Range", "bytes=0-2047")],
-            json!({}),
-        ));
-        // A third reconcile finds the completed object.
-        replies.push(json_reply(
-            200,
-            json!({
-                "id": "pack-expired",
-                "size": payload.len().to_string(),
-                "version": "8",
-                "sha256Checksum": digest,
-            }),
-        ));
-        // A fourth reconcile finds a different object under the same identity.
-        replies.push(json_reply(
-            200,
-            json!({ "id": "pack-expired", "size": "10", "version": "9" }),
-        ));
+        replies.extend([ids_reply("pack-expired"), json_reply(404, json!({})), error_reply(404, "notFound"),
+            json_reply(200, stored), Reply::Http { status: 200, headers: vec![], body: payload.clone() },
+            json_reply(200, json!({ "id": "pack-expired", "size": "10", "appProperties": { "risunestRole": "pack" } }))]);
         let server = WireServer::start(replies);
         let test = deps_with(Some(stored_secret(NOW_MS + 3_600_000)));
         let cancel = Cancellation::default();
         let (provider, repository) = opened(&server, &test, &cancel).await;
         let intent = intent(&repository, "object-3", ObjectRole::Pack, &payload);
-        let resume = provider
-            .begin_upload(&repository, &intent, &cancel)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(matches!(
-            provider
-                .reconcile_upload(&repository, &intent, Some(&resume), &cancel)
-                .await
-                .unwrap(),
-            UploadResolution::RestartRequired
-        ));
-        let UploadResolution::Resumable(updated) = provider
-            .reconcile_upload(&repository, &intent, Some(&resume), &cancel)
-            .await
-            .unwrap()
-        else {
-            panic!("expected a resumable session");
-        };
-        assert_eq!(updated.confirmed_offset, 2048);
-        let UploadResolution::Complete(receipt) = provider
-            .reconcile_upload(&repository, &intent, Some(&resume), &cancel)
-            .await
-            .unwrap()
-        else {
-            panic!("expected a completed upload");
-        };
-        assert_eq!(receipt.byte_length, payload.len() as u64);
-        assert!(receipt.checksum.unwrap().provider_verified);
-        assert!(matches!(
-            provider
-                .reconcile_upload(&repository, &intent, Some(&resume), &cancel)
-                .await
-                .unwrap(),
-            UploadResolution::Conflict
-        ));
+        let resume = provider.begin_upload(&repository, &intent, &cancel).await.unwrap().unwrap();
+        let state = SecretBytes(zeroize::Zeroizing::new(json!({ "fileId": "pack-expired",
+            "sessionUri": server.url.join("/synthetic/upload/session/expired").unwrap().as_str(), "intent": intent }).to_string().into_bytes()));
+        crate::external_storage::auth::SecretVault::replace(test.vault.as_ref(), &resume.sealed_state, &state).await.unwrap();
+        let UploadResolution::Resumable(updated) = provider.reconcile_upload(&repository, &intent, Some(&resume), &cancel).await.unwrap()
+            else { panic!("must preserve allocated identity"); };
+        assert_eq!(updated.sealed_state.0, resume.sealed_state.0);
+        assert_eq!(updated.confirmed_offset, 0);
+        assert!(String::from_utf8(test.vault.contents(&updated.sealed_state.0).unwrap()).unwrap().contains("pack-expired"));
+        let UploadResolution::Complete(receipt) = provider.reconcile_upload(&repository, &intent, Some(&updated), &cancel).await.unwrap()
+            else { panic!("expected complete"); };
+        assert_eq!(receipt.byte_length, 4096);
+        assert!(matches!(provider.reconcile_upload(&repository, &intent, Some(&updated), &cancel).await.unwrap(), UploadResolution::Conflict));
+        assert_eq!(request_lines(&server).iter().filter(|line| line.contains("/files/generateIds")).count(), 1);
     });
 }
 
@@ -1473,11 +1369,6 @@ fn a_mismatched_identifier_or_digest_is_never_reported_as_complete() {
         // A completion naming another file is never the object of this job.
         let mut replies = open_existing_replies();
         replies.push(ids_reply("pack-wanted"));
-        replies.push(json_reply_with(
-            200,
-            &[("Location", "/synthetic/upload/session/two")],
-            json!({}),
-        ));
         replies.push(json_reply(
             200,
             json!({
@@ -1497,6 +1388,7 @@ fn a_mismatched_identifier_or_digest_is_never_reported_as_complete() {
             .await
             .unwrap()
             .unwrap();
+        set_synthetic_session(&test, &resume, &intent, "pack-wanted", server.url.join("/synthetic/upload/session/two").unwrap().as_str()).await;
         assert_eq!(
             provider
                 .create_object(&repository, &intent, &source, Some(&resume), &cancel)
@@ -2416,7 +2308,6 @@ fn transfer_401_refreshes_once_and_replays_only_confirmed_bytes() {
             let payload = vec![5u8; 1024];
             let mut replies = open_existing_replies();
             replies.push(ids_reply("session-file"));
-            replies.push(json_reply_with(200, &[("Location", "/synthetic/upload/session/one")], json!({})));
             replies.push(error_reply(401, "authError"));
             replies.push(json_reply(200, json!({"access_token":"fresh-access","expires_in":3600,"token_type":"Bearer"})));
             replies.push(json_reply_with(308, &[("Range", "bytes=0-511")], json!({})));
@@ -2431,14 +2322,15 @@ fn transfer_401_refreshes_once_and_replays_only_confirmed_bytes() {
             let source = spool(directory.path(), "pack", &payload);
             let intent = intent(&repository, "object", ObjectRole::SyncState, &payload);
             let resume = provider.begin_upload(&repository, &intent, &cancel).await.unwrap().unwrap();
+            set_synthetic_session(&test, &resume, &intent, "session-file", server.url.join("/synthetic/upload/session/one").unwrap().as_str()).await;
             let result = provider.create_object(&repository, &intent, &source, Some(&resume), &cancel).await;
             if repeated { assert_eq!(result.err().unwrap().kind, ErrorKind::Unauthorized); }
             else { assert_eq!(result.unwrap().byte_length, 1024); }
             let requests = server.requests.lock().unwrap();
-            assert_eq!(requests.len(), 9);
-            assert!(requests[7].headers.to_lowercase().contains("content-range: bytes */1024"));
-            assert!(requests[8].headers.to_lowercase().contains("content-range: bytes 512-1023/1024"));
-            assert_eq!(requests[8].body, payload[512..]);
+            assert_eq!(requests.len(), 8);
+            assert!(requests[6].headers.to_lowercase().contains("content-range: bytes */1024"));
+            assert!(requests[7].headers.to_lowercase().contains("content-range: bytes 512-1023/1024"));
+            assert_eq!(requests[7].body, payload[512..]);
         }
     });
 }
@@ -2450,7 +2342,7 @@ fn multipart_and_media_retry_once_after_token_rejection() {
         let file = json!({"id":"generated-file","size":payload.len().to_string(),"version":"1","sha256Checksum":hash(payload)});
         let mut replies = open_existing_replies();
         replies.extend([
-            control_reply(vec![]), ids_reply("generated-file"), error_reply(401, "authError"),
+            ids_reply("generated-file"), error_reply(401, "authError"),
             json_reply(200, json!({"access_token":"fresh-access","expires_in":3600,"token_type":"Bearer"})),
             json_reply(200, file.clone()), json_reply(200, file), error_reply(401, "authError"),
             json_reply(200, json!({"access_token":"fresh-access-2","expires_in":3600,"token_type":"Bearer"})),
@@ -2463,13 +2355,14 @@ fn multipart_and_media_retry_once_after_token_rejection() {
         let directory = tempfile::tempdir().unwrap();
         let source = spool(directory.path(), "pack", payload);
         let intent = intent(&repository, "object", ObjectRole::Pack, payload);
-        let receipt = provider.create_object(&repository, &intent, &source, None, &cancel).await.unwrap();
+        let resume = provider.begin_upload(&repository, &intent, &cancel).await.unwrap().unwrap();
+        let receipt = provider.create_object(&repository, &intent, &source, Some(&resume), &cancel).await.unwrap();
         let mut sink = SpoolSink::create(&directory.path().join("read"), payload.len() as u64).unwrap();
         provider.read_object(&repository, &receipt.locator, None, &mut sink, &cancel).await.unwrap();
         let requests = server.requests.lock().unwrap();
-        assert_eq!(requests.len(), 12);
-        assert!(requests[5].body.windows(payload.len()).any(|bytes| bytes == payload));
-        assert!(requests[7].body.windows(payload.len()).any(|bytes| bytes == payload));
+        assert_eq!(requests.len(), 11);
+        assert!(requests[4].body.windows(payload.len()).any(|bytes| bytes == payload));
+        assert!(requests[6].body.windows(payload.len()).any(|bytes| bytes == payload));
     });
 }
 
@@ -2488,5 +2381,315 @@ fn creation_rejects_crowded_folders_as_occupied() {
             assert_eq!(requests.len(), 3);
             assert!(requests[2].contains("pageSize=1"));
         }
+    });
+}
+
+
+#[test]
+fn longest_sync_names_fit_the_longest_accepted_root() {
+    use crate::external_storage::contract::{MAX_SEGMENT_NAME_BYTES, MAX_SNAPSHOT_NAME_BYTES, segment_object_id};
+    let root = "r".repeat(256);
+    super::validate_sync_root(&root).unwrap();
+    let name = segment_object_id("00000000-0000-4000-8000-000000000001", u64::MAX, &"f".repeat(64)).unwrap();
+    assert_eq!(name.len(), MAX_SEGMENT_NAME_BYTES);
+    let snapshot = "00000000-0000-4000-8000-000000000002";
+    assert_eq!(snapshot.len(), MAX_SNAPSHOT_NAME_BYTES);
+    // Drive addresses the root by ID, so it consumes no physical name bytes.
+    assert_eq!(format!("segments/{name}").len(), 131);
+    assert_eq!(format!("snapshots/{snapshot}").len(), 46);
+    assert!(super::validate_sync_root(&(root + "r")).is_err());
+}
+
+async fn set_synthetic_session(test: &TestDependencies, resume: &ResumeState, intent: &ObjectIntent, file_id: &str, uri: &str) {
+    let bytes = SecretBytes(zeroize::Zeroizing::new(json!({ "fileId": file_id, "sessionUri": uri, "intent": intent }).to_string().into_bytes()));
+    crate::external_storage::auth::SecretVault::replace(test.vault.as_ref(), &resume.sealed_state, &bytes).await.unwrap();
+}
+
+
+
+#[test]
+fn identical_drive_duplicates_are_verified_and_choose_the_smallest_file_id() {
+    runtime().block_on(async {
+        let bytes = b"sealed-a";
+        let name = crate::external_storage::contract::segment_object_id("00000000-0000-4000-8000-000000000001", u64::MAX, &hash(bytes)).unwrap();
+        let file = |id: &str| json!({ "id": id, "name": format!("segments/{name}"), "size": "8", "version": "1",
+            "appProperties": { "risunestRole": "segment" } });
+        let mut replies = open_existing_replies();
+        replies.extend([control_reply(vec![file("file-z"), file("file-a")]),
+            Reply::Http { status: 200, headers: vec![], body: bytes.to_vec() }, Reply::Http { status: 200, headers: vec![], body: bytes.to_vec() },
+            control_reply(vec![file("file-a"), file("file-z")]), Reply::Http { status: 200, headers: vec![], body: bytes.to_vec() },
+            Reply::Http { status: 200, headers: vec![], body: b"sealed-b".to_vec() }]);
+        let server = WireServer::start(replies);
+        let test = deps_with(Some(stored_secret(NOW_MS + 3_600_000)));
+        let cancel = Cancellation::default();
+        let (provider, repository) = opened(&server, &test, &cancel).await;
+        let directory = tempfile::tempdir().unwrap();
+        let source = spool(directory.path(), "sealed", bytes);
+        let intent = intent(&repository, &name, ObjectRole::Segment, bytes);
+        let receipt = provider.create_object(&repository, &intent, &source, None, &cancel).await.unwrap();
+        assert_eq!(receipt.locator.object, format!("file-a/{name}"));
+        assert_eq!(provider.create_object(&repository, &intent, &source, None, &cancel).await.unwrap_err().kind, ErrorKind::PreconditionFailed);
+        let lines = request_lines(&server);
+        assert!(lines[3].contains("name+contains"));
+        assert!(lines.iter().all(|line| line.starts_with("GET ")));
+    });
+}
+
+#[test]
+fn segment_preallocation_accepts_the_full_hash_name_and_sends_no_body() {
+    runtime().block_on(async {
+        let bytes = b"sealed-a";
+        let name = crate::external_storage::contract::segment_object_id("00000000-0000-4000-8000-000000000001", u64::MAX, &hash(bytes)).unwrap();
+        let mut replies = open_existing_replies();
+        replies.extend([ids_reply("allocated-file"), Reply::Lost]);
+        let server = WireServer::start(replies);
+        let test = deps_with(Some(stored_secret(NOW_MS + 3_600_000)));
+        let cancel = Cancellation::default();
+        let (provider, repository) = opened(&server, &test, &cancel).await;
+        let intent = intent(&repository, &name, ObjectRole::Segment, bytes);
+        let state = provider.begin_upload(&repository, &intent, &cancel).await.unwrap().unwrap();
+        assert_eq!(request_lines(&server).len(), 4);
+        assert!(server.requests.lock().unwrap().iter().all(|request| request.body.is_empty()));
+        let sealed = String::from_utf8(test.vault.contents(&state.sealed_state.0).unwrap()).unwrap();
+        assert!(sealed.contains("allocated-file"));
+        let directory = tempfile::tempdir().unwrap();
+        let source = spool(directory.path(), "sealed", bytes);
+        assert_eq!(provider.create_object(&repository, &intent, &source, Some(&state), &cancel).await.unwrap_err().kind, ErrorKind::Transient);
+        let records = server.requests.lock().unwrap();
+        let metadata = String::from_utf8_lossy(&records[4].body);
+        assert!(metadata.contains(&format!("segments/{name}")));
+        assert!(!metadata.contains("risunestObjectId"));
+    });
+}
+
+
+#[test]
+fn distinct_drive_hash_variants_stop_reconciliation_and_both_remain_listable() {
+    runtime().block_on(async {
+        let bytes = b"sealed-a";
+        let first = crate::external_storage::contract::segment_object_id("00000000-0000-4000-8000-000000000001", 1, &hash(bytes)).unwrap();
+        let second = crate::external_storage::contract::segment_object_id("00000000-0000-4000-8000-000000000001", 1, &hash(b"sealed-b")).unwrap();
+        let file = |id: &str, name: &str| json!({ "id": id, "name": format!("segments/{name}"), "size": "8", "version": "1",
+            "appProperties": { "risunestRole": "segment" } });
+        let files = vec![file("file-a", &first), file("file-b", &second)];
+        let mut replies = open_existing_replies();
+        replies.extend([control_reply(files.clone()), Reply::Http { status: 200, headers: vec![], body: bytes.to_vec() }, control_reply(files),
+            control_reply(vec![json!({ "id":"snapshot-file", "size":"8", "version":"1", "appProperties": { "risunestRole":"snapshot" } })])]);
+        let server = WireServer::start(replies);
+        let test = deps_with(Some(stored_secret(NOW_MS + 3_600_000)));
+        let cancel = Cancellation::default();
+        let (provider, repository) = opened(&server, &test, &cancel).await;
+        let intent = intent(&repository, &first, ObjectRole::Segment, bytes);
+        assert_eq!(provider.reconcile_upload(&repository, &intent, None, &cancel).await.err().unwrap().kind, ErrorKind::PreconditionFailed);
+        let page = provider.list_objects(&repository, Collection::Segments, None, 10, &cancel).await.unwrap();
+        assert_eq!(page.objects.len(), 2);
+        assert_eq!(page.objects[0].locator.object, format!("file-a/{first}"));
+        assert_eq!(page.objects[1].locator.object, format!("file-b/{second}"));
+        let page = provider.list_objects(&repository, Collection::Snapshots, None, 10, &cancel).await.unwrap();
+        assert_eq!(page.objects[0].locator.object, "snapshot-file");
+        assert!(request_lines(&server).iter().all(|line| line.starts_with("GET ")));
+    });
+}
+
+#[test]
+fn segment_listing_keeps_logical_names_and_routes_read_stat_delete_to_file_ids() {
+    runtime().block_on(async {
+        let writer = "00000000-0000-4000-8000-000000000001";
+        let key = [31; 32];
+        let segment = crate::external_storage::lww_segment::Segment::new("synthetic-drive-library", writer, u64::MAX);
+        let (bytes, _) = crate::external_storage::lww_segment::seal(&segment, &key).unwrap();
+        let digest = hash(&bytes);
+        let name = segment_object_id(writer, u64::MAX, &digest).unwrap();
+        let file = |id: &str| json!({ "id":id, "name":format!("segments/{name}"),
+            "size":bytes.len().to_string(), "version":"9", "sha256Checksum":digest,
+            "parents":[FOLDER], "appProperties":{"risunestRole":"segment"} });
+        let mut replies = open_existing_replies();
+        replies.extend([control_reply(vec![file("opaque-file-a"), file("opaque-file-b")]),
+            json_reply(200, file("opaque-file-a")), json_reply(200, file("opaque-file-a")),
+            Reply::Http {status:200,headers:vec![],body:bytes.clone()},
+            json_reply(200, file("opaque-file-a")), Reply::Http {status:204,headers:vec![],body:vec![]}]);
+        let server = WireServer::start(replies);
+        let test = deps_with(Some(stored_secret(NOW_MS + 3_600_000)));
+        let cancel = Cancellation::default();
+        let (provider, repository) = opened(&server, &test, &cancel).await;
+        let page = provider.list_objects(&repository, Collection::Segments, None, 10, &cancel).await.unwrap();
+        assert_eq!(page.objects.len(), 2);
+        assert_eq!(page.objects[0].locator.object, format!("opaque-file-a/{name}"));
+        assert_eq!(page.objects[1].locator.object, format!("opaque-file-b/{name}"));
+        assert_eq!(page.objects[0].checksum.as_ref().unwrap().value, digest);
+        assert!(!page.objects[0].checksum.as_ref().unwrap().provider_verified);
+        let (listed_writer, seq, listed_hash) = parse_segment_object_id(page.objects[0].locator.object.rsplit('/').next().unwrap()).unwrap();
+        assert_eq!((listed_writer, seq, listed_hash), (writer, u64::MAX, digest.as_str()));
+        let directory = tempfile::tempdir().unwrap();
+        let mut unchanged = SpoolSink::create(&directory.path().join("unchanged"), bytes.len() as u64).unwrap();
+        assert_eq!(provider.read_object(&repository, &page.objects[0].locator, Some(&VersionToken("9".into())), &mut unchanged, &cancel).await.unwrap(),
+            ReadReceipt::NotModified(VersionToken("9".into())));
+        assert_eq!(request_lines(&server).len(), 5);
+        let body_path = directory.path().join("body");
+        let mut sink = SpoolSink::create(&body_path, bytes.len() as u64).unwrap();
+        let ReadReceipt::Body(receipt) = provider.read_object(&repository, &page.objects[0].locator, None, &mut sink, &cancel).await.unwrap()
+            else { panic!("expected a verified segment body") };
+        assert_eq!(receipt.locator, page.objects[0].locator);
+        assert!(receipt.checksum.unwrap().provider_verified && sink.is_verified());
+        let downloaded = std::fs::read(body_path).unwrap();
+        let opened_segment = crate::external_storage::lww_segment::open(&downloaded, "synthetic-drive-library", listed_writer, seq, &key).unwrap();
+        assert_eq!(opened_segment.encode().unwrap(), segment.encode().unwrap());
+        provider.delete_object(&repository, &receipt.locator, &cancel).await.unwrap();
+        let lines = request_lines(&server);
+        assert_eq!(lines.len(), 9);
+        assert!(lines[4].starts_with("GET /synthetic/drive/v3/files/opaque-file-a?fields="));
+        assert!(lines[5].starts_with("GET /synthetic/drive/v3/files/opaque-file-a?fields="));
+        assert!(lines[6].contains("/files/opaque-file-a?alt=media"));
+        assert!(lines[7].starts_with("GET /synthetic/drive/v3/files/opaque-file-a?fields="));
+        assert_eq!(lines[8], "DELETE /synthetic/drive/v3/files/opaque-file-a HTTP/1.1");
+        assert!(lines[4..].iter().all(|line| !line.contains(&name)));
+    });
+}
+
+#[test]
+fn segment_listing_refuses_missing_malformed_or_foreign_names() {
+    runtime().block_on(async {
+        let name = segment_object_id("00000000-0000-4000-8000-000000000001", 1, &hash(b"sealed-a")).unwrap();
+        for (id, file_name, role) in [
+            ("opaque-file", None, "segment"),
+            ("opaque-file", Some(format!("snapshots/{name}")), "segment"),
+            ("opaque-file", Some(format!("segments/{name}/extra")), "segment"),
+            ("opaque-file", Some(format!("segments/{}", name.replacen("-1-", "-01-", 1))), "segment"),
+            ("bad/file", Some(format!("segments/{name}")), "segment"),
+            ("opaque-file", Some(format!("segments/{name}")), "pack"),
+        ] {
+            let mut replies = open_existing_replies();
+            replies.push(control_reply(vec![json!({"id":id,"name":file_name,"size":"8","appProperties":{"risunestRole":role}})]));
+            let server = WireServer::start(replies);
+            let test = deps_with(Some(stored_secret(NOW_MS + 3_600_000)));
+            let cancel = Cancellation::default();
+            let (provider, repository) = opened(&server, &test, &cancel).await;
+            assert_eq!(provider.list_objects(&repository, Collection::Segments, None, 10, &cancel).await.unwrap_err().kind, ErrorKind::Corrupt);
+            assert_eq!(request_lines(&server).len(), 4);
+        }
+    });
+}
+
+#[test]
+fn segment_locators_reject_raw_ids_and_changed_metadata_before_media_or_delete() {
+    runtime().block_on(async {
+        let writer = "00000000-0000-4000-8000-000000000001";
+        let name = segment_object_id(writer, 1, &hash(b"sealed-a")).unwrap();
+        let changed = segment_object_id(writer, 2, &hash(b"sealed-a")).unwrap();
+        let file = |id: &str, name: &str| json!({"id":id,"name":format!("segments/{name}"),"size":"8","version":"9",
+            "parents":[FOLDER],"appProperties":{"risunestRole":"segment"}});
+        let mut replies = open_existing_replies();
+        replies.extend([control_reply(vec![file("opaque-file", &name)]),
+            json_reply(200, file("opaque-file", &changed)), json_reply(200, file("another-file", &name)),
+            json_reply(200, file("opaque-file", &changed))]);
+        let server = WireServer::start(replies);
+        let test = deps_with(Some(stored_secret(NOW_MS + 3_600_000)));
+        let cancel = Cancellation::default();
+        let (provider, repository) = opened(&server, &test, &cancel).await;
+        let page = provider.list_objects(&repository, Collection::Segments, None, 10, &cancel).await.unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let mut sink = SpoolSink::create(&directory.path().join("rejected"), 8).unwrap();
+        for object in ["opaque-file".into(), format!("opaque-file/{name}/extra"), format!("bad file/{name}")] {
+            let mut locator = page.objects[0].locator.clone(); locator.object = object;
+            assert_eq!(provider.read_object(&repository, &locator, None, &mut sink, &cancel).await.unwrap_err().kind, ErrorKind::Corrupt);
+            assert_eq!(provider.delete_object(&repository, &locator, &cancel).await.unwrap_err().kind, ErrorKind::Corrupt);
+        }
+        assert_eq!(request_lines(&server).len(), 4);
+        assert_eq!(provider.read_object(&repository, &page.objects[0].locator, Some(&VersionToken("9".into())), &mut sink, &cancel).await.unwrap_err().kind, ErrorKind::Corrupt);
+        assert_eq!(provider.read_object(&repository, &page.objects[0].locator, None, &mut sink, &cancel).await.unwrap_err().kind, ErrorKind::Corrupt);
+        assert_eq!(provider.delete_object(&repository, &page.objects[0].locator, &cancel).await.unwrap_err().kind, ErrorKind::Corrupt);
+        let lines = request_lines(&server);
+        assert_eq!(lines.len(), 7);
+        assert!(lines.iter().all(|line| line.starts_with("GET ") && !line.contains("alt=media")));
+        assert!(!sink.is_verified());
+    });
+}
+
+#[test]
+fn segment_response_loss_reconciles_the_same_preallocated_id_and_logical_name() {
+    runtime().block_on(async {
+        let bytes = b"sealed-a";
+        let name = segment_object_id("00000000-0000-4000-8000-000000000001", 1, &hash(bytes)).unwrap();
+        let file = json!({"id":"allocated-segment","name":format!("segments/{name}"),"size":"8","version":"1",
+            "sha256Checksum":hash(bytes),"appProperties":{"risunestRole":"segment"}});
+        let mut replies = open_existing_replies();
+        replies.extend([ids_reply("allocated-segment"), Reply::Lost, json_reply(200, file),
+            Reply::Http {status:200,headers:vec![],body:bytes.to_vec()}]);
+        let server = WireServer::start(replies);
+        let test = deps_with(Some(stored_secret(NOW_MS + 3_600_000)));
+        let cancel = Cancellation::default();
+        let (provider, repository) = opened(&server, &test, &cancel).await;
+        let intent = intent(&repository, &name, ObjectRole::Segment, bytes);
+        let resume = provider.begin_upload(&repository, &intent, &cancel).await.unwrap().unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let source = spool(directory.path(), "segment", bytes);
+        assert_eq!(provider.create_object(&repository, &intent, &source, Some(&resume), &cancel).await.unwrap_err().kind, ErrorKind::Transient);
+        let UploadResolution::Complete(receipt) = provider.reconcile_upload(&repository, &intent, Some(&resume), &cancel).await.unwrap()
+            else { panic!("expected the original completed segment") };
+        assert_eq!(receipt.locator.object, format!("allocated-segment/{name}"));
+        assert_eq!(receipt.locator.collection.as_deref(), Some("segments"));
+        assert!(receipt.checksum.unwrap().provider_verified);
+        let lines = request_lines(&server);
+        assert_eq!(lines.len(), 7);
+        assert!(lines[3].contains("generateIds"));
+        assert!(lines[4].starts_with("POST "));
+        assert!(lines[5].starts_with("GET /synthetic/drive/v3/files/allocated-segment?fields="));
+        assert!(lines[6].contains("/files/allocated-segment?alt=media"));
+        assert!(lines[5..].iter().all(|line| !line.contains("generateIds") && !line.starts_with("POST ")));
+    });
+}
+
+
+#[test]
+fn lost_session_initialization_keeps_the_preallocated_id_on_every_retry() {
+    runtime().block_on(async {
+        let bytes = vec![7u8; 5_000_001];
+        let mut replies = open_existing_replies();
+        replies.extend([ids_reply("allocated-session"), Reply::Lost, error_reply(404, "notFound"), Reply::Lost]);
+        let server = WireServer::start(replies);
+        let test = deps_with(Some(stored_secret(NOW_MS + 3_600_000)));
+        let cancel = Cancellation::default();
+        let (provider, repository) = opened(&server, &test, &cancel).await;
+        let directory = tempfile::tempdir().unwrap();
+        let source = spool(directory.path(), "sealed", &bytes);
+        let intent = intent(&repository, "object", ObjectRole::Pack, &bytes);
+        let resume = provider.begin_upload(&repository, &intent, &cancel).await.unwrap().unwrap();
+        assert_eq!(provider.create_object(&repository, &intent, &source, Some(&resume), &cancel).await.unwrap_err().kind, ErrorKind::Transient);
+        let UploadResolution::Resumable(updated) = provider.reconcile_upload(&repository, &intent, Some(&resume), &cancel).await.unwrap()
+            else { panic!("unresolved identity must be retained"); };
+        assert_eq!(resume.sealed_state.0, updated.sealed_state.0);
+        assert_eq!(provider.create_object(&repository, &intent, &source, Some(&updated), &cancel).await.unwrap_err().kind, ErrorKind::Transient);
+        let records = server.requests.lock().unwrap();
+        assert_eq!(records[4].body, records[6].body);
+        assert!(String::from_utf8_lossy(&records[4].body).contains("allocated-session"));
+        assert_eq!(records.iter().filter(|record| record.headers.contains("/files/generateIds")).count(), 1);
+        assert!(records[4].body.len() < 1024);
+    });
+}
+
+
+#[test]
+fn retained_drive_session_reports_only_confirmed_offsets_and_verifies_completion() {
+    runtime().block_on(async {
+        let bytes = vec![7u8; 4096];
+        let file = json!({ "id":"fixed-session", "size":"4096", "version":"1", "appProperties":{"risunestRole":"pack"} });
+        let mut replies = open_existing_replies();
+        replies.extend([ids_reply("fixed-session"), json_reply_with(308, &[("Range", "bytes=0-2047")], json!({})),
+            json_reply(200, file), Reply::Http { status:200, headers:vec![], body:bytes.clone() }]);
+        let server = WireServer::start(replies);
+        let test = deps_with(Some(stored_secret(NOW_MS + 3_600_000)));
+        let cancel = Cancellation::default();
+        let (provider, repository) = opened(&server, &test, &cancel).await;
+        let intent = intent(&repository, "object", ObjectRole::Pack, &bytes);
+        let resume = provider.begin_upload(&repository, &intent, &cancel).await.unwrap().unwrap();
+        set_synthetic_session(&test, &resume, &intent, "fixed-session", server.url.join("/synthetic/upload/session/fixed").unwrap().as_str()).await;
+        let UploadResolution::Resumable(updated) = provider.reconcile_upload(&repository, &intent, Some(&resume), &cancel).await.unwrap()
+            else { panic!("expected confirmed partial offset"); };
+        assert_eq!(updated.confirmed_offset, 2048);
+        assert_eq!(updated.sealed_state.0, resume.sealed_state.0);
+        let UploadResolution::Complete(receipt) = provider.reconcile_upload(&repository, &intent, Some(&updated), &cancel).await.unwrap()
+            else { panic!("expected verified completion"); };
+        assert_eq!(receipt.checksum.unwrap().value, intent.sha256);
+        assert_eq!(receipt.locator.object, "fixed-session");
     });
 }

@@ -1,19 +1,17 @@
 //! Portable ZIP64/SQLite archive primitives. File jobs own capture, publication and activation.
 mod capture;
 mod catalog;
-#[cfg(test)]
-mod internal;
 mod inventory;
 mod reader;
 mod restore_inventory;
 mod validation;
 mod writer;
-
-pub(crate) use capture::{capture_library, CapturedLibrary};
-pub(crate) use catalog::Catalog;
 #[cfg(test)]
-pub(crate) use internal::create_verified_library_backup;
-pub(crate) use reader::VerifiedArchive;
+pub(crate) mod source_io;
+
+pub(crate) use capture::{capture_library, capture_library_only, capture_library_with_ready, CapturedLibrary};
+pub(crate) use catalog::Catalog;
+pub(crate) use reader::{ArchiveObjectReader, VerifiedArchive};
 pub(crate) use validation::{
     registered_object_totals, scan_live_library, scan_registered_objects, validate_live_library,
     ObjectPage, ObjectTotals,
@@ -174,6 +172,10 @@ pub(crate) fn copy_hash(
     length: u64,
     probe: &dyn CancellationProbe,
 ) -> Result<String> {
+    copy_hash_observed(input,output,length,probe,|_|{})
+}
+
+fn copy_hash_observed(input:&mut (impl Read+?Sized),output:&mut (impl Write+?Sized),length:u64,probe:&dyn CancellationProbe,mut observe:impl FnMut(usize))->Result<String> {
     let mut hash = Sha256::new();
     let mut remaining = length;
     let mut buffer = vec![0; BUFFER_BYTES];
@@ -183,6 +185,7 @@ pub(crate) fn copy_hash(
         input.read_exact(&mut buffer[..size])?;
         output.write_all(&buffer[..size])?;
         hash.update(&buffer[..size]);
+        observe(size);
         remaining -= size as u64;
         probe.backup_bytes_processed(size as u64);
     }

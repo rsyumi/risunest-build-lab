@@ -1,3 +1,4 @@
+import { presetMirrorMap } from '../effectiveIdentityState'
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb'
 import localforage from 'localforage'
 import { describe, expect, it, vi } from 'vitest'
@@ -16,7 +17,16 @@ import {
     withFlushedRisuSaveExport,
 } from '../risuSaveStoreAdapter'
 import { iteratePinnedCharacters } from '../persistentRecordIterator'
-import { risuSaveFixtureDatabase, risuSaveFixtures } from './risuSaveFixtures'
+import { risuSaveFixtureDatabase as upstreamFixtureDatabase, risuSaveFixtures } from './risuSaveFixtures'
+
+function nativeIdentityFixture<T extends typeof upstreamFixtureDatabase>(database: T): T {
+    database.botPresets.forEach((preset, index) => preset['id'] = 'fixture-preset-' + index)
+    const selected = database.botPresets[database.botPresetsId ?? 0] as unknown as Record<string, unknown>
+    const root = database as unknown as Record<string, unknown>
+    for (const [key, field] of Object.entries(presetMirrorMap)) if (Object.hasOwn(root, key)) selected[field] = structuredClone(root[key])
+    return database
+}
+const risuSaveFixtureDatabase = nativeIdentityFixture(structuredClone(upstreamFixtureDatabase))
 
 vi.mock('../database.svelte', () => ({
     getDatabase: () => {
@@ -80,6 +90,24 @@ async function deleteSnapshotLeases(indexedDB: IDBFactory, databaseName: string)
 }
 
 describe('RisuSave persistent store adapter', () => {
+    it('exports current selected record mirrors instead of stale root projections', async () => {
+        const database = structuredClone(risuSaveFixtureDatabase)
+        Object.assign(database, { temperature: 999, username: 'stale', personaPrompt: 'stale', selectedPersona: 0,
+            personas: [{id:'persona',name:'Current persona',personaPrompt:'Current prompt',icon:'current.png',note:'Current note'}],
+            explicitGlobalChatVariables: {explicit:'saved'}, globalChatVariables:{bound:'runtime'},
+            protectedPresetValues:{seperateModels:['protected']}, doNotChangeSeperateModels:true,
+        })
+        Object.assign(database.botPresets[0], {temperature:42,NAISettings:{current:true},regex:[{current:true}],reasonEffort:'high',seperateModels:['record']})
+        const store = new IndexedDbPersistentDataStore('coherent-export', new IDBFactory(), IDBKeyRange)
+        await store.open()
+        const imported = await store.replaceFromDatabase(database)
+        const decoded = await decodeRisuSave(await concatenate(streamRisuSaveFromStore(store, imported.revision)))
+        expect(decoded).toMatchObject({temperature:42,username:'Current persona',personaPrompt:'Current prompt',
+            NAIsettings:{current:true},presetRegex:[{current:true}],reasoningEffort:'high',seperateModels:['protected'],globalChatVariables:{explicit:'saved'}})
+        expect(decoded.globalChatVariables).not.toHaveProperty('bound')
+        expect((await store.readRoot()).value).toMatchObject({temperature:999,username:'stale'})
+    })
+
     it('preserves the existing raw block framing bytes', async () => {
         await expect(
             encodeRisuSaveBlock({
@@ -104,7 +132,7 @@ describe('RisuSave persistent store adapter', () => {
         await store.open()
 
         const imported = await store.replaceFromDatabase(
-            (await decodeRisuSave(fixture)) as typeof risuSaveFixtureDatabase,
+            nativeIdentityFixture((await decodeRisuSave(fixture)) as typeof risuSaveFixtureDatabase),
         )
         await localforage.dropInstance({ name: 'risuSaveCache' })
         const exported = await concatenate(streamRisuSaveFromStore(store, imported.revision))

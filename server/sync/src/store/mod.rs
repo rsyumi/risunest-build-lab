@@ -1,15 +1,14 @@
 mod backup;
-mod commits;
 mod connection;
+mod lww;
+#[cfg(test)]
+mod lww_tests;
 pub(crate) mod management;
+mod registration_claims;
 pub use backup::BackupManifest;
 pub use management::{ManagedDevice, ManagementConnection};
-mod jobs;
-pub use jobs::CommitSubmission;
-mod checkpoints;
 mod descriptors;
 mod descriptors_index;
-mod journal;
 mod maintenance;
 mod media;
 pub use media::MediaResponse;
@@ -18,25 +17,20 @@ pub use retention::{ObjectIdentity, RetainedObject, RetentionPage, RetentionRele
 mod objects;
 pub use objects::Body;
 mod schema;
-mod scopes;
-mod staged;
 mod stream_transfers;
 pub use stream_transfers::DeltaProgress;
 mod transfers;
 mod upload_jobs;
 mod uploads;
-pub use checkpoints::{Checkpoint, CheckpointCursor, CheckpointPage, ReadPin};
-pub use journal::{ChangeCursor, ChangePage, JournalChange};
-pub use staged::StagedChanges;
 pub use transfers::TransferRequest;
 pub use uploads::{UploadManifest, UploadProgress, UPLOAD_CHUNK_BYTES};
 
 use crate::{Error, Result};
-use risunest_sync_wire::{canonical, hash, validate_id, Domain, RemoteHead, Sequence};
+use risunest_sync_wire::{canonical, hash, validate_id, RemoteHead, Sequence};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeSet,
     fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
     sync::{Mutex, MutexGuard},
@@ -55,7 +49,16 @@ pub struct Store {
     temporary_paths: Mutex<BTreeSet<PathBuf>>,
     media_signer: risunest_sync_connect::media::MediaSigner,
     heads: tokio::sync::watch::Sender<u64>,
-    _owner: File,
+    _owner: OwnerLock,
+}
+
+struct OwnerLock(File);
+
+impl Drop for OwnerLock {
+    fn drop(&mut self) {
+        // Duplicated or inherited descriptors must not retain ownership after close.
+        let _ = self.0.unlock();
+    }
 }
 
 struct StagingTemp<'a> {
@@ -128,27 +131,6 @@ pub(super) fn parse<T: for<'de> Deserialize<'de>>(value: &str) -> Result<T> {
     canonical::decode(value.as_bytes(), risunest_sync_wire::MAX_METADATA_BYTES)
         .map_err(|_| Error::new("corrupt-metadata", 503))
 }
-/// Requested sections, deduplicated. An empty request is never an implicit all.
-pub(super) fn requested_domains(domains: &[Domain]) -> Result<Vec<Domain>> {
-    if domains.is_empty() {
-        return Err(Error::new("invalid-domains", 400));
-    }
-    Ok(domains
-        .iter()
-        .copied()
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect())
-}
-/// Literal list for an IN clause. Values come from a closed enum, never input text.
-pub(super) fn domain_filter(domains: &[Domain]) -> String {
-    domains
-        .iter()
-        .map(|domain| format!("'{}'", domain.as_str()))
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
 impl Store {
     fn staging_temp(&self) -> Result<StagingTemp<'_>> {
         let mut paths = self
@@ -170,11 +152,31 @@ impl Store {
             u64::try_from(value).map_err(|_| Error::new("corrupt-metadata", 503))
         };
         Ok(DurableWork {
-            commit_jobs: count("commit_jobs")?,
+            commit_jobs: 0,
             upload_jobs: count("upload_jobs")?,
             download_jobs: count("download_deltas")?,
-            staged_changes: count("staged_changes")?,
+            staged_changes: 0,
             uploads: count("uploads")?,
+        })
+    }
+    #[cfg(test)]
+    pub(crate) fn source_observer_body_work(
+        &self,
+    ) -> Result<crate::source_observer::PendingBodyWork> {
+        let db = self.reader()?;
+        let (upload_jobs,download_jobs,upload_sessions):(i64,i64,i64)=db.query_row(
+            "SELECT (SELECT count(*) FROM upload_jobs WHERE terminal=0), (SELECT count(*) FROM download_deltas WHERE state IN ('queued','working')), (SELECT count(*) FROM uploads WHERE state IN ('open','queued','finalizing') AND expires>unixepoch())",
+            [],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)))?;
+        Ok(crate::source_observer::PendingBodyWork {
+            upload_jobs: upload_jobs
+                .try_into()
+                .map_err(|_| Error::new("corrupt-metadata", 503))?,
+            download_jobs: download_jobs
+                .try_into()
+                .map_err(|_| Error::new("corrupt-metadata", 503))?,
+            upload_sessions: upload_sessions
+                .try_into()
+                .map_err(|_| Error::new("corrupt-metadata", 503))?,
         })
     }
 
@@ -214,6 +216,7 @@ impl Store {
         owner
             .try_lock()
             .map_err(|_| Error::new("data-dir-busy", 409))?;
+        let owner = OwnerLock(owner);
         // No publisher from this daemon exists while the owner is opening.
         for directory in [&root, &root.join("staging")] {
             let entries = match fs::read_dir(directory) {
@@ -360,21 +363,11 @@ impl Store {
         let mut connection = self.reader()?;
         let db = connection.transaction()?;
         Self::require_device(&db, device)?;
-        let watermark: String = db.query_row(
-            "SELECT watermark FROM devices WHERE id=?1",
-            [&device.id],
-            |r| r.get(0),
-        )?;
-        let pending = db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM commit_jobs WHERE device=?1)",
-            [&device.id],
-            |r| r.get(0),
-        )?;
         Ok(DeviceSession {
             head: Self::read_head(&db)?,
             device_id: device.id.clone(),
-            operation_watermark: watermark.try_into()?,
-            operation_pending: pending,
+            operation_watermark: 0.into(),
+            operation_pending: false,
             protocol_id: crate::PROTOCOL_ID,
         })
     }
@@ -468,74 +461,33 @@ impl Store {
         }
         Ok(())
     }
-    /// Per-section application points. Sections absent from the request are not
-    /// received, which is neither a deletion nor a completed application.
-    pub fn acknowledge(
-        &self,
-        device: &Device,
-        epoch: &str,
-        sections: &BTreeMap<Domain, Sequence>,
-    ) -> Result<()> {
-        if sections.is_empty() {
-            return Err(Error::new("invalid-ack", 400));
-        }
-        let mut db = self.db()?;
-        Self::require_device(&db, device)?;
-        let tx = db.transaction()?;
-        let head = Self::read_head(&tx)?;
-        if head.epoch != epoch {
-            return Err(Error::new("invalid-ack", 409));
-        }
-        for (domain, seq) in sections {
-            let old = Self::read_section_ack(&tx, &device.id, *domain)?;
-            if seq > &head.seq || seq < &old {
-                return Err(Error::new("invalid-ack", 409));
-            }
-            tx.execute("INSERT INTO device_section_acks VALUES(?1,?2,?3) ON CONFLICT(device,domain) DO UPDATE SET ack=excluded.ack",params![device.id,domain.as_str(),seq.as_str()])?;
-        }
-        tx.execute(
-            "UPDATE devices SET last_ack=unixepoch() WHERE id=?1",
-            [&device.id],
-        )?;
-        tx.commit()?;
-        Ok(())
-    }
-    pub(super) fn read_section_ack(
-        db: &Connection,
-        device: &str,
-        domain: Domain,
-    ) -> Result<Sequence> {
-        let value: Option<String> = db
-            .query_row(
-                "SELECT ack FROM device_section_acks WHERE device=?1 AND domain=?2",
-                params![device, domain.as_str()],
-                |r| r.get(0),
-            )
-            .optional()?;
-        Ok(match value {
-            Some(value) => value.try_into()?,
-            None => 0.into(),
-        })
-    }
-    /// The oldest point acknowledged members have applied for one section.
-    /// Issued but unused registrations bootstrap from a checkpoint.
-    pub fn section_ack_floor(&self, domain: Domain) -> Result<Sequence> {
-        let db = self.reader()?;
-        Self::read_section_ack_floor(&db, domain, &Self::read_head(&db)?.seq)
-    }
-    pub(super) fn read_section_ack_floor(
-        db: &Connection,
-        domain: Domain,
-        ceiling: &Sequence,
-    ) -> Result<Sequence> {
-        let mut floor = ceiling.clone();
-        let mut statement = db.prepare(
-            "SELECT COALESCE((SELECT ack FROM device_section_acks WHERE device=devices.id AND domain=?1),'0') FROM devices WHERE revoked=0 AND EXISTS(SELECT 1 FROM device_section_acks WHERE device=devices.id)",
-        )?;
-        for value in statement.query_map([domain.as_str()], |r| r.get::<_, String>(0))? {
-            floor = floor.min(Sequence::try_from(value?)?);
-        }
-        Ok(floor)
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+
+    #[test]
+    fn closing_store_releases_ownership_while_a_duplicate_descriptor_remains() {
+        let root = tempfile::tempdir().unwrap();
+        let store = Store::init(root.path()).unwrap();
+        let duplicate = store._owner.0.try_clone().unwrap();
+        let head = store.head().unwrap();
+        let error = Store::open(root.path())
+            .err()
+            .expect("active owner must be rejected");
+        assert_eq!((error.code, error.status), ("data-dir-busy", 409));
+        drop(store);
+
+        let reopened = Store::open(root.path()).unwrap();
+        assert_eq!(reopened.head().unwrap(), head);
+        drop(duplicate);
+        let error = Store::open(root.path())
+            .err()
+            .expect("new active owner must be rejected");
+        assert_eq!((error.code, error.status), ("data-dir-busy", 409));
+        drop(reopened);
+        assert_eq!(Store::open(root.path()).unwrap().head().unwrap(), head);
     }
 }
 

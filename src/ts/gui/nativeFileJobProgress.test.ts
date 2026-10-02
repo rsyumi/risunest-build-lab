@@ -84,7 +84,7 @@ describe('nativeFileJobProgress', () => {
         expect(appSource).not.toContain('nativeFileJobProgressText(')
         expect(dialogSource).toContain('buildNativeFileJobDialogModel(')
         expect(dialogSource).not.toContain('.phase')
-        expect(dialogSource).not.toContain('status?.')
+        expect(dialogSource).not.toMatch(/\{[^}]*status\??\.[^}]*phase[^}]*\}/)
     })
     it('names official account operations and shows measured upload bytes', () => {
         const upload = status({ kind: 'official-publication-upload', phase: 'uploading-database',

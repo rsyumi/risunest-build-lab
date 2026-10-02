@@ -5,26 +5,30 @@ export interface PresetChainState {
 
 export async function activatePresetChain(
     database: PresetChainState,
-    changePreset: (index: number, saveCurrent: boolean) => Promise<void>,
+    setOverride: (index: number | null) => Promise<void>,
     random: () => number,
     onMissing: (name: string) => void,
 ): Promise<void> {
-    if (!database.presetChain) return
+    if (!database.presetChain) {
+        await setOverride(null)
+        return
+    }
     const names = database.presetChain.split(',').map((name) => name.trim())
     const selectedName = names[Math.floor(random() * names.length)]
     const index = database.botPresets.findIndex((preset) => preset.name === selectedName)
     if (index < 0) {
+        await setOverride(null)
         onMissing(selectedName)
         return
     }
-    await changePreset(index, true)
+    await setOverride(index)
 }
 
 export async function activatePresetChainForRequest(
     database: PresetChainState,
-    changePreset: (index: number, saveCurrent: boolean) => Promise<void>,
+    setOverride: (index: number | null) => Promise<void>,
     random: () => number,
     onMissing: (name: string) => void,
 ): Promise<void> {
-    await activatePresetChain(database, changePreset, random, onMissing)
+    await activatePresetChain(database, setOverride, random, onMissing)
 }

@@ -4,6 +4,9 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::{fs::File, path::Path};
 
 pub(super) const SCHEMA: &[(&str, &str)] = &[
+    ("backup_units", "CREATE TABLE backup_units (key TEXT PRIMARY KEY, value TEXT NOT NULL)"),
+    ("backup_payloads", "CREATE TABLE backup_payloads (hash TEXT PRIMARY KEY, byte_length INTEGER NOT NULL CHECK(byte_length >= 0), record INTEGER NOT NULL CHECK(record IN (0,1)))"),
+    ("backup_controls", "CREATE TABLE backup_controls (hash TEXT PRIMARY KEY, body BLOB NOT NULL)"),
     ("backup_info", "CREATE TABLE backup_info (key TEXT PRIMARY KEY, value TEXT NOT NULL)"),
     ("packs", "CREATE TABLE packs (id INTEGER PRIMARY KEY, entry TEXT NOT NULL UNIQUE, byte_length INTEGER NOT NULL, sha256 TEXT NOT NULL)"),
     ("objects", "CREATE TABLE objects (sha256 BLOB PRIMARY KEY NOT NULL CHECK(length(sha256)=32), pack_id INTEGER, offset INTEGER NOT NULL, byte_length INTEGER NOT NULL)"),
@@ -20,6 +23,15 @@ pub(crate) struct Catalog {
 }
 
 impl Catalog {
+    pub(crate) fn reference_captured_object(&self,kind:&str,key:&str,metadata:&str,hash:&str)->Result<bool> {
+        if !hash_valid(hash) {return Err(Error::Invalid("invalid captured object hash"));}
+        let hash_bytes=hex::decode(hash).map_err(|_|Error::Invalid("invalid captured object hash"))?;
+        let present:bool=self.db.query_row("SELECT EXISTS(SELECT 1 FROM objects WHERE sha256=?1)",[&hash_bytes],|row|row.get(0))?;
+        if present {
+            self.db.execute("INSERT INTO files VALUES(?1,?2,?3,?4,?5,'present')",params![kind,key,hash_bytes,hash,metadata])?;
+        }
+        Ok(present)
+    }
     /// Copy a sealed device stream into the job's immutable spool. The supplied length and
     /// digest are checked before its object can become part of the archive.
     pub(crate) fn add_reader(
@@ -74,7 +86,7 @@ impl Catalog {
         check(probe)?;
         if !matches!(
             kind,
-            "asset" | "inlay" | "owner" | "preserved" | "device"
+            "asset" | "inlay" | "owner" | "preserved" | "device" | "unit"
         ) || key.is_empty()
             || key.contains('\0')
             || !hash_valid(hash)
@@ -189,7 +201,7 @@ impl Catalog {
         check(probe)?;
         if !matches!(
             kind,
-            "asset" | "inlay" | "owner" | "preserved" | "device"
+            "asset" | "inlay" | "owner" | "preserved" | "device" | "unit"
         ) || key.is_empty()
             || key.contains('\0')
             || expected_hash.is_some_and(|v| !hash_valid(v))

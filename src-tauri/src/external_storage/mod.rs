@@ -40,7 +40,6 @@ pub(crate) mod quota;
 pub(crate) mod quota_profiles;
 pub(crate) mod reachability;
 pub(crate) mod receive_artifacts;
-pub(crate) mod receive_difference;
 pub(crate) mod recovery;
 #[cfg(test)]
 mod recovery_integration_tests;
@@ -50,11 +49,12 @@ pub(crate) mod runtime;
 pub(crate) mod runtime_restore;
 pub(crate) mod secrets;
 pub(crate) mod sections;
-pub(crate) mod snapshot;
 pub(crate) mod snapshot_export;
 pub(crate) mod snapshot_export_commands;
 pub(crate) mod snapshot_restore;
-pub(crate) mod sync_engine;
+#[cfg(test)]
+pub(crate) mod worker_observation;
+pub(crate) mod head_observation;
 #[cfg(test)]
 mod tests;
 pub(crate) mod transfer;
@@ -62,3 +62,12 @@ pub(crate) mod transfer_job;
 pub(crate) mod usage;
 #[cfg(test)]
 pub(crate) mod wire_fixture;
+pub(crate) mod lww_segment;
+pub(crate) mod lww_engine;
+pub(crate) mod lww_checkpoint;
+pub(crate) mod lww_compaction;
+
+pub(crate) mod lww_residency;
+pub(crate) mod lww_commands;
+#[cfg(test)]
+pub(crate) mod lww_tests;

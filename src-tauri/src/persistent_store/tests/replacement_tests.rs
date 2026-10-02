@@ -69,6 +69,84 @@ fn bounded_generation_replacement_rolls_back_deleted_and_partly_moved_batches() 
 }
 
 #[test]
+fn ordinary_replacement_retry_returns_its_receipt_without_replacing_later_edits() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = PersistentStore::open(directory.path()).unwrap();
+    let seed = stage_root(&mut store, "Original");
+    store.replace_commit(&seed, Some(0)).unwrap();
+    let stage = stage_root(&mut store, "Replacement");
+    assert_eq!(store.replace_commit(&stage, Some(1)).unwrap().revision, 2);
+    store.commit(&WorkingSetCommit {
+        root: Some(json!({"username":"Later edit"})),
+        ..empty_working_set_commit(2)
+    }).unwrap();
+    let before = serde_json::to_value(store.lww_clock_state().unwrap()).unwrap();
+    let pending = serde_json::to_value(store.lww_read_outbox(store.lww_binding_authority().unwrap(), 100).unwrap()).unwrap();
+    assert_eq!(store.replace_commit(&stage, Some(1)).unwrap().revision, 2);
+    assert_eq!(store.revision().unwrap(), 3);
+    assert_eq!(store.read_root(None).unwrap().value["username"], "Later edit");
+    assert_eq!(serde_json::to_value(store.lww_clock_state().unwrap()).unwrap(), before);
+    assert_eq!(serde_json::to_value(store.lww_read_outbox(store.lww_binding_authority().unwrap(), 100).unwrap()).unwrap(), pending);
+    assert!(store.replace_commit(&stage, Some(2)).is_err());
+    store.connection.execute("INSERT INTO root VALUES(?1,'{}')", [&stage]).unwrap();
+    assert!(store.replace_commit(&stage, Some(1)).is_err());
+    store.connection.execute("DELETE FROM root WHERE generation=?1", [&stage]).unwrap();
+    store.device_store_mut().unwrap().connection().execute(
+        "UPDATE lww_clock SET binding_authority='1' WHERE singleton=1", [],
+    ).unwrap();
+    assert!(store.replace_commit(&stage, Some(1)).is_err());
+    assert_eq!(store.read_root(None).unwrap().value["username"], "Later edit");
+}
+
+#[test]
+fn unfinished_ordinary_replacement_rejects_changed_stage_before_recovery() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = PersistentStore::open(directory.path()).unwrap();
+    let seed = stage_root(&mut store, "Original");
+    store.replace_commit(&seed, Some(0)).unwrap();
+    let stage = stage_root(&mut store, "Replacement");
+    store.connection.execute_batch(
+        "CREATE TRIGGER reject_replacement BEFORE DELETE ON root WHEN OLD.generation='revision-1'
+         BEGIN SELECT RAISE(ABORT,'synthetic replacement failure'); END;",
+    ).unwrap();
+    assert!(store.replace_commit(&stage, Some(1)).is_err());
+    let before = serde_json::to_value(store.lww_clock_state().unwrap()).unwrap();
+    store.replace_put_root(&stage, &json!({"username":"Changed staged input"})).unwrap();
+    store.connection.execute_batch("DROP TRIGGER reject_replacement").unwrap();
+    assert!(store.replace_commit(&stage, Some(1)).is_err());
+    assert_eq!(store.revision().unwrap(), 1);
+    assert_eq!(store.read_root(None).unwrap().value["username"], "Original");
+    assert_eq!(serde_json::to_value(store.lww_clock_state().unwrap()).unwrap(), before);
+    drop(store);
+    assert!(PersistentStore::open(directory.path()).is_err());
+}
+
+#[test]
+fn ordinary_replacement_receipt_rejects_another_source_kind_even_with_matching_digests() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = PersistentStore::open(directory.path()).unwrap();
+    let stage = stage_root(&mut store, "Original");
+    store.replace_commit(&stage, Some(0)).unwrap();
+    let body: String = store.device_store().unwrap().connection().query_row(
+        "SELECT body FROM lww_intents WHERE request_id=?1", [&stage], |row| row.get(0),
+    ).unwrap();
+    let mut body: Value = serde_json::from_str(&body).unwrap();
+    body["source_units"] = json!({});
+    let body = serde_json::to_string(&body).unwrap();
+    let digest = risunest_sync_wire::hash(body.as_bytes());
+    store.device_store().unwrap().connection().execute(
+        "UPDATE lww_intents SET body=?2,digest=?3 WHERE request_id=?1",
+        params![stage, body, digest],
+    ).unwrap();
+    store.connection.execute(
+        "UPDATE lww_requests SET digest=?2 WHERE request_id=?1", params![stage, digest],
+    ).unwrap();
+    assert!(store.replace_commit(&stage, Some(0)).is_err());
+    assert_eq!(store.revision().unwrap(), 1);
+    assert_eq!(store.read_root(None).unwrap().value["username"], "Original");
+}
+
+#[test]
 fn replacements_do_not_create_or_require_recovery_snapshots() {
     let directory = tempfile::tempdir().unwrap();
     let mut store = PersistentStore::open(directory.path()).unwrap();

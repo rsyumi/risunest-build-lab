@@ -1,35 +1,34 @@
 import { describe, expect, it } from 'vitest'
 import {
     buildPrepareConnectionRequest,
-    defaultExternalCapturePolicy,
     mergeExternalHistoryItems,
     restorableExternalHistoryItems,
-    externalConflictActions,
 } from './connection'
 import { buildConnectionConfig, buildProviderSecret, externalProviderDefinitions } from './providerRegistry'
 
 describe('external storage connection request', () => {
-    it('keeps a capture policy off synchronization connections and requires one for a backup', () => {
-        expect(() => buildPrepareConnectionRequest({
-            providerId: 'google_drive',
-            values: { folderName: 'RisuNest', projectId: 'project', clientId: 'client' },
-            platform: 'windows', mode: 'create', purpose: 'sync',
-            capturePolicy: { hypa: true, localPlugins: false, localSettings: false },
-            acknowledgements: [],
-        })).toThrow('capture policy')
-        expect(() => buildPrepareConnectionRequest({
-            providerId: 'gitlab_packages',
-            values: { endpoint: 'https://gitlab.example', accountId: 'user', profile: 'selfManaged', projectId: '1', packageName: 'risunest' },
-            platform: 'windows', mode: 'create', purpose: 'backup',
-            acknowledgements: [],
-        })).toThrow('capture policy')
+    it.each(['webdav','s3','google_drive','onedrive'] as const)('supports both purposes for %s', providerId => {
+        for (const purpose of ['backup','sync'] as const) {
+            const request=buildPrepareConnectionRequest({providerId,values:{endpoint:'https://synthetic.invalid',root:'risunest',prefix:'risunest',folderId:'synthetic-folder',space:'drive',accountType:'personal',tenant:'common'},platform:'windows',mode:'existing',purpose,acknowledgements:[]})
+            expect(request.purpose).toBe(purpose)
+            expect(request).not.toHaveProperty('capturePolicy')
+        }
+    })
+    it('uses fixed full scope without capture policy and rejects backup-only sync', () => {
+        const request = buildPrepareConnectionRequest({providerId: 'gitlab_packages', values: {
+            endpoint: 'https://gitlab.example', profile: 'selfManaged', projectId: '1', packageName: 'risunest',
+        }, platform: 'windows', mode: 'create', purpose: 'backup', acknowledgements: []})
+        expect(request).not.toHaveProperty('capturePolicy')
+        for (const providerId of ['mybox', 'github_releases', 'gitlab_packages'] as const) {
+            expect(() => buildPrepareConnectionRequest({providerId, values: {}, platform: 'windows',
+                mode: 'create', purpose: 'sync', acknowledgements: []})).toThrow('does not support synchronization')
+        }
     })
 
     it('leaves publication strategy selection to the native connection', () => {
         const request = buildPrepareConnectionRequest({
             providerId: 'google_drive', values: {}, platform: 'android', mode: 'existing',
-            purpose: 'sync', capturePolicy: defaultExternalCapturePolicy('sync'),
-            acknowledgements: [],
+            purpose: 'sync', acknowledgements: [],
         })
         expect(request).not.toHaveProperty('publicationStrategy')
         expect(request.acknowledgements).toEqual([])
@@ -40,7 +39,7 @@ describe('external storage connection request', () => {
             providerId: 'gitlab_packages',
             values: { endpoint: 'https://gitlab.example', accountId: 'user', profile: 'selfManaged', projectId: '1', packageName: 'risunest' },
             platform: 'windows', mode: 'create', purpose: 'backup',
-            capturePolicy: defaultExternalCapturePolicy('backup'), acknowledgements: [],
+            acknowledgements: [],
         })
         expect(request.config).toEqual({
             provider: 'gitlab_packages', profile: 'selfManaged', endpoint: 'https://gitlab.example', accountId: '',
@@ -76,7 +75,6 @@ describe('external storage connection request', () => {
                 clientSecret: 'must-stay-transient',
             },
             platform: 'android', mode: 'create', purpose: 'backup',
-            capturePolicy: defaultExternalCapturePolicy('backup'),
             acknowledgements: [],
         })
 
@@ -104,7 +102,7 @@ describe('external storage connection request', () => {
                 password: 'must-not-be-in-preparation',
             },
             platform: 'windows', mode: 'create', purpose: 'backup',
-            capturePolicy: defaultExternalCapturePolicy('backup'), acknowledgements: [],
+            acknowledgements: [],
         })
         expect(JSON.stringify(request)).not.toContain('must-not-be-in-preparation')
     })
@@ -190,27 +188,4 @@ describe('external storage connection request', () => {
         }])
     })
 
-    it('gates conflict resolution on durable remote confirmation and side availability', () => {
-        const unconfirmed = {
-            id: 'conflict-1', connectionId: 'connection', detectedAtMs: '1' as const,
-            localRevision: '8' as const, remoteRevision: '7' as const,
-            localAvailable: true, remoteAvailable: true,
-            remotePointConfirmed: false, resolved: false,
-        }
-
-        expect(externalConflictActions(unconfirmed)).toEqual(['retry-sync'])
-        expect(externalConflictActions({
-            ...unconfirmed,
-            remotePointConfirmed: true,
-        })).toEqual(['keep-local', 'use-remote'])
-        expect(externalConflictActions({
-            ...unconfirmed,
-            remotePointConfirmed: true,
-            localAvailable: false,
-        })).toEqual(['use-remote'])
-        expect(externalConflictActions({
-            ...unconfirmed,
-            resolved: true,
-        })).toEqual([])
-    })
 })

@@ -23,6 +23,15 @@ import {
 
 const copy = languageEnglish.risuNest.importDialog
 
+it('shows cancellable body copying after activation using the existing file copy label', () => {
+    const current=status({kind:'restore-portable-backup',phase:'copying-missing-bodies',activationRevision:8,detail:detail('activating')})
+    expect(resolveNativeFileJobStage(current)).toBe('copying-assets')
+    const model=buildNativeFileJobDialogModel(running({format:'library-backup',status:current,observedStages:['activating','copying-assets']}),null,2000)
+    expect(model.cancelEnabled).toBe(true)
+    expect(model.stages.find(row=>row.stage==='copying-assets')?.label).toBe(copy.stageCopyingSource)
+    expect(model.stages.findIndex(row=>row.stage==='activating')).toBeLessThan(model.stages.findIndex(row=>row.stage==='copying-assets'))
+})
+
 it('shows a cancellable wait without invented file progress before synchronization settles', () => {
     const model = buildNativeFileJobDialogModel(running({ format: 'content', waitingForSync: true }), null, 1000)
     expect(model.overallText).toBe(copy.waitingForSync)
@@ -131,7 +140,7 @@ describe('nativeFileJobDialogModel', () => {
         expect(failureReason(code, 'export')).toMatch(/export/i)
     })
 
-    it.each(['source-problems', 'source-preserved-repair-required', 'compatibility-losses',
+    it.each(['upstream-restore-losses', 'source-problems', 'source-preserved-repair-required', 'compatibility-losses',
         'risuai-inlays-excluded', 'converted-inlay-extension', 'converted-inlay-sidecars',
         'converted-inlay-provenance', 'inlay-ids-remapped', 'asset-paths-remapped',
         'opaque-plugin-inlay-references-unverified', 'opaque-plugin-asset-references-unverified',
@@ -609,7 +618,7 @@ describe('nativeFileJobDialogModel', () => {
                     result: {
                         revision: 3,
                         sourceBytes: 2048,
-                        sourceSha256: 'x',
+                        sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'x',
                         characterCount: 7,
                         presetCount: 2,
                         warningCodes: ['cleanup-failed'],
@@ -618,7 +627,7 @@ describe('nativeFileJobDialogModel', () => {
                 result: {
                     revision: 3,
                     sourceBytes: 2048,
-                    sourceSha256: 'x',
+                    sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'x',
                     characterCount: 7,
                     presetCount: 2,
                     warningCodes: ['cleanup-failed'],

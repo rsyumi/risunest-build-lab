@@ -401,6 +401,7 @@ fn restore_risu_save_reader_controlled<R: Read>(
             revision,
             source_bytes: reader.completed,
             source_sha256: hex::encode(reader.hasher.finalize()),
+            source_fingerprint_kind: crate::native_file_jobs::SourceFingerprintKind::WholeFileSha256,
             character_count: parsed.character_count,
             preset_count: parsed.preset_count,
             warning_codes,
@@ -2538,14 +2539,14 @@ mod tests {
             self.store
                 .lock()
                 .unwrap()
-                .replace_put_root(staging_id, root)
+                .replace_put_upstream_root(staging_id, root)
         }
 
         fn put_presets(&self, staging_id: &str, presets: &[Value]) -> StoreResult<()> {
             self.store
                 .lock()
                 .unwrap()
-                .replace_put_presets(staging_id, presets)
+                .replace_put_upstream_presets(staging_id, presets)
         }
 
         fn add_characters(&self, staging_id: &str, characters: &[Value]) -> StoreResult<()> {
@@ -3333,14 +3334,32 @@ mod tests {
         error
     }
 
-    fn persistent_projection(value: Value) -> Value {
+    fn persistent_projection(value: Value, actual: &Value) -> Value {
         let mut database = value.as_object().unwrap().clone();
-        let characters = database.remove("characters").unwrap();
-        let presets = database.remove("botPresets").unwrap();
-        let plugin_storage = database.remove("pluginCustomStorage").unwrap();
-        database.insert("characters".to_owned(), characters);
-        database.insert("botPresets".to_owned(), presets);
-        database.insert("pluginCustomStorage".to_owned(), plugin_storage);
+        for field in ["botPresets", "modules", "loadouts"] {
+            let records = database.get_mut(field).unwrap().as_array_mut().unwrap();
+            let actual_records = actual[field].as_array().unwrap();
+            assert_eq!(records.len(), actual_records.len());
+            let mut ids = std::collections::HashSet::new();
+            for (record, actual_record) in records.iter_mut().zip(actual_records) {
+                let id = actual_record["id"].as_str().unwrap();
+                assert!(ids.insert(id));
+                if let Some(existing) = record.get("id") {
+                    assert_eq!(existing, &actual_record["id"]);
+                } else {
+                    assert!(uuid::Uuid::parse_str(id).is_ok());
+                    record["id"] = json!(id);
+                }
+            }
+        }
+        if !database["botPresets"].as_array().unwrap().is_empty() {
+            let selected = database.get("botPresetsId").and_then(Value::as_u64).unwrap_or(0) as usize;
+            let selected_id = database["botPresets"][selected]["id"].clone();
+            database.insert("botPresetsId".to_owned(), selected_id);
+            if let Some(api_type) = database.get("apiType").cloned() {
+                database.get_mut("botPresets").unwrap()[selected]["apiType"] = api_type;
+            }
+        }
         Value::Object(database)
     }
 
@@ -3464,7 +3483,7 @@ mod tests {
 
         assert_eq!(result.revision, 2);
         let first = sink.store.lock().unwrap().materialize(Some(2)).unwrap();
-        let expected = persistent_projection(parity["expectedProjection"].clone());
+        let expected = persistent_projection(parity["expectedProjection"].clone(), &first);
         assert_eq!(first, expected);
         assert_eq!(
             first["roadmap14Unknown"]["persistedDate"],
@@ -3712,7 +3731,7 @@ mod tests {
         restore_risu_save(&source, 1, &job, &sink).unwrap();
 
         let first = sink.store.lock().unwrap().materialize(Some(2)).unwrap();
-        let expected = persistent_projection(parity["edgeExpectedProjection"].clone());
+        let expected = persistent_projection(parity["edgeExpectedProjection"].clone(), &first);
         assert_eq!(first, expected);
 
         let exported_path = {
@@ -3749,7 +3768,7 @@ mod tests {
 
         assert_eq!(result.revision, 2);
         let first = sink.store.lock().unwrap().materialize(Some(2)).unwrap();
-        let expected = persistent_projection(serde_json::from_str(W0_LEGACY_EXPECTED).unwrap());
+        let expected = persistent_projection(serde_json::from_str(W0_LEGACY_EXPECTED).unwrap(), &first);
         assert_eq!(first, expected);
         let exported_path = {
             let mut store = sink.store.lock().unwrap();
@@ -3785,7 +3804,7 @@ mod tests {
 
         assert_eq!(result.revision, 2);
         let first = sink.store.lock().unwrap().materialize(Some(2)).unwrap();
-        let expected = persistent_projection(serde_json::from_str(W0_LEGACY_EXPECTED).unwrap());
+        let expected = persistent_projection(serde_json::from_str(W0_LEGACY_EXPECTED).unwrap(), &first);
         assert_eq!(first, expected);
         let exported_path = {
             let mut store = sink.store.lock().unwrap();
@@ -3922,7 +3941,7 @@ mod tests {
 
         assert_eq!(result.revision, 2);
         let first = sink.store.lock().unwrap().materialize(Some(2)).unwrap();
-        let expected = persistent_projection(serde_json::from_str(W0_LEGACY_EXPECTED).unwrap());
+        let expected = persistent_projection(serde_json::from_str(W0_LEGACY_EXPECTED).unwrap(), &first);
         assert_eq!(first, expected);
         let exported_path = {
             let mut store = sink.store.lock().unwrap();
@@ -3959,7 +3978,7 @@ mod tests {
 
         assert_eq!(result.revision, 2);
         let first = sink.store.lock().unwrap().materialize(Some(2)).unwrap();
-        let expected = persistent_projection(parity["expectedProjection"].clone());
+        let expected = persistent_projection(parity["expectedProjection"].clone(), &first);
         assert_eq!(first, expected);
         let exported_path = {
             let mut store = sink.store.lock().unwrap();

@@ -1,21 +1,28 @@
 use super::Store;
+#[cfg(test)]
+use crate::source_observer::small_object_store;
+#[cfg(test)]
+pub use crate::source_observer::Body;
 use crate::{Error, Result};
+#[cfg(not(test))]
 use risunest_small_object_store as small_object_store;
+#[cfg(not(test))]
 pub use risunest_small_object_store::Body;
 use risunest_sync_wire::{delta::MAX_TARGET_BYTES, hash, validate_hash};
 use rusqlite::{params, Connection, OptionalExtension};
-use std::{
-    fs::{self, File},
-    io::Write,
-    path::Path,
-};
+#[cfg(any(not(test), unix))]
+use std::fs::File;
+use std::{fs, io::Write, path::Path};
 
 /// Bodies at or below this are written into the metadata database. The
 /// threshold decides where a new body goes; where an existing one lives is
 /// read from its row, never inferred from its size.
 pub(super) const SMALL_OBJECT_BYTES: usize = 64 * 1024;
+pub(super) use small_object_store::delete_batch as delete_inline;
 
 pub(super) fn body_error(error: small_object_store::StoreError) -> Error {
+    #[cfg(test)]
+    crate::source_observer::note_current_violation("inline-body-error");
     match error {
         small_object_store::StoreError::TooLarge => Error::new("object-too-large", 413),
         small_object_store::StoreError::Database(error) => error.into(),
@@ -106,6 +113,8 @@ pub(super) fn publish(from: &Path, to: &Path) -> Result<()> {
 }
 impl Store {
     pub fn open_object(&self, digest: &str) -> Result<(Body, u64)> {
+        #[cfg(test)]
+        let _observed = crate::source_observer::operation(&self.root);
         let (size, inline) = {
             let db = self.reader()?;
             placement(&db, digest)?.ok_or(Error::new("object-not-found", 404))?
@@ -120,8 +129,18 @@ impl Store {
             .objects_gate
             .lock()
             .map_err(|_| Error::new("storage-unavailable", 503))?;
+        #[cfg(not(test))]
         let file = File::open(self.object_path(digest)?)?;
+        #[cfg(test)]
+        let file = crate::source_observer::TrackedFile::open(
+            &self.root,
+            digest,
+            &self.object_path(digest)?,
+            "file",
+        )?;
         if file.metadata()?.len() != size {
+            #[cfg(test)]
+            crate::source_observer::note_current_violation("corrupt-object");
             return Err(Error::new("corrupt-object", 503));
         }
         Ok((Body::File(file), size))
@@ -177,7 +196,16 @@ impl Store {
     /// keeps the object where the row puts it; a damaged one is replaced there,
     /// so an upload never acknowledges a body nothing can read.
     fn filed_body_differs(&self, digest: &str, bytes: &[u8]) -> Result<bool> {
-        let file = match File::open(self.object_path(digest)?) {
+        #[cfg(not(test))]
+        let opened = File::open(self.object_path(digest)?);
+        #[cfg(test)]
+        let opened = crate::source_observer::TrackedFile::open(
+            &self.root,
+            digest,
+            &self.object_path(digest)?,
+            "file",
+        );
+        let file = match opened {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
             Err(error) => return Err(error.into()),
@@ -223,6 +251,8 @@ impl Store {
         device: &super::Device,
         objects: &[(String, Vec<u8>)],
     ) -> Result<()> {
+        #[cfg(test)]
+        let _observed = crate::source_observer::ingress(&self.root);
         Self::require_device(&*self.db()?, device)?;
         let staging = self.root.join("staging");
         check_path(&staging)?;
@@ -247,7 +277,12 @@ impl Store {
             #[cfg(test)]
             let measured = std::time::Instant::now();
             validate_hash(digest)?;
-            if bytes.len() > MAX_TARGET_BYTES || hash(bytes) != *digest {
+            if bytes.len() > MAX_TARGET_BYTES || {
+                let actual = hash(bytes);
+                #[cfg(test)]
+                crate::source_observer::hashed(digest, "object-ingress-sha256", bytes.len());
+                actual != *digest
+            } {
                 return Err(Error::new("hash-mismatch", 400));
             }
             #[cfg(test)]
@@ -363,6 +398,8 @@ impl Store {
         }
     }
     pub fn get_object(&self, digest: &str) -> Result<Vec<u8>> {
+        #[cfg(test)]
+        let _observed = crate::source_observer::operation(&self.root);
         let (size, inline) = {
             let db = self.reader()?;
             placement(&db, digest)?.ok_or(Error::new("object-not-found", 404))?
@@ -377,13 +414,23 @@ impl Store {
             return Ok(bytes);
         }
         let path = self.object_path(digest)?;
+        #[cfg(not(test))]
         let file = File::open(path)?;
+        #[cfg(test)]
+        let file = crate::source_observer::TrackedFile::open(&self.root, digest, &path, "file")?;
         #[cfg(test)]
         frame_metrics::opened();
         use std::io::Read;
         let mut bytes = Vec::new();
         file.take(size + 1).read_to_end(&mut bytes)?;
-        if bytes.len() as u64 != size || hash(&bytes) != digest {
+        if bytes.len() as u64 != size || {
+            let actual = hash(&bytes);
+            #[cfg(test)]
+            crate::source_observer::hashed(digest, "object-source-sha256", bytes.len());
+            actual != digest
+        } {
+            #[cfg(test)]
+            crate::source_observer::note_violation("corrupt-object");
             return Err(Error::new("corrupt-object", 503));
         }
         Ok(bytes)

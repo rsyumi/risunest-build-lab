@@ -1,4 +1,16 @@
 export const languageKorean = {
+    checkboxConfirmation: {
+        "characterDeletion": "캐릭터 삭제",
+        "dataReplacement": "현재 데이터 초기화",
+        "hypaReset": "HypaV3 데이터 초기화",
+        "hypaDeletion": "이후 요약 삭제",
+        "pluginDataDeletion": "플러그인 데이터 삭제",
+        "lorebookDeletion": "로어북 폴더와 항목 삭제",
+        "partialBackup": "다른 에셋을 제외한 백업",
+        "incompleteRestore": "누락된 데이터를 제외한 복원",
+        "onlySelectedMessage": "이 메시지만 삭제"
+    },
+
     close: "닫기",
     retry: "다시 시도",
     contentRenderFailed: "내용을 표시하지 못했습니다.",
@@ -224,8 +236,8 @@ export const languageKorean = {
         "requestLogRemoved": "요청 로그가 삭제되었습니다.",
         "requestLogRemovedDesc": "요청 로그는 앱이 재시작되거나 새로고침되면 삭제됩니다.",
         "vertexAuthError": "Vertex AI 인증 정보가 누락되었습니다.",
-        "coldStorageIncompleteRestoreConfirm": (characterNames: string, unavailableCount: number, unresolvedCount: number) =>
-            `${characterNames || "알 수 없는 캐릭터"}의 콜드 스토리지 데이터를 복원하지 못했습니다.${unresolvedCount > 0 ? ` 캐릭터를 확인할 수 없는 항목이 ${unresolvedCount}개 있습니다.` : ""}\n\n계속하면 콜드 스토리지 항목 ${unavailableCount}개를 사용할 수 없으며, 해당 캐릭터 또는 채팅 데이터가 영구적으로 손실될 수 있습니다.\n\n그래도 불완전한 복원을 계속하시겠습니까?`
+        "coldStorageIncompleteRestoreConfirm": (characterNames: string, unavailableCount: number, unresolvedCount: number, includeQuestion = true) =>
+            `${characterNames || "알 수 없는 캐릭터"}의 콜드 스토리지 데이터를 복원하지 못했습니다.${unresolvedCount > 0 ? ` 캐릭터를 확인할 수 없는 항목이 ${unresolvedCount}개 있습니다.` : ""}\n\n계속하면 콜드 스토리지 항목 ${unavailableCount}개를 사용할 수 없으며, 해당 캐릭터 또는 채팅 데이터가 영구적으로 손실될 수 있습니다.${includeQuestion ? "\n\n그래도 불완전한 복원을 계속하시겠습니까?" : ""}`
     },
     "showHelp": "도움말 보기",
     "help": {
@@ -1942,8 +1954,11 @@ export const languageKorean = {
                 '플러그인 API {version} 버전은 지원하지 않습니다. API 3.0으로 업데이트된 버전을 설치하세요.',
             unsupportedApiVersionLoad:
                 '다음 플러그인은 지원하지 않는 플러그인 API 버전을 사용하므로 실행되지 않았습니다. API 3.0으로 업데이트된 버전을 설치하세요.\n\n{plugins}',
-        
-            "removeRetainedDataNotice": '플러그인 값과 권한은 유지됩니다. 값은 RisuNest 설정의 플러그인 데이터에서 관리할 수 있으며, 권한은 플러그인 설정에서 초기화할 수 있습니다.',
+
+            "removeTitle": "플러그인을 삭제하시겠습니까?",
+            "removeDescription": "플러그인 데이터를 함께 삭제할 경우 플러그인을 다시 설치해도 설정과 저장된 내용이 복원되지 않습니다. 플러그인 데이터를 유지하면 다시 설치했을 때 기존 내용을 그대로 사용할 수 있습니다.",
+            "removeDataOption": "플러그인 데이터도 삭제",
+            "removeAction": "삭제",
         },
         exitDrain: {
             title: '동기화를 마치는 중',
@@ -2627,6 +2642,7 @@ export const languageKorean = {
             reasonUnknown: '알 수 없는 오류가 발생했습니다.',
             warningCleanupFailed:
                 '임시 파일을 정리하지 못했습니다. 다음 시작 때 다시 시도합니다.',
+            warningUpstreamRestoreLosses: '콜드 스토리지 또는 인레이 데이터 일부를 복원하지 못했습니다. 복원된 데이터를 확인해주세요.',
             warningPocketInlayFailed:
                 '일부 PocketRisu 첨부를 가져오지 못했습니다.',
             warningUnknown: '작업은 완료되었지만 경고가 있습니다. 상세 내용을 확인해주세요.',
@@ -2887,4 +2903,21 @@ export const languageKorean = {
     "generationInterruptedInBackground": "백그라운드에서 응답 생성이 중단되었습니다.",
     "mcpDesktopOnly": "로컬 MCP는 데스크톱 앱에서 사용할 수 있습니다.",
     "screenshotPreparationFailed": "스크린샷을 준비하지 못했습니다. 범위를 줄여 다시 시도하세요.",
+    lwwSync: {
+        concurrentEditNotice: "같은 항목을 여러 기기에서 동시에 수정할 경우 마지막 수정 내용이 유지됩니다. 수정한 내용이나 메시지가 사라질 수 있으니 여러 기기를 동시에 사용하지 마세요.",
+        replaceTitle: "이 기기의 데이터를 교체하시겠습니까?",
+        replaceDescription: "동기화를 위해 이 기기의 데이터를 초기화한 후 원격 데이터로 교체합니다. 백업이 필요한 경우 수동으로 백업해주세요.",
+        replaceAcknowledge: "이 기기의 데이터 초기화",
+        replaceAction: "교체",
+        cancelAction: "취소",
+        clockBlocked: "기기와 원격 간의 시간 차이가 있어 동기화가 중단되었습니다. 시간을 보정한 후 다시 시도해주세요.",
+        writerCollision: "중복된 기기로 인해 동기화가 중단되었습니다. 새 기기로 다시 연결해주세요.",
+        newDeviceAction: "새 기기로 연결",
+        restoreTitle: "백업을 복원하시겠습니까?",
+        restoreDescriptionBound: "현재 데이터를 초기화한 후 선택한 백업으로 복원하며, 복원한 내용은 원격으로 동기화됩니다. 백업이 필요한 경우 수동으로 백업해주세요.",
+        restoreDescription: "현재 데이터를 초기화한 후 선택한 백업으로 복원합니다. 백업이 필요한 경우 수동으로 백업해주세요.",
+        restoreAcknowledge: "현재 데이터 초기화",
+        restoreAction: "복원",
+        myboxSyncUnavailable: "MYBOX는 동기화에 사용할 수 없습니다.",
+    },
 } satisfies DeepPartial<typeof import('./en').languageEnglish>

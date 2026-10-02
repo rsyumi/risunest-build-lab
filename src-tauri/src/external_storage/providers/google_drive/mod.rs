@@ -53,3 +53,9 @@ pub(crate) use provider::GoogleDrive;
 pub(crate) fn create(dependencies: Dependencies) -> Result<Arc<dyn Provider>> {
     Ok(provider::provider(dependencies))
 }
+
+
+pub(crate) fn validate_sync_root(root: &str) -> Result<()> {
+    if !config::is_drive_id(root) { return Err(config::unsupported()); }
+    Ok(())
+}

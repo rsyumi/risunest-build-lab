@@ -49,9 +49,9 @@ pub enum LogicalOwnerLocator {
         character_id: String,
     },
     #[serde(rename = "root-module-assets")]
-    RootModule { index: u64 },
+    RootModule { #[serde(rename = "moduleId")] module_id: String },
     #[serde(rename = "persona-embedded-module-assets")]
-    PersonaEmbeddedModule { index: u64 },
+    PersonaEmbeddedModule { #[serde(rename = "personaId")] persona_id: String, #[serde(rename = "moduleId")] module_id: String },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -60,8 +60,13 @@ pub struct LogicalOwnerHead {
     pub owner: LogicalOwnerLocator,
     pub present: bool,
     pub manifest_hash: Option<String>,
+    #[serde(with = "crate::control_integer")]
     pub entry_count: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        with = "crate::control_integer::optional",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub property_index: Option<u64>,
 }
 
@@ -187,9 +192,12 @@ impl LogicalOwnerHead {
             LogicalOwnerLocator::CharacterAdditional { character_id } => {
                 validate_component(character_id, "owner characterId", false)?;
             }
-            LogicalOwnerLocator::RootModule { index }
-            | LogicalOwnerLocator::PersonaEmbeddedModule { index } => {
-                validate_safe_integer(*index, "owner index")?;
+            LogicalOwnerLocator::RootModule { module_id } => {
+                validate_component(module_id, "owner moduleId", false)?;
+            }
+            LogicalOwnerLocator::PersonaEmbeddedModule { persona_id, module_id } => {
+                validate_component(persona_id, "owner personaId", false)?;
+                validate_component(module_id, "owner moduleId", false)?;
             }
         }
         validate_safe_integer(self.entry_count, "owner entry count")?;
@@ -209,11 +217,11 @@ impl LogicalOwnerHead {
             LogicalOwnerLocator::CharacterAdditional { character_id } => {
                 format!("character-additional-assets:{character_id}")
             }
-            LogicalOwnerLocator::RootModule { index } => {
-                format!("root-module-assets:{index:020}")
+            LogicalOwnerLocator::RootModule { module_id } => {
+                format!("root-module-assets:{module_id}")
             }
-            LogicalOwnerLocator::PersonaEmbeddedModule { index } => {
-                format!("persona-embedded-module-assets:{index:020}")
+            LogicalOwnerLocator::PersonaEmbeddedModule { persona_id, module_id } => {
+                format!("persona-embedded-module-assets:{}",serde_json::to_string(&[persona_id,module_id]).expect("string owner identity"))
             }
         }
     }
@@ -261,6 +269,8 @@ pub enum LogicalRecordEnvelope {
         trash_time: Option<i64>,
         #[serde(rename = "archiveObjectHash")]
         archive_object_hash: String,
+        #[serde(rename = "sharedArchiveObjectHash")]
+        shared_archive_object_hash: String,
         #[serde(rename = "archiveObjectSize")]
         archive_object_size: u64,
         #[serde(rename = "archivedAt")]
@@ -271,6 +281,10 @@ pub enum LogicalRecordEnvelope {
         message_count: u64,
         #[serde(rename = "assetHashes")]
         asset_hashes: Vec<String>,
+        #[serde(rename = "sharedAssetHashes")]
+        shared_asset_hashes: Vec<String>,
+        #[serde(rename = "identityRemap")]
+        identity_remap: Vec<Value>,
         #[serde(rename = "ownerHeads")]
         owner_heads: Vec<LogicalOwnerHead>,
     },
@@ -407,26 +421,31 @@ impl LogicalRecordEnvelope {
                 }
                 if let Self::ArchivedCharacter {
                     archive_object_hash,
+                    shared_archive_object_hash,
                     archive_object_size,
                     archived_at,
                     conversation_count,
                     message_count,
                     asset_hashes,
+                    shared_asset_hashes,
                     owner_heads,
                     ..
                 } = self
                 {
                     validate_object_descriptor(archive_object_hash, *archive_object_size)?;
+                    validate_hash(shared_archive_object_hash,"shared archive object hash")?;
                     validate_safe_integer(*archived_at, "archive timestamp")?;
                     validate_safe_integer(*conversation_count, "archived conversation count")?;
                     validate_safe_integer(*message_count, "archived message count")?;
+                    for hashes in [asset_hashes,shared_asset_hashes] {
                     let mut previous: Option<&str> = None;
-                    for hash in asset_hashes {
+                    for hash in hashes {
                         validate_hash(hash, "archived asset hash")?;
                         if previous.is_some_and(|value| value >= hash.as_str()) {
                             return Err(invalid("archived asset hashes must be sorted and unique"));
                         }
                         previous = Some(hash);
+                    }
                     }
                     for head in owner_heads {
                         head.validate_identity()?;
@@ -488,11 +507,13 @@ impl LogicalRecordEnvelope {
                 .collect(),
             Self::ArchivedCharacter {
                 archive_object_hash,
+                shared_archive_object_hash,
                 asset_hashes,
+                shared_asset_hashes,
                 owner_heads,
                 ..
-            } => std::iter::once(archive_object_hash.clone())
-                .chain(asset_hashes.iter().cloned())
+            } => std::iter::once(archive_object_hash.clone()).chain(std::iter::once(shared_archive_object_hash.clone()))
+                .chain(asset_hashes.iter().cloned()).chain(shared_asset_hashes.iter().cloned())
                 .chain(owner_heads.iter().filter_map(|head| head.manifest_hash.clone()))
                 .collect(),
             Self::Conversation {
@@ -549,11 +570,13 @@ pub fn encode_message_page(messages: &[Value]) -> Result<EncodedLogicalObject, L
     if messages.len() > LOGICAL_MESSAGE_PAGE_SIZE {
         return Err(invalid("logical message page exceeds 128 messages"));
     }
-    let bytes = serde_json::to_vec(&LogicalMessagePageDocument {
-        schema: LOGICAL_MESSAGE_PAGE_SCHEMA.to_owned(),
-        messages: messages.to_vec(),
-    })
-    .map_err(|error| invalid(format!("logical message page encoding failed: {error}")))?;
+    let mut bytes = b"{\"schema\":\"risunest.logical-message-page/v1\",\"messages\":[".to_vec();
+    for (index, message) in messages.iter().enumerate() {
+        if index > 0 { bytes.push(b','); }
+        bytes.extend(risunest_sync_wire::payload_value::encode(message)
+            .map_err(|error| invalid(error.to_string()))?);
+    }
+    bytes.extend(b"]}");
     encoded_object(bytes)
 }
 
@@ -810,7 +833,7 @@ mod tests {
             LogicalRecordEnvelope::Root {
                 value: json!({ "username": "Fixture" }),
                 owner_heads: vec![LogicalOwnerHead::present(
-                    LogicalOwnerLocator::RootModule { index: 0 },
+                    LogicalOwnerLocator::RootModule { module_id: "module-0".to_owned() },
                     manifest_hash.clone(),
                     2,
                     1,
@@ -845,11 +868,14 @@ mod tests {
                 creator_notes: Some("notes".to_owned()),
                 trash_time: None,
                 archive_object_hash: "4".repeat(64),
+                shared_archive_object_hash: "6".repeat(64),
                 archive_object_size: 128,
                 archived_at: 43,
                 conversation_count: 2,
                 message_count: 7,
                 asset_hashes: vec!["5".repeat(64)],
+                shared_asset_hashes: vec!["5".repeat(64)],
+                identity_remap: vec![],
                 owner_heads: vec![LogicalOwnerHead::unpositioned_present(
                     LogicalOwnerLocator::CharacterAdditional {
                         character_id: "archived-1".to_owned(),
@@ -911,6 +937,17 @@ mod tests {
             assert_eq!(json["kind"], expected_kind);
             if expected_kind == "root" {
                 assert!(json["ownerHeads"][0].get("manifestSize").is_none());
+                assert_eq!(json["ownerHeads"][0]["entryCount"], "2");
+                assert_eq!(json["ownerHeads"][0]["propertyIndex"], "1");
+            }
+            if expected_kind == "preset" {
+                assert_eq!(json["configuredIndex"], 4);
+            }
+            if expected_kind == "archived-character" {
+                assert_eq!(json["identityRemap"], json!([]));
+                let mut missing = json.clone();
+                missing.as_object_mut().unwrap().remove("identityRemap");
+                assert!(decode_logical_record(&serde_json::to_vec(&missing).unwrap()).is_err());
             }
             assert_eq!(encoded.size, encoded.bytes.len() as u64);
             assert_eq!(decode_logical_record(&encoded.bytes).unwrap(), record);
@@ -921,7 +958,7 @@ mod tests {
     fn present_owner_heads_require_a_canonical_property_position() {
         let manifest_hash = "2".repeat(64);
         let canonical = format!(
-            "{{\"schema\":\"risunest.logical-record/v1\",\"kind\":\"root\",\"value\":{{}},\"ownerHeads\":[{{\"owner\":{{\"kind\":\"root-module-assets\",\"index\":0}},\"present\":true,\"manifestHash\":\"{manifest_hash}\",\"entryCount\":0,\"propertyIndex\":0}}]}}"
+            "{{\"schema\":\"risunest.logical-record/v1\",\"kind\":\"root\",\"value\":{{}},\"ownerHeads\":[{{\"owner\":{{\"kind\":\"root-module-assets\",\"moduleId\":\"module-0\"}},\"present\":true,\"manifestHash\":\"{manifest_hash}\",\"entryCount\":\"0\",\"propertyIndex\":\"0\"}}]}}"
         );
         let decoded = decode_logical_record(canonical.as_bytes())
             .expect("decode present owner head with a property position");
@@ -932,15 +969,15 @@ mod tests {
 
         for invalid in [
             format!(
-                "{{\"schema\":\"risunest.logical-record/v1\",\"kind\":\"root\",\"value\":{{}},\"ownerHeads\":[{{\"owner\":{{\"kind\":\"root-module-assets\",\"index\":0}},\"present\":true,\"manifestHash\":\"{manifest_hash}\",\"entryCount\":0}}]}}"
+                "{{\"schema\":\"risunest.logical-record/v1\",\"kind\":\"root\",\"value\":{{}},\"ownerHeads\":[{{\"owner\":{{\"kind\":\"root-module-assets\",\"moduleId\":\"module-0\"}},\"present\":true,\"manifestHash\":\"{manifest_hash}\",\"entryCount\":\"0\"}}]}}"
             ),
             format!(
-                "{{\"schema\":\"risunest.logical-record/v1\",\"kind\":\"root\",\"value\":{{}},\"ownerHeads\":[{{\"owner\":{{\"kind\":\"root-module-assets\",\"index\":0}},\"present\":true,\"manifestHash\":\"{manifest_hash}\",\"entryCount\":0,\"propertyIndex\":null}}]}}"
+                "{{\"schema\":\"risunest.logical-record/v1\",\"kind\":\"root\",\"value\":{{}},\"ownerHeads\":[{{\"owner\":{{\"kind\":\"root-module-assets\",\"moduleId\":\"module-0\"}},\"present\":true,\"manifestHash\":\"{manifest_hash}\",\"entryCount\":\"0\",\"propertyIndex\":null}}]}}"
             ),
             format!(
-                "{{\"schema\":\"risunest.logical-record/v1\",\"kind\":\"root\",\"value\":{{}},\"ownerHeads\":[{{\"owner\":{{\"kind\":\"root-module-assets\",\"index\":0}},\"present\":true,\"manifestHash\":\"{manifest_hash}\",\"entryCount\":0,\"propertyIndex\":9007199254740992}}]}}"
+                "{{\"schema\":\"risunest.logical-record/v1\",\"kind\":\"root\",\"value\":{{}},\"ownerHeads\":[{{\"owner\":{{\"kind\":\"root-module-assets\",\"moduleId\":\"module-0\"}},\"present\":true,\"manifestHash\":\"{manifest_hash}\",\"entryCount\":\"0\",\"propertyIndex\":\"9007199254740992\"}}]}}"
             ),
-            "{\"schema\":\"risunest.logical-record/v1\",\"kind\":\"root\",\"value\":{},\"ownerHeads\":[{\"owner\":{\"kind\":\"root-module-assets\",\"index\":0},\"present\":false,\"manifestHash\":null,\"entryCount\":0,\"propertyIndex\":0}]}".to_owned(),
+            "{\"schema\":\"risunest.logical-record/v1\",\"kind\":\"root\",\"value\":{},\"ownerHeads\":[{\"owner\":{\"kind\":\"root-module-assets\",\"moduleId\":\"module-0\"},\"present\":false,\"manifestHash\":null,\"entryCount\":\"0\",\"propertyIndex\":\"0\"}]}".to_owned(),
         ] {
             assert!(decode_logical_record(invalid.as_bytes()).is_err());
         }

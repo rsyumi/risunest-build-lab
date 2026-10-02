@@ -822,6 +822,7 @@ fn immutable_create_converges_on_a_retry_and_refuses_different_bytes() {
                 b"<Error><Code>PreconditionFailed</Code></Error>".to_vec(),
             ),
             metadata(2048, "\"pack-etag\""),
+            reply(200, &[], spool.bytes.clone()),
         ]);
         let (provider, handle) = opened(&test, "r2", &server).await;
         let intent = spool.intent(&handle, "pack-1", ObjectRole::Pack);
@@ -831,7 +832,7 @@ fn immutable_create_converges_on_a_retry_and_refuses_different_bytes() {
             .unwrap();
         assert!(receipt.complete);
         assert_eq!(receipt.version, Some(VersionToken("\"pack-etag\"".into())));
-        assert_eq!(server.requests.lock().unwrap().len(), 3);
+        assert_eq!(server.requests.lock().unwrap().len(), 4);
 
         // A different length under the same name is a conflict, never a write.
         let test = dependencies();
@@ -898,7 +899,7 @@ fn without_a_conditional_put_the_adapter_looks_before_it_writes() {
         drop(records);
 
         let test = dependencies();
-        let server = WireServer::start(vec![one_descriptor(), metadata(2048, "\"b2-etag\"")]);
+        let server = WireServer::start(vec![one_descriptor(), metadata(2048, "\"b2-etag\""), reply(200, &[], spool.bytes.clone())]);
         let (provider, handle) = opened(&test, "b2", &server).await;
         let intent = spool.intent(&handle, "pack-1", ObjectRole::Pack);
         assert!(
@@ -908,7 +909,7 @@ fn without_a_conditional_put_the_adapter_looks_before_it_writes() {
                 .unwrap()
                 .complete
         );
-        assert_eq!(server.requests.lock().unwrap().len(), 2);
+        assert_eq!(server.requests.lock().unwrap().len(), 3);
 
         let test = dependencies();
         let server = WireServer::start(vec![one_descriptor(), metadata(7, "\"b2-etag\"")]);
@@ -954,6 +955,11 @@ fn a_checksum_receipt_claims_verification_only_when_the_service_confirms_it() {
                 expected
             );
         }
+        let test = dependencies();
+        let wrong = base64_of(&risunest_sync_wire::hash(b"different"));
+        let server = WireServer::start(vec![one_descriptor(), reply(200, &[("x-amz-checksum-sha256", &wrong)], Vec::new())]);
+        let (provider, handle) = opened(&test, "generic", &server).await;
+        assert_eq!(provider.create_object(&handle, &spool.intent(&handle, "pack-1", ObjectRole::Pack), &spool.source(), None, &cancel).await.unwrap_err().kind, ErrorKind::Corrupt);
     });
 }
 
@@ -1326,12 +1332,15 @@ fn a_multipart_session_uploads_every_part_and_completes_the_object() {
                 sigv4::UNSIGNED_PAYLOAD
             );
             assert_eq!(record.body.len(), *length);
+            let offset = index * 1024;
+            assert_eq!(record.body, spool.bytes[offset..offset + length]);
         }
         assert_eq!(
             line(&records[4]),
             "POST /synthetic/synthetic-bucket/risunest/packs/pack-1\
              ?uploadId=synthetic-upload HTTP/1.1"
         );
+        assert_eq!(header(&records[4], "if-none-match").as_deref(), Some("*"));
         assert_eq!(
             String::from_utf8(records[4].body.clone()).unwrap(),
             "<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>\"p1\"</ETag></Part>\
@@ -1416,7 +1425,7 @@ fn reconcile_separates_completion_conflict_expiry_and_a_confirmed_offset() {
 
         // The final object exists with the intended length.
         let test = dependencies();
-        let server = WireServer::start(vec![one_descriptor(), metadata(2560, "\"done\"")]);
+        let server = WireServer::start(vec![one_descriptor(), metadata(2560, "\"done\""), reply(200, &[], spool.bytes.clone())]);
         let (provider, handle) = opened(&test, "r2", &server).await;
         let resume = seal_session(&test, "synthetic-upload", "risunest/packs/pack-1", 1024).await;
         let intent = spool.intent(&handle, "pack-1", ObjectRole::Pack);
@@ -1967,5 +1976,102 @@ fn ambiguous_lease_copies_are_not_filtered_as_foreign() {
         let (provider, handle) = opened(&test, "generic", &server).await;
         assert_eq!(provider.list_objects(&handle, Collection::Leases, None, 10, &Cancellation::default())
             .await.unwrap_err().kind, ErrorKind::Corrupt);
+    });
+}
+
+
+#[test]
+fn longest_sync_names_fit_the_longest_accepted_root() {
+    use crate::external_storage::contract::{MAX_SEGMENT_NAME_BYTES, MAX_SNAPSHOT_NAME_BYTES, segment_object_id};
+    let root = ["r".repeat(200), "r".repeat(200), "r".repeat(110)].join("/");
+    super::validate_sync_root(&root).unwrap();
+    let name = segment_object_id("00000000-0000-4000-8000-000000000001", u64::MAX, &"f".repeat(64)).unwrap();
+    assert_eq!(name.len(), MAX_SEGMENT_NAME_BYTES);
+    let snapshot = "00000000-0000-4000-8000-000000000002";
+    assert_eq!(snapshot.len(), MAX_SNAPSHOT_NAME_BYTES);
+    assert!(format!("{root}/segments/{name}").len() <= 1024);
+    assert!(format!("{root}/snapshots/{snapshot}").len() <= 1024);
+    assert!(super::validate_sync_root(&(root + "r")).is_err());
+}
+
+
+#[test]
+fn unconditioned_segments_use_distinct_hash_keys_without_a_lookup_lock() {
+    runtime().block_on(async {
+        let first = Spool::of(64);
+        let mut second = Spool::of(64);
+        second.bytes.fill(9);
+        second.sha256 = risunest_sync_wire::hash(&second.bytes);
+        std::fs::write(second.directory.path().join("source"), &second.bytes).unwrap();
+        let test = dependencies();
+        let server = WireServer::start(vec![one_descriptor(), reply(200, &[], Vec::new()), reply(200, &[], Vec::new())]);
+        let (provider, handle) = opened(&test, "b2", &server).await;
+        let name = |hash: &str| crate::external_storage::contract::segment_object_id("00000000-0000-4000-8000-000000000001", 1, hash).unwrap();
+        let cancel = Cancellation::default();
+        let a = provider.create_object(&handle, &first.intent(&handle, &name(&first.sha256), ObjectRole::Segment), &first.source(), None, &cancel).await.unwrap();
+        let b = provider.create_object(&handle, &second.intent(&handle, &name(&second.sha256), ObjectRole::Segment), &second.source(), None, &cancel).await.unwrap();
+        assert_ne!(a.locator.object, b.locator.object);
+        let records = server.requests.lock().unwrap();
+        assert_eq!(records.len(), 3);
+        assert!(line(&records[1]).starts_with("PUT "));
+        assert!(line(&records[2]).starts_with("PUT "));
+        assert_eq!(records[1].body, first.bytes);
+        assert_eq!(records[2].body, second.bytes);
+    });
+}
+
+#[test]
+fn equal_length_and_etag_without_sha256_do_not_prove_a_retry() {
+    runtime().block_on(async {
+        let spool = Spool::of(64);
+        let test = dependencies();
+        let server = WireServer::start(vec![one_descriptor(), reply(412, &[], Vec::new()), metadata(64, "\"same-etag\""), reply(200, &[], vec![9; 64])]);
+        let (provider, handle) = opened(&test, "r2", &server).await;
+        assert_eq!(provider.create_object(&handle, &spool.intent(&handle, "pack", ObjectRole::Pack), &spool.source(), None, &Cancellation::default()).await.unwrap_err().kind, ErrorKind::PreconditionFailed);
+        assert_eq!(server.requests.lock().unwrap().len(), 4);
+    });
+}
+
+
+#[test]
+fn segment_and_snapshot_listing_keep_every_physical_variant() {
+    runtime().block_on(async {
+        let first = crate::external_storage::contract::segment_object_id("00000000-0000-4000-8000-000000000001", 1, &"a".repeat(64)).unwrap();
+        let second = first.replace(&"a".repeat(64), &"b".repeat(64));
+        let snapshot = "00000000-0000-4000-8000-000000000002";
+        let test = dependencies();
+        let server = WireServer::start(vec![one_descriptor(), reply(200, &[], listing("segments", &[&first, &second], None)),
+            reply(200, &[], listing("snapshots", &[snapshot], None))]);
+        let (provider, handle) = opened(&test, "r2", &server).await;
+        let cancel = Cancellation::default();
+        let page = provider.list_objects(&handle, Collection::Segments, None, 10, &cancel).await.unwrap();
+        assert_eq!(page.objects.len(), 2);
+        assert_ne!(page.objects[0].locator, page.objects[1].locator);
+        let page = provider.list_objects(&handle, Collection::Snapshots, None, 10, &cancel).await.unwrap();
+        assert_eq!(page.objects[0].locator.object, format!("snapshots/{snapshot}"));
+    });
+}
+
+#[test]
+fn lost_multipart_completion_requires_exact_remote_bytes() {
+    runtime().block_on(async {
+        let spool = Spool::of(64);
+        let test = dependencies();
+        let server = WireServer::start(vec![one_descriptor(), reply(200, &[("ETag", "\"part-1\"")], Vec::new()), Reply::Lost,
+            metadata(64, "\"complete\""), reply(200, &[], spool.bytes.clone())]);
+        let (provider, handle) = opened(&test, "r2", &server).await;
+        let name = crate::external_storage::contract::segment_object_id("00000000-0000-4000-8000-000000000001", 1, &spool.sha256).unwrap();
+        let intent = spool.intent(&handle, &name, ObjectRole::Segment);
+        let key = format!("risunest/segments/{name}");
+        let resume = seal_session(&test, "fixed-upload", &key, 1024).await;
+        let cancel = Cancellation::default();
+        assert_eq!(provider.create_object(&handle, &intent, &spool.source(), Some(&resume), &cancel).await.unwrap_err().kind, ErrorKind::Transient);
+        assert!(matches!(provider.reconcile_upload(&handle, &intent, Some(&resume), &cancel).await.unwrap(), UploadResolution::Complete(_)));
+        let records = server.requests.lock().unwrap();
+        assert_eq!(records.len(), 5);
+        assert_eq!(header(&records[2], "if-none-match").as_deref(), Some("*"));
+        assert_eq!(records[1].body, spool.bytes);
+        assert!(line(&records[3]).starts_with("HEAD "));
+        assert!(line(&records[4]).starts_with("GET "));
     });
 }

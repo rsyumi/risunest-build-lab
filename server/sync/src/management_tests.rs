@@ -89,53 +89,34 @@ fn bad_registration_input_allocates_no_device() {
 }
 
 #[tokio::test]
-async fn live_revoke_cancels_reserved_work_without_removing_committed_data() {
-    use risunest_sync_wire::{hash, ChangeSet, CommitIntent, Domain, RecordChange, RecordVersion};
+async fn live_revoke_refuses_new_pushes_without_removing_committed_data() {
+    use risunest_sync_wire::{
+        lww::{PushRequest, UnitChange},
+        stamp::Stamp,
+        unit::{UnitKey, UnitValue},
+    };
     let root = tempfile::tempdir().unwrap();
     let store = std::sync::Arc::new(Store::init(root.path()).unwrap());
     let credential = store.add_device().unwrap();
     let device = store
         .authenticate(&credential.library_id, &credential.token)
         .unwrap();
-    store
-        .put_object(&device, &hash(b"synthetic"), b"synthetic")
-        .unwrap();
-    let intent = |key: &str, seq: u64| {
-        let staged = store
-            .stage_changes(
-                &device,
-                &ChangeSet {
-                    changes: vec![RecordChange {
-                        domain: Domain::Library,
-                        key: key.into(),
-                        before: RecordVersion::Absent,
-                        after: RecordVersion::Live {
-                            object_hash: hash(b"synthetic"),
-                            descriptor_hash: None,
-                        },
-                    }],
-                    read_fences: vec![],
-                    scope_fences: vec![],
-                },
-            )
-            .unwrap();
-        CommitIntent {
-            device_operation_seq: seq.into(),
-            expected_head: store.head().unwrap(),
-            changes_digest: staged.changes_digest,
-            staged_changes_id: staged.staged_changes_id,
-        }
+    let request = PushRequest {
+        library_id: credential.library_id.clone(),
+        writer_id: "00000000-0000-4000-8000-000000000001".into(),
+        operation_id: "committed".into(),
+        changes: vec![UnitChange {
+            key: UnitKey::new(&["root", "synthetic"]).unwrap(),
+            stamp: Stamp {
+                physical_ms: 1.into(),
+                logical: 0,
+                writer_id: "00000000-0000-4000-8000-000000000001".into(),
+            },
+            value: UnitValue::inline(br#""synthetic""#).unwrap(),
+        }],
     };
-    let committed = intent("committed", 1);
-    let receipt = store
-        .commit(&device, &committed, &committed.expected_head.etag())
-        .unwrap();
+    store.push(&device, &request).unwrap();
     let head = store.head().unwrap();
-    let pending = intent("pending", 2);
-    store
-        .submit_commit(&device, &pending, &pending.expected_head.etag())
-        .unwrap();
-    assert!(store.managed_devices().unwrap()[0].pending);
     let manager =
         crate::management::Management::start(store.clone(), "127.0.0.1:4320".parse().unwrap())
             .await
@@ -164,8 +145,7 @@ async fn live_revoke_cancels_reserved_work_without_removing_committed_data() {
     assert!(store
         .authenticate(&credential.library_id, &credential.token)
         .is_err());
-    assert!(store.run_pending_commit().unwrap());
-    assert!(!store.managed_devices().unwrap()[0].pending);
+    assert!(store.push(&device, &request).is_err());
     assert_eq!(store.head().unwrap(), head);
     let db = rusqlite::Connection::open_with_flags(
         root.path().join("metadata.sqlite"),
@@ -174,14 +154,14 @@ async fn live_revoke_cancels_reserved_work_without_removing_committed_data() {
     .unwrap();
     let persisted: String = db
         .query_row(
-            "SELECT body FROM receipts WHERE operation=?1",
-            [&receipt.operation_id],
+            "SELECT body FROM units WHERE key=?1",
+            [request.changes[0].key.as_str()],
             |r| r.get(0),
         )
         .unwrap();
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&persisted).unwrap(),
-        serde_json::to_value(&receipt).unwrap()
+        serde_json::to_value(&request.changes[0]).unwrap()
     );
     manager.close().await;
 }

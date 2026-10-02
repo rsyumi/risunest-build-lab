@@ -21,7 +21,6 @@
     const createStb = () => {
         stb = Sortable.create(ele, {
             onStart: async () => {
-                DBState.db.personas[DBState.db.selectedPersona].id ??= v4()
                 selectedId = DBState.db.personas[DBState.db.selectedPersona].id
                 saveUserPersona()
             },
@@ -90,6 +89,7 @@
                 const sel = parseInt(await alertSelect([language.createfromScratch, language.importCharacter]))
                 if(sel === 0){
                     DBState.db.personas.push({
+                        id: v4(),
                         name: 'New Persona',
                         icon: '',
                         personaPrompt: '',
@@ -156,7 +156,6 @@
                     return
                 }
                 const persona = DBState.db.personas[DBState.db.selectedPersona]
-                persona.id ??= v4()
                 const personaId = persona.id
                 const d = await alertConfirm(`${language.removeConfirm}${persona.name}`)
                 if(d){

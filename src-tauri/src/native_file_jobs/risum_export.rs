@@ -241,6 +241,7 @@ where
             revision: prepared.revision,
             source_bytes: published.bytes,
             source_sha256: published.sha256,
+            source_fingerprint_kind: crate::native_file_jobs::SourceFingerprintKind::WholeFileSha256,
             character_count: 0,
             preset_count: 0,
             warning_codes: Vec::new(),
@@ -518,7 +519,7 @@ mod tests {
         store
             .replace_put_root(
                 &staging,
-                &json!({"modules": [{"name": "Module", "id": "module"}]}),
+                &json!({"modules": [{"name": "Module", "id": "module-0"}]}),
             )
             .unwrap();
         store.replace_put_presets(&staging, &[]).unwrap();
@@ -640,8 +641,8 @@ mod tests {
             .prepare_bytes(&owner_manifest_codec::encode_owner_manifest(&entries).unwrap())
             .unwrap();
         let root = json!({"modules": [
-            {"name": "wrong", "id": "same"},
-            {"name": "selected", "id": "same", "assets": [
+            {"name": "wrong", "id": "module-0"},
+            {"name": "selected", "id": "module-1", "assets": [
                 ["first", shared.key, "BIN", {"tail": 1}],
                 ["second", shared.key, "bin", null],
                 ["empty", empty.key, "bin", "tail"]
@@ -657,7 +658,7 @@ mod tests {
             .replace_put_asset_owner_heads(
                 &staging,
                 &[AssetOwnerHead::present(
-                    AssetOwnerLocator::RootModuleAssets { index: 1 },
+                    AssetOwnerLocator::RootModuleAssets { module_id: "module-1".to_owned() },
                     manifest.content_hash,
                     3,
                 )],

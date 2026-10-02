@@ -1,0 +1,534 @@
+use super::{
+    connection_commands,
+    contract::*,
+    lww_engine::{ExternalLwwEngine, PublicationResult},
+    lww_segment,
+    providers::Dependencies,
+    runtime,
+};
+use crate::persistent_store::{
+    lww::{Header, MessageLocator, NewDevicePreparation, StageReceive},
+    sync_selection::SyncTarget,
+};
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex, OnceLock},
+    time::Instant,
+};
+use tauri::{AppHandle,Manager};
+
+struct Session {
+    engine: Option<ExternalLwwEngine>,
+    dependencies: Option<Dependencies>,
+    fresh_after: Instant,
+    cancel: Cancellation,
+}
+struct Context {
+    session: tokio::sync::Mutex<Session>,
+    cancel: Mutex<Cancellation>,
+    maintenance:tokio::sync::Mutex<()>,
+}
+static CONTEXTS: OnceLock<Mutex<BTreeMap<String, Arc<Context>>>> = OnceLock::new();
+fn context(id: &str) -> Result<Arc<Context>> {
+    if id.is_empty() {
+        return Err(lww_segment::corrupt());
+    }
+    let mut contexts = CONTEXTS
+        .get_or_init(|| Mutex::new(BTreeMap::new()))
+        .lock()
+        .map_err(runtime::local_error)?;
+    Ok(contexts
+        .entry(id.into())
+        .or_insert_with(|| {
+            Arc::new(Context {
+                session: tokio::sync::Mutex::new(Session {
+                    engine: None,
+                    dependencies: None,
+                    fresh_after: Instant::now(),
+                    cancel: Cancellation::default(),
+                }),
+                cancel: Mutex::new(Cancellation::default()),
+                maintenance:tokio::sync::Mutex::new(()),
+            })
+        })
+        .clone())
+}
+async fn open(app: &AppHandle, id: &str, session: &mut Session) -> Result<()> {
+    if session.engine.is_none() {
+        session.fresh_after = Instant::now();
+        let connected =
+            connection_commands::open_connected_with_cancel(app, id, &session.cancel).await?;
+        if !matches!(
+            connected.stored.config.provider.as_str(),
+            "webdav" | "s3" | "google_drive" | "onedrive"
+        ) || connected.stored.descriptor.publication_strategy.is_none()
+        {
+            return Err(ProviderError::new(ErrorKind::Unsupported));
+        }
+        super::connection::validate_sync_location(&connected.stored.config)?;
+        session.dependencies = Some(connected.dependencies);
+        session.engine = Some(ExternalLwwEngine {
+            provider: connected.provider,
+            repository: connected.handle,
+            library: connected.stored.descriptor.repository_id.clone(),
+            root_key: connected.root_key,
+            admission: None,
+            connection_id: id.into(),
+            connection_root: runtime::root(app)?,
+            capabilities: connected.stored.capabilities,
+            descriptor: connected.stored.descriptor,
+        });
+    }
+    let engine = session.engine.as_mut().ok_or_else(lww_segment::corrupt)?;
+    if engine.admitted_upper().is_err() {
+        let requests = &session
+            .dependencies
+            .as_ref()
+            .ok_or_else(lww_segment::corrupt)?
+            .requests;
+        let mut sample =
+            requests.clock_sample_after(&engine.repository.account, session.fresh_after)?;
+        if sample.is_none() {
+            session.fresh_after = Instant::now();
+            engine
+                .provider
+                .list_objects(
+                    &engine.repository,
+                    Collection::Segments,
+                    None,
+                    1,
+                    &session.cancel,
+                )
+                .await?;
+            sample =
+                requests.clock_sample_after(&engine.repository.account, session.fresh_after)?;
+        }
+        engine.admit(&sample.ok_or_else(|| ProviderError::new(ErrorKind::ClockSkew))?)?;
+    }
+    Ok(())
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ExitTarget {
+    revision: risunest_sync_wire::stamp::DecimalU64,
+    library_epoch: String,
+    selection_epoch: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct Request {
+    pub connection_id: String,
+    #[serde(flatten)]
+    pub header: Header,
+    #[serde(default)]
+    pub generating: Vec<MessageLocator>,
+    #[serde(default)]
+    exit_target: Option<ExitTarget>,
+}
+fn check(
+    app: &AppHandle,
+    request: &Request,
+    selected: bool,
+) -> Result<crate::persistent_store::PersistentStore> {
+    let store = runtime::native_store(app)?;
+    check_store(&store, request, selected)?;
+    Ok(store)
+}
+fn check_store(
+    store: &crate::persistent_store::PersistentStore,
+    request: &Request,
+    selected: bool,
+) -> Result<()> {
+    if store
+        .lww_binding_authority()
+        .map_err(runtime::local_error)?
+        != request.header.binding_authority
+    {
+        return Err(ProviderError::new(ErrorKind::PreconditionFailed));
+    }
+    if selected
+        && store
+            .lww_binding_state()
+            .map_err(runtime::local_error)?
+            .target
+            != SyncTarget::External(request.connection_id.clone())
+    {
+        return Err(ProviderError::new(ErrorKind::Cancelled));
+    }
+    Ok(())
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Inspection {
+    inspection_id: String,
+    target_id: String,
+    library_id: String,
+    empty: bool,
+    previously_bound_library: bool,
+}
+#[tauri::command]
+pub(crate) async fn external_lww_inspect(app: AppHandle, request: Request) -> Result<Inspection> {
+    let context = context(&request.connection_id)?;
+    let mut session = context.session.lock().await;
+    session.cancel = context.cancel.lock().map_err(runtime::local_error)?.clone();
+    open(&app, &request.connection_id, &mut session).await?;
+    let store = check(&app, &request, false)?;
+    let engine = session.engine.as_ref().ok_or_else(lww_segment::corrupt)?;
+    let objects = engine.listing(&session.cancel).await?;
+    let target_id = engine.repository.connection_identity.clone();
+    let library_id = engine.library.clone();
+    let inspection_id = store
+        .register_lww_binding_inspection(
+            request.header.binding_authority,
+            &SyncTarget::External(request.connection_id),
+            &target_id,
+            &library_id,
+        )
+        .map_err(runtime::local_error)?;
+    let previous = store.lww_binding_state().map_err(runtime::local_error)?;
+    Ok(Inspection {
+        inspection_id,
+        target_id,
+        library_id: library_id.clone(),
+        empty: objects.is_empty() && engine.snapshot_listing(&session.cancel).await?.is_empty(),
+        previously_bound_library: previous.library_id.as_deref() == Some(&library_id),
+    })
+}
+pub(crate) struct StageRequest {
+    request: Request,
+    inspection_id: String,
+    target_id: String,
+    library_id: String,
+}
+impl<'de> Deserialize<'de> for StageRequest {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Input {
+            connection_id: String,
+            binding_authority: risunest_sync_wire::stamp::DecimalU64,
+            request_id: String,
+            #[serde(default)]
+            generating: Vec<MessageLocator>,
+            inspection_id: String,
+            target_id: String,
+            library_id: String,
+        }
+        let input = Input::deserialize(deserializer)?;
+        Ok(Self {
+            request: Request {
+                connection_id: input.connection_id,
+                header: Header {
+                    binding_authority: input.binding_authority,
+                    request_id: input.request_id,
+                },
+                generating: input.generating,
+                exit_target: None,
+            },
+            inspection_id: input.inspection_id,
+            target_id: input.target_id,
+            library_id: input.library_id,
+        })
+    }
+}
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct Staged {
+    target_id: String,
+    library_id: String,
+    staging_id: String,
+    receive_id: String,
+}
+#[tauri::command]
+pub(crate) async fn external_lww_stage_binding(
+    app: AppHandle,
+    request: StageRequest,
+) -> Result<Staged> {
+    let context = context(&request.request.connection_id)?;
+    let mut session = context.session.lock().await;
+    open(&app, &request.request.connection_id, &mut session).await?;
+    let mut store = check(&app, &request.request, false)?;
+    let engine = session.engine.as_ref().ok_or_else(lww_segment::corrupt)?;
+    if request.library_id != engine.library
+        || request.target_id != engine.repository.connection_identity
+    {
+        return Err(lww_segment::corrupt());
+    }
+    let stage = engine
+        .stage_binding(
+            &mut store,
+            &request.request.header,
+            &request.inspection_id,
+            &session.cancel,
+        )
+        .await?;
+    Ok(Staged {
+        target_id: request.target_id,
+        library_id: request.library_id,
+        staging_id: stage.staging_id,
+        receive_id: request.request.header.request_id,
+    })
+}
+#[tauri::command]
+pub(crate) async fn external_lww_publish(
+    app: AppHandle,
+    request: Request,
+    initial: bool,
+) -> Result<PublicationResult> {
+    let state = app.state::<crate::persistent_store::PersistentStoreState>();
+    let _operation = state.admit_renderer_operation().map_err(runtime::local_error)?;
+    let context = context(&request.connection_id)?;
+    let mut session = context.session.lock().await;
+    open(&app, &request.connection_id, &mut session).await?;
+    let mut store = state.open_admitted_native_job_store(&_operation).map_err(runtime::local_error)?;
+    check_store(&store, &request, true)?;
+    if let Some(target) = &request.exit_target {
+        let identity = store.external_identity().map_err(runtime::local_error)?;
+        if identity.library_epoch != target.library_epoch
+            || identity.selection_epoch != target.selection_epoch
+            || u64::try_from(identity.revision).ok() != Some(target.revision.0)
+        {
+            return Err(ProviderError::new(ErrorKind::PreconditionFailed));
+        }
+    }
+    if initial {
+        let mut after = None;
+        loop {
+            let page = store
+                .lww_queue_unit_state_page(&request.header, after.as_ref(), 4096)
+                .map_err(runtime::local_error)?;
+            if !page.has_more {
+                break;
+            }
+            after = page.after_key;
+        }
+    }
+    let Session { engine, cancel, .. } = &mut *session;
+    let result = engine
+        .as_mut()
+        .ok_or_else(lww_segment::corrupt)?
+        .publish(
+            &mut store,
+            request.header.binding_authority,
+            &request.generating,
+            cancel,
+        )
+        .await?;
+    if let Some(target) = &request.exit_target {
+        let identity = store.external_identity().map_err(runtime::local_error)?;
+        if identity.library_epoch != target.library_epoch
+            || identity.selection_epoch != target.selection_epoch
+            || u64::try_from(identity.revision).ok() != Some(target.revision.0)
+            || !store
+                .lww_read_outbox(request.header.binding_authority, 1)
+                .map_err(runtime::local_error)?
+                .entries
+                .is_empty()
+        {
+            return Err(ProviderError::new(ErrorKind::PreconditionFailed));
+        }
+    }
+    Ok(result)
+}
+#[tauri::command]
+pub(crate) async fn external_lww_receive(
+    app: AppHandle,
+    request: Request,
+) -> Result<Vec<StageReceive>> {
+    let context = context(&request.connection_id)?;
+    let mut session = context.session.lock().await;
+    open(&app, &request.connection_id, &mut session).await?;
+    let mut store = check(&app, &request, true)?;
+    session
+        .engine
+        .as_ref()
+        .ok_or_else(lww_segment::corrupt)?
+        .receive_requests(
+            &mut store,
+            request.header.binding_authority,
+            &session.cancel,
+        )
+        .await
+}
+
+#[tauri::command]
+pub(crate) async fn external_lww_maintenance(app:AppHandle,request:Request)->Result<Option<serde_json::Value>> {
+    let context=context(&request.connection_id)?;
+    let Ok(_maintenance)=context.maintenance.try_lock() else {return Ok(None)};
+    let cancel=context.cancel.lock().map_err(runtime::local_error)?.clone();
+    let mut session=Session{engine:None,dependencies:None,fresh_after:Instant::now(),cancel:cancel.clone()};
+    open(&app,&request.connection_id,&mut session).await?;
+    let store=check(&app,&request,true)?;
+    let writer=store.lww_clock_state().map_err(runtime::local_error)?.writer_id;
+    let engine=session.engine.as_ref().ok_or_else(lww_segment::corrupt)?;
+    let compact=engine.maintenance_needed(&cancel).await?;
+    let root=runtime::root(&app)?;
+    let stored=super::connection_store::ConnectionStore::open(&root)?.read(&request.connection_id)?;
+    let job=uuid::Uuid::new_v4().to_string();
+    let protection=super::leases::LeaseContext{root:&root,connection_id:&request.connection_id,writer_id:&writer,descriptor:&stored.descriptor,root_key:&engine.root_key,provider:engine.provider.as_ref(),repository:&engine.repository,clock:super::leases::system_clock(),protection_supported:stored.capabilities.lease_operations,ledger:Some(app.state::<super::job_store::JobCommandState>().lease_ledger()?)};
+    let snapshot_id=if compact {
+        let owner=match super::leases::admit_shared_work(&protection,&job,&cancel).await? {
+            super::leases::Admission::Admitted(owner)=>owner,
+            super::leases::Admission::Yield{..}=>return Ok(None),
+            super::leases::Admission::UnsupportedProtection=>return Err(ProviderError::new(ErrorKind::Unsupported)),
+        };
+        let directory=root.join("external-storage").join("maintenance").join(&job);
+        let result=owner.run(&protection,&cancel,async {
+            if let Some(reason)=owner.recheck(&protection,&cancel).await? {return Err(super::leases::yield_error(reason));}
+            check(&app,&request,true)?;
+            let completed=engine.compact_published(&directory,&job,&writer,&stored.capabilities,&cancel,Some((&owner,&protection))).await?;
+            check(&app,&request,true)?;
+            Ok(completed)
+        }).await?;
+        Some(result.snapshot_id)
+    } else {None};
+    check(&app,&request,true)?;
+    let connected=connection_commands::open_connected_with_cancel(&app,&request.connection_id,&cancel).await?;
+    if connected.handle.repository_id!=engine.repository.repository_id || connected.handle.connection_identity!=engine.repository.connection_identity || connected.stored.descriptor.repository_id!=engine.library {return Err(lww_segment::corrupt())}
+    let cleanup=runtime::run_connected_cleanup(&app,&connected,&request.connection_id,&job,Some(engine),&cancel).await?;
+    check(&app,&request,true)?;
+    Ok(Some(serde_json::json!({"snapshotId":snapshot_id,"cleanup":cleanup})))
+}
+#[tauri::command]
+pub(crate) async fn external_lww_fence(app: AppHandle, connection_id: String) -> Result<()> {
+    let context = context(&connection_id)?;
+    context
+        .cancel
+        .lock()
+        .map_err(runtime::local_error)?
+        .cancel();
+    let mut session = context.session.lock().await;
+    session.cancel = Cancellation::default();
+    open(&app, &connection_id, &mut session).await?;
+    let mut store = runtime::native_store(&app)?;
+    session
+        .engine
+        .as_ref()
+        .ok_or_else(lww_segment::corrupt)?
+        .settle_publication(&mut store, &session.cancel)
+        .await?;
+    session.cancel.cancel();
+    if let Some(engine) = session.engine.as_mut() {
+        engine.invalidate_clock()
+    }
+    session.fresh_after = Instant::now();
+    Ok(())
+}
+#[tauri::command]
+pub(crate) async fn external_lww_resume(connection_id: String) -> Result<()> {
+    let context = context(&connection_id)?;
+    let mut session = context.session.lock().await;
+    let cancel = Cancellation::default();
+    *context.cancel.lock().map_err(runtime::local_error)? = cancel.clone();
+    session.cancel = cancel;
+    session.fresh_after = Instant::now();
+    if let Some(engine) = session.engine.as_mut() {
+        engine.invalidate_clock()
+    }
+    Ok(())
+}
+pub(crate) struct NewDeviceRequest {
+    request: Request,
+    staging_id: String,
+}
+impl<'de> Deserialize<'de> for NewDeviceRequest {
+    fn deserialize<D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "camelCase", deny_unknown_fields)]
+        struct Input {
+            connection_id: String,
+            binding_authority: risunest_sync_wire::stamp::DecimalU64,
+            request_id: String,
+            #[serde(default)]
+            generating: Vec<MessageLocator>,
+            staging_id: String,
+        }
+        let input = Input::deserialize(deserializer)?;
+        Ok(Self {
+            request: Request {
+                connection_id: input.connection_id,
+                header: Header {
+                    binding_authority: input.binding_authority,
+                    request_id: input.request_id,
+                },
+                generating: input.generating,
+                exit_target: None,
+            },
+            staging_id: input.staging_id,
+        })
+    }
+}
+#[tauri::command]
+pub(crate) async fn external_lww_prepare_new_device(
+    app: AppHandle,
+    request: NewDeviceRequest,
+) -> Result<NewDevicePreparation> {
+    let context = context(&request.request.connection_id)?;
+    let mut session = context.session.lock().await;
+    // Acquiring this lock settles every task using the old cancellation token.
+    session.cancel = Cancellation::default();
+    open(&app, &request.request.connection_id, &mut session).await?;
+    let mut store = check(&app, &request.request, false)?;
+    session
+        .engine
+        .as_ref()
+        .ok_or_else(lww_segment::corrupt)?
+        .prepare_new_device(
+            &mut store,
+            &request.request.header,
+            &request.staging_id,
+            &session.cancel,
+        )
+        .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn renderer_command_envelopes_deserialize_and_reject_unknown_fields() {
+        let base = serde_json::json!({"connectionId":"sync","bindingAuthority":"4","requestId":"request","generating":[]});
+        assert!(serde_json::from_value::<Request>(base.clone()).is_ok());
+        let mut stage = base.clone();
+        stage["inspectionId"] = serde_json::json!("inspection");
+        stage["targetId"] = serde_json::json!("target");
+        stage["libraryId"] = serde_json::json!("library");
+        assert!(serde_json::from_value::<StageRequest>(stage.clone()).is_ok());
+        let mut invalid_stage = stage.clone();
+        invalid_stage["inspectionId"] = serde_json::json!(4);
+        assert!(serde_json::from_value::<StageRequest>(invalid_stage).is_err());
+        stage["rendererSettled"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<StageRequest>(stage).is_err());
+        let mut prepare = base.clone();
+        prepare["stagingId"] = serde_json::json!("stage");
+        assert!(serde_json::from_value::<NewDeviceRequest>(prepare.clone()).is_ok());
+        let mut invalid_prepare = prepare.clone();
+        invalid_prepare["bindingAuthority"] = serde_json::json!(4);
+        assert!(serde_json::from_value::<NewDeviceRequest>(invalid_prepare).is_err());
+        prepare["rendererSettled"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<NewDeviceRequest>(prepare).is_err());
+        let mut exit = base.clone();
+        exit["exitTarget"] = serde_json::json!({"revision":"12","libraryEpoch":"epoch","selectionEpoch":"selection"});
+        assert!(serde_json::from_value::<Request>(exit).is_ok());
+        for (field, value) in [
+            ("bindingAuthority", serde_json::json!(4)),
+            ("generating", serde_json::json!("conversation")),
+            ("requestId", serde_json::json!(4)),
+        ] {
+            let mut invalid = base.clone();
+            invalid[field] = value;
+            assert!(
+                serde_json::from_value::<Request>(invalid).is_err(),
+                "{field}"
+            );
+        }
+        let mut invalid = base;
+        invalid["rendererSettled"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<Request>(invalid).is_err());
+    }
+}

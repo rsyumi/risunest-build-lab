@@ -58,7 +58,51 @@ pub(crate) const SMALL_OBJECT_BYTES: usize = 64 * 1024;
 const BATCH_ROWS: usize = 256;
 const BATCH_BYTES: usize = 8 * 1024 * 1024;
 
+#[cfg(not(test))]
 pub(crate) use small_object_store::Body;
+
+#[cfg(test)]
+pub(crate) enum Body {
+    File(std::fs::File),
+    Bytes(Cursor<Vec<u8>>),
+    Tracked(crate::asset_repository::body_io::TrackedBodyFile),
+}
+
+#[cfg(test)]
+impl Body {
+    pub fn bytes(bytes: Vec<u8>) -> Self {
+        Self::Bytes(Cursor::new(bytes))
+    }
+    pub fn len(&self) -> std::io::Result<u64> {
+        match self {
+            Self::File(file) => Ok(file.metadata()?.len()),
+            Self::Bytes(bytes) => Ok(bytes.get_ref().len() as u64),
+            Self::Tracked(file) => file.len(),
+        }
+    }
+}
+
+#[cfg(test)]
+impl Read for Body {
+    fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::File(file) => file.read(buffer),
+            Self::Bytes(bytes) => bytes.read(buffer),
+            Self::Tracked(file) => file.read(buffer),
+        }
+    }
+}
+
+#[cfg(test)]
+impl std::io::Seek for Body {
+    fn seek(&mut self, position: std::io::SeekFrom) -> std::io::Result<u64> {
+        match self {
+            Self::File(file) => std::io::Seek::seek(file, position),
+            Self::Bytes(bytes) => std::io::Seek::seek(bytes, position),
+            Self::Tracked(file) => std::io::Seek::seek(file, position),
+        }
+    }
+}
 
 #[derive(Default)]
 struct Staged {
@@ -231,14 +275,23 @@ impl Cache {
                 }
             }
             let tx = objects.transaction()?;
-            small_object_store::insert_batch(
+            let inserted = small_object_store::insert_batch(
                 &tx,
                 &group
                     .iter()
                     .map(|(hash, bytes)| (hash.as_str(), bytes.as_slice()))
                     .collect::<Vec<_>>(),
-            )
-            .map_err(|_| SyncError::new("cached-object-corrupt", 409))?;
+            );
+            #[cfg(test)]
+            match &inserted {
+                Ok(()) => {
+                    for (_, body) in &group {
+                        super::hash_metrics::record("c_small_object_insert_identity", body.len());
+                    }
+                }
+                Err(_) => super::hash_metrics::incomplete(),
+            }
+            inserted.map_err(|_| SyncError::new("cached-object-corrupt", 409))?;
             tx.commit()?;
             // Between groups, never inside one. A reader on another connection
             // can leave the log where it is; this group is already durable, so
@@ -291,19 +344,35 @@ impl Cache {
         if let Some((_, bytes)) = self.staged()?.bodies.get(hash) {
             return Ok(Some(Body::bytes(bytes.clone())));
         }
-        let stored = small_object_store::read(&*self.objects()?, hash, SMALL_OBJECT_BYTES)
-            .map_err(|_| SyncError::new("cached-object-corrupt", 409))?;
+        let stored = small_object_store::read(&*self.objects()?, hash, SMALL_OBJECT_BYTES);
+        #[cfg(test)]
+        match &stored {
+            Ok(Some(bytes)) => super::hash_metrics::record("c_small_object_verify", bytes.len()),
+            Ok(None) => (),
+            Err(_) => super::hash_metrics::incomplete(),
+        }
+        let stored = stored.map_err(|_| SyncError::new("cached-object-corrupt", 409))?;
         if let Some(bytes) = stored {
             return Ok(Some(Body::bytes(bytes)));
         }
-        Ok(self.cas.open_object(hash)?.map(Body::File))
+        #[cfg(test)]
+        let body = self.cas.open_object_tracked(hash)?.map(Body::Tracked);
+        #[cfg(not(test))]
+        let body = self.cas.open_object(hash)?.map(Body::File);
+        Ok(body)
     }
     pub fn open_object(&self, hash: &str) -> Result<Option<Body>> {
         if let Some(body) = self.open_derived(hash)? {
             return Ok(Some(body));
         }
         Ok(match &self.library {
-            Some(library) => library.open_object(hash)?.map(Body::File),
+            Some(library) => {
+                #[cfg(test)]
+                let body = library.open_object_tracked(hash)?.map(Body::Tracked);
+                #[cfg(not(test))]
+                let body = library.open_object(hash)?.map(Body::File);
+                body
+            }
             None => None,
         })
     }
@@ -313,6 +382,8 @@ impl Cache {
             .open_object(hash)?
             .ok_or_else(|| SyncError::new("cached-object-missing", 409))?;
         let mut digest = Sha256::new();
+        #[cfg(test)]
+        super::hash_metrics::begin_stream("c_cache_stream_verify");
         let mut buffer = [0u8; 64 * 1024];
         loop {
             check()?;
@@ -321,6 +392,8 @@ impl Cache {
                 break;
             }
             digest.update(&buffer[..size]);
+            #[cfg(test)]
+            super::hash_metrics::stream_bytes("c_cache_stream_verify", size);
         }
         if hex::encode(digest.finalize()) != hash {
             return Err(SyncError::new("cached-object-corrupt", 409));
@@ -333,7 +406,11 @@ impl Cache {
     fn emit(&self, emission: Emission, bytes: &[u8]) -> Result<String> {
         match emission {
             Emission::Persist => self.put(bytes),
-            Emission::Identity => Ok(risunest_sync_wire::hash(bytes)),
+            Emission::Identity => {
+                #[cfg(test)]
+                super::hash_metrics::record("c_cache_identity", bytes.len());
+                Ok(risunest_sync_wire::hash(bytes))
+            },
         }
     }
 
@@ -341,6 +418,8 @@ impl Cache {
         #[cfg(test)]
         PUT_CALLS.with(|calls| calls.set(calls.get() + 1));
         let hash = risunest_sync_wire::hash(bytes);
+        #[cfg(test)]
+        super::hash_metrics::record("c_cache_identity", bytes.len());
         if bytes.len() > SMALL_OBJECT_BYTES {
             if self.cas.stat_object(&hash)?.is_some() {
                 self.read(&hash, bytes.len())?;
@@ -380,6 +459,8 @@ impl Cache {
         if bytes.len() > limit {
             return Err(SyncError::new("cached-object-too-large", 413));
         }
+        #[cfg(test)]
+        super::hash_metrics::record("c_cache_verify", bytes.len());
         if risunest_sync_wire::hash(&bytes) != hash {
             return Err(SyncError::new("cached-object-corrupt", 409));
         }
@@ -443,6 +524,8 @@ impl Cache {
         scopes: Vec<String>,
     ) -> Result<ProjectedRecord> {
         let local_hash = risunest_sync_wire::hash(bytes);
+        #[cfg(test)]
+        super::hash_metrics::record("c_cache_identity", bytes.len());
         let mut objects = BTreeSet::new();
         let segmented = if bytes.len() <= INLINE_PAYLOAD_BYTES {
             RecordContent::Inline {
@@ -544,6 +627,8 @@ impl Cache {
             RecordContent::Inline { bytes_base64url } => {
                 let bytes = decode_inline(&bytes_base64url)?;
                 let hash = risunest_sync_wire::hash(&bytes);
+                #[cfg(test)]
+                super::hash_metrics::record("c_cache_identity", bytes.len());
                 Ok((bytes, hash))
             }
             RecordContent::Tree { value } => {
@@ -716,10 +801,16 @@ impl Cache {
                 }
                 Envelope::ArchivedCharacter {
                     archive_object_hash,
+                    shared_archive_object_hash,
+                    asset_hashes,
+                    shared_asset_hashes,
                     owner_heads,
                     ..
                 } => {
                     hashes.insert(archive_object_hash);
+                    hashes.insert(shared_archive_object_hash);
+                    hashes.extend(asset_hashes);
+                    hashes.extend(shared_asset_hashes);
                     hashes.extend(owner_heads.into_iter().filter_map(|h| h.manifest_hash));
                 }
                 Envelope::Asset { object_hash, .. }
@@ -736,6 +827,110 @@ impl Cache {
 mod tests {
     use super::*;
     use crate::logical_records::LogicalRecordEnvelope;
+
+    #[test]
+    fn a_tracked_cache_file_without_object_provenance_invalidates_the_body_sample() {
+        use crate::asset_repository::body_io::{reset_body_io, take_body_io};
+        fn require_send<T: Send>() {}
+        require_send::<Body>();
+        let directory = tempfile::tempdir().unwrap();
+        let cache = Cache::open(directory.path()).unwrap();
+        let bytes = vec![17; SMALL_OBJECT_BYTES + 1];
+        let hash = cache.put(&bytes).unwrap();
+        reset_body_io();
+        assert_eq!(cache.read(&hash, bytes.len()).unwrap(), bytes);
+        let observed = take_body_io();
+        assert!(!observed.complete());
+        let object = observed.objects.get(&hash).unwrap();
+        assert!(object.purposes.is_empty());
+        assert_eq!(object.work.opens, 1);
+        assert_eq!(object.work.read_bytes, bytes.len() as u64);
+        assert_eq!(object.work.escaped_handles, 0);
+    }
+
+    #[test]
+    fn a_raw_cache_cas_file_escape_remains_incomplete_with_known_control_provenance() {
+        use crate::asset_repository::body_io::{
+            register_object_purpose, reset_body_io, take_body_io, BodyPurpose,
+        };
+        let directory = tempfile::tempdir().unwrap();
+        let cache = Cache::open(directory.path()).unwrap();
+        let bytes = vec![23; SMALL_OBJECT_BYTES + 1];
+        let hash = cache.put(&bytes).unwrap();
+        reset_body_io();
+        register_object_purpose(&hash, BodyPurpose::Control);
+        let mut body = Body::File(cache.cas.open_object(&hash).unwrap().unwrap());
+        let mut read = Vec::new();
+        body.read_to_end(&mut read).unwrap();
+        drop(body);
+        assert_eq!(read, bytes);
+        let observed = take_body_io();
+        assert!(!observed.complete());
+        assert_eq!(observed.domains["managed"].escaped_handles, 1);
+        assert_eq!(observed.domains["managed"].read_bytes, 0);
+    }
+
+    #[test]
+    fn delegated_small_object_reads_count_success_and_fail_closed_without_guessing() {
+        use super::super::hash_metrics::{reset_hash_metrics, take_hash_metrics, HashDomain};
+        let directory = tempfile::tempdir().unwrap();
+        let cache = Cache::open(directory.path()).unwrap();
+        let bytes = b"synthetic small control";
+        let hash = cache.put(bytes).unwrap();
+
+        reset_hash_metrics();
+        assert_eq!(cache.read(&hash, bytes.len()).unwrap(), bytes);
+        let successful = take_hash_metrics();
+        assert!(!successful.incomplete);
+        let digest = HashDomain { calls: 1, bytes: bytes.len() as u64 };
+        assert_eq!(successful.domains["c_small_object_verify"], digest);
+        assert_eq!(successful.domains["c_cache_verify"], digest);
+
+        reset_hash_metrics();
+        assert!(cache.open_derived(&"f".repeat(64)).unwrap().is_none());
+        let empty = take_hash_metrics();
+        assert!(!empty.incomplete);
+        assert!(empty.domains.is_empty());
+
+        cache.objects().unwrap().execute("UPDATE small_objects SET body=?1 WHERE hash=?2",
+            rusqlite::params![b"damaged", hash]).unwrap();
+        reset_hash_metrics();
+        assert!(cache.open_derived(&hash).is_err());
+        assert!(take_hash_metrics().incomplete);
+    }
+
+    #[test]
+    fn delegated_small_object_insert_hashes_count_submitted_slices_and_fail_closed() {
+        use super::super::hash_metrics::{reset_hash_metrics, take_hash_metrics, HashDomain};
+        let directory = tempfile::tempdir().unwrap();
+        let cache = Cache::open(directory.path()).unwrap();
+        reset_hash_metrics();
+        let batch = cache.begin_batch().unwrap();
+        cache.put(b"one").unwrap();
+        cache.put(b"second").unwrap();
+        batch.commit().unwrap();
+        let successful = take_hash_metrics();
+        assert!(!successful.incomplete);
+        let digest = HashDomain { calls: 2, bytes: 9 };
+        assert_eq!(successful.domains["c_cache_identity"], digest);
+        assert_eq!(successful.domains["c_small_object_insert_identity"], digest);
+
+        reset_hash_metrics();
+        cache.begin_batch().unwrap().commit().unwrap();
+        let empty = take_hash_metrics();
+        assert!(!empty.incomplete);
+        assert!(empty.domains.is_empty());
+
+        cache.objects().unwrap().execute_batch(
+            "CREATE TRIGGER synthetic_insert_failure BEFORE INSERT ON small_objects BEGIN SELECT RAISE(ABORT,'synthetic insert failure'); END"
+        ).unwrap();
+        reset_hash_metrics();
+        let batch = cache.begin_batch().unwrap();
+        cache.put(b"third").unwrap();
+        cache.put(b"fourth").unwrap();
+        assert!(batch.commit().is_err());
+        assert!(take_hash_metrics().incomplete);
+    }
 
     /// A10. The inline wrapper carries canonical unpadded base64url under its
     /// own field name, and every boundary size round trips to the same bytes.

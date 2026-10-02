@@ -242,7 +242,7 @@ describe('persistent save mutation observation', () => {
         expect(markDirty).not.toHaveBeenCalled()
     })
 
-    it('follows selected characters and stops observing when disposed', () => {
+    it('observes every materialized character and stops observing when disposed', () => {
         const database = fixture()
         const next = structuredClone(database.characters[0])
         next.chaId = 'synthetic-next'
@@ -262,7 +262,7 @@ describe('persistent save mutation observation', () => {
         markDirty.mockClear()
         previous.chats[0].message[0].data += '!'
         flushSync()
-        expect(markDirty).not.toHaveBeenCalled()
+        expect(markDirty).toHaveBeenCalled()
         state.database.characters[1].chats[0].message[0].data += '!'
         flushSync()
         expect(markDirty).toHaveBeenCalled()
@@ -271,7 +271,7 @@ describe('persistent save mutation observation', () => {
         markDirty.mockClear()
         state.database.characters[1].chats[0].message[0].data += '!'
         flushSync()
-        expect(markDirty).not.toHaveBeenCalled()
+        expect(markDirty).toHaveBeenCalled()
 
         dispose()
         markDirty.mockClear()

@@ -54,7 +54,7 @@ function receipt(
         result: {
             revision: 7,
             sourceBytes: 128,
-            sourceSha256: 'a'.repeat(64),
+            sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'a'.repeat(64),
             characterCount: 1,
             presetCount: 0,
             warningCodes: [],

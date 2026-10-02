@@ -39,7 +39,7 @@ pub(super) fn load_owner_heads(
              WHERE generation = ?1 AND owner_kind IN (
                 'root-module-assets', 'persona-embedded-module-assets'
              )
-             ORDER BY owner_kind ASC, CAST(owner_locator AS INTEGER) ASC",
+             ORDER BY owner_kind ASC, owner_locator ASC",
             None,
         ),
     };
@@ -55,18 +55,7 @@ pub(super) fn load_owner_heads(
         let present: bool = row.get(2)?;
         let manifest_hash: Option<String> = row.get(3)?;
         let entry_count = nonnegative_u64(row.get(4)?, "owner entry count")?;
-        let owner = match kind.as_str() {
-            "character-additional-assets" => LogicalOwnerLocator::CharacterAdditional {
-                character_id: locator,
-            },
-            "root-module-assets" => LogicalOwnerLocator::RootModule {
-                index: parse_owner_index(&locator)?,
-            },
-            "persona-embedded-module-assets" => LogicalOwnerLocator::PersonaEmbeddedModule {
-                index: parse_owner_index(&locator)?,
-            },
-            _ => return validation("asset owner kind is unsupported"),
-        };
+        let owner = super::AssetOwnerLocator::from_storage(&kind,&locator)?.logical();
         let head = if present {
             let hash = manifest_hash.ok_or_else(|| StoreError::Validation {
                 message: "present owner head has no manifest hash".to_owned(),
@@ -96,7 +85,7 @@ fn resolve_owner_heads_with_sizes(
         load_owner_heads(connection, generation, character_id)?,
         size,
     )?;
-    for (owner, parent, property) in owner_parents(value, character_id) {
+    for (owner, parent, property) in owner_parents(value, character_id)? {
         if heads.iter().any(|head| head.head.owner == owner) {
             continue;
         }
@@ -170,9 +159,9 @@ fn resolve_owner_heads_with_sizes(
     }
     // Stored and derived heads must have the same order, including after import.
     heads.sort_by_key(|head| match &head.head.owner {
-        LogicalOwnerLocator::CharacterAdditional { character_id } => (0, 0, character_id.clone()),
-        LogicalOwnerLocator::PersonaEmbeddedModule { index } => (1, *index, String::new()),
-        LogicalOwnerLocator::RootModule { index } => (2, *index, String::new()),
+        LogicalOwnerLocator::CharacterAdditional { character_id } => (0, character_id.clone()),
+        LogicalOwnerLocator::PersonaEmbeddedModule { persona_id, module_id } => (1, format!("{persona_id}:{module_id}")),
+        LogicalOwnerLocator::RootModule { module_id } => (2, module_id.clone()),
     });
     Ok(heads)
 }
@@ -180,38 +169,36 @@ fn resolve_owner_heads_with_sizes(
 pub(super) fn owner_parents<'a>(
     value: &'a Value,
     character_id: Option<&str>,
-) -> Vec<(LogicalOwnerLocator, &'a Value, &'static str)> {
+) -> StoreResult<Vec<(LogicalOwnerLocator, &'a Value, &'static str)>> {
     if let Some(character_id) = character_id {
-        return vec![(
+        return Ok(vec![(
             LogicalOwnerLocator::CharacterAdditional {
                 character_id: character_id.to_owned(),
             },
             value,
             "additionalAssets",
-        )];
+        )]);
     }
     let mut parents = Vec::new();
-    for (index, module) in value
+    for module in value
         .get("modules")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .enumerate()
     {
         parents.push((
             LogicalOwnerLocator::RootModule {
-                index: index as u64,
+                module_id: owner_id(module)?.to_owned(),
             },
             module,
             "assets",
         ));
     }
-    for (index, persona) in value
+    for persona in value
         .get("personas")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-        .enumerate()
     {
         if let Some(module) = persona
             .get("embeddedModule")
@@ -219,14 +206,15 @@ pub(super) fn owner_parents<'a>(
         {
             parents.push((
                 LogicalOwnerLocator::PersonaEmbeddedModule {
-                    index: index as u64,
+                    persona_id: owner_id(persona)?.to_owned(),
+                    module_id: owner_id(module)?.to_owned(),
                 },
                 module,
                 "assets",
             ));
         }
     }
-    parents
+    Ok(parents)
 }
 
 fn validate_owner_heads_with_sizes(
@@ -381,8 +369,8 @@ pub(super) fn strip_root_owner_properties(
     let mut by_identity = BTreeMap::new();
     for (head_index, head) in heads.iter().enumerate() {
         let identity = match &head.head.owner {
-            LogicalOwnerLocator::RootModule { index } => format!("module:{index}"),
-            LogicalOwnerLocator::PersonaEmbeddedModule { index } => format!("persona:{index}"),
+            LogicalOwnerLocator::RootModule { module_id } => format!("module:{module_id}"),
+            LogicalOwnerLocator::PersonaEmbeddedModule { persona_id, module_id } => format!("persona:{}", serde_json::to_string(&(persona_id,module_id))?),
             LogicalOwnerLocator::CharacterAdditional { .. } => {
                 return validation("root logical record contains a character owner head")
             }
@@ -398,13 +386,14 @@ pub(super) fn strip_root_owner_properties(
             .ok_or_else(|| StoreError::Validation {
                 message: "root modules must be an array".to_owned(),
             })?;
-        for (index, module) in modules.iter_mut().enumerate() {
+        for module in modules.iter_mut() {
+            let module_id = owner_id(module)?.to_owned();
             let module = module
                 .as_object_mut()
                 .ok_or_else(|| StoreError::Validation {
                     message: "root module must be an object".to_owned(),
                 })?;
-            let head_index = *by_identity.get(&format!("module:{index}")).ok_or_else(|| {
+            let head_index = *by_identity.get(&format!("module:{module_id}")).ok_or_else(|| {
                 StoreError::Validation {
                     message: "root module owner head coverage is incomplete".to_owned(),
                 }
@@ -419,7 +408,8 @@ pub(super) fn strip_root_owner_properties(
             .ok_or_else(|| StoreError::Validation {
                 message: "root personas must be an array".to_owned(),
             })?;
-        for (index, persona) in personas.iter_mut().enumerate() {
+        for persona in personas.iter_mut() {
+            let persona_id = owner_id(persona)?.to_owned();
             let persona = persona
                 .as_object_mut()
                 .ok_or_else(|| StoreError::Validation {
@@ -428,13 +418,14 @@ pub(super) fn strip_root_owner_properties(
             let Some(embedded) = persona.get_mut("embeddedModule") else {
                 continue;
             };
+            let module_id = owner_id(embedded)?.to_owned();
             let embedded = embedded
                 .as_object_mut()
                 .ok_or_else(|| StoreError::Validation {
                     message: "persona embeddedModule must be an object".to_owned(),
                 })?;
             let head_index = *by_identity
-                .get(&format!("persona:{index}"))
+                .get(&format!("persona:{}", serde_json::to_string(&(&persona_id,&module_id))?))
                 .ok_or_else(|| StoreError::Validation {
                     message: "persona embedded module owner head coverage is incomplete".to_owned(),
                 })?;
@@ -607,6 +598,7 @@ pub(super) fn reconstruct_record_with_owner_objects(
                     creator_notes,
                     trash_time,
                     archive_object_hash: archived.object_hash,
+                    shared_archive_object_hash: archived.shared_object_hash,
                     archive_object_size,
                     archived_at: nonnegative_u64(archived.archived_at, "archive timestamp")?,
                     conversation_count: nonnegative_u64(
@@ -618,6 +610,8 @@ pub(super) fn reconstruct_record_with_owner_objects(
                         "archived message count",
                     )?,
                     asset_hashes: archived.asset_hashes,
+                    shared_asset_hashes: archived.shared_asset_hashes,
+                    identity_remap: archived.identity_remap.iter().map(serde_json::to_value).collect::<Result<_,_>>()?,
                     owner_heads: logical_owner_heads(&owner_heads),
                 })
                 .map_err(codec_error)?
@@ -757,16 +751,6 @@ pub(super) fn required_text(
         })
 }
 
-pub(super) fn parse_owner_index(value: &str) -> StoreResult<u64> {
-    let parsed = value.parse::<u64>().map_err(|_| StoreError::Validation {
-        message: "asset owner locator is not a nonnegative integer".to_owned(),
-    })?;
-    if parsed.to_string() != value {
-        return validation("asset owner locator is not canonical");
-    }
-    Ok(parsed)
-}
-
 pub(super) fn verify_object_bytes(bytes: &[u8], hash: &str, size: u64) -> StoreResult<()> {
     if bytes.len() as u64 != size || hex::encode(Sha256::digest(bytes)) != hash {
         return validation("reconstructed logical object failed hash or size verification");
@@ -796,4 +780,8 @@ pub(super) fn validation<T>(message: impl Into<String>) -> StoreResult<T> {
     Err(StoreError::Validation {
         message: message.into(),
     })
+}
+
+fn owner_id(value: &Value) -> StoreResult<&str> {
+    value.get("id").and_then(Value::as_str).filter(|id| !id.is_empty()).ok_or_else(|| StoreError::Validation { message: "owner identity is required".to_owned() })
 }

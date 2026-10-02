@@ -2,6 +2,8 @@ import { doingChat, reserveGeneration } from "../process/generationState";
 import { isLibraryFileOperationReserved, registerLibraryFileOperationGate } from "./libraryFileOperation";
 import { get } from 'svelte/store'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
+const nativeInvoke = vi.hoisted(() => vi.fn())
+vi.mock('@tauri-apps/api/core', () => ({invoke: nativeInvoke}))
 
 import {
     cancelActiveNativeFileOperation,
@@ -33,6 +35,70 @@ function status(patch: Partial<NativeFileJobStatus> = {}): NativeFileJobStatus {
 }
 
 describe('renderer-lifetime native file job manager', () => {
+    it('allows generation during exact native-confirmed portable body retry and refuses mismatched receipts', async () => {
+        const receipt = {jobId: 'portable', stagingId: 'stage', catalogSha256: 'a'.repeat(64), activationRevision: '8', bindingAuthority: '2', deviceSessionId: 'session'}
+        const native = status({jobId: receipt.jobId, kind: 'restore-portable-backup', state: 'cancelled', phase: 'copying-missing-bodies', activationRevision: 8, activationAuthority: '2', deviceSessionId: 'session', restoreAdoptionConfirmed: true, portableBodyRetry: {stagingId: 'stage', catalogSha256: receipt.catalogSha256, pending: true, available: true, sourceRequired: false}})
+        nativeInvoke.mockResolvedValue(native)
+        await expect(runSharedNativeFileOperation('import', 'portable-retry', async () => {
+            expect(isLibraryFileOperationReserved()).toBe(false)
+            const generation = reserveGeneration()
+            expect(generation).not.toBeNull()
+            generation!.release()
+            return 'bodies only'
+        }, {format: 'library-backup', portableBodyOwner: receipt})).resolves.toBe('bodies only')
+        nativeInvoke.mockResolvedValue({...native, restoreAdoptionConfirmed: false})
+        await expect(runSharedNativeFileOperation('import', 'unconfirmed-retry', async () => 'unsafe', {portableBodyOwner: receipt})).rejects.toMatchObject({code: 'portable-body-retry-refused'})
+        nativeInvoke.mockResolvedValue(native)
+        await expect(runSharedNativeFileOperation('import', 'wrong-retry', async () => 'unsafe', {portableBodyOwner: {...receipt, catalogSha256: 'b'.repeat(64)}})).rejects.toMatchObject({code: 'portable-body-receipt-mismatch'})
+    })
+    it('releases only the adopted portable reservation while retaining body progress and cancellation', async () => {
+        const receipt=status({jobId:'portable',kind:'restore-portable-backup',activationRevision:8,activationAuthority:'2',deviceSessionId:'session'})
+        let finish!:()=>void
+        const held=new Promise<void>(resolve=>{finish=resolve})
+        let entered!:()=>void
+        const ready=new Promise<void>(resolve=>{entered=resolve})
+        const operation=runSharedNativeFileOperation('import','portable-body-progress',async context=> {
+            expect(reserveGeneration()).toBeNull()
+            context.setBlocking(false)
+            expect(isLibraryFileOperationReserved()).toBe(true)
+            nativeInvoke.mockResolvedValue({...receipt,restoreAdoptionConfirmed:false})
+            await expect(context.releaseLibraryAfterPortableAdoption(receipt)).rejects.toMatchObject({code:'portable-adoption-receipt-mismatch'})
+            expect(isLibraryFileOperationReserved()).toBe(true)
+            nativeInvoke.mockResolvedValue({...receipt,restoreAdoptionConfirmed:true,phase:'copying-missing-bodies'})
+            await context.releaseLibraryAfterPortableAdoption(receipt)
+            expect(isLibraryFileOperationReserved()).toBe(false)
+            const generation=reserveGeneration()
+            expect(generation).not.toBeNull()
+            generation!.release()
+            context.onStatus({...receipt,phase:'copying-missing-bodies'})
+            entered()
+            await held
+            expect(context.signal.aborted).toBe(true)
+        },{format:'library-backup'})
+        await ready
+        expect(get(nativeFileOperation)?.status?.phase).toBe('copying-missing-bodies')
+        cancelActiveNativeFileOperation()
+        finish()
+        await operation
+    })
+    it('permits foreground generation and sync only for a native-confirmed snapshot body owner', async () => {
+        const receipt = {jobId: 'bodies', kind: 'snapshot-bodies' as const, stagingId: 'stage', activationRevision: '8', bindingAuthority: '2'}
+        nativeInvoke.mockResolvedValue(status({jobId: 'bodies', kind: 'snapshot-bodies', snapshotStagingId: 'stage', activationRevision: 8, activationAuthority: '2', phase: 'copying-missing-bodies'}))
+        doingChat.set(true)
+        const unregister = registerLibraryFileOperationGate(() => new Promise<void>(() => {}))
+        try {
+            await expect(runSharedNativeFileOperation('import', 'snapshot-bodies', async () => {
+                expect(isLibraryFileOperationReserved()).toBe(false)
+                return 'settled'
+            }, {format: 'library-backup', snapshotBodyOwner: receipt})).resolves.toBe('settled')
+            nativeInvoke.mockResolvedValue(status({jobId: 'bodies', kind: 'restore-portable-backup'}))
+            await expect(runSharedNativeFileOperation('import', 'wrong-body-owner', async () => 'unsafe', {format: 'library-backup', snapshotBodyOwner: receipt})).rejects.toMatchObject({code: 'snapshot-body-receipt-mismatch'})
+            await expect(runSharedNativeFileOperation('import', 'replacement', async () => 'unsafe', {format: 'library-backup'})).rejects.toMatchObject({code: 'generation-active'})
+        } finally {
+            doingChat.set(false)
+            unregister()
+        }
+    })
     it('waits for safe synchronization settlement and releases a cancelled wait', async () => {
         let releaseSync!: () => void
         const sync = new Promise<void>(resolve => { releaseSync = resolve })
@@ -223,7 +289,7 @@ describe('renderer-lifetime native file job manager', () => {
             result: {
                 revision: 7,
                 sourceBytes: 128,
-                sourceSha256: 'abc',
+                sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'abc',
                 characterCount: 2,
                 presetCount: 1,
                 warningCodes: ['cleanup-failed'],

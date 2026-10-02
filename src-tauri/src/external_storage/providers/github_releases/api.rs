@@ -180,6 +180,7 @@ impl Context {
 
     pub(super) fn holds_collection(&self, tag: &str, collection: Collection) -> bool {
         match collection {
+            Collection::Segments => false,
             Collection::Descriptors => tag == self.descriptor_tag(),
             Collection::Snapshots | Collection::BackupPoints | Collection::InventoryPages => {
                 tag.starts_with(&format!("{}-{JOB_BATCH_PREFIX}", self.tag_prefix))
@@ -247,6 +248,8 @@ pub(super) fn is_safe_name(value: &str, max: usize) -> bool {
 
 pub(super) fn role_prefix(role: ObjectRole) -> &'static str {
     match role {
+        ObjectRole::Segment => "segments",
+        ObjectRole::Snapshot => "snapshots",
         ObjectRole::Descriptor => "descriptor",
         ObjectRole::Pack => "pack",
         ObjectRole::Catalog => "catalog",
@@ -262,6 +265,7 @@ pub(super) fn role_prefix(role: ObjectRole) -> &'static str {
 /// the snapshot listing, and each role keeps its own asset name prefix.
 pub(super) fn collection_roles(collection: Collection) -> &'static [ObjectRole] {
     match collection {
+        Collection::Segments => &[ObjectRole::Segment],
         Collection::Snapshots => &[ObjectRole::SyncState, ObjectRole::BackupBundle],
         Collection::BackupPoints => &[ObjectRole::BackupPoint],
         Collection::InventoryPages => &[ObjectRole::InventoryPage],

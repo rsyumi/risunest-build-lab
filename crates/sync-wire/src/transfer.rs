@@ -1,4 +1,4 @@
-use crate::{delta::Recipe, hash, validate_hash, Result, WireError};
+use super::{delta::Recipe, hash, validate_hash, Result, WireError};
 
 pub const MAX_BATCH_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_BATCH_OBJECTS: usize = 1024;
@@ -26,7 +26,14 @@ pub fn encode(frames: &[Frame]) -> Result<Vec<u8>> {
         match frame {
             Frame::Full(bytes) => {
                 payload.push(0);
-                put_hash(&mut payload, &hash(bytes));
+                let digest = hash(bytes);
+                #[cfg(test)]
+                super::delta::source_test_observer::completed(
+                    &digest,
+                    "transfer-full-encode-sha256",
+                    bytes.len(),
+                );
+                put_hash(&mut payload, &digest);
                 payload.extend((bytes.len() as u64).to_be_bytes());
                 payload.extend(bytes);
             }
@@ -77,7 +84,19 @@ pub fn decode(bytes: &[u8]) -> Result<Vec<Frame>> {
                         return Err(WireError("frame-too-large"));
                     }
                     let bytes = take(&mut payload, size as usize)?;
-                    if hash(bytes) != digest {
+                    let actual = hash(bytes);
+                    #[cfg(test)]
+                    super::delta::source_test_observer::completed(
+                        &digest,
+                        "transfer-full-decode-sha256",
+                        bytes.len(),
+                    );
+                    if actual != digest {
+                        #[cfg(test)]
+                        super::delta::source_test_observer::failed(
+                            &digest,
+                            "transfer-full-decode-sha256",
+                        );
                         return Err(WireError("hash-mismatch"));
                     }
                     Frame::Full(bytes.to_vec())

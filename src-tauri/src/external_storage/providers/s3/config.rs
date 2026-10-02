@@ -84,11 +84,12 @@ fn valid_bucket(bucket: &str, addressing: Addressing) -> bool {
 pub(crate) fn role_folder(role: ObjectRole) -> &'static str {
     match role {
         ObjectRole::Descriptor => "descriptors",
+        ObjectRole::Segment => "segments",
         ObjectRole::Pack => "packs",
         ObjectRole::Catalog => "catalogs",
         // A published state and a backup bundle share one collection. The
         // authenticated envelope header, not the path, tells them apart.
-        ObjectRole::SyncState | ObjectRole::BackupBundle => "snapshots",
+        ObjectRole::SyncState | ObjectRole::Snapshot | ObjectRole::BackupBundle => "snapshots",
         ObjectRole::BackupPoint => "backup-points",
         ObjectRole::InventoryPage => "inventory",
         ObjectRole::Lease => "leases",
@@ -99,6 +100,7 @@ pub(crate) fn role_folder(role: ObjectRole) -> &'static str {
 /// and the head is not a member of any folder, so neither is a target.
 pub(crate) fn removable_folder(folder: &str) -> bool {
     [
+        ObjectRole::Segment,
         ObjectRole::Pack,
         ObjectRole::Catalog,
         ObjectRole::SyncState,
@@ -112,6 +114,7 @@ pub(crate) fn removable_folder(folder: &str) -> bool {
 
 pub(crate) fn collection_folder(collection: Collection) -> &'static str {
     match collection {
+        Collection::Segments => "segments",
         Collection::Snapshots => role_folder(ObjectRole::SyncState),
         Collection::BackupPoints => role_folder(ObjectRole::BackupPoint),
         Collection::InventoryPages => role_folder(ObjectRole::InventoryPage),
@@ -195,7 +198,7 @@ fn endpoint(endpoint: &str, profile: &Profile) -> Result<(url::Url, String)> {
     Ok((origin, base_path))
 }
 
-fn normalize_prefix(prefix: Option<&str>) -> Result<String> {
+pub(super) fn normalize_prefix(prefix: Option<&str>) -> Result<String> {
     let prefix = prefix.unwrap_or_default().trim_matches('/');
     if prefix.is_empty() {
         return Ok(String::new());

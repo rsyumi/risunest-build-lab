@@ -424,15 +424,15 @@ fn create_refuses_an_occupied_root_and_existing_requires_the_descriptor_collecti
 fn create_builds_the_root_and_every_role_collection_without_touching_ancestors() {
     runtime().block_on(async {
         let mut replies = vec![reply(404, &[], b"")];
-        replies.extend((0..8).map(|_| reply(201, &[], b"")));
+        replies.extend((0..9).map(|_| reply(201, &[], b"")));
         let harness = Harness::start(replies);
         harness.open(OpenMode::Create).await.unwrap();
-        assert_eq!(harness.count(), 9);
+        assert_eq!(harness.count(), 10);
         assert_eq!(
             harness.line(1),
             format!("MKCOL {}/ HTTP/1.1", encoded_root())
         );
-        let created: Vec<String> = (2..9).map(|index| harness.line(index)).collect();
+        let created: Vec<String> = (2..10).map(|index| harness.line(index)).collect();
         for folder in ROLE_FOLDERS {
             assert!(
                 created.contains(&format!("MKCOL {}/{folder}/ HTTP/1.1", encoded_root())),
@@ -442,10 +442,10 @@ fn create_builds_the_root_and_every_role_collection_without_touching_ancestors()
 
         // An empty root that already exists is reused; only its contents decide.
         let mut existing = vec![root_listing(Vec::new())];
-        existing.extend((0..7).map(|_| reply(405, &[], b"")));
+        existing.extend((0..8).map(|_| reply(405, &[], b"")));
         let reuse = Harness::start(existing);
         reuse.open(OpenMode::Create).await.unwrap();
-        assert_eq!(reuse.count(), 8);
+        assert_eq!(reuse.count(), 9);
         assert!(reuse.line(1).starts_with("MKCOL "));
     });
 }
@@ -594,6 +594,7 @@ fn immutable_create_converges_on_retry_and_refuses_a_different_length() {
             reply(201, &[("ETag", "\"pack-v1\"")], b""),
             reply(412, &[], b""),
             multistatus_reply(&[object_response(&object, 512, Some("\"pack-v1\""))]),
+            reply(200, &[("ETag", "\"pack-v1\"")], &bytes),
             reply(412, &[], b""),
             multistatus_reply(&[object_response(&object, 511, Some("\"pack-v1\""))]),
         ]);
@@ -686,7 +687,7 @@ fn immutable_create_converges_on_retry_and_refuses_a_different_length() {
                 .kind,
             ErrorKind::Corrupt
         );
-        assert_eq!(harness.count(), 6);
+        assert_eq!(harness.count(), 7);
     });
 }
 
@@ -705,6 +706,7 @@ fn a_lost_put_reconciles_from_the_stored_resource() {
             multistatus_reply(&[object_response(&object, 120, None)]),
             reply(404, &[], b""),
             multistatus_reply(&[object_response(&object, 300, Some("\"pack-v2\""))]),
+            reply(200, &[("ETag", "\"pack-v2\"")], &bytes),
         ]);
         let repository = harness.opened().await;
         let directory = tempfile::tempdir().unwrap();
@@ -776,7 +778,7 @@ fn a_lost_put_reconciles_from_the_stored_resource() {
             receipt.version,
             Some(VersionToken("\"pack-v2\"".to_owned()))
         );
-        assert_eq!(harness.count(), 5);
+        assert_eq!(harness.count(), 6);
     });
 }
 
@@ -1457,5 +1459,49 @@ fn listing_resumes_after_expiry_and_on_a_new_provider() {
         assert_eq!(third.objects[0].locator.object, "snapshots/item-060");
         assert!(third.next_cursor.is_none());
         assert_eq!(harness.count(), 5);
+    });
+}
+
+
+#[test]
+fn longest_sync_names_fit_the_longest_accepted_root() {
+    use crate::external_storage::contract::{MAX_SEGMENT_NAME_BYTES, MAX_SNAPSHOT_NAME_BYTES, segment_object_id};
+    let root = ["r".repeat(255), "r".repeat(255), "r".repeat(255), "r".repeat(123)].join("/");
+    super::validate_sync_root(&root).unwrap();
+    let name = segment_object_id("00000000-0000-4000-8000-000000000001", u64::MAX, &"f".repeat(64)).unwrap();
+    assert_eq!(name.len(), MAX_SEGMENT_NAME_BYTES);
+    let snapshot = "00000000-0000-4000-8000-000000000002";
+    assert_eq!(snapshot.len(), MAX_SNAPSHOT_NAME_BYTES);
+    assert!(format!("{root}/segments/{name}").len() <= 1023);
+    assert!(format!("{root}/snapshots/{snapshot}").len() <= 1023);
+    assert!(super::validate_sync_root(&(root + "r")).is_err());
+}
+
+
+#[test]
+fn same_length_collision_is_rejected_and_hash_variants_remain_listable() {
+    runtime().block_on(async {
+        let bytes = b"sealed-a";
+        let first = crate::external_storage::contract::segment_object_id("00000000-0000-4000-8000-000000000001", 1, &risunest_sync_wire::hash(bytes)).unwrap();
+        let second = crate::external_storage::contract::segment_object_id("00000000-0000-4000-8000-000000000001", 1, &risunest_sync_wire::hash(b"sealed-b")).unwrap();
+        let object = format!("{}/segments/{first}", encoded_root());
+        let harness = Harness::start(vec![established_root(), reply(201, &[], b""), reply(412, &[], b""),
+            multistatus_reply(&[object_response(&object, bytes.len() as u64, Some("\"same-etag\""))]),
+            reply(200, &[], b"sealed-b"),
+            multistatus_reply(&[collection_response(&format!("{}/segments/", encoded_root())),
+                object_response(&object, 8, None), object_response(&format!("{}/segments/{second}", encoded_root()), 8, None)])]);
+        let repository = harness.opened().await;
+        let directory = tempfile::tempdir().unwrap();
+        let source = source(&directory, "sealed", bytes);
+        let intent = intent(&repository, &first, ObjectRole::Segment, bytes);
+        let cancel = Cancellation::default();
+        harness.provider.create_object(&repository, &intent, &source, None, &cancel).await.unwrap();
+        assert_eq!(harness.provider.create_object(&repository, &intent, &source, None, &cancel).await.unwrap_err().kind, ErrorKind::PreconditionFailed);
+        let page = harness.provider.list_objects(&repository, Collection::Segments, None, 10, &cancel).await.unwrap();
+        assert_eq!(page.objects.len(), 2);
+        assert!(page.objects.iter().any(|receipt| receipt.locator.object.ends_with(&first)));
+        assert!(page.objects.iter().any(|receipt| receipt.locator.object.ends_with(&second)));
+        assert_eq!(harness.body(1), bytes);
+        assert_eq!(harness.body(2), bytes);
     });
 }

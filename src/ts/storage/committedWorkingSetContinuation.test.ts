@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
     continueCommittedWorkingSetRefresh,
+    claimCommittedWorkingSetRecovery,
     registerCommittedWorkingSetContinuation,
     retryCommittedWorkingSetRefreshWithContinuation,
 } from './committedWorkingSetContinuation'
@@ -20,6 +21,16 @@ describe('committed working-set continuation', () => {
         await continueCommittedWorkingSetRefresh(10, runtime, 2)
 
         expect(continuation).toHaveBeenCalledOnce()
+    })
+
+    it('retains a critical failed lifecycle and shares concurrent retries',async()=>{
+        const runtime={}
+        const continuation=vi.fn(async()=>{}).mockRejectedValueOnce(new Error('adapter resume failed'))
+        registerCommittedWorkingSetContinuation(11,runtime,3,continuation,undefined,true)
+        await expect(continueCommittedWorkingSetRefresh(11,runtime,3)).rejects.toThrow('adapter resume failed')
+        await Promise.all([continueCommittedWorkingSetRefresh(11,runtime,3),continueCommittedWorkingSetRefresh(11,runtime,3)])
+        await continueCommittedWorkingSetRefresh(11,runtime,3)
+        expect(continuation).toHaveBeenCalledTimes(2)
     })
 
     it('does not repeat a continuation that fails', async () => {
@@ -44,6 +55,46 @@ describe('committed working-set continuation', () => {
 
         await continueCommittedWorkingSetRefresh(12, runtime, 5)
 
+        expect(stale).not.toHaveBeenCalled()
+    })
+
+    it('protects only the actively claimed critical dispatch and releases that protection exactly',async()=>{
+        const runtime={}
+        const stale=vi.fn(async()=>{})
+        registerCommittedWorkingSetContinuation(12,runtime,4,stale,undefined,true)
+        const release=claimCommittedWorkingSetRecovery(runtime,4,Symbol('actual-guard'),()=>true)
+        expect(()=>claimCommittedWorkingSetRecovery(runtime,4,Symbol('other-guard'),()=>true)).toThrow()
+        await continueCommittedWorkingSetRefresh(12,runtime,5)
+        release()
+        await continueCommittedWorkingSetRefresh(12,runtime,5)
+        await continueCommittedWorkingSetRefresh(12,runtime,4)
+        expect(stale).not.toHaveBeenCalled()
+    })
+
+    it('never protects a replaced runtime or a newly registered unrelated authority',async()=>{
+        const runtime={}
+        const stale=vi.fn(async()=>{})
+        registerCommittedWorkingSetContinuation(12,runtime,4,stale,undefined,true)
+        const release=claimCommittedWorkingSetRecovery(runtime,4,Symbol('actual-guard'),()=>true)
+        await continueCommittedWorkingSetRefresh(12,{},4)
+        await continueCommittedWorkingSetRefresh(12,runtime,4)
+        registerCommittedWorkingSetContinuation(12,runtime,6,stale,undefined,true)
+        await continueCommittedWorkingSetRefresh(12,runtime,7)
+        release()
+        await continueCommittedWorkingSetRefresh(12,runtime,6)
+        expect(stale).not.toHaveBeenCalled()
+    })
+
+    it('does not retain an owned callback after its actual authority is replaced',async()=>{
+        const runtime={}
+        const stale=vi.fn(async()=>{})
+        let current=true
+        registerCommittedWorkingSetContinuation(12,runtime,4,stale,undefined,true)
+        const release=claimCommittedWorkingSetRecovery(runtime,4,Symbol('actual-guard'),()=>current)
+        current=false
+        await continueCommittedWorkingSetRefresh(12,runtime,5)
+        release()
+        await continueCommittedWorkingSetRefresh(12,runtime,4)
         expect(stale).not.toHaveBeenCalled()
     })
 

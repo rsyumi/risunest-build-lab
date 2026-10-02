@@ -60,6 +60,7 @@ private const val LEGACY_OPENED_FILE_STALE_MILLIS = 24 * 60 * 60 * 1_000L
 private const val OPENED_FILE_INTENT_CONSUMED = "io.github.rsyumi.risunest.OPENED_FILE_INTENT_CONSUMED"
 private const val OPENED_FILE_FINGERPRINT_STATE = "risu.opened-file-fingerprint"
 private const val BACKUP_SOURCE_REQUEST_STATE = "risu.backup-source-request"
+private const val BACKUP_SOURCE_CUSTODY_STATE = "risu.backup-source-custody"
 private const val BACKUP_SOURCE_CANCELLED_STATE = "risu.backup-source-cancelled"
 private const val CONTENT_SOURCE_STATE = "risu.content-source"
 private const val LEGACY_BACKUP_SOURCE_REQUEST_STATE = "risu.legacy-backup-source-request"
@@ -281,6 +282,7 @@ private data class PendingBackupSource(
   val requestId: String,
   val cancellation: AtomicBoolean,
   val restored: Boolean = false,
+  val custody: Boolean = false,
 )
 
 private data class PendingLegacyBackupSource(
@@ -552,6 +554,7 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
   private val generationKeepAliveOwner = GenerationKeepAliveOwner()
   private val mainHandler = Handler(Looper.getMainLooper())
   private val safScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+  private val portableSourceOwner = PortableSourceOwner()
   private val safSourcePickFlow = SafSourcePickFlow { block -> safScope.launch { block() } }
   private val postNotificationsGate = PostNotificationsRequestGate(
     Build.VERSION.SDK_INT,
@@ -635,7 +638,7 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
           val cancellation = AtomicBoolean(
             state.getBoolean(BACKUP_SOURCE_CANCELLED_STATE, false),
           )
-          pendingBackupSource = PendingBackupSource(requestId, cancellation, restored = true)
+          pendingBackupSource = PendingBackupSource(requestId, cancellation, restored = true, custody = state.getBoolean(BACKUP_SOURCE_CUSTODY_STATE))
           safSourceCancellations[requestId] = cancellation
           safPickerSlot.acquireRestored()
         }
@@ -795,6 +798,7 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
     }
     pendingBackupSource?.let { pending ->
       outState.putString(BACKUP_SOURCE_REQUEST_STATE, pending.requestId)
+      outState.putBoolean(BACKUP_SOURCE_CUSTODY_STATE, pending.custody)
       outState.putBoolean(BACKUP_SOURCE_CANCELLED_STATE, pending.cancellation.get())
     }
     pendingLegacyBackupSource?.let { pending ->
@@ -829,6 +833,7 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
     commitBridge?.close()
     commitBridge = null
     safSourceCancellations.values.forEach { it.set(true) }
+    PortableSourceNative.retireUnclaimed(portableSourceOwner)
     safDestinationCancellations.values.forEach { it.set(true) }
     pendingSafDestination = null
     pendingBackupSource = null
@@ -952,6 +957,7 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
       "generation.openNotificationSettings" -> generationCommands.openNotificationSettings()
       "generation.webViewVersion" -> generationCommands.webViewVersion()
       "saf.pickBackupSource" -> safCommands.pickBackupSource(args[0])
+      "saf.pickPortableBackupSource" -> safCommands.pickBackupSource(args[0], custody = true)
       "saf.pickLegacyBackupSource" -> safCommands.pickLegacyBackupSource(args[0])
       "saf.pickContentSource" -> safCommands.pickContentSource(args[0], args[1])
       "saf.copyExport" -> safCommands.copyExport(args[0], args[1], args[2])
@@ -960,6 +966,8 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
         when (method) {
           "saf.cancelExport" -> safCommands.cancelExport(args[0])
           "saf.discardSource" -> safCommands.discardSource(args[0])
+          "saf.discardPortableSource" -> PortableSourceNative.discard(args[0])
+          "saf.materializeBackupSource" -> portableSourceBatchJson(PortableSourceNative.materialize(args[0], safSpoolStore()), sourceType = "androidSpool")
           "saf.getActiveSourceRequestIds" -> safCommands.getActiveSourceRequestIds()
           "saf.getExportStatus" -> safCommands.getExportStatus()
           "saf.getExportSourceId" -> safCommands.getExportSourceId()
@@ -1073,7 +1081,7 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
   }
 
   private inner class SafBridge {
-    fun pickBackupSource(requestId: String) {
+    fun pickBackupSource(requestId: String, custody: Boolean = false) {
       if (!isCanonicalUuidV4(requestId)) return
       val cancellation = AtomicBoolean(false)
       safSourcePickFlow.begin(
@@ -1090,7 +1098,7 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
           )
         },
         startPicker = {
-          pendingBackupSource = PendingBackupSource(requestId, cancellation)
+          pendingBackupSource = PendingBackupSource(requestId, cancellation, custody = custody)
           launchSafSourcePicker(
             launch = { backupSourcePicker.launch(arrayOf("*/*")) },
             onFailure = {
@@ -1358,6 +1366,28 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
       finishBackupSourcePick(pending, SafSpoolBatch(emptyList(), emptyList()))
       return
     }
+    if (pending.custody) {
+      safScope.launch {
+        val (batch, sourceType) = withContext(Dispatchers.IO) {
+          try {
+            if (pending.restored) throw java.io.IOException("source-reselect-required")
+            val (name, _) = resolveSourceMetadata(uri)
+            if (!isBackupSource(name)) throw java.io.IOException("unsupported-source")
+            val selected = PortableSourceNative.select(contentResolver, uri, name, safSpoolStore(), portableSourceOwner, { pending.cancellation.get() })
+            if (pending.cancellation.get()) {
+              val removed = if (selected.sourceType == "androidSeekable") PortableSourceNative.discard(selected.ready.token)
+                else safSpoolStore().discardReady(selected.ready.token)
+              if (!removed) throw java.io.IOException("cleanup-failed")
+              Pair(SafSpoolBatch(emptyList(), emptyList()), selected.sourceType)
+            } else Pair(SafSpoolBatch(listOf(selected.ready), emptyList()), selected.sourceType)
+          } catch (error: Exception) {
+            Pair(SafSpoolBatch(emptyList(), listOf(SafSpoolFailure("backup", error.message ?: "source-unavailable"))), "androidSeekable")
+          }
+        }
+        finishBackupSourcePick(pending, batch, sourceType)
+      }
+      return
+    }
     safScope.launch {
       val copyContext = currentCoroutineContext()
       val batch = try {
@@ -1416,14 +1446,31 @@ class MainActivity : TauriActivity(), RendererRecoveryHost {
   private fun finishBackupSourcePick(
     pending: PendingBackupSource,
     batch: SafSpoolBatch,
+    sourceType: String = "androidSeekable",
   ) {
     safSourceCancellations.remove(pending.requestId, pending.cancellation)
     safProgressThrottle.clear(pending.requestId)
     safPickerSlot.release()
     lifecycleWebView?.evaluateJavascript(
-      androidBackupSourceResultScript(pending.requestId, batch, pending.restored),
+      if (pending.custody) "window.dispatchEvent(new CustomEvent('risu-android-portable-source-picked',{detail:" +
+        portableSourceBatchJson(batch, pending.requestId, sourceType) + "}));"
+      else androidBackupSourceResultScript(pending.requestId, batch, pending.restored),
       null,
     )
+  }
+
+  private fun portableSourceBatchJson(batch: SafSpoolBatch, requestId: String? = null, sourceType: String = "androidSeekable"): String {
+    val value = org.json.JSONObject()
+    if (requestId != null) value.put("requestId", requestId)
+    value.put("ready", org.json.JSONArray(batch.ready.map { source ->
+      org.json.JSONObject().put("token", source.token).put("displayName", source.displayName)
+        .put("sourceType", sourceType)
+        .put("bytes", source.bytes).put("totalBytes", source.totalBytes)
+    }))
+    value.put("failures", org.json.JSONArray(batch.failures.map { failure ->
+      org.json.JSONObject().put("displayName", failure.displayName).put("code", failure.code)
+    }))
+    return value.toString()
   }
 
   private fun dispatchBackupSourceBatch(requestId: String, batch: SafSpoolBatch) {

@@ -31,13 +31,13 @@ internal fun acceptsAndroidControl(
 
 internal fun androidControlNotification(method: String): Boolean =
   method.startsWith("lifecycle.") || method in setOf(
-    "saf.copyExport", "saf.cancelSource", "saf.pickBackupSource",
+    "saf.copyExport", "saf.cancelSource", "saf.pickBackupSource", "saf.pickPortableBackupSource",
     "saf.pickLegacyBackupSource", "saf.pickContentSource",
   )
 
 internal fun androidControlArgumentCount(method: String): Int? = when (method) {
   "lifecycle.onFlushComplete", "lifecycle.onFlushHold", "lifecycle.exitListenerReady", "lifecycle.acknowledgeOpenedFile",
-  "saf.pickBackupSource", "saf.pickLegacyBackupSource", "saf.cancelExport",
+  "saf.pickBackupSource", "saf.pickPortableBackupSource", "saf.discardPortableSource", "saf.materializeBackupSource", "saf.pickLegacyBackupSource", "saf.cancelExport",
   "saf.cancelSource", "saf.discardSource", "saf.markExportPublicationReady",
   "saf.acknowledgeExport" -> 1
   "background.begin", "background.end", "notification.completion" -> 1

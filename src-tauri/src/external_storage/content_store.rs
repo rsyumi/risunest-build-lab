@@ -76,10 +76,6 @@ pub(crate) enum ObjectSource {
     /// locally or through its custody. It is registered where it is rather
     /// than read out of a staging file, and only packaging resolves one.
     Library(String),
-    /// A record the receiving library already holds under the same key and
-    /// identity. A difference leaves it alone, so its body was never fetched
-    /// and nothing may read it.
-    Unchanged,
 }
 
 impl ObjectSource {
@@ -87,7 +83,7 @@ impl ObjectSource {
     pub(crate) fn file(&self) -> Option<&Path> {
         match self {
             Self::File(path) => Some(path),
-            Self::Captured(_) | Self::Library(_) | Self::Unchanged => None,
+            Self::Captured(_) | Self::Library(_) => None,
         }
     }
 }
@@ -153,6 +149,8 @@ impl ContentStore {
     /// identity already present keeps the body it already has; different bytes
     /// under it are corruption, never a replacement.
     pub(crate) fn put(&mut self, expected: &str, bytes: &[u8]) -> Result<()> {
+        #[cfg(test)]
+        crate::persistent_store::hash_work::observe("external_content_put_verify",bytes.len());
         if hex::encode(hash(bytes)) != expected {
             return Err(invalid("Capture object identity differs"));
         }
@@ -302,7 +300,6 @@ impl ContentStore {
             // A library body belongs to the asset repository, which is the only
             // store that may hand one out.
             ObjectSource::Library(_) => Err(invalid("Capture source is not a capture body")),
-            ObjectSource::Unchanged => Err(invalid("An unchanged record has no fetched body")),
         }
     }
 

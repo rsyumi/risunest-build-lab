@@ -761,6 +761,9 @@ async fn finish_oauth_connection(
                                 cancel,
                             )
                             .await?;
+                        if pending.request.purpose == ConnectionPurpose::Sync {
+                            pending.request.config.location.insert("syncRootPath".into(), folder.sync_root_path()?.into());
+                        }
                         pending.request.config.location.remove("folderName");
                         pending
                             .request
@@ -898,10 +901,10 @@ pub(crate) fn external_storage_prepare_renewal(
         requires_o_auth: stored.config.oauth_profile.is_some(), requires_recovery_key: false,
         requires_platform_o_auth_client: false, requires_folder_selection: false, oauth_project_hint: None,
     };
-    let purpose = if stored.capture_policy.is_some() { ConnectionPurpose::Backup } else { ConnectionPurpose::Sync };
+    let purpose = if stored.descriptor.publication_strategy.is_none() { ConnectionPurpose::Backup } else { ConnectionPurpose::Sync };
     lock(&state.preparations)?.insert(preparation_id, PendingPreparation {
         request: PrepareConnectionRequest { config: stored.config, mode: ConnectionOpenMode::Existing,
-            purpose, capture_policy: stored.capture_policy, recovery_key: None, acknowledgements: vec![] },
+            purpose, recovery_key: None, acknowledgements: vec![] },
         expires_at_ms, recovery_key: None, expected_repository_id: Some(stored.descriptor.repository_id),
         imported_credential: None, bound_credential: None, selected_folder_name: None, transferred: false,
         renewal: Some(connection_id),
@@ -1610,6 +1613,9 @@ pub(crate) async fn external_storage_select_folder(
             return Err(error);
         }
     };
+    if pending.request.purpose == ConnectionPurpose::Sync {
+        pending.request.config.location.insert("syncRootPath".into(), folder.sync_root_path()?.into());
+    }
     pending
         .request
         .config
@@ -1707,13 +1713,16 @@ async fn commit_preparation(
     if let Some(account_id) = provided_account_id {
         config.account_id = account_id.clone();
     }
+    validate_sync_folder_before_commit(
+        &mut config, preparation.request.purpose, &credential, &dependencies, cancel,
+    ).await?;
     let effective_connection_id = if preparation.request.mode == ConnectionOpenMode::Create
         && store
             .pending(connection_id)
             .is_err_and(|error| error.kind == ErrorKind::NotFound)
     {
         store
-            .pending_create_for(&config, preparation.request.capture_policy)?
+            .pending_create_for(&config)?
             .map_or_else(|| connection_id.to_owned(), |pending| pending.id)
     } else {
         connection_id.to_owned()
@@ -1876,15 +1885,6 @@ async fn commit_preparation(
                     return Err(error.into());
                 }
             };
-            let capture_policy = descriptor
-                .as_ref()
-                .map(|value| {
-                    value
-                        .publication_strategy
-                        .is_none()
-                        .then(CapturePolicy::default)
-                })
-                .unwrap_or(preparation.request.capture_policy);
             let pending = PendingStoredConnection {
                 id: connection_id.into(),
                 config,
@@ -1895,7 +1895,6 @@ async fn commit_preparation(
                 credential_ref: credential_ref.0.clone(),
                 root_key_ref: key_ref.0.clone(),
                 recovery_key_ref: recovery_key_ref.0.clone(),
-                capture_policy,
                 created_at_ms: now_ms(),
             };
             if let Err(error) = store.put_pending(&pending) {
@@ -2027,7 +2026,34 @@ async fn commit_preparation(
     })
 }
 
-async fn read_root_key(vault: &dyn SecretVault, reference: &str) -> Result<Zeroizing<[u8; 32]>> {
+async fn validate_sync_folder_before_commit(
+    config: &mut super::contract::ConnectionConfig,
+    purpose: ConnectionPurpose,
+    credential: &CredentialInput,
+    dependencies: &Dependencies,
+    cancel: &Cancellation,
+) -> Result<()> {
+    if purpose != ConnectionPurpose::Sync {
+        return Ok(());
+    }
+    if config.provider == "onedrive" {
+        let reference = match credential {
+            CredentialInput::Reference { reference, .. } => reference,
+            _ => return Err(ProviderError::new(ErrorKind::Unsupported)),
+        };
+        let drive = config.location.get("driveId")
+            .ok_or_else(|| ProviderError::new(ErrorKind::Unsupported))?;
+        let item = config.location.get("rootItemId")
+            .ok_or_else(|| ProviderError::new(ErrorKind::Unsupported))?;
+        let folder = providers::onedrive::OneDrive::new(dependencies.clone()).inspect_setup_folder(
+            config, reference, &config.account_id, drive, item, cancel,
+        ).await?;
+        config.location.insert("syncRootPath".into(), folder.sync_root_path()?.into());
+    }
+    connection::validate_sync_location(config)
+}
+
+pub(crate) async fn read_root_key(vault: &dyn SecretVault, reference: &str) -> Result<Zeroizing<[u8; 32]>> {
     let mut bytes = vault.read(&SecretRef(reference.into())).await.map_err(|error| {
         if error.kind == ErrorKind::ReauthRequired { ProviderError::new(ErrorKind::RepositoryKeyUnavailable) }
         else { error }
@@ -2121,7 +2147,7 @@ pub(crate) async fn external_storage_probe_head(
     let operation = async {
         let connected = open_connected_with_cancel(&app, &connection_id, &cancel).await?;
         let base = runtime::native_store(&app)?.external_base(&connection_id).map_err(runtime::local_error)?;
-        let known = base.as_ref().map(|base| super::sync_engine::head_observation(&base.head_observation)).transpose()?;
+        let known = base.as_ref().map(|base| super::head_observation::head_observation(&base.head_observation)).transpose()?;
         super::control::head_changed(connected.provider.as_ref(), &connected.handle,
             &connected.stored.descriptor, &connected.root_key, known.as_ref(), &cancel).await
     };
@@ -2131,22 +2157,6 @@ pub(crate) async fn external_storage_probe_head(
     }
 }
 
-#[tauri::command]
-pub(crate) fn external_storage_set_capture_policy(
-    app: AppHandle,
-    connection_id: String,
-    policy: super::connection::CapturePolicy,
-) -> Result<()> {
-    let cleanup_state = app.state::<ConnectionCommandState>();
-    let _cleanup_guard = cleanup_state.admit()?;
-    let root = connection_root(&app)?;
-    let mut store = ConnectionStore::open(&root)?;
-    store.set_capture_policy(&connection_id, policy)?;
-    Ok(())
-}
-
-/// Changes how much of what this device backed up a connection keeps. The new
-/// policy applies to cleanups started afterwards.
 #[tauri::command]
 pub(crate) fn external_storage_set_retention_policy(
     app: AppHandle,
@@ -2339,7 +2349,6 @@ pub(crate) fn external_storage_prepare_connection_settings_import(
         config: imported.config,
         mode: ConnectionOpenMode::Existing,
         purpose: ConnectionPurpose::Backup,
-        capture_policy: Some(super::connection::CapturePolicy::default()),
         recovery_key: Some(recovery_key.to_string()),
         acknowledgements,
     };
@@ -2509,6 +2518,39 @@ mod tests {
     use std::collections::BTreeMap;
 
     #[test]
+    fn onedrive_sync_commit_uses_actual_decoded_folder_path_even_when_supplied() {
+        use super::super::{fake::{loopback_dependencies, MemoryVault}, wire_fixture::{Reply, WireServer}};
+        tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
+            let now = 1_700_000_000_000u64;
+            let secret = serde_json::to_vec(&serde_json::json!({"refreshToken":"synthetic-refresh","accessToken":"synthetic-access","accessTokenExpiresAtMs":now+3_600_000})).unwrap();
+            for allowed in [false, true] {
+                let parent = if allowed {"Projects/%EC%83%88%20%ED%8F%B4%EB%8D%94".into()} else {"r".repeat(200)};
+                let name = if allowed {"Allowed".into()} else {"r".repeat(68)};
+                let body = serde_json::to_vec(&serde_json::json!({"id":"configured-root","name":name,"folder":{},"parentReference":{"driveId":"drive-1","path":format!("/drive/root:/{parent}")}})).unwrap();
+                let server = WireServer::start(vec![Reply::Http {status:200,headers:vec![("Content-Type".into(),"application/json".into())],body}]);
+                let dependencies = loopback_dependencies(MemoryVault::with("synthetic-secret", &secret), now).dependencies;
+                let mut config = super::super::contract::ConnectionConfig {provider:"onedrive".into(), profile:Some("personal".into()), endpoint:server.url.to_string(), account_id:"account-1".into(),
+                    location:BTreeMap::from([("accountType".into(),"personal".into()),("tenant".into(),"consumers".into()),("driveId".into(),"drive-1".into()),("rootItemId".into(),"configured-root".into()),("syncRootPath".into(),"forged-safe".into())]),
+                    oauth_profile:Some(super::super::contract::OAuthProfile {project_id:"synthetic-app".into(),platform_client_ids:BTreeMap::new()})};
+                let credential = CredentialInput::Reference {reference:SecretRef("synthetic-secret".into()),account_id:Some("account-1".into())};
+                let result = validate_sync_folder_before_commit(&mut config, ConnectionPurpose::Sync, &credential, &dependencies, &Cancellation::default()).await;
+                assert_eq!(server.requests.lock().unwrap().len(),1);
+                if allowed {
+                    result.unwrap();
+                    assert_eq!(config.location["syncRootPath"], "Projects/새 폴더/Allowed");
+                } else {assert_eq!(result.unwrap_err().kind,ErrorKind::Unsupported);}
+            }
+            let server = WireServer::start(vec![]);
+            let dependencies = loopback_dependencies(MemoryVault::with("synthetic-secret", &secret), now).dependencies;
+            let mut config = super::super::contract::ConnectionConfig {provider:"onedrive".into(),profile:Some("personal".into()),endpoint:server.url.to_string(),account_id:"account-1".into(),location:BTreeMap::from([("syncRootPath".into(),"supplied-backup-value".into())]),oauth_profile:None};
+            let credential = CredentialInput::Reference {reference:SecretRef("synthetic-secret".into()),account_id:None};
+            validate_sync_folder_before_commit(&mut config, ConnectionPurpose::Backup, &credential, &dependencies, &Cancellation::default()).await.unwrap();
+            assert!(server.requests.lock().unwrap().is_empty());
+            assert_eq!(config.location["syncRootPath"],"supplied-backup-value");
+        });
+    }
+
+    #[test]
     fn existing_prepare_requires_a_well_formed_recovery_key() {
         let state = ConnectionCommandState::default();
         let request = PrepareConnectionRequest {
@@ -2522,7 +2564,6 @@ mod tests {
             },
             mode: ConnectionOpenMode::Existing,
             purpose: ConnectionPurpose::Backup,
-            capture_policy: Some(super::connection::CapturePolicy::default()),
             recovery_key: Some(recovery::generate_key().unwrap().to_string()),
             acknowledgements: Vec::new(),
         };
@@ -2562,7 +2603,6 @@ mod tests {
             credential_ref: "not-exported".into(),
             root_key_ref: "not-exported".into(),
             recovery_key_ref: "not-exported-recovery".into(),
-            capture_policy: None,
             retention_policy: None,
             capabilities: super::super::fake::capabilities(false),
             created_at_ms: 1,
@@ -2607,7 +2647,6 @@ mod tests {
                 },
                 mode: ConnectionOpenMode::Existing,
                 purpose: ConnectionPurpose::Backup,
-                capture_policy: Some(CapturePolicy::default()),
                 recovery_key: Some(recovery::generate_key().unwrap().to_string()),
                 acknowledgements: Vec::new(),
             },
@@ -2675,7 +2714,6 @@ mod tests {
                 config,
                 mode: ConnectionOpenMode::Existing,
                 purpose: ConnectionPurpose::Sync,
-                capture_policy: None,
                 recovery_key: Some(recovery::generate_key().unwrap().to_string()),
                 acknowledgements: Vec::new(),
             },
@@ -2720,8 +2758,7 @@ mod tests {
             credential_ref: "old".into(), root_key_ref: "root".into(), recovery_key_ref: "recovery".into(),
             capabilities: super::super::fake::capabilities(false), created_at_ms: 1,
             verified_at_ms: 1,
-            last_sync_at_ms: None, last_backup_at_ms: None, capture_policy: Some(CapturePolicy::default()),
-            retention_policy: None,
+            last_sync_at_ms: None, last_backup_at_ms: None, retention_policy: None,
         }
     }
 
@@ -2779,4 +2816,13 @@ mod tests {
         assert_eq!(occupied_location_error(true, ProviderError::new(ErrorKind::Corrupt)).kind, ErrorKind::Corrupt);
     }
 
+}
+
+#[tauri::command]
+pub(crate) fn external_storage_validate_sync_root(config: super::contract::ConnectionConfig) -> Result<()> {
+    match config.provider.as_str() {
+        "google_drive" if !config.location.contains_key("folderId") => Ok(()),
+        "onedrive" if !config.location.contains_key("syncRootPath") => Ok(()),
+        _ => connection::validate_sync_location(&config),
+    }
 }

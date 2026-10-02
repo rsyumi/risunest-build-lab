@@ -64,27 +64,6 @@ impl From<ConnectionOpenMode> for OpenMode {
     }
 }
 
-/// What a backup connection captures by default. A synchronization connection
-/// has none: what it exchanges is chosen per device under local data.
-/// Changing it applies to work started afterwards and never rewrites a point.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct CapturePolicy {
-    pub hypa: bool,
-    pub local_plugins: bool,
-    pub local_settings: bool,
-}
-
-impl Default for CapturePolicy {
-    fn default() -> Self {
-        Self {
-            hypa: true,
-            local_plugins: true,
-            local_settings: true,
-        }
-    }
-}
-
 /// Automatic backup points this device made are removed only once they are past
 /// both limits. Manual, conflict and recovery-candidate points are never removed.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -196,8 +175,6 @@ pub(crate) struct PrepareConnectionRequest {
     pub mode: ConnectionOpenMode,
     pub purpose: ConnectionPurpose,
     /// Backup connections only.
-    #[serde(default)]
-    pub capture_policy: Option<CapturePolicy>,
     #[serde(default)]
     pub recovery_key: Option<String>,
     pub acknowledgements: Vec<String>,
@@ -316,8 +293,6 @@ pub(crate) struct ConnectionSummary {
     pub mode: ConnectionOpenMode,
     pub display_name: String,
     pub endpoint: EndpointConfirmation,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub capture_policy: Option<CapturePolicy>,
     /// The policy in force, which is the default until the user changes it.
     pub retention_policy: RetentionPolicy,
     pub capabilities: Capabilities,
@@ -368,7 +343,7 @@ pub(crate) fn provider_descriptors() -> Vec<ProviderDescriptor> {
             "mybox",
             "NAVER MYBOX",
             false,
-            &["sequential", "backup-only"],
+            &["backup-only"],
             &[
                 "plan30gb",
                 "plan80gb",
@@ -426,11 +401,6 @@ pub(crate) fn validate_preparation(
     if (request.mode == ConnectionOpenMode::Existing) != request.recovery_key.is_some() {
         return Err(ProviderError::new(ErrorKind::Unsupported));
     }
-    // A synchronization connection carries no capture policy: what it
-    // exchanges is chosen per device.
-    if request.purpose == ConnectionPurpose::Sync && request.capture_policy.is_some() {
-        return Err(ProviderError::new(ErrorKind::Unsupported));
-    }
     let definition = provider_descriptors()
         .into_iter()
         .find(|provider| provider.id == request.config.provider)
@@ -456,7 +426,26 @@ pub(crate) fn validate_preparation(
         return Err(ProviderError::new(ErrorKind::Unsupported));
     }
     validate_preparation_config_shape(&request.config, request.mode)?;
+    if request.purpose == ConnectionPurpose::Sync {
+        match request.config.provider.as_str() {
+            "webdav" | "s3" => validate_sync_location(&request.config)?,
+            "google_drive" if request.config.location.contains_key("folderId") => validate_sync_location(&request.config)?,
+            "onedrive" if request.config.location.contains_key("syncRootPath") => validate_sync_location(&request.config)?,
+            _ => {},
+        }
+    }
     endpoint_confirmation(&request.config, false)
+}
+
+pub(crate) fn validate_sync_location(config: &ConnectionConfig) -> Result<()> {
+    let root = |key:&str| config.location.get(key).map(String::as_str).ok_or_else(||ProviderError::new(ErrorKind::Unsupported));
+    match config.provider.as_str() {
+        "webdav" => super::providers::webdav::validate_sync_root(root("root")?),
+        "s3" => super::providers::s3::validate_sync_root(config.location.get("prefix").map(String::as_str).unwrap_or("")),
+        "google_drive" => super::providers::google_drive::validate_sync_root(root("folderId")?),
+        "onedrive" => super::providers::onedrive::validate_sync_root(root("syncRootPath")?),
+        _ => Err(ProviderError::new(ErrorKind::Unsupported)),
+    }
 }
 
 pub(crate) fn requires_folder_selection(request: &PrepareConnectionRequest) -> bool {
@@ -638,6 +627,7 @@ pub(crate) fn validate_config_shape(config: &ConnectionConfig) -> Result<()> {
                     "driveId",
                     "rootItemId",
                     "redirectUri",
+                    "syncRootPath",
                 ])
                 && config.location.get("accountType").is_some_and(|value| {
                     matches!(value.as_str(), "personal" | "business" | "appFolder")
@@ -815,7 +805,6 @@ pub(crate) fn summary(connection: &StoredConnection) -> ConnectionSummary {
             warnings: Vec::new(),
             remote_verified: false,
         }),
-        capture_policy: connection.capture_policy,
         retention_policy: connection
             .retention_policy
             .unwrap_or(RetentionPolicy::DEFAULT),
@@ -978,8 +967,6 @@ mod tests {
             },
             mode: ConnectionOpenMode::Create,
             purpose,
-            capture_policy: (purpose == ConnectionPurpose::Backup)
-                .then(CapturePolicy::default),
             recovery_key: None,
             acknowledgements: Vec::new(),
         }
@@ -1050,25 +1037,15 @@ mod tests {
         assert!(!decision.roots.contains(&"bundle-mine-old".to_string()));
     }
 
-    /// A kept point, a conflict and a recovery candidate outlive any policy,
-    /// and a conflict keeps both of the sides it preserved.
+    /// A manual point and a recovery candidate outlive any policy.
     #[test]
-    fn kept_conflict_and_recovery_points_survive_the_narrowest_policy() {
+    fn manual_and_recovery_points_survive_the_narrowest_policy() {
         let points = [
             point(
                 "manual",
                 BackupPointKind::Manual,
                 400,
                 vec![made_by("bundle-manual", "this-device")],
-            ),
-            point(
-                "conflict",
-                BackupPointKind::Conflict,
-                400,
-                vec![
-                    made_by("bundle-local", "this-device"),
-                    made_by("bundle-remote", "other-device"),
-                ],
             ),
             point(
                 "recovery",
@@ -1088,9 +1065,9 @@ mod tests {
             NOW_MS,
         );
         assert_eq!(decision.remove, Vec::<String>::new());
-        assert_eq!(decision.keep, ["manual", "conflict", "recovery", "automatic"]);
-        assert!(decision.roots.contains(&"bundle-local".to_string()));
-        assert!(decision.roots.contains(&"bundle-remote".to_string()));
+        assert_eq!(decision.keep, ["manual", "recovery", "automatic"]);
+        assert!(decision.roots.contains(&"bundle-manual".to_string()));
+        assert!(decision.roots.contains(&"bundle-recovery".to_string()));
     }
 
     /// One limit alone never removes anything, and a bundle a synchronized
@@ -1194,14 +1171,13 @@ mod tests {
     }
 
     #[test]
-    fn local_prepare_needs_no_strategy_approval_and_rejects_sync_device_scope() {
+    fn local_prepare_needs_no_strategy_approval_for_either_purpose() {
         let mut sync = request("webdav", ConnectionPurpose::Sync);
         assert!(validate_preparation(&sync).is_ok());
         sync.acknowledgements.push("sequential-single-device".into());
         assert!(validate_preparation(&sync).is_err());
         sync.acknowledgements.clear();
-        sync.capture_policy = Some(CapturePolicy::default());
-        assert!(validate_preparation(&sync).is_err());
+        assert!(validate_preparation(&sync).is_ok());
     }
 
     #[test]
@@ -1379,7 +1355,6 @@ mod tests {
             verified_at_ms: 1,
             last_sync_at_ms: None,
             last_backup_at_ms: None,
-            capture_policy: Some(CapturePolicy::default()),
             retention_policy: None,
         };
         let summary = summary(&connection);

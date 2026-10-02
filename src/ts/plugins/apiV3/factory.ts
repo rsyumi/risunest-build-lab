@@ -1,3 +1,5 @@
+import { attachPluginReadProvenance, collectPluginReadProvenance, type PluginReadProvenance } from '../pluginReadBaselines'
+
 type MsgType =
     | 'CALL_ROOT'
     | 'CALL_INSTANCE'
@@ -17,6 +19,8 @@ interface RpcMessage {
     result?: any;
     error?: string;
     abortId?: string;
+    provenance?: PluginReadProvenance[];
+    argProvenance?: PluginReadProvenance[][];
 }
 
 interface RemoteRef {
@@ -45,6 +49,29 @@ await (async function() {
     // plugin lifetime; release() also removes the mapping explicitly.
     const proxyRefRegistry = new WeakMap();
     const abortControllers = new Map();
+    const readProvenance = new WeakMap();
+
+    function attachReadProvenance(value, entries) {
+        for (const entry of entries || []) {
+            let object = value;
+            for (const key of entry.path) object = object?.[key];
+            if (object && typeof object === 'object') readProvenance.set(object, entry.token);
+        }
+    }
+
+    function collectReadProvenance(value) {
+        const entries = [];
+        const seen = new WeakSet();
+        function visit(object, path) {
+            if (!object || typeof object !== 'object' || seen.has(object)) return;
+            seen.add(object);
+            const token = readProvenance.get(object);
+            if (token) entries.push({ path, token });
+            for (const [key, child] of Object.entries(object)) visit(child, [...path, Array.isArray(object) ? Number(key) : key]);
+        }
+        visit(value, []);
+        return entries;
+    }
 
     function serializeArg(arg) {
         if (typeof arg === 'function') {
@@ -134,6 +161,10 @@ await (async function() {
                     return result;
                 }
                 const chunk = next.value;
+                if (chunk?.type === 'provenance') {
+                    attachReadProvenance(result, chunk.entries);
+                    continue;
+                }
                 if (!chunk || typeof chunk.key !== 'string') {
                     throw new Error('Invalid iframe object stream chunk');
                 }
@@ -367,6 +398,7 @@ await (async function() {
 
 
             if (payload.args) {
+                payload.argProvenance = payload.args.map(collectReadProvenance);
                 payload.args = payload.args.map(serializeArg);
             }
 
@@ -410,7 +442,9 @@ await (async function() {
                 if (data.error) req.reject(new Error(data.error));
                 else {
                     try {
-                        req.resolve(deserializeResult(reconstructStreamsFromPorts(data.result, event.ports)));
+                        const result = await deserializeResult(reconstructStreamsFromPorts(data.result, event.ports));
+                        attachReadProvenance(result, data.provenance);
+                        req.resolve(result);
                     } catch (e) {
                         req.reject(e);
                     }
@@ -573,6 +607,13 @@ export class SandboxHost {
     private callbackWrapperCache = new Map<string, Function>();
 
     private pendingCallbacks = new Map<string, { resolve: Function, reject: Function }>();
+    private pendingStorageMutations = 0;
+    private storageDrainWaiters = new Set<() => void>();
+
+    public drainStorageMutations(): Promise<void> {
+        if (this.pendingStorageMutations === 0) return Promise.resolve();
+        return new Promise(resolve => this.storageDrainWaiters.add(resolve));
+    }
 
     // The guest reports when its top level script has settled. Until the calls
     // it made before that have answered, the script is not finished.
@@ -1027,9 +1068,16 @@ export class SandboxHost {
                 };
 
                 this.pendingHostCalls += 1;
+                const storageMutation = data.type === 'CALL_INSTANCE'
+                    ? ['setItem', 'removeItem', 'clear'].includes(String(data.method))
+                    : ['setChar', 'setCharacter', 'setCharacterToIndex', 'setChatToIndex', 'setDatabase', 'setDatabaseLite', '_setPluginStorage', '_removePluginStorage', '_clearPluginStorage', '_setSafeLocalStorage', '_removeSafeLocalStorage', '_clearSafeLocalStorage'].includes(String(data.method));
+                if (storageMutation) this.pendingStorageMutations += 1;
                 try {
 
                     const args = this.deserializeArgs(data.args || [], usedAbortIds);
+                    if (Array.isArray(data.argProvenance)) {
+                        args.forEach((arg, index) => attachPluginReadProvenance(arg, data.argProvenance![index] ?? []));
+                    }
                     let result: any;
 
 
@@ -1050,6 +1098,7 @@ export class SandboxHost {
                         return;
                     }
                     response.result = this.serialize(result);
+                    response.provenance = collectPluginReadProvenance(result);
                     const { result: streamResult, ports: streamPorts, cleanups } = this.replaceStreamsWithPorts(response.result);
                     response.result = streamResult;
                     streamCleanups = cleanups;
@@ -1064,6 +1113,10 @@ export class SandboxHost {
                 } finally {
                     for (const id of usedAbortIds) this.abortControllers.delete(id);
                     this.pendingHostCalls -= 1;
+                    if (storageMutation && --this.pendingStorageMutations === 0) {
+                        for (const resolve of this.storageDrainWaiters) resolve();
+                        this.storageDrainWaiters.clear();
+                    }
                     this.reportScriptSettled();
                 }
 

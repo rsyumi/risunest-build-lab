@@ -305,7 +305,7 @@ fn asset_object_catalog_revives_a_recreated_deleted_hash_transactionally() {
 }
 
 #[test]
-fn snapshot_restore_without_newer_catalog_rows_leaves_objects_untracked() {
+fn snapshot_restore_preserves_current_asset_catalog_and_objects() {
     use super::asset_object_catalog::AssetObjectRegistration;
 
     let directory = tempfile::tempdir().expect("create catalog restore directory");
@@ -327,9 +327,9 @@ fn snapshot_restore_without_newer_catalog_rows_leaves_objects_untracked() {
             1,
         )
         .expect("register post-snapshot object");
-    store
-        .snapshot_restore_request(&snapshot.id)
-        .expect("request empty-catalog restore");
+    let stage=store.snapshot_restore_stage(&snapshot.id,"catalog-restore").unwrap();
+    let authority=store.lww_binding_authority().unwrap();
+    store.snapshot_restore_activate(&stage.staging_id,0,authority).unwrap();
     drop(store);
 
     let restored = PersistentStore::open(directory.path()).expect("restore catalog snapshot");
@@ -337,7 +337,7 @@ fn snapshot_restore_without_newer_catalog_rows_leaves_objects_untracked() {
         .query_asset_object_catalog(16, None)
         .expect("query restored catalog")
         .items
-        .is_empty());
+        .iter().any(|item|item.object_hash==prepared.content_hash));
     assert_eq!(
         cas.stat_object(&prepared.content_hash)
             .expect("stat surviving object"),
@@ -534,10 +534,7 @@ fn asset_gc_delete_page_refuses_unsealed_jobs() {
         .report
         .blockers
         .contains(&"job-pin-unsealed:gc-blocker-job".to_owned()));
-    assert!(page
-        .report
-        .blockers
-        .contains(&"plugin-storage-opaque".to_owned()));
+    assert!(!page.report.blockers.contains(&"plugin-storage-opaque".to_owned()));
     assert!(!page.report.deletion_enabled);
     assert!(page.report.deleted_hashes.is_empty());
     assert_eq!(
@@ -1410,9 +1407,11 @@ fn resolved_aliases_allow_gc_but_unknown_references_and_plugins_report_blocked()
         register_gc_candidate(&mut store, &held);
         if plugin {
             store.connection.execute("UPDATE root SET value = '{}'", []).unwrap();
+            let unresolved = json!({"image":"assets/plugin-unknown.bin"}).to_string();
             store.connection.execute(
                 "INSERT INTO plugin_storage (generation, owner, storage_key, byte_size, ordinal, value)
-                 VALUES (?1, 'synthetic-plugin', 'opaque', 2, 0, '{}')", [&generation]).unwrap();
+                 VALUES (?1, 'synthetic-plugin', 'opaque', ?2, 0, ?3)",
+                rusqlite::params![generation, unresolved.len() as i64, unresolved]).unwrap();
         } else {
             store.connection.execute("UPDATE root SET value = ?1 WHERE generation = ?2",
                 rusqlite::params![r#"{"image":"assets/unknown.bin"}"#, generation]).unwrap();
@@ -1471,4 +1470,109 @@ fn command_marks_recheck_new_roots_between_gc_pages() {
         100, 10, |_| Ok(())).unwrap();
     assert!(last.report.deleted_hashes.is_empty());
     assert!(cas.stat_object(&objects[1].content_hash).unwrap().is_some());
+}
+
+#[test]
+fn plugin_gc_operation_collects_once_and_rejects_own_second_and_reopened_writes() {
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = PersistentStore::open(directory.path()).unwrap();
+    let cas = crate::asset_repository::PayloadCas::new(directory.path()).unwrap();
+    let objects = [cas.prepare_bytes(b"gc-first-plugin-page").unwrap(), cas.prepare_bytes(b"gc-second-plugin-page").unwrap()];
+    for object in &objects { register_gc_candidate(&mut store, object); }
+    super::snapshot::PLUGIN_ROOT_SCANS.with(|count|count.set(0));
+    let marks = store.prepare_asset_gc_delete_marks().unwrap();
+    let first = store.asset_gc_delete_marked_page_with_hook(&marks, 1, None, 100, 10, |_|Ok(())).unwrap();
+    store.asset_gc_delete_marked_page_with_hook(&marks, 1, first.next_cursor.as_deref(), 100, 10, |_|Ok(())).unwrap();
+    assert_eq!(super::snapshot::PLUGIN_ROOT_SCANS.with(|count|count.get()), 1);
+    let generation = super::active_generation(&store.connection).unwrap();
+    store.connection.execute("INSERT INTO plugin_storage (generation,owner,storage_key,byte_size,ordinal,value) VALUES(?1,'synthetic','one',2,0,'{}')", [&generation]).unwrap();
+    assert!(matches!(store.asset_gc_delete_marked_page_with_hook(&marks, 1, None, 100, 10, |_|Ok(())),Err(StoreError::CommitBusy)));
+    let marks = store.prepare_asset_gc_delete_marks().unwrap();
+    let writer = Connection::open(&store.database_path).unwrap();
+    writer.execute("UPDATE plugin_storage SET value='[]' WHERE owner='synthetic'", []).unwrap();
+    assert!(matches!(store.asset_gc_delete_marked_page_with_hook(&marks, 1, None, 100, 10, |_|Ok(())),Err(StoreError::CommitBusy)));
+    let marks = store.prepare_asset_gc_delete_marks().unwrap();
+    drop(writer);
+    drop(store);
+    let mut reopened = PersistentStore::open(directory.path()).unwrap();
+    assert!(matches!(reopened.asset_gc_delete_marked_page_with_hook(&marks, 1, None, 100, 10, |_|Ok(())),Err(StoreError::CommitBusy)));
+}
+
+#[test]
+fn plugin_gc_changed_after_tombstone_preserves_body_and_reopen_cancels_pending() {
+    use crate::asset_repository::migration_gc::AssetGcDeleteHookPoint;
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = PersistentStore::open(directory.path()).unwrap();
+    let cas = crate::asset_repository::PayloadCas::new(directory.path()).unwrap();
+    let object = cas.prepare_bytes(b"gc-gap-plugin-root").unwrap();
+    register_gc_candidate(&mut store, &object);
+    let generation = super::active_generation(&store.connection).unwrap();
+    let writer = Connection::open(&store.database_path).unwrap();
+    let result = store.asset_gc_delete_page_with_hook(1, None, 100, 10, |point| {
+        if point == AssetGcDeleteHookPoint::AfterTombstone {
+            writer.execute("INSERT INTO plugin_storage (generation,owner,storage_key,byte_size,ordinal,value) VALUES(?1,'synthetic','gap',length(?2),0,?2)", rusqlite::params![generation,serde_json::to_string(&object.content_hash)?])?;
+        }
+        Ok(())
+    });
+    assert!(matches!(result, Err(StoreError::CommitBusy)));
+    assert_eq!(cas.stat_object(&object.content_hash).unwrap(), Some(object.byte_size));
+    assert_eq!(store.connection.query_row("SELECT COUNT(*) FROM asset_object_deletions WHERE state='pending'", [], |row|row.get::<_,i64>(0)).unwrap(),1);
+    drop(writer);
+    drop(store);
+    let reopened = PersistentStore::open(directory.path()).unwrap();
+    assert_eq!(reopened.connection.query_row("SELECT COUNT(*) FROM asset_object_deletions", [], |row|row.get::<_,i64>(0)).unwrap(),0);
+    assert_eq!(cas.stat_object(&object.content_hash).unwrap(),Some(object.byte_size));
+}
+
+#[test]
+fn plugin_gc_final_transaction_blocks_library_writer_through_unlink() {
+    use crate::asset_repository::migration_gc::AssetGcDeleteHookPoint;
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = PersistentStore::open(directory.path()).unwrap();
+    let cas = crate::asset_repository::PayloadCas::new(directory.path()).unwrap();
+    let object = cas.prepare_bytes(b"gc-exclusive-unlink").unwrap();
+    register_gc_candidate(&mut store, &object);
+    let writer = Connection::open(&store.database_path).unwrap();
+    writer.busy_timeout(std::time::Duration::ZERO).unwrap();
+    let mut observed = false;
+    store.asset_gc_delete_page_with_hook(1,None,100,10,|point| {
+        if point == AssetGcDeleteHookPoint::AfterUnlink {
+            observed = true;
+            assert!(writer.execute("UPDATE plugin_gc_revision SET revision=revision+1 WHERE singleton=1",[]).is_err());
+        }
+        Ok(())
+    }).unwrap();
+    assert!(observed);
+    writer.execute("UPDATE plugin_gc_revision SET revision=revision+1 WHERE singleton=1",[]).unwrap();
+}
+
+#[test]
+fn plugin_gc_preserves_both_disabled_namespaces_and_received_inline_roots_without_body_reads() {
+    use risunest_sync_wire::unit::{UnitKey, UnitValue};
+    let directory = tempfile::tempdir().unwrap();
+    let mut store = PersistentStore::open(directory.path()).unwrap();
+    let cas = crate::asset_repository::PayloadCas::new(directory.path()).unwrap();
+    let objects = [cas.prepare_bytes(b"plugin-string-body").unwrap(),cas.prepare_bytes(b"plugin-json-body").unwrap(),cas.prepare_bytes(b"plugin-disabled-received-body").unwrap()];
+    for object in &objects { register_gc_candidate(&mut store,object); }
+    let device = store.device_store().unwrap();
+    for (index,space) in ["string","json"].into_iter().enumerate() {
+        let value = serde_json::to_string(&objects[index].content_hash).unwrap();
+        device.connection().execute("INSERT INTO plugin_device_storage(owner,space,key,value,byte_size,tombstone,write_clock,writer_id) VALUES('synthetic',?1,'asset',?2,?3,0,'0','')",rusqlite::params![space,value,value.len() as i64]).unwrap();
+    }
+    let key=UnitKey::new(&["plugin-local","received-only","json","asset"]).unwrap();
+    let value=UnitValue::inline(&serde_json::to_vec(&objects[2].content_hash).unwrap()).unwrap();
+    device.connection().execute("INSERT INTO lww_units(key,stamp,value,version,identity) VALUES(?1,'synthetic-stamp',?2,'synthetic-version',?3)",rusqlite::params![key.as_str(),serde_json::to_string(&value).unwrap(),value.identity().unwrap()]).unwrap();
+    assert!(!device.section_state(crate::persistent_store::device_store::Section::LocalPlugins).unwrap().participating);
+    crate::asset_repository::body_io::reset_body_io();
+    let marks=store.prepare_asset_gc_delete_marks().unwrap();
+    let page=store.asset_gc_delete_marked_page_with_hook(&marks,16,None,100,10,|_|Ok(())).unwrap();
+    assert!(page.report.deleted_hashes.is_empty());
+    for object in &objects { assert!(page.report.marked_hashes.contains(&object.content_hash)); }
+    let io=crate::asset_repository::body_io::take_body_io();
+    assert!(io.complete());
+    assert_eq!(io.asset_work().opens,0);
+    assert_eq!(io.asset_work().read_bytes,0);
+    let changed=UnitValue::inline(br#"null"#).unwrap();
+    store.device_store().unwrap().connection().execute("UPDATE lww_units SET value=?1 WHERE key=?2",rusqlite::params![serde_json::to_string(&changed).unwrap(),key.as_str()]).unwrap();
+    assert!(matches!(store.asset_gc_delete_marked_page_with_hook(&marks,16,None,100,10,|_|Ok(())),Err(StoreError::CommitBusy)));
 }

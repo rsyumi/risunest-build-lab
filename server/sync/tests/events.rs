@@ -1,5 +1,6 @@
 mod common;
-use common::{changes, stage};
+use common::*;
+use futures_util::{SinkExt, StreamExt};
 use reqwest::{Client, RequestBuilder, StatusCode};
 use risunest_sync_server::{
     http,
@@ -8,11 +9,18 @@ use risunest_sync_server::{
 };
 use risunest_sync_wire::{
     canonical,
+    lww::{CancelOperationRequest, OperationReceipt},
     transfer::{self, Frame},
-    RemoteHead,
 };
 use std::{sync::Arc, time::Duration};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{client::IntoClientRequest, Message},
+    MaybeTlsStream, WebSocketStream,
+};
 
+type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 struct Server {
     base: String,
     store: Arc<Store>,
@@ -20,27 +28,28 @@ struct Server {
     workload: Workload,
     device: DeviceCredential,
     task: tokio::task::JoinHandle<()>,
+    shutdown: tokio::sync::watch::Sender<bool>,
     _dir: tempfile::TempDir,
 }
-
 impl Server {
     async fn start() -> Self {
         let dir = tempfile::tempdir().unwrap();
         let store = Arc::new(Store::init(dir.path()).unwrap());
         let device = store.add_device().unwrap();
+        let workload = Workload::new();
+        let (shutdown, signal) = tokio::sync::watch::channel(false);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
-        let workload = Workload::new();
-        let router = http::router_with_workload(store.clone(), workload.clone());
+        let router = http::router_with_shutdown(store.clone(), workload.clone(), signal);
         let task = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
         Self {
             base,
             store,
-            // No total deadline: a held stream is expected to outlive a request.
             client: Client::builder().no_proxy().build().unwrap(),
             workload,
             device,
             task,
+            shutdown,
             _dir: dir,
         }
     }
@@ -49,199 +58,227 @@ impl Server {
             .bearer_auth(&self.device.token)
             .header("x-risu-library", &self.device.library_id)
     }
-    async fn events(&self) -> reqwest::Response {
-        self.auth(self.client.get(format!("{}/events", self.base)))
-            .send()
-            .await
-            .unwrap()
-    }
-    async fn head(&self) -> RemoteHead {
-        self.auth(self.client.get(format!("{}/head", self.base)))
-            .send()
-            .await
-            .unwrap()
-            .error_for_status()
-            .unwrap()
-            .json()
-            .await
-            .unwrap()
-    }
-    /// One small library change, committed through the ordinary endpoints.
-    async fn commit(&self, key: &str, body: &[u8]) {
-        let response = self
-            .auth(self.client.post(format!("{}/uploads/frames", self.base)))
-            .body(transfer::encode(&[Frame::Full(body.to_vec())]).unwrap())
-            .send()
-            .await
+    async fn socket(&self) -> Socket {
+        let mut request = format!("{}/notify", self.base.replace("http://", "ws://"))
+            .into_client_request()
             .unwrap();
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
-        let head = self.head().await;
-        let device = self
-            .store
+        request.headers_mut().insert(
+            "authorization",
+            format!("Bearer {}", self.device.token).parse().unwrap(),
+        );
+        request
+            .headers_mut()
+            .insert("x-risu-library", self.device.library_id.parse().unwrap());
+        connect_async(request).await.unwrap().0
+    }
+    fn actor(&self) -> risunest_sync_server::store::Device {
+        self.store
             .authenticate(&self.device.library_id, &self.device.token)
-            .unwrap();
-        let intent = stage(&self.store, &device, &head, 1, &changes(key, body));
-        let response = self
-            .auth(self.client.post(format!("{}/commits", self.base)))
-            .header("if-match", head.etag())
-            .body(canonical::encode(&intent).unwrap())
-            .send()
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+            .unwrap()
     }
 }
-
-/// Reads the next announcement, failing rather than hanging if none arrives.
-async fn next_announcement(buffer: &mut String, stream: &mut reqwest::Response) -> String {
-    loop {
-        if let Some(index) = buffer.find("\n\n") {
-            let frame = buffer[..index].to_owned();
-            buffer.drain(..index + 2);
-            if let Some(data) = frame.lines().find_map(|line| line.strip_prefix("data:")) {
-                return data.trim().to_owned();
-            }
-            continue;
-        }
-        let chunk = tokio::time::timeout(Duration::from_secs(10), stream.chunk())
-            .await
-            .expect("an announcement must arrive")
-            .expect("the stream must stay readable")
-            .expect("the stream must not end");
-        buffer.push_str(std::str::from_utf8(&chunk).unwrap());
+impl Drop for Server {
+    fn drop(&mut self) {
+        self.task.abort();
     }
+}
+async fn next(socket: &mut Socket) -> Message {
+    tokio::time::timeout(Duration::from_secs(3), socket.next())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap()
 }
 
 #[tokio::test]
-async fn a_committed_head_reaches_a_held_stream_and_an_unknown_client_is_refused() {
+async fn websocket_initial_changed_sequence_and_rfc_ping_echo() {
     let server = Server::start().await;
-    assert_eq!(
-        server
-            .client
-            .get(format!("{}/events", server.base))
-            .send()
-            .await
-            .unwrap()
-            .status(),
-        StatusCode::UNAUTHORIZED
+    let url = format!("{}/notify", server.base.replace("http://", "ws://"));
+    let denied = connect_async(&url).await.err().unwrap();
+    assert!(
+        matches!(denied, tokio_tungstenite::tungstenite::Error::Http(response) if response.status() == 401)
     );
-
-    let mut stream = server.events().await;
-    assert_eq!(stream.status(), StatusCode::OK);
+    let mut socket = server.socket().await;
     assert_eq!(
-        stream.headers()["content-type"]
-            .to_str()
-            .unwrap()
-            .split(';')
-            .next()
-            .unwrap(),
-        "text/event-stream"
+        next(&mut socket).await.into_text().unwrap(),
+        r#"{"type":"seq","seq":"0"}"#
     );
-    let mut buffer = String::new();
-    // Connecting is itself a head confirmation, so the current head arrives
-    // before anything moves.
-    let opened = next_announcement(&mut buffer, &mut stream).await;
-    assert_eq!(opened, server.head().await.head_id);
-
+    socket
+        .send(Message::Ping(b"synthetic heartbeat".to_vec().into()))
+        .await
+        .unwrap();
+    assert_eq!(
+        next(&mut socket).await,
+        Message::Pong(b"synthetic heartbeat".to_vec().into())
+    );
     server
-        .commit("r1:character:synthetic", b"synthetic body")
-        .await;
-    let announced = next_announcement(&mut buffer, &mut stream).await;
-    let head = server.head().await;
-    assert_eq!(announced, head.head_id);
-    assert_ne!(announced, opened);
-    server.task.abort();
+        .store
+        .push(
+            &server.actor(),
+            &request(
+                &server.store,
+                WRITER_A,
+                "changed",
+                vec![inline("a", WRITER_A, 1, "a")],
+            ),
+        )
+        .unwrap();
+    assert_eq!(
+        next(&mut socket).await.into_text().unwrap(),
+        r#"{"type":"seq","seq":"1"}"#
+    );
+    socket.close(None).await.unwrap();
 }
 
 #[tokio::test]
-async fn held_streams_occupy_no_admission_slot_and_leave_the_server_drainable() {
+async fn idle_sockets_use_dedicated_slots_and_remain_drainable() {
     let server = Server::start().await;
-    let mut streams = Vec::new();
-    for _ in 0..4 {
-        let mut stream = server.events().await;
-        assert_eq!(stream.status(), StatusCode::OK);
-        let mut buffer = String::new();
-        // Wait for the first announcement so the stream is really established.
-        next_announcement(&mut buffer, &mut stream).await;
-        streams.push(stream);
+    let mut sockets = Vec::new();
+    for _ in 0..32 {
+        let mut socket = server.socket().await;
+        assert!(next(&mut socket).await.is_text());
+        sockets.push(socket);
     }
-    // Four streams exceed the two concurrent requests one device is admitted,
-    // yet ordinary requests still pass and maintenance still sees a drain.
-    server.head().await;
-    assert_eq!(server.workload.status().unwrap().active_requests, 0);
-    // Idle background passes briefly hold a slot every 250 ms, so the drain is
-    // observed between them rather than at one instant.
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while !server.workload.status().unwrap().drained {
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("held streams must leave the server drainable");
-    drop(streams);
-    server.task.abort();
+    assert!(server.workload.status().unwrap().drained);
+    let mut request = format!("{}/notify", server.base.replace("http://", "ws://"))
+        .into_client_request()
+        .unwrap();
+    request.headers_mut().insert(
+        "authorization",
+        format!("Bearer {}", server.device.token).parse().unwrap(),
+    );
+    request
+        .headers_mut()
+        .insert("x-risu-library", server.device.library_id.parse().unwrap());
+    assert!(
+        matches!(connect_async(request).await.err().unwrap(), tokio_tungstenite::tungstenite::Error::Http(response) if response.status() == 429)
+    );
+    let response = server
+        .auth(
+            server
+                .client
+                .get(format!("{}/changes?after=0", server.base)),
+        )
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    server.shutdown.send(true).unwrap();
+    for mut socket in sockets {
+        assert!(next(&mut socket).await.is_close());
+    }
 }
 
 #[tokio::test]
-async fn revocation_closes_a_held_stream_without_a_notice_timeout() {
+async fn revocation_closes_a_socket_without_occupying_request_slots() {
     let server = Server::start().await;
-    let mut stream = server.events().await;
-    next_announcement(&mut String::new(), &mut stream).await;
+    let mut socket = server.socket().await;
+    next(&mut socket).await;
     server
         .store
         .revoke_device(&server.device.device_id)
         .unwrap();
-    assert!(tokio::time::timeout(Duration::from_secs(2), stream.chunk())
-        .await
-        .unwrap()
-        .unwrap()
-        .is_none());
-    server.task.abort();
+    assert!(next(&mut socket).await.is_close());
+    assert!(server.workload.status().unwrap().drained);
 }
 
 #[tokio::test]
-async fn shutdown_signal_closes_streams_before_http_drain() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Arc::new(Store::init(dir.path()).unwrap());
-    let device = store.add_device().unwrap();
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let (stop, mut stopped) = tokio::sync::watch::channel(false);
-    let router = http::router_with_shutdown(store.clone(), Workload::new(), stopped.clone());
-    let server = tokio::spawn(async move {
-        axum::serve(listener, router)
-            .with_graceful_shutdown(async move {
-                let _ = stopped.changed().await;
-            })
-            .await
-            .unwrap();
-    });
-    let mut stream = Client::builder()
-        .no_proxy()
-        .build()
-        .unwrap()
-        .get(format!("http://{address}/events"))
-        .bearer_auth(&device.token)
-        .header("x-risu-library", &device.library_id)
+async fn delayed_post_after_absent_lookup_and_terminal_cancel_cannot_accept() {
+    let server = Server::start().await;
+    let req = request(
+        &server.store,
+        WRITER_A,
+        "delayed",
+        vec![inline("a", WRITER_A, 1, "a")],
+    );
+    let body = canonical::encode(&req).unwrap();
+    let mut socket = tokio::net::TcpStream::connect(server.base.strip_prefix("http://").unwrap())
+        .await
+        .unwrap();
+    let headers = format!("POST /push HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer {}\r\nX-Risu-Library: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", server.device.token, server.device.library_id, body.len());
+    socket.write_all(headers.as_bytes()).await.unwrap();
+    socket.write_all(&body[..body.len() / 2]).await.unwrap();
+    let lookup = server
+        .auth(
+            server
+                .client
+                .get(format!("{}/operations/delayed", server.base)),
+        )
         .send()
         .await
         .unwrap();
-    next_announcement(&mut String::new(), &mut stream).await;
-    stop.send_replace(true);
-    drop(stop);
-    assert!(tokio::time::timeout(Duration::from_secs(2), stream.chunk())
+    assert_eq!(lookup.status(), StatusCode::NOT_FOUND);
+    let cancel = server
+        .auth(
+            server
+                .client
+                .post(format!("{}/operations/delayed/cancel", server.base)),
+        )
+        .json(&CancelOperationRequest {
+            body_digest: req.digest().unwrap(),
+        })
+        .send()
         .await
-        .unwrap()
-        .unwrap()
-        .is_none());
-    tokio::time::timeout(Duration::from_secs(2), server)
+        .unwrap();
+    assert!(
+        matches!(cancel.json::<OperationReceipt>().await.unwrap(), OperationReceipt::Rejected { error, .. } if error == "operation-cancelled")
+    );
+    socket.write_all(&body[body.len() / 2..]).await.unwrap();
+    let mut response = Vec::new();
+    tokio::time::timeout(Duration::from_secs(3), socket.read_to_end(&mut response))
         .await
         .unwrap()
         .unwrap();
-    drop(store);
-    Store::open(dir.path()).unwrap();
+    assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 409"));
+    assert_eq!(server.store.head().unwrap().seq.as_str(), "0");
 }
 
+#[tokio::test]
+async fn absent_lookup_alone_does_not_prevent_a_delayed_post_accepting() {
+    let server = Server::start().await;
+    let req = request(
+        &server.store,
+        WRITER_A,
+        "delayed",
+        vec![inline("a", WRITER_A, 1, "a")],
+    );
+    assert_eq!(
+        server
+            .auth(
+                server
+                    .client
+                    .get(format!("{}/operations/delayed", server.base))
+            )
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    let response = server
+        .auth(server.client.post(format!("{}/push", server.base)))
+        .json(&req)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let proof = server
+        .auth(
+            server
+                .client
+                .post(format!("{}/operations/delayed/cancel", server.base)),
+        )
+        .json(&CancelOperationRequest {
+            body_digest: req.digest().unwrap(),
+        })
+        .send()
+        .await
+        .unwrap();
+    assert!(matches!(
+        proof.json::<OperationReceipt>().await.unwrap(),
+        OperationReceipt::Accepted { .. }
+    ));
+}
 #[tokio::test]
 async fn missing_negotiation_repairs_a_lost_body_before_retention() {
     let server = Server::start().await;

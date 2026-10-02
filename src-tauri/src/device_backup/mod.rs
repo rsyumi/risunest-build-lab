@@ -10,7 +10,7 @@ mod spool;
 pub(crate) use archive::{
     apply_prepared_native_sections, capture_native_sections, capture_prepared_native_sections,
     journal_prepared_native_sections, prepare_native_sections,
-    resume_journaled_native_restore, validate_archive_catalog, PreparedDeviceSection,
+    resume_journaled_native_restore, validate_archive_catalog, write_native_section, PreparedDeviceSection,
 };
 pub(crate) use commands::*;
 pub(crate) use spool::{BlobManifest, RowPage, SectionManifest};
@@ -363,8 +363,63 @@ impl DeviceBackupState {
         })
     }
 
+    pub(crate) fn set_library_replacement(&self, id: &str, header: &crate::persistent_store::lww::Header, units: &std::collections::BTreeMap<risunest_sync_wire::unit::UnitKey,risunest_sync_wire::unit::UnitValue>) -> Result<()> {
+        let mut inner = self.lock()?;
+        let db = inner.connection.as_mut().unwrap();
+        let session = active_session_for(db,id)?;
+        require(session.phase == "loading-source", "Replacement metadata requires loading source")?;
+        let transaction=db.transaction()?;
+        transaction.execute("INSERT INTO replacements VALUES(?1,?2)",params![id,serde_json::to_string(header).map_err(|_| error("device-metadata-invalid","Replacement header could not be encoded"))?])?;
+        for (key,value) in units {
+            transaction.execute("INSERT INTO replacement_units VALUES(?1,?2,?3)",params![id,String::from(key.clone()),serde_json::to_string(value).map_err(|_|error("device-metadata-invalid","Replacement unit could not be encoded"))?])?;
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn library_replacement(&self,id:&str) -> Result<(crate::persistent_store::lww::Header,std::collections::BTreeMap<risunest_sync_wire::unit::UnitKey,risunest_sync_wire::unit::UnitValue>)> {
+        let inner = self.lock()?;
+        let db=inner.connection.as_ref().unwrap();
+        let header:String = db.query_row("SELECT header FROM replacements WHERE session=?1",[id],|r|r.get(0))?;
+        let mut units=std::collections::BTreeMap::new();
+        let mut statement=db.prepare("SELECT key,value FROM replacement_units WHERE session=?1 ORDER BY key")?;
+        let mut rows=statement.query([id])?;
+        while let Some(row)=rows.next()? {
+            let key=row.get::<_,String>(0)?.try_into().map_err(|_|error("device-metadata-invalid","Replacement key is invalid"))?;
+            let value=serde_json::from_str(&row.get::<_,String>(1)?).map_err(|_|error("device-metadata-invalid","Replacement unit is invalid"))?;
+            units.insert(key,value);
+        }
+        Ok((serde_json::from_str(&header).map_err(|_| error("device-metadata-invalid","Replacement header is invalid"))?,units))
+    }
+
     pub(crate) fn session(&self, id: &str) -> Result<Session> {
         session_for(self.lock()?.connection.as_ref().unwrap(), id)
+    }
+
+    pub(crate) fn verify_portable_adoption_complete(&self,id:&str,job:&str,revision:&str,authority:&str)->Result<()> {
+        let inner=self.lock()?;
+        let connection=inner.connection.as_ref().unwrap();
+        let session=session_for(connection,id)?;
+        require(session.job_id==job && session.includes_library && native_section_session(&session),"Portable adoption session identity differs")?;
+        let active:bool=connection.query_row("SELECT active FROM sessions WHERE id=?1",[id],|row|row.get(0))?;
+        require(!active && session.phase=="committed","Portable device recovery has not completed")?;
+        verify_completions(connection,id,Spool::Source)?;
+        let encoded:String=connection.query_row("SELECT header FROM replacements WHERE session=?1",[id],|row|row.get(0))?;
+        let header:crate::persistent_store::lww::Header=serde_json::from_str(&encoded).map_err(|_|error("device-metadata-invalid","Replacement header is invalid"))?;
+        require(header.request_id==job && header.binding_authority.0.to_string()==authority,"Portable adoption authority differs")?;
+        let stage=session.stage_id.as_deref().ok_or_else(||error("device-metadata-invalid","Replacement staging identity is missing"))?;
+        let persistent=self.repository_root.join("persistent");
+        let library=Connection::open_with_flags(persistent.join(crate::persistent_store::DATABASE_FILE),OpenFlags::SQLITE_OPEN_READ_ONLY|OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+        let device=Connection::open_with_flags(persistent.join(crate::persistent_store::device_store::DEVICE_DATABASE_FILE),OpenFlags::SQLITE_OPEN_READ_ONLY|OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+        library.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA query_only=ON;")?;
+        device.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA query_only=ON;")?;
+        let generation:String=library.query_row("SELECT value FROM meta WHERE key='activeGeneration'",[],|row|row.get(0))?;
+        let generation:String=serde_json::from_str(&generation).map_err(|_|error("device-metadata-invalid","Active library identity is invalid"))?;
+        let current_authority:String=device.query_row("SELECT binding_authority FROM lww_clock WHERE singleton=1",[],|row|row.get(0))?;
+        require(current_authority==authority,"Portable activated library authority has changed")?;
+        let receipt=crate::persistent_store::lww::completed_device_replacement_receipt(&library,&device,&header,stage)
+            .map_err(|failure|error("device-receipt-invalid",&failure.to_string()))?;
+        require(receipt.is_some_and(|receipt|receipt.revision.to_string()==revision && generation==format!("revision-{}",receipt.revision)),"Portable adoption activation identity differs")
     }
 
     /// Native-only: source section and binary import has fully completed.
@@ -488,7 +543,7 @@ impl DeviceBackupState {
             "Library commit has wrong phase",
         )?;
         require(
-            read_commit_marker(&self.repository_root, &session)?.is_some(),
+            commit_exists(connection,&self.repository_root, &session)?,
             "Library commit marker is absent",
         )?;
         connection.execute("UPDATE sessions SET phase='committed' WHERE id=?1", [id])?;
@@ -658,6 +713,8 @@ fn open(root: &Path) -> Result<Connection> {
     let connection = Connection::open(path)?;
     connection.busy_timeout(std::time::Duration::from_secs(5))?;
     connection.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA foreign_keys=ON; PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL; PRAGMA auto_vacuum=INCREMENTAL;
+        CREATE TABLE IF NOT EXISTS replacements(session TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,header TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS replacement_units(session TEXT NOT NULL REFERENCES replacements(session) ON DELETE CASCADE,key TEXT NOT NULL,value TEXT NOT NULL,PRIMARY KEY(session,key));
         CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,job_id TEXT NOT NULL,phase TEXT NOT NULL,includes_library INTEGER NOT NULL,profile TEXT NOT NULL CHECK(profile='native-portable'),expected_revision INTEGER NOT NULL,stage_id TEXT,device_committed INTEGER NOT NULL DEFAULT 0,active INTEGER NOT NULL DEFAULT 1,failure_code TEXT);
         CREATE UNIQUE INDEX IF NOT EXISTS one_active_session ON sessions(active) WHERE active=1;
         CREATE TABLE IF NOT EXISTS selection(session TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,section TEXT NOT NULL,position INTEGER NOT NULL,intent TEXT,verified_digest TEXT,PRIMARY KEY(session,section));
@@ -844,6 +901,19 @@ fn read_commit_marker(root: &Path, session: &Session) -> Result<Option<CommitMar
 }
 fn commit_exists(connection: &Connection, root: &Path, session: &Session) -> Result<bool> {
     if session.includes_library {
+        if native_section_session(session) {
+            let header:String=connection.query_row("SELECT header FROM replacements WHERE session=?1",[&session.session_id],|r|r.get(0))?;
+            let header:crate::persistent_store::lww::Header=serde_json::from_str(&header).map_err(|_|error("device-metadata-invalid","Replacement header is invalid"))?;
+            require(header.request_id==session.job_id,"Replacement request identity mismatch")?;
+            let stage=session.stage_id.as_deref().ok_or_else(||error("device-metadata-invalid","Replacement staging identity is missing"))?;
+            let persistent=root.join("persistent");
+            let library=Connection::open_with_flags(persistent.join(crate::persistent_store::DATABASE_FILE),OpenFlags::SQLITE_OPEN_READ_ONLY|OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+            let device=Connection::open_with_flags(persistent.join(crate::persistent_store::device_store::DEVICE_DATABASE_FILE),OpenFlags::SQLITE_OPEN_READ_ONLY|OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+            library.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA query_only=ON;")?;
+            device.execute_batch("PRAGMA trusted_schema=OFF; PRAGMA query_only=ON;")?;
+            return crate::persistent_store::lww::completed_device_replacement_receipt(&library,&device,&header,stage)
+                .map(|receipt|receipt.is_some()).map_err(|failure|error("device-receipt-invalid",&failure.to_string()));
+        }
         Ok(read_commit_marker(root, session)?.is_some())
     } else {
         Ok(connection.query_row(

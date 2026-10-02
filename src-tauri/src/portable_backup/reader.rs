@@ -8,6 +8,68 @@ use std::{
 };
 use zip::{CompressionMethod, ZipArchive};
 
+struct IdentityFile {
+    file: File,
+    identity: crate::asset_repository::ExactFileIdentity,
+    metadata: bool,
+    #[cfg(test)]
+    scope: super::source_io::Scope,
+}
+impl IdentityFile {
+    fn new(file: File, identity: crate::asset_repository::ExactFileIdentity, metadata: bool) -> Self {
+        Self { file, identity, metadata, #[cfg(test)] scope: super::source_io::capture_scope() }
+    }
+    fn try_clone(&self) -> io::Result<Self> { Ok(Self::new(self.file.try_clone()?,self.identity.clone(),self.metadata)) }
+    fn metadata(&self) -> io::Result<std::fs::Metadata> { self.file.metadata() }
+    fn check(&self) -> io::Result<()> {
+        if crate::asset_repository::exact_file_identity(&self.file)? != self.identity {
+            return Err(io::Error::new(io::ErrorKind::InvalidData,"portable source identity changed"));
+        }
+        Ok(())
+    }
+}
+impl Read for IdentityFile {
+    fn read(&mut self,bytes:&mut[u8])->io::Result<usize> {
+        #[cfg(test)] let offset=self.file.stream_position()?;
+        let result=(|| {self.check()?;let count=self.file.read(bytes)?;self.check()?;Ok(count)})();
+        #[cfg(test)] if self.metadata {self.scope.metadata(offset,&result);}
+        result
+    }
+}
+impl Seek for IdentityFile { fn seek(&mut self,position:SeekFrom)->io::Result<u64> {self.check()?;self.file.seek(position)} }
+
+pub(crate) struct ArchiveObjectReader {
+    input: std::io::Take<IdentityFile>,
+    hash: String,
+    hasher: Sha256,
+    size: u64,
+    consumed: u64,
+    verified: bool,
+    #[cfg(test)] scope: super::source_io::Scope,
+}
+impl Read for ArchiveObjectReader {
+    fn read(&mut self,bytes:&mut[u8])->io::Result<usize> {
+        #[cfg(test)] self.scope.before_object_read(&self.hash);
+        #[cfg(test)] let offset=self.input.get_mut().stream_position()?;
+        let result=self.input.read(bytes);
+        #[cfg(test)] self.scope.read(&self.hash,offset,&result);
+        let count=result?;
+        self.consumed+=count as u64;
+        self.hasher.update(&bytes[..count]);
+        #[cfg(test)] self.scope.hash_update(&self.hash,count as u64);
+        if self.consumed==self.size && !self.verified {
+            let valid=hex::encode(self.hasher.clone().finalize())==self.hash;
+            #[cfg(test)] self.scope.hashed(&self.hash,self.consumed,valid);
+            if !valid {return Err(io::Error::new(io::ErrorKind::InvalidData,"portable object hash mismatch"));}
+            self.verified=true;
+        }
+        if count==0 && self.consumed!=self.size {return Err(io::Error::new(io::ErrorKind::UnexpectedEof,"portable object body truncated"));}
+        Ok(count)
+    }
+}
+#[cfg(test)]
+impl Drop for ArchiveObjectReader {fn drop(&mut self) {self.scope.closed(&self.hash,self.verified);}}
+
 struct Entry {
     start: u64,
     size: u64,
@@ -19,19 +81,31 @@ pub(crate) struct VerifiedArchive {
     pub(crate) manifest: Manifest,
     // The catalog is job-owned and lives exactly as long as this verified handle.
     _directory: tempfile::TempDir,
-    input: File,
+    input: IdentityFile,
+    identity: crate::asset_repository::ExactFileIdentity,
     packs: BTreeMap<i64, Entry>,
 }
 
 impl VerifiedArchive {
     /// The input handle must already refer to an immutable, managed input. Verification does not
     /// turn an arbitrary mutable desktop path into an immutable restore source.
-    pub(crate) fn open(
-        mut input: File,
+    pub(crate) fn open(input: File, job_directory: &Path, probe: &dyn CancellationProbe) -> Result<Self> {
+        Self::open_inner(input, job_directory, probe, true)
+    }
+
+    pub(crate) fn open_for_restore(input: File, job_directory: &Path, probe: &dyn CancellationProbe) -> Result<Self> {
+        Self::open_inner(input, job_directory, probe, false)
+    }
+
+    fn open_inner(
+        input: File,
         job_directory: &Path,
         probe: &dyn CancellationProbe,
+        verify_bodies: bool,
     ) -> Result<Self> {
         check(probe)?;
+        let identity = crate::asset_repository::exact_file_identity(&input)?;
+        let mut input = IdentityFile::new(input,identity.clone(),true);
         let length = input.metadata()?.len();
         if length < 22 {
             return Err(Error::Invalid("truncated ZIP end record"));
@@ -133,9 +207,11 @@ impl VerifiedArchive {
                 return Err(Error::Invalid("catalog size differs from manifest"));
             }
             let mut output = File::create(&path)?;
-            if copy_hash(&mut catalog, &mut output, catalog_length, probe)?
-                != manifest.catalog_sha256
-            {
+            let copied=copy_hash_observed(&mut catalog,&mut output,catalog_length,probe,|_bytes| {
+                #[cfg(test)] super::source_io::capture_scope().catalog_hash(_bytes as u64);
+            });
+            #[cfg(test)] super::source_io::capture_scope().catalog_checked(copied.as_ref().is_ok_and(|hash|hash==&manifest.catalog_sha256));
+            if copied? != manifest.catalog_sha256 {
                 return Err(Error::Invalid("catalog hash mismatch"));
             }
             if catalog.read(&mut [0])? != 0 {
@@ -260,9 +336,10 @@ impl VerifiedArchive {
             manifest,
             _directory: directory,
             input,
+            identity,
             packs,
         };
-        verified.verify_objects(probe)?;
+        verified.verify_objects(probe, verify_bodies)?;
         verified.verify_file_mappings(probe)?;
         crate::device_backup::validate_archive_catalog(&verified.db, probe).map_err(|failure| {
             if failure.code == "device-cancelled" {
@@ -271,10 +348,23 @@ impl VerifiedArchive {
                 Error::Invalid("invalid device archive catalog")
             }
         })?;
+        verified.check_identity()?;
         Ok(verified)
     }
 
-    fn verify_objects(&mut self, probe: &dyn CancellationProbe) -> Result<()> {
+    pub(crate) fn check_identity(&self) -> Result<()> {
+        if crate::asset_repository::exact_file_identity(&self.input.file)? != self.identity {
+            return Err(Error::Invalid("portable source identity changed"));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn source_identity_guard(&self) -> Result<(File, crate::asset_repository::ExactFileIdentity)> {
+        self.check_identity()?;
+        Ok((self.input.file.try_clone()?, self.identity.clone()))
+    }
+
+    fn verify_objects(&mut self, probe: &dyn CancellationProbe, verify_bodies: bool) -> Result<()> {
         let mut statement = self.db.prepare(
             "SELECT sha256,pack_id,offset,byte_length FROM objects ORDER BY pack_id,offset,sha256",
         )?;
@@ -309,20 +399,15 @@ impl VerifiedArchive {
                 return Err(Error::Invalid("overlapping or incomplete object ranges"));
             }
             coverage.insert(id, end);
-            self.input.seek(SeekFrom::Start(
-                entry
-                    .start
-                    .checked_add(offset)
-                    .ok_or(Error::Invalid("object file offset overflow"))?,
-            ))?;
+            #[cfg(test)] super::source_io::capture_scope().declare(&hash,entry.start+offset,size);
+            if !verify_bodies { continue; }
+            let (mut input,_) = self.open_object(&hash)?;
             let mut sink = PackHashSink(
                 pack_hashes
                     .get_mut(&id)
                     .ok_or(Error::Invalid("unknown pack hash state"))?,
             );
-            if copy_hash(&mut self.input, &mut sink, size, probe)? != hash {
-                return Err(Error::Invalid("object hash mismatch"));
-            }
+            copy_verified_object(&mut input, &mut sink, size, probe)?;
         }
         if self
             .packs
@@ -331,6 +416,7 @@ impl VerifiedArchive {
         {
             return Err(Error::Invalid("unclaimed pack payload"));
         }
+        if !verify_bodies { return Ok(()); }
         for (id, hash) in pack_hashes {
             if self.packs[&id].expected_hash.as_deref()
                 != Some(hex::encode(hash.finalize()).as_str())
@@ -342,6 +428,19 @@ impl VerifiedArchive {
     }
 
     fn verify_file_mappings(&self, probe: &dyn CancellationProbe) -> Result<()> {
+        let mut payloads=self.db.prepare("SELECT hash,byte_length FROM backup_payloads")?;
+        let mut payload_lookup=self.db.prepare("SELECT byte_length FROM objects WHERE sha256=?1")?;
+        let mut rows=payloads.query([])?;
+        while let Some(row)=rows.next()? {
+            check(probe)?;
+            let hash:String=row.get(0)?;
+            let expected:i64=row.get(1)?;
+            let binary=hex::decode(&hash).map_err(|_|Error::Invalid("invalid original payload hash"))?;
+            let actual:Option<i64>=payload_lookup.query_row([binary],|row|row.get(0)).optional()?;
+            if !hash_valid(&hash) || expected<0 || actual!=Some(expected) {return Err(Error::Invalid("original payload catalog mismatch"));}
+        }
+        drop(rows);
+        drop(payloads);
         let mut statement=self.db.prepare("SELECT f.kind,f.logical_key,f.object_hash,f.expected_hash,f.state,o.sha256 FROM files f LEFT JOIN objects o ON f.object_hash=o.sha256")?;
         let mut rows = statement.query([])?;
         let mut missing = false;
@@ -355,7 +454,7 @@ impl VerifiedArchive {
             let found: Option<Vec<u8>> = row.get(5)?;
             if !matches!(
                 kind.as_str(),
-                "asset" | "inlay" | "owner" | "preserved" | "device"
+                "asset" | "inlay" | "owner" | "preserved" | "device" | "unit"
             ) || key.is_empty()
                 || key.contains('\0')
                 || expected.as_deref().is_some_and(|v| !hash_valid(v))
@@ -393,15 +492,14 @@ impl VerifiedArchive {
         probe: &dyn CancellationProbe,
     ) -> Result<u64> {
         let (mut input, size) = self.open_object(hash)?;
-        if copy_hash(&mut input, output, size, probe)? != hash {
-            return Err(Error::Invalid("verified input changed"));
-        }
+        copy_verified_object(&mut input, output, size, probe)?;
         Ok(size)
     }
 
     /// Consume this bounded reader completely before opening another object. File clones share
     /// a seek cursor; the SQLite handle already confines this archive to one consuming thread.
-    pub(crate) fn open_object(&self, hash: &str) -> Result<(std::io::Take<File>, u64)> {
+    pub(crate) fn open_object(&self, hash: &str) -> Result<(ArchiveObjectReader, u64)> {
+        self.check_identity()?;
         let (pack, offset, size): (Option<i64>, i64, i64) = self.db.query_row(
             "SELECT pack_id,offset,byte_length FROM objects WHERE sha256=?1",
             [hex::decode(hash).map_err(|_| Error::Invalid("invalid requested object hash"))?],
@@ -409,6 +507,7 @@ impl VerifiedArchive {
         )?;
         let size = sql_u64(size)?;
         let mut input = self.input.try_clone()?;
+        input.metadata=false;
         if let Some(pack) = pack {
             let entry = self
                 .packs
@@ -421,7 +520,15 @@ impl VerifiedArchive {
                     .ok_or(Error::Invalid("object file offset overflow"))?,
             ))?;
         }
-        Ok((input.take(size), size))
+        #[cfg(test)] let scope=super::source_io::capture_scope();
+        #[cfg(test)] scope.opened(hash);
+        let verified=size==0;
+        if verified {
+            let valid=hex::encode(Sha256::digest([]))==hash;
+            #[cfg(test)] scope.hashed(hash,0,valid);
+            if !valid {return Err(Error::Invalid("empty object hash mismatch"));}
+        }
+        Ok((ArchiveObjectReader {input:input.take(size),hash:hash.into(),hasher:Sha256::new(),size,consumed:0,verified,#[cfg(test)] scope}, size))
     }
 }
 
@@ -429,6 +536,7 @@ struct PackHashSink<'a>(&'a mut Sha256);
 impl Write for PackHashSink<'_> {
     fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
         self.0.update(bytes);
+        #[cfg(test)] super::source_io::capture_scope().pack_hash(bytes.len() as u64);
         Ok(bytes.len())
     }
     fn flush(&mut self) -> io::Result<()> {
@@ -436,7 +544,21 @@ impl Write for PackHashSink<'_> {
     }
 }
 
-fn small_json<T: serde::de::DeserializeOwned>(zip: &mut ZipArchive<File>, name: &str) -> Result<T> {
+fn copy_verified_object(input:&mut ArchiveObjectReader, output:&mut (impl Write + ?Sized), size:u64, probe:&dyn CancellationProbe)->Result<()> {
+    let mut copied=0u64;
+    let mut bytes=[0u8;64*1024];
+    loop {
+        check(probe)?;
+        let count=input.read(&mut bytes)?;
+        if count==0 {break;}
+        output.write_all(&bytes[..count])?;
+        copied=copied.checked_add(count as u64).ok_or(Error::Invalid("object size overflow"))?;
+    }
+    if copied!=size {return Err(Error::Invalid("truncated object"));}
+    Ok(())
+}
+
+fn small_json<T: serde::de::DeserializeOwned>(zip: &mut ZipArchive<IdentityFile>, name: &str) -> Result<T> {
     let mut entry = zip.by_name(name)?;
     if entry.size() > SMALL_DOCUMENT_LIMIT || entry.compression() != CompressionMethod::Stored {
         return Err(Error::Invalid("oversized or compressed format document"));

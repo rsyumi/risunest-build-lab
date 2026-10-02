@@ -10,10 +10,9 @@
         externalApplicationRecovery,
         retryExternalApplication,
     } from 'src/ts/storage/sync/external/applicationRecovery'
-    import { serverSyncRecovery, retryServerSyncRecovery } from 'src/ts/storage/sync/serverSyncRecovery'
 
-    const unknown = $derived($externalApplicationRecovery?.confirmationPending === true || $serverSyncRecovery?.confirmationPending === true)
-    const open = $derived($externalApplicationRecovery !== null || $serverSyncRecovery !== null || $persistentWorkingSetRefreshRevision !== null)
+    const unknown = $derived($externalApplicationRecovery?.confirmationPending === true)
+    const open = $derived($externalApplicationRecovery !== null || $persistentWorkingSetRefreshRevision !== null)
     const title = $derived(unknown
         ? language.risuNest.persistentData.confirmApplicationTitle
         : language.risuNest.persistentData.refreshTitle)
@@ -33,8 +32,6 @@
         try {
             if ($externalApplicationRecovery !== null) {
                 await retryExternalApplication()
-            } else if ($serverSyncRecovery !== null) {
-                await retryServerSyncRecovery()
             } else {
                 const outcome = await retryCommittedWorkingSetRefresh()
                 refreshFailed = outcome?.projection === 'refresh-required'

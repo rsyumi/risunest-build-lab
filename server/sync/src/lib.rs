@@ -6,6 +6,10 @@ pub mod management;
 mod management_tests;
 pub mod publication;
 pub mod runtime;
+#[cfg(test)]
+mod source_observer;
+#[cfg(test)]
+mod source_observer_harness;
 pub mod store;
 pub mod tunnel;
 #[cfg(windows)]
@@ -46,9 +50,12 @@ pub fn resolve_data_root(path: &std::path::Path) -> Result<std::path::PathBuf> {
 pub struct Error {
     pub code: &'static str,
     pub status: u16,
-    /// The record a page or seal rejection failed on. A locator, not content,
-    /// so the client can name the change without another round of guessing.
+    /// The unit whose validation failed, when the rejection names one.
     pub key: Option<String>,
+    pub journal_floor: Option<(
+        risunest_sync_wire::stamp::DecimalU64,
+        risunest_sync_wire::stamp::DecimalU64,
+    )>,
 }
 impl Error {
     pub fn new(code: &'static str, status: u16) -> Self {
@@ -56,10 +63,19 @@ impl Error {
             code,
             status,
             key: None,
+            journal_floor: None,
         }
     }
     pub fn for_key(mut self, key: &str) -> Self {
         self.key = Some(key.to_owned());
+        self
+    }
+    pub fn with_floor(
+        mut self,
+        floor: risunest_sync_wire::stamp::DecimalU64,
+        latest: risunest_sync_wire::stamp::DecimalU64,
+    ) -> Self {
+        self.journal_floor = Some((floor, latest));
         self
     }
 }

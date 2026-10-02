@@ -14,7 +14,6 @@ use serde_json::json;
 use std::{collections::BTreeMap, fs, path::Path};
 
 
-
 fn open_store() -> (tempfile::TempDir, PersistentStore) {
     let directory = tempfile::tempdir().unwrap();
     let mut store = PersistentStore::open(directory.path()).unwrap();
@@ -155,10 +154,10 @@ fn external_snapshot_stages_streamed_records_and_preserves_local_view_fields() {
             value: json!({
                 "marker": "remote",
                 "statics": { "messages": ["remote-device-value"] },
-                "modules": [{"name":"Remote module"}]
+                "modules": [{"id": "module-0", "name":"Remote module"}]
             }),
             owner_heads: vec![LogicalOwnerHead::present(
-                LogicalOwnerLocator::RootModule { index: 0 },
+                LogicalOwnerLocator::RootModule { module_id: "module-0".to_owned() },
                 owner_manifest.content_hash.clone(),
                 1,
                 1,
@@ -244,11 +243,14 @@ fn external_snapshot_restores_archived_character_state_and_payload_references() 
             creator_notes: None,
             trash_time: None,
             archive_object_hash: archive_object.content_hash.clone(),
+            shared_archive_object_hash: archive_object.content_hash.clone(),
             archive_object_size: archive_object.byte_length,
             archived_at: 10,
             conversation_count: 1,
             message_count: 2,
             asset_hashes: vec![asset_object.content_hash.clone()],
+            shared_asset_hashes: vec![asset_object.content_hash.clone()],
+            identity_remap: vec![],
             owner_heads: vec![],
         },
     );
@@ -648,89 +650,9 @@ fn connection_removal_cancels_local_jobs_releases_roots_and_deselects() {
     assert_ne!(after.epoch, selected.epoch);
 }
 
+
 #[test]
-fn connection_removal_detaches_unknown_publication_but_keeps_its_recovery_root() {
-    for phase in ["publishing", "publicationUnknown"] {
-        let (_directory, mut store) = open_store();
-        let initial = sync_selection::read(&store.connection).unwrap();
-        let tx = store.connection.transaction().unwrap();
-        sync_selection::select(
-            &tx,
-            &initial.epoch,
-            &sync_selection::SyncTarget::External("connection".into()),
-        )
-        .unwrap();
-        tx.commit().unwrap();
-        let identity =
-            serde_json::to_string(&sync_selection::identity(&store.connection).unwrap()).unwrap();
-        store.connection.execute(
-            "INSERT INTO external_storage_jobs VALUES('unsettled','connection','repository','capture',?1,?2,'cas','head','commit',?3)",
-            rusqlite::params![identity, "sync", phase],
-        ).unwrap();
-        store
-            .connection
-            .execute(
-                "INSERT INTO external_storage_capture_refs VALUES('capture','unsettled')",
-                [],
-            )
-            .unwrap();
-        store.connection.execute(
-            "INSERT INTO external_storage_bases VALUES('connection','repository','snapshot','commit','observation',?1)",
-            [&identity],
-        ).unwrap();
-
-        store.external_prepare_connection_removal("connection").unwrap();
-
-        assert_eq!(
-            store
-                .connection
-                .query_row(
-                    "SELECT phase FROM external_storage_jobs WHERE id='unsettled'",
-                    [],
-                    |row| row.get::<_, String>(0),
-                )
-                .unwrap(),
-            "publicationUnknown"
-        );
-        assert_eq!(
-            store
-                .connection
-                .query_row(
-                    "SELECT count(*) FROM external_storage_capture_refs",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )
-                .unwrap(),
-            1
-        );
-        assert_eq!(
-            store
-                .connection
-                .query_row(
-                    "SELECT count(*) FROM external_storage_bases WHERE connection_id='connection'",
-                    [],
-                    |row| row.get::<_, i64>(0),
-                )
-                .unwrap(),
-            0
-        );
-        let retained=store.external_unknown_publications().unwrap();
-        assert_eq!(retained.len(),1);
-        assert_eq!(retained[0].id,"unsettled");
-        store.connection.execute("INSERT INTO external_storage_capture_refs VALUES('capture','independent-export')",[]).unwrap();
-        store.external_remove_retained_publication("unsettled").unwrap();
-        assert!(store.external_unknown_publications().unwrap().is_empty());
-        assert_eq!(store.external_job("unsettled").unwrap().unwrap().phase,"cancelled");
-        let owners: Vec<String>={
-            let mut query=store.connection.prepare("SELECT job_id FROM external_storage_capture_refs WHERE capture_id='capture'").unwrap();
-            let rows=query.query_map([],|row|row.get(0)).unwrap(); rows.collect::<Result<_,_>>().unwrap()
-        };
-        assert_eq!(owners,vec!["independent-export"]);
-        assert!(store.external_remove_retained_publication("unsettled").is_err());
-        let after = sync_selection::read(&store.connection).unwrap();
-        assert_eq!(after.target, sync_selection::SyncTarget::None);
-    }
-
+fn connection_removal_blocks_an_unsettled_restore_activation() {
     let (_directory, mut store) = open_store();
     let initial = sync_selection::read(&store.connection).unwrap();
     let tx = store.connection.transaction().unwrap();

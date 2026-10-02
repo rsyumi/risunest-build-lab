@@ -39,7 +39,7 @@ fn root_of(store: &PersistentStore) -> Value {
 
 fn bind_server_capture(store: &PersistentStore) {
     store.connection.execute_batch(
-        "INSERT INTO server_sync_state(singleton,config,full_scan) VALUES(1,'{}',0);
+        "INSERT INTO server_sync_state(singleton,config) VALUES(1,'{}');
          UPDATE library_sync_selection SET target='server',connection_id='synthetic',decision_required=0;"
     ).unwrap();
 }
@@ -63,7 +63,7 @@ fn check_repair_and_undo_sync_identity(external: bool) {
     }
     let selected = super::super::sync_selection::read(&store.connection).unwrap();
     let before = super::super::sync_selection::identity(&store.connection).unwrap();
-    store.connection.execute_batch("DELETE FROM content_changes; DELETE FROM server_sync_dirty;").unwrap();
+    store.connection.execute_batch("DELETE FROM content_changes; ").unwrap();
     let (_, journal) = store.apply_repair(1, &[candidate(RepairAction::DropReference {
         owner: crate::data_health::Owner { kind: "root".into(), id: "database".into() },
         source_path: "$.userIcon".into(), occurrence: 0,
@@ -77,7 +77,7 @@ fn check_repair_and_undo_sync_identity(external: bool) {
         let after_selection = super::super::sync_selection::read(&store.connection).unwrap();
         assert!(!after_selection.decision_required);
         assert_eq!(after_selection.target, selected.target);
-        for table in ["content_changes", "server_sync_dirty"] {
+        for table in ["content_changes"] {
             let entries: Vec<(String, String, String, i64)> = store.connection.prepare(&format!("SELECT kind,key1,key2,revision FROM {table}")).unwrap()
                 .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).unwrap().collect::<Result<_,_>>().unwrap();
             assert_eq!(entries, vec![("root".into(), String::new(), String::new(), revision)]);
@@ -235,12 +235,12 @@ fn an_undo_leaves_a_record_the_reader_changed_after_the_repair() {
             delete_character_ids: None,
             plugin_storage: None,
             asset_owner_heads: None,
-        })
+        ..Default::default()})
         .unwrap();
 
     let (_, skipped) = store.undo_repair(&journal, 3).unwrap();
     assert_eq!(skipped, ["root:"], "the later edit is reported, not discarded");
-    for table in ["content_changes", "server_sync_dirty"] {
+    for table in ["content_changes"] {
         let revision: i64 = store.connection.query_row(
             &format!("SELECT revision FROM {table} WHERE kind='root' AND key1='' AND key2=''"),
             [], |row| row.get(0),
@@ -409,7 +409,7 @@ fn a_failure_during_repair_activation_preserves_live_data_identity_and_capture()
     store.external_select(&epoch, &super::super::sync_selection::SyncTarget::External("synthetic-external".into())).unwrap();
     let before = super::super::sync_selection::identity(&store.connection).unwrap();
     let root = root_of(&store);
-    store.connection.execute_batch("DELETE FROM content_changes; DELETE FROM server_sync_dirty;
+    store.connection.execute_batch("DELETE FROM content_changes;
         CREATE TRIGGER synthetic_repair_activation_failure BEFORE UPDATE ON meta
         WHEN NEW.key='currentRevision' BEGIN SELECT RAISE(ABORT,'synthetic activation failure'); END;").unwrap();
     assert!(store.apply_repair(1, &[candidate(RepairAction::DropReference {
@@ -423,7 +423,7 @@ fn a_failure_during_repair_activation_preserves_live_data_identity_and_capture()
     assert_eq!(store.revision().unwrap(), 1);
     assert_eq!(root_of(&store), root);
     assert!(!super::super::sync_selection::read(&store.connection).unwrap().decision_required);
-    for table in ["content_changes", "server_sync_dirty", "server_sync_context"] {
+    for table in ["content_changes"] {
         let count: i64 = store.connection.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0)).unwrap();
         assert_eq!(count, 0, "failed activation must not publish {table}");
     }
@@ -444,7 +444,7 @@ fn measures_single_reference_repair_and_undo_on_a_large_library() {
             let entry = entry.unwrap();
             let kind = entry.file_type().unwrap();
             assert!(!kind.is_symlink());
-            if kind.is_dir() { directory_bytes(&entry.path()) } else { entry.metadata().unwrap().len() }
+            if kind.is_dir() { directory_bytes(&entry.path()) } else { file_bytes(&entry.path()) }
         }).sum()
     }
 
@@ -471,10 +471,16 @@ fn measures_single_reference_repair_and_undo_on_a_large_library() {
         "SELECT COUNT(*),SUM(LENGTH(CAST(value AS BLOB))) FROM messages", [], |row| Ok((row.get(0)?, row.get(1)?)),
     ).unwrap();
     assert_eq!(actual_messages, MESSAGES as i64);
-    store.connection.execute_batch("DELETE FROM content_changes; DELETE FROM server_sync_dirty; PRAGMA wal_autocheckpoint=0;").unwrap();
+    store.connection.execute_batch("DELETE FROM content_changes;  PRAGMA wal_autocheckpoint=0;").unwrap();
     let database = store.database_path.clone();
     let wal = std::path::PathBuf::from(format!("{}-wal", database.display()));
-    let footprint = || (directory_bytes(directory.path()), file_bytes(&database), file_bytes(&wal));
+    let footprint = || {
+        let database_bytes = file_bytes(&database);
+        let wal_bytes = file_bytes(&wal);
+        let total_bytes = directory_bytes(directory.path());
+        assert!(total_bytes >= database_bytes + wal_bytes, "synthetic fixture footprint omitted database or WAL bytes");
+        (total_bytes, database_bytes, wal_bytes)
+    };
     let assert_contract = |store: &PersistentStore, revision: i64| {
         let after = super::super::sync_selection::identity(&store.connection).unwrap();
         assert_eq!(after.library_epoch, identity.library_epoch);
@@ -487,7 +493,7 @@ fn measures_single_reference_repair_and_undo_on_a_large_library() {
             "SELECT COUNT(*),SUM(LENGTH(CAST(value AS BLOB))) FROM messages", [], |row| Ok((row.get(0)?, row.get(1)?)),
         ).unwrap();
         assert_eq!(retained, (actual_messages, message_json_bytes));
-        for table in ["content_changes", "server_sync_dirty"] {
+        for table in ["content_changes"] {
             let entries: Vec<(String, String, String, i64)> = store.connection.prepare(&format!("SELECT kind,key1,key2,revision FROM {table}")).unwrap()
                 .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))).unwrap().collect::<Result<_,_>>().unwrap();
             assert_eq!(entries, vec![("root".into(), String::new(), String::new(), revision)]);
@@ -526,5 +532,6 @@ fn measures_single_reference_repair_and_undo_on_a_large_library() {
         journal.records.len(), undo_before.0, undo_after.0, undo_after.0.saturating_sub(undo_before.0), undo_before.1, undo_after.1,
         undo_before.2, undo_after.2, undo_after.2.saturating_sub(undo_before.2));
     store.checkpoint(crate::persistent_store::CheckpointMode::Truncate).unwrap();
-    eprintln!("cr004 phase=checkpoint temporary_root_file_bytes={} database_bytes={} wal_bytes={}", directory_bytes(directory.path()), file_bytes(&database), file_bytes(&wal));
+    let checkpoint = footprint();
+    eprintln!("cr004 phase=checkpoint temporary_root_file_bytes={} database_bytes={} wal_bytes={}", checkpoint.0, checkpoint.1, checkpoint.2);
 }

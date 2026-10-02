@@ -97,30 +97,25 @@ impl OwnerManifestProjector {
         }
         for (owner, head) in &self.heads {
             let (parent, property) = match owner {
-                AssetOwnerLocator::RootModuleAssets { index } => {
-                    let index = usize::try_from(*index).map_err(|_| {
-                        validation("owner manifest root module index does not fit this platform")
-                    })?;
+                AssetOwnerLocator::RootModuleAssets { module_id } => {
                     let parent = root
                         .get_mut("modules")
                         .and_then(Value::as_array_mut)
-                        .and_then(|modules| modules.get_mut(index))
+                        .and_then(|modules| modules.iter_mut().find(|m|m.get("id").and_then(Value::as_str)==Some(module_id)))
                         .and_then(Value::as_object_mut)
                         .ok_or_else(|| {
                             validation("owner manifest root module occurrence does not exist")
                         })?;
                     (parent, "assets")
                 }
-                AssetOwnerLocator::PersonaEmbeddedModuleAssets { index } => {
-                    let index = usize::try_from(*index).map_err(|_| {
-                        validation("owner manifest persona module index does not fit this platform")
-                    })?;
+                AssetOwnerLocator::PersonaEmbeddedModuleAssets { persona_id, module_id } => {
                     let parent = root
                         .get_mut("personas")
                         .and_then(Value::as_array_mut)
-                        .and_then(|personas| personas.get_mut(index))
+                        .and_then(|personas| personas.iter_mut().find(|p|p.get("id").and_then(Value::as_str)==Some(persona_id)))
                         .and_then(Value::as_object_mut)
                         .and_then(|persona| persona.get_mut("embeddedModule"))
+                        .filter(|m|m.get("id").and_then(Value::as_str)==Some(module_id))
                         .and_then(Value::as_object_mut)
                         .ok_or_else(|| {
                             validation("owner manifest persona module occurrence does not exist")
@@ -136,15 +131,14 @@ impl OwnerManifestProjector {
 
     pub(crate) fn project_root_module(
         &self,
-        index: u64,
+        _index: u64,
         module: &mut Map<String, Value>,
     ) -> StoreResult<Option<Vec<owner_manifest_codec::OwnerManifestEntry>>> {
         if self.cas.is_none() {
             return Ok(None);
         }
-        let index = i64::try_from(index)
-            .map_err(|_| validation("owner manifest root module index does not fit storage"))?;
-        let owner = AssetOwnerLocator::RootModuleAssets { index };
+        let module_id=module.get("id").and_then(Value::as_str).ok_or_else(||validation("owner module ID is missing"))?.to_owned();
+        let owner = AssetOwnerLocator::RootModuleAssets { module_id };
         let Some(head) = self.heads.get(&owner) else {
             return Ok(None);
         };

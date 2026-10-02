@@ -4,8 +4,15 @@ const effects = vi.hoisted(() => ({ hub: vi.fn(), log: vi.fn(async () => {}) }))
 vi.mock('../platform', () => ({ isTauri: true, isTauriIOS: false }))
 vi.mock('../characterCards', () => ({ applyHubSelection: effects.hub }))
 vi.mock('../nativeLog', () => ({ setNativeLogFileEnabled: effects.log }))
+vi.mock('./sync/bindingRegistry',()=>({prepareBoundLibraryReplacement:async()=>({bound:false,state:{targetAuthority:'0'},fence:async()=>{},assertAuthority:async()=>{},resume:async()=>{}})}))
+vi.mock('./upstreamReplacement',()=>({confirmUpstreamLibraryReplacement:async()=>true,acquireUpstreamImportPause:async(runtime:{acquireDestructiveReplacementFence():Promise<{release():void}>})=>{
+    const fence=await runtime.acquireDestructiveReplacementFence()
+    let finished=false
+    return {token:{},fence,complete(){},async finish(){if(!finished){finished=true;fence.release()}},async abortUnchanged(){}}
+}}))
+vi.mock('../plugins/apiV3/v3.svelte',()=>({fencePluginExecutionForAuthorityReplacement:async()=>{},invalidatePluginCachesAfterAuthorityReplacement:async()=>{},restartPluginsAfterAuthorityReplacement:async()=>{}}))
 
-import { runNativeArchiveRestore, type NativeFileJobStatus } from './nativeFileJobs'
+import { runNativeArchiveRestore, NativeFileJobActivationCommittedError, type NativeFileJobStatus } from './nativeFileJobs'
 import { initializeDeviceMarkers, installDeviceMarkers, getDeviceMarkers } from './deviceMarkers'
 import { reloadDeviceSettings, getDeviceSettings, updateDeviceSettings } from './deviceSettings'
 import { getAppUpdateSettings, reloadAppUpdateSettings, updateAppUpdateSettings,
@@ -13,7 +20,7 @@ import { getAppUpdateSettings, reloadAppUpdateSettings, updateAppUpdateSettings,
 
 afterEach(() => { installDeviceMarkers(null); vi.clearAllMocks() })
 
-it('clears cached update and device preferences through an empty native settings restore before releasing the fence', async () => {
+it.each([false,true])('adopts empty device settings before body completion and retains committed outcome on body failure (%s)', async (bodyFailure) => {
     const durable = new Map<string, unknown>()
     const markers = await initializeDeviceMarkers({
         get: async key => durable.get(key) ?? null,
@@ -37,18 +44,24 @@ it('clears cached update and device preferences through an empty native settings
         expect(getAppUpdateSettings()).toMatchObject({ autoUpdateCheck: true, skippedVersion: '' })
         expect(getDeviceSettings()).toMatchObject({ nativeFileLogEnabled: true, performanceProfile: 'normal' })
     }
-    const result = { revision: 4, sourceBytes: 128, sourceSha256: 'a'.repeat(64),
+    const result = { revision: 4, sourceBytes: 128, sourceFingerprintKind: 'portable-catalog-sha256' as const, sourceSha256: 'a'.repeat(64),
         characterCount: 0, presetCount: 0, warningCodes: [] }
     const base = { jobId: 'settings-restore', kind: 'restore-portable-backup' as const,
         progress: { completedBytes: 128, totalBytes: 128, completedItems: 0 } }
     const statuses: NativeFileJobStatus[] = [
         { ...base, state: 'waitingForInput', phase: 'awaiting-backup-selection',
-            restorePreview: { libraryIncluded: false, repairRequired: false, deviceSections: ['local-settings'] } },
+            restorePreview: { libraryIncluded: true, repairRequired: false, deviceSections: ['hypa','local-plugins','local-settings'] } },
         { ...base, state: 'waitingForInput', phase: 'awaiting-activation' },
-        { ...base, state: 'succeeded', phase: 'complete', result, deviceSessionId: 'empty-settings' },
+        { ...base,state:'running',phase:'activating-database',activationRevision:4,activationAuthority:'1',deviceSessionId:'empty-settings' },
+        bodyFailure ? {...base,state:'failed',phase:'activating-database',activationRevision:4,activationAuthority:'1',deviceSessionId:'empty-settings',error:{code:'missing-body',message:'Synthetic missing body'}} : { ...base, state: 'succeeded', phase: 'complete', result, activationRevision:4,activationAuthority:'1', deviceSessionId: 'empty-settings' },
     ]
     const runtime: Parameters<typeof runNativeArchiveRestore>[0] = {
+        store: {readRoot:async()=>({revision:7})} as unknown as import('./persistentDataStore').PersistentDataStore,
+        setActivatedLibraryRecoveryLifecycle: vi.fn(),
         getStorageAuthorityEpoch: () => 1,
+        withPausedPersistentWrites: async () => { throw new Error('Unexpected upstream pause') },
+        beginActivatedLibraryGuard: () => { throw new Error('Unexpected upstream guard') },
+        refreshActivatedLibraryUnderPause: async () => { throw new Error('Unexpected upstream refresh') },
         capturePersistentMutationToken: async () => ({ revision: 3, mutationGeneration: 1 }),
         acquireDestructiveReplacementFence: async () => {
             fenced = true
@@ -65,8 +78,8 @@ it('clears cached update and device preferences through an empty native settings
         markCommittedWorkingSetRefreshRequired: () => { throw new Error('Unexpected committed refresh failure') },
     }
     try {
-        await expect(runNativeArchiveRestore(runtime, { type: 'desktopPath', path: '/synthetic/empty-settings.risunest' }, {
-            choosePortableSections: async () => ({ library: false, deviceSections: ['local-settings'] }),
+        const running=runNativeArchiveRestore(runtime, { type: 'desktopPath', path: '/synthetic/empty-settings.risunest' }, {
+            choosePortableSections: async () => ({ library: true, deviceSections: ['hypa','local-plugins','local-settings'] }),
         }, {
             isTauri: () => true,
             invoke: async command => {
@@ -86,12 +99,15 @@ it('clears cached update and device preferences through an empty native settings
                 }
                 if (command === 'native_device_backup_recovery_complete') { events.push('ack'); return undefined }
                 if (command === 'pds_open') return { revision: 4 }
+                if (command === 'native_portable_confirm_restore_adoption') return undefined
                 if (command === 'native_file_job_forget') { events.push('forget'); return true }
                 throw new Error(`Unexpected native command: ${command}`)
             },
             wait: async () => {},
-        })).resolves.toEqual(result)
-        expect(events).toEqual(['activate', 'ack', 'projection', 'release', 'forget'])
+        })
+        if (bodyFailure) await expect(running).rejects.toBeInstanceOf(NativeFileJobActivationCommittedError)
+        else await expect(running).resolves.toEqual(result)
+        expect(events).toEqual(bodyFailure ? ['activate','ack','projection','release'] : ['activate', 'ack', 'projection', 'release', 'forget'])
         expect(updates).toHaveBeenLastCalledWith(expect.objectContaining({ autoUpdateCheck: true, skippedVersion: '' }))
         expect(effects.log).toHaveBeenCalledExactlyOnceWith(true)
         expect(effects.hub).toHaveBeenCalledExactlyOnceWith(markers)

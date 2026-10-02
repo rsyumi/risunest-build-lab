@@ -487,11 +487,11 @@ export async function loadPlugins() {
     await applyPluginLoad(enabledPlugins.filter(isSupportedPluginVersion))
 }
 
-export async function loadPluginsAfterAuthoritativeRestore() {
+export async function loadPluginsAfterAuthoritativeRestore(alreadyRestarted = false) {
     const { invalidatePluginDeviceKeyspaces } = await import('./pluginDeviceKeyspace')
     invalidatePluginDeviceKeyspaces()
     try {
-        await loadPlugins()
+        if (!alreadyRestarted) await loadPlugins()
     } finally {
         const { closePluginClaimEligibility } = await import('./pluginClaimSession')
         await closePluginClaimEligibility()

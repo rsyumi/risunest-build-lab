@@ -2,7 +2,7 @@ import { offerHtmlClipboardExport } from './htmlClipboardExport'
 import { defaultChatToggleBinding } from './toggleBindings'
 import { get, writable } from "svelte/store";
 import { saveImage, type character, type Chat, defaultSdDataFunc, type loreBook, getDatabase, getCharacterByIndex, setCharacterByIndex } from "./storage/database.svelte";
-import { alertAddCharacter, alertConfirm, alertError, alertNormal, alertSelect, alertStore, alertToast, alertWait } from "./alert";
+import { alertAddCharacter, alertCheckboxConfirm, alertError, alertNormal, alertSelect, alertStore, alertToast, alertWait } from "./alert";
 import { language } from "../lang";
 import { isArchivedCharacter } from "./storage/workingSetCatalog";
 import { restoreArchivedCharacterWithConfirmation } from "./storage/characterArchive";
@@ -908,14 +908,14 @@ export async function removeChar(identifier:string|number,name:string, type:'nor
         : liveDatabase.characters[identifier]?.chaId
     if (!targetId) return
     if(type !== 'permanentForce'){
-        const conf = await alertConfirm(language.removeConfirm + name)
-        if(!conf){
-            return
-        }
-        const conf2 = await alertConfirm(language.removeConfirm2 + name)
-        if(!conf2){
-            return
-        }
+        if (!(await alertCheckboxConfirm({
+            title: language.removeConfirm + name,
+            description: language.removeConfirm2 + name,
+            checkboxLabel: language.checkboxConfirmation.characterDeletion,
+            actionLabel: language.confirm,
+            cancelLabel: language.cancel,
+            requireChecked: true,
+        })).confirmed) return
     }
     const selected = liveDatabase.characters[get(selectedCharID)]
     const targetTrashTime = liveDatabase.characters.find(

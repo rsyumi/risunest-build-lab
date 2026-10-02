@@ -243,9 +243,7 @@
 {/if}
 <Button
     onclick={async () => {
-        if (await alertConfirm(language.backupConfirm)) {
-            SavePartialLocalBackup();
-        }
+        await SavePartialLocalBackup();
     }}
     className="mt-2"
 >
@@ -255,13 +253,7 @@
 <Button
     disabled={risuSaveOperation !== null}
     onclick={async () => {
-        if (
-            isTauri ||
-            ((await alertConfirm(language.backupLoadConfirm)) &&
-                (await alertConfirm(language.backupLoadConfirm2)))
-        ) {
-            await runLocalBackupOperation("import");
-        }
+        await runLocalBackupOperation("import");
     }}
     className="mt-2"
 >

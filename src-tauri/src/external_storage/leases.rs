@@ -324,10 +324,13 @@ pub(crate) enum Admission {
 }
 impl LeaseSurvey {
     pub(crate) fn blocker(&self, owned: &BTreeSet<String>, now: ClockReading) -> Option<YieldReason> {
+        self.blocker_for(owned,now,false)
+    }
+    fn blocker_for(&self,owned:&BTreeSet<String>,now:ClockReading,shared_work:bool)->Option<YieldReason> {
         for lease in &self.leases {
             let Some(document) = &lease.document else { return Some(YieldReason::UnknownProtection); };
             let Some(object_id) = &lease.object_id else { return Some(YieldReason::UnknownProtection); };
-            if owned.contains(object_id) { continue; }
+            if owned.contains(object_id) || (shared_work && document.kind == WireLeaseKind::Work) { continue; }
             if now.trusted && foreign_lease_expired(document.expires_at_ms, now.wall_ms) { continue; }
             return Some(match document.kind {
                 WireLeaseKind::Work => YieldReason::ForeignWork,
@@ -515,6 +518,12 @@ fn release_record(context: &LeaseContext<'_>, object: &str) -> Result<()> {
 pub(crate) async fn admit(
     context: &LeaseContext<'_>, job_id: &str, kind: LeaseKind, cancel: &Cancellation,
 ) -> Result<Admission> {
+    admit_mode(context,job_id,kind,cancel,false).await
+}
+pub(crate) async fn admit_shared_work(context:&LeaseContext<'_>,job_id:&str,cancel:&Cancellation)->Result<Admission> {
+    admit_mode(context,job_id,LeaseKind::Work,cancel,true).await
+}
+async fn admit_mode(context:&LeaseContext<'_>,job_id:&str,kind:LeaseKind,cancel:&Cancellation,shared_work:bool)->Result<Admission> {
     cancel.check()?;
     if !context.protection_supported { return Ok(Admission::UnsupportedProtection); }
     if kind == LeaseKind::Deleting { return Err(corrupt()); }
@@ -552,7 +561,7 @@ pub(crate) async fn admit(
         }
         before.leases = retained;
     }
-    if let Some(reason) = before.blocker(&BTreeSet::new(), context.clock.reading()) {
+    if let Some(reason) = before.blocker_for(&BTreeSet::new(), context.clock.reading(),shared_work) {
         return Ok(Admission::Yield { reason });
     }
     let sequence = before.leases.iter().filter_map(|lease| lease.document.as_ref())
@@ -563,7 +572,8 @@ pub(crate) async fn admit(
         Err(error) if error.kind == ErrorKind::Unsupported => return Ok(Admission::UnsupportedProtection),
         Err(error) => return Err(error),
     };
-    let owner = LeaseOwner::new(lease);
+    let mut owner = LeaseOwner::new(lease);
+    owner.shared_work=shared_work;
     match owner.recheck(context, cancel).await {
         Ok(None) => Ok(Admission::Admitted(owner)),
         Ok(Some(reason)) => {
@@ -591,6 +601,7 @@ pub(crate) struct LeaseOwner {
     running: AtomicBool,
     closed: AtomicBool,
     delete_in_flight: AtomicBool,
+    shared_work:bool,
 }
 impl LeaseOwner {
     fn new(primary: LeaseHandle) -> Self {
@@ -603,6 +614,7 @@ impl LeaseOwner {
             running: AtomicBool::new(false),
             closed: AtomicBool::new(false),
             delete_in_flight: AtomicBool::new(false),
+            shared_work:false,
         }
     }
     fn state(&self) -> Result<std::sync::MutexGuard<'_, OwnerState>> {
@@ -663,7 +675,7 @@ impl LeaseOwner {
         if self.check_control(context, false).is_err() {
             return Ok(Some(YieldReason::ProtectionLost));
         }
-        Ok(survey.blocker(&owned, context.clock.reading()))
+        Ok(survey.blocker_for(&owned, context.clock.reading(),self.shared_work))
     }
     pub(crate) async fn place_marker(&self, context: &LeaseContext<'_>, cancel: &Cancellation) -> Result<()> {
         let _renewing = self.renewal.lock().await;
@@ -738,6 +750,33 @@ impl LeaseOwner {
             }
         }).await;
     }
+    pub(crate) async fn run_restore<T>(
+        &self,context:&LeaseContext<'_>,cancel:&Cancellation,
+        operation:impl Future<Output=Result<T>>,
+    )->Result<T> {
+        if self.running.compare_exchange(false,true,Ordering::AcqRel,Ordering::Acquire).is_err() {return Err(corrupt());}
+        struct Running<'a>(&'a LeaseOwner);
+        impl Drop for Running<'_> {
+            fn drop(&mut self) {self.0.closed.store(true,Ordering::Release);self.0.running.store(false,Ordering::Release);}
+        }
+        let _running=Running(self);
+        tokio::pin!(operation);
+        let result=match self.check_control(context,false) {
+            Err(error)=>Err(error),
+            Ok(())=>tokio::select! {
+                biased;
+                _=cancel.cancelled()=>operation.await,
+                result=&mut operation=>result,
+                protection=self.renewal_loop(context,cancel)=>{
+                    cancel.cancel();
+                    let settled=operation.await;
+                    match protection {Err(error)=>Err(error),Ok(())=>settled.and_then(|_|Err(transient()))}
+                }
+            },
+        };
+        self.release_all(context).await;
+        result
+    }
     pub(crate) async fn run<T>(
         &self, context: &LeaseContext<'_>, cancel: &Cancellation,
         operation: impl Future<Output = Result<T>>,
@@ -779,6 +818,20 @@ mod tests {
     fn runtime() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
     }
+    #[test]
+    fn restore_cancellation_drains_same_future_before_releasing_admission() {
+        runtime().block_on(async {
+            let h=Harness::new();let context=h.context();let cancel=Cancellation::default();
+            let owner=match admit_shared_work(&context,"restore-drain",&cancel).await.unwrap() {Admission::Admitted(owner)=>owner,_=>panic!("work admission")};
+            let admission=std::sync::Arc::new(crate::native_file_jobs::admission::Admission::default());
+            let mut permit=admission.staging().unwrap();permit.upgrade_staging().unwrap();
+            let (started,start)=tokio::sync::oneshot::channel();let (adopted,adopt)=tokio::sync::oneshot::channel();
+            let operation=async {let _=started.send(());adopt.await.map_err(|_|transient())?;drop(permit);cancel.check()};
+            let control=async {start.await.unwrap();cancel.cancel();tokio::task::yield_now().await;assert!(admission.file(true).is_err());adopted.send(()).unwrap();};
+            let (result,())=tokio::join!(owner.run_restore(&context,&cancel,operation),control);
+            assert_eq!(result.unwrap_err().kind,ErrorKind::Cancelled);assert!(admission.file(true).is_ok());
+        });
+    }
     struct Harness {
         root: tempfile::TempDir,
         provider: FakeProvider,
@@ -819,6 +872,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn shared_source_protection_allows_work_but_excludes_cleanup_and_deletion() {
+        runtime().block_on(async {
+            let h=Harness::new();
+            let (id,bytes)=h.foreign(LeaseKind::Work,1,NOW);
+            h.provider.seed(&id,ObjectRole::Lease,bytes);
+            let cancel=Cancellation::default();
+            let owner=match admit_shared_work(&h.context(),"reader",&cancel).await.unwrap() {Admission::Admitted(owner)=>owner,_=>panic!("shared reader rejected work")};
+            assert_eq!(owner.recheck(&h.context(),&cancel).await.unwrap(),None);
+            assert!(matches!(admit(&h.context(),"gc",LeaseKind::Cleanup,&cancel).await.unwrap(),Admission::Yield{reason:YieldReason::ForeignWork}));
+            let (id,bytes)=h.foreign(LeaseKind::Deleting,2,NOW);
+            h.provider.seed(&id,ObjectRole::Lease,bytes);
+            assert_eq!(owner.recheck(&h.context(),&cancel).await.unwrap(),Some(YieldReason::ForeignDeletion));
+            owner.release_all(&h.context()).await;
+        });
+    }
     #[test]
     fn recorded_abandoned_work_and_export_recover_without_clock_trust_but_live_clones_block() {
         runtime().block_on(async {

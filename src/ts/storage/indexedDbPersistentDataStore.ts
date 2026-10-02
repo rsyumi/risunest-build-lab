@@ -1,3 +1,4 @@
+import { stableSelectionRoot, projectSelectionIndexes } from './persistentSelectionBoundary'
 import { PersistentStorageQuotaError } from './persistentDataStore'
 import isEqual from 'lodash/isEqual'
 import { applyRootMutations } from './rootMutation'
@@ -35,6 +36,7 @@ import type {
     PresetSummary,
     Versioned,
     WorkingSetCommit,
+    PersistentUnitMutation,
 } from './persistentDataStore'
 import {
     RevisionConflictError,
@@ -155,10 +157,10 @@ function replacementOwnerTupleFromDatabase(
         )
     }
     if (owner.kind === 'root-module-assets') {
-        return replacementOwnerTupleFromParent(database.modules?.[owner.index], 'assets')
+        return replacementOwnerTupleFromParent(database.modules?.find((value) => value.id === owner.moduleId), 'assets')
     }
     return replacementOwnerTupleFromParent(
-        database.personas?.[owner.index]?.embeddedModule,
+        database.personas?.find((value) => value.id === owner.personaId && value.embeddedModule?.id === owner.moduleId)?.embeddedModule,
         'assets',
     )
 }
@@ -173,46 +175,6 @@ function replacementOwnerTuplesEqual(
         && isEqual(left.entries, right.entries)
 }
 
-function retainedModuleIndex(
-    oldRoot: PersistentRoot,
-    newRoot: PersistentRoot,
-    property: 'modules' | 'personas',
-    index: number,
-    embedded: boolean,
-): number | null {
-    const oldValues = (oldRoot as Record<string, unknown>)[property]
-    const newValues = (newRoot as Record<string, unknown>)[property]
-    if (!Array.isArray(oldValues) || !Array.isArray(newValues)) return null
-    const source = oldValues[index]
-    if (source === undefined) return null
-    const moduleFrom = (value: unknown): unknown => {
-        if (!embedded) return value
-        if (!value || typeof value !== 'object') return undefined
-        return (value as Record<string, unknown>).embeddedModule
-    }
-    const sourceModule = moduleFrom(source)
-    const id = sourceModule && typeof sourceModule === 'object'
-        ? (sourceModule as Record<string, unknown>).id
-        : undefined
-    if (typeof id === 'string' && id.length > 0) {
-        const matchesId = (value: unknown) => {
-            const module = moduleFrom(value)
-            return module && typeof module === 'object'
-                && (module as Record<string, unknown>).id === id
-        }
-        if (oldValues.filter(matchesId).length === 1 && newValues.filter(matchesId).length === 1) {
-            return newValues.findIndex(matchesId)
-        }
-    }
-    if (isEqual(newValues[index], source)) return index
-    const oldMatches = oldValues.filter((value) => isEqual(value, source))
-    const newMatches = newValues
-        .map((value, candidate) => ({ value, candidate }))
-        .filter(({ value }) => isEqual(value, source))
-    return oldMatches.length === 1 && newMatches.length === 1
-        ? newMatches[0].candidate
-        : null
-}
 
 interface StoredMessageOccurrencePage {
     key: string
@@ -243,26 +205,30 @@ function validateOwnerHeadsForCommit(input: WorkingSetCommit): void {
     const characterParents = commitCharacterParents(input)
     for (const head of heads) {
         validateAssetOwnerHead(head)
+        const owner = head.owner
         const key = assetOwnerLocatorKey(head.owner)
         if (keys.has(key)) throw new TypeError(`Duplicate asset owner head ${key}`)
         keys.add(key)
 
         let entries: unknown[] | undefined
-        if (head.owner.kind === 'character-additional-assets') {
-            const parent = characterParents.get(head.owner.characterId)
+        if (owner.kind === 'character-additional-assets') {
+            const parent = characterParents.get(owner.characterId)
             if (!parent) {
                 throw new TypeError('Character asset owner head requires its parent mutation')
             }
             entries = ownArrayProperty(parent, 'additionalAssets')
         } else {
-            if (!input.root) throw new TypeError('Root asset owner head requires its parent root')
-            if (head.owner.kind === 'root-module-assets') {
-                const module = input.root.modules?.[head.owner.index]
-                if (!module) throw new TypeError('Root module asset owner occurrence does not exist')
+            if (owner.kind === 'root-module-assets') {
+                const parent = input.unitMutations?.find((mutation) => mutation.key === JSON.stringify(['record', 'modules', owner.moduleId]))
+                if (!input.root && !parent) throw new TypeError('Root asset owner head requires its parent root or module unit')
+                const module = parent ? parent.type === 'set' ? parent.value : null : input.root?.modules?.find((value) => value.id === owner.moduleId)
+                if (!module || typeof module !== 'object' || (module as {id?:unknown}).id !== owner.moduleId) throw new TypeError('Root module asset owner occurrence does not exist')
                 entries = ownArrayProperty(module, 'assets')
             } else {
-                const module = input.root.personas?.[head.owner.index]?.embeddedModule
-                if (!module) throw new TypeError('Persona module asset owner occurrence does not exist')
+                const parent = input.unitMutations?.find((mutation) => mutation.key === JSON.stringify(['persona', owner.personaId, 'embeddedModule']))
+                if (!input.root && !parent) throw new TypeError('Root asset owner head requires its parent root or persona unit')
+                const module = parent ? parent.type === 'set' ? parent.value : null : input.root?.personas?.find((value) => value.id === owner.personaId && value.embeddedModule?.id === owner.moduleId)?.embeddedModule
+                if (!module || typeof module !== 'object' || (module as {id?:unknown}).id !== owner.moduleId) throw new TypeError('Persona module asset owner occurrence does not exist')
                 entries = ownArrayProperty(module, 'assets')
             }
         }
@@ -980,9 +946,16 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
             if (input.addCharacter) {
                 await this.addCharacter(transaction, generation, input.addCharacter)
             }
+            const conversationOrders: PersistentUnitMutation[] = []
+            for (const mutation of input.unitMutations ?? []) {
+                const [kind, scope] = JSON.parse(mutation.key)
+                if (kind === 'order' && scope === 'conversations') conversationOrders.push(mutation)
+                else await this.applyUnitMutation(transaction, generation, mutation)
+            }
             for (const mutation of input.conversations ?? []) {
                 await this.applyConversationMutation(transaction, generation, mutation)
             }
+            for (const mutation of conversationOrders) await this.applyUnitMutation(transaction, generation, mutation)
             for (const mutation of input.pluginStorage ?? []) {
                 await this.applyPluginStorageMutation(transaction, generation, mutation)
             }
@@ -1149,7 +1122,7 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
             pluginCustomStorage,
         } as Database
         await transactionDone(transaction)
-        return result
+        return projectSelectionIndexes(result)
     }
 
     async acquireRevision(revision: DataRevision): Promise<PersistentRevisionLease> {
@@ -1762,22 +1735,9 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
                     'additionalAssets',
                 )
             } else {
-                const property = owner.kind === 'root-module-assets' ? 'modules' : 'personas'
-                const index = retainedModuleIndex(
-                    oldRoot!,
-                    input.root!,
-                    property,
-                    owner.index,
-                    owner.kind === 'persona-embedded-module-assets',
-                )
-                if (index === null) continue
-                owner = { ...owner, index }
                 replacementTuple = owner.kind === 'root-module-assets'
-                    ? replacementOwnerTupleFromParent(input.root!.modules?.[index], 'assets')
-                    : replacementOwnerTupleFromParent(
-                        input.root!.personas?.[index]?.embeddedModule,
-                        'assets',
-                    )
+                    ? replacementOwnerTupleFromParent(input.root!.modules?.find((value) => value.id === owner.moduleId), 'assets')
+                    : replacementOwnerTupleFromParent(input.root!.personas?.find((value) => value.id === owner.personaId && value.embeddedModule?.id === owner.moduleId)?.embeddedModule, 'assets')
             }
             const sourceTuple = await this.readReplacementOwnerTuple(
                 transaction,
@@ -2257,10 +2217,10 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
             return replacementOwnerTupleFromParent(record?.value, 'additionalAssets')
         }
         if (owner.kind === 'root-module-assets') {
-            return replacementOwnerTupleFromParent(root.modules?.[owner.index], 'assets')
+            return replacementOwnerTupleFromParent(root.modules?.find((value) => value.id === owner.moduleId), 'assets')
         }
         return replacementOwnerTupleFromParent(
-            root.personas?.[owner.index]?.embeddedModule,
+            root.personas?.find((value) => value.id === owner.personaId && value.embeddedModule?.id === owner.moduleId)?.embeddedModule,
             'assets',
         )
     }
@@ -2293,7 +2253,7 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
             pluginStorageMeta,
             ...root
         } = databaseValue as Database & { pluginStorageMeta?: PluginStorageMeta }
-        this.putRoot(transaction, generation, root)
+        this.putRoot(transaction, generation, stableSelectionRoot(databaseValue))
         this.writePresetRows(transaction, generation, botPresets ?? [])
         if (pluginStorageValues) {
             this.writePluginStorageValueRows(transaction, generation, pluginStorageValues)
@@ -2472,6 +2432,132 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
                 cursor.continue()
             }
         })
+    }
+
+    private async applyUnitMutation(transaction: IDBTransaction, generation: string, mutation: PersistentUnitMutation): Promise<void> {
+        const components = JSON.parse(mutation.key) as string[]
+        if (!Array.isArray(components) || components.some((part) => typeof part !== 'string')
+            || JSON.stringify(components) !== mutation.key) throw new TypeError('Invalid unit key')
+        const [kind, id, field, conversationField] = components
+        const patch = (object: object, key: string) => {
+            const value = object as Record<string, unknown>
+            if (mutation.type === 'delete') delete value[key]
+            else Object.defineProperty(value, key, { value: structuredClone(mutation.value), enumerable: true, writable: true, configurable: true })
+        }
+        if (kind === 'exists' && id === 'character') {
+            if (mutation.type === 'delete') await this.deleteCharacter(transaction, generation, field)
+            else {
+                const existing = await requestResult(transaction.objectStore('characters').get(this.characterKey(generation, field)))
+                if (!existing) {
+                    const type = (mutation.value as {type?: string})?.type
+                    if (type !== 'character' && type !== 'group') throw new TypeError('Character existence requires its structural type')
+                    await this.putCharacter(transaction, generation, {chaId:field, type, name:''} as CharacterDetail)
+                }
+            }
+            return
+        }
+        if (kind === 'exists' && id === 'conversation') {
+            if (mutation.type === 'delete') await this.applyConversationMutation(transaction, generation, {type:'delete',characterId:field,conversationId:conversationField})
+            else {
+                const parent = await requestResult(transaction.objectStore('characters').get(this.characterKey(generation, field)))
+                if (!parent) throw new TypeError('Missing character parent')
+                const existing = await requestResult(transaction.objectStore('conversations').get(this.conversationKey(generation, field, conversationField)))
+                if (!existing) {
+                    const index = await this.conversationCount(transaction, generation, field)
+                    this.putConversation(transaction, generation, field, {id:conversationField,name:'',note:'',localLore:[],message:[]} as Chat, index)
+                    await this.refreshCharacterSummary(transaction, generation, field)
+                }
+            }
+            return
+        }
+        if (kind === 'character' || kind === 'group-members') {
+            const detail = await requestResult<StoredRecord<CharacterDetail> | undefined>(transaction.objectStore('characters').get(this.characterKey(generation, id)))
+            if (!detail) throw new TypeError('Missing character parent')
+            if (kind === 'group-members') {
+                if (mutation.type !== 'set') throw new TypeError('Group membership requires a value')
+                Object.assign(detail.value, structuredClone(mutation.value))
+            } else patch(detail.value, field)
+            await this.putCharacter(transaction, generation, detail.value)
+            return
+        }
+        if (kind === 'conversation') {
+            const record = await requestResult<StoredRecord<StoredConversation> | undefined>(transaction.objectStore('conversations').get(this.conversationKey(generation, id, field)))
+            if (!record) throw new TypeError('Missing conversation parent')
+            patch(record.value.detail, conversationField)
+            this.putConversationRecord(transaction, generation, record.value.summary, record.value.detail)
+            return
+        }
+        if (kind === 'order' && id === 'conversations') {
+            if (mutation.type !== 'set' || !mutation.value || typeof mutation.value !== 'object') throw new TypeError('Invalid conversation order')
+            const order = mutation.value as { ids: string[]; folders: unknown[] }
+            if (!Array.isArray(order.ids) || !Array.isArray(order.folders)) throw new TypeError('Invalid conversation order')
+            await this.reorderConversations(transaction, generation, { type: 'reorder', characterId: field, conversationIds: order.ids })
+            const detail = await requestResult<StoredRecord<CharacterDetail> | undefined>(transaction.objectStore('characters').get(this.characterKey(generation, field)))
+            if (!detail) throw new TypeError('Missing character parent')
+            detail.value.chatFolders = structuredClone(order.folders) as typeof detail.value.chatFolders
+            await this.putCharacter(transaction, generation, detail.value)
+            return
+        }
+        if (kind === 'preset' || (kind === 'exists' && id === 'preset')) {
+            const presetId = kind === 'preset' ? id : field
+            const store = transaction.objectStore('presets')
+            const key = this.presetKey(generation, presetId)
+            const existing = await requestResult<StoredRecord<StoredPreset> | undefined>(store.get(key))
+            if (kind === 'exists' && mutation.type === 'delete') { store.delete(key); return }
+            const record = existing ?? { key, generation, configuredIndex: (await this.generationRecords<StoredPreset>(store, generation)).length,
+                value: { summary: { id: presetId, name: '', image: undefined as string | undefined, configuredIndex: (await this.generationRecords<StoredPreset>(store, generation)).length }, preset: { id: presetId } as unknown as botPreset } }
+            if (kind === 'preset') patch(record.value.preset, field)
+            record.value.summary.name = record.value.preset.name ?? ''
+            record.value.summary.image = record.value.preset.image
+            store.put(record)
+            return
+        }
+        if (kind === 'order' && id === 'presets') {
+            if (mutation.type !== 'set' || !Array.isArray(mutation.value)) throw new TypeError('Invalid preset order')
+            const values = await this.generationRecords<StoredPreset>(transaction.objectStore('presets'), generation)
+            const order = new Map((mutation.value as string[]).map((value, index) => [value, index]))
+            values.sort((a,b) => (order.get(a.value.summary.id) ?? Infinity) - (order.get(b.value.summary.id) ?? Infinity) || (a.value.summary.id < b.value.summary.id ? -1 : a.value.summary.id > b.value.summary.id ? 1 : 0))
+            values.forEach((record, configuredIndex) => { (record as StoredRecord<StoredPreset> & { configuredIndex: number }).configuredIndex = configuredIndex; record.value.summary.configuredIndex = configuredIndex; transaction.objectStore('presets').put(record) })
+            return
+        }
+        const root = await requestResult<StoredRecord<PersistentRoot> | undefined>(transaction.objectStore('root').get(generation))
+        if (!root) throw new TypeError('Missing root')
+        const value = root.value as unknown as Record<string, unknown>
+        if (kind === 'root') patch(value, id)
+        else if (kind === 'exists' && ['modules', 'loadouts', 'customModels', 'persona'].includes(id)) {
+            const collectionKey = id === 'persona' ? 'personas' : id
+            const values = (value[collectionKey] ??= []) as Record<string, unknown>[]
+            const index = values.findIndex((item) => item.id === field)
+            if (mutation.type === 'delete') { if (index >= 0) values.splice(index, 1) }
+            else if (index < 0) values.push({ id: field })
+        }
+        else if (kind === 'record') {
+            const identity = id === 'plugins' ? 'name' : 'id'
+            const collection = [...(value[id] as Record<string, unknown>[] ?? [])]
+            const index = collection.findIndex((item) => item[identity] === field)
+            if (mutation.type === 'delete') { if (index >= 0) collection.splice(index, 1) }
+            else if (index >= 0) collection[index] = structuredClone(mutation.value) as Record<string, unknown>
+            else collection.push(structuredClone(mutation.value) as Record<string, unknown>)
+            value[id] = collection
+        } else if (kind === 'order') {
+            if (mutation.type !== 'set' || !Array.isArray(mutation.value)) throw new TypeError('Invalid collection order')
+            if (id === 'characters') { value.characterOrder = structuredClone(mutation.value); this.putRoot(transaction, generation, root.value); return }
+            const collectionKey = id === 'personas' ? 'personas' : id
+            const identity = id === 'plugins' ? 'name' : 'id'
+            const order = new Map((mutation.value as string[]).map((value, index) => [value, index]))
+            value[collectionKey] = [...(value[collectionKey] as Record<string, unknown>[] ?? [])].sort((a,b) => (order.get(a[identity] as string) ?? Infinity) - (order.get(b[identity] as string) ?? Infinity))
+        } else if (kind === 'persona') {
+            const persona = (value.personas as Record<string, unknown>[]).find((item) => item.id === id)
+            if (!persona) throw new TypeError('Missing persona parent')
+            patch(persona, field)
+        } else if (kind === 'preset-protected') {
+            const values = (value.protectedPresetValues ??= {}) as Record<string, unknown>
+            patch(values, id)
+        } else if (kind === 'variable' || kind === 'toggle') {
+            const values = (value.explicitGlobalChatVariables ??= {}) as Record<string, unknown>
+            patch(values, id)
+        } else throw new TypeError('Unsupported editable unit')
+        this.putRoot(transaction, generation, root.value)
     }
 
     private async applyConversationMutation(
@@ -3341,8 +3427,9 @@ export class IndexedDbPersistentDataStore implements PersistentDataStore {
         presets: botPreset[],
     ): void {
         for (let configuredIndex = 0; configuredIndex < presets.length; configuredIndex++) {
-            const id = String(configuredIndex)
             const preset = presets[configuredIndex]
+            const id = preset['id']
+            if (typeof id !== 'string' || !id || presets.slice(0, configuredIndex).some((value) => value['id'] === id)) throw new TypeError('Presets require unique stable IDs')
             const summary: PresetSummary = {
                 id,
                 name: preset.name ?? '',

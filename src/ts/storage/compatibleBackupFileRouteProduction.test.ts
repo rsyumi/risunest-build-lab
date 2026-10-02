@@ -51,7 +51,7 @@ import { exportCompatibilityBackupFromSystemPicker } from './compatibleBackupFil
 const result = {
     revision: 4,
     sourceBytes: 1024,
-    sourceSha256: 'a'.repeat(64),
+    sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'a'.repeat(64),
     characterCount: 1,
     presetCount: 0,
     warningCodes: [],

@@ -18,7 +18,8 @@ vi.mock('src/ts/stores.svelte', () => {
     return { DBState, selectedCharID: writable(0) }
 })
 vi.mock('src/ts/util', () => ({ sortableOptions: {}, sleep: vi.fn() }))
-vi.mock('src/ts/alert', () => ({ alertConfirm: vi.fn(async () => true), alertError: vi.fn() }))
+const alerts = vi.hoisted(() => ({ alertConfirm: vi.fn(), alertCheckboxConfirm: vi.fn(), alertError: vi.fn() }))
+vi.mock('src/ts/alert', () => alerts)
 vi.mock('src/ts/storage/database.svelte', () => ({
     getCurrentCharacter: () => DBState.db.characters[0],
     getCurrentChat: () => DBState.db.characters[0].chats[0],
@@ -53,6 +54,8 @@ async function remove(name: string) {
 }
 
 beforeEach(() => {
+    alerts.alertConfirm.mockReset().mockResolvedValue(true)
+    alerts.alertCheckboxConfirm.mockReset().mockResolvedValue({ confirmed: true, checked: true })
     mocks.create.mockReset()
     mocks.instances = []
     mocks.create.mockImplementation(() => {
@@ -185,6 +188,15 @@ describe('lorebook editing', () => {
         instance = mount(LoreBookList, { target: document.body, props: { externalLoreBooks: lore } })
         await tick()
         await remove('Folder')
+        expect(alerts.alertCheckboxConfirm).toHaveBeenCalledExactlyOnceWith({
+            title: languageEnglish.folderRemoveConfirm,
+            description: languageEnglish.removeConfirm + 'Folder',
+            checkboxLabel: languageEnglish.checkboxConfirmation.lorebookDeletion,
+            actionLabel: languageEnglish.confirm,
+            cancelLabel: languageEnglish.cancel,
+            requireChecked: true,
+        })
+        expect(alerts.alertConfirm).not.toHaveBeenCalled()
         expect(lore.map(item => item.comment)).toEqual(['Keep'])
         coordinator.markPersistentDataDirty(0)
         await coordinator.flushPendingDataLocally('module-lore-editor-test')
@@ -196,6 +208,23 @@ describe('lorebook editing', () => {
         await tick()
         expect(document.body.textContent).not.toContain('Folder')
         expect(document.body.textContent).toContain('Keep')
+    })
+
+    it('keeps a folder and its children while acknowledgement is pending and after cancellation', async () => {
+        const lore = [book('Folder', { mode: 'folder', key: 'folder' }), book('Child', { folder: 'folder' }), book('Keep')]
+        DBState.db.characters[0].globalLore = lore
+        let confirm!: (answer: { confirmed: boolean; checked: boolean }) => void
+        alerts.alertCheckboxConfirm.mockImplementationOnce(() => new Promise(resolve => { confirm = resolve }))
+        instance = mount(LoreBookList, { target: document.body })
+        await tick()
+        row('Folder').querySelectorAll<HTMLButtonElement>(':scope > button')[2].click()
+        await vi.waitFor(() => expect(alerts.alertCheckboxConfirm).toHaveBeenCalledOnce())
+        expect(DBState.db.characters[0].globalLore.map(item => item.comment)).toEqual(['Folder', 'Child', 'Keep'])
+        confirm({ confirmed: false, checked: false })
+        await tick()
+        expect(DBState.db.characters[0].globalLore.map(item => item.comment)).toEqual(['Folder', 'Child', 'Keep'])
+        expect(document.body.textContent).toContain('Folder')
+        expect(alerts.alertConfirm).not.toHaveBeenCalled()
     })
 
     it.each(['character', 'chat', 'module'])('restores %s dragging after deleting a closed entry and opening then closing another', async (scope) => {

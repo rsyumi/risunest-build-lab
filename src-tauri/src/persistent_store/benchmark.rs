@@ -630,6 +630,7 @@ fn run_sample(database: &Value, root: &Value) -> Sample {
                 delete_character_ids: None,
                 asset_owner_heads: None,
                 plugin_storage: None,
+                ..Default::default()
             })
             .expect("append benchmark message")
             .revision,
@@ -910,6 +911,7 @@ fn run_post_lease_commit_benchmark(database: &Value) -> Vec<PostLeaseCommitSampl
                         key: "benchmark-plugin".to_owned(),
                         value: json!(deterministic_text(run, 1024)),
                     }]),
+                    ..Default::default()
                 },
                 "plugin",
             );
@@ -932,6 +934,7 @@ fn run_post_lease_commit_benchmark(database: &Value) -> Vec<PostLeaseCommitSampl
                     delete_character_ids: None,
                     asset_owner_heads: None,
                     plugin_storage: None,
+                    ..Default::default()
                 },
                 "root",
             );
@@ -960,6 +963,7 @@ fn run_post_lease_commit_benchmark(database: &Value) -> Vec<PostLeaseCommitSampl
                     delete_character_ids: None,
                     asset_owner_heads: None,
                     plugin_storage: None,
+                    ..Default::default()
                 },
                 "message",
             );
