@@ -140,6 +140,104 @@ describe('production persistent working-set publication', () => {
         }
     })
 
+    it.each(['modules', 'loadouts', 'customModels', 'personas', 'protectedPresetValues', 'explicitGlobalChatVariables'] as const)(
+        'converges an empty %s projection omitted from the accepted root without a durable write', async (field) => {
+            const initial = {username: 'Before', botPresets: [], botPresetsId: 0, characters: [], plugins: [],
+                globalChatVariables: {}, explicitGlobalChatVariables: {}} as unknown as Database
+            delete initial[field]
+            setDatabaseLite(initial)
+            selectedCharID.set(-1)
+            const adapter = createProductionStateAdapter()
+            const commit = vi.fn(async ({expectedRevision}) => ({revision: expectedRevision + 1}))
+            const coordinator = new SaveCoordinator({store: {commit} as unknown as PersistentDataStore, ...adapter})
+            coordinator.initialize(1)
+            const accepted = adapter.captureRoot()
+            delete accepted[field]
+            coordinator.adoptAppliedUnitState(1, accepted, null, [])
+            const current = getDatabase() as unknown as Record<string, unknown>
+            current[field] = field.endsWith('Values') || field === 'explicitGlobalChatVariables' ? {} : []
+            const capture = adapter.canonicalCapture!
+            const root = capture.root.bind(capture)
+            let captures = 0
+            vi.spyOn(capture, 'root').mockImplementation(() => {
+                if (++captures > 12) throw new Error('Non-converging empty split-root projection')
+                return root()
+            })
+            coordinator.markPersistentDataDirty(1)
+            await coordinator.flushPendingDataLocally('empty-split-root-projection')
+            expect(commit).not.toHaveBeenCalled()
+            expect(coordinator.revision).toBe(1)
+            expect(coordinator.hasPendingPersistenceWork).toBe(false)
+            expect(captures).toBeLessThanOrEqual(2)
+            getDatabase().username = 'Real edit'
+            coordinator.markPersistentDataDirty(1)
+            await coordinator.flushPendingDataLocally('after-empty-projection')
+            expect(commit).toHaveBeenCalledExactlyOnceWith({expectedRevision: 1,
+                rootMutations: [{key: 'username', type: 'set', value: 'Real edit'}]})
+        },
+    )
+
+    it.each(['explicitGlobalChatVariables', 'protectedPresetValues'] as const)(
+        'persists real %s additions and deletions after empty projection convergence', async (field) => {
+            setDatabaseLite({username: 'Before', botPresets: [], botPresetsId: 0, characters: [], plugins: [],
+                globalChatVariables: {}, explicitGlobalChatVariables: {}, protectedPresetValues: {}} as unknown as Database)
+            selectedCharID.set(-1)
+            const adapter = createProductionStateAdapter()
+            const commit = vi.fn(async ({expectedRevision}) => ({revision: expectedRevision + 1}))
+            const coordinator = new SaveCoordinator({store: {commit} as unknown as PersistentDataStore, ...adapter})
+            coordinator.initialize(1)
+            const accepted = adapter.captureRoot()
+            delete accepted[field]
+            coordinator.adoptAppliedUnitState(1, accepted, null, [])
+            coordinator.markPersistentDataDirty(1)
+            await coordinator.flushPendingDataLocally('empty-map-projection')
+            expect(commit).not.toHaveBeenCalled()
+            const map = getDatabase()[field] as Record<string, unknown>
+            const key = field === 'explicitGlobalChatVariables' ? 'ordinary' : 'seperateModels'
+            const unitKey = JSON.stringify([field === 'explicitGlobalChatVariables' ? 'variable' : 'preset-protected', key])
+            const value = field === 'explicitGlobalChatVariables' ? 'Real value' : {memory: 'Real value'}
+            map[key] = value
+            coordinator.markPersistentDataDirty(1)
+            await coordinator.flushPendingDataLocally('real-map-add')
+            expect(commit).toHaveBeenCalledExactlyOnceWith({expectedRevision: 1, rootMutations: [],
+                unitMutations: [{key: unitKey, type: 'set', value}]})
+            delete map[key]
+            coordinator.markPersistentDataDirty(1)
+            await coordinator.flushPendingDataLocally('real-map-delete')
+            expect(commit).toHaveBeenCalledTimes(2)
+            expect(commit.mock.calls[1][0]).toEqual({expectedRevision: 2, rootMutations: [],
+                unitMutations: [{key: unitKey, type: 'delete'}]})
+            await coordinator.flushPendingDataLocally('empty-map-again')
+            expect(commit).toHaveBeenCalledTimes(2)
+            expect(coordinator.hasPendingPersistenceWork).toBe(false)
+        },
+    )
+
+    it('retains genuine split-root units when an empty projection accompanies a failed commit', async () => {
+        setDatabaseLite({username: 'Before', botPresets: [], botPresetsId: 0, characters: [], plugins: [],
+            globalChatVariables: {}, explicitGlobalChatVariables: {},
+            modules: [{id: 'module', name: 'Module', description: 'Before'}]} as unknown as Database)
+        selectedCharID.set(-1)
+        const adapter = createProductionStateAdapter()
+        const commit = vi.fn().mockRejectedValueOnce(new Error('Synthetic failure'))
+            .mockImplementation(async ({expectedRevision}) => ({revision: expectedRevision + 1}))
+        const coordinator = new SaveCoordinator({store: {commit} as unknown as PersistentDataStore, ...adapter})
+        coordinator.initialize(1)
+        const accepted = adapter.captureRoot()
+        delete accepted.explicitGlobalChatVariables
+        coordinator.adoptAppliedUnitState(1, accepted, null, [])
+        getDatabase().modules[0].description = 'Real record edit'
+        coordinator.markPersistentDataDirty(1)
+        await expect(coordinator.flushPendingDataLocally('mixed-empty-real-unit')).rejects.toThrow('Synthetic failure')
+        expect(coordinator.hasPendingPersistenceWork).toBe(true)
+        await coordinator.flushPendingDataLocally('retry-mixed-empty-real-unit')
+        expect(commit).toHaveBeenCalledTimes(2)
+        for (const [input] of commit.mock.calls) expect(input).toEqual({expectedRevision: 1, rootMutations: [], unitMutations: [
+            {key: '["record","modules","module"]', type: 'set', value: {id: 'module', name: 'Module', description: 'Real record edit'}},
+        ]})
+        expect(coordinator.hasPendingPersistenceWork).toBe(false)
+    })
+
     it('uses canonical captures for immediate production edits and emits a small delta', async () => {
         setDatabaseLite({
             username: 'Before',

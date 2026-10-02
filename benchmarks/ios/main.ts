@@ -30,17 +30,7 @@ async function userStart(label: string) {
 }
 async function resetLegacyMeasurementProfile() {
   await guard();
-  const profile = await nativeDataPath();
-  const ownershipPath = await join(profile, "legacy-restore-profile-owner.json");
-  const owner = "io.github.rsyumi.risunest.ios.bench:legacy-restore-v1";
   const opened = await invoke<{ revision: number }>("pds_open");
-  if (await exists(ownershipPath)) {
-    check(new TextDecoder().decode(await readFile(ownershipPath)) === owner, "Synthetic profile ownership mismatch");
-  } else {
-    check(opened.revision === 0, "Install a fresh isolated benchmark profile before memory measurement");
-    await mkdir(profile, { recursive: true });
-    await writeFile(ownershipPath, new TextEncoder().encode(owner));
-  }
   const jobs = await invoke<unknown[]>("native_file_job_list");
   check(jobs.length === 0, "Resolve retained synthetic jobs before resetting the measurement profile");
   const resetId = crypto.randomUUID();

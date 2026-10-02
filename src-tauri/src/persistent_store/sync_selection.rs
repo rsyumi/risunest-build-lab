@@ -691,15 +691,7 @@ pub(crate) fn pds_lww_replace_from_target(state: tauri::State<'_, super::command
 }
 
 pub(crate) fn binding_stage_digest(db: &Connection, staging_id: &str) -> StoreResult<String> {
-    use sha2::{Digest, Sha256};
-    let target = super::ReadTarget { generation: staging_id.into(), revision: current_revision(db)? };
-    let value = super::query::materialize_target(db, &target)?;
-    let aliases = super::query::list_asset_aliases(db, &target)?.value;
-    let owners = super::query::list_asset_owner_heads(db, &target)?.value;
-    let bytes = serde_json::to_vec(&(value,aliases,owners))?;
-    #[cfg(test)]
-    crate::persistent_store::hash_work::observe("binding_stage_proof", bytes.len());
-    Ok(hex::encode(Sha256::digest(&bytes)))
+    super::lww::catalog_digest(db, staging_id)
 }
 
 pub(crate) fn validate_binding_stage_content(db: &Connection, staging_id: &str) -> StoreResult<()> {

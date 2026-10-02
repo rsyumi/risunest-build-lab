@@ -133,10 +133,16 @@
       "sha256": "8e844555e86e61999600c0df7873d01f097960319c0083d7cc1210a117321d22"
     },
     {
+      "path": "benchmarks/ios/contracts.test.ts",
+      "mode": "100644",
+      "bytes": 4351,
+      "sha256": "8ed633384f13f1750768eabde00a7a148477044f9d5c583c3738e2660448b70e"
+    },
+    {
       "path": "benchmarks/ios/contracts.ts",
       "mode": "100644",
-      "bytes": 7750,
-      "sha256": "bbd507976d741401c033f685b30c4756cbbfd6b1accd861534f85bc0a272f5c8"
+      "bytes": 8594,
+      "sha256": "609be8c6b832b5c3b1e1bdc80fd990dd562782c82937c362ed127bca03bf5d4e"
     },
     {
       "path": "benchmarks/ios/index.html",
@@ -147,8 +153,8 @@
     {
       "path": "benchmarks/ios/main.ts",
       "mode": "100644",
-      "bytes": 14738,
-      "sha256": "f3542bfd065ab3cf21f1e0c14b45929ed3a990bc85cd560c1e9313e292f90f8a"
+      "bytes": 14149,
+      "sha256": "737047d95e99443e949de07d9c452abab1532e81e9d7dc2e075843990b2f0c4e"
     },
     {
       "path": "benchmarks/ios/native/.gitignore",
@@ -243,26 +249,26 @@
     {
       "path": "benchmarks/legacy-restore/fixture.test.ts",
       "mode": "100644",
-      "bytes": 1784,
-      "sha256": "9ad6313ac0db5f22481edc4963ef6484ef9e31a93cede8e338faf54985eb714d"
+      "bytes": 3369,
+      "sha256": "48a4357872143dbf745cfafb67b0eb0ccb2c0132f4f3f41ee2b17e211e363664"
     },
     {
       "path": "benchmarks/legacy-restore/fixture.ts",
       "mode": "100644",
-      "bytes": 4120,
-      "sha256": "ee01387461f1f7b8c4eafead559d684cc9cb6b7874f1fc45a76c7eec24599974"
+      "bytes": 4320,
+      "sha256": "241121796a140bb8115929ff5433974b784b4c04ace5bb124241a6d9f0d93a5b"
     },
     {
       "path": "benchmarks/legacy-restore/run.test.ts",
       "mode": "100644",
-      "bytes": 7334,
-      "sha256": "61095d3e0c3128441f40ee38d3edcb3bf9f7e01889dd356892876370bfd3643b"
+      "bytes": 9423,
+      "sha256": "c6c0b019db65bac00d294c00398c9e0013a3f8eb4601d5220d04625e5e5cbabd"
     },
     {
       "path": "benchmarks/legacy-restore/run.ts",
       "mode": "100644",
-      "bytes": 7550,
-      "sha256": "47f40c7b0673f5f0445a303d599f1aa72cbee3832fa727ca3b73e47a2b3808b4"
+      "bytes": 7567,
+      "sha256": "7784bf9b8fbaf074657405d31cf2260508fe70398f8d3670154c560747658b1e"
     },
     {
       "path": "benchmarks/linux/index.html",
@@ -357,8 +363,8 @@
     {
       "path": "benchmarks/lww-native/src/final_matrix.rs",
       "mode": "100644",
-      "bytes": 82116,
-      "sha256": "ba9ca6202e32643e2acd17532d41a77ae5ae64b9f9a8a81ff80be42273689291"
+      "bytes": 85302,
+      "sha256": "452be974a95e780a9fc8738f37a94c6b48094f944d9de49c5a37ed40093dcba8"
     },
     {
       "path": "benchmarks/lww-native/src/final_runner.rs",
@@ -6729,8 +6735,8 @@
     {
       "path": "src-tauri/src/persistent_store/lww_binding_stage_tests.rs",
       "mode": "100644",
-      "bytes": 30268,
-      "sha256": "c72ecde9bd23fccf194faf8581cd32d7042ad8bfe2a5cd3549840d50443fbd84"
+      "bytes": 34220,
+      "sha256": "1e956a4c811fcb41898f4f0be380ab39bc3520a55125c874613666e085fb5cc4"
     },
     {
       "path": "src-tauri/src/persistent_store/lww_classification.rs",
@@ -6891,8 +6897,8 @@
     {
       "path": "src-tauri/src/persistent_store/sync_selection.rs",
       "mode": "100644",
-      "bytes": 43349,
-      "sha256": "1a681fa2ea92ef454cd431e9b0be9f55f656882fb975ab7583430c8f3f752ebd"
+      "bytes": 42842,
+      "sha256": "2fd52482467b44bacc5e8d2afc9fdf8ca848000a5abd0117721ad7bf38ffaddc"
     },
     {
       "path": "src-tauri/src/persistent_store/tests.rs",
@@ -13833,8 +13839,8 @@
     {
       "path": "src/ts/storage/persistentDataRuntime.production.test.ts",
       "mode": "100644",
-      "bytes": 29928,
-      "sha256": "76e08fc2feb0ba4bea97f5ff1bdae86705d9f8beb38f8fa74faa49515c0f7927"
+      "bytes": 36359,
+      "sha256": "690fa5ecdfa9aea2900a675d73334cdf351678ada1525c12dd79c3f919e520a4"
     },
     {
       "path": "src/ts/storage/persistentDataRuntime.svelte.ts",
@@ -14193,8 +14199,8 @@
     {
       "path": "src/ts/storage/saveCoordinator.reviewRegression.test.ts",
       "mode": "100644",
-      "bytes": 26677,
-      "sha256": "5aa3a802c36b8186a276b407ba74e231f6e3fd05367543df297d5070a1d9d474"
+      "bytes": 29189,
+      "sha256": "b8a16d7fd8c9d5eb1f347063294cf840a6a48efcf1e2bd61fbcd24d7804753b2"
     },
     {
       "path": "src/ts/storage/saveCoordinator.scopedScale.test.ts",
@@ -14205,8 +14211,8 @@
     {
       "path": "src/ts/storage/saveCoordinator.test.ts",
       "mode": "100644",
-      "bytes": 160029,
-      "sha256": "0ed6f30219c624959b6ddfc64f3f683244879bee8d237341ade0e702e01a7e49"
+      "bytes": 166307,
+      "sha256": "2a40c6d5ce66d20404319482cc195605e52ddc7cc13cf6e4f64fec968c551839"
     },
     {
       "path": "src/ts/storage/saveCoordinator.testSupport.ts",
@@ -14223,8 +14229,8 @@
     {
       "path": "src/ts/storage/saveCoordinator.ts",
       "mode": "100644",
-      "bytes": 231889,
-      "sha256": "ecdfc1febefd878f8307247a646bffcd2b3c2d9cd54dad4f70585cc294842496"
+      "bytes": 232909,
+      "sha256": "c535be5f05fc4cc2e62ee8678ba6c2f2f7b8132fa0a6de2b525b26e7d7e696f1"
     },
     {
       "path": "src/ts/storage/saveCoordinator.windowed.test.ts",
@@ -14745,8 +14751,8 @@
     {
       "path": "src/ts/storage/sync/serverSyncProduction.ts",
       "mode": "100644",
-      "bytes": 18585,
-      "sha256": "d5c2e47151f0b37a9a8b6eb90af3ffbac14e9097b62bd77ccbffefd44f9a1f72"
+      "bytes": 18910,
+      "sha256": "94079f2253db8c0a2ac7ca509695d7bb69e24d5e1a922b1493fa9a3c801cdc98"
     },
     {
       "path": "src/ts/storage/sync/serverSyncQr.test.ts",
@@ -14805,8 +14811,8 @@
     {
       "path": "src/ts/storage/sync/serverSyncStartup.test.ts",
       "mode": "100644",
-      "bytes": 9689,
-      "sha256": "793c6dabf90802e011a4c15e7a8cf6f550b2e9b99abd3d8dc5fa3af736bc875d"
+      "bytes": 10886,
+      "sha256": "11360a6f9d93189ae3e3c20efa1fa7e023ef66a54e2be5c5b9022fe37ec18162"
     },
     {
       "path": "src/ts/storage/sync/syncConflictBackup.test.ts",
@@ -15729,8 +15735,8 @@
     {
       "path": "tests/native/main.ts",
       "mode": "100644",
-      "bytes": 4977,
-      "sha256": "799d6db72bd91f530186174d2eee173368e2e1a2f4a3c29b4fb86702f0735936"
+      "bytes": 5010,
+      "sha256": "b1c3a45949d0806cac592965cd283b55f84dd9532264f5ed8c6b0107ce06b6dd"
     },
     {
       "path": "tests/native/native/.gitignore",
