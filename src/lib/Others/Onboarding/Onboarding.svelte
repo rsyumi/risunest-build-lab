@@ -67,6 +67,8 @@
         ExternalJobSummary,
     } from 'src/ts/storage/sync/external/types'
     import { getNativeOfficialAccountFlow } from 'src/ts/storage/sync/nativeOfficialAccountFlow'
+    import ServerSyncSettings from 'src/lib/Setting/Pages/ServerSyncSettings.svelte'
+    import type { ServerConfig } from 'src/ts/storage/sync/serverSync'
     import ConnectionForm from 'src/lib/Setting/ExternalStorage/ConnectionForm.svelte'
     import {
         externalConnectionTitle,
@@ -85,6 +87,7 @@
     } from './onboardingFlow'
     import {
         bindExternalOnboardingTarget,
+        connectServerOnboardingTarget,
         externalOnboardingRestorable,
         externalOnboardingRestoreAreas,
         externalOnboardingRestoreRestarts,
@@ -330,6 +333,13 @@
         externalSelected = ''
         externalJob = undefined
         externalKey += 1
+    }
+
+    async function onServerConnected(config: ServerConfig, newDevice: boolean): Promise<void> {
+        const outcome = await connectServerOnboardingTarget(config, newDevice)
+        if (outcome.kind === 'bound' && flow.state === 'sync-server') {
+            flow = goToOnboardingState(flow, 'done', 'server')
+        }
     }
 
     async function onExternalConnected(result: ExternalConnectionResult): Promise<void> {
@@ -833,7 +843,13 @@
                             <h1>{t.sync.title}</h1>
                             <p class="lead">{t.sync.lead}</p>
                             <div class="rows">
-
+                                {#if isTauri}
+                                    <button class="row" type="button" onclick={() => goTo('sync-server')}>
+                                        <span class="ic"><Server /></span>
+                                        <span class="tx"><b>{t.sync.hubTitle}</b><small>{t.sync.hubDesc}</small></span>
+                                        <span class="chev"><ChevronRight /></span>
+                                    </button>
+                                {/if}
                                 <button
                                     class="row"
                                     type="button"
@@ -861,6 +877,11 @@
                                     <span class="chev"><ChevronRight /></span>
                                 </button>
                             </div>
+                        {:else if flow.state === 'sync-server' && isTauri}
+                            {@render back('sync', t.back)}
+                            <h1>{t.hub.title}</h1>
+                            <p class="lead">{t.hub.leadScan}</p>
+                            <ServerSyncSettings connectTarget={onServerConnected} />
                         {:else if flow.state === 'sync-external'}
                             {#if !isTauri}
                                 {@render back('sync', t.back)}

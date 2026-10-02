@@ -798,7 +798,13 @@ impl PayloadCas {
             if path.starts_with(self.repository_root.join("assets").join("objects")) { "managed" } else { "owned" },
             &file,
         );
-        let file = file?;
+        let file = match file {
+            #[cfg(unix)]
+            Err(error) if error.raw_os_error() == Some(libc::ELOOP) => {
+                return invalid_owned_path(path, "linked object is forbidden");
+            }
+            result => result?,
+        };
         let metadata = file.metadata()?;
         self.validate_owned_file(path, &metadata)?;
         Ok(file)

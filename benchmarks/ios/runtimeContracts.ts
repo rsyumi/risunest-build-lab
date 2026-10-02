@@ -8,6 +8,7 @@ import {
 import corpus from "../tokenizer/native-tokenizer-corpus.json";
 import { check } from "./contracts";
 import { PersistentBenchmarkMarker } from "./persistentMarker";
+import type { SyncBindingState } from "../../src/ts/storage/sync/bindingFlow";
 
 export async function streaming() {
   const base = await invoke<string>("ios_bench_stream_url");
@@ -101,10 +102,10 @@ export async function snapshotRestore(): Promise<boolean> {
     reason: "ios-synthetic",
   });
   await marker.write("after");
-  const state = await invoke<{ targetAuthority: string; target: unknown }>(
+  const state = await invoke<SyncBindingState>(
     "pds_lww_binding_state",
   );
-  check(state.target === null, "snapshot contract uses an unbound synthetic library");
+  check(state.target.kind === "none", "snapshot contract uses an unbound synthetic library");
   const staged = await invoke<{ stagingId: string }>("pds_snapshot_restore_stage", {
     id: snapshot.id,
     requestId: crypto.randomUUID(),
