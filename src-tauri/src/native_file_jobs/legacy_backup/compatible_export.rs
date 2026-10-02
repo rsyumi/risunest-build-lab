@@ -1046,7 +1046,7 @@ mod tests {
                     ],
                 )
                 .unwrap();
-            let mut root = json!({"account":{"token":"synthetic-token"},"characterOrder":["synthetic",{"name":"Folder","data":["group","synthetic"],"id":"folder","color":"red","img":"assets/nested/icon.webp"},"group"],"plugins":[],"modules":[],"personas":[{"id":"persona-first","name":"First persona"},{"id":"persona-selected","name":"Stale persona"}],"selectedPersona":1,"username":"Current persona","mainPrompt":"Current preset prompt","loadouts":[],"disableToggleBinding":true,"defaultToggleValues":{"test":"1"},"risunestInlayMode":"unsupported","streamingThoughtMode":"unsupported","unknownRoot":true});
+            let mut root = json!({"account":{"token":"synthetic-token"},"characterOrder":[{"name":"Empty","data":[],"id":"empty-folder"},{"name":"Folder","data":["synthetic","group"],"id":"folder","color":"red","img":"assets/nested/icon.webp"},"group"],"plugins":[],"modules":[],"personas":[{"id":"persona-first","name":"First persona"},{"id":"persona-selected","name":"Stale persona"}],"selectedPersona":1,"username":"Current persona","mainPrompt":"Current preset prompt","loadouts":[],"disableToggleBinding":true,"defaultToggleValues":{"test":"1"},"risunestInlayMode":"unsupported","streamingThoughtMode":"unsupported","unknownRoot":true});
             root["pluginCustomStorage"] = json!({"10":null,"2":true,"01":"leading zero","z":{"exact":"assets/nested/icon.webp","opaque":"prefix assets/nested/icon.webp suffix","large":"큰".repeat(65536)},"4294967295":9007199254740991u64});
             store.replace_put_upstream_root(&staging, &root).unwrap();
             store
@@ -1125,6 +1125,16 @@ mod tests {
             let durable_root = store.read_root(None).unwrap().value;
             assert!(durable_root["botPresetsId"].is_string());
             assert_eq!(durable_root["selectedPersona"], "persona-selected");
+            assert_eq!(durable_root["characterOrder"][0]["data"], json!([]));
+            assert_eq!(durable_root["characterOrder"][1]["data"], json!(["synthetic", "group"]));
+            let durable_ids = durable_root["characterOrder"].as_array().unwrap().iter()
+                .flat_map(|entry| {
+                    entry.as_str().into_iter().chain(
+                        entry.get("data").and_then(Value::as_array).into_iter().flatten()
+                            .filter_map(Value::as_str),
+                    )
+                }).collect::<Vec<_>>();
+            assert_eq!(durable_ids.len(), durable_ids.iter().collect::<HashSet<_>>().len());
             export_compatible_local_backup(
                 target,
                 Some(&output),

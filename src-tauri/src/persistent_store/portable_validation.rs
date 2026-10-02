@@ -151,10 +151,8 @@ fn validate_row(table: &PortableTable, row: &Row<'_>) -> StoreResult<()> {
         "bot_presets" => {
             let value = json(row, 4)?;
             let index: i64 = row.get(1)?;
-            require(
-                index >= 0 && row.get::<_, String>(0)? == index.to_string(),
-                "portable preset identity mismatch",
-            )?;
+            require(index >= 0, "portable preset order is negative")?;
+            required_id(row, 0, &value, "id")?;
             text_equal(
                 row,
                 2,
@@ -484,6 +482,10 @@ mod tests {
     #[test]
     fn refuses_damaged_identity_order_parent_and_derived_columns() {
         for sql in [
+            "UPDATE bot_presets SET preset_id='forged-preset'",
+            "UPDATE bot_presets SET value=json_remove(value,'$.id')",
+            "UPDATE bot_presets SET configured_index=-1",
+            "INSERT INTO bot_presets SELECT * FROM bot_presets",
             "UPDATE characters SET detail='not JSON'",
             "UPDATE characters SET character_id='wrong'",
             "UPDATE characters SET name='wrong'",

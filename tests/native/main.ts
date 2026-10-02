@@ -2,6 +2,7 @@ import { runContractScenarios, verifyContractReadback } from './contractScenario
 import { invoke } from '@tauri-apps/api/core'
 import { SqlitePersistentDataStore } from '../../src/ts/storage/sqlitePersistentDataStore'
 import { RevisionConflictError } from '../../src/ts/storage/persistentDataStore'
+import { stableSelectionRoot } from '../../src/ts/storage/persistentSelectionBoundary'
 import type { Database } from '../../src/ts/storage/database.svelte'
 
 const fixture = {
@@ -46,7 +47,7 @@ try {
             cases.push('commit')
         } else if (phase.phase !== 'read' && phase.phase !== 'read-abort') throw new Error('unknown phase')
         const verify = async () => {
-            const { characters: _, botPresets: __, pluginCustomStorage: ___, ...root } = fixture
+            const { pluginCustomStorage: _, ...root } = stableSelectionRoot(fixture)
             equal(await store.readRoot(), { revision: 1, value: root }, 'root readback')
             for (const character of fixture.characters) for (const chat of character.chats) {
                 equal(await store.readConversation(character.chaId, chat.id!), { revision: 1, value: chat }, 'ordered conversation readback')
