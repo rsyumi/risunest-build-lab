@@ -1700,7 +1700,7 @@ fn same_batch_parent_creation_precedes_message_range_and_local_statics_never_pub
 #[test]
 fn archive_publishes_one_state_unit_and_shared_payload_excludes_local_fields() {
     use std::io::Read;
-    let (_, mut store) = store();
+    let (_directory, mut store) = store();
     create_conversation(&mut store, "char", "chat");
     save(
         &mut store,
@@ -1778,7 +1778,7 @@ fn archive_publishes_one_state_unit_and_shared_payload_excludes_local_fields() {
 }
 #[test]
 fn received_archive_retains_local_fields_and_holds_children_until_restore() {
-    let (_, mut source) = store();
+    let (_source_directory, mut source) = store();
     let (dir, mut target) = store();
     create_conversation(&mut source, "char", "chat");
     create_conversation(&mut target, "char", "chat");
@@ -1900,7 +1900,7 @@ fn archive_record_restore_keeps_both_bodies_but_publishes_filtered_body_only() {
         decode_logical_record, encode_logical_record_key, LogicalRecordEnvelope,
         LogicalRecordLocator,
     };
-    let (_, mut store) = store();
+    let (_directory, mut store) = store();
     create_conversation(&mut store, "char", "chat");
     save(
         &mut store,

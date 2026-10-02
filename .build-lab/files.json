@@ -225,8 +225,8 @@
     {
       "path": "benchmarks/ios/runtimeContracts.ts",
       "mode": "100644",
-      "bytes": 4390,
-      "sha256": "5bff04cc6010c5e9c368e4bc8fd9d4afddd32b3e6816327d1255aad9252c4768"
+      "bytes": 4448,
+      "sha256": "66a6d199caf5c5702676063b3ad1330161fdce0f82607a315fb3bed6d971cfa0"
     },
     {
       "path": "benchmarks/ios/vite.config.ts",
@@ -5349,8 +5349,8 @@
     {
       "path": "src-tauri/src/asset_repository/payload_cas.rs",
       "mode": "100644",
-      "bytes": 97481,
-      "sha256": "c79ab715d72898dd69a8ca3e07a208b1aad01f831187618f1a4dd7ba8604d277"
+      "bytes": 97720,
+      "sha256": "c041081115566ae88332308fb238d2267a8b7fa3f8c0ef58db03a5c688abd741"
     },
     {
       "path": "src-tauri/src/boot_marker.rs",
@@ -6759,8 +6759,8 @@
     {
       "path": "src-tauri/src/persistent_store/lww_tests.rs",
       "mode": "100644",
-      "bytes": 124604,
-      "sha256": "0d41123b49feb921977e415266a6ce0de566c8dd188f62599bfa947b2d775313"
+      "bytes": 124638,
+      "sha256": "e3dc7c6ced0ea077780434cd1644e1ea8b14912b4619a6d88c43b9eb1ec65f1c"
     },
     {
       "path": "src-tauri/src/persistent_store/message_pages.rs",
@@ -6981,8 +6981,8 @@
     {
       "path": "src-tauri/src/persistent_store/tests/selective_import_tests.rs",
       "mode": "100644",
-      "bytes": 10197,
-      "sha256": "d885df1aa74ae3146426bdf8621bbda9cd330183b4b12ff166d4cbaaf4941230"
+      "bytes": 10609,
+      "sha256": "92f9515eaf7d2293869959d48d1ab8419b5470d496f8ec81b857d07ceef0bfb9"
     },
     {
       "path": "src-tauri/src/persistent_store/tests/snapshot_lease_tests.rs",
@@ -8151,8 +8151,8 @@
     {
       "path": "src/lib/Others/Onboarding/Onboarding.svelte",
       "mode": "100644",
-      "bytes": 74600,
-      "sha256": "afd84c3b5a30a9e42519b96787979100993317bce85611aa9c7a1db7266fe2cc"
+      "bytes": 75971,
+      "sha256": "57840a8bc12273efc9a1704fb834d417eea0592300b66a71e28cff671110d946"
     },
     {
       "path": "src/lib/Others/Onboarding/Onboarding.theme.test.ts",
@@ -8163,26 +8163,26 @@
     {
       "path": "src/lib/Others/Onboarding/externalStorageOnboardingFlow.test.ts",
       "mode": "100644",
-      "bytes": 3037,
-      "sha256": "149e4b23bf101a33ed89bb06174fba7028ee18e6db6de107eb4fe7783ea7ed72"
+      "bytes": 3141,
+      "sha256": "9958fc2ad7e91c2f2b83f57d94f8eca9dabd9118c51cb34681a2aee43be35a02"
     },
     {
       "path": "src/lib/Others/Onboarding/externalStorageOnboardingFlow.ts",
       "mode": "100644",
-      "bytes": 2378,
-      "sha256": "3d8beaf40e6139c7344e0c95792d641700a4c7e35c89d9df5b7b92694713be45"
+      "bytes": 2860,
+      "sha256": "85ba7fe00aa695a087a8845d8bd41693ff5b091423b6c13a338f7d4a3cc4c4d3"
     },
     {
       "path": "src/lib/Others/Onboarding/onboardingFlow.test.ts",
       "mode": "100644",
-      "bytes": 3320,
-      "sha256": "96927a42e96cfa5ade60ea524438879c7a26b54aa8f8364e13315579a162a677"
+      "bytes": 3217,
+      "sha256": "3581dc49d4013c061c181c268635c70c8511a0d51bdc933747349e187ff26ed3"
     },
     {
       "path": "src/lib/Others/Onboarding/onboardingFlow.ts",
       "mode": "100644",
-      "bytes": 3130,
-      "sha256": "2ec38c539e5b5710afb872720184bb88844504b7f9a0196cebf744de41e56ed7"
+      "bytes": 2989,
+      "sha256": "9db303405b026573ca7f5db7409407ab9334be72510b13d6aadb574ea8c4b24d"
     },
     {
       "path": "src/lib/Others/Onboarding/onboardingGate.ts",
@@ -8195,6 +8195,12 @@
       "mode": "100644",
       "bytes": 3432,
       "sha256": "95b1aa1577ffe7fa4d2d8957eb77713cd849ec726b8718ddb1d72852ee8c10e3"
+    },
+    {
+      "path": "src/lib/Others/Onboarding/serverSyncOnboardingFlow.test.ts",
+      "mode": "100644",
+      "bytes": 2782,
+      "sha256": "13e5fcfc30365cda0646c6f5c01fbde3571e528952adf538ec29eda5166309f5"
     },
     {
       "path": "src/lib/Others/PersistentLocalSaveFailure.svelte",
@@ -8889,8 +8895,14 @@
     {
       "path": "src/lib/Setting/Pages/ServerSyncSettings.svelte",
       "mode": "100644",
-      "bytes": 8260,
-      "sha256": "af3aa1ffb1332ff0d3dbb163107d8aa12f21e1ec45cf3bbdbb91d8d24211f808"
+      "bytes": 8398,
+      "sha256": "1d8e2cc69e844736aa61a0e5c001aaf9bb41c48aaa63eae92941cbdd29f7ed1e"
+    },
+    {
+      "path": "src/lib/Setting/Pages/ServerSyncSettings.test.ts",
+      "mode": "100644",
+      "bytes": 9755,
+      "sha256": "ed25bcc0bd912b22ff880cd28fedde7f8b2d420b056ac8f59e1d68b852cf4496"
     },
     {
       "path": "src/lib/Setting/Pages/UserSettings.account.test.ts",
@@ -14727,14 +14739,14 @@
     {
       "path": "src/ts/storage/sync/serverSyncProduction.test.ts",
       "mode": "100644",
-      "bytes": 21786,
-      "sha256": "b5f3a49b4a9793b27941fee7c634b51af7046acded7bc045d5a62a0743d92e99"
+      "bytes": 22870,
+      "sha256": "56c149716f5b09b6d48afb51a8d644da873d53e532baacf105897ae5b3865bef"
     },
     {
       "path": "src/ts/storage/sync/serverSyncProduction.ts",
       "mode": "100644",
-      "bytes": 18448,
-      "sha256": "3428e5dd8efdbe104b9664611c60f3708d8bb23e9f6747c3d79995a134bd27e3"
+      "bytes": 18585,
+      "sha256": "d5c2e47151f0b37a9a8b6eb90af3ffbac14e9097b62bd77ccbffefd44f9a1f72"
     },
     {
       "path": "src/ts/storage/sync/serverSyncQr.test.ts",

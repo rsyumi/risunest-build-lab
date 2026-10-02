@@ -78,6 +78,21 @@ const settle = async () => { for (let i = 0; i < 40; i++) await Promise.resolve(
 const hydrationCalls = () => f.invoke.mock.calls.filter(([command]) => command === 'server_sync_lww_hydrate')
 
 describe('production server LWW composition', () => {
+    it('exposes native configuration without starting a second binding', async () => {
+        const config = { endpoint: 'https://synthetic.invalid', libraryId: 'library', deviceId: 'registration', token: 'synthetic' }
+        await production.configureServerSyncConnection(config)
+        expect(f.invoke).toHaveBeenCalledExactlyOnceWith('server_sync_configure', { config })
+        const { bindSyncTarget } = await import('./bindingRegistry')
+        expect(bindSyncTarget).not.toHaveBeenCalled()
+    })
+    it('retains settings configuration then its single shared binding action', async () => {
+        const config = { endpoint: 'https://synthetic.invalid', libraryId: 'library', deviceId: 'registration', token: 'synthetic' }
+        await production.connectServerSync(config, true)
+        expect(f.invoke.mock.calls[0]).toEqual(['server_sync_configure', { config }])
+        const { bindSyncTarget } = await import('./bindingRegistry')
+        expect(bindSyncTarget).toHaveBeenCalledExactlyOnceWith({ kind: 'server', connectionId: 'server' }, { mode: 'new-device' })
+    })
+
     it('resumes the persisted server binding through shared flow ownership at startup', async () => {
         const state = bindingContext().state
         f.invoke.mockImplementation(async command => command === 'server_sync_status' ? { configured: true, writerId: 'writer', bindingAuthority: '0' } : command === 'pds_lww_binding_state' ? state : null)

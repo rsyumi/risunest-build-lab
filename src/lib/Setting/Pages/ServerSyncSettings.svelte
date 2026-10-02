@@ -14,6 +14,8 @@
     import SettingRow from '../RisuNest/SettingRow.svelte'
     import SettingButton from '../RisuNest/SettingButton.svelte'
 
+    let { connectTarget = connectServerSync }: { connectTarget?: (config: ServerConfig, newDevice: boolean) => Promise<unknown> } = $props()
+
     const copy = language.risuNest.serverSync
     const controller = getServerSyncController()
     const scanner = createServerQrScanner()
@@ -43,7 +45,7 @@
     }
     function readCode() { try { candidate = parseServerRegistration(code); code = ''; failure = '' } catch { failure = copy.registrationInvalid } }
     async function scan() { scanning = true; try { candidate = await scanner.scan(() => {}); failure = '' } catch (error) { failure = message(error) } finally { scanning = false } }
-    async function connect(newDevice = false) { if (!candidate) return; await connectServerSync(candidate, newDevice); candidate = undefined }
+    async function connect(newDevice = false) { if (!candidate) return; await connectTarget(candidate, newDevice); candidate = undefined }
     async function cleanCache() { if (await alertConfirm(copy.management.cleanConfirm)) await cleanupServerSyncCache() }
     const bytes = (value: number) => `${(value / 1024 / 1024).toFixed(1)} MiB`
     onMount(() => {
