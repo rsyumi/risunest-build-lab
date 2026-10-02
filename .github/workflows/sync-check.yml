@@ -90,7 +90,11 @@ jobs:
       - name: Sync wire tests
         run: cargo test --manifest-path crates/sync-wire/Cargo.toml --release --locked --target ${{ matrix.target }} 2>&1 | tee artifacts/sync-wire.log
       - name: Sync server tests
-        run: cargo test --manifest-path server/sync/Cargo.toml --release --locked --target ${{ matrix.target }} 2>&1 | tee artifacts/sync-server.log
+        run: |
+          set -euo pipefail
+          cargo test --manifest-path server/sync/Cargo.toml --release --locked --target ${{ matrix.target }} -- --skip source_observer 2>&1 | tee artifacts/sync-server.log
+          cargo test --manifest-path server/sync/Cargo.toml --release --locked --target ${{ matrix.target }} --lib source_observer -- --skip source_observer::small_object_store::tests 2>&1 | tee artifacts/sync-source-observer.log
+          cargo test --manifest-path server/sync/Cargo.toml --release --locked --target ${{ matrix.target }} --lib source_observer::small_object_store::tests 2>&1 | tee artifacts/sync-source-object-store.log
       - name: Sync manager tests
         run: cargo test --manifest-path server/manager/Cargo.toml --release --locked --target ${{ matrix.target }} 2>&1 | tee artifacts/sync-manager.log
       - name: Linux installer checks
