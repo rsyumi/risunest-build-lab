@@ -78,14 +78,14 @@ fn preset_catalog_reads_and_materializes_in_configured_order() {
         json!({
             "revision": 1,
             "items": [
-                { "id": "0", "name": "Preset Beta", "image": "preset-beta.png", "configuredIndex": 0 },
-                { "id": "1", "name": "Preset Alpha", "configuredIndex": 1 }
+                { "id": "preset-beta", "name": "Preset Beta", "image": "preset-beta.png", "configuredIndex": 0 },
+                { "id": "preset-alpha", "name": "Preset Alpha", "configuredIndex": 1 }
             ]
         })
     );
     assert_eq!(
         store
-            .read_preset("1", None)
+            .read_preset("preset-alpha", None)
             .expect("read preset")
             .expect("preset exists")
             .value,
@@ -1820,7 +1820,7 @@ fn leased_family_canonical(store: &PersistentStore, lease: &str) -> Vec<u8> {
     serde_json::to_vec(&json!({
         "root": store.read_root(Some(lease)).expect("read leased root"),
         "presetCatalog": store.query_presets(Some(lease)).expect("query leased presets"),
-        "preset": store.read_preset("0", Some(lease)).expect("read leased preset"),
+        "preset": store.read_preset("preset-beta", Some(lease)).expect("read leased preset"),
         "liveCharacters": store.query_characters(
             &CharacterQuery {
                 search: None,

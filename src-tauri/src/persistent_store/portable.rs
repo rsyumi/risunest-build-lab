@@ -600,7 +600,6 @@ fn renumber_selected(transaction: &Connection, staging: &str) -> StoreResult<()>
             [staging],
         )?;
     }
-    // A preset is named by its own position, so renumbering has to carry the identity with it.
     let kept: Vec<String> = {
         let mut statement = transaction.prepare(
             "SELECT preset_id FROM bot_presets WHERE generation=?1 ORDER BY configured_index",
@@ -612,9 +611,9 @@ fn renumber_selected(transaction: &Connection, staging: &str) -> StoreResult<()>
         }
         kept
     };
-    let selected: Option<i64> = transaction
+    let selected: Option<String> = transaction
         .query_row(
-            "SELECT CAST(json_extract(value,'$.botPresetsId') AS INTEGER) FROM root WHERE generation=?1",
+            "SELECT json_extract(value,'$.botPresetsId') FROM root WHERE generation=?1",
             [staging],
             |row| row.get(0),
         )
@@ -622,21 +621,18 @@ fn renumber_selected(transaction: &Connection, staging: &str) -> StoreResult<()>
         .flatten();
     for (position, preset_id) in kept.iter().enumerate() {
         transaction.execute(
-            "UPDATE bot_presets SET preset_id=?3, configured_index=?4 WHERE generation=?1 AND preset_id=?2",
-            rusqlite::params![staging, preset_id, position.to_string(), position as i64],
+            "UPDATE bot_presets SET configured_index=?3 WHERE generation=?1 AND preset_id=?2",
+            rusqlite::params![staging, preset_id, position as i64],
         )?;
     }
     if let Some(selected) = selected {
-        // The chosen preset keeps being the chosen one where it landed, or the first that stayed.
         let landed = kept
             .iter()
-            .position(|preset_id| preset_id.parse::<i64>() == Ok(selected))
-            .map(|position| position as i64)
-            .unwrap_or(0)
-            .min((kept.len() as i64 - 1).max(0));
-        if landed != selected {
+            .find(|preset_id| **preset_id == selected)
+            .or_else(|| kept.first());
+        if landed != Some(&selected) {
             transaction.execute(
-                "UPDATE root SET value=json_set(value,'$.botPresetsId',?2) WHERE generation=?1",
+                "UPDATE root SET value=CASE WHEN ?2 IS NULL THEN json_remove(value,'$.botPresetsId') ELSE json_set(value,'$.botPresetsId',?2) END WHERE generation=?1",
                 rusqlite::params![staging, landed],
             )?;
         }
@@ -789,6 +785,43 @@ fn invalid(message: &str) -> StoreError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn selected_presets_keep_stable_ids_and_selected_identity_when_order_is_compacted() {
+        for (selected, remove_all, expected) in [
+            ("preset-c", false, Some("preset-c")),
+            ("preset-a", false, Some("preset-b")),
+            ("preset-c", true, None),
+        ] {
+            let directory = tempfile::tempdir().unwrap();
+            let mut store = PersistentStore::open(directory.path()).unwrap();
+            let stage = store.replace_begin().unwrap().staging_id;
+            store.replace_put_root(&stage, &serde_json::json!({"botPresetsId":selected})).unwrap();
+            store.replace_put_presets(&stage, &[
+                serde_json::json!({"id":"preset-a","name":"A"}),
+                serde_json::json!({"id":"preset-b","name":"B"}),
+                serde_json::json!({"id":"preset-c","name":"C"}),
+            ]).unwrap();
+            store.connection.execute(
+                "DELETE FROM bot_presets WHERE generation=?1 AND (?2 OR preset_id='preset-a')",
+                params![stage, remove_all],
+            ).unwrap();
+            renumber_selected(&store.connection, &stage).unwrap();
+            let actual: Vec<(String, i64, String)> = store.connection.prepare(
+                "SELECT preset_id,configured_index,value FROM bot_presets WHERE generation=?1 ORDER BY configured_index",
+            ).unwrap().query_map([&stage], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)))
+                .unwrap().collect::<Result<_,_>>().unwrap();
+            let expected_ids: &[&str] = if remove_all { &[] } else { &["preset-b", "preset-c"] };
+            assert_eq!(actual.iter().map(|row|row.0.as_str()).collect::<Vec<_>>(), expected_ids);
+            for (position, (id, order, raw)) in actual.iter().enumerate() {
+                assert_eq!(*order, position as i64);
+                assert_eq!(serde_json::from_str::<serde_json::Value>(raw).unwrap()["id"], *id);
+            }
+            let root: String = store.connection.query_row("SELECT value FROM root WHERE generation=?1", [&stage], |row|row.get(0)).unwrap();
+            assert_eq!(serde_json::from_str::<serde_json::Value>(&root).unwrap().get("botPresetsId").and_then(serde_json::Value::as_str), expected);
+            store.replace_abort(&stage).unwrap();
+        }
+    }
+
     #[test]
     fn selected_views_keep_only_selected_valid_rows_and_owner_qualified_plugins() {
         let source = Connection::open_in_memory().unwrap();

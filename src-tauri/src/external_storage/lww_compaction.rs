@@ -294,7 +294,7 @@ impl ExternalLwwEngine {
         }
         for (receipt,document) in &state.segments {
             let protected_segment=receipt.locator.object.rsplit('/').next().ok_or_else(segment::corrupt)?;
-            super::snapshot_restore::admit_asset_catalogs(&document.asset_catalogs,store,&self.library,
+            super::snapshot_restore::admit_asset_catalogs(&document.asset_catalogs,store,&self.target_scope(),&self.library,
                 protected_segment,&self.connection_id,&self.connection_root,&self.root_key,
                 self.provider.as_ref(),&self.repository,cancel).await?;
         }

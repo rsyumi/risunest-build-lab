@@ -6,7 +6,7 @@ use super::{
 #[cfg(test)]
 use crate::persistent_store::lww::ApplyReceive;
 use crate::persistent_store::{
-    external_lww::{FrozenAsset, FrozenControl, FrozenControlCatalog, SealedBody, SealedPublication, UploadState},
+    external_lww::{AssetReference, FrozenAsset, FrozenAssetReference, FrozenControl, FrozenControlCatalog, SealedBody, SealedPublication, UploadState},
     lww::{Change, Header, MessageLocator, Progress, StageReceive},
     PersistentStore,
 };
@@ -358,11 +358,13 @@ impl ExternalLwwEngine {
                     let mut assets = BTreeMap::new();
                     let mut controls = BTreeMap::new();
                     let mut reused_controls = BTreeMap::new();
+                    let mut reused_assets = BTreeMap::new();
                     for entry in entries {
                         let mut candidate = payload.clone();
                         let mut candidate_assets = assets.clone();
                         let mut candidate_controls = controls.clone();
                         let mut candidate_reused = reused_controls.clone();
+                        let mut candidate_reused_assets = reused_assets.clone();
                         let mut added = Vec::new();
                         self.include_objects(
                             store,
@@ -372,6 +374,7 @@ impl ExternalLwwEngine {
                             &mut candidate_assets,
                             &mut candidate_controls,
                             &mut candidate_reused,
+                            &mut candidate_reused_assets,
                             cancel,
                         )
                         .await?;
@@ -401,6 +404,7 @@ impl ExternalLwwEngine {
                         assets = candidate_assets;
                         controls = candidate_controls;
                         reused_controls = candidate_reused;
+                        reused_assets = candidate_reused_assets;
                         bodies.extend(added);
                         selected.push(entry);
                     }
@@ -410,7 +414,7 @@ impl ExternalLwwEngine {
                     let sha256 = String::new();
                     let object_id = String::new();
                     let assets = assets.into_values().collect::<Vec<_>>();
-                    let asset_job = if assets.is_empty() && controls.is_empty() && reused_controls.is_empty() {
+                    let asset_job = if assets.is_empty() && controls.is_empty() && reused_controls.is_empty() && reused_assets.is_empty() {
                         None
                     } else {
                         let job = super::journal::JobIdentity {
@@ -466,6 +470,7 @@ impl ExternalLwwEngine {
                         assets,
                         controls: frozen_controls,
                         reused_control_catalogs: reused_controls.into_values().collect(),
+                        reused_assets: reused_assets.into_values().collect(),
                         asset_job,
                         data_catalogs: Vec::new(),
                         asset_catalogs: Vec::new(),
@@ -579,6 +584,32 @@ impl ExternalLwwEngine {
                         ).await?;
                     }
                 }
+                let mut checked_assets=BTreeSet::new();
+                for proof in &publication.reused_assets {
+                    if Self::trusted_control_time().and_then(|now|now.checked_sub(proof.rooted_at_ms))
+                        .is_none_or(|age|age>super::leases::CACHE_REUSE_LIMIT_MS) {
+                        match &proof.reference {
+                            AssetReference::Catalog(catalog)=>{
+                                if checked_assets.insert(hex::encode(catalog.ciphertext_sha256)) {
+                                    super::snapshot_restore::revalidate_catalog(catalog,risunest_external_storage_format::snapshot::CatalogKind::Assets,
+                                        &self.root_key,self.provider.as_ref(),&self.repository,cancel).await?;
+                                }
+                            }
+                            AssetReference::Standalone(body)=>{
+                                let intent=ObjectIntent{job_id:self.library.clone(),repository_id:self.repository.repository_id.clone(),
+                                    object_id:body.object_id.clone(),role:ObjectRole::Pack,byte_length:body.byte_length.0,sha256:body.sha256.clone()};
+                                match self.provider.reconcile_upload(&self.repository,&intent,None,cancel).await? {
+                                    UploadResolution::Complete(receipt)=>{
+                                        Self::validate_receipt(&intent,&receipt)?;
+                                        if body.locator.as_ref()!=Some(&receipt.locator) {return Err(segment::corrupt());}
+                                    }
+                                    UploadResolution::Conflict=>return Err(segment::corrupt()),
+                                    UploadResolution::RestartRequired|UploadResolution::Resumable(_)=>return Err(ProviderError::new(ErrorKind::NotFound)),
+                                }
+                            }
+                        }
+                    }
+                }
                 if Self::trusted_control_time().and_then(|now|publication.captured_at_ms.and_then(|captured|now.checked_sub(captured)))
                     .is_none_or(|age|age>super::leases::CACHE_REUSE_LIMIT_MS) {
                     for catalog in &publication.data_catalogs {
@@ -673,7 +704,8 @@ impl ExternalLwwEngine {
                 store.external_lww_persist(&publication, &sealed).map_err(store_error)?;
             }
         } else if !publication.assets.is_empty() || !publication.asset_catalogs.is_empty()
-            || !publication.controls.is_empty() || !publication.data_catalogs.is_empty() {
+            || !publication.controls.is_empty() || !publication.data_catalogs.is_empty()
+            || !publication.reused_assets.is_empty() || !publication.reused_control_catalogs.is_empty() {
             return Err(segment::corrupt());
         }
         for index in 0..publication.bodies.len() {
@@ -732,8 +764,14 @@ impl ExternalLwwEngine {
                 .map_err(|_| segment::corrupt())?;
             let mut payload = Segment::decode_capture(&plain)?;
             payload.data_catalogs.extend(publication.data_catalogs.clone());
-            payload.asset_catalogs = publication.asset_catalogs.clone();
-            for body in payload.large_bodies.values_mut() {
+            payload.asset_catalogs.extend(publication.asset_catalogs.clone());
+            for (hash,body) in &mut payload.large_bodies {
+                if let Some(proof)=publication.reused_assets.iter().find(|proof|proof.content_hash==*hash) {
+                    match &proof.reference {
+                        AssetReference::Standalone(original) if original==&*body=>continue,
+                        _=>return Err(segment::corrupt()),
+                    }
+                }
                 let prepared = publication
                     .bodies
                     .iter()
@@ -821,14 +859,11 @@ impl ExternalLwwEngine {
             .map_err(store_error)?;
         self.admit_objects(store, &payload, &publication.object_id, cancel).await?;
         if let Some(rooted_at_ms)=Self::trusted_control_time() {
-            for catalog in &payload.data_catalogs {
-                store.external_lww_authorize_data_catalog(&self.target_scope(),catalog,rooted_at_ms).map_err(store_error)?;
-            }
+            self.authorize_dependencies(store,&payload,rooted_at_ms)?;
         }
         for hash in payload
             .message_pages
             .keys()
-            .chain(payload.large_bodies.keys())
         {
             store
                 .external_lww_witness_object(&self.target_scope(), hash)
@@ -1056,6 +1091,7 @@ impl ExternalLwwEngine {
         assets: &mut BTreeMap<String, FrozenAsset>,
         controls: &mut BTreeMap<String,String>,
         reused_controls: &mut BTreeMap<String,FrozenControlCatalog>,
+        reused_assets: &mut BTreeMap<String,FrozenAssetReference>,
         _cancel: &Cancellation,
     ) -> Result<()> {
         let mut hashes = BTreeSet::new();
@@ -1096,6 +1132,7 @@ impl ExternalLwwEngine {
             if payload.message_pages.contains_key(&hash)
                 || controls.contains_key(&hash)
                 || assets.contains_key(&hash)
+                || reused_assets.contains_key(&hash)
                 || payload.large_bodies.contains_key(&hash)
             {
                 continue;
@@ -1116,7 +1153,20 @@ impl ExternalLwwEngine {
                 else { payload.message_pages.insert(hash,encoded); }
                 continue;
             }
-            if store.external_lww_has_object(&self.target_scope(),&hash).map_err(store_error)? {continue;}
+            if let Some(now)=Self::trusted_control_time() {
+                if let Some(proof)=store.external_lww_reusable_asset(&self.target_scope(),&hash,now).map_err(store_error)? {
+                    match &proof.reference {
+                        AssetReference::Catalog(catalog)=>{
+                            if let Some(previous)=payload.asset_catalogs.iter().find(|root|root.header.object_id==catalog.header.object_id) {
+                                if previous!=catalog {return Err(segment::corrupt());}
+                            } else {payload.asset_catalogs.push(catalog.clone());}
+                        }
+                        AssetReference::Standalone(body)=>{payload.large_bodies.insert(hash.clone(),body.clone());}
+                    }
+                    reused_assets.insert(hash,proof);
+                    continue;
+                }
+            }
             let root = store.repository_root();
             let local_size = crate::asset_repository::PayloadCas::new(root).map_err(transient)?
                 .stat_object(&hash).map_err(transient)?;
@@ -1320,24 +1370,29 @@ impl ExternalLwwEngine {
         for hash in hashes {
             store.external_lww_witness_object(&self.target_scope(),&hash).map_err(store_error)?;
         }
+        super::snapshot_restore::admit_asset_catalogs(
+            &payload.asset_catalogs, store, &self.target_scope(), &self.library, physical_segment, &self.connection_id,
+            &self.connection_root, &self.root_key, self.provider.as_ref(), &self.repository, cancel,
+        ).await?;
+        self.register_sources(store, payload, physical_segment)?;
         if let Some(rooted_at_ms)=payload.changes.iter().map(|change|change.stamp.physical_ms.0).max() {
             // Original unit clocks bound publication age; downloading does not renew it.
             let upper=self.admitted_upper()?.checked_add(300_000).ok_or_else(segment::corrupt)?;
             if rooted_at_ms>upper {return Err(ProviderError::new(ErrorKind::ClockSkew));}
-            for catalog in &payload.data_catalogs {
-                store.external_lww_authorize_data_catalog(&self.target_scope(),catalog,rooted_at_ms).map_err(store_error)?;
-            }
+            self.authorize_dependencies(store,payload,rooted_at_ms)?;
         }
-        let hashes = super::snapshot_restore::admit_asset_catalogs(
-            &payload.asset_catalogs, store, &self.library, physical_segment, &self.connection_id,
-            &self.connection_root, &self.root_key, self.provider.as_ref(), &self.repository, cancel,
-        ).await?;
-        for hash in hashes {
-            store
-                .external_lww_witness_object(&self.target_scope(), &hash)
-                .map_err(store_error)?;
+        Ok(())
+    }
+    fn authorize_dependencies(&self,store:&PersistentStore,payload:&Segment,rooted_at_ms:u64)->Result<()> {
+        for catalog in &payload.data_catalogs {
+            store.external_lww_authorize_data_catalog(&self.target_scope(),catalog,rooted_at_ms).map_err(store_error)?;
         }
-        self.register_sources(store, payload, physical_segment)?;
+        for catalog in &payload.asset_catalogs {
+            store.external_lww_authorize_asset_catalog(&self.target_scope(),catalog,rooted_at_ms).map_err(store_error)?;
+        }
+        for (hash,body) in &payload.large_bodies {
+            store.external_lww_authorize_standalone(&self.target_scope(),hash,body,rooted_at_ms).map_err(store_error)?;
+        }
         Ok(())
     }
     fn register_sources(
@@ -1360,7 +1415,7 @@ impl ExternalLwwEngine {
                 })
                 .map_err(store_error)?;
             store
-                .external_lww_witness_object(&self.target_scope(), hash)
+                .external_lww_witness_standalone(&self.target_scope(), hash, body)
                 .map_err(store_error)?;
         }
         Ok(())

@@ -496,6 +496,118 @@ fn a_claim_refuses_a_key_the_plugin_already_holds_and_a_foreign_caller() {
     }
 }
 
+#[test]
+fn a_claim_stamps_only_the_moved_keys_and_orders_and_misses_reserve_nothing() {
+    use risunest_sync_wire::unit::{UnitKey, UnitValue};
+    use std::collections::{BTreeMap, BTreeSet};
+    fn units(store: &PersistentStore) -> BTreeMap<String, (String, String, String)> {
+        store.connection.prepare("SELECT key,stamp,value,version FROM lww_units ORDER BY key").unwrap()
+            .query_map([], |row| Ok((row.get(0)?, (row.get(1)?, row.get(2)?, row.get(3)?)))).unwrap()
+            .collect::<Result<_, _>>().unwrap()
+    }
+    let (_directory, mut store) = imported_store(
+        json!({"first":1,"claimed":2,"shared":3,"last":4}), json!({}),
+    );
+    store.commit(&WorkingSetCommit {
+        expected_revision: store.revision().unwrap(),
+        plugin_storage: Some(vec![PluginStorageMutation::Set {
+            owner: "plugin-a".into(), key: "shared".into(), value: json!(5),
+        }]), ..Default::default()
+    }).unwrap();
+    let session = store.begin_plugin_claim_session("plugin-a", EMPTY_SCRIPT_HASH, "run-one").unwrap().unwrap();
+    let generation = active_generation(&store.connection).unwrap();
+    let original_ordinal: i64 = store.connection.query_row(
+        "SELECT ordinal FROM plugin_storage WHERE generation=?1 AND owner=?2 AND storage_key='claimed'",
+        params![generation, UNOWNED_OWNER], |row| row.get(0),
+    ).unwrap();
+    let before = units(&store);
+    assert_eq!(claim(&mut store, &session, "plugin-a", EMPTY_SCRIPT_HASH, "run-one", "claimed"), Some(json!(2)));
+    let after = units(&store);
+    let changed = after.iter().filter(|(key, value)| before.get(*key) != Some(*value)).map(|(key, _)| key.clone()).collect::<BTreeSet<_>>();
+    let expected = [
+        UnitKey::new(&["plugin", UNOWNED_OWNER, "claimed"]).unwrap(),
+        UnitKey::new(&["plugin", "plugin-a", "claimed"]).unwrap(),
+        UnitKey::new(&["order", "plugin-storage", UNOWNED_OWNER]).unwrap(),
+        UnitKey::new(&["order", "plugin-storage", "plugin-a"]).unwrap(),
+    ].map(|key| key.as_str().to_owned()).into_iter().collect::<BTreeSet<_>>();
+    assert_eq!(changed, expected);
+    let stamps = changed.iter().map(|key| after[key].0.clone()).collect::<BTreeSet<_>>();
+    let versions = changed.iter().map(|key| after[key].2.clone()).collect::<BTreeSet<_>>();
+    assert_eq!(stamps.len(), 1);
+    assert_eq!(versions.len(), 1);
+    let old_key = UnitKey::new(&["plugin", UNOWNED_OWNER, "claimed"]).unwrap();
+    assert_eq!(serde_json::from_str::<UnitValue>(&after[old_key.as_str()].1).unwrap(), UnitValue::Deleted);
+    let claimed_ordinal: i64 = store.connection.query_row(
+        "SELECT ordinal FROM plugin_storage WHERE generation=?1 AND owner='plugin-a' AND storage_key='claimed'",
+        [&generation], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(claimed_ordinal, original_ordinal);
+    for key in &changed {
+        let pending: (String, String, String) = store.connection.query_row(
+            "SELECT stamp,value,version FROM lww_outbox WHERE key=?1", [key],
+            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+        ).unwrap();
+        assert_eq!(&pending, &after[key]);
+    }
+    let revision = store.revision().unwrap();
+    let clock = serde_json::to_value(store.lww_clock_state().unwrap()).unwrap();
+    let intents: i64 = store.device_store().unwrap().connection().query_row("SELECT count(*) FROM lww_intents", [], |row| row.get(0)).unwrap();
+    let pending: Vec<(String,String,String,String)> = store.connection.prepare("SELECT key,stamp,value,version FROM lww_outbox ORDER BY key").unwrap()
+        .query_map([], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).unwrap().collect::<Result<_,_>>().unwrap();
+    for key in ["missing", "shared"] {
+        assert!(claim(&mut store, &session, "plugin-a", EMPTY_SCRIPT_HASH, "run-one", key).is_none());
+    }
+    assert_eq!(store.revision().unwrap(), revision);
+    assert_eq!(units(&store), after);
+    assert_eq!(serde_json::to_value(store.lww_clock_state().unwrap()).unwrap(), clock);
+    assert_eq!(store.device_store().unwrap().connection().query_row("SELECT count(*) FROM lww_intents", [], |row| row.get::<_,i64>(0)).unwrap(), intents);
+    let after_pending: Vec<(String,String,String,String)> = store.connection.prepare("SELECT key,stamp,value,version FROM lww_outbox ORDER BY key").unwrap()
+        .query_map([], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).unwrap().collect::<Result<_,_>>().unwrap();
+    assert_eq!(after_pending, pending);
+}
+
+#[test]
+fn a_reserved_claim_recovers_after_reopen_and_a_committed_claim_does_not_replay() {
+    let (directory, mut store) = imported_store(json!({"claimed":1,"unowned":2}), json!({}));
+    let session = store.begin_plugin_claim_session("plugin-a", EMPTY_SCRIPT_HASH, "run-one").unwrap().unwrap();
+    let revision = store.revision().unwrap();
+    let before_units: Vec<(String,String,String,String)> = store.connection.prepare("SELECT key,stamp,value,version FROM lww_units ORDER BY key").unwrap()
+        .query_map([], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).unwrap().collect::<Result<_,_>>().unwrap();
+    store.connection.execute_batch("CREATE TRIGGER fail_claim BEFORE INSERT ON lww_requests BEGIN SELECT RAISE(ABORT,'synthetic claim failure'); END;").unwrap();
+    assert!(store.claim_plugin_storage_value(&session, "plugin-a", EMPTY_SCRIPT_HASH, "run-one", "claimed", revision).is_err());
+    assert_eq!(store.revision().unwrap(), revision);
+    assert!(store.read_plugin_storage(UNOWNED_OWNER, "claimed", None).unwrap().is_some());
+    assert!(store.read_plugin_storage("plugin-a", "claimed", None).unwrap().is_none());
+    let after_units: Vec<(String,String,String,String)> = store.connection.prepare("SELECT key,stamp,value,version FROM lww_units ORDER BY key").unwrap()
+        .query_map([], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).unwrap().collect::<Result<_,_>>().unwrap();
+    assert_eq!(after_units, before_units);
+    let (request_id, stamp): (String, String) = store.device_store().unwrap().connection().query_row(
+        "SELECT request_id,stamp FROM lww_intents WHERE complete=0", [], |row| Ok((row.get(0)?,row.get(1)?)),
+    ).unwrap();
+    store.connection.execute_batch("DROP TRIGGER fail_claim;").unwrap();
+    drop(store);
+    let mut store = PersistentStore::open(directory.path()).unwrap();
+    assert_eq!(store.revision().unwrap(), revision + 1);
+    assert_eq!(store.read_plugin_storage("plugin-a", "claimed", None).unwrap().unwrap().value, json!(1));
+    assert!(store.read_plugin_storage(UNOWNED_OWNER, "claimed", None).unwrap().is_none());
+    let unit_key = risunest_sync_wire::unit::UnitKey::new(&["plugin", "plugin-a", "claimed"]).unwrap();
+    assert_eq!(store.connection.query_row("SELECT stamp FROM lww_units WHERE key=?1", [unit_key.as_str()], |row| row.get::<_,String>(0)).unwrap(), stamp);
+    store.commit(&WorkingSetCommit {
+        expected_revision: store.revision().unwrap(),
+        plugin_storage: Some(vec![PluginStorageMutation::Set { owner:"plugin-a".into(),key:"claimed".into(),value:json!(3) }]),
+        ..Default::default()
+    }).unwrap();
+    let later_revision = store.revision().unwrap();
+    let clock = serde_json::to_value(store.lww_clock_state().unwrap()).unwrap();
+    store.device_store().unwrap().connection().execute("UPDATE lww_intents SET complete=0 WHERE request_id=?1", [&request_id]).unwrap();
+    drop(store);
+    let store = PersistentStore::open(directory.path()).unwrap();
+    assert_eq!(store.revision().unwrap(), later_revision);
+    assert_eq!(store.read_plugin_storage("plugin-a", "claimed", None).unwrap().unwrap().value, json!(3));
+    assert_eq!(serde_json::to_value(store.lww_clock_state().unwrap()).unwrap(), clock);
+    assert_eq!(store.device_store().unwrap().connection().query_row("SELECT complete FROM lww_intents WHERE request_id=?1", [&request_id], |row| row.get::<_,bool>(0)).unwrap(), true);
+}
+
 /// A full replacement written later must not mint a fresh window for values a
 /// person deliberately left alone.
 #[test]

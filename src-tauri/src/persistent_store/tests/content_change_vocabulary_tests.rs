@@ -53,7 +53,7 @@ fn root_and_preset_mutations_record_their_own_locators() {
         .unwrap();
     assert_eq!(
         recorded(&store, before),
-        vec![key("preset", "0", ""), key("preset", "1", "")]
+        vec![key("preset", "preset-alpha", ""), key("preset", "preset-beta", "")]
     );
 }
 

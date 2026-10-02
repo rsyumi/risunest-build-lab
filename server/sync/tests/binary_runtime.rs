@@ -147,28 +147,59 @@ async fn standalone_daemon_sigterm_releases_the_owner_and_reopens_exact_head() {
     let credential = store.add_device().unwrap();
     drop(store);
     let mut daemon = Daemon::start(directory.path());
-    let mut stream = Client::builder()
-        .no_proxy()
-        .build()
-        .unwrap()
-        .get(format!("{}/events", daemon.endpoint))
-        .bearer_auth(&credential.token)
-        .header("x-risu-library", &credential.library_id)
-        .send()
+    let mut request = format!("{}/notify", daemon.endpoint.replace("http://", "ws://"))
+        .into_client_request()
+        .unwrap();
+    request.headers_mut().insert(
+        "authorization",
+        format!("Bearer {}", credential.token).parse().unwrap(),
+    );
+    request
+        .headers_mut()
+        .insert("x-risu-library", credential.library_id.parse().unwrap());
+    let (mut stream, response) =
+        tokio::time::timeout(Duration::from_secs(2), connect_async(request))
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(response.status(), 101);
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+        Message::Text(r#"{"type":"seq","seq":"0"}"#.into())
+    );
+    stream
+        .send(Message::Ping(
+            b"synthetic SIGTERM heartbeat".to_vec().into(),
+        ))
         .await
         .unwrap();
-    assert!(stream.chunk().await.unwrap().is_some());
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+        Message::Pong(b"synthetic SIGTERM heartbeat".to_vec().into())
+    );
     // Only the child created by this test is signalled. No process enumeration.
     let status = Command::new("/bin/kill")
         .args(["-TERM", &daemon.child.id().to_string()])
         .status()
         .unwrap();
     assert!(status.success());
-    assert!(tokio::time::timeout(Duration::from_secs(2), stream.chunk())
-        .await
-        .unwrap()
-        .unwrap()
-        .is_none());
+    assert!(matches!(
+        tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+        Message::Close(_)
+    ));
+    drop(stream);
     let start = std::time::Instant::now();
     loop {
         if let Some(status) = daemon.child.try_wait().unwrap() {
