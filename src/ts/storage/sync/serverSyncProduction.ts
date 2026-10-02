@@ -212,7 +212,13 @@ export async function installServerSyncProduction(): Promise<void> {
     disposeServer = () => { scheduler.dispose(); for (const dispose of disposers) dispose(); context = undefined; persistedBinding = undefined; foreground = false; hydrationPending = false; hydrationAgain = false }
     await controller.ensureStatus()
     const current = await invoke<BindingContext['state']>('pds_lww_binding_state')
-    if (current.target.kind === 'server' && status.configured) await resumeCurrentServerBinding(current)
+    if (current.target.kind === 'server' && status.configured) {
+        try { await resumeCurrentServerBinding(current) }
+        catch (value) {
+            // A fenced offline binding keeps the local library usable until retry.
+            if (serverSyncErrorCode(value) !== 'server-unreachable' || typeof value !== 'object' || value === null || !('retryable' in value) || value.retryable !== true) throw value
+        }
+    }
 }
 
 const snapshot = () => ({ status: { ...status, bound: persistedBinding?.target.kind === 'server' || !!context && !context.signal.aborted }, running: scheduler.isRunning() || !!hydrating, paused: !context || context.signal.aborted || scheduler.isBlocked(), replacing, draining: false, error })

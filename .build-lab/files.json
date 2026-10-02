@@ -133,10 +133,16 @@
       "sha256": "8e844555e86e61999600c0df7873d01f097960319c0083d7cc1210a117321d22"
     },
     {
+      "path": "benchmarks/ios/contracts.test.ts",
+      "mode": "100644",
+      "bytes": 4351,
+      "sha256": "8ed633384f13f1750768eabde00a7a148477044f9d5c583c3738e2660448b70e"
+    },
+    {
       "path": "benchmarks/ios/contracts.ts",
       "mode": "100644",
-      "bytes": 7750,
-      "sha256": "bbd507976d741401c033f685b30c4756cbbfd6b1accd861534f85bc0a272f5c8"
+      "bytes": 8594,
+      "sha256": "609be8c6b832b5c3b1e1bdc80fd990dd562782c82937c362ed127bca03bf5d4e"
     },
     {
       "path": "benchmarks/ios/index.html",
@@ -147,8 +153,8 @@
     {
       "path": "benchmarks/ios/main.ts",
       "mode": "100644",
-      "bytes": 14738,
-      "sha256": "f3542bfd065ab3cf21f1e0c14b45929ed3a990bc85cd560c1e9313e292f90f8a"
+      "bytes": 14149,
+      "sha256": "737047d95e99443e949de07d9c452abab1532e81e9d7dc2e075843990b2f0c4e"
     },
     {
       "path": "benchmarks/ios/native/.gitignore",
@@ -357,8 +363,8 @@
     {
       "path": "benchmarks/lww-native/src/final_matrix.rs",
       "mode": "100644",
-      "bytes": 82116,
-      "sha256": "ba9ca6202e32643e2acd17532d41a77ae5ae64b9f9a8a81ff80be42273689291"
+      "bytes": 85302,
+      "sha256": "452be974a95e780a9fc8738f37a94c6b48094f944d9de49c5a37ed40093dcba8"
     },
     {
       "path": "benchmarks/lww-native/src/final_runner.rs",
@@ -14745,8 +14751,8 @@
     {
       "path": "src/ts/storage/sync/serverSyncProduction.ts",
       "mode": "100644",
-      "bytes": 18585,
-      "sha256": "d5c2e47151f0b37a9a8b6eb90af3ffbac14e9097b62bd77ccbffefd44f9a1f72"
+      "bytes": 18910,
+      "sha256": "94079f2253db8c0a2ac7ca509695d7bb69e24d5e1a922b1493fa9a3c801cdc98"
     },
     {
       "path": "src/ts/storage/sync/serverSyncQr.test.ts",
@@ -14805,8 +14811,8 @@
     {
       "path": "src/ts/storage/sync/serverSyncStartup.test.ts",
       "mode": "100644",
-      "bytes": 9689,
-      "sha256": "793c6dabf90802e011a4c15e7a8cf6f550b2e9b99abd3d8dc5fa3af736bc875d"
+      "bytes": 10886,
+      "sha256": "11360a6f9d93189ae3e3c20efa1fa7e023ef66a54e2be5c5b9022fe37ec18162"
     },
     {
       "path": "src/ts/storage/sync/syncConflictBackup.test.ts",
@@ -15729,8 +15735,8 @@
     {
       "path": "tests/native/main.ts",
       "mode": "100644",
-      "bytes": 4977,
-      "sha256": "799d6db72bd91f530186174d2eee173368e2e1a2f4a3c29b4fb86702f0735936"
+      "bytes": 5010,
+      "sha256": "b1c3a45949d0806cac592965cd283b55f84dd9532264f5ed8c6b0107ce06b6dd"
     },
     {
       "path": "tests/native/native/.gitignore",

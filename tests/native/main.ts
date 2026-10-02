@@ -47,7 +47,8 @@ try {
             cases.push('commit')
         } else if (phase.phase !== 'read' && phase.phase !== 'read-abort') throw new Error('unknown phase')
         const verify = async () => {
-            const { pluginCustomStorage: _, ...root } = stableSelectionRoot(fixture)
+            const root = stableSelectionRoot(fixture)
+            Reflect.deleteProperty(root, 'pluginCustomStorage')
             equal(await store.readRoot(), { revision: 1, value: root }, 'root readback')
             for (const character of fixture.characters) for (const chat of character.chats) {
                 equal(await store.readConversation(character.chaId, chat.id!), { revision: 1, value: chat }, 'ordered conversation readback')
