@@ -24,40 +24,41 @@ function text(bytes: number, seed: number): string {
     }
     return parts.join('').slice(0, bytes)
 }
-function character(index: number, tailBytes?: number) {
+function character(index: number, tailBytes?: number, characterPrefix = 'synthetic') {
     const id = String(index).padStart(6, '0')
     const message = Array.from({ length: tailBytes === undefined ? fullMessages : 1 }, (_, slot) => ({
         role: slot % 2 === 0 ? 'user' : 'char',
         chatId: `synthetic-message-${id}-${String(slot).padStart(3, '0')}`,
         data: text(tailBytes ?? messageBytes, (index + 1) * 131 + slot),
     }))
-    return { type: 'character', chaId: `synthetic-${id}`, name: `Synthetic ${id}`, chatPage: 0,
+    return { type: 'character', chaId: `${characterPrefix}-${id}`, name: `Synthetic ${id}`, chatPage: 0,
         chats: [{ id: `chat-${id}`, name: 'Synthetic chat', note: '', localLore: [], message }] }
 }
 export interface FixturePlan {
+    characterPrefix: string
     decodedBytes: number
     characterCount: number
     messageCount: number
     fullCharacterCount: number
     tailTextBytes: number
 }
-export function planFixture(decodedBytes: number): FixturePlan {
+export function planFixture(decodedBytes: number, characterPrefix = 'synthetic'): FixturePlan {
     if (!Number.isSafeInteger(decodedBytes) || decodedBytes < 2_500_000 || decodedBytes > 600_000_000)
         throw new Error('Synthetic decoded size must be between 2.5 and 600 decimal MB')
-    const packetBytes = pack.encode(character(0)).length
+    const packetBytes = pack.encode(character(0, undefined, characterPrefix)).length
     const fullCharacterCount = Math.floor((decodedBytes - rootBytes) / packetBytes) - 1
     const remaining = decodedBytes - rootBytes - fullCharacterCount * packetBytes
     // The last character has one bounded str32 message instead of a partial MessagePack value.
-    const tailTextBytes = remaining - pack.encode(character(fullCharacterCount, 0)).length - 4
+    const tailTextBytes = remaining - pack.encode(character(fullCharacterCount, 0, characterPrefix)).length - 4
     if (tailTextBytes < 65_536 || tailTextBytes > 3_000_000) throw new Error('Unexpected tail bounds')
-    if (pack.encode(character(fullCharacterCount, tailTextBytes)).length !== remaining)
+    if (pack.encode(character(fullCharacterCount, tailTextBytes, characterPrefix)).length !== remaining)
         throw new Error('Exact decoded fixture size mismatch')
-    return { decodedBytes, characterCount: fullCharacterCount + 1,
+    return { characterPrefix, decodedBytes, characterCount: fullCharacterCount + 1,
         messageCount: fullCharacterCount * fullMessages + 1, fullCharacterCount, tailTextBytes }
 }
 export function fixtureCharacter(plan: FixturePlan, index: number) {
     if (index < 0 || index >= plan.characterCount) throw new Error('Invalid fixture character index')
-    return character(index, index === plan.fullCharacterCount ? plan.tailTextBytes : undefined)
+    return character(index, index === plan.fullCharacterCount ? plan.tailTextBytes : undefined, plan.characterPrefix)
 }
 export function* fixturePackets(plan: FixturePlan, charactersFirst = true): Generator<Uint8Array> {
     yield Uint8Array.of(0x80 + Object.keys(rootFields).length + 1)

@@ -158,7 +158,7 @@ fn archive_alias_and_reference_controls_stage_without_reading_any_large_dependen
     let original:String=store.connection.query_row("SELECT archived_object FROM characters WHERE generation=?1 AND character_id='archived'",[&stage.staging_id],|r|r.get(0)).unwrap();
     let mut changed:Value=serde_json::from_str(&original).unwrap(); changed["archivedAt"]=json!(2);
     store.connection.execute("UPDATE characters SET archived_object=?2 WHERE generation=?1 AND character_id='archived'",params![stage.staging_id,changed.to_string()]).unwrap();
-    crate::persistent_store::sync_selection::validate_binding_stage_content(&store.connection,&stage.staging_id).unwrap();
+    assert!(crate::persistent_store::sync_selection::validate_binding_stage_content(&store.connection,&stage.staging_id).is_err());
     assert!(validate_binding_source(&store.connection,&stage.staging_id,&header,&incoming).is_err());
     store.connection.execute("UPDATE characters SET archived_object=?2 WHERE generation=?1 AND character_id='archived'",params![stage.staging_id,original]).unwrap();
     activate(&mut store,&header,&inspection,&stage);
@@ -334,4 +334,62 @@ fn empty_incoming_stage_copies_no_active_records_and_preserves_exact_empty_recei
     assert_eq!(store.connection.query_row("SELECT changes FROM lww_binding_stages WHERE staging_id=?1",[&stage.staging_id],|r|r.get::<_,String>(0)).unwrap(),"[]");
     activate(&mut store,&header,&inspection,&stage);
     assert!(catalog(&store,&active_generation(&store.connection).unwrap())["characters"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn binding_stage_digest_streams_large_message_catalog_and_detects_tail_changes() {
+    use crate::persistent_store::{hash_work::{reset_hash_work, take_hash_work}, sync_selection::binding_stage_digest};
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = PersistentStore::open(dir.path()).unwrap();
+    let staging = store.replace_begin().unwrap().staging_id;
+    let message = json!({"role":"char","data":"x".repeat(4096),"chatId":"synthetic"}).to_string();
+    {
+        let tx = store.connection.transaction().unwrap();
+        let mut insert = tx.prepare("INSERT INTO messages(generation,character_id,conversation_id,message_index,value) VALUES(?1,'character','conversation',?2,?3)").unwrap();
+        for index in 0..8192 { insert.execute(params![staging,index,message]).unwrap(); }
+        drop(insert);
+        tx.commit().unwrap();
+    }
+    let expected = catalog_digest(&store.connection, &staging).unwrap();
+    reset_hash_work();
+    assert_eq!(binding_stage_digest(&store.connection, &staging).unwrap(), expected);
+    let work = take_hash_work();
+    assert!(work.incomplete.is_empty());
+    assert_eq!(work.domains["binding_catalog_proof"].calls, 1);
+    assert!(work.domains["binding_catalog_proof"].bytes > 32 * 1024 * 1024);
+    assert!(!work.domains.contains_key("binding_stage_proof"));
+    store.connection.execute("UPDATE messages SET value='{}' WHERE generation=?1 AND message_index=8191",[&staging]).unwrap();
+    assert_ne!(binding_stage_digest(&store.connection, &staging).unwrap(), expected);
+    store.connection.execute("UPDATE messages SET value=?2 WHERE generation=?1 AND message_index=8191",params![staging,message]).unwrap();
+    assert_eq!(binding_stage_digest(&store.connection, &staging).unwrap(), expected);
+}
+
+#[test]
+fn binding_stage_digest_covers_raw_root_plugin_owners_and_asset_metadata() {
+    use crate::persistent_store::sync_selection::binding_stage_digest;
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = PersistentStore::open(dir.path()).unwrap();
+    let staging = store.replace_begin().unwrap().staging_id;
+    let root = json!({"futureRoot":{"nested":true},"hypaV3":{"memos":[{"chatId":"synthetic"}]},"plugins":[{"name":"synthetic"}]}).to_string();
+    store.connection.execute("UPDATE root SET value=?2 WHERE generation=?1",params![staging,root]).unwrap();
+    store.connection.execute("INSERT INTO plugin_storage(generation,owner,storage_key,byte_size,ordinal,value) VALUES(?1,'orphan','key',2,0,'{}')",[&staging]).unwrap();
+    store.connection.execute("INSERT INTO asset_aliases(generation,logical_key,kind,size,mime,name,ext,metadata) VALUES(?1,'assets/synthetic','asset',0,'application/octet-stream','synthetic','bin','{}')",[&staging]).unwrap();
+    store.connection.execute("INSERT INTO asset_owner_heads(generation,owner_kind,owner_locator,present,manifest_hash,entry_count) VALUES(?1,'root-module-assets','synthetic',1,?2,0)",params![staging,"ab".repeat(32)]).unwrap();
+    let expected = binding_stage_digest(&store.connection, &staging).unwrap();
+    for sql in [
+        "UPDATE root SET value='{}' WHERE generation=?1",
+        "UPDATE plugin_storage SET owner='different' WHERE generation=?1",
+        "UPDATE plugin_storage SET value='null' WHERE generation=?1",
+        "UPDATE plugin_storage SET ordinal=1 WHERE generation=?1",
+        "UPDATE asset_aliases SET metadata='{\"unknown\":true}' WHERE generation=?1",
+        "UPDATE asset_aliases SET size=1 WHERE generation=?1",
+        "UPDATE asset_owner_heads SET entry_count=1 WHERE generation=?1",
+        "DELETE FROM asset_owner_heads WHERE generation=?1",
+    ] {
+        let tx = store.connection.transaction().unwrap();
+        tx.execute(sql,[&staging]).unwrap();
+        assert_ne!(binding_stage_digest(&tx, &staging).unwrap(), expected, "{sql}");
+        tx.rollback().unwrap();
+        assert_eq!(binding_stage_digest(&store.connection, &staging).unwrap(), expected);
+    }
 }

@@ -6,6 +6,7 @@ import { PersistentStorageQuotaError } from './persistentDataStore'
 import { prepareNativePersistenceValue } from './nativePersistenceValue'
 import type { WindowedConversationPersistenceAuthority } from './saveCoordinator'
 import { createPersistentDataRuntime, publishPersistentCharacterMutationToWorkingSet } from './persistentDataRuntime'
+import { ActiveConversationSession } from './activeConversationSession'
 import { WorkingSetResidencyRegistry } from './workingSetResidency'
 import { captureRoot, deferred, makeDatabase, makeStore, SaveCoordinator } from './saveCoordinator.testSupport'
 
@@ -66,6 +67,38 @@ describe('coordinator review regressions', () => {
         expect(errors).toHaveBeenCalledOnce()
         expect(failures).toHaveBeenCalledTimes(2)
         expect(failures).toHaveBeenLastCalledWith(null)
+    })
+
+    it.each([false, true])('persists an all-resident session append once (unrelated edit: %s)', async (unrelatedEdit) => {
+        const database = makeDatabase()
+        database.characters[0].chats = [
+            {id: 'session-chat', name: 'Session', message: [{role: 'user', data: 'Initial'}]},
+            {id: 'other-chat', name: 'Other', message: [{role: 'user', data: 'Other initial'}]},
+        ] as any
+        const store = new IndexedDbPersistentDataStore('all-resident-session-range', new IDBFactory(), IDBKeyRange)
+        await store.open()
+        const {revision} = await store.replaceFromDatabase(database)
+        let session!: ActiveConversationSession
+        const onPersisted = vi.fn((event) => session.acknowledgePersisted(event.sessionToken, event.sessionVersion, event.revision))
+        const coordinator = new SaveCoordinator({store, captureRoot: () => captureRoot(database),
+            captureCharacters: () => database.characters, captureSelectedCharacter: () => database.characters[0],
+            replaceDatabase: () => undefined, onConversationMutationPersisted: onPersisted})
+        coordinator.initialize(revision)
+        session = new ActiveConversationSession({characterId: 'char-a', conversationId: 'session-chat',
+            conversation: database.characters[0].chats[0], storeRevision: revision,
+            onMutation: (event) => coordinator.recordActiveConversationMutation(event)})
+        const commit = vi.spyOn(store, 'commit')
+        session.append({role: 'char', data: 'Appended once'})
+        if (unrelatedEdit) database.characters[0].chats[1].message[0].data = 'Independent edit'
+        coordinator.markPersistentDataDirty(1)
+        await coordinator.flushPendingDataLocally('all-resident-append')
+        expect((await store.readConversation('char-a', 'session-chat'))?.value.message.map((value) => value.data)).toEqual(['Initial', 'Appended once'])
+        expect((await store.readConversation('char-a', 'other-chat'))?.value.message[0].data).toBe(unrelatedEdit ? 'Independent edit' : 'Other initial')
+        expect(commit).toHaveBeenCalledOnce()
+        expect(commit.mock.calls[0][0].conversations?.filter((value) => value.type !== 'reorder' && value.conversationId === 'session-chat')).toHaveLength(1)
+        expect(onPersisted).toHaveBeenCalledOnce()
+        expect(session.persistedVersion).toBe(1)
+        expect(coordinator.hasPendingPersistenceWork).toBe(false)
     })
 
     it('keeps quota failures pending without scheduling an automatic retry', async () => {

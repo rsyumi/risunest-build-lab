@@ -34,7 +34,7 @@ export async function runLegacyRestoreMeasurement(options: MeasurementOptions) {
     if (!MEASUREMENT_MB.includes(options.megabytes) || !['raw', 'gzip'].includes(options.encoding))
         throw new Error('Unknown synthetic legacy restore case')
     const runId = crypto.randomUUID()
-    const plan = planFixture(options.megabytes * 1_000_000)
+    const plan = planFixture(options.megabytes * 1_000_000, runId)
     const identity = { schema: 'risunest.synthetic-legacy-restore/v1', synthetic: true, runId,
         decodedBytes: plan.decodedBytes, encoding: options.encoding, charactersFirst: options.charactersFirst ?? true,
         characterCount: plan.characterCount, messageCount: plan.messageCount }
@@ -114,9 +114,9 @@ export async function runLegacyRestoreMeasurement(options: MeasurementOptions) {
     // Read one bounded conversation at a time, after the measurement interval ends.
     let messages = 0
     for (let index = 0; index < plan.characterCount; index++) {
-        const id = String(index).padStart(6, '0')
+        const expected = fixtureCharacter(plan, index)
         const read = await invoke<{ value: { message: LegacyMessage[] } }>('pds_read_conversation', {
-            characterId: `synthetic-${id}`, conversationId: `chat-${id}`,
+            characterId: expected.chaId, conversationId: expected.chats[0].id,
         })
         if (!read || await hash(messageProjection(read.value.message)) !== hashes[index])
             throw new Error('Restored synthetic message hash mismatch')
