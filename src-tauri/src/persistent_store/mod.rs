@@ -1600,8 +1600,7 @@ impl PersistentStore {
                 revision: expected_revision,
             });
         };
-        let (value, revision) = commit::claim_unowned_plugin_value(
-            &mut self.connection,
+        let (value, revision) = self.lww_claim_plugin_value(
             owner,
             key,
             &batch,

@@ -817,7 +817,7 @@ async fn authenticated_source_ids(fixture:&CycleFixture,backup:Option<&crate::ex
     let cancel=Cancellation::default();
     if let Some(backup)=backup {
         let catalog=backup.asset_catalog.stored(&fixture.sender.repository).map_err(|e|format!("{e:?}"))?;
-        crate::external_storage::snapshot_restore::admit_asset_catalogs(std::slice::from_ref(&catalog),&mut metadata,&fixture.sender.library,
+        crate::external_storage::snapshot_restore::admit_asset_catalogs(std::slice::from_ref(&catalog),&mut metadata,&fixture.sender.target_scope(),&fixture.sender.library,
             &backup.snapshot_id,&fixture.sender.connection_id,&fixture.sender.connection_root,&fixture.sender.root_key,
             fixture.sender.provider.as_ref(),&fixture.sender.repository,&cancel).await.map_err(|e|format!("{e:?}"))?;
     } else {

@@ -1341,8 +1341,22 @@ pub(in crate::persistent_store) fn refresh_orders(
                 &live,
                 &BTreeSet::new(),
             );
-            for (index, id) in ids.iter().enumerate() {
-                tx.execute("UPDATE plugin_storage SET ordinal=?4 WHERE generation=?1 AND owner=?2 AND storage_key=?3 AND ordinal<>?4",params![generation,p[2],id,index as i64])?;
+            let positions: Vec<i64> = {
+                let mut q = tx.prepare(
+                    "SELECT ordinal FROM plugin_storage WHERE generation=?1 AND owner=?2 ORDER BY ordinal,storage_key",
+                )?;
+                let rows = q
+                    .query_map(params![generation, p[2]], |r| r.get(0))?
+                    .collect::<Result<_, _>>()?;
+                rows
+            };
+            if positions.len() != ids.len() {
+                return Err(error("plugin-order-projection-mismatch"));
+            }
+            // Owner-local reordering must retain the positions of other owners
+            // in the flattened upstream object.
+            for (id, position) in ids.iter().zip(positions) {
+                tx.execute("UPDATE plugin_storage SET ordinal=?4 WHERE generation=?1 AND owner=?2 AND storage_key=?3 AND ordinal<>?4",params![generation,p[2],id,position])?;
             }
             continue;
         }
