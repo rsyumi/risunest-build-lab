@@ -7,7 +7,7 @@ import type {
 
 const english = {
     title: 'External storage',
-    help: 'Upload backups to a cloud service or your own server and sync with other devices. All data is encrypted on this device before it is uploaded.',
+    help: 'Upload backups to a cloud service or your own server. All data is encrypted on this device before it is uploaded.',
     unsupported: 'External storage is available in the Android and desktop apps.',
     add: 'Connect storage', cancel: 'Cancel', refresh: 'Refresh', loading: 'Loading…', back: 'Back to the form',
     provider: 'Service', mode: 'Repository', create: 'Create new', existing: 'Connect existing repository',
@@ -26,7 +26,7 @@ const english = {
     devicePluginsHelp: 'Data plugins store per device. Restoring brings plugin settings back as they were.',
     deviceSettingsHelp: "This device's sync, update and performance settings, and its plugin permissions. Used when restoring to the same device.",
     included: 'Included',
-    chooseRestore: 'Choose what to restore',
+    restoreConfirm: 'Replace the current library with this backup?',
     syncPurposeLocalDataNotice: 'Characters, chats and attachments are synchronized. Whether local data is synchronized with them is chosen under Local data in the RisuNest settings, and each device can choose differently.',
     prepare: 'Review details',
     pendingVerification: 'The next step reviews what you entered and asks you to sign in or to enter the password or key. Pressing Review details does not connect to the server.',
@@ -185,7 +185,7 @@ const english = {
 
 const korean: typeof english = {
     title: '외부 저장소',
-    help: '클라우드나 개인 서버에 백업을 올리고 다른 기기와 동기화할 수 있습니다. 모든 데이터는 업로드 하기 전 이 기기에서 암호화 됩니다.',
+    help: '클라우드나 개인 서버에 백업을 올릴 수 있습니다. 모든 데이터는 업로드 하기 전 이 기기에서 암호화 됩니다.',
     unsupported: '외부 저장소는 Android 및 데스크톱 앱에서 사용할 수 있습니다.',
     add: '저장소 연결', cancel: '취소', refresh: '새로 고침', loading: '불러오는 중…', back: '입력으로 돌아가기',
     provider: '서비스', mode: '저장소', create: '새로 만들기', existing: '이미 있는 저장소 연결',
@@ -204,7 +204,7 @@ const korean: typeof english = {
     devicePluginsHelp: '플러그인이 기기별로 저장하는 데이터입니다. 복원하면 플러그인 설정이 그대로 돌아옵니다.',
     deviceSettingsHelp: '이 기기의 동기화·업데이트·성능 설정과 플러그인 권한입니다. 같은 기기로 복원할 때 사용됩니다.',
     included: '포함',
-    chooseRestore: '복원할 영역 선택',
+    restoreConfirm: '현재 데이터를 이 백업으로 복원하시겠습니까?',
     syncPurposeLocalDataNotice: '캐릭터, 대화, 첨부 파일이 동기화됩니다. 로컬 데이터를 함께 동기화할지는 RisuNest 설정의 로컬 데이터에서 선택하며, 기기마다 다르게 선택할 수 있습니다.',
     prepare: '입력 내용 확인',
     pendingVerification: '다음 단계에서 입력한 내용을 검토하고 로그인을 하거나, 비밀번호/키를 입력하게 됩니다. 입력 내용 확인 버튼을 눌러도 서버에 연결되지 않습니다.',

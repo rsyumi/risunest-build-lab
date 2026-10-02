@@ -202,31 +202,13 @@ describe('selected conversation eviction correctness corpus', () => {
                 runtime.acquireCompleteConversation(reason, target),
             refreshSelectedConversationAfterReplacement: (target, expectedSession) =>
                 runtime.refreshSelectedConversationAfterReplacement(target, expectedSession),
-            replacePersistentCompleteCharacter: (characterId, reason, mutate, options) =>
-                runtime.replacePersistentCompleteCharacter(characterId, reason, mutate, options),
-            replacePersistentConversation: (
-                characterId,
-                conversationId,
-                reason,
-                replacement,
-                options,
-            ) => runtime.replacePersistentConversation(
-                characterId,
-                conversationId,
-                reason,
-                replacement,
-                options,
-            ),
+            getPersistentRevision: () => runtime.revision,
+            commitPersistentUnitIntent: (reason, units, conversations, wholeMessages) => runtime.commitPersistentUnitIntent(reason, units, conversations, wholeMessages),
             reportIdentityReplacementRejected: vi.fn(),
             getNavigationGeneration: () => runtime.getNavigationGeneration(),
             getStorageAuthorityEpoch: () => runtime.getStorageAuthorityEpoch(),
             assertPersistentMutationAllowed: (epoch) => runtime.assertPersistentMutationAllowed(epoch),
-            applyCompatibilityDatabaseLite: vi.fn(),
             readPluginStorageSnapshot: vi.fn(async () => ({})),
-            mutatePluginStorage: vi.fn(),
-            invalidatePluginStorage: vi.fn(),
-            materializeDatabaseSnapshot,
-            replacePersistentDatabase,
             snapshot: structuredClone,
         })
         const detached = await pluginAccess.getChatFromIndex(0, 0, {
@@ -446,26 +428,17 @@ describe('selected conversation eviction correctness corpus', () => {
             root: { ...competingRoot.value, username: 'Competing writer' },
         })
         expectedRevision = competingCommit.revision
-        await expect(runtime.flushPendingData('revision-conflict-stale'))
-            .rejects.toBeInstanceOf(RevisionConflictError)
-        expect(runtime.getSelectedConversationMode()).toBe('complete')
-        backgroundErrors.length = 0
-        const refresh = await runtime.refreshActiveWorkingSetFromStore(competingCommit.revision)
-        expect(backgroundErrors, 'refresh after competing commit').toEqual([])
-        expect(refresh.projection).toBe('applied')
-        await waitForWindowed(runtime, 'refresh after competing commit')
-        const retryLease = await runtime.acquireCompleteConversation('revision-conflict-retry')
-        onTestFinished(() => retryLease.release())
-        retryLease.session.append(structuredClone(conflictMessage))
-        retryLease.release()
+        await expect(runtime.flushPendingData('revision-conflict-stale')).resolves.toBeUndefined()
         oracle.message.push(structuredClone(conflictMessage))
-        await runtime.flushPendingData('revision-conflict-retry')
         expectedRevision += 1
+        expect((await store.readRoot()).value.username).toBe('Competing writer')
+        await runtime.flushPendingData('revision-conflict-no-op')
+        expect(runtime.revision).toBe(expectedRevision)
         const conflictPersisted = await store.readConversation('char-a', 'chat-a')
         expect(conflictPersisted!.value.message.filter((message) =>
             message.chatId === conflictMessage.chatId
         )).toEqual([conflictMessage])
-        await assertWindowed('revision conflict exact retry')
+        await assertWindowed('revision conflict rebase without duplicate append')
 
         const regexLease = await runtime.acquireCompleteConversation('regex-operation-context')
         onTestFinished(() => regexLease.release())

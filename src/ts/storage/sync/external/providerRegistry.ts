@@ -89,7 +89,7 @@ export const externalProviderDefinitions: ExternalProviderDefinition[] = [
         profiles: ['plan30gb', 'plan80gb', 'plan180gb', 'plan2tb', 'plan5tb', 'plan10tb', 'plan20tb'].map(value => ({ value, label: '' })),
         fields: [{ key: 'rootFolderName', required: true, location: true }, { key: 'rootFolderId', location: true }],
         secretFields: [{ key: 'pat', required: true, secret: true }, { key: 'expiresAtMs', required: true, type: 'datetime-local' }],
-        supportsSync: true,
+        supportsSync: false,
     },
     {
         id: 'github_releases', oauth: false, customEndpoint: false,

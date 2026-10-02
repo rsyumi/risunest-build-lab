@@ -356,7 +356,6 @@ mod tests {
             credential_ref: "credential".into(),
             root_key_ref: "root".into(),
             recovery_key_ref: "recovery".into(),
-            capture_policy: None,
             retention_policy: None,
             capabilities: Capabilities::default(),
             created_at_ms: 1,

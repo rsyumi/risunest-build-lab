@@ -1,7 +1,7 @@
 use super::{json, random_id, uploads::now, Device, Store};
 use crate::{Error, Result};
-use risunest_sync_wire::{Domain, RemoteHead, Sequence};
-use rusqlite::{params, Connection};
+use risunest_sync_wire::{RemoteHead, Sequence};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 
 #[derive(Serialize)]
@@ -282,8 +282,7 @@ impl Store {
             .map(|(_, hash)| hash.as_str())
             .collect::<Vec<_>>();
         let tx = db.transaction()?;
-        risunest_small_object_store::delete_batch(&tx, &hashes)
-            .map_err(super::objects::body_error)?;
+        super::objects::delete_inline(&tx, &hashes).map_err(super::objects::body_error)?;
         for row in obsolete.iter().chain(removed.iter().map(|(row, _)| row)) {
             tx.execute("DELETE FROM object_trash WHERE rowid=?1", [row])?;
         }
@@ -326,25 +325,18 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
-    /// A revoked device cannot authenticate again, so its acknowledgements and
-    /// receipts are unreadable once no commit job of its own is pending. The row
-    /// itself leaves only when nothing else still names it, which keeps custody
-    /// held for a replacement registration and work that is still finishing.
     fn purge_revoked_devices(tx: &Connection) -> Result<()> {
-        tx.execute("DELETE FROM device_section_acks WHERE device IN (SELECT id FROM devices WHERE revoked=1)",[])?;
-        tx.execute("DELETE FROM receipts WHERE device IN (SELECT id FROM devices WHERE revoked=1 AND NOT EXISTS(SELECT 1 FROM commit_jobs WHERE device=devices.id))",[])?;
+        tx.execute(
+            "DELETE FROM operations WHERE device IN (SELECT id FROM devices WHERE revoked=1)",
+            [],
+        )?;
         tx.execute(
             "DELETE FROM devices WHERE revoked=1
-             AND NOT EXISTS(SELECT 1 FROM device_section_acks WHERE device=devices.id)
-             AND NOT EXISTS(SELECT 1 FROM object_leases WHERE device=devices.id)
-             AND NOT EXISTS(SELECT 1 FROM object_custody WHERE device=devices.id)
-             AND NOT EXISTS(SELECT 1 FROM read_pins WHERE device=devices.id)
-             AND NOT EXISTS(SELECT 1 FROM checkpoints WHERE device=devices.id)
-             AND NOT EXISTS(SELECT 1 FROM uploads WHERE device=devices.id)
-             AND NOT EXISTS(SELECT 1 FROM download_deltas WHERE device=devices.id)
-             AND NOT EXISTS(SELECT 1 FROM staged_changes WHERE device=devices.id)
-             AND NOT EXISTS(SELECT 1 FROM receipts WHERE device=devices.id)
-             AND NOT EXISTS(SELECT 1 FROM commit_jobs WHERE device=devices.id)",
+            AND NOT EXISTS(SELECT 1 FROM object_leases WHERE device=devices.id)
+            AND NOT EXISTS(SELECT 1 FROM object_custody WHERE device=devices.id)
+            AND NOT EXISTS(SELECT 1 FROM state_pins WHERE device=devices.id)
+            AND NOT EXISTS(SELECT 1 FROM uploads WHERE device=devices.id)
+            AND NOT EXISTS(SELECT 1 FROM download_deltas WHERE device=devices.id)",
             [],
         )?;
         Ok(())
@@ -353,66 +345,72 @@ impl Store {
     /// Offline devices are never silently forgotten. Tombstones stay as identity
     /// fences; payloads and acknowledged journal bodies can be reclaimed.
     pub fn maintain(&self) -> Result<MaintenanceResult> {
+        self.maintain_at(now()?)
+    }
+    pub(super) fn maintain_at(&self, current: i64) -> Result<MaintenanceResult> {
         let _gate = self
             .objects_gate
             .lock()
             .map_err(|_| Error::new("storage-unavailable", 503))?;
         let mut db = self.db()?;
         let tx = db.transaction()?;
-        let current = now()?;
         tx.execute("DELETE FROM download_deltas WHERE state!='working' AND (expires<=?1 OR device IN (SELECT id FROM devices WHERE revoked=1))", [current])?;
         tx.execute("DELETE FROM upload_deltas WHERE upload IN (SELECT id FROM uploads WHERE state='complete')", [])?;
         tx.execute("DELETE FROM upload_delta_bases WHERE upload IN (SELECT id FROM uploads WHERE state='complete')", [])?;
         tx.execute("INSERT OR IGNORE INTO staging_trash SELECT c.upload,c.ordinal FROM upload_chunks c JOIN uploads u ON c.upload=u.id WHERE u.state!='finalizing' AND (u.state='complete' OR u.expires<=?1 OR u.device IN (SELECT id FROM devices WHERE revoked=1))",[current])?;
         tx.execute("DELETE FROM upload_chunks WHERE (upload,ordinal) IN (SELECT upload,ordinal FROM staging_trash)",[])?;
         tx.execute("DELETE FROM uploads WHERE state!='finalizing' AND (expires<=?1 OR device IN (SELECT id FROM devices WHERE revoked=1))",[current])?;
-        tx.execute("DELETE FROM read_pins WHERE expires<=?1 OR device IN (SELECT id FROM devices WHERE revoked=1)",[current])?;
-        tx.execute("DELETE FROM checkpoints WHERE expires<=?1 OR device IN (SELECT id FROM devices WHERE revoked=1)",[current])?;
+        tx.execute("DELETE FROM state_pins WHERE expires<=?1 OR device IN (SELECT id FROM devices WHERE revoked=1)",[current])?;
         tx.execute("DELETE FROM object_leases WHERE expires<=?1 OR device IN (SELECT id FROM devices WHERE revoked=1)",[current])?;
-        tx.execute("DELETE FROM staged_changes WHERE (expires<=?1 OR device IN (SELECT id FROM devices WHERE revoked=1)) AND id NOT IN (SELECT stage FROM commit_jobs)",[current])?;
         Self::purge_revoked_devices(&tx)?;
         let mut head = Self::read_head(&tx)?;
-        let mut pinned = head.seq.clone();
+        let latest: u64 = head
+            .seq
+            .as_str()
+            .parse()
+            .map_err(|_| Error::new("corrupt-metadata", 503))?;
+        let old_floor: u64 = head
+            .min_retained_seq
+            .as_str()
+            .parse()
+            .map_err(|_| Error::new("corrupt-metadata", 503))?;
+        let mut floor = latest;
         {
-            let mut stmt = tx.prepare("SELECT after_seq FROM read_pins")?;
-            for value in stmt.query_map([], |r| r.get::<_, String>(0))? {
-                pinned = pinned.min(Sequence::try_from(value?)?);
+            let mut stmt = tx.prepare("SELECT ack FROM devices WHERE revoked=0 AND last_ack IS NOT NULL AND last_ack>?1 UNION ALL SELECT start_seq FROM state_pins")?;
+            for value in stmt.query_map([current - 604800], |r| r.get::<_, String>(0))? {
+                floor = floor.min(
+                    value?
+                        .parse()
+                        .map_err(|_| Error::new("corrupt-metadata", 503))?,
+                );
             }
         }
-        // One section's acknowledgement never reclaims another section's journal.
-        let mut floor: Option<Sequence> = None;
-        for domain in Domain::ALL {
-            let section_floor = Self::read_section_ack_floor(&tx, domain, &head.seq)?
-                .min(pinned.clone())
-                .max(head.section(domain)?.gc_floor.clone());
-            tx.execute(
-                "DELETE FROM changes WHERE domain=?1 AND (length(seq),seq)<=(?2,?3)",
-                params![
-                    domain.as_str(),
-                    section_floor.as_str().len() as i64,
-                    section_floor.as_str()
-                ],
-            )?;
-            floor = Some(match floor {
-                Some(value) => value.min(section_floor.clone()),
-                None => section_floor.clone(),
-            });
-            let section = head
-                .sections
-                .get_mut(&domain)
-                .ok_or(Error::new("corrupt-metadata", 503))?;
-            section.gc_floor = section_floor;
+        // Keep a seven-day tail independently of active acknowledgements.
+        let oldest: Option<String> = tx
+            .query_row(
+                "SELECT seq FROM journal WHERE created>?1 ORDER BY length(seq),seq LIMIT 1",
+                [current - 604800],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(oldest) = oldest {
+            floor = floor.min(
+                oldest
+                    .parse::<u64>()
+                    .map_err(|_| Error::new("corrupt-metadata", 503))?
+                    .saturating_sub(1),
+            );
         }
-        let floor = floor
-            .ok_or(Error::new("corrupt-metadata", 503))?
-            .max(head.min_retained_seq.clone());
-        // Receipts are pruned only once their resulting head is acknowledged.
-        tx.execute("DELETE FROM receipts WHERE created<=unixepoch()-86400 AND (length(json_extract(body,'$.head.seq')),json_extract(body,'$.head.seq'))<=(?1,?2)",params![floor.as_str().len() as i64,floor.as_str()])?;
+        floor = floor.max(old_floor);
         tx.execute(
-            "DELETE FROM commits WHERE (length(seq),seq)<(?1,?2)",
-            params![floor.as_str().len() as i64, floor.as_str()],
+            "DELETE FROM journal WHERE (length(seq),seq)<=(?1,?2)",
+            params![floor.to_string().len() as i64, floor.to_string()],
         )?;
+        let floor = Sequence::from(floor);
         head.min_retained_seq = floor.clone();
+        for section in head.sections.values_mut() {
+            section.gc_floor = floor.clone();
+        }
         tx.execute("UPDATE library SET head=?1", [json(&head)?])?;
         tx.execute_batch("CREATE TEMP TABLE IF NOT EXISTS gc_roots(hash TEXT PRIMARY KEY); DELETE FROM gc_roots;
             INSERT OR IGNORE INTO gc_roots SELECT hash FROM object_leases;
@@ -421,10 +419,8 @@ impl Store {
             INSERT OR IGNORE INTO gc_roots SELECT hash FROM upload_delta_bases;
             INSERT OR IGNORE INTO gc_roots SELECT hash FROM download_delta_bases;
             CREATE TEMP TABLE IF NOT EXISTS gc_versions(body TEXT); DELETE FROM gc_versions;
-            INSERT INTO gc_versions SELECT version FROM records UNION ALL SELECT version FROM checkpoint_records;
-            INSERT INTO gc_versions SELECT json_extract(body,'$.before') FROM changes UNION ALL SELECT json_extract(body,'$.after') FROM changes;
-            INSERT INTO gc_versions SELECT json_extract(body,'$.before') FROM staged_records UNION ALL SELECT json_extract(body,'$.after') FROM staged_records UNION ALL SELECT json_extract(body,'$.version') FROM staged_fences;
-            INSERT OR IGNORE INTO gc_roots SELECT json_extract(body,'$.objectHash') FROM gc_versions WHERE json_extract(body,'$.objectHash') IS NOT NULL;
+            INSERT INTO gc_versions SELECT json_extract(body,'$.value') FROM units UNION ALL SELECT json_extract(body,'$.value') FROM state_pin_units UNION ALL SELECT json_extract(body,'$.value') FROM journal;
+            INSERT OR IGNORE INTO gc_roots SELECT json_extract(body,'$.descriptor.objectHash') FROM gc_versions WHERE json_extract(body,'$.descriptor.objectHash') IS NOT NULL;
             INSERT OR IGNORE INTO gc_roots SELECT json_extract(body,'$.descriptorHash') FROM gc_versions WHERE json_extract(body,'$.descriptorHash') IS NOT NULL;
             CREATE TEMP TABLE IF NOT EXISTS gc_alive(hash TEXT PRIMARY KEY); DELETE FROM gc_alive;
             WITH RECURSIVE edges(source,target) AS (
@@ -463,7 +459,7 @@ impl Store {
         checkpoint(&*self.db()?)
     }
     /// Call only after restoring a stopped, complete server-directory backup.
-    /// Old clients must reconcile against the restored checkpoint under a new epoch.
+    /// Clients must bootstrap the restored state under a new media identity.
     pub fn rotate_restored_epoch(&self) -> Result<()> {
         let _gate = self
             .objects_gate
@@ -471,12 +467,18 @@ impl Store {
             .map_err(|_| Error::new("storage-unavailable", 503))?;
         let mut db = self.db()?;
         let tx = db.transaction()?;
-        let head = RemoteHead::genesis(Self::read_head(&tx)?.library_id, random_id()?)?;
+        let prior = Self::read_head(&tx)?;
+        let mut head = RemoteHead::genesis(prior.library_id, random_id()?)?;
+        head.seq = prior.seq;
+        head.min_retained_seq = head.seq.clone();
+        for section in head.sections.values_mut() {
+            section.gc_floor = head.seq.clone();
+        }
         tx.execute(
             "INSERT OR IGNORE INTO staging_trash SELECT upload,ordinal FROM upload_chunks",
             [],
         )?;
-        tx.execute_batch("DELETE FROM changes; DELETE FROM commits; DELETE FROM receipts; DELETE FROM commit_jobs; DELETE FROM staged_changes; DELETE FROM read_pins; DELETE FROM checkpoints; DELETE FROM uploads; DELETE FROM download_deltas; DELETE FROM object_leases; DELETE FROM scope_versions; DELETE FROM device_section_acks;")?;
+        tx.execute_batch("DELETE FROM journal; DELETE FROM state_pins; DELETE FROM uploads; DELETE FROM download_deltas; DELETE FROM object_leases; UPDATE devices SET ack='0',last_ack=NULL,revoked=1;")?;
         tx.execute("UPDATE library SET head=?1", [json(&head)?])?;
         tx.commit()?;
         self.announce_head();

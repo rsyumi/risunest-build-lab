@@ -1,10 +1,16 @@
 use super::{Device, Store};
-use crate::{Error, Result};
-use risunest_sync_wire::{
-    delta, hash,
+#[cfg(test)]
+use crate::source_observer::shared_wire::{
+    delta,
     transfer::{self, Frame},
-    validate_hash,
 };
+use crate::{Error, Result};
+#[cfg(not(test))]
+use risunest_sync_wire::{
+    delta,
+    transfer::{self, Frame},
+};
+use risunest_sync_wire::{hash, validate_hash};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
@@ -15,6 +21,8 @@ pub struct TransferRequest {
 }
 impl Store {
     pub fn receive_frames(&self, device: &Device, bytes: &[u8]) -> Result<Vec<String>> {
+        #[cfg(test)]
+        let _observed = crate::source_observer::ingress(&self.root);
         #[cfg(test)]
         let measured = std::time::Instant::now();
         let frames = transfer::decode(bytes)?;
@@ -59,6 +67,8 @@ impl Store {
             };
             let digest = hash(&bytes);
             #[cfg(test)]
+            crate::source_observer::hashed(&digest, "frame-ingress-sha256", bytes.len());
+            #[cfg(test)]
             super::objects::frame_metrics::record(1, measured);
             materialized = materialized
                 .checked_add(bytes.len())
@@ -75,6 +85,8 @@ impl Store {
         device: &Device,
         requests: &[TransferRequest],
     ) -> Result<Vec<u8>> {
+        #[cfg(test)]
+        let _observed = crate::source_observer::operation(&self.root);
         if requests.len() > 1024 {
             return Err(Error::new("too-many-candidates", 400));
         }

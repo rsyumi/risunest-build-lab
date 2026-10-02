@@ -37,7 +37,10 @@ export function patchWorkingSetRoot(target: Database, root: PersistentRoot): voi
     }
     for (const key of Object.keys(rootRecord)) {
         if (isTauri && key === 'account') continue
-        if (!isEqual(targetRecord[key], rootRecord[key])) targetRecord[key] = rootRecord[key]
+        let value = rootRecord[key]
+        if (key === 'botPresetsId' && typeof value === 'string') value = Math.max(0, target.botPresets.findIndex((preset) => preset?.['id'] === value))
+        if (key === 'selectedPersona' && typeof value === 'string') value = Math.max(0, target.personas?.findIndex((persona) => persona.id === value) ?? 0)
+        if (!isEqual(targetRecord[key], value)) targetRecord[key] = value
     }
 }
 
@@ -208,9 +211,10 @@ export function createCatalogPresetWorkingSet(
     const presets: Database['botPresets'] = []
     for (const summary of catalog.items) {
         presets[summary.configuredIndex] = {
+            id: summary.id,
             name: summary.name,
             ...(summary.image === undefined ? {} : { image: summary.image }),
-        } as Database['botPresets'][number]
+        } as unknown as Database['botPresets'][number]
     }
     if (active) presets[active.summary.configuredIndex] = active.value
 
@@ -230,19 +234,19 @@ export function createCatalogPresetWorkingSet(
 export function createPresetCatalogWorkingSetFromValues(
     presets: Database['botPresets'],
     revision: number,
-    activeConfiguredIndex: number | undefined,
+    activeConfiguredIndex: number | string | undefined,
 ): Database['botPresets'] {
     const catalog: PresetCatalog = {
         revision,
         items: presets.map((preset, configuredIndex) => ({
-            id: String(configuredIndex),
+            id: preset['id'] as string,
             configuredIndex,
             name: preset.name ?? '',
             image: preset.image,
         })),
     }
     const activeSummary = catalog.items.find(
-        (summary) => summary.configuredIndex === activeConfiguredIndex,
+        (summary) => typeof activeConfiguredIndex === 'string' ? summary.id === activeConfiguredIndex : summary.configuredIndex === activeConfiguredIndex,
     )
     return createCatalogPresetWorkingSet(
         catalog,
@@ -305,6 +309,8 @@ export function projectCatalogWorkingSet(
         .map(createCatalogCharacterStub)
     return {
         ...root,
+        botPresetsId: typeof root.botPresetsId === 'string' ? Math.max(0, presets.findIndex((preset) => preset?.['id'] === root.botPresetsId)) : root.botPresetsId,
+        selectedPersona: typeof root.selectedPersona === 'string' ? Math.max(0, root.personas?.findIndex((persona) => persona.id === root.selectedPersona) ?? 0) : root.selectedPersona,
         pluginCustomStorage: {},
         botPresets: presets,
         characters,
@@ -328,12 +334,12 @@ async function readPinnedPresets(
 
 export async function readPinnedActivePreset(
     reader: PersistentRevisionReader,
-    configuredIndex: number,
+    configuredIndex: number | string,
 ): Promise<{ catalog: PresetCatalog; active: ActiveCatalogPreset | null }> {
     const catalog = await reader.queryPresets()
     assertPinnedRevision(reader.revision, catalog.revision, 'Preset catalog')
     const summary = catalog.items.find((candidate) =>
-        candidate.configuredIndex === configuredIndex)
+        typeof configuredIndex === 'string' ? candidate.id === configuredIndex : candidate.configuredIndex === configuredIndex)
     if (!summary) return { catalog, active: null }
     const preset = await reader.readPreset(summary.id)
     if (!preset) throw new Error(`Missing preset ${summary.id}`)

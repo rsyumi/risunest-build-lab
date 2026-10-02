@@ -12,6 +12,7 @@ import { sleep } from '../util'
 import { getBackupInlayName } from './backupAssets'
 
 const state = vi.hoisted(() => ({
+    native: true,
     blobStore: null as BlobStore | null,
     currentDatabase: null as Database | null,
     runtime: null as PersistentDataRuntime | null,
@@ -21,10 +22,9 @@ const state = vi.hoisted(() => ({
     nativeFileClose: vi.fn(async () => undefined),
     fullReadFile: vi.fn(async () => new Uint8Array([99])),
     restoreEvents: [] as string[],
-    replacePersistentDatabase: vi.fn(async (_database: Database, _reason: string) => ({
+    replacePersistentDatabase: vi.fn(async (_database: Database, _reason: string, _options?: import('../storage/saveCoordinator').PersistentReplacementOptions) => ({
         kind: 'committed', revision: 1, projection: 'applied',
     } as const)),
-    confirmColdStorage: vi.fn(async () => true),
     getUncleanables: vi.fn(async () => ['assets/second-read.png']),
     fallbackContext: {
         signal: new AbortController().signal,
@@ -35,7 +35,7 @@ const state = vi.hoisted(() => ({
 }))
 
 vi.mock('../alert', () => ({
-    alertConfirm: vi.fn(async () => true),
+    alertConfirm: vi.fn(async () => true), alertCheckboxConfirm: vi.fn(async () => ({ confirmed: true, checked: true })),
     alertError: vi.fn(),
     alertMd: vi.fn(),
     alertNormal: vi.fn(),
@@ -88,13 +88,12 @@ vi.mock('../storage/database.svelte', () => ({
 vi.mock('../storage/persistentDataRuntime.svelte', () => ({
     getPersistentDataRuntime: () => state.runtime,
     publishCurrentOfficialRevision: vi.fn(async () => undefined),
-    replacePersistentDatabase: (database: Database, reason: string) => (
-        state.replacePersistentDatabase(database, reason)
+    replacePersistentDatabase: (database: Database, reason: string, options?: import('../storage/saveCoordinator').PersistentReplacementOptions) => (
+        state.replacePersistentDatabase(database, reason, options)
     ),
 }))
 
 vi.mock('../process/coldstorage.svelte', () => ({
-    confirmIncompleteColdStorageRestore: state.confirmColdStorage,
     getColdStorageBackupKey: (name: string) => {
         const match = /^coldstorage_(.+)\.json$/.exec(name)
         return match?.[1] ?? null
@@ -110,7 +109,7 @@ vi.mock('../process/coldstorage.svelte', () => ({
 }))
 
 vi.mock('src/ts/platform', () => ({
-    isTauri: true,
+    get isTauri() {return state.native},
     isTauriDesktop: true,
     isTauriAndroid: false,
     isTauriIOS: false,
@@ -134,7 +133,7 @@ vi.mock('../util', () => ({
     sleep: vi.fn(async () => undefined),
 }))
 vi.mock('../characterCards', () => ({ hubURL: 'https://hub.invalid' }))
-vi.mock('src/lang', () => ({ language: {} }))
+vi.mock('src/lang', async () => ({ language: (await import('src/lang/en')).languageEnglish }))
 
 function emptyBlobStore(): BlobStore {
     return {
@@ -149,6 +148,7 @@ function emptyBlobStore(): BlobStore {
 
 describe('local backup persistent snapshot', () => {
     beforeEach(() => {
+        state.native = true
         vi.clearAllMocks()
         state.written.clear()
         state.restoreEvents = []
@@ -209,6 +209,7 @@ describe('local backup persistent snapshot', () => {
         const file = {
             name: 'backup.bin',
             size: archive.byteLength,
+            slice: (start: number, end: number) => ({ arrayBuffer: async () => archive.slice(start, end).buffer }),
             stream: () => new ReadableStream<Uint8Array>({
                 start(controller) {
                     controller.enqueue(archive)
@@ -272,7 +273,10 @@ describe('local backup persistent snapshot', () => {
         expect(JSON.stringify(context.onStatus.mock.calls)).toContain(`coldstorage_${coldKey}.json`)
     })
 
-    it('skips a damaged RisuNest inlay envelope instead of restoring it as an asset', async () => {
+    it.each([[true,false,false],[false,false,false],[true,true,false],[true,false,true]])('preflights, acknowledges, and preserves committed outcomes (%s,%s,%s)', async (confirmed, bodyFails, native) => {
+        state.native = native
+        const { alertCheckboxConfirm } = await import('../alert')
+        vi.mocked(alertCheckboxConfirm).mockResolvedValueOnce({ confirmed, checked: confirmed })
         const database = structuredClone(risuSaveFixtureDatabase) as Database
         const encodeEntry = (name: string, data: Uint8Array) => {
             const encodedName = new TextEncoder().encode(name)
@@ -298,6 +302,13 @@ describe('local backup persistent snapshot', () => {
         const file = {
             name: 'damaged-inlay.bin',
             size: archive.byteLength,
+            slice: (start: number, end: number) => ({ arrayBuffer: async () => {
+                if (start === 8 + new TextEncoder().encode(damagedInlayName).byteLength && end - start === 6) {
+                    expect(state.replacePersistentDatabase).toHaveBeenCalledOnce()
+                    if (bodyFails) throw new Error('synthetic attachment read failure')
+                }
+                return archive.slice(start, end).buffer
+            } }),
             stream: () => new ReadableStream<Uint8Array>({
                 start(controller) {
                     controller.enqueue(archive)
@@ -323,13 +334,37 @@ describe('local backup persistent snapshot', () => {
             setPartialWritesPossible: vi.fn(),
         }
 
-        const pending = importLegacyBackupWithWebView(context)
+        const {language} = await import('../../lang')
+        const pending = importLegacyBackupWithWebView(context, {}, language.pocketRisuImportConfirm)
         await vi.waitFor(() => expect(input.onchange).not.toBeNull())
         await input.onchange?.()
+        if (!confirmed) {
+            await expect(pending).rejects.toMatchObject({name:'AbortError'})
+            createElement.mockRestore()
+            expect(alertCheckboxConfirm).toHaveBeenCalledOnce()
+            expect(state.replacePersistentDatabase).not.toHaveBeenCalled()
+            expect(state.blobStore?.put).not.toHaveBeenCalled()
+            return
+        }
+        if (bodyFails) {
+            await expect(pending).rejects.toMatchObject({name:'NativeFileJobActivationCommittedError',committedRevision:1})
+            createElement.mockRestore()
+            expect(state.replacePersistentDatabase).toHaveBeenCalledOnce()
+            expect(context.setPartialWritesPossible).toHaveBeenCalledWith(true)
+            expect(state.blobStore?.put).not.toHaveBeenCalled()
+            return
+        }
         const result = await pending
         createElement.mockRestore()
+        if (native) {
+            expect(alertCheckboxConfirm).not.toHaveBeenCalled()
+            expect(state.replacePersistentDatabase.mock.calls[0][2]).toMatchObject({upstreamImport:true, upstreamImportWarnings:[language.backupLoadConfirm2]})
+        } else {
+            expect(alertCheckboxConfirm).toHaveBeenCalledOnce()
+            expect(alertCheckboxConfirm).toHaveBeenCalledWith(expect.objectContaining({title:language.pocketRisuImportConfirm}))
+        }
 
-        expect(result).toEqual({ warningCodes: ['invalid-inlay-entry'] })
+        expect(result).toEqual({ warningCodes: ['upstream-restore-losses'], upstreamLosses: {coldMissing:0,invalidInlays:1,pocketInlays:0} })
         expect(state.blobStore?.put).not.toHaveBeenCalled()
         const last = context.onStatus.mock.calls.at(-1)?.[0]
         expect(last?.detail?.counts).toMatchObject({
@@ -351,11 +386,11 @@ describe('local backup persistent snapshot', () => {
         view.setUint32(4 + encodedName.byteLength, data.byteLength, true)
         entry.set(data, 8 + encodedName.byteLength)
         const controller = new AbortController()
-        // Cancel after staging the first attachment.
-        vi.mocked(sleep).mockImplementationOnce(async () => controller.abort())
+        // Cancel after reading the first entry header, before any attachment body.
         const file = {
             name: 'partial.bin',
             size: entry.byteLength,
+            slice: (start: number, end: number) => ({ arrayBuffer: async () => entry.slice(start, end).buffer }),
             stream: () => new ReadableStream<Uint8Array>({
                 start(stream) {
                     stream.enqueue(entry)
@@ -376,7 +411,7 @@ describe('local backup persistent snapshot', () => {
         const { importLegacyBackupWithWebView } = await import('./backuplocal')
         const context = {
             signal: controller.signal,
-            onStatus: vi.fn(),
+            onStatus: vi.fn((status) => { if (status.detail?.counts?.entriesRead > 0) controller.abort() }),
             setSource: vi.fn(),
             setPartialWritesPossible: vi.fn(),
         }
@@ -470,6 +505,7 @@ describe('local backup persistent snapshot', () => {
         )
         await store.open()
         const persisted = structuredClone(risuSaveFixtureDatabase) as Database
+        persisted.botPresets.forEach((preset, index) => { preset.id = `synthetic-local-backup-preset-${index}` })
         const pluginAssetKey = 'assets/plugin-storage.bin'
         const pluginAssetBytes = Uint8Array.of(11, 22, 33)
         persisted.pluginCustomStorage = {
@@ -520,6 +556,7 @@ describe('local backup persistent snapshot', () => {
         )
         await store.open()
         const persisted = structuredClone(risuSaveFixtureDatabase) as Database
+        persisted.botPresets.forEach((preset, index) => { preset.id = `synthetic-local-backup-preset-${index}` })
         persisted.pluginCustomStorage = {
             zero: 0,
             nested: {
@@ -603,6 +640,7 @@ describe('local backup persistent snapshot', () => {
         )
         await store.open()
         const persisted = structuredClone(risuSaveFixtureDatabase) as Database
+        persisted.botPresets.forEach((preset, index) => { preset.id = `synthetic-local-backup-preset-${index}` })
         persisted.characters[0].image = 'assets\\partial-profile.png'
         const imported = await store.replaceFromDatabase(persisted)
         state.currentDatabase = structuredClone(persisted)

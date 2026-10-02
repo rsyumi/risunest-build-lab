@@ -1,6 +1,10 @@
 //! Direct-locator snapshot download and full verification into native staging.
 //! No PDS generation is activated here; the caller owns the subsequent staged
 //! apply and eventual cleanup of this durable verified directory.
+#[cfg(test)]
+use super::worker_observation::spawn_blocking;
+#[cfg(not(test))]
+use tokio::task::spawn_blocking;
 use super::{
     content_store::{ContentStore, ObjectSource},
     package_cache::CatalogRange,
@@ -18,6 +22,7 @@ use risunest_external_storage_format::{
     content_identity::hash_reader, crypto::derive_key, pack, snapshot as wire,
 };
 use sha2::{Digest, Sha256};
+use rusqlite::OptionalExtension;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs::{self, OpenOptions},
@@ -191,7 +196,6 @@ impl PreparedRemoteSnapshot {
                 .read_all(digest)
                 .expect("prepared record body"),
             ObjectSource::Library(_) => panic!("a library body is not read through here"),
-            ObjectSource::Unchanged => panic!("an unchanged record has no fetched body"),
         }
     }
     pub(super) fn record_body(&self, index: usize) -> Vec<u8> {
@@ -227,6 +231,7 @@ fn ensure_directory(path: &Path) -> Result<()> {
     }
     Ok(())
 }
+pub(crate) fn verify_body_file(path:&Path,length:u64,sha256:&str)->Result<bool> {verify(path,length,sha256)}
 fn verify(path: &Path, length: u64, sha256: &str) -> Result<bool> {
     let mut file = match crate::trust_boundary::open_regular_source(path) {
         Ok(file) => file,
@@ -236,7 +241,13 @@ fn verify(path: &Path, length: u64, sha256: &str) -> Result<bool> {
     if file.metadata().map_err(corrupt)?.len() != length {
         return Ok(false);
     }
-    Ok(hex::encode(hash_reader(&mut file, length).map_err(corrupt)?) == sha256)
+    let hashed=hash_reader(&mut file,length);
+    #[cfg(test)]
+    match &hashed {
+        Ok(_)=>crate::persistent_store::hash_work::observe("external_restore_file_verify",length as usize),
+        Err(_)=>crate::persistent_store::hash_work::incomplete("external_restore_file_verify"),
+    }
+    Ok(hex::encode(hashed.map_err(corrupt)?) == sha256)
 }
 
 fn publish_verified(
@@ -371,7 +382,7 @@ pub(super) async fn open_object(
     let cipher_path = ciphertext.clone();
     let partial_path = partial.clone();
     let cpu = cpu_permit().await?;
-    tokio::task::spawn_blocking(move || {
+    spawn_blocking(move || {
         let mut input =
             crate::trust_boundary::open_regular_source(&cipher_path).map_err(corrupt)?;
         let mut output = OpenOptions::new()
@@ -391,6 +402,8 @@ pub(super) async fn open_object(
         output.sync_all().map_err(transient)?;
         drop(output);
         let expected_role = match object_copy.role {
+            ObjectRole::Segment => return Err(ProviderError::new(ErrorKind::Unsupported)),
+            ObjectRole::Snapshot => wire::ObjectRole::SyncState,
             ObjectRole::Descriptor => wire::ObjectRole::Descriptor,
             ObjectRole::Pack => wire::ObjectRole::Pack,
             ObjectRole::Catalog => wire::ObjectRole::Catalog,
@@ -668,15 +681,6 @@ pub(crate) enum SourceTrust<'a> {
     /// The repository at this root may answer on identity and length alone,
     /// which is what it was already admitted under.
     AdmittedLibrary(&'a Path),
-    /// As `AdmittedLibrary`, for a receive whose library holds `records` (its
-    /// base record map, key to content hash). When the snapshot's records
-    /// differ from them by no more than `within`, a record they name with
-    /// the same identity is left `Unchanged` and its pack is not read.
-    AdmittedLibraryAt {
-        root: &'a Path,
-        records: &'a BTreeMap<String, String>,
-        within: super::receive_difference::DifferenceBudget,
-    },
 }
 
 /// The repository a plan may take bodies from, and whether each one has to be
@@ -705,7 +709,6 @@ fn resolve_entries(
     staging_root: &Path,
     content: &ContentStore,
     library: Option<LocalLibrary>,
-    unchanged: &BTreeSet<String>,
     cancel: &Cancellation,
 ) -> Result<Vec<ResolvedEntry>> {
     let prove = library.as_ref().is_some_and(|library| library.prove);
@@ -722,9 +725,6 @@ fn resolve_entries(
         let (destination, source) = match entry.kind {
             // A record already in the content store is proved the same way a
             // staging file was, by its length and then by its content.
-            wire::CatalogEntryKind::Record if unchanged.contains(&entry.key) => {
-                (None, Some(ObjectSource::Unchanged))
-            }
             wire::CatalogEntryKind::Record => {
                 let length = i64::try_from(entry.byte_length).map_err(corrupt)?;
                 let held = content.validate(&digest, length, true).is_ok();
@@ -755,37 +755,6 @@ fn resolve_entries(
     Ok(plan)
 }
 
-/// The record keys a receive against `base` would leave alone, when the
-/// difference is small enough to be applied in place. A difference too large
-/// for that is applied by replacing the library, which needs every body.
-fn unchanged_records(
-    entries: &[CompleteEntry],
-    base: &BTreeMap<String, String>,
-    within: super::receive_difference::DifferenceBudget,
-) -> Result<BTreeSet<String>> {
-    use super::receive_difference::{difference, LocalRecord, RemoteRecord};
-    let computed = difference(
-        entries.iter().map(|entry| RemoteRecord {
-            key: entry.key.clone(),
-            content_hash: hex::encode(entry.content_sha256),
-            byte_length: entry.byte_length,
-        }),
-        base.iter().map(|(key, content_hash)| LocalRecord {
-            key: key.clone(),
-            content_hash: content_hash.clone(),
-        }),
-    )?;
-    if !computed.within(within) {
-        return Ok(BTreeSet::new());
-    }
-    let moved: BTreeSet<&String> = computed.added.iter().chain(&computed.changed).collect();
-    Ok(entries
-        .iter()
-        .filter(|entry| !moved.contains(&entry.key))
-        .map(|entry| entry.key.clone())
-        .collect())
-}
-
 /// A body the library already holds under this exact identity and length. The
 /// length is asked for as well, because a truncated file carries the name of
 /// the content it no longer is.
@@ -809,8 +778,14 @@ fn library_body(
     // Proving it costs one read of a body that is going to be consumed anyway,
     // which is what a job that answers for everything it consumes owes. A body
     // that fails is not a source, so the pack that carries it is read instead.
-    if prove && hex::encode(hash_reader(&mut file, byte_length).map_err(corrupt)?) != digest {
-        return Ok(None);
+    if prove {
+        let hashed=hash_reader(&mut file,byte_length);
+        #[cfg(test)]
+        match &hashed {
+            Ok(_)=>crate::persistent_store::hash_work::observe("external_restore_local_source_verify",byte_length as usize),
+            Err(_)=>crate::persistent_store::hash_work::incomplete("external_restore_local_source_verify"),
+        }
+        if hex::encode(hashed.map_err(corrupt)?) != digest {return Ok(None);}
     }
     Ok(Some(ObjectSource::Library(digest.to_owned())))
 }
@@ -941,7 +916,13 @@ fn read_chunk(
     }
     input.seek(SeekFrom::Start(chunk.offset)).map_err(corrupt)?;
     let mut limited = input.take(chunk.stored_length);
-    let decoded = pack::read_entry(&mut limited, pack::MAX_CHUNK_BYTES).map_err(corrupt)?;
+    let decoded = pack::read_entry(&mut limited, pack::MAX_CHUNK_BYTES);
+    #[cfg(test)]
+    match &decoded {
+        Ok(decoded)=>crate::persistent_store::hash_work::observe("native_external_pack_decode",decoded.bytes.len()),
+        Err(_)=>crate::persistent_store::hash_work::incomplete("native_external_pack_decode"),
+    }
+    let decoded=decoded.map_err(corrupt)?;
     if limited.limit() != 0
         || decoded.hash != chunk.plaintext_sha256
         || decoded.bytes.len() as u64 != chunk.plaintext_length
@@ -993,10 +974,14 @@ fn place_whole(
         .open(&partial)
         .map_err(transient)?;
     let mut output_hash = Sha256::new();
+    #[cfg(test)]
+    crate::persistent_store::hash_work::begin("external_restore_entry_assembly");
     let mut written = 0u64;
     for chunk in &entry.chunks {
         let bytes = next(chunk)?;
         output.write_all(&bytes).map_err(transient)?;
+        #[cfg(test)]
+        crate::persistent_store::hash_work::update("external_restore_entry_assembly",bytes.len());
         output_hash.update(&bytes);
         written = written
             .checked_add(bytes.len() as u64)
@@ -1132,6 +1117,8 @@ fn finish_assemblies(staging_root: &Path, pending: &[Pending]) -> Result<()> {
             let mut bytes =
                 Vec::with_capacity(usize::try_from(entry.byte_length).map_err(corrupt)?);
             source.read_to_end(&mut bytes).map_err(transient)?;
+            #[cfg(test)]
+            crate::persistent_store::hash_work::observe("external_restore_record_verify",bytes.len());
             let actual: [u8; 32] = Sha256::digest(&bytes).into();
             (actual == entry.content_sha256 && bytes.len() as u64 == entry.byte_length)
                 .then_some(Some(bytes))
@@ -1221,7 +1208,7 @@ async fn turn_over_packs(
     let prepared_root = staging_root.to_path_buf();
     let prepared_pending = pending.clone();
     let cpu = cpu_permit().await?;
-    tokio::task::spawn_blocking(move || prepare_turnover(&prepared_root, &prepared_pending))
+    spawn_blocking(move || prepare_turnover(&prepared_root, &prepared_pending))
         .await
         .map_err(transient)??;
     drop(cpu);
@@ -1233,7 +1220,7 @@ async fn turn_over_packs(
     );
     let opened_root = staging_root.to_path_buf();
     let mut content = Some(
-        tokio::task::spawn_blocking(move || content_store(&opened_root))
+        spawn_blocking(move || content_store(&opened_root))
             .await
             .map_err(transient)??,
     );
@@ -1272,7 +1259,7 @@ async fn turn_over_packs(
             let mut place_group = group.take().ok_or_else(|| transient("placed group"))?;
             let plaintext_length = pack.plaintext_length;
             let cpu = cpu_permit().await?;
-            let (returned_content, returned_group, placed) = tokio::task::spawn_blocking(move || {
+            let (returned_content, returned_group, placed) = spawn_blocking(move || {
                 let placed = place_pack(
                     &place_root,
                     &place_id,
@@ -1310,7 +1297,7 @@ async fn turn_over_packs(
     // attempt, which is what makes it resume rather than restart.
     if let (Some(mut flush_content), Some(mut flush_group)) = (content.take(), group.take()) {
         let flush_root = staging_root.to_path_buf();
-        let flushed = tokio::task::spawn_blocking(move || {
+        let flushed = spawn_blocking(move || {
             flush_group.flush(&flush_root, &mut flush_content)
         })
         .await
@@ -1323,7 +1310,7 @@ async fn turn_over_packs(
     let finish_root = staging_root.to_path_buf();
     let finish_pending = pending.clone();
     let cpu = cpu_permit().await?;
-    tokio::task::spawn_blocking(move || finish_assemblies(&finish_root, &finish_pending))
+    spawn_blocking(move || finish_assemblies(&finish_root, &finish_pending))
         .await
         .map_err(transient)??;
     drop(cpu);
@@ -1412,6 +1399,8 @@ fn assemble(entry: &CompleteEntry, packs: &BTreeMap<String, PathBuf>) -> Result<
     validate_section_lengths(std::slice::from_ref(entry))?;
     let mut bytes = Vec::with_capacity(usize::try_from(entry.byte_length).map_err(corrupt)?);
     let mut digest = Sha256::new();
+    #[cfg(test)]
+    crate::persistent_store::hash_work::begin("external_restore_section_assembly");
     for chunk in &entry.chunks {
         let pack_path = packs
             .get(&chunk.pack_id)
@@ -1419,6 +1408,8 @@ fn assemble(entry: &CompleteEntry, packs: &BTreeMap<String, PathBuf>) -> Result<
         let mut input = crate::trust_boundary::open_regular_source(pack_path).map_err(corrupt)?;
         let input_length = input.metadata().map_err(corrupt)?.len();
         let decoded = read_chunk(&mut input, input_length, chunk)?;
+        #[cfg(test)]
+        crate::persistent_store::hash_work::update("external_restore_section_assembly",decoded.len());
         digest.update(&decoded);
         bytes.extend_from_slice(&decoded);
     }
@@ -1541,7 +1532,7 @@ pub(crate) async fn download_sections(
         let cpu = cpu_permit().await?;
         let section_cancel = cancel.clone();
         let section_staging = staging_root.to_path_buf();
-        let sources = tokio::task::spawn_blocking(move || {
+        let sources = spawn_blocking(move || {
             materialize_section_entries(complete, &pack_paths, &section_staging, &section_cancel)
         })
         .await
@@ -1559,6 +1550,322 @@ pub(crate) async fn download_sections(
     Ok(prepared)
 }
 
+pub(crate) async fn download_checkpoint_data(
+    root: &RemoteObject, staging_root: &Path, root_key: &[u8;32],
+    provider: &dyn Provider, repository: &RepositoryHandle, cancel: &Cancellation,
+) -> Result<(Vec<PreparedRecord>, Vec<PreparedObject>)> {
+    ensure_directory(staging_root)?;
+    let (entries,packs,_) = read_catalog(root,wire::CatalogKind::Records,root_key,staging_root,provider,repository,cancel).await?;
+    let content=content_store(staging_root)?;
+    let plan=resolve_entries(entries,staging_root,&content,None,cancel)?;
+    let (records,objects)=turn_over_packs(plan,&packs,root_key,staging_root,provider,repository,&PhaseProgress::silent(),cancel).await?;
+    Ok((records.into_values().collect(),objects.into_values().collect()))
+}
+
+pub(crate) async fn download_control_catalogs(
+    catalogs:&[wire::StoredObject],staging_root:&Path,root_key:&[u8;32],
+    provider:&dyn Provider,repository:&RepositoryHandle,cancel:&Cancellation,
+) -> Result<Vec<PreparedObject>> {
+    let mut objects=BTreeMap::new();let mut roots=BTreeMap::new();
+    for catalog in catalogs {
+        cancel.check()?;
+        if catalog.header.repository_id!=repository.repository_id || catalog.header.role!=wire::ObjectRole::Catalog {
+            return Err(corrupt("control catalog scope differs"));
+        }
+        if let Some(previous)=roots.insert(catalog.header.object_id.clone(),catalog.clone()) {
+            if previous!=*catalog {return Err(corrupt("control catalog identity differs"));}
+            continue;
+        }
+        let remote=RemoteObject::from_stored(catalog,repository)?;
+        let stage=staging_root.join(&catalog.header.object_id);
+        let (records,controls)=download_checkpoint_data(&remote,&stage,root_key,provider,repository,cancel).await?;
+        if !records.is_empty() {return Err(corrupt("control catalog contains unit records"));}
+        for mut control in controls {
+            if let ObjectSource::Captured(hash)=&control.source {
+                let content=content_store(&stage)?;let mut reader=content.open_body(hash).map_err(transient)?;
+                let path=stage.join(format!("{hash}.control"));let mut file=std::fs::File::create(&path).map_err(transient)?;
+                if std::io::copy(&mut reader,&mut file).map_err(transient)?!=control.byte_length {return Err(corrupt("control file length differs"));}
+                file.sync_all().map_err(transient)?;control.source=ObjectSource::File(path);
+            }
+            if let Some(previous)=objects.insert(control.content_hash.clone(),control.clone()) {
+                if previous.byte_length!=control.byte_length {return Err(corrupt("control body length differs"));}
+            }
+        }
+    }
+    Ok(objects.into_values().collect())
+}
+
+pub(crate) async fn revalidate_catalog(
+    catalog:&wire::StoredObject,kind:wire::CatalogKind,root_key:&[u8;32],provider:&dyn Provider,
+    repository:&RepositoryHandle,cancel:&Cancellation,
+) -> Result<()> {
+    if !matches!(kind,wire::CatalogKind::Records|wire::CatalogKind::Assets)
+        || catalog.header.repository_id!=repository.repository_id || catalog.header.role!=wire::ObjectRole::Catalog {return Err(corrupt("dependency catalog scope differs"));}
+    let stage=tempfile::tempdir().map_err(transient)?;
+    let remote=RemoteObject::from_stored(catalog,repository)?;
+    let (entries,packs,_)=read_catalog(&remote,kind,root_key,stage.path(),provider,repository,cancel).await?;
+    if entries.iter().any(|entry|entry.kind!=wire::CatalogEntryKind::Object) {return Err(corrupt("dependency catalog contains unit records"));}
+    for pack in packs.values() {
+        cancel.check()?;
+        let body=tempfile::tempdir_in(stage.path()).map_err(transient)?;
+        open_object(pack,root_key,body.path(),provider,repository,cancel).await?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn admit_data_catalogs(
+    catalogs:&[wire::StoredObject],store:&mut crate::persistent_store::PersistentStore,target:&str,root_key:&[u8;32],
+    provider:&dyn Provider,repository:&RepositoryHandle,cancel:&Cancellation,
+) -> Result<Vec<String>> {
+    if catalogs.is_empty() {return Ok(Vec::new());}
+    let stage=tempfile::tempdir().map_err(transient)?;
+    let mut hashes=BTreeSet::new();let mut roots=BTreeMap::new();
+    for catalog in catalogs {
+        cancel.check()?;
+        if catalog.header.repository_id!=repository.repository_id || catalog.header.role!=wire::ObjectRole::Catalog {return Err(corrupt("control catalog scope differs"));}
+        if let Some(previous)=roots.insert(catalog.header.object_id.clone(),catalog.clone()) {
+            if previous!=*catalog {return Err(corrupt("control catalog identity differs"));}continue;
+        }
+        if let Some(known)=store.external_lww_verified_data_catalog(target,catalog).map_err(corrupt)? {
+            let mut complete=true;
+            for hash in &known {if !store.lww_verified_object_present(hash).map_err(corrupt)? {complete=false;break;}}
+            if complete {hashes.extend(known);continue;}
+        }
+        let remote=RemoteObject::from_stored(catalog,repository)?;
+        let directory=stage.path().join(&catalog.header.object_id);ensure_directory(&directory)?;
+        let (entries,packs,_)=read_catalog(&remote,wire::CatalogKind::Records,root_key,&directory,provider,repository,cancel).await?;
+        let mut required=BTreeSet::new();let mut missing=Vec::new();
+        for entry in entries {
+            if entry.kind!=wire::CatalogEntryKind::Object {return Err(corrupt("control catalog contains unit records"));}
+            let hash=hex::encode(entry.content_sha256);required.insert(hash.clone());
+            if let Some(size)=store.external_lww_verified_control_size(&hash).map_err(corrupt)? {
+                if size!=entry.byte_length {return Err(corrupt("known control body length differs"));}
+            } else {missing.push(entry);}
+        }
+        let content=content_store(&directory)?;
+        let plan=resolve_entries(missing,&directory,&content,None,cancel)?;
+        let (records,controls)=turn_over_packs(plan,&packs,root_key,&directory,provider,repository,&PhaseProgress::silent(),cancel).await?;
+        if !records.is_empty() {return Err(corrupt("control catalog contains unit records"));}
+        for control in controls.into_values() {
+            cancel.check()?;
+            let ObjectSource::File(path)=control.source else {return Err(corrupt("control file is unavailable"));};
+            let bytes=read_bytes(&path,usize::try_from(control.byte_length).map_err(corrupt)?)?;
+            if bytes.len() as u64!=control.byte_length || crate::persistent_store::external_capture::hash_backup_body(&bytes,"native_data_catalog_control_identity")!=control.content_hash {return Err(corrupt("control body identity differs"));}
+            if bytes.len()>risunest_sync_wire::MAX_METADATA_BYTES {crate::persistent_store::external_capture::verified_large_message_page(&bytes).map_err(corrupt)?;}
+            store.lww_put_object(&control.content_hash,&bytes).map_err(corrupt)?;
+        }
+        let required=required.into_iter().collect::<Vec<_>>();
+        store.external_lww_witness_data_catalog(target,catalog,&required).map_err(corrupt)?;
+        hashes.extend(required);
+    }
+    Ok(hashes.into_iter().collect())
+}
+
+pub(crate) async fn download_packed_body(hash:&str,length:u64,chunks:Vec<wire::StoredChunk>,packs:Vec<wire::StoredObject>,stage:&Path,key:&[u8;32],provider:&dyn Provider,repository:&RepositoryHandle,cancel:&Cancellation)->Result<Vec<u8>> {
+    let path=download_packed_body_file(hash,length,chunks,packs,stage,key,provider,repository,cancel).await?;
+    std::fs::read(path).map_err(transient)
+}
+pub(crate) async fn download_packed_body_files(
+    sources:&[super::lww_residency::PackedSource],staging_root:&Path,root_key:&[u8;32],
+    provider:&dyn Provider,repository:&RepositoryHandle,cancel:&Cancellation,
+)->Result<BTreeMap<String,PathBuf>> {
+    ensure_directory(staging_root)?;
+    let mut packs=BTreeMap::new();let mut entries=Vec::new();let mut hashes=BTreeSet::new();
+    for source in sources {
+        cancel.check()?;super::lww_residency::validate_packed_source(source,repository)?;
+        if !hashes.insert(source.hash.clone()) {return Err(corrupt("duplicate body"));}
+        for stored in &source.packs {
+            let pack=RemoteObject::from_stored(stored,repository)?;
+            if let Some(previous)=packs.insert(pack.object_id.clone(),pack.clone()) {
+                if previous!=pack {return Err(corrupt("conflicting pack"));}
+            }
+        }
+        entries.push(CompleteEntry {kind:wire::CatalogEntryKind::Object,key:format!("object/{}",source.hash),content_sha256:hex::decode(&source.hash).map_err(corrupt)?.try_into().map_err(|_|corrupt("body hash"))?,byte_length:source.byte_length,chunks:source.chunks.clone()});
+    }
+    let content=content_store(staging_root)?;
+    let mut plan=resolve_entries(entries,staging_root,&content,None,cancel)?;
+    for resolved in &mut plan {resolved.destination=Some(staging_root.join(format!("{}.payload",resolved.digest)));}
+    let (_,objects)=turn_over_packs(plan,&packs,root_key,staging_root,provider,repository,&PhaseProgress::silent(),cancel).await?;
+    objects.into_iter().map(|(hash,object)|match object.source {ObjectSource::File(path)=>Ok((hash,path)),_=>Err(corrupt("body source"))}).collect()
+}
+
+pub(crate) async fn download_packed_body_file(
+    hash:&str, length:u64, chunks:Vec<wire::StoredChunk>, stored_packs:Vec<wire::StoredObject>, staging_root:&Path, root_key:&[u8;32],
+    provider:&dyn Provider, repository:&RepositoryHandle,cancel:&Cancellation,
+) -> Result<PathBuf> {
+    ensure_directory(staging_root)?;
+    let mut packs=BTreeMap::new();
+    for stored in &stored_packs { let pack=RemoteObject::from_stored(stored,repository)?; packs.insert(pack.object_id.clone(),pack); }
+    let entry=CompleteEntry {kind:wire::CatalogEntryKind::Object,key:format!("object/{hash}"),content_sha256:hex::decode(hash).map_err(corrupt)?.try_into().map_err(|_|corrupt("body hash"))?,byte_length:length,chunks};
+    let content=content_store(staging_root)?;
+    let plan=resolve_entries(vec![entry],staging_root,&content,None,cancel)?;
+    let (_,objects)=turn_over_packs(plan,&packs,root_key,staging_root,provider,repository,&PhaseProgress::silent(),cancel).await?;
+    let body=objects.get(hash).ok_or_else(||corrupt("body missing"))?;
+    match &body.source { ObjectSource::File(path)=>Ok(path.clone()), _=>Err(corrupt("body source")) }
+}
+
+pub(crate) async fn download_original_backup_units(
+    root: &RemoteObject,
+    staging_root: &Path,
+    key: &[u8; 32],
+    provider: &dyn Provider,
+    repository: &RepositoryHandle,
+    cancel: &Cancellation,
+) -> Result<BTreeMap<risunest_sync_wire::unit::UnitKey, risunest_sync_wire::unit::UnitValue>> {
+    let (records, objects) = download_checkpoint_data(
+        root, staging_root, key, provider, repository, cancel,
+    ).await?;
+    if !objects.is_empty() { return Err(corrupt("original unit catalog contains non-unit controls")); }
+    let content = content_store(staging_root)?;
+    let mut units = BTreeMap::new();
+    for record in records {
+        cancel.check()?;
+        if record.byte_length > risunest_sync_wire::MAX_METADATA_BYTES as u64 {
+            return Err(corrupt("original unit control exceeds its bound"));
+        }
+        let mut source=content.open_body(&record.content_hash).map_err(transient)?;
+        let mut bytes=Vec::new();
+        source.by_ref().take(risunest_sync_wire::MAX_METADATA_BYTES as u64+1).read_to_end(&mut bytes).map_err(transient)?;
+        if bytes.len() as u64 != record.byte_length {
+            return Err(corrupt("original unit control length"));
+        }
+        let unit: super::packaging::OriginalBackupUnit = risunest_sync_wire::canonical::decode(
+            &bytes, risunest_sync_wire::MAX_METADATA_BYTES,
+        ).map_err(corrupt)?;
+        if unit.schema != "risunest.backup-unit/v1"
+            || record.key != format!("original-unit/{}", hex::encode(unit.key.as_str()))
+        {
+            return Err(corrupt("original unit catalog key differs from its control"));
+        }
+        #[cfg(test)]
+        crate::persistent_store::hash_work::validation(&unit.value);
+        unit.value.validate().map_err(corrupt)?;
+        if units.insert(unit.key, unit.value).is_some() {
+            return Err(corrupt("duplicate original unit"));
+        }
+    }
+    Ok(units)
+}
+
+pub(crate) async fn download_backup_original_units(
+    snapshot:&RemoteObject, staging_root:&Path, key:&[u8;32], provider:&dyn Provider,
+    repository:&RepositoryHandle, cancel:&Cancellation,
+) -> Result<BTreeMap<risunest_sync_wire::unit::UnitKey,risunest_sync_wire::unit::UnitValue>> {
+    if snapshot.role != ObjectRole::BackupBundle {return Err(corrupt("full backup is required"))}
+    let root=open_object(snapshot,key,staging_root,provider,repository,cancel).await?;
+    let document=super::control::SnapshotView::read(&read_bytes(&root,wire::MAX_METADATA_BYTES)?,wire::ObjectRole::BackupBundle,&snapshot.repository_id)?;
+    if snapshot.object_id != format!("snapshot-{}",document.snapshot_id) {return Err(corrupt("backup identity differs"))}
+    let original=RemoteObject::from_stored(document.original_units.as_ref().ok_or_else(|| corrupt("complete original unit root is required"))?,repository)?;
+    download_original_backup_units(&original,staging_root,key,provider,repository,cancel).await
+}
+
+pub(crate) struct DatabaseFirstSnapshot {
+    pub snapshot:PreparedRemoteSnapshot,
+    pub original_units:BTreeMap<risunest_sync_wire::unit::UnitKey,risunest_sync_wire::unit::UnitValue>,
+    pub required:BTreeSet<String>,
+    pub present:BTreeSet<String>,
+    pub missing:BTreeSet<String>,
+    pub sources:Vec<super::lww_residency::PackedSource>,
+}
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn admit_asset_catalogs(
+    catalogs:&[wire::StoredObject],store:&mut crate::persistent_store::PersistentStore,
+    library_id:&str,protected_segment:&str,connection_id:&str,connection_root:&Path,root_key:&[u8;32],
+    provider:&dyn Provider,repository:&RepositoryHandle,cancel:&Cancellation,
+) -> Result<Vec<String>> {
+    let scratch=super::leftovers::managed_scratch(store.repository_root(),"asset-catalog-")?;
+    let metadata=rusqlite::Connection::open_with_flags(store.repository_root().join("persistent/persistent.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX).map_err(transient)?;
+    let cas=PayloadCas::new(store.repository_root()).map_err(transient)?;
+    let mut planned=BTreeMap::<String,super::lww_residency::PackedSource>::new();
+    for catalog in catalogs {
+        if catalog.header.repository_id!=repository.repository_id || catalog.header.role!=wire::ObjectRole::Catalog {
+            return Err(corrupt("asset catalog repository or role differs"));
+        }
+        let root=RemoteObject::from_stored(catalog,repository)?;
+        let (entries,packs,_)=read_catalog(&root,wire::CatalogKind::Assets,root_key,scratch.path(),provider,repository,cancel).await?;
+        for entry in entries {
+            cancel.check()?;
+            if entry.kind!=wire::CatalogEntryKind::Object {return Err(corrupt("asset catalog kind differs"));}
+            let hash=hex::encode(entry.content_sha256);
+            let catalogued:Option<i64>=metadata.query_row("SELECT byte_size FROM asset_objects WHERE object_hash=?1",[&hash],|row|row.get(0)).optional().map_err(transient)?;
+            let catalogued=catalogued.map(u64::try_from).transpose().map_err(corrupt)?;
+            if catalogued.is_some_and(|size|size!=entry.byte_length)
+                || cas.stat_object(&hash).map_err(transient)?.is_some_and(|size|size!=entry.byte_length) {
+                return Err(corrupt("immutable asset size differs"));
+            }
+            let ids=entry.chunks.iter().map(|chunk|chunk.pack_id.as_str()).collect::<BTreeSet<_>>();
+            let references=packs.iter().filter(|(id,_)|ids.contains(id.as_str())).map(|(_,pack)|pack.stored(repository)).collect::<Result<Vec<_>>>()?;
+            let source=super::lww_residency::PackedSource{hash:hash.clone(),byte_length:entry.byte_length,
+                library_id:library_id.into(),connection_id:connection_id.into(),connection_root:connection_root.into(),
+                protected_snapshot:protected_segment.into(),catalog:catalog.clone(),chunks:entry.chunks,packs:references};
+            super::lww_residency::validate_packed_source(&source,repository)?;
+            if let Some(previous)=planned.get(&hash) {
+                if previous.byte_length!=source.byte_length {return Err(corrupt("conflicting asset catalog body"));}
+            } else {planned.insert(hash,source);}
+        }
+    }
+    cancel.check()?;
+    let registrations=planned.values().map(|source|crate::persistent_store::asset_object_catalog::AssetObjectRegistration{object_hash:source.hash.clone(),byte_size:source.byte_length}).collect::<Vec<_>>();
+    for batch in registrations.chunks(crate::persistent_store::asset_object_catalog::ASSET_OBJECT_CATALOG_MAX_PAGE as usize) {
+        store.asset_object_catalog().register(batch,super::runtime::now_ms() as i64).map_err(transient)?;
+    }
+    for source in planned.values() {
+        cancel.check()?;
+        super::lww_residency::register_packed(store.repository_root(),source,repository)?;
+    }
+    Ok(planned.into_keys().collect())
+}
+pub(crate) async fn download_snapshot_database_first(snapshot:&RemoteObject,staging_root:&Path,library_root:&Path,connection_root:&Path,connection_id:&str,key:&[u8;32],provider:&dyn Provider,repository:&RepositoryHandle,cancel:&Cancellation)->Result<DatabaseFirstSnapshot> {
+    if snapshot.role!=ObjectRole::BackupBundle {return Err(corrupt("full backup required"));}
+    ensure_directory(staging_root)?;
+    let root_path=open_object(snapshot,key,staging_root,provider,repository,cancel).await?;
+    let document=super::control::SnapshotView::read(&read_bytes(&root_path,wire::MAX_METADATA_BYTES)?,wire::ObjectRole::BackupBundle,&snapshot.repository_id)?;
+    if snapshot.object_id!=format!("snapshot-{}",document.snapshot_id) {return Err(corrupt("backup identity"));}
+    let original_root = document.original_units.as_ref()
+        .ok_or_else(|| corrupt("full backup original unit root is required"))?;
+    let original_root = RemoteObject::from_stored(original_root, repository)?;
+    let original_units = download_original_backup_units(
+        &original_root, staging_root, key, provider, repository, cancel,
+    ).await?;
+    let records_root=RemoteObject::from_stored(&document.library.record_catalog,repository)?;
+    let (records,mut objects)=download_checkpoint_data(&records_root,staging_root,key,provider,repository,cancel).await?;
+    let assets_root=RemoteObject::from_stored(&document.library.asset_catalog,repository)?;
+    let (entries,packs,_)=read_catalog(&assets_root,wire::CatalogKind::Assets,key,staging_root,provider,repository,cancel).await?;
+    let cas=PayloadCas::new(library_root).map_err(transient)?;
+    let metadata = rusqlite::Connection::open_with_flags(
+        library_root.join("persistent/persistent.sqlite"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    ).map_err(transient)?;
+    let mut required=BTreeSet::new();let mut present=BTreeSet::new();let mut missing=BTreeSet::new();
+    let mut sources=Vec::new();
+    for entry in entries {
+        if entry.kind!=wire::CatalogEntryKind::Object {return Err(corrupt("asset catalog kind"));}
+        let hash=hex::encode(entry.content_sha256);
+        if !required.insert(hash.clone()) {return Err(corrupt("duplicate asset body"));}
+        let catalogued: Option<i64> = metadata.query_row(
+            "SELECT byte_size FROM asset_objects WHERE object_hash=?1", [&hash], |row| row.get(0),
+        ).optional().map_err(transient)?;
+        let catalogued = catalogued.map(u64::try_from).transpose().map_err(corrupt)?;
+        if catalogued.is_some_and(|size| size != entry.byte_length) {
+            return Err(corrupt("local immutable body size differs from backup"));
+        }
+        let local_size=cas.stat_object(&hash).map_err(transient)?;
+        if local_size.is_some_and(|size|size!=entry.byte_length) {
+            return Err(corrupt("local immutable body size differs from backup"));
+        }
+        if local_size==Some(entry.byte_length) {present.insert(hash.clone());} else {
+            missing.insert(hash.clone());
+        }
+        let ids=entry.chunks.iter().map(|chunk|chunk.pack_id.as_str()).collect::<BTreeSet<_>>();
+        let references=packs.iter().filter(|(id,_)|ids.contains(id.as_str())).map(|(_,pack)|pack.stored(repository)).collect::<Result<Vec<_>>>()?;
+        let source=super::lww_residency::PackedSource {hash:hash.clone(),byte_length:entry.byte_length,library_id:snapshot.repository_id.clone(),connection_id:connection_id.into(),connection_root:connection_root.into(),protected_snapshot:snapshot.object_id.clone(),catalog:document.library.asset_catalog.clone(),chunks:entry.chunks,packs:references};
+        super::lww_residency::validate_packed_source(&source,repository)?;
+        sources.push(source);
+        objects.push(PreparedObject{content_hash:hash.clone(),byte_length:entry.byte_length,source:ObjectSource::Library(hash)});
+    }
+    Ok(DatabaseFirstSnapshot{snapshot:PreparedRemoteSnapshot{snapshot_id:document.snapshot_id,repository_id:snapshot.repository_id.clone(),fingerprint:hex::encode(document.library.content_fingerprint),library_fingerprint:hex::encode(document.library.content_fingerprint),logical_revision:document.revision.parse().map_err(corrupt)?,staging_root:staging_root.into(),records,objects,captured_by_device:document.captured_by_device},original_units,required,present,missing,sources})
+}
 pub(crate) async fn download_snapshot(
     snapshot: &RemoteObject,
     staging_root: &Path,
@@ -1648,16 +1955,6 @@ pub(crate) async fn download_snapshot(
             }
         }
     }
-    // The records a difference would leave alone are known from the catalog
-    // and the base alone, before any pack is chosen.
-    let unchanged = match trust {
-        SourceTrust::AdmittedLibraryAt {
-            records, within, ..
-        } => unchanged_records(&record_entries, records, within)?,
-        _ => BTreeSet::new(),
-    };
-    let mut library_entries = record_entries;
-    library_entries.extend(asset_entries);
     let library_staging = staging_root.to_path_buf();
     let library_cancel = cancel.clone();
     let library = match trust {
@@ -1666,7 +1963,7 @@ pub(crate) async fn download_snapshot(
             root: root.to_path_buf(),
             prove: true,
         }),
-        SourceTrust::AdmittedLibrary(root) | SourceTrust::AdmittedLibraryAt { root, .. } => {
+        SourceTrust::AdmittedLibrary(root) => {
             Some(LocalLibrary {
                 root: root.to_path_buf(),
                 prove: false,
@@ -1674,16 +1971,12 @@ pub(crate) async fn download_snapshot(
         }
     };
     let cpu = cpu_permit().await?;
-    let plan = tokio::task::spawn_blocking(move || {
+    let plan = spawn_blocking(move || {
         let content = content_store(&library_staging)?;
-        resolve_entries(
-            library_entries,
-            &library_staging,
-            &content,
-            library,
-            &unchanged,
-            &library_cancel,
-        )
+        let mut data=resolve_entries(record_entries,&library_staging,&content,None,&library_cancel)?;
+        let assets=resolve_entries(asset_entries,&library_staging,&content,library,&library_cancel)?;
+        data.extend(assets);
+        Ok::<_,ProviderError>(data)
     })
     .await
     .map_err(transient)??;

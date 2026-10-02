@@ -222,6 +222,7 @@ impl JobStore {
         db.execute_batch(
             "PRAGMA journal_mode=WAL;
              PRAGMA synchronous=FULL;
+             PRAGMA foreign_keys=ON;
              CREATE TABLE IF NOT EXISTS external_requests(
                  id TEXT PRIMARY KEY,
                  connection_id TEXT NOT NULL,
@@ -258,10 +259,64 @@ impl JobStore {
              CREATE TABLE IF NOT EXISTS external_receive_cleanup(
                  connection_id TEXT PRIMARY KEY,
                  after_rowid INTEGER NOT NULL CHECK(after_rowid>=0)
+             );
+             CREATE TABLE IF NOT EXISTS external_restore_bodies(
+                 job_id TEXT NOT NULL REFERENCES external_requests(id) ON DELETE CASCADE,
+                 hash TEXT NOT NULL,
+                 source TEXT NOT NULL,
+                 present INTEGER NOT NULL CHECK(present IN (0,1)),
+                 settled INTEGER NOT NULL CHECK(settled IN (0,1)),
+                 PRIMARY KEY(job_id,hash)
              );",
         )
         .map_err(failure)?;
         Ok(Self(db))
+    }
+    pub(crate) fn freeze_restore_bodies(&self,job:&DurableJob,sources:&[super::lww_residency::PackedSource],present:&std::collections::BTreeSet<String>) -> Result<()> {
+        let tx=self.0.unchecked_transaction().map_err(failure)?;
+        let mut current=self.read(&job.id)?;
+        let ready=current.summary["restoreBodiesReady"]==true;
+        let mut seen=std::collections::BTreeSet::new();
+        for source in sources {
+            if !seen.insert(source.hash.clone()) {return Err(ProviderError::new(ErrorKind::Corrupt));}
+            let encoded=serde_json::to_string(source).map_err(failure)?;
+            let is_present=present.contains(&source.hash);
+            let previous:Option<(String,bool)>=tx.query_row("SELECT source,present FROM external_restore_bodies WHERE job_id=?1 AND hash=?2",rusqlite::params![job.id,source.hash],|row|Ok((row.get(0)?,row.get(1)?))).optional().map_err(failure)?;
+            if let Some(previous)=previous {
+                if previous.0!=encoded {return Err(ProviderError::new(ErrorKind::Corrupt));}
+            } else {
+                if ready {return Err(ProviderError::new(ErrorKind::Corrupt));}
+                tx.execute("INSERT INTO external_restore_bodies VALUES(?1,?2,?3,?4,?4)",rusqlite::params![job.id,source.hash,encoded,is_present]).map_err(failure)?;
+            }
+        }
+        let count:i64=tx.query_row("SELECT count(*) FROM external_restore_bodies WHERE job_id=?1",[&job.id],|row|row.get(0)).map_err(failure)?;
+        if count as usize!=sources.len() || present.iter().any(|hash|!seen.contains(hash)) {
+            return Err(ProviderError::new(ErrorKind::Corrupt));
+        }
+        current.summary["restoreBodiesReady"]=json!(true);
+        tx.execute("UPDATE external_requests SET value=?2 WHERE id=?1",rusqlite::params![job.id,serde_json::to_string(&current).map_err(failure)?]).map_err(failure)?;
+        tx.commit().map_err(failure)
+    }
+    pub(crate) fn restore_body_page(&self,job:&str,after:&str)->Result<Vec<super::lww_residency::PackedSource>> {
+        if self.read(job)?.summary["restoreBodiesReady"]!=true {return Err(ProviderError::new(ErrorKind::Corrupt));}
+        let mut statement=self.0.prepare("SELECT source FROM external_restore_bodies WHERE job_id=?1 AND hash>?2 AND settled=0 ORDER BY hash LIMIT 128").map_err(failure)?;
+        let rows=statement.query_map(rusqlite::params![job,after],|row|row.get::<_,String>(0)).map_err(failure)?;
+        rows.map(|row|serde_json::from_str(&row.map_err(failure)?).map_err(failure)).collect()
+    }
+    pub(crate) fn restore_body(&self,job:&str,hash:&str)->Result<Option<super::lww_residency::PackedSource>> {
+        let source:Option<String>=self.0.query_row("SELECT source FROM external_restore_bodies WHERE job_id=?1 AND hash=?2 AND settled=0",rusqlite::params![job,hash],|row|row.get(0)).optional().map_err(failure)?;
+        source.map(|value|serde_json::from_str(&value).map_err(failure)).transpose()
+    }
+    pub(crate) fn settle_restore_body(&self,job:&str,hash:&str)->Result<()> {
+        if self.0.execute("UPDATE external_restore_bodies SET settled=1 WHERE job_id=?1 AND hash=?2",rusqlite::params![job,hash]).map_err(failure)?!=1 {
+            return Err(ProviderError::new(ErrorKind::Corrupt));
+        }
+        Ok(())
+    }
+    pub(crate) fn restore_bodies_settled(&self,job:&str)->Result<bool> {
+        if self.read(job)?.summary["restoreBodiesReady"]!=true {return Ok(false);}
+        let pending:bool=self.0.query_row("SELECT EXISTS(SELECT 1 FROM external_restore_bodies WHERE job_id=?1 AND settled=0)",[job],|row|row.get(0)).map_err(failure)?;
+        Ok(!pending)
     }
     pub fn put(&self, job: &DurableJob) -> Result<()> {
         let encoded = serde_json::to_string(job).map_err(failure)?;
@@ -354,7 +409,6 @@ impl JobStore {
         rows.map(|row| Self::decode(row.map_err(failure)?))
             .collect()
     }
-
 
     /// Jobs whose transfer material may still be on disk. A job that ended in
     /// failure keeps its sealed ciphertext until a cleanup can release it.
@@ -580,13 +634,6 @@ impl Drop for JobClaimOwner {
     }
 }
 
-#[derive(Clone)]
-pub(crate) struct AutomaticTarget {
-    pub owner_job_id: String,
-    pub request: StartJobRequest,
-    pub identity: CaptureIdentity,
-}
-
 #[derive(Default)]
 pub(crate) struct JobCommandState {
     cleanup_closed: std::sync::atomic::AtomicBool,
@@ -595,8 +642,6 @@ pub(crate) struct JobCommandState {
     lease_ledger: Mutex<Option<Arc<super::lease_ledger::LocalLeaseLedger>>>,
     pub active: ActiveJobs,
     pub session: Mutex<Session>,
-    pub automatic_targets: Mutex<HashMap<String, AutomaticTarget>>,
-    pub prepared_receives: Mutex<HashMap<String, super::sync_engine::PreparedReceive>>,
     blocking_tasks: Mutex<HashMap<String, Vec<tokio::sync::oneshot::Receiver<()>>>>,
 }
 pub(crate) struct BackgroundWorker(Arc<std::sync::atomic::AtomicUsize>);
@@ -652,7 +697,6 @@ impl JobCommandState {
         let active = self.active.lock().map_err(failure)?;
         self.cleanup_closed.store(true, std::sync::atomic::Ordering::Release);
         for (_, cancel) in active.values() { cancel.cancel(); }
-        self.automatic_targets.lock().map_err(failure)?.clear();
         Ok(())
     }
 
@@ -661,7 +705,6 @@ impl JobCommandState {
         if !active.is_empty() || self.background_workers.load(std::sync::atomic::Ordering::Acquire) != 0 {
             return Ok(false);
         }
-        self.prepared_receives.lock().map_err(failure)?.clear();
         *self.session.lock().map_err(failure)? = Session::default();
         Ok(true)
     }
@@ -689,61 +732,9 @@ impl JobCommandState {
         }) }))
     }
 
-    pub fn coalesce_automatic(
-        &self,
-        running: &DurableJob,
-        request: &StartJobRequest,
-        identity: &CaptureIdentity,
-    ) -> Result<bool> {
-        if running.request.kind != JobKind::Sync
-            || request.kind != JobKind::Sync
-            || running.request.reason.as_deref() != Some("automatic")
-            || request.reason.as_deref() != Some("automatic")
-            || running.request.connection_id != request.connection_id
-        {
-            return Ok(false);
-        }
-        super::runtime::require_admitted_library(running, identity)?;
-        let target = requested_revision(request, identity.revision)?;
-        if target <= requested_revision(&running.request, running.admission_identity.revision)? {
-            return Ok(true);
-        }
-        let mut queued = self.automatic_targets.lock().map_err(failure)?;
-        if self.cleanup_closed.load(std::sync::atomic::Ordering::Acquire) {
-            return Err(ProviderError::new(ErrorKind::Cancelled));
-        }
-        if queued.get(&request.connection_id).is_some_and(|held| {
-            held.owner_job_id == running.id && requested_revision(&held.request, held.identity.revision)
-                .is_ok_and(|revision| revision >= target)
-        }) {
-            return Ok(true);
-        }
-        let mut request = request.clone();
-        request.target_revision = Some(target.to_string());
-        queued.insert(request.connection_id.clone(), AutomaticTarget {
-            owner_job_id: running.id.clone(),
-            request,
-            identity: identity.clone(),
-        });
-        Ok(true)
-    }
-
-    pub fn cancel_automatic_target(&self, job: &DurableJob) -> Result<()> {
-        let mut queued = self.automatic_targets.lock().map_err(failure)?;
-        if queued.get(&job.request.connection_id)
-            .is_some_and(|target| target.owner_job_id == job.id)
-        {
-            queued.remove(&job.request.connection_id);
-        }
-        Ok(())
-    }
 }
 
-pub(crate) fn requested_revision(request: &StartJobRequest, fallback: i64) -> Result<i64> {
-    request.target_revision.as_deref().map_or(Ok(fallback), |value| {
-        value.parse().map_err(|_| ProviderError::new(ErrorKind::Corrupt))
-    })
-}
+
 
 #[cfg(test)]
 mod tests {
@@ -1036,45 +1027,6 @@ mod tests {
         assert_eq!(state.active.lock().unwrap().len(), 1);
         drop(claim);
         assert!(state.active.lock().unwrap().is_empty());
-    }
-
-    #[test]
-    fn automatic_requests_keep_one_latest_target_without_changing_the_capture() {
-        let state = JobCommandState::default();
-        let mut request = request();
-        request.kind = JobKind::Sync;
-        request.reason = Some("automatic".into());
-        request.target_revision = Some("1".into());
-        let job = DurableJob::new(request.clone(), false, 1, identity());
-        for revision in [2, 7, 3, 6] {
-            request.target_revision = Some(revision.to_string());
-            let mut current = identity();
-            current.revision = revision;
-            assert!(state.coalesce_automatic(&job, &request, &current).unwrap());
-        }
-        let queued = state.automatic_targets.lock().unwrap();
-        assert_eq!(queued.len(), 1);
-        assert_eq!(queued["synthetic"].request.target_revision.as_deref(), Some("7"));
-        assert_eq!(job.request.target_revision.as_deref(), Some("1"));
-        assert_eq!(job.admission_identity.revision, 1);
-    }
-
-    #[test]
-    fn automatic_targets_do_not_absorb_explicit_operations_or_other_connections() {
-        let state = JobCommandState::default();
-        let mut automatic = request();
-        automatic.kind = JobKind::Sync;
-        automatic.reason = Some("automatic".into());
-        let job = DurableJob::new(automatic.clone(), false, 1, identity());
-        let mut explicit = automatic.clone();
-        explicit.reason = Some("manual".into());
-        for kind in [JobKind::Sync, JobKind::Backup, JobKind::Restore, JobKind::ResolveConflict] {
-            explicit.kind = kind;
-            assert!(!state.coalesce_automatic(&job, &explicit, &identity()).unwrap());
-        }
-        automatic.connection_id = "another".into();
-        assert!(!state.coalesce_automatic(&job, &automatic, &identity()).unwrap());
-        assert!(state.automatic_targets.lock().unwrap().is_empty());
     }
 
     #[test]

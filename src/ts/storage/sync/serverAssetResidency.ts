@@ -1,5 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { beginMobileBackgroundTask } from "../../mobileBackgroundTask";
+import { get } from "svelte/store";
+import { selectedCharID } from "src/ts/stores.svelte";
+import { getDatabase } from "../database.svelte";
 
 export type AssetResidencyPolicy = "full" | "remote";
 export interface AssetResidencyStatus {
@@ -51,7 +54,7 @@ async function protectedCommand(name: string, args?: Record<string, unknown>) {
 }
 export const setAssetResidencyPolicy = (policy: AssetResidencyPolicy) =>
   policy === "full"
-    ? protectedCommand("server_sync_asset_policy", { policy })
+    ? protectedCommand("server_sync_asset_policy", { policy, selectedCharacterId: getDatabase().characters[get(selectedCharID)]?.chaId ?? null })
     : command("server_sync_asset_policy", { policy });
 export const evictLocalAssets = () => protectedCommand("server_sync_asset_evict");
 export const cancelAssetResidencyOperation = () =>

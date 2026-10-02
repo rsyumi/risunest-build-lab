@@ -81,7 +81,7 @@ const conversationWindow: ConversationWindow = {
     hasMoreAfter: false,
 }
 
-function createHarness() {
+function createHarness(options: { unitIntent?: boolean; revisionAdmission?: boolean } = {}) {
     const compatibilityDatabase = {
         username: 'Live user',
         maxContext: 8192,
@@ -102,13 +102,15 @@ function createHarness() {
         mutationGeneration?: number
         pluginStorageValues?: Array<{ owner: string; key: string; value: unknown }>
     }> = []
+    let lastPinnedDatabase: Database | undefined
     const readRoot = vi.fn(async () => {
-        const database = pinnedDatabases[0]!
+        const database = pinnedDatabases[0] ?? lastPinnedDatabase ?? authoritativeSnapshots[0]?.database ?? compatibilityDatabase
         const { characters, botPresets, pluginCustomStorage, ...root } = database
         return { revision: 4, value: root }
     })
     const acquireRevision = vi.fn(async (revision: number) => {
-        const database = pinnedDatabases.shift()!
+        const database = pinnedDatabases.shift() ?? lastPinnedDatabase ?? authoritativeSnapshots[0]?.database ?? compatibilityDatabase
+        lastPinnedDatabase = database
         const characters = database.characters ?? []
         const presets = database.botPresets ?? []
         const pluginStorage = database.pluginCustomStorage ?? {}
@@ -306,9 +308,12 @@ function createHarness() {
     const replacePersistentCompleteCharacter = vi.fn(async () => true)
     const replacePersistentConversation = vi.fn(async () => true)
     const reportIdentityReplacementRejected = vi.fn()
+    const commitPersistentUnitIntent = vi.fn(async (_reason: string, _units: readonly import('./pluginUnitIntents').PluginUnitMutation[], _conversations?: readonly unknown[], _wholeMessages?: readonly import('./pluginUnitIntents').PluginWholeMessageIntent[]) => undefined)
     const access = createPluginDatabaseAccess({
         owner: PLUGIN_ACCESS_OWNER,
         store,
+        commitPersistentUnitIntent,
+        getPersistentRevision: () => 4,
         flushPendingData,
         getCompatibilityDatabase: () => compatibilityDatabase,
         getSelectedCharacterId,
@@ -317,23 +322,17 @@ function createHarness() {
         refreshSelectedConversationAfterReplacement:
             refreshSelectedConversationAfterReplacement as any,
         invalidateActiveConversationSession,
-        replacePersistentCompleteCharacter,
-        replacePersistentConversation,
         reportIdentityReplacementRejected,
         getNavigationGeneration: () => navigationGeneration,
         getStorageAuthorityEpoch: () => authorityEpoch,
         assertPersistentMutationAllowed,
-        applyCompatibilityDatabaseLite,
-        materializeDatabaseSnapshot,
-        replacePersistentDatabase,
         readPluginStorageSnapshot,
-        mutatePluginStorage,
-        invalidatePluginStorage,
         prepareAuthoritativeDatabaseUpdate,
         snapshot: <T>(value: T) => snapshot(value) as T,
     })
     return {
         access,
+        commitPersistentUnitIntent,
         applyCompatibilityDatabaseLite,
         archivedCharacterIds,
         authoritativeSnapshots,
@@ -403,6 +402,134 @@ function callContext(): PluginFullObjectCallContext {
     return { pluginName: 'fixture-plugin', signal: new AbortController().signal }
 }
 
+describe('plugin unit writes with read provenance', () => {
+    it('commits only the field edited on an exact character read', async () => {
+        const harness = createHarness({ unitIntent: true })
+        const database = makeFullObjectDatabase()
+        harness.pinnedDatabases.push(database, database)
+        const read = await harness.access.getCharacterFromIndex(0, callContext())
+        read!.name = 'Edited'
+        database.characters[0].image = 'Remote description'
+        await harness.access.setCharacterToIndex(0, read!, callContext())
+        expect(harness.commitPersistentUnitIntent).toHaveBeenCalledWith('plugin-setCharacterToIndex', [{ key: '["character","active","name"]', type: 'set', value: 'Edited' }], [], [])
+        expect(harness.replacePersistentCompleteCharacter).not.toHaveBeenCalled()
+    })
+
+    it('passes only explicit opaque edits from public character and chat setters to local unit commit', async () => {
+        const harness = createHarness({ unitIntent: true })
+        const database = makeFullObjectDatabase()
+        Object.assign(database.characters[0], { opaqueRetained: 'Imported', opaqueEdited: 'Before' })
+        Object.assign(database.characters[0].chats[0], { opaqueRetained: 'Imported', opaqueEdited: 'Before' })
+        harness.pinnedDatabases.push(database, database, database)
+        const read: any = await harness.access.getCharacterFromIndex(0, callContext())
+        read.opaqueEdited = 'Edited character'
+        await harness.access.setCharacterToIndex(0, read, callContext())
+        expect(harness.commitPersistentUnitIntent).toHaveBeenLastCalledWith('plugin-setCharacterToIndex', [{ key: '["character","active","opaqueEdited"]', type: 'set', value: 'Edited character' }], [], [])
+        read.chats[0].opaqueEdited = 'Edited chat'
+        await harness.access.setChatToIndex(0, 0, read.chats[0], callContext())
+        expect(harness.commitPersistentUnitIntent).toHaveBeenLastCalledWith('plugin-setChatToIndex', [{ key: '["conversation","active","active-chat-a","opaqueEdited"]', type: 'set', value: 'Edited chat' }], [], [])
+        expect(harness.replacePersistentCompleteCharacter).not.toHaveBeenCalled()
+        expect(harness.replacePersistentConversation).not.toHaveBeenCalled()
+    })
+
+    it('uses nested chat provenance from a character read without replacing messages', async () => {
+        const harness = createHarness({ unitIntent: true })
+        const database = makeFullObjectDatabase()
+        harness.pinnedDatabases.push(database, database)
+        const read = await harness.access.getCurrentCharacter(callContext())
+        const chat = read!.chats[0]
+        chat.name = 'Edited chat'
+        database.characters[0].chats[0].message.push({ role: 'user', data: 'Remote append' })
+        await harness.access.setChatToIndex(0, 0, chat, callContext())
+        expect(harness.commitPersistentUnitIntent).toHaveBeenCalledWith('plugin-setChatToIndex', [{ key: '["conversation","active","active-chat-a","name"]', type: 'set', value: 'Edited chat' }], [], [])
+    })
+
+    it('commits only approved plugin additions and preserves installed records on API list omission and replacement', async () => {
+        const harness = createHarness()
+        const original = { name: 'installed', script: 'original', version: '3.0', enabled: true }
+        harness.compatibilityDatabase.plugins = [original] as any
+        harness.prepareAuthoritativeDatabaseUpdate.mockImplementation(async update => ({ ...update, plugins: [] }))
+        await harness.access.setDatabase({ plugins: [] }, ['plugins'])
+        expect(harness.commitPersistentUnitIntent).toHaveBeenLastCalledWith('plugin-setDatabase', [], [], [])
+        await harness.access.setDatabase({ plugins: [{ ...original, script: 'replacement' }] }, ['plugins'])
+        expect(harness.commitPersistentUnitIntent).toHaveBeenLastCalledWith('plugin-setDatabase', [], [], [])
+        const proposed = { name: 'new', script: 'proposed', version: '3.0', enabled: true }
+        await harness.access.setDatabase({ plugins: [proposed] }, ['plugins'])
+        expect(harness.commitPersistentUnitIntent).toHaveBeenLastCalledWith('plugin-setDatabase', [], [], [])
+        harness.prepareAuthoritativeDatabaseUpdate.mockImplementation(async update => ({ ...update, plugins: [proposed] }))
+        await harness.access.setDatabase({ plugins: [proposed, proposed] }, ['plugins'])
+        expect(harness.commitPersistentUnitIntent).toHaveBeenLastCalledWith('plugin-setDatabase', [
+            { key: '["record","plugins","new"]', type: 'set', value: proposed },
+            { key: '["order","plugins"]', type: 'set', value: ['installed', 'new'] },
+        ], [], [])
+        expect(harness.compatibilityDatabase.plugins).toEqual([original])
+    })
+
+    it('commits a single-baseline copy but rejects an ambiguous copy without writes', async () => {
+        const harness = createHarness({ unitIntent: true })
+        const read = await harness.access.getDatabaseSnapshot(['username'], ['username'])
+        const copy = JSON.parse(JSON.stringify(read))
+        copy.username = 'Copy edit'
+        await harness.access.setDatabase(copy, ['username'])
+        expect(harness.commitPersistentUnitIntent).toHaveBeenCalledOnce()
+        harness.compatibilityDatabase.username = 'Copy edit'
+        await harness.access.getDatabaseSnapshot(['username'], ['username'])
+        harness.commitPersistentUnitIntent.mockClear()
+        await expect(harness.access.setDatabase(copy, ['username'])).rejects.toThrow('ambiguous')
+        expect(harness.commitPersistentUnitIntent).not.toHaveBeenCalled()
+    })
+
+    it('rejects an expired JSON clone and a delayed exact object after authority replacement', async () => {
+        const harness = createHarness({ unitIntent: true })
+        const read = await harness.access.getDatabaseSnapshot(['username'], ['username'])
+        const copy = JSON.parse(JSON.stringify(read))
+        harness.advanceAuthorityEpoch()
+        harness.access.expireReadBaselines()
+        await expect(harness.access.setDatabase(copy, ['username'])).rejects.toThrow('stale')
+        await expect(harness.access.setDatabase(read, ['username'])).rejects.toThrow('stale')
+        expect(harness.commitPersistentUnitIntent).not.toHaveBeenCalled()
+    })
+
+    it('pins a dormant no-read chat baseline before awaits and preserves its messages', async () => {
+        const harness = createHarness({ unitIntent: true, revisionAdmission: true })
+        const database = makeFullObjectDatabase()
+        harness.compatibilityDatabase.characters = [createCatalogCharacterStub({ id: 'active', name: 'Stub', type: 'character', configuredIndex: 0, recentAt: 0, trashed: false, conversationCount: 2 })]
+        harness.pinnedDatabases.push(database, database)
+        const submitted = structuredClone(database.characters[0].chats[0])
+        submitted.name = 'Edited dormant chat'
+        const writing = harness.access.setChatToIndex(0, 0, submitted, callContext())
+        expect(harness.store.acquireRevision).toHaveBeenCalledWith(4)
+        expect(harness.flushPendingData).not.toHaveBeenCalled()
+        submitted.message.push({ role: 'user', data: 'Mutation after admission' })
+        await writing
+        expect(harness.commitPersistentUnitIntent).toHaveBeenCalledWith('plugin-setChatToIndex', [{ key: '["conversation","active","active-chat-a","name"]', type: 'set', value: 'Edited dormant chat' }], [], [])
+        expect(harness.releasedLeases.every(release => release.mock.calls.length === 1)).toBe(true)
+    })
+
+    it('rejects a no-read setter when its admitted revision cannot be pinned', async () => {
+        const harness = createHarness({ unitIntent: true, revisionAdmission: true })
+        harness.store.acquireRevision = vi.fn(async () => { throw new RevisionConflictError(4, 5) })
+        const writing = harness.access.setCharacterToIndex(0, makeCharacter('active'), callContext())
+        expect(harness.store.acquireRevision).toHaveBeenCalledWith(4)
+        harness.advanceAuthorityEpoch()
+        await expect(writing).rejects.toThrow('stale')
+        expect(harness.flushPendingData).not.toHaveBeenCalled()
+        expect(harness.commitPersistentUnitIntent).not.toHaveBeenCalled()
+    })
+
+    it('rejects a write that outlives execution while asynchronous preparation is pending', async () => {
+        const harness = createHarness({ unitIntent: true })
+        const gate = deferred<Record<string, unknown>>()
+        harness.prepareAuthoritativeDatabaseUpdate.mockReturnValueOnce(gate.promise)
+        const writing = harness.access.setDatabase({ username: 'Old execution' }, ['username'])
+        await vi.waitFor(() => expect(harness.prepareAuthoritativeDatabaseUpdate).toHaveBeenCalledOnce())
+        harness.access.closeReadBaselines()
+        gate.resolve({ username: 'Old execution' })
+        await expect(writing).rejects.toThrow('closed')
+        expect(harness.commitPersistentUnitIntent).not.toHaveBeenCalled()
+    })
+})
+
 describe('plugin database access', () => {
     it('late_plugin_result_cannot_cross_replacement during database preparation', async () => {
         const harness = createHarness()
@@ -423,7 +550,7 @@ describe('plugin database access', () => {
         const flushed = deferred<void>()
         harness.flushPendingData.mockReturnValueOnce(flushed.promise)
         const writing = harness.access.setCurrentCharacter(makeCharacter('active'), callContext())
-        const rejected = expect(writing).rejects.toThrow('Persistent mutation fenced')
+        const rejected = expect(writing).rejects.toThrow('stale read baseline')
         harness.advanceAuthorityEpoch()
         flushed.resolve()
         await rejected
@@ -582,6 +709,7 @@ describe('plugin database access', () => {
             'message',
             'conversationStart',
             'message',
+            'provenance',
         ])
         expect(chunks.filter((chunk) => chunk.type === 'characterStart').map((chunk) => chunk.value.chaId)).toEqual([
             'active-a',
@@ -780,7 +908,7 @@ describe('plugin database access', () => {
         expect(harness.releasedLeases).toHaveLength(3)
     })
 
-    it('captures IDs and expected revision before an indexed character write', async () => {
+    it('captures stable IDs and admits only changed fields before an indexed character write', async () => {
         const harness = createHarness()
         const database = makeFullObjectDatabase()
         harness.pinnedDatabases.push(database)
@@ -792,11 +920,9 @@ describe('plugin database access', () => {
         harness.compatibilityDatabase.characters.reverse()
         await mutation
 
-        expect(harness.replacePersistentCompleteCharacter).toHaveBeenCalledWith(
-            database.characters[1].chaId,
-            'plugin-setCharacterToIndex',
-            expect.any(Function),
-            { expectedRevision: 4 },
+        expect(harness.commitPersistentUnitIntent).toHaveBeenCalledWith(
+            expect.stringMatching(/^plugin-setCharacter/),
+            expect.arrayContaining([{ key: JSON.stringify(['character', candidate.chaId, 'name']), type: 'set', value: candidate.name }]), [], [],
         )
     })
 
@@ -808,13 +934,12 @@ describe('plugin database access', () => {
         replacement.localLore = [{ key: 'plugin', content: 'saved' } as any]
 
         await harness.access.setChatToIndex(0, 1, replacement, callContext())
-        expect(harness.replacePersistentConversation).toHaveBeenCalledWith(
-            'active', replacement.id, 'plugin-setChatToIndex', replacement,
-            { expectedRevision: 4 },
+        expect(harness.commitPersistentUnitIntent).toHaveBeenCalledWith('plugin-setChatToIndex',
+            expect.arrayContaining([{ key: JSON.stringify(['conversation', 'active', replacement.id, 'localLore']), type: 'set', value: replacement.localLore }]), [], [],
         )
 
         await harness.access.setChatToIndex(99, 99, replacement, callContext())
-        expect(harness.replacePersistentConversation).toHaveBeenCalledTimes(1)
+        expect(harness.commitPersistentUnitIntent).toHaveBeenCalledTimes(1)
     })
 
     it('keeps the call-boundary current character when navigation changes during flush', async () => {
@@ -839,11 +964,8 @@ describe('plugin database access', () => {
         flushed.resolve(undefined)
         await writing
 
-        expect(harness.replacePersistentCompleteCharacter).toHaveBeenCalledWith(
-            'active',
-            'plugin-setCharacter',
-            expect.any(Function),
-            { expectedRevision: 4 },
+        expect(harness.commitPersistentUnitIntent).toHaveBeenCalledWith('plugin-setCharacter',
+            expect.arrayContaining([{ key: '["character","active","name"]', type: 'set', value: candidate.name }]), [], [],
         )
         expect(harness.acquireCompleteConversation).not.toHaveBeenCalled()
         expect(harness.refreshSelectedConversationAfterReplacement).not.toHaveBeenCalled()
@@ -914,12 +1036,8 @@ describe('plugin database access', () => {
         flushed.resolve(undefined)
         await writing
 
-        expect(harness.replacePersistentConversation).toHaveBeenCalledWith(
-            'active',
-            'active-chat-a',
-            'plugin-setChatToIndex',
-            replacement,
-            { expectedRevision: 4 },
+        expect(harness.commitPersistentUnitIntent).toHaveBeenCalledWith('plugin-setChatToIndex',
+            [{ key: '["conversation","active","active-chat-a","note"]', type: 'set', value: replacement.note }], [], [],
         )
         expect(harness.acquireCompleteConversation).not.toHaveBeenCalled()
         expect(harness.refreshSelectedConversationAfterReplacement).not.toHaveBeenCalled()
@@ -946,7 +1064,7 @@ describe('plugin database access', () => {
         flushed.resolve(undefined)
         await writing
 
-        expect(harness.replacePersistentConversation).toHaveBeenCalledOnce()
+        expect(harness.commitPersistentUnitIntent).toHaveBeenCalledOnce()
         expect(harness.acquireCompleteConversation).not.toHaveBeenCalled()
         expect(harness.invalidateActiveConversationSession).not.toHaveBeenCalled()
     })
@@ -978,14 +1096,14 @@ describe('plugin database access', () => {
         expect(harness.replacePersistentConversation).not.toHaveBeenCalled()
     })
 
-    it('holds a selected windowed lease until the scoped replacement settles', async () => {
+    it('holds a selected windowed lease until the unit commit settles', async () => {
         const harness = createHarness()
         const database = makeFullObjectDatabase()
         harness.pinnedDatabases.push(database)
         const replacement = structuredClone(database.characters[0])
         replacement.name = 'Selected replacement'
         const persistence = deferred<boolean>()
-        harness.replacePersistentCompleteCharacter.mockReturnValueOnce(persistence.promise)
+        harness.commitPersistentUnitIntent.mockImplementationOnce(async () => { await persistence.promise })
 
         const writing = harness.access.setCurrentCharacter(replacement, callContext())
         await vi.waitFor(() => expect(harness.acquireCompleteConversation).toHaveBeenCalledOnce())
@@ -1011,9 +1129,9 @@ describe('plugin database access', () => {
         harness.pinnedDatabases.push(database)
         const replacement = structuredClone(database.characters[0])
         if (outcome instanceof Error) {
-            harness.replacePersistentCompleteCharacter.mockRejectedValueOnce(outcome)
+            harness.commitPersistentUnitIntent.mockRejectedValueOnce(outcome)
         } else {
-            harness.replacePersistentCompleteCharacter.mockResolvedValueOnce(outcome)
+            harness.commitPersistentUnitIntent.mockRejectedValueOnce(new Error('stale target'))
         }
 
         await expect(harness.access.setCurrentCharacter(replacement, callContext())).rejects
@@ -1070,7 +1188,7 @@ describe('plugin database access', () => {
         const database = makeFullObjectDatabase()
         harness.pinnedDatabases.push(database)
         const persistence = deferred<boolean>()
-        harness.replacePersistentCompleteCharacter.mockReturnValueOnce(persistence.promise)
+        harness.commitPersistentUnitIntent.mockImplementationOnce(async () => { await persistence.promise })
 
         const writing = harness.access.setCurrentCharacter(
             structuredClone(database.characters[0]),
@@ -1180,24 +1298,19 @@ describe('plugin database access', () => {
         })
         const access = createProductionPluginDatabaseAccess({
         owner: PLUGIN_ACCESS_OWNER,
+            commitPersistentUnitIntent: harness.commitPersistentUnitIntent,
+            getPersistentRevision: () => 4,
             flushPendingData: harness.flushPendingData,
             getCompatibilityDatabase: () => harness.compatibilityDatabase,
             getSelectedCharacterId: harness.getSelectedCharacterId,
             captureSelectedConversationTarget: () => null,
             acquireCompleteConversation: vi.fn(),
             refreshSelectedConversationAfterReplacement: vi.fn(),
-            replacePersistentCompleteCharacter: vi.fn(),
-            replacePersistentConversation: vi.fn(),
             reportIdentityReplacementRejected: vi.fn(),
             getNavigationGeneration: () => 0,
             getStorageAuthorityEpoch: () => 0,
             assertPersistentMutationAllowed: vi.fn(),
-            applyCompatibilityDatabaseLite: harness.applyCompatibilityDatabaseLite,
             readPluginStorageSnapshot: harness.readPluginStorageSnapshot,
-            mutatePluginStorage: harness.mutatePluginStorage,
-            invalidatePluginStorage: harness.invalidatePluginStorage,
-            materializeDatabaseSnapshot: harness.materializeDatabaseSnapshot,
-            replacePersistentDatabase: harness.replacePersistentDatabase,
             prepareAuthoritativeDatabaseUpdate: harness.prepareAuthoritativeDatabaseUpdate,
             snapshot: <T>(value: T) => harness.snapshot(value) as T,
         })
@@ -1604,6 +1717,7 @@ describe('plugin database access', () => {
         resultPresets[0].mainPrompt = 'mutated snapshot'
         expect(durablePresets[0].mainPrompt).toBe('full first body')
         expect(harness.compatibilityDatabase.botPresets[0]).toEqual({
+            id: '0',
             name: 'First',
             image: 'first.png',
         })
@@ -1841,111 +1955,56 @@ describe('plugin database access', () => {
         expect(harness.snapshot).toHaveBeenCalledWith('Live user')
     })
 
-    it('replaces scalable character updates from a detached authoritative snapshot', async () => {
+    it('emits only edits from a database baseline including inactive characters and owned storage', async () => {
         const harness = createHarness()
-        const authoritative = {
-            username: 'Before',
-            botPresets: [{ name: 'Preserved preset', prompt: 'preset body' }],
-            characters: [
-                {
-                    chaId: 'active',
-                    name: 'Active',
-                    chats: [{ id: 'active-chat', message: [{ role: 'user', data: 'keep active' }] }],
-                },
-                {
-                    chaId: 'inactive',
-                    name: 'Inactive',
-                    chats: [{ id: 'inactive-chat', message: [{ role: 'char', data: 'keep inactive' }] }],
-                },
-            ],
-        } as unknown as Database
-        harness.authoritativeSnapshots.push({ database: authoritative, revision: 7 })
-        const pluginCharacters = structuredClone(authoritative.characters)
-        pluginCharacters[1].name = 'Edited while inactive'
-
-        await harness.access.setDatabase(
-            { characters: pluginCharacters, username: 'After', privateValue: 42 },
-            ['characters', 'username'],
-        )
-
-        expect(harness.materializeDatabaseSnapshot).toHaveBeenCalledWith(
-            'plugin-database-set',
-            { includePluginStorageValues: true },
-        )
-        expect(harness.replacePersistentDatabase).toHaveBeenCalledTimes(1)
-        const [candidate, reason, options] = harness.replacePersistentDatabase.mock.calls[0]
-        expect(reason).toBe('plugin-database-set')
-        expect(options).toEqual({
-            authoritative: true,
-            publishOfficial: true,
-            expectedRevision: 7,
-            expectedMutationGeneration: 0,
-        })
-        expect(candidate.username).toBe('After')
-        expect(candidate.characters[1].name).toBe('Edited while inactive')
-        expect(candidate.characters[0].chats[0].message[0].data).toBe('keep active')
-        expect(candidate.characters[1].chats[0].message[0].data).toBe('keep inactive')
-        expect(candidate.botPresets).toEqual(authoritative.botPresets)
-        expect(candidate.pluginCustomStorage.privateValue).toBe(42)
-        expect(candidate).not.toHaveProperty('privateValue')
-        expect(candidate).not.toBe(authoritative)
-        expect(candidate.characters).not.toBe(pluginCharacters)
+        const authoritative = makeFullObjectDatabase()
+        harness.pinnedDatabases.push(authoritative)
+        const read = await harness.access.getDatabaseSnapshot(['characters', 'username'], ['characters', 'username'])
+        ;(read.characters as Database['characters'])[1].name = 'Edited while inactive'
+        read.username = 'After'
+        read.privateValue = 42
+        await harness.access.setDatabase(read, ['characters', 'username'])
+        expect(harness.commitPersistentUnitIntent).toHaveBeenCalledWith('plugin-setDatabase', [
+            { key: '["character","trashed","name"]', type: 'set', value: 'Edited while inactive' },
+            { key: '["plugin","test-plugin","privateValue"]', type: 'set', value: 42 },
+            { key: '["root","username"]', type: 'set', value: 'After' },
+        ], [], [])
+        expect(harness.materializeDatabaseSnapshot).not.toHaveBeenCalled()
+        expect(harness.replacePersistentDatabase).not.toHaveBeenCalled()
+        expect(authoritative.characters[1].name).toBe('trashed')
     })
 
-    it('keeps same-key values from other plugin owners during a full replacement', async () => {
+    it('scopes same-key plugin storage changes to the execution owner', async () => {
         const harness = createHarness()
-        const authoritative = {
-            username: 'Before',
-            botPresets: [],
-            characters: [{ chaId: 'inactive', name: 'Before', chats: [] }],
-            pluginCustomStorage: { shared: 'plugin-a-value' },
-        } as unknown as Database
-        harness.authoritativeSnapshots.push({
-            database: authoritative,
-            revision: 7,
-            pluginStorageValues: [
-                { owner: PLUGIN_ACCESS_OWNER, key: 'shared', value: 'plugin-a-value' },
-                { owner: 'plugin-b', key: 'shared', value: 'plugin-b-value' },
-            ],
-        })
-
-        await harness.access.setDatabase(
-            {
-                characters: [{ chaId: 'inactive', name: 'After', chats: [] }],
-                pluginCustomStorage: { shared: 'plugin-a-updated' },
-            },
-            ['characters', 'pluginCustomStorage'],
-        )
-
-        const [, , options] = harness.replacePersistentDatabase.mock.calls[0]
-        expect(options.pluginStorageValues).toHaveLength(2)
-        expect(options.pluginStorageValues).toEqual(expect.arrayContaining([
-            { owner: PLUGIN_ACCESS_OWNER, key: 'shared', value: 'plugin-a-updated' },
-            { owner: 'plugin-b', key: 'shared', value: 'plugin-b-value' },
-        ]))
+        const authoritative = { characters: [], botPresets: [], pluginCustomStorage: { shared: 'before' } } as unknown as Database
+        harness.pinnedDatabases.push(authoritative)
+        const read = await harness.access.getDatabaseSnapshot(['pluginCustomStorage'], ['pluginCustomStorage'])
+        ;(read.pluginCustomStorage as Record<string, unknown>).shared = 'updated'
+        await harness.access.setDatabase(read, ['pluginCustomStorage'])
+        expect(harness.commitPersistentUnitIntent).toHaveBeenCalledWith('plugin-setDatabase', [
+            { key: '["plugin","test-plugin","shared"]', type: 'set', value: 'updated' },
+        ], [], [])
+        expect(harness.replacePersistentDatabase).not.toHaveBeenCalled()
     })
 
-    it('waits for authoritative replacement so scalable live reprojection is observable', async () => {
+    it('waits for the unit commit and its renderer projection before resolving', async () => {
         const harness = createHarness()
-        harness.authoritativeSnapshots.push({
-            database: {
-                characters: [{ chaId: 'inactive', name: 'Before', chats: [] }],
-                botPresets: [],
-            } as unknown as Database,
-            revision: 8,
+        const pending = deferred<void>()
+        const projection = vi.fn()
+        harness.commitPersistentUnitIntent.mockImplementationOnce(async () => {
+            await pending.promise
+            projection()
         })
-        vi.mocked(harness.replacePersistentDatabase).mockImplementation(async () => {
-            harness.compatibilityDatabase.characters = [
-                { chaId: 'inactive', name: 'Projected', chats: [] },
-            ] as never
-        })
-
-        await harness.access.setDatabase(
-            { characters: [{ chaId: 'inactive', name: 'After', chats: [] }] },
-            ['characters'],
-        )
-
-        expect(harness.compatibilityDatabase.characters[0].name).toBe('Projected')
+        const finished = vi.fn()
+        const writing = harness.access.setDatabase({ username: 'After' }, ['username']).then(finished)
+        await vi.waitFor(() => expect(harness.commitPersistentUnitIntent).toHaveBeenCalledOnce())
+        expect(finished).not.toHaveBeenCalled()
+        expect(projection).not.toHaveBeenCalled()
+        pending.resolve(undefined)
+        await writing
+        expect(projection).toHaveBeenCalledOnce()
+        expect(finished).toHaveBeenCalledOnce()
+        expect(projection.mock.invocationCallOrder[0]).toBeLessThan(finished.mock.invocationCallOrder[0])
     })
 
     it('rejects synchronous scalable character updates before live mutation', () => {
@@ -1991,27 +2050,16 @@ describe('plugin database access', () => {
         expect(harness.replacePersistentDatabase).not.toHaveBeenCalled()
     })
 
-    it('keeps synchronous root-only setters on the observer path and serializes async updates', async () => {
+    it('routes lite and async root-only setters through the same unit commit path', async () => {
         const harness = createHarness()
-        const liteUpdate = { username: 'Lite' }
-        const asyncUpdate = { username: 'Async' }
-        harness.authoritativeSnapshots.push({
-            database: {
-                username: 'Before',
-                characters: [],
-                botPresets: [],
-            } as unknown as Database,
-            revision: 9,
-        })
-
-        harness.access.setDatabaseLite(liteUpdate, ['characters', 'username'])
-        await harness.access.setDatabase(asyncUpdate, ['characters', 'username'])
-
-        expect(harness.applyCompatibilityDatabaseLite).toHaveBeenCalledWith(liteUpdate)
-        expect(harness.applyCompatibilityDatabaseLite).toHaveBeenCalledWith(asyncUpdate)
+        await harness.access.setDatabaseLite({ username: 'Lite' }, ['username'])
+        await harness.access.setDatabase({ username: 'Async' }, ['username'])
+        expect(harness.commitPersistentUnitIntent.mock.calls.map(call => [call[0], call[1]])).toEqual([
+            ['plugin-setDatabaseLite', [{ key: '["root","username"]', type: 'set', value: 'Lite' }]],
+            ['plugin-setDatabase', [{ key: '["root","username"]', type: 'set', value: 'Async' }]],
+        ])
+        expect(harness.applyCompatibilityDatabaseLite).not.toHaveBeenCalled()
         expect(harness.materializeDatabaseSnapshot).not.toHaveBeenCalled()
-        expect(harness.replacePersistentDatabase).not.toHaveBeenCalled()
-        expect(harness.flushPendingData).toHaveBeenCalledWith('plugin-root-update')
     })
 
     it(
@@ -2026,7 +2074,9 @@ describe('plugin database access', () => {
                 revision: 9,
             })
             const character = harness.compatibilityDatabase.characters[0]
-            harness.applyCompatibilityDatabaseLite.mockImplementation((update) => {
+            harness.commitPersistentUnitIntent.mockImplementation(async (_reason, units) => {
+                character.name = 'Concurrent edit'
+                const update = Object.fromEntries(units.filter(unit => JSON.parse(unit.key)[0] === 'root').map(unit => [JSON.parse(unit.key)[1], unit.type === 'set' ? unit.value : undefined]))
                 applyPluginDatabaseUpdate(
                     harness.compatibilityDatabase as Database,
                     update,
@@ -2056,11 +2106,10 @@ describe('plugin database access', () => {
             },
         }, ['pluginCustomStorage'])
 
-        expect(harness.mutatePluginStorage).toHaveBeenCalledWith([
-            { type: 'clear' },
-            { type: 'set', key: '2', value: 0 },
-            { type: 'set', key: 'memory', value: { replaced: true } },
-        ])
+        expect(harness.commitPersistentUnitIntent).toHaveBeenCalledWith('plugin-setDatabaseLite', [
+            { key: '["plugin","test-plugin","2"]', type: 'set', value: 0 },
+            { key: '["plugin","test-plugin","memory"]', type: 'set', value: { replaced: true } },
+        ], [], [])
         expect(harness.applyCompatibilityDatabaseLite).not.toHaveBeenCalled()
         expect(harness.materializeDatabaseSnapshot).not.toHaveBeenCalled()
     })
@@ -2072,189 +2121,81 @@ describe('plugin database access', () => {
             pluginCustomStorage: { memory: 'authoritative' },
         }, ['pluginCustomStorage'])
 
-        expect(harness.mutatePluginStorage).toHaveBeenCalledWith([
-            { type: 'clear' },
-            { type: 'set', key: 'memory', value: 'authoritative' },
+        expect(harness.commitPersistentUnitIntent).toHaveBeenCalledWith('plugin-setDatabase', [
+            { key: '["plugin","test-plugin","memory"]', type: 'set', value: 'authoritative' },
+        ], [], [])
+        expect(harness.materializeDatabaseSnapshot).not.toHaveBeenCalled()
+        expect(harness.replacePersistentDatabase).not.toHaveBeenCalled()
+    })
+
+    it('leaves read and live values unchanged when the unit commit fails', async () => {
+        const harness = createHarness()
+        const liveBefore = structuredClone(harness.compatibilityDatabase)
+        const submitted = { username: 'After' }
+        harness.commitPersistentUnitIntent.mockRejectedValueOnce(new Error('unit commit failed'))
+        await expect(harness.access.setDatabase(submitted, ['username'])).rejects.toThrow('unit commit failed')
+        expect(harness.compatibilityDatabase).toEqual(liveBefore)
+        expect(submitted).toEqual({ username: 'After' })
+        expect(harness.applyCompatibilityDatabaseLite).not.toHaveBeenCalled()
+    })
+
+    it('commits concurrent routine setters as independent admitted unit intents', async () => {
+        const harness = createHarness({ unitIntent: true })
+        const outcomes = await Promise.allSettled([
+            harness.access.setDatabase({ username: 'First' }, ['username']),
+            harness.access.setDatabase({ maxContext: 4096 }, ['maxContext']),
+        ])
+        expect(outcomes.every(outcome => outcome.status === 'fulfilled')).toBe(true)
+        expect(harness.commitPersistentUnitIntent.mock.calls.map(call => call[1])).toEqual([
+            [{ key: '["root","username"]', type: 'set', value: 'First' }],
+            [{ key: '["root","maxContext"]', type: 'set', value: 4096 }],
         ])
         expect(harness.materializeDatabaseSnapshot).not.toHaveBeenCalled()
         expect(harness.replacePersistentDatabase).not.toHaveBeenCalled()
     })
 
-    it('leaves live and authoritative snapshots unchanged when scalable replacement fails', async () => {
-        const harness = createHarness()
-        const liveBefore = structuredClone(harness.compatibilityDatabase)
-        const authoritative = {
-            username: 'Before',
-            botPresets: [{ name: 'Preset' }],
-            characters: [{ chaId: 'inactive', name: 'Before', chats: [] }],
-        } as unknown as Database
-        const authoritativeBefore = structuredClone(authoritative)
-        harness.authoritativeSnapshots.push({ database: authoritative, revision: 10 })
-        harness.replacePersistentDatabase.mockRejectedValueOnce(new Error('replacement failed'))
-
-        await expect(harness.access.setDatabase(
-            { characters: [{ chaId: 'inactive', name: 'After', chats: [] }] },
-            ['characters'],
-        )).rejects.toThrow('replacement failed')
-
-        expect(harness.compatibilityDatabase).toEqual(liveBefore)
-        expect(authoritative).toEqual(authoritativeBefore)
+    it('omits untouched stale character fields when a database read is submitted later', async () => {
+        const harness = createHarness({ unitIntent: true })
+        const database = { characters: [{ chaId: 'char', name: 'Before', chats: [] }] } as unknown as Database
+        harness.pinnedDatabases.push(database)
+        const read = await harness.access.getDatabaseSnapshot(['characters'], ['characters'])
+        ;(read.characters as Database['characters'])[0].name = 'Plugin edit'
+        database.characters[0].image = 'Concurrent remote description'
+        await harness.access.setDatabase(read, ['characters'])
+        expect(harness.commitPersistentUnitIntent).toHaveBeenCalledWith('plugin-setDatabase', [
+            { key: '["character","char","name"]', type: 'set', value: 'Plugin edit' },
+        ], [], [])
+        expect(harness.replacePersistentDatabase).not.toHaveBeenCalled()
+        expect(database.characters[0].image).toBe('Concurrent remote description')
     })
 
-    it('allows only one of two setters materialized from the same revision to commit', async () => {
-        const harness = createHarness()
-        const base = {
-            username: 'Before',
-            characters: [],
-            botPresets: [{ name: 'Preset' }],
-        } as unknown as Database
-        harness.authoritativeSnapshots.push(
-            { database: structuredClone(base), revision: 20 },
-            { database: structuredClone(base), revision: 20 },
-        )
-        let currentRevision = 20
-        harness.replacePersistentDatabase.mockImplementation(async (
-            _database,
-            _reason,
-            options,
-        ) => {
-            if (options.expectedRevision !== currentRevision) {
-                throw new Error('revision-conflict')
-            }
-            currentRevision++
-            return { kind: 'committed', revision: currentRevision, projection: 'applied' }
-        })
-
-        const outcomes = await Promise.allSettled([
-            harness.access.setDatabase({ username: 'First', characters: [] }, [
-                'username',
-                'characters',
-            ]),
-            harness.access.setDatabase({ username: 'Second', characters: [] }, [
-                'username',
-                'characters',
-            ]),
-        ])
-
-        expect(outcomes.filter((outcome) => outcome.status === 'fulfilled')).toHaveLength(1)
-        expect(outcomes.filter((outcome) => outcome.status === 'rejected')).toHaveLength(1)
-        expect(harness.replacePersistentDatabase).toHaveBeenCalledTimes(2)
+    it('uses the exact read baseline instead of taking a newer database baseline', async () => {
+        const harness = createHarness({ unitIntent: true })
+        const read = await harness.access.getDatabaseSnapshot(['username', 'maxContext'], ['username', 'maxContext'])
+        harness.compatibilityDatabase.maxContext = 16384
+        read.username = 'After'
+        await harness.access.setDatabase(read, ['username', 'maxContext'])
+        expect(harness.commitPersistentUnitIntent).toHaveBeenCalledWith('plugin-setDatabase', [
+            { key: '["root","username"]', type: 'set', value: 'After' },
+        ], [], [])
+        expect(harness.materializeDatabaseSnapshot).not.toHaveBeenCalled()
+        expect(harness.compatibilityDatabase.maxContext).toBe(16384)
     })
 
-    it('does not overwrite a disjoint edit committed after materialization', async () => {
-        const harness = createHarness()
-        const storeDatabase = {
-            username: 'Before',
-            characters: [{ chaId: 'char', name: 'Before', chats: [] }],
-            botPresets: [],
-        } as unknown as Database
-        harness.authoritativeSnapshots.push({
-            database: structuredClone(storeDatabase),
-            revision: 30,
-        })
-        storeDatabase.characters[0].name = 'Concurrent character edit'
-        harness.replacePersistentDatabase.mockRejectedValueOnce(new Error('revision-conflict'))
-
-        await expect(
-            harness.access.setDatabase(
-                {
-                    username: 'Plugin root edit',
-                    characters: [{ chaId: 'char', name: 'Before', chats: [] }],
-                },
-                ['username', 'characters'],
-            ),
-        ).rejects.toThrow('revision-conflict')
-
-        expect(harness.replacePersistentDatabase).toHaveBeenCalledWith(
-            expect.anything(),
-            'plugin-database-set',
-            expect.objectContaining({ expectedRevision: 30 }),
-        )
-        expect(storeDatabase.characters[0].name).toBe('Concurrent character edit')
-        expect(storeDatabase.username).toBe('Before')
-    })
-
-    it('uses the revision paired with the materialized database snapshot', async () => {
-        const harness = createHarness()
-        let currentRevision = 50
-        harness.authoritativeSnapshots.push({
-            database: {
-                username: 'Before',
-                characters: [],
-                botPresets: [],
-            } as unknown as Database,
-            revision: currentRevision,
-        })
-        harness.materializeDatabaseSnapshot.mockImplementationOnce(async () => {
-            const snapshot = harness.authoritativeSnapshots.shift()!
-            currentRevision++
-            return {
-                ...snapshot,
-                mutationGeneration: snapshot.mutationGeneration ?? 0,
-            }
-        })
-
-        await harness.access.setDatabase({ username: 'After', characters: [] }, [
-            'username',
-            'characters',
-        ])
-
-        expect(currentRevision).toBe(51)
-        expect(harness.replacePersistentDatabase).toHaveBeenCalledWith(
-            expect.objectContaining({ username: 'After' }),
-            'plugin-database-set',
-            expect.objectContaining({ expectedRevision: 50 }),
-        )
-    })
-
-    it('rejects replacement after an unflushed live mutation changes generation', async () => {
-        const harness = createHarness()
-        const liveBefore = structuredClone(harness.compatibilityDatabase)
-        let currentMutationGeneration = 70
-        harness.authoritativeSnapshots.push({
-            database: {
-                username: 'Before',
-                characters: [],
-                botPresets: [],
-            } as unknown as Database,
-            revision: 60,
-            mutationGeneration: currentMutationGeneration,
-        })
-        harness.materializeDatabaseSnapshot.mockImplementationOnce(async () => {
-            const snapshot = harness.authoritativeSnapshots.shift()!
-            currentMutationGeneration++
-            return {
-                ...snapshot,
-                mutationGeneration: snapshot.mutationGeneration!,
-            }
-        })
-        harness.replacePersistentDatabase.mockImplementationOnce(async (
-            _database,
-            _reason,
-            options,
-        ) => {
-            if (options.expectedMutationGeneration !== currentMutationGeneration) {
-                throw new Error('mutation-generation-conflict')
-            }
-            return { kind: 'committed', revision: 61, projection: 'applied' }
-        })
-
-        await expect(
-            harness.access.setDatabase({ username: 'Plugin edit', characters: [] }, [
-                'username',
-                'characters',
-            ]),
-        ).rejects.toThrow('mutation-generation-conflict')
-
-        expect(harness.replacePersistentDatabase).toHaveBeenCalledWith(
-            expect.anything(),
-            'plugin-database-set',
-            expect.objectContaining({
-                expectedRevision: 60,
-                expectedMutationGeneration: 70,
-            }),
-        )
-        expect(harness.compatibilityDatabase).toEqual(liveBefore)
+    it('keeps the no-read call admission baseline across asynchronous preparation', async () => {
+        const harness = createHarness({ unitIntent: true })
+        const gate = deferred<Record<string, unknown>>()
+        harness.prepareAuthoritativeDatabaseUpdate.mockImplementationOnce(() => gate.promise)
+        const writing = harness.access.setDatabase({ username: 'Plugin edit', maxContext: 8192 }, ['username', 'maxContext'])
+        await vi.waitFor(() => expect(harness.prepareAuthoritativeDatabaseUpdate).toHaveBeenCalledOnce())
+        harness.compatibilityDatabase.maxContext = 16384
+        gate.resolve({ username: 'Plugin edit' })
+        await writing
+        expect(harness.commitPersistentUnitIntent).toHaveBeenCalledWith('plugin-setDatabase', [
+            { key: '["root","username"]', type: 'set', value: 'Plugin edit' },
+        ], [], [])
+        expect(harness.compatibilityDatabase.maxContext).toBe(16384)
+        expect(harness.replacePersistentDatabase).not.toHaveBeenCalled()
     })
 
     it('rejects a scalable update when confirmation outlives profile or navigation state', async () => {
@@ -2276,39 +2217,20 @@ describe('plugin database access', () => {
     it('merges explicit and extra custom storage independently of input key order', async () => {
         const first = createHarness()
         const second = createHarness()
-        const base = {
-            characters: [],
-            botPresets: [],
-            pluginCustomStorage: { existing: 'kept only without explicit replacement' },
-        } as unknown as Database
-        first.authoritativeSnapshots.push({ database: structuredClone(base), revision: 40 })
-        second.authoritativeSnapshots.push({ database: structuredClone(base), revision: 40 })
+        const base = { characters: [], botPresets: [], pluginCustomStorage: { existing: 'before' } } as unknown as Database
+        first.pinnedDatabases.push(structuredClone(base))
+        second.pinnedDatabases.push(structuredClone(base))
         const explicit = { shared: 'explicit', explicitOnly: 'value' }
-        const firstUpdate = {
-            pluginCustomStorage: explicit,
-            shared: 'extra',
-            extraOnly: 2,
-        }
-        const secondUpdate = {
-            extraOnly: 2,
-            shared: 'extra',
-            pluginCustomStorage: explicit,
-        }
-
-        await first.access.setDatabase(firstUpdate, ['pluginCustomStorage'])
-        await second.access.setDatabase(secondUpdate, ['pluginCustomStorage'])
-
-        expect(first.mutatePluginStorage).toHaveBeenCalledWith([
-            { type: 'clear' },
-            { type: 'set', key: 'shared', value: 'extra' },
-            { type: 'set', key: 'explicitOnly', value: 'value' },
-            { type: 'set', key: 'extraOnly', value: 2 },
-        ])
-        expect(second.mutatePluginStorage.mock.calls[0][0]).toEqual(
-            first.mutatePluginStorage.mock.calls[0][0],
-        )
-        expect(first.replacePersistentDatabase).not.toHaveBeenCalled()
-        expect(second.replacePersistentDatabase).not.toHaveBeenCalled()
+        await first.access.setDatabase({ pluginCustomStorage: explicit, shared: 'extra', extraOnly: 2 }, ['pluginCustomStorage'])
+        await second.access.setDatabase({ extraOnly: 2, shared: 'extra', pluginCustomStorage: explicit }, ['pluginCustomStorage'])
+        const expected = [
+            { key: '["plugin","test-plugin","extraOnly"]', type: 'set', value: 2 },
+            { key: '["plugin","test-plugin","existing"]', type: 'delete' },
+            { key: '["plugin","test-plugin","explicitOnly"]', type: 'set', value: 'value' },
+            { key: '["plugin","test-plugin","shared"]', type: 'set', value: 'extra' },
+        ]
+        expect(first.commitPersistentUnitIntent.mock.calls[0][1]).toEqual(expected)
+        expect(second.commitPersistentUnitIntent.mock.calls[0][1]).toEqual(expected)
     })
 
     it.each([

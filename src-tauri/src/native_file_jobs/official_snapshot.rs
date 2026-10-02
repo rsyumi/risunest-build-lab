@@ -259,6 +259,7 @@ async fn download_snapshot_attempt(
     Ok(DownloadOutcome::File(OpenedJobSource {
         file,
         total_bytes: written,
+        custody: None,
     }))
 }
 
@@ -952,6 +953,7 @@ mod tests {
         let mut source = OpenedJobSource {
             file: File::open(path).unwrap(),
             total_bytes: 17,
+            custody: None,
         };
 
         let error = require_native_prepared_format(&mut source).unwrap_err();

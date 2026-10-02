@@ -185,6 +185,8 @@ export async function reconcileNativeFileJobsBeforeBootstrap(
             case 'restore-official-account-snapshot':
             case 'restore-portable-backup':
             case 'restore-legacy-local-backup': {
+                if (job.kind === 'restore-portable-backup' && job.restoreAdoptionConfirmed === true
+                    && (job.portableBodyRetry?.pending || job.phase === 'copying-missing-bodies')) break
                 if (options.reconcileRestores === false) break
                 const terminal = isTerminal(job)
                     ? job
@@ -202,6 +204,7 @@ export async function reconcileNativeFileJobsBeforeBootstrap(
                 break
             }
             case 'export-portable-backup':
+            case 'snapshot-bodies':
                 // The app-owned export intent resumes publication after the
                 // maintenance navigation. Never discard its SAF handoff here.
                 break

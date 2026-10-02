@@ -110,7 +110,43 @@ struct OpenedFilesRequest { urls: Vec<String> }
 struct DataRootRequest<'a> { data_root: &'a str }
 
 #[cfg(target_os = "ios")]
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PortableSourceRequest<'a> { token:&'a str, job_id:Option<&'a str> }
+#[cfg(target_os = "ios")]
+#[derive(Serialize)]
+struct PortableSourceFormatRequest<'a> {token:&'a str, format:&'a str}
+#[cfg(target_os = "ios")]
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PortableSourceProbeRequest<'a> {token:&'a str,probe_id:&'a str}
+#[cfg(target_os = "ios")]
+#[derive(Deserialize)]
+pub struct PortableSourceDescriptor { pub fd:i32, pub bytes:u64 }
+
+#[cfg(target_os = "ios")]
 impl<R: Runtime> IosNative<R> {
+    pub fn portable_source_descriptor(&self, token:&str, job_id:Option<&str>) -> Result<PortableSourceDescriptor,String> {
+        self.0.handle.run_mobile_plugin("portableSourceDescriptor",PortableSourceRequest {token,job_id}).map_err(|error|error.to_string())
+    }
+    pub fn release_portable_source(&self, token:&str, job_id:Option<&str>) -> Result<bool,String> {
+        self.0.handle.run_mobile_plugin("releasePortableSource",PortableSourceRequest {token,job_id}).map_err(|error|error.to_string())
+    }
+    pub fn portable_source_orphans(&self)->Result<Vec<String>,String> {
+        self.0.handle.run_mobile_plugin("portableSourceOrphans",()).map_err(|error|error.to_string())
+    }
+    pub fn acknowledge_portable_source_orphan(&self,token:&str)->Result<bool,String> {
+        self.0.handle.run_mobile_plugin("acknowledgePortableSourceOrphan",PortableSourceRequest{token,job_id:None}).map_err(|error|error.to_string())
+    }
+    pub fn begin_portable_source_probe(&self,token:&str,probe_id:&str)->Result<bool,String> {
+        self.0.handle.run_mobile_plugin("beginPortableSourceProbe",PortableSourceProbeRequest{token,probe_id}).map_err(|error|error.to_string())
+    }
+    pub fn end_portable_source_probe(&self,token:&str,probe_id:&str)->Result<bool,String> {
+        self.0.handle.run_mobile_plugin("endPortableSourceProbe",PortableSourceProbeRequest{token,probe_id}).map_err(|error|error.to_string())
+    }
+    pub fn confirm_portable_source_format(&self,token:&str,format:&str)->Result<(),String> {
+        self.0.handle.run_mobile_plugin("confirmPortableSourceFormat",PortableSourceFormatRequest{token,format}).map_err(|error|error.to_string())
+    }
     /// Hands over the store root, once. The native side enforces file ownership
     /// against it and rejects every staged path until it arrives, so each call
     /// that can reach a staged file waits here instead of racing the handover.

@@ -7,6 +7,7 @@
     import {
         cancelActiveNativeFileOperation,
         dismissNativeFileOperationOutcome,
+        retryPortableRestoreBodiesFromOutcome,
         nativeFileJobHost,
         nativeFileOperation,
         nativeFileOperationOutcome,
@@ -24,6 +25,11 @@
     const open = $derived(model.open && !embedded)
     const ticking = $derived(open && model.terminal === null)
     const copy = $derived(language.risuNest.importDialog)
+    const retryAvailable = $derived($nativeFileOperationOutcome?.status?.kind === 'restore-portable-backup'
+        && $nativeFileOperationOutcome.status.restoreAdoptionConfirmed === true
+        && $nativeFileOperationOutcome.status.portableBodyRetry?.pending === true
+        && $nativeFileOperationOutcome.status.portableBodyRetry.available === true
+        && !$nativeFileOperationOutcome.status.portableBodyRetry.sourceRequired)
 
     $effect(() => {
         if (!ticking) return
@@ -182,6 +188,9 @@
                         </SettingButton>
                     {/if}
                     {#if model.closeVisible}
+                        {#if retryAvailable}
+                            <SettingButton variant="secondary" onclick={() => {void retryPortableRestoreBodiesFromOutcome().catch(() => {})}}>{language.retry}</SettingButton>
+                        {/if}
                         <SettingButton onclick={dismissNativeFileOperationOutcome}>{copy.close}</SettingButton>
                     {/if}
                 </footer>

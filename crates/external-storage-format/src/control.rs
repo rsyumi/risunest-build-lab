@@ -93,7 +93,6 @@ pub enum BackupPointKind {
     Backup,
     History,
     Manual,
-    Conflict,
 }
 
 /// A point names the one backup bundle it preserves.
@@ -104,6 +103,7 @@ pub struct BackupPointDocument {
     pub repository_id: String,
     pub point_id: String,
     pub kind: BackupPointKind,
+    #[serde(with = "crate::control_integer")]
     pub created_at_ms: u64,
     pub bundle: StoredObject,
 }
@@ -126,20 +126,6 @@ impl BackupPointDocument {
         };
         value.validate()?;
         Ok(value)
-    }
-    pub fn conflict(
-        repository_id: String,
-        point_id: String,
-        created_at_ms: u64,
-        remote_bundle: StoredObject,
-    ) -> Result<Self> {
-        Self::single(
-            repository_id,
-            point_id,
-            BackupPointKind::Conflict,
-            created_at_ms,
-            remote_bundle,
-        )
     }
     pub fn bundles(&self) -> Vec<&StoredObject> {
         vec![&self.bundle]
@@ -207,6 +193,7 @@ pub struct BackupBundleDocument {
     pub repository_id: String,
     pub bundle_id: String,
     pub source: BundleSource,
+    #[serde(with = "crate::control_integer")]
     pub captured_at_ms: u64,
     pub local_library_revision: Option<Sequence>,
     pub local_device_revision: Option<Sequence>,
@@ -215,6 +202,14 @@ pub struct BackupBundleDocument {
     pub library: LibrarySnapshotRef,
     pub sections: BTreeMap<String, SectionSnapshotRef>,
     pub bundle_fingerprint: [u8; 32],
+    #[serde(deserialize_with = "deserialize_original_units")]
+    pub original_units: Option<StoredObject>,
+}
+
+fn deserialize_original_units<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<StoredObject>, D::Error> {
+    Option::<StoredObject>::deserialize(deserializer)
 }
 
 impl BackupBundleDocument {
@@ -229,6 +224,7 @@ impl BackupBundleDocument {
         remote_generation: Option<Sequence>,
         library: LibrarySnapshotRef,
         sections: BTreeMap<String, SectionSnapshotRef>,
+        original_units: Option<StoredObject>,
     ) -> Result<Self> {
         let value = Self {
             schema: BUNDLE_SCHEMA.into(),
@@ -240,9 +236,14 @@ impl BackupBundleDocument {
             local_device_revision,
             remote_generation,
             included_sections: sections.keys().cloned().collect(),
-            bundle_fingerprint: bundle_fingerprint(&library.content_fingerprint, &sections),
+            bundle_fingerprint: bundle_fingerprint(
+                &library.content_fingerprint,
+                &sections,
+                original_units.as_ref(),
+            ),
             library,
             sections,
+            original_units,
         };
         value.validate()?;
         Ok(value)
@@ -257,6 +258,18 @@ impl BackupBundleDocument {
             return Err(FormatError("invalid-backup-bundle"));
         }
         self.source.validate()?;
+        match (&self.source, &self.original_units) {
+            (BundleSource::Device { .. }, Some(root)) => {
+                root.validate()?;
+                if root.header.repository_id != self.repository_id
+                    || root.header.role != ObjectRole::Catalog
+                {
+                    return Err(FormatError("invalid-original-unit-catalog"));
+                }
+            }
+            (BundleSource::SyncState { .. }, None) => {}
+            _ => return Err(FormatError("invalid-original-unit-catalog")),
+        }
         self.library.validate(&self.repository_id)?;
         let mut previous: Option<&str> = None;
         for id in &self.included_sections {
@@ -279,7 +292,11 @@ impl BackupBundleDocument {
             section.validate(&self.repository_id, id)?;
         }
         if self.bundle_fingerprint
-            != bundle_fingerprint(&self.library.content_fingerprint, &self.sections)
+            != bundle_fingerprint(
+                &self.library.content_fingerprint,
+                &self.sections,
+                self.original_units.as_ref(),
+            )
         {
             return Err(FormatError("invalid-bundle-fingerprint"));
         }
@@ -305,8 +322,10 @@ impl BackupBundleDocument {
 pub struct InventoryEntry {
     pub object_id: String,
     pub role: ObjectRole,
+    #[serde(with = "crate::control_integer")]
     pub ciphertext_length: u64,
     pub ciphertext_sha256: [u8; 32],
+    #[serde(with = "crate::control_integer")]
     pub plaintext_length: u64,
     pub plaintext_sha256: [u8; 32],
 }
@@ -444,8 +463,11 @@ pub struct LeaseDocument {
     pub writer_id: String,
     pub job_id: String,
     pub kind: LeaseKind,
+    #[serde(with = "crate::control_integer")]
     pub seq: u64,
+    #[serde(with = "crate::control_integer")]
     pub created_at_ms: u64,
+    #[serde(with = "crate::control_integer")]
     pub expires_at_ms: u64,
 }
 
@@ -539,6 +561,39 @@ mod tests {
         }
     }
 
+    fn original_catalog(repository: &str, id: &str, role: ObjectRole) -> StoredObject {
+        use crate::snapshot::{open_envelope, seal_envelope, CatalogDocument, CatalogKind};
+        let plaintext = CatalogDocument::leaf(CatalogKind::Records, vec![], vec![])
+            .unwrap()
+            .encode(4096)
+            .unwrap();
+        let header =
+            PublicObjectHeader::new(repository.into(), id.into(), role, plaintext.len() as u64)
+                .unwrap();
+        let mut sealed = Vec::new();
+        seal_envelope(&mut plaintext.as_slice(), &mut sealed, &[7; 32], &header).unwrap();
+        let mut opened = Vec::new();
+        assert_eq!(
+            open_envelope(&mut sealed.as_slice(), &mut opened, &[7; 32], 4096).unwrap(),
+            header
+        );
+        assert_eq!(opened, plaintext);
+        let root = StoredObject {
+            header,
+            locator: WireLocator {
+                connection_identity: "account/root".into(),
+                collection: None,
+                object: id.into(),
+            },
+            ciphertext_length: sealed.len() as u64,
+            ciphertext_sha256: crate::content_identity::hash(&sealed),
+            plaintext_length: plaintext.len() as u64,
+            plaintext_sha256: crate::content_identity::hash(&plaintext),
+        };
+        root.validate().unwrap();
+        root
+    }
+
     pub(crate) fn library() -> LibrarySnapshotRef {
         LibrarySnapshotRef {
             record_catalog: stored("catalog-records", ObjectRole::Catalog),
@@ -602,9 +657,10 @@ mod tests {
         )
         .is_err());
 
-        let point = BackupPointDocument::conflict(
+        let point = BackupPointDocument::single(
             "repository".into(),
             "point".into(),
+            BackupPointKind::Manual,
             1,
             stored("bundle-b", ObjectRole::BackupBundle),
         )
@@ -617,17 +673,11 @@ mod tests {
         assert!(encoded_value.get("remoteBundle").is_none());
         assert_eq!(point.bundles(), vec![&point.bundle]);
 
-        let old_dual_shape = serde_json::json!({
-            "schema": POINT_SCHEMA,
-            "repositoryId": "repository",
-            "pointId": "point",
-            "kind": "conflict",
-            "createdAtMs": 1,
-            "localBundle": stored("bundle-a", ObjectRole::BackupBundle),
-            "remoteBundle": stored("bundle-b", ObjectRole::BackupBundle),
-        });
+        let mut unknown_field = encoded_value.clone();
+        unknown_field["extraBundle"] =
+            serde_json::to_value(stored("bundle-a", ObjectRole::BackupBundle)).unwrap();
         assert!(
-            BackupPointDocument::decode(&serde_json::to_vec(&old_dual_shape).unwrap(), 8192)
+            BackupPointDocument::decode(&serde_json::to_vec(&unknown_field).unwrap(), 8192)
                 .is_err()
         );
 
@@ -640,18 +690,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(single.bundles().len(), 1);
-        assert!(BackupPointDocument::conflict(
+        assert!(BackupPointDocument::single(
             "repository".into(),
             "point".into(),
+            BackupPointKind::Manual,
             1,
             stored("state", ObjectRole::SyncState),
         )
         .is_err());
         let mut wrong_repository = stored("bundle", ObjectRole::BackupBundle);
         wrong_repository.header.repository_id = "other-repository".into();
-        assert!(BackupPointDocument::conflict(
+        assert!(BackupPointDocument::single(
             "repository".into(),
             "point".into(),
+            BackupPointKind::Manual,
             1,
             wrong_repository,
         )
@@ -669,7 +721,7 @@ mod tests {
             .unwrap();
         let encoded = lease.encode(4096).unwrap();
         let value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
-        assert_eq!(value["expiresAtMs"], 42 + 60 * 60_000u64);
+        assert_eq!(value["expiresAtMs"], (42 + 60 * 60_000u64).to_string());
         assert_eq!(value["schema"], LEASE_SCHEMA);
         assert_eq!(LeaseDocument::decode(&encoded, 4096).unwrap(), lease);
     }
@@ -682,7 +734,8 @@ mod tests {
         let lease = LeaseDocument::new("writer".into(), "job".into(), LeaseKind::Work, 0, 0)
             .unwrap();
         let encoded = String::from_utf8(lease.encode(4096).unwrap()).unwrap();
-        let without_expiry = encoded.replace(",\"expiresAtMs\":3600000", "");
+        let without_expiry = encoded.replace(",\"expiresAtMs\":\"3600000\"", "");
+        assert_ne!(without_expiry, encoded);
         assert!(LeaseDocument::decode(without_expiry.as_bytes(), 4096).is_err());
     }
 
@@ -805,6 +858,11 @@ mod tests {
             None,
             library(),
             sections.clone(),
+            Some(original_catalog(
+                "repository",
+                "original-a",
+                ObjectRole::Catalog,
+            )),
         )
         .unwrap();
         assert_eq!(
@@ -829,6 +887,7 @@ mod tests {
             Some(Sequence::from(9u64)),
             library(),
             BTreeMap::new(),
+            None,
         )
         .unwrap();
         assert!(empty.included_sections.is_empty());
@@ -857,10 +916,9 @@ mod tests {
     }
 
     /// Two devices backing up the same repository produce separate points whose
-    /// contents are never merged, and a conflict point names only the remote
-    /// bundle already being preserved.
+    /// contents are never merged.
     #[test]
-    fn a_backup_point_belongs_to_one_device_and_a_conflict_keeps_the_remote_bundle() {
+    fn a_backup_point_belongs_to_one_device() {
         let bundle = |id: &str, writer: &str, kind: SectionKind| {
             BackupBundleDocument::new(
                 "repository".into(),
@@ -874,6 +932,11 @@ mod tests {
                 None,
                 library(),
                 BTreeMap::from([(kind.id().into(), section(kind, 1))]),
+                Some(original_catalog(
+                    "repository",
+                    "original-a",
+                    ObjectRole::Catalog,
+                )),
             )
             .unwrap()
         };
@@ -899,23 +962,6 @@ mod tests {
         assert_eq!(own.bundles().len(), 1);
         assert_eq!(other.bundles().len(), 1);
         assert_ne!(own.bundles()[0].header.object_id, other.bundles()[0].header.object_id);
-
-        let conflict = BackupPointDocument::conflict(
-            "repository".into(),
-            "point-conflict".into(),
-            1,
-            stored("bundle-b", ObjectRole::BackupBundle),
-        )
-        .unwrap();
-        assert_eq!(conflict.bundle.header.object_id, "bundle-b");
-        assert_eq!(
-            conflict
-                .bundles()
-                .iter()
-                .map(|object| object.header.object_id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["bundle-b"]
-        );
     }
 
     /// A repository created while every device section was switched off still
@@ -1032,5 +1078,146 @@ mod tests {
         let full_pages = wire_capacity_objects.div_ceil(MAX_INVENTORY_OBJECTS);
         assert_eq!(full_pages, 79);
         assert!(maximum_bytes * full_pages < 5 * 1024 * 1024);
+    }
+
+    #[test]
+    fn device_bundle_authenticates_the_original_catalog_reference() {
+        let root = original_catalog("repository", "original-a", ObjectRole::Catalog);
+        let make = |original_units| {
+            BackupBundleDocument::new(
+                "repository".into(),
+                "bundle".into(),
+                BundleSource::Device {
+                    writer_id: "writer".into(),
+                },
+                1,
+                None,
+                None,
+                None,
+                library(),
+                BTreeMap::new(),
+                original_units,
+            )
+        };
+        let bundle = make(Some(root.clone())).unwrap();
+        assert_eq!(
+            BackupBundleDocument::decode(&bundle.encode(16384).unwrap(), 16384).unwrap(),
+            bundle
+        );
+        assert_eq!(
+            make(None),
+            Err(FormatError("invalid-original-unit-catalog"))
+        );
+        for invalid in [
+            original_catalog("other-repository", "original-a", ObjectRole::Catalog),
+            original_catalog("repository", "original-a", ObjectRole::Pack),
+        ] {
+            assert_eq!(
+                make(Some(invalid)),
+                Err(FormatError("invalid-original-unit-catalog"))
+            );
+        }
+        let mut invalid = root.clone();
+        invalid.ciphertext_length += 1;
+        assert_eq!(
+            make(Some(invalid)),
+            Err(FormatError("object-length-mismatch"))
+        );
+        let mut tampered = bundle.clone();
+        tampered.original_units.as_mut().unwrap().ciphertext_sha256[0] ^= 1;
+        assert_eq!(
+            tampered.validate(),
+            Err(FormatError("invalid-bundle-fingerprint"))
+        );
+        assert_eq!(
+            BackupBundleDocument::decode(&serde_json::to_vec(&tampered).unwrap(), 16384),
+            Err(FormatError("invalid-bundle-fingerprint"))
+        );
+        let mut missing_root = serde_json::to_value(&bundle).unwrap();
+        missing_root["originalUnits"] = serde_json::Value::Null;
+        assert_eq!(
+            BackupBundleDocument::decode(&serde_json::to_vec(&missing_root).unwrap(), 16384),
+            Err(FormatError("invalid-original-unit-catalog"))
+        );
+        let changed_root = make(Some(original_catalog(
+            "repository",
+            "original-b",
+            ObjectRole::Catalog,
+        )))
+        .unwrap();
+        assert_eq!(
+            bundle.library.content_fingerprint,
+            changed_root.library.content_fingerprint
+        );
+        assert_ne!(bundle.bundle_fingerprint, changed_root.bundle_fingerprint);
+        // Every part of the immutable reference, including location and hashes,
+        // is bound even when the original catalog's plaintext is unchanged.
+        for field in 0..5 {
+            let mut changed = root.clone();
+            match field {
+                0 => changed.header.object_id = "original-b".into(),
+                1 => changed.locator.object = "other-object".into(),
+                2 => changed.ciphertext_sha256[0] ^= 1,
+                3 => changed.plaintext_sha256[0] ^= 1,
+                _ => changed.locator.connection_identity = "other-account/root".into(),
+            }
+            assert_ne!(
+                bundle.bundle_fingerprint,
+                make(Some(changed)).unwrap().bundle_fingerprint
+            );
+        }
+    }
+
+    #[test]
+    fn synchronized_bundle_requires_explicit_null_original_units() {
+        let make = |root| {
+            BackupBundleDocument::new(
+                "repository".into(),
+                "bundle".into(),
+                BundleSource::SyncState {
+                    commit_id: "commit".into(),
+                },
+                1,
+                None,
+                None,
+                Some(Sequence::from(1u64)),
+                library(),
+                BTreeMap::new(),
+                root,
+            )
+        };
+        assert_eq!(
+            make(Some(original_catalog(
+                "repository",
+                "original-a",
+                ObjectRole::Catalog
+            ))),
+            Err(FormatError("invalid-original-unit-catalog"))
+        );
+        let bundle = make(None).unwrap();
+        let expected_bundle_input = format!(
+            "{{\"domain\":\"risunest.external-backup-bundle-fingerprint/v1\",\"library\":\"{}\",\"sections\":{{}},\"originalUnits\":null}}",
+            hex::encode(bundle.library.content_fingerprint),
+        );
+        assert_eq!(
+            bundle.bundle_fingerprint,
+            crate::content_identity::hash(expected_bundle_input.as_bytes())
+        );
+        let expected_state_input = format!(
+            "{{\"domain\":\"risunest.external-state-fingerprint/v1\",\"library\":\"{}\",\"sections\":{{}}}}",
+            hex::encode(bundle.library.content_fingerprint),
+        );
+        assert_eq!(
+            state_fingerprint(&bundle.library.content_fingerprint, &BTreeMap::new()),
+            crate::content_identity::hash(expected_state_input.as_bytes())
+        );
+        let bytes = bundle.encode(16384).unwrap();
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(value.as_object().unwrap().contains_key("originalUnits"));
+        assert!(value["originalUnits"].is_null());
+        assert_eq!(BackupBundleDocument::decode(&bytes, 16384).unwrap(), bundle);
+        value.as_object_mut().unwrap().remove("originalUnits");
+        assert!(serde_json::from_value::<BackupBundleDocument>(value.clone()).is_err());
+        assert!(BackupBundleDocument::decode(&serde_json::to_vec(&value).unwrap(), 16384).is_err());
     }
 }

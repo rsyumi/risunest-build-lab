@@ -60,6 +60,9 @@ impl PendingIndex {
     pub fn descriptor(&self, hash: &str) -> Option<&str> {
         self.descriptors.get(hash).map(String::as_str)
     }
+    pub fn remember_descriptor(&mut self, hash: String, body: String) {
+        self.descriptors.insert(hash, body);
+    }
 
     #[allow(clippy::too_many_arguments)]
     pub fn add_node(

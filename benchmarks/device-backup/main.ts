@@ -15,7 +15,6 @@ import {
   runNativeArchiveExport,
   runNativeArchiveRestore,
   type NativeBackupExportDependencies,
-  type NativeBlockRestoreRuntime,
   type NativeFileJobStatus,
 } from "../../src/ts/storage/nativeFileJobs";
 import {
@@ -23,6 +22,13 @@ import {
   type HypaEmbeddingEntry,
 } from "../../src/ts/storage/hypaEmbeddingCache";
 import { createNativeDeviceSettings } from "../../src/ts/storage/nativeDeviceSettings";
+import {
+  capturePersistentRoot,
+  createPersistentDataRuntime,
+  type PersistentDataRuntime,
+} from "../../src/ts/storage/persistentDataRuntime";
+import { SqlitePersistentDataStore } from "../../src/ts/storage/sqlitePersistentDataStore";
+import { projectScalableWorkingSetAtRevision } from "../../src/ts/storage/workingSetCatalog";
 
 const key = "risunest-synthetic-device-smoke";
 const faultKey = "risunest-synthetic-device-smoke-fault";
@@ -231,36 +237,50 @@ async function fingerprints() {
   ];
 }
 
-function syntheticRuntime(): NativeBlockRestoreRuntime & {
-  readonly revision: number;
-  flushPendingData(reason: string): Promise<void>;
-} {
-  return {
-    get revision() {
-      return control.revision;
-    },
-    async flushPendingData() {},
-    async capturePersistentMutationToken() {
-      return { revision: control.revision, mutationGeneration: 0 };
-    },
-    async acquireDestructiveReplacementFence(expected) {
-      return {
-        revision: expected.revision,
-        async refreshCommittedWorkingSet(revision) {
-          if (revision !== control.revision)
-            throw new Error("Synthetic device-only restore changed the library revision");
-          // The isolated entry has no DBState projection. Device-only jobs must
-          // leave the already-current library revision untouched.
-          return { kind: "committed", revision, projection: "applied" };
+let runtimePromise: Promise<PersistentDataRuntime> | undefined;
+function syntheticRuntime(): Promise<PersistentDataRuntime> {
+  return runtimePromise ??= (async () => {
+    const store = new SqlitePersistentDataStore();
+    await store.open();
+    const root = await store.readRoot();
+    let database = await projectScalableWorkingSetAtRevision(store, root.revision, {
+      selectedCharacterId: null,
+      selectedConversationId: null,
+      activeCharacterIds: new Set(),
+    });
+    const runtime = createPersistentDataRuntime({
+      store,
+      state: {
+        captureRoot: () => capturePersistentRoot(database),
+        capturePresets: () => null,
+        capturePluginStorage: () => null,
+        captureSelectedCharacter: () => null,
+        captureCharacter: (id) => database.characters.find((value) => value.chaId === id) ?? null,
+        getSelectedCharacterId: () => null,
+        getSelectedConversationId: () => null,
+        captureWorkingSetDatabase: () => database,
+        replaceDatabase: (next) => { database = next; },
+        publishCharacter(value) {
+          const index = database.characters.findIndex((candidate) => candidate.chaId === value.chaId);
+          if (index < 0) database.characters.push(value);
+          else database.characters[index] = value;
         },
-        release() {},
-      };
-    },
-    markCommittedWorkingSetRefreshRequired() {},
-    getStorageAuthorityEpoch() {
-      return 0;
-    },
-  };
+        publishConversation(characterId, conversation, nextCharacter) {
+          const character = database.characters.find((value) => value.chaId === characterId);
+          if (!character) throw new Error("Synthetic projection parent missing");
+          if (nextCharacter) Object.assign(character, nextCharacter);
+          const index = character.chats.findIndex((value) => value.id === conversation.id);
+          if (index < 0) character.chats.push(conversation);
+          else character.chats[index] = conversation;
+        },
+      },
+      prepareDatabase: async (value) => structuredClone(value),
+      onLocalRevision(revision) { control.revision = revision; save(); },
+    });
+    await runtime.initializeActiveWorkingSet(database);
+    check(runtime.revision === root.revision, "real-native-runtime-initialized");
+    return runtime;
+  })();
 }
 
 const fileJobDependencies: NativeBackupExportDependencies = {
@@ -314,7 +334,7 @@ async function observeRestoreStatus(status: NativeFileJobStatus) {
 
 async function exportArchive(destination: string) {
   const result = await runNativeArchiveExport(
-    syntheticRuntime(),
+    await syntheticRuntime(),
     { type: "desktopPath", path: destination },
     { library: false, deviceSections: sections },
     {
@@ -340,7 +360,7 @@ async function exportArchive(destination: string) {
 
 async function restore(destination: string) {
   return runNativeArchiveRestore(
-    syntheticRuntime(),
+    await syntheticRuntime(),
     { type: "desktopPath", path: destination },
     {
       pollIntervalMs: 20,
@@ -444,7 +464,7 @@ async function completeRestore() {
   let cancellationPhase: string | undefined;
   try {
     await runNativeArchiveExport(
-      syntheticRuntime(),
+      await syntheticRuntime(),
       {
         type: "desktopPath",
         path: await join(await appDataDir(), "synthetic-cancelled.risunest"),

@@ -198,8 +198,8 @@ pub(super) fn rehydrate_root_owners(
     let mut by_identity = BTreeMap::new();
     for head in heads {
         let identity = match &head.head.owner {
-            LogicalOwnerLocator::RootModule { index } => format!("module:{index}"),
-            LogicalOwnerLocator::PersonaEmbeddedModule { index } => format!("persona:{index}"),
+            LogicalOwnerLocator::RootModule { module_id } => format!("module:{module_id}"),
+            LogicalOwnerLocator::PersonaEmbeddedModule { persona_id, module_id } => format!("persona:{}", serde_json::to_string(&(persona_id,module_id)).map_err(json_error)?),
             LogicalOwnerLocator::CharacterAdditional { .. } => {
                 return validation("logical root contains a character owner head")
             }
@@ -213,9 +213,10 @@ pub(super) fn rehydrate_root_owners(
         let modules = modules
             .as_array_mut()
             .ok_or_else(|| record_validation("logical root modules must be an array".to_owned()))?;
-        for (index, module) in modules.iter_mut().enumerate() {
+        for module in modules.iter_mut() {
+            let module_id = owner_id(module)?.to_owned();
             let module = json_object_mut(module, "logical root module")?;
-            let head = by_identity.get(&format!("module:{index}")).ok_or_else(|| {
+            let head = by_identity.get(&format!("module:{module_id}")).ok_or_else(|| {
                 record_validation(
                     "logical root module owner head coverage is incomplete".to_owned(),
                 )
@@ -228,14 +229,16 @@ pub(super) fn rehydrate_root_owners(
         let personas = personas.as_array_mut().ok_or_else(|| {
             record_validation("logical root personas must be an array".to_owned())
         })?;
-        for (index, persona) in personas.iter_mut().enumerate() {
+        for persona in personas.iter_mut() {
+            let persona_id = owner_id(persona)?.to_owned();
             let persona = json_object_mut(persona, "logical root persona")?;
             let Some(embedded) = persona.get_mut("embeddedModule") else {
                 continue;
             };
+            let module_id = owner_id(embedded)?.to_owned();
             let embedded = json_object_mut(embedded, "logical persona embedded module")?;
             let head = by_identity
-                .get(&format!("persona:{index}"))
+                .get(&format!("persona:{}", serde_json::to_string(&(&persona_id,&module_id)).map_err(json_error)?))
                 .ok_or_else(|| {
                     record_validation(
                         "logical persona owner head coverage is incomplete".to_owned(),
@@ -714,10 +717,12 @@ pub(super) fn apply_record_rows(
                 creator_notes,
                 trash_time,
                 archive_object_hash,
+                shared_archive_object_hash,
                 archived_at,
                 conversation_count,
                 message_count,
                 asset_hashes,
+                shared_asset_hashes,
                 owner_heads,
                 ..
             },
@@ -735,6 +740,7 @@ pub(super) fn apply_record_rows(
                 )
                 .map_err(sql_error)?;
             let archived = super::archive::ArchivedObject {
+                shared_object_hash: shared_archive_object_hash.clone(),
                 object_hash: archive_object_hash.clone(),
                 archived_at: sqlite_i64(*archived_at, "archive timestamp")?,
                 conversation_count: sqlite_i64(
@@ -743,6 +749,8 @@ pub(super) fn apply_record_rows(
                 )?,
                 message_count: sqlite_i64(*message_count, "archived message count")?,
                 asset_hashes: asset_hashes.clone(),
+                shared_asset_hashes: shared_asset_hashes.clone(),
+                identity_remap: if let LogicalRecordEnvelope::ArchivedCharacter { identity_remap, .. } = envelope { identity_remap.iter().cloned().map(serde_json::from_value).collect::<Result<_,_>>()? } else { unreachable!() },
             };
             let marker = super::archive::marker_detail(character_id, name, character_type);
             transaction
@@ -946,9 +954,9 @@ fn insert_owner_heads(
             LogicalOwnerLocator::CharacterAdditional { character_id } => {
                 ("character-additional-assets", character_id.clone())
             }
-            LogicalOwnerLocator::RootModule { index } => ("root-module-assets", index.to_string()),
-            LogicalOwnerLocator::PersonaEmbeddedModule { index } => {
-                ("persona-embedded-module-assets", index.to_string())
+            LogicalOwnerLocator::RootModule { module_id } => ("root-module-assets", module_id.clone()),
+            LogicalOwnerLocator::PersonaEmbeddedModule { persona_id, module_id } => {
+                ("persona-embedded-module-assets", serde_json::to_string(&(persona_id,module_id)).map_err(json_error)?)
             }
         };
         transaction
@@ -1025,4 +1033,8 @@ fn sql_error(error: rusqlite::Error) -> StoreError {
 }
 fn json_error(error: serde_json::Error) -> StoreError {
     error.into()
+}
+
+fn owner_id(value: &Value) -> Result<&str, StoreError> {
+    value.get("id").and_then(Value::as_str).filter(|id| !id.is_empty()).ok_or_else(|| record_validation("owner identity is required".to_owned()))
 }

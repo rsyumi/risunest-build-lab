@@ -3,12 +3,14 @@ import type { NativeFileJobSource } from './nativeFileJobs'
 
 const SPOOL_EVENT = 'risu-android-spool-ready'
 const BACKUP_SOURCE_EVENT = 'risu-android-backup-source-picked'
+const PORTABLE_SOURCE_EVENT = 'risu-android-portable-source-picked'
 const LEGACY_BACKUP_SOURCE_EVENT = 'risu-android-legacy-backup-source-picked'
 const DESTINATION_EVENT = 'risu-android-saf-destination'
 const PROGRESS_EVENT = 'risu-android-saf-progress'
 const activeDestinationRequestIds = new Set<string>()
 
 export interface AndroidSpoolReady {
+    sourceType?: 'androidSeekable' | 'androidSpool'
     token: string
     displayName: string
     bytes: number
@@ -150,6 +152,9 @@ export interface AndroidSafJavascriptBridge {
     cancelExport?(requestId: string): NativeReply<boolean | void>
     cancelSource?(requestId: string): NativeReply<void>
     pickBackupSource?(requestId: string): NativeReply<void>
+    pickPortableBackupSource?(requestId: string): NativeReply<void>
+    discardPortableSource?(token: string): NativeReply<boolean>
+    materializeBackupSource?(token: string): NativeReply<string>
     pickContentSource?(
         requestId: string,
         destination: 'character' | 'module',
@@ -237,12 +242,14 @@ interface AndroidSafSourcePickerConfig {
     eventName: string
     pickMethod:
         | 'pickBackupSource'
+        | 'pickPortableBackupSource'
         | 'pickLegacyBackupSource'
         | 'pickContentSource'
     pickerUnavailableMessage: string
     acceptExtension: string | string[]
     cancelMessage: string
     importDestination?: 'character' | 'module'
+    custody?: boolean
 }
 
 function pickAndroidSpoolSource(
@@ -289,11 +296,14 @@ function pickAndroidSpoolSource(
             const batch = (event as CustomEvent<AndroidSpoolBatch>).detail
             if (!batch || batch.requestId !== requestId || settled || receiving) return
             receiving = true
+            const discard = (source: AndroidSpoolReady) => config.custody && source.sourceType !== 'androidSpool'
+                ? dependencies.bridge.discardPortableSource?.(source.token)
+                : dependencies.bridge.discardSource?.(source.token)
             if (aborted) {
                 let cleanupFailed = false
                 for (const source of batch.ready) {
                     if (
-                        await Promise.resolve().then(() => dependencies.bridge.discardSource?.(source.token)).catch(() => false) !==
+                        await Promise.resolve().then(() => discard(source)).catch(() => false) !==
                         true
                     ) {
                         cleanupFailed = true
@@ -342,7 +352,7 @@ function pickAndroidSpoolSource(
                     source.displayName.toLocaleLowerCase('en-US').endsWith(ext),
                 )
             ) {
-                await Promise.resolve().then(() => dependencies.bridge.discardSource?.(source.token)).catch(() => false)
+                await Promise.resolve().then(() => discard(source)).catch(() => false)
                 finish(() =>
                     reject(
                         new AndroidSafSourceError(
@@ -357,7 +367,12 @@ function pickAndroidSpoolSource(
                 displayName: source.displayName,
                 bytes: source.bytes,
             })
-            finish(() => resolve({ type: 'androidSpool', token: source.token }))
+            if (config.custody && source.sourceType !== 'androidSeekable' && source.sourceType !== 'androidSpool') {
+                await Promise.resolve().then(() => discard(source)).catch(() => false)
+                finish(() => reject(new AndroidSafSourceError('source-reselect-required', 'Backup source custody is unavailable')))
+                return
+            }
+            finish(() => resolve({ type: config.custody ? source.sourceType! : 'androidSpool', token: source.token }))
         }
         const onProgress = (event: Event) => {
             const progress = (event as CustomEvent<AndroidSafProgress>).detail
@@ -403,6 +418,29 @@ export function pickAndroidBackupSource(
         options,
         dependencies,
     )
+}
+
+export function pickAndroidPortableBackupSource(
+    options: AndroidSafSourcePickerOptions = {},
+    dependencies: AndroidSafSourcePickerDependencies = productionDependencies,
+): Promise<NativeFileJobSource | null> {
+    return pickAndroidSpoolSource({
+        eventName: PORTABLE_SOURCE_EVENT,
+        pickMethod: 'pickPortableBackupSource', custody: true,
+        pickerUnavailableMessage: 'Android backup picker is unavailable',
+        acceptExtension: ['.risunest', '.risudat', '.bin'],
+        cancelMessage: 'Android backup selection was cancelled',
+    }, options, dependencies)
+}
+
+export async function materializeAndroidBackupSource(token: string): Promise<NativeFileJobSource> {
+    const response = await productionBridge().materializeBackupSource?.(token)
+    if (!response) throw new AndroidSafSourceError('source-reselect-required', 'Backup source custody is unavailable')
+    const batch = JSON.parse(response) as AndroidSpoolBatch
+    const failure = batch.failures[0]
+    if (failure) throw new AndroidSafSourceError(failure.code, failure.code)
+    if (batch.ready.length !== 1) throw new AndroidSafSourceError('source-reselect-required', 'Backup source copy is unavailable')
+    return {type: 'androidSpool', token: batch.ready[0].token}
 }
 
 export function pickAndroidLegacyBackupSource(

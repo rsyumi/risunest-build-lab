@@ -940,7 +940,7 @@ describe('selected chat list edits', () => {
             const inactiveIndex = app.stores.DBState.db.characters.findIndex(item => item.chaId === 'second-character')
             const inactive = app.stores.DBState.db.characters[inactiveIndex]
             // A non-plain test object retains its guard without Svelte replacing its descriptor.
-            const guarded = Object.assign(Object.create({}), inactive)
+            const guarded = Object.defineProperties(Object.create({}), Object.getOwnPropertyDescriptors(inactive))
             Object.defineProperty(guarded, 'chats', { configurable: true, enumerable: true, get: () => { throw new Error('inactive production capture') } })
             app.stores.DBState.db.characters[inactiveIndex] = guarded
             try {

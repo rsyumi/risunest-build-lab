@@ -1,6 +1,47 @@
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+const restoreAlerts = vi.hoisted(() => ({ confirm: vi.fn(), checkbox: vi.fn() }))
+vi.mock('../alert', () => ({ alertConfirm: restoreAlerts.confirm, alertCheckboxConfirm: restoreAlerts.checkbox }))
 const deviceRestore = vi.hoisted(() => ({ flushDeviceStateBeforeRestore: vi.fn(async () => {}), refreshDeviceStateAfterRestore: vi.fn(async () => {}) }))
 vi.mock('./deviceStateRestore', () => deviceRestore)
+vi.mock('./sync/bindingRegistry', () => ({prepareBoundLibraryReplacement: async () => ({bound:false,state:{targetAuthority:'1'},fence:async()=>{},assertAuthority:async()=>{},resume:async()=>{}})}))
+vi.mock('../plugins/apiV3/v3.svelte', () => ({fencePluginExecutionForAuthorityReplacement:async()=>{},invalidatePluginCachesAfterAuthorityReplacement:async()=>{},restartPluginsAfterAuthorityReplacement:async()=>{}}))
+beforeEach(() => { restoreAlerts.checkbox.mockReset().mockResolvedValue({confirmed:true,checked:true}) })
+
+it.each(['portable', 'block'] as const)('holds the write pause until the actual %s capture, then permits writes during export', async format => {
+    let paused = false
+    let releaseCapture!: () => void
+    let releaseBodies!: () => void
+    const capture = new Promise<void>(resolve => {releaseCapture = resolve})
+    const bodies = new Promise<void>(resolve => {releaseBodies = resolve})
+    let waits = 0
+    let polls = 0
+    const runtime = {...restoreRuntime(5, {acquire: () => {paused = true}, release: () => {paused = false}}), revision: 5, flushPendingData: async () => {throw new Error('A write pause already flushes')}}
+    const result = {revision:5,sourceBytes:12,sourceFingerprintKind:'whole-file-sha256' as const,sourceSha256:'a'.repeat(64),characterCount:1,presetCount:0,warningCodes:[]}
+    const dependencies = {
+        isTauri: () => true,
+        invoke: async (command: string) => {
+            if (command === 'native_file_job_start') {expect(paused).toBe(true); return {jobId:'captured-export'}}
+            if (command === 'native_file_job_status') {
+                const index = polls++
+                return {jobId:'captured-export',kind:format === 'portable' ? 'export-portable-backup' : 'export-block-risu-save',state:index === 2 ? 'succeeded' : 'running',phase:index === 2 ? 'complete' : 'writing-export',progress:{completedBytes:0,completedItems:0},...(index > 0 ? {exportCaptureRevision:5} : {}),...(index === 2 ? {result} : {})}
+            }
+            if (command === 'native_file_job_forget') return true
+            throw new Error(command)
+        },
+        wait: async () => {if (waits++ === 0) await capture; else await bodies},
+        copyToAndroidSaf: async () => {throw new Error('Desktop fixture')},
+    }
+    const operation = format === 'portable'
+        ? runNativeArchiveExport(runtime, {type:'desktopPath',path:'C:\\synthetic\\capture.risunest'}, {library:true,deviceSections:['hypa','local-plugins','local-settings']}, {}, dependencies)
+        : runNativeBlockRisuSaveExport(runtime, 'C:\\synthetic\\capture.risudat', {}, dependencies)
+    await vi.waitFor(() => expect(waits).toBe(1))
+    expect(paused).toBe(true)
+    releaseCapture()
+    await vi.waitFor(() => expect(paused).toBe(false))
+    expect(polls).toBe(2)
+    releaseBodies()
+    await expect(operation).resolves.toEqual(result)
+})
 
 describe('local source preservation consent', () => {
     it.each(['accept', 'refuse', 'cancel'] as const)('requires explicit %s before retrying damaged source export', async (decision) => {
@@ -11,7 +52,7 @@ describe('local source preservation consent', () => {
             if (decision === 'cancel') controller.abort()
             return decision !== 'refuse'
         })
-        const result = { revision: 4, sourceBytes: 12, sourceSha256: 'a'.repeat(64), characterCount: 1, presetCount: 1, warningCodes: ['source-preserved-repair-required'] }
+        const result = { revision: 4, sourceBytes: 12, sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'a'.repeat(64), characterCount: 1, presetCount: 1, warningCodes: ['source-preserved-repair-required'] }
         const operation = runNativeArchiveExport(
             { ...restoreRuntime(4), flushPendingData: async () => {}, revision: 4 },
             { type: 'desktopPath', path: 'C:\\synthetic\\recovery.risunest' },
@@ -24,8 +65,9 @@ describe('local source preservation consent', () => {
                     if (command === 'native_file_job_start') { requests.push(args!.request as Record<string, unknown>); return { jobId: `synthetic-${requests.length}` } }
                     if (command === 'native_file_job_status') return requests.length === 1
                         ? { ...status('failed'), error: { code: 'source-preservation-confirmation-required', message: 'synthetic source requires preservation' } }
-                        : status('succeeded', result)
-                    if (command === 'native_file_job_forget') return true
+                        : {...status('succeeded', result), exportCaptureRevision: 4}
+                    if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') return true
                     throw new Error(`Unexpected command: ${command}`)
                 },
                 copyToAndroidSaf: async () => { throw new Error('Desktop test must not use Android') },
@@ -56,7 +98,7 @@ describe('local source preservation consent', () => {
                 wait: async () => {},
                 invoke: async (command) => {
                     if (command === 'native_file_job_start') return { jobId: 'synthetic' }
-                    if (command === 'native_file_job_status') return status('succeeded', { revision: 4, sourceBytes: 12, sourceSha256: 'a'.repeat(64), characterCount: 1, presetCount: 1, warningCodes: [], handoffPath: 'C:\\synthetic\\handoff.risunest' })
+                    if (command === 'native_file_job_status') return {...status('succeeded', { revision: 4, sourceBytes: 12, sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'a'.repeat(64), characterCount: 1, presetCount: 1, warningCodes: [], handoffPath: 'C:\\synthetic\\handoff.risunest' }), exportCaptureRevision: 4}
                     if (command === 'native_portable_handoff_cleanup' || command === 'native_file_job_forget') return true
                     throw new Error(`Unexpected command: ${command}`)
                 },
@@ -76,7 +118,7 @@ import {
     runNativeBlockRisuSaveRestore,
     runNativeArchiveExport,
     runNativeArchiveRestore,
-    runNativeArchiveReferenceExport,
+    retryNativePortableRestoreBodies,
     runNativeBlockRisuSaveExport,
     runNativeRawRecoveryExport,
     runNativeCompatibleLocalBackupExport,
@@ -131,6 +173,20 @@ function restoreRuntime(
     let captures = 0
     return {
         getStorageAuthorityEpoch: () => 2,
+        withPausedPersistentWrites: async <T>(reason: string, operation: (token: import('./saveCoordinator').PersistentMutationToken) => Promise<T>) => {
+            await options.capture?.(reason)
+            await options.acquire?.()
+            try { return await operation({revision:options.fencedRevision ?? revision,mutationGeneration:1} as import('./saveCoordinator').PersistentMutationToken) }
+            finally { options.release?.() }
+        },
+        store: {readRoot:async()=>({revision})} as unknown as import('./persistentDataStore').PersistentDataStore,
+        setActivatedLibraryRecoveryLifecycle: () => {},
+        beginActivatedLibraryGuard: () => ({complete(){},abortUnchanged:async()=>{}}),
+        refreshActivatedLibraryUnderPause: async () => {
+            await options.refresh?.((options.fencedRevision ?? revision) + 1)
+            if (options.projection === 'refresh-required') throw new Error('Activated library projection is incomplete')
+            return {kind:'committed' as const, revision:(options.fencedRevision ?? revision) + 1, projection:'applied' as const}
+        },
         retryCommittedWorkingSetRefresh: async () => {
             await options.refresh?.(revision + 1)
             return {
@@ -208,7 +264,7 @@ async function restoreOverPluginValues(options: {
                   ...status('succeeded', {
                       revision: 9,
                       sourceBytes: 128,
-                      sourceSha256: 'c'.repeat(64),
+                      sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'c'.repeat(64),
                       characterCount: 1,
                       presetCount: 0,
                       warningCodes: [],
@@ -244,6 +300,7 @@ async function restoreOverPluginValues(options: {
                 if (command === 'native_plugin_values_assign') return undefined
                 if (command === 'native_file_job_cancel') return 'requested'
                 if (command === 'native_file_job_finalize') return 'requested'
+                if (command === 'native_portable_confirm_restore_adoption') return undefined
                 if (command === 'native_file_job_forget') return true
                 throw new Error(`Unexpected command: ${command}`)
             },
@@ -255,17 +312,30 @@ async function restoreOverPluginValues(options: {
 }
 
 describe('native file jobs', () => {
-    it('flushes a device-section export without acquiring the old renderer replacement fence', async () => {
+    it('continues only portable bodies on the same job and retains committed outcome after a lost retry response', async () => {
+        const request = {jobId: 'portable', stagingId: 'stage', catalogSha256: 'a'.repeat(64), activationRevision: '8', bindingAuthority: '2', deviceSessionId: 'session'}
+        const result = {revision: 8, sourceBytes: 128, sourceFingerprintKind: 'portable-catalog-sha256' as const, sourceSha256: request.catalogSha256, characterCount: 1, presetCount: 0, warningCodes: []}
+        const invoke = vi.fn(async (command: string) => {
+            if (command === 'native_portable_retry_restore_bodies') return {jobId: request.jobId}
+            if (command === 'native_file_job_forget') return true
+            if (command === 'native_file_job_status') return {...status('succeeded', result), jobId: request.jobId, kind: 'restore-portable-backup', activationRevision: 8, activationAuthority: '2', deviceSessionId: 'session', restoreAdoptionConfirmed: true, portableBodyRetry: {stagingId: request.stagingId, catalogSha256: request.catalogSha256, pending: false, available: false, sourceRequired: false}}
+            throw new Error(`Body retry touched ${command}`)
+        })
+        await expect(retryNativePortableRestoreBodies(request, {}, {isTauri: () => true, wait: async () => {}, invoke})).resolves.toEqual(result)
+        expect(invoke.mock.calls).toEqual([['native_portable_retry_restore_bodies', {request}], ['native_file_job_status', {jobId: request.jobId}], ['native_file_job_forget', {jobId: request.jobId}]])
+        const lost = vi.fn(async () => {throw new Error('synthetic lost response')})
+        await expect(retryNativePortableRestoreBodies(request, {}, {isTauri: () => true, wait: async () => {}, invoke: lost})).rejects.toMatchObject({committedRevision: 8})
+        expect(lost).toHaveBeenCalledOnce()
+    })
+    it('pauses a device-section export at its flushed revision without a replacement fence', async () => {
         localStorage.removeItem('risuNestPortableExportIntent')
         const calls: Array<[string, Record<string, unknown> | undefined]> = []
         let revision = 20
         const runtime = {
-            ...restoreRuntime(20, {
+            ...restoreRuntime(21, {
                 capture: () => {
-                    throw new Error('old mutation token must not be captured')
-                },
-                acquire: () => {
-                    throw new Error('old replacement fence must not be acquired')
+                    calls.push(['flush:native-portable-export', undefined])
+                    revision = 21
                 },
             }),
             get revision() {
@@ -279,7 +349,7 @@ describe('native file jobs', () => {
         const result = {
             revision: 21,
             sourceBytes: 128,
-            sourceSha256: 'd'.repeat(64),
+            sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'd'.repeat(64),
             characterCount: 1,
             presetCount: 0,
             warningCodes: [],
@@ -300,10 +370,12 @@ describe('native file jobs', () => {
                         if (command === 'native_file_job_status')
                             return {
                                 ...status('succeeded', result),
+                                exportCaptureRevision: 21,
                                 jobId: 'device-export-1',
                                 kind: 'export-portable-backup',
                             }
-                        if (command === 'native_file_job_forget') return true
+                        if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') return true
                         throw new Error(`Unexpected command: ${command}`)
                     },
                     wait: async () => undefined,
@@ -332,53 +404,6 @@ describe('native file jobs', () => {
         expect(localStorage.getItem('risuNestPortableExportIntent')).toBeNull()
     })
 
-    it('starts a library-only portable export from an opaque conflict source', async () => {
-        const calls: Array<[string, Record<string, unknown> | undefined]> = []
-        const result = {
-            revision: 0,
-            sourceBytes: 128,
-            sourceSha256: 'a'.repeat(64),
-            characterCount: 1,
-            presetCount: 0,
-            warningCodes: [],
-        }
-
-        await expect(runNativeArchiveReferenceExport(
-            { type: 'conflictReference', token: 'external:source-token' },
-            { type: 'desktopPath', path: 'C:\\chosen\\conflict.risunest' },
-            {},
-            {
-                isTauri: () => true,
-                invoke: async (command, args) => {
-                    calls.push([command, args])
-                    if (command === 'native_file_job_start') return { jobId: 'export-1' }
-                    if (command === 'native_file_job_status') return {
-                        ...status('succeeded', result),
-                        jobId: 'export-1',
-                        kind: 'export-portable-backup',
-                    }
-                    if (command === 'native_file_job_forget') return true
-                    throw new Error(`Unexpected command: ${command}`)
-                },
-                wait: async () => undefined,
-                copyToAndroidSaf: async () => ({ bytes: 0, warningCodes: [] }),
-            },
-        )).resolves.toEqual(result)
-
-        expect(calls[0]).toEqual([
-            'native_file_job_start',
-            {
-                request: {
-                    kind: 'export-portable-backup',
-                    source: { type: 'conflictReference', token: 'external:source-token' },
-                    selection: { library: true, deviceSections: [] },
-                    destination: 'C:\\chosen\\conflict.risunest',
-                },
-            },
-        ])
-        expect(JSON.stringify(calls[0])).not.toContain('expectedRevision')
-    })
-
     it.each(['none', 'ack', 'open', 'cache'] as const)(
         'acknowledges and reopens a committed portable device session before refresh (failure: %s)',
         async (failure) => {
@@ -403,7 +428,7 @@ describe('native file jobs', () => {
             const committed = {
                 revision: 4,
                 sourceBytes: 128,
-                sourceSha256: 'b'.repeat(64),
+                sourceFingerprintKind: 'portable-catalog-sha256' as const, sourceSha256: 'b'.repeat(64),
                 characterCount: 1,
                 presetCount: 0,
                 warningCodes: [],
@@ -416,7 +441,7 @@ describe('native file jobs', () => {
                     restorePreview: {
                         libraryIncluded: true,
                         repairRequired: false,
-                        deviceSections: ['hypa'],
+                        deviceSections: ['hypa','local-plugins','local-settings'],
                     },
                 },
                 {
@@ -427,7 +452,7 @@ describe('native file jobs', () => {
                 {
                     ...status('succeeded', committed),
                     kind: 'restore-portable-backup',
-                    deviceSessionId: 'device-session',
+                    deviceSessionId: 'device-session',activationRevision:4,activationAuthority:'1',
                 },
             ]
             const invoke = async (command: string) => {
@@ -447,10 +472,11 @@ describe('native file jobs', () => {
                     storeOpen = true
                     return { revision: 4 }
                 }
+                if (command === 'native_portable_confirm_restore_adoption') return undefined
                 if (command === 'native_file_job_forget') return true
                 throw new Error(`Unexpected command: ${command}`)
             }
-            const runtime = restoreRuntime(3, {
+            const baseRuntime = restoreRuntime(3, {
                 refresh,
                 markRefreshRequired,
                 release: () => {
@@ -458,13 +484,20 @@ describe('native file jobs', () => {
                     events.push('fence-released')
                 },
             })
+            let lifecycle:{beforeRefresh():Promise<number>,afterRefresh():Promise<void>} | undefined
+            const runtime={...baseRuntime,setActivatedLibraryRecoveryLifecycle:(_token:unknown,value:NonNullable<typeof lifecycle>)=>{lifecycle=value},retryCommittedWorkingSetRefresh:async()=>{
+                await lifecycle!.beforeRefresh()
+                const outcome=await baseRuntime.retryCommittedWorkingSetRefresh()
+                await lifecycle!.afterRefresh()
+                return outcome
+            }}
             const running = runNativeArchiveRestore(
                 runtime,
                 { type: 'desktopPath', path: 'C:\\synthetic\\portable.risunest' },
                 {
                     choosePortableSections: async () => ({
                         library: true,
-                        deviceSections: ['hypa'],
+                        deviceSections: ['hypa','local-plugins','local-settings'],
                     }),
                     onNativeStatus: async (value) => {
                         if (value.state === 'succeeded') events.push('library-hold')
@@ -557,7 +590,7 @@ describe('native file jobs', () => {
                 restorePreview: {
                     libraryIncluded: true,
                     repairRequired: false,
-                    deviceSections: ['hypa'],
+                    deviceSections: ['hypa','local-plugins','local-settings'],
                 },
             }
             await expect(
@@ -581,7 +614,7 @@ describe('native file jobs', () => {
                             if (point === 'chooser') abort.abort()
                             return {
                                 library: true,
-                                deviceSections: ['hypa'],
+                                deviceSections: ['hypa','local-plugins','local-settings'],
                             }
                         },
                     },
@@ -645,7 +678,7 @@ describe('native file jobs', () => {
             result: {
                 revision: 31,
                 sourceBytes: 8192,
-                sourceSha256: 'c'.repeat(64),
+                sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'c'.repeat(64),
                 characterCount: 1,
                 presetCount: 0,
                 warningCodes: [],
@@ -695,7 +728,8 @@ describe('native file jobs', () => {
                     if (command === 'native_file_job_start')
                         return { jobId: 'character-export' }
                     if (command === 'native_file_job_status') return terminal
-                    if (command === 'native_file_job_forget') return true
+                    if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') return true
                     throw new Error(`Unexpected command: ${command}`)
                 },
                 wait: async () => undefined,
@@ -737,7 +771,7 @@ describe('native file jobs', () => {
             result: {
                 revision: 31,
                 sourceBytes: 4096,
-                sourceSha256: 'c'.repeat(64),
+                sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'c'.repeat(64),
                 characterCount: 1,
                 presetCount: 0,
                 warningCodes: [],
@@ -766,7 +800,8 @@ describe('native file jobs', () => {
                     if (command === 'native_file_job_status') return terminal
                     if (command === 'native_character_charx_handoff_cleanup')
                         return undefined
-                    if (command === 'native_file_job_forget') return true
+                    if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') return true
                     throw new Error(`Unexpected command: ${command}`)
                 },
                 wait: async () => undefined,
@@ -806,7 +841,7 @@ describe('native file jobs', () => {
             result: {
                 revision: 31,
                 sourceBytes: 4096,
-                sourceSha256: 'c'.repeat(64),
+                sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'c'.repeat(64),
                 characterCount: 1,
                 presetCount: 0,
                 warningCodes: [],
@@ -836,7 +871,8 @@ describe('native file jobs', () => {
                     if (command === 'native_character_charx_handoff_cleanup') {
                         throw new Error('handoff is still in use')
                     }
-                    if (command === 'native_file_job_forget') return true
+                    if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') return true
                     throw new Error(`Unexpected command: ${command}`)
                 },
                 wait: async () => undefined,
@@ -868,7 +904,7 @@ describe('native file jobs', () => {
             result: {
                 revision: 31,
                 sourceBytes: 4096,
-                sourceSha256: 'c'.repeat(64),
+                sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'c'.repeat(64),
                 characterCount: 1,
                 presetCount: 0,
                 warningCodes: [],
@@ -901,7 +937,8 @@ describe('native file jobs', () => {
                             command === 'native_character_charx_handoff_cleanup'
                         )
                             return undefined
-                        if (command === 'native_file_job_forget') return true
+                        if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') return true
                         throw new Error(`Unexpected command: ${command}`)
                     },
                     wait: async () => undefined,
@@ -936,7 +973,7 @@ describe('native file jobs', () => {
             result: {
                 revision: 44,
                 sourceBytes: 2048,
-                sourceSha256: 'd'.repeat(64),
+                sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'd'.repeat(64),
                 characterCount: 1,
                 presetCount: 0,
                 warningCodes: [],
@@ -967,7 +1004,8 @@ describe('native file jobs', () => {
                     if (command === 'native_file_job_status') return terminal
                     if (command === 'native_character_card_handoff_cleanup')
                         return undefined
-                    if (command === 'native_file_job_forget') return true
+                    if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') return true
                     throw new Error(`Unexpected command: ${command}`)
                 },
                 wait: async () => undefined,
@@ -1031,7 +1069,7 @@ describe('native file jobs', () => {
                             result: {
                                 revision: 44,
                                 sourceBytes: 9,
-                                sourceSha256: 'e'.repeat(64),
+                                sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'e'.repeat(64),
                                 characterCount: 0,
                                 presetCount: 0,
                                 warningCodes: [],
@@ -1040,7 +1078,8 @@ describe('native file jobs', () => {
                         }
                     if (command === 'native_risu_module_handoff_cleanup')
                         return undefined
-                    if (command === 'native_file_job_forget') return true
+                    if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') return true
                     throw new Error(`Unexpected command: ${command}`)
                 },
                 wait: async () => undefined,
@@ -1084,7 +1123,7 @@ describe('native file jobs', () => {
                 ...status('succeeded', {
                     revision: 9,
                     sourceBytes: 128,
-                    sourceSha256: 'c'.repeat(64),
+                    sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'c'.repeat(64),
                     characterCount: 1,
                     presetCount: 0,
                     warningCodes: [],
@@ -1121,7 +1160,8 @@ describe('native file jobs', () => {
                     if (command === 'native_file_job_status') return statuses.shift()
                     if (command === 'native_plugin_values_assign') return undefined
                     if (command === 'native_file_job_finalize') return 'requested'
-                    if (command === 'native_file_job_forget') return true
+                    if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') return true
                     throw new Error(`Unexpected command: ${command}`)
                 },
                 wait: async () => undefined,
@@ -1167,7 +1207,8 @@ describe('native file jobs', () => {
                         if (command === 'native_file_job_start') return { jobId: 'job-1' }
                         if (command === 'native_file_job_status') return statuses.shift()
                         if (command === 'native_file_job_cancel') return 'requested'
-                        if (command === 'native_file_job_forget') return true
+                        if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') return true
                         throw new Error(`Unexpected command: ${command}`)
                     },
                     wait: async () => undefined,
@@ -1278,7 +1319,7 @@ describe('native file jobs', () => {
                 ...status('succeeded', {
                     revision: 12,
                     sourceBytes: 16_384,
-                    sourceSha256: 'b'.repeat(64),
+                    sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'b'.repeat(64),
                     characterCount: 4,
                     presetCount: 2,
                     warningCodes: [],
@@ -1318,7 +1359,8 @@ describe('native file jobs', () => {
                         return statuses.shift()
                     if (command === 'native_file_job_finalize')
                         return 'requested'
-                    if (command === 'native_file_job_forget') return true
+                    if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') return true
                     throw new Error(`Unexpected command: ${command}`)
                 },
                 wait: async () => undefined,
@@ -1378,7 +1420,8 @@ describe('native file jobs', () => {
                                 message: 'No official account snapshot exists',
                             },
                         }
-                    if (command === 'native_file_job_forget') return true
+                    if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') return true
                     throw new Error(`Unexpected command: ${command}`)
                 },
                 wait: async () => undefined,
@@ -1416,7 +1459,8 @@ describe('native file jobs', () => {
                                 message: 'Legacy snapshot requires preparation',
                             },
                         }
-                    if (command === 'native_file_job_forget') return true
+                    if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') return true
                     throw new Error(`Unexpected command: ${command}`)
                 },
                 wait: async () => undefined,
@@ -1439,7 +1483,7 @@ describe('native file jobs', () => {
                 ...status('succeeded', {
                     revision: 12,
                     sourceBytes: 8192,
-                    sourceSha256: 'c'.repeat(64),
+                    sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'c'.repeat(64),
                     characterCount: 4,
                     presetCount: 2,
                     warningCodes: [],
@@ -1462,7 +1506,8 @@ describe('native file jobs', () => {
                         return statuses.shift()
                     if (command === 'native_file_job_finalize')
                         return 'requested'
-                    if (command === 'native_file_job_forget') return true
+                    if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') return true
                     throw new Error(`Unexpected command: ${command}`)
                 },
                 wait: async () => undefined,
@@ -1544,7 +1589,7 @@ describe('native file jobs', () => {
                                     ...status('succeeded', {
                                         revision: 21,
                                         sourceBytes: 4096,
-                                        sourceSha256: 'd'.repeat(64),
+                                        sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'd'.repeat(64),
                                         characterCount: 1,
                                         presetCount: 0,
                                         warningCodes: ['compatibility-losses'],
@@ -1635,14 +1680,15 @@ describe('native file jobs', () => {
                             result: {
                                 revision: 21,
                                 sourceBytes: 4096,
-                                sourceSha256: 'd'.repeat(64),
+                                sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'd'.repeat(64),
                                 characterCount: 2,
                                 presetCount: 1,
                                 warningCodes: [],
                             },
                         } satisfies NativeFileJobStatus
                     }
-                    if (command === 'native_file_job_forget') return true
+                    if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') return true
                     throw new Error(`Unexpected command: ${command}`)
                 },
                 wait: async () => undefined,
@@ -1701,7 +1747,7 @@ describe('native file jobs', () => {
                             result: {
                                 revision: 21,
                                 sourceBytes: 4096,
-                                sourceSha256: 'd'.repeat(64),
+                                sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'd'.repeat(64),
                                 characterCount: 2,
                                 presetCount: 1,
                                 warningCodes: [],
@@ -1712,7 +1758,8 @@ describe('native file jobs', () => {
                     }
                     if (command === 'native_legacy_backup_handoff_cleanup')
                         return true
-                    if (command === 'native_file_job_forget') return true
+                    if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') return true
                     throw new Error(`Unexpected command: ${command}`)
                 },
                 wait: async () => undefined,
@@ -1792,7 +1839,7 @@ describe('native file jobs', () => {
                 ...status('succeeded', {
                     revision: 18,
                     sourceBytes: 4096,
-                    sourceSha256: '8'.repeat(64),
+                    sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: '8'.repeat(64),
                     characterCount: 3,
                     presetCount: 2,
                     warningCodes: [],
@@ -1835,7 +1882,8 @@ describe('native file jobs', () => {
                         return statuses.shift()
                     if (command === 'native_file_job_finalize')
                         return 'requested'
-                    if (command === 'native_file_job_forget') return true
+                    if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') return true
                     throw new Error(`Unexpected command: ${command}`)
                 },
                 wait: async () => undefined,
@@ -1888,7 +1936,7 @@ describe('native file jobs', () => {
                 ...status('succeeded', {
                     revision: 19,
                     sourceBytes: 4096,
-                    sourceSha256: '9'.repeat(64),
+                    sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: '9'.repeat(64),
                     characterCount: 3,
                     presetCount: 2,
                     warningCodes: [],
@@ -1919,7 +1967,8 @@ describe('native file jobs', () => {
                             return statuses.shift()
                         if (command === 'native_file_job_finalize')
                             return 'requested'
-                        if (command === 'native_file_job_forget') return true
+                        if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') return true
                         throw new Error(`Unexpected command: ${command}`)
                     },
                     wait: async () => undefined,
@@ -1949,7 +1998,7 @@ describe('native file jobs', () => {
             result: {
                 revision: 23,
                 sourceBytes: 4096,
-                sourceSha256: 'a'.repeat(64),
+                sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'a'.repeat(64),
                 characterCount: 3,
                 presetCount: 2,
                 warningCodes: [],
@@ -1973,7 +2022,8 @@ describe('native file jobs', () => {
                     if (command === 'native_file_job_start')
                         return { jobId: 'lossless-export' }
                     if (command === 'native_file_job_status') return terminal
-                    if (command === 'native_file_job_forget') return true
+                    if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') return true
                     throw new Error(`Unexpected command: ${command}`)
                 },
                 wait: async () => undefined,
@@ -2018,7 +2068,7 @@ describe('native file jobs', () => {
             result: {
                 revision: 22,
                 sourceBytes: 4096,
-                sourceSha256: 'b'.repeat(64),
+                sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'b'.repeat(64),
                 characterCount: 3,
                 presetCount: 2,
                 warningCodes: [],
@@ -2040,7 +2090,8 @@ describe('native file jobs', () => {
                     if (command === 'native_file_job_status') return terminal
                     if (command === 'native_legacy_backup_handoff_cleanup')
                         return undefined
-                    if (command === 'native_file_job_forget') return true
+                    if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') return true
                     throw new Error(`Unexpected command: ${command}`)
                 },
                 wait: async () => undefined,
@@ -2092,7 +2143,7 @@ describe('native file jobs', () => {
             result: {
                 revision: 22,
                 sourceBytes: 4096,
-                sourceSha256: 'b'.repeat(64),
+                sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'b'.repeat(64),
                 characterCount: 0,
                 presetCount: 0,
                 warningCodes: [],
@@ -2116,7 +2167,8 @@ describe('native file jobs', () => {
                             return terminal
                         if (command === 'native_legacy_backup_handoff_cleanup')
                             return undefined
-                        if (command === 'native_file_job_forget') return true
+                        if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') return true
                         throw new Error(`Unexpected command: ${command}`)
                     },
                     wait: async () => undefined,
@@ -2151,7 +2203,7 @@ describe('native file jobs', () => {
             result: {
                 revision: 0,
                 sourceBytes: 4096,
-                sourceSha256: 'b'.repeat(64),
+                sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'b'.repeat(64),
                 characterCount: 0,
                 presetCount: 0,
                 warningCodes: [],
@@ -2220,7 +2272,7 @@ describe('native file jobs', () => {
                 result: {
                     revision: 22,
                     sourceBytes: 4096,
-                    sourceSha256: 'b'.repeat(64),
+                    sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'b'.repeat(64),
                     characterCount: 3,
                     presetCount: 2,
                     warningCodes: [],
@@ -2243,7 +2295,8 @@ describe('native file jobs', () => {
                             return terminal
                         if (command === cleanupCommand)
                             throw new Error('handoff is still in use')
-                        if (command === 'native_file_job_forget') return true
+                        if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') return true
                         throw new Error(`Unexpected command: ${command}`)
                     },
                     wait: async () => undefined,
@@ -2274,7 +2327,7 @@ describe('native file jobs', () => {
             status('succeeded', {
                 revision: 4,
                 sourceBytes: 128,
-                sourceSha256: 'a'.repeat(64),
+                sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'a'.repeat(64),
                 characterCount: 2,
                 presetCount: 1,
                 warningCodes: [],
@@ -2308,7 +2361,8 @@ describe('native file jobs', () => {
                         return statuses.shift()
                     if (command === 'native_file_job_finalize')
                         return 'requested'
-                    if (command === 'native_file_job_forget') return true
+                    if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') return true
                     throw new Error(`Unexpected command: ${command}`)
                 },
                 wait: async () => undefined,
@@ -2357,7 +2411,7 @@ describe('native file jobs', () => {
             status('succeeded', {
                 revision: 6,
                 sourceBytes: 128,
-                sourceSha256: 'a'.repeat(64),
+                sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'a'.repeat(64),
                 characterCount: 2,
                 presetCount: 1,
                 warningCodes: [],
@@ -2380,7 +2434,8 @@ describe('native file jobs', () => {
                         return statuses.shift()
                     if (command === 'native_file_job_finalize')
                         return 'requested'
-                    if (command === 'native_file_job_forget') return true
+                    if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') return true
                     throw new Error(`Unexpected command: ${command}`)
                 },
                 wait: async () => undefined,
@@ -2426,7 +2481,8 @@ describe('native file jobs', () => {
                             : status('cancelled')
                     }
                     if (command === 'native_file_job_cancel') return 'requested'
-                    if (command === 'native_file_job_forget') return true
+                    if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') return true
                     throw new Error(`Unexpected command: ${command}`)
                 },
                 wait: async () => {
@@ -2493,7 +2549,8 @@ describe('native file jobs', () => {
                             return 'requested'
                         if (command === 'native_file_job_finalize')
                             return 'requested'
-                        if (command === 'native_file_job_forget') return true
+                        if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') return true
                         throw new Error(`Unexpected command: ${command}`)
                     },
                     wait: async () => undefined,
@@ -2678,7 +2735,8 @@ describe('native file jobs', () => {
                             return statuses.shift()
                         if (command === 'native_file_job_cancel')
                             return 'requested'
-                        if (command === 'native_file_job_forget') return true
+                        if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') return true
                         throw new Error(`Unexpected command: ${command}`)
                     },
                     wait: async () => undefined,
@@ -2703,7 +2761,7 @@ describe('native file jobs', () => {
         const committed = {
             revision: 9,
             sourceBytes: 128,
-            sourceSha256: 'f'.repeat(64),
+            sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'f'.repeat(64),
             characterCount: 1,
             presetCount: 0,
             warningCodes: [],
@@ -2748,7 +2806,8 @@ describe('native file jobs', () => {
                         events.push('native-finalized')
                         return 'requested'
                     }
-                    if (command === 'native_file_job_forget') {
+                    if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') {
                         events.push('terminal-acknowledged')
                         return true
                     }
@@ -2778,7 +2837,7 @@ describe('native file jobs', () => {
         const committed = {
             revision: 9,
             sourceBytes: 128,
-            sourceSha256: 'e'.repeat(64),
+            sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'e'.repeat(64),
             characterCount: 1,
             presetCount: 0,
             warningCodes: [],
@@ -2804,7 +2863,8 @@ describe('native file jobs', () => {
                             : status('succeeded', committed)
                     }
                     if (command === 'native_file_job_finalize') return 'requested'
-                    if (command === 'native_file_job_forget') {
+                    if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') {
                         events.push('terminal-acknowledged')
                         return true
                     }
@@ -2832,7 +2892,7 @@ describe('native file jobs', () => {
         const committed = {
             revision: 9,
             sourceBytes: 128,
-            sourceSha256: 'd'.repeat(64),
+            sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'd'.repeat(64),
             characterCount: 1,
             presetCount: 0,
             warningCodes: [],
@@ -2854,7 +2914,8 @@ describe('native file jobs', () => {
                             : status('succeeded', committed)
                     }
                     if (command === 'native_file_job_finalize') return 'requested'
-                    if (command === 'native_file_job_forget') return true
+                    if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') return true
                     throw new Error(`Unexpected command: ${command}`)
                 },
                 wait: async () => undefined,
@@ -2873,7 +2934,7 @@ describe('native file jobs', () => {
             const committed = {
                 revision: 9,
                 sourceBytes: 128,
-                sourceSha256: 'b'.repeat(64),
+                sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'b'.repeat(64),
                 characterCount: 1,
                 presetCount: 0,
                 warningCodes: [],
@@ -2920,7 +2981,8 @@ describe('native file jobs', () => {
                         }
                         if (command === 'native_file_job_finalize')
                             return 'requested'
-                        if (command === 'native_file_job_forget') return true
+                        if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') return true
                         throw new Error(`Unexpected command: ${command}`)
                     },
                     wait: async () => undefined,
@@ -2950,7 +3012,7 @@ describe('native file jobs', () => {
         const committed = {
             revision: 9,
             sourceBytes: 128,
-            sourceSha256: 'c'.repeat(64),
+            sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'c'.repeat(64),
             characterCount: 1,
             presetCount: 0,
             warningCodes: [],
@@ -2977,7 +3039,8 @@ describe('native file jobs', () => {
                     }
                     if (command === 'native_file_job_finalize')
                         return 'requested'
-                    if (command === 'native_file_job_forget') {
+                    if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') {
                         throw {
                             code: 'store-error',
                             message: 'terminal acknowledgement failed',
@@ -3019,7 +3082,8 @@ describe('native file jobs', () => {
                         if (command === 'native_file_job_start')
                             return { jobId: 'job-1' }
                         if (command === 'native_file_job_status') return failed
-                        if (command === 'native_file_job_forget') return true
+                        if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') return true
                         throw new Error(`Unexpected command: ${command}`)
                     },
                     wait: async () => undefined,
@@ -3058,6 +3122,11 @@ describe('native file jobs', () => {
         const observed: NativeFileJobStatus[] = []
         let revision = 11
         const runtime = {
+            withPausedPersistentWrites: async <T>(reason: string, operation: (token: import('./saveCoordinator').PersistentMutationToken) => Promise<T>) => {
+                calls.push([`flush:${reason}`, undefined])
+                revision = 12
+                return operation({revision: 12, mutationGeneration: 1} as import('./saveCoordinator').PersistentMutationToken)
+            },
             get revision() {
                 return revision
             },
@@ -3068,6 +3137,7 @@ describe('native file jobs', () => {
         }
         const running: NativeFileJobStatus = {
             jobId: 'export-1',
+            exportCaptureRevision: 12,
             kind: 'export-block-risu-save',
             state: 'running',
             phase: 'writing-export',
@@ -3090,7 +3160,7 @@ describe('native file jobs', () => {
             result: {
                 revision: 12,
                 sourceBytes: 256,
-                sourceSha256: 'd'.repeat(64),
+                sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'd'.repeat(64),
                 characterCount: 2,
                 presetCount: 1,
                 warningCodes: [],
@@ -3110,7 +3180,8 @@ describe('native file jobs', () => {
                         return { jobId: 'export-1' }
                     if (command === 'native_file_job_status')
                         return statuses.shift()
-                    if (command === 'native_file_job_forget') return true
+                    if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') return true
                     throw new Error(`Unexpected command: ${command}`)
                 },
                 wait: async () => undefined,
@@ -3149,6 +3220,7 @@ describe('native file jobs', () => {
         const tenGiB = 10 * 1024 * 1024 * 1024
         const terminal: NativeFileJobStatus = {
             jobId: 'large-export',
+            exportCaptureRevision: 15,
             kind: 'export-block-risu-save',
             state: 'succeeded',
             phase: 'complete',
@@ -3161,7 +3233,7 @@ describe('native file jobs', () => {
             result: {
                 revision: 15,
                 sourceBytes: tenGiB,
-                sourceSha256: 'e'.repeat(64),
+                sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'e'.repeat(64),
                 characterCount: 50_000,
                 presetCount: 7,
                 warningCodes: [],
@@ -3170,8 +3242,7 @@ describe('native file jobs', () => {
 
         const result = await runNativeBlockRisuSaveExport(
             {
-                revision: 15,
-                flushPendingData: async () => undefined,
+                ...restoreRuntime(15),
             },
             'C:\\chosen\\ten-gib.risudat',
             {},
@@ -3183,7 +3254,8 @@ describe('native file jobs', () => {
                         return { jobId: 'large-export' }
                     }
                     if (command === 'native_file_job_status') return terminal
-                    if (command === 'native_file_job_forget') return true
+                    if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') return true
                     throw new Error(`Unexpected command: ${command}`)
                 },
                 wait: async () => undefined,
@@ -3211,8 +3283,7 @@ describe('native file jobs', () => {
 
         const promise = runNativeBlockRisuSaveExport(
             {
-                revision: 6,
-                flushPendingData: async () => undefined,
+                ...restoreRuntime(6),
             },
             'C:\\chosen\\backup.risudat',
             { signal: controller.signal },
@@ -3247,7 +3318,8 @@ describe('native file jobs', () => {
                               }
                     }
                     if (command === 'native_file_job_cancel') return 'requested'
-                    if (command === 'native_file_job_forget') return true
+                    if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') return true
                     throw new Error(`Unexpected command: ${command}`)
                 },
                 wait: async () => controller.abort(),
@@ -3282,7 +3354,7 @@ describe('native file jobs', () => {
         const result = {
             revision: 17,
             sourceBytes: 512,
-            sourceSha256: 'f'.repeat(64),
+            sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'f'.repeat(64),
             characterCount: 2,
             presetCount: 1,
             warningCodes: [],
@@ -3323,7 +3395,8 @@ describe('native file jobs', () => {
                             result,
                         }
                     }
-                    if (command === 'native_file_job_forget') return true
+                    if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') return true
                     throw new Error(`Unexpected command: ${command}`)
                 },
                 wait: async () => undefined,
@@ -3539,7 +3612,8 @@ describe('native file jobs', () => {
                                 message: 'cancel response was lost',
                             }
                         }
-                        if (command === 'native_file_job_forget') return true
+                        if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') return true
                         throw new Error(`Unexpected command: ${command}`)
                     },
                     wait: async () => {
@@ -3567,7 +3641,7 @@ describe('native file jobs', () => {
         const result = {
             revision: 9,
             sourceBytes: 128,
-            sourceSha256: 'd'.repeat(64),
+            sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'd'.repeat(64),
             characterCount: 1,
             presetCount: 0,
             warningCodes: [],
@@ -3627,7 +3701,8 @@ describe('native file jobs', () => {
                         }
                     }
                     if (command === 'native_file_job_cancel') return 'tooLate'
-                    if (command === 'native_file_job_forget') return true
+                    if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') return true
                     throw new Error(`Unexpected command: ${command}`)
                 },
                 wait: async () => controller.abort(),
@@ -3688,7 +3763,8 @@ describe('native file jobs', () => {
                                 },
                             }
                         }
-                        if (command === 'native_file_job_forget') return true
+                        if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') return true
                         throw new Error(`Unexpected command: ${command}`)
                     },
                     wait: async () => undefined,
@@ -3720,7 +3796,8 @@ describe('native file jobs', () => {
                                 },
                             }
                         }
-                        if (command === 'native_file_job_forget') return true
+                        if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') return true
                         throw new Error(`Unexpected command: ${command}`)
                     },
                     wait: async () => undefined,
@@ -3771,7 +3848,7 @@ describe('native file jobs', () => {
                                 result: {
                                     revision: mismatch.revision,
                                     sourceBytes: 128,
-                                    sourceSha256: 'a'.repeat(64),
+                                    sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'a'.repeat(64),
                                     characterCount: 1,
                                     presetCount: 0,
                                     warningCodes: [],
@@ -3786,7 +3863,8 @@ describe('native file jobs', () => {
                                 },
                             }
                         }
-                        if (command === 'native_file_job_forget') return true
+                        if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') return true
                         throw new Error(`Unexpected command: ${command}`)
                     },
                     wait: async () => undefined,
@@ -3839,7 +3917,7 @@ describe('native file jobs', () => {
                             result: {
                                 revision: 3,
                                 sourceBytes: 128,
-                                sourceSha256: 'a'.repeat(64),
+                                sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'a'.repeat(64),
                                 characterCount: 1,
                                 presetCount: 0,
                                 warningCodes: [],
@@ -3847,7 +3925,8 @@ describe('native file jobs', () => {
                             },
                         }
                     }
-                    if (command === 'native_file_job_forget') return true
+                    if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') return true
                     throw new Error(`Unexpected command: ${command}`)
                 },
                 wait: async () => undefined,
@@ -3929,7 +4008,7 @@ describe('native file jobs', () => {
         const result = {
             revision: 17,
             sourceBytes: 512,
-            sourceSha256: 'f'.repeat(64),
+            sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'f'.repeat(64),
             characterCount: 2,
             presetCount: 1,
             warningCodes: [],
@@ -4034,7 +4113,7 @@ describe('native file jobs', () => {
             result: {
                 revision: 17,
                 sourceBytes: 512,
-                sourceSha256: 'f'.repeat(64),
+                sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'f'.repeat(64),
                 characterCount: 2,
                 presetCount: 1,
                 warningCodes: [],
@@ -4159,7 +4238,8 @@ describe('native file jobs', () => {
                                     completedItems: 1,
                                 },
                             }
-                        if (command === 'native_file_job_forget') return true
+                        if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') return true
                         throw new Error(`Unexpected command: ${command}`)
                     },
                     wait: async () => undefined,
@@ -4187,7 +4267,7 @@ describe('native file jobs', () => {
             result: {
                 revision: 17,
                 sourceBytes: 512,
-                sourceSha256: 'f'.repeat(64),
+                sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'f'.repeat(64),
                 characterCount: 2,
                 presetCount: 1,
                 warningCodes: [],
@@ -4248,7 +4328,7 @@ describe('native file jobs', () => {
             result: {
                 revision: 9,
                 sourceBytes: 128,
-                sourceSha256: 'd'.repeat(64),
+                sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'd'.repeat(64),
                 characterCount: 1,
                 presetCount: 0,
                 warningCodes: [],
@@ -4279,7 +4359,8 @@ describe('native file jobs', () => {
                             }
                         return terminal
                     }
-                    if (command === 'native_file_job_forget') return true
+                    if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') return true
                     throw new Error(`Unexpected command: ${command}`)
                 },
                 wait: async () => undefined,
@@ -4341,7 +4422,8 @@ describe('native file jobs', () => {
                         }
                         if (command === 'native_file_job_cancel')
                             return 'requested'
-                        if (command === 'native_file_job_forget') return true
+                        if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') return true
                         throw new Error(`Unexpected command: ${command}`)
                     },
                     wait: async () => undefined,
@@ -4369,7 +4451,7 @@ describe('native file jobs', () => {
             result: {
                 revision: 17,
                 sourceBytes: 128,
-                sourceSha256: 'c'.repeat(64),
+                sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'c'.repeat(64),
                 characterCount: 1,
                 presetCount: 0,
                 warningCodes: [],
@@ -4446,7 +4528,8 @@ describe('native file jobs', () => {
                                 },
                                 error: { code: 'offline', message: 'offline' },
                             }
-                        if (command === 'native_file_job_forget') return true
+                        if (command === 'native_portable_confirm_restore_adoption') return undefined
+                if (command === 'native_file_job_forget') return true
                         throw new Error(`Unexpected command: ${command}`)
                     },
                     wait: async () => undefined,
@@ -4524,4 +4607,24 @@ it('cancels an incomplete legacy restore before acquiring the replacement fence'
     expect(acquire).not.toHaveBeenCalled()
     expect(commands).toContain('native_file_job_cancel')
     expect(commands).not.toContain('native_file_job_finalize')
+})
+
+it.each(['both', 'cold', 'inlay'] as const)('cancels default incomplete restore warnings in one dialog: %s', async kind => {
+    restoreAlerts.confirm.mockReset().mockResolvedValue(false)
+    restoreAlerts.checkbox.mockReset().mockResolvedValue({ confirmed: false, checked: false })
+    const preview = { unavailableColdKeys: kind === 'inlay' ? [] : ['missing'], characterNames: ['Synthetic'], invalidInlays: kind === 'cold' ? [] : ['inlay_aa.risuinlay'] }
+    const states = [{ ...status('waitingForInput'), phase: 'awaiting-activation', incompleteRestorePreview: preview }, status('cancelled')]
+    const acquire = vi.fn()
+    await expect(runNativeLegacyLocalBackupRestore(
+        restoreRuntime(17, { acquire }), { type: 'desktopPath', path: 'synthetic.bin' }, {},
+        { isTauri: () => true, wait: async () => undefined, invoke: async command => {
+            if (command === 'native_file_job_start') return { jobId: 'job-1' }
+            if (command === 'native_file_job_status') return states.shift()
+            return true
+        } },
+    )).rejects.toMatchObject({ name: 'AbortError' })
+    expect(acquire).not.toHaveBeenCalled()
+    expect(restoreAlerts.checkbox).toHaveBeenCalledTimes(1)
+    expect(restoreAlerts.confirm).not.toHaveBeenCalled()
+    expect(restoreAlerts.checkbox).toHaveBeenCalledWith(expect.objectContaining({ requireChecked: true }))
 })

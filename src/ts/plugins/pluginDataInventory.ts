@@ -172,6 +172,13 @@ export async function deletePluginDataItems(
     }
 }
 
+export async function deletePluginDataForOwner(owner: string): Promise<void> {
+    const library = (await listPluginDataItems('library')).filter((item) => item.owner === owner)
+    const device = (await listPluginDataItems('device')).filter((item) => item.owner === owner)
+    await deletePluginDataItems(library, 'library')
+    await deletePluginDataItems(device, 'device')
+}
+
 export async function collidingPluginDataKeys(
     owner: string,
     keys: readonly string[],

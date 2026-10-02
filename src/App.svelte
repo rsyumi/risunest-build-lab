@@ -156,7 +156,6 @@
         if (isTauri && $loadedStore) {
             // Start only after storage, asset authority and the working set are ready.
             if (!isStartupExcluded('sync', getStartupExclusions()))
-                void import('./ts/storage/sync/serverSyncProduction').then(({ startServerSync }) => startServerSync())
             // The update check runs after the start finishes, so a start that left it off keeps it off.
             if (!isStartupExcluded('autoUpdate', getStartupExclusions()))
                 void import('./ts/update/controller').then(({ startAppUpdateChecks }) => startAppUpdateChecks())
@@ -184,7 +183,7 @@
             import('./lib/Setting/Pages/CustomGUISettingMenu.svelte'))
 
 
-  
+
     let didFirstSetup: boolean  = $derived(DBState.db?.didFirstSetup)
     let gridOpen = $state(false)
     let aprilFools = $state(new Date().getMonth() === 3 && new Date().getDate() === 1)
@@ -329,7 +328,7 @@
                                 <button class="p-2 rounded-full border border-[#bbbbbb30]">
                                     <GlobeIcon size={18} color="#bbbbbb" />
                                 </button>
-                                
+
                             </div>
                             <div class="absolute bottom-2 right-4 flex">
                                 <button class="p-2 rounded-full bg-[#bbbbbb]">
@@ -368,7 +367,7 @@
                             aprilFoolsPage = 0
                             aprilFools = false
                         }}>
-                            Go to RisuNest  
+                            Go to RisuNest
                         </a>
                     </p>
 
@@ -498,7 +497,6 @@
                 <div class="top-0 w-full h-full left-0 z-30 flex flex-row items-center" class:fixed={$sideBarStore} class:hidden={!$sideBarStore} >
                     <!-- svelte-ignore a11y_click_events_have_key_events -->
                     <Sidebar openGrid={() => {gridOpen = true}}  hidden={false} />
-
 
 
                 </div>

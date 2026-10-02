@@ -31,6 +31,17 @@
     import { isExpectedHubMessage } from "src/ts/storage/officialAccountMessage";
     import { RISUNEST_PRIVACY_URL, RISUNEST_TERMS_URL, RISU_SERVICE_PRIVACY_URL, RISU_SERVICE_TERMS_URL } from "src/ts/legal";
 
+    let checkboxChecked = $state(false);
+    $effect(() => {
+        const dialog = $alertStore.checkboxConfirm;
+        if (dialog) checkboxChecked = false;
+    });
+    function finishCheckboxConfirm(confirmed: boolean) {
+        const dialog = $alertStore;
+        if (confirmed && dialog.checkboxConfirm?.requireChecked && !checkboxChecked) return;
+        dialog.onCheckboxConfirm?.({ confirmed, checked: checkboxChecked });
+        alertStore.set({ type: 'none', msg: '' });
+    }
     let showDetails = $state(false);
     let translatedStackTrace = $state('');
     let stackTraceTranslationFailed = $state(false);
@@ -200,7 +211,12 @@
     }
 </script>
 
-<svelte:window onmessage={async (e) => {
+<svelte:window onkeydown={(event) => {
+    if (event.key === 'Escape' && $alertStore.type === 'checkboxConfirm') {
+        event.preventDefault();
+        finishCheckboxConfirm(false);
+    }
+}} onmessage={async (e) => {
     if(isExpectedHubMessage(e, hubURL + '/hub/login', loginIframe?.contentWindow)){
         if(e.data?.msg?.data?.vaild && $alertStore.type === 'login'){
             $alertStore = {
@@ -211,7 +227,24 @@
     }
 }}></svelte:window>
 
-{#if $alertStore.type !== 'none' &&  $alertStore.type !== 'toast' &&  $alertStore.type !== 'cardexport' && $alertStore.type !== 'branches' && $alertStore.type !== 'selectModule' && $alertStore.type !== 'pukmakkurit' && $alertStore.type !== 'requestlogs'}
+{#if $alertStore.type === 'checkboxConfirm' && $alertStore.checkboxConfirm}
+    {@const dialog = $alertStore.checkboxConfirm}
+    <div class="absolute w-full h-full z-modal bg-black/50 flex justify-center items-center p-4">
+        <button type="button" class="absolute inset-0" aria-label={dialog.cancelLabel} onclick={() => finishCheckboxConfirm(false)}></button>
+        <div role="dialog" tabindex="-1" aria-modal="true" aria-labelledby="checkbox-confirm-title" aria-describedby="checkbox-confirm-description" class="relative bg-darkbg text-textcolor p-4 rounded-md flex flex-col gap-4 w-full max-w-lg max-h-full overflow-y-auto">
+            <h2 id="checkbox-confirm-title" class="text-xl font-bold">{dialog.title}</h2>
+            <p id="checkbox-confirm-description" class="whitespace-pre-wrap">{dialog.description}</p>
+            <label class="flex items-start gap-2">
+                <input type="checkbox" bind:checked={checkboxChecked} class="mt-1 accent-selected" />
+                <span>{dialog.checkboxLabel}</span>
+            </label>
+            <div class="flex gap-2">
+                <Button className="grow" styled="outlined" onclick={() => finishCheckboxConfirm(false)}>{dialog.cancelLabel}</Button>
+                <Button className="grow" disabled={dialog.requireChecked && !checkboxChecked} onclick={() => finishCheckboxConfirm(true)}>{dialog.actionLabel}</Button>
+            </div>
+        </div>
+    </div>
+{:else if $alertStore.type !== 'none' &&  $alertStore.type !== 'toast' &&  $alertStore.type !== 'cardexport' && $alertStore.type !== 'branches' && $alertStore.type !== 'selectModule' && $alertStore.type !== 'pukmakkurit' && $alertStore.type !== 'requestlogs'}
     <div class="absolute w-full h-full z-modal bg-black/50 flex justify-center items-center" class:vis={ $alertStore.type === 'wait2'}>
         <div class="bg-darkbg p-4 break-any rounded-md flex flex-col max-w-3xl  max-h-full overflow-y-auto">
             {#if $alertStore.type === 'error'}

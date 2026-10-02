@@ -1,5 +1,6 @@
+mod lww;
 use crate::{
-    store::{CommitSubmission, Device, Store},
+    store::{Device, Store},
     workload::{WorkKind, Workload},
     Error, Result,
 };
@@ -8,15 +9,11 @@ use axum::{
     extract::{DefaultBodyLimit, Path, Query, Request, State},
     http::{HeaderMap, StatusCode},
     middleware::{self, Next},
-    response::sse::{Event, KeepAlive, Sse},
     response::{IntoResponse, Response},
     routing::{get, post, put},
     Extension, Json, Router,
 };
-use risunest_sync_wire::{
-    canonical, transfer, ChangeSet, CommitIntent, Domain, Receipt, Sequence, TerminalStatus,
-    MAX_METADATA_BYTES,
-};
+use risunest_sync_wire::{canonical, transfer, Sequence, MAX_METADATA_BYTES};
 use serde::Deserialize;
 use std::{
     collections::HashMap,
@@ -25,9 +22,6 @@ use std::{
 };
 use tokio::sync::Semaphore;
 
-/// How long a held notification stream waits before confirming the head on its
-/// own. It bounds the delay of a change no writer announced.
-const HEAD_NOTICE_INTERVAL: Duration = Duration::from_secs(20);
 const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(15 * 60);
 
 #[derive(Clone)]
@@ -178,27 +172,6 @@ pub fn router_with_shutdown(
             }
         }
     });
-    let alive = Arc::downgrade(&lifetime);
-    let jobs = Arc::downgrade(&store);
-    let commit_workload = workload.clone();
-    tokio::spawn(async move {
-        while alive.strong_count() > 0 {
-            let Some(store) = jobs.upgrade() else { break };
-            let Ok(mut work) = commit_workload.begin(WorkKind::Background) else {
-                tokio::time::sleep(Duration::from_millis(250)).await;
-                continue;
-            };
-            let result = blocking(move || {
-                let result = store.run_pending_commit();
-                work.set_performed_work(matches!(&result, Ok(true)));
-                result
-            })
-            .await;
-            if !matches!(result, Ok(true)) {
-                tokio::time::sleep(Duration::from_millis(250)).await;
-            }
-        }
-    });
     let delta_alive = Arc::downgrade(&lifetime);
     let delta_store = Arc::downgrade(&store);
     let delta_workload = workload.clone();
@@ -239,16 +212,15 @@ pub fn router_with_shutdown(
     };
     Router::new()
         .route("/session", get(session))
+        .route("/session/claim-writer", post(lww::claim_writer))
         .route("/devices/{id}/status", get(device_status))
         .route("/head", get(head))
-        .route("/changes", get(changes))
-        .route("/read-pins", post(pin_changes))
-        .route("/read-pins/{id}", get(pinned_changes).delete(release_pin))
-        .route("/checkpoints", post(create_checkpoint))
-        .route(
-            "/checkpoints/{id}",
-            get(checkpoint_page).delete(release_checkpoint),
-        )
+        .route("/time", get(lww::time))
+        .route("/push", post(lww::push))
+        .route("/changes", get(lww::changes))
+        .route("/state/pins", post(lww::create_pin))
+        .route("/state/pins/{id}", axum::routing::delete(lww::release_pin))
+        .route("/state", get(lww::state))
         .route("/objects/pins", post(pin_objects))
         .route(
             "/objects/retention",
@@ -256,7 +228,6 @@ pub fn router_with_shutdown(
         )
         .route("/objects/retention/release", post(release_retained_objects))
         .route("/media/access", post(media_access))
-        .route("/scopes", get(scope))
         .route("/objects/missing", post(missing))
         .route("/objects/{hash}", get(object))
         .route("/uploads/frames", post(upload_frames))
@@ -271,30 +242,26 @@ pub fn router_with_shutdown(
             "/object-deltas/{id}",
             get(download_delta_progress).delete(release_download_delta),
         )
-        .route("/staged-changes", post(stage))
-        .route("/staged-changes/start", post(begin_stage))
-        .route(
-            "/staged-changes/{id}",
-            get(stage_progress).delete(cancel_stage),
-        )
-        .route("/staged-changes/{id}/pages/{index}", put(stage_page))
-        .route("/staged-changes/{id}/seal", post(seal_stage))
-        .route("/commits", post(commit))
-        .route("/operations/{id}", get(receipt))
-        .route("/acks", post(ack))
+        .route("/operations/{id}", get(lww::operation))
+        .route("/operations/{id}/cancel", post(lww::cancel_operation))
+        .route("/ack", post(lww::ack))
         .layer(DefaultBodyLimit::max(transfer::MAX_BATCH_BYTES))
         .route_layer(middleware::from_fn_with_state(app.clone(), authorize))
         // A held notification stream must not occupy an admission slot or a
         // device slot for its whole life, so it authenticates on its own.
-        .route("/events", get(events))
+        .route("/notify", get(lww::notify))
         .route("/media/{token}", get(media))
         .with_state(app)
 }
 impl IntoResponse for Error {
     fn into_response(self) -> Response {
-        let body = match &self.key {
-            Some(key) => serde_json::json!({"error":self.code,"key":key}),
-            None => serde_json::json!({"error":self.code}),
+        let body = if let Some((floor, latest)) = self.journal_floor {
+            serde_json::json!({"error":self.code,"journalFloor":floor,"latestSeq":latest})
+        } else {
+            match &self.key {
+                Some(key) => serde_json::json!({"error":self.code,"key":key}),
+                None => serde_json::json!({"error":self.code}),
+            }
         };
         let mut response = (
             StatusCode::from_u16(self.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
@@ -310,6 +277,16 @@ impl IntoResponse for Error {
     }
 }
 async fn blocking<T: Send + 'static>(f: impl FnOnce() -> Result<T> + Send + 'static) -> Result<T> {
+    #[cfg(test)]
+    let worker = crate::source_observer::worker();
+    #[cfg(test)]
+    let f = move || {
+        let _entered = worker.enter();
+        let result = f();
+        drop(_entered);
+        drop(worker);
+        result
+    };
     tokio::task::spawn_blocking(f)
         .await
         .map_err(|_| Error::new("worker-unavailable", 503))?
@@ -455,66 +432,6 @@ async fn head(State(app): State<App>, headers: HeaderMap) -> Result<Response> {
     response.headers_mut().insert("etag", etag.parse().unwrap());
     Ok(response)
 }
-/// Notifies a held client that the ledger head may have moved. The change
-/// itself still travels over the ordinary endpoints, so a client that never
-/// connects here, or whose connection drops, reaches the same state by asking.
-async fn events(State(app): State<App>, headers: HeaderMap) -> Result<Response> {
-    let token = header(&headers, "authorization")
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .ok_or(Error::new("unauthorized", 401))?
-        .to_owned();
-    let library = header(&headers, "x-risu-library")
-        .ok_or(Error::new("unauthorized", 401))?
-        .to_owned();
-    let store = app.store.clone();
-    let device = blocking(move || store.authenticate(&library, &token)).await?;
-    let permit = app
-        .notice_slots
-        .clone()
-        .try_acquire_owned()
-        .map_err(|_| Error::new("server-busy", 429))?;
-    let announced = app.store.head_announcements();
-    let stream = futures_util::stream::unfold(
-        (app, announced, None::<String>, permit, device),
-        |(mut app, mut announced, last, permit, device)| async move {
-            loop {
-                // A stream outlives the drain a maintenance owner waits for, so
-                // it closes as soon as admission does.
-                if *app.shutdown.borrow()
-                    || !app
-                        .workload
-                        .status()
-                        .is_ok_and(|status| status.state == "open")
-                {
-                    return None;
-                }
-                let store = app.store.clone();
-                let actor = device.clone();
-                let head = blocking(move || store.device_head(&actor)).await.ok()?;
-                if last.as_deref() != Some(head.head_id.as_str()) {
-                    let event = Event::default().event("head").data(&head.head_id);
-                    return Some((
-                        Ok::<_, std::convert::Infallible>(event),
-                        (app, announced, Some(head.head_id), permit, device),
-                    ));
-                }
-                tokio::select! {
-                    _ = tokio::time::timeout(HEAD_NOTICE_INTERVAL, announced.changed()) => (),
-                    _ = async {
-                        if app.shutdown.has_changed().is_err() && !*app.shutdown.borrow() {
-                            std::future::pending::<()>().await;
-                        } else {
-                            let _ = app.shutdown.wait_for(|stopped| *stopped).await;
-                        }
-                    } => return None,
-                }
-            }
-        },
-    );
-    Ok(Sse::new(stream)
-        .keep_alive(KeepAlive::default())
-        .into_response())
-}
 async fn session(State(app): State<App>, Extension(device): Extension<Device>) -> Result<Response> {
     blocking(move || Ok(Json(app.store.device_session(&device)?).into_response())).await
 }
@@ -528,55 +445,6 @@ async fn device_status(
             Json(serde_json::json!({"deviceId":id,"active":app.store.device_active(&device,&id)?}))
                 .into_response(),
         )
-    })
-    .await
-}
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ChangesQuery {
-    epoch: String,
-    after_seq: Sequence,
-    after_ordinal: Sequence,
-    through_seq: Sequence,
-    domains: String,
-    limit: Option<usize>,
-}
-/// Sections are named explicitly. There is no implicit all-sections read.
-fn query_domains(value: &str) -> Result<Vec<Domain>> {
-    value
-        .split(',')
-        .map(|name| Ok(Domain::try_from(name)?))
-        .collect()
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ScopeQuery {
-    scope: String,
-}
-async fn scope(State(app): State<App>, Query(query): Query<ScopeQuery>) -> Result<Response> {
-    blocking(move || {
-        let (head, version, clear_version) = app.store.scope_snapshot(&query.scope)?;
-        Ok(Json(
-            serde_json::json!({"head":head,"scope":query.scope,"version":version,"clearVersion":clear_version}),
-        )
-        .into_response())
-    })
-    .await
-}
-async fn changes(State(app): State<App>, Query(query): Query<ChangesQuery>) -> Result<Response> {
-    let cursor = crate::store::ChangeCursor {
-        seq: query.after_seq,
-        ordinal: query.after_ordinal,
-    };
-    blocking(move || {
-        Ok(Json(app.store.changes(
-            &query.epoch,
-            &cursor,
-            &query.through_seq,
-            &query_domains(&query.domains)?,
-            query.limit.unwrap_or(128),
-        )?)
-        .into_response())
     })
     .await
 }
@@ -653,7 +521,14 @@ async fn object_response(
             };
             response = match body {
                 crate::store::Body::File(file) => {
+                    #[cfg(not(test))]
                     let mut file = tokio::fs::File::from_std(file);
+                    #[cfg(test)]
+                    let mut file = {
+                        let file = file.into_async();
+                        file.selected(start, length);
+                        file
+                    };
                     use tokio::io::{AsyncReadExt, AsyncSeekExt};
                     file.seek(std::io::SeekFrom::Start(start)).await?;
                     axum::body::Body::from_stream(tokio_util::io::ReaderStream::with_capacity(
@@ -665,6 +540,8 @@ async fn object_response(
                 // Already in memory and bounded by the inline threshold, so a
                 // range is a slice rather than a seek.
                 crate::store::Body::Bytes(bytes) => {
+                    #[cfg(test)]
+                    crate::source_observer::inline_selection(digest, start, length);
                     let bytes = bytes.into_inner();
                     let end = (start + length).min(bytes.len() as u64) as usize;
                     axum::body::Body::from(bytes[start as usize..end].to_vec()).into_response()
@@ -800,127 +677,6 @@ fn parse_range(range: &str, total: usize) -> Option<(usize, usize)> {
     };
     (start <= end && start < total).then_some((start, end))
 }
-async fn stage(
-    State(app): State<App>,
-    Extension(device): Extension<Device>,
-    body: Bytes,
-) -> Result<Response> {
-    let changes: ChangeSet = canonical::decode(&body, MAX_METADATA_BYTES)?;
-    blocking(move || {
-        Ok((
-            StatusCode::CREATED,
-            Json(app.store.stage_changes(&device, &changes)?),
-        )
-            .into_response())
-    })
-    .await
-}
-async fn cancel_stage(
-    State(app): State<App>,
-    Extension(device): Extension<Device>,
-    Path(id): Path<String>,
-) -> Result<StatusCode> {
-    blocking(move || app.store.cancel_staged_changes(&device, &id)).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-async fn begin_stage(
-    State(app): State<App>,
-    Extension(device): Extension<Device>,
-) -> Result<Response> {
-    blocking(move || {
-        Ok((
-            StatusCode::CREATED,
-            Json(serde_json::json!({"stagedChangesId":app.store.begin_changes(&device)?})),
-        )
-            .into_response())
-    })
-    .await
-}
-async fn stage_progress(
-    State(app): State<App>,
-    Extension(device): Extension<Device>,
-    Path(id): Path<String>,
-) -> Result<Response> {
-    blocking(move || Ok(Json(app.store.changes_progress(&device, &id)?).into_response())).await
-}
-async fn stage_page(
-    State(app): State<App>,
-    Extension(device): Extension<Device>,
-    Path((id, index)): Path<(String, u64)>,
-    body: Bytes,
-) -> Result<StatusCode> {
-    let page: ChangeSet = canonical::decode(&body, MAX_METADATA_BYTES)?;
-    blocking(move || app.store.put_changes_page(&device, &id, index, &page)).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-async fn seal_stage(
-    State(app): State<App>,
-    Extension(device): Extension<Device>,
-    Path(id): Path<String>,
-) -> Result<Response> {
-    blocking(move || Ok(Json(app.store.seal_changes(&device, &id)?).into_response())).await
-}
-fn receipt_response(receipt: Receipt) -> Response {
-    let status = match receipt.status {
-        TerminalStatus::Committed => StatusCode::OK,
-        TerminalStatus::Stale => StatusCode::PRECONDITION_FAILED,
-        TerminalStatus::Failed => StatusCode::CONFLICT,
-    };
-    (status, Json(receipt)).into_response()
-}
-async fn commit(
-    State(app): State<App>,
-    Extension(device): Extension<Device>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Result<Response> {
-    let intent: CommitIntent = canonical::decode(&body, MAX_METADATA_BYTES)?;
-    let if_match = header(&headers, "if-match")
-        .ok_or(Error::new("if-match-required", 428))?
-        .to_owned();
-    blocking(
-        move || match app.store.submit_commit(&device, &intent, &if_match)? {
-            CommitSubmission::Terminal(receipt) => Ok(receipt_response(*receipt)),
-            pending => {
-                let small = app
-                    .store
-                    .changes_progress(&device, &intent.staged_changes_id)
-                    .is_ok_and(|p| p.next_page == 1.into());
-                if small {
-                    Ok(receipt_response(
-                        app.store.commit(&device, &intent, &if_match)?,
-                    ))
-                } else {
-                    Ok((StatusCode::ACCEPTED, Json(pending)).into_response())
-                }
-            }
-        },
-    )
-    .await
-}
-async fn receipt(
-    State(app): State<App>,
-    Extension(device): Extension<Device>,
-    Path(id): Path<String>,
-) -> Result<Response> {
-    blocking(move || Ok(Json(app.store.operation_status(&device, &id)?).into_response())).await
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Ack {
-    epoch: String,
-    sections: std::collections::BTreeMap<Domain, Sequence>,
-}
-async fn ack(
-    State(app): State<App>,
-    Extension(device): Extension<Device>,
-    body: Bytes,
-) -> Result<StatusCode> {
-    let ack: Ack = canonical::decode(&body, MAX_METADATA_BYTES)?;
-    blocking(move || app.store.acknowledge(&device, &ack.epoch, &ack.sections)).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
 async fn begin_upload(
     State(app): State<App>,
     Extension(device): Extension<Device>,
@@ -1002,125 +758,6 @@ async fn cancel_upload(
     Path(id): Path<String>,
 ) -> Result<StatusCode> {
     blocking(move || app.store.cancel_upload(&device, &id)).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct PinRequest {
-    epoch: String,
-    after_seq: Sequence,
-    domains: Vec<Domain>,
-}
-async fn pin_changes(
-    State(app): State<App>,
-    Extension(device): Extension<Device>,
-    body: Bytes,
-) -> Result<Response> {
-    let request: PinRequest = canonical::decode(&body, MAX_METADATA_BYTES)?;
-    blocking(move || {
-        Ok((
-            StatusCode::CREATED,
-            Json(app.store.pin_changes(
-                &device,
-                &request.epoch,
-                &request.after_seq,
-                &request.domains,
-            )?),
-        )
-            .into_response())
-    })
-    .await
-}
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct PinQuery {
-    after_seq: Sequence,
-    after_ordinal: Sequence,
-    limit: Option<usize>,
-}
-async fn pinned_changes(
-    State(app): State<App>,
-    Extension(device): Extension<Device>,
-    Path(id): Path<String>,
-    Query(query): Query<PinQuery>,
-) -> Result<Response> {
-    blocking(move || {
-        Ok(Json(app.store.pinned_changes(
-            &device,
-            &id,
-            &crate::store::ChangeCursor {
-                seq: query.after_seq,
-                ordinal: query.after_ordinal,
-            },
-            query.limit.unwrap_or(128),
-        )?)
-        .into_response())
-    })
-    .await
-}
-async fn release_pin(
-    State(app): State<App>,
-    Extension(device): Extension<Device>,
-    Path(id): Path<String>,
-) -> Result<StatusCode> {
-    blocking(move || app.store.release_pin(&device, &id)).await?;
-    Ok(StatusCode::NO_CONTENT)
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CheckpointRequest {
-    domains: Vec<Domain>,
-}
-async fn create_checkpoint(
-    State(app): State<App>,
-    Extension(device): Extension<Device>,
-    body: Bytes,
-) -> Result<Response> {
-    let request: CheckpointRequest = canonical::decode(&body, MAX_METADATA_BYTES)?;
-    blocking(move || {
-        Ok((
-            StatusCode::CREATED,
-            Json(app.store.create_checkpoint(&device, &request.domains)?),
-        )
-            .into_response())
-    })
-    .await
-}
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct CheckpointQuery {
-    after_domain: Option<Domain>,
-    after_key: Option<String>,
-    limit: Option<usize>,
-}
-async fn checkpoint_page(
-    State(app): State<App>,
-    Extension(device): Extension<Device>,
-    Path(id): Path<String>,
-    Query(query): Query<CheckpointQuery>,
-) -> Result<Response> {
-    let after = match (query.after_domain, query.after_key) {
-        (Some(domain), Some(key)) => Some(crate::store::CheckpointCursor { domain, key }),
-        (None, None) => None,
-        _ => return Err(Error::new("invalid-cursor", 400)),
-    };
-    blocking(move || {
-        Ok(Json(app.store.checkpoint_page(
-            &device,
-            &id,
-            after.as_ref(),
-            query.limit.unwrap_or(128),
-        )?)
-        .into_response())
-    })
-    .await
-}
-async fn release_checkpoint(
-    State(app): State<App>,
-    Extension(device): Extension<Device>,
-    Path(id): Path<String>,
-) -> Result<StatusCode> {
-    blocking(move || app.store.release_checkpoint(&device, &id)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 #[derive(Deserialize)]

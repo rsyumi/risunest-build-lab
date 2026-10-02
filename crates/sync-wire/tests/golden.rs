@@ -1,6 +1,7 @@
 use risunest_sync_wire::{
-    canonical, change_digest::ChangeDigest, hash, operation_id, transfer::{self, Frame}, ChangeSet, CommitIntent,
-    Domain, ReadFence, RecordChange, RecordVersion, RemoteHead, Sequence,
+    canonical, hash,
+    transfer::{self, Frame},
+    Domain, RecordVersion, RemoteHead, Sequence,
 };
 use serde_json::{json, Value};
 
@@ -49,70 +50,8 @@ fn sequence_is_decimal_not_a_local_revision_or_js_number() {
     }
     assert!(Sequence::try_from("9".repeat(64)).unwrap().next().is_err());
 }
-fn changes() -> ChangeSet {
-    ChangeSet {
-        changes: vec![RecordChange {
-            domain: Domain::Library,
-            key: "conversation/한글".into(),
-            before: RecordVersion::Absent,
-            after: RecordVersion::Live {
-                object_hash: hash(b"raw"),
-                descriptor_hash: None,
-            },
-        }],
-        read_fences: vec![],
-        scope_fences: vec![],
-    }
-}
-fn intent() -> CommitIntent {
-    CommitIntent {
-        device_operation_seq: 1.into(),
-        expected_head: RemoteHead {
-            seq: 7.into(),
-            head_id: hash(b"head"),
-            ..RemoteHead::genesis("library".into(), "epoch".into()).unwrap()
-        },
-        changes_digest: changes().digest().unwrap(),
-        staged_changes_id: "first".into(),
-    }
-}
 #[test]
-fn intent_identity_excludes_transport_and_staging_but_includes_fences() {
-    let a = intent();
-    let mut b = a.clone();
-    b.staged_changes_id = "second".into();
-    assert_eq!(a.digest().unwrap(), b.digest().unwrap());
-    b.expected_head.seq = 8.into();
-    assert_ne!(a.digest().unwrap(), b.digest().unwrap());
-    let mut changed = changes();
-    changed.read_fences.push(ReadFence {
-        domain: Domain::Library,
-        key: "owner".into(),
-        version: RecordVersion::Absent,
-    });
-    assert_ne!(changed.digest().unwrap(), changes().digest().unwrap());
-    assert_ne!(
-        operation_id("a-b", "c", &1.into()).unwrap(),
-        operation_id("a", "b-c", &1.into()).unwrap()
-    );
-    assert_ne!(
-        operation_id("a", "b", &1.into()).unwrap(),
-        operation_id("a", "b", &2.into()).unwrap()
-    );
-}
-#[test]
-fn change_schema_rejects_duplicate_keys_absent_targets_unknown_fields_and_bad_hashes() {
-    let mut c = changes();
-    c.changes.push(c.changes[0].clone());
-    assert!(c.validate().is_err());
-    let mut c = changes();
-    c.changes[0].after = RecordVersion::Absent;
-    assert!(c.validate().is_err());
-    let mut c = changes();
-    c.changes[0].key = "x".repeat(64 * 1024);
-    assert!(c.validate().is_ok());
-    c.changes[0].key.push('x');
-    assert!(c.validate().is_err());
+fn record_versions_reject_surplus_fields_and_bad_hashes() {
     assert!(
         canonical::decode::<RecordVersion>(br#"{"state":"absent","extra":true}"#, 1024).is_err()
     );
@@ -133,12 +72,17 @@ fn change_schema_rejects_duplicate_keys_absent_targets_unknown_fields_and_bad_ha
 fn full_frames_preserve_opaque_bytes_including_empty_and_noncanonical_json() {
     let raw = br#"{ "b":1.0, "a":9007199254740993 }"#;
     let objects: &[&[u8]] = &[b"", raw, &[0xff, 0, 7]];
-    let frames = objects.iter().map(|bytes| Frame::Full(bytes.to_vec())).collect::<Vec<_>>();
+    let frames = objects
+        .iter()
+        .map(|bytes| Frame::Full(bytes.to_vec()))
+        .collect::<Vec<_>>();
     let encoded = transfer::encode(&frames).unwrap();
     let decoded = transfer::decode(&encoded).unwrap();
     assert_eq!(decoded.len(), objects.len());
     for (frame, expected) in decoded.iter().zip(objects) {
-        let Frame::Full(bytes) = frame else { panic!("expected full frame") };
+        let Frame::Full(bytes) = frame else {
+            panic!("expected full frame")
+        };
         assert_eq!(bytes, expected);
         assert_eq!(hash(bytes), hash(expected));
     }
@@ -179,7 +123,10 @@ fn full_frame_limits_include_count_and_framing() {
     let full = Frame::Full(vec![0; transfer::MAX_BATCH_BYTES - 53]);
     let encoded = transfer::encode(&[full]).unwrap();
     assert_eq!(encoded.len(), transfer::MAX_BATCH_BYTES);
-    assert!(matches!(transfer::decode(&encoded).unwrap().as_slice(), [Frame::Full(_)]));
+    assert!(matches!(
+        transfer::decode(&encoded).unwrap().as_slice(),
+        [Frame::Full(_)]
+    ));
     let mut oversized = encoded;
     oversized.push(0);
     assert!(transfer::decode(&oversized).is_err());
@@ -188,7 +135,10 @@ fn full_frame_limits_include_count_and_framing() {
         .map(|_| Frame::Full(Vec::new()))
         .collect::<Vec<_>>();
     let mut encoded = transfer::encode(&frames).unwrap();
-    assert_eq!(transfer::decode(&encoded).unwrap().len(), transfer::MAX_BATCH_OBJECTS);
+    assert_eq!(
+        transfer::decode(&encoded).unwrap().len(),
+        transfer::MAX_BATCH_OBJECTS
+    );
     frames.push(Frame::Full(Vec::new()));
     assert!(transfer::encode(&frames).is_err());
     encoded[4..8].copy_from_slice(&((transfer::MAX_BATCH_OBJECTS + 1) as u32).to_be_bytes());
@@ -197,10 +147,16 @@ fn full_frame_limits_include_count_and_framing() {
 #[test]
 fn full_required_preserves_exact_hash_and_u64_size_without_materializing() {
     let digest = hash(b"synthetic large object");
-    let encoded = transfer::encode(&[Frame::FullRequired { hash: digest.clone(), size: u64::MAX }]).unwrap();
+    let encoded = transfer::encode(&[Frame::FullRequired {
+        hash: digest.clone(),
+        size: u64::MAX,
+    }])
+    .unwrap();
     assert_eq!(encoded.len(), 53);
     let decoded = transfer::decode(&encoded).unwrap();
-    assert!(matches!(&decoded[0], Frame::FullRequired { hash, size } if hash == &digest && *size == u64::MAX));
+    assert!(
+        matches!(&decoded[0], Frame::FullRequired { hash, size } if hash == &digest && *size == u64::MAX)
+    );
     for end in 0..encoded.len() {
         assert!(transfer::decode(&encoded[..end]).is_err(), "prefix {end}");
     }
@@ -220,13 +176,24 @@ fn full_frame_goldens_match_the_javascript_harness() {
     let vectors: Vec<Golden> = serde_json::from_str(include_str!("transfer-golden.json")).unwrap();
     assert_eq!(vectors.len(), 3);
     for vector in vectors {
-        let frames = vector.objects.iter().map(|hex| {
-            assert_eq!(hex.len() % 2, 0);
-            Frame::Full((0..hex.len()).step_by(2)
-                .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect())
-        }).collect::<Vec<_>>();
+        let frames = vector
+            .objects
+            .iter()
+            .map(|hex| {
+                assert_eq!(hex.len() % 2, 0);
+                Frame::Full(
+                    (0..hex.len())
+                        .step_by(2)
+                        .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
+                        .collect(),
+                )
+            })
+            .collect::<Vec<_>>();
         let encoded = transfer::encode(&frames).unwrap();
-        let hex = encoded.iter().map(|byte| format!("{byte:02x}")).collect::<String>();
+        let hex = encoded
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
         assert_eq!(hex, vector.encoded, "{}", vector.name);
         assert_eq!(transfer::decode(&encoded).unwrap().len(), frames.len());
     }
@@ -250,61 +217,6 @@ fn domain_ordering_matches_its_wire_strings() {
     }
     assert!(Domain::try_from("device-settings").is_err());
     assert!(canonical::decode::<Domain>(b"\"device-settings\"", 1024).is_err());
-}
-#[test]
-fn change_sets_address_records_by_domain_and_key() {
-    let mut c = changes();
-    let mut other = c.changes[0].clone();
-    other.domain = Domain::Hypa;
-    c.changes.insert(0, other);
-    assert!(c.validate().is_ok());
-    c.changes.swap(0, 1);
-    assert!(c.validate().is_err());
-    let mut c = changes();
-    c.changes.push(RecordChange {
-        domain: Domain::Hypa,
-        ..c.changes[0].clone()
-    });
-    // hypa sorts before library, so the same key in two domains still needs order.
-    assert!(c.validate().is_err());
-    let mut c = changes();
-    let library = c.changes[0].clone();
-    c.changes[0].domain = Domain::Hypa;
-    assert_ne!(c.digest().unwrap(), changes().digest().unwrap());
-    c.changes.push(library);
-    assert!(c.validate().is_ok());
-}
-#[test]
-fn streaming_digest_equals_the_flat_change_set() {
-    let mut set = changes();
-    set.changes.insert(
-        0,
-        RecordChange {
-            domain: Domain::Hypa,
-            ..set.changes[0].clone()
-        },
-    );
-    set.read_fences.push(ReadFence {
-        domain: Domain::LocalPlugins,
-        key: "owner".into(),
-        version: RecordVersion::Absent,
-    });
-    set.read_fences.insert(
-        0,
-        ReadFence {
-            domain: Domain::Hypa,
-            key: "owner".into(),
-            version: RecordVersion::Absent,
-        },
-    );
-    let mut digest = ChangeDigest::new();
-    for change in &set.changes {
-        digest.change(change).unwrap();
-    }
-    for fence in &set.read_fences {
-        digest.read_fence(fence).unwrap();
-    }
-    assert_eq!(digest.finish().unwrap(), set.digest().unwrap());
 }
 #[test]
 fn heads_carry_one_sequence_and_a_state_per_section() {

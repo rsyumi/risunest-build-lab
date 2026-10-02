@@ -1,3 +1,4 @@
+import { stableSelectionRoot, projectSelectionIndexes } from './persistentSelectionBoundary'
 import { prepareNativePersistenceValue } from './nativePersistenceValue'
 import { invoke } from '@tauri-apps/api/core'
 import { nativeCommitTransport } from './nativeCommitTransport'
@@ -44,6 +45,11 @@ import {
     type PresetCatalog,
     type Versioned,
     type WorkingSetCommit,
+    type LwwStageReceive,
+    type LwwOutboxRequest, type LwwOutboxPage, type LwwAcknowledgeRequest, type LwwClockState, type LwwRetryRequest, type LwwReplacementRequest,
+    type LwwApplyReceive,
+    type LwwApplyResult,
+    type LwwReceiveHeader,
 } from './persistentDataStore'
 
 const MAX_STAGED_CHARACTER_COUNT = 16
@@ -55,7 +61,6 @@ const textEncoder = new TextEncoder()
 export interface PersistentStoreOpenResult {
     revision: DataRevision
     /** Present when a requested snapshot restore was skipped and the old database stayed active. */
-    restoreFailure?: string
 }
 
 interface NativeStoreError {
@@ -158,19 +163,12 @@ function batches<T>(values: T[], limit: number): T[][] {
 }
 
 export class SqlitePersistentDataStore implements PersistentDataStore {
-    /** Latest native revision and skipped restore details; every open still reaches the store. */
+    /** Latest native revision; every open still reaches the store. */
     lastOpenResult: PersistentStoreOpenResult | null = null
 
     async open(): Promise<void> {
         const result = await invokeStore<PersistentStoreOpenResult>('pds_open')
         this.lastOpenResult = result
-        if (result?.restoreFailure) {
-            // The native side already wrote this to the native log, but the web layer keeps its
-            // own console breadcrumb so a skipped restore is not silent in the frontend.
-            console.warn(
-                `Persistent store opened without the requested snapshot restore: ${result.restoreFailure}`,
-            )
-        }
     }
 
     readRoot(): Promise<Versioned<PersistentRoot>> {
@@ -297,6 +295,29 @@ export class SqlitePersistentDataStore implements PersistentDataStore {
         })
     }
 
+    lwwBindingState(): Promise<{ targetAuthority: string }> { return invokeStore('pds_lww_binding_state', {}) }
+    lwwReadOutbox(request: LwwOutboxRequest): Promise<LwwOutboxPage> { return invokeStore('pds_lww_read_outbox', { request }) }
+    lwwAckOutbox(request: LwwAcknowledgeRequest): Promise<void> { return invokeStore('pds_lww_ack_outbox', { request }) }
+    lwwClockState(request: LwwReceiveHeader): Promise<LwwClockState> { return invokeStore('pds_lww_clock_state', { request }) }
+    lwwRetryUnpublished(request: LwwRetryRequest): Promise<{ revision: DataRevision }> { return invokeStore('pds_lww_retry_unpublished', { request }) }
+    lwwCommitReplacement(request: LwwReplacementRequest): Promise<{ revision: DataRevision }> { return invokeStore('pds_lww_commit_replacement', { request }) }
+
+    lwwStageReceive(request: LwwStageReceive): Promise<void> {
+        return invokeStore('pds_lww_stage_receive', { request })
+    }
+
+    lwwApplyReceive(request: LwwApplyReceive): Promise<LwwApplyResult> {
+        return invokeStore('pds_lww_apply_receive', { request })
+    }
+
+    lwwFinishReceive(request: LwwReceiveHeader): Promise<void> {
+        return invokeStore('pds_lww_finish_receive', { request })
+    }
+
+    lwwDrainDeferred(request: LwwApplyReceive): Promise<LwwApplyResult> {
+        return invokeStore('pds_lww_drain_deferred', { request })
+    }
+
     archivePreview(characterId: string): Promise<ArchivePreview> {
         return invokeStore('pds_archive_preview', { characterId })
     }
@@ -325,18 +346,27 @@ export class SqlitePersistentDataStore implements PersistentDataStore {
         )
     }
 
-    async replaceFromDatabase(
+    async replaceFromDatabase(...args: Parameters<PersistentDataStore['replaceFromDatabase']>): Promise<{revision: DataRevision}> {
+        const stage = await this.stageDatabaseReplacement(...args)
+        try { return await stage.activate() }
+        catch (error) { try { await stage.abort() } catch {} ; throw error }
+    }
+
+    async stageDatabaseReplacement(
         database: Database,
         expectedRevision?: DataRevision,
         assetAliases: AssetAlias[] = [],
         pluginStorageValues?: PluginStorageValue[],
-    ): Promise<{ revision: DataRevision }> {
+        replacementHeader?: import('./persistentDataStore').LwwReceiveHeader,
+    ): Promise<import('./persistentDataStore').PersistentDatabaseReplacementStage> {
+        replacementHeader = replacementHeader && {...replacementHeader}
         database = prepareNativePersistenceValue(database, 'replacement database')
         assetAliases = prepareNativePersistenceValue(assetAliases, 'asset aliases')
         pluginStorageValues = prepareNativePersistenceValue(pluginStorageValues, 'plugin storage')
         const { stagingId } = await invokeStore<{ stagingId: string }>('pds_replace_begin')
         try {
-            const { characters, botPresets, ...root } = database
+            const { characters, botPresets } = database
+            const root = stableSelectionRoot(database)
             await invokeStore<void>('pds_replace_put_root', {
                 stagingId,
                 root,
@@ -365,10 +395,19 @@ export class SqlitePersistentDataStore implements PersistentDataStore {
                     aliases,
                 })
             }
-            return await invokeStore('pds_replace_commit', {
-                stagingId,
-                expectedRevision: preserved.revision,
-            })
+            const header = replacementHeader && {...replacementHeader}
+            let submitted = false
+            return {
+                async activate() {
+                    if (submitted) throw new Error('Replacement activation was already submitted')
+                    submitted = true
+                    if (header) return invokeStore('pds_lww_commit_replacement', {request: {...header, stagingId}})
+                    return invokeStore('pds_replace_commit', {stagingId, expectedRevision: preserved.revision})
+                },
+                async abort() {
+                    if (!submitted) await invokeStore<void>('pds_replace_abort', {stagingId})
+                },
+            }
         } catch (error) {
             try {
                 await invokeStore<void>('pds_replace_abort', { stagingId })
@@ -378,9 +417,9 @@ export class SqlitePersistentDataStore implements PersistentDataStore {
     }
 
     materializeDatabase(revision?: DataRevision): Promise<Database> {
-        return revision === undefined
-            ? invokeStore('pds_materialize', {})
-            : invokeStore('pds_materialize', { revision })
+        return (revision === undefined
+            ? invokeStore<Database>('pds_materialize', {})
+            : invokeStore<Database>('pds_materialize', { revision })).then(projectSelectionIndexes)
     }
 
     async acquireRevision(revision: DataRevision): Promise<PersistentRevisionLease> {

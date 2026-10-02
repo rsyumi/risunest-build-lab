@@ -90,6 +90,7 @@ export async function createEvictionFixture(initialConversation = makeConversati
         return owner.chats[owner.chatPage ?? 0]
     }
     const state: PersistentDataRuntimeStateAdapter = {
+        captureWorkingSetDatabase: () => workingCopy,
         captureRoot: () => capturePersistentRoot(workingCopy),
         captureSelectedCharacter: () => workingCopy.characters[0] ?? null,
         captureCharacter: (id) =>

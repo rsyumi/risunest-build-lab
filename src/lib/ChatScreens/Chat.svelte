@@ -18,7 +18,7 @@
     import { type Unsubscriber } from "svelte/store"
     import { v4 as uuidv4 } from 'uuid'
     import { language } from "../../lang"
-    import { alertClear, alertConfirm, alertError, alertInput, alertNormal, alertRequestData, alertWait, alertToast } from "../../ts/alert"
+    import { alertCheckboxConfirm, alertClear, alertConfirm, alertError, alertInput, alertNormal, alertRequestData, alertWait, alertToast } from "../../ts/alert"
     import { conversationMutationBlockedByGeneration } from 'src/ts/chatBindings.svelte'
     import { ParseMarkdown, type CbsConditions, type simpleCharacterArgument } from "../../ts/parser/parser.svelte"
     import { getCurrentCharacter, getCurrentChat, setCurrentChat, type character as CharacterRecord, type Message, type MessageGenerationInfo, type StreamingDisplayOptimizationMode } from "../../ts/storage/database.svelte"
@@ -445,7 +445,14 @@
                 captureCurrent: captureCurrentChat,
                 getCurrentSession: currentConversationSession,
                 confirmRemoval: () => alertConfirm(language.removeChat),
-                confirmInstantRemoval: () => alertConfirm(language.instantRemoveConfirm),
+                confirmInstantRemoval: () => alertCheckboxConfirm({
+                    title: language.removeChat,
+                    description: language.instantRemoveConfirm,
+                    checkboxLabel: language.checkboxConfirmation.onlySelectedMessage,
+                    actionLabel: language.risuNest.plugins.removeAction,
+                    cancelLabel: language.cancel,
+                    requireChecked: false,
+                }),
                 mutationBlocked,
             })
             if (outcome === 'stale') reportRowActionRefused()

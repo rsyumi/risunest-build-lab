@@ -2,7 +2,7 @@
     import { openRisuNestSettingsTab } from "src/ts/setting/risuNestSettingsTabs";
     import { PlusIcon, TrashIcon, LinkIcon, CodeXmlIcon, PowerIcon, PowerOffIcon, ShieldIcon } from "@lucide/svelte";
     import { language } from "src/lang";
-    import { alertConfirm, alertMd, alertSelect, alertToast } from "src/ts/alert";
+    import { alertCheckboxConfirm, alertError, alertConfirm, alertMd, alertSelect, alertToast } from "src/ts/alert";
     import { TriangleAlert } from '@lucide/svelte';
 
     import { DBState, hotReloading, SettingsMenuIndex } from "src/ts/stores.svelte";
@@ -15,6 +15,8 @@
     import TextAreaInput from "src/lib/UI/GUI/TextAreaInput.svelte";
     import { hotReloadPluginFiles } from "src/ts/plugins/apiV3/developMode";
     import { resetAllPluginPermissions } from "src/ts/plugins/apiV3/v3.svelte";
+
+    import { deletePluginDataForOwner } from "src/ts/plugins/pluginDataInventory";
 
     let showParams = $state([])
 
@@ -123,21 +125,28 @@
 
             <!--Also, remove button.-->
             <button
+                aria-label={language.risuNest.plugins.removeAction + " " + (plugin.displayName ?? plugin.name)}
                 class="textcolor2 hover:gray-200 cursor-pointer"
                 onclick={async () => {
-                    const v = await alertConfirm(
-                        language.removeConfirm +
-                            (plugin.displayName ?? plugin.name) + "\n\n" +
-                            language.risuNest.plugins.removeRetainedDataNotice,
-                    );
-                    if (v) {
-                        if (DBState.db.currentPluginProvider === plugin.name) {
-                            DBState.db.currentPluginProvider = "";
-                        }
-                        let plugins = DBState.db.plugins ?? [];
-                        plugins.splice(i, 1);
-                        DBState.db.plugins = plugins;
-                        loadPlugins()
+                    const owner = plugin.name;
+                    const result = await alertCheckboxConfirm({
+                        title: language.risuNest.plugins.removeTitle + "\n" + (plugin.displayName ?? plugin.name),
+                        description: language.risuNest.plugins.removeDescription,
+                        checkboxLabel: language.risuNest.plugins.removeDataOption,
+                        actionLabel: language.risuNest.plugins.removeAction,
+                        cancelLabel: language.cancel,
+                        requireChecked: false,
+                    });
+                    if (!result.confirmed) return;
+                    try {
+                        if (result.checked) await deletePluginDataForOwner(owner);
+                        const index = DBState.db.plugins.findIndex((installed) => installed.name === owner);
+                        if (index === -1) return;
+                        if (DBState.db.currentPluginProvider === owner) DBState.db.currentPluginProvider = "";
+                        DBState.db.plugins.splice(index, 1);
+                        await loadPlugins();
+                    } catch (error) {
+                        alertError(error);
                     }
                 }}
             >

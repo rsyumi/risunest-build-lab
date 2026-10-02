@@ -409,7 +409,7 @@ describe('IndexedDbPersistentDataStore I/O shape', () => {
         const database = structuredClone(fixtureDatabase)
         const ownerCount = 4_096
         database.modules = Array.from({ length: ownerCount }, (_, index) => ({
-            id: index % 2 === 0 ? '' : 'duplicate',
+            id: `module-${index}`,
             name: `Module ${index}`,
             description: '',
             assets: [],
@@ -428,7 +428,7 @@ describe('IndexedDbPersistentDataStore I/O shape', () => {
             entryCount: 0,
         }
         const rootHeads: AssetOwnerHead[] = database.modules.map((_, index) => ({
-            owner: { kind: 'root-module-assets', index },
+            owner: { kind: 'root-module-assets', moduleId: database.modules[index].id },
             present: true,
             manifestHash: '99'.repeat(32),
             entryCount: 0,

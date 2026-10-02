@@ -1,6 +1,6 @@
 //! RNSD exact-byte COPY/INSERT profile, not VCDIFF. Ordered CAS bases are
 //! independent sources; COPY never references output or a patch chain.
-use crate::{hash, validate_hash, Result, WireError};
+use super::{hash, validate_hash, Result, WireError};
 
 pub const MAX_BASES: usize = 4;
 pub const MAX_TARGET_BYTES: usize = 16 * 1024 * 1024;
@@ -96,7 +96,19 @@ impl Recipe {
             return Err(WireError("missing-base"));
         }
         for (bytes, base) in bases.iter().zip(&self.bases) {
-            if bytes.len() as u64 != base.size || hash(bytes) != base.hash {
+            if bytes.len() as u64 != base.size || {
+                let actual = hash(bytes);
+                #[cfg(test)]
+                source_test_observer::completed(
+                    &base.hash,
+                    "memory-delta-apply-base-sha256",
+                    bytes.len(),
+                );
+                actual
+            } != base.hash
+            {
+                #[cfg(test)]
+                source_test_observer::failed(&base.hash, "memory-delta-apply-base-sha256");
                 return Err(WireError("base-hash-mismatch"));
             }
         }
@@ -113,7 +125,19 @@ impl Recipe {
                 ),
             }
         }
-        if hash(&output) != self.target_hash {
+        if {
+            let actual = hash(&output);
+            #[cfg(test)]
+            source_test_observer::completed(
+                &self.target_hash,
+                "memory-delta-apply-target-sha256",
+                output.len(),
+            );
+            actual
+        } != self.target_hash
+        {
+            #[cfg(test)]
+            source_test_observer::failed(&self.target_hash, "memory-delta-apply-target-sha256");
             return Err(WireError("target-hash-mismatch"));
         }
         Ok(output)
@@ -339,15 +363,120 @@ pub fn create(bases: &[&[u8]], target: &[u8]) -> Result<Recipe> {
     let recipe = Recipe {
         bases: bases
             .iter()
-            .map(|b| Base {
-                hash: hash(b),
-                size: b.len() as u64,
+            .map(|b| {
+                let digest = hash(b);
+                #[cfg(test)]
+                source_test_observer::completed(
+                    &digest,
+                    "memory-delta-create-base-sha256",
+                    b.len(),
+                );
+                Base {
+                    hash: digest,
+                    size: b.len() as u64,
+                }
             })
             .collect(),
-        target_hash: hash(target),
+        target_hash: {
+            let digest = hash(target);
+            #[cfg(test)]
+            source_test_observer::completed(
+                &digest,
+                "memory-delta-create-target-sha256",
+                target.len(),
+            );
+            digest
+        },
         target_size: target.len() as u64,
         ops,
     };
     recipe.validate()?;
     Ok(recipe)
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) mod source_test_observer {
+    use std::sync::{Arc, Mutex, OnceLock};
+    #[derive(Clone, Debug)]
+    pub(crate) struct Event {
+        pub hash: String,
+        pub domain: &'static str,
+        pub calls: u64,
+        pub bytes: u64,
+        pub finalizations: u64,
+        pub failed: bool,
+    }
+    type Hook = Arc<dyn Fn(Event) + Send + Sync>;
+    static HOOK: OnceLock<Mutex<Option<Hook>>> = OnceLock::new();
+    pub(crate) fn install(hook: Hook) {
+        *HOOK.get_or_init(|| Mutex::new(None)).lock().unwrap() = Some(hook);
+    }
+    fn emit(
+        hash: &str,
+        domain: &'static str,
+        calls: u64,
+        bytes: u64,
+        finalizations: u64,
+        failed: bool,
+    ) {
+        let hook = HOOK
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap()
+            .clone();
+        if let Some(hook) = hook {
+            hook(Event {
+                hash: hash.into(),
+                domain,
+                calls,
+                bytes,
+                finalizations,
+                failed,
+            });
+        }
+    }
+    pub(crate) fn completed(hash: &str, domain: &'static str, bytes: usize) {
+        emit(hash, domain, 1, bytes as u64, 1, false);
+    }
+    pub(crate) fn begin(hash: &str, domain: &'static str) {
+        emit(hash, domain, 1, 0, 0, false);
+    }
+    pub(crate) fn input(hash: &str, domain: &'static str, bytes: usize) {
+        emit(hash, domain, 0, bytes as u64, 0, false);
+    }
+    pub(crate) fn failed(hash: &str, domain: &'static str) {
+        emit(hash, domain, 0, 0, 0, true);
+    }
+    pub(crate) struct Scope {
+        hash: String,
+        domain: &'static str,
+        complete: bool,
+    }
+    impl Scope {
+        pub(crate) fn new(hash: &str, domain: &'static str) -> Self {
+            begin(hash, domain);
+            Self {
+                hash: hash.into(),
+                domain,
+                complete: false,
+            }
+        }
+        pub(crate) fn input(&self, bytes: usize) {
+            input(&self.hash, self.domain, bytes);
+        }
+        pub(crate) fn finalized(&self) {
+            emit(&self.hash, self.domain, 0, 0, 1, false);
+        }
+        pub(crate) fn finish(&mut self) {
+            self.complete = true;
+        }
+    }
+    impl Drop for Scope {
+        fn drop(&mut self) {
+            if !self.complete {
+                failed(&self.hash, self.domain);
+            }
+        }
+    }
 }

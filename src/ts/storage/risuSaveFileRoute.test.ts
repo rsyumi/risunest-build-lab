@@ -17,6 +17,10 @@ function dependencies(platform: 'native-desktop' | 'web'): RisuSaveFileRouteDepe
             store: {} as never,
             revision: 4,
             getStorageAuthorityEpoch: () => 1,
+            withPausedPersistentWrites: async () => { throw new Error('Unexpected route pause') },
+            setActivatedLibraryRecoveryLifecycle: () => { throw new Error('Unexpected upstream lifecycle') },
+            beginActivatedLibraryGuard: () => { throw new Error('Unexpected route guard') },
+            refreshActivatedLibraryUnderPause: async () => { throw new Error('Unexpected route refresh') },
             flushPendingData: vi.fn(async () => undefined),
             capturePersistentMutationToken: vi.fn(async () => ({
                 revision: 4,
@@ -55,7 +59,7 @@ function dependencies(platform: 'native-desktop' | 'web'): RisuSaveFileRouteDepe
             return {
                 revision: 5,
                 sourceBytes: 4096,
-                sourceSha256: 'a'.repeat(64),
+                sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'a'.repeat(64),
                 characterCount: 2,
                 presetCount: 1,
                 warningCodes: [],
@@ -64,7 +68,7 @@ function dependencies(platform: 'native-desktop' | 'web'): RisuSaveFileRouteDepe
         runNativeExport: vi.fn(async () => ({
             revision: 4,
             sourceBytes: 8192,
-            sourceSha256: 'b'.repeat(64),
+            sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'b'.repeat(64),
             exportExclusions: { archivedCharacters: 1, collidingPluginValues: 2 },
             characterCount: 2,
             presetCount: 1,
@@ -643,9 +647,9 @@ describe('RisuSave picker route', () => {
         expect(exported?.mode).toBe('web')
         expect(deps.decodeRisuSave).toHaveBeenCalledWith(Uint8Array.from([1, 2, 3]))
         expect(runtime.replacePersistentDatabase).toHaveBeenCalledWith(
-            { username: 'Web import', characters: [] },
+            { username: 'Web import', characters: [], explicitGlobalChatVariables: {} },
             'risu-save-file-import',
-            { authoritative: true },
+            { authoritative: true, upstreamImport: true },
         )
         expect(deps.collectWebExport).toHaveBeenCalledWith(false)
         expect(deps.downloadWebExport).toHaveBeenCalledWith(
@@ -669,6 +673,20 @@ describe('RisuSave picker route', () => {
         expect(result?.mode).toBe('web')
         expect(deps.chooseWebImport).toHaveBeenCalledOnce()
         expect(runtime.replacePersistentDatabase).toHaveBeenCalledOnce()
+    })
+
+    it.each([true,false])('decoded native fallback avoids duplicate loading only after its restart receipt=%s',async restarted=>{
+        const deps=dependencies('native-desktop')
+        const runtime=deps.runtime()
+        deps.runtime=()=>runtime
+        vi.mocked(deps.runNativeImport).mockRejectedValueOnce(new NativeFileJobError('unsupported-format','synthetic upstream format'))
+        vi.mocked(runtime.replacePersistentDatabase).mockImplementationOnce(async(_database,_reason,options)=>{
+            if(restarted)options?.onPluginsRestarted?.()
+            return {kind:'committed',revision:5,projection:'applied'}
+        })
+        await importRisuSaveFromPicker({},deps)
+        expect(runtime.replacePersistentDatabase).toHaveBeenCalledOnce()
+        expect(deps.reloadPlugins).toHaveBeenCalledTimes(restarted?0:1)
     })
 
     it('uses a separate Web picker with the JavaScript codec for unsupported formats', async () => {

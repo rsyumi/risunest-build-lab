@@ -147,6 +147,8 @@ pub(crate) enum ObjectRole {
     Pack,
     Catalog,
     SyncState,
+    Segment,
+    Snapshot,
     BackupBundle,
     BackupPoint,
     InventoryPage,
@@ -244,7 +246,110 @@ impl ObjectIntent {
         {
             return Err(ProviderError::new(ErrorKind::Corrupt));
         }
+        if self.role == ObjectRole::Segment {
+            let (writer, seq, digest) = parse_segment_object_id(&self.object_id)?;
+            if segment_object_id(writer, seq, digest)? != self.object_id || digest != self.sha256 {
+                return Err(ProviderError::new(ErrorKind::Corrupt));
+            }
+        }
+        if self.role == ObjectRole::Snapshot {
+            let id = uuid::Uuid::parse_str(&self.object_id).map_err(|_| ProviderError::new(ErrorKind::Corrupt))?;
+            if id.to_string() != self.object_id { return Err(ProviderError::new(ErrorKind::Corrupt)); }
+        }
         Ok(())
+    }
+}
+
+pub(crate) const MAX_SEGMENT_NAME_BYTES: usize = 122;
+pub(crate) const MAX_SNAPSHOT_NAME_BYTES: usize = 36;
+
+#[cfg(test)]
+#[test]
+fn segment_names_keep_complete_identity_and_reject_noncanonical_names() {
+    let writer = "aaaaaaaa-aaaa-4000-8000-aaaaaaaaaaaa";
+    let hash = "a".repeat(64);
+    let name = segment_object_id(writer, u64::MAX, &hash).unwrap();
+    assert_eq!(name.len(), MAX_SEGMENT_NAME_BYTES);
+    for invalid_writer in [
+        "00000000-0000-1000-8000-000000000001",
+        "00000000-0000-0000-0000-000000000000",
+        "00000000-0000-4000-7000-000000000001",
+        "00000000-0000-4000-c000-000000000001",
+    ] {
+        assert!(segment_object_id(invalid_writer, 1, &hash).is_err(), "{invalid_writer}");
+        assert!(parse_segment_object_id(&format!("{invalid_writer}-1-{hash}")).is_err(), "{invalid_writer}");
+    }
+
+    assert_eq!(parse_segment_object_id(&name).unwrap(), (writer, u64::MAX, hash.as_str()));
+    for name in [format!("{writer}-01-{hash}"), format!("{writer}-0-{hash}"),
+        format!("{writer}-18446744073709551616-{hash}"), format!("{writer}-1-{}", "A".repeat(64)),
+        format!("{}-1-{hash}", writer.replace('a', "A")), format!("{writer}-1-{}", "a".repeat(63))] {
+        assert!(parse_segment_object_id(&name).is_err(), "{name}");
+    }
+}
+
+pub(crate) fn segment_object_id(writer: &str, seq: u64, sha256: &str) -> Result<String> {
+    risunest_sync_wire::stamp::validate_writer_id(writer)
+        .map_err(|_| ProviderError::new(ErrorKind::Corrupt))?;
+    if seq == 0 || !crate::trust_boundary::is_lower_hex_256(sha256) {
+        return Err(ProviderError::new(ErrorKind::Corrupt));
+    }
+    Ok(format!("{writer}-{seq}-{sha256}"))
+}
+
+pub(crate) fn parse_segment_object_id(name: &str) -> Result<(&str, u64, &str)> {
+    let bad = || ProviderError::new(ErrorKind::Corrupt);
+    let writer = name.get(..36).ok_or_else(bad)?;
+    let suffix = name.get(37..).filter(|_| name.as_bytes().get(36) == Some(&b'-')).ok_or_else(bad)?;
+    let (seq, digest) = suffix.split_once('-').ok_or_else(bad)?;
+    let seq = seq.parse::<u64>().map_err(|_| bad())?;
+    if segment_object_id(writer, seq, digest)? != name { return Err(bad()); }
+    Ok((writer, seq, digest))
+}
+
+pub(crate) struct IdentitySink<'a> { pub intent: &'a ObjectIntent }
+
+pub(crate) async fn verify_source(source: &dyn TransferSource, intent: &ObjectIntent, cancel: &Cancellation) -> Result<()> {
+    use sha2::{Digest, Sha256};
+    use tokio::io::AsyncReadExt;
+    if source.byte_length() != intent.byte_length { return Err(ProviderError::new(ErrorKind::Corrupt)); }
+    let mut reader = source.open(0, intent.byte_length, cancel).await?;
+    let mut hash = Sha256::new();
+    let mut length = 0u64;
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        cancel.check()?;
+        let read = reader.read(&mut buffer).await.map_err(|_| ProviderError::new(ErrorKind::Transient))?;
+        if read == 0 { break; }
+        length = length.checked_add(read as u64).ok_or_else(|| ProviderError::new(ErrorKind::Corrupt))?;
+        if length > intent.byte_length { return Err(ProviderError::new(ErrorKind::Corrupt)); }
+        hash.update(&buffer[..read]);
+    }
+    let digest: String = hash.finalize().iter().map(|byte| format!("{byte:02x}")).collect();
+    if length != intent.byte_length || digest != intent.sha256 {
+        return Err(ProviderError::new(ErrorKind::Corrupt));
+    }
+    Ok(())
+}
+
+impl TransferSink for IdentitySink<'_> {
+    fn open<'a>(&'a mut self, offset: u64, max_length: u64, cancel: &'a Cancellation)
+        -> ProviderFuture<'a, Pin<Box<dyn AsyncWrite + Send>>> {
+        Box::pin(async move {
+            cancel.check()?;
+            if offset != 0 || max_length != self.intent.byte_length {
+                return Err(ProviderError::new(ErrorKind::PreconditionFailed));
+            }
+            Ok(Box::pin(tokio::io::sink()) as Pin<Box<dyn AsyncWrite + Send>>)
+        })
+    }
+    fn finish<'a>(&'a mut self, length: u64, sha256: &'a str) -> ProviderFuture<'a, ()> {
+        Box::pin(async move {
+            if length != self.intent.byte_length || sha256 != self.intent.sha256 {
+                return Err(ProviderError::new(ErrorKind::PreconditionFailed));
+            }
+            Ok(())
+        })
     }
 }
 
@@ -254,14 +359,20 @@ pub(crate) struct Cancellation(Arc<CancelState>);
 struct CancelState {
     cancelled: AtomicBool,
     notify: tokio::sync::Notify,
+    external_flag: Option<Arc<AtomicBool>>,
 }
 impl Cancellation {
+    pub(crate) fn with_external_flag(external_flag: Arc<AtomicBool>) -> Self {
+        Self(Arc::new(CancelState { external_flag: Some(external_flag), ..Default::default() }))
+    }
     pub fn cancel(&self) {
         self.0.cancelled.store(true, Ordering::Release);
         self.0.notify.notify_waiters();
     }
     pub fn check(&self) -> Result<()> {
-        if self.0.cancelled.load(Ordering::Acquire) {
+        if self.0.cancelled.load(Ordering::Acquire)
+            || self.0.external_flag.as_ref().is_some_and(|flag| flag.load(Ordering::Acquire))
+        {
             Err(ProviderError::new(ErrorKind::Cancelled))
         } else {
             Ok(())
@@ -275,7 +386,14 @@ impl Cancellation {
             if self.check().is_err() {
                 return;
             }
-            notified.await;
+            if self.0.external_flag.is_some() {
+                tokio::select! {
+                    _ = notified => {},
+                    _ = tokio::time::sleep(std::time::Duration::from_millis(25)) => {},
+                }
+            } else {
+                notified.await;
+            }
         }
     }
 }
@@ -348,6 +466,7 @@ pub(crate) struct ObjectPage {
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Collection {
+    Segments,
     Snapshots,
     BackupPoints,
     InventoryPages,
@@ -506,6 +625,30 @@ impl HeadBytes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn external_native_job_cancellation_reaches_checks_and_pending_control_requests() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let flag = Arc::new(AtomicBool::new(false));
+            let cancel = Cancellation::with_external_flag(flag.clone());
+            cancel.check().unwrap();
+            let pending = super::super::leases::control_request(
+                &cancel, std::future::pending::<Result<()>>(),
+            );
+            tokio::pin!(pending);
+            assert!(tokio::time::timeout(std::time::Duration::from_millis(1), &mut pending).await.is_err());
+            flag.store(true, Ordering::Release);
+            assert_eq!(cancel.check().unwrap_err().kind, ErrorKind::Cancelled);
+            let error = tokio::time::timeout(std::time::Duration::from_secs(1), pending)
+                .await.unwrap().unwrap_err();
+            assert_eq!(error.kind, ErrorKind::Cancelled);
+            let local = Cancellation::with_external_flag(Arc::new(AtomicBool::new(false)));
+            let clone = local.clone();
+            local.cancel();
+            assert_eq!(clone.check().unwrap_err().kind, ErrorKind::Cancelled);
+        });
+    }
 
     #[test]
     fn role_names_ignore_only_proven_foreign_members() {

@@ -113,7 +113,6 @@ impl Archive {
                 CREATE TABLE snapshot_pages(snapshot_id TEXT NOT NULL REFERENCES snapshots(id) ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
                     seq INTEGER NOT NULL CHECK(seq>=0), hash BLOB NOT NULL REFERENCES chunks(hash), PRIMARY KEY(snapshot_id,seq));
                 CREATE INDEX snapshot_pages_hash ON snapshot_pages(hash);
-                CREATE TABLE pending_restore(singleton INTEGER PRIMARY KEY CHECK(singleton=1), id TEXT NOT NULL REFERENCES snapshots(id), request_token TEXT NOT NULL);
                 PRAGMA user_version=1;")?;
             tx.pragma_update(None, "application_id", APPLICATION_ID)?;
             tx.commit()?;
@@ -320,46 +319,8 @@ impl Archive {
         Ok(total)
     }
 
-    pub fn pending_restore(&self) -> StoreResult<Option<String>> {
-        Ok(self
-            .connection
-            .query_row(
-                "SELECT id FROM pending_restore WHERE singleton=1",
-                [],
-                |r| r.get(0),
-            )
-            .optional()?)
-    }
-
-    pub fn pending_restore_token(&self) -> StoreResult<Option<String>> {
-        Ok(self.connection.query_row(
-            "SELECT request_token FROM pending_restore WHERE singleton=1", [], |row| row.get(0),
-        ).optional()?)
-    }
-
-    pub fn request_restore(&self, id: &str) -> StoreResult<()> {
-        self.metadata(id)?;
-        self.connection.execute("INSERT INTO pending_restore(singleton,id,request_token) VALUES(1,?1,?2) ON CONFLICT(singleton) DO UPDATE SET id=excluded.id, request_token=excluded.request_token", rusqlite::params![id, uuid::Uuid::new_v4().to_string()])?;
-        let attempt = self.directory.join("restore-attempt");
-        match fs::remove_file(attempt) {
-            Ok(()) => {},
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {},
-            Err(error) => return Err(error.into()),
-        }
-        Ok(())
-    }
-
-    pub fn clear_pending_restore(&self, id: &str) -> StoreResult<()> {
-        self.connection
-            .execute("DELETE FROM pending_restore WHERE id=?1", [id])?;
-        Ok(())
-    }
-
     pub fn delete(&mut self, id: &str) -> StoreResult<()> {
         self.metadata(id)?;
-        if self.pending_restore()?.as_deref() == Some(id) {
-            return Err(invalid("snapshot is pending restore"));
-        }
         let tx = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -370,7 +331,6 @@ impl Archive {
     }
 
     pub fn rotate(&mut self, byte_budget: u64, protected: &str) -> StoreResult<()> {
-        let pending = self.pending_restore()?;
         loop {
             let snapshots = self.list()?;
             if snapshots.len() <= 8 && self.bytes()? <= byte_budget {
@@ -379,7 +339,7 @@ impl Archive {
             let Some(oldest) = snapshots
                 .iter()
                 .rev()
-                .filter(|s| s.id != protected && pending.as_deref() != Some(&s.id))
+                .filter(|s| s.id != protected)
                 .min_by_key(|s| (s.reason != "periodic", s.modified_at))
             else {
                 break;
@@ -532,9 +492,6 @@ mod tests {
         let restored = archive.scratch().unwrap();
         archive.restore(&second.id, &restored.path).unwrap();
         assert_eq!(fs::read(&restored.path).unwrap(), bytes);
-        archive.request_restore(&second.id).unwrap();
-        assert!(archive.delete(&second.id).is_err());
-        archive.clear_pending_restore(&second.id).unwrap();
         archive.delete(&second.id).unwrap();
         assert!(archive.list().unwrap().is_empty());
     }
@@ -554,11 +511,10 @@ mod tests {
         archive.rotate(u64::MAX, &latest).unwrap();
         assert!(archive.metadata(&periodic.id).is_err());
         assert!(archive.metadata(&manual.id).is_ok());
-        archive.request_restore(&manual.id).unwrap();
         archive.rotate(1, &latest).unwrap();
         let kept = archive.list().unwrap();
-        assert_eq!(kept.len(), 2);
-        assert!(kept.iter().any(|item| item.id == manual.id));
+        assert_eq!(kept.len(), 1);
+        assert!(!kept.iter().any(|item| item.id == manual.id));
         assert!(kept.iter().any(|item| item.id == latest));
         assert!(archive.bytes().unwrap() > 1);
     }
@@ -613,7 +569,8 @@ mod tests {
             )
             .unwrap();
         assert!(archive.roots().is_err());
-        assert!(archive.request_restore(&metadata.id).is_err());
+        let restore=archive.scratch().unwrap();
+        assert!(archive.restore(&metadata.id,&restore.path).is_err());
     }
 
     #[test]

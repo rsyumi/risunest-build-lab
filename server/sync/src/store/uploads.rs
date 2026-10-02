@@ -2,13 +2,21 @@ use super::{
     objects::{check_path, publish, sync_directory},
     random_id, Device, Store,
 };
+#[cfg(test)]
+use crate::source_observer::{shared_wire::stream_delta, small_object_store};
 use crate::{Error, Result};
+#[cfg(not(test))]
+use risunest_small_object_store as small_object_store;
+#[cfg(not(test))]
+use risunest_sync_wire::stream_delta;
 use risunest_sync_wire::{hash, validate_hash, validate_id, Sequence};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+#[cfg(not(test))]
+use std::fs::File;
 use std::{
-    fs::{self, File},
+    fs,
     io::{Read, Write},
     path::PathBuf,
     time::{SystemTime, UNIX_EPOCH},
@@ -153,8 +161,12 @@ impl Store {
         digest: &str,
         bytes: &[u8],
     ) -> Result<()> {
+        #[cfg(test)]
+        let _observed = crate::source_observer::ingress(&self.root);
         validate_hash(digest)?;
-        let (_, size, state) = Self::upload_row(&*self.reader()?, device, id)?;
+        let (object_digest, size, state) = Self::upload_row(&*self.reader()?, device, id)?;
+        #[cfg(not(test))]
+        let _ = object_digest;
         if state != "open" {
             return Err(Error::new("upload-not-open", 409));
         }
@@ -162,7 +174,16 @@ impl Store {
             .checked_mul(UPLOAD_CHUNK_BYTES)
             .filter(|v| *v < size)
             .ok_or(Error::new("invalid-chunk-offset", 400))?;
-        if bytes.len() as u64 != (size - offset).min(UPLOAD_CHUNK_BYTES) || hash(bytes) != digest {
+        if bytes.len() as u64 != (size - offset).min(UPLOAD_CHUNK_BYTES) || {
+            let actual = hash(bytes);
+            #[cfg(test)]
+            crate::source_observer::hashed(
+                &object_digest,
+                "upload-chunk-ingress-sha256",
+                bytes.len(),
+            );
+            actual != digest
+        } {
             return Err(Error::new("chunk-mismatch", 400));
         }
         let mut temp = self.staging_temp()?;
@@ -200,6 +221,8 @@ impl Store {
         Ok(())
     }
     pub fn finish_upload(&self, device: &Device, id: &str) -> Result<String> {
+        #[cfg(test)]
+        let _observed = crate::source_observer::ingress(&self.root);
         let (digest, size) = {
             let db = self.db()?;
             let (digest, size, state) = Self::upload_row(&db, device, id)?;
@@ -236,14 +259,14 @@ impl Store {
                 )
                 .optional()?;
             if let Some(bytes) = recipe {
-                let recipe = risunest_sync_wire::stream_delta::decode(&bytes)?;
+                let recipe = stream_delta::decode(&bytes)?;
                 let mut bases = recipe
                     .bases
                     .iter()
                     .map(|b| self.open_object(&b.hash).map(|v| v.0))
                     .collect::<Result<Vec<_>>>()?;
                 let mut checked = std::time::Instant::now() - std::time::Duration::from_secs(1);
-                risunest_sync_wire::stream_delta::apply(&recipe, &mut bases, &mut *temp, || {
+                stream_delta::apply(&recipe, &mut bases, &mut *temp, || {
                     if checked.elapsed() >= std::time::Duration::from_millis(100) {
                         checked = std::time::Instant::now();
                         let db = self
@@ -256,6 +279,9 @@ impl Store {
                 })?;
             } else {
                 let mut full = Sha256::new();
+                #[cfg(test)]
+                let mut full_observed =
+                    crate::source_observer::HashScope::new(&digest, "upload-full-sha256");
                 let mut buffer = vec![0u8; 1024 * 1024];
                 let mut total = 0u64;
                 for index in 0..size.div_ceil(UPLOAD_CHUNK_BYTES) {
@@ -264,8 +290,19 @@ impl Store {
                         params![id, index as i64],
                         |r| Ok((r.get(0)?, r.get(1)?)),
                     )?;
+                    #[cfg(not(test))]
                     let mut file = File::open(self.chunk_path(id, index)?)?;
+                    #[cfg(test)]
+                    let mut file = crate::source_observer::TrackedFile::open(
+                        &self.root,
+                        &digest,
+                        &self.chunk_path(id, index)?,
+                        "upload-chunk",
+                    )?;
                     let mut chunk = Sha256::new();
+                    #[cfg(test)]
+                    let mut chunk_observed =
+                        crate::source_observer::HashScope::new(&digest, "upload-chunk-sha256");
                     let mut length = 0u64;
                     loop {
                         let n = file.read(&mut buffer)?;
@@ -278,16 +315,35 @@ impl Store {
                         }
                         chunk.update(&buffer[..n]);
                         full.update(&buffer[..n]);
+                        #[cfg(test)]
+                        {
+                            chunk_observed.input(n);
+                            full_observed.input(n);
+                        }
                         temp.write_all(&buffer[..n])?;
                     }
-                    if length != expected_size as u64 || hex::encode(chunk.finalize()) != expected {
+                    if length != expected_size as u64 || {
+                        let actual = hex::encode(chunk.finalize());
+                        #[cfg(test)]
+                        chunk_observed.finalized();
+                        actual != expected
+                    } {
                         return Err(Error::new("corrupt-chunk", 503));
                     }
+                    #[cfg(test)]
+                    chunk_observed.finish();
                     total += length;
                 }
-                if total != size || hex::encode(full.finalize()) != digest {
+                if total != size || {
+                    let actual = hex::encode(full.finalize());
+                    #[cfg(test)]
+                    full_observed.finalized();
+                    actual != digest
+                } {
                     return Err(Error::new("hash-mismatch", 400));
                 }
+                #[cfg(test)]
+                full_observed.finish();
             }
             temp.as_file().sync_all()?;
             let destination = self.object_path(&digest)?;
@@ -313,12 +369,22 @@ impl Store {
             }
             let tx = db.transaction()?;
             if inline {
+                #[cfg(not(test))]
                 let bytes = fs::read(temp.path())?;
-                risunest_small_object_store::insert_batch(
-                    &tx,
-                    &[(digest.as_str(), bytes.as_slice())],
-                )
-                .map_err(super::objects::body_error)?;
+                #[cfg(test)]
+                let bytes = {
+                    let mut bytes = Vec::new();
+                    crate::source_observer::TrackedFile::open(
+                        &self.root,
+                        &digest,
+                        temp.path(),
+                        "upload-staging",
+                    )?
+                    .read_to_end(&mut bytes)?;
+                    bytes
+                };
+                small_object_store::insert_batch(&tx, &[(digest.as_str(), bytes.as_slice())])
+                    .map_err(super::objects::body_error)?;
             }
             tx.execute(
                 "INSERT INTO objects(hash,size,storage) VALUES(?1,?2,'file') ON CONFLICT DO NOTHING",

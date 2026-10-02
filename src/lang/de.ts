@@ -1,4 +1,28 @@
 export const languageGerman = {
+    risuNest: {
+        importDialog: {
+            warningUpstreamRestoreLosses: 'Einige Kaltlager- oder Inlay-Daten konnten nicht wiederhergestellt werden. Prüfen Sie die wiederhergestellten Daten.',
+        },
+        plugins: {
+            "removeTitle": "Dieses Plugin entfernen?",
+            "removeDescription": "Beim Löschen der Plugin-Daten gehen Einstellungen und gespeicherte Inhalte auch bei einer Neuinstallation verloren. Behaltene Daten stehen nach der Neuinstallation wieder zur Verfügung.",
+            "removeDataOption": "Plugin-Daten ebenfalls löschen",
+            "removeAction": "Löschen"
+        },
+    },
+
+    checkboxConfirmation: {
+        "characterDeletion": "Charakter löschen",
+        "dataReplacement": "Aktuelle Daten ersetzen",
+        "hypaReset": "HypaV3-Daten zurücksetzen",
+        "hypaDeletion": "Nachfolgende Zusammenfassungen löschen",
+        "pluginDataDeletion": "Plugin-Daten löschen",
+        "lorebookDeletion": "Lorebook-Ordner und Einträge löschen",
+        "partialBackup": "Backup ohne weitere Assets",
+        "incompleteRestore": "Ohne fehlende Daten wiederherstellen",
+        "onlySelectedMessage": "Nur diese Nachricht löschen"
+    },
+
     "formating": {
         "main": "Haupt-Anweisung",
         "jailbreak": "Jailbreak Anweisung",
@@ -29,8 +53,8 @@ export const languageGerman = {
         "requestLogRemoved": "Dieses Anfrage-Protokoll wurde entfernt.",
         "requestLogRemovedDesc": "Dieses Anfrage-Protokoll wird entfernt, wenn der Client aktualisiert oder neu geladen wird.",
         "vertexAuthError": "Vertex AI-Authentifizierungsdetails fehlen.",
-        "coldStorageIncompleteRestoreConfirm": (characterNames: string, unavailableCount: number, unresolvedCount: number) =>
-            `Kaltlagerdaten für ${characterNames || "unbekannte Charaktere"} konnten nicht wiederhergestellt werden.${unresolvedCount > 0 ? ` ${unresolvedCount} Element(e) konnten keinem Charakter zugeordnet werden.` : ""}\n\nWenn Sie fortfahren, bleiben ${unavailableCount} Kaltlagerelement(e) nicht verfügbar. Die betroffenen Charakter- oder Chatdaten können dauerhaft verloren gehen.\n\nTrotzdem mit der unvollständigen Wiederherstellung fortfahren?`
+        "coldStorageIncompleteRestoreConfirm": (characterNames: string, unavailableCount: number, unresolvedCount: number, includeQuestion = true) =>
+            `Kaltlagerdaten für ${characterNames || "unbekannte Charaktere"} konnten nicht wiederhergestellt werden.${unresolvedCount > 0 ? ` ${unresolvedCount} Element(e) konnten keinem Charakter zugeordnet werden.` : ""}\n\nWenn Sie fortfahren, bleiben ${unavailableCount} Kaltlagerelement(e) nicht verfügbar. Die betroffenen Charakter- oder Chatdaten können dauerhaft verloren gehen.${includeQuestion ? "\n\nTrotzdem mit der unvollständigen Wiederherstellung fortfahren?" : ""}`
     },
     "showHelp": "Hilfe anzeigen",
     "help": {
@@ -1468,4 +1492,21 @@ export const languageGerman = {
     nanoGPTSelectFromList: "Aus der Liste auswählen",
     nanoGPTManualInput: "Manuelle Eingabe",
     nanoGPTManualModelSelect: "Manuelle Modellauswahl",
+    lwwSync: {
+        concurrentEditNotice: "Wenn derselbe Eintrag gleichzeitig auf mehreren Geräten bearbeitet wird, bleibt die letzte Änderung erhalten. Änderungen oder Nachrichten können verloren gehen. Verwenden Sie nicht mehrere Geräte gleichzeitig.",
+        replaceTitle: "Daten auf diesem Gerät ersetzen?",
+        replaceDescription: "Zur Synchronisierung werden die Daten auf diesem Gerät gelöscht und durch die entfernten Daten ersetzt. Erstellen Sie bei Bedarf manuell eine Sicherung.",
+        replaceAcknowledge: "Daten auf diesem Gerät löschen",
+        replaceAction: "Ersetzen",
+        cancelAction: "Abbrechen",
+        clockBlocked: "Die Synchronisierung wurde wegen unterschiedlicher Geräte- und Remotezeiten angehalten. Korrigieren Sie die Zeit und versuchen Sie es erneut.",
+        writerCollision: "Die Synchronisierung wurde wegen einer doppelten Geräteidentität angehalten. Verbinden Sie sich erneut als neues Gerät.",
+        newDeviceAction: "Als neues Gerät verbinden",
+        restoreTitle: "Sicherung wiederherstellen?",
+        restoreDescriptionBound: "Die aktuellen Daten werden gelöscht und durch die gewählte Sicherung ersetzt. Die wiederhergestellten Daten werden synchronisiert. Erstellen Sie bei Bedarf manuell eine Sicherung.",
+        restoreDescription: "Die aktuellen Daten werden gelöscht und durch die gewählte Sicherung ersetzt. Erstellen Sie bei Bedarf manuell eine Sicherung.",
+        restoreAcknowledge: "Aktuelle Daten löschen",
+        restoreAction: "Wiederherstellen",
+        myboxSyncUnavailable: "MYBOX kann nicht zur Synchronisierung verwendet werden.",
+    },
 } satisfies DeepPartial<typeof import('./en').languageEnglish>;

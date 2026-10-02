@@ -1,4 +1,28 @@
 export const languageChineseTraditional = {
+    risuNest: {
+        importDialog: {
+            warningUpstreamRestoreLosses: '部分冷儲存或嵌入資料無法復原。請檢查復原的資料。',
+        },
+        plugins: {
+            "removeTitle": "刪除此外掛嗎？",
+            "removeDescription": "一併刪除外掛資料後，即使重新安裝也無法還原設定與儲存內容。保留外掛資料可在重新安裝後繼續使用。",
+            "removeDataOption": "一併刪除外掛資料",
+            "removeAction": "刪除"
+        },
+    },
+
+    checkboxConfirmation: {
+        "characterDeletion": "刪除角色",
+        "dataReplacement": "取代目前資料",
+        "hypaReset": "重置 HypaV3 資料",
+        "hypaDeletion": "刪除後續摘要",
+        "pluginDataDeletion": "刪除外掛資料",
+        "lorebookDeletion": "刪除世界書資料夾及項目",
+        "partialBackup": "備份不包含其他資源",
+        "incompleteRestore": "還原不包含缺失資料",
+        "onlySelectedMessage": "僅刪除此訊息"
+    },
+
     "formating": {
         "main": "主要提示詞",
         "jailbreak": "越獄提示詞",
@@ -29,8 +53,8 @@ export const languageChineseTraditional = {
         "requestLogRemoved": "該請求記錄已被刪除。",
         "requestLogRemovedDesc": "當用戶端重新整理或重新載入時，該請求記錄會被刪除。",
         "vertexAuthError": "缺少 Vertex AI 驗證詳細資料。",
-        "coldStorageIncompleteRestoreConfirm": (characterNames: string, unavailableCount: number, unresolvedCount: number) =>
-            `無法復原 ${characterNames || "未知角色"}的冷儲存資料。${unresolvedCount > 0 ? `有 ${unresolvedCount} 個項目無法連結到角色。` : ""}\n\n若繼續，${unavailableCount} 個冷儲存項目將無法使用，受影響的角色或對話資料可能永久遺失。\n\n仍要繼續不完整的復原嗎？`
+        "coldStorageIncompleteRestoreConfirm": (characterNames: string, unavailableCount: number, unresolvedCount: number, includeQuestion = true) =>
+            `無法復原 ${characterNames || "未知角色"}的冷儲存資料。${unresolvedCount > 0 ? `有 ${unresolvedCount} 個項目無法連結到角色。` : ""}\n\n若繼續，${unavailableCount} 個冷儲存項目將無法使用，受影響的角色或對話資料可能永久遺失。${includeQuestion ? "\n\n仍要繼續不完整的復原嗎？" : ""}`
     },
     "showHelp": "顯示幫助",
     "help": {
@@ -1511,4 +1535,21 @@ export const languageChineseTraditional = {
     "nanoGPTSelectFromList": "從列表中選擇",
     "nanoGPTManualInput": "手動輸入",
     "nanoGPTManualModelSelect": "手動模型選擇",
+    lwwSync: {
+        concurrentEditNotice: "同時在多台裝置上修改同一項時，將保留最後一次修改。修改內容或訊息可能會遺失，請勿同時使用多台裝置。",
+        replaceTitle: "是否取代此裝置的資料？",
+        replaceDescription: "為進行同步，將清除此裝置的資料並取代為遠端資料。如需備份，請手動備份。",
+        replaceAcknowledge: "清除此裝置的資料",
+        replaceAction: "取代",
+        cancelAction: "取消",
+        clockBlocked: "裝置與遠端時間有差異，同步已停止。請校正時間後重試。",
+        writerCollision: "裝置識別重複，同步已停止。請作為新裝置重新連線。",
+        newDeviceAction: "作為新裝置連線",
+        restoreTitle: "是否還原備份？",
+        restoreDescriptionBound: "將清除目前資料並還原所選備份，還原的資料將同步至遠端。如需備份，請手動備份。",
+        restoreDescription: "將清除目前資料並還原所選備份。如需備份，請手動備份。",
+        restoreAcknowledge: "清除目前資料",
+        restoreAction: "還原",
+        myboxSyncUnavailable: "MYBOX 無法用於同步。",
+    },
 } satisfies DeepPartial<typeof import('./en').languageEnglish>

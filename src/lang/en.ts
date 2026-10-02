@@ -1,4 +1,16 @@
 export const languageEnglish = {
+    checkboxConfirmation: {
+        "characterDeletion": "Delete character",
+        "dataReplacement": "Replace current data",
+        "hypaReset": "Reset HypaV3 data",
+        "hypaDeletion": "Delete following summaries",
+        "pluginDataDeletion": "Delete plugin data",
+        "lorebookDeletion": "Delete lorebook folder and entries",
+        "partialBackup": "Backup without other assets",
+        "incompleteRestore": "Restore without unavailable data",
+        "onlySelectedMessage": "Delete only this message"
+    },
+
     close: "Close",
     retry: "Retry",
     contentRenderFailed: "Could not display this content.",
@@ -229,8 +241,8 @@ export const languageEnglish = {
         networkFetchPlain: "This can be a plain fetch error. try disabling force plain fetch option in settings.",
         requestLogRemoved: "This request log is removed.",
         requestLogRemovedDesc: "This request log removes when client is refreshed or reloaded.",
-        coldStorageIncompleteRestoreConfirm: (characterNames: string, unavailableCount: number, unresolvedCount: number) =>
-            `Cold storage data for ${characterNames || "unknown characters"} could not be restored.${unresolvedCount > 0 ? ` ${unresolvedCount} item(s) could not be linked to a character.` : ""}\n\nIf you continue, ${unavailableCount} cold storage item(s) will remain unavailable, and the affected character or chat data may be permanently lost.\n\nContinue with the incomplete restore anyway?`,
+        coldStorageIncompleteRestoreConfirm: (characterNames: string, unavailableCount: number, unresolvedCount: number, includeQuestion = true) =>
+            `Cold storage data for ${characterNames || "unknown characters"} could not be restored.${unresolvedCount > 0 ? ` ${unresolvedCount} item(s) could not be linked to a character.` : ""}\n\nIf you continue, ${unavailableCount} cold storage item(s) will remain unavailable, and the affected character or chat data may be permanently lost.${includeQuestion ? "\n\nContinue with the incomplete restore anyway?" : ""}`,
     },
     showHelp: "Show Help",
     help: {
@@ -2127,8 +2139,11 @@ export const languageEnglish = {
                 'Plugin API {version} is not supported. Install a version updated to API 3.0.',
             unsupportedApiVersionLoad:
                 'These plugins use an unsupported Plugin API version and did not run. Install versions updated to API 3.0.\n\n{plugins}',
-        
-            "removeRetainedDataNotice": 'Plugin values and permissions are retained. Manage values in RisuNest settings → Plugin Data, and reset permissions in Plugin settings.',
+
+            "removeTitle": "Remove this plugin?",
+            "removeDescription": "Deleting plugin data also removes its settings and saved content, even if you reinstall the plugin. Keeping plugin data lets you use it again after reinstalling.",
+            "removeDataOption": "Also delete plugin data",
+            "removeAction": "Delete",
         },
         exitDrain: {
             title: 'Finishing synchronization',
@@ -2814,6 +2829,7 @@ export const languageEnglish = {
             reasonUnknown: 'An unknown error occurred.',
             warningCleanupFailed:
                 'A temporary file could not be cleaned up. It will be retried at startup.',
+            warningUpstreamRestoreLosses: 'Some cold storage or inlay data could not be restored. Review the restored data.',
             warningPocketInlayFailed:
                 'Some PocketRisu attachments could not be imported.',
             warningUnknown: 'The operation completed with a warning. Check the details.',
@@ -3076,6 +3092,23 @@ export const languageEnglish = {
     "generationInterruptedInBackground": "Response generation was interrupted in the background.",
     "screenshotPreparationFailed": "Screenshot preparation failed. Reduce the range and try again.",
     "mcpDesktopOnly": "Local MCPs are available in the desktop app.",
+    lwwSync: {
+        concurrentEditNotice: "When the same item is edited on multiple devices at the same time, the last edit is kept. Edits or messages may be lost. Avoid using multiple devices at the same time.",
+        replaceTitle: "Replace the data on this device?",
+        replaceDescription: "To sync, the data on this device will be cleared and replaced with remote data. Make a manual backup if needed.",
+        replaceAcknowledge: "Clear the data on this device",
+        replaceAction: "Replace",
+        cancelAction: "Cancel",
+        clockBlocked: "Sync stopped because the device and remote times differ. Correct the time and try again.",
+        writerCollision: "Sync stopped because another device uses the same identity. Reconnect as a new device.",
+        newDeviceAction: "Connect as new device",
+        restoreTitle: "Restore the backup?",
+        restoreDescriptionBound: "The current data will be cleared and replaced with the selected backup, and the restored data will sync remotely. Make a manual backup if needed.",
+        restoreDescription: "The current data will be cleared and replaced with the selected backup. Make a manual backup if needed.",
+        restoreAcknowledge: "Clear the current data",
+        restoreAction: "Restore",
+        myboxSyncUnavailable: "MYBOX cannot be used for sync.",
+    },
 } satisfies I18nTranslation;
 
 type I18nTranslationFunction = (...args: any[]) => string;

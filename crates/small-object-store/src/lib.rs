@@ -125,10 +125,28 @@ pub fn insert_batch(tx: &Transaction<'_>, objects: &[(&str, &[u8])]) -> Result<(
     let mut insert = tx.prepare(&format!("INSERT INTO {TABLE}(hash,body) VALUES(?1,?2)"))?;
     for (hash, bytes) in objects {
         check_identity(hash)?;
-        if identity(bytes) != *hash {
+        if {
+            let actual = identity(bytes);
+            #[cfg(test)]
+            source_test_observer::hashed(db_path(tx), hash, "inline-ingress-sha256", bytes.len());
+            actual
+        } != *hash
+        {
+            #[cfg(test)]
+            source_test_observer::failed(db_path(tx), hash, "inline-ingress-sha256");
             return Err(StoreError::Corrupt);
         }
-        let stored: Option<Vec<u8>> = existing.query_row([hash], |r| r.get(0)).optional()?;
+        let stored = existing
+            .query_row([hash], |r| r.get::<_, Vec<u8>>(0))
+            .optional();
+        #[cfg(test)]
+        source_test_observer::extracted(
+            db_path(tx),
+            hash,
+            "ingress",
+            &stored.as_ref().map(|v| v.as_ref().map(Vec::len)),
+        );
+        let stored = stored?;
         match stored {
             Some(stored) if stored == *bytes => continue,
             Some(_) => return Err(StoreError::Corrupt),
@@ -165,15 +183,109 @@ pub fn read(db: &Connection, hash: &str, limit: usize) -> Result<Option<Vec<u8>>
     if size > limit as u64 {
         return Err(StoreError::TooLarge);
     }
-    let bytes: Vec<u8> = db.query_row(
+    let bytes = db.query_row(
         &format!("SELECT body FROM {TABLE} WHERE hash=?1"),
         [hash],
-        |r| r.get(0),
-    )?;
-    if identity(&bytes) != hash {
+        |r| r.get::<_, Vec<u8>>(0),
+    );
+    #[cfg(test)]
+    source_test_observer::extracted(
+        db_path(db),
+        hash,
+        "source",
+        &bytes.as_ref().map(|v| Some(v.len())),
+    );
+    let bytes = bytes?;
+    if {
+        let actual = identity(&bytes);
+        #[cfg(test)]
+        source_test_observer::hashed(db_path(db), hash, "inline-source-sha256", bytes.len());
+        actual
+    } != hash
+    {
+        #[cfg(test)]
+        source_test_observer::failed(db_path(db), hash, "inline-source-sha256");
         return Err(StoreError::Corrupt);
     }
     Ok(Some(bytes))
+}
+
+#[cfg(test)]
+fn db_path(db: &Connection) -> Option<&str> {
+    db.path()
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) mod source_test_observer {
+    use std::sync::{Arc, Mutex, OnceLock};
+    #[derive(Clone, Debug)]
+    pub(crate) enum Event {
+        Extract {
+            origin: Option<String>,
+            hash: String,
+            flow: &'static str,
+            bytes: Option<usize>,
+            failed: bool,
+        },
+        Hash {
+            origin: Option<String>,
+            hash: String,
+            domain: &'static str,
+            bytes: usize,
+            calls: u64,
+            failed: bool,
+        },
+    }
+    type Hook = Arc<dyn Fn(Event) + Send + Sync>;
+    static HOOK: OnceLock<Mutex<Option<Hook>>> = OnceLock::new();
+    pub(crate) fn install(hook: Hook) {
+        *HOOK.get_or_init(|| Mutex::new(None)).lock().unwrap() = Some(hook);
+    }
+    fn emit(event: Event) {
+        let hook = HOOK
+            .get_or_init(|| Mutex::new(None))
+            .lock()
+            .unwrap()
+            .clone();
+        if let Some(hook) = hook {
+            hook(event);
+        }
+    }
+    pub(crate) fn extracted<E>(
+        origin: Option<&str>,
+        hash: &str,
+        flow: &'static str,
+        result: &std::result::Result<Option<usize>, E>,
+    ) {
+        emit(Event::Extract {
+            origin: origin.map(str::to_owned),
+            hash: hash.into(),
+            flow,
+            bytes: result.as_ref().ok().copied().flatten(),
+            failed: result.is_err(),
+        });
+    }
+    pub(crate) fn hashed(origin: Option<&str>, hash: &str, domain: &'static str, bytes: usize) {
+        emit(Event::Hash {
+            origin: origin.map(str::to_owned),
+            hash: hash.into(),
+            domain,
+            bytes,
+            calls: 1,
+            failed: false,
+        });
+    }
+    pub(crate) fn failed(origin: Option<&str>, hash: &str, domain: &'static str) {
+        emit(Event::Hash {
+            origin: origin.map(str::to_owned),
+            hash: hash.into(),
+            domain,
+            bytes: 0,
+            calls: 0,
+            failed: true,
+        });
+    }
 }
 
 /// Identities and sizes in identity order, starting after the given one. The
@@ -219,10 +331,9 @@ impl Checkpoint {
 pub fn checkpoint(db: &Connection) -> Result<Checkpoint> {
     // The first column only reports a blocked RESTART, FULL or TRUNCATE; a
     // passive checkpoint that a reader held back says so in the counts.
-    let (log, copied): (i64, i64) =
-        db.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |r| {
-            Ok((r.get(1)?, r.get(2)?))
-        })?;
+    let (log, copied): (i64, i64) = db.query_row("PRAGMA wal_checkpoint(PASSIVE)", [], |r| {
+        Ok((r.get(1)?, r.get(2)?))
+    })?;
     let page: i64 = db.query_row("PRAGMA page_size", [], |r| r.get(0))?;
     // A frame is one page plus its 24-byte header. Outside WAL mode both
     // counts are -1 and nothing is pending.
@@ -484,7 +595,10 @@ mod tests {
         );
         // An unmeasured log is measured before anything is admitted.
         let mut unknown = Checkpoint::UNKNOWN;
-        assert_eq!(admit(&db, &mut unknown, high_water, 100, 1200).unwrap(), None);
+        assert_eq!(
+            admit(&db, &mut unknown, high_water, 100, 1200).unwrap(),
+            None
+        );
         assert_eq!(unknown.pending_bytes, 0);
     }
 
@@ -520,7 +634,9 @@ mod tests {
         let mut expected = hashes.clone();
         expected.sort();
         assert_eq!(
-            seen.iter().map(|(hash, _)| hash.clone()).collect::<Vec<_>>(),
+            seen.iter()
+                .map(|(hash, _)| hash.clone())
+                .collect::<Vec<_>>(),
             expected
         );
         assert!(seen.iter().all(|(hash, size)| {

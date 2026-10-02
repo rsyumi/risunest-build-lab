@@ -86,42 +86,6 @@ fn missing_and_truncated_bodies_request_repair_without_losing_custody() {
 }
 
 #[test]
-fn unused_registration_does_not_pin_history_but_acknowledged_offline_device_does() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::init(dir.path()).unwrap();
-    let active = common::device(&store);
-    let offline = common::device(&store);
-    let unused = common::device(&store);
-    let head = store.head().unwrap();
-    store
-        .acknowledge(&offline, &head.epoch, &common::acks(&head.seq))
-        .unwrap();
-    store.put_object(&active, &hash(b"body"), b"body").unwrap();
-    let intent = common::stage(&store, &active, &head, 1, &common::changes("key", b"body"));
-    let head = store.commit(&active, &intent, &head.etag()).unwrap().head;
-    store
-        .acknowledge(&active, &head.epoch, &common::acks(&head.seq))
-        .unwrap();
-    assert_eq!(store.maintain().unwrap().min_retained_seq.as_str(), "0");
-    store.revoke_device(&offline.id).unwrap();
-    assert_eq!(store.maintain().unwrap().min_retained_seq, head.seq);
-    let error = store
-        .pin_changes(&unused, &head.epoch, &0.into(), &common::LIBRARY)
-        .err()
-        .unwrap();
-    assert_eq!((error.code, error.status), ("checkpoint-required", 410));
-    let checkpoint = store.create_checkpoint(&unused, &common::LIBRARY).unwrap();
-    assert_eq!(checkpoint.head.seq, head.seq);
-    let devices = store.managed_devices().unwrap();
-    assert!(devices
-        .iter()
-        .find(|d| d.id == active.id)
-        .unwrap()
-        .last_ack
-        .is_some());
-}
-
-#[test]
 fn only_explicit_forget_releases_revoked_custody_and_keeps_shared_objects() {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::init(dir.path()).unwrap();
@@ -164,33 +128,6 @@ fn only_explicit_forget_releases_revoked_custody_and_keeps_shared_objects() {
     store.maintain().unwrap();
     assert!(!store.object_presence(&hash(b"exclusive")).unwrap());
     assert!(store.object_presence(&hash(b"shared")).unwrap());
-}
-
-#[test]
-fn persistent_commit_failure_is_visible_backed_off_and_still_reserved() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::init(dir.path()).unwrap();
-    let device = common::device(&store);
-    let db = Connection::open(dir.path().join("metadata.sqlite")).unwrap();
-    db.execute("INSERT INTO commit_jobs(operation,device,digest,body,stage) VALUES('synthetic',?1,'synthetic','invalid','synthetic')", [&device.id]).unwrap();
-    for attempt in 0..12 {
-        db.execute("UPDATE commit_jobs SET retry_after=0", [])
-            .unwrap();
-        assert_eq!(
-            store.run_pending_commit().unwrap_err().code,
-            "corrupt-metadata"
-        );
-        let delay: i64 = db
-            .query_row("SELECT retry_after-unixepoch() FROM commit_jobs", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert_eq!(delay, (1i64 << attempt.min(9)).min(300));
-        assert!(!store.run_pending_commit().unwrap());
-    }
-    let status = store.managed_devices().unwrap();
-    assert!(status[0].pending);
-    assert_eq!(status[0].pending_error.as_deref(), Some("corrupt-metadata"));
 }
 
 #[test]
@@ -263,51 +200,4 @@ fn linked_parent_is_resolved_but_links_inside_the_store_are_refused() {
         Store::open(&root).err().unwrap().code,
         "unsafe-storage-path"
     );
-}
-
-#[test]
-fn reserved_commit_completes_exactly_once_when_storage_recovers() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::init(dir.path()).unwrap();
-    let device = common::device(&store);
-    store.put_object(&device, &hash(b"body"), b"body").unwrap();
-    let head = store.head().unwrap();
-    let intent = common::stage(&store, &device, &head, 1, &common::changes("key", b"body"));
-    store.submit_commit(&device, &intent, &head.etag()).unwrap();
-    let db = Connection::open(dir.path().join("metadata.sqlite")).unwrap();
-    db.execute_batch("CREATE TRIGGER synthetic_write_failure BEFORE INSERT ON records BEGIN SELECT RAISE(ABORT,'synthetic'); END;").unwrap();
-    assert_eq!(
-        store.run_pending_commit().unwrap_err().code,
-        "metadata-storage"
-    );
-    let pending = store.managed_devices().unwrap();
-    assert!(pending[0].pending);
-    assert_eq!(
-        pending[0].pending_error.as_deref(),
-        Some("metadata-storage")
-    );
-    let competing = common::stage(
-        &store,
-        &device,
-        &head,
-        2,
-        &common::changes("other", b"body"),
-    );
-    assert_eq!(
-        store
-            .submit_commit(&device, &competing, &head.etag())
-            .err()
-            .unwrap()
-            .code,
-        "device-operation-active"
-    );
-    db.execute_batch("DROP TRIGGER synthetic_write_failure; UPDATE commit_jobs SET retry_after=0;")
-        .unwrap();
-    assert!(store.run_pending_commit().unwrap());
-    assert!(!store.run_pending_commit().unwrap());
-    assert_eq!(store.head().unwrap().seq.as_str(), "1");
-    let count: i64 = db
-        .query_row("SELECT count(*) FROM receipts", [], |r| r.get(0))
-        .unwrap();
-    assert_eq!(count, 1);
 }

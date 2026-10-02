@@ -18,8 +18,8 @@ export interface PersistentConversationMetadata {
 
 export type PersistentRoot = Omit<
     Database,
-    'characters' | 'botPresets' | 'pluginCustomStorage' | 'pluginStorageMeta'
->
+    'characters' | 'botPresets' | 'pluginCustomStorage' | 'pluginStorageMeta' | 'botPresetsId' | 'selectedPersona'
+> & { botPresetsId: string | number; selectedPersona: string | number }
 
 export interface PluginStorageSummary {
     owner: string
@@ -124,8 +124,8 @@ export type AssetAlias = AssetAliasBase & (
 
 export type AssetOwnerLocator =
     | { kind: 'character-additional-assets'; characterId: string }
-    | { kind: 'root-module-assets'; index: number }
-    | { kind: 'persona-embedded-module-assets'; index: number }
+    | { kind: 'root-module-assets'; moduleId: string }
+    | { kind: 'persona-embedded-module-assets'; personaId: string; moduleId: string }
 
 export type AssetOwnerHead = { owner: AssetOwnerLocator } & (
     | {
@@ -144,7 +144,8 @@ export function assetOwnerLocatorKey(owner: AssetOwnerLocator): string {
     validateAssetOwnerLocator(owner)
     return owner.kind === 'character-additional-assets'
         ? `${owner.kind}:${owner.characterId}`
-        : `${owner.kind}:${owner.index}`
+        : owner.kind === 'root-module-assets' ? `${owner.kind}:${owner.moduleId}`
+        : `${owner.kind}:${JSON.stringify([owner.personaId, owner.moduleId])}`
 }
 
 export function validateAssetOwnerLocator(owner: AssetOwnerLocator): void {
@@ -160,9 +161,7 @@ export function validateAssetOwnerLocator(owner: AssetOwnerLocator): void {
     ) {
         throw new TypeError('Asset owner kind is invalid')
     }
-    if (!Number.isSafeInteger(owner.index) || owner.index < 0) {
-        throw new TypeError('Asset owner occurrence index must be a nonnegative safe integer')
-    }
+    if (typeof owner.moduleId !== 'string' || !owner.moduleId || (owner.kind === 'persona-embedded-module-assets' && (typeof owner.personaId !== 'string' || !owner.personaId))) throw new TypeError('Asset owner requires stable record IDs')
 }
 
 export function validateAssetOwnerHead(head: AssetOwnerHead): void {
@@ -286,6 +285,7 @@ export interface CharacterSummary {
     type: CharacterDetail['type']
     creatorNotes?: string
     trashTime?: number
+    trashStampMs?: string
     archived?: ArchivedCharacterSummary
 }
 
@@ -472,8 +472,70 @@ export type ConversationMutation =
 export type RootMutation =
     { type: 'set'; key: string; value: unknown } | { type: 'delete'; key: string }
 
+export type PersistentUnitMutation =
+    { key: string; type: 'set'; value: unknown } | { key: string; type: 'delete' }
+
+export interface GeneratingConversation {
+    characterId: string
+    conversationId: string
+}
+
+export interface LwwReceiveHeader {
+    bindingAuthority: string
+    requestId: string
+}
+
+export interface LwwApplyResult {
+    revision: DataRevision
+    affectedKeys: string[]
+    heldKeys: string[]
+    deferredKeys: string[]
+}
+
+export interface LwwStamp {
+    physicalMs: string
+    logical: string
+    writerId: string
+}
+
+export type LwwUnitValue = { kind: 'inline'; bytes: string }
+    | { kind: 'object'; descriptorHash: string; descriptor: unknown }
+    | { kind: 'deleted' }
+
+export interface LwwRemoteChange {
+    key: string
+    stamp: LwwStamp
+    value: LwwUnitValue
+}
+
+export interface LwwStageReceive extends LwwReceiveHeader {
+    changes: LwwRemoteChange[]
+    progress: { kind: 'server' | 'external'; cursor: string; writerId?: string }
+    admittedTimeUpperMs: string
+}
+
+export interface LwwApplyReceive extends LwwReceiveHeader {
+    generating: GeneratingConversation[]
+}
+
+export interface LwwOutboxEntry extends LwwRemoteChange { version: string; targetAuthority: string }
+export interface LwwOutboxPage { revision: DataRevision; entries: LwwOutboxEntry[] }
+export interface LwwOutboxIdentity { key: string; version: string; stamp: LwwStamp; valueIdentity: string }
+export interface LwwClockState { writerId: string; issued: LwwStamp | null; accepted: LwwStamp | null; bindingAuthority: string }
+export interface LwwOutboxRequest extends LwwReceiveHeader { limit: string }
+export interface LwwAcknowledgeRequest extends LwwReceiveHeader { entries: LwwOutboxIdentity[] }
+export interface LwwRetryRequest extends LwwReceiveHeader { proofId: string; correctedTimeMs: string }
+export interface LwwReplacementRequest extends LwwReceiveHeader { stagingId: string }
+
+export interface WholeMessageIntent extends GeneratingConversation {
+    messages: Message[]
+}
+
 export interface WorkingSetCommit {
     expectedRevision: DataRevision
+    unitMutations?: PersistentUnitMutation[]
+    bindingAuthority?: string
+    requestId?: string
     root?: PersistentRoot
     /** Mutually exclusive with a complete root replacement. */
     rootMutations?: RootMutation[]
@@ -556,7 +618,22 @@ export interface PersistentRevisionLease extends PersistentRevisionReader {
     release(): Promise<void>
 }
 
+export interface PersistentDatabaseReplacementStage {
+    activate(): Promise<{revision: DataRevision}>
+    abort(): Promise<void>
+}
+
 export interface PersistentDataStore {
+    lwwBindingState?(): Promise<{ targetAuthority: string }>
+    lwwReadOutbox?(request: LwwOutboxRequest): Promise<LwwOutboxPage>
+    lwwAckOutbox?(request: LwwAcknowledgeRequest): Promise<void>
+    lwwClockState?(request: LwwReceiveHeader): Promise<LwwClockState>
+    lwwRetryUnpublished?(request: LwwRetryRequest): Promise<{ revision: DataRevision }>
+    lwwCommitReplacement?(request: LwwReplacementRequest): Promise<{ revision: DataRevision }>
+    lwwStageReceive?(request: LwwStageReceive): Promise<void>
+    lwwApplyReceive?(request: LwwApplyReceive): Promise<LwwApplyResult>
+    lwwFinishReceive?(request: LwwReceiveHeader): Promise<void>
+    lwwDrainDeferred?(request: LwwApplyReceive): Promise<LwwApplyResult>
     open(): Promise<void>
     readRoot(): Promise<Versioned<PersistentRoot>>
     queryPresets(): Promise<PresetCatalog>
@@ -604,11 +681,19 @@ export interface PersistentDataStore {
         expectedRevision: DataRevision,
         signal?: AbortSignal,
     ): Promise<{ revision: DataRevision }>
+    stageDatabaseReplacement?(
+        database: Database,
+        expectedRevision?: DataRevision,
+        assetAliases?: AssetAlias[],
+        pluginStorageValues?: PluginStorageValue[],
+        replacementHeader?: LwwReceiveHeader,
+    ): Promise<PersistentDatabaseReplacementStage>
     replaceFromDatabase(
         database: Database,
         expectedRevision?: DataRevision,
         assetAliases?: AssetAlias[],
         pluginStorageValues?: PluginStorageValue[],
+        replacementHeader?: LwwReceiveHeader,
     ): Promise<{ revision: DataRevision }>
     materializeDatabase(revision?: DataRevision): Promise<Database>
     acquireRevision(revision: DataRevision): Promise<PersistentRevisionLease>

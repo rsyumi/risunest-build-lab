@@ -24,6 +24,7 @@ pub(crate) fn document_references(
 ) -> Vec<&risunest_external_storage_format::snapshot::StoredObject> {
     std::iter::once(&view.library.record_catalog)
         .chain(std::iter::once(&view.library.asset_catalog))
+        .chain(view.original_units.iter())
         .chain(view.sections.values().map(|section| &section.entries_root))
         .collect()
 }
@@ -43,6 +44,8 @@ pub(crate) trait DocumentSource: Sync {
     fn catalog<'a>(&'a self, object: &'a RemoteObject) -> ProviderFuture<'a, Vec<RemoteObject>>;
     /// Verify current identity and bytes. Only a confirmed missing object is None.
     fn probe<'a>(&'a self, object: &'a RemoteObject) -> ProviderFuture<'a, Option<ObjectReceipt>>;
+    fn native_body(&self, _object:&RemoteObject)->Result<bool> {Ok(false)}
+    fn format_repository_id(&self,_object:&RemoteObject)->Option<&str> {None}
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -77,19 +80,38 @@ pub(crate) struct MarkRequest<'a> {
 pub(crate) struct Mark {
     pub reachable: BTreeSet<String>,
     pub reachable_bytes: u64,
-    /// Parents precede children; all entries passed this run's seven-day check.
+    /// All entries passed this run's seven-day check. Native bodies precede their discovery parents.
     pub candidates: Vec<RemoteObject>,
     pub deferred: usize,
 }
 
 pub(crate) fn object_identity(object: &RemoteObject, repository: &RepositoryHandle) -> Result<String> {
+    if object.role==ObjectRole::Segment {return native_identity(object,repository)}
     let encoded = serde_json::to_vec(&object.stored(repository)?).map_err(|_| corrupt())?;
+    #[cfg(test)] crate::persistent_store::hash_work::observe("native_external_gc_object_identity",encoded.len());
     Ok(risunest_sync_wire::hash(&encoded))
 }
+pub(super) fn native_identity(object:&RemoteObject,repository:&RepositoryHandle)->Result<String> {
+    object.receipt.locator.validate_for(repository)?;
+    let mut object=object.clone();object.receipt.version=None;object.receipt.checksum=None;
+    let bytes=serde_json::to_vec(&object).map_err(|_|corrupt())?;
+    #[cfg(test)] crate::persistent_store::hash_work::observe("native_external_gc_object_identity",bytes.len());
+    Ok(risunest_sync_wire::hash(&bytes))
+}
 fn validate_object(
-    object: &RemoteObject, repository: &RepositoryHandle, format_repository_id: &str,
+    object: &RemoteObject, repository: &RepositoryHandle, format_repository_id: &str,native_body:bool,
 ) -> Result<()> {
-    object.stored(repository)?;
+    if object.role==ObjectRole::Segment || native_body {
+        object.receipt.locator.validate_for(repository)?;
+        if !object.receipt.complete || object.receipt.byte_length==0
+            || !crate::trust_boundary::is_lower_hex_256(&object.ciphertext_sha256)
+            || !crate::trust_boundary::is_lower_hex_256(&object.plaintext_sha256)
+            || (native_body && object.role!=ObjectRole::Pack) {return Err(corrupt())}
+        if object.role==ObjectRole::Segment {
+            let (_,_,hash)=super::contract::parse_segment_object_id(&object.object_id)?;
+            if hash!=object.ciphertext_sha256 {return Err(corrupt())}
+        }
+    } else {object.stored(repository)?;}
     if object.repository_id != format_repository_id
         || matches!(object.role, ObjectRole::Descriptor | ObjectRole::Lease)
     {
@@ -150,9 +172,10 @@ async fn walk(
     let mut pending: VecDeque<_> = objects.into();
     while let Some(object) = pending.pop_front() {
         cancel.check()?;
-        validate_object(&object, repository, format_repository_id)?;
+        let native_body=source.native_body(&object)?;
+        validate_object(&object, repository, source.format_repository_id(&object).unwrap_or(format_repository_id),native_body)?;
         let key = locator_key(&object.receipt.locator)?;
-        let identity = object_identity(&object, repository)?;
+        let identity = if native_body {native_identity(&object,repository)?}else{object_identity(&object, repository)?};
         if let Some(previous) = graph.identities.insert(key.clone(), identity.clone()) {
             if previous != identity { return Err(corrupt()); }
             continue;
@@ -168,7 +191,7 @@ async fn walk(
             return Err(corrupt());
         }
         let children = match object.role {
-            ObjectRole::SyncState | ObjectRole::BackupBundle => {
+            ObjectRole::SyncState | ObjectRole::BackupBundle | ObjectRole::Snapshot | ObjectRole::Segment => {
                 source.document(&object).await.map(|node| node.references)
             }
             ObjectRole::Catalog => source.catalog(&object).await,
@@ -226,8 +249,8 @@ pub(crate) async fn mark(
             return Err(corrupt());
         }
         let (object, document) = source.listed(receipt).await?;
-        validate_object(&object, request.repository, request.format_repository_id)?;
-        if !matches!(object.role, ObjectRole::SyncState | ObjectRole::BackupBundle)
+        validate_object(&object, request.repository, source.format_repository_id(&object).unwrap_or(request.format_repository_id),source.native_body(&object)?)?;
+        if !matches!(object.role, ObjectRole::SyncState | ObjectRole::BackupBundle | ObjectRole::Snapshot | ObjectRole::Segment)
             || object.receipt.locator != receipt.locator || object.receipt.byte_length != receipt.byte_length
             || document.snapshot_id.is_empty()
             || by_snapshot.insert(document.snapshot_id, object).is_some()
@@ -239,11 +262,14 @@ pub(crate) async fn mark(
     let mut authorized = BTreeSet::new();
     let mut known_by_locator = BTreeMap::new();
     for object in &request.known_objects {
-        validate_object(object, request.repository, request.format_repository_id)?;
+        let native_body=source.native_body(object)?;
+        validate_object(object, request.repository, source.format_repository_id(object).unwrap_or(request.format_repository_id),native_body)?;
         let key = locator_key(&object.receipt.locator)?;
         authorized.insert(key.clone());
         if let Some(previous) = known_by_locator.insert(key, object.clone()) {
-            if object_identity(&previous, request.repository)? != object_identity(object, request.repository)? {
+            let before=if native_body {native_identity(&previous,request.repository)?}else{object_identity(&previous,request.repository)?};
+            let after=if native_body {native_identity(object,request.repository)?}else{object_identity(object,request.repository)?};
+            if before != after {
                 return Err(corrupt());
             }
         }
@@ -360,9 +386,26 @@ pub(crate) async fn mark(
         }
     }
     if visited != inactive.len() { return Err(corrupt()); }
+    let native=eligible.iter().map(|object|Ok((locator_key(&object.receipt.locator)?,source.native_body(object)?)))
+        .collect::<Result<BTreeMap<_,_>>>()?;
+    let mut ordered=Vec::new();let mut parents=Vec::new();
+    for object in eligible {
+        let key=locator_key(&object.receipt.locator)?;
+        if native[&key] {ordered.push(object);continue}
+        let mut defer=false;
+        for child in &candidates.nodes[&key].children {
+            if reachable.contains(child) {continue}
+            if let Some(node)=candidates.nodes.get(child) {
+                if source.native_body(&node.object)? && !native.contains_key(child) {defer=true;break}
+            }
+        }
+        if !defer {parents.push(object)}
+    }
+    // A native body's obsolete parent is its durable discovery proof until the body is gone.
+    ordered.extend(parents);
     Ok(Mark {
         reachable, reachable_bytes,
-        deferred: unreachable.len().saturating_sub(eligible.len()), candidates: eligible,
+        deferred: unreachable.len().saturating_sub(ordered.len()), candidates: ordered,
     })
 }
 

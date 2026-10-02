@@ -542,10 +542,11 @@ async function performAccountUnmigration(): Promise<void> {
             })
             await expandColdPayloads(candidate, async (key) => selectedCold.get(key) ?? null)
         },
-        replaceDatabase: (database, reason) => {
+        replaceDatabase: (database, reason, options) => {
             alertStore.set({ type: 'wait', msg: language.accountUnmigration.finishing })
             // Keep the snapshot guards: concurrent edits must survive a failed transition.
             return replacePersistentDatabase(database, reason, {
+                ...options,
                 authoritative: true,
                 expectedRevision,
                 expectedMutationGeneration,

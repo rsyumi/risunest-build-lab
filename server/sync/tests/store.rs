@@ -1,8 +1,7 @@
 mod common;
 use common::*;
 use risunest_sync_server::{config::Config, store::Store};
-use risunest_sync_wire::{hash, Domain, ReadFence, RecordVersion, TerminalStatus};
-use std::sync::Arc;
+use risunest_sync_wire::hash;
 
 #[test]
 fn owner_lock_and_reinitialization_protect_the_store() {
@@ -49,7 +48,17 @@ fn tokens_are_scoped_verifiers_and_revocation_is_checked_on_mutations() {
     store.revoke_device(&a.id).unwrap();
     assert!(store.authenticate(&c.library_id, &c.token).is_err());
     assert!(store.put_object(&a, &hash(b"x"), b"x").is_err());
-    assert!(store.stage_changes(&a, &changes("a", b"x")).is_err());
+    assert!(store
+        .push(
+            &a,
+            &request(
+                &store,
+                WRITER_A,
+                "revoked",
+                vec![inline("a", WRITER_A, 1, "x")]
+            )
+        )
+        .is_err());
     drop(store);
     // Synthetic credential only. Never print token bytes.
     let bytes = std::fs::read(dir.path().join("metadata.sqlite")).unwrap();
@@ -72,176 +81,6 @@ fn objects_publish_before_metadata_and_raw_content_is_preserved() {
     }
     assert_eq!(store.head().unwrap(), head);
 }
-#[test]
-fn commit_retry_precedes_head_and_staging_checks_and_conflicting_identity_is_rejected() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::init(dir.path()).unwrap();
-    let a = device(&store);
-    let head = store.head().unwrap();
-    store.put_object(&a, &hash(b"x"), b"x").unwrap();
-    let intent = stage(&store, &a, &head, 1, &changes("a", b"x"));
-    let committed = store.commit(&a, &intent, &head.etag()).unwrap();
-    assert_eq!(committed.status, TerminalStatus::Committed);
-    assert_eq!(committed.head.seq.as_str(), "1");
-    let mut retry = intent.clone();
-    retry.staged_changes_id = "another-locator".into();
-    assert_eq!(store.commit(&a, &retry, &head.etag()).unwrap(), committed);
-    retry.changes_digest = hash(b"different");
-    assert_eq!(
-        store.commit(&a, &retry, &head.etag()).unwrap_err().code,
-        "operation-intent-conflict"
-    );
-    assert_eq!(store.head().unwrap(), committed.head);
-}
-#[test]
-fn missing_dependencies_and_wrong_before_or_fence_never_advance_head() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::init(dir.path()).unwrap();
-    let a = device(&store);
-    let head = store.head().unwrap();
-    let intent = stage(&store, &a, &head, 1, &changes("a", b"missing"));
-    let failed = store.commit(&a, &intent, &head.etag()).unwrap();
-    assert_eq!(failed.error.as_deref(), Some("missing-dependency"));
-    // The rejection names the record it failed on, so a retry loop has something
-    // to report beyond the code.
-    assert_eq!(failed.error_key.as_deref(), Some("a"));
-    store.put_object(&a, &hash(b"missing"), b"missing").unwrap();
-    assert_eq!(store.commit(&a, &intent, &head.etag()).unwrap(), failed);
-    let mut c = changes("a", b"missing");
-    c.changes[0].before = RecordVersion::Tombstone {
-        deletion_id: "deleted".into(),
-    };
-    let intent = stage(&store, &a, &head, 2, &c);
-    let rejected = store.commit(&a, &intent, &head.etag()).unwrap();
-    assert_eq!(rejected.error.as_deref(), Some("before-version-mismatch"));
-    assert_eq!(rejected.error_key.as_deref(), Some("a"));
-    let mut c = changes("a", b"missing");
-    c.read_fences.push(ReadFence {
-        domain: Domain::Library,
-        key: "owner".into(),
-        version: RecordVersion::Tombstone {
-            deletion_id: "deleted".into(),
-        },
-    });
-    let intent = stage(&store, &a, &head, 3, &c);
-    let rejected = store.commit(&a, &intent, &head.etag()).unwrap();
-    assert_eq!(rejected.error.as_deref(), Some("read-fence-mismatch"));
-    assert_eq!(rejected.error_key.as_deref(), Some("owner"));
-    assert_eq!(store.head().unwrap(), head);
-}
-#[test]
-fn device_scoping_isolates_staging_receipts_ack_and_revocation() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::init(dir.path()).unwrap();
-    let a = device(&store);
-    let b = device(&store);
-    let head = store.head().unwrap();
-    store.put_object(&a, &hash(b"x"), b"x").unwrap();
-    let intent = stage(&store, &a, &head, 1, &changes("a", b"x"));
-    assert!(store
-        .cancel_staged_changes(&b, &intent.staged_changes_id)
-        .is_err());
-    let failed = store.commit(&b, &intent, &head.etag()).unwrap();
-    assert_eq!(failed.error.as_deref(), Some("staging-not-found"));
-    let receipt = store.commit(&a, &intent, &head.etag()).unwrap();
-    assert!(store.receipt(&b, &receipt.operation_id).is_err());
-    assert!(store.acknowledge(&a, "wrong", &acks(&1.into())).is_err());
-    assert!(store
-        .acknowledge(&a, &head.epoch, &acks(&2.into()))
-        .is_err());
-    store
-        .acknowledge(&a, &head.epoch, &acks(&1.into()))
-        .unwrap();
-    assert!(store
-        .acknowledge(&a, &head.epoch, &acks(&0.into()))
-        .is_err());
-    store
-        .acknowledge(&b, &head.epoch, &acks(&0.into()))
-        .unwrap();
-    store.revoke_device(&a.id).unwrap();
-    store
-        .put_object(&b, &hash(b"still-allowed"), b"still-allowed")
-        .unwrap();
-}
-#[test]
-fn simultaneous_devices_get_one_commit_one_stale_then_both_independent_changes() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Arc::new(Store::init(dir.path()).unwrap());
-    let a = device(&store);
-    let b = device(&store);
-    let head = store.head().unwrap();
-    store.put_object(&a, &hash(b"x"), b"x").unwrap();
-    let ia = stage(&store, &a, &head, 1, &changes("a", b"x"));
-    let ib = stage(&store, &b, &head, 1, &changes("b", b"x"));
-    let barrier = Arc::new(std::sync::Barrier::new(2));
-    let outcomes = std::thread::scope(|scope| {
-        let sa = store.clone();
-        let ba = barrier.clone();
-        let da = a.clone();
-        let ha = head.clone();
-        let first = scope.spawn(move || {
-            ba.wait();
-            sa.commit(&da, &ia, &ha.etag()).unwrap()
-        });
-        barrier.wait();
-        let second = store.commit(&b, &ib, &head.etag()).unwrap();
-        (first.join().unwrap(), second)
-    });
-    assert_eq!(
-        [&outcomes.0, &outcomes.1]
-            .iter()
-            .filter(|r| r.status == TerminalStatus::Committed)
-            .count(),
-        1
-    );
-    let (loser, key) = if outcomes.0.status == TerminalStatus::Stale {
-        (&a, "a")
-    } else {
-        (&b, "b")
-    };
-    let head = store.head().unwrap();
-    let retry = stage(&store, loser, &head, 2, &changes(key, b"x"));
-    assert_eq!(
-        store.commit(loser, &retry, &head.etag()).unwrap().status,
-        TerminalStatus::Committed
-    );
-    assert!(matches!(
-        store.record(Domain::Library, "a").unwrap(),
-        RecordVersion::Live { .. }
-    ));
-    assert!(matches!(
-        store.record(Domain::Library, "b").unwrap(),
-        RecordVersion::Live { .. }
-    ));
-}
-#[test]
-fn staging_quota_can_be_released_without_affecting_another_device() {
-    let dir = tempfile::tempdir().unwrap();
-    let store = Store::init(dir.path()).unwrap();
-    let a = device(&store);
-    let b = device(&store);
-    let mut ids = Vec::new();
-    for _ in 0..16 {
-        ids.push(
-            store
-                .stage_changes(&a, &changes("a", b"x"))
-                .unwrap()
-                .staged_changes_id,
-        );
-    }
-    assert_eq!(
-        store
-            .stage_changes(&a, &changes("a", b"x"))
-            .err()
-            .unwrap()
-            .code,
-        "staging-quota"
-    );
-    store.stage_changes(&b, &changes("b", b"x")).unwrap();
-    store.cancel_staged_changes(&a, &ids[0]).unwrap();
-    store.stage_changes(&a, &changes("a", b"x")).unwrap();
-}
-
 #[test]
 fn linked_data_directory_and_cas_shard_cannot_escape_private_storage() {
     fn link_directory(link: &std::path::Path, target: &std::path::Path) {

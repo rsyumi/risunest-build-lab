@@ -39,12 +39,11 @@
 
     const strings = language.risuNest.localData
     const rows: { section: LocalDataSection; label: string; help: string }[] = [
-        { section: 'hypa', label: strings.hypaTitle, help: strings.hypaDescription },
         { section: 'local-plugins', label: strings.pluginTitle, help: strings.pluginDescription },
     ]
 
-    let chosen = $state<Record<LocalDataSection, boolean>>({ hypa: false, 'local-plugins': false })
-    let confirmed: Record<LocalDataSection, boolean> = { hypa: false, 'local-plugins': false }
+    let chosen = $state<Record<LocalDataSection, boolean>>({ hypa: true, 'local-plugins': false })
+    let confirmed: Record<LocalDataSection, boolean> = { hypa: true, 'local-plugins': false }
     let failure = $state<'load' | 'apply' | null>(null)
     let loaded = $state(false)
     let remotes = $state<LocalDataRemoteState>('unknown')

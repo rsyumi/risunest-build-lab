@@ -5,7 +5,6 @@ use super::{
 };
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use std::collections::BTreeMap;
-use crate::external_storage::publication::{PublicationMode, PublicationPermit};
 
 const SCHEMA: &str = r#"
 CREATE TABLE external_storage_jobs(id TEXT PRIMARY KEY,connection_id TEXT NOT NULL,repository_id TEXT NOT NULL,capture_id TEXT NOT NULL,identity TEXT NOT NULL,role TEXT NOT NULL CHECK(role IN ('backup','sync','restore','history')),strategy TEXT CHECK(strategy IN ('cas','sequential')),expected_head TEXT,commit_id TEXT NOT NULL,phase TEXT NOT NULL CHECK(phase IN ('preparing','ready','publishing','publicationUnknown','applying','complete','cancelled','stale')));
@@ -184,16 +183,6 @@ pub(super) fn finish_receive_activation(
     Ok(())
 }
 
-pub(crate) struct PublishIntent<'a> {
-    pub job_id: &'a str,
-    pub connection_id: &'a str,
-    pub repository_id: &'a str,
-    pub capture_id: &'a str,
-    pub identity: &'a CaptureIdentity,
-    pub strategy: &'a str,
-    pub expected_head: Option<&'a str>,
-    pub commit_id: &'a str,
-}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct PinHistoryRecord {
@@ -481,86 +470,10 @@ pub(crate) fn capture_has_consumers(db: &Connection, capture: &str) -> StoreResu
     )?)
 }
 
-pub(crate) fn prepare_publication(
-    tx: &Transaction<'_>,
-    intent: &PublishIntent<'_>,
-    permit: &PublicationPermit,
-) -> StoreResult<()> {
-    if permit.job_id() != intent.job_id
-        || permit.selection_epoch() != intent.identity.selection_epoch
-    {
-        return Err(invalid("Publication permit does not match its intent"));
-    }
-    require_publication_permit(tx, permit, intent.identity, intent.connection_id)?;
-    let identity = serde_json::to_string(intent.identity)?;
-    let exists: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM external_storage_captures WHERE id=?1 AND identity=?2)",
-        params![intent.capture_id, identity],
-        |r| r.get(0),
-    )?;
-    if !exists {
-        return Err(invalid("Publication requires a durable capture"));
-    }
-    let busy:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM external_storage_jobs WHERE connection_id=?1 AND phase NOT IN ('complete','cancelled','stale','publicationUnknown'))",[intent.connection_id],|r|r.get(0))?;
-    if busy {
-        return Err(invalid("External destination already has an active job"));
-    }
-    if reusable_job(tx, intent.job_id, intent.connection_id)? {
-        if tx.execute(
-            "UPDATE external_storage_jobs SET repository_id=?2,capture_id=?3,identity=?4,role='sync',strategy=?5,expected_head=?6,commit_id=?7,phase='ready' WHERE id=?1 AND connection_id=?8 AND phase IN ('stale','cancelled')",
-            params![intent.job_id,intent.repository_id,intent.capture_id,identity,intent.strategy,intent.expected_head,intent.commit_id,intent.connection_id],
-        )? != 1 {
-            return Err(invalid("External job cannot be reused"));
-        }
-    } else {
-        tx.execute(
-            "INSERT INTO external_storage_jobs VALUES(?1,?2,?3,?4,?5,'sync',?6,?7,?8,'ready')",
-            params![
-                intent.job_id,
-                intent.connection_id,
-                intent.repository_id,
-                intent.capture_id,
-                identity,
-                intent.strategy,
-                intent.expected_head,
-                intent.commit_id
-            ],
-        )?;
-    }
-    tx.execute(
-        "DELETE FROM external_storage_capture_refs WHERE job_id=?1 AND capture_id!=?2",
-        params![intent.job_id, intent.capture_id],
-    )?;
-    tx.execute(
-        "INSERT OR IGNORE INTO external_storage_capture_refs VALUES(?1,?2)",
-        params![intent.capture_id, intent.job_id],
-    )?;
-    Ok(())
-}
 
 /// The caller owns file(false) through the head request AND this result's
 /// settlement. Commit this intent before making the network request.
-pub(crate) fn begin_publication(
-    tx: &Transaction<'_>,
-    permit: &PublicationPermit,
-) -> StoreResult<()> {
-    let job = permit.job_id();
-    let (connection, identity, phase): (String, String, String) = tx.query_row(
-        "SELECT connection_id,identity,phase FROM external_storage_jobs WHERE id=?1 AND role='sync'",
-        [job],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    )?;
-    if phase != "ready" {
-        return Err(invalid("Publication cannot blindly retry a head write"));
-    }
-    let identity = serde_json::from_str(&identity)?;
-    require_publication_permit(tx, permit, &identity, &connection)?;
-    tx.execute(
-        "UPDATE external_storage_jobs SET phase='publishing' WHERE id=?1",
-        [job],
-    )?;
-    Ok(())
-}
+
 
 /// What a writer of a base knows about the records behind it: the whole map,
 /// or only what moved since the map already stored.
@@ -676,145 +589,4 @@ pub(crate) fn base_records(
         records.insert(key, hash);
     }
     Ok(Some(records))
-}
-
-pub(crate) fn publication_unknown(tx: &Transaction<'_>, job: &str) -> StoreResult<()> {
-    if tx.execute("UPDATE external_storage_jobs SET phase='publicationUnknown' WHERE id=?1 AND phase='publishing'",[job])?!=1 { return Err(invalid("No in-flight publication")); }
-    Ok(())
-}
-
-/// Call only after verifying the remote commit and authenticated head, never on
-/// the strength of a local receipt file alone. Capture revision preserves R+1.
-enum PublicationRecords<'a> {
-    Map(&'a BTreeMap<String, String>),
-    Attached,
-    Missing,
-}
-
-pub(crate) fn confirm_captured_publication(
-    tx: &Transaction<'_>, permit: &PublicationPermit, commit: &str,
-    snapshot: &str, observation: &str, attached: bool,
-) -> StoreResult<()> {
-    confirm_publication_records(tx, permit, commit, snapshot, observation,
-        if attached { PublicationRecords::Attached } else { PublicationRecords::Missing })
-}
-
-pub(crate) fn confirm_publication(
-    tx: &Transaction<'_>,
-    permit: &PublicationPermit,
-    commit: &str,
-    snapshot: &str,
-    observation: &str,
-    records: Option<&BTreeMap<String, String>>,
-) -> StoreResult<()> {
-    confirm_publication_records(tx, permit, commit, snapshot, observation,
-        records.map(PublicationRecords::Map).unwrap_or(PublicationRecords::Missing))
-}
-
-fn confirm_publication_records(
-    tx: &Transaction<'_>, permit: &PublicationPermit, commit: &str,
-    snapshot: &str, observation: &str, records: PublicationRecords<'_>,
-) -> StoreResult<()> {
-    let job = permit.job_id();
-    let (connection,repository,identity,expected,phase):(String,String,String,String,String)=tx.query_row("SELECT connection_id,repository_id,identity,commit_id,phase FROM external_storage_jobs WHERE id=?1",[job],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
-    if expected != commit || !matches!(phase.as_str(), "publishing" | "publicationUnknown") {
-        return Err(invalid(
-            "Remote confirmation differs from publication intent",
-        ));
-    }
-    let capture = serde_json::from_str(&identity)?;
-    require_publication_permit(tx, permit, &capture, &connection)?;
-    tx.execute("INSERT INTO external_storage_bases VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(connection_id) DO UPDATE SET repository_id=excluded.repository_id,snapshot_id=excluded.snapshot_id,commit_id=excluded.commit_id,head_observation=excluded.head_observation,identity=excluded.identity",params![connection,repository,snapshot,commit,observation,identity])?;
-    // The remote commit already exists, so this must not fail over a catalog
-    // the caller could not read. Dropping the rows costs the next receive one
-    // pass through the replace path; keeping rows that describe another
-    // snapshot costs correctness.
-    match records {
-        PublicationRecords::Map(records) => replace_base_records(tx, &connection, snapshot, records)?,
-        PublicationRecords::Attached => update_base_from_capture(tx, &connection, snapshot)?,
-        PublicationRecords::Missing => clear_base_records(tx, &connection)?,
-    }
-    tx.execute(
-        "UPDATE external_storage_jobs SET phase='complete' WHERE id=?1",
-        [job],
-    )?;
-    tx.execute(
-        "DELETE FROM external_storage_capture_refs WHERE job_id=?1",
-        [job],
-    )?;
-    Ok(())
-}
-
-fn update_base_from_capture(tx: &Transaction<'_>, connection: &str, snapshot: &str) -> StoreResult<()> {
-    tx.execute(
-        "DELETE FROM external_storage_base_records WHERE connection_id=?1
-         AND NOT EXISTS(SELECT 1 FROM publication_capture.records captured
-                        WHERE captured.key=external_storage_base_records.key)", [connection],
-    )?;
-    tx.execute(
-        "INSERT INTO external_storage_base_records(connection_id,key,content_hash)
-         SELECT ?1,key,hash FROM publication_capture.records WHERE true
-         ON CONFLICT(connection_id,key) DO UPDATE SET content_hash=excluded.content_hash
-         WHERE external_storage_base_records.content_hash<>excluded.content_hash", [connection],
-    )?;
-    tx.execute(
-        "INSERT INTO external_storage_base_record_state VALUES(?1,?2)
-         ON CONFLICT(connection_id) DO UPDATE SET snapshot_id=excluded.snapshot_id",
-        params![connection, snapshot],
-    )?;
-    Ok(())
-}
-
-fn require_publication_permit(
-    db: &Connection,
-    permit: &PublicationPermit,
-    capture: &CaptureIdentity,
-    connection: &str,
-) -> StoreResult<()> {
-    if permit.selection_epoch() != capture.selection_epoch {
-        return Err(invalid("Publication permit selection changed"));
-    }
-    match permit.mode() {
-        PublicationMode::Foreground => sync_selection::require_publish(db, capture, connection),
-        PublicationMode::ExitDrain => {
-            sync_selection::require_publish_exit_drain(db, capture, connection)
-        }
-    }
-}
-
-#[cfg(test)]
-mod publication_delta_tests {
-    use super::*;
-
-    #[test]
-    fn publication_updates_only_changed_base_rows() {
-        let mut db = Connection::open_in_memory().unwrap();
-        create_schema(&db).unwrap();
-        db.execute_batch("ATTACH DATABASE ':memory:' AS publication_capture;
-            CREATE TABLE publication_capture.records(key TEXT PRIMARY KEY,hash TEXT NOT NULL);").unwrap();
-        {
-            let tx = db.transaction().unwrap();
-            for index in 0..10_000 {
-                let key = format!("record-{index:05}");
-                let hash = "a".repeat(64);
-                tx.execute("INSERT INTO publication_capture.records VALUES(?1,?2)", params![key,hash]).unwrap();
-                tx.execute("INSERT INTO external_storage_base_records VALUES('connection',?1,?2)", params![key,hash]).unwrap();
-            }
-            tx.execute("INSERT INTO external_storage_base_record_state VALUES('connection','old')", []).unwrap();
-            tx.commit().unwrap();
-        }
-        db.execute("UPDATE publication_capture.records SET hash=?1 WHERE key='record-00005'", ["b".repeat(64)]).unwrap();
-        db.execute("DELETE FROM publication_capture.records WHERE key='record-00006'", []).unwrap();
-        let before = db.total_changes();
-        let started = std::time::Instant::now();
-        let tx = db.transaction().unwrap();
-        update_base_from_capture(&tx, "connection", "new").unwrap();
-        tx.commit().unwrap();
-        assert_eq!(db.total_changes()-before, 3);
-        assert_eq!(db.query_row::<i64,_,_>(
-            "SELECT count(*) FROM (SELECT key,hash FROM publication_capture.records EXCEPT SELECT key,content_hash FROM external_storage_base_records WHERE connection_id='connection')", [], |row| row.get(0),
-        ).unwrap(), 0);
-        assert_eq!(db.query_row::<i64,_,_>("SELECT count(*) FROM external_storage_base_records", [], |row| row.get(0)).unwrap(), 9999);
-        eprintln!("10k publication delta: {:?}, 3 changed rows", started.elapsed());
-    }
 }

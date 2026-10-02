@@ -40,6 +40,10 @@ type FileRouteRuntime = Pick<
     | 'markCommittedWorkingSetRefreshRequired'
     | 'getStorageAuthorityEpoch'
     | 'replacePersistentDatabase'
+    | 'withPausedPersistentWrites'
+    | 'beginActivatedLibraryGuard'
+    | 'refreshActivatedLibraryUnderPause'
+    | 'setActivatedLibraryRecoveryLifecycle'
 >
 
 export interface RisuSaveFileRouteDependencies {
@@ -75,7 +79,7 @@ export interface RisuSaveFileRouteDependencies {
     markAndroidExportReady(requestId: string): boolean | Promise<boolean>
     acknowledgeAndroidExport(requestId: string): boolean | Promise<boolean>
     reloadPlugins(): void | Promise<void>
-    reloadPluginsAfterNativeRestore(): void | Promise<void>
+    reloadPluginsAfterNativeRestore(pluginsAlreadyRestarted?: boolean): void | Promise<void>
     /** Name and size of a picked desktop file for the progress dialog; defaults to the basename. */
     describeNativeSource?(path: string): Promise<NativeFileOperationSource>
 }
@@ -362,15 +366,21 @@ async function importWithBytes(
     dependencies: RisuSaveFileRouteDependencies,
 ): Promise<RisuSaveFileRouteResult> {
     webImportStatus(options, 'decoding-database', bytes.byteLength, bytes.byteLength)
-    const database = await dependencies.decodeRisuSave(bytes) as Database
+    const { prepareUpstreamImport } = await import('./importedIdentity')
+    const database = prepareUpstreamImport(await dependencies.decodeRisuSave(bytes) as Database)
     webImportStatus(options, 'activating', bytes.byteLength, bytes.byteLength)
+    let pluginsRestarted = false
     await runtime.replacePersistentDatabase(
         database,
         'risu-save-file-import',
-        { authoritative: true },
+        {
+            authoritative: true,
+            upstreamImport: true,
+            ...(dependencies.platform() === 'web' ? {} : {onPluginsRestarted: () => { pluginsRestarted = true }}),
+        },
     )
     webImportStatus(options, 'reloading-plugins', bytes.byteLength, bytes.byteLength)
-    await dependencies.reloadPlugins()
+    if (!pluginsRestarted) await dependencies.reloadPlugins()
     return { mode: 'web', warningCodes: [], bytes: bytes.byteLength }
 }
 

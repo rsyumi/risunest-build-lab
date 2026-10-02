@@ -47,7 +47,7 @@ function makeDatabase(username: string): Database {
                 chats: [{ id: 'chat-b', name: 'Second', message: [] }],
             },
         ],
-        botPresets: [{ name: 'Preset' }],
+        botPresets: [{ id: 'preset-a', name: 'Preset' }],
         pluginCustomStorage: {},
     } as unknown as Database
 }

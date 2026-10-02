@@ -1,7 +1,6 @@
 import { get } from "svelte/store";
 import { processScriptFull, risuChatParser } from "src/ts/process/scripts";
 import { type Message } from "src/ts/storage/database.svelte";
-import { alertConfirm } from "src/ts/alert";
 import { DBState, selectedCharID } from "src/ts/stores.svelte";
 import { language } from "src/lang";
 import {
@@ -16,15 +15,6 @@ import {
   getPersistentDataRuntime,
   peekActiveConversationSession,
 } from "src/ts/storage/persistentDataRuntime.svelte";
-
-export async function alertConfirmTwice(
-  firstMessage: string,
-  secondMessage: string
-): Promise<boolean> {
-  return (
-    (await alertConfirm(firstMessage)) && (await alertConfirm(secondMessage))
-  );
-}
 
 export type DualActionParams = {
   onMainAction?: () => void;

@@ -5,14 +5,13 @@
 //! authenticated plaintext. Public envelope fields are only routing hints
 //! until the complete body has authenticated.
 use super::{
-    capabilities::Capabilities,
     contract::{
         Cancellation, Collection, ErrorKind, HeadBytes, ObjectIntent, ObjectReceipt, ObjectRole,
         Provider, ProviderError, ReadReceipt, RemoteLocator, RepositoryHandle, Result,
     },
     journal::{SpoolAdmission, TransferJournal},
     packaging::{native_role, wire_role, RemoteObject},
-    publication::{Attempt, HeadObservation, Outcome, PublicationMode, PublicationWrite},
+    publication::HeadObservation,
     transfer::SpoolSink,
     transfer_job,
 };
@@ -20,13 +19,48 @@ use risunest_external_storage_format::{
     content_identity::hash,
     control as wire_control,
     crypto::derive_key,
-    format::{Descriptor, Strategy},
+    format::Descriptor,
     snapshot as wire,
 };
+#[cfg(test)]
+use risunest_external_storage_format::format::Strategy;
 use std::{
     fs,
     io::{Cursor, Read, Write},
 };
+
+#[cfg(test)]
+pub(crate) fn observe_control_fingerprint(role:wire::ObjectRole,library:&[u8;32],sections:&std::collections::BTreeMap<String,wire::SectionSnapshotRef>,original:Option<&wire::StoredObject>,calls:usize) {
+    use serde::Serialize;
+    #[derive(Serialize)]
+    #[serde(rename_all="camelCase")]
+    struct Section<'a>{content:String,generation:&'a risunest_sync_wire::head::Sequence,gc_floor:&'a risunest_sync_wire::head::Sequence,max_write_clock:&'a risunest_sync_wire::head::Sequence}
+    #[derive(Serialize)]
+    struct State<'a>{domain:&'static str,library:String,sections:std::collections::BTreeMap<&'a str,Section<'a>>}
+    #[derive(Serialize)]
+    #[serde(rename_all="camelCase")]
+    struct Bundle<'a>{#[serde(flatten)]state:State<'a>,original_units:Option<&'a wire::StoredObject>}
+    struct Count(usize);
+    impl std::io::Write for Count {
+        fn write(&mut self,bytes:&[u8])->std::io::Result<usize>{self.0=self.0.checked_add(bytes.len()).ok_or_else(||std::io::Error::other("fingerprint input length overflow"))?;Ok(bytes.len())}
+        fn flush(&mut self)->std::io::Result<()>{Ok(())}
+    }
+    let bundle=role==wire::ObjectRole::BackupBundle;
+    let domain=if bundle {"native_external_bundle_fingerprint"} else {"native_external_state_fingerprint"};
+    let state=State{domain:if bundle {wire::BUNDLE_FINGERPRINT_DOMAIN} else {wire::STATE_FINGERPRINT_DOMAIN},library:hex::encode(library),sections:sections.iter().map(|(id,section)|(id.as_str(),Section{content:hex::encode(section.content_fingerprint),generation:&section.generation,gc_floor:&section.gc_floor,max_write_clock:&section.max_write_clock})).collect()};
+    let mut count=Count(0);
+    let result=if bundle {serde_json::to_writer(&mut count,&Bundle{state,original_units:original})} else {serde_json::to_writer(&mut count,&state)};
+    if result.is_err() {crate::persistent_store::hash_work::incomplete(domain);return;}
+    for _ in 0..calls {crate::persistent_store::hash_work::observe(domain,count.0);}
+}
+#[cfg(test)]
+pub(crate) fn observe_bundle_result(result:&risunest_external_storage_format::Result<wire_control::BackupBundleDocument>,calls:usize) {
+    match result {Ok(document)=>observe_control_fingerprint(wire::ObjectRole::BackupBundle,&document.library.content_fingerprint,&document.sections,document.original_units.as_ref(),calls),Err(_)=>crate::persistent_store::hash_work::incomplete("native_external_bundle_fingerprint")}
+}
+#[cfg(test)]
+pub(crate) fn observe_state_result(result:&risunest_external_storage_format::Result<wire::SyncStateDocument>,calls:usize) {
+    match result {Ok(document)=>observe_control_fingerprint(wire::ObjectRole::SyncState,&document.library_fingerprint,&document.sections,None,calls),Err(_)=>crate::persistent_store::hash_work::incomplete("native_external_state_fingerprint")}
+}
 
 const HEAD_OBJECT_ID: &str = "head";
 const MAX_CONTROL_PLAINTEXT: usize = 48 * 1024;
@@ -131,7 +165,6 @@ impl HeadDocument {
 pub(crate) enum BackupPointKind {
     Automatic,
     Manual,
-    Conflict,
     RecoveryCandidate,
 }
 
@@ -140,14 +173,12 @@ impl BackupPointKind {
         match self {
             Self::Automatic => wire_control::BackupPointKind::Backup,
             Self::Manual => wire_control::BackupPointKind::Manual,
-            Self::Conflict => wire_control::BackupPointKind::Conflict,
             Self::RecoveryCandidate => wire_control::BackupPointKind::History,
         }
     }
 }
 
-/// A point names the one remote bundle it preserves. A conflict's local side
-/// remains in the native conflict store rather than being uploaded here.
+/// A point names the one remote bundle it preserves.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct BackupPointDocument {
     pub repository_id: String,
@@ -164,32 +195,12 @@ impl BackupPointDocument {
         created_at_ms: u64,
         bundle: RemoteObject,
     ) -> Result<Self> {
-        if kind == BackupPointKind::Conflict {
-            return Err(corrupt("use the conflict point constructor"));
-        }
         let value = Self {
             repository_id: descriptor.repository_id.clone(),
             point_id,
             kind,
             created_at_ms,
             bundle,
-        };
-        descriptor.validate().map_err(corrupt)?;
-        value.check(descriptor)?;
-        Ok(value)
-    }
-    pub(crate) fn conflict(
-        descriptor: &Descriptor,
-        point_id: String,
-        created_at_ms: u64,
-        remote_bundle: RemoteObject,
-    ) -> Result<Self> {
-        let value = Self {
-            repository_id: descriptor.repository_id.clone(),
-            point_id,
-            kind: BackupPointKind::Conflict,
-            created_at_ms,
-            bundle: remote_bundle,
         };
         descriptor.validate().map_err(corrupt)?;
         value.check(descriptor)?;
@@ -214,21 +225,13 @@ impl BackupPointDocument {
     ) -> Result<wire_control::BackupPointDocument> {
         descriptor.validate().map_err(corrupt)?;
         self.check(descriptor)?;
-        match self.kind {
-            BackupPointKind::Conflict => wire_control::BackupPointDocument::conflict(
-                self.repository_id.clone(),
-                self.point_id.clone(),
-                self.created_at_ms,
-                self.bundle.stored(repository)?,
-            ),
-            _ => wire_control::BackupPointDocument::single(
-                self.repository_id.clone(),
-                self.point_id.clone(),
-                self.kind.to_wire(),
-                self.created_at_ms,
-                self.bundle.stored(repository)?,
-            ),
-        }
+        wire_control::BackupPointDocument::single(
+            self.repository_id.clone(),
+            self.point_id.clone(),
+            self.kind.to_wire(),
+            self.created_at_ms,
+            self.bundle.stored(repository)?,
+        )
         .map_err(corrupt)
     }
     fn from_wire(
@@ -243,7 +246,6 @@ impl BackupPointDocument {
             wire_control::BackupPointKind::Backup => BackupPointKind::Automatic,
             wire_control::BackupPointKind::History => BackupPointKind::RecoveryCandidate,
             wire_control::BackupPointKind::Manual => BackupPointKind::Manual,
-            wire_control::BackupPointKind::Conflict => BackupPointKind::Conflict,
         };
         Ok(Self {
             repository_id: value.repository_id,
@@ -261,20 +263,10 @@ pub(crate) struct ObservedHead {
     pub observation: HeadObservation,
 }
 
+#[cfg(test)]
 pub(crate) struct PreparedHead {
-    pub document: HeadDocument,
     pub bytes: HeadBytes,
     pub authenticated_body_hash: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum PublicationResult {
-    Confirmed(ObservedHead),
-    Conflict(Option<ObservedHead>),
-    Unknown {
-        observation: Option<ObservedHead>,
-        cause: Option<ErrorKind>,
-    },
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -299,12 +291,6 @@ pub(crate) struct ListedInventoryPage {
 pub(crate) struct InventoryPagePage {
     pub pages: Vec<ListedInventoryPage>,
     pub next_cursor: Option<String>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RemoteConflictPointDeleteOutcome {
-    Deleted,
-    NotFound,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -413,6 +399,7 @@ fn open(
     Ok((plaintext, header, plaintext_hash, ciphertext_hash))
 }
 
+#[cfg(test)]
 pub(crate) fn prepare_head(
     descriptor: &Descriptor,
     root_key: &[u8; 32],
@@ -432,7 +419,6 @@ pub(crate) fn prepare_head(
     )?;
     let authenticated_body_hash = hex::encode(hash(&sealed));
     Ok(PreparedHead {
-        document,
         bytes: HeadBytes::new(sealed)?,
         authenticated_body_hash,
     })
@@ -561,110 +547,6 @@ pub(crate) async fn read_head(
     }
 }
 
-pub(crate) async fn publish_head(
-    provider: &dyn Provider,
-    repository: &RepositoryHandle,
-    capabilities: &Capabilities,
-    descriptor: &Descriptor,
-    root_key: &[u8; 32],
-    strategy: Strategy,
-    expected: Option<&ObservedHead>,
-    prepared: &PreparedHead,
-    mode: PublicationMode,
-    cancel: &Cancellation,
-) -> Result<PublicationResult> {
-    publish_head_guarded(
-        provider,
-        repository,
-        capabilities,
-        descriptor,
-        root_key,
-        strategy,
-        expected,
-        prepared,
-        || Ok(mode),
-        |_| Ok(()),
-        cancel,
-    )
-    .await
-}
-
-/// Revalidates the native execution session after the remote pre-read and
-/// immediately before the single head write. The guard also lets the caller
-/// durably enter its publishing phase at that exact boundary.
-pub(crate) async fn publish_head_guarded<F, G>(
-    provider: &dyn Provider,
-    repository: &RepositoryHandle,
-    capabilities: &Capabilities,
-    descriptor: &Descriptor,
-    root_key: &[u8; 32],
-    strategy: Strategy,
-    expected: Option<&ObservedHead>,
-    prepared: &PreparedHead,
-    read_session: F,
-    before_write: G,
-    cancel: &Cancellation,
-) -> Result<PublicationResult>
-where
-    F: FnOnce() -> Result<PublicationMode>,
-    G: FnOnce(PublicationMode) -> Result<()>,
-{
-    prepared.document.to_wire(descriptor, repository)?;
-    let expected_observation = expected.map(|head| head.observation.clone());
-    let current = read_head(provider, repository, descriptor, root_key, None, cancel).await?;
-    let mut attempt = Attempt::new(
-        capabilities,
-        strategy,
-        expected_observation,
-        prepared.document.commit_id.clone(),
-        prepared.authenticated_body_hash.clone(),
-    )?;
-    let mode = read_session()?;
-    let write = match attempt.before_write(current.as_ref().map(|h| &h.observation), mode) {
-        Ok(write) => write,
-        Err(error) if error.kind == ErrorKind::PreconditionFailed => {
-            return Ok(PublicationResult::Conflict(current));
-        }
-        Err(error) => return Err(error),
-    };
-    let locator = provider.head_locator(repository)?;
-    before_write(mode)?;
-    let write_result = match write {
-        PublicationWrite::Cas(expected) => {
-            provider
-                .compare_exchange_head(repository, &locator, &expected, &prepared.bytes, cancel)
-                .await
-        }
-        PublicationWrite::Sequential => {
-            provider
-                .replace_head(repository, &locator, &prepared.bytes, cancel)
-                .await
-        }
-    };
-    if let Err(error) = &write_result {
-        if attempt.write_failed(error) == Outcome::Conflict {
-            return Ok(PublicationResult::Conflict(None));
-        }
-    }
-    let post = if cancel.check().is_ok() {
-        read_head(provider, repository, descriptor, root_key, None, cancel)
-            .await
-            .ok()
-            .flatten()
-    } else {
-        None
-    };
-    if attempt.observe_result(post.as_ref().map(|h| &h.observation)) == Outcome::Confirmed {
-        return Ok(PublicationResult::Confirmed(
-            post.expect("confirmed observation exists"),
-        ));
-    }
-    Ok(PublicationResult::Unknown {
-        observation: post,
-        cause: write_result.err().map(|error| error.kind),
-    })
-}
-
 pub(crate) async fn upload_backup_point(
     descriptor: &Descriptor,
     root_key: &[u8; 32],
@@ -728,33 +610,6 @@ pub(crate) async fn upload_inventory_page(
     .await
 }
 
-pub(crate) async fn ensure_remote_conflict_point(
-    descriptor: &Descriptor,
-    conflict_id: &str,
-    created_at_ms: u64,
-    remote_bundle: RemoteObject,
-    journal: &mut TransferJournal,
-    connected: &super::connection_commands::ConnectedRepository,
-    cancel: &Cancellation,
-) -> Result<RemoteObject> {
-    let document = BackupPointDocument::conflict(
-        descriptor,
-        conflict_id.to_owned(),
-        created_at_ms,
-        remote_bundle,
-    )?;
-    upload_backup_point(
-        descriptor,
-        &connected.root_key,
-        document,
-        journal,
-        connected.provider.as_ref(),
-        &connected.handle,
-        cancel,
-    )
-    .await
-}
-
 /// Wraps an already published library reference in its own immutable bundle so
 /// a retained point names a bundle rather than a synchronized state. A state is
 /// the merged result of several devices, which is why the source says so. The
@@ -769,6 +624,7 @@ pub(crate) async fn upload_backup_bundle(
     captured_at_ms: u64,
     library: wire::LibrarySnapshotRef,
     sections: std::collections::BTreeMap<String, wire::SectionSnapshotRef>,
+    original_units: Option<wire::StoredObject>,
     journal: &mut TransferJournal,
     provider: &dyn Provider,
     repository: &RepositoryHandle,
@@ -784,8 +640,10 @@ pub(crate) async fn upload_backup_bundle(
         None,
         library,
         sections,
-    )
-    .map_err(corrupt)?;
+        original_units,
+    );
+    #[cfg(test)] observe_bundle_result(&document,2);
+    let document=document.map_err(corrupt)?;
     let plaintext = document.encode(MAX_POINT_PLAINTEXT).map_err(corrupt)?;
     upload_control_object(
         descriptor,
@@ -799,103 +657,6 @@ pub(crate) async fn upload_backup_bundle(
         cancel,
     )
     .await
-}
-
-pub(crate) async fn ensure_remote_conflict_bundle(
-    connected: &super::connection_commands::ConnectedRepository,
-    conflict_id: &str,
-    remote_commit_id: &str,
-    captured_at_ms: u64,
-    remote_snapshot: &RemoteObject,
-    journal: &mut TransferJournal,
-    cancel: &Cancellation,
-) -> Result<RemoteObject> {
-    if conflict_id.is_empty()
-        || conflict_id.len() > 1024
-        || conflict_id.contains('\0')
-        || remote_commit_id.is_empty()
-        || remote_commit_id.len() > 1024
-        || remote_commit_id.contains('\0')
-        || remote_snapshot.repository_id != connected.stored.descriptor.repository_id
-    {
-        return Err(corrupt("conflict remote state identity differs"));
-    }
-    match remote_snapshot.role {
-        ObjectRole::BackupBundle => Ok(remote_snapshot.clone()),
-        ObjectRole::SyncState => {
-            let view = read_snapshot_document(connected, remote_snapshot, cancel).await?;
-            upload_backup_bundle(
-                &connected.stored.descriptor,
-                &connected.root_key,
-                format!("{conflict_id}-remote"),
-                wire_control::BundleSource::SyncState {
-                    commit_id: remote_commit_id.to_owned(),
-                },
-                captured_at_ms,
-                view.library,
-                view.sections,
-                journal,
-                connected.provider.as_ref(),
-                &connected.handle,
-                cancel,
-            )
-            .await
-        }
-        _ => Err(corrupt("conflict remote state role differs")),
-    }
-}
-
-/// Republishes an already captured library reference as a synchronized state.
-/// Resolving a conflict in favour of this device publishes the preserved
-/// material, and a head can only point at a state.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn upload_sync_state(
-    descriptor: &Descriptor,
-    root_key: &[u8; 32],
-    state_id: String,
-    library_id: String,
-    epoch: String,
-    generation: risunest_sync_wire::head::Sequence,
-    parent_state_id: Option<String>,
-    author_writer_id: String,
-    created_at_ms: u64,
-    library: wire::LibrarySnapshotRef,
-    sections: std::collections::BTreeMap<String, wire::SectionSnapshotRef>,
-    journal: &mut TransferJournal,
-    provider: &dyn Provider,
-    repository: &RepositoryHandle,
-    cancel: &Cancellation,
-) -> Result<(RemoteObject, String)> {
-    let document = wire::SyncStateDocument::new(
-        state_id.clone(),
-        descriptor.repository_id.clone(),
-        library_id,
-        epoch,
-        generation,
-        parent_state_id,
-        author_writer_id,
-        created_at_ms,
-        library,
-        sections,
-    )
-    .map_err(corrupt)?;
-    let fingerprint = hex::encode(document.state_fingerprint);
-    let plaintext = document
-        .encode(wire::MAX_METADATA_BYTES)
-        .map_err(corrupt)?;
-    let object = upload_control_object(
-        descriptor,
-        root_key,
-        format!("snapshot-{state_id}"),
-        ObjectRole::SyncState,
-        &plaintext,
-        journal,
-        provider,
-        repository,
-        cancel,
-    )
-    .await?;
-    Ok((object, fingerprint))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1088,6 +849,17 @@ async fn open_listed_inventory_page(
     repository: &RepositoryHandle,
     cancel: &Cancellation,
 ) -> Result<ListedInventoryPage> {
+    open_listed_inventory_page_in_scope(receipt,descriptor,root_key,provider,repository,cancel,None).await
+}
+async fn open_listed_inventory_page_in_scope(
+    receipt: ObjectReceipt,
+    descriptor: &Descriptor,
+    root_key: &[u8; 32],
+    provider: &dyn Provider,
+    repository: &RepositoryHandle,
+    cancel: &Cancellation,
+    extra_repository_id:Option<&str>,
+) -> Result<ListedInventoryPage> {
     receipt.locator.validate_for(repository)?;
     if !receipt.complete || receipt.byte_length == 0 || receipt.byte_length > MAX_POINT_CIPHERTEXT {
         return Err(corrupt("invalid listed inventory page"));
@@ -1102,6 +874,11 @@ async fn open_listed_inventory_page(
     )
     .await?;
     let bytes = bytes.ok_or_else(|| corrupt("listed inventory page was not downloaded"))?;
+    let (advertised,_)=wire::read_public_header(&mut Cursor::new(&bytes)).map_err(corrupt)?;
+    if advertised.role!=wire::ObjectRole::InventoryPage || (advertised.repository_id!=descriptor.repository_id
+        && extra_repository_id!=Some(advertised.repository_id.as_str())) {return Err(corrupt("inventory page repository differs"))}
+    let mut scoped=descriptor.clone();scoped.repository_id=advertised.repository_id;
+    let descriptor=&scoped;
     let (plaintext, header, plaintext_sha256, ciphertext_sha256) = open(
         descriptor,
         root_key,
@@ -1136,6 +913,13 @@ pub(crate) async fn delete_authenticated_inventory_page(
     expected: &wire::StoredObject,
     cancel: &Cancellation,
 ) -> Result<RemoteInventoryPageDeleteOutcome> {
+    delete_authenticated_inventory_page_for_repository(connected,expected,&connected.stored.descriptor.repository_id,cancel).await
+}
+pub(crate) async fn delete_authenticated_inventory_page_for_repository(
+    connected:&super::connection_commands::ConnectedRepository,expected:&wire::StoredObject,repository_id:&str,cancel:&Cancellation,
+)->Result<RemoteInventoryPageDeleteOutcome> {
+    if expected.header.repository_id!=repository_id {return Err(corrupt("inventory page repository differs"))}
+    let mut descriptor=connected.stored.descriptor.clone();descriptor.repository_id=repository_id.into();
     if expected.header.role != wire::ObjectRole::InventoryPage
         || !expected.header.object_id.starts_with("inventory-page-")
     {
@@ -1144,7 +928,7 @@ pub(crate) async fn delete_authenticated_inventory_page(
     let expected = RemoteObject::from_stored(expected, &connected.handle)?;
     let listed = match open_listed_inventory_page(
         expected.receipt.clone(),
-        &connected.stored.descriptor,
+        &descriptor,
         &connected.root_key,
         connected.provider.as_ref(),
         &connected.handle,
@@ -1165,46 +949,6 @@ pub(crate) async fn delete_authenticated_inventory_page(
         .delete_object(&connected.handle, &expected.receipt.locator, cancel)
         .await?;
     Ok(RemoteInventoryPageDeleteOutcome::Deleted)
-}
-
-pub(crate) async fn delete_authenticated_conflict_point(
-    connected: &super::connection_commands::ConnectedRepository,
-    conflict_id: &str,
-    point: &wire::StoredObject,
-    cancel: &Cancellation,
-) -> Result<RemoteConflictPointDeleteOutcome> {
-    if conflict_id.is_empty()
-        || conflict_id.len() > 1024
-        || conflict_id.contains('\0')
-        || point.header.role != wire::ObjectRole::BackupPoint
-        || point.header.object_id != format!("backup-point-{conflict_id}")
-    {
-        return Err(corrupt("conflict point identity differs"));
-    }
-    let expected = RemoteObject::from_stored(point, &connected.handle)?;
-    let listed = match open_listed_point(
-        expected.receipt.clone(),
-        &connected.stored.descriptor,
-        &connected.root_key,
-        connected.provider.as_ref(),
-        &connected.handle,
-        cancel,
-    )
-    .await
-    {
-        Err(error) if error.kind == ErrorKind::NotFound => {
-            return Ok(RemoteConflictPointDeleteOutcome::NotFound)
-        }
-        other => other?,
-    };
-    if listed.reference.stored(&connected.handle)? != *point {
-        return Err(corrupt("conflict point bytes differ"));
-    }
-    connected
-        .provider
-        .delete_object(&connected.handle, &expected.receipt.locator, cancel)
-        .await?;
-    Ok(RemoteConflictPointDeleteOutcome::Deleted)
 }
 
 pub(crate) async fn list_backup_points_page(
@@ -1280,6 +1024,7 @@ pub(crate) async fn delete_authenticated_backup_point(
     Ok(RemoteBackupPointDeleteOutcome::Deleted)
 }
 
+#[cfg(test)]
 pub(crate) async fn list_inventory_pages_page(
     descriptor: &Descriptor,
     root_key: &[u8; 32],
@@ -1289,6 +1034,12 @@ pub(crate) async fn list_inventory_pages_page(
     limit: u16,
     cancel: &Cancellation,
 ) -> Result<InventoryPagePage> {
+    list_inventory_pages_page_in_scope(descriptor,root_key,provider,repository,cursor,limit,cancel,None).await
+}
+pub(crate) async fn list_inventory_pages_page_in_scope(
+    descriptor:&Descriptor,root_key:&[u8;32],provider:&dyn Provider,repository:&RepositoryHandle,
+    cursor:Option<&str>,limit:u16,cancel:&Cancellation,extra_repository_id:Option<&str>,
+)->Result<InventoryPagePage> {
     if limit == 0 || limit > 100 {
         return Err(corrupt("invalid inventory page limit"));
     }
@@ -1305,13 +1056,14 @@ pub(crate) async fn list_inventory_pages_page(
     for receipt in page.objects {
         cancel.check()?;
         pages.push(
-            open_listed_inventory_page(
+            open_listed_inventory_page_in_scope(
                 receipt,
                 descriptor,
                 root_key,
                 provider,
                 repository,
                 cancel,
+                extra_repository_id,
             )
             .await?,
         );
@@ -1391,8 +1143,13 @@ pub(crate) async fn read_catalog_children(
     node: &RemoteObject,
     cancel: &Cancellation,
 ) -> Result<Vec<RemoteObject>> {
-    let repository_id = &connected.stored.descriptor.repository_id;
-    if node.role != ObjectRole::Catalog || node.repository_id != *repository_id {
+    read_catalog_children_for_repository(connected,node,&connected.stored.descriptor.repository_id,cancel).await
+}
+pub(crate) async fn read_catalog_children_for_repository(
+    connected:&super::connection_commands::ConnectedRepository,node:&RemoteObject,repository_id:&str,cancel:&Cancellation,
+)->Result<Vec<RemoteObject>> {
+    let mut descriptor=connected.stored.descriptor.clone();descriptor.repository_id=repository_id.into();
+    if node.role != ObjectRole::Catalog || node.repository_id != repository_id {
         return Err(corrupt("invalid catalog node"));
     }
     node.stored(&connected.handle)?;
@@ -1407,7 +1164,7 @@ pub(crate) async fn read_catalog_children(
     .await?;
     let bytes = bytes.ok_or_else(|| corrupt("catalog node was not downloaded"))?;
     let (plaintext, _, plaintext_sha256, ciphertext_sha256) = open(
-        &connected.stored.descriptor,
+        &descriptor,
         &connected.root_key,
         Some(&node.object_id),
         wire::ObjectRole::Catalog,
@@ -1566,6 +1323,7 @@ pub(crate) struct SnapshotView {
     /// a published state. These are different counters and are never mixed.
     pub revision: String,
     pub library: wire::LibrarySnapshotRef,
+    pub original_units: Option<wire::StoredObject>,
     pub sections: std::collections::BTreeMap<String, wire::SectionSnapshotRef>,
     pub is_state: bool,
     /// The device whose own values these sections are, when there is one. A
@@ -1578,8 +1336,9 @@ impl SnapshotView {
     pub(crate) fn read(plaintext: &[u8], role: wire::ObjectRole, repository_id: &str) -> Result<Self> {
         let view = match role {
             wire::ObjectRole::SyncState => {
-                let document = wire::SyncStateDocument::decode(plaintext, wire::MAX_METADATA_BYTES)
-                    .map_err(corrupt)?;
+                let document = wire::SyncStateDocument::decode(plaintext, wire::MAX_METADATA_BYTES);
+                #[cfg(test)] observe_state_result(&document,2);
+                let document=document.map_err(corrupt)?;
                 Self {
                     snapshot_id: document.state_id,
                     parent_snapshot_id: document.parent_state_id,
@@ -1590,12 +1349,13 @@ impl SnapshotView {
                     sections: document.sections,
                     is_state: true,
                     captured_by_device: None,
+                    original_units: None,
                 }
             }
             wire::ObjectRole::BackupBundle => {
-                let document =
-                    wire_control::BackupBundleDocument::decode(plaintext, MAX_POINT_PLAINTEXT)
-                        .map_err(corrupt)?;
+                let document=wire_control::BackupBundleDocument::decode(plaintext, MAX_POINT_PLAINTEXT);
+                #[cfg(test)] observe_bundle_result(&document,1);
+                let document=document.map_err(corrupt)?;
                 Self {
                     snapshot_id: document.bundle_id,
                     parent_snapshot_id: None,
@@ -1613,6 +1373,7 @@ impl SnapshotView {
                         wire_control::BundleSource::SyncState { .. } => None,
                     },
                     library: document.library,
+                    original_units: document.original_units,
                     sections: document.sections,
                     is_state: false,
                 }
@@ -1857,7 +1618,6 @@ mod tests {
                 credential_ref: "credential".into(),
                 root_key_ref: "key".into(),
                 recovery_key_ref: "recovery-key".into(),
-                capture_policy: None,
                 retention_policy: None,
                 capabilities: fake::capabilities(true),
                 created_at_ms: 1_000,
@@ -1925,6 +1685,7 @@ mod tests {
                 content_fingerprint: [3; 32],
             },
             BTreeMap::new(),
+            Some(catalog(&connected.handle, "original-units")),
         )
         .unwrap()
         .encode(MAX_POINT_PLAINTEXT)
@@ -2003,71 +1764,6 @@ mod tests {
             MAX_CONTROL_PLAINTEXT
         )
         .is_err());
-    }
-
-    #[test]
-    fn cas_publication_rechecks_and_lost_response_is_confirmed_by_authenticated_read() {
-        runtime().block_on(async {
-            let provider = fake::FakeProvider::new(true);
-            let repository = fake::repository();
-            let descriptor = descriptor(Strategy::Cas);
-            let first = prepare_head(&descriptor, &[9; 32], &repository, head(Strategy::Cas, &repository, "c1")).unwrap();
-            provider.state.lock().unwrap().lose_response = true;
-            let result = publish_head(
-                &provider, &repository, &fake::capabilities(true), &descriptor, &[9; 32],
-                Strategy::Cas, None, &first, PublicationMode::Foreground, &Cancellation::default(),
-            ).await.unwrap();
-            assert!(matches!(result, PublicationResult::Confirmed(ref observed) if observed.document.commit_id == "c1"));
-
-            let observed = read_head(&provider, &repository, &descriptor, &[9; 32], None, &Cancellation::default()).await.unwrap().unwrap();
-            let second = prepare_head(&descriptor, &[9; 32], &repository, head(Strategy::Cas, &repository, "c2")).unwrap();
-            let mut stale = observed.clone();
-            stale.observation.authenticated_body_hash = "44".repeat(32);
-            let conflict = publish_head(
-                &provider, &repository, &fake::capabilities(true), &descriptor, &[9; 32],
-                Strategy::Cas, Some(&stale), &second, PublicationMode::Foreground, &Cancellation::default(),
-            ).await.unwrap();
-            assert!(matches!(conflict, PublicationResult::Conflict(Some(_))));
-            assert_eq!(read_head(&provider, &repository, &descriptor, &[9; 32], None, &Cancellation::default()).await.unwrap().unwrap().document.commit_id, "c1");
-        });
-    }
-
-    #[test]
-    fn sequential_head_revalidates_publication_mode_after_remote_pre_read() {
-        runtime().block_on(async {
-            let provider = fake::FakeProvider::new(false);
-            let repository = fake::repository();
-            let descriptor = descriptor(Strategy::Sequential);
-            let prepared = prepare_head(
-                &descriptor,
-                &[8; 32],
-                &repository,
-                head(Strategy::Sequential, &repository, "c1"),
-            )
-            .unwrap();
-            let entered = std::sync::atomic::AtomicBool::new(false);
-            let error = publish_head_guarded(
-                &provider,
-                &repository,
-                &fake::capabilities(false),
-                &descriptor,
-                &[8; 32],
-                Strategy::Sequential,
-                None,
-                &prepared,
-                || Err(ProviderError::new(ErrorKind::Cancelled)),
-                |_| {
-                    entered.store(true, std::sync::atomic::Ordering::Release);
-                    Ok(())
-                },
-                &Cancellation::default(),
-            )
-            .await
-            .unwrap_err();
-            assert_eq!(error.kind, ErrorKind::Cancelled);
-            assert!(!entered.load(std::sync::atomic::Ordering::Acquire));
-            assert!(provider.state.lock().unwrap().objects.is_empty());
-        });
     }
 
     #[test]
@@ -2254,21 +1950,23 @@ mod tests {
     }
 
     #[test]
-    fn conflict_point_keeps_one_remote_bundle_and_uploads_once_at_its_fixed_id() {
+    fn a_backup_point_keeps_one_bundle_and_uploads_once_at_its_fixed_id() {
         runtime().block_on(async {
             let provider = fake::FakeProvider::new(false);
             let repository = fake::repository();
             let descriptor = descriptor(Strategy::Sequential);
-            assert!(BackupPointDocument::conflict(
+            assert!(BackupPointDocument::single(
                 &descriptor,
-                "conflict-1".into(),
+                "manual-1".into(),
+                BackupPointKind::Manual,
                 1,
                 snapshot(&repository, "s1"),
             )
             .is_err());
-            let document = BackupPointDocument::conflict(
+            let document = BackupPointDocument::single(
                 &descriptor,
-                "conflict-1".into(),
+                "manual-1".into(),
+                BackupPointKind::Manual,
                 1,
                 bundle(&repository, "s2"),
             )
@@ -2302,7 +2000,7 @@ mod tests {
             .unwrap();
             assert_eq!(uploaded.repository_id, descriptor.repository_id);
             assert_eq!(uploaded.role, ObjectRole::BackupPoint);
-            assert_eq!(uploaded.object_id, "backup-point-conflict-1");
+            assert_eq!(uploaded.object_id, "backup-point-manual-1");
             let repeated = upload_backup_point(
                 &descriptor,
                 &[6; 32],
@@ -2318,65 +2016,7 @@ mod tests {
             assert_eq!(provider.state.lock().unwrap().objects.len(), 2);
             assert_eq!(provider.state.lock().unwrap().objects.keys()
                 .filter(|id| id.starts_with("inventory-page-")).count(), 1);
-            assert_eq!(provider.upload_attempts("backup-point-conflict-1"), 1);
-        });
-    }
-
-    #[test]
-    fn conflict_point_delete_distinguishes_authenticated_presence_from_absence() {
-        runtime().block_on(async {
-            let provider = Arc::new(fake::FakeProvider::new(false));
-            let connected = connected(provider);
-            let root = tempfile::tempdir().unwrap();
-            let identity = JobIdentity {
-                job_id: "job".into(),
-                connection_id: "connection".into(),
-                repository_id: connected.handle.repository_id.clone(),
-                capture_id: "capture".into(),
-                capture: CaptureIdentity {
-                    store_id: "store".into(),
-                    library_epoch: "epoch".into(),
-                    generation: "generation".into(),
-                    selection_epoch: "selection".into(),
-                    revision: 1,
-                },
-            };
-            let mut journal = TransferJournal::open(root.path(), identity).unwrap();
-            let uploaded = ensure_remote_conflict_point(
-                &connected.stored.descriptor,
-                "conflict",
-                1,
-                bundle(&connected.handle, "remote"),
-                &mut journal,
-                &connected,
-                &Cancellation::default(),
-            )
-            .await
-            .unwrap();
-            let stored = uploaded.stored(&connected.handle).unwrap();
-
-            assert_eq!(
-                delete_authenticated_conflict_point(
-                    &connected,
-                    "conflict",
-                    &stored,
-                    &Cancellation::default(),
-                )
-                .await
-                .unwrap(),
-                RemoteConflictPointDeleteOutcome::Deleted
-            );
-            assert_eq!(
-                delete_authenticated_conflict_point(
-                    &connected,
-                    "conflict",
-                    &stored,
-                    &Cancellation::default(),
-                )
-                .await
-                .unwrap(),
-                RemoteConflictPointDeleteOutcome::NotFound
-            );
+            assert_eq!(provider.upload_attempts("backup-point-manual-1"), 1);
         });
     }
 
@@ -2740,102 +2380,6 @@ mod tests {
         });
     }
 
-    #[test]
-    fn sync_state_conflict_wrapper_uploads_only_small_metadata() {
-        runtime().block_on(async {
-            let provider = Arc::new(fake::FakeProvider::new(false));
-            let connected = connected(provider.clone());
-            let root = tempfile::tempdir().unwrap();
-            let identity = JobIdentity {
-                job_id: "job".into(),
-                connection_id: "connection".into(),
-                repository_id: connected.handle.repository_id.clone(),
-                capture_id: "capture".into(),
-                capture: CaptureIdentity {
-                    store_id: "store".into(),
-                    library_epoch: "epoch".into(),
-                    generation: "generation".into(),
-                    selection_epoch: "selection".into(),
-                    revision: 1,
-                },
-            };
-            let mut journal = TransferJournal::open(root.path(), identity).unwrap();
-            let library = wire::LibrarySnapshotRef {
-                record_catalog: catalog(&connected.handle, "records"),
-                asset_catalog: catalog(&connected.handle, "assets"),
-                content_fingerprint: [3; 32],
-            };
-            let (state, _) = upload_sync_state(
-                &connected.stored.descriptor,
-                &connected.root_key,
-                "remote-state".into(),
-                "library".into(),
-                "epoch".into(),
-                risunest_sync_wire::head::Sequence::from(1u64),
-                None,
-                "writer".into(),
-                1,
-                library,
-                BTreeMap::new(),
-                &mut journal,
-                connected.provider.as_ref(),
-                &connected.handle,
-                &Cancellation::default(),
-            )
-            .await
-            .unwrap();
-
-            let bundle = ensure_remote_conflict_bundle(
-                &connected,
-                "conflict",
-                "remote-commit",
-                2,
-                &state,
-                &mut journal,
-                &Cancellation::default(),
-            )
-            .await
-            .unwrap();
-
-            assert_eq!(bundle.role, ObjectRole::BackupBundle);
-            assert_eq!(bundle.object_id, "snapshot-conflict-remote");
-            assert_eq!(provider.upload_attempts("snapshot-remote-state"), 1);
-            assert_eq!(provider.upload_attempts("snapshot-conflict-remote"), 1);
-            assert_eq!(provider.state.lock().unwrap().objects.len(), 4);
-            assert_eq!(provider.state.lock().unwrap().objects.keys()
-                .filter(|id| id.starts_with("inventory-page-")).count(), 2);
-
-            let repeated = ensure_remote_conflict_bundle(
-                &connected,
-                "conflict",
-                "remote-commit",
-                2,
-                &state,
-                &mut journal,
-                &Cancellation::default(),
-            )
-            .await
-            .unwrap();
-            assert_eq!(repeated.object_id, bundle.object_id);
-            assert_eq!(provider.upload_attempts("snapshot-conflict-remote"), 1);
-            assert_eq!(
-                ensure_remote_conflict_bundle(
-                    &connected,
-                    "conflict",
-                    "different-commit",
-                    2,
-                    &state,
-                    &mut journal,
-                    &Cancellation::default(),
-                )
-                .await
-                .unwrap_err()
-                .kind,
-                ErrorKind::Corrupt
-            );
-            assert_eq!(provider.upload_attempts("snapshot-conflict-remote"), 1);
-        });
-    }
     #[test]
     fn a_head_probe_observes_peer_changes_without_creating_any_remote_object() {
         runtime().block_on(async {

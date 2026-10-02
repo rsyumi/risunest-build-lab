@@ -58,6 +58,7 @@ async function concatenate(chunks: AsyncIterable<Uint8Array>): Promise<Uint8Arra
 
 function makeDatabase(): Database {
     const database = structuredClone(risuSaveFixtureDatabase) as any
+    database.botPresets = database.botPresets.map((preset: object, index: number) => ({...preset, id: `synthetic-preset-${index}`}))
     database.customBackground = 'assets/background.png'
     database.userIcon = 'assets/user.png'
     database.modules = [{

@@ -3,6 +3,7 @@ import { mount, tick, unmount } from 'svelte'
 import { writable } from 'svelte/store'
 import { IDBFactory, IDBKeyRange } from 'fake-indexeddb'
 import { languageEnglish } from 'src/lang/en'
+import { deriveEffectivePersonaMirrors } from 'src/ts/storage/effectiveIdentityState'
 import { DBState } from 'src/ts/stores.svelte'
 import PersonaSettings from './PersonaSettings.svelte'
 import { IndexedDbPersistentDataStore } from 'src/ts/storage/indexedDbPersistentDataStore'
@@ -19,7 +20,10 @@ vi.mock('sortablejs/modular/sortable.core.esm.js', () => ({ default: { create: (
 vi.mock('src/ts/util', () => ({ sortableOptions: {}, sleep: async () => {} }))
 vi.mock('src/ts/alert', () => ({ alertConfirm: vi.fn() }))
 vi.mock('src/ts/characters', () => ({ getCharImage: vi.fn(async () => '') }))
-vi.mock('src/ts/storage/database.svelte', () => ({}))
+vi.mock('src/ts/storage/database.svelte', async () => {
+    const identity = await import('src/ts/storage/effectiveIdentityState')
+    return { saveImage: vi.fn(), flushEffectivePersonaEdits: identity.flushEffectivePersonaEdits, deriveEffectivePersonaMirrors: identity.deriveEffectivePersonaMirrors }
+})
 vi.mock('src/ts/globalApi.svelte', () => ({}))
 vi.mock('src/ts/process/files/inlays', () => ({}))
 vi.mock('src/ts/pngChunk', () => ({}))
@@ -38,6 +42,7 @@ it('removes the confirmed persona after the active selection changes', async () 
         personas: ['First', 'Second', 'Third'].map(id => ({ id, name: id, icon: '', personaPrompt: '', note: '' })),
         selectedPersona: 0, username: 'First', userIcon: '', personaPrompt: '', userNote: '', hotkeys: [],
     } as any
+    deriveEffectivePersonaMirrors(DBState.db)
     let confirm!: (value: boolean) => void
     vi.mocked(alertConfirm).mockReturnValueOnce(new Promise(resolve => { confirm = resolve }))
     instance = mount(PersonaSettings, { target: document.body })
@@ -59,6 +64,7 @@ it('updates the persona used by bound chats while editing its current name, note
         selectedPersona: 0, username: 'Before', userIcon: '', personaPrompt: 'Before prompt', userNote: 'Before note',
         personaNote: true, hotkeys: [], characters: [], botPresets: [],
     } as any
+    deriveEffectivePersonaMirrors(DBState.db)
     const indexedDB = new IDBFactory()
     const store = new IndexedDbPersistentDataStore('persona-editor', indexedDB, IDBKeyRange)
     await store.open()

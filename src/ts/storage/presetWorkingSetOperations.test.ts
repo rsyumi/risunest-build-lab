@@ -104,7 +104,16 @@ describe('store-backed preset operations', () => {
     it('copies an inactive full body instead of its catalog stub', async () => {
         await controller.copyPreset(1)
 
-        expect(persisted[2]).toEqual(preset('Second Copy', 'stored second'))
+        expect(persisted[2]).toEqual({ ...preset('Second Copy', 'stored second'), id: expect.stringMatching(/^[0-9a-f-]{36}$/) })
+        expect(persisted[2].id).not.toBe(persisted[1].id)
+    })
+
+    it('assigns a fresh identity when adding a file preset with an existing ID', async () => {
+        const incoming = { ...preset('Imported', 'imported'), id: 'file-id' }
+        const added = await controller.addPreset(incoming)
+        expect(persisted[added].id).toMatch(/^[0-9a-f-]{36}$/)
+        expect(persisted[added].id).not.toBe('file-id')
+        expect(incoming.id).toBe('file-id')
     })
 
     it('does not alter the live working set when persistence fails before publication', async () => {
@@ -162,6 +171,30 @@ describe('store-backed preset operations', () => {
     })
 })
 
+it('saves only mirror fields into the effective stable record and preserves protected and opaque copies', async () => {
+    const live = {
+        botPresetsId: 0, botPresets: [{ id: 'a' }, { id: 'b' }], doNotChangeFallbackModels: true,
+    } as unknown as Database
+    const stored = [{ id: 'a', mainPrompt: 'A' }, {
+        id: 'b', mainPrompt: 'B', openAIKey: 'stored opaque', extension: 'stored extension',
+        fallbackModels: { model: ['stored protected'] }, autoSuggestClean: true,
+    }] as unknown as botPreset[]
+    const controller = createPresetWorkingSetController({
+        getDatabase: () => live,
+        getEffectivePresetId: () => 'b',
+        captureCurrentPreset: () => ({
+            id: 'b', mainPrompt: 'edited B', openAIKey: 'stale opaque', extension: 'stale extension',
+            fallbackModels: { model: ['stale protected'] },
+        }) as unknown as botPreset,
+        applyPreset: () => {},
+        mutatePersistentPresets: async (_reason, mutate) => { await mutate({ root: {} as any, presets: stored }) },
+    })
+    await controller.saveCurrentPreset()
+    expect(stored[0].mainPrompt).toBe('A')
+    expect(stored[1]).toMatchObject({ id: 'b', mainPrompt: 'edited B', openAIKey: 'stored opaque', extension: 'stored extension', fallbackModels: { model: ['stored protected'] } })
+    expect(stored[1]).not.toHaveProperty('autoSuggestClean')
+})
+
 it('rejects an originally selected index after an earlier queued reorder publishes', async () => {
     let live = { botPresetsId: 0, botPresets: ['A', 'B', 'C'].map(name => preset(name, name)) } as Database
     let queue = Promise.resolve()
@@ -209,7 +242,7 @@ it.each(['remove', 'copy'] as const)('rejects queued %s after a same-name reorde
     await expect(pending).rejects.toThrow('Preset list changed')
     expect(live.botPresets.map(item => item.mainPrompt)).toEqual(['B', 'C', 'A'])
     await controller.copyPreset(0, ['X', 'X', 'X'])
-    expect(live.botPresets[3]).toEqual(preset('X Copy', 'B'))
+    expect(live.botPresets[3]).toEqual({ ...preset('X Copy', 'B'), id: expect.stringMatching(/^[0-9a-f-]{36}$/) })
 })
 
 it('rejects a confirmed same-name replacement before entering the mutation queue', async () => {

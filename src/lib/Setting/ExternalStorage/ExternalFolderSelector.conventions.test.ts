@@ -11,6 +11,11 @@ describe('external folder selector source contracts', () => {
 
     it('keeps raw provider identifiers out of the connection form', () => {
         const source = readFileSync('src/lib/Setting/ExternalStorage/ConnectionForm.svelte', 'utf8')
-        expect(source).not.toMatch(/folderId|driveId|rootItemId/)
+        const markup = source
+            .replace(/<script\b[^>]*>[\s\S]*?<\/script>/g, '')
+            .replace(/<style\b[^>]*>[\s\S]*?<\/style>/g, '')
+        expect(markup).toContain('<label')
+        expect(markup).toContain('<TextInput')
+        expect(markup).not.toMatch(/folderId|driveId|rootItemId/)
     })
 })

@@ -1,7 +1,6 @@
 <script lang="ts">
     import { AlertTriangleIcon, LoaderCircleIcon, SaveIcon } from '@lucide/svelte'
     import { language } from 'src/lang'
-    import { serverSyncErrorHelp } from 'src/ts/storage/sync/serverSyncConnectFlow'
     import SettingButton from 'src/lib/Setting/RisuNest/SettingButton.svelte'
     import {
         decideSyncExit,
@@ -41,9 +40,7 @@
             case 'syncing': return copy.syncing
             case 'remote-delayed': return copy.delayed
             case 'remote-blocked': {
-                const help = (dialogState.destination === 'server' || dialogState.destination.startsWith('server:'))
-                    ? serverSyncErrorHelp(dialogState.reason, language.risuNest.serverSync)
-                    : copy.blocked
+                const help = copy.blocked
                 return `${help} (${dialogState.reason})`
             }
             case 'local-failed': return copy.saveFailed

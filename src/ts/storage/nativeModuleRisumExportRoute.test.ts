@@ -36,7 +36,7 @@ describe('native RISUM export route', () => {
                 return {
                     revision: 13,
                     sourceBytes: 7,
-                    sourceSha256: 'a'.repeat(64),
+                    sourceFingerprintKind: 'whole-file-sha256' as const, sourceSha256: 'a'.repeat(64),
                     characterCount: 0,
                     presetCount: 0,
                     warningCodes: [],

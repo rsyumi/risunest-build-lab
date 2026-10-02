@@ -96,23 +96,35 @@ export async function tokenizer() {
 export async function snapshotRestore(): Promise<boolean> {
   const marker = new PersistentBenchmarkMarker();
   await marker.open();
-  const key = "ios-synthetic-restore";
-  if (localStorage.getItem(key)) {
-    check(
-      (await marker.read()) === "before",
-      "snapshot reopened the native SQLite state",
-    );
-    localStorage.removeItem(key);
-    return true;
-  }
   await marker.write("before");
   const snapshot = await invoke<{ id: string }>("pds_snapshot_create", {
     reason: "ios-synthetic",
   });
   await marker.write("after");
-  await invoke("pds_snapshot_restore_request", { id: snapshot.id });
-  localStorage.setItem(key, "pending");
-  await invoke("ios_prepare_restart");
-  location.reload();
-  return false;
+  const state = await invoke<{ targetAuthority: string; target: unknown }>(
+    "pds_lww_binding_state",
+  );
+  check(state.target === null, "snapshot contract uses an unbound synthetic library");
+  const staged = await invoke<{ stagingId: string }>("pds_snapshot_restore_stage", {
+    id: snapshot.id,
+    requestId: crypto.randomUUID(),
+  });
+  const current = await invoke<{ revision: number }>("pds_open");
+  const activation = {
+    stagingId: staged.stagingId,
+    expectedRevision: current.revision,
+    bindingAuthority: state.targetAuthority,
+  };
+  const restored = await invoke<{ revision: number }>(
+    "pds_snapshot_restore_activate",
+    activation,
+  );
+  await marker.open();
+  check((await marker.read()) === "before", "snapshot activated the native SQLite state live");
+  const replay = await invoke<{ revision: number }>(
+    "pds_snapshot_restore_activate",
+    activation,
+  );
+  check(replay.revision === restored.revision, "snapshot activation replays its exact receipt");
+  return true;
 }

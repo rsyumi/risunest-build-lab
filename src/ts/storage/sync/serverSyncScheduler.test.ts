@@ -1,345 +1,131 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { createServerSyncController } from "./serverSyncController";
-import { connectServerSync } from "./serverSyncConnectFlow";
-import { createServerSyncScheduler } from "./serverSyncScheduler";
-import type { ServerCycle, ServerStatus, ServerSyncFacade } from "./serverSync";
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { createServerSyncScheduler } from './serverSyncScheduler'
 
-const head = {
-  libraryId: "library",
-  epoch: "epoch",
-  seq: "0",
-  headId: "head",
-  minRetainedSeq: "0",
-  sections: {
-    hypa: { stateId: "hypa-state", changedSeq: "0", gcFloor: "0" },
-    library: { stateId: "library-state", changedSeq: "0", gcFloor: "0" },
-    "local-plugins": { stateId: "plugins-state", changedSeq: "0", gcFloor: "0" },
-  },
-};
+afterEach(() => vi.useRealTimers())
 function fixture() {
-  const status: ServerStatus = {
-    localRevision: 0,
-    reconciling: false,
-    configured: true,
-    endpoint: "http://localhost",
-    libraryId: "library",
-    deviceId: "device",
-    head,
-    dirtyRecords: 0,
-    pendingDeviceSections: false,
-    fullScan: false,
-    registrationRequired: false,
-    operationPending: false,
-  };
-  const result: ServerCycle = {
-    endpoint: "http://localhost",
-    phase: "idle",
-    localRevision: 0,
-    head,
-    conflictCount: 0,
-    conflicts: [],
-    appliedRecords: 0,
-    proposedRecords: 0,
-  };
-  const cycle = vi.fn(async () => result);
-  const bind = vi.fn(async () => status);
-  const reregister = vi.fn(async () => status);
-  const controller = createServerSyncController({
-    status: async () => status,
-    bind,
-    reregister,
-    cycle,
-    cancel: async () => {},
-    needsRefresh: () => false,
-  } as unknown as ServerSyncFacade);
-  let available = true;
-  const scheduler = createServerSyncScheduler(controller, {
-    available: () => available,
-    random: () => 0.5,
-  });
-  return {
-    controller,
-    scheduler,
-    cycle,
-    result,
-    bind,
-    reregister,
-    status,
-    setAvailable: (value: boolean) => {
-      available = value;
-    },
-  };
+    vi.useFakeTimers()
+    const dependencies = { push: vi.fn(async () => {}), pull: vi.fn(async () => {}), connect: vi.fn(async () => {}), disconnect: vi.fn(async () => {}), retryClock: vi.fn(async () => {}), failed: vi.fn() }
+    return { ...dependencies, scheduler: createServerSyncScheduler(dependencies) }
 }
-beforeEach(() => vi.useFakeTimers());
-afterEach(() => vi.useRealTimers());
-describe("server sync scheduler", () => {
-  it.each([false, true])("holds automatic sync until native registration and policy are durable (replacing=%s)", async (replacing) => {
-    const f = fixture();
-    let release!: () => void;
-    const registration = replacing ? f.reregister : f.bind;
-    registration.mockImplementationOnce(() => new Promise<ServerStatus>((resolve) => { release = () => resolve(f.status); }));
-    const connecting = connectServerSync(f.controller, {
-      config: { endpoint: "http://localhost", libraryId: "library", deviceId: "device", token: "a".repeat(64) },
-      residency: "remote",
-      replacing,
-    });
-    await vi.advanceTimersByTimeAsync(0);
-    expect(registration).toHaveBeenCalledWith(expect.objectContaining({ deviceId: "device" }), "remote");
-    expect(f.cycle).not.toHaveBeenCalled();
-    expect(f.controller.snapshot().connecting).toBe(true);
-    expect(f.controller.canAutoSync()).toBe(false);
-    expect(f.controller.canRestore()).toBe(false);
-    f.scheduler.resume();
-    f.scheduler.localCommit();
-    f.scheduler.remoteHint();
-    await vi.advanceTimersByTimeAsync(60_000);
-    expect(f.cycle).not.toHaveBeenCalled();
-    await expect(f.controller.synchronize()).rejects.toMatchObject({ code: "library-operation-busy" });
-    release();
-    await connecting;
-    await vi.advanceTimersByTimeAsync(0);
-    expect(f.cycle).toHaveBeenCalledTimes(1);
-    expect(f.controller.snapshot()).toMatchObject({ connecting: false, error: "" });
-    f.scheduler.stop();
-  });
-  it("does not turn failed native registration into a manual pause and permits retry", async () => {
-    const f = fixture();
-    const request = {
-      config: { endpoint: "http://localhost", libraryId: "library", deviceId: "device", token: "a".repeat(64) },
-      residency: "remote" as const,
-    };
-    f.status.configured = false;
-    f.bind.mockRejectedValueOnce({ code: "library-operation-busy" });
-    await expect(connectServerSync(f.controller, request)).rejects.toMatchObject({ code: "library-operation-busy" });
-    f.scheduler.resume();
-    await vi.advanceTimersByTimeAsync(60_000);
-    expect(f.cycle).not.toHaveBeenCalled();
-    expect(f.controller.snapshot()).toMatchObject({ connecting: false, paused: false });
-    f.status.configured = true;
-    await connectServerSync(f.controller, request);
-    await vi.advanceTimersByTimeAsync(0);
-    expect(f.cycle).toHaveBeenCalledTimes(1);
-    f.scheduler.stop();
-  });
-  it("checks after initialization and lengthens idle polls without reading every local object", async () => {
-    const f = fixture();
-    await f.controller.initialize();
-    await vi.advanceTimersByTimeAsync(0);
-    expect(f.cycle).toHaveBeenCalledTimes(1);
-    await vi.advanceTimersByTimeAsync(59_999);
-    expect(f.cycle).toHaveBeenCalledTimes(1);
-    await vi.advanceTimersByTimeAsync(1);
-    expect(f.cycle).toHaveBeenCalledTimes(2);
-    await vi.advanceTimersByTimeAsync(119_999);
-    expect(f.cycle).toHaveBeenCalledTimes(2);
-    await vi.advanceTimersByTimeAsync(1);
-    expect(f.cycle).toHaveBeenCalledTimes(3);
-    f.scheduler.stop();
-  });
-  it("debounces saves at 500 ms and bounds continuous edits to five seconds", async () => {
-    const f = fixture();
-    await f.controller.initialize();
-    await vi.advanceTimersByTimeAsync(0);
-    for (let i = 0; i < 12; i += 1) {
-      f.scheduler.localCommit();
-      await vi.advanceTimersByTimeAsync(400);
-    }
-    expect(f.cycle).toHaveBeenCalledTimes(1);
-    f.scheduler.localCommit();
-    await vi.advanceTimersByTimeAsync(200);
-    expect(f.cycle).toHaveBeenCalledTimes(2);
-    f.scheduler.localCommit();
-    await vi.advanceTimersByTimeAsync(499);
-    expect(f.cycle).toHaveBeenCalledTimes(2);
-    await vi.advanceTimersByTimeAsync(1);
-    expect(f.cycle).toHaveBeenCalledTimes(3);
-    f.scheduler.stop();
-  });
-  it("keeps a local revision arriving during transport for the next single-flight run", async () => {
-    const f = fixture();
-    let finish!: (value: ServerCycle) => void;
-    f.cycle.mockImplementationOnce(
-      () =>
-        new Promise((resolve) => {
-          finish = resolve;
-        }),
-    );
-    await f.controller.initialize();
-    await vi.advanceTimersByTimeAsync(0);
-    f.scheduler.localCommit();
-    await vi.advanceTimersByTimeAsync(800);
-    expect(f.cycle).toHaveBeenCalledTimes(1);
-    finish(f.result);
-    await f.controller.waitForIdle();
-    await vi.advanceTimersByTimeAsync(0);
-    expect(f.cycle).toHaveBeenCalledTimes(2);
-    f.scheduler.stop();
-  });
-  it("backs off failures despite edits, resets on manual retry, and stops unauthorized automatic attempts", async () => {
-    const f = fixture();
-    f.cycle.mockRejectedValue({ code: "server-unreachable" });
-    await f.controller.initialize();
-    await vi.advanceTimersByTimeAsync(0);
-    f.scheduler.localCommit();
-    await vi.advanceTimersByTimeAsync(999);
-    expect(f.cycle).toHaveBeenCalledTimes(1);
-    await vi.advanceTimersByTimeAsync(1);
-    expect(f.cycle).toHaveBeenCalledTimes(2);
-    f.scheduler.localCommit();
-    await vi.advanceTimersByTimeAsync(1999);
-    expect(f.cycle).toHaveBeenCalledTimes(2);
-    await vi.advanceTimersByTimeAsync(1);
-    expect(f.cycle).toHaveBeenCalledTimes(3);
-    await f.controller.synchronize();
-    await vi.advanceTimersByTimeAsync(1000);
-    expect(f.cycle).toHaveBeenCalledTimes(5);
-    f.cycle.mockRejectedValue({ code: "unauthorized", retryable: false });
-    await f.controller.synchronize();
-    await vi.advanceTimersByTimeAsync(300_000);
-    expect(f.cycle).toHaveBeenCalledTimes(6);
-    f.scheduler.stop();
-  });
-  it("stops retrying a rejection the same attempt would receive again", async () => {
-    const f = fixture();
-    f.cycle.mockRejectedValue({
-      code: "invalid-control-schema",
-      status: 400,
-      retryable: false,
-    });
-    await f.controller.initialize();
-    await vi.advanceTimersByTimeAsync(0);
-    f.scheduler.localCommit();
-    await vi.advanceTimersByTimeAsync(999);
-    expect(f.cycle).toHaveBeenCalledTimes(1);
-    expect(f.controller.snapshot().errorRetryable).toBe(false);
-    // Neither backoff nor an ongoing edit nor a remote notice may start another.
-    await vi.advanceTimersByTimeAsync(300_000);
-    f.scheduler.localCommit();
-    f.scheduler.remoteHint();
-    await vi.advanceTimersByTimeAsync(300_000);
-    expect(f.cycle).toHaveBeenCalledTimes(1);
-    // The manual action clears the error itself, which releases the block.
-    f.cycle.mockResolvedValue(f.result);
-    await f.controller.synchronize();
-    expect(f.cycle).toHaveBeenCalledTimes(2);
-    f.scheduler.resume();
-    await vi.advanceTimersByTimeAsync(0);
-    expect(f.cycle).toHaveBeenCalledTimes(3);
-    f.scheduler.stop();
-  });
-  it("keeps backing off a failure that is worth another attempt", async () => {
-    const f = fixture();
-    f.cycle.mockRejectedValue({
-      code: "server-unreachable",
-      status: 503,
-      retryable: true,
-    });
-    await f.controller.initialize();
-    await vi.advanceTimersByTimeAsync(0);
-    f.scheduler.localCommit();
-    await vi.advanceTimersByTimeAsync(999);
-    expect(f.cycle).toHaveBeenCalledTimes(1);
-    await vi.advanceTimersByTimeAsync(1);
-    expect(f.cycle).toHaveBeenCalledTimes(2);
-    f.scheduler.stop();
-  });
-  it("reaches the same state from polling alone when no notification arrives", async () => {
-    const hinted = fixture();
-    const silent = fixture();
-    await hinted.controller.initialize();
-    await silent.controller.initialize();
-    await vi.advanceTimersByTimeAsync(0);
-    expect(hinted.cycle).toHaveBeenCalledTimes(1);
-    expect(silent.cycle).toHaveBeenCalledTimes(1);
-    // One side is told the remote moved; the other is told nothing at all.
-    hinted.scheduler.remoteHint();
-    await vi.advanceTimersByTimeAsync(250);
-    expect(hinted.cycle).toHaveBeenCalledTimes(2);
-    expect(silent.cycle).toHaveBeenCalledTimes(1);
-    await vi.advanceTimersByTimeAsync(60_000);
-    expect(silent.cycle).toHaveBeenCalledTimes(2);
-    expect(hinted.controller.snapshot().result).toEqual(
-      silent.controller.snapshot().result,
-    );
-    hinted.scheduler.stop();
-    silent.scheduler.stop();
-  });
-  it("coalesces repeated notifications and keeps a failing connection backed off", async () => {
-    const f = fixture();
-    await f.controller.initialize();
-    await vi.advanceTimersByTimeAsync(0);
-    for (let i = 0; i < 10; i += 1) f.scheduler.remoteHint();
-    await vi.advanceTimersByTimeAsync(250);
-    expect(f.cycle).toHaveBeenCalledTimes(2);
-    f.cycle.mockRejectedValue({ code: "server-unreachable" });
-    f.scheduler.remoteHint();
-    await vi.advanceTimersByTimeAsync(250);
-    expect(f.cycle).toHaveBeenCalledTimes(3);
-    f.scheduler.remoteHint();
-    await vi.advanceTimersByTimeAsync(999);
-    expect(f.cycle).toHaveBeenCalledTimes(3);
-    await vi.advanceTimersByTimeAsync(1);
-    expect(f.cycle).toHaveBeenCalledTimes(4);
-    f.scheduler.stop();
-  });
-  it("does no background work and resumes immediately while preserving manual pause", async () => {
-    const f = fixture();
-    await f.controller.initialize();
-    await vi.advanceTimersByTimeAsync(0);
-    f.setAvailable(false);
-    f.scheduler.suspend();
-    f.scheduler.localCommit();
-    await vi.advanceTimersByTimeAsync(300_000);
-    expect(f.cycle).toHaveBeenCalledTimes(1);
-    f.setAvailable(true);
-    f.scheduler.resume();
-    await vi.advanceTimersByTimeAsync(0);
-    expect(f.cycle).toHaveBeenCalledTimes(2);
-    await f.controller.pause();
-    f.scheduler.resume();
-    await vi.advanceTimersByTimeAsync(300_000);
-    expect(f.cycle).toHaveBeenCalledTimes(2);
-    f.scheduler.stop();
-  });
-});
-
-it("stops scheduling on Home while preserving a protected in-flight cycle", async () => {
-  const f = fixture();
-  let finish!: () => void;
-  f.cycle.mockImplementationOnce(() => new Promise(resolve => { finish = () => resolve(f.result); }));
-  const suspend = vi.spyOn(f.controller, "suspend");
-  const running = f.controller.synchronize();
-  await vi.advanceTimersByTimeAsync(0);
-  expect(f.cycle).toHaveBeenCalledOnce();
-  f.setAvailable(false);
-  f.scheduler.suspend(true);
-  expect(suspend).not.toHaveBeenCalled();
-  await vi.advanceTimersByTimeAsync(60_000);
-  expect(f.cycle).toHaveBeenCalledOnce();
-  finish();
-  await running;
-  await vi.advanceTimersByTimeAsync(60_000);
-  expect(f.cycle).toHaveBeenCalledOnce();
-  f.scheduler.stop();
-});
-
-it("leaves exit retries to the drain and resumes polling when its ownership ends", async () => {
-  const f = fixture();
-  const explicit = vi.spyOn(f.controller, "synchronize");
-  await f.controller.initialize();
-  f.cycle.mockRejectedValueOnce({ code: "server-unreachable", retryable: true });
-  const draining = f.controller.drainToRevision(0, new AbortController().signal);
-  await vi.advanceTimersByTimeAsync(800);
-  expect(f.cycle).toHaveBeenCalledOnce();
-  expect(f.controller.snapshot().draining).toBe(true);
-  f.scheduler.localCommit();
-  f.scheduler.remoteHint();
-  await vi.advanceTimersByTimeAsync(200);
-  await expect(draining).resolves.toEqual({ kind: "complete" });
-  expect(f.cycle).toHaveBeenCalledTimes(2);
-  expect(explicit).not.toHaveBeenCalled();
-  expect(f.controller.snapshot().draining).toBe(false);
-  await vi.advanceTimersByTimeAsync(120_000);
-  expect(f.cycle).toHaveBeenCalledTimes(3);
-  f.scheduler.stop();
-});
+describe('server LWW foreground scheduler', () => {
+    it('debounces from the last durable edit and flushes generation completion immediately', async () => {
+        const f = fixture(); await f.scheduler.foreground(true); await vi.advanceTimersByTimeAsync(0); f.push.mockClear()
+        f.scheduler.localChange(); await vi.advanceTimersByTimeAsync(1500); f.scheduler.localChange()
+        await vi.advanceTimersByTimeAsync(1999); expect(f.push).not.toHaveBeenCalled()
+        await vi.advanceTimersByTimeAsync(1); expect(f.push).toHaveBeenCalledTimes(1)
+        f.scheduler.localChange(true); await vi.advanceTimersByTimeAsync(0); expect(f.push).toHaveBeenCalledTimes(2)
+        f.scheduler.dispose()
+    })
+    it('keeps a stalled receive independent from publication', async () => {
+        const f = fixture(); let release!: () => void; f.pull.mockImplementation(() => new Promise<void>(resolve => { release = resolve }))
+        await f.scheduler.foreground(true); await vi.advanceTimersByTimeAsync(0); f.push.mockClear()
+        f.scheduler.localChange(true); await vi.advanceTimersByTimeAsync(0)
+        expect(f.push).toHaveBeenCalledTimes(1); release(); f.scheduler.dispose()
+    })
+    it('uses foreground fallback and connected safety intervals and stops all work in background', async () => {
+        const f = fixture(); await f.scheduler.foreground(true); await vi.advanceTimersByTimeAsync(0); f.pull.mockClear()
+        await vi.advanceTimersByTimeAsync(5000); expect(f.pull).toHaveBeenCalledTimes(1)
+        f.scheduler.socket(true); f.pull.mockClear(); await vi.advanceTimersByTimeAsync(59_999); expect(f.pull).not.toHaveBeenCalled()
+        await vi.advanceTimersByTimeAsync(1); expect(f.pull).toHaveBeenCalledTimes(1)
+        await f.scheduler.foreground(false); f.pull.mockClear(); f.push.mockClear(); f.connect.mockClear()
+        await vi.advanceTimersByTimeAsync(120_000); f.scheduler.localChange(true); f.scheduler.remoteHint()
+        expect(f.pull).not.toHaveBeenCalled(); expect(f.push).not.toHaveBeenCalled(); expect(f.connect).not.toHaveBeenCalled(); expect(f.disconnect).toHaveBeenCalledTimes(1)
+    })
+    it('immediately pulls on notification, conversation open, foreground return and socket loss', async () => {
+        const f = fixture(); await f.scheduler.foreground(true); await vi.advanceTimersByTimeAsync(0); f.pull.mockClear()
+        f.scheduler.remoteHint(); await vi.advanceTimersByTimeAsync(0); f.scheduler.conversationOpened(); await vi.advanceTimersByTimeAsync(0); f.scheduler.socket(false); await vi.advanceTimersByTimeAsync(0)
+        expect(f.pull).toHaveBeenCalledTimes(3)
+        await f.scheduler.foreground(false); await f.scheduler.foreground(true); await vi.advanceTimersByTimeAsync(0); expect(f.pull).toHaveBeenCalledTimes(4)
+        f.scheduler.dispose()
+    })
+    it('retries transient publication with bounded backoff and stops permanent failures', async () => {
+        const f = fixture()
+        f.push.mockRejectedValueOnce({ code: 'server-unreachable', retryable: true })
+        await f.scheduler.foreground(true); await vi.advanceTimersByTimeAsync(0)
+        expect(f.push).toHaveBeenCalledTimes(1)
+        await vi.advanceTimersByTimeAsync(999); expect(f.push).toHaveBeenCalledTimes(1)
+        await vi.advanceTimersByTimeAsync(1); expect(f.push).toHaveBeenCalledTimes(2)
+        f.push.mockRejectedValueOnce({ code: 'equal-stamp-integrity', retryable: false })
+        f.scheduler.localChange(true); await vi.advanceTimersByTimeAsync(0)
+        expect(f.scheduler.isBlocked()).toBe(true)
+        f.push.mockClear(); f.pull.mockClear(); f.connect.mockClear()
+        await vi.advanceTimersByTimeAsync(120_000)
+        expect(f.push).not.toHaveBeenCalled(); expect(f.pull).not.toHaveBeenCalled(); expect(f.connect).not.toHaveBeenCalled()
+        f.scheduler.dispose()
+    })
+    it('serializes explicit receive-to-head in background and fences every active lane', async () => {
+        const f = fixture(); const release: Array<() => void> = []
+        f.pull.mockImplementation(() => new Promise<void>(resolve => release.push(resolve)))
+        const available = f.scheduler.receiveAvailableChanges()
+        await vi.advanceTimersByTimeAsync(0)
+        expect(f.pull).toHaveBeenCalledWith(true)
+        let fenced = false; const fence = f.scheduler.fence().then(() => { fenced = true })
+        await vi.advanceTimersByTimeAsync(0); expect(fenced).toBe(false)
+        release[0](); await available; await fence; expect(fenced).toBe(true)
+        await vi.advanceTimersByTimeAsync(120_000); expect(f.pull).toHaveBeenCalledTimes(1)
+        f.scheduler.dispose()
+    })
+    it('stops native integrity errors restored as Error messages', async () => {
+        const f=fixture(); f.pull.mockRejectedValueOnce(new Error('equal-stamp-integrity'))
+        await f.scheduler.foreground(true); await vi.advanceTimersByTimeAsync(0)
+        expect(f.scheduler.isBlocked()).toBe(true); f.pull.mockClear(); f.push.mockClear()
+        await vi.advanceTimersByTimeAsync(120_000); expect(f.pull).not.toHaveBeenCalled(); expect(f.push).not.toHaveBeenCalled()
+        f.scheduler.dispose()
+    })
+    it('rechecks only a clock block on foreground and resumes publication after native admission succeeds', async () => {
+        const f = fixture(); f.push.mockRejectedValueOnce({ code: 'clock-skew', retryable: false })
+        await f.scheduler.foreground(true); await vi.advanceTimersByTimeAsync(0)
+        expect(f.scheduler.isBlocked()).toBe(true)
+        await vi.advanceTimersByTimeAsync(120_000); expect(f.retryClock).not.toHaveBeenCalled()
+        await f.scheduler.foreground(false); await f.scheduler.foreground(true); await vi.advanceTimersByTimeAsync(0)
+        expect(f.retryClock).toHaveBeenCalledOnce(); expect(f.scheduler.isBlocked()).toBe(false)
+        expect(f.push).toHaveBeenCalledTimes(2)
+        f.scheduler.dispose()
+    })
+    it('keeps an uncorrected clock blocked and coalesces an open-event native recheck', async () => {
+        const f = fixture(); f.push.mockRejectedValueOnce(new Error('clock-skew'))
+        await f.scheduler.foreground(true); await vi.advanceTimersByTimeAsync(0)
+        f.retryClock.mockRejectedValueOnce({ code: 'clock-skew', retryable: false })
+        await f.scheduler.conversationOpened(); expect(f.scheduler.isBlocked()).toBe(true)
+        let finish!: () => void
+        f.retryClock.mockImplementationOnce(() => new Promise<void>(resolve => { finish = resolve }))
+        const first = f.scheduler.conversationOpened(); const second = f.scheduler.conversationOpened()
+        await vi.advanceTimersByTimeAsync(0); expect(f.retryClock).toHaveBeenCalledTimes(2)
+        expect(f.scheduler.isBlocked()).toBe(true)
+        finish(); await Promise.all([first, second]); await vi.advanceTimersByTimeAsync(0)
+        expect(f.scheduler.isBlocked()).toBe(false); expect(f.push).toHaveBeenCalledTimes(2)
+        f.scheduler.dispose()
+    })
+    it('waits for the blocked connection cancellation before admitting clock repair', async () => {
+        const f = fixture(); let stopped!: () => void
+        f.disconnect.mockImplementationOnce(() => new Promise<void>(resolve => { stopped = resolve }))
+        f.push.mockRejectedValueOnce({ code: 'clock-skew', retryable: false })
+        await f.scheduler.foreground(true); await vi.advanceTimersByTimeAsync(0)
+        const opened = f.scheduler.conversationOpened(); await vi.advanceTimersByTimeAsync(0)
+        expect(f.retryClock).not.toHaveBeenCalled()
+        stopped(); await opened
+        expect(f.retryClock).toHaveBeenCalledOnce()
+        f.scheduler.dispose()
+    })
+    it.each(['incoming-clock-skew', 'accepted-clock-correction-required', 'writer-collision', 'equal-stamp-integrity'])('never automatically clears %s', async code => {
+        const f = fixture(); f.push.mockRejectedValueOnce({ code, retryable: false })
+        await f.scheduler.foreground(true); await vi.advanceTimersByTimeAsync(0)
+        await f.scheduler.foreground(false); await f.scheduler.foreground(true); await f.scheduler.conversationOpened()
+        await vi.advanceTimersByTimeAsync(120_000)
+        expect(f.retryClock).not.toHaveBeenCalled(); expect(f.scheduler.isBlocked()).toBe(true)
+        expect(f.push).toHaveBeenCalledTimes(1)
+        f.scheduler.dispose()
+    })
+    it('retains an incoming integrity block when an already running push later fails clock admission', async () => {
+        const f = fixture(); let rejectPush!: (error: unknown) => void; let rejectPull!: (error: unknown) => void
+        f.push.mockImplementationOnce(() => new Promise<void>((_resolve, reject) => { rejectPush = reject }))
+        f.pull.mockImplementationOnce(() => new Promise<void>((_resolve, reject) => { rejectPull = reject }))
+        await f.scheduler.foreground(true); await vi.advanceTimersByTimeAsync(0)
+        rejectPull({ code: 'equal-stamp-integrity', retryable: false }); await vi.advanceTimersByTimeAsync(0)
+        rejectPush({ code: 'clock-skew', retryable: false }); await vi.advanceTimersByTimeAsync(0)
+        await f.scheduler.conversationOpened()
+        expect(f.retryClock).not.toHaveBeenCalled(); expect(f.scheduler.isBlocked()).toBe(true)
+        expect(f.failed).toHaveBeenLastCalledWith({ code: 'equal-stamp-integrity', retryable: false })
+        f.scheduler.dispose()
+    })
+})

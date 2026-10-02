@@ -64,6 +64,7 @@ vi.mock('./alert', async () => {
     return {
         alertAddCharacter: mocks.alertAddCharacter,
         alertConfirm: mocks.alertConfirm,
+        alertCheckboxConfirm: async () => ({ confirmed: await mocks.alertConfirm(), checked: true }),
         alertError: mocks.alertError,
         alertToast: mocks.alertToast,
         alertNormal: vi.fn(),
@@ -72,7 +73,7 @@ vi.mock('./alert', async () => {
         alertWait: vi.fn(),
     }
 })
-vi.mock('../lang', () => ({ language: { errors: {} } }))
+vi.mock('../lang', () => ({ language: { errors: {}, checkboxConfirmation: { characterDeletion: "Delete character" } } }))
 vi.mock('./util', () => ({
     checkNullish: (value: unknown) => value === null || value === undefined,
     findCharacterbyId: mocks.findCharacterbyId,

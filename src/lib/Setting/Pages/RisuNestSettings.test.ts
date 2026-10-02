@@ -7,6 +7,9 @@ const appRawSource = readFileSync('src/App.svelte', 'utf8')
 const backupRestoreRawSource = readFileSync('src/lib/Setting/Pages/RisuNestBackupRestore.svelte', 'utf8')
 const storageRawSource = readFileSync('src/lib/Setting/Pages/RisuNestStorageDashboard.svelte', 'utf8')
 const tauriLibRawSource = readFileSync('src-tauri/src/lib.rs', 'utf8')
+const maintenanceSource = readFileSync('src/ts/storage/nativePersistentMaintenance.ts', 'utf8')
+const replacementSource = readFileSync('src/ts/storage/upstreamReplacement.ts', 'utf8')
+const alertSource = readFileSync('src/lib/Others/AlertComp.svelte', 'utf8')
 import { languageEnglish } from 'src/lang/en'
 import { languageKorean } from 'src/lang/ko'
 import { RISUNEST_SETTINGS_TABS } from 'src/ts/setting/risuNestSettingsTabs'
@@ -106,9 +109,12 @@ describe('RisuNest settings navigation', () => {
             '<ExternalStorageSettings />',
             '<RisuNestLocalData />',
         ])
-        // The deep link scrolls to the group the sync section renders itself.
-        expect(readFileSync('src/lib/Setting/ServerSync/ServerSyncConnection.svelte', 'utf8'))
-            .toContain('id="risunest-server-sync"')
+        const nativeServerGroup = '{#if isTauri}\n                <ServerSyncSettings />\n            {/if}'
+        expect(panel).toContain(nativeServerGroup)
+        expect(panel.replace(nativeServerGroup, '')).not.toContain('<ServerSyncSettings />')
+        expect(panel).toContain('{#if isTauri}\n                <RisuNestLocalData />\n            {/if}')
+        const serverSettingsSource = normalizeNewlines(readFileSync('src/lib/Setting/Pages/ServerSyncSettings.svelte', 'utf8'))
+        expect(serverSettingsSource).toContain('{#if isTauri}\n    <SettingGroup title={copy.title} description={copy.description}>')
         expect(backupRestoreSource).not.toContain('ExternalStorageSettings')
     })
 
@@ -121,6 +127,14 @@ describe('RisuNest settings navigation', () => {
         expect(pageSource).toContain('risuNestSettingsTabRequest')
         expect(appSource).toContain("openRisuNestSettingsTab('storage')")
         expect(appSource).toContain("openRisuNestSettingsTab('sync')")
+        const serverNavigation = between(appSource, 'if (!isTauri || !$loadedStore) return', 'return dataHealthNavigation.subscribe(')
+        inOrder(serverNavigation, [
+            'serverSyncNavigation.subscribe(',
+            'if (DBState.db.didFirstSetup && !$onboardingHold)',
+            "openRisuNestSettingsTab('sync')",
+            'SettingsMenuIndex.set(17)',
+            'settingsOpen.set(true)',
+        ])
         expect(appSource.indexOf("openRisuNestSettingsTab('storage')")).toBeLessThan(
             appSource.indexOf('getElementById(DATA_HEALTH_SECTION_ID)'),
         )
@@ -170,7 +184,23 @@ describe('RisuNest backup and restore layout', () => {
         expect(backupRestoreSource).not.toContain('restoreLocalSnapshot')
         expect(backupRestoreSource).not.toContain('alertSelect')
         expect(storageSource).toContain('restoreNativePersistentSnapshot')
-        expect(storageSource).toContain('alertConfirm(language.restoreLocalSnapshotConfirm)')
+        const restoreFlow = between(maintenanceSource, 'export async function requestNativePersistentSnapshotRestore(', 'export async function restartNativeApp(')
+        const confirmation = between(replacementSource, 'export async function confirmUpstreamLibraryReplacement(', '})).confirmed')
+        expect(confirmation).toContain('alertCheckboxConfirm({')
+        expect(confirmation).toContain('checkboxLabel: language.lwwSync.restoreAcknowledge')
+        expect(confirmation).toContain('actionLabel: language.lwwSync.restoreAction')
+        expect(confirmation).toContain('cancelLabel: language.lwwSync.cancelAction')
+        expect(confirmation).toContain('requireChecked: true')
+        inOrder(restoreFlow, [
+            'confirmUpstreamLibraryReplacement(binding.bound)',
+            "await invoke('pds_snapshot_restore_abort'",
+            'return false',
+            'await binding.fence()',
+            "invoke<{revision:number}>('pds_snapshot_restore_activate'",
+        ])
+        expect(alertSource).toContain('disabled={dialog.requireChecked && !checkboxChecked}')
+        expect(alertSource).toContain('if (confirmed && dialog.checkboxConfirm?.requireChecked && !checkboxChecked) return;')
+        expect(alertSource).toContain('onclick={() => finishCheckboxConfirm(false)}>{dialog.cancelLabel}')
         const restore = storageSource.indexOf('{strings.restoreSnapshot}')
         const remove = storageSource.indexOf('{language.remove}')
         expect(restore).toBeGreaterThanOrEqual(0)
@@ -214,12 +244,26 @@ describe('RisuNest native command integration', () => {
         ).toHaveLength(1)
     })
 
-    it('keeps server commands without a peer runtime', () => {
+    it('registers LWW and server settings commands exactly once without a peer runtime', () => {
         expect(tauriLibSource).not.toContain('peer_sync')
         for (const command of [
-            'server_sync_bind',
-            'server_sync_backup_inventory',
-            'server_sync_backup_delete',
+            'server_sync_status',
+            'server_sync_configure',
+            'server_sync_lww_push',
+            'server_sync_lww_pull',
+            'server_sync_lww_ack',
+            'server_sync_lww_fence',
+            'server_sync_lww_activate',
+            'server_sync_lww_hydrate',
+            'server_sync_lww_inspect',
+            'server_sync_lww_stage_target',
+            'server_sync_lww_prepare_new_device',
+            'server_sync_lww_activate_new_device',
+            'server_sync_lww_retry',
+            'server_sync_lww_drain',
+            'server_sync_cancel',
+            'server_sync_notify_start',
+            'server_sync_notify_stop',
             'server_sync_cache_usage',
             'server_sync_cache_cleanup',
         ]) {

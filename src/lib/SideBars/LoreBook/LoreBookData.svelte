@@ -3,7 +3,7 @@
     import { v4 } from "uuid";
     import { language } from "../../../lang";
     import { getCurrentCharacter, getCurrentChat, type loreBook } from "../../../ts/storage/database.svelte";
-    import { alertConfirm, alertMd } from "../../../ts/alert";
+    import { alertCheckboxConfirm, alertConfirm, alertMd } from "../../../ts/alert";
     import Check from "../../UI/GUI/CheckInput.svelte";
     import Help from "../../Others/Help.svelte";
     import TextInput from "../../UI/GUI/TextInput.svelte";
@@ -153,20 +153,20 @@
             {/if}
         </button>
         <button class="valuer" onclick={async () => {
-            let shouldRemove = true;
-            if (value.mode === 'folder' && externalLoreBooks.some(e => e.folder === value.key)) {
-                const firstConfirm = await alertConfirm(language.folderRemoveConfirm);
-                if (!firstConfirm) {
-                    shouldRemove = false;
-                }
-            }
-
-            if (shouldRemove) {
-                const secondConfirm = await alertConfirm(language.removeConfirm + (value.comment || 'Unnamed Folder'));
-                if (secondConfirm) {
-                    deactivateLocally(value);
-                    onRemove();
-                }
+            const title = language.removeConfirm + (value.comment || 'Unnamed Folder');
+            const confirmed = value.mode === 'folder' && externalLoreBooks.some(e => e.folder === value.key)
+                ? (await alertCheckboxConfirm({
+                    title: language.folderRemoveConfirm,
+                    description: title,
+                    checkboxLabel: language.checkboxConfirmation.lorebookDeletion,
+                    actionLabel: language.confirm,
+                    cancelLabel: language.cancel,
+                    requireChecked: true,
+                })).confirmed
+                : await alertConfirm(title);
+            if (confirmed) {
+                deactivateLocally(value);
+                onRemove();
             }
         }}>
             <XIcon size={20} />

@@ -1,21 +1,21 @@
 use super::*;
 
 #[test]
-fn ordinary_parent_saves_preserve_owner_heads_and_remap_modules() {
+fn ordinary_parent_saves_preserve_owner_heads_by_stable_module_identity() {
     let (_directory, mut store, database) = open_fixture();
     let mut value = root(&database);
     value["modules"] = json!([
-        {"id":"one", "assets":[["a","assets/a","bin"]]},
-        {"id":"two", "assets":[]}
+        {"id": "module-0", "assets":[["a","assets/a","bin"]]},
+        {"id": "module-1", "assets":[]}
     ]);
     let heads = vec![
         AssetOwnerHead::present(
-            AssetOwnerLocator::RootModuleAssets { index: 0 },
+            AssetOwnerLocator::RootModuleAssets { module_id: "module-0".to_owned() },
             "11".repeat(32),
             1,
         ),
         AssetOwnerHead::present(
-            AssetOwnerLocator::RootModuleAssets { index: 1 },
+            AssetOwnerLocator::RootModuleAssets { module_id: "module-1".to_owned() },
             "22".repeat(32),
             0,
         ),
@@ -47,7 +47,7 @@ fn ordinary_parent_saves_preserve_owner_heads_and_remap_modules() {
         .unwrap();
     assert_eq!(
         store
-            .read_asset_owner_head(&AssetOwnerLocator::RootModuleAssets { index: 0 }, None)
+            .read_asset_owner_head(&AssetOwnerLocator::RootModuleAssets { module_id: "module-1".to_owned() }, None)
             .unwrap()
             .unwrap()
             .value
@@ -112,7 +112,7 @@ fn asset_owner_occurrences_are_isolated_by_revision_lease() {
     let mut first_root = root(&database);
     first_root["modules"] = json!([
         {
-            "id": "duplicate-module",
+            "id": "module-0",
             "name": "First duplicate",
             "description": "",
             "assets": [
@@ -121,25 +121,25 @@ fn asset_owner_occurrences_are_isolated_by_revision_lease() {
             ]
         },
         {
-            "id": "duplicate-module",
+            "id": "module-1",
             "name": "Second duplicate",
             "description": "",
             "assets": []
         }
     ]);
     first_root["personas"] = json!([
-        {
+        {"id": "persona-0",
             "name": "Missing ID and absent assets",
             "personaPrompt": "",
             "icon": "",
-            "embeddedModule": { "id": "", "name": "Absent assets", "description": "" }
+            "embeddedModule": { "id": "embedded-0", "name": "Absent assets", "description": "" }
         },
-        {
+        {"id": "persona-1",
             "name": "Missing ID and present assets",
             "personaPrompt": "",
             "icon": "",
             "embeddedModule": {
-                "id": "",
+                "id": "embedded-1",
                 "name": "Present assets",
                 "description": "",
                 "assets": [["persona", "assets/persona.bin", "OddExt"]]
@@ -148,18 +148,18 @@ fn asset_owner_occurrences_are_isolated_by_revision_lease() {
     ]);
     let original_heads = vec![
         AssetOwnerHead::present(
-            AssetOwnerLocator::RootModuleAssets { index: 0 },
+            AssetOwnerLocator::RootModuleAssets { module_id: "module-0".to_owned() },
             "11".repeat(32),
             2,
         ),
         AssetOwnerHead::present(
-            AssetOwnerLocator::RootModuleAssets { index: 1 },
+            AssetOwnerLocator::RootModuleAssets { module_id: "module-1".to_owned() },
             "22".repeat(32),
             0,
         ),
-        AssetOwnerHead::absent(AssetOwnerLocator::PersonaEmbeddedModuleAssets { index: 0 }),
+        AssetOwnerHead::absent(AssetOwnerLocator::PersonaEmbeddedModuleAssets { persona_id: "persona-0".to_owned(), module_id: "embedded-0".to_owned() }),
         AssetOwnerHead::present(
-            AssetOwnerLocator::PersonaEmbeddedModuleAssets { index: 1 },
+            AssetOwnerLocator::PersonaEmbeddedModuleAssets { persona_id: "persona-1".to_owned(), module_id: "embedded-1".to_owned() },
             "33".repeat(32),
             1,
         ),
@@ -179,18 +179,7 @@ fn asset_owner_occurrences_are_isolated_by_revision_lease() {
         .as_array_mut()
         .expect("module array")
         .reverse();
-    let reordered_heads = vec![
-        AssetOwnerHead::present(
-            AssetOwnerLocator::RootModuleAssets { index: 0 },
-            "22".repeat(32),
-            0,
-        ),
-        AssetOwnerHead::present(
-            AssetOwnerLocator::RootModuleAssets { index: 1 },
-            "11".repeat(32),
-            2,
-        ),
-    ];
+    let reordered_heads = original_heads[..2].to_vec();
     let reordered = store
         .commit(&WorkingSetCommit {
             root: Some(reordered_root),
@@ -201,7 +190,7 @@ fn asset_owner_occurrences_are_isolated_by_revision_lease() {
 
     assert_eq!(
         store
-            .read_asset_owner_head(&AssetOwnerLocator::RootModuleAssets { index: 0 }, None)
+            .read_asset_owner_head(&AssetOwnerLocator::RootModuleAssets { module_id: "module-0".to_owned() }, None)
             .expect("read current owner head"),
         Some(super::Versioned {
             revision: reordered.revision,
@@ -211,7 +200,7 @@ fn asset_owner_occurrences_are_isolated_by_revision_lease() {
     assert_eq!(
         store
             .read_asset_owner_head(
-                &AssetOwnerLocator::RootModuleAssets { index: 0 },
+                &AssetOwnerLocator::RootModuleAssets { module_id: "module-0".to_owned() },
                 Some(&lease.lease),
             )
             .expect("read leased owner head"),
@@ -223,7 +212,7 @@ fn asset_owner_occurrences_are_isolated_by_revision_lease() {
     assert_eq!(
         store
             .read_asset_owner_head(
-                &AssetOwnerLocator::PersonaEmbeddedModuleAssets { index: 0 },
+                &AssetOwnerLocator::PersonaEmbeddedModuleAssets { persona_id: "persona-0".to_owned(), module_id: "embedded-0".to_owned() },
                 Some(&lease.lease),
             )
             .expect("read leased absent owner head"),
@@ -239,13 +228,13 @@ fn invalid_or_stale_owner_head_commit_preserves_parent_and_revision() {
     let (_directory, mut store, database) = open_fixture();
     let mut original_root = root(&database);
     original_root["modules"] = json!([{
-        "id": "module",
+        "id": "module-0",
         "name": "Module",
         "description": "",
         "assets": [["kept", "assets/kept.bin", "BIN"]]
     }]);
     let valid_head = AssetOwnerHead::present(
-        AssetOwnerLocator::RootModuleAssets { index: 0 },
+        AssetOwnerLocator::RootModuleAssets { module_id: "module-0".to_owned() },
         "44".repeat(32),
         1,
     );
@@ -284,7 +273,7 @@ fn invalid_or_stale_owner_head_commit_preserves_parent_and_revision() {
     assert!(matches!(
         store.read_asset_owner_head(
             &AssetOwnerLocator::RootModuleAssets {
-                index: super::JAVASCRIPT_MAX_SAFE_INTEGER + 1,
+                module_id: String::new(),
             },
             None,
         ),
@@ -447,18 +436,18 @@ fn unchanged_asset_owner_head_survives_cow_generation_and_pinned_reads() {
     let (_directory, mut store, database) = open_fixture();
     let mut database_root = root(&database);
     database_root["modules"] = json!([{
-        "id": "module",
+        "id": "module-0",
         "name": "Module",
         "description": "",
         "assets": [["asset", "assets/owner.bin", "BIN"]]
     }]);
-    database_root["personas"] = json!([{
+    database_root["personas"] = json!([{"id": "persona-0",
         "name": "Absent assets",
-        "embeddedModule": { "id": "embedded", "name": "Embedded" }
+        "embeddedModule": { "id": "embedded-0", "name": "Embedded" }
     }]);
-    let owner = AssetOwnerLocator::RootModuleAssets { index: 0 };
+    let owner = AssetOwnerLocator::RootModuleAssets { module_id: "module-0".to_owned() };
     let head = AssetOwnerHead::present(owner.clone(), "81".repeat(32), 1);
-    let absent_owner = AssetOwnerLocator::PersonaEmbeddedModuleAssets { index: 0 };
+    let absent_owner = AssetOwnerLocator::PersonaEmbeddedModuleAssets { persona_id: "persona-0".to_owned(), module_id: "embedded-0".to_owned() };
     let absent_head = AssetOwnerHead::absent(absent_owner.clone());
     let committed = store
         .commit(&WorkingSetCommit {
@@ -737,7 +726,7 @@ fn materialization_and_export_fail_closed_on_corrupt_owner_manifest() {
             &staging.staging_id,
             &json!({
                 "modules": [{
-                    "id": "module",
+                    "id": "module-0",
                     "name": "Module",
                     "description": "",
                     "assets": tuples.clone()
@@ -749,7 +738,7 @@ fn materialization_and_export_fail_closed_on_corrupt_owner_manifest() {
         .replace_put_asset_owner_heads(
             &staging.staging_id,
             &[AssetOwnerHead::present(
-                AssetOwnerLocator::RootModuleAssets { index: 0 },
+                AssetOwnerLocator::RootModuleAssets { module_id: "module-0".to_owned() },
                 manifest.content_hash.clone(),
                 2,
             )],
@@ -779,22 +768,22 @@ fn materialization_and_export_fail_closed_on_corrupt_owner_manifest() {
         .execute(
             "INSERT INTO asset_owner_heads (
                 generation, owner_kind, owner_locator, present, manifest_hash, entry_count
-             ) VALUES (?1, 'root-module-assets', '00', 1, ?2, 2)",
+             ) VALUES (?1, 'root-module-assets', '', 1, ?2, 2)",
             params![generation, manifest.content_hash],
         )
-        .expect("insert noncanonical duplicate owner locator");
+        .expect("insert empty owner identity");
     let locator_error = store
         .materialize(None)
-        .expect_err("noncanonical owner locators must fail closed");
-    assert!(locator_error.to_string().contains("locator"));
+        .expect_err("empty owner identities must fail closed");
+    assert!(locator_error.to_string().contains("moduleId"));
     store
         .connection
         .execute(
             "DELETE FROM asset_owner_heads
-             WHERE generation = ?1 AND owner_kind = 'root-module-assets' AND owner_locator = '00'",
+             WHERE generation = ?1 AND owner_kind = 'root-module-assets' AND owner_locator = ''",
             [generation],
         )
-        .expect("remove noncanonical duplicate owner locator");
+        .expect("remove empty owner identity");
 
     fs::write(directory.path().join(&manifest.physical_key), b"corrupt")
         .expect("corrupt owner manifest object");
@@ -823,13 +812,13 @@ fn staged_owner_heads_activate_and_remain_pinned_with_their_database_generation(
             &staging.staging_id,
             &json!({
                 "modules": [{
-                    "id": "module",
+                    "id": "module-0",
                     "name": "Module",
                     "assets": [["asset", "shared", "BIN"]]
                 }],
                 "personas": [{
-                    "id": "persona",
-                    "embeddedModule": { "id": "embedded", "name": "Embedded" }
+                    "id": "persona-0",
+                    "embeddedModule": { "id": "embedded-0", "name": "Embedded" }
                 }]
             }),
         )
@@ -841,12 +830,12 @@ fn staged_owner_heads_activate_and_remain_pinned_with_their_database_generation(
         .replace_add_characters(&staging.staging_id, &[])
         .expect("stage empty characters");
     let present = AssetOwnerHead::present(
-        AssetOwnerLocator::RootModuleAssets { index: 0 },
+        AssetOwnerLocator::RootModuleAssets { module_id: "module-0".to_owned() },
         "91".repeat(32),
         1,
     );
     let absent =
-        AssetOwnerHead::absent(AssetOwnerLocator::PersonaEmbeddedModuleAssets { index: 0 });
+        AssetOwnerHead::absent(AssetOwnerLocator::PersonaEmbeddedModuleAssets { persona_id: "persona-0".to_owned(), module_id: "embedded-0".to_owned() });
     store
         .replace_put_asset_owner_heads(&staging.staging_id, &[present.clone(), absent.clone()])
         .expect("stage owner heads");
@@ -1460,7 +1449,7 @@ fn working_set_asset_alias_batch_is_atomic_with_imported_owners() {
     let (directory, mut store, database) = open_fixture();
     let mut imported_root = root(&database);
     imported_root["modules"] = json!([{
-        "id": "native-module",
+        "id": "module-0",
         "name": "Native module",
         "description": "",
         "assets": [["module asset", "assets/native-module.bin", "BIN"]]
@@ -1538,7 +1527,7 @@ fn working_set_asset_alias_batch_is_atomic_with_imported_owners() {
             1,
         ),
         AssetOwnerHead::present(
-            AssetOwnerLocator::RootModuleAssets { index: 0 },
+            AssetOwnerLocator::RootModuleAssets { module_id: "module-0".to_owned() },
             module_manifest.content_hash,
             1,
         ),
