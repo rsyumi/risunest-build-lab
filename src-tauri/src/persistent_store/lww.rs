@@ -195,6 +195,13 @@ enum Intent {
         commit: WorkingSetCommit,
         aliases: Vec<super::AssetAlias>,
     },
+    PluginClaim {
+        owner: String,
+        key: String,
+        import_batch_id: String,
+        assigned_at: i64,
+        expected_revision: i64,
+    },
     Replacement {
         staging_id: String,
         base_revision: i64,
@@ -870,6 +877,31 @@ impl PersistentStore {
         }
         result
     }
+    pub(super) fn lww_claim_plugin_value(
+        &mut self,
+        owner: &str,
+        key: &str,
+        import_batch_id: &str,
+        assigned_at: i64,
+        expected_revision: i64,
+    ) -> StoreResult<(Option<Value>, i64)> {
+        self.lww_recover_intents()?;
+        if commit::plugin_claim_source(&self.connection, owner, key, import_batch_id, expected_revision)?.is_none() {
+            return Ok((None, expected_revision));
+        }
+        let header = Header { binding_authority: self.lww_binding_authority()?, request_id: Uuid::new_v4().to_string() };
+        let intent = Intent::PluginClaim {
+            owner: owner.into(), key: key.into(), import_batch_id: import_batch_id.into(), assigned_at, expected_revision,
+        };
+        let (stamp, digest) = self.reserve_intent(&header, &intent)?;
+        let result = commit::claim_unowned_plugin_value(
+            &mut self.connection, owner, key, import_batch_id, assigned_at, expected_revision, &header, &stamp, &digest,
+        );
+        if result.is_ok() || matches!(result, Err(StoreError::RevisionConflict { .. }) | Err(StoreError::Validation { .. })) {
+            self.complete_intent(&header)?;
+        }
+        result
+    }
     pub(crate) fn lww_recover_intents(&mut self) -> StoreResult<()> {
         let authority = self.lww_binding_authority()?;
         let rows: Vec<(String, String, String, String, String)> = {
@@ -923,7 +955,7 @@ impl PersistentStore {
             if header.binding_authority != authority {
                 return Err(error("unfinished-intent-authority-changed"));
             }
-            if matches!(&intent, Intent::Replacement { .. }) {
+            if matches!(&intent, Intent::Replacement { .. } | Intent::PluginClaim { .. }) {
                 self.completed_intent(&header, &intent)?;
             }
             match intent {
@@ -938,6 +970,12 @@ impl PersistentStore {
                         &header,
                         &stamp,
                         &digest,
+                    )?;
+                }
+                Intent::PluginClaim { owner, key, import_batch_id, assigned_at, expected_revision } => {
+                    commit::claim_unowned_plugin_value(
+                        &mut self.connection, &owner, &key, &import_batch_id, assigned_at, expected_revision,
+                        &header, &stamp, &digest,
                     )?;
                 }
                 Intent::Replacement {

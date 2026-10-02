@@ -2426,40 +2426,34 @@ fn validation(message: impl Into<String>) -> StoreError {
     }
 }
 
-/// Moves one value from the unowned side to the plugin that asked for it, in
-/// the revision path so the change index and the outbox see it. Answers with
-/// nothing when the plugin already holds that key or no unassigned row from
-/// this import carries it, and then nothing is written.
-pub(super) fn claim_unowned_plugin_value(
-    connection: &mut Connection,
+pub(super) fn plugin_claim_source(
+    connection: &Connection,
     owner: &str,
     key: &str,
     import_batch_id: &str,
-    assigned_at: i64,
     expected_revision: i64,
-) -> StoreResult<(Option<Value>, i64)> {
+) -> StoreResult<Option<(i64, i64, String)>> {
     if !plugin_owner::validate_owner(owner) || plugin_owner::is_unowned(owner) {
         return Err(validation("plugin storage owner is invalid"));
     }
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let actual_revision = current_revision(&transaction)?;
+    let actual_revision = current_revision(connection)?;
     if actual_revision != expected_revision {
         return Err(StoreError::RevisionConflict {
             expected: expected_revision,
             actual: actual_revision,
         });
     }
-    let generation = active_generation(&transaction)?;
-    let held: i64 = transaction.query_row(
+    let generation = active_generation(connection)?;
+    let held: i64 = connection.query_row(
         "SELECT COUNT(*) FROM plugin_storage
          WHERE generation = ?1 AND owner = ?2 AND storage_key = ?3",
         params![generation, owner, key],
         |row| row.get(0),
     )?;
     if held != 0 {
-        return Ok((None, actual_revision));
+        return Ok(None);
     }
-    let source: Option<(i64, i64, String)> = transaction
+    Ok(connection
         .query_row(
             "SELECT byte_size, ordinal, value FROM plugin_storage
              WHERE generation = ?1 AND owner = ?2 AND storage_key = ?3
@@ -2472,12 +2466,46 @@ pub(super) fn claim_unowned_plugin_value(
             ],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
-        .optional()?;
+        .optional()?)
+}
+
+/// Moves one value without changing its global position. Both owner keys and
+/// their order values are compared and recorded in the same transaction.
+pub(super) fn claim_unowned_plugin_value(
+    connection: &mut Connection,
+    owner: &str,
+    key: &str,
+    import_batch_id: &str,
+    assigned_at: i64,
+    expected_revision: i64,
+    header: &super::lww::Header,
+    stamp: &risunest_sync_wire::stamp::Stamp,
+    digest: &str,
+) -> StoreResult<(Option<Value>, i64)> {
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    if let Some((previous, revision)) = transaction.query_row(
+        "SELECT digest,revision FROM lww_requests WHERE request_id=?1", [&header.request_id],
+        |row| Ok((row.get::<_,String>(0)?,row.get::<_,i64>(1)?)),
+    ).optional()? {
+        if previous != digest { return Err(validation("request-id-integrity")); }
+        return Ok((None, revision));
+    }
+    let source = plugin_claim_source(&transaction, owner, key, import_batch_id, expected_revision)?;
     let Some((byte_size, ordinal, serialized)) = source else {
-        return Ok((None, actual_revision));
+        return Ok((None, expected_revision));
     };
+    let generation = active_generation(&transaction)?;
     let value: Value = serde_json::from_str(&serialized)?;
-    let revision = actual_revision + 1;
+    let input = WorkingSetCommit {
+        expected_revision,
+        plugin_storage: Some(vec![
+            PluginStorageMutation::Delete { owner: plugin_owner::UNOWNED_OWNER.into(), key: key.into() },
+            PluginStorageMutation::Set { owner: owner.into(), key: key.into(), value: value.clone() },
+        ]),
+        ..Default::default()
+    };
+    let before = super::lww::capture_targets(&transaction, &generation, &input, &[], true, &BTreeSet::new())?;
+    let revision = expected_revision + 1;
     super::content_change_index::begin_mutation(&transaction, &generation, revision, "local")?;
     // A delete and an insert, so both sides of the move reach the change index.
     transaction.execute(
@@ -2502,6 +2530,11 @@ pub(super) fn claim_unowned_plugin_value(
             assigned_at
         ],
     )?;
+    let after = super::lww::capture_targets(&transaction, &generation, &input, &[], false, &BTreeSet::new())?;
+    let changed = before.keys().chain(after.keys()).cloned().collect::<Vec<_>>();
+    super::lww::record_changes(&transaction, before, after, stamp, header.binding_authority, &header.request_id)?;
+    super::lww::refresh_orders(&transaction, &generation, &changed)?;
+    transaction.execute("INSERT INTO lww_requests VALUES(?1,?2,?3)", params![header.request_id, digest, revision])?;
     super::content_change_index::finish_mutation(&transaction)?;
     set_active(&transaction, revision, &generation)?;
     transaction.commit()?;
