@@ -2,6 +2,7 @@
 use super::{active_generation, current_revision, StoreError, StoreResult};
 use rusqlite::{params, Connection, Transaction, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use crate::native_log::logged;
 
 pub(super) const SCHEMA: &str = r#"
 CREATE TABLE library_sync_selection(singleton INTEGER PRIMARY KEY CHECK(singleton=1),target TEXT NOT NULL CHECK(target IN ('none','server','external')),connection_id TEXT,selection_epoch TEXT NOT NULL,paused INTEGER NOT NULL CHECK(paused IN (0,1)),decision_required INTEGER NOT NULL CHECK(decision_required IN (0,1)),CHECK((target='none' AND connection_id IS NULL) OR (target!='none' AND length(connection_id)>0)));
@@ -140,74 +141,6 @@ pub(crate) fn require_no_pending_publication(db: &Connection) -> StoreResult<()>
     Ok(())
 }
 
-pub(crate) fn require_publish(
-    db: &Connection,
-    capture: &CaptureIdentity,
-    connection: &str,
-) -> StoreResult<()> {
-    require_publish_with_pause(db, capture, connection, false)
-}
-
-/// Exit drain may flush the selected paused target without changing the
-/// user's durable pause intent. Native code validates the live exit session
-/// immediately before every call to this override.
-pub(crate) fn require_publish_exit_drain(
-    db: &Connection,
-    capture: &CaptureIdentity,
-    connection: &str,
-) -> StoreResult<()> {
-    require_publish_with_pause(db, capture, connection, true)
-}
-
-fn require_publish_with_pause(
-    db: &Connection,
-    capture: &CaptureIdentity,
-    connection: &str,
-    allow_paused: bool,
-) -> StoreResult<()> {
-    let current = identity(db)?;
-    let selection = read(db)?;
-    if current.store_id != capture.store_id
-        || current.library_epoch != capture.library_epoch
-        || current.generation != capture.generation
-        || current.selection_epoch != capture.selection_epoch
-        || capture.revision > current.revision
-        || capture.revision < 0
-    {
-        return Err(invalid("Stale external capture"));
-    }
-    if selection.target != SyncTarget::External(connection.into())
-        || (selection.paused && !allow_paused)
-        || selection.decision_required
-    {
-        return Err(invalid("External sync target is not active"));
-    }
-    Ok(())
-}
-
-pub(crate) fn require_server(db: &Connection) -> StoreResult<()> {
-    let selected = read(db)?;
-    if !matches!(selected.target, SyncTarget::Server(_)) || selected.paused {
-        return Err(invalid("Server sync target is not active"));
-    }
-    Ok(())
-}
-
-pub(super) fn restored_copy(tx: &Transaction<'_>) -> StoreResult<()> {
-    tx.execute(
-        "UPDATE local_library_identity SET store_id=?1,library_epoch=?2 WHERE singleton=1",
-        params![
-            uuid::Uuid::new_v4().to_string(),
-            uuid::Uuid::new_v4().to_string()
-        ],
-    )?;
-    tx.execute("UPDATE library_sync_selection SET selection_epoch=?1,decision_required=1 WHERE singleton=1",[uuid::Uuid::new_v4().to_string()])?;
-    tx.execute("UPDATE external_storage_jobs SET phase='stale' WHERE phase NOT IN ('complete','cancelled')",[])?;
-    tx.execute("UPDATE content_change_consumers SET rebuild_required=1", [])?;
-    tx.execute("DELETE FROM content_change_context", [])?;
-    Ok(())
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BindingContent {
@@ -270,7 +203,7 @@ impl super::PersistentStore {
 
 #[tauri::command]
 pub(crate) fn pds_lww_binding_content(state: tauri::State<'_, super::commands::PersistentStoreState>) -> StoreResult<BindingContent> {
-    super::commands::with_store(state, |store| store.lww_binding_content())
+    logged("pds_lww_binding_content", super::commands::with_store(state, |store| store.lww_binding_content()))
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -745,15 +678,15 @@ fn validate_binding_inspection_stages(store: &super::PersistentStore, inspection
 
 #[tauri::command]
 pub(crate) fn pds_lww_binding_state(state: tauri::State<'_, super::commands::PersistentStoreState>) -> StoreResult<BindingState> {
-    super::commands::with_store_mut(state, |store| { store.lww_recover_intents()?; store.lww_binding_state() })
+    logged("pds_lww_binding_state", super::commands::with_store_mut(state, |store| { store.lww_recover_intents()?; store.lww_binding_state() }))
 }
 #[tauri::command]
 pub(crate) fn pds_lww_switch_target(state: tauri::State<'_, super::commands::PersistentStoreState>, request: SwitchBindingRequest) -> StoreResult<BindingState> {
-    super::commands::with_store_mut(state, |store| store.switch_lww_binding(&request))
+    logged("pds_lww_switch_target", super::commands::with_store_mut(state, |store| store.switch_lww_binding(&request)))
 }
 #[tauri::command]
 pub(crate) fn pds_lww_replace_from_target(state: tauri::State<'_, super::commands::PersistentStoreState>, request: ReplaceBindingRequest) -> StoreResult<super::RevisionResult> {
-    super::commands::with_store_mut(state, |store| store.replace_lww_binding(&request))
+    logged("pds_lww_replace_from_target", super::commands::with_store_mut(state, |store| store.replace_lww_binding(&request)))
 }
 
 pub(crate) fn binding_stage_digest(db: &Connection, staging_id: &str) -> StoreResult<String> {

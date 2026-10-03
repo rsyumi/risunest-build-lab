@@ -280,24 +280,6 @@ pub(super) fn logical_owner_heads(heads: &[ValidatedOwnerHead]) -> Vec<LogicalOw
     heads.iter().map(|head| head.head.clone()).collect()
 }
 
-pub(super) fn owner_dependencies(
-    heads: &[ValidatedOwnerHead],
-) -> StoreResult<Vec<LogicalManifestObject>> {
-    let mut dependencies = BTreeMap::new();
-    for dependency in heads.iter().flat_map(|head| &head.dependencies) {
-        if dependencies
-            .insert(dependency.hash.clone(), dependency.size)
-            .is_some_and(|old| old != dependency.size)
-        {
-            return validation("owner dependency hash has conflicting sizes");
-        }
-    }
-    Ok(dependencies
-        .into_iter()
-        .map(|(hash, size)| LogicalManifestObject { hash, size })
-        .collect())
-}
-
 pub(super) fn owner_tuple_shape(values: &[Value], allow_trailing: bool) -> StoreResult<()> {
     for value in values {
         let Some(tuple) = value.as_array() else { return validation("owner tuple must be an array"); };

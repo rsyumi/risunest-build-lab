@@ -47,7 +47,21 @@ mod lww {
             "native LWW validation is unavailable in the isolated page fixture",
         ))
     }
+    #[allow(dead_code)]
+    pub(crate) fn archive_object_hashes(
+        _archived: &super::archive::ArchivedObject,
+    ) -> super::StoreResult<Vec<String>> {
+        Err(super::record_projection::codec_error(
+            "native archive roots are unavailable in the isolated page fixture",
+        ))
+    }
 }
+mod archive {
+    #[allow(dead_code)]
+    pub(crate) type ArchivedObject = serde_json::Value;
+}
+// The sweep and copied-database acceptance are outside this fixture.
+#[allow(dead_code)]
 #[path = "../../../src-tauri/src/persistent_store/message_pages.rs"]
 mod message_pages;
 
@@ -189,11 +203,11 @@ mod tests {
                 "g",
                 "c",
                 "chat",
-                Some(MessageEdit {
+                Some(&[MessageEdit {
                     start: start as i64,
                     delete_count: delete as i64,
                     insert_count: values.len() as i64,
-                }),
+                }]),
             )
             .unwrap();
             let updated_manifest = manifest(&tx, &updated);
@@ -254,9 +268,9 @@ mod tests {
             let old_manifest = manifest(&target,&before);
             let tx = source.transaction().unwrap(); capture_manifest(&tx,"g","c","chat",None).unwrap();
             splice(&tx,start,delete,&values);
-            let updated = capture_manifest(&tx,"g","c","chat",Some(MessageEdit {
+            let updated = capture_manifest(&tx,"g","c","chat",Some(&[MessageEdit {
                 start:start as i64,delete_count:delete as i64,insert_count:values.len() as i64,
-            })).unwrap();
+            }])).unwrap();
             let new_manifest = manifest(&tx,&updated);
             let new_pages = new_manifest.pages.iter().filter(|p| !old_manifest.pages.iter().any(|old| old.hash==p.hash)).collect::<Vec<_>>();
             let hashed_messages = new_pages.iter().map(|p| p.message_count as u64).sum::<u64>();
@@ -337,7 +351,7 @@ mod tests {
         assert_eq!(target.query_row("SELECT value FROM messages WHERE message_index=1",[],|r| r.get::<_,String>(0)).unwrap(),
             String::from_utf8(payload_value::encode(&values[1]).unwrap()).unwrap());
         splice(&tx,1,1,&[edited]);
-        let updated = capture_manifest(&tx,"g","c","chat",Some(MessageEdit { start:1,delete_count:1,insert_count:1 })).unwrap();
+        let updated = capture_manifest(&tx,"g","c","chat",Some(&[MessageEdit { start:1,delete_count:1,insert_count:1 }])).unwrap();
         let after = manifest(&tx,&updated); assert_eq!(after.pages.len(),1);
         copy_objects(&tx,&target);
         reset_hash_work(); validate_manifest(&target,&updated).unwrap();
@@ -499,11 +513,11 @@ mod tests {
                 "g",
                 "c",
                 "chat",
-                Some(MessageEdit {
+                Some(&[MessageEdit {
                     start: 1,
                     delete_count: 1,
                     insert_count: 1,
-                }),
+                }]),
             )
             .unwrap();
             assert_ne!(old, updated);

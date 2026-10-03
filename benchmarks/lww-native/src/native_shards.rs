@@ -19,7 +19,7 @@ impl ShardPlan {
         Self {seed, assets, ordinary_messages:256, assets_per_owner:64}
     }
     fn validate(&self) -> Result<(), String> {
-        if !(1..=512).contains(&self.ordinary_messages) || !(1..=256).contains(&self.assets_per_owner) {
+        if !(1..=512).contains(&self.ordinary_messages) || self.assets_per_owner == 0 {
             return Err("shard plan exceeds bounded message/owner batch size".into());
         }
         Ok(())
@@ -147,5 +147,14 @@ mod tests {
         let mut plan = ShardPlan::new(1,100001);
         plan.ordinary_messages = 513;
         assert!(NativeShards::new(plan).is_err());
+        assert!(NativeShards::new(ShardPlan {assets_per_owner:0, ..ShardPlan::new(1,1)}).is_err());
+    }
+    #[test]
+    fn one_owner_can_hold_ten_thousand_assets_within_shard_bytes() {
+        let plan = ShardPlan {assets_per_owner:10_000, ..ShardPlan::new(3,10_000)};
+        let shard = NativeShards::new(plan).unwrap().next().unwrap().unwrap();
+        assert_eq!(shard.assets.len(),10_000);
+        assert_eq!(shard.character["additionalAssets"].as_array().unwrap().len(),10_000);
+        assert!(shard.serialized_character_bytes <= MAX_SHARD_BYTES as u64);
     }
 }

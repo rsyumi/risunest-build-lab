@@ -58,6 +58,7 @@ pub(super) fn classify(
             retry_at_ms: None,
             oauth_error: None,
             oauth_error_description: None,
+            cause: Default::default(),
         },
         423 => common::error(ErrorKind::Transient, status),
         _ => common::classify_status(status, headers, now_ms),

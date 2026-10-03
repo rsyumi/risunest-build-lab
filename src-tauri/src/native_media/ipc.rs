@@ -1,5 +1,6 @@
 use super::{encode_inlay_image, EncodedInlayImage, InlayEncodeOptions, InlayImageMetadata};
 use crate::persistent_store::PersistentStoreState;
+use crate::native_log::logged;
 use std::{
     collections::HashMap,
     fs,
@@ -543,24 +544,26 @@ pub(crate) async fn native_media_inlay_input_open(
     upload_id: String,
     total_bytes: u64,
 ) -> Result<NativeMediaInputOpened, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let _operation = app
-            .state::<PersistentStoreState>()
-            .admit_renderer_operation()
-            .map_err(|error| error.to_string())?;
-        let state = app.state::<NativeMediaIpcState>();
-        let file = state.create_spool()?;
-        state
-            .pool
-            .lock()
-            .map_err(|error| format!("native media transfer mutex poisoned: {error}"))?
-            .open(upload_id, total_bytes, file)?;
-        Ok(NativeMediaInputOpened {
-            capacity: NATIVE_MEDIA_IPC_CHUNK_BYTES,
+    logged("native_media_inlay_input_open", async move {
+        tauri::async_runtime::spawn_blocking(move || {
+            let _operation = app
+                .state::<PersistentStoreState>()
+                .admit_renderer_operation()
+                .map_err(|error| error.to_string())?;
+            let state = app.state::<NativeMediaIpcState>();
+            let file = state.create_spool()?;
+            state
+                .pool
+                .lock()
+                .map_err(|error| format!("native media transfer mutex poisoned: {error}"))?
+                .open(upload_id, total_bytes, file)?;
+            Ok(NativeMediaInputOpened {
+                capacity: NATIVE_MEDIA_IPC_CHUNK_BYTES,
+            })
         })
-    })
-    .await
-    .map_err(|error| format!("failed to join native media input open operation: {error}"))?
+        .await
+        .map_err(|error| format!("failed to join native media input open operation: {error}"))?
+    }.await)
 }
 
 #[tauri::command(async)]
@@ -570,19 +573,21 @@ pub(crate) async fn native_media_inlay_input_chunk(
     offset: u64,
     data: Vec<u8>,
 ) -> Result<u64, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let _operation = app
-            .state::<PersistentStoreState>()
-            .admit_renderer_operation()
-            .map_err(|error| error.to_string())?;
-        app.state::<NativeMediaIpcState>()
-            .pool
-            .lock()
-            .map_err(|error| format!("native media transfer mutex poisoned: {error}"))?
-            .append(&upload_id, offset, &data)
-    })
-    .await
-    .map_err(|error| format!("failed to join native media input chunk operation: {error}"))?
+    logged("native_media_inlay_input_chunk", async move {
+        tauri::async_runtime::spawn_blocking(move || {
+            let _operation = app
+                .state::<PersistentStoreState>()
+                .admit_renderer_operation()
+                .map_err(|error| error.to_string())?;
+            app.state::<NativeMediaIpcState>()
+                .pool
+                .lock()
+                .map_err(|error| format!("native media transfer mutex poisoned: {error}"))?
+                .append(&upload_id, offset, &data)
+        })
+        .await
+        .map_err(|error| format!("failed to join native media input chunk operation: {error}"))?
+    }.await)
 }
 
 #[tauri::command]
@@ -590,12 +595,14 @@ pub(crate) fn native_media_inlay_input_cancel(
     state: tauri::State<'_, NativeMediaIpcState>,
     upload_id: String,
 ) -> Result<(), String> {
-    state
-        .pool
-        .lock()
-        .map_err(|error| format!("native media transfer mutex poisoned: {error}"))?
-        .cancel_renderer(&upload_id);
-    Ok(())
+    logged("native_media_inlay_input_cancel", (|| {
+        state
+            .pool
+            .lock()
+            .map_err(|error| format!("native media transfer mutex poisoned: {error}"))?
+            .cancel_renderer(&upload_id);
+        Ok(())
+    })())
 }
 
 #[tauri::command(async)]
@@ -606,65 +613,67 @@ pub(crate) async fn native_media_encode_inlay_finish(
     name: String,
     options: Option<InlayEncodeOptions>,
 ) -> Result<EncodedInlayIpcResult, String> {
-    let cleanup_app = app.clone();
-    let cleanup_id = upload_id.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || {
-        let _operation = app
-            .state::<PersistentStoreState>()
-            .admit_renderer_operation()
-            .map_err(|error| error.to_string())?;
-        let state = app.state::<NativeMediaIpcState>();
-        let input = state
-            .pool
-            .lock()
-            .map_err(|error| format!("native media transfer mutex poisoned: {error}"))?
-            .begin_uploaded_processing(&upload_id)?;
-        let _admission = state.admit_processing(&upload_id)?;
-        let (input, data) = match read_processing_input(input) {
-            Ok(value) => value,
+    logged("native_media_encode_inlay_finish", async move {
+        let cleanup_app = app.clone();
+        let cleanup_id = upload_id.clone();
+        let result = tauri::async_runtime::spawn_blocking(move || {
+            let _operation = app
+                .state::<PersistentStoreState>()
+                .admit_renderer_operation()
+                .map_err(|error| error.to_string())?;
+            let state = app.state::<NativeMediaIpcState>();
+            let input = state
+                .pool
+                .lock()
+                .map_err(|error| format!("native media transfer mutex poisoned: {error}"))?
+                .begin_uploaded_processing(&upload_id)?;
+            let _admission = state.admit_processing(&upload_id)?;
+            let (input, data) = match read_processing_input(input) {
+                Ok(value) => value,
+                Err(error) => {
+                    if let Ok(mut pool) = state.pool.lock() {
+                        pool.finish_processing(&upload_id);
+                    }
+                    return Err(error);
+                }
+            };
+            let encoded = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                encode_inlay_image(&id, &data, &name, options)
+            })) {
+                Ok(Ok(value)) => value,
+                Ok(Err(error)) => {
+                    if let Ok(mut pool) = state.pool.lock() {
+                        pool.finish_processing(&input.id);
+                    }
+                    return Err(error);
+                }
+                Err(_) => {
+                    if let Ok(mut pool) = state.pool.lock() {
+                        pool.finish_processing(&input.id);
+                    }
+                    return Err("native Inlay encoder panicked".to_owned());
+                }
+            };
+            let processing_id = input.id;
+            let generation = input.generation;
+            drop(input.file);
+            finish_encoded_result(&state, processing_id, generation, encoded)
+        })
+        .await;
+        match result {
+            Ok(result) => result,
             Err(error) => {
-                if let Ok(mut pool) = state.pool.lock() {
-                    pool.finish_processing(&upload_id);
+                if let Some(state) = cleanup_app.try_state::<NativeMediaIpcState>() {
+                    if let Ok(mut pool) = state.pool.lock() {
+                        pool.finish_processing(&cleanup_id);
+                    }
                 }
-                return Err(error);
+                Err(format!(
+                    "failed to join native Inlay streamed encoder: {error}"
+                ))
             }
-        };
-        let encoded = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            encode_inlay_image(&id, &data, &name, options)
-        })) {
-            Ok(Ok(value)) => value,
-            Ok(Err(error)) => {
-                if let Ok(mut pool) = state.pool.lock() {
-                    pool.finish_processing(&input.id);
-                }
-                return Err(error);
-            }
-            Err(_) => {
-                if let Ok(mut pool) = state.pool.lock() {
-                    pool.finish_processing(&input.id);
-                }
-                return Err("native Inlay encoder panicked".to_owned());
-            }
-        };
-        let processing_id = input.id;
-        let generation = input.generation;
-        drop(input.file);
-        finish_encoded_result(&state, processing_id, generation, encoded)
-    })
-    .await;
-    match result {
-        Ok(result) => result,
-        Err(error) => {
-            if let Some(state) = cleanup_app.try_state::<NativeMediaIpcState>() {
-                if let Ok(mut pool) = state.pool.lock() {
-                    pool.finish_processing(&cleanup_id);
-                }
-            }
-            Err(format!(
-                "failed to join native Inlay streamed encoder: {error}"
-            ))
         }
-    }
+    }.await)
 }
 
 #[tauri::command(async)]
@@ -674,19 +683,21 @@ pub(crate) async fn native_media_inlay_output_read(
     start: u64,
     end_exclusive: u64,
 ) -> Result<Vec<u8>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let _operation = app
-            .state::<PersistentStoreState>()
-            .admit_renderer_operation()
-            .map_err(|error| error.to_string())?;
-        app.state::<NativeMediaIpcState>()
-            .pool
-            .lock()
-            .map_err(|error| format!("native media transfer mutex poisoned: {error}"))?
-            .read_download(&output_id, start, end_exclusive)
-    })
-    .await
-    .map_err(|error| format!("failed to join native media output read operation: {error}"))?
+    logged("native_media_inlay_output_read", async move {
+        tauri::async_runtime::spawn_blocking(move || {
+            let _operation = app
+                .state::<PersistentStoreState>()
+                .admit_renderer_operation()
+                .map_err(|error| error.to_string())?;
+            app.state::<NativeMediaIpcState>()
+                .pool
+                .lock()
+                .map_err(|error| format!("native media transfer mutex poisoned: {error}"))?
+                .read_download(&output_id, start, end_exclusive)
+        })
+        .await
+        .map_err(|error| format!("failed to join native media output read operation: {error}"))?
+    }.await)
 }
 
 #[tauri::command]
@@ -694,12 +705,14 @@ pub(crate) fn native_media_inlay_output_cancel(
     state: tauri::State<'_, NativeMediaIpcState>,
     output_id: String,
 ) -> Result<(), String> {
-    state
-        .pool
-        .lock()
-        .map_err(|error| format!("native media transfer mutex poisoned: {error}"))?
-        .cancel_renderer(&output_id);
-    Ok(())
+    logged("native_media_inlay_output_cancel", (|| {
+        state
+            .pool
+            .lock()
+            .map_err(|error| format!("native media transfer mutex poisoned: {error}"))?
+            .cancel_renderer(&output_id);
+        Ok(())
+    })())
 }
 
 pub(super) fn encode_direct(

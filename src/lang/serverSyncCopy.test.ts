@@ -21,4 +21,23 @@ describe('sync recovery copy', () => {
         walk(languageKorean, '')
         expect(found.sort()).toEqual(['askLoadFirstMsg', 'remindLaterQuestion', 'setup.finally'].sort())
     })
+    it('offers a download before disconnecting from a server that keeps files only there', () => {
+        expect(languageKorean.risuNest.serverSync).toMatchObject({
+            disconnect: '연결 해제',
+            disconnectTitle: '연결을 해제하시겠습니까?',
+            disconnectRemoteOnly: '서버에만 있는 파일이 있습니다. 필요한 경우 다운로드한 뒤 연결을 해제하세요.',
+            downloadThenDisconnect: '다운로드 후 연결 해제',
+            downloadFailedKeptConnection: '파일을 다운로드하지 못해 연결을 해제하지 않았습니다. 다시 시도하거나 다운로드하지 않고 연결을 해제하세요.',
+            residency: { download: '다운로드' },
+        })
+        expect(languageEnglish.risuNest.serverSync).toMatchObject({
+            disconnect: 'Disconnect',
+            disconnectTitle: 'Disconnect from the server?',
+            disconnectRemoteOnly: 'Some files are stored only on the server. If you need them, download them before disconnecting.',
+            downloadThenDisconnect: 'Download, then disconnect',
+            downloadFailedKeptConnection: 'The files could not be downloaded, so the server was not disconnected. Try again, or disconnect without downloading.',
+            residency: { download: 'Download' },
+        })
+        for (const text of [languageEnglish.risuNest.serverSync, languageKorean.risuNest.serverSync]) expect(text).not.toHaveProperty('downloadBeforeDisconnect')
+    })
 })

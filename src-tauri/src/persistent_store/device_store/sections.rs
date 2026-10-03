@@ -6,7 +6,8 @@ use crate::persistent_store::StoreResult;
 use risunest_external_storage_format::section::{
     decode_local_plugin_entry_key, hypa_entry_key, local_plugin_entry_key, HypaValue,
     InlineOrObject, LocalPluginValue, LocalSettingValue, ObjectReference, PluginSpace,
-    SectionEntry, SectionEntryVersion, SectionKind, SectionValue, MAX_INLINE_VALUE_BYTES,
+    SectionEntry, SectionEntryVersion, SectionKind, SectionValue, ValueOrObject,
+    MAX_INLINE_VALUE_BYTES,
 };
 use risunest_sync_wire::Sequence;
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
@@ -110,6 +111,24 @@ impl SectionValueRow {
             _ => None,
         }
     }
+    /// The bytes this row's entry names as an object instead of carrying them
+    /// inline: a vector, or a plugin or setting value's stored text.
+    pub(crate) fn object_body(&self) -> Option<&[u8]> {
+        let bytes = match self {
+            Self::Hypa { vector, .. } => vector.as_slice(),
+            Self::Plugin { value, .. } | Self::Setting { value } => value.as_bytes(),
+            Self::PluginPermission { .. } | Self::Tombstone { .. } => return None,
+        };
+        rides_as_object(bytes).then_some(bytes)
+    }
+    fn take_object_body(&mut self) -> Option<Vec<u8>> {
+        self.object_body()?;
+        match self {
+            Self::Hypa { vector, .. } => Some(std::mem::take(vector)),
+            Self::Plugin { value, .. } | Self::Setting { value } => Some(std::mem::take(value).into_bytes()),
+            Self::PluginPermission { .. } | Self::Tombstone { .. } => None,
+        }
+    }
 }
 
 fn same_json(a: &str, b: &str) -> bool {
@@ -121,27 +140,6 @@ fn same_json(a: &str, b: &str) -> bool {
 
 /// The triple a section row is named by, in the order the change index holds.
 pub(crate) type SectionKey = (String, String, String);
-pub(crate) type PublishedRows = Vec<(SectionKey, SectionEntryVersion)>;
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ReclaimedRowVersion {
-    pub write_clock: Sequence,
-    pub writer_id: String,
-    pub first_published: TombstonePublication,
-}
-
-pub(crate) type ReclaimedRows = BTreeMap<SectionKey, ReclaimedRowVersion>;
-
-pub(crate) enum SectionPublicationDisposition {
-    Published { first_published: Option<TombstonePublication> },
-    Reclaimed { first_published: TombstonePublication },
-}
-
-pub(crate) struct SectionPublicationRow {
-    pub key: SectionKey,
-    pub version: SectionEntryVersion,
-    pub disposition: SectionPublicationDisposition,
-}
 
 /// The key triple matches the change index, so a row and its change entry name
 /// the same thing without a second encoding.
@@ -186,18 +184,6 @@ pub(crate) struct SectionCursor {
     pub applied_generation: Sequence,
     pub applied_gc_floor: Sequence,
     pub observed_max_write_clock: Sequence,
-}
-
-pub(crate) enum SectionSnapshotEvent {
-    Section {
-        section: Section,
-        state: SectionState,
-        cursor: Option<SectionCursor>,
-    },
-    Row {
-        section: Section,
-        row: SectionRow,
-    },
 }
 
 impl SectionCursor {
@@ -374,6 +360,72 @@ fn section_format_error(_: risunest_external_storage_format::FormatError) -> cra
     invalid("Section entry is invalid")
 }
 
+fn rides_as_object(bytes: &[u8]) -> bool {
+    bytes.len() > MAX_INLINE_VALUE_BYTES
+}
+
+fn object_reference(bytes: &[u8]) -> ObjectReference {
+    ObjectReference {
+        content_sha256: risunest_external_storage_format::content_identity::hash(bytes),
+        byte_length: bytes.len() as u64,
+    }
+}
+
+fn is_json(text: &str) -> bool {
+    serde_json::from_str::<serde::de::IgnoredAny>(text).is_ok()
+}
+
+/// Stored JSON text as its entry carries it. Text that does not parse is
+/// refused at any length; past the inline limit the entry names the text.
+fn json_value(text: &str) -> StoreResult<ValueOrObject> {
+    if !rides_as_object(text.as_bytes()) {
+        return serde_json::from_str(text)
+            .map(ValueOrObject::Inline)
+            .map_err(|_| invalid("Device value is not JSON"));
+    }
+    if !is_json(text) {
+        return Err(invalid("Device value is not JSON"));
+    }
+    Ok(ValueOrObject::Object(object_reference(text.as_bytes())))
+}
+
+fn read_object(
+    reference: &ObjectReference,
+    object: &mut impl FnMut(&ObjectReference) -> StoreResult<Vec<u8>>,
+) -> StoreResult<Vec<u8>> {
+    let bytes = object(reference)?;
+    if bytes.len() as u64 != reference.byte_length
+        || risunest_external_storage_format::content_identity::hash(&bytes) != reference.content_sha256 {
+        return Err(invalid("Section object does not match its reference"));
+    }
+    Ok(bytes)
+}
+
+/// The stored text an object holds. It is installed byte for byte, so it has
+/// to be text, and JSON text has to parse.
+fn object_text(
+    reference: &ObjectReference,
+    object: &mut impl FnMut(&ObjectReference) -> StoreResult<Vec<u8>>,
+    json: bool,
+) -> StoreResult<String> {
+    let text = String::from_utf8(read_object(reference, object)?)
+        .map_err(|_| invalid("Section value object is not text"))?;
+    if json && !is_json(&text) {
+        return Err(invalid("Section value object is not JSON"));
+    }
+    Ok(text)
+}
+
+fn json_text(
+    value: ValueOrObject,
+    object: &mut impl FnMut(&ObjectReference) -> StoreResult<Vec<u8>>,
+) -> StoreResult<String> {
+    match value {
+        ValueOrObject::Inline(value) => Ok(serde_json::to_string(&value)?),
+        ValueOrObject::Object(reference) => object_text(&reference, object, true),
+    }
+}
+
 fn vector_identity(vector: &InlineOrObject) -> StoreResult<([u8; 32], u64)> {
     match vector {
         InlineOrObject::Object(reference) => Ok((reference.content_sha256, reference.byte_length)),
@@ -488,11 +540,8 @@ impl SectionRow {
                 SectionValue::tombstone(marker.generation.clone(), marker.at_ms)
             }
             (SectionValueRow::Hypa { producer, model, endpoint, preprocess_version, dimensions, vector, metadata }, SectionKind::Hypa) => {
-                let vector = if vector.len() > MAX_INLINE_VALUE_BYTES {
-                    InlineOrObject::Object(ObjectReference {
-                        content_sha256: risunest_external_storage_format::content_identity::hash(vector),
-                        byte_length: vector.len() as u64,
-                    })
+                let vector = if rides_as_object(vector) {
+                    InlineOrObject::Object(object_reference(vector))
                 } else {
                     InlineOrObject::inline(vector).map_err(section_format_error)?
                 };
@@ -508,8 +557,11 @@ impl SectionRow {
                     return Err(invalid("Plugin value names another space"));
                 }
                 let (space, value) = match space.as_str() {
-                    "string" => (PluginSpace::String, serde_json::Value::String(value.clone())),
-                    "json" => (PluginSpace::Json, serde_json::from_str(value)?),
+                    "string" if rides_as_object(value.as_bytes()) => {
+                        (PluginSpace::String, ValueOrObject::Object(object_reference(value.as_bytes())))
+                    }
+                    "string" => (PluginSpace::String, ValueOrObject::Inline(serde_json::Value::String(value.clone()))),
+                    "json" => (PluginSpace::Json, json_value(value)?),
                     _ => return Err(invalid("Plugin device space is invalid")),
                 };
                 SectionValue::LocalPlugin(LocalPluginValue { space, value })
@@ -518,13 +570,15 @@ impl SectionRow {
                 if self.key1 != "setting" || !setting_is_local(&self.key2) || !self.key3.is_empty() {
                     return Err(invalid("Device setting is outside the backup scope"));
                 }
-                SectionValue::LocalSetting(LocalSettingValue { value: serde_json::from_str(value)? })
+                SectionValue::LocalSetting(LocalSettingValue { value: json_value(value)? })
             }
             (SectionValueRow::PluginPermission { granted }, SectionKind::LocalSettings) => {
                 if self.key1 != "pluginPermission" || self.key2.is_empty() || self.key3.is_empty() {
                     return Err(invalid("Plugin permission key is invalid"));
                 }
-                SectionValue::LocalSetting(LocalSettingValue { value: serde_json::Value::Bool(*granted) })
+                SectionValue::LocalSetting(LocalSettingValue {
+                    value: ValueOrObject::Inline(serde_json::Value::Bool(*granted)),
+                })
             }
             _ => return Err(invalid("Section row belongs to another section")),
         };
@@ -554,14 +608,7 @@ impl SectionRow {
             SectionValue::Hypa(value) => {
                 let vector = match &value.vector {
                     InlineOrObject::Inline(_) => value.vector.decode_inline().map_err(section_format_error)?,
-                    InlineOrObject::Object(reference) => {
-                        let bytes = object(reference)?;
-                        if bytes.len() as u64 != reference.byte_length
-                            || risunest_external_storage_format::content_identity::hash(&bytes) != reference.content_sha256 {
-                            return Err(invalid("Section vector object does not match its reference"));
-                        }
-                        bytes
-                    }
+                    InlineOrObject::Object(reference) => read_object(reference, &mut object)?,
                 };
                 if vector.len() as u64 != u64::from(value.dimensions) * 4 {
                     return Err(invalid("Section vector length does not match its dimensions"));
@@ -575,21 +622,23 @@ impl SectionRow {
             SectionValue::LocalPlugin(value) => {
                 let space = match value.space { PluginSpace::String => "string", PluginSpace::Json => "json" };
                 if space != key2 { return Err(invalid("Plugin value names another space")); }
-                let text = match value.space {
-                    PluginSpace::String => match value.value {
-                        serde_json::Value::String(text) => text,
-                        _ => return Err(invalid("Plugin string value is not text")),
-                    },
-                    PluginSpace::Json => serde_json::to_string(&value.value)?,
+                let text = match (value.space, value.value) {
+                    (PluginSpace::String, ValueOrObject::Inline(serde_json::Value::String(text))) => text,
+                    (PluginSpace::String, ValueOrObject::Inline(_)) => return Err(invalid("Plugin string value is not text")),
+                    (PluginSpace::String, ValueOrObject::Object(reference)) => object_text(&reference, &mut object, false)?,
+                    (PluginSpace::Json, value) => json_text(value, &mut object)?,
                 };
                 SectionValueRow::Plugin { space: space.to_owned(), value: text }
             }
             SectionValue::LocalSetting(value) => match key1.as_str() {
                 "setting" if setting_is_local(&key2) && key3.is_empty() => {
-                    SectionValueRow::Setting { value: serde_json::to_string(&value.value)? }
+                    SectionValueRow::Setting { value: json_text(value.value, &mut object)? }
                 }
                 "pluginPermission" if !key2.is_empty() && !key3.is_empty() => SectionValueRow::PluginPermission {
-                    granted: value.value.as_bool().ok_or_else(|| invalid("Plugin permission is not a decision"))?,
+                    granted: match value.value {
+                        ValueOrObject::Inline(serde_json::Value::Bool(granted)) => granted,
+                        _ => return Err(invalid("Plugin permission is not a decision")),
+                    },
                 },
                 _ => return Err(invalid("Device setting is outside the backup scope")),
             },
@@ -929,14 +978,6 @@ impl PreparedSectionRows {
         }).transpose()
     }
 
-    fn contains(&self, key: &SectionKey, tombstone_only: bool) -> StoreResult<bool> {
-        Ok(self.connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM row_index WHERE key1=?1 AND key2=?2 AND key3=?3
-                AND (?4=0 OR tombstone=1))",
-            params![key.0, key.1, key.2, tombstone_only], |row| row.get(0),
-        )?)
-    }
-
     fn visit(&self, mut visitor: impl FnMut(SectionRow) -> StoreResult<()>) -> StoreResult<()> {
         let mut after = (String::new(), String::new(), String::new());
         let mut visited = 0i64;
@@ -984,12 +1025,7 @@ impl PreparedSectionRows {
                 let mut row = self.row_by_entry_key(&key).map_err(&mut map_error)?
                     .ok_or_else(|| map_error(invalid("Prepared row is missing")))?;
                 let entry = row.to_entry(self.kind, self.versioned).map_err(&mut map_error)?;
-                let object = match &mut row.value {
-                    SectionValueRow::Hypa { vector, .. } if vector.len() > MAX_INLINE_VALUE_BYTES => {
-                        Some(std::mem::take(vector))
-                    }
-                    _ => None,
-                };
+                let object = row.value.take_object_body();
                 #[cfg(test)]
                 if let Some(object) = &object {
                     SECTION_TEST_MAX_VALUE_BYTES.fetch_max(object.len(), Ordering::Relaxed);
@@ -1309,56 +1345,11 @@ impl DeviceStore {
         Ok(sections)
     }
 
-    /// Visits participating synchronized rows from one read-only SQLite
-    /// snapshot. The callback may spool each row before the snapshot closes.
-    pub(crate) fn visit_participating_section_snapshot_mapped<E>(
-        &self,
-        connection_id: &str,
-        library_lineage: &str,
-        mut visitor: impl FnMut(SectionSnapshotEvent) -> std::result::Result<(), E>,
-        mut map_error: impl FnMut(crate::persistent_store::StoreError) -> E,
-    ) -> std::result::Result<(), E> {
-        let path: String = self.connection.query_row(
-            "SELECT file FROM pragma_database_list WHERE name='main'", [], |row| row.get(0),
-        ).map_err(|error| map_error(error.into()))?;
-        if path.is_empty() { return Err(map_error(invalid("Device database path is unavailable"))); }
-        let snapshot = Connection::open_with_flags(
-            path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        ).map_err(|error| map_error(error.into()))?;
-        snapshot.execute_batch(
-            "PRAGMA busy_timeout=5000; PRAGMA query_only=ON; PRAGMA mmap_size=0; BEGIN;",
-        ).map_err(|error| map_error(error.into()))?;
-        for section in CHOOSABLE_SECTIONS {
-            let state = read_section_state(&snapshot, section).map_err(&mut map_error)?;
-            if !state.participating { continue; }
-            let cursor = read_cursor(&snapshot, connection_id, library_lineage, section)
-                .map_err(&mut map_error)?;
-            visitor(SectionSnapshotEvent::Section { section, state, cursor })?;
-            let mut statement = snapshot.prepare(match section {
-                Section::Hypa => "SELECT * FROM hypa_embeddings ORDER BY cache_key",
-                Section::LocalPlugins => "SELECT * FROM plugin_device_storage ORDER BY owner,space,key",
-            }).map_err(|error| map_error(error.into()))?;
-            let mut rows = statement.query([]).map_err(|error| map_error(error.into()))?;
-            while let Some(row) = rows.next().map_err(|error| map_error(error.into()))? {
-                visitor(SectionSnapshotEvent::Row {
-                    section,
-                    row: row_from_sql(section, row).map_err(&mut map_error)?,
-                })?;
-            }
-        }
-        snapshot.execute_batch("COMMIT;").map_err(|error| map_error(error.into()))?;
-        Ok(())
-    }
-
     pub(crate) fn read_section_entry(&self, section: Section, key: &str) -> StoreResult<Option<LocalSectionEntry>> {
         let kind = kind_of_section(section);
         let Some((mut row, published)) = read_row(&self.connection, section, &decode_entry_key(kind, key)?)? else { return Ok(None); };
         let entry = row.to_entry(kind, true)?;
-        let object = match &mut row.value {
-            SectionValueRow::Hypa { vector, .. } if vector.len() > MAX_INLINE_VALUE_BYTES => Some(std::mem::take(vector)),
-            _ => None,
-        };
+        let object = row.value.take_object_body();
         Ok(Some(LocalSectionEntry { version: row.version(), entry, object, published }))
     }
 
@@ -1433,7 +1424,7 @@ impl DeviceStore {
             SectionWriteInput::Apply { section, entry, object } => {
                 if entry.kind != kind_of_section(*section) { return Err(invalid("Section entry belongs to another section")); }
                 let row = SectionRow::from_entry((*entry).clone(), true, |_| {
-                    object.map(|bytes| bytes.to_vec()).ok_or_else(|| invalid("Section vector object is missing"))
+                    object.map(|bytes| bytes.to_vec()).ok_or_else(|| invalid("Section object is missing"))
                 })?;
                 merge_row(tx, *section, &row)?;
                 observe_remote_clock(tx, *section, &row.write_clock)?;
@@ -1603,192 +1594,6 @@ impl DeviceStore {
         Ok(false)
     }
 
-    /// Records the versions a confirmed publication put on the remote. Each row
-    /// is matched at the version it was captured at, so a local write that
-    /// landed between the capture and the publication stays unpublished.
-    /// Publication bookkeeping is control metadata, so it runs outside a change
-    /// context and never reaches the device change index.
-    pub(crate) fn note_section_published(
-        &mut self,
-        section: Section,
-        published: &[(SectionKey, SectionEntryVersion)],
-        stamped: &[(SectionKey, SectionEntryVersion)],
-        first_published: &TombstonePublication,
-        _reclaimed: &ReclaimedRows,
-        gc_floor: &Sequence,
-        cursor: Option<(&str, &str, &Sequence, &SectionCursor)>,
-    ) -> StoreResult<bool> {
-        let transaction = self.transaction()?;
-        if let Some((_, _, expected_generation, _)) = cursor {
-            let (participating, generation): (bool, String) = transaction.query_row(
-                "SELECT participating,participation_generation FROM device_sections WHERE section=?1",
-                [section.as_str()],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )?;
-            if !participating || sequence(&generation)? != *expected_generation {
-                transaction.commit()?;
-                return Ok(false);
-            }
-        }
-        let current = sequence(&transaction.query_row(
-            "SELECT gc_floor FROM device_sections WHERE section=?1",
-            [section.as_str()],
-            |row| row.get::<_, String>(0),
-        )?)?;
-        if *gc_floor > current {
-            transaction.execute(
-                "UPDATE device_sections SET gc_floor=?1 WHERE section=?2",
-                params![gc_floor.as_str(), section.as_str()],
-            )?;
-        }
-        // A removal takes the marker the publication carried, so the device
-        // file and every remote that read it name the same commit. A removal
-        // rewritten since the capture is not the one that went out.
-        {
-            let mut statement = match section {
-                Section::Hypa => transaction.prepare(
-                    "UPDATE hypa_embeddings
-                        SET first_published_generation=?4,first_published_at_ms=?5
-                        WHERE cache_key=?1 AND write_clock=?2 AND writer_id=?3 AND tombstone=1
-                          AND first_published_generation IS NULL",
-                )?,
-                Section::LocalPlugins => transaction.prepare(
-                    "UPDATE plugin_device_storage
-                        SET first_published_generation=?6,first_published_at_ms=?7
-                        WHERE owner=?1 AND space=?2 AND key=?3 AND write_clock=?4 AND writer_id=?5
-                          AND tombstone=1 AND first_published_generation IS NULL",
-                )?,
-            };
-            let generation = first_published.generation.as_str();
-            let at_ms = i64::try_from(first_published.at_ms)
-                .map_err(|_| invalid("device removal marker time is out of range"))?;
-            for ((key1, key2, key3), version) in stamped {
-                match section {
-                    Section::Hypa => {
-                        statement.execute(params![key1, version.write_clock.as_str(),
-                            version.writer_id, generation, at_ms])?;
-                    }
-                    Section::LocalPlugins => {
-                        statement.execute(params![key1, key2, key3, version.write_clock.as_str(),
-                            version.writer_id, generation, at_ms])?;
-                    }
-                }
-            }
-        }
-        {
-            let mut statement = match section {
-                Section::Hypa => transaction.prepare(
-                    "UPDATE hypa_embeddings SET published_clock=?2
-                        WHERE cache_key=?1 AND write_clock=?2 AND writer_id=?3",
-                )?,
-                Section::LocalPlugins => transaction.prepare(
-                    "UPDATE plugin_device_storage SET published_clock=?4
-                        WHERE owner=?1 AND space=?2 AND key=?3 AND write_clock=?4 AND writer_id=?5",
-                )?,
-            };
-            for ((key1, key2, key3), version) in published {
-                match section {
-                    Section::Hypa => {
-                        statement.execute(params![key1, version.write_clock.as_str(), version.writer_id])?;
-                    }
-                    Section::LocalPlugins => {
-                        statement.execute(params![key1, key2, key3, version.write_clock.as_str(), version.writer_id])?;
-                    }
-                }
-            }
-        }
-        if let Some((connection_id, library_lineage, _, cursor)) = cursor {
-            record_cursor(&transaction, connection_id, library_lineage, section, cursor)?;
-        }
-        transaction.commit()?;
-        Ok(true)
-    }
-
-    /// Applies immutable publication evidence a row at a time. The evidence
-    /// may come from a durable job spool and is consumed inside one local
-    /// transaction, so a confirmed publication is either fully recorded or
-    /// left for reconciliation to retry.
-    pub(crate) fn note_spooled_section_published(
-        &mut self,
-        section: Section,
-        expected_participation_generation: &Sequence,
-        first_published: &TombstonePublication,
-        gc_floor: &Sequence,
-        cursor: (&str, &str, &SectionCursor),
-        rows: impl Iterator<Item = StoreResult<SectionPublicationRow>>,
-    ) -> StoreResult<bool> {
-        let transaction = self.transaction()?;
-        let (participating, generation): (bool, String) = transaction.query_row(
-            "SELECT participating,participation_generation FROM device_sections WHERE section=?1",
-            [section.as_str()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        if !participating || sequence(&generation)? != *expected_participation_generation {
-            transaction.commit()?;
-            return Ok(false);
-        }
-        let stamp_at_ms = i64::try_from(first_published.at_ms)
-            .map_err(|_| invalid("device removal marker time is out of range"))?;
-        for evidence in rows {
-            let evidence = evidence?;
-            let (key1, key2, key3) = evidence.key;
-            match evidence.disposition {
-                SectionPublicationDisposition::Reclaimed { .. } => {}
-                SectionPublicationDisposition::Published { first_published: stamp } => {
-                    if let Some(stamp) = stamp {
-                        if stamp != *first_published {
-                            return Err(invalid("Publication removal marker differs from its spool"));
-                        }
-                        match section {
-                            Section::Hypa => transaction.execute(
-                                "UPDATE hypa_embeddings
-                                    SET first_published_generation=?4,first_published_at_ms=?5
-                                    WHERE cache_key=?1 AND write_clock=?2 AND writer_id=?3 AND tombstone=1
-                                      AND first_published_generation IS NULL",
-                                params![key1, evidence.version.write_clock.as_str(), evidence.version.writer_id,
-                                    first_published.generation.as_str(), stamp_at_ms],
-                            )?,
-                            Section::LocalPlugins => transaction.execute(
-                                "UPDATE plugin_device_storage
-                                    SET first_published_generation=?6,first_published_at_ms=?7
-                                    WHERE owner=?1 AND space=?2 AND key=?3 AND write_clock=?4 AND writer_id=?5
-                                      AND tombstone=1 AND first_published_generation IS NULL",
-                                params![key1, key2, key3, evidence.version.write_clock.as_str(),
-                                    evidence.version.writer_id, first_published.generation.as_str(), stamp_at_ms],
-                            )?,
-                        };
-                    }
-                    match section {
-                        Section::Hypa => transaction.execute(
-                            "UPDATE hypa_embeddings SET published_clock=?2
-                                WHERE cache_key=?1 AND write_clock=?2 AND writer_id=?3",
-                            params![key1, evidence.version.write_clock.as_str(), evidence.version.writer_id],
-                        )?,
-                        Section::LocalPlugins => transaction.execute(
-                            "UPDATE plugin_device_storage SET published_clock=?4
-                                WHERE owner=?1 AND space=?2 AND key=?3 AND write_clock=?4 AND writer_id=?5",
-                            params![key1, key2, key3, evidence.version.write_clock.as_str(), evidence.version.writer_id],
-                        )?,
-                    };
-                }
-            }
-        }
-        let current = sequence(&transaction.query_row(
-            "SELECT gc_floor FROM device_sections WHERE section=?1",
-            [section.as_str()],
-            |row| row.get::<_, String>(0),
-        )?)?;
-        if *gc_floor > current {
-            transaction.execute(
-                "UPDATE device_sections SET gc_floor=?1 WHERE section=?2",
-                params![gc_floor.as_str(), section.as_str()],
-            )?;
-        }
-        record_cursor(&transaction, cursor.0, cursor.1, section, cursor.2)?;
-        transaction.commit()?;
-        Ok(true)
-    }
-
     /// Merges a received section. The higher `(write_clock, writer_id)` wins,
     /// the same version with different content is refused, and a received row
     /// keeps the version it arrived with instead of becoming a local write.
@@ -1838,132 +1643,6 @@ impl DeviceStore {
         let tx = self.transaction()?;
         record_cursor(&tx, connection_id, library_lineage, section, cursor)?;
         tx.commit()?;
-        Ok(())
-    }
-
-    /// Forgets how far one lineage has been applied, so the section counts as
-    /// not yet exchanged with it. The row stays, because it is what says the
-    /// markers this device holds were issued by this lineage. Explicit resets
-    /// may move a cursor backwards.
-    pub(crate) fn forget_section_cursor(
-        &mut self,
-        connection_id: &str,
-        library_lineage: &str,
-        section: Section,
-    ) -> StoreResult<()> {
-        self.connection.execute(
-            "UPDATE device_remote_cursors SET applied_generation='0',applied_gc_floor='0'
-                WHERE connection_id=?1 AND library_lineage=?2 AND section=?3",
-            params![connection_id, library_lineage, section.as_str()],
-        )?;
-        Ok(())
-    }
-
-    /// Replaces exactly one present backup section. An empty spool clears the
-    /// selected scope; callers preserve an absent scope by not invoking this.
-    pub(crate) fn restore_prepared_backup_section(
-        &mut self,
-        prepared: &PreparedSectionRows,
-    ) -> StoreResult<()> {
-        if prepared.versioned { return Err(invalid("Synchronized section input is not backup material")); }
-        match section_of_kind(prepared.kind) {
-            Some(section) => self.restore_prepared_value_section(section, prepared),
-            None if prepared.kind == SectionKind::LocalSettings => self.restore_prepared_local_settings(prepared),
-            None => Err(invalid("Backup section kind is unsupported")),
-        }
-    }
-
-    fn restore_prepared_value_section(
-        &mut self,
-        section: Section,
-        prepared: &PreparedSectionRows,
-    ) -> StoreResult<()> {
-        let transaction = self.transaction()?;
-        let writer_id: String = transaction.query_row(
-            "SELECT writer_id FROM device_meta WHERE singleton=1", [], |row| row.get(0),
-        )?;
-        let mut changed = false;
-        prepared.visit(|mut row| {
-            if row.value.is_tombstone() { return Err(invalid("Restored section row has no value")); }
-            let settled = read_row(&transaction, section, &row.key())?.is_some_and(|(current, published)| {
-                !published && current.writer_id == writer_id && current.value.same_content(&row.value)
-            });
-            if settled { return Ok(()); }
-            if !changed { super::begin_mutation(&transaction)?; changed = true; }
-            row.write_clock = super::issue_write_clock(&transaction, section)?;
-            row.writer_id = writer_id.clone();
-            write_row(&transaction, section, &row, false)
-        })?;
-        let mut after = (String::new(), String::new(), String::new());
-        loop {
-            let page = local_key_page(&transaction, section, &after, false)?;
-            if page.is_empty() { break; }
-            for key in page {
-                let (mut current, _) = read_row(&transaction, section, &key)?
-                    .ok_or_else(|| invalid("Section row disappeared"))?;
-                after = key;
-                if current.value.is_tombstone() || prepared.contains(&after, false)? { continue; }
-                if !changed { super::begin_mutation(&transaction)?; changed = true; }
-                current.value = SectionValueRow::Tombstone { first_published: None };
-                current.write_clock = super::issue_write_clock(&transaction, section)?;
-                current.writer_id = writer_id.clone();
-                write_row(&transaction, section, &current, false)?;
-            }
-        }
-        if changed { super::finish_mutation(&transaction)?; }
-        transaction.commit()?;
-        Ok(())
-    }
-
-    fn restore_prepared_local_settings(&mut self, prepared: &PreparedSectionRows) -> StoreResult<()> {
-        let transaction = self.transaction()?;
-        prepared.visit(|row| match row.value {
-            SectionValueRow::Setting { value } => {
-                if row.key1 != "setting" || !setting_is_local(&row.key2) || !row.key3.is_empty() {
-                    return Err(invalid("Restored device setting is not a device setting"));
-                }
-                transaction.execute(
-                    "INSERT INTO device_settings (key,value) VALUES (?1,?2)
-                        ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                    params![row.key2, value],
-                )?;
-                Ok(())
-            }
-            SectionValueRow::PluginPermission { granted } => {
-                if row.key1 != "pluginPermission" || row.key2.is_empty() || row.key3.is_empty() {
-                    return Err(invalid("Restored plugin permission is incomplete"));
-                }
-                transaction.execute(
-                    "INSERT INTO plugin_permissions (code_hash,permission,granted)
-                        VALUES (?1,?2,?3)
-                        ON CONFLICT(code_hash,permission) DO UPDATE SET granted=excluded.granted",
-                    params![row.key2, row.key3, i64::from(granted)],
-                )?;
-                Ok(())
-            }
-            _ => Err(invalid("Restored device setting has the wrong shape")),
-        })?;
-        for key in LOCAL_SETTING_KEYS {
-            let row_key = ("setting".to_owned(), key.to_owned(), String::new());
-            if !prepared.contains(&row_key, false)? {
-                transaction.execute("DELETE FROM device_settings WHERE key=?1", [key])?;
-            }
-        }
-        let mut after = (String::new(), String::new(), String::new());
-        loop {
-            let page = local_permission_key_page(&transaction, &after)?;
-            if page.is_empty() { break; }
-            for key in page {
-                after = key;
-                if !prepared.contains(&after, false)? {
-                    transaction.execute(
-                        "DELETE FROM plugin_permissions WHERE code_hash=?1 AND permission=?2",
-                        params![after.1, after.2],
-                    )?;
-                }
-            }
-        }
-        transaction.commit()?;
         Ok(())
     }
 

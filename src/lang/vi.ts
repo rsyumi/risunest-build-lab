@@ -1495,6 +1495,7 @@ export const languageVietnamese = {
         concurrentEditNotice: "Khi chỉnh sửa cùng một mục trên nhiều thiết bị đồng thời, bản chỉnh sửa cuối cùng được giữ lại. Nội dung chỉnh sửa hoặc tin nhắn có thể bị mất. Không sử dụng nhiều thiết bị đồng thời.",
         replaceTitle: "Thay thế dữ liệu trên thiết bị này?",
         replaceDescription: "Để đồng bộ, dữ liệu trên thiết bị này sẽ bị xóa và thay thế bằng dữ liệu từ xa. Hãy sao lưu thủ công nếu cần.",
+        serverRestoredDescription: "Máy chủ đã được khôi phục từ bản sao lưu. Dữ liệu trên thiết bị này sẽ bị xóa và thay thế bằng dữ liệu máy chủ, các thay đổi trên thiết bị này sau thời điểm sao lưu sẽ bị mất. Hãy sao lưu thủ công nếu cần.",
         replaceAcknowledge: "Xóa dữ liệu trên thiết bị này",
         replaceAction: "Thay thế",
         cancelAction: "Hủy",

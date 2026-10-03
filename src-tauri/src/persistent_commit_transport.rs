@@ -4,6 +4,7 @@ use crate::persistent_store::{RevisionResult, StoreError, StoreResult};
 use serde::Serialize;
 use std::cell::RefCell;
 use tauri::{AppHandle, WebviewWindow};
+use crate::native_log::logged;
 use webview2_com::Microsoft::Web::WebView2::Win32::{
     ICoreWebView2Environment12, ICoreWebView2SharedBuffer, ICoreWebView2_17,
     COREWEBVIEW2_SHARED_BUFFER_ACCESS_READ_WRITE,
@@ -110,44 +111,46 @@ pub(crate) async fn pds_commit_shared_open(
     request_id: String,
     total_bytes: usize,
 ) -> StoreResult<Option<Opened>> {
-    guard(&window)?;
-    if uuid::Uuid::parse_str(&request_id).is_err() {
-        return Err(invalid("invalid shared commit request ID"));
-    }
-    if total_bytes == 0 || total_bytes > MAX_BYTES {
-        return Err(invalid("invalid shared commit size"));
-    }
-    let (sender, receiver) = futures::channel::oneshot::channel();
-    window.with_webview(move |webview| {
-        let result = POOL.with(|slot| -> StoreResult<Option<Opened>> {
-            let mut pool = slot.borrow_mut();
-            if pool.as_ref().is_some_and(|pool| pool.transfer.is_some()) { return Err(invalid("shared commit already active")); }
-            unsafe {
-                let environment = match webview.environment().cast::<ICoreWebView2Environment12>() {
-                    Ok(value) => value,
-                    Err(error) if error.code().0 == 0x80004002_u32 as i32 => return Ok(None),
-                    Err(error) => return Err(native_error(error)),
-                };
-                let view = match webview.controller().CoreWebView2().map_err(native_error)?.cast::<ICoreWebView2_17>() {
-                    Ok(value) => value,
-                    Err(error) if error.code().0 == 0x80004002_u32 as i32 => return Ok(None),
-                    Err(error) => return Err(native_error(error)),
-                };
-                if pool.is_none() { *pool = Some(Pool { buffer: environment.CreateSharedBuffer(CAPACITY as u64).map_err(native_error)?, transfer: None }); }
-                let pool = pool.as_mut().unwrap();
-                // Reserve payload memory only after acquiring the single producer slot.
-                let transfer = Transfer::new(request_id.clone(), total_bytes)?;
-                let metadata = serde_json::json!({ "kind": "pds-commit", "requestId": request_id, "id": transfer.id }).to_string();
-                let metadata: Vec<u16> = metadata.encode_utf16().chain(Some(0)).collect();
-                view.PostSharedBufferToScript(&pool.buffer, COREWEBVIEW2_SHARED_BUFFER_ACCESS_READ_WRITE, PCWSTR(metadata.as_ptr())).map_err(native_error)?;
-                let opened = Opened { id: transfer.id.clone(), capacity: CAPACITY };
-                pool.transfer = Some(transfer);
-                Ok(Some(opened))
-            }
-        });
-        let _ = sender.send(result);
-    }).map_err(native_error)?;
-    receiver.await.map_err(native_error)?
+    logged("pds_commit_shared_open", async move {
+        guard(&window)?;
+        if uuid::Uuid::parse_str(&request_id).is_err() {
+            return Err(invalid("invalid shared commit request ID"));
+        }
+        if total_bytes == 0 || total_bytes > MAX_BYTES {
+            return Err(invalid("invalid shared commit size"));
+        }
+        let (sender, receiver) = futures::channel::oneshot::channel();
+        window.with_webview(move |webview| {
+            let result = POOL.with(|slot| -> StoreResult<Option<Opened>> {
+                let mut pool = slot.borrow_mut();
+                if pool.as_ref().is_some_and(|pool| pool.transfer.is_some()) { return Err(invalid("shared commit already active")); }
+                unsafe {
+                    let environment = match webview.environment().cast::<ICoreWebView2Environment12>() {
+                        Ok(value) => value,
+                        Err(error) if error.code().0 == 0x80004002_u32 as i32 => return Ok(None),
+                        Err(error) => return Err(native_error(error)),
+                    };
+                    let view = match webview.controller().CoreWebView2().map_err(native_error)?.cast::<ICoreWebView2_17>() {
+                        Ok(value) => value,
+                        Err(error) if error.code().0 == 0x80004002_u32 as i32 => return Ok(None),
+                        Err(error) => return Err(native_error(error)),
+                    };
+                    if pool.is_none() { *pool = Some(Pool { buffer: environment.CreateSharedBuffer(CAPACITY as u64).map_err(native_error)?, transfer: None }); }
+                    let pool = pool.as_mut().unwrap();
+                    // Reserve payload memory only after acquiring the single producer slot.
+                    let transfer = Transfer::new(request_id.clone(), total_bytes)?;
+                    let metadata = serde_json::json!({ "kind": "pds-commit", "requestId": request_id, "id": transfer.id }).to_string();
+                    let metadata: Vec<u16> = metadata.encode_utf16().chain(Some(0)).collect();
+                    view.PostSharedBufferToScript(&pool.buffer, COREWEBVIEW2_SHARED_BUFFER_ACCESS_READ_WRITE, PCWSTR(metadata.as_ptr())).map_err(native_error)?;
+                    let opened = Opened { id: transfer.id.clone(), capacity: CAPACITY };
+                    pool.transfer = Some(transfer);
+                    Ok(Some(opened))
+                }
+            });
+            let _ = sender.send(result);
+        }).map_err(native_error)?;
+        receiver.await.map_err(native_error)?
+    }.await)
 }
 
 #[tauri::command]
@@ -157,44 +160,46 @@ pub(crate) async fn pds_commit_shared_chunk(
     offset: usize,
     length: usize,
 ) -> StoreResult<usize> {
-    guard(&window)?;
-    let (sender, receiver) = futures::channel::oneshot::channel();
-    window
-        .with_webview(move |_| {
-            let result = POOL.with(|slot| -> StoreResult<usize> {
-                let mut borrow = slot.borrow_mut();
-                let pool = borrow
-                    .as_mut()
-                    .ok_or_else(|| invalid("no shared commit buffer"))?;
-                let transfer = pool
-                    .transfer
-                    .as_mut()
-                    .ok_or_else(|| invalid("no active shared commit"))?;
-                transfer.validate_chunk(&id, offset, length)?;
-                let mut bytes = vec![0_u8; length];
-                // Read through the COM stream into Rust-owned bytes. Do not create a Rust
-                // reference into memory that the renderer can mutate independently.
-                unsafe {
-                    let stream = pool.buffer.OpenStream().map_err(native_error)?;
-                    stream
-                        .Seek(0, STREAM_SEEK_SET, None)
-                        .map_err(native_error)?;
-                    let mut read = 0;
-                    stream
-                        .Read(bytes.as_mut_ptr().cast(), length as u32, Some(&mut read))
-                        .ok()
-                        .map_err(native_error)?;
-                    if read as usize != length {
-                        return Err(invalid("short shared commit read"));
+    logged("pds_commit_shared_chunk", async move {
+        guard(&window)?;
+        let (sender, receiver) = futures::channel::oneshot::channel();
+        window
+            .with_webview(move |_| {
+                let result = POOL.with(|slot| -> StoreResult<usize> {
+                    let mut borrow = slot.borrow_mut();
+                    let pool = borrow
+                        .as_mut()
+                        .ok_or_else(|| invalid("no shared commit buffer"))?;
+                    let transfer = pool
+                        .transfer
+                        .as_mut()
+                        .ok_or_else(|| invalid("no active shared commit"))?;
+                    transfer.validate_chunk(&id, offset, length)?;
+                    let mut bytes = vec![0_u8; length];
+                    // Read through the COM stream into Rust-owned bytes. Do not create a Rust
+                    // reference into memory that the renderer can mutate independently.
+                    unsafe {
+                        let stream = pool.buffer.OpenStream().map_err(native_error)?;
+                        stream
+                            .Seek(0, STREAM_SEEK_SET, None)
+                            .map_err(native_error)?;
+                        let mut read = 0;
+                        stream
+                            .Read(bytes.as_mut_ptr().cast(), length as u32, Some(&mut read))
+                            .ok()
+                            .map_err(native_error)?;
+                        if read as usize != length {
+                            return Err(invalid("short shared commit read"));
+                        }
                     }
-                }
-                transfer.bytes.extend_from_slice(&bytes);
-                Ok(transfer.bytes.len())
-            });
-            let _ = sender.send(result);
-        })
-        .map_err(native_error)?;
-    receiver.await.map_err(native_error)?
+                    transfer.bytes.extend_from_slice(&bytes);
+                    Ok(transfer.bytes.len())
+                });
+                let _ = sender.send(result);
+            })
+            .map_err(native_error)?;
+        receiver.await.map_err(native_error)?
+    }.await)
 }
 
 #[tauri::command]
@@ -203,28 +208,30 @@ pub(crate) async fn pds_commit_shared_finish(
     window: WebviewWindow,
     id: String,
 ) -> StoreResult<RevisionResult> {
-    guard(&window)?;
-    let (sender, receiver) = futures::channel::oneshot::channel();
-    window
-        .with_webview(move |_| {
-            let result = POOL.with(|slot| -> StoreResult<Vec<u8>> {
-                let mut borrow = slot.borrow_mut();
-                let pool = borrow
-                    .as_mut()
-                    .ok_or_else(|| invalid("no shared commit buffer"))?;
-                pool.transfer
-                    .as_ref()
-                    .ok_or_else(|| invalid("no active shared commit"))?
-                    .ready(&id)?;
-                Ok(pool.transfer.take().unwrap().bytes)
-            });
-            let _ = sender.send(result);
-        })
-        .map_err(native_error)?;
-    let bytes = receiver.await.map_err(native_error)??;
-    tauri::async_runtime::spawn_blocking(move || commit_bytes(&app, &bytes))
-        .await
-        .map_err(native_error)?
+    logged("pds_commit_shared_finish", async move {
+        guard(&window)?;
+        let (sender, receiver) = futures::channel::oneshot::channel();
+        window
+            .with_webview(move |_| {
+                let result = POOL.with(|slot| -> StoreResult<Vec<u8>> {
+                    let mut borrow = slot.borrow_mut();
+                    let pool = borrow
+                        .as_mut()
+                        .ok_or_else(|| invalid("no shared commit buffer"))?;
+                    pool.transfer
+                        .as_ref()
+                        .ok_or_else(|| invalid("no active shared commit"))?
+                        .ready(&id)?;
+                    Ok(pool.transfer.take().unwrap().bytes)
+                });
+                let _ = sender.send(result);
+            })
+            .map_err(native_error)?;
+        let bytes = receiver.await.map_err(native_error)??;
+        tauri::async_runtime::spawn_blocking(move || commit_bytes(&app, &bytes))
+            .await
+            .map_err(native_error)?
+    }.await)
 }
 
 #[tauri::command]
@@ -232,19 +239,21 @@ pub(crate) async fn pds_commit_shared_cancel(
     window: WebviewWindow,
     request_id: String,
 ) -> StoreResult<()> {
-    guard(&window)?;
-    let (sender, receiver) = futures::channel::oneshot::channel();
-    window
-        .with_webview(move |_| {
-            POOL.with(|slot| {
-                if let Some(pool) = slot.borrow_mut().as_mut() {
-                    pool.cancel_request(&request_id);
-                }
-            });
-            let _ = sender.send(());
-        })
-        .map_err(native_error)?;
-    receiver.await.map_err(native_error)
+    logged("pds_commit_shared_cancel", async move {
+        guard(&window)?;
+        let (sender, receiver) = futures::channel::oneshot::channel();
+        window
+            .with_webview(move |_| {
+                POOL.with(|slot| {
+                    if let Some(pool) = slot.borrow_mut().as_mut() {
+                        pool.cancel_request(&request_id);
+                    }
+                });
+                let _ = sender.send(());
+            })
+            .map_err(native_error)?;
+        receiver.await.map_err(native_error)
+    }.await)
 }
 
 /// Called on main-page navigation so an interrupted producer cannot retain a lease.

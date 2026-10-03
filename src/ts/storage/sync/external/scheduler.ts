@@ -7,11 +7,9 @@ import type {
     ExternalStorageController,
 } from './controller'
 
-export type ExternalRevisionCause = 'edit' | 'generation-complete'
-
 export interface ExternalScheduledDestination {
     connectionId: string
-    kind: 'sync' | 'backup'
+    kind: 'backup'
     quietMillis?: number
     maximumMillis?: number
 }
@@ -20,7 +18,6 @@ export interface ExternalSchedulerDependencies {
     available(): boolean
     destinations(): ExternalScheduledDestination[]
     session(): ExternalExecutionSession
-    probeHead?(connectionId: string): Promise<boolean>
     maintenance?(): Array<{ connectionId: string; lastAttemptAt?: number }>
     now?(): number
     setTimer?(callback: () => void, delay: number): unknown
@@ -33,10 +30,7 @@ interface PendingRevision {
     dueAt: number
 }
 
-const defaultPolicy = {
-    sync: { quietMillis: 15_000, maximumMillis: 60_000 },
-    backup: { quietMillis: 60_000, maximumMillis: 300_000 },
-} as const
+const defaultPolicy = { quietMillis: 60_000, maximumMillis: 300_000 } as const
 
 function parseRevision(value: DecimalString): bigint {
     if (!/^(0|[1-9]\d*)$/.test(value)) throw new RangeError('Revision must be a decimal string')
@@ -52,8 +46,6 @@ export function createExternalStorageScheduler(
     let timer: unknown
     let stopped = false
     let suspended = false
-    let latestRevision = 0n
-    const lastProbe = new Map<string, number>()
     const refusals = new Map<string, number>()
     const now = dependencies.now ?? Date.now
     const setTimer = dependencies.setTimer
@@ -83,32 +75,21 @@ export function createExternalStorageScheduler(
         clear()
         if (stopped || suspended || !dependencies.available()) return
         const next = Math.min(...[...pending.values()].map(item => item.dueAt),
-            (dependencies.maintenance || dependencies.probeHead) ? maintenanceAt : Number.POSITIVE_INFINITY)
+            dependencies.maintenance ? maintenanceAt : Number.POSITIVE_INFINITY)
         if (!Number.isFinite(next)) return
         timer = setTimer(runDue, Math.max(0, next - now()))
     }
-    const merge = (
-        destination: ExternalScheduledDestination,
-        target: bigint,
-        cause: ExternalRevisionCause,
-    ): void => {
+    const merge = (destination: ExternalScheduledDestination, target: bigint): void => {
         const currentTime = now()
-        const policy = defaultPolicy[destination.kind]
-        const quiet = destination.quietMillis ?? policy.quietMillis
-        const maximum = destination.maximumMillis ?? policy.maximumMillis
+        const quiet = destination.quietMillis ?? defaultPolicy.quietMillis
+        const maximum = destination.maximumMillis ?? defaultPolicy.maximumMillis
         const key = destinationKey(destination)
         const current = pending.get(key)
         const firstAt = current?.firstAt ?? currentTime
-        const causeDue = currentTime + (
-            cause === 'generation-complete' && destination.kind === 'sync' ? 5_000 : quiet
-        )
-        const quietDue = cause === 'generation-complete' && destination.kind === 'sync'
-            ? Math.min(current?.dueAt ?? Number.POSITIVE_INFINITY, causeDue)
-            : causeDue
         pending.set(key, {
             revision: current && current.revision > target ? current.revision : target,
             firstAt,
-            dueAt: Math.min(quietDue, firstAt + maximum),
+            dueAt: Math.min(currentTime + quiet, firstAt + maximum),
         })
     }
     const scheduleRetry = (
@@ -177,30 +158,13 @@ export function createExternalStorageScheduler(
                 }
                 if (result.error?.action === 'wait' || result.error?.action === 'reauthenticate'
                     || result.error?.action === 'unlock-key'
-                    || result.error?.action === 'resolve-conflict'
                     || result.error?.action === 'free-space'
                     || result.reason === 'publication-unknown') return
-                merge(destination, item.revision, 'edit')
+                merge(destination, item.revision)
                 scheduleNext()
             }).finally(() => finished(destination.connectionId))
         }
-        if ((dependencies.maintenance || dependencies.probeHead) && currentTime >= maintenanceAt) {
-            if (dependencies.probeHead) {
-                for (const destination of destinations.values()) {
-                    if (destination.kind !== 'sync' || inFlight.has(destination.connectionId)
-                        || pending.has(destinationKey(destination))
-                        || currentTime - (lastProbe.get(destination.connectionId) ?? 0) < 180_000) continue
-                    lastProbe.set(destination.connectionId, currentTime)
-                    started(destination.connectionId)
-                    void dependencies.probeHead(destination.connectionId).then(changed => {
-                        if (changed && !stopped && !suspended && dependencies.available()
-                            && dependencies.destinations().some(item => destinationKey(item) === destinationKey(destination))) {
-                            merge(destination, latestRevision, 'generation-complete')
-                            scheduleNext()
-                        }
-                    }).catch(() => {}).finally(() => finished(destination.connectionId))
-                }
-            }
+        if (dependencies.maintenance && currentTime >= maintenanceAt) {
             maintenanceAt = currentTime + 60_000
             for (const candidate of dependencies.maintenance?.() ?? []) {
                 const last = Math.max(lastCleanup.get(candidate.connectionId) ?? -Infinity,
@@ -218,22 +182,15 @@ export function createExternalStorageScheduler(
     }
 
     return {
-        durableRevision(value: DecimalString, cause: ExternalRevisionCause = 'edit'): void {
+        durableRevision(value: DecimalString): void {
             const target = parseRevision(value)
-            latestRevision = target
             refusals.clear()
-            for (const destination of dependencies.destinations()) merge(destination, target, cause)
-            scheduleNext()
-        },
-        deviceChanged(): void {
-            for (const destination of dependencies.destinations()) {
-                if (destination.kind === 'sync') merge(destination, latestRevision, 'edit')
-            }
+            for (const destination of dependencies.destinations()) merge(destination, target)
             scheduleNext()
         },
         requestNow(
             connectionId: string,
-            kind: 'sync' | 'backup' | 'cleanup',
+            kind: 'backup' | 'cleanup',
             value: DecimalString,
             backgroundTask?: MobileBackgroundTask,
         ) {
@@ -270,9 +227,6 @@ export function createExternalStorageScheduler(
         stop(): void {
             stopped = true
             clear()
-        },
-        pendingRevision(connectionId: string, kind: 'sync' | 'backup'): DecimalString | undefined {
-            return pending.get(`${kind}:${connectionId}`)?.revision.toString() as DecimalString | undefined
         },
     }
 }

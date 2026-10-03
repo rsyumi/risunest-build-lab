@@ -53,7 +53,20 @@ pub(crate) struct ProviderError {
     pub oauth_error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth_error_description: Option<String>,
+    /// The local failure behind the kind, for the device log only.
+    #[serde(skip)]
+    pub cause: ErrorCause,
 }
+/// Kept beside an error for the device log. Two errors that differ only in
+/// their cause are equal.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct ErrorCause(pub Option<String>);
+impl PartialEq for ErrorCause {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+impl Eq for ErrorCause {}
 impl ProviderError {
     pub fn new(kind: ErrorKind) -> Self {
         Self {
@@ -62,7 +75,39 @@ impl ProviderError {
             retry_at_ms: None,
             oauth_error: None,
             oauth_error_description: None,
+            cause: ErrorCause::default(),
         }
+    }
+    /// Keeps the failure that produced this error for the device log.
+    pub fn caused<E: std::fmt::Display + ?Sized>(mut self, error: &E) -> Self {
+        self.cause = ErrorCause(Some(crate::native_log::failure_text(error)));
+        self
+    }
+}
+impl crate::native_log::CommandFailure for ProviderError {
+    fn code(&self) -> std::borrow::Cow<'_, str> {
+        serde_json::to_value(self.kind)
+            .ok()
+            .and_then(|kind| kind.as_str().map(str::to_owned))
+            .unwrap_or_default()
+            .into()
+    }
+    fn detail(&self) -> Option<std::borrow::Cow<'_, str>> {
+        match (&self.cause.0, self.http_status) {
+            (Some(cause), Some(status)) => Some(format!("{cause}; http {status}").into()),
+            (Some(cause), None) => Some(cause.as_str().into()),
+            (None, Some(status)) => Some(format!("http {status}").into()),
+            (None, None) => None,
+        }
+    }
+    fn expected(&self) -> bool {
+        matches!(
+            self.kind,
+            ErrorKind::Cancelled
+                | ErrorKind::RepositoryBusy
+                | ErrorKind::PreconditionFailed
+                | ErrorKind::RateLimited
+        )
     }
 }
 impl std::fmt::Display for ProviderError {
@@ -626,6 +671,39 @@ impl HeadBytes {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_kept_cause_stays_out_of_the_reply_and_equality() {
+        let shape = serde_json::from_str::<u32>("\"private-payload-value\"").unwrap_err();
+        let kept = ProviderError::new(ErrorKind::Corrupt).caused(&shape);
+        let cause = kept.cause.0.clone().unwrap();
+        assert!(cause.starts_with("json failure at line 1 column"), "{cause}");
+        assert!(!cause.contains("private-payload-value"));
+        assert_eq!(kept, ProviderError::new(ErrorKind::Corrupt));
+        let reply = serde_json::to_value(&kept).unwrap();
+        assert_eq!(reply, serde_json::to_value(ProviderError::new(ErrorKind::Corrupt)).unwrap());
+        assert!(reply.get("cause").is_none());
+        let returned: ProviderError = serde_json::from_value(reply).unwrap();
+        assert!(returned.cause.0.is_none());
+        let poisoned: std::sync::LockResult<()> = Err(std::sync::PoisonError::new(()));
+        let error = poisoned.map_err(|error| ProviderError::new(ErrorKind::Transient).caused(&error)).unwrap_err();
+        assert!(error.cause.0.unwrap().contains("poisoned"));
+    }
+
+    #[test]
+    fn provider_failures_log_their_kind_and_routine_kinds_are_warnings() {
+        use crate::native_log::CommandFailure;
+        let io = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        let error = ProviderError { http_status: Some(503), ..ProviderError::new(ErrorKind::Transient).caused(&io) };
+        assert_eq!(error.code(), "transient");
+        assert_eq!(error.detail().unwrap(), "permission denied; http 503");
+        assert!(!error.expected());
+        for kind in [ErrorKind::Cancelled, ErrorKind::RepositoryBusy, ErrorKind::PreconditionFailed, ErrorKind::RateLimited] {
+            assert!(ProviderError::new(kind).expected(), "{kind:?}");
+        }
+        assert!(!ProviderError::new(ErrorKind::Corrupt).expected());
+        assert_eq!(ProviderError::new(ErrorKind::DailyQuotaExhausted).code(), "dailyQuotaExhausted");
+    }
 
     #[test]
     fn external_native_job_cancellation_reaches_checks_and_pending_control_requests() {

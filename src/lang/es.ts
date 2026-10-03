@@ -1494,6 +1494,7 @@ export const languageSpanish = {
         concurrentEditNotice: "Si se edita el mismo elemento en varios dispositivos a la vez, se conserva la última edición. Los cambios o mensajes pueden perderse. Evite usar varios dispositivos a la vez.",
         replaceTitle: "¿Reemplazar los datos de este dispositivo?",
         replaceDescription: "Para sincronizar, se borrarán los datos de este dispositivo y se reemplazarán por los datos remotos. Si necesita una copia de seguridad, créela manualmente.",
+        serverRestoredDescription: "El servidor se restauró desde una copia de seguridad. Se borrarán los datos de este dispositivo y se reemplazarán por los datos del servidor, y se perderán los cambios hechos en este dispositivo después de la copia. Si necesita una copia de seguridad, créela manualmente.",
         replaceAcknowledge: "Borrar los datos de este dispositivo",
         replaceAction: "Reemplazar",
         cancelAction: "Cancelar",

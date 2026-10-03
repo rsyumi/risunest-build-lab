@@ -5,7 +5,7 @@ import type { ExternalStorageController } from './controller'
 describe('external storage scheduler', () => {
     beforeEach(() => vi.useFakeTimers())
 
-    function harness(kind: 'sync' | 'backup' = 'sync') {
+    function harness() {
         const request = vi.fn(async input => ({
             kind: 'complete' as const,
             revision: input.targetRevision,
@@ -15,7 +15,7 @@ describe('external storage scheduler', () => {
         const controller = { request, cancel } as unknown as ExternalStorageController
         const scheduler = createExternalStorageScheduler(controller, {
             available: () => true,
-            destinations: () => [{ connectionId: 'destination-1', kind }],
+            destinations: () => [{ connectionId: 'destination-1', kind: 'backup' }],
             session: () => ({ kind: 'foreground', id: 'foreground-1' }),
         })
         return { scheduler, request, cancel }
@@ -68,47 +68,36 @@ describe('external storage scheduler', () => {
         scheduler.stop()
     })
 
-    it('coalesces edits to the latest revision after 15 seconds of quiet', async () => {
+    it('coalesces edits to the latest revision after 60 seconds of quiet', async () => {
         const { scheduler, request } = harness()
         scheduler.durableRevision('1')
-        await vi.advanceTimersByTimeAsync(14_000)
+        await vi.advanceTimersByTimeAsync(59_000)
         scheduler.durableRevision('2')
-        await vi.advanceTimersByTimeAsync(14_000)
+        await vi.advanceTimersByTimeAsync(59_000)
         scheduler.durableRevision('30')
         expect(request).not.toHaveBeenCalled()
-        await vi.advanceTimersByTimeAsync(14_999)
+        await vi.advanceTimersByTimeAsync(59_999)
         expect(request).not.toHaveBeenCalled()
         await vi.advanceTimersByTimeAsync(1)
         expect(request).toHaveBeenCalledOnce()
         expect(request).toHaveBeenCalledWith(expect.objectContaining({ targetRevision: '30' }))
     })
 
-    it('does not let continuous edits extend the 60 second maximum', async () => {
+    it('does not let continuous edits extend the five minute maximum', async () => {
         const { scheduler, request } = harness()
         scheduler.durableRevision('1')
-        for (let index = 2; index <= 5; index += 1) {
-            await vi.advanceTimersByTimeAsync(12_000)
+        for (let index = 2; index <= 6; index += 1) {
+            await vi.advanceTimersByTimeAsync(50_000)
             scheduler.durableRevision(String(index) as `${number}`)
         }
-        await vi.advanceTimersByTimeAsync(11_999)
+        await vi.advanceTimersByTimeAsync(49_999)
         expect(request).not.toHaveBeenCalled()
         await vi.advanceTimersByTimeAsync(1)
-        expect(request).toHaveBeenCalledWith(expect.objectContaining({ targetRevision: '5' }))
-    })
-
-    it('uses five seconds for generation completion and creates no token-level jobs', async () => {
-        const { scheduler, request } = harness()
-        scheduler.durableRevision('7', 'generation-complete')
-        scheduler.durableRevision('7', 'generation-complete')
-        await vi.advanceTimersByTimeAsync(4_999)
-        expect(request).not.toHaveBeenCalled()
-        await vi.advanceTimersByTimeAsync(1)
-        expect(request).toHaveBeenCalledOnce()
-        expect(request).toHaveBeenCalledWith(expect.objectContaining({ targetRevision: '7' }))
+        expect(request).toHaveBeenCalledWith(expect.objectContaining({ targetRevision: '6' }))
     })
 
     it('uses the 60 second quiet and five minute maximum backup policy', async () => {
-        const { scheduler, request } = harness('backup')
+        const { scheduler, request } = harness()
         scheduler.durableRevision('1')
         await vi.advanceTimersByTimeAsync(59_000)
         scheduler.durableRevision('2')
@@ -128,7 +117,7 @@ describe('external storage scheduler', () => {
         } as unknown as ExternalStorageController
         const scheduler = createExternalStorageScheduler(controller, {
             available: () => online,
-            destinations: () => [{ connectionId: 'sync-1', kind: 'sync' }],
+            destinations: () => [{ connectionId: 'backup-1', kind: 'backup' }],
             session: () => ({ kind: 'foreground', id: 'foreground-1' }),
         })
         scheduler.durableRevision('9')
@@ -143,11 +132,11 @@ describe('external storage scheduler', () => {
     it('manual requests bypass debounce and preserve a later automatic revision', async () => {
         const { scheduler, request } = harness()
         scheduler.durableRevision('20')
-        await scheduler.requestNow('destination-1', 'sync', '10')
+        await scheduler.requestNow('destination-1', 'backup', '10')
         expect(request).toHaveBeenNthCalledWith(1, expect.objectContaining({
             reason: 'manual', targetRevision: '10',
         }))
-        await vi.advanceTimersByTimeAsync(15_000)
+        await vi.advanceTimersByTimeAsync(60_000)
         expect(request).toHaveBeenNthCalledWith(2, expect.objectContaining({
             reason: 'automatic', targetRevision: '20',
         }))
@@ -160,7 +149,7 @@ describe('external storage scheduler', () => {
                 reason: 'daily-quota-exhausted',
                 error: {
                     code: 'daily-quota-exhausted', message: 'Wait', retryable: true,
-                    action: 'wait' as const, retryAtMs: '20000' as const,
+                    action: 'wait' as const, retryAtMs: '80000' as const,
                 },
             })
             .mockResolvedValue({ kind: 'complete' as const, revision: '7', job: {} as never })
@@ -171,18 +160,18 @@ describe('external storage scheduler', () => {
         let now = 0
         const scheduler = createExternalStorageScheduler(controller, {
             available: () => true,
-            destinations: () => [{ connectionId: 'sync-1', kind: 'sync' }],
+            destinations: () => [{ connectionId: 'backup-1', kind: 'backup' }],
             session: () => ({ kind: 'foreground', id: 'foreground-1' }),
             now: () => now,
         })
         scheduler.durableRevision('7')
-        now = 15_000
-        await vi.advanceTimersByTimeAsync(15_000)
+        now = 60_000
+        await vi.advanceTimersByTimeAsync(60_000)
         expect(request).toHaveBeenCalledOnce()
-        now = 19_999
-        await vi.advanceTimersByTimeAsync(4_999)
+        now = 79_999
+        await vi.advanceTimersByTimeAsync(19_999)
         expect(request).toHaveBeenCalledOnce()
-        now = 20_000
+        now = 80_000
         await vi.advanceTimersByTimeAsync(1)
         expect(request).toHaveBeenCalledTimes(2)
     })
@@ -194,12 +183,11 @@ describe('external storage scheduler', () => {
             error: { code: 'corrupt', message: 'Rejected', retryable: false, action, retryAtMs: '20000' },
         } as never)
         scheduler.durableRevision('7')
-        await vi.advanceTimersByTimeAsync(15_000)
+        await vi.advanceTimersByTimeAsync(60_000)
         scheduler.resume()
         await vi.advanceTimersByTimeAsync(300_000)
         expect(request).toHaveBeenCalledOnce()
-        expect(scheduler.pendingRevision('destination-1', 'sync')).toBeUndefined()
-        await scheduler.requestNow('destination-1', 'sync', '7')
+        await scheduler.requestNow('destination-1', 'backup', '7')
         expect(request).toHaveBeenCalledTimes(2)
     })
 
@@ -221,61 +209,20 @@ describe('external storage scheduler', () => {
         } as unknown as ExternalStorageController
         const scheduler = createExternalStorageScheduler(controller, {
             available: () => true,
-            destinations: () => [{ connectionId: 'sync-1', kind: 'sync' }],
+            destinations: () => [{ connectionId: 'backup-1', kind: 'backup' }],
             session: () => ({ kind: 'foreground', id: 'foreground-1' }),
         })
 
         scheduler.durableRevision('7')
-        await vi.advanceTimersByTimeAsync(15_000)
+        await vi.advanceTimersByTimeAsync(60_000)
         await vi.advanceTimersByTimeAsync(300_000)
 
         expect(request).toHaveBeenCalledOnce()
-        expect(scheduler.pendingRevision('sync-1', 'sync')).toBeUndefined()
     })
-    it('coalesces device-only mutations for sync without creating backup points', async () => {
-        const request = vi.fn(async input => ({ kind: 'complete' as const, revision: input.targetRevision, job: {} as never }))
-        const scheduler = createExternalStorageScheduler({ request, cancel: vi.fn() } as unknown as ExternalStorageController, {
-            available: () => true,
-            destinations: () => [{ connectionId: 'sync', kind: 'sync' }, { connectionId: 'backup', kind: 'backup' }],
-            session: () => ({ kind: 'foreground', id: 'session' }),
-        })
-        scheduler.durableRevision('7')
-        await vi.advanceTimersByTimeAsync(60_000)
-        request.mockClear()
-        scheduler.deviceChanged()
-        scheduler.deviceChanged()
-        await vi.advanceTimersByTimeAsync(60_000)
-        expect(request).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ connectionId: 'sync', targetRevision: '7' }))
-        scheduler.stop()
-    })
-
-    it('probes idle foreground sync and schedules receive only for a changed head', async () => {
-        const request = vi.fn(async input => ({ kind: 'complete' as const, revision: input.targetRevision, job: {} as never }))
-        const probeHead = vi.fn().mockResolvedValueOnce(false).mockResolvedValue(true)
-        let available = true
-        const scheduler = createExternalStorageScheduler({ request, cancel: vi.fn() } as unknown as ExternalStorageController, {
-            available: () => available,
-            destinations: () => [{ connectionId: 'sync', kind: 'sync' }], probeHead,
-            session: () => ({ kind: 'foreground', id: 'session' }),
-        })
-        scheduler.durableRevision('7')
-        await vi.advanceTimersByTimeAsync(180_000)
-        expect(probeHead).toHaveBeenCalledTimes(1)
-        expect(request).toHaveBeenCalledTimes(1)
-        await vi.advanceTimersByTimeAsync(180_000)
-        await vi.advanceTimersByTimeAsync(5_000)
-        expect(probeHead).toHaveBeenCalledTimes(2)
-        expect(request).toHaveBeenCalledTimes(2)
-        available = false
-        await vi.advanceTimersByTimeAsync(300_000)
-        expect(probeHead).toHaveBeenCalledTimes(2)
-        scheduler.stop()
-    })
-
     it('does not automatically retry a native action-required start rejection', async () => {
         const request = vi.fn(async () => ({ kind: 'blocked' as const, reason: 'endpointRejected', cause: { kind: 'endpointRejected' } }))
         const scheduler = createExternalStorageScheduler({ request, cancel: vi.fn() } as unknown as ExternalStorageController, {
-            available: () => true, destinations: () => [{ connectionId: 'sync', kind: 'sync' }],
+            available: () => true, destinations: () => [{ connectionId: 'backup', kind: 'backup' }],
             session: () => ({ kind: 'foreground', id: 'session' }),
         })
         scheduler.durableRevision('7')
@@ -284,10 +231,10 @@ describe('external storage scheduler', () => {
         scheduler.stop()
     })
 
-    it('does not restart from device events while suspended', async () => {
+    it('does not dispatch durable revisions while suspended', async () => {
         const { scheduler, request } = harness()
         await scheduler.suspend()
-        scheduler.deviceChanged()
+        scheduler.durableRevision('1')
         await vi.advanceTimersByTimeAsync(60_000)
         expect(request).not.toHaveBeenCalled()
         scheduler.resume()

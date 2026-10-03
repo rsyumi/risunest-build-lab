@@ -8,6 +8,7 @@ use crate::persistent_store::{
 };
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
+use crate::native_log::logged;
 use tauri::{
     ipc::{InvokeBody, Request, Response},
     AppHandle, State,
@@ -148,21 +149,23 @@ pub(crate) fn pds_read_hypa_embeddings(
     state: State<'_, PersistentStoreState>,
     keys: Vec<String>,
 ) -> StoreResult<Response> {
-    let rows = with_store(state, |store| {
-        store.device_store()?.read_hypa_embeddings(&keys)
-    })?;
-    let mut entries = Vec::with_capacity(rows.len());
-    let mut vectors = Vec::with_capacity(rows.len());
-    for row in rows {
-        let vector = row.vector.unwrap_or_default();
-        entries.push(ReadHeaderEntry {
-            key: row.cache_key,
-            dimensions: row.dimensions,
-            byte_length: vector.len(),
-        });
-        vectors.push(vector);
-    }
-    Ok(Response::new(build_frame(&ReadHeader { entries }, vectors)?))
+    logged("pds_read_hypa_embeddings", (|| {
+        let rows = with_store(state, |store| {
+            store.device_store()?.read_hypa_embeddings(&keys)
+        })?;
+        let mut entries = Vec::with_capacity(rows.len());
+        let mut vectors = Vec::with_capacity(rows.len());
+        for row in rows {
+            let vector = row.vector.unwrap_or_default();
+            entries.push(ReadHeaderEntry {
+                key: row.cache_key,
+                dimensions: row.dimensions,
+                byte_length: vector.len(),
+            });
+            vectors.push(vector);
+        }
+        Ok(Response::new(build_frame(&ReadHeader { entries }, vectors)?))
+    })())
 }
 
 #[tauri::command(async)]
@@ -171,17 +174,19 @@ pub(crate) fn pds_write_hypa_embeddings(
     state: State<'_, PersistentStoreState>,
     request: Request<'_>,
 ) -> StoreResult<()> {
-    let entries = decode_write_frame(&request_frame(&request)?)?;
-    let changed = with_store_mut(state, |store| {
-        let device = store.device_store_mut()?;
-        let before = device.revision()?;
-        device.write_hypa_embeddings(&entries)?;
-        Ok(device.revision()? != before)
-    })?;
-    if changed {
-        crate::server_sync::events::notify_device_changed(&app);
-    }
-    Ok(())
+    logged("pds_write_hypa_embeddings", (|| {
+        let entries = decode_write_frame(&request_frame(&request)?)?;
+        let changed = with_store_mut(state, |store| {
+            let device = store.device_store_mut()?;
+            let before = device.revision()?;
+            device.write_hypa_embeddings(&entries)?;
+            Ok(device.revision()? != before)
+        })?;
+        if changed {
+            crate::server_sync::events::notify_device_changed(&app);
+        }
+        Ok(())
+    })())
 }
 
 #[derive(Serialize)]
@@ -190,22 +195,24 @@ pub(crate) struct HypaEmbeddingUsage { count: u64, bytes: u64 }
 
 #[tauri::command(async)]
 pub(crate) fn pds_hypa_embedding_usage(state: State<'_, PersistentStoreState>) -> StoreResult<HypaEmbeddingUsage> {
-    with_store(state, |store| {
+    logged("pds_hypa_embedding_usage", with_store(state, |store| {
         let (count, bytes) = store.device_store()?.hypa_embedding_usage()?;
         Ok(HypaEmbeddingUsage { count, bytes })
-    })
+    }))
 }
 
 #[tauri::command(async)]
 pub(crate) fn pds_clear_hypa_embeddings(app: AppHandle, state: State<'_, PersistentStoreState>) -> StoreResult<()> {
-    let changed = with_store_mut(state, |store| {
-        let device = store.device_store_mut()?;
-        let before = device.revision()?;
-        device.clear_hypa_embeddings()?;
-        Ok(device.revision()? != before)
-    })?;
-    if changed { crate::server_sync::events::notify_device_changed(&app); }
-    Ok(())
+    logged("pds_clear_hypa_embeddings", (|| {
+        let changed = with_store_mut(state, |store| {
+            let device = store.device_store_mut()?;
+            let before = device.revision()?;
+            device.clear_hypa_embeddings()?;
+            Ok(device.revision()? != before)
+        })?;
+        if changed { crate::server_sync::events::notify_device_changed(&app); }
+        Ok(())
+    })())
 }
 
 #[cfg(test)]

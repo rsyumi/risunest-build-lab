@@ -466,17 +466,6 @@ impl Cache {
         }
         Ok(bytes)
     }
-    pub fn dependencies(&self, payload: &ServerPayload) -> Result<Vec<String>> {
-        Ok(
-            crate::persistent_store::server_sync_projection::dependencies_with(payload, |hash| {
-                self.read(hash, usize::MAX).map_err(|error| {
-                    crate::persistent_store::StoreError::Validation {
-                        message: error.code,
-                    }
-                })
-            })?,
-        )
-    }
     pub fn project(
         &self,
         payload: &ServerPayload,

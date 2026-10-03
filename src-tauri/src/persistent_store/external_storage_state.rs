@@ -13,8 +13,6 @@ CREATE TABLE external_storage_history_points(job_id TEXT PRIMARY KEY,connection_
 CREATE TABLE external_storage_captures(id TEXT PRIMARY KEY,identity TEXT NOT NULL,scope_id TEXT NOT NULL,codec_id TEXT NOT NULL,device_capture_id TEXT NOT NULL,manifest_hash TEXT NOT NULL CHECK(length(manifest_hash)=64 AND manifest_hash NOT GLOB '*[^0-9a-f]*'),UNIQUE(identity,scope_id,codec_id,device_capture_id));
 CREATE TABLE external_storage_capture_refs(capture_id TEXT NOT NULL,job_id TEXT NOT NULL,PRIMARY KEY(capture_id,job_id));
 CREATE TABLE external_storage_capture_files(capture_id TEXT PRIMARY KEY,catalog_path TEXT NOT NULL,file_hash TEXT NOT NULL CHECK(length(file_hash)=64 AND file_hash NOT GLOB '*[^0-9a-f]*'));
-CREATE TABLE external_storage_base_records(connection_id TEXT NOT NULL,key TEXT NOT NULL,content_hash TEXT NOT NULL CHECK(length(content_hash)=64 AND content_hash NOT GLOB '*[^0-9a-f]*'),PRIMARY KEY(connection_id,key));
-CREATE TABLE external_storage_base_record_state(connection_id TEXT PRIMARY KEY,snapshot_id TEXT NOT NULL);
 "#;
 
 pub(super) fn create_schema(db: &Connection) -> StoreResult<()> {
@@ -47,90 +45,6 @@ fn invalid(message: &str) -> StoreError {
     StoreError::Validation {
         message: message.into(),
     }
-}
-
-fn reusable_job(tx: &Transaction<'_>, job: &str, connection: &str) -> StoreResult<bool> {
-    let existing = tx
-        .query_row(
-            "SELECT connection_id,phase FROM external_storage_jobs WHERE id=?1",
-            [job],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        )
-        .optional()?;
-    let Some((existing_connection, phase)) = existing else {
-        return Ok(false);
-    };
-    if existing_connection != connection || !matches!(phase.as_str(), "stale" | "cancelled") {
-        return Err(invalid("External job cannot be reused"));
-    }
-    Ok(true)
-}
-
-/// A verified remote snapshot selected for normal sync receive. For restore
-/// jobs, capture_id identifies this remote snapshot, not a local capture/pin.
-/// Network authentication and full staged payload validation precede activation.
-pub(crate) struct ReceiveIntent<'a> {
-    pub job_id: &'a str,
-    pub connection_id: &'a str,
-    pub repository_id: &'a str,
-    pub snapshot_id: &'a str,
-    pub commit_id: &'a str,
-    pub authenticated_head: &'a str,
-    pub identity: &'a CaptureIdentity,
-}
-
-pub(crate) fn prepare_receive(tx: &Transaction<'_>, intent: &ReceiveIntent<'_>) -> StoreResult<()> {
-    sync_selection::require_publish(tx, intent.identity, intent.connection_id)?;
-    if sync_selection::identity(tx)? != *intent.identity {
-        return Err(invalid("Local revision changed before remote receive"));
-    }
-    sync_selection::require_no_pending_publication(tx)?;
-    if [
-        intent.job_id,
-        intent.repository_id,
-        intent.snapshot_id,
-        intent.commit_id,
-        intent.authenticated_head,
-    ]
-    .iter()
-    .any(|value| value.is_empty())
-    {
-        return Err(invalid("Incomplete remote receive intent"));
-    }
-    let busy: bool = tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM external_storage_jobs WHERE connection_id=?1 AND phase NOT IN ('complete','cancelled','stale','publicationUnknown'))",
-        [intent.connection_id], |r| r.get(0),
-    )?;
-    if busy {
-        return Err(invalid("Destination already has an active job"));
-    }
-    let identity = serde_json::to_string(intent.identity)?;
-    if reusable_job(tx, intent.job_id, intent.connection_id)? {
-        if tx.execute(
-            "UPDATE external_storage_jobs SET repository_id=?2,capture_id=?3,identity=?4,role='restore',strategy=NULL,expected_head=?5,commit_id=?6,phase='ready' WHERE id=?1 AND connection_id=?7 AND phase IN ('stale','cancelled')",
-            params![intent.job_id,intent.repository_id,intent.snapshot_id,identity,intent.authenticated_head,intent.commit_id,intent.connection_id],
-        )? != 1 {
-            return Err(invalid("External job cannot be reused"));
-        }
-        tx.execute(
-            "DELETE FROM external_storage_capture_refs WHERE job_id=?1",
-            [intent.job_id],
-        )?;
-    } else {
-        tx.execute(
-            "INSERT INTO external_storage_jobs VALUES(?1,?2,?3,?4,?5,'restore',NULL,?6,?7,'ready')",
-            params![
-                intent.job_id,
-                intent.connection_id,
-                intent.repository_id,
-                intent.snapshot_id,
-                identity,
-                intent.authenticated_head,
-                intent.commit_id
-            ],
-        )?;
-    }
-    Ok(())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -417,16 +331,4 @@ pub(crate) fn capture_has_consumers(db: &Connection, capture: &str) -> StoreResu
         [capture],
         |r| r.get(0),
     )?)
-}
-
-pub(crate) fn clear_base_records(tx: &Transaction<'_>, connection: &str) -> StoreResult<()> {
-    tx.execute(
-        "DELETE FROM external_storage_base_records WHERE connection_id=?1",
-        [connection],
-    )?;
-    tx.execute(
-        "DELETE FROM external_storage_base_record_state WHERE connection_id=?1",
-        [connection],
-    )?;
-    Ok(())
 }

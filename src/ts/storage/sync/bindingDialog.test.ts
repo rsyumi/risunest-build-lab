@@ -14,3 +14,8 @@ it.each([{ confirmed: false, checked: false }, { confirmed: false, checked: true
     dialog.mockResolvedValue(result)
     expect(await confirmSyncBindingReplacement()).toBe(false)
 })
+it('describes a restored server instead of an ordinary replacement and keeps the acknowledgement', async () => {
+    dialog.mockResolvedValue({ confirmed: true, checked: true })
+    expect(await confirmSyncBindingReplacement('server-restored')).toBe(true)
+    expect(dialog).toHaveBeenCalledWith({ title: language.lwwSync.replaceTitle, description: language.lwwSync.serverRestoredDescription, checkboxLabel: language.lwwSync.replaceAcknowledge, actionLabel: language.lwwSync.replaceAction, cancelLabel: language.lwwSync.cancelAction, requireChecked: true })
+})

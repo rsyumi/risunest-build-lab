@@ -7,6 +7,7 @@ use super::{
     leases::{self, Admission, PageTracker},
     runtime,
 };
+use crate::native_log::logged;
 use risunest_external_storage_format::snapshot::StoredObject;
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
@@ -95,17 +96,19 @@ pub(crate) async fn external_storage_prepare_history_delete(
     app: tauri::AppHandle,
     request: PrepareHistoryDeleteRequest,
 ) -> Result<HistoryDeletePreparation> {
-    let connected = connection_commands::open_connected(&app, &request.connection_id).await?;
-    let observation: StoredObject = serde_json::from_str(&request.point_observation)
-        .map_err(|_| ProviderError::new(ErrorKind::Corrupt))?;
-    let store_id = runtime::native_store(&app)?.external_identity().map_err(runtime::local_error)?.store_id;
-    let inspected = inspect(&connected, &request.point_id, &observation, &store_id, &Cancellation::default())
-        .await?
-        .ok_or_else(|| ProviderError::new(ErrorKind::NotFound))?;
-    Ok(HistoryDeletePreparation {
-        same_device: inspected.same_device,
-        last_retained: inspected.last_retained,
-    })
+    logged("external_storage_prepare_history_delete", async move {
+        let connected = connection_commands::open_connected(&app, &request.connection_id).await?;
+        let observation: StoredObject = serde_json::from_str(&request.point_observation)
+            .map_err(|_| ProviderError::new(ErrorKind::Corrupt))?;
+        let store_id = runtime::native_store(&app)?.external_identity().map_err(runtime::local_error)?.store_id;
+        let inspected = inspect(&connected, &request.point_id, &observation, &store_id, &Cancellation::default())
+            .await?
+            .ok_or_else(|| ProviderError::new(ErrorKind::NotFound))?;
+        Ok(HistoryDeletePreparation {
+            same_device: inspected.same_device,
+            last_retained: inspected.last_retained,
+        })
+    }.await)
 }
 
 pub(crate) async fn run_delete_history(

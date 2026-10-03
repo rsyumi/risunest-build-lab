@@ -1,10 +1,8 @@
 import { externalJobIsPaused } from './connection'
-import { isTauri, isTauriDesktop } from '../../../platform'
-import { listen } from '@tauri-apps/api/event'
+import { isTauriDesktop } from '../../../platform'
 import { get } from 'svelte/store'
 import { selectedCharID } from '../../../stores.svelte'
 import { getDatabase } from '../../database.svelte'
-import { SERVER_SYNC_DEVICE_CHANGED_EVENT } from '../serverSyncNativeSignals'
 import { flushDeviceStateBeforeRestore, refreshDeviceStateAfterRestore } from '../../deviceStateRestore'
 import { hasMobileBackgroundTasks, subscribeMobileBackgroundTasks, runWithMobileBackgroundTask, measuredTaskPercent, type MobileBackgroundTask } from '../../../mobileBackgroundTask'
 import {
@@ -115,7 +113,6 @@ export function installExternalStorageProduction(): Promise<() => void> {
                 && document.visibilityState !== 'hidden' && navigator.onLine,
             destinations: () => destinations(holder.current?.state ?? state),
             session: () => holder.current?.session ?? session,
-            probeHead: connectionId => bridge.probeHead(connectionId),
             maintenance: () => {
                 const current = holder.current?.state ?? state
                 return destinations(current).filter(destination => {
@@ -152,9 +149,8 @@ export function installExternalStorageProduction(): Promise<() => void> {
                     connection.id === connectionId ? { ...connection, status: job.error?.action === 'reauthenticate' ? 'reauth-required' as const : 'key-locked' as const, lastError: job.error } : connection) }
             }
         }))
-        if (isTauri) disposers.push(await listen(SERVER_SYNC_DEVICE_CHANGED_EVENT, () => scheduler.deviceChanged()))
-        disposers.push(subscribeLocalPersistentRevision((value, cause) => {
-            scheduler.durableRevision(String(value) as DecimalString, cause)
+        disposers.push(subscribeLocalPersistentRevision(value => {
+            scheduler.durableRevision(String(value) as DecimalString)
         }))
 
         const onOnline = (): void => {
@@ -165,7 +161,7 @@ export function installExternalStorageProduction(): Promise<() => void> {
             }).catch(() => {})
         }
         const onOffline = (): void => {
-            void scheduler.suspend(destination => destination.kind === 'sync')
+            void scheduler.suspend(() => false)
         }
         const onVisibility = (): void => {
             if (isTauriDesktop) {
@@ -178,11 +174,7 @@ export function installExternalStorageProduction(): Promise<() => void> {
                     if (hasMobileBackgroundTasks()) return
                     current.session = { kind: 'foreground', id: crypto.randomUUID() }
                     await bridge.setExecutionSession({ kind: 'hidden', id: current.session.id })
-                    await scheduler.suspend(destination => {
-                        if (destination.kind !== 'sync') return false
-                        return current.state.connections.find(item =>
-                            item.id === destination.connectionId)?.strategy === 'sequential'
-                    })
+                    await scheduler.suspend(() => false)
                 } else await refreshForeground(current)
             }).catch(() => {})
         }
@@ -204,16 +196,6 @@ export function installExternalStorageProduction(): Promise<() => void> {
         throw error
     })
     return installation
-}
-
-/** Gives answer-completion saves the five-second synchronization policy. */
-export function notifyExternalStorageGenerationComplete(revision: number): void {
-    try {
-        revision = parseExternalLocalRevision(revision)
-    } catch {
-        return
-    }
-    runtime?.scheduler.durableRevision(String(revision) as DecimalString, 'generation-complete')
 }
 
 /** Refreshes scheduler routing after an explicit settings mutation. */
@@ -335,13 +317,6 @@ export async function requestExternalStorageDeleteHistory(
     }, undefined, true)
 }
 
-/**
- * Runs a conflict decision to its end. The native side answers a received
- * repository side with `remote-apply`, which only this layer can activate, so
- * starting the job through the bridge alone would leave it waiting.
- */
-
-
 async function retryPausedJob(
     job: ExternalJobSummary,
     request: StartExternalJobRequest,
@@ -393,7 +368,7 @@ export async function requestExternalStorageRestore(
         let handedOff = false
         let replacementFenced = false
         let pluginsFenced = false
-        await current.scheduler.suspend(destination => destination.kind === 'sync')
+        await current.scheduler.suspend(() => false)
         try {
             await flushPendingDataLocally('external-storage-restore')
             const areas = [...restoreAreas]

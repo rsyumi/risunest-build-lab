@@ -106,6 +106,7 @@ pub(super) fn classify(
             retry_at_ms: None,
             oauth_error: None,
             oauth_error_description: None,
+            cause: Default::default(),
         },
         509 => ProviderError {
             kind: ErrorKind::RateLimited,
@@ -113,6 +114,7 @@ pub(super) fn classify(
             retry_at_ms: common::retry_after_ms(headers, now_ms),
             oauth_error: None,
             oauth_error_description: None,
+            cause: Default::default(),
         },
         _ => common::classify_status(status, headers, now_ms),
     }
@@ -139,6 +141,7 @@ pub(super) fn classify_token(
             retry_at_ms: None,
             oauth_error: None,
             oauth_error_description: None,
+            cause: Default::default(),
         },
         _ => classify(status, headers, now_ms),
     }

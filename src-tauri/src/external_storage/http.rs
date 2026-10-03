@@ -554,6 +554,7 @@ pub(crate) async fn send_signed(
             ),
             oauth_error: None,
             oauth_error_description: None,
+            cause: Default::default(),
         });
     }
     dispatch_ready(transport, clock, state, request, cancel, deadline).await
@@ -746,6 +747,7 @@ mod tests {
                     retry_at_ms: Some(now_ms + 3_600_000),
                     oauth_error: None,
                     oauth_error_description: None,
+                    cause: Default::default(),
                 },
                 &BTreeMap::from([
                     ("x-ratelimit-remaining".into(), "0".into()),
@@ -766,6 +768,7 @@ mod tests {
                     retry_at_ms: Some(now_ms + 3_600_000),
                     oauth_error: None,
                     oauth_error_description: None,
+                    cause: Default::default(),
                 },
                 &BTreeMap::from([("retry-after".into(), "3600".into())]),
                 now_ms,

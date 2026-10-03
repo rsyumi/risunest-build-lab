@@ -1,17 +1,17 @@
 // @vitest-environment happy-dom
-import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { mount, tick, unmount } from 'svelte'
 import { languageEnglish } from 'src/lang/en'
-const f = vi.hoisted(() => ({ connect: vi.fn(), configure: vi.fn(), bind: vi.fn(), native: true, view: { status: { configured: false }, paused: false } as Record<string, unknown> }))
+const f = vi.hoisted(() => ({ connect: vi.fn(), configure: vi.fn(), bind: vi.fn(), disconnect: vi.fn(), hold: vi.fn(), release: vi.fn(), status: vi.fn(), policy: vi.fn(), cancel: vi.fn(), checkbox: vi.fn(), native: true, view: { status: { configured: false }, paused: false } as Record<string, unknown> }))
 vi.mock('src/lang', async () => ({ language: (await import('src/lang/en')).languageEnglish, changeLanguage: vi.fn() }))
 vi.mock('src/ts/platform', () => ({ get isTauri() { return f.native } }))
-vi.mock('src/ts/alert', () => ({ alertConfirm: vi.fn(), alertError: vi.fn(), alertNormal: vi.fn(), openRisuAccountLogin: vi.fn() }))
+vi.mock('src/ts/alert', () => ({ alertConfirm: vi.fn(), alertCheckboxConfirm: f.checkbox, alertError: vi.fn(), alertNormal: vi.fn(), openRisuAccountLogin: vi.fn() }))
 vi.mock('src/ts/storage/sync/serverSyncProduction', () => ({
-    connectServerSync: f.connect, configureServerSyncConnection: f.configure, disconnectServerSync: vi.fn(), retryServerSync: vi.fn(),
+    connectServerSync: f.connect, configureServerSyncConnection: f.configure, disconnectServerSync: f.disconnect, retryServerSync: vi.fn(), holdServerSync: f.hold,
     getServerSyncCacheUsage: vi.fn(), cleanupServerSyncCache: vi.fn(),
     getServerSyncController: () => ({ snapshot: () => f.view, subscribe: () => () => {}, ensureStatus: vi.fn() }),
 }))
-vi.mock('src/ts/storage/sync/serverAssetResidency', () => ({ getAssetResidencyStatus: vi.fn(), setAssetResidencyPolicy: vi.fn(), evictLocalAssets: vi.fn(), cancelAssetResidencyOperation: vi.fn() }))
+vi.mock('src/ts/storage/sync/serverAssetResidency', () => ({ getAssetResidencyStatus: f.status, setAssetResidencyPolicy: f.policy, evictLocalAssets: vi.fn(), cancelAssetResidencyOperation: f.cancel }))
 vi.mock('src/ts/storage/sync/serverSyncRegistration', () => ({ parseServerRegistration: () => ({ endpoint: 'https://synthetic.invalid', libraryId: 'library', deviceId: 'registration', token: 'synthetic' }) }))
 vi.mock('src/ts/storage/sync/serverSyncRegistrationInbox', () => ({ serverRegistrationInbox: { changed: { subscribe: () => () => {} }, releaseConsumed: vi.fn() } }))
 vi.mock('src/ts/storage/sync/serverSyncQr', () => ({ canScanServerRegistration: false, createServerQrScanner: () => ({ cancel: vi.fn() }) }))
@@ -38,7 +38,11 @@ import ServerSyncSettings from './ServerSyncSettings.svelte'
 import Onboarding from 'src/lib/Others/Onboarding/Onboarding.svelte'
 let component: ReturnType<typeof mount> | undefined
 let host: HTMLDivElement
-beforeEach(() => { vi.clearAllMocks(); f.native = true; f.view = { status: { configured: false }, paused: false }; host = document.createElement('div'); document.body.append(host) })
+beforeEach(() => {
+    vi.clearAllMocks(); f.native = true; f.view = { status: { configured: false }, paused: false }; host = document.createElement('div'); document.body.append(host)
+    for (const mock of [f.disconnect, f.hold, f.release, f.status, f.policy, f.cancel, f.checkbox]) mock.mockReset()
+    f.hold.mockResolvedValue(f.release)
+})
 afterEach(async () => { if (component) await unmount(component); component = undefined; host.remove() })
 const settle = async () => { for (let i = 0; i < 12; i++) await tick() }
 function click(text: string) { const button = [...host.querySelectorAll('button')].find(button => button.textContent?.trim() === text); expect(button).toBeDefined(); button!.click() }
@@ -88,6 +92,131 @@ it('dismisses a registration without connecting', async () => {
 it('hides the native server connection UI on web', async () => {
     f.native = false; component = mount(ServerSyncSettings, { target: host }); await tick()
     expect(host.querySelector('textarea')).toBeNull(); expect(host.querySelector('button')).toBeNull()
+})
+
+const sync = languageEnglish.risuNest.serverSync
+const residencyStatus = (overrides: Record<string, unknown> = {}) => ({ policy: 'remote', localBytes: 0, remoteBytes: 4096, remoteObjects: 2, unavailableObjects: 0, evictedBytes: 0, ...overrides })
+async function mountBound(status: Record<string, unknown> = residencyStatus()) {
+    f.view = { status: { configured: true, bound: true }, paused: false, error: '' }
+    f.status.mockResolvedValue(status)
+    component = mount(ServerSyncSettings, { target: host, props: { connectTarget: vi.fn() } })
+    await settle()
+}
+const alertText = () => host.querySelector('[role="alert"]')?.textContent
+describe('disconnecting with files kept only on the server', () => {
+    it('disconnects without asking when no file is kept only on the server', async () => {
+        await mountBound(residencyStatus({ remoteObjects: 0, remoteBytes: 0 }))
+        click(sync.disconnect); await settle()
+        expect(f.checkbox).not.toHaveBeenCalled(); expect(f.policy).not.toHaveBeenCalled()
+        expect(f.disconnect).toHaveBeenCalledOnce()
+    })
+    it('reads the current status when disconnecting and asks once with an unchecked download option', async () => {
+        await mountBound(residencyStatus({ remoteObjects: 0, remoteBytes: 0 }))
+        f.status.mockResolvedValue(residencyStatus())
+        f.checkbox.mockResolvedValue({ confirmed: false, checked: false })
+        click(sync.disconnect); await settle()
+        expect(f.checkbox).toHaveBeenCalledExactlyOnceWith({
+            title: sync.disconnectTitle, description: sync.disconnectRemoteOnly, checkboxLabel: sync.downloadThenDisconnect,
+            actionLabel: sync.disconnect, cancelLabel: languageEnglish.cancel, requireChecked: false,
+        })
+        expect(f.disconnect).not.toHaveBeenCalled(); expect(f.policy).not.toHaveBeenCalled(); expect(f.hold).not.toHaveBeenCalled()
+    })
+    it('disconnects without downloading when the download option stays unchecked', async () => {
+        await mountBound()
+        f.checkbox.mockResolvedValue({ confirmed: true, checked: false })
+        click(sync.disconnect); await settle()
+        expect(f.disconnect).toHaveBeenCalledOnce(); expect(f.policy).not.toHaveBeenCalled(); expect(f.hold).not.toHaveBeenCalled()
+    })
+    it('stops sync, downloads every file, then disconnects', async () => {
+        await mountBound()
+        f.checkbox.mockResolvedValue({ confirmed: true, checked: true })
+        f.policy.mockResolvedValue(residencyStatus({ policy: 'full', remoteObjects: 0, remoteBytes: 0 }))
+        click(sync.disconnect); await settle()
+        expect(f.policy).toHaveBeenCalledExactlyOnceWith('full')
+        expect(f.disconnect).toHaveBeenCalledOnce(); expect(f.release).toHaveBeenCalledOnce()
+        const order = [f.hold, f.policy, f.disconnect, f.release].map(mock => mock.mock.invocationCallOrder[0])
+        expect(order).toEqual([...order].sort((a, b) => a - b))
+        expect(alertText()).toBeUndefined()
+    })
+    it('shows the busy text and the cancel button while the download runs', async () => {
+        await mountBound()
+        let finish!: () => void
+        f.checkbox.mockResolvedValue({ confirmed: true, checked: true })
+        f.policy.mockImplementation(() => new Promise(resolve => { finish = () => resolve(residencyStatus({ policy: 'full', remoteObjects: 0 })) }))
+        click(sync.disconnect); await settle()
+        expect(host.querySelector('[role="status"]')?.textContent).toBe(sync.residency.working)
+        click(sync.residency.cancel); await settle()
+        expect(f.cancel).toHaveBeenCalledOnce()
+        finish(); await settle()
+        expect(host.querySelector('[role="status"]')).toBeNull()
+    })
+    it('keeps the connection and explains it when the download fails', async () => {
+        await mountBound()
+        f.checkbox.mockResolvedValue({ confirmed: true, checked: true })
+        f.policy.mockRejectedValue({ code: 'server-unreachable', retryable: true })
+        click(sync.disconnect); await settle()
+        expect(f.disconnect).not.toHaveBeenCalled(); expect(f.release).toHaveBeenCalledOnce()
+        expect(alertText()).toBe(sync.downloadFailedKeptConnection)
+    })
+    it('disconnects when the failed download leaves no file only on the server', async () => {
+        await mountBound()
+        f.status.mockResolvedValueOnce(residencyStatus()).mockResolvedValueOnce(residencyStatus({ remoteObjects: 0, remoteBytes: 0, unavailableObjects: 1 }))
+        f.checkbox.mockResolvedValue({ confirmed: true, checked: true })
+        f.policy.mockRejectedValue({ code: 'required-asset-unavailable', retryable: false })
+        click(sync.disconnect); await settle()
+        expect(f.disconnect).toHaveBeenCalledOnce(); expect(f.release).toHaveBeenCalledOnce()
+        const order = [f.hold, f.policy, f.disconnect, f.release].map(mock => mock.mock.invocationCallOrder[0])
+        expect(order).toEqual([...order].sort((a, b) => a - b))
+        expect(alertText()).toBeUndefined()
+    })
+    it.each([
+        { name: 'still lists files only on the server', reread: () => f.status.mockResolvedValueOnce(residencyStatus()).mockResolvedValueOnce(residencyStatus({ remoteObjects: 1, unavailableObjects: 1 })) },
+        { name: 'cannot be read', reread: () => f.status.mockResolvedValueOnce(residencyStatus()).mockRejectedValueOnce(new Error('status-unavailable')) },
+    ])('keeps the connection when the status after a failed download $name', async ({ reread }) => {
+        await mountBound()
+        reread()
+        f.checkbox.mockResolvedValue({ confirmed: true, checked: true })
+        f.policy.mockRejectedValue({ code: 'required-asset-unavailable', retryable: false })
+        click(sync.disconnect); await settle()
+        expect(f.disconnect).not.toHaveBeenCalled(); expect(f.release).toHaveBeenCalledOnce()
+        expect(alertText()).toBe(sync.downloadFailedKeptConnection)
+    })
+    it('keeps the connection without a message when the download is cancelled', async () => {
+        await mountBound()
+        f.status.mockResolvedValueOnce(residencyStatus()).mockResolvedValue(residencyStatus({ remoteObjects: 0, remoteBytes: 0 }))
+        f.checkbox.mockResolvedValue({ confirmed: true, checked: true })
+        f.policy.mockRejectedValue({ code: 'cancelled', retryable: true })
+        click(sync.disconnect); await settle()
+        expect(f.disconnect).not.toHaveBeenCalled(); expect(f.release).toHaveBeenCalledOnce()
+        expect(alertText()).toBeUndefined()
+    })
+    it('disconnects without asking when the status cannot be read', async () => {
+        await mountBound()
+        f.status.mockRejectedValueOnce(new Error('status-unavailable'))
+        click(sync.disconnect); await settle()
+        expect(f.checkbox).not.toHaveBeenCalled(); expect(f.policy).not.toHaveBeenCalled()
+        expect(f.disconnect).toHaveBeenCalledOnce()
+    })
+})
+describe('downloading files kept only on the server', () => {
+    it.each([
+        { policy: 'full', remoteObjects: 2, shown: true },
+        { policy: 'full', remoteObjects: 0, shown: false },
+        { policy: 'remote', remoteObjects: 2, shown: false },
+    ])('offers the download for policy $policy with $remoteObjects server-only files: $shown', async ({ policy, remoteObjects, shown }) => {
+        await mountBound(residencyStatus({ policy, remoteObjects }))
+        expect(!!findButton(sync.residency.download)).toBe(shown)
+    })
+    it('downloads with sync stopped and stays connected', async () => {
+        await mountBound(residencyStatus({ policy: 'full' }))
+        f.policy.mockResolvedValue(residencyStatus({ policy: 'full', remoteObjects: 0, remoteBytes: 0 }))
+        f.status.mockResolvedValue(residencyStatus({ policy: 'full', remoteObjects: 0, remoteBytes: 0 }))
+        click(sync.residency.download); await settle()
+        expect(f.policy).toHaveBeenCalledExactlyOnceWith('full'); expect(f.disconnect).not.toHaveBeenCalled()
+        const order = [f.hold, f.policy, f.release].map(mock => mock.mock.invocationCallOrder[0])
+        expect(order).toEqual([...order].sort((a, b) => a - b))
+        expect(findButton(sync.residency.download)).toBeUndefined()
+    })
 })
 
 async function openOnboardingServer() {
