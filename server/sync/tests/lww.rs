@@ -511,6 +511,50 @@ fn stable_state_pin_pages_in_key_byte_order_while_tail_continues() {
 }
 
 #[test]
+fn a_device_that_left_pins_behind_can_still_read_state() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::init(root.path()).unwrap();
+    let a = device(&store);
+    let b = device(&store);
+    store
+        .push(
+            &a,
+            &request(
+                &store,
+                WRITER_A,
+                "initial",
+                vec![inline("a", WRITER_A, 1, "a")],
+            ),
+        )
+        .unwrap();
+    let other = store.create_state_pin(&b).unwrap();
+    let left: Vec<_> = (0..4)
+        .map(|_| store.create_state_pin(&a).unwrap())
+        .collect();
+    let next = store.create_state_pin(&a).unwrap();
+    assert_eq!(
+        store
+            .state_page(&a, &left[0].pin_id, None, 1)
+            .unwrap_err()
+            .code,
+        "state-pin-expired"
+    );
+    for pin in left[1..].iter().chain([&next]) {
+        assert!(store.state_page(&a, &pin.pin_id, None, 1).is_ok());
+    }
+    assert!(store.state_page(&b, &other.pin_id, None, 1).is_ok());
+    let held: i64 = Connection::open(root.path().join("metadata.sqlite"))
+        .unwrap()
+        .query_row(
+            "SELECT count(*) FROM state_pin_units WHERE pin=?1",
+            [&left[0].pin_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(held, 0);
+}
+
+#[test]
 fn pruning_respects_active_ack_and_pin_then_returns_structured_floor() {
     let root = tempfile::tempdir().unwrap();
     let store = Store::init(root.path()).unwrap();

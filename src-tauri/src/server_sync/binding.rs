@@ -264,6 +264,7 @@ pub(crate) fn stage(
     store: &mut PersistentStore,
     header: &Header,
     inspection_id: &str,
+    cancelled: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Result<StagedTarget> {
     assert_authority(store, header)?;
     let log = OperationLog::open(store.repository_root())?;
@@ -271,9 +272,10 @@ pub(crate) fn stage(
     if target.authority != header.binding_authority {
         return Err(SyncError::new("binding-authority-changed", 409));
     }
-    let mut core = LwwClient::new(
+    let mut core = LwwClient::with_cancellation(
         store.repository_root(),
         target.config.resolve(store.repository_root())?,
+        cancelled,
     )?;
     core.access = Some(target.config.clone());
     if core.client.resolve_identity()?.epoch != target.epoch {
@@ -623,7 +625,7 @@ pub(crate) fn first_binding_cycle(
         let inspected = inspect(store, &super::lww_tests::header(store))?;
         if inspected.previously_bound_library { return Err(SyncError::new("fixture-first-binding-required",409)); }
         if inspected.empty { return Err(SyncError::new("fixture-nonempty-target-required",409)); }
-        let staged = stage(store, &super::lww_tests::header(store), &inspected.inspection_id)?;
+        let staged = stage(store, &super::lww_tests::header(store), &inspected.inspection_id, None)?;
         let next = store.switch_lww_binding(&crate::persistent_store::sync_selection::SwitchBindingRequest {
             header: super::lww_tests::header(store),
             expected_selection_epoch: original.selection_epoch,
@@ -758,7 +760,7 @@ mod tests {
         let request = header(&target);
         let inspected = inspect(&target, &request).unwrap();
         let request = header(&target);
-        let staged = stage(&mut target, &request, &inspected.inspection_id).unwrap();
+        let staged = stage(&mut target, &request, &inspected.inspection_id, None).unwrap();
         let hash = alias.object_hash.unwrap();
         assert_eq!(target.read_root(None).unwrap().value["language"], "local");
         assert!(
@@ -835,7 +837,7 @@ mod tests {
         let request = header(&store);
         let inspected = inspect(&store, &request).unwrap();
         let request = header(&store);
-        let staged = stage(&mut store, &request, &inspected.inspection_id).unwrap();
+        let staged = stage(&mut store, &request, &inspected.inspection_id, None).unwrap();
         let prepared = prepare_new_device(&mut store, &request, &staged.staging_id).unwrap();
         assert_eq!(store.lww_clock_state().unwrap().writer_id, old_writer);
         assert!(server
@@ -921,7 +923,7 @@ mod tests {
         let request = header(&store);
         let inspected = inspect(&store, &request).unwrap();
         let request = header(&store);
-        let staged = stage(&mut store, &request, &inspected.inspection_id).unwrap();
+        let staged = stage(&mut store, &request, &inspected.inspection_id, None).unwrap();
         let preparation = prepare_new_device(&mut store, &request, &staged.staging_id).unwrap();
         assert!(core.log.pending().unwrap().is_empty());
         let receipt: String = core
@@ -1468,7 +1470,7 @@ mod tests {
         assert!(inspected.registration_changed);
         assert!(!inspected.previously_bound_library);
         let request = header(&a);
-        let staged = stage(&mut a, &request, &inspected.inspection_id).unwrap();
+        let staged = stage(&mut a, &request, &inspected.inspection_id, None).unwrap();
         let prepared = prepare_new_device(&mut a, &request, &staged.staging_id).unwrap();
         let result = a
             .lww_replace_target_as_new_device(&request, &staged.staging_id, &prepared.authorization_id)

@@ -437,6 +437,14 @@ impl ServerClient {
             activity: None,
         })
     }
+    /// A client for the same server that ignores this one's cancellation, for
+    /// releasing what a cancelled operation still holds on the server.
+    pub(crate) fn uncancelled(&self) -> Result<Self> {
+        let client = Self::with_cancellation(self.config(), None)?;
+        #[cfg(test)]
+        let client = Self { test_io: self.test_io.clone(), ..client };
+        Ok(client)
+    }
     /// Lets this client repeat a request the server refused before admission.
     pub(crate) fn with_admission_retry(mut self, admission: Arc<AdmissionRetry>) -> Self {
         self.admission = Some(admission);
