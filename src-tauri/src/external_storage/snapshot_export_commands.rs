@@ -7,6 +7,7 @@ use super::{
     control, leases,
     runtime, snapshot_export, snapshot_restore,
 };
+use crate::native_log::logged;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -45,7 +46,8 @@ fn claim_export(id: &str) -> Result<(ExportClaim, Cancellation)> {
 }
 #[tauri::command]
 pub(crate) fn external_storage_cancel_export(export_id: String) -> Result<()> {
-    if let Some(cancel) = EXPORTS.lock().map_err(runtime::local_error)?.get(&export_id) { cancel.cancel(); }
+    let exports = logged("external_storage_cancel_export", EXPORTS.lock().map_err(runtime::local_error))?;
+    if let Some(cancel) = exports.get(&export_id) { cancel.cancel(); }
     Ok(())
 }
 
@@ -212,98 +214,100 @@ pub(crate) async fn external_storage_export_snapshot(
     request: ExportSnapshotRequest,
     progress: tauri::ipc::Channel<serde_json::Value>,
 ) -> Result<ExportSnapshotResponse> {
-    if !valid_id(&request.connection_id) || !valid_id(&request.snapshot_id) {
-        return Err(ProviderError::new(ErrorKind::Corrupt));
-    }
-    let (_claim, cancel) = claim_export(&request.export_id)?;
-    let counters = super::phase_progress::PhaseProgress::new(move |value| {
-        let _ = progress.send(serde_json::json!({
-            "completedBytes": value.bytes.to_string(), "totalBytes": value.total_bytes.to_string(),
-            "completedItems": value.items.to_string(), "totalItems": value.total_items.to_string(),
-        }));
-    });
-    let Some(selected) = selected_path(&app, &request.snapshot_id) else {
-        return Ok(ExportSnapshotResponse {
-            cancelled: true,
-            destination: None,
-            sha256: None,
+    logged("external_storage_export_snapshot", async move {
+        if !valid_id(&request.connection_id) || !valid_id(&request.snapshot_id) {
+            return Err(ProviderError::new(ErrorKind::Corrupt));
+        }
+        let (_claim, cancel) = claim_export(&request.export_id)?;
+        let counters = super::phase_progress::PhaseProgress::new(move |value| {
+            let _ = progress.send(serde_json::json!({
+                "completedBytes": value.bytes.to_string(), "totalBytes": value.total_bytes.to_string(),
+                "completedItems": value.items.to_string(), "totalItems": value.total_items.to_string(),
+            }));
         });
-    };
-    let root = runtime::root(&app)?;
-    let staging = super::leftovers::managed_scratch(&root, "external-snapshot-download-")?;
-    cancel.check()?;
-    let connected = connection_commands::open_connected_with_cancel(&app, &request.connection_id, &cancel).await?;
-    let known = match ConnectionStore::open(&root)?.discovery_snapshot(
-        &request.connection_id,
-        &request.snapshot_id,
-    ) {
-        Ok(value) => Some(value),
-        Err(error) if error.kind == ErrorKind::NotFound => None,
-        Err(error) => return Err(error),
-    };
-    let writer_id = crate::persistent_store::commands::with_store_mut(app.state(), |store| {
-        store.external_identity()
-    })
-    .map_err(runtime::local_error)?
-    .store_id;
-    let context = leases::LeaseContext {
-        root: root.as_path(),
-        connection_id: &connected.stored.id,
-        writer_id: &writer_id,
-        descriptor: &connected.stored.descriptor,
-        root_key: &connected.root_key,
-        provider: connected.provider.as_ref(),
-        repository: &connected.handle,
-        clock: leases::system_clock(),
-        protection_supported: connected.stored.capabilities.lease_operations,
-        ledger: Some(app.state::<super::job_store::JobCommandState>().lease_ledger()?),
-    };
-    let prepared = with_export_lease(
-        &context,
-        &connected.stored.capabilities,
-        &cancel,
-        async {
-            let cache_root = root.clone();
-            let cache_connection = request.connection_id.clone();
-            let cache_id = request.snapshot_id.clone();
-            let remote = control::find_snapshot_with_locator_invalidation(
-                &connected,
-                &request.snapshot_id,
-                known.as_ref(),
-                move || {
-                    ConnectionStore::open(&cache_root)?
-                        .forget_discovery(&cache_connection, &cache_id)
-                },
-                &cancel,
-            )
-            .await?;
-            ConnectionStore::open(&root)?.remember_discovery(
-                &request.connection_id,
-                &request.snapshot_id,
-                &remote,
-            )?;
-            let prepared = snapshot_restore::download_snapshot(
-                &remote,
-                &staging.path().join("verified"),
-                &connected.root_key,
-                None,
-                snapshot_restore::SourceTrust::Downloaded,
-                connected.provider.as_ref(),
-                &connected.handle,
-                &counters,
-                &cancel,
-            )
-            .await?;
-            if prepared.snapshot_id != request.snapshot_id {
-                return Err(ProviderError::new(ErrorKind::Corrupt));
-            }
-            Ok(prepared)
-        },
-    )
-    .await?;
-    counters.flush();
-    cancel.check()?;
-    publish_prepared_snapshot(&app, selected, prepared, staging.path(), &cancel)
+        let Some(selected) = selected_path(&app, &request.snapshot_id) else {
+            return Ok(ExportSnapshotResponse {
+                cancelled: true,
+                destination: None,
+                sha256: None,
+            });
+        };
+        let root = runtime::root(&app)?;
+        let staging = super::leftovers::managed_scratch(&root, "external-snapshot-download-")?;
+        cancel.check()?;
+        let connected = connection_commands::open_connected_with_cancel(&app, &request.connection_id, &cancel).await?;
+        let known = match ConnectionStore::open(&root)?.discovery_snapshot(
+            &request.connection_id,
+            &request.snapshot_id,
+        ) {
+            Ok(value) => Some(value),
+            Err(error) if error.kind == ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        let writer_id = crate::persistent_store::commands::with_store_mut(app.state(), |store| {
+            store.external_identity()
+        })
+        .map_err(runtime::local_error)?
+        .store_id;
+        let context = leases::LeaseContext {
+            root: root.as_path(),
+            connection_id: &connected.stored.id,
+            writer_id: &writer_id,
+            descriptor: &connected.stored.descriptor,
+            root_key: &connected.root_key,
+            provider: connected.provider.as_ref(),
+            repository: &connected.handle,
+            clock: leases::system_clock(),
+            protection_supported: connected.stored.capabilities.lease_operations,
+            ledger: Some(app.state::<super::job_store::JobCommandState>().lease_ledger()?),
+        };
+        let prepared = with_export_lease(
+            &context,
+            &connected.stored.capabilities,
+            &cancel,
+            async {
+                let cache_root = root.clone();
+                let cache_connection = request.connection_id.clone();
+                let cache_id = request.snapshot_id.clone();
+                let remote = control::find_snapshot_with_locator_invalidation(
+                    &connected,
+                    &request.snapshot_id,
+                    known.as_ref(),
+                    move || {
+                        ConnectionStore::open(&cache_root)?
+                            .forget_discovery(&cache_connection, &cache_id)
+                    },
+                    &cancel,
+                )
+                .await?;
+                ConnectionStore::open(&root)?.remember_discovery(
+                    &request.connection_id,
+                    &request.snapshot_id,
+                    &remote,
+                )?;
+                let prepared = snapshot_restore::download_snapshot(
+                    &remote,
+                    &staging.path().join("verified"),
+                    &connected.root_key,
+                    None,
+                    snapshot_restore::SourceTrust::Downloaded,
+                    connected.provider.as_ref(),
+                    &connected.handle,
+                    &counters,
+                    &cancel,
+                )
+                .await?;
+                if prepared.snapshot_id != request.snapshot_id {
+                    return Err(ProviderError::new(ErrorKind::Corrupt));
+                }
+                Ok(prepared)
+            },
+        )
+        .await?;
+        counters.flush();
+        cancel.check()?;
+        publish_prepared_snapshot(&app, selected, prepared, staging.path(), &cancel)
+    }.await)
 }
 
 #[cfg(test)]

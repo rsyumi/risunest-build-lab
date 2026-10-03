@@ -164,7 +164,7 @@ function succeeded(connectionId: string, revision: string): ExternalJobSummary {
     return {
         id: `job-${connectionId}`,
         connectionId,
-        kind: 'sync',
+        kind: 'backup',
         state: 'succeeded',
         phase: 'complete',
         completedBytes: '0',
@@ -262,6 +262,26 @@ describe('external storage production integration', () => {
         expect(mocks.bridge.setExecutionSession).not.toHaveBeenCalled()
         expect(mocks.bridge.cancelJob).not.toHaveBeenCalled()
         visibility.mockRestore()
+    })
+
+    it('keeps a running automatic backup alive when the device goes offline', async () => {
+        vi.useFakeTimers()
+        try {
+            const running = (id: string): ExternalJobSummary => ({
+                ...succeeded('old-sync', '8'), id, state: 'running', phase: 'upload', result: undefined,
+            })
+            mocks.bridge.startJob.mockImplementation(async () => running('automatic-backup'))
+            mocks.bridge.getJob.mockImplementation(async id => running(id))
+            const { installExternalStorageProduction } = await import('./production')
+            await installExternalStorageProduction()
+            await vi.advanceTimersByTimeAsync(60_000)
+            expect(mocks.bridge.startJob).toHaveBeenCalledOnce()
+            window.dispatchEvent(new Event('offline'))
+            await vi.advanceTimersByTimeAsync(1_000)
+            expect(mocks.bridge.cancelJob).not.toHaveBeenCalled()
+        } finally {
+            vi.useRealTimers()
+        }
     })
 
     it.each([

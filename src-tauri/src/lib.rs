@@ -321,7 +321,7 @@ fn builder_with_main_window(
                     if let Some(state) =
                         webview.try_state::<asset_repository::commands::DurableCasJobState>()
                     {
-                        if let Err(error) = state.reset_renderer_session() {
+                        if let Err(error) = state.reset_renderer_session(webview.app_handle()) {
                             crate::nlog!(
                                 "error",
                                 "failed to reset durable CAS renderer session: {error}"
@@ -341,7 +341,7 @@ fn builder_with_main_window(
                     if let Some(state) =
                         webview.try_state::<server_sync::commands::ServerSyncCommandState>()
                     {
-                        if let Err(error) = state.cancel() {
+                        if let Err(error) = state.reset_renderer_session() {
                             crate::nlog!(
                                 "error",
                                 "failed to reset server sync renderer session: {}",
@@ -372,7 +372,7 @@ fn builder_with_main_window(
                 if let Some(state) =
                     webview.try_state::<asset_repository::commands::DurableCasJobState>()
                 {
-                    if let Err(error) = state.reset_renderer_session() {
+                    if let Err(error) = state.reset_renderer_session(webview.app_handle()) {
                         crate::nlog!(
                             "error",
                             "failed to reset durable CAS renderer session: {error}"
@@ -390,7 +390,7 @@ fn builder_with_main_window(
                 if let Some(state) =
                     webview.try_state::<server_sync::commands::ServerSyncCommandState>()
                 {
-                    if let Err(error) = state.cancel() {
+                    if let Err(error) = state.reset_renderer_session() {
                         crate::nlog!(
                             "error",
                             "failed to reset server sync renderer session: {}",
@@ -424,7 +424,7 @@ fn builder_with_main_window(
                 if let Some(state) =
                     webview.try_state::<asset_repository::commands::DurableCasJobState>()
                 {
-                    if let Err(error) = state.reset_renderer_session() {
+                    if let Err(error) = state.reset_renderer_session(webview.app_handle()) {
                         crate::nlog!(
                             "error",
                             "failed to reset durable CAS renderer session: {error}"
@@ -442,7 +442,7 @@ fn builder_with_main_window(
                 if let Some(state) =
                     webview.try_state::<server_sync::commands::ServerSyncCommandState>()
                 {
-                    if let Err(error) = state.cancel() {
+                    if let Err(error) = state.reset_renderer_session() {
                         crate::nlog!(
                             "error",
                             "failed to reset server sync renderer session: {}",
@@ -638,7 +638,6 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         external_storage::connection_commands::external_storage_prepare_connection,
         external_storage::connection_commands::external_storage_prepare_renewal,
         external_storage::connection_commands::external_storage_unlock_connection,
-        external_storage::connection_commands::external_storage_probe_head,
         external_storage::connection_commands::external_storage_commit_connection,
         external_storage::connection_commands::external_storage_begin_authorization,
         external_storage::connection_commands::external_storage_complete_authorization,
@@ -705,6 +704,7 @@ pub fn invoke_handler() -> impl Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Sen
         server_sync::commands::server_sync_lww_inspect,
         server_sync::commands::server_sync_lww_stage_target,
         server_sync::commands::server_sync_lww_prepare_new_device,
+        server_sync::commands::server_sync_lww_prepare_fresh_writer,
         server_sync::commands::server_sync_lww_activate_new_device,
         server_sync::commands::server_sync_lww_retry,
         server_sync::commands::server_sync_lww_drain,

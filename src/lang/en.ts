@@ -2310,6 +2310,12 @@ export const languageEnglish = {
                 'The operating system could not open this device’s credentials. Unlock its key storage, or register this device again on the server and enter the new registration code. Linux requires an unlocked Secret Service.',
             connect: 'Connect and sync',
             disconnect: 'Disconnect',
+            disconnectTitle: 'Disconnect from the server?',
+            disconnectRemoteOnly:
+                'Some files are stored only on the server. If you need them, download them before disconnecting.',
+            downloadThenDisconnect: 'Download, then disconnect',
+            downloadFailedKeptConnection:
+                'The files could not be downloaded, so the server was not disconnected. Try again, or disconnect without downloading.',
             syncNow: 'Sync now',
             pause: 'Pause',
             refresh: 'Refresh screen',
@@ -2368,7 +2374,6 @@ export const languageEnglish = {
                 "unknown": 'Items',
             },
             "statusUnknown": 'Sync status unavailable',
-            "downloadBeforeDisconnect": 'Download server-only files to this device before disconnecting. Select Keep all on this device, then try again.',
             "registrationRefusedHelp": 'The server refused this registration. Create a new registration code on the server and enter it under Register as a new device. If you recreated the server, disconnect and connect again.',
             "revokeBeforeRegistration": 'Revoke the existing device on the server, then enter a new registration code.',
             "conflictRefreshed": 'The conflicting items changed. Choose which version to keep again.',
@@ -3060,6 +3065,7 @@ export const languageEnglish = {
         concurrentEditNotice: "When the same item is edited on multiple devices at the same time, the last edit is kept. Edits or messages may be lost. Avoid using multiple devices at the same time.",
         replaceTitle: "Replace the data on this device?",
         replaceDescription: "To sync, the data on this device will be cleared and replaced with remote data. Make a manual backup if needed.",
+        serverRestoredDescription: "The server was restored from a backup. The data on this device will be cleared and replaced with the server data, and changes made on this device after the backup will be lost. Make a manual backup if needed.",
         replaceAcknowledge: "Clear the data on this device",
         replaceAction: "Replace",
         cancelAction: "Cancel",

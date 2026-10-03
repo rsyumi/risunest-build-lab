@@ -211,6 +211,153 @@ fn command_failures_log_native_detail_and_return_only_a_bounded_code() {
     assert!(!entry.message.contains(NATIVE_LOG_FILE_UPDATE_FAILED));
 }
 
+struct SyntheticFailure {
+    code: &'static str,
+    detail: Option<String>,
+    expected: bool,
+}
+
+impl CommandFailure for SyntheticFailure {
+    fn code(&self) -> std::borrow::Cow<'_, str> {
+        self.code.into()
+    }
+    fn detail(&self) -> Option<std::borrow::Cow<'_, str>> {
+        self.detail.as_deref().map(Into::into)
+    }
+    fn expected(&self) -> bool {
+        self.expected
+    }
+}
+
+fn command_line(command: &str) -> LogEntry {
+    global_state()
+        .tail(None)
+        .into_iter()
+        .rev()
+        .find(|entry| entry.message.starts_with(&format!("{command} failed: ")))
+        .expect("the command failure is logged")
+}
+
+#[test]
+fn a_failed_command_logs_one_masked_line_with_its_code_cause_and_caller() {
+    let failure = SyntheticFailure {
+        code: "synthetic-code",
+        detail: Some(format!("disk refused password=synthetic-secret {}", "x ".repeat(1500))),
+        expected: false,
+    };
+    let line = line!() + 1;
+    let returned = logged::<(), _>("synthetic_failed_command", Err(failure));
+    assert_eq!(returned.err().map(|error| error.code), Some("synthetic-code"));
+    let entry = command_line("synthetic_failed_command");
+    assert_eq!(entry.level, "error");
+    assert_eq!(entry.target, COMMAND_TARGET);
+    assert!(entry
+        .message
+        .starts_with("synthetic_failed_command failed: code=synthetic-code cause=disk refused password=*** x x"));
+    assert!(!entry.message.contains("synthetic-secret"));
+    assert!(entry.message.ends_with(&format!(" at={}:{line}", file!())));
+    assert!(entry.message.chars().count() < 2300);
+    assert_eq!(
+        global_state()
+            .tail(None)
+            .iter()
+            .filter(|entry| entry.message.starts_with("synthetic_failed_command failed: "))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn an_expected_refusal_is_a_warning_without_its_cause_and_success_logs_nothing() {
+    let refusal = SyntheticFailure {
+        code: "synthetic-busy",
+        detail: Some("synthetic-hidden-detail".to_owned()),
+        expected: true,
+    };
+    let _ = logged::<(), _>("synthetic_refused_command", Err(refusal));
+    let entry = command_line("synthetic_refused_command");
+    assert_eq!(entry.level, "warn");
+    assert!(entry
+        .message
+        .starts_with("synthetic_refused_command failed: code=synthetic-busy at="));
+    assert!(!entry.message.contains("synthetic-hidden-detail"));
+
+    assert_eq!(logged::<_, SyntheticFailure>("synthetic_quiet_command", Ok(7)).ok(), Some(7));
+    assert!(global_state()
+        .tail(None)
+        .iter()
+        .all(|entry| !entry.message.starts_with("synthetic_quiet_command")));
+}
+
+#[test]
+fn a_kept_failure_never_quotes_json_input_or_network_text() {
+    let shape = serde_json::from_str::<u32>("\"private-payload-value\"").unwrap_err();
+    let text = failure_text(&shape);
+    assert!(text.starts_with("json failure at line 1 column"), "{text}");
+    assert!(!text.contains("private-payload-value"));
+    assert_eq!(failure_text(&&shape), text);
+    assert_eq!(json_failure(&shape), format!("json-shape{}", &text["json failure".len()..]));
+    let network = reqwest::Client::new()
+        .get("http://[private-signature")
+        .build()
+        .unwrap_err();
+    assert_eq!(failure_text(&network), "network failure");
+    assert_eq!(failure_text(&&network), "network failure");
+    let io = std::io::Error::other("disk refused");
+    assert_eq!(failure_text(&io), "disk refused");
+}
+
+#[test]
+fn a_json_reader_failure_keeps_the_reader_text() {
+    struct Refusing;
+    impl std::io::Read for Refusing {
+        fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("synthetic restore cancelled"))
+        }
+    }
+    let error = serde_json::from_reader::<_, serde_json::Value>(Refusing).unwrap_err();
+    assert_eq!(json_failure(&error), format!("json-io: {error}"));
+    assert!(json_failure(&error).contains("synthetic restore cancelled"));
+}
+
+#[test]
+fn a_string_failure_is_logged_as_its_code_or_as_a_message() {
+    let code = "cleanup-journal-unavailable".to_owned();
+    assert_eq!((code.code().as_ref(), code.detail(), code.expected()), ("cleanup-journal-unavailable", None, false));
+    let message = "CAS upload mutex poisoned: synthetic".to_owned();
+    assert_eq!(message.code().as_ref(), "error");
+    assert_eq!(message.detail().as_deref(), Some("CAS upload mutex poisoned: synthetic"));
+    assert!(!message.expected());
+    for message in ["Upper-case", "two words", "", "trailing-"] {
+        assert_eq!(message.to_owned().code().as_ref(), "error", "{message}");
+    }
+    assert_eq!(&*"x".repeat(65).code(), "error");
+    assert!("cancelled".to_owned().expected());
+    assert!("library-operation-busy".to_owned().expected());
+    assert!("cleanup-pending".to_owned().expected());
+    assert!("native-media-busy".to_owned().expected());
+    assert!(!"native-media-unavailable".to_owned().expected());
+}
+
+#[test]
+fn a_logged_failure_never_names_the_temporary_file_path() {
+    let root = tempfile::tempdir().unwrap();
+    let error = tempfile::Builder::new()
+        .tempfile_in(root.path().join("private-\"folder\"-name"))
+        .unwrap_err();
+    assert!(error.to_string().contains("private-"));
+    let failure = SyntheticFailure {
+        code: "synthetic-path",
+        detail: Some(format!("{error}; retry {error}; kept")),
+        expected: false,
+    };
+    let _ = logged::<(), _>("synthetic_path_command", Err(failure));
+    let entry = command_line("synthetic_path_command");
+    assert!(!entry.message.contains("private-"), "{}", entry.message);
+    assert!(entry.message.contains("; retry "), "{}", entry.message);
+    assert!(entry.message.contains("; kept at="), "{}", entry.message);
+}
+
 #[test]
 fn unconfigured_file_path_command_returns_only_a_bounded_code() {
     let state = NativeLogState::for_tests();

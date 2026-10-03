@@ -2,6 +2,28 @@ use std::{fs, io, path::{Component, Path, PathBuf}};
 
 pub(super) type Result<T> = std::result::Result<T, String>;
 
+/// Returns a cleanup code after logging the failure behind it. The line stays
+/// in memory, since the log directory can be one of the roots being removed.
+#[track_caller]
+pub(super) fn failed(code: &str, cause: impl std::fmt::Display) -> String {
+    let at = std::panic::Location::caller();
+    crate::native_log::log_ring_only(
+        "error",
+        "app-cleanup",
+        format!("{code} cause={} at={}:{}", crate::native_log::failure_text(&cause), at.file(), at.line()),
+    );
+    code.to_owned()
+}
+
+#[cfg(mobile)]
+#[track_caller]
+pub(super) fn refused(code: &str, error: &impl crate::native_log::CommandFailure) -> String {
+    match error.detail() {
+        Some(detail) => failed(code, format!("{} {detail}", error.code())),
+        None => failed(code, error.code()),
+    }
+}
+
 pub(super) fn linked(metadata: &fs::Metadata) -> bool {
     #[cfg(windows)]
     {
@@ -23,7 +45,7 @@ pub(super) fn validate(path: &Path) -> Result<()> {
             Ok(metadata) if linked(&metadata) => return Err("cleanup-path-redirected".into()),
             Ok(_) => {},
             Err(error) if error.kind() == io::ErrorKind::NotFound => {},
-            Err(_) => return Err("cleanup-path-unavailable".into()),
+            Err(error) => return Err(failed("cleanup-path-unavailable", error)),
         }
     }
     Ok(())
@@ -34,10 +56,10 @@ pub(super) fn remove(path: &Path) -> Result<()> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
-        Err(_) => return Err("cleanup-path-unavailable".into()),
+        Err(error) => return Err(failed("cleanup-path-unavailable", error)),
     };
     let result = if metadata.is_dir() { fs::remove_dir_all(path) } else { fs::remove_file(path) };
-    result.map_err(|_| "cleanup-files-busy-or-denied".to_owned())
+    result.map_err(|error| failed("cleanup-files-busy-or-denied", error))
 }
 
 pub(super) fn independent_roots(mut paths: Vec<PathBuf>) -> Vec<PathBuf> {
@@ -51,14 +73,14 @@ pub(super) fn independent_roots(mut paths: Vec<PathBuf>) -> Vec<PathBuf> {
 pub(super) fn write_json(path: &Path, value: &impl serde::Serialize) -> Result<()> {
     validate(path)?;
     let parent = path.parent().ok_or("cleanup-path-invalid")?;
-    fs::create_dir_all(parent).map_err(|_| "cleanup-journal-unavailable")?;
-    let mut file = tempfile::NamedTempFile::new_in(parent).map_err(|_| "cleanup-journal-unavailable")?;
-    serde_json::to_writer(file.as_file_mut(), value).map_err(|_| "cleanup-journal-unavailable")?;
-    file.as_file().sync_all().map_err(|_| "cleanup-journal-unavailable")?;
-    file.persist(path).map_err(|_| "cleanup-journal-unavailable")?;
+    fs::create_dir_all(parent).map_err(|error| failed("cleanup-journal-unavailable", error))?;
+    let mut file = tempfile::NamedTempFile::new_in(parent).map_err(|error| failed("cleanup-journal-unavailable", error))?;
+    serde_json::to_writer(file.as_file_mut(), value).map_err(|error| failed("cleanup-journal-unavailable", error))?;
+    file.as_file().sync_all().map_err(|error| failed("cleanup-journal-unavailable", error))?;
+    file.persist(path).map_err(|error| failed("cleanup-journal-unavailable", error))?;
     #[cfg(unix)]
     fs::File::open(parent).and_then(|directory| directory.sync_all())
-        .map_err(|_| "cleanup-journal-unavailable")?;
+        .map_err(|error| failed("cleanup-journal-unavailable", error))?;
     Ok(())
 }
 

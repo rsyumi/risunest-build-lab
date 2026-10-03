@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tauri::State;
+use crate::native_log::logged;
 
 /// How many findings one diagnosis keeps. Past this the scan counts what it drops, so a library
 /// damaged everywhere cannot exhaust memory through its own report.
@@ -117,7 +118,7 @@ pub(crate) fn pds_data_health_scan(
     state: State<'_, PersistentStoreState>,
     health: State<'_, DataHealthState>,
 ) -> Result<ScanResult, StoreError> {
-    quick_scan(&state, &health)
+    logged("pds_data_health_scan", quick_scan(&state, &health))
 }
 
 fn quick_scan(
@@ -150,7 +151,7 @@ pub(crate) fn pds_data_health_deep_scan(
     health: State<'_, DataHealthState>,
     resume: bool,
 ) -> Result<ScanResult, StoreError> {
-    deep_scan(&state, &health, resume)
+    logged("pds_data_health_deep_scan", deep_scan(&state, &health, resume))
 }
 
 fn deep_scan(
@@ -241,7 +242,7 @@ fn scan_deep_page(
 pub(crate) fn pds_data_health_result(
     state: State<'_, PersistentStoreState>,
 ) -> Result<Option<ScanResult>, StoreError> {
-    last_result(&state)
+    logged("pds_data_health_result", last_result(&state))
 }
 
 fn last_result(state: &PersistentStoreState) -> StoreResult<Option<ScanResult>> {
@@ -281,8 +282,10 @@ fn current_diagnosis(
 pub(crate) fn pds_data_health_repair_plan(
     state: State<'_, PersistentStoreState>,
 ) -> Result<Vec<RepairCandidate>, StoreError> {
-    let operation_guard = state.admit_renderer_operation()?;
-    Ok(repair::plan(&current_diagnosis(&state, &operation_guard)?.1))
+    logged("pds_data_health_repair_plan", (|| {
+        let operation_guard = state.admit_renderer_operation()?;
+        Ok(repair::plan(&current_diagnosis(&state, &operation_guard)?.1))
+    })())
 }
 
 #[tauri::command(async)]
@@ -291,10 +294,12 @@ pub(crate) fn pds_data_health_repair_preview(
     selection: Vec<String>,
     expected_scanned_at: i64,
 ) -> Result<RepairPreview, StoreError> {
-    let operation_guard = state.admit_renderer_operation()?;
-    let diagnosis = current_diagnosis(&state, &operation_guard)?.1;
-    require_diagnosis_identity(&diagnosis, diagnosis.revision, expected_scanned_at)?;
-    Ok(repair::preview(&diagnosis, &selection))
+    logged("pds_data_health_repair_preview", (|| {
+        let operation_guard = state.admit_renderer_operation()?;
+        let diagnosis = current_diagnosis(&state, &operation_guard)?.1;
+        require_diagnosis_identity(&diagnosis, diagnosis.revision, expected_scanned_at)?;
+        Ok(repair::preview(&diagnosis, &selection))
+    })())
 }
 
 #[tauri::command(async)]
@@ -306,7 +311,7 @@ pub(crate) fn pds_data_health_repair_apply(
     expected_revision: i64,
     expected_scanned_at: i64,
 ) -> Result<RepairApplied, StoreError> {
-    apply_repair(&state, &health, &selection, snapshot, expected_revision, expected_scanned_at)
+    logged("pds_data_health_repair_apply", apply_repair(&state, &health, &selection, snapshot, expected_revision, expected_scanned_at))
 }
 
 fn require_diagnosis_identity(result: &ScanResult, revision: i64, scanned_at: i64) -> StoreResult<()> {
@@ -370,7 +375,7 @@ fn apply_repair(
 pub(crate) fn pds_data_health_journals(
     state: State<'_, PersistentStoreState>,
 ) -> Result<Vec<JournalSummary>, StoreError> {
-    journals(&state)
+    logged("pds_data_health_journals", journals(&state))
 }
 
 fn journals(state: &PersistentStoreState) -> StoreResult<Vec<JournalSummary>> {
@@ -401,7 +406,7 @@ pub(crate) fn pds_data_health_undo(
     journal_id: String,
     expected_revision: i64,
 ) -> Result<RepairUndone, StoreError> {
-    undo_repair(&state, &health, &journal_id, expected_revision)
+    logged("pds_data_health_undo", undo_repair(&state, &health, &journal_id, expected_revision))
 }
 
 fn undo_repair(

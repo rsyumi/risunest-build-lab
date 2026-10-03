@@ -10,6 +10,7 @@ use crate::persistent_store::{
     lww::{Header, MessageLocator, NewDevicePreparation, StageReceive},
     sync_selection::SyncTarget,
 };
+use crate::native_log::logged;
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -172,36 +173,42 @@ pub(crate) struct Inspection {
     library_id: String,
     empty: bool,
     previously_bound_library: bool,
+    registration_changed: bool,
+    server_restored: bool,
 }
 #[tauri::command]
 pub(crate) async fn external_lww_inspect(app: AppHandle, request: Request) -> Result<Inspection> {
-    let context = context(&request.connection_id)?;
-    let mut session = context.session.lock().await;
-    session.cancel = context.cancel.lock().map_err(runtime::local_error)?.clone();
-    open(&app, &request.connection_id, &mut session).await?;
-    let store = check(&app, &request, false)?;
-    let engine = session.engine.as_ref().ok_or_else(lww_segment::corrupt)?;
-    let objects = engine.listing(&session.cancel).await?;
-    let target_id = engine.repository.connection_identity.clone();
-    let library_id = engine.library.clone();
-    let inspection_id = store
-        .register_lww_binding_inspection(
-            request.header.binding_authority,
-            &SyncTarget::External(request.connection_id),
-            &target_id,
-            &library_id,
-        )
-        .map_err(runtime::local_error)?;
-    let previously_bound_library = store
-        .lww_previously_bound(&library_id, &target_id)
-        .map_err(runtime::local_error)?;
-    Ok(Inspection {
-        inspection_id,
-        target_id,
-        library_id,
-        empty: objects.is_empty() && engine.snapshot_listing(&session.cancel).await?.is_empty(),
-        previously_bound_library,
-    })
+    logged("external_lww_inspect", async move {
+        let context = context(&request.connection_id)?;
+        let mut session = context.session.lock().await;
+        session.cancel = context.cancel.lock().map_err(runtime::local_error)?.clone();
+        open(&app, &request.connection_id, &mut session).await?;
+        let store = check(&app, &request, false)?;
+        let engine = session.engine.as_ref().ok_or_else(lww_segment::corrupt)?;
+        let objects = engine.listing(&session.cancel).await?;
+        let target_id = engine.repository.connection_identity.clone();
+        let library_id = engine.library.clone();
+        let inspection_id = store
+            .register_lww_binding_inspection(
+                request.header.binding_authority,
+                &SyncTarget::External(request.connection_id),
+                &target_id,
+                &library_id,
+            )
+            .map_err(runtime::local_error)?;
+        let previously_bound_library = store
+            .lww_previously_bound(&library_id, &target_id)
+            .map_err(runtime::local_error)?;
+        Ok(Inspection {
+            inspection_id,
+            target_id,
+            library_id,
+            empty: objects.is_empty() && engine.snapshot_listing(&session.cancel).await?.is_empty(),
+            previously_bound_library,
+            registration_changed: false,
+            server_restored: false,
+        })
+    }.await)
 }
 pub(crate) struct StageRequest {
     request: Request,
@@ -255,30 +262,32 @@ pub(crate) async fn external_lww_stage_binding(
     app: AppHandle,
     request: StageRequest,
 ) -> Result<Staged> {
-    let context = context(&request.request.connection_id)?;
-    let mut session = context.session.lock().await;
-    open(&app, &request.request.connection_id, &mut session).await?;
-    let mut store = check(&app, &request.request, false)?;
-    let engine = session.engine.as_ref().ok_or_else(lww_segment::corrupt)?;
-    if request.library_id != engine.library
-        || request.target_id != engine.repository.connection_identity
-    {
-        return Err(lww_segment::corrupt());
-    }
-    let stage = engine
-        .stage_binding(
-            &mut store,
-            &request.request.header,
-            &request.inspection_id,
-            &session.cancel,
-        )
-        .await?;
-    Ok(Staged {
-        target_id: request.target_id,
-        library_id: request.library_id,
-        staging_id: stage.staging_id,
-        receive_id: request.request.header.request_id,
-    })
+    logged("external_lww_stage_binding", async move {
+        let context = context(&request.request.connection_id)?;
+        let mut session = context.session.lock().await;
+        open(&app, &request.request.connection_id, &mut session).await?;
+        let mut store = check(&app, &request.request, false)?;
+        let engine = session.engine.as_ref().ok_or_else(lww_segment::corrupt)?;
+        if request.library_id != engine.library
+            || request.target_id != engine.repository.connection_identity
+        {
+            return Err(lww_segment::corrupt());
+        }
+        let stage = engine
+            .stage_binding(
+                &mut store,
+                &request.request.header,
+                &request.inspection_id,
+                &session.cancel,
+            )
+            .await?;
+        Ok(Staged {
+            target_id: request.target_id,
+            library_id: request.library_id,
+            staging_id: stage.staging_id,
+            receive_id: request.request.header.request_id,
+        })
+    }.await)
 }
 #[tauri::command]
 pub(crate) async fn external_lww_publish(
@@ -286,132 +295,138 @@ pub(crate) async fn external_lww_publish(
     request: Request,
     initial: bool,
 ) -> Result<PublicationResult> {
-    let state = app.state::<crate::persistent_store::PersistentStoreState>();
-    let _operation = state.admit_renderer_operation().map_err(runtime::local_error)?;
-    let context = context(&request.connection_id)?;
-    let mut session = context.session.lock().await;
-    open(&app, &request.connection_id, &mut session).await?;
-    let mut store = state.open_admitted_native_job_store(&_operation).map_err(runtime::local_error)?;
-    check_store(&store, &request, true)?;
-    if let Some(target) = &request.exit_target {
-        let identity = store.external_identity().map_err(runtime::local_error)?;
-        if identity.library_epoch != target.library_epoch
-            || identity.selection_epoch != target.selection_epoch
-            || u64::try_from(identity.revision).ok() != Some(target.revision.0)
-        {
-            return Err(ProviderError::new(ErrorKind::PreconditionFailed));
-        }
-    }
-    if initial {
-        let mut after = None;
-        loop {
-            let page = store
-                .lww_queue_unit_state_page(&request.header, after.as_ref(), 4096)
-                .map_err(runtime::local_error)?;
-            if !page.has_more {
-                break;
+    logged("external_lww_publish", async move {
+        let state = app.state::<crate::persistent_store::PersistentStoreState>();
+        let _operation = state.admit_renderer_operation().map_err(runtime::local_error)?;
+        let context = context(&request.connection_id)?;
+        let mut session = context.session.lock().await;
+        open(&app, &request.connection_id, &mut session).await?;
+        let mut store = state.open_admitted_native_job_store(&_operation).map_err(runtime::local_error)?;
+        check_store(&store, &request, true)?;
+        if let Some(target) = &request.exit_target {
+            let identity = store.external_identity().map_err(runtime::local_error)?;
+            if identity.library_epoch != target.library_epoch
+                || identity.selection_epoch != target.selection_epoch
+                || u64::try_from(identity.revision).ok() != Some(target.revision.0)
+            {
+                return Err(ProviderError::new(ErrorKind::PreconditionFailed));
             }
-            after = page.after_key;
         }
-    }
-    let Session { engine, cancel, .. } = &mut *session;
-    let result = engine
-        .as_mut()
-        .ok_or_else(lww_segment::corrupt)?
-        .publish(
-            &mut store,
-            request.header.binding_authority,
-            &request.generating,
-            cancel,
-        )
-        .await?;
-    if result.segments.0 > 0 {
-        context.turn.lock().map_err(runtime::local_error)?.published(Instant::now());
-    }
-    if let Some(target) = &request.exit_target {
-        let identity = store.external_identity().map_err(runtime::local_error)?;
-        if identity.library_epoch != target.library_epoch
-            || identity.selection_epoch != target.selection_epoch
-            || u64::try_from(identity.revision).ok() != Some(target.revision.0)
-            || !store
-                .lww_read_outbox(request.header.binding_authority, 1)
-                .map_err(runtime::local_error)?
-                .entries
-                .is_empty()
-        {
-            return Err(ProviderError::new(ErrorKind::PreconditionFailed));
+        if initial {
+            let mut after = None;
+            loop {
+                let page = store
+                    .lww_queue_unit_state_page(&request.header, after.as_ref(), 4096)
+                    .map_err(runtime::local_error)?;
+                if !page.has_more {
+                    break;
+                }
+                after = page.after_key;
+            }
         }
-    }
-    Ok(result)
+        let Session { engine, cancel, .. } = &mut *session;
+        let result = engine
+            .as_mut()
+            .ok_or_else(lww_segment::corrupt)?
+            .publish(
+                &mut store,
+                request.header.binding_authority,
+                &request.generating,
+                cancel,
+            )
+            .await?;
+        if result.segments.0 > 0 {
+            context.turn.lock().map_err(runtime::local_error)?.published(Instant::now());
+        }
+        if let Some(target) = &request.exit_target {
+            let identity = store.external_identity().map_err(runtime::local_error)?;
+            if identity.library_epoch != target.library_epoch
+                || identity.selection_epoch != target.selection_epoch
+                || u64::try_from(identity.revision).ok() != Some(target.revision.0)
+                || !store
+                    .lww_read_outbox(request.header.binding_authority, 1)
+                    .map_err(runtime::local_error)?
+                    .entries
+                    .is_empty()
+            {
+                return Err(ProviderError::new(ErrorKind::PreconditionFailed));
+            }
+        }
+        Ok(result)
+    }.await)
 }
 #[tauri::command]
 pub(crate) async fn external_lww_receive(
     app: AppHandle,
     request: Request,
 ) -> Result<Vec<StageReceive>> {
-    let context = context(&request.connection_id)?;
-    let mut session = context.session.lock().await;
-    open(&app, &request.connection_id, &mut session).await?;
-    let mut store = check(&app, &request, true)?;
-    let requests = session
-        .engine
-        .as_ref()
-        .ok_or_else(lww_segment::corrupt)?
-        .receive_requests(
-            &mut store,
-            request.header.binding_authority,
-            &session.cancel,
-        )
-        .await?;
-    let own = store.lww_clock_state().map_err(runtime::local_error)?.writer_id;
-    if requests.iter().any(|request| request.progress.writer_id.as_deref() != Some(own.as_str())) {
-        context.turn.lock().map_err(runtime::local_error)?.observed_foreign(Instant::now());
-    }
-    Ok(requests)
+    logged("external_lww_receive", async move {
+        let context = context(&request.connection_id)?;
+        let mut session = context.session.lock().await;
+        open(&app, &request.connection_id, &mut session).await?;
+        let mut store = check(&app, &request, true)?;
+        let requests = session
+            .engine
+            .as_ref()
+            .ok_or_else(lww_segment::corrupt)?
+            .receive_requests(
+                &mut store,
+                request.header.binding_authority,
+                &session.cancel,
+            )
+            .await?;
+        let own = store.lww_clock_state().map_err(runtime::local_error)?.writer_id;
+        if requests.iter().any(|request| request.progress.writer_id.as_deref() != Some(own.as_str())) {
+            context.turn.lock().map_err(runtime::local_error)?.observed_foreign(Instant::now());
+        }
+        Ok(requests)
+    }.await)
 }
 
 #[tauri::command]
 pub(crate) async fn external_lww_maintenance(app:AppHandle,request:Request)->Result<Option<serde_json::Value>> {
-    let context=context(&request.connection_id)?;
-    let Ok(_maintenance)=context.maintenance.try_lock() else {return Ok(None)};
-    let cancel=context.cancel.lock().map_err(runtime::local_error)?.clone();
-    let mut session=Session{engine:None,dependencies:None,fresh_after:Instant::now(),cancel:cancel.clone()};
-    open(&app,&request.connection_id,&mut session).await?;
-    let store=check(&app,&request,true)?;
-    let writer=store.lww_clock_state().map_err(runtime::local_error)?.writer_id;
-    let engine=session.engine.as_ref().ok_or_else(lww_segment::corrupt)?;
-    let due=engine.maintenance_needed(&cancel).await?;
-    let compact=context.turn.lock().map_err(runtime::local_error)?.ready(due,Instant::now());
-    let root=runtime::root(&app)?;
-    let stored=super::connection_store::ConnectionStore::open(&root)?.read(&request.connection_id)?;
-    let job=uuid::Uuid::new_v4().to_string();
-    let protection=super::leases::LeaseContext{root:&root,connection_id:&request.connection_id,writer_id:&writer,descriptor:&stored.descriptor,root_key:&engine.root_key,provider:engine.provider.as_ref(),repository:&engine.repository,clock:super::leases::system_clock(),protection_supported:stored.capabilities.lease_operations,ledger:Some(app.state::<super::job_store::JobCommandState>().lease_ledger()?)};
-    let snapshot_id=if compact {
-        let owner=match super::leases::admit_shared_work(&protection,&job,&cancel).await? {
-            super::leases::Admission::Admitted(owner)=>owner,
-            super::leases::Admission::Yield{..}=>return Ok(None),
-            super::leases::Admission::UnsupportedProtection=>return Err(ProviderError::new(ErrorKind::Unsupported)),
-        };
-        let directory=root.join("external-storage").join("maintenance").join(&job);
-        let result=owner.run(&protection,&cancel,async {
-            if let Some(reason)=owner.recheck(&protection,&cancel).await? {return Err(super::leases::yield_error(reason));}
-            check(&app,&request,true)?;
-            let completed=engine.compact_published(&directory,&job,&writer,&stored.capabilities,&cancel,Some((&owner,&protection))).await?;
-            check(&app,&request,true)?;
-            Ok(completed)
-        }).await?;
-        Some(result.snapshot_id)
-    } else {None};
-    check(&app,&request,true)?;
-    let last_run=super::gc_store::GcStore::open(&root)?.last_run_ms(&request.connection_id)?;
-    if !super::cleanup::lww_cleanup_due(snapshot_id.is_some(),last_run,runtime::now_ms()) {
-        return Ok(Some(serde_json::json!({"snapshotId":snapshot_id,"cleanup":null})));
-    }
-    let connected=connection_commands::open_connected_with_cancel(&app,&request.connection_id,&cancel).await?;
-    if connected.handle.repository_id!=engine.repository.repository_id || connected.handle.connection_identity!=engine.repository.connection_identity || connected.stored.descriptor.repository_id!=engine.library {return Err(lww_segment::corrupt())}
-    let cleanup=runtime::run_connected_cleanup(&app,&connected,&request.connection_id,&job,Some(engine),&cancel).await?;
-    check(&app,&request,true)?;
-    Ok(Some(serde_json::json!({"snapshotId":snapshot_id,"cleanup":cleanup})))
+    logged("external_lww_maintenance", async move {
+        let context=context(&request.connection_id)?;
+        let Ok(_maintenance)=context.maintenance.try_lock() else {return Ok(None)};
+        let cancel=context.cancel.lock().map_err(runtime::local_error)?.clone();
+        let mut session=Session{engine:None,dependencies:None,fresh_after:Instant::now(),cancel:cancel.clone()};
+        open(&app,&request.connection_id,&mut session).await?;
+        let store=check(&app,&request,true)?;
+        let writer=store.lww_clock_state().map_err(runtime::local_error)?.writer_id;
+        let engine=session.engine.as_ref().ok_or_else(lww_segment::corrupt)?;
+        let due=engine.maintenance_needed(&cancel).await?;
+        let compact=context.turn.lock().map_err(runtime::local_error)?.ready(due,Instant::now());
+        let root=runtime::root(&app)?;
+        let stored=super::connection_store::ConnectionStore::open(&root)?.read(&request.connection_id)?;
+        let job=uuid::Uuid::new_v4().to_string();
+        let protection=super::leases::LeaseContext{root:&root,connection_id:&request.connection_id,writer_id:&writer,descriptor:&stored.descriptor,root_key:&engine.root_key,provider:engine.provider.as_ref(),repository:&engine.repository,clock:super::leases::system_clock(),protection_supported:stored.capabilities.lease_operations,ledger:Some(app.state::<super::job_store::JobCommandState>().lease_ledger()?)};
+        let snapshot_id=if compact {
+            let owner=match super::leases::admit_shared_work(&protection,&job,&cancel).await? {
+                super::leases::Admission::Admitted(owner)=>owner,
+                super::leases::Admission::Yield{..}=>return Ok(None),
+                super::leases::Admission::UnsupportedProtection=>return Err(ProviderError::new(ErrorKind::Unsupported)),
+            };
+            let directory=root.join("external-storage").join("maintenance").join(&job);
+            let result=owner.run(&protection,&cancel,async {
+                if let Some(reason)=owner.recheck(&protection,&cancel).await? {return Err(super::leases::yield_error(reason));}
+                check(&app,&request,true)?;
+                let completed=engine.compact_published(&directory,&job,&writer,&stored.capabilities,&cancel,Some((&owner,&protection))).await?;
+                check(&app,&request,true)?;
+                Ok(completed)
+            }).await?;
+            Some(result.snapshot_id)
+        } else {None};
+        check(&app,&request,true)?;
+        let last_run=super::gc_store::GcStore::open(&root)?.last_run_ms(&request.connection_id)?;
+        if !super::cleanup::lww_cleanup_due(snapshot_id.is_some(),last_run,runtime::now_ms()) {
+            return Ok(Some(serde_json::json!({"snapshotId":snapshot_id,"cleanup":null})));
+        }
+        let connected=connection_commands::open_connected_with_cancel(&app,&request.connection_id,&cancel).await?;
+        if connected.handle.repository_id!=engine.repository.repository_id || connected.handle.connection_identity!=engine.repository.connection_identity || connected.stored.descriptor.repository_id!=engine.library {return Err(lww_segment::corrupt())}
+        let cleanup=runtime::run_connected_cleanup(&app,&connected,&request.connection_id,&job,Some(engine),&cancel).await?;
+        check(&app,&request,true)?;
+        Ok(Some(serde_json::json!({"snapshotId":snapshot_id,"cleanup":cleanup})))
+    }.await)
 }
 #[tauri::command]
 pub(crate) async fn external_lww_fence(
@@ -419,21 +434,23 @@ pub(crate) async fn external_lww_fence(
     connection_id: String,
     new_device: bool,
 ) -> Result<()> {
-    let context = context(&connection_id)?;
-    context
-        .cancel
-        .lock()
-        .map_err(runtime::local_error)?
-        .cancel();
-    let mut session = context.session.lock().await;
-    session.cancel = Cancellation::default();
-    let fenced = fence(&app, &connection_id, &mut session, new_device).await;
-    session.cancel.cancel();
-    if let Some(engine) = session.engine.as_mut() {
-        engine.invalidate_clock()
-    }
-    session.fresh_after = Instant::now();
-    fenced
+    logged("external_lww_fence", async move {
+        let context = context(&connection_id)?;
+        context
+            .cancel
+            .lock()
+            .map_err(runtime::local_error)?
+            .cancel();
+        let mut session = context.session.lock().await;
+        session.cancel = Cancellation::default();
+        let fenced = fence(&app, &connection_id, &mut session, new_device).await;
+        session.cancel.cancel();
+        if let Some(engine) = session.engine.as_mut() {
+            engine.invalidate_clock()
+        }
+        session.fresh_after = Instant::now();
+        fenced
+    }.await)
 }
 /// Asks the repository about a sent segment only when one awaits an answer,
 /// so a binding change away from a repository that cannot be reached goes
@@ -458,16 +475,18 @@ async fn fence(app: &AppHandle, id: &str, session: &mut Session, new_device: boo
 }
 #[tauri::command]
 pub(crate) async fn external_lww_resume(connection_id: String) -> Result<()> {
-    let context = context(&connection_id)?;
-    let mut session = context.session.lock().await;
-    let cancel = Cancellation::default();
-    *context.cancel.lock().map_err(runtime::local_error)? = cancel.clone();
-    session.cancel = cancel;
-    session.fresh_after = Instant::now();
-    if let Some(engine) = session.engine.as_mut() {
-        engine.invalidate_clock()
-    }
-    Ok(())
+    logged("external_lww_resume", async move {
+        let context = context(&connection_id)?;
+        let mut session = context.session.lock().await;
+        let cancel = Cancellation::default();
+        *context.cancel.lock().map_err(runtime::local_error)? = cancel.clone();
+        session.cancel = cancel;
+        session.fresh_after = Instant::now();
+        if let Some(engine) = session.engine.as_mut() {
+            engine.invalidate_clock()
+        }
+        Ok(())
+    }.await)
 }
 pub(crate) struct NewDeviceRequest {
     request: Request,
@@ -507,28 +526,59 @@ pub(crate) async fn external_lww_prepare_new_device(
     app: AppHandle,
     request: NewDeviceRequest,
 ) -> Result<NewDevicePreparation> {
-    let context = context(&request.request.connection_id)?;
-    let mut session = context.session.lock().await;
-    // Acquiring this lock settles every task using the old cancellation token.
-    session.cancel = Cancellation::default();
-    open(&app, &request.request.connection_id, &mut session).await?;
-    let mut store = check(&app, &request.request, false)?;
-    session
-        .engine
-        .as_ref()
-        .ok_or_else(lww_segment::corrupt)?
-        .prepare_new_device(
-            &mut store,
-            &request.request.header,
-            &request.staging_id,
-            &session.cancel,
-        )
-        .await
+    logged("external_lww_prepare_new_device", async move {
+        let context = context(&request.request.connection_id)?;
+        let mut session = context.session.lock().await;
+        // Acquiring this lock settles every task using the old cancellation token.
+        session.cancel = Cancellation::default();
+        open(&app, &request.request.connection_id, &mut session).await?;
+        let mut store = check(&app, &request.request, false)?;
+        session
+            .engine
+            .as_ref()
+            .ok_or_else(lww_segment::corrupt)?
+            .prepare_new_device(
+                &mut store,
+                &request.request.header,
+                &request.staging_id,
+                &session.cancel,
+            )
+            .await
+    }.await)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn external_commands_log_their_own_failures() {
+        use crate::external_storage::contract::{ConnectionConfig, ErrorKind};
+        let resumed = tauri::async_runtime::block_on(external_lww_resume(String::new()));
+        assert_eq!(resumed.unwrap_err().kind, ErrorKind::Corrupt);
+        let config = ConnectionConfig {
+            provider: "synthetic-provider".into(),
+            profile: None,
+            endpoint: String::new(),
+            account_id: String::new(),
+            location: Default::default(),
+            oauth_profile: None,
+        };
+        let validated = super::super::connection_commands::external_storage_validate_sync_root(config);
+        assert_eq!(validated.unwrap_err().kind, ErrorKind::Unsupported);
+        for (command, code, file) in [
+            ("external_lww_resume", "corrupt", "lww_commands.rs:"),
+            ("external_storage_validate_sync_root", "unsupported", "connection_commands.rs:"),
+        ] {
+            let entry = crate::native_log::global_state()
+                .tail(None)
+                .into_iter()
+                .rev()
+                .find(|entry| entry.message.starts_with(&format!("{command} failed: code={code} at=")))
+                .unwrap_or_else(|| panic!("{command} logs its failure"));
+            assert_eq!((entry.level.as_str(), entry.target.as_str()), ("error", "native-command"));
+            assert!(entry.message.contains(file), "{}", entry.message);
+        }
+    }
     #[test]
     fn renderer_command_envelopes_deserialize_and_reject_unknown_fields() {
         let base = serde_json::json!({"connectionId":"sync","bindingAuthority":"4","requestId":"request","generating":[]});

@@ -16,6 +16,7 @@ use tauri_plugin_updater::{Update, UpdaterExt};
 
 use super::platform::{current_selection, InstallStrategy};
 use super::transport::GithubTransport;
+use crate::native_log::logged;
 
 const PUBLIC_KEY: &str = match option_env!("RISUNEST_UPDATE_PUBLIC_KEY") {
     Some(value) => value,
@@ -130,9 +131,11 @@ pub(crate) async fn app_update_check(
     app: AppHandle,
     state: tauri::State<'_, AppUpdateState>,
 ) -> Result<UpdateCheckResult, String> {
-    tokio::time::timeout(Duration::from_secs(30), run_app_update_check(app, state))
-        .await
-        .map_err(|_| "update check timed out".to_owned())?
+    logged("app_update_check", async move {
+        tokio::time::timeout(Duration::from_secs(30), run_app_update_check(app, state))
+            .await
+            .map_err(|_| "update check timed out".to_owned())?
+    }.await)
 }
 
 async fn run_app_update_check(
@@ -287,12 +290,14 @@ pub(crate) fn app_update_cancel(
     state: tauri::State<'_, AppUpdateState>,
     handle_id: String,
 ) -> Result<(), String> {
-    let handles = state.handles.lock().map_err(|error| error.to_string())?;
-    let handle = handles
-        .get(&handle_id)
-        .ok_or("verified update handle is unavailable")?;
-    handle.cancelled.store(true, Ordering::Release);
-    Ok(())
+    logged("app_update_cancel", (|| {
+        let handles = state.handles.lock().map_err(|error| error.to_string())?;
+        let handle = handles
+            .get(&handle_id)
+            .ok_or("verified update handle is unavailable")?;
+        handle.cancelled.store(true, Ordering::Release);
+        Ok(())
+    })())
 }
 
 #[tauri::command]
@@ -301,30 +306,32 @@ pub(crate) async fn app_update_install(
     state: tauri::State<'_, AppUpdateState>,
     handle_id: String,
 ) -> Result<(), String> {
-    #[cfg(not(desktop))]
-    {
-        let _ = (app, state, handle_id);
-        return Err("self-install is unavailable on this platform".to_owned());
-    }
-    #[cfg(desktop)]
-    {
-        let _active = ActiveOperation::enter(&state)?;
-        let handle = clone_handle(&state, &handle_id)?;
-        let _started = HandleOperation::enter(&handle)?;
-        if handle.strategy != InstallStrategy::SelfInstall {
-            return Err("verified update handle is not self-installable".to_owned());
+    logged("app_update_install", async move {
+        #[cfg(not(desktop))]
+        {
+            let _ = (app, state, handle_id);
+            return Err("self-install is unavailable on this platform".to_owned());
         }
-        let update = handle
-            .native_update
-            .as_ref()
-            .ok_or("native update handle is missing")?;
-        let bytes = download_native(&app, &handle_id, &handle, update).await?;
-        if handle.cancelled.load(Ordering::Acquire) {
-            return Err("cancelled".to_owned());
+        #[cfg(desktop)]
+        {
+            let _active = ActiveOperation::enter(&state)?;
+            let handle = clone_handle(&state, &handle_id)?;
+            let _started = HandleOperation::enter(&handle)?;
+            if handle.strategy != InstallStrategy::SelfInstall {
+                return Err("verified update handle is not self-installable".to_owned());
+            }
+            let update = handle
+                .native_update
+                .as_ref()
+                .ok_or("native update handle is missing")?;
+            let bytes = download_native(&app, &handle_id, &handle, update).await?;
+            if handle.cancelled.load(Ordering::Acquire) {
+                return Err("cancelled".to_owned());
+            }
+            let _ = app.emit("app-update://applying", &handle_id);
+            update.install(&bytes).map_err(|error| error.to_string())
         }
-        let _ = app.emit("app-update://applying", &handle_id);
-        update.install(&bytes).map_err(|error| error.to_string())
-    }
+    }.await)
 }
 
 #[tauri::command]
@@ -333,38 +340,40 @@ pub(crate) async fn app_update_stage_deb(
     state: tauri::State<'_, AppUpdateState>,
     handle_id: String,
 ) -> Result<StagedDeb, String> {
-    #[cfg(not(desktop))]
-    {
-        let _ = (app, state, handle_id);
-        return Err("DEB staging is unavailable on this platform".to_owned());
-    }
-    #[cfg(desktop)]
-    {
-        let _active = ActiveOperation::enter(&state)?;
-        let handle = clone_handle(&state, &handle_id)?;
-        let _started = HandleOperation::enter(&handle)?;
-        if handle.strategy != InstallStrategy::StageDeb {
-            return Err("verified update handle is not a DEB package".to_owned());
+    logged("app_update_stage_deb", async move {
+        #[cfg(not(desktop))]
+        {
+            let _ = (app, state, handle_id);
+            return Err("DEB staging is unavailable on this platform".to_owned());
         }
-        let update = handle
-            .native_update
-            .as_ref()
-            .ok_or("native update handle is missing")?;
-        let bytes = download_native(&app, &handle_id, &handle, update).await?;
-        if handle.cancelled.load(Ordering::Acquire) {
-            return Err("cancelled".to_owned());
+        #[cfg(desktop)]
+        {
+            let _active = ActiveOperation::enter(&state)?;
+            let handle = clone_handle(&state, &handle_id)?;
+            let _started = HandleOperation::enter(&handle)?;
+            if handle.strategy != InstallStrategy::StageDeb {
+                return Err("verified update handle is not a DEB package".to_owned());
+            }
+            let update = handle
+                .native_update
+                .as_ref()
+                .ok_or("native update handle is missing")?;
+            let bytes = download_native(&app, &handle_id, &handle, update).await?;
+            if handle.cancelled.load(Ordering::Acquire) {
+                return Err("cancelled".to_owned());
+            }
+            let directory = app
+                .path()
+                .download_dir()
+                .map_err(|error| error.to_string())?;
+            let file_name = url::Url::parse(&handle.download.url)
+                .ok()
+                .and_then(|url| url.path_segments()?.next_back().map(str::to_owned))
+                .filter(|name| !name.is_empty() && !name.contains('/') && !name.contains('\\'))
+                .ok_or("signed DEB filename is invalid")?;
+            stage_verified_deb(&directory, &file_name, &bytes)
         }
-        let directory = app
-            .path()
-            .download_dir()
-            .map_err(|error| error.to_string())?;
-        let file_name = url::Url::parse(&handle.download.url)
-            .ok()
-            .and_then(|url| url.path_segments()?.next_back().map(str::to_owned))
-            .filter(|name| !name.is_empty() && !name.contains('/') && !name.contains('\\'))
-            .ok_or("signed DEB filename is invalid")?;
-        stage_verified_deb(&directory, &file_name, &bytes)
-    }
+    }.await)
 }
 
 #[cfg(desktop)]
@@ -504,6 +513,24 @@ impl Drop for HandleOperation {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_commands_log_their_own_failures() {
+        let app = tauri::test::mock_builder()
+            .build(tauri::test::mock_context(tauri::test::noop_assets()))
+            .unwrap();
+        app.manage(AppUpdateState::initialize(true));
+        let cancelled = app_update_cancel(app.state(), "missing-handle".into());
+        assert_eq!(cancelled.unwrap_err(), "verified update handle is unavailable");
+        let entry = crate::native_log::global_state()
+            .tail(None)
+            .into_iter()
+            .rev()
+            .find(|entry| entry.message.starts_with("app_update_cancel failed: code=error cause=verified update handle is unavailable at="))
+            .expect("the command logs its failure");
+        assert_eq!((entry.level.as_str(), entry.target.as_str()), ("error", "native-command"));
+        assert!(entry.message.contains("commands.rs:"), "{}", entry.message);
+    }
 
     #[cfg(desktop)]
     #[test]

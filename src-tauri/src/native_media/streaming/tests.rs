@@ -287,3 +287,20 @@ fn foreground_recovery_does_not_replace_a_listener_with_active_transfers() {
     drop(transfer);
     assert!(state.ensure().is_ok());
 }
+
+#[test]
+fn media_commands_log_their_own_failures() {
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    app.manage(MediaServerState(std::sync::Mutex::new(Err("native-media-unavailable".into()))));
+    assert_eq!(native_media_base_url(app.state()).unwrap_err(), "native-media-unavailable");
+    let entry = crate::native_log::global_state()
+        .tail(None)
+        .into_iter()
+        .rev()
+        .find(|entry| entry.message.starts_with("native_media_base_url failed: code=native-media-unavailable at="))
+        .expect("the command logs its failure");
+    assert_eq!((entry.level.as_str(), entry.target.as_str()), ("error", "native-command"));
+    assert!(entry.message.contains("streaming.rs:"), "{}", entry.message);
+}

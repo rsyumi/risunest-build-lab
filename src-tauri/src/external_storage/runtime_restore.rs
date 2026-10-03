@@ -13,6 +13,7 @@ use crate::persistent_store::{
     external_apply::{ExternalSnapshotApplication, ExternalSnapshotObject, ExternalSnapshotRecord},
     PersistentStore, StoreError,
 };
+use crate::native_log::logged;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{collections::BTreeSet, path::Path};
@@ -146,7 +147,7 @@ pub(crate) fn confirmed_restore_activation(app:&AppHandle,job:&DurableJob)->Resu
 
 #[tauri::command]
 pub(crate) fn external_storage_confirm_restore_adoption(app:AppHandle,request:RestoreAdoptionRequest)->Result<Value> {
-    confirm_restore_adoption_in_store(&runtime::native_store(&app)?,&runtime::root(&app)?,&request)
+    logged("external_storage_confirm_restore_adoption", (|| confirm_restore_adoption_in_store(&runtime::native_store(&app)?,&runtime::root(&app)?,&request))())
 }
 
 pub(crate) fn application_started(job: &DurableJob) -> bool {
@@ -548,7 +549,7 @@ fn stage_original_backup_controls(
     units:&std::collections::BTreeMap<risunest_sync_wire::unit::UnitKey,risunest_sync_wire::unit::UnitValue>,
     cancel:&Cancellation,
 ) -> Result<()> {
-    use crate::persistent_store::external_capture::{large_unit_body_hashes,original_unit_dependency_inventory,BackupBodyRole};
+    use crate::persistent_store::external_capture::{original_unit_control_lengths,original_unit_dependency_inventory,BackupBodyRole};
     let content=super::content_store::ContentStore::open(&snapshot.staging_root.join("external-storage")).map_err(pds_error)?;
     let declared=snapshot.objects.iter().map(|object| (object.content_hash.as_str(),object)).collect::<std::collections::BTreeMap<_,_>>();
     if declared.len() != snapshot.objects.len() {return Err(corrupt())}
@@ -566,12 +567,12 @@ fn stage_original_backup_controls(
     };
     let size=|hash:&str| Ok(declared.get(hash).map(|object| object.byte_length));
     let probe=runtime::CancelProbe(cancel.clone());
-    // Only large unit bodies are read above the bound here. Message pages are
-    // read in the second pass with the lengths their manifests declare.
-    let large=large_unit_body_hashes(units);
-    let metadata=original_unit_dependency_inventory(units,
-        &|hash| read(hash,if large.contains(hash) {u64::MAX} else {risunest_sync_wire::MAX_METADATA_BYTES as u64}),
-        &size,&probe,false,&mut |_,_,_| Ok(()));
+    // Nothing above the bound is read here. Message pages and large unit
+    // bodies are read once, in the second pass, at the lengths their
+    // manifests and the snapshot declare.
+    let metadata=original_unit_control_lengths(units,
+        &|hash| read(hash,risunest_sync_wire::MAX_METADATA_BYTES as u64),
+        &size,&size,&probe);
     cancel.check()?;
     let metadata=metadata.map_err(pds_error)?;
     let mut spool=super::capture::BackupDependencySpool::new(&snapshot.staging_root.join("verified-original-controls")).map_err(pds_error)?;
@@ -861,7 +862,10 @@ mod tests {
         let unit=|key:&[&str],bytes:&[u8]| std::collections::BTreeMap::from([(UnitKey::new(key).unwrap(),UnitValue::object(RecordDescriptor::content(risunest_sync_wire::hash(bytes))).unwrap())]);
         assert!(stage_original_backup_controls(&mut store,&snapshot,&unit(&["root","additionalPrompt"],&padded),&Cancellation::default()).is_err());
         assert!(store.lww_object_body(&risunest_sync_wire::hash(&body)).unwrap().is_none());
+        crate::persistent_store::hash_work::reset_hash_work();
         stage_original_backup_controls(&mut store,&snapshot,&unit(&["root","additionalPrompt"],&body),&Cancellation::default()).unwrap();
+        let work=crate::persistent_store::hash_work::take_hash_work();
+        assert_eq!(work.domains["native_backup_large_unit_source"].calls,1);
         assert!(store.lww_object_body(&risunest_sync_wire::hash(&body)).unwrap()==Some(body));
     }
 
@@ -889,7 +893,7 @@ mod tests {
         let root=tempfile::tempdir().unwrap();
         let mut store=PersistentStore::open(root.path()).unwrap();
         let input=serde_json::from_value(json!({"connectionId":"synthetic-connection","kind":"restore","snapshotId":"synthetic-snapshot","targetRevision":"0"})).unwrap();
-        let job=DurableJob::new(input,false,1,store.external_identity().unwrap());
+        let job=DurableJob::new(input,1,store.external_identity().unwrap());
         let pending=commit_fixture(&mut store,root.path(),&job);
         let receipt=completed_restore_in_store(&store,&pending).unwrap().unwrap();
         let request=RestoreAdoptionRequest{job_id:job.id.clone(),received_revision:receipt["receivedRevision"].as_str().unwrap().into(),selected_character_id:None};
@@ -914,7 +918,7 @@ mod tests {
         let root=tempfile::tempdir().unwrap();
         let mut store=PersistentStore::open(root.path()).unwrap();
         let input=serde_json::from_value(json!({"connectionId":"synthetic-connection","kind":"restore","snapshotId":"synthetic-snapshot","targetRevision":"0"})).unwrap();
-        let job=DurableJob::new(input,false,1,store.external_identity().unwrap());
+        let job=DurableJob::new(input,1,store.external_identity().unwrap());
         let pending=commit_fixture(&mut store,root.path(),&job);
         let receipt=completed_restore_in_store(&store,&pending).unwrap().unwrap();
         store.commit(&crate::persistent_store::WorkingSetCommit{expected_revision:1,
@@ -932,7 +936,7 @@ mod tests {
     fn local_application_evidence_survives_reopen_and_later_phase_updates() {
         let root=tempfile::tempdir().unwrap();
         let input=serde_json::from_value(json!({"connectionId":"synthetic-connection","kind":"restore","snapshotId":"synthetic-snapshot","targetRevision":"0"})).unwrap();
-        let job=DurableJob::new(input,false,1,identity());
+        let job=DurableJob::new(input,1,identity());
         JobStore::open(root.path()).unwrap().put(&job).unwrap();
         mark_application_started(root.path(),&job).unwrap();
         update_phase(root.path(),&job,"downloading").unwrap();
@@ -985,7 +989,7 @@ mod tests {
         let root=tempfile::tempdir().unwrap();
         let mut store=PersistentStore::open(root.path()).unwrap();
         let request=serde_json::from_value(json!({"connectionId":"synthetic-connection","kind":"restore","snapshotId":"synthetic-snapshot","targetRevision":"0"})).unwrap();
-        let job=DurableJob::new(request,false,1,identity());
+        let job=DurableJob::new(request,1,identity());
         assert!(completed_restore_in_store(&store,&job).unwrap().is_none());
         let pending=commit_fixture(&mut store,root.path(),&job);
         assert!(completed_restore_in_store(&store,&pending).unwrap().is_some());

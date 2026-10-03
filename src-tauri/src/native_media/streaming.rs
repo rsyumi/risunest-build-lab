@@ -1,6 +1,7 @@
 //! File-backed loopback transport. Neither the response planner nor this
 //! transport collects a complete media body in native or JavaScript memory.
 use crate::server_sync::media::MediaProvider;
+use crate::native_log::logged;
 use axum::{
     body::Body,
     extract::State,
@@ -159,18 +160,22 @@ impl MediaServer {
 pub(crate) fn native_media_base_url(
     state: tauri::State<'_, MediaServerState>,
 ) -> Result<String, String> {
-    state
-        .0
-        .lock().map_err(|_| "native-media-unavailable".to_owned())?
-        .as_ref()
-        .map(|server| server.base_url.clone())
-        .map_err(Clone::clone)
+    logged("native_media_base_url", (|| {
+        state
+            .0
+            .lock().map_err(|_| "native-media-unavailable".to_owned())?
+            .as_ref()
+            .map(|server| server.base_url.clone())
+            .map_err(Clone::clone)
+    })())
 }
 
 #[tauri::command]
 pub(crate) async fn native_media_ensure(app: tauri::AppHandle) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || app.state::<MediaServerState>().ensure())
-        .await.map_err(|_| "native-media-unavailable".to_owned())?
+    logged("native_media_ensure", async move {
+        tauri::async_runtime::spawn_blocking(move || app.state::<MediaServerState>().ensure())
+            .await.map_err(|_| "native-media-unavailable".to_owned())?
+    }.await)
 }
 
 fn empty(status: StatusCode) -> Response<Body> {

@@ -18,6 +18,18 @@ use std::{
 };
 use tokio::io::{AsyncRead, AsyncSeek, ReadBuf};
 
+/// Tests share these locks, so one failed assertion must not poison every
+/// later test.
+pub(crate) trait LockUnpoisoned<T> {
+    fn lock_unpoisoned(&self) -> std::sync::MutexGuard<'_, T>;
+}
+impl<T> LockUnpoisoned<T> for Mutex<T> {
+    fn lock_unpoisoned(&self) -> std::sync::MutexGuard<'_, T> {
+        self.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Role {
@@ -160,18 +172,21 @@ fn current() -> Option<Context> {
     CONTEXTS.with(|contexts| contexts.borrow().last().cloned())
 }
 fn active() -> Option<Context> {
-    registry().lock().unwrap().active.clone()
+    registry().lock_unpoisoned().active.clone()
 }
 fn root_context(root: &Path) -> Option<Context> {
     let context = current().or_else(active)?;
     let root = match crate::resolve_data_root(root) {
         Ok(root) => root,
         Err(_) => {
-            violation(&mut context.scope.lock().unwrap(), "source-root-unresolved");
+            violation(
+                &mut context.scope.lock_unpoisoned(),
+                "source-root-unresolved",
+            );
             return None;
         }
     };
-    let mut scope = context.scope.lock().unwrap();
+    let mut scope = context.scope.lock_unpoisoned();
     if scope.root != root {
         violation(&mut scope, "source-root-mismatch");
         return None;
@@ -192,7 +207,7 @@ impl Context {
         domain: Option<&str>,
         range: Option<Range>,
     ) {
-        let mut scope = self.scope.lock().unwrap();
+        let mut scope = self.scope.lock_unpoisoned();
         if scope.closed {
             violation(&mut scope, "late-work");
         }
@@ -242,7 +257,7 @@ impl Context {
         }
     }
     fn reader(&self, hash: &str, placement: &str, delta: bool) {
-        let mut scope = self.scope.lock().unwrap();
+        let mut scope = self.scope.lock_unpoisoned();
         if scope.closed {
             violation(&mut scope, "late-reader");
         }
@@ -305,7 +320,7 @@ pub(crate) fn worker() -> Worker {
         .or_else(current)
         .or_else(active);
     if let Some(context) = &context {
-        context.scope.lock().unwrap().workers += 1;
+        context.scope.lock_unpoisoned().workers += 1;
     }
     Worker { context }
 }
@@ -321,7 +336,7 @@ impl Worker {
 impl Drop for Worker {
     fn drop(&mut self) {
         if let Some(context) = &self.context {
-            context.scope.lock().unwrap().workers -= 1;
+            context.scope.lock_unpoisoned().workers -= 1;
         }
     }
 }
@@ -331,14 +346,14 @@ pub(crate) struct Request {
 impl Drop for Request {
     fn drop(&mut self) {
         if let Some(context) = &self.context {
-            context.scope.lock().unwrap().requests -= 1;
+            context.scope.lock_unpoisoned().requests -= 1;
         }
     }
 }
 pub(crate) fn request() -> Request {
     let context = active();
     if let Some(context) = &context {
-        context.scope.lock().unwrap().requests += 1;
+        context.scope.lock_unpoisoned().requests += 1;
     }
     Request { context }
 }
@@ -347,12 +362,12 @@ pub(crate) async fn request_context<T>(f: impl std::future::Future<Output = T>) 
 }
 pub(crate) fn note_violation(name: &str) {
     if let Some(context) = active() {
-        violation(&mut context.scope.lock().unwrap(), name);
+        violation(&mut context.scope.lock_unpoisoned(), name);
     }
 }
 pub(crate) fn body_work(value: PendingBodyWork) {
     if let Some(context) = active() {
-        let mut scope = context.scope.lock().unwrap();
+        let mut scope = context.scope.lock_unpoisoned();
         if !value.settled() {
             violation(&mut scope, "pending-durable-body-work");
         }
@@ -361,12 +376,12 @@ pub(crate) fn body_work(value: PendingBodyWork) {
 }
 pub(crate) fn note_current_violation(name: &str) {
     if let Some(context) = current().or_else(active) {
-        violation(&mut context.scope.lock().unwrap(), name);
+        violation(&mut context.scope.lock_unpoisoned(), name);
     }
 }
 pub(crate) fn unsupported(root: &Path, name: &str) {
     if let Some(context) = root_context(root) {
-        violation(&mut context.scope.lock().unwrap(), name);
+        violation(&mut context.scope.lock_unpoisoned(), name);
     }
 }
 
@@ -469,9 +484,9 @@ pub(crate) fn begin(
         return Err("scope-limit");
     }
     let root = crate::resolve_data_root(root).map_err(|_| "invalid-source-root")?;
-    let mut registry = registry().lock().unwrap();
+    let mut registry = registry().lock_unpoisoned();
     if let Some(context) = &registry.active {
-        let scope = context.scope.lock().unwrap();
+        let scope = context.scope.lock_unpoisoned();
         if !scope.closed
             || scope.workers != 0
             || scope.requests != 0
@@ -528,7 +543,7 @@ pub(crate) fn begin(
 }
 pub(crate) fn snapshot(close: bool) -> Option<Snapshot> {
     let context = active()?;
-    let mut scope = context.scope.lock().unwrap();
+    let mut scope = context.scope.lock_unpoisoned();
     if close {
         scope.closed = true;
     }
@@ -625,7 +640,7 @@ pub(crate) fn inline_selection(hash: &str, start: u64, bytes: u64) {
         .or_else(current)
         .or_else(active);
     if let Some(context) = context {
-        let mut scope = context.scope.lock().unwrap();
+        let mut scope = context.scope.lock_unpoisoned();
         if let Some(row) = scope
             .rows
             .get_mut(&(hash.into(), "inline".into(), context.flow))
@@ -650,7 +665,7 @@ impl HashScope {
     pub(crate) fn new(hash: &str, domain: &'static str) -> Self {
         let context = current().or_else(|| {
             let context = active()?;
-            violation(&mut context.scope.lock().unwrap(), "unattributed-hash");
+            violation(&mut context.scope.lock_unpoisoned(), "unattributed-hash");
             Some(context)
         });
         let scope = Self {
@@ -744,7 +759,7 @@ impl Reader {
         }
         self.started = true;
         let context = self.context.as_ref()?;
-        let mut scope = context.scope.lock().unwrap();
+        let mut scope = context.scope.lock_unpoisoned();
         scope
             .started_reads
             .insert((self.hash.clone(), context.flow.clone()));
@@ -803,7 +818,7 @@ impl Reader {
     }
     fn selected(&self, start: u64, bytes: u64) {
         if let Some(context) = &self.context {
-            let mut scope = context.scope.lock().unwrap();
+            let mut scope = context.scope.lock_unpoisoned();
             let key = (
                 self.hash.clone(),
                 self.placement.into(),
@@ -830,7 +845,7 @@ impl Reader {
             Ok(position) => self.position = *position,
             Err(_) => {
                 if let Some(context) = &self.context {
-                    violation(&mut context.scope.lock().unwrap(), "source-seek-error");
+                    violation(&mut context.scope.lock_unpoisoned(), "source-seek-error");
                 }
             }
         }
@@ -861,9 +876,9 @@ impl TrackedFile {
         if let Some(context) = &reader.context {
             if result.is_ok()
                 && !std::fs::canonicalize(path)
-                    .is_ok_and(|path| path.starts_with(&context.scope.lock().unwrap().root))
+                    .is_ok_and(|path| path.starts_with(&context.scope.lock_unpoisoned().root))
             {
-                violation(&mut context.scope.lock().unwrap(), "source-path-escape");
+                violation(&mut context.scope.lock_unpoisoned(), "source-path-escape");
             }
         }
         match result {
@@ -971,7 +986,7 @@ impl AsyncSeek for TrackedAsyncFile {
         if result.is_ok() {
             self.seeking = true;
         } else if let Some(context) = &self.reader.context {
-            violation(&mut context.scope.lock().unwrap(), "source-seek-error");
+            violation(&mut context.scope.lock_unpoisoned(), "source-seek-error");
         }
         result
     }
@@ -991,7 +1006,7 @@ impl Drop for TrackedAsyncFile {
         }
         if self.seeking {
             if let Some(context) = &self.reader.context {
-                violation(&mut context.scope.lock().unwrap(), "pending-source-seek");
+                violation(&mut context.scope.lock_unpoisoned(), "pending-source-seek");
             }
         }
     }

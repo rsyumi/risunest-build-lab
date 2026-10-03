@@ -1,5 +1,18 @@
 use super::*;
 
+fn native_restore_stage(
+    store: &mut crate::persistent_store::PersistentStore,
+    request_id: &str,
+) -> (crate::persistent_store::lww::Header, String) {
+    let stage = store.replace_begin().unwrap().staging_id;
+    store.replace_put_root(&stage, &serde_json::json!({"username":"restored"})).unwrap();
+    let header = crate::persistent_store::lww::Header {
+        binding_authority: store.lww_binding_authority().unwrap(),
+        request_id: request_id.into(),
+    };
+    (header, stage)
+}
+
 fn state(root: &Path) -> DeviceBackupState {
     let state = DeviceBackupState::initialize(root.join("device-backup"));
     let pds = crate::persistent_store::commands::PersistentStoreState::default();
@@ -43,6 +56,70 @@ fn portable_adoption_requires_completed_exact_native_session_before_release() {
     let library=rusqlite::Connection::open(root.path().join("persistent").join(crate::persistent_store::DATABASE_FILE)).unwrap();
     library.execute("UPDATE meta SET value=?1 WHERE key='activeGeneration'",[serde_json::to_string("other-generation").unwrap()]).unwrap();
     assert!(coordinator.verify_portable_adoption_complete(&id,job,&revision.to_string(),&authority).is_err());
+}
+
+/// Large device values travel as objects through both journal spools. The
+/// rollback spool captures what this device already holds before the restore
+/// replaces it, and the restore installs the source text byte for byte.
+#[test]
+fn journaled_restore_carries_large_device_values_in_source_and_rollback_spools() {
+    use crate::local_backup::NeverCancelled;
+    use crate::persistent_store::device_store::plugin_values::PluginDeviceMutation;
+    fn write_large(store: &mut crate::persistent_store::PersistentStore, label: &str) -> (String, String, String) {
+        let string = format!("{label}\n{}", "가".repeat(25_000));
+        let json = format!("{{ \"label\": \"{label}\", \"n\": 1.0e1,\n \"pad\": \"{}\" }}", "p".repeat(70_000));
+        let setting = serde_json::json!({ "label": label, "pad": "q".repeat(70_000) });
+        let device = store.device_store_mut().unwrap();
+        device.write_plugin_device_values("owner-large", &[
+            PluginDeviceMutation::Set { space: "string".into(), key: "value".into(), value: string.clone() },
+            PluginDeviceMutation::Set { space: "json".into(), key: "value".into(), value: json.clone() },
+        ]).unwrap();
+        device.write_setting("risuNestDeviceSettings", &setting).unwrap();
+        (string, json, serde_json::to_string(&setting).unwrap())
+    }
+    fn objects(sections: &[PreparedDeviceSection]) -> std::collections::BTreeSet<Vec<u8>> {
+        let mut objects = std::collections::BTreeSet::new();
+        for section in sections {
+            section.rows().visit_entries(|_, object| {
+                objects.extend(object.map(<[u8]>::to_vec));
+                Ok(())
+            }).unwrap();
+        }
+        objects
+    }
+    let root = tempfile::tempdir().unwrap();
+    let source_root = tempfile::tempdir().unwrap();
+    let mut source_store = crate::persistent_store::PersistentStore::open(source_root.path()).unwrap();
+    let restored = write_large(&mut source_store, "source");
+    let mut store = crate::persistent_store::PersistentStore::open(root.path()).unwrap();
+    let held = write_large(&mut store, "held");
+    let stage = store.replace_begin().unwrap().staging_id;
+    store.replace_put_root(&stage, &serde_json::json!({"username": "synthetic restored"})).unwrap();
+    let selected = vec!["hypa".to_owned(), "local-plugins".to_owned(), "local-settings".to_owned()];
+    let source = capture_prepared_native_sections(&mut source_store, &selected, &NeverCancelled).unwrap();
+    let rollback = capture_prepared_native_sections(&mut store, &selected, &NeverCancelled).unwrap();
+    let coordinator = state(root.path());
+    let job = "large-device-values";
+    let id = coordinator.create_native_portable_session(job, true, &selected, 0, Some(stage)).unwrap();
+    let header = crate::persistent_store::lww::Header {
+        binding_authority: store.lww_binding_authority().unwrap(), request_id: job.into(),
+    };
+    coordinator.set_library_replacement(&id, &header, &std::collections::BTreeMap::new()).unwrap();
+    journal_prepared_native_sections(&coordinator, &id, Spool::Source, &source).unwrap();
+    coordinator.source_ready(&id).unwrap();
+    journal_prepared_native_sections(&coordinator, &id, Spool::Rollback, &rollback).unwrap();
+    coordinator.prepared(&id).unwrap();
+    let held_bodies = [&held.0, &held.1, &held.2].map(|text| text.as_bytes().to_vec());
+    let journaled = archive::prepare_journaled_native_sections(&coordinator, &id, Spool::Rollback, &selected).unwrap();
+    assert_eq!(objects(&journaled), held_bodies.into_iter().collect());
+    resume_journaled_native_restore(&coordinator, &id, &mut store).unwrap();
+    let device = store.device_store().unwrap();
+    assert_eq!(device.read_plugin_device_value("owner-large", "string", "value").unwrap(), Some(restored.0));
+    assert_eq!(device.read_plugin_device_value("owner-large", "json", "value").unwrap(), Some(restored.1));
+    let setting: String = device.connection().query_row(
+        "SELECT value FROM device_settings WHERE key='risuNestDeviceSettings'", [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(setting, restored.2);
 }
 
 #[test]
@@ -259,6 +336,9 @@ fn native_section_archive_roundtrip_keeps_structured_keys_objects_and_local_scop
     std::fs::create_dir(&jobs).unwrap();
     let mut source = crate::persistent_store::PersistentStore::open(&source_root).unwrap();
     let large_vector = vec![7u8; 8 * 1024];
+    let large_string = format!("{}\n{}", "가".repeat(25_000), "z".repeat(100));
+    let large_json = format!("{{ \"items\": [1.50, 2e1],\n  \"text\": \"{}\" }}", "j".repeat(70_000));
+    let large_setting = serde_json::json!({ "notes": "s".repeat(70_000) });
     {
         let device = source.device_store_mut().unwrap();
         device
@@ -289,6 +369,26 @@ fn native_section_archive_roundtrip_keeps_structured_keys_objects_and_local_scop
                 )
                 .unwrap();
         }
+        device
+            .write_plugin_device_values(
+                "owner-b",
+                &[
+                    PluginDeviceMutation::Set {
+                        space: "string".into(),
+                        key: "large".into(),
+                        value: large_string.clone(),
+                    },
+                    PluginDeviceMutation::Set {
+                        space: "json".into(),
+                        key: "large".into(),
+                        value: large_json.clone(),
+                    },
+                ],
+            )
+            .unwrap();
+        device
+            .write_setting("risuNestDeviceSettings", &large_setting)
+            .unwrap();
         device
             .write_plugin_device_values(
                 "owner-a",
@@ -335,7 +435,7 @@ fn native_section_archive_roundtrip_keeps_structured_keys_objects_and_local_scop
             .db
             .query_row::<i64, _, _>("SELECT count(*) FROM objects", [], |row| row.get(0))
             .unwrap(),
-        1
+        4
     );
     assert_eq!(
         catalog
@@ -346,7 +446,7 @@ fn native_section_archive_roundtrip_keeps_structured_keys_objects_and_local_scop
                 |row| row.get(0),
             )
             .unwrap(),
-        3
+        5
     );
     let path = root.path().join("native.risunest");
     catalog.write_candidate(&path, false, &Never).unwrap();
@@ -378,9 +478,11 @@ fn native_section_archive_roundtrip_keeps_structured_keys_objects_and_local_scop
             .write_setting("risu_lastsaved", &serde_json::json!("target-control"))
             .unwrap();
     }
-    apply_prepared_native_sections(&mut target, &prepared).unwrap();
+    let rows = prepared.iter().map(PreparedDeviceSection::rows).collect::<Vec<_>>();
+    let (header, stage) = native_restore_stage(&mut target, "synthetic-native-roundtrip");
+    target.lww_commit_replacement_with_device_sections(&header, &stage, None, &rows).unwrap();
     let revision = target.device_store().unwrap().revision().unwrap();
-    apply_prepared_native_sections(&mut target, &prepared).unwrap();
+    target.lww_commit_replacement_with_device_sections(&header, &stage, None, &rows).unwrap();
     let device = target.device_store().unwrap();
     assert_eq!(device.revision().unwrap(), revision);
     assert_eq!(
@@ -402,6 +504,19 @@ fn native_section_archive_roundtrip_keeps_structured_keys_objects_and_local_scop
             Some(expected)
         );
     }
+    for (space, expected) in [("string", &large_string), ("json", &large_json)] {
+        assert_eq!(
+            device
+                .read_plugin_device_value("owner-b", space, "large")
+                .unwrap()
+                .as_ref(),
+            Some(expected)
+        );
+    }
+    assert_eq!(
+        device.read_setting("risuNestDeviceSettings").unwrap(),
+        Some(large_setting.clone())
+    );
     assert_eq!(
         device
             .read_plugin_device_value("owner-a", "string", "removed")
@@ -430,7 +545,7 @@ fn native_section_archive_roundtrip_keeps_structured_keys_objects_and_local_scop
 }
 
 #[test]
-fn selected_empty_native_section_clears_only_that_section() {
+fn selected_empty_native_sections_clear_device_data_and_keep_coordination_settings() {
     use crate::persistent_store::device_store::plugin_values::PluginDeviceMutation;
 
     struct Never;
@@ -453,18 +568,22 @@ fn selected_empty_native_section_clears_only_that_section() {
             [],
         )
         .unwrap();
-    let selected = vec!["local-plugins".to_owned()];
+    let selected = vec![
+        "hypa".to_owned(),
+        "local-plugins".to_owned(),
+        "local-settings".to_owned(),
+    ];
     capture_native_sections(&mut source, &selected, &catalog, &Never).unwrap();
     assert_eq!(
         catalog
             .db
-            .query_row::<(i64, i64), _, _>(
-                "SELECT present,record_count FROM device_sections WHERE section='local-plugins'",
+            .query_row::<i64, _, _>(
+                "SELECT count(*) FROM device_sections WHERE present=1 AND record_count=0",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| row.get(0),
             )
             .unwrap(),
-        (1, 0)
+        3
     );
     let path = root.path().join("empty.risunest");
     catalog.write_candidate(&path, false, &Never).unwrap();
@@ -492,8 +611,16 @@ fn selected_empty_native_section_clears_only_that_section() {
         device
             .write_setting("dosync", &serde_json::json!(true))
             .unwrap();
+        device
+            .write_setting("risu_lastsaved", &serde_json::json!("target-control"))
+            .unwrap();
+        device
+            .write_plugin_permission("plugin-hash", "network", true)
+            .unwrap();
     }
-    apply_prepared_native_sections(&mut target, &prepared).unwrap();
+    let rows = prepared.iter().map(PreparedDeviceSection::rows).collect::<Vec<_>>();
+    let (header, stage) = native_restore_stage(&mut target, "synthetic-empty-restore");
+    target.lww_commit_replacement_with_device_sections(&header, &stage, None, &rows).unwrap();
     let device = target.device_store().unwrap();
     assert_eq!(
         device
@@ -501,10 +628,12 @@ fn selected_empty_native_section_clears_only_that_section() {
             .unwrap(),
         None
     );
+    assert_eq!(device.read_setting("dosync").unwrap(), None);
     assert_eq!(
-        device.read_setting("dosync").unwrap(),
-        Some(serde_json::json!(true))
+        device.read_setting("risu_lastsaved").unwrap(),
+        Some(serde_json::json!("target-control"))
     );
+    assert!(device.read_plugin_permissions().unwrap().is_empty());
 }
 
 #[test]
@@ -858,4 +987,43 @@ fn cleanup_closes_the_device_database_and_reopens_only_a_fresh_store() {
     assert!(inner.connection.is_some());
     assert!(inner.cold_session.is_none());
     assert!(!inner.reconciled);
+}
+
+#[test]
+fn device_backup_commands_log_their_failures() {
+    let root = tempfile::tempdir().unwrap();
+    let app = tauri::test::mock_builder()
+        .build(tauri::test::mock_context(tauri::test::noop_assets()))
+        .unwrap();
+    tauri::Manager::manage(&app, state(root.path()));
+    let missing = native_device_backup_recovery_complete(tauri::Manager::state(&app), "missing-session".into());
+    assert_eq!(missing.unwrap_err().code, "device-session-missing");
+    let entry = crate::native_log::global_state()
+        .tail(None)
+        .into_iter()
+        .rev()
+        .find(|entry| entry.message.starts_with("native_device_backup_recovery_complete failed: code=device-session-missing cause="))
+        .expect("the command logs its failure");
+    assert_eq!((entry.level.as_str(), entry.target.as_str()), ("error", "native-command"));
+    assert!(entry.message.contains("commands.rs:"), "{}", entry.message);
+}
+
+#[test]
+fn a_kept_device_failure_cause_stays_out_of_the_reply() {
+    use crate::native_log::CommandFailure;
+    let failure = DeviceBackupError::from(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "synthetic refusal"));
+    assert_eq!(
+        serde_json::to_value(&failure).unwrap(),
+        serde_json::json!({"code": "device-storage-failed", "message": "Device maintenance filesystem operation failed"}),
+    );
+    assert_eq!(
+        failure.detail().as_deref(),
+        Some("Device maintenance filesystem operation failed: PermissionDenied: synthetic refusal"),
+    );
+    let failure = DeviceBackupError::from(rusqlite::Error::QueryReturnedNoRows);
+    assert_eq!(failure.code().as_ref(), "device-storage-failed");
+    assert_eq!(
+        failure.detail().as_deref(),
+        Some("Device maintenance SQLite operation failed: Query returned no rows"),
+    );
 }

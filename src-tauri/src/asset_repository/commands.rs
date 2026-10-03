@@ -1,14 +1,18 @@
-use super::job_pins::{CasJobKind, CasObjectRole, CasReleaseOutcome, DurableCasJob};
+use super::job_pins::{
+    durable_cas_job_ids, CasJobKind, CasObjectRole, CasReleaseOutcome, DurableCasJob,
+};
 use super::{PayloadCas, PreparedPayload};
 use crate::asset_repository::owner_manifest_codec::{
     decode_owner_manifest, encode_owner_manifest, OWNER_MANIFEST_V1_MAX_CANONICAL_BYTES,
 };
 use crate::native_file_jobs::NativeFileJobState;
+use crate::native_log::logged;
 use crate::persistent_store::{self, PersistentStore, PersistentStoreState, StoreError};
 use crate::trust_boundary::is_lower_hex_256;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
 use std::io::{self, Cursor, ErrorKind, Seek, SeekFrom, Write};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Manager, State};
@@ -22,6 +26,7 @@ pub(crate) struct ContentDirectObject {
 pub(crate) struct DurableCasJobState {
     jobs: Mutex<HashMap<String, DurableCasJob>>,
     uploads: Mutex<CasUploadPool>,
+    renderer_started: AtomicBool,
 }
 
 impl Default for DurableCasJobState {
@@ -29,23 +34,113 @@ impl Default for DurableCasJobState {
         Self {
             jobs: Mutex::new(HashMap::new()),
             uploads: Mutex::new(CasUploadPool::default()),
+            renderer_started: AtomicBool::new(false),
         }
+    }
+}
+
+/// Write sessions no page can finish any more, released on a blocking thread
+/// because the repository lock may be held for a long time.
+struct AbandonedCasJobs {
+    root: std::path::PathBuf,
+    sessions: Vec<DurableCasJob>,
+    journal_ids: Vec<String>,
+    listing_failure: Option<String>,
+}
+
+impl AbandonedCasJobs {
+    fn release(self) -> Result<(), String> {
+        let mut failure = self.listing_failure;
+        for mut session in self.sessions {
+            if let Err(error) = session.release(CasReleaseOutcome::Aborted) {
+                failure.get_or_insert(error.to_string());
+            }
+        }
+        for id in self.journal_ids {
+            let released = match DurableCasJob::open(&self.root, &id) {
+                Ok(mut job) if job.kind() == CasJobKind::DirectAssetOrInlayWrite => {
+                    job.release(CasReleaseOutcome::Aborted)
+                }
+                Ok(_) => Ok(()),
+                Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+                Err(error) => Err(error),
+            };
+            if let Err(error) = released {
+                failure.get_or_insert(error.to_string());
+            }
+        }
+        failure.map_or(Ok(()), Err)
     }
 }
 
 impl DurableCasJobState {
     pub(crate) fn close_for_cleanup(&self) -> Result<(), String> {
-        self.reset_renderer_session()?;
+        self.clear_uploads()?;
         self.jobs.lock().map_err(|_| "cleanup-cas-busy")?.clear();
         Ok(())
     }
 
-    pub(crate) fn reset_renderer_session(&self) -> Result<(), String> {
+    fn clear_uploads(&self) -> Result<(), String> {
         self.uploads
             .lock()
             .map_err(|error| format!("CAS upload mutex poisoned: {error}"))?
             .clear();
         Ok(())
+    }
+
+    pub(crate) fn reset_renderer_session(&self, app: &AppHandle) -> Result<(), String> {
+        let abandoned = self.take_abandoned(&repository_root(app)?)?;
+        if !abandoned.sessions.is_empty()
+            || !abandoned.journal_ids.is_empty()
+            || abandoned.listing_failure.is_some()
+        {
+            let app = app.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                let released = app
+                    .state::<PersistentStoreState>()
+                    .admit_renderer_operation()
+                    .map_err(|error| error.to_string())
+                    .and_then(|_operation| abandoned.release());
+                if let Err(error) = released {
+                    crate::nlog!("error", "failed to release abandoned CAS write sessions: {error}");
+                }
+            });
+        }
+        Ok(())
+    }
+
+    fn take_abandoned(&self, root: &std::path::Path) -> Result<AbandonedCasJobs, String> {
+        self.clear_uploads()?;
+        let mut jobs = self
+            .jobs
+            .lock()
+            .map_err(|error| format!("CAS job session mutex poisoned: {error}"))?;
+        // A page keeps its write session IDs only in memory, so the next page
+        // cannot finish them.
+        let ids = jobs
+            .iter()
+            .filter(|(_, job)| job.kind() == CasJobKind::DirectAssetOrInlayWrite)
+            .map(|(id, _)| id.clone())
+            .collect::<Vec<_>>();
+        let sessions = ids.iter().filter_map(|id| jobs.remove(id)).collect();
+        drop(jobs);
+        // Sessions an earlier run left behind have no page either. Native jobs
+        // of the same kind start only from a page, so none exists before the
+        // first one.
+        let (journal_ids, listing_failure) = if self.renderer_started.swap(true, Ordering::AcqRel) {
+            (Vec::new(), None)
+        } else {
+            match durable_cas_job_ids(root) {
+                Ok(ids) => (ids, None),
+                Err(error) => (Vec::new(), Some(error.to_string())),
+            }
+        };
+        Ok(AbandonedCasJobs {
+            root: root.to_owned(),
+            sessions,
+            journal_ids,
+            listing_failure,
+        })
     }
 }
 
@@ -249,24 +344,26 @@ pub(crate) async fn asset_cas_job_begin(
     app: AppHandle,
     kind: CasJobKind,
 ) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let _operation = app
-            .state::<PersistentStoreState>()
-            .admit_renderer_operation()
-            .map_err(|error| error.to_string())?;
-        let root = repository_root(&app)?;
-        let session_id = uuid::Uuid::new_v4().to_string();
-        let job = DurableCasJob::begin(&root, &session_id, kind, now_ms()?)
-            .map_err(|error| error.to_string())?;
-        app.state::<DurableCasJobState>()
-            .jobs
-            .lock()
-            .map_err(|error| format!("CAS job session mutex poisoned: {error}"))?
-            .insert(session_id.clone(), job);
-        Ok(session_id)
-    })
-    .await
-    .map_err(|error| format!("failed to join CAS job begin operation: {error}"))?
+    logged("asset_cas_job_begin", async move {
+        tauri::async_runtime::spawn_blocking(move || {
+            let _operation = app
+                .state::<PersistentStoreState>()
+                .admit_renderer_operation()
+                .map_err(|error| error.to_string())?;
+            let root = repository_root(&app)?;
+            let session_id = uuid::Uuid::new_v4().to_string();
+            let job = DurableCasJob::begin(&root, &session_id, kind, now_ms()?)
+                .map_err(|error| error.to_string())?;
+            app.state::<DurableCasJobState>()
+                .jobs
+                .lock()
+                .map_err(|error| format!("CAS job session mutex poisoned: {error}"))?
+                .insert(session_id.clone(), job);
+            Ok(session_id)
+        })
+        .await
+        .map_err(|error| format!("failed to join CAS job begin operation: {error}"))?
+    }.await)
 }
 
 #[tauri::command(async)]
@@ -276,20 +373,22 @@ pub(crate) async fn asset_cas_job_prepare(
     data: Vec<u8>,
     role: CasObjectRole,
 ) -> Result<PreparedPayload, String> {
-    if data.len() > CAS_UPLOAD_CHUNK_BYTES {
-        return Err("direct CAS prepare exceeds the IPC chunk limit".to_owned());
-    }
-    tauri::async_runtime::spawn_blocking(move || {
-        let _operation = app
-            .state::<PersistentStoreState>()
-            .admit_renderer_operation()
-            .map_err(|error| error.to_string())?;
-        with_recovered_job(&app, &session_id, |job, cas| {
-            job.prepare_bytes(cas, &data, role)
+    logged("asset_cas_job_prepare", async move {
+        if data.len() > CAS_UPLOAD_CHUNK_BYTES {
+            return Err("direct CAS prepare exceeds the IPC chunk limit".to_owned());
+        }
+        tauri::async_runtime::spawn_blocking(move || {
+            let _operation = app
+                .state::<PersistentStoreState>()
+                .admit_renderer_operation()
+                .map_err(|error| error.to_string())?;
+            with_recovered_job(&app, &session_id, |job, cas| {
+                job.prepare_bytes(cas, &data, role)
+            })
         })
-    })
-    .await
-    .map_err(|error| format!("failed to join CAS job prepare operation: {error}"))?
+        .await
+        .map_err(|error| format!("failed to join CAS job prepare operation: {error}"))?
+    }.await)
 }
 
 #[derive(serde::Serialize)]
@@ -305,35 +404,37 @@ pub(crate) async fn asset_cas_job_upload_open(
     role: CasObjectRole,
     total_bytes: u64,
 ) -> Result<CasUploadOpened, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let _operation = app
-            .state::<PersistentStoreState>()
-            .admit_renderer_operation()
-            .map_err(|error| error.to_string())?;
-        let root = repository_root(&app)?;
-        let cas = PayloadCas::new(&root).map_err(|error| error.to_string())?;
-        let state = app.state::<DurableCasJobState>();
-        let mut uploads = state
-            .uploads
-            .lock()
-            .map_err(|error| format!("CAS upload mutex poisoned: {error}"))?;
-        let mut jobs = state
-            .jobs
-            .lock()
-            .map_err(|error| format!("CAS job session mutex poisoned: {error}"))?;
-        let job = recover_job(&mut jobs, &root, &session_id)?;
-        if job.is_sealed() || job.is_released() {
-            return Err("sealed or released CAS job cannot accept an upload".to_owned());
-        }
-        uploads
-            .open(&cas, upload_id, session_id, role, total_bytes)
-            .map_err(|error| error.to_string())?;
-        Ok(CasUploadOpened {
-            capacity: CAS_UPLOAD_CHUNK_BYTES,
+    logged("asset_cas_job_upload_open", async move {
+        tauri::async_runtime::spawn_blocking(move || {
+            let _operation = app
+                .state::<PersistentStoreState>()
+                .admit_renderer_operation()
+                .map_err(|error| error.to_string())?;
+            let root = repository_root(&app)?;
+            let cas = PayloadCas::new(&root).map_err(|error| error.to_string())?;
+            let state = app.state::<DurableCasJobState>();
+            let mut uploads = state
+                .uploads
+                .lock()
+                .map_err(|error| format!("CAS upload mutex poisoned: {error}"))?;
+            let mut jobs = state
+                .jobs
+                .lock()
+                .map_err(|error| format!("CAS job session mutex poisoned: {error}"))?;
+            let job = recover_job(&mut jobs, &root, &session_id)?;
+            if job.is_sealed() || job.is_released() {
+                return Err("sealed or released CAS job cannot accept an upload".to_owned());
+            }
+            uploads
+                .open(&cas, upload_id, session_id, role, total_bytes)
+                .map_err(|error| error.to_string())?;
+            Ok(CasUploadOpened {
+                capacity: CAS_UPLOAD_CHUNK_BYTES,
+            })
         })
-    })
-    .await
-    .map_err(|error| format!("failed to join CAS upload open operation: {error}"))?
+        .await
+        .map_err(|error| format!("failed to join CAS upload open operation: {error}"))?
+    }.await)
 }
 
 #[tauri::command(async)]
@@ -343,20 +444,22 @@ pub(crate) async fn asset_cas_job_upload_chunk(
     offset: u64,
     data: Vec<u8>,
 ) -> Result<u64, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let _operation = app
-            .state::<PersistentStoreState>()
-            .admit_renderer_operation()
-            .map_err(|error| error.to_string())?;
-        app.state::<DurableCasJobState>()
-            .uploads
-            .lock()
-            .map_err(|error| format!("CAS upload mutex poisoned: {error}"))?
-            .append(&upload_id, offset, &data)
-            .map_err(|error| error.to_string())
-    })
-    .await
-    .map_err(|error| format!("failed to join CAS upload chunk operation: {error}"))?
+    logged("asset_cas_job_upload_chunk", async move {
+        tauri::async_runtime::spawn_blocking(move || {
+            let _operation = app
+                .state::<PersistentStoreState>()
+                .admit_renderer_operation()
+                .map_err(|error| error.to_string())?;
+            app.state::<DurableCasJobState>()
+                .uploads
+                .lock()
+                .map_err(|error| format!("CAS upload mutex poisoned: {error}"))?
+                .append(&upload_id, offset, &data)
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| format!("failed to join CAS upload chunk operation: {error}"))?
+    }.await)
 }
 
 #[tauri::command(async)]
@@ -364,40 +467,42 @@ pub(crate) async fn asset_cas_job_upload_finish(
     app: AppHandle,
     upload_id: String,
 ) -> Result<PreparedPayload, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let _operation = app
-            .state::<PersistentStoreState>()
-            .admit_renderer_operation()
-            .map_err(|error| error.to_string())?;
-        let root = repository_root(&app)?;
-        let cas = PayloadCas::new(&root).map_err(|error| error.to_string())?;
-        let state = app.state::<DurableCasJobState>();
-        let mut upload = state
-            .uploads
-            .lock()
-            .map_err(|error| format!("CAS upload mutex poisoned: {error}"))?
-            .take_complete(&upload_id)
-            .map_err(|error| error.to_string())?;
-        upload.file.flush().map_err(|error| error.to_string())?;
-        upload
-            .file
-            .as_file()
-            .sync_all()
-            .map_err(|error| error.to_string())?;
-        upload
-            .file
-            .seek(SeekFrom::Start(0))
-            .map_err(|error| error.to_string())?;
-        let mut jobs = state
-            .jobs
-            .lock()
-            .map_err(|error| format!("CAS job session mutex poisoned: {error}"))?;
-        recover_job(&mut jobs, &root, &upload.session_id)?
-            .prepare_reader(&cas, &mut upload.file, upload.role)
-            .map_err(|error| error.to_string())
-    })
-    .await
-    .map_err(|error| format!("failed to join CAS upload finish operation: {error}"))?
+    logged("asset_cas_job_upload_finish", async move {
+        tauri::async_runtime::spawn_blocking(move || {
+            let _operation = app
+                .state::<PersistentStoreState>()
+                .admit_renderer_operation()
+                .map_err(|error| error.to_string())?;
+            let root = repository_root(&app)?;
+            let cas = PayloadCas::new(&root).map_err(|error| error.to_string())?;
+            let state = app.state::<DurableCasJobState>();
+            let mut upload = state
+                .uploads
+                .lock()
+                .map_err(|error| format!("CAS upload mutex poisoned: {error}"))?
+                .take_complete(&upload_id)
+                .map_err(|error| error.to_string())?;
+            upload.file.flush().map_err(|error| error.to_string())?;
+            upload
+                .file
+                .as_file()
+                .sync_all()
+                .map_err(|error| error.to_string())?;
+            upload
+                .file
+                .seek(SeekFrom::Start(0))
+                .map_err(|error| error.to_string())?;
+            let mut jobs = state
+                .jobs
+                .lock()
+                .map_err(|error| format!("CAS job session mutex poisoned: {error}"))?;
+            recover_job(&mut jobs, &root, &upload.session_id)?
+                .prepare_reader(&cas, &mut upload.file, upload.role)
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| format!("failed to join CAS upload finish operation: {error}"))?
+    }.await)
 }
 
 #[tauri::command(async)]
@@ -405,20 +510,22 @@ pub(crate) async fn asset_cas_job_upload_cancel(
     app: AppHandle,
     upload_id: String,
 ) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let _operation = app
-            .state::<PersistentStoreState>()
-            .admit_renderer_operation()
-            .map_err(|error| error.to_string())?;
-        app.state::<DurableCasJobState>()
-            .uploads
-            .lock()
-            .map_err(|error| format!("CAS upload mutex poisoned: {error}"))?
-            .cancel(&upload_id);
-        Ok(())
-    })
-    .await
-    .map_err(|error| format!("failed to join CAS upload cancel operation: {error}"))?
+    logged("asset_cas_job_upload_cancel", async move {
+        tauri::async_runtime::spawn_blocking(move || {
+            let _operation = app
+                .state::<PersistentStoreState>()
+                .admit_renderer_operation()
+                .map_err(|error| error.to_string())?;
+            app.state::<DurableCasJobState>()
+                .uploads
+                .lock()
+                .map_err(|error| format!("CAS upload mutex poisoned: {error}"))?
+                .cancel(&upload_id);
+            Ok(())
+        })
+        .await
+        .map_err(|error| format!("failed to join CAS upload cancel operation: {error}"))?
+    }.await)
 }
 
 #[tauri::command(async)]
@@ -429,53 +536,57 @@ pub(crate) async fn asset_cas_job_pin_existing(
     byte_size: u64,
     role: CasObjectRole,
 ) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let _operation = app
-            .state::<PersistentStoreState>()
-            .admit_renderer_operation()
-            .map_err(|error| error.to_string())?;
-        with_recovered_job(&app, &session_id, |job, cas| {
-            job.pin_existing(cas, &content_hash, byte_size, role)
+    logged("asset_cas_job_pin_existing", async move {
+        tauri::async_runtime::spawn_blocking(move || {
+            let _operation = app
+                .state::<PersistentStoreState>()
+                .admit_renderer_operation()
+                .map_err(|error| error.to_string())?;
+            with_recovered_job(&app, &session_id, |job, cas| {
+                job.pin_existing(cas, &content_hash, byte_size, role)
+            })
         })
-    })
-    .await
-    .map_err(|error| format!("failed to join existing CAS pin operation: {error}"))?
+        .await
+        .map_err(|error| format!("failed to join existing CAS pin operation: {error}"))?
+    }.await)
 }
 
 #[tauri::command(async)]
 pub(crate) async fn asset_cas_job_seal(app: AppHandle, session_id: String) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let operation_guard = app
-            .state::<PersistentStoreState>()
-            .admit_renderer_operation()
-            .map_err(|error| error.to_string())?;
-        let root = repository_root(&app)?;
-        let state = app.state::<DurableCasJobState>();
-        state
-            .uploads
-            .lock()
-            .map_err(|error| format!("CAS upload mutex poisoned: {error}"))?
-            .cancel_session(&session_id);
-        let mut jobs = state
-            .jobs
-            .lock()
-            .map_err(|error| format!("CAS job session mutex poisoned: {error}"))?;
-        let job = recover_job(&mut jobs, &root, &session_id)?;
-        persistent_store::commands::with_store_mut_admitted(
-            app.state::<PersistentStoreState>(),
-            &operation_guard,
-            |store| {
-                job.seal(
-                    store,
-                    now_ms().map_err(|message| StoreError::Store { message })?,
-                )
-                .map_err(StoreError::from)
-            },
-        )
-        .map_err(|error| error.to_string())
-    })
-    .await
-    .map_err(|error| format!("failed to join CAS job seal operation: {error}"))?
+    logged("asset_cas_job_seal", async move {
+        tauri::async_runtime::spawn_blocking(move || {
+            let operation_guard = app
+                .state::<PersistentStoreState>()
+                .admit_renderer_operation()
+                .map_err(|error| error.to_string())?;
+            let root = repository_root(&app)?;
+            let state = app.state::<DurableCasJobState>();
+            state
+                .uploads
+                .lock()
+                .map_err(|error| format!("CAS upload mutex poisoned: {error}"))?
+                .cancel_session(&session_id);
+            let mut jobs = state
+                .jobs
+                .lock()
+                .map_err(|error| format!("CAS job session mutex poisoned: {error}"))?;
+            let job = recover_job(&mut jobs, &root, &session_id)?;
+            persistent_store::commands::with_store_mut_admitted(
+                app.state::<PersistentStoreState>(),
+                &operation_guard,
+                |store| {
+                    job.seal(
+                        store,
+                        now_ms().map_err(|message| StoreError::Store { message })?,
+                    )
+                    .map_err(StoreError::from)
+                },
+            )
+            .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| format!("failed to join CAS job seal operation: {error}"))?
+    }.await)
 }
 
 #[tauri::command(async)]
@@ -484,26 +595,28 @@ pub(crate) async fn asset_cas_job_release(
     session_id: String,
     outcome: CasReleaseOutcome,
 ) -> Result<(), String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let _operation = app
-            .state::<PersistentStoreState>()
-            .admit_renderer_operation()
-            .map_err(|error| error.to_string())?;
-        let root = repository_root(&app)?;
-        let state = app.state::<DurableCasJobState>();
-        state
-            .uploads
-            .lock()
-            .map_err(|error| format!("CAS upload mutex poisoned: {error}"))?
-            .cancel_session(&session_id);
-        let mut jobs = state
-            .jobs
-            .lock()
-            .map_err(|error| format!("CAS job session mutex poisoned: {error}"))?;
-        release_job(&mut jobs, &root, &session_id, outcome)
-    })
-    .await
-    .map_err(|error| format!("failed to join CAS job release operation: {error}"))?
+    logged("asset_cas_job_release", async move {
+        tauri::async_runtime::spawn_blocking(move || {
+            let _operation = app
+                .state::<PersistentStoreState>()
+                .admit_renderer_operation()
+                .map_err(|error| error.to_string())?;
+            let root = repository_root(&app)?;
+            let state = app.state::<DurableCasJobState>();
+            state
+                .uploads
+                .lock()
+                .map_err(|error| format!("CAS upload mutex poisoned: {error}"))?
+                .cancel_session(&session_id);
+            let mut jobs = state
+                .jobs
+                .lock()
+                .map_err(|error| format!("CAS job session mutex poisoned: {error}"))?;
+            release_job(&mut jobs, &root, &session_id, outcome)
+        })
+        .await
+        .map_err(|error| format!("failed to join CAS job release operation: {error}"))?
+    }.await)
 }
 
 fn release_job(
@@ -551,21 +664,23 @@ pub(crate) async fn asset_cas_read_object_range(
     start: u64,
     end_exclusive: u64,
 ) -> Result<Option<Vec<u8>>, String> {
-    if end_exclusive < start || end_exclusive - start > CAS_UPLOAD_CHUNK_BYTES as u64 {
-        return Err("CAS range read exceeds the IPC chunk limit".to_owned());
-    }
-    let root = repository_root(&app)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let _operation = app
-            .state::<PersistentStoreState>()
-            .admit_renderer_operation()
-            .map_err(|error| error.to_string())?;
-        PayloadCas::new(&root)
-            .and_then(|cas| cas.read_object_range(&content_hash, start, end_exclusive))
-            .map_err(|error| error.to_string())
-    })
-    .await
-    .map_err(|error| format!("failed to join CAS range operation: {error}"))?
+    logged("asset_cas_read_object_range", async move {
+        if end_exclusive < start || end_exclusive - start > CAS_UPLOAD_CHUNK_BYTES as u64 {
+            return Err("CAS range read exceeds the IPC chunk limit".to_owned());
+        }
+        let root = repository_root(&app)?;
+        tauri::async_runtime::spawn_blocking(move || {
+            let _operation = app
+                .state::<PersistentStoreState>()
+                .admit_renderer_operation()
+                .map_err(|error| error.to_string())?;
+            PayloadCas::new(&root)
+                .and_then(|cas| cas.read_object_range(&content_hash, start, end_exclusive))
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| format!("failed to join CAS range operation: {error}"))?
+    }.await)
 }
 
 #[tauri::command(async)]
@@ -573,18 +688,20 @@ pub(crate) async fn asset_cas_stat_object(
     app: AppHandle,
     content_hash: String,
 ) -> Result<Option<u64>, String> {
-    let root = repository_root(&app)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let _operation = app
-            .state::<PersistentStoreState>()
-            .admit_renderer_operation()
-            .map_err(|error| error.to_string())?;
-        PayloadCas::new(&root)
-            .and_then(|cas| cas.stat_object(&content_hash))
-            .map_err(|error| error.to_string())
-    })
-    .await
-    .map_err(|error| format!("failed to join CAS stat operation: {error}"))?
+    logged("asset_cas_stat_object", async move {
+        let root = repository_root(&app)?;
+        tauri::async_runtime::spawn_blocking(move || {
+            let _operation = app
+                .state::<PersistentStoreState>()
+                .admit_renderer_operation()
+                .map_err(|error| error.to_string())?;
+            PayloadCas::new(&root)
+                .and_then(|cas| cas.stat_object(&content_hash))
+                .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| format!("failed to join CAS stat operation: {error}"))?
+    }.await)
 }
 
 #[tauri::command(async)]
@@ -592,15 +709,17 @@ pub(crate) async fn asset_remote_stat_object(
     app: AppHandle,
     content_hash: String,
 ) -> Result<Option<u64>, String> {
-    let root = repository_root(&app)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        crate::server_sync::residency::Residency::open(&root)
-            .and_then(|store| store.object(&content_hash, None))
-            .map(|object| object.map(|object| object.size))
-            .map_err(|error| error.code)
-    })
-    .await
-    .map_err(|_| "remote-stat-unavailable".to_owned())?
+    logged("asset_remote_stat_object", async move {
+        let root = repository_root(&app)?;
+        tauri::async_runtime::spawn_blocking(move || {
+            crate::server_sync::residency::Residency::open(&root)
+                .and_then(|store| store.object(&content_hash, None))
+                .map(|object| object.map(|object| object.size))
+                .map_err(|error| error.code)
+        })
+        .await
+        .map_err(|_| "remote-stat-unavailable".to_owned())?
+    }.await)
 }
 
 #[tauri::command(async)]
@@ -608,16 +727,18 @@ pub(crate) async fn asset_remote_hydrate_object(
     app: AppHandle,
     content_hash: String,
 ) -> Result<Option<u64>, String> {
-    let root = repository_root(&app)?;
-    tauri::async_runtime::spawn_blocking(move || {
-        let _operation = app
-            .state::<PersistentStoreState>()
-            .admit_renderer_operation()
-            .map_err(|error| error.to_string())?;
-        hydrate_remote_object(&root, &content_hash)
-    })
-    .await
-    .map_err(|_| "remote-read-unavailable".to_owned())?
+    logged("asset_remote_hydrate_object", async move {
+        let root = repository_root(&app)?;
+        tauri::async_runtime::spawn_blocking(move || {
+            let _operation = app
+                .state::<PersistentStoreState>()
+                .admit_renderer_operation()
+                .map_err(|error| error.to_string())?;
+            hydrate_remote_object(&root, &content_hash)
+        })
+        .await
+        .map_err(|_| "remote-read-unavailable".to_owned())?
+    }.await)
 }
 
 fn hydrate_remote_object(root: &std::path::Path, content_hash: &str) -> Result<Option<u64>, String> {
@@ -752,48 +873,50 @@ pub(crate) async fn asset_cas_job_finalize_content(
     session_id: String,
     owner_manifest: Vec<u8>,
 ) -> Result<PreparedPayload, String> {
-    let native_jobs = NativeFileJobState::clone(&native_jobs);
-    tauri::async_runtime::spawn_blocking(move || {
-        let operation_guard = app
-            .state::<PersistentStoreState>()
-            .admit_renderer_operation()
-            .map_err(|error| error.to_string())?;
-        let root = repository_root(&app)?;
-        let cas = PayloadCas::new(&root).map_err(|error| error.to_string())?;
-        let state = app.state::<DurableCasJobState>();
-        let mut jobs = state
-            .jobs
-            .lock()
-            .map_err(|error| format!("CAS job session mutex poisoned: {error}"))?;
-        let content_assets = native_jobs
-            .content_asset_receipt(&session_id)
-            .map_err(|error| format!("{}: {}", error.code, error.message))?
-            .into_iter()
-            .map(|(object_hash, byte_size)| ContentDirectObject {
-                object_hash,
-                byte_size,
-            })
-            .collect::<Vec<_>>();
-        let job = recover_job(&mut jobs, &root, &session_id)?;
-        persistent_store::commands::with_store_mut_admitted(
-            app.state::<PersistentStoreState>(),
-            &operation_guard,
-            |store| {
-                finalize_content_job(
-                    job,
-                    &cas,
-                    store,
-                    &owner_manifest,
-                    &content_assets,
-                    now_ms().map_err(|message| StoreError::Store { message })?,
-                )
-                .map_err(StoreError::from)
-            },
-        )
-        .map_err(|error| error.to_string())
-    })
-    .await
-    .map_err(|error| format!("failed to join content CAS finalization: {error}"))?
+    logged("asset_cas_job_finalize_content", async move {
+        let native_jobs = NativeFileJobState::clone(&native_jobs);
+        tauri::async_runtime::spawn_blocking(move || {
+            let operation_guard = app
+                .state::<PersistentStoreState>()
+                .admit_renderer_operation()
+                .map_err(|error| error.to_string())?;
+            let root = repository_root(&app)?;
+            let cas = PayloadCas::new(&root).map_err(|error| error.to_string())?;
+            let state = app.state::<DurableCasJobState>();
+            let mut jobs = state
+                .jobs
+                .lock()
+                .map_err(|error| format!("CAS job session mutex poisoned: {error}"))?;
+            let content_assets = native_jobs
+                .content_asset_receipt(&session_id)
+                .map_err(|error| format!("{}: {}", error.code, error.message))?
+                .into_iter()
+                .map(|(object_hash, byte_size)| ContentDirectObject {
+                    object_hash,
+                    byte_size,
+                })
+                .collect::<Vec<_>>();
+            let job = recover_job(&mut jobs, &root, &session_id)?;
+            persistent_store::commands::with_store_mut_admitted(
+                app.state::<PersistentStoreState>(),
+                &operation_guard,
+                |store| {
+                    finalize_content_job(
+                        job,
+                        &cas,
+                        store,
+                        &owner_manifest,
+                        &content_assets,
+                        now_ms().map_err(|message| StoreError::Store { message })?,
+                    )
+                    .map_err(StoreError::from)
+                },
+            )
+            .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| format!("failed to join content CAS finalization: {error}"))?
+    }.await)
 }
 
 fn seal_prepared_content_job_by_id(
@@ -867,37 +990,39 @@ pub(crate) async fn asset_cas_job_seal_prepared_content(
     native_jobs: State<'_, NativeFileJobState>,
     session_id: String,
 ) -> Result<(), String> {
-    let native_jobs = NativeFileJobState::clone(&native_jobs);
-    tauri::async_runtime::spawn_blocking(move || {
-        let operation_guard = app
-            .state::<PersistentStoreState>()
-            .admit_renderer_operation()
-            .map_err(|error| error.to_string())?;
-        let root = repository_root(&app)?;
-        let state = app.state::<DurableCasJobState>();
-        let mut jobs = state
-            .jobs
-            .lock()
-            .map_err(|error| format!("CAS job session mutex poisoned: {error}"))?;
-        persistent_store::commands::with_store_mut_admitted(
-            app.state::<PersistentStoreState>(),
-            &operation_guard,
-            |store| {
-                seal_prepared_content_job_by_id(
-                    &native_jobs,
-                    &root,
-                    &mut jobs,
-                    store,
-                    &session_id,
-                    now_ms().map_err(|message| StoreError::Store { message })?,
-                )
-                .map_err(|message| StoreError::Store { message })
-            },
-        )
-        .map_err(|error| error.to_string())
-    })
-    .await
-    .map_err(|error| format!("failed to join prepared content CAS seal: {error}"))?
+    logged("asset_cas_job_seal_prepared_content", async move {
+        let native_jobs = NativeFileJobState::clone(&native_jobs);
+        tauri::async_runtime::spawn_blocking(move || {
+            let operation_guard = app
+                .state::<PersistentStoreState>()
+                .admit_renderer_operation()
+                .map_err(|error| error.to_string())?;
+            let root = repository_root(&app)?;
+            let state = app.state::<DurableCasJobState>();
+            let mut jobs = state
+                .jobs
+                .lock()
+                .map_err(|error| format!("CAS job session mutex poisoned: {error}"))?;
+            persistent_store::commands::with_store_mut_admitted(
+                app.state::<PersistentStoreState>(),
+                &operation_guard,
+                |store| {
+                    seal_prepared_content_job_by_id(
+                        &native_jobs,
+                        &root,
+                        &mut jobs,
+                        store,
+                        &session_id,
+                        now_ms().map_err(|message| StoreError::Store { message })?,
+                    )
+                    .map_err(|message| StoreError::Store { message })
+                },
+            )
+            .map_err(|error| error.to_string())
+        })
+        .await
+        .map_err(|error| format!("failed to join prepared content CAS seal: {error}"))?
+    }.await)
 }
 
 #[cfg(test)]
@@ -948,6 +1073,47 @@ mod tests {
             assert!(roots.object_hashes.is_empty());
             assert!(cas.stat_object(&object.content_hash).unwrap().is_some());
         }
+    }
+
+    #[test]
+    fn a_new_page_releases_the_write_sessions_the_old_page_and_an_earlier_run_left_behind() {
+        let directory = TempDir::new().unwrap();
+        let root = directory.path();
+        let mut store = PersistentStore::open(root).unwrap();
+        let cas = PayloadCas::new(root).unwrap();
+        let begin = |id: &str, kind| DurableCasJob::begin(root, id, kind, 1).unwrap();
+        let mut earlier = begin("earlier-write", CasJobKind::DirectAssetOrInlayWrite);
+        earlier.prepare_bytes(&cas, b"synthetic earlier", CasObjectRole::DirectObject).unwrap();
+        drop(earlier);
+        drop(begin("earlier-restore", CasJobKind::LocalBackupRestore));
+        let mut unsealed = begin("page-unsealed", CasJobKind::DirectAssetOrInlayWrite);
+        unsealed.prepare_bytes(&cas, b"synthetic unsealed", CasObjectRole::DirectObject).unwrap();
+        let mut sealed = begin("page-sealed", CasJobKind::DirectAssetOrInlayWrite);
+        let sealed_object =
+            sealed.prepare_bytes(&cas, b"synthetic sealed", CasObjectRole::DirectObject).unwrap();
+        sealed.seal(&mut store, 1).unwrap();
+        let state = DurableCasJobState::default();
+        state.jobs.lock().unwrap().extend([
+            ("page-unsealed".to_owned(), unsealed),
+            ("page-sealed".to_owned(), sealed),
+            ("page-import".to_owned(), begin("page-import", CasJobKind::CardOrModuleContentImport)),
+        ]);
+
+        state.take_abandoned(root).unwrap().release().unwrap();
+        let roots = collect_durable_cas_job_roots(root);
+        assert_eq!(
+            roots.blockers.iter().map(String::as_str).collect::<Vec<_>>(),
+            ["job-pin-unsealed:earlier-restore", "job-pin-unsealed:page-import"],
+        );
+        assert!(!roots.object_hashes.contains(&sealed_object.content_hash));
+        assert_eq!(state.jobs.lock().unwrap().keys().collect::<Vec<_>>(), ["page-import"]);
+
+        // After the first page, a write journal outside the map belongs to a native job.
+        drop(begin("native-write", CasJobKind::DirectAssetOrInlayWrite));
+        state.take_abandoned(root).unwrap().release().unwrap();
+        assert!(collect_durable_cas_job_roots(root)
+            .blockers
+            .contains("job-pin-unsealed:native-write"));
     }
 
     fn owner_manifest() -> Vec<u8> {

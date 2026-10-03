@@ -14,8 +14,8 @@ pub(crate) struct MyboxBudget {
     path: Arc<PathBuf>,
     connection: Arc<Mutex<Option<Connection>>>,
 }
-fn storage_error(_: impl std::fmt::Display) -> ProviderError {
-    ProviderError::new(ErrorKind::Transient)
+fn storage_error(error: impl std::fmt::Display) -> ProviderError {
+    ProviderError::new(ErrorKind::Transient).caused(&error)
 }
 fn corrupt() -> ProviderError { ProviderError::new(ErrorKind::Corrupt) }
 
@@ -149,6 +149,7 @@ impl MyboxBudget {
                         retry_at_ms: Some(until),
                         oauth_error: None,
                         oauth_error_description: None,
+                        cause: Default::default(),
                     };
                     if denied.as_ref().is_none_or(|previous| previous.retry_at_ms < error.retry_at_ms) {
                         denied = Some(error);

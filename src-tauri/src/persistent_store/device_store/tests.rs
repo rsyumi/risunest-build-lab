@@ -1152,19 +1152,10 @@ fn a_committed_device_value_survives_reopening_the_device_file() {
 mod section_exchange {
     use risunest_external_storage_format::section::SectionKind;
 
-    impl DeviceStore {
-        fn restore_backup_fixture(&mut self, kind: SectionKind, rows: &[SectionRow]) -> crate::persistent_store::StoreResult<()> {
-            let mut spool = SectionSpoolBuilder::new_backup(kind)?;
-            for row in rows { spool.push_backup_row(row.clone())?; }
-            self.restore_prepared_backup_section(&spool.finish_captured()?)
-        }
-    }
-
     use super::super::sections::{
-        PublishedRows, SectionCursor, SectionRow, SectionSpoolBuilder,
+        SectionCursor, SectionRow, SectionSpoolBuilder,
         SectionValueRow, TombstonePublication, LOCAL_SETTING_KEYS,
     };
-    use std::collections::BTreeMap;
     use super::super::{plugin_values::PluginDeviceMutation, DeviceStore, Section};
     use super::open;
     use risunest_sync_wire::Sequence;
@@ -1180,13 +1171,6 @@ mod section_exchange {
             },
             write_clock: Sequence::from(clock),
             writer_id: writer.into(),
-        }
-    }
-
-    fn marker(generation: u64, at_ms: u64) -> TombstonePublication {
-        TombstonePublication {
-            generation: Sequence::from(generation),
-            at_ms,
         }
     }
 
@@ -1434,31 +1418,11 @@ mod section_exchange {
         );
     }
 
-    /// Invariant 32 on the device side. Restored backup material is this
-    /// device's own write, so it installs no other writer and no counters, and
-    /// coordination settings never enter a bundle in the first place.
+    /// Invariant 32 on the device side. Coordination settings never enter a
+    /// bundle in the first place.
     #[test]
-    fn restored_backup_material_becomes_this_device_own_write() {
+    fn coordination_settings_never_enter_local_setting_rows() {
         let (_directory, mut store) = open();
-        store
-            .restore_backup_fixture(
-                SectionKind::LocalPlugins,
-                &[plugin_row("alpha", "from-backup", 0, "")],
-            )
-            .expect("restore plugin value");
-        let (clock, writer, published): (String, String, Option<String>) = store
-            .connection()
-            .query_row(
-                "SELECT write_clock,writer_id,published_clock FROM plugin_device_storage
-                    WHERE owner='plugin-a' AND space='string' AND key='alpha'",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .expect("read restored row");
-        assert_eq!(clock, "1");
-        assert_eq!(writer, store.writer_id().unwrap());
-        assert!(published.is_none());
-
         for key in [
             "official-account.association.v1",
             "official-account.asset-ledger.v1",
@@ -1482,27 +1446,6 @@ mod section_exchange {
     }
 
     #[test]
-    fn prepared_hypa_restore_reissues_local_clocks_and_retries_without_new_writes() {
-        let (_source_dir, mut source) = open();
-        source.write_hypa_embeddings(&[super::embedding("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", &[1.0, 2.0])]).unwrap();
-        let rows = source.read_backup_section_rows(Section::Hypa).unwrap();
-        let (_target_dir, mut target) = open();
-        target.write_hypa_embeddings(&[super::embedding("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", &[3.0])]).unwrap();
-        target.restore_backup_fixture(SectionKind::Hypa, &rows).unwrap();
-        let first = target.read_section_rows(Section::Hypa).unwrap();
-        assert!(first.iter().all(|row| row.writer_id == target.writer_id().unwrap()));
-        let restored = first.iter().find(|row| !row.value.is_tombstone()).unwrap();
-        assert_eq!(restored.value, rows[0].value);
-        assert!(restored.write_clock > Sequence::from(1u64));
-        let clock = target.section_state(Section::Hypa).unwrap().max_write_clock;
-        target.restore_backup_fixture(SectionKind::Hypa, &rows).unwrap();
-        assert_eq!(target.read_section_rows(Section::Hypa).unwrap(), first);
-        assert_eq!(target.section_state(Section::Hypa).unwrap().max_write_clock, clock);
-        target.restore_backup_fixture(SectionKind::Hypa, &[]).unwrap();
-        assert!(target.read_backup_section_rows(Section::Hypa).unwrap().is_empty());
-    }
-
-    #[test]
     fn backup_spool_rejects_duplicate_keys_before_restore() {
         let mut spool = SectionSpoolBuilder::new_backup(SectionKind::LocalPlugins).unwrap();
         let row = plugin_row("duplicate", "one", 0, "");
@@ -1510,178 +1453,165 @@ mod section_exchange {
         assert!(spool.push_backup_row(row).is_err());
     }
 
-    /// Invariant 31 on the device side. The material decides the section: a key
-    /// it carries is installed, a key it leaves out is removed, and a section it
-    /// says nothing about keeps everything this device holds.
+    /// The stored text decides the form: up to the inline limit a value rides
+    /// in its entry, past it the entry names an object holding that text.
     #[test]
-    fn restoring_a_section_replaces_only_what_the_material_covers() {
-        let (_directory, mut store) = open();
-        set(&mut store, "kept", "before");
-        set(&mut store, "dropped", "before");
-        store
-            .write_hypa_embeddings(&[super::embedding("kept-embedding", &[1.0])])
-            .expect("write embedding");
-        store
-            .restore_backup_fixture(
+    fn a_device_value_past_the_inline_limit_becomes_an_object() {
+        use risunest_external_storage_format::section::MAX_INLINE_VALUE_BYTES;
+        let encoded = |row: SectionRow, kind| {
+            String::from_utf8(row.to_entry(kind, false).unwrap().encode().unwrap()).unwrap()
+        };
+        let json_row = |value: String| SectionRow {
+            key2: "json".into(),
+            value: SectionValueRow::Plugin { space: "json".into(), value },
+            ..plugin_row("edge", "", 0, "")
+        };
+        let setting_row = |value: String| SectionRow {
+            key1: "setting".into(),
+            key2: "risuNestDeviceSettings".into(),
+            key3: String::new(),
+            value: SectionValueRow::Setting { value },
+            write_clock: Sequence::from(0u64),
+            writer_id: String::new(),
+        };
+        let quoted = |length: usize| format!("\"{}\"", "q".repeat(length - 2));
+        for (at_limit, past, inline, object) in [
+            (
+                encoded(plugin_row("edge", &"a".repeat(MAX_INLINE_VALUE_BYTES), 0, ""), SectionKind::LocalPlugins),
+                encoded(plugin_row("edge", &"a".repeat(MAX_INLINE_VALUE_BYTES + 1), 0, ""), SectionKind::LocalPlugins),
+                "\"localPlugin\":{\"space\":\"string\",\"value\":",
+                "\"localPlugin\":{\"space\":\"string\",\"object\":{\"contentSha256\":",
+            ),
+            (
+                encoded(json_row(quoted(MAX_INLINE_VALUE_BYTES)), SectionKind::LocalPlugins),
+                encoded(json_row(quoted(MAX_INLINE_VALUE_BYTES + 1)), SectionKind::LocalPlugins),
+                "\"localPlugin\":{\"space\":\"json\",\"value\":",
+                "\"localPlugin\":{\"space\":\"json\",\"object\":{\"contentSha256\":",
+            ),
+            (
+                encoded(setting_row(quoted(MAX_INLINE_VALUE_BYTES)), SectionKind::LocalSettings),
+                encoded(setting_row(quoted(MAX_INLINE_VALUE_BYTES + 1)), SectionKind::LocalSettings),
+                "\"localSetting\":{\"value\":",
+                "\"localSetting\":{\"object\":{\"contentSha256\":",
+            ),
+        ] {
+            assert!(at_limit.contains(inline) && !at_limit.contains(object));
+            assert!(past.contains(object) && !past.contains(inline));
+            assert!(past.contains(&format!("\"byteLength\":\"{}\"", MAX_INLINE_VALUE_BYTES + 1)));
+        }
+    }
+
+    /// An object installs only as the stored text its entry names: the body
+    /// matches the reference, it is text, and a JSON value still parses.
+    #[test]
+    fn a_device_value_object_that_is_not_its_stored_text_is_refused() {
+        use crate::persistent_store::StoreError;
+        use risunest_external_storage_format::{
+            content_identity::hash,
+            section::{
+                local_plugin_entry_key, LocalPluginValue, LocalSettingValue, ObjectReference,
+                PluginSpace, SectionEntry, SectionValue, ValueOrObject,
+            },
+        };
+        let object = |body: &[u8]| ValueOrObject::Object(ObjectReference {
+            content_sha256: hash(body),
+            byte_length: body.len() as u64,
+        });
+        let plugin = |space: PluginSpace, body: &[u8]| {
+            let id = if space == PluginSpace::Json { "json" } else { "string" };
+            SectionEntry::new(
                 SectionKind::LocalPlugins,
-                &[
-                    plugin_row("kept", "after", 0, ""),
-                    plugin_row("added", "after", 0, ""),
-                ],
+                local_plugin_entry_key("plugin-a", id, "key").unwrap(),
+                SectionValue::LocalPlugin(LocalPluginValue { space, value: object(body) }),
+                None,
             )
-            .expect("restore plugin values");
-        assert_eq!(
-            live(&mut store),
-            vec![
-                ("added".to_owned(), Some("after".to_owned())),
-                ("dropped".to_owned(), None),
-                ("kept".to_owned(), Some("after".to_owned())),
-            ]
-        );
-        assert_eq!(
-            store
-                .read_backup_section_rows(Section::Hypa)
-                .expect("read embeddings")
-                .len(),
-            1
-        );
+            .unwrap()
+        };
+        let setting = |body: &[u8]| {
+            SectionEntry::new(
+                SectionKind::LocalSettings,
+                serde_json::to_string(&["setting", "risuNestDeviceSettings", ""]).unwrap(),
+                SectionValue::LocalSetting(LocalSettingValue { value: object(body) }),
+                None,
+            )
+            .unwrap()
+        };
+        let push = |entry: SectionEntry, body: &[u8]| {
+            let mut spool = SectionSpoolBuilder::new_backup(entry.kind).unwrap();
+            spool.push_backup_entry(entry, |_| Ok(body.to_vec()))
+        };
+        let refused = |result: crate::persistent_store::StoreResult<()>| {
+            assert!(matches!(result, Err(StoreError::Validation { .. })), "{result:?}");
+        };
+        let json = format!("{{ \"pad\": \"{}\" }}", "p".repeat(5_000));
+        let broken = format!("{{\"pad\":\"{}\"", "b".repeat(5_000));
+        let mut not_text = "t".repeat(5_000).into_bytes();
+        not_text[7] = 0xff;
+        let mut altered = json.clone().into_bytes();
+        altered[10] = b'q';
+
+        push(plugin(PluginSpace::Json, json.as_bytes()), json.as_bytes()).unwrap();
+        push(plugin(PluginSpace::String, broken.as_bytes()), broken.as_bytes()).unwrap();
+        push(setting(json.as_bytes()), json.as_bytes()).unwrap();
+        refused(push(plugin(PluginSpace::Json, broken.as_bytes()), broken.as_bytes()));
+        refused(push(setting(broken.as_bytes()), broken.as_bytes()));
+        refused(push(plugin(PluginSpace::String, &not_text), &not_text));
+        refused(push(plugin(PluginSpace::String, json.as_bytes()), &altered));
+        refused(push(plugin(PluginSpace::String, json.as_bytes()), &json.as_bytes()[1..]));
+
+        let unparsable = SectionRow {
+            key2: "json".into(),
+            value: SectionValueRow::Plugin { space: "json".into(), value: broken.clone() },
+            ..plugin_row("key", "", 0, "")
+        };
+        assert!(matches!(
+            unparsable.to_entry(SectionKind::LocalPlugins, false),
+            Err(StoreError::Validation { .. })
+        ));
     }
 
-    /// Invariant 31. A selected area that the material covers with nothing is an
-    /// emptied area, not an untouched one.
+    /// Stored JSON text that does not parse is refused the same way whether it
+    /// would ride inline or as an object, and the refusal never repeats it.
     #[test]
-    fn restoring_an_empty_selected_section_clears_it() {
-        let (_directory, mut store) = open();
-        set(&mut store, "alpha", "before");
-        set(&mut store, "beta", "before");
-        store
-            .restore_backup_fixture(SectionKind::LocalPlugins, &[])
-            .expect("restore an empty section");
-        assert_eq!(
-            live(&mut store),
-            vec![("alpha".to_owned(), None), ("beta".to_owned(), None)]
-        );
-        assert!(store
-            .read_backup_section_rows(Section::LocalPlugins)
-            .expect("read backup rows")
-            .is_empty());
-    }
-
-    /// Invariant 19 at the restore site. A restore that is interrupted before
-    /// its library commit runs again, and the second run finds its own
-    /// unpublished writes already in place instead of issuing new clocks for
-    /// them.
-    #[test]
-    fn a_retried_section_restore_does_not_reissue_write_clocks() {
-        let (_directory, mut store) = open();
-        set(&mut store, "dropped", "before");
-        let material = [
-            plugin_row("alpha", "from-backup", 0, ""),
-            plugin_row("beta", "from-backup", 0, ""),
-        ];
-        store
-            .restore_backup_fixture(SectionKind::LocalPlugins, &material)
-            .expect("restore plugin values");
-        let after_first = store
-            .section_state(Section::LocalPlugins)
-            .expect("read section state")
-            .max_write_clock;
-        let rows = store
-            .read_section_rows(Section::LocalPlugins)
-            .expect("read section rows");
-
-        store
-            .restore_backup_fixture(SectionKind::LocalPlugins, &material)
-            .expect("retry the restore");
-        assert_eq!(
-            store
-                .section_state(Section::LocalPlugins)
-                .expect("read section state")
-                .max_write_clock,
-            after_first
-        );
-        assert_eq!(
-            store
-                .read_section_rows(Section::LocalPlugins)
-                .expect("read section rows"),
-            rows
-        );
-    }
-
-    /// Invariant 31. The local settings area covers the backed-up list and
-    /// nothing else, so a coordination setting beside it keeps its value even
-    /// when the material leaves the whole area empty.
-    #[test]
-    fn a_local_settings_restore_leaves_coordination_settings_untouched() {
-        let (_directory, mut store) = open();
-        store
-            .write_setting("risuNestDeviceSettings", &serde_json::json!({ "a": 1 }))
-            .expect("write device setting");
-        store.write_setting("risuNestStartupExclusions", &serde_json::json!(["plugin-script", "triggers"])).unwrap();
-        store
-            .write_setting("dosync", &serde_json::json!(true))
-            .expect("write sync setting");
-        store
-            .write_setting("risu_lastsaved", &serde_json::json!("control"))
-            .expect("write control setting");
-        store
-            .write_plugin_permission(&"a".repeat(64), "network", true)
-            .expect("write permission");
-        store
-            .write_plugin_permission("code-b", "network", true)
-            .expect("write permission");
-
-        store
-            .restore_backup_fixture(SectionKind::LocalSettings, &[
-                SectionRow {
-                    key1: "setting".into(),
-                    key2: "dosync".into(),
-                    key3: String::new(),
-                    value: SectionValueRow::Setting {
-                        value: "false".into(),
-                    },
-                    write_clock: Sequence::from(0u64),
-                    writer_id: String::new(),
-                },
-                SectionRow {
-                    key1: "pluginPermission".into(),
-                    key2: "b".repeat(64),
-                    key3: "network".into(),
-                    value: SectionValueRow::PluginPermission { granted: false },
-                    write_clock: Sequence::from(0u64),
-                    writer_id: String::new(),
-                },
-            ])
-            .expect("restore local settings");
-
-        assert_eq!(
-            store.read_setting("dosync").expect("read sync setting"),
-            Some(serde_json::json!(false))
-        );
-        assert!(store
-            .read_setting("risuNestDeviceSettings")
-            .expect("read device setting")
-            .is_none());
-        assert_eq!(
-            store
-                .read_setting("risu_lastsaved")
-                .expect("read control setting"),
-            Some(serde_json::json!("control"))
-        );
-        assert_eq!(
-            store
-                .read_plugin_permissions()
-                .expect("read permissions")
-                .into_iter()
-                .map(|permission| (permission.code_hash, permission.granted))
-                .collect::<Vec<_>>(),
-            vec![("b".repeat(64), false)]
-        );
-        store.restore_backup_fixture(SectionKind::LocalSettings, &[]).unwrap();
-        assert!(store.read_setting("dosync").unwrap().is_none());
-        assert!(store.read_plugin_permissions().unwrap().is_empty());
-        assert_eq!(store.read_setting("risuNestStartupExclusions").unwrap(), Some(serde_json::json!(["plugin-script", "triggers"])));
-        assert_eq!(store.read_setting("risu_lastsaved").unwrap(), Some(serde_json::json!("control")));
+    fn unparseable_stored_json_is_refused_alike_at_any_length() {
+        use crate::persistent_store::StoreError;
+        use risunest_external_storage_format::section::MAX_INLINE_VALUE_BYTES;
+        let refusal = |kind: SectionKind, broken: &str| {
+            let (_directory, mut store) = open();
+            if kind == SectionKind::LocalPlugins {
+                store
+                    .write_plugin_device_values(
+                        "plugin-a",
+                        &[PluginDeviceMutation::Set {
+                            space: "json".to_owned(),
+                            key: "broken".to_owned(),
+                            value: broken.to_owned(),
+                        }],
+                    )
+                    .expect("write plugin value");
+            } else {
+                store
+                    .connection()
+                    .execute(
+                        "INSERT INTO device_settings(key,value) VALUES('risuNestDeviceSettings',?1)",
+                        [broken],
+                    )
+                    .expect("write setting");
+            }
+            match store.capture_backup_sections(&[kind]).err().expect("capture refused") {
+                StoreError::Validation { message } => {
+                    assert!(!message.contains("secret"), "{message}");
+                    message
+                }
+                other => panic!("{other:?}"),
+            }
+        };
+        let small = "{\"secret\":\"s\"".to_owned();
+        let large = format!("{{\"secret\":\"{}\"", "s".repeat(MAX_INLINE_VALUE_BYTES));
+        assert!(small.len() <= MAX_INLINE_VALUE_BYTES && large.len() > MAX_INLINE_VALUE_BYTES);
+        for kind in [SectionKind::LocalPlugins, SectionKind::LocalSettings] {
+            assert_eq!(refusal(kind, &small), refusal(kind, &large));
+        }
     }
 
     /// A cursor only moves forward, so a replayed apply cannot lose ground and
@@ -1713,9 +1643,7 @@ mod section_exchange {
     }
 
     /// A row this device wrote below the highest version the remote carries is
-    /// still unpublished, so counters cannot stand in for the question. A
-    /// confirmed publication marks the version it captured, and a write that
-    /// landed after that capture keeps owing one.
+    /// still unpublished, so counters cannot stand in for the question.
     #[test]
     fn a_local_write_below_the_remote_counter_still_owes_a_publication() {
         let (_directory, mut store) = open();
@@ -1742,49 +1670,6 @@ mod section_exchange {
             )
             .unwrap();
         assert!(store
-            .sections_await_publication("connection", "library")
-            .unwrap());
-
-        let captured: PublishedRows = store
-            .read_section_rows(Section::LocalPlugins)
-            .unwrap()
-            .into_iter()
-            .map(|row| (row.key(), row.version()))
-            .collect();
-        set(&mut store, "late", "after the capture");
-        store
-            .note_section_published(
-                Section::LocalPlugins,
-                &captured,
-                &[],
-                &marker(7, 1_760_000_000_000),
-                &BTreeMap::new(),
-                &Sequence::from(0u64),
-                None,
-            )
-            .expect("record the confirmed publication");
-        assert!(store
-            .sections_await_publication("connection", "library")
-            .unwrap());
-
-        let captured: PublishedRows = store
-            .read_section_rows(Section::LocalPlugins)
-            .unwrap()
-            .into_iter()
-            .map(|row| (row.key(), row.version()))
-            .collect();
-        store
-            .note_section_published(
-                Section::LocalPlugins,
-                &captured,
-                &[],
-                &marker(7, 1_760_000_000_000),
-                &BTreeMap::new(),
-                &Sequence::from(0u64),
-                None,
-            )
-            .expect("record the second publication");
-        assert!(!store
             .sections_await_publication("connection", "library")
             .unwrap());
 

@@ -23,6 +23,7 @@ pub(crate) fn error(kind: ErrorKind, status: u16) -> ProviderError {
         retry_at_ms: None,
         oauth_error: None,
         oauth_error_description: None,
+        cause: Default::default(),
     }
 }
 fn io_error(cancel: &Cancellation) -> ProviderError {
@@ -167,6 +168,7 @@ pub(crate) fn classify_status(
         },
         oauth_error: None,
         oauth_error_description: None,
+        cause: Default::default(),
     }
 }
 

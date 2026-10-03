@@ -350,7 +350,6 @@ mod tests {
                 session_id: None,
                 reason: Some("manual".into()),
             },
-            false,
             1_000,
             identity,
         )

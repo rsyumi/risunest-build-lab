@@ -144,8 +144,8 @@ fn record_test_read(downloads: &Path, pack: bool, byte_length: u64) {
     }
 }
 
-fn corrupt(_: impl std::fmt::Display) -> ProviderError {
-    ProviderError::new(ErrorKind::Corrupt)
+fn corrupt(error: impl std::fmt::Display) -> ProviderError {
+    ProviderError::new(ErrorKind::Corrupt).caused(&error)
 }
 fn transient(error: impl std::fmt::Display + 'static) -> ProviderError {
     super::packaging::transient(error)

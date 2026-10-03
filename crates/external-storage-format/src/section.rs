@@ -112,6 +112,16 @@ pub struct ObjectReference {
     pub byte_length: u64,
 }
 
+impl ObjectReference {
+    fn validate(&self) -> Result<()> {
+        if self.byte_length == 0 || self.byte_length > MAX_SECTION_OBJECT_BYTES as u64 {
+            Err(FormatError("invalid-section-value"))
+        } else {
+            Ok(())
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum InlineOrObject {
@@ -147,13 +157,32 @@ impl InlineOrObject {
     fn validate(&self) -> Result<()> {
         match self {
             Self::Inline(_) => self.decode_inline().map(|_| ()),
-            Self::Object(reference) => {
-                if reference.byte_length == 0 || reference.byte_length > MAX_SECTION_OBJECT_BYTES as u64 {
-                    Err(FormatError("invalid-section-value"))
-                } else {
-                    Ok(())
-                }
+            Self::Object(reference) => reference.validate(),
+        }
+    }
+}
+
+/// A device value rides inline in its own JSON shape while its stored text is
+/// small. Past the inline limit the entry names an object whose body is that
+/// stored text, byte for byte.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ValueOrObject {
+    #[serde(rename = "value")]
+    Inline(serde_json::Value),
+    #[serde(rename = "object")]
+    Object(ObjectReference),
+}
+
+impl ValueOrObject {
+    fn validate(&self) -> Result<()> {
+        match self {
+            Self::Inline(_) => Ok(()),
+            // Text up to the inline limit always rides inline, so a smaller
+            // object is a shape no device writes.
+            Self::Object(reference) if reference.byte_length <= MAX_INLINE_VALUE_BYTES as u64 => {
+                Err(FormatError("invalid-section-value"))
             }
+            Self::Object(reference) => reference.validate(),
         }
     }
 }
@@ -176,13 +205,15 @@ pub struct HypaValue {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LocalPluginValue {
     pub space: PluginSpace,
-    pub value: serde_json::Value,
+    #[serde(flatten)]
+    pub value: ValueOrObject,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LocalSettingValue {
-    pub value: serde_json::Value,
+    #[serde(flatten)]
+    pub value: ValueOrObject,
 }
 
 /// A removal carries the commit it first reached a remote in and when that
@@ -218,6 +249,17 @@ impl SectionValue {
         Self::Tombstone {
             first_published_generation,
             first_published_at_ms,
+        }
+    }
+    /// The object this value names instead of carrying its bytes inline.
+    pub fn object_reference(&self) -> Option<&ObjectReference> {
+        match self {
+            Self::Hypa(HypaValue { vector: InlineOrObject::Object(reference), .. })
+            | Self::LocalPlugin(LocalPluginValue { value: ValueOrObject::Object(reference), .. })
+            | Self::LocalSetting(LocalSettingValue { value: ValueOrObject::Object(reference) }) => {
+                Some(reference)
+            }
+            _ => None,
         }
     }
 }
@@ -313,7 +355,10 @@ impl SectionEntry {
                 if space != declared {
                     return Err(FormatError("section-plugin-space-mismatch"));
                 }
-                if matches!(value.space, PluginSpace::String) && !value.value.is_string() {
+                value.value.validate()?;
+                if matches!(value.space, PluginSpace::String)
+                    && matches!(&value.value, ValueOrObject::Inline(inline) if !inline.is_string())
+                {
                     return Err(FormatError("invalid-section-value"));
                 }
             }
@@ -331,7 +376,7 @@ impl SectionEntry {
                     return Err(FormatError("invalid-section-value"));
                 }
             }
-            SectionValue::LocalSetting(_) => {}
+            SectionValue::LocalSetting(value) => value.value.validate()?,
         }
         if self
             .version
@@ -425,7 +470,7 @@ mod tests {
                 local_plugin_entry_key("provider-manager", "json", "settings").unwrap(),
                 SectionValue::LocalPlugin(LocalPluginValue {
                     space: PluginSpace::Json,
-                    value: serde_json::json!({ "b": 1, "a": [2, 3] }),
+                    value: ValueOrObject::Inline(serde_json::json!({ "b": 1, "a": [2, 3] })),
                 }),
                 version(9),
             )
@@ -435,7 +480,7 @@ mod tests {
                 local_plugin_entry_key("yumi-translator", "string", "token").unwrap(),
                 SectionValue::LocalPlugin(LocalPluginValue {
                     space: PluginSpace::String,
-                    value: serde_json::Value::String("kept".into()),
+                    value: ValueOrObject::Inline(serde_json::Value::String("kept".into())),
                 }),
                 None,
             )
@@ -484,7 +529,7 @@ mod tests {
             local_plugin_entry_key("owner", "json", "key").unwrap(),
             SectionValue::LocalPlugin(LocalPluginValue {
                 space: PluginSpace::Json,
-                value: value.clone(),
+                value: ValueOrObject::Inline(value.clone()),
             }),
             None,
         )
@@ -493,9 +538,10 @@ mod tests {
         let SectionValue::LocalPlugin(restored) = decoded.value else {
             panic!("plugin value changed kind");
         };
-        assert_eq!(restored.value, value);
+        assert_eq!(restored.value, ValueOrObject::Inline(value.clone()));
+        let ValueOrObject::Inline(restored) = restored.value else { unreachable!() };
         assert_eq!(
-            serde_json::to_string(&restored.value).unwrap(),
+            serde_json::to_string(&restored).unwrap(),
             serde_json::to_string(&value).unwrap()
         );
         assert!(SectionEntry::new(
@@ -503,7 +549,7 @@ mod tests {
             local_plugin_entry_key("owner", "string", "key").unwrap(),
             SectionValue::LocalPlugin(LocalPluginValue {
                 space: PluginSpace::String,
-                value: serde_json::json!(5),
+                value: ValueOrObject::Inline(serde_json::json!(5)),
             }),
             None,
         )
@@ -557,7 +603,7 @@ mod tests {
             SectionKind::LocalPlugins,
             local_plugin_entry_key("owner", "json", "key").unwrap(),
             SectionValue::LocalPlugin(LocalPluginValue {
-                space: PluginSpace::String, value: serde_json::Value::String("value".into()),
+                space: PluginSpace::String, value: ValueOrObject::Inline(serde_json::Value::String("value".into())),
             }),
             version(1),
         ), Err(FormatError("section-plugin-space-mismatch")));
@@ -645,11 +691,138 @@ mod tests {
                 hypa_entry_key(&"f".repeat(64)).unwrap(),
                 SectionValue::LocalPlugin(LocalPluginValue {
                     space: PluginSpace::Json,
-                    value: serde_json::json!(1),
+                    value: ValueOrObject::Inline(serde_json::json!(1)),
                 }),
                 None,
             ),
             Err(FormatError("section-value-kind-mismatch"))
         );
+    }
+
+    fn device_entry(kind: SectionKind, space: Option<PluginSpace>, value: ValueOrObject) -> Result<SectionEntry> {
+        match space {
+            Some(space) => {
+                let id = if space == PluginSpace::Json { "json" } else { "string" };
+                SectionEntry::new(
+                    kind,
+                    local_plugin_entry_key("owner", id, "key").unwrap(),
+                    SectionValue::LocalPlugin(LocalPluginValue { space, value }),
+                    version(3),
+                )
+            }
+            None => SectionEntry::new(
+                kind,
+                "risuNestDeviceSettings".into(),
+                SectionValue::LocalSetting(LocalSettingValue { value }),
+                None,
+            ),
+        }
+    }
+
+    fn object(byte_length: u64) -> ValueOrObject {
+        ValueOrObject::Object(ObjectReference { content_sha256: [4; 32], byte_length })
+    }
+
+    /// Inline device values keep the exact bytes they always had. An object
+    /// takes the value's place under its own field and names the same kind of
+    /// reference a vector uses.
+    #[test]
+    fn a_device_value_is_inline_json_or_one_object_reference() {
+        let inline = device_entry(
+            SectionKind::LocalPlugins,
+            Some(PluginSpace::Json),
+            ValueOrObject::Inline(serde_json::Value::Null),
+        )
+        .unwrap();
+        let encoded = String::from_utf8(inline.encode().unwrap()).unwrap();
+        assert!(encoded.contains("\"value\":{\"localPlugin\":{\"space\":\"json\",\"value\":null}}"));
+        assert_eq!(SectionEntry::decode(encoded.as_bytes()).unwrap(), inline);
+        let setting = device_entry(
+            SectionKind::LocalSettings,
+            None,
+            ValueOrObject::Inline(serde_json::json!({ "b": 1, "a": 2 })),
+        )
+        .unwrap();
+        assert!(String::from_utf8(setting.encode().unwrap())
+            .unwrap()
+            .contains("\"value\":{\"localSetting\":{\"value\":{\"b\":1,\"a\":2}}}"));
+
+        let length = MAX_INLINE_VALUE_BYTES as u64 + 1;
+        for (kind, space, prefix) in [
+            (SectionKind::LocalPlugins, Some(PluginSpace::String), "{\"localPlugin\":{\"space\":\"string\",\"object\":"),
+            (SectionKind::LocalPlugins, Some(PluginSpace::Json), "{\"localPlugin\":{\"space\":\"json\",\"object\":"),
+            (SectionKind::LocalSettings, None, "{\"localSetting\":{\"object\":"),
+        ] {
+            let entry = device_entry(kind, space, object(length)).unwrap();
+            let encoded = String::from_utf8(entry.encode().unwrap()).unwrap();
+            assert!(encoded.contains(&format!(
+                "\"value\":{prefix}{{\"contentSha256\":[{}],\"byteLength\":\"{length}\"}}}}}}",
+                ["4"; 32].join(",")
+            )), "{encoded}");
+            assert_eq!(SectionEntry::decode(encoded.as_bytes()).unwrap(), entry);
+            assert_eq!(
+                entry.value.object_reference(),
+                Some(&ObjectReference { content_sha256: [4; 32], byte_length: length })
+            );
+            assert_eq!(device_entry(kind, space, object(length - 1)), Err(FormatError("invalid-section-value")));
+            assert_eq!(
+                device_entry(kind, space, object(MAX_SECTION_OBJECT_BYTES as u64 + 1)),
+                Err(FormatError("invalid-section-value"))
+            );
+            assert!(device_entry(kind, space, object(MAX_SECTION_OBJECT_BYTES as u64)).is_ok());
+        }
+        assert_eq!(inline.value.object_reference(), None);
+        assert_eq!(hypa_entry(&"a".repeat(64)).value.object_reference(), None);
+        assert_eq!(
+            SectionValue::tombstone(Sequence::from(1u64), 1).object_reference(),
+            None
+        );
+    }
+
+    #[test]
+    fn a_device_value_names_exactly_one_inline_value_or_object() {
+        let digest = [4u8; 32];
+        let reference = serde_json::json!({ "contentSha256": digest, "byteLength": "5000" });
+        let plugin = |value: serde_json::Value| serde_json::json!({
+            "codec": SECTION_CODEC,
+            "kind": "local-plugins",
+            "key": local_plugin_entry_key("owner", "json", "key").unwrap(),
+            "value": { "localPlugin": value },
+            "version": null,
+        });
+        let setting = |value: serde_json::Value| serde_json::json!({
+            "codec": SECTION_CODEC,
+            "kind": "local-settings",
+            "key": "risuNestDeviceSettings",
+            "value": { "localSetting": value },
+            "version": null,
+        });
+        for valid in [
+            plugin(serde_json::json!({ "space": "json", "value": null })),
+            plugin(serde_json::json!({ "space": "json", "object": reference.clone() })),
+            setting(serde_json::json!({ "object": reference.clone() })),
+        ] {
+            SectionEntry::decode(&serde_json::to_vec(&valid).unwrap()).unwrap();
+            serde_json::from_value::<SectionEntry>(valid).unwrap();
+        }
+        for invalid in [
+            plugin(serde_json::json!({ "space": "json", "value": 1, "object": reference.clone() })),
+            plugin(serde_json::json!({ "space": "json", "object": reference.clone(), "value": 1 })),
+            plugin(serde_json::json!({ "space": "json" })),
+            plugin(serde_json::json!({ "space": "json", "value": 1, "extra": 1 })),
+            setting(serde_json::json!({ "value": 1, "object": reference.clone() })),
+            setting(serde_json::json!({})),
+            setting(serde_json::json!({ "object": reference.clone(), "extra": 1 })),
+            plugin(serde_json::json!({ "space": "string", "value": 1 })),
+        ] {
+            assert!(SectionEntry::decode(&serde_json::to_vec(&invalid).unwrap()).is_err(), "{invalid}");
+            assert!(
+                serde_json::from_value::<SectionEntry>(invalid.clone())
+                    .map_err(|_| FormatError("invalid-section-entry"))
+                    .and_then(|entry| entry.validate())
+                    .is_err(),
+                "{invalid}"
+            );
+        }
     }
 }

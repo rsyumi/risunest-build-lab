@@ -26,11 +26,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
-fn corrupt(_: impl std::fmt::Display) -> ProviderError {
-    ProviderError::new(ErrorKind::Corrupt)
+fn corrupt(error: impl std::fmt::Display) -> ProviderError {
+    ProviderError::new(ErrorKind::Corrupt).caused(&error)
 }
-fn transient(_: impl std::fmt::Display) -> ProviderError {
-    ProviderError::new(ErrorKind::Transient)
+fn transient(error: impl std::fmt::Display) -> ProviderError {
+    ProviderError::new(ErrorKind::Transient).caused(&error)
 }
 
 const ROOT_FILE: &str = "checked-root.json";

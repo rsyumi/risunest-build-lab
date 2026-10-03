@@ -35,8 +35,6 @@ fn all_live_tables_have_an_explicit_preservation_owner() {
         "external_storage_captures",
         "external_storage_capture_refs",
         "external_storage_capture_files",
-        "external_storage_base_records",
-        "external_storage_base_record_state",
         "lww_binding_identity",
         "lww_binding_inspections",
         "lww_binding_source_units",
@@ -106,6 +104,8 @@ fn content_change_schema_retains_live_protections_without_write_only_tables() {
         "content_capture_reservations",
         "external_storage_content_cache",
         "external_storage_conflicts",
+        "external_storage_base_records",
+        "external_storage_base_record_state",
     ] {
         let exists: bool = db.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",

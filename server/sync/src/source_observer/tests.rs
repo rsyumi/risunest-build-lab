@@ -8,16 +8,22 @@ pub(crate) struct Reset {
 }
 impl Reset {
     pub(crate) fn new() -> Self {
-        let fixture = FIXTURE.lock().unwrap();
+        let fixture = FIXTURE.lock_unpoisoned();
         install();
-        assert!(registry().lock().unwrap().active.is_none());
+        assert!(registry().lock_unpoisoned().active.is_none());
         Self { _fixture: fixture }
     }
 }
 impl Drop for Reset {
     fn drop(&mut self) {
-        if let Some(context) = active() {
-            let scope = context.scope.lock().unwrap();
+        // The scope leaves the registry before any check, so a failed check
+        // cannot leak it into the next test.
+        let active = registry().lock_unpoisoned().active.take();
+        if std::thread::panicking() {
+            return;
+        }
+        if let Some(context) = active {
+            let scope = context.scope.lock_unpoisoned();
             assert_eq!(scope.workers, 0);
             assert_eq!(scope.requests, 0);
             assert!(scope
@@ -29,7 +35,6 @@ impl Drop for Reset {
                 .as_ref()
                 .is_none_or(|b| b.observation().waiters == 0));
         }
-        registry().lock().unwrap().active = None;
     }
 }
 fn role(hash: &str, purposes: &[&str]) -> Role {
@@ -1074,4 +1079,31 @@ fn actual_empty_read_buffer_does_not_trigger_source_first_body_read() {
     read_barrier::release(&intent).unwrap();
     assert_eq!(task.join().unwrap(), 1);
     assert!(snapshot(true).unwrap().complete);
+}
+
+#[test]
+fn a_failed_scope_check_leaves_the_next_test_a_clean_observer() {
+    let reset = Reset::new();
+    let root = tempfile::tempdir().unwrap();
+    begin(root.path(), "unsettled".into(), "error".into(), vec![]).unwrap();
+    let pending = worker();
+    let failed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(reset)));
+    assert!(failed.is_err());
+    drop(pending);
+    let _reset = Reset::new();
+    assert!(active().is_none());
+}
+
+#[test]
+fn a_panicking_observer_test_does_not_poison_the_next_one() {
+    let failed = std::thread::spawn(|| {
+        let _reset = Reset::new();
+        let root = tempfile::tempdir().unwrap();
+        begin(root.path(), "panicked".into(), "error".into(), vec![]).unwrap();
+        panic!("synthetic observer test failure");
+    })
+    .join();
+    assert!(failed.is_err());
+    let _reset = Reset::new();
+    assert!(active().is_none());
 }

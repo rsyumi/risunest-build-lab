@@ -134,7 +134,6 @@ export interface ExternalConnectionError {
         | 'reauthenticate'
         | 'unlock-key'
         | 'check-endpoint'
-        | 'resolve-conflict'
         | 'free-space'
         | 'wait'
         | 'none'
@@ -175,12 +174,10 @@ export interface ExternalExitCapture {
 
 export type ExternalJobKind =
     | 'backup'
-    | 'sync'
     | 'restore'
     | 'pin-history'
     | 'delete-history'
     | 'cleanup'
-    | 'resolve-conflict'
     | 'check-repository'
 
 /** The areas beside the library that a backup can carry. */
@@ -199,8 +196,6 @@ export interface StartExternalJobRequest {
     pointObservation?: string
     confirmOtherDevice?: boolean
     confirmLastRetained?: boolean
-    conflictId?: string
-    choice?: 'local' | 'remote'
     restoreAreas?: ExternalRestoreArea[]
     targetRevision?: DecimalString
     session?: 'foreground' | 'exitDrain'
@@ -217,10 +212,6 @@ export interface ExternalJobSummary {
         snapshotId: string
         targetRevision: DecimalString
         restoreAreas: ExternalRestoreArea[]
-    }
-    resolveRequest?: {
-        conflictId: string
-        choice: 'local' | 'remote'
     }
     pinRequest?: { snapshotId: string }
     deleteRequest?: {
@@ -256,7 +247,6 @@ export interface ExternalJobSummary {
     updatedAtMs: DecimalString
     result?: {
         snapshotId?: string
-        conflictId?: string
         publishedRevision?: DecimalString
         receivedRevision?: DecimalString
         receiveReady?: boolean

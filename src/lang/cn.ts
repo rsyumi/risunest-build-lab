@@ -1495,6 +1495,7 @@ export const languageChinese = {
         concurrentEditNotice: "同时在多台设备上修改同一项时，将保留最后一次修改。修改内容或消息可能会丢失，请勿同时使用多台设备。",
         replaceTitle: "是否替换此设备的数据？",
         replaceDescription: "为进行同步，将清除此设备的数据并替换为远程数据。如需备份，请手动备份。",
+        serverRestoredDescription: "服务器已从备份恢复。将清除此设备的数据并替换为服务器数据，备份之后在此设备上所做的修改将会丢失。如需备份，请手动备份。",
         replaceAcknowledge: "清除此设备的数据",
         replaceAction: "替换",
         cancelAction: "取消",

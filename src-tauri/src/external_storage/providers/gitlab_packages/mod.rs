@@ -716,6 +716,7 @@ impl GitlabPackages {
                     retry_at_ms: None,
                     oauth_error: None,
                     oauth_error_description: None,
+                    cause: Default::default(),
                 })
             }
             status => return Err(api::classify(status, &response.headers, self.now())),
@@ -865,6 +866,7 @@ impl Provider for GitlabPackages {
                         retry_at_ms: None,
                         oauth_error: None,
                         oauth_error_description: None,
+                        cause: Default::default(),
                     })
                 }
                 (200, OpenMode::Existing | OpenMode::ResumeCreate) => {
@@ -884,6 +886,7 @@ impl Provider for GitlabPackages {
                         retry_at_ms: None,
                         oauth_error: None,
                         oauth_error_description: None,
+                        cause: Default::default(),
                     })
                 }
                 (404, OpenMode::Create | OpenMode::ResumeCreate) => {
@@ -942,6 +945,7 @@ impl Provider for GitlabPackages {
                     retry_at_ms: None,
                     oauth_error: None,
                     oauth_error_description: None,
+                    cause: Default::default(),
                 });
             };
             let declared = common::content_length(&response.headers)?;
@@ -1083,6 +1087,7 @@ impl Provider for GitlabPackages {
                         retry_at_ms: None,
                         oauth_error: None,
                         oauth_error_description: None,
+                        cause: Default::default(),
                     }),
                     Verification::Absent => Err(api::classify(400, &response.headers, self.now())),
                 },

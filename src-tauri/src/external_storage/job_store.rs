@@ -126,7 +126,6 @@ pub(crate) struct DurableJob {
 impl DurableJob {
     pub fn new(
         request: StartJobRequest,
-        _device: bool,
         now: u64,
         admission_identity: CaptureIdentity,
     ) -> Self {
@@ -161,8 +160,8 @@ impl DurableJob {
         )
     }
 }
-fn failure(_: impl std::fmt::Display) -> ProviderError {
-    ProviderError::new(ErrorKind::Transient)
+fn failure(error: impl std::fmt::Display) -> ProviderError {
+    ProviderError::new(ErrorKind::Transient).caused(&error)
 }
 pub(crate) struct JobStore(Connection);
 const STATE_TERMINAL_LIMIT: i64 = 32;
@@ -635,7 +634,7 @@ mod tests {
         use std::time::Duration;
         tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap().block_on(async {
             let state = JobCommandState::default();
-            let job = DurableJob::new(request(), false, 1, identity());
+            let job = DurableJob::new(request(), 1, identity());
             let (cancel, claim) = state.claim(&job).unwrap();
             let completion = state.track_blocking(&job.id).unwrap();
             let admission = Arc::new(Admission::default());
@@ -686,7 +685,7 @@ mod tests {
     #[test]
     fn cleanup_waits_for_worker_tail_after_the_job_claim_is_released() {
         let state = JobCommandState::default();
-        let job = DurableJob::new(request(), false, 1, identity());
+        let job = DurableJob::new(request(), 1, identity());
         let (cancel, claim) = state.claim(&job).unwrap();
         let worker = state.track_worker();
         state.begin_cleanup().unwrap();
@@ -710,7 +709,7 @@ mod tests {
             "snapshotId":"snapshot", "targetRevision":"1"
         })).unwrap();
         let id = uuid::Uuid::new_v4().to_string();
-        let queued = DurableJob::new(input, false, 1, identity())
+        let queued = DurableJob::new(input, 1, identity())
             .with_restore_id(id.clone()).unwrap();
         assert_eq!(queued.summary["id"], id);
         assert!(jobs.insert_new(&queued).unwrap());
@@ -731,7 +730,7 @@ mod tests {
         assert!(!reopened.insert_new(&queued).unwrap());
         assert_eq!(reopened.read(&id).unwrap().summary, running.summary);
         assert!(queued.clone().with_restore_id("../job".into()).is_err());
-        assert!(DurableJob::new(request(), false, 1, identity()).with_restore_id(id).is_err());
+        assert!(DurableJob::new(request(), 1, identity()).with_restore_id(id).is_err());
     }
 
     #[test]
@@ -812,7 +811,7 @@ mod tests {
         let db = JobStore::open(root.path()).unwrap();
         let mut invalid = identity();
         invalid.library_epoch.clear();
-        let job = DurableJob::new(request(), false, 1, invalid);
+        let job = DurableJob::new(request(), 1, invalid);
         db.put(&job).unwrap();
         assert_eq!(db.read(&job.id).err().unwrap().kind, ErrorKind::Corrupt);
     }
@@ -823,7 +822,7 @@ mod tests {
         let db = JobStore::open(root.path()).unwrap();
         let mut terminal_ids = Vec::new();
         for index in 0..40 {
-            let mut completed = DurableJob::new(request(), false, index, identity());
+            let mut completed = DurableJob::new(request(), index, identity());
             completed.summary["state"] = json!("succeeded");
             completed.summary["phase"] = json!("complete");
             terminal_ids.push(completed.id.clone());
@@ -831,10 +830,10 @@ mod tests {
         }
         let mut first = request();
         first.connection_id = "pending-a".into();
-        let first = DurableJob::new(first, false, 41, identity());
+        let first = DurableJob::new(first, 41, identity());
         let mut second = request();
         second.connection_id = "pending-b".into();
-        let second = DurableJob::new(second, false, 42, identity());
+        let second = DurableJob::new(second, 42, identity());
         db.put(&first).unwrap();
         db.put(&second).unwrap();
 
@@ -854,12 +853,12 @@ mod tests {
     #[test]
     fn cancellation_keeps_the_worker_claim_until_its_owner_returns() {
         let state = JobCommandState::default();
-        let job = DurableJob::new(request(), false, 1, identity());
+        let job = DurableJob::new(request(), 1, identity());
         let (cancel, claim) = state.claim(&job).unwrap();
         let retained = claim.clone();
         cancel.cancel();
         assert!(state.claim(&job).is_err());
-        let other = DurableJob::new(request(), false, 2, identity());
+        let other = DurableJob::new(request(), 2, identity());
         assert!(state.claim(&other).is_err());
         drop(claim);
         assert!(state.claim(&other).is_err());
@@ -871,7 +870,7 @@ mod tests {
     #[test]
     fn cleanup_claim_excludes_restart_until_settlement_finishes() {
         let state = Arc::new(JobCommandState::default());
-        let job = DurableJob::new(request(), false, 1, identity());
+        let job = DurableJob::new(request(), 1, identity());
         let (cancel, worker) = state.claim(&job).unwrap();
         cancel.cancel();
         drop(worker);
@@ -895,7 +894,7 @@ mod tests {
     fn a_claim_is_bound_to_its_job_and_runtime_instance() {
         let state = JobCommandState::default();
         let other_state = JobCommandState::default();
-        let job = DurableJob::new(request(), false, 1, identity());
+        let job = DurableJob::new(request(), 1, identity());
         let (_, claim) = state.claim(&job).unwrap();
         assert!(claim.require_job(&state, &job).is_ok());
         assert!(claim.require_job(&other_state, &job).is_err());
@@ -907,7 +906,7 @@ mod tests {
     #[test]
     fn stored_running_state_does_not_own_a_worker() {
         let state = JobCommandState::default();
-        let mut job = DurableJob::new(request(), false, 1, identity());
+        let mut job = DurableJob::new(request(), 1, identity());
         job.summary["state"] = json!("running");
         let (_, claim) = state.claim(&job).unwrap();
         assert_eq!(state.active.lock().unwrap().len(), 1);
@@ -943,7 +942,7 @@ mod tests {
         let store = JobStore::open(root.path()).unwrap();
         let mut wanted = Vec::new();
         for n in 0..260 {
-            let mut other = DurableJob::new(request(), false, n, identity());
+            let mut other = DurableJob::new(request(), n, identity());
             other.summary["state"] = json!("succeeded");
             other.spool_released = true;
             store.put(&other).unwrap();
@@ -986,7 +985,7 @@ mod tests {
         let jobs = JobStore::open(root.path()).unwrap();
         let mut ids = Vec::new();
         for n in 0..260 {
-            let mut job = DurableJob::new(request(), false, n, identity());
+            let mut job = DurableJob::new(request(), n, identity());
             job.summary["state"] = json!("failed");
             ids.push(job.id.clone());
             jobs.put(&job).unwrap();
@@ -1018,7 +1017,7 @@ mod tests {
         let store = JobStore::open(root.path()).unwrap();
         let mut protected = Vec::new();
         for _ in 0..3 {
-            let mut job = DurableJob::new(request(), false, 1, identity());
+            let mut job = DurableJob::new(request(), 1, identity());
             job.summary["state"] = json!("failed");
             protected.push(job.id.clone());
             store.put(&job).unwrap();
@@ -1027,7 +1026,7 @@ mod tests {
             for n in 0..40 {
                 let mut request = request();
                 request.connection_id = connection.into();
-                let mut job = DurableJob::new(request, false, n, identity());
+                let mut job = DurableJob::new(request, n, identity());
                 job.summary["state"] = json!("succeeded");
                 job.spool_released = true;
                 store.put(&job).unwrap();
@@ -1054,12 +1053,12 @@ mod tests {
     fn released_history_pruning_preserves_live_material_and_recent_retry_ids() {
         let root = tempfile::tempdir().unwrap();
         let store = JobStore::open(root.path()).unwrap();
-        let mut held = DurableJob::new(request(), false, 1, identity());
+        let mut held = DurableJob::new(request(), 1, identity());
         held.summary["state"] = json!("failed");
         store.put(&held).unwrap();
         let mut latest = String::new();
         for n in 0..1000 {
-            let mut job = DurableJob::new(request(), false, n, identity());
+            let mut job = DurableJob::new(request(), n, identity());
             job.summary["state"] = json!("failed");
             job.spool_released = true;
             latest = job.id.clone();
@@ -1080,11 +1079,11 @@ mod tests {
     fn publication_unknown_excludes_a_second_pending_operation() {
         let root = tempfile::tempdir().unwrap();
         let store = JobStore::open(root.path()).unwrap();
-        let mut unknown = DurableJob::new(request(), false, 1, identity());
+        let mut unknown = DurableJob::new(request(), 1, identity());
         unknown.summary["state"] = json!("uncertain");
         unknown.summary["phase"] = json!("publication-unknown");
         store.put(&unknown).unwrap();
-        let next = DurableJob::new(request(), false, 2, identity());
+        let next = DurableJob::new(request(), 2, identity());
         assert_eq!(store.put(&next).unwrap_err().kind, ErrorKind::PreconditionFailed);
         assert!(!store.insert_new(&next).unwrap());
         assert_eq!(store.list_pending().unwrap().len(), 1);

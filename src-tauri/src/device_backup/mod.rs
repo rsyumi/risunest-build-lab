@@ -8,7 +8,7 @@ mod archive;
 mod commands;
 mod spool;
 pub(crate) use archive::{
-    apply_prepared_native_sections, capture_native_sections, capture_prepared_native_sections,
+    capture_native_sections, capture_prepared_native_sections,
     journal_prepared_native_sections, prepare_native_sections,
     resume_journaled_native_restore, validate_archive_catalog, write_native_section, PreparedDeviceSection,
 };
@@ -30,6 +30,9 @@ pub(crate) type Result<T> = std::result::Result<T, DeviceBackupError>;
 pub(crate) struct DeviceBackupError {
     pub(crate) code: String,
     pub(crate) message: String,
+    /// The source failure, kept for the native log and never sent to the renderer.
+    #[serde(skip)]
+    pub(crate) cause: Option<String>,
 }
 
 impl std::fmt::Display for DeviceBackupError {
@@ -40,21 +43,40 @@ impl std::fmt::Display for DeviceBackupError {
 
 impl std::error::Error for DeviceBackupError {}
 
+impl crate::native_log::CommandFailure for DeviceBackupError {
+    fn code(&self) -> std::borrow::Cow<'_, str> {
+        std::borrow::Cow::Borrowed(&self.code)
+    }
+
+    fn detail(&self) -> Option<std::borrow::Cow<'_, str>> {
+        Some(match &self.cause {
+            Some(cause) => std::borrow::Cow::Owned(format!("{}: {cause}", self.message)),
+            None => std::borrow::Cow::Borrowed(&self.message),
+        })
+    }
+}
+
 impl From<rusqlite::Error> for DeviceBackupError {
-    fn from(_: rusqlite::Error) -> Self {
-        error(
-            "device-storage-failed",
-            "Device maintenance SQLite operation failed",
-        )
+    fn from(failure: rusqlite::Error) -> Self {
+        DeviceBackupError {
+            cause: Some(crate::native_log::sqlite_failure(&failure)),
+            ..error(
+                "device-storage-failed",
+                "Device maintenance SQLite operation failed",
+            )
+        }
     }
 }
 
 impl From<std::io::Error> for DeviceBackupError {
-    fn from(_: std::io::Error) -> Self {
-        error(
-            "device-storage-failed",
-            "Device maintenance filesystem operation failed",
-        )
+    fn from(failure: std::io::Error) -> Self {
+        DeviceBackupError {
+            cause: Some(format!("{:?}: {}", failure.kind(), crate::native_log::io_failure(&failure))),
+            ..error(
+                "device-storage-failed",
+                "Device maintenance filesystem operation failed",
+            )
+        }
     }
 }
 
@@ -62,6 +84,7 @@ fn error(code: &str, message: &str) -> DeviceBackupError {
     DeviceBackupError {
         code: code.into(),
         message: message.into(),
+        cause: None,
     }
 }
 
