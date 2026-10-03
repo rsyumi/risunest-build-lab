@@ -1281,8 +1281,8 @@
     {
       "path": "crates/external-storage-format/tests/native_message_pages.rs",
       "mode": "100644",
-      "bytes": 26924,
-      "sha256": "57d2be850eff6648ea582298d4d07dbd9635b383711615bb78379ca5f313a3de"
+      "bytes": 27431,
+      "sha256": "8034c46fd2a93470144e4f6c34b8ea239230acdea9360b35362577ada16c8120"
     },
     {
       "path": "crates/external-storage-wasm/Cargo.lock",
@@ -3381,8 +3381,8 @@
     {
       "path": "server/manager/Cargo.lock",
       "mode": "100644",
-      "bytes": 60227,
-      "sha256": "82da89ea9ae192aaf9aa0b39819dee0b31561cc8c8a4deb824022425c479ec17"
+      "bytes": 60245,
+      "sha256": "2f63dca79e07c0a8f430a6de641663fb4cbbd9460bfcaf1caed4f6a654f15568"
     },
     {
       "path": "server/manager/Cargo.toml",
@@ -3417,8 +3417,8 @@
     {
       "path": "server/manager/gui/src-tauri/Cargo.lock",
       "mode": "100644",
-      "bytes": 145784,
-      "sha256": "5d80a63a22ab7dc9e2f3d44d19bc5473394eadfabb402ee368865a6a1bd0248f"
+      "bytes": 145802,
+      "sha256": "85f8753af5e4fe73c85d2ff66468de5bf282cab470d1197f6aa1dfd8356bc36a"
     },
     {
       "path": "server/manager/gui/src-tauri/Cargo.toml",
@@ -3969,8 +3969,8 @@
     {
       "path": "server/sync/src/store/lww_tests.rs",
       "mode": "100644",
-      "bytes": 9560,
-      "sha256": "fd728f00a04c159b5c30a9a18987dea17d2722079227cb7a9740e92b6bb3d9b4"
+      "bytes": 9604,
+      "sha256": "2b1d7c13aeebc2995772defdeeb73bdc2634b78815b27af7fa3f7b985058c50e"
     },
     {
       "path": "server/sync/src/store/maintenance.rs",
