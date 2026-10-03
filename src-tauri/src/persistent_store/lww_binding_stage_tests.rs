@@ -393,3 +393,87 @@ fn binding_stage_digest_covers_raw_root_plugin_owners_and_asset_metadata() {
         assert_eq!(binding_stage_digest(&store.connection, &staging).unwrap(), expected);
     }
 }
+
+#[test]
+fn triggered_binding_copy_does_not_spool_source_rows_into_an_ephemeral_btree() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = PersistentStore::open(dir.path()).unwrap();
+    store.connection.execute("ATTACH DATABASE ?1 AS binding_incoming", [store.database_path.to_string_lossy().as_ref()]).unwrap();
+    let columns = catalog_columns(&store.connection, "messages").unwrap();
+    let opcodes = |sql: &str| {
+        let expanded = store.connection.prepare(sql).unwrap().expanded_sql().unwrap();
+        let mut stmt = store.connection.prepare(&format!("EXPLAIN {expanded}")).unwrap();
+        stmt.query_map([], |row| row.get::<_, String>(1)).unwrap().collect::<Result<Vec<_>, _>>().unwrap()
+    };
+    let bulk = format!("INSERT INTO messages(generation,{0}) SELECT ?1,{0} FROM binding_incoming.messages WHERE generation='incoming'", columns.join(","));
+    assert!(opcodes(&bulk).iter().any(|opcode| opcode == "OpenEphemeral"));
+    assert!(!opcodes(&binding_copy_insert_sql("messages", &columns)).iter().any(|opcode| opcode == "OpenEphemeral"));
+    store.connection.execute_batch("DETACH DATABASE binding_incoming").unwrap();
+}
+
+#[test]
+fn binding_copy_streams_large_multicolumn_catalog_without_changing_source_types() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("incoming.sqlite");
+    let mut source = Connection::open(&path).unwrap();
+    schema::initialize(&mut source).unwrap();
+    source.execute("INSERT INTO root VALUES('incoming','{}')", []).unwrap();
+    let body = json!({"role":"char","data":"x".repeat(4096)}).to_string();
+    {
+        let tx = source.transaction().unwrap();
+        let mut insert = tx.prepare("INSERT INTO messages(generation,character_id,conversation_id,message_index,message_id,value,canonical_hash,canonical_size) VALUES('incoming','character','conversation',?1,NULL,?2,'synthetic-hash',?3)").unwrap();
+        for index in 0..8192 { insert.execute(params![index,body,body.len() as i64]).unwrap(); }
+        drop(insert);
+        tx.execute("INSERT INTO plugin_storage(generation,owner,storage_key,byte_size,ordinal,value,assigned_at) VALUES('incoming','orphan','raw-types',3,0,?1,?2)", params![vec![0u8,1,255],1.5f64]).unwrap();
+        tx.commit().unwrap();
+    }
+    let expected = catalog_digest(&source, "incoming").unwrap();
+    source.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)").unwrap();
+    let mut store = PersistentStore::open(&dir.path().join("target")).unwrap();
+    store.connection.execute("ATTACH DATABASE ?1 AS binding_incoming", [path.to_string_lossy().as_ref()]).unwrap();
+    {
+        let tx = store.connection.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+        for &(table, _) in GENERATION_TABLES { copy_binding_table(&tx, table, "copied").unwrap(); }
+        assert_eq!(catalog_digest(&tx, "copied").unwrap(), expected);
+        tx.commit().unwrap();
+    }
+    store.connection.execute_batch("DETACH DATABASE binding_incoming").unwrap();
+    assert_eq!(catalog_digest(&source, "incoming").unwrap(), expected);
+    assert_eq!(store.connection.query_row("SELECT count(*) FROM messages WHERE generation='copied'", [], |row| row.get::<_,i64>(0)).unwrap(),8192);
+    let types: (String,String,String) = store.connection.query_row("SELECT typeof(value),typeof(assigned_at),typeof(claimed_from) FROM plugin_storage WHERE generation='copied'", [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap();
+    assert_eq!(types,("blob".into(),"real".into(),"null".into()));
+}
+
+#[test]
+fn late_binding_copy_trigger_failure_rolls_back_every_family_and_retries_exactly() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = PersistentStore::open(dir.path()).unwrap();
+    let values = (0..513).map(|index| json!({"role":"char","data":"x".repeat(4096),"chatId":format!("synthetic-{index}")})).collect::<Vec<_>>();
+    let mut messages = change(&["messages","character","conversation"], Value::Null);
+    messages.value = message_value(&store, &values);
+    let incoming = vec![change(&["root","language"],json!("remote")),change(&["exists","character","character"],json!(true)),change(&["exists","conversation","character","conversation"],json!(true)),messages];
+    let (header,inspection) = context(&store);
+    let generation = active_generation(&store.connection).unwrap();
+    let clock = serde_json::to_value(store.lww_clock_state().unwrap()).unwrap();
+    let source_objects: i64 = store.connection.query_row("SELECT count(*) FROM message_page_objects", [], |row| row.get(0)).unwrap();
+    store.connection.execute_batch("CREATE TRIGGER reject_binding_tail BEFORE INSERT ON messages WHEN NEW.generation LIKE 'staging-%' AND NEW.message_index=512 BEGIN SELECT RAISE(ABORT,'synthetic tail failure'); END;").unwrap();
+    assert!(store.lww_stage_binding_units(&header,&inspection,&incoming,7.into()).is_err());
+    for &(table, _) in GENERATION_TABLES {
+        assert_eq!(store.connection.query_row(&format!("SELECT count(*) FROM {table} WHERE generation LIKE 'staging-%'"), [], |row| row.get::<_,i64>(0)).unwrap(),0,"{table}");
+    }
+    for table in ["lww_binding_sources","lww_binding_source_units","lww_binding_stages"] {
+        assert_eq!(store.connection.query_row(&format!("SELECT count(*) FROM {table}"), [], |row| row.get::<_,i64>(0)).unwrap(),0,"{table}");
+    }
+    assert_eq!(active_generation(&store.connection).unwrap(),generation);
+    assert_eq!(store.revision().unwrap(),0);
+    assert_eq!(store.lww_binding_authority().unwrap(),header.binding_authority);
+    assert_eq!(serde_json::to_value(store.lww_clock_state().unwrap()).unwrap(),clock);
+    assert_eq!(store.connection.query_row("SELECT count(*) FROM message_page_objects", [], |row| row.get::<_,i64>(0)).unwrap(),source_objects);
+    store.connection.execute_batch("DROP TRIGGER reject_binding_tail").unwrap();
+    let stage = store.lww_stage_binding_units(&header,&inspection,&incoming,7.into()).unwrap();
+    assert_eq!(store.connection.query_row("SELECT count(*) FROM messages WHERE generation=?1", [&stage.staging_id], |row| row.get::<_,i64>(0)).unwrap(),513);
+    assert_eq!(store.lww_stage_binding_units(&header,&inspection,&incoming,7.into()).unwrap(),stage);
+    activate(&mut store,&header,&inspection,&stage);
+    let last: String = store.connection.query_row("SELECT value FROM messages WHERE generation=?1 AND message_index=512", [active_generation(&store.connection).unwrap()], |row| row.get(0)).unwrap();
+    assert_eq!(serde_json::from_str::<Value>(&last).unwrap(),values[512]);
+}

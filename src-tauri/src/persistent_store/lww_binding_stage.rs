@@ -115,6 +115,30 @@ pub(in crate::persistent_store) fn catalog_digest(db: &Connection, staging_id: &
     Ok(hex::encode(writer.0.finalize()))
 }
 
+fn binding_copy_insert_sql(table: &str, columns: &[String]) -> String {
+    let placeholders = (0..=columns.len()).map(|_| "?").collect::<Vec<_>>().join(",");
+    format!("INSERT INTO {table}(generation,{}) VALUES ({placeholders})", columns.join(","))
+}
+
+fn copy_binding_table(tx: &Transaction<'_>, table: &str, staging_id: &str) -> StoreResult<()> {
+    let columns = catalog_columns(tx, table)?;
+    let mut select = tx.prepare(&format!(
+        "SELECT {} FROM binding_incoming.{table} WHERE generation='incoming'", columns.join(",")
+    ))?;
+    let mut insert = tx.prepare(&binding_copy_insert_sql(table, &columns))?;
+    let mut rows = select.query([])?;
+    // INSERT SELECT on a triggered table buffers every source row in a temporary B-tree.
+    // Android forces that B-tree into memory; single-row VALUES retains triggers and rollback.
+    while let Some(row) = rows.next()? {
+        insert.raw_bind_parameter(1, staging_id)?;
+        for index in 0..columns.len() {
+            insert.raw_bind_parameter(index + 2, rusqlite::types::ToSqlOutput::Borrowed(row.get_ref(index)?))?;
+        }
+        insert.raw_execute()?;
+    }
+    Ok(())
+}
+
 fn validate_inspection(store: &PersistentStore, header: &Header, inspection_id: &str) -> StoreResult<()> {
     validate_header(header)?;
     verify(store.device_store()?.connection(), header.binding_authority)?;
@@ -186,8 +210,7 @@ impl PersistentStore {
             let copied = (|| -> StoreResult<()> {
                 let tx = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
                 for &(table, _) in GENERATION_TABLES {
-                    let columns = catalog_columns(&tx, table)?.join(",");
-                    tx.execute(&format!("INSERT INTO {table}(generation,{columns}) SELECT ?1,{columns} FROM binding_incoming.{table} WHERE generation='incoming'"), [&id])?;
+                    copy_binding_table(&tx, table, &id)?;
                 }
                 let status_digest = status_digest(&changes.iter().zip(&statuses).map(|(c,s)| (c.key.as_str(),*s)).collect::<Vec<_>>())?;
                 let catalog_digest = catalog_digest(&tx, &id)?;

@@ -2113,7 +2113,7 @@ export const languageEnglish = {
 
             title: 'Local data',
             description:
-                'Choose which of the data kept on this device only is synchronized with your other devices. The choice applies to the sync server and to external storage alike, and what a backup keeps is chosen on the external storage connection.',
+                'Choose whether to synchronize plugin local data with your other devices. The choice applies to both the sync server and external storage.',
             notConnected: 'No sync server or external storage is connected yet.',
             hypaTitle: 'Hypa embedding data',
             hypaDescription:

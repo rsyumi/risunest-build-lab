@@ -111,8 +111,8 @@
     {
       "path": "benchmarks/ios/NativeUITests.swift",
       "mode": "100644",
-      "bytes": 29876,
-      "sha256": "e1255f7a2cbdf1dce40268e72a033a8f6f1e415c8ff8b8a18b6699df42d923e5"
+      "bytes": 31325,
+      "sha256": "55d4f2ae3322c72ec84d57c8ba3306022986b18551e71db2f37a3532b26e3f15"
     },
     {
       "path": "benchmarks/ios/buildTestLab.py",
@@ -153,8 +153,8 @@
     {
       "path": "benchmarks/ios/main.ts",
       "mode": "100644",
-      "bytes": 14149,
-      "sha256": "737047d95e99443e949de07d9c452abab1532e81e9d7dc2e075843990b2f0c4e"
+      "bytes": 14950,
+      "sha256": "881c147a9209f528c19714579b82e4cf8a9931439e7f0294c99f6a491730b9ac"
     },
     {
       "path": "benchmarks/ios/native/.gitignore",
@@ -195,8 +195,8 @@
     {
       "path": "benchmarks/ios/native/src/lib.rs",
       "mode": "100644",
-      "bytes": 4132,
-      "sha256": "fe0160fa2ed6933d9f1822cac33eac41726a839b4737a79afc0a306363bab0e4"
+      "bytes": 4975,
+      "sha256": "a12a4e95cdfcd967b9ed725d172ce8ede89802f6483062ed7cb68b05b6fbf1d1"
     },
     {
       "path": "benchmarks/ios/native/src/network_probe.rs",
@@ -261,14 +261,14 @@
     {
       "path": "benchmarks/legacy-restore/run.test.ts",
       "mode": "100644",
-      "bytes": 9423,
-      "sha256": "c6c0b019db65bac00d294c00398c9e0013a3f8eb4601d5220d04625e5e5cbabd"
+      "bytes": 11029,
+      "sha256": "812e56dac11cff08eccf097396c4062b5b37ea55815429f3f7ea07560c66ccc1"
     },
     {
       "path": "benchmarks/legacy-restore/run.ts",
       "mode": "100644",
-      "bytes": 7567,
-      "sha256": "7784bf9b8fbaf074657405d31cf2260508fe70398f8d3670154c560747658b1e"
+      "bytes": 8473,
+      "sha256": "dcf8ec834ffacf13a0cdc56be61a8d44b11a3deadefe2269b5b043ddc8054a58"
     },
     {
       "path": "benchmarks/linux/index.html",
@@ -6729,14 +6729,14 @@
     {
       "path": "src-tauri/src/persistent_store/lww_binding_stage.rs",
       "mode": "100644",
-      "bytes": 20686,
-      "sha256": "e059dbc8405256b2fd502fe28781f1362852bf033aaf24bf819e0a899b0a291e"
+      "bytes": 21649,
+      "sha256": "0aa312124ca8ea3ec8b28f56a2b086863edb073373f3d61cbe4a9b3ec12d924c"
     },
     {
       "path": "src-tauri/src/persistent_store/lww_binding_stage_tests.rs",
       "mode": "100644",
-      "bytes": 34220,
-      "sha256": "1e956a4c811fcb41898f4f0be380ab39bc3520a55125c874613666e085fb5cc4"
+      "bytes": 40748,
+      "sha256": "d0db352d00b0768f93a8398b3a3b199875198edbf6ae2c2dc0d448c903997358"
     },
     {
       "path": "src-tauri/src/persistent_store/lww_classification.rs",
@@ -7497,8 +7497,8 @@
     {
       "path": "src/lang/en.ts",
       "mode": "100644",
-      "bytes": 194083,
-      "sha256": "aa6a61d95305a2fdbc83c14590c88eb87f3405550b11745feceba8a8a15c37c4"
+      "bytes": 193991,
+      "sha256": "e75aa9d957e06b95eebe681d3277d43da117e6512c415bcc0770ca126aa5db38"
     },
     {
       "path": "src/lang/es.ts",
@@ -7515,8 +7515,8 @@
     {
       "path": "src/lang/ko.ts",
       "mode": "100644",
-      "bytes": 217913,
-      "sha256": "88b16cdbb1dc658fa283672c7b79f961a0382c41c7b4d7d552ae931cfb353508"
+      "bytes": 217791,
+      "sha256": "552198da5974cce9a687fcd38b8797ed3664e0ab60f7d7d0447a97bd55bd4b65"
     },
     {
       "path": "src/lang/lwwSyncCopy.test.ts",
@@ -12627,8 +12627,8 @@
     {
       "path": "src/ts/storage/accountStorage.test.ts",
       "mode": "100644",
-      "bytes": 70313,
-      "sha256": "713e557e3d90cfe0c689230d59b4125674e11324fcf90ea6dec1c7c4ac32c86d"
+      "bytes": 69882,
+      "sha256": "2169ee36cff29d56656b62e201be88b86e6402607b0b8d8721617890ead80a36"
     },
     {
       "path": "src/ts/storage/accountStorage.ts",
