@@ -432,7 +432,7 @@ async fn session_identity_and_previous_device_status_are_authenticated_and_revoc
         .unwrap();
     assert_eq!(
         session,
-        serde_json::json!({"head":server.store.head().unwrap(),"deviceId":server.a.device_id,"operationWatermark":"0","operationPending":false,"protocolId":risunest_sync_server::PROTOCOL_ID})
+        serde_json::json!({"head":server.store.head().unwrap(),"deviceId":server.a.device_id,"protocolId":risunest_sync_server::PROTOCOL_ID})
     );
     let url = format!("{}/devices/{}/status", server.base, server.a.device_id);
     let before: serde_json::Value = server

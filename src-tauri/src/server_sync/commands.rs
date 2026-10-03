@@ -1,7 +1,7 @@
 use super::{Result, SyncError};
 use crate::persistent_store::{commands::with_store_mut, PersistentStore};
 use std::collections::BTreeSet;
-use std::sync::{atomic::{AtomicBool, Ordering}, Arc, Mutex};
+use std::sync::{atomic::{AtomicBool, AtomicU64, Ordering}, Arc, Mutex};
 use tauri::{AppHandle, Manager};
 #[derive(Default)]
 pub(crate) struct ServerSyncCommandState {
@@ -10,8 +10,11 @@ pub(crate) struct ServerSyncCommandState {
     cancelled: Mutex<Arc<AtomicBool>>,
     notification: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
     notification_active: Arc<AtomicBool>,
+    notification_epoch: AtomicU64,
+    notification_start: Mutex<Option<Arc<AtomicBool>>>,
     transports: Mutex<TransportJobs>,
 }
+pub(crate) struct NotificationStart { epoch: u64, cancelled: Arc<AtomicBool> }
 #[derive(Default)]
 struct TransportJobs {
     permit: Option<crate::native_file_jobs::admission::Permit>,
@@ -46,6 +49,31 @@ impl ServerSyncCommandState {
         self.running.compare_exchange(false,true,Ordering::AcqRel,Ordering::Acquire).map_err(|_| SyncError::new("server-sync-busy",409))?;
         if self.cleanup_closed.load(Ordering::Acquire) { self.running.store(false,Ordering::Release); return Err(SyncError::new("cleanup-pending",409)); }
         Ok(Running(self))
+    }
+    // A stop also cancels a start that is still checking the server identity, so it never
+    // installs a notification job after the stop returned.
+    fn stop_notification(&self) -> Result<Option<tauri::async_runtime::JoinHandle<()>>> {
+        let mut slot=self.notification.lock().map_err(|_|SyncError::new("server-sync-state-unavailable",503))?;
+        self.notification_epoch.fetch_add(1,Ordering::AcqRel);
+        if let Some(start)=self.notification_start.lock().map_err(|_|SyncError::new("server-sync-state-unavailable",503))?.take(){start.store(true,Ordering::Release);}
+        Ok(slot.take())
+    }
+    fn begin_notification(&self) -> Result<NotificationStart> {
+        let _slot=self.notification.lock().map_err(|_|SyncError::new("server-sync-state-unavailable",503))?;
+        let cancelled=Arc::new(AtomicBool::new(false));
+        *self.notification_start.lock().map_err(|_|SyncError::new("server-sync-state-unavailable",503))?=Some(cancelled.clone());
+        Ok(NotificationStart{epoch:self.notification_epoch.load(Ordering::Acquire),cancelled})
+    }
+    fn install_notification(&self,start:NotificationStart,spawn:impl FnOnce(NotificationJob)->tauri::async_runtime::JoinHandle<()>) -> Result<()> {
+        let mut slot=self.notification.lock().map_err(|_|SyncError::new("server-sync-state-unavailable",503))?;
+        if self.cleanup_closed.load(Ordering::Acquire){return Err(SyncError::new("cleanup-pending",409));}
+        let mut current=self.notification_start.lock().map_err(|_|SyncError::new("server-sync-state-unavailable",503))?;
+        if current.as_ref().is_some_and(|flag|Arc::ptr_eq(flag,&start.cancelled)){*current=None;}
+        drop(current);
+        if start.cancelled.load(Ordering::Acquire)||self.notification_epoch.load(Ordering::Acquire)!=start.epoch{return Err(SyncError::new("cancelled",409));}
+        self.notification_active.store(true,Ordering::Release);
+        *slot=Some(spawn(NotificationJob(self.notification_active.clone())));
+        Ok(())
     }
     fn claim_preparation(&self) -> Result<(Running<'_>, Arc<AtomicBool>)> {
         let running=self.claim()?; let flag=Arc::new(AtomicBool::new(false));
@@ -157,7 +185,7 @@ pub(crate) async fn server_sync_status(app:AppHandle)->Result<LwwStatus> {
 }
 #[tauri::command]
 pub(crate) async fn server_sync_configure(app:AppHandle,config:super::client::ServerConfig)->Result<()> {
-    logged_blocking("configure",move|| {let _permit=claim_library(&app)?;let store=job_store(&app)?;let client=super::client::ServerClient::new(config.clone())?;client.resolve_identity(false)?;let stored=super::credentials::StoredConfig::persist(store.repository_root(),&config)?;super::lww_client::OperationLog::open(store.repository_root())?.save_config("candidate",&stored)?;Ok(())}).await
+    logged_blocking("configure",move|| {let _permit=claim_library(&app)?;let store=job_store(&app)?;let client=super::client::ServerClient::new(config.clone())?;client.resolve_identity()?;let stored=super::credentials::StoredConfig::persist(store.repository_root(),&config)?;super::lww_client::OperationLog::open(store.repository_root())?.save_config("candidate",&stored)?;Ok(())}).await
 }
 #[tauri::command]
 pub(crate) async fn server_sync_lww_push(app:AppHandle,request:crate::persistent_store::lww::Header,generating:Vec<crate::persistent_store::lww::MessageLocator>)->Result<Option<risunest_sync_wire::lww::PushReceipt>> {
@@ -175,7 +203,7 @@ pub(crate) async fn server_sync_lww_ack(app:AppHandle,request:crate::persistent_
 pub(crate) async fn server_sync_cancel(app:AppHandle)->Result<()> {app.state::<ServerSyncCommandState>().cancel()}
 #[tauri::command]
 pub(crate) async fn server_sync_lww_fence(app:AppHandle,new_device:bool)->Result<()> {
-    logged_blocking("fence",move|| {let state=app.state::<ServerSyncCommandState>();if !state.cleanup_drained()?{return Err(SyncError::new("server-sync-busy",409));}let mut store=job_store(&app)?;if store.server_stored_config()?.is_none(){return Ok(());}let core=lww_client(&store)?;if new_device{core.fence_new_device(&mut store)}else{core.fence(&mut store)}}).await
+    logged_blocking("fence",move|| {let state=app.state::<ServerSyncCommandState>();if !state.cleanup_drained()?{return Err(SyncError::new("server-sync-busy",409));}let mut store=job_store(&app)?;if store.server_stored_config()?.is_none(){return Ok(());}let core=lww_client(&store)?;if new_device{core.fence_new_device(&mut store)}else{super::binding::fence_for_binding_change(&core,&mut store)}}).await
 }
 
 #[tauri::command]
@@ -208,8 +236,7 @@ pub(crate) fn hydrate_binding_assets(store:&crate::persistent_store::PersistentS
 
 #[tauri::command]
 pub(crate) async fn server_sync_notify_stop(app:AppHandle)->Result<()> {
-    let state=app.state::<ServerSyncCommandState>();
-    let job={state.notification.lock().map_err(|_|SyncError::new("server-sync-state-unavailable",503))?.take()};
+    let job=app.state::<ServerSyncCommandState>().stop_notification()?;
     if let Some(job)=job {job.abort();let _=job.await;}
     Ok(())
 }
@@ -217,22 +244,17 @@ pub(crate) async fn server_sync_notify_stop(app:AppHandle)->Result<()> {
 pub(crate) async fn server_sync_notify_start(app:AppHandle,request:crate::persistent_store::lww::Header)->Result<()> {
     server_sync_notify_stop(app.clone()).await?;
     if app.state::<ServerSyncCommandState>().cleanup_closed.load(Ordering::Acquire){return Err(SyncError::new("cleanup-pending",409));}
+    let start=app.state::<ServerSyncCommandState>().begin_notification()?;
+    let lookup=start.cancelled.clone();
     let copy=app.clone();
-    let config=blocking(move|| {let store=job_store(&copy)?;if store.lww_binding_authority()?!=request.binding_authority {return Err(SyncError::new("binding-authority-changed",409));}let core=lww_client(&store)?;core.client.resolve_identity(false)?;Ok(core.client.config())}).await?;
+    let config=blocking(move|| {let store=job_store(&copy)?;if store.lww_binding_authority()?!=request.binding_authority {return Err(SyncError::new("binding-authority-changed",409));}let core=lww_client_cancelled(&store,Some(lookup))?;core.client.resolve_identity()?;Ok(core.client.config())}).await?;
     let events=app.clone();
     let connection=app.clone();
-    let state=app.state::<ServerSyncCommandState>();
-    let mut slot=state.notification.lock().map_err(|_|SyncError::new("server-sync-state-unavailable",503))?;
-    if app.state::<ServerSyncCommandState>().cleanup_closed.load(Ordering::Acquire){return Err(SyncError::new("cleanup-pending",409));}
-    app.state::<ServerSyncCommandState>().notification_active.store(true,Ordering::Release);
-    let guard=NotificationJob(app.state::<ServerSyncCommandState>().notification_active.clone());
-    let job=tauri::async_runtime::spawn(async move {
+    app.state::<ServerSyncCommandState>().install_notification(start,move|guard| tauri::async_runtime::spawn(async move {
         let _guard=guard;
         use tauri::Emitter;
         let _=super::notification::run(config,move|frame| {let _=events.emit("risu-server-sync-remote-hint",frame);},move|connected| {let _=connection.emit("risu-server-sync-notification",serde_json::json!({"connected":connected}));}).await;
-    });
-    *slot=Some(job);
-    Ok(())
+    }))
 }
 
 #[cfg(test)]
@@ -262,6 +284,20 @@ mod tests {
         let request=header(&store);assert!(core.push(&mut store,&request,&[]).unwrap().is_some());
         drop(send);assert!(admission.file(true).is_err());
         gate.notify_one();receive.join().unwrap();assert!(state.cleanup_drained().unwrap());assert!(admission.file(true).is_ok());
+    }
+    #[test]
+    fn a_stop_during_the_identity_check_keeps_the_late_notification_start_from_installing() {
+        let state=ServerSyncCommandState::default();
+        let start=state.begin_notification().unwrap();let lookup=start.cancelled.clone();
+        assert!(state.stop_notification().unwrap().is_none());
+        assert!(lookup.load(Ordering::Acquire));
+        let result=state.install_notification(start,|guard|tauri::async_runtime::spawn(async move {let _guard=guard;std::future::pending::<()>().await;}));
+        assert_eq!(result.err().map(|error|error.code),Some("cancelled".to_string()));
+        assert!(state.notification.lock().unwrap().is_none());assert!(state.cleanup_drained().unwrap());
+        let start=state.begin_notification().unwrap();
+        state.install_notification(start,|guard|tauri::async_runtime::spawn(async move {let _guard=guard;std::future::pending::<()>().await;})).unwrap();
+        assert!(!state.cleanup_drained().unwrap());
+        state.stop_notification().unwrap().unwrap().abort();
     }
     #[test]
     fn transport_lanes_overlap_and_only_the_last_active_job_holds_replacement_admission() {

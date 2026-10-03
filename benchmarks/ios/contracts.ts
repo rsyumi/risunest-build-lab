@@ -1,7 +1,10 @@
 import { runUnicodePersistenceProbe, verifyUnicodePersistenceProbe } from "../unicodePersistenceProbe";
 import { invoke } from "@tauri-apps/api/core";
 import { getIdentifier } from "@tauri-apps/api/app";
+import { join } from "@tauri-apps/api/path";
+import { exists, mkdir, readFile, writeFile } from "@tauri-apps/plugin-fs";
 import { platform } from "@tauri-apps/plugin-os";
+import { nativeDataPath } from "../../src/ts/storage/nativePaths";
 import {
   NativeCommitTransport,
   encodeNativeCommit,
@@ -22,6 +25,17 @@ async function guard() {
     (await getIdentifier()) === "io.github.rsyumi.risunest.ios.bench",
     "isolated benchmark identifier required",
   );
+  const profile = await nativeDataPath();
+  const ownershipPath = await join(profile, "legacy-restore-profile-owner.json");
+  const owner = "io.github.rsyumi.risunest.ios.bench:legacy-restore-v1";
+  if (await exists(ownershipPath)) {
+    check(new TextDecoder().decode(await readFile(ownershipPath)) === owner, "Synthetic profile ownership mismatch");
+  } else {
+    const opened = await invoke<{ revision: number }>("pds_open");
+    check(opened.revision === 0, "Install a fresh isolated benchmark profile before memory measurement");
+    await mkdir(profile, { recursive: true });
+    await writeFile(ownershipPath, new TextEncoder().encode(owner));
+  }
 }
 async function initialize() {
   await guard();

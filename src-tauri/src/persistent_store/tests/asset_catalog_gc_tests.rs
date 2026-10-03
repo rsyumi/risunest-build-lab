@@ -1473,6 +1473,45 @@ fn command_marks_recheck_new_roots_between_gc_pages() {
 }
 
 #[test]
+fn reused_library_roots_are_collected_again_after_a_change_between_gc_pages() {
+    for other_connection in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let mut store = PersistentStore::open(directory.path()).unwrap();
+        let cas = crate::asset_repository::PayloadCas::new(directory.path()).unwrap();
+        let mut objects = [
+            cas.prepare_bytes(b"reuse-first").unwrap(),
+            cas.prepare_bytes(b"reuse-second").unwrap(),
+            cas.prepare_bytes(b"reuse-third").unwrap(),
+        ];
+        objects.sort_by(|left, right| left.content_hash.cmp(&right.content_hash));
+        for object in &objects { register_gc_candidate(&mut store, object); }
+        let marks = store.prepare_asset_gc_delete_marks().unwrap();
+        let mut library = None;
+        super::super::ASSET_GC_LIBRARY_ROOT_COLLECTIONS.with(|count| count.set(0));
+        let first = store.asset_gc_delete_marked_page_reusing_library(&marks, &mut library, 1, None, 100, 10, |_| Ok(())).unwrap();
+        let second = store.asset_gc_delete_marked_page_reusing_library(&marks, &mut library, 1, first.next_cursor.as_deref(), 100, 10, |_| Ok(())).unwrap();
+        assert_eq!(first.report.deleted_hashes, [objects[0].content_hash.clone()]);
+        assert_eq!(second.report.deleted_hashes, [objects[1].content_hash.clone()]);
+        assert_eq!(super::super::ASSET_GC_LIBRARY_ROOT_COLLECTIONS.with(|count| count.get()), 1);
+        let generation = super::active_generation(&store.connection).unwrap();
+        let insert = "INSERT INTO asset_aliases (generation, logical_key, object_hash, kind, size, mime, name, ext,
+                inlay_type, width, height, metadata)
+             VALUES (?1, 'assets/between-reused-pages.bin', ?2, 'asset', ?3, 'application/octet-stream',
+                'between-reused-pages', 'bin', NULL, NULL, NULL, '{}')";
+        let params = rusqlite::params![generation, objects[2].content_hash, objects[2].byte_size as i64];
+        if other_connection {
+            Connection::open(&store.database_path).unwrap().execute(insert, params).unwrap();
+        } else {
+            store.connection.execute(insert, params).unwrap();
+        }
+        let last = store.asset_gc_delete_marked_page_reusing_library(&marks, &mut library, 1, second.next_cursor.as_deref(), 100, 10, |_| Ok(())).unwrap();
+        assert!(last.report.deleted_hashes.is_empty(), "other connection: {other_connection}");
+        assert_eq!(super::super::ASSET_GC_LIBRARY_ROOT_COLLECTIONS.with(|count| count.get()), 2);
+        assert!(cas.stat_object(&objects[2].content_hash).unwrap().is_some());
+    }
+}
+
+#[test]
 fn plugin_gc_operation_collects_once_and_rejects_own_second_and_reopened_writes() {
     let directory = tempfile::tempdir().unwrap();
     let mut store = PersistentStore::open(directory.path()).unwrap();

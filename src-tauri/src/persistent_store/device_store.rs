@@ -479,6 +479,7 @@ fn create_schema(connection: &mut Connection) -> StoreResult<()> {
     transaction.execute_batch(super::lww::UNIT_SCHEMA)?;
     transaction.execute_batch(super::lww::DEVICE_SCHEMA)?;
     transaction.execute_batch(super::external_lww::SCHEMA)?;
+    transaction.execute_batch(super::message_pages::SCHEMA)?;
     transaction.execute("INSERT INTO lww_clock VALUES(1,NULL,NULL,'0')", [])?;
     create_triggers(&transaction)?;
     transaction.execute(
@@ -511,6 +512,7 @@ fn validate_schema(db: &Connection) -> StoreResult<()> {
     reference.execute_batch(super::lww::UNIT_SCHEMA)?;
     reference.execute_batch(super::lww::DEVICE_SCHEMA)?;
     reference.execute_batch(super::external_lww::SCHEMA)?;
+    reference.execute_batch(super::message_pages::SCHEMA)?;
     create_triggers(&reference)?;
     if definitions(db)? != definitions(&reference)? {
         return Err(invalid("Device schema is incompatible"));

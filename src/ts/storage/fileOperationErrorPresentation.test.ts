@@ -24,6 +24,7 @@ it('does not let an older outcome swallow a new preflight error', () => {
 it.each([
     ['generation-active', 'generationBusy'], ['server-sync-busy', 'syncBusy'], ['library-operation-busy', 'syncBusy'],
     ['library-file-operation-busy', 'syncBusy'], ['resolve-pending-operation-first', 'syncUnconfirmed'], ['server-status-unavailable', 'syncUnconfirmed'],
+    ['sync-unavailable', 'syncUnavailable'],
 ] as const)('presents %s as a safe refusal', (code, key) => {
     presentFileOperationError('import', Object.assign(new Error(), { code }), 0)
     expect(mocks.alert).toHaveBeenCalledExactlyOnceWith(languageEnglish.risuNest.backup[key])

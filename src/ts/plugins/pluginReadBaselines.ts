@@ -101,30 +101,42 @@ export function diffPluginReadBaseline(baseline: any, submitted: any, kind: Plug
     return intents.sort((a, b) => canonical(a.path) < canonical(b.path) ? -1 : canonical(a.path) > canonical(b.path) ? 1 : 0)
 }
 
+// Parents keep only child targets; a child's content lives once, in its own newest read.
+type StoredValue =
+    | { kind: 'conversation' | 'preset'; value: unknown }
+    | { kind: 'character'; detail: unknown; chats?: string[] }
+    | { kind: 'database'; fields: Map<string, { children: PluginReadKind; targets: string[] } | { value: unknown }> }
+
 interface Baseline {
     token: string
-    kind: PluginReadKind
-    target: string
-    revision: number
     authority: number
-    value: unknown
+    stored: StoredValue
 }
 
+const nestedRecords = [['characters', 'character', 'chaId'], ['botPresets', 'preset', 'id']] as const
+
 export class PluginReadBaselineError extends Error {
-    constructor(reason: 'stale' | 'ambiguous' | 'target' | 'closed') {
+    constructor(reason: 'stale' | 'target' | 'closed') {
         super(`Plugin whole-object write rejected: ${reason} read baseline`)
         this.name = 'PluginReadBaselineError'
     }
 }
 
+/**
+ * Keeps the newest completed read of each target. Database reads keep each
+ * top-level key separately, so a read of fewer keys replaces only those keys.
+ */
 export class PluginReadBaselines {
     private readonly baselines = new Map<string, Baseline>()
+    private readonly tokens = new Map<string, { kind: PluginReadKind; target: string }>()
     private readonly history = new Set<string>()
     private closed = false
 
     constructor(private readonly owner: string, private readonly authority: () => number) {}
 
-    expire(): void { this.baselines.clear() }
+    get retainedBaselineCount(): number { return this.baselines.size }
+
+    expire(): void { this.baselines.clear(); this.tokens.clear() }
     close(): void { this.closed = true; this.expire() }
 
     assertOpen(): void {
@@ -135,88 +147,123 @@ export class PluginReadBaselines {
         return this.history.has(JSON.stringify([this.owner, kind, target]))
     }
 
-    track<T>(value: T, kind: PluginReadKind, target: string, revision: number, expectedAuthority = this.authority()): T {
+    track<T>(value: T, kind: PluginReadKind, target: string, _revision: number, expectedAuthority = this.authority()): T {
         if (this.closed) throw new PluginReadBaselineError('closed')
         if (expectedAuthority !== this.authority()) throw new PluginReadBaselineError('stale')
-        const token = crypto.randomUUID()
-        const baseline: Baseline = { token, kind, target, revision, authority: expectedAuthority, value: structuredClone(value) }
-        this.baselines.set(token, baseline)
-        this.history.add(JSON.stringify([this.owner, kind, target]))
-        if (value && typeof value === 'object') provenance.set(value, token)
-        if (kind === 'database') {
-            const database = value as any
-            for (const character of database.characters ?? []) this.track(character, 'character', character.chaId, revision, expectedAuthority)
-            for (const preset of database.botPresets ?? []) this.track(preset, 'preset', preset.id, revision, expectedAuthority)
-        }
-        if (kind === 'character') {
-            for (const chat of (value as any).chats ?? []) this.track(chat, 'conversation', JSON.stringify([target, chat.id]), revision, expectedAuthority)
-        }
+        this.store(value, kind, target, expectedAuthority)
         return value
     }
 
-    private withNestedBaselines(baseline: unknown, submitted: any, kind: PluginReadKind, target: string): unknown {
-        const result: any = structuredClone(baseline)
-        const overlay = (before: any, after: any, childKind: PluginReadKind, childTarget: string) => {
-            const token = after && typeof after === 'object' ? provenance.get(after) : undefined
-            if (token) {
-                const read = this.baselines.get(token)
-                if (!read || read.authority !== this.authority()) throw new PluginReadBaselineError('stale')
-                if (read.kind !== childKind || read.target !== childTarget) throw new PluginReadBaselineError('target')
-                before = structuredClone(read.value)
-            } else if (this.hasRead(childKind, childTarget)) {
-                const compatible = [...this.baselines.values()].filter(read => read.kind === childKind && read.target === childTarget && read.authority === this.authority())
-                if (!compatible.length) throw new PluginReadBaselineError('stale')
-                const candidates = compatible.map(read => diffPluginReadBaseline(this.withNestedBaselines(read.value, after, childKind, childTarget), after, childKind))
-                if (candidates.some(candidate => canonical(candidate) !== canonical(candidates[0]))) throw new PluginReadBaselineError('ambiguous')
-                before = structuredClone(compatible[0].value)
-            }
-            return this.withNestedBaselines(before, after, childKind, childTarget)
+    private store(value: unknown, kind: PluginReadKind, target: string, authority: number): void {
+        const key = JSON.stringify([kind, target])
+        let baseline = this.baselines.get(key)
+        if (!baseline || baseline.authority !== authority) {
+            if (baseline) this.tokens.delete(baseline.token)
+            baseline = { token: crypto.randomUUID(), authority, stored: { kind: 'database', fields: new Map() } }
+            this.baselines.set(key, baseline)
+            this.tokens.set(baseline.token, { kind, target })
         }
-        if (kind === 'database' && result && submitted) {
-            for (const [field, childKind, id] of [['characters', 'character', 'chaId'], ['botPresets', 'preset', 'id']] as const) {
-                if (!Array.isArray(submitted[field])) continue
-                for (const child of submitted[field]) {
-                    const index = result[field]?.findIndex((record: any) => record[id] === child[id]) ?? -1
-                    const previous = index >= 0 ? result[field][index] : undefined
-                    const next = overlay(previous, child, childKind, child[id])
-                    if (next !== undefined) {
-                        result[field] ??= []
-                        if (index >= 0) result[field][index] = next
-                        else result[field].push(next)
-                    }
-                }
+        this.history.add(JSON.stringify([this.owner, kind, target]))
+        if (value && typeof value === 'object') provenance.set(value, baseline.token)
+        const record = value as any
+        if (kind === 'database') {
+            if (baseline.stored.kind !== 'database') baseline.stored = { kind, fields: new Map() }
+            const fields = baseline.stored.fields
+            for (const field of record && typeof record === 'object' ? Object.keys(record) : []) {
+                const nested = nestedRecords.find(([name]) => name === field)
+                if (nested && Array.isArray(record[field])) {
+                    const [, childKind, id] = nested
+                    for (const child of record[field]) this.store(child, childKind, child?.[id], authority)
+                    fields.set(field, { children: childKind, targets: record[field].map((child: any) => child?.[id]) })
+                } else fields.set(field, { value: structuredClone(record[field]) })
             }
-        } else if (kind === 'character' && result && submitted) {
-            for (const chat of submitted.chats ?? []) {
-                const index = result.chats?.findIndex((record: any) => record.id === chat.id) ?? -1
-                const next = overlay(index >= 0 ? result.chats[index] : undefined, chat, 'conversation', JSON.stringify([target, chat.id]))
-                if (next !== undefined) {
-                    result.chats ??= []
-                    if (index >= 0) result.chats[index] = next
-                    else result.chats.push(next)
-                }
+        } else if (kind === 'character' && record && typeof record === 'object' && Array.isArray(record.chats)) {
+            const { chats, ...detail } = record
+            const targets = chats.map((chat: any) => JSON.stringify([target, chat?.id]))
+            chats.forEach((chat: unknown, index: number) => this.store(chat, 'conversation', targets[index], authority))
+            baseline.stored = { kind, detail: structuredClone(detail), chats: targets }
+        } else if (kind === 'character') baseline.stored = { kind, detail: structuredClone(value) }
+        else baseline.stored = { kind: kind as 'conversation' | 'preset', value: structuredClone(value) }
+    }
+
+    private current(kind: PluginReadKind, target: string): Baseline | undefined {
+        const baseline = this.baselines.get(JSON.stringify([kind, target]))
+        return baseline?.authority === this.authority() ? baseline : undefined
+    }
+
+    // Composes a read value by reference from current baselines; callers never mutate it.
+    private compose(kind: PluginReadKind, target: string): unknown {
+        const stored = this.current(kind, target)?.stored
+        if (!stored) return undefined
+        if (stored.kind === 'character') {
+            if (!stored.chats) return stored.detail
+            return { ...stored.detail as object, chats: stored.chats.map(chat => this.compose('conversation', chat)).filter(chat => chat !== undefined) }
+        }
+        if (stored.kind !== 'database') return stored.value
+        const result: Record<string, unknown> = {}
+        for (const [field, entry] of stored.fields) {
+            const value = 'children' in entry
+                ? entry.targets.map(child => this.compose(entry.children, child)).filter(child => child !== undefined)
+                : entry.value
+            Object.defineProperty(result, field, { value, enumerable: true, configurable: true, writable: true })
+        }
+        return result
+    }
+
+    // Resolves the baseline of a submitted value: its token's target, or the newest read of the target.
+    private resolve(value: unknown, kind: PluginReadKind, target: string, fallback: unknown, staleWithoutRead: boolean): unknown {
+        const token = value && typeof value === 'object' ? provenance.get(value) : undefined
+        if (token) {
+            const read = this.tokens.get(token)
+            const baseline = read && this.current(read.kind, read.target)
+            if (!read || baseline?.token !== token) throw new PluginReadBaselineError('stale')
+            if (read.kind !== kind || read.target !== target) throw new PluginReadBaselineError('target')
+            return this.compose(kind, target)
+        }
+        if (this.current(kind, target)) return this.compose(kind, target)
+        if (staleWithoutRead && this.hasRead(kind, target)) throw new PluginReadBaselineError('stale')
+        return fallback
+    }
+
+    private withNestedBaselines(baseline: unknown, submitted: any, kind: PluginReadKind, target: string): unknown {
+        if (!baseline || typeof baseline !== 'object' || !submitted || typeof submitted !== 'object') return baseline
+        const overlay = (records: unknown, children: unknown, childKind: PluginReadKind, id: string, childTarget: (child: any) => string) => {
+            if (!Array.isArray(children)) return records
+            let result = Array.isArray(records) ? records : undefined
+            const positions = new Map<unknown, number>()
+            result?.forEach((record: any, index) => { if (!positions.has(record?.[id])) positions.set(record?.[id], index) })
+            for (const child of children) {
+                const index = positions.get(child?.[id]) ?? -1
+                const previous = index >= 0 ? result![index] : undefined
+                const target = childTarget(child)
+                const next = this.withNestedBaselines(this.resolve(child, childKind, target, previous, true), child, childKind, target)
+                if (next === undefined || next === previous) continue
+                if (result === records) result = [...(result ?? [])]
+                if (index >= 0) result![index] = next
+                else positions.set(child?.[id], result!.push(next) - 1)
             }
+            return result
+        }
+        let result = baseline as Record<string, unknown>
+        const replace = (field: string, value: unknown) => {
+            if (value === result[field]) return
+            if (result === baseline) result = { ...result }
+            Object.defineProperty(result, field, { value, enumerable: true, configurable: true, writable: true })
+        }
+        if (kind === 'database') {
+            for (const [field, childKind, id] of nestedRecords) {
+                replace(field, overlay(result[field], submitted[field], childKind, id, child => child?.[id]))
+            }
+        } else if (kind === 'character') {
+            replace('chats', overlay(result.chats, submitted.chats, 'conversation', 'id', chat => JSON.stringify([target, chat?.id])))
         }
         return result
     }
 
     intent(value: unknown, kind: PluginReadKind, target: string, admission: unknown): PluginFieldIntent[] {
         if (this.closed) throw new PluginReadBaselineError('closed')
-        const token = value && typeof value === 'object' ? provenance.get(value) : undefined
-        if (token) {
-            const baseline = this.baselines.get(token)
-            if (!baseline || baseline.authority !== this.authority()) throw new PluginReadBaselineError('stale')
-            if (baseline.kind !== kind || baseline.target !== target) throw new PluginReadBaselineError('target')
-            return diffPluginReadBaseline(this.withNestedBaselines(baseline.value, value, kind, target), value, kind)
-        }
-        const compatible = [...this.baselines.values()].filter(baseline => baseline.kind === kind && baseline.target === target && baseline.authority === this.authority())
-        if (!compatible.length) {
-            if (this.history.has(JSON.stringify([this.owner, kind, target]))) throw new PluginReadBaselineError('stale')
-            return diffPluginReadBaseline(this.withNestedBaselines(admission, value, kind, target), value, kind)
-        }
-        const candidates = compatible.map(baseline => diffPluginReadBaseline(this.withNestedBaselines(baseline.value, value, kind, target), value, kind))
-        if (candidates.some(candidate => canonical(candidate) !== canonical(candidates[0]))) throw new PluginReadBaselineError('ambiguous')
-        return candidates[0]
+        const baseline = this.resolve(value, kind, target, admission, true)
+        return diffPluginReadBaseline(this.withNestedBaselines(baseline, value, kind, target), value, kind)
     }
 }
 

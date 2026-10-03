@@ -9,17 +9,23 @@ interface NativeBindingContent {
     hypaValueCount: string
     pluginLocalValueCount: string
     opaqueSharedUnitCount: string
+    pluginLocalParticipating: boolean
     protectedValues?: Record<string, unknown>
     sharedVariables?: Record<string, unknown>
 }
 
-export async function inspectLocalBindingData(): Promise<BindingLocalContent> {
-    const native = await invoke<NativeBindingContent>('pds_lww_binding_content')
+async function readLocalBindingData(): Promise<{ content: BindingLocalContent; pluginLocalParticipating: boolean }> {
+    const { pluginLocalParticipating, ...native } = await invoke<NativeBindingContent>('pds_lww_binding_content')
     for (const key of ['managedAliasCount', 'ordinaryPluginValueCount', 'hypaValueCount', 'pluginLocalValueCount', 'opaqueSharedUnitCount'] as const) {
         validateBindingCount(native[key])
     }
+    if (typeof pluginLocalParticipating !== 'boolean') throw new Error('Invalid binding content')
     const factoryLibrary = structuredClone(normalizeDatabaseDefaults({} as Database)) as unknown as Record<string, unknown>
-    return { ...native, factoryLibrary, factoryManagedAliasCount: '0' }
+    return { content: { ...native, factoryLibrary, factoryManagedAliasCount: '0' }, pluginLocalParticipating }
+}
+
+export async function inspectLocalBindingData(): Promise<BindingLocalContent> {
+    return (await readLocalBindingData()).content
 }
 
 export async function hasLocalBindingData(): Promise<boolean> {
@@ -27,6 +33,7 @@ export async function hasLocalBindingData(): Promise<boolean> {
 }
 
 export async function hasLocalSharedBindingData(): Promise<boolean> {
-    const content = await inspectLocalBindingData()
-    return hasNonDefaultBindingData({ ...content, pluginLocalValueCount: '0' })
+    const { content, pluginLocalParticipating } = await readLocalBindingData()
+    // Plugin-local values are shared only while this device takes part in plugin-local sync.
+    return hasNonDefaultBindingData(pluginLocalParticipating ? content : { ...content, pluginLocalValueCount: '0' })
 }

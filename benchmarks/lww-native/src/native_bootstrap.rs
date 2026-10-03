@@ -122,7 +122,7 @@ pub(crate) fn source_client(source:&mut source_process::SourceProcess,store:&Per
     let registration=source.register(name,registration_request_id)?;
     let config=server_sync::client::ServerConfig::parse_uri(&registration.uri).map_err(|_|"source registration invalid")?;
     let client=server_sync::client::ServerClient::new(config.clone()).map_err(|e|format!("{e:?}"))?;
-    client.resolve_identity(false).map_err(|e|format!("{e:?}"))?;
+    client.resolve_identity().map_err(|e|format!("{e:?}"))?;
     let stored=server_sync::credentials::StoredConfig::persist(store.repository_root(),&config).map_err(|e|format!("{e:?}"))?;
     let mut core=LwwClient::new(store.repository_root(),config).map_err(|e|format!("{e:?}"))?;
     core.access=Some(stored.clone());core.client.test_io=Some(Arc::new(server_sync::client::TestIoCounters::default()));

@@ -707,7 +707,9 @@ fn initial_state_retry_settles_original_acceptance_without_republishing_acked_un
                 .query_row("SELECT COUNT(*) FROM publications", [], |row| row
                     .get::<_, i64>(0))
                 .unwrap(),
-            2
+            // The next fence drops both acknowledged publications and the
+            // empty outbox adds none.
+            if attempt == 0 { 2 } else { 0 }
         );
     }
 }
@@ -1261,4 +1263,169 @@ fn a_new_target_initialization_preserves_received_issuers_under_its_authenticate
     receive(&d, &mut peer);
     assert_eq!(peer.read_root(None).unwrap().value["language"], "ja");
     assert_eq!(peer.read_root(None).unwrap().value["askRemoval"], false);
+}
+
+/// One synthetic issuer on the server side of a test.
+struct ServerWriter {
+    server: Arc<Store>,
+    device: risunest_sync_server::store::Device,
+    library_id: String,
+}
+impl ServerWriter {
+    const WRITER: &'static str = "00000000-0000-4000-8000-0000000000aa";
+    fn new(server: &Arc<Store>) -> Self {
+        let credential = server.add_device().unwrap();
+        Self {
+            server: server.clone(),
+            device: server
+                .authenticate(&credential.library_id, &credential.token)
+                .unwrap(),
+            library_id: credential.library_id,
+        }
+    }
+    fn push(&self, operation: &str, key: &UnitKey, physical: u64, value: UnitValue) {
+        self.server
+            .push(
+                &self.device,
+                &PushRequest {
+                    library_id: self.library_id.clone(),
+                    writer_id: Self::WRITER.into(),
+                    operation_id: operation.into(),
+                    changes: vec![UnitChange {
+                        key: key.clone(),
+                        stamp: Stamp {
+                            physical_ms: physical.into(),
+                            logical: 0,
+                            writer_id: Self::WRITER.into(),
+                        },
+                        value,
+                    }],
+                },
+            )
+            .unwrap();
+    }
+}
+
+#[test]
+fn bootstrap_keeps_a_lower_stamped_retirement_from_the_journal_tail() {
+    let key = UnitKey::new(&["exists", "character", "synthetic"]).unwrap();
+    let writer: Arc<std::sync::OnceLock<ServerWriter>> = Arc::default();
+    let retire = (writer.clone(), key.clone());
+    let pinned = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let server = LocalServerFixture::with_router(move |router| {
+        router.layer(axum::middleware::from_fn(
+            move |request: axum::extract::Request, next: axum::middleware::Next| {
+                let (writer, key) = retire.clone();
+                let pinned = pinned.clone();
+                async move {
+                    let pin = request.method() == axum::http::Method::POST
+                        && request.uri().path() == "/state/pins";
+                    let response = next.run(request).await;
+                    // The retirement lands after the pin copied the live
+                    // existence, so only the journal tail carries it.
+                    if pin && !pinned.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                        tokio::task::spawn_blocking(move || {
+                            writer
+                                .get()
+                                .unwrap()
+                                .push("retire", &key, 20, UnitValue::Deleted)
+                        })
+                        .await
+                        .unwrap();
+                    }
+                    response
+                }
+            },
+        ))
+    });
+    assert!(writer.set(ServerWriter::new(&server.server)).is_ok());
+    writer.get().unwrap().push(
+        "create",
+        &key,
+        100,
+        UnitValue::inline(br#"{"type":"character"}"#).unwrap(),
+    );
+    let (_root, mut store) = local();
+    let client = server.client(&store);
+    let upper = client.admission().unwrap();
+    let (_, changes) = client.state(&mut store, upper).unwrap();
+    let existence = changes.iter().find(|change| change.key == key).unwrap();
+    assert_eq!(existence.value, UnitValue::Deleted);
+    assert_eq!(existence.stamp.physical_ms.0, 20);
+}
+
+fn publication_ids(client: &LwwClient) -> Vec<String> {
+    let mut query = client
+        .log
+        .0
+        .prepare("SELECT id FROM publications ORDER BY rowid")
+        .unwrap();
+    query
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<rusqlite::Result<_>>()
+        .unwrap()
+}
+
+#[test]
+fn settled_publications_leave_the_log_at_the_next_fence_and_detached_ones_stay() {
+    let server = LocalServerFixture::new();
+    let (_root, mut store) = local();
+    let client = server.client(&store);
+    let digest = "0".repeat(64);
+    let detached = serde_json::json!({"kind":"auth-inactive-detached","authorizationId":"former","bodyDigest":digest,"historicalAcceptance":"unknown"});
+    let rejected = OperationReceipt::Rejected {
+        operation_id: "rejected".into(),
+        body_digest: digest.clone(),
+        error: "clock-skew".into(),
+        server_time_ms: 1.into(),
+    };
+    for (id, receipt) in [
+        ("detached", detached.to_string()),
+        ("rejected", serde_json::to_string(&rejected).unwrap()),
+    ] {
+        client
+            .log
+            .0
+            .execute(
+                "INSERT INTO publications VALUES(?1,?2,x'7b7d','{}',?3,1)",
+                rusqlite::params![id, digest, receipt],
+            )
+            .unwrap();
+    }
+    for index in 0..4 {
+        save(
+            &mut store,
+            &["root", "language"],
+            serde_json::json!(format!("synthetic-{index}")),
+        );
+        let receipt = publish_cycle(&client, &mut store, &[]).unwrap().unwrap();
+        assert_eq!(
+            publication_ids(&client),
+            ["detached".to_string(), receipt.operation_id]
+        );
+    }
+}
+
+#[test]
+fn clock_retry_does_not_decode_publications_of_another_authority() {
+    let server = LocalServerFixture::new();
+    let (_root, mut store) = local();
+    let client = server.client(&store);
+    let other = store.lww_binding_authority().unwrap().0 + 1;
+    client
+        .log
+        .0
+        .execute(
+            "INSERT INTO publications VALUES('other',?1,x'7b7d',?2,'{}',1)",
+            rusqlite::params![
+                "0".repeat(64),
+                serde_json::json!({"authority": other.to_string()}).to_string()
+            ],
+        )
+        .unwrap();
+    let request = header(&store);
+    let result = client.retry_unpublished(&mut store, &request).unwrap();
+    assert!(result.affected_keys.is_empty());
+    assert_eq!(publication_ids(&client), ["other"]);
 }

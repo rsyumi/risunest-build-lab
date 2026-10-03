@@ -75,9 +75,9 @@ describe('RisuNestStorageDashboard', () => {
     })
 
     it('localizes snapshot reasons without exposing unknown tokens', async () => {
-        maintenance.listNativePersistentSnapshots.mockResolvedValueOnce(['manual', 'periodic', 'pre-restore', 'data-health-repair', 'synthetic-unknown'].map((reason, index) => ({ id: `snapshot-${index}`, reason, bytes: 1, reclaimableBytes: 0, modifiedAt: 1 })))
+        maintenance.listNativePersistentSnapshots.mockResolvedValueOnce(['manual', 'periodic', 'data-health-repair', 'synthetic-unknown'].map((reason, index) => ({ id: `snapshot-${index}`, reason, bytes: 1, reclaimableBytes: 0, modifiedAt: 1 })))
         const target = setup()
-        await vi.waitFor(() => expect(target.querySelectorAll('[data-storage-backup-list="snapshots"] [data-storage-backup-row]')).toHaveLength(5))
+        await vi.waitFor(() => expect(target.querySelectorAll('[data-storage-backup-list="snapshots"] [data-storage-backup-row]')).toHaveLength(4))
         expect(target.textContent).toContain(languageEnglish.risuNest.storage.snapshotReasons.dataHealthRepair)
         expect(target.textContent).not.toContain('synthetic-unknown')
         expect(target.textContent).not.toContain('data-health-repair')
@@ -381,6 +381,20 @@ describe('RisuNestStorageDashboard', () => {
         expect(maintenance.restoreNativePersistentSnapshot).toHaveBeenCalledOnce()
         expect(alerts.alertConfirm).not.toHaveBeenCalled()
         expect(alerts.alertError).not.toHaveBeenCalled()
+    })
+
+    it('asks to connect sync when a snapshot restore cannot reach the bound sync target', async () => {
+        const target = setup()
+        maintenance.restoreNativePersistentSnapshot.mockRejectedValue(
+            Object.assign(new Error('Sync is unavailable for library replacement'), { code: 'sync-unavailable' }),
+        )
+        await vi.waitFor(() => expect(exact(target, 'Restore')).toBeDefined())
+
+        exact(target, 'Restore')!.click()
+
+        await vi.waitFor(() => expect(alerts.alertError).toHaveBeenCalledOnce())
+        expect(alerts.alertError).toHaveBeenCalledWith(languageEnglish.risuNest.backup.syncUnavailable)
+        expect(alerts.alertError).not.toHaveBeenCalledWith(languageEnglish.risuNest.storage.actionFailed)
     })
 
     it('marks a running action busy on its button instead of swapping the label', async () => {

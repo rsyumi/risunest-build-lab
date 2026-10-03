@@ -8,6 +8,11 @@ use risunest_sync_wire::{
     unit::UnitKey,
 };
 
+#[cfg(not(test))]
+const NOTIFY_CHECK: Duration = Duration::from_secs(1);
+#[cfg(test)]
+const NOTIFY_CHECK: Duration = Duration::from_millis(20);
+
 pub(super) async fn time(State(app): State<App>) -> Result<Response> {
     blocking(move || Ok(Json(app.store.time_sample()?).into_response())).await
 }
@@ -158,27 +163,34 @@ async fn notify_socket(
 ) {
     let mut announced = app.store.head_announcements();
     let mut last = None;
-    let mut check = tokio::time::interval(Duration::from_secs(1));
+    // Head moves and revocations are announced, so the database is read only
+    // then; the timer rechecks the in-memory workload state.
+    let mut stale = true;
+    let mut check = tokio::time::interval(NOTIFY_CHECK);
     loop {
         if *app.shutdown.borrow() || !app.workload.status().is_ok_and(|s| s.state == "open") {
             break;
         }
-        let store = app.store.clone();
-        let actor = device.clone();
-        let Ok(head) = blocking(move || store.device_head(&actor)).await else {
-            break;
-        };
-        let Ok(seq) = DecimalU64::try_from(head.seq.as_str().to_owned()) else {
-            break;
-        };
-        if last != Some(seq) {
-            let Ok(body) = serde_json::to_string(&SeqNotification::Seq { seq }) else {
+        if std::mem::take(&mut stale) {
+            #[cfg(test)]
+            tests::HEAD_READS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let store = app.store.clone();
+            let actor = device.clone();
+            let Ok(head) = blocking(move || store.device_head(&actor)).await else {
                 break;
             };
-            if !send_notice(&mut socket, &mut app.shutdown, Message::Text(body.into())).await {
+            let Ok(seq) = DecimalU64::try_from(head.seq.as_str().to_owned()) else {
                 break;
+            };
+            if last != Some(seq) {
+                let Ok(body) = serde_json::to_string(&SeqNotification::Seq { seq }) else {
+                    break;
+                };
+                if !send_notice(&mut socket, &mut app.shutdown, Message::Text(body.into())).await {
+                    break;
+                }
+                last = Some(seq);
             }
-            last = Some(seq);
         }
         tokio::select! {
             message = socket.recv() => match message {
@@ -188,8 +200,14 @@ async fn notify_socket(
                 Some(Ok(Message::Pong(_))) => (),
                 _ => break,
             },
-            changed = announced.changed() => if changed.is_err() { break; },
-            _ = check.tick() => (),
+            changed = announced.changed() => {
+                if changed.is_err() { break; }
+                stale = true;
+            }
+            _ = check.tick() => {
+                #[cfg(test)]
+                tests::CHECKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            }
             _ = stopped(&mut app.shutdown) => break,
         }
     }
@@ -212,5 +230,103 @@ async fn send_notice(
     tokio::select! {
         result = tokio::time::timeout(Duration::from_secs(10), socket.send(message)) => matches!(result, Ok(Ok(()))),
         _ = stopped(shutdown) => false,
+    }
+}
+
+#[cfg(test)]
+pub(super) mod tests {
+    use futures_util::{SinkExt, StreamExt};
+    use risunest_sync_wire::{
+        lww::{PushRequest, UnitChange},
+        stamp::Stamp,
+        unit::{UnitKey, UnitValue},
+    };
+    use std::{
+        sync::{
+            atomic::{AtomicU64, Ordering},
+            Arc,
+        },
+        time::Duration,
+    };
+    use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Message};
+
+    pub(crate) static HEAD_READS: AtomicU64 = AtomicU64::new(0);
+    pub(crate) static CHECKS: AtomicU64 = AtomicU64::new(0);
+
+    type Socket = tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >;
+    async fn next(socket: &mut Socket) -> Message {
+        tokio::time::timeout(Duration::from_secs(5), socket.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_idle_socket_reads_the_head_only_when_it_is_announced() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(crate::store::Store::init(dir.path()).unwrap());
+        let credential = store.add_device().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let router = super::super::router(store.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, router).await.unwrap() });
+        let mut request = format!("ws://{address}/notify")
+            .into_client_request()
+            .unwrap();
+        request.headers_mut().insert(
+            "authorization",
+            format!("Bearer {}", credential.token).parse().unwrap(),
+        );
+        request
+            .headers_mut()
+            .insert("x-risu-library", credential.library_id.parse().unwrap());
+        let (mut socket, _) = tokio_tungstenite::connect_async(request).await.unwrap();
+        assert_eq!(
+            next(&mut socket).await.into_text().unwrap(),
+            r#"{"type":"seq","seq":"0"}"#
+        );
+        let reads = HEAD_READS.load(Ordering::SeqCst);
+        let checks = CHECKS.load(Ordering::SeqCst);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while CHECKS.load(Ordering::SeqCst) < checks + 5 {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(HEAD_READS.load(Ordering::SeqCst), reads);
+        let actor = store
+            .authenticate(&credential.library_id, &credential.token)
+            .unwrap();
+        let writer = "00000000-0000-4000-8000-000000000001";
+        store
+            .push(
+                &actor,
+                &PushRequest {
+                    library_id: credential.library_id.clone(),
+                    writer_id: writer.into(),
+                    operation_id: "announced".into(),
+                    changes: vec![UnitChange {
+                        key: UnitKey::new(&["root", "key"]).unwrap(),
+                        stamp: Stamp {
+                            physical_ms: 1.into(),
+                            logical: 0,
+                            writer_id: writer.into(),
+                        },
+                        value: UnitValue::inline(br#""value""#).unwrap(),
+                    }],
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            next(&mut socket).await.into_text().unwrap(),
+            r#"{"type":"seq","seq":"1"}"#
+        );
+        assert_eq!(HEAD_READS.load(Ordering::SeqCst), reads + 1);
+        socket.send(Message::Close(None)).await.unwrap();
+        server.abort();
     }
 }

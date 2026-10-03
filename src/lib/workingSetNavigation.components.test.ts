@@ -13,6 +13,7 @@ const persistence = vi.hoisted(() => ({
 vi.mock('@lucide/svelte', () => Object.fromEntries([
     'ArrowLeft', 'MenuIcon', 'ShellIcon', 'Settings', 'ListIcon', 'LayoutGridIcon',
     'FolderIcon', 'FolderOpenIcon', 'HomeIcon', 'WrenchIcon', 'User2Icon',
+    'DownloadIcon', 'PencilIcon', 'HardDriveUploadIcon', 'TrashIcon', 'SplitIcon', 'FolderPlusIcon', 'BookmarkCheckIcon',
 ].map((name) => [name, () => {}])))
 
 vi.mock('src/ts/stores.svelte', async () => {
@@ -26,6 +27,7 @@ vi.mock('src/ts/stores.svelte', async () => {
         botMakerMode: writable(false), sideBarClosing: writable(false), sideBarStore: writable(false),
         OpenRealmStore: writable(false), SizeStore: writable({ w: 1200, h: 800 }),
         QuickSettings: { open: false }, additionalHamburgerMenu: [], alertStore: writable(null),
+        bookmarkListOpen: writable(false),
     }
 })
 vi.mock('src/ts/storage/persistentDataRuntime.svelte', () => ({
@@ -36,14 +38,19 @@ vi.mock('src/ts/characters', () => ({
     changeChar: persistence.changeChar,
     characterFormatUpdate: (character: unknown) => character,
     commitDetachedCharacter: vi.fn(), createBlankChar: vi.fn(), addCharacter: vi.fn(), getCharImage: vi.fn(),
+    addNewChat: vi.fn(), duplicateChat: vi.fn(), editSelectedChatList: vi.fn(), exportChat: vi.fn(),
+    importChat: vi.fn(), exportAllChats: vi.fn(), removeChat: vi.fn(),
 }))
 vi.mock('src/ts/storage/database.svelte', () => ({ setDatabase: vi.fn() }))
-vi.mock('src/ts/alert', () => ({ alertError: persistence.alertError, alertInput: vi.fn(), alertSelect: vi.fn() }))
-vi.mock('src/ts/globalApi.svelte', () => ({ checkCharOrder: vi.fn(), getFileSrc: vi.fn(), saveAsset: vi.fn() }))
+vi.mock('src/ts/alert', () => ({ alertError: persistence.alertError, alertInput: vi.fn(), alertSelect: vi.fn(),
+    alertChatOptions: vi.fn(), alertConfirm: vi.fn(), alertNormal: vi.fn(), alertStore: {subscribe: vi.fn()},
+}))
+vi.mock('src/ts/chatBindings.svelte', () => ({bindPersona: vi.fn(), chatBindingBlockedByGeneration: () => false, saveChatBinding: vi.fn()}))
+vi.mock('src/ts/globalApi.svelte', () => ({ checkCharOrder: vi.fn(), getFileSrc: vi.fn(), saveAsset: vi.fn(), changeChatTo: vi.fn() }))
 vi.mock('src/ts/util', async () => {
     const { DBState } = await import('src/ts/stores.svelte')
     return {
-        getCharacterIndexObject: () => ({}), selectSingleFile: vi.fn(),
+        getCharacterIndexObject: () => ({}), selectSingleFile: vi.fn(), sortableOptions: {},
         findCharacterIndexbyId: (id: string) => DBState.db.characters.findIndex((character) => character.chaId === id),
     }
 })
@@ -51,6 +58,7 @@ vi.mock('src/ts/sync/multiuser', async () => {
     const { writable } = await import('svelte/store')
     return {
         joinMultiuserRoom: vi.fn(), ConnectionIsHost: writable(false),
+        createMultiuserRoom: vi.fn(),
         ConnectionOpenStore: writable(false), RoomIdStore: writable('synthetic-room'),
     }
 })
@@ -68,11 +76,13 @@ vi.mock('src/lang', () => ({
 
 import { language } from 'src/lang'
 import { DBState, MobileSideBar, PlaygroundStore, selectedCharID, settingsOpen } from 'src/ts/stores.svelte'
+import { createCatalogCharacterStub } from 'src/ts/storage/workingSetCatalog'
 
 const visualPanels = [
     './SideBars/SidebarIndicator.svelte', './SideBars/CharConfig.svelte',
     './SideBars/SelectedConversationEditor.svelte', './SideBars/SidebarAvatar.svelte',
-    './SideBars/SideChatList.svelte', './SideBars/DevTool.svelte',
+    './SideBars/Toggles.svelte', './SideBars/DevTool.svelte',
+    './UI/GUI/Button.svelte', './UI/GUI/CheckInput.svelte', './UI/GUI/TextInput.svelte',
     './Others/QuickSettingsGUI.svelte', './Others/PluginDefinedIcon.svelte',
     './Playground/PlaygroundEmbedding.svelte', './Playground/PlaygroundTokenizer.svelte',
     './Playground/PlaygroundJinja.svelte', './Playground/PlaygroundSyntax.svelte',
@@ -94,8 +104,8 @@ let mounted: ReturnType<typeof mount> | undefined
 beforeEach(() => {
     vi.resetAllMocks()
     DBState.db.characters = [
-        { type: 'character', chaId: 'synthetic-owner', name: 'Synthetic owner', chatPage: 0, chats: [] },
-        { type: 'character', chaId: '§playground', name: 'Playground owner', chatPage: 0, chats: [] },
+        { type: 'character', chaId: 'synthetic-owner', name: 'Synthetic owner', chatPage: 0, chats: [], chatFolders: [] },
+        { type: 'character', chaId: '§playground', name: 'Playground owner', chatPage: 0, chats: [], chatFolders: [] },
     ] as typeof DBState.db.characters
     DBState.db.characterOrder = []
     DBState.db.menuSideBar = true
@@ -144,6 +154,22 @@ function buttonNamed(name: string): HTMLButtonElement {
 }
 
 describe('mounted navigation waits for persistence', () => {
+    it('keeps the open chat drawer safe while Home releases the selected character before clearing selection', async () => {
+        persistence.deactivate.mockImplementationOnce(async () => {
+            DBState.db.characters[0] = createCatalogCharacterStub({id: 'synthetic-owner', name: 'Synthetic owner',
+                type: 'character', configuredIndex: 0, recentAt: 0, conversationCount: 0, trashed: false})
+            await tick()
+            expect(get(selectedCharID)).toBe(0)
+            return true
+        })
+        mounted = mount(Sidebar, {target})
+        await tick()
+        buttonNamed(language.home).click()
+        await vi.waitFor(() => expect(get(selectedCharID)).toBe(-1))
+        expect(persistence.alertError).not.toHaveBeenCalled()
+        expect(DBState.db.characters[0]).not.toHaveProperty('chatFolders')
+    })
+
     it.each(['resolve', 'reject', 'refuse'] as const)('mobile back handles %s without clearing selection early', async (outcome) => {
         const pending = deferredPersistence()
         persistence.deactivate.mockReturnValueOnce(pending.promise)

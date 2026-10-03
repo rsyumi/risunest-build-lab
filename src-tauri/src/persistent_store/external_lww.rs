@@ -166,6 +166,27 @@ impl SealedPublication {
             .collect()
     }
 }
+pub(super) fn carry_pending_publications(db: &rusqlite::Connection, old: DecimalU64, new: DecimalU64) -> StoreResult<()> {
+    let pending: Vec<(String, String, String, String)> = {
+        let mut statement = db.prepare("SELECT target,writer,seq,metadata FROM external_lww_segments WHERE complete=0 AND authority=?1")?;
+        let rows = statement
+            .query_map([old.0.to_string()], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        rows
+    };
+    for (target, writer, seq, metadata) in pending {
+        let mut publication: SealedPublication = serde_json::from_str(&metadata)?;
+        publication.authority = new;
+        for entry in &mut publication.entries {
+            entry.target_authority = new;
+        }
+        db.execute(
+            "UPDATE external_lww_segments SET authority=?4,metadata=?5 WHERE target=?1 AND writer=?2 AND seq=?3",
+            params![target, writer, seq, new.0.to_string(), serde_json::to_string(&publication)?],
+        )?;
+    }
+    Ok(())
+}
 impl PersistentStore {
     pub(super) fn external_lww_active_asset_roots(&self) -> StoreResult<crate::asset_repository::migration_gc::AssetRootSet> {
         let device = self.device_store()?;
@@ -254,6 +275,115 @@ impl PersistentStore {
         }
         Ok(())
     }
+    /// Settles a publication that a binding switch left under an earlier
+    /// authority. One the repository holds keeps its sequence; any other is
+    /// removed so the sequence goes to the next publication.
+    pub(crate) fn external_lww_settle_detached(
+        &mut self,
+        publication: &SealedPublication,
+        landed: bool,
+    ) -> StoreResult<()> {
+        let seq = publication.seq.0.to_string();
+        let tx = self.device_store_mut()?.transaction()?;
+        let authority: String = tx.query_row(
+            "SELECT binding_authority FROM lww_clock WHERE singleton=1",
+            [],
+            |r| r.get(0),
+        )?;
+        let stored: Option<(String, String)> = tx
+            .query_row(
+                "SELECT authority,metadata FROM external_lww_segments WHERE target=?1 AND writer=?2 AND seq=?3",
+                params![publication.target, publication.writer, seq],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((stored_authority, metadata)) = stored else {
+            return Err(super::lww::error("detached-publication-integrity"));
+        };
+        let mut stored: SealedPublication = serde_json::from_str(&metadata)?;
+        if stored_authority == authority
+            || stored_authority != publication.authority.0.to_string()
+            || stored.object_id != publication.object_id
+            || stored.sha256 != publication.sha256
+            || stored.dispatched != publication.dispatched
+            || stored.complete != publication.complete
+        {
+            return Err(super::lww::error("detached-publication-integrity"));
+        }
+        let next: Option<String> = tx
+            .query_row(
+                "SELECT next_seq FROM external_lww_sequences WHERE target=?1 AND writer=?2",
+                params![publication.target, publication.writer],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let next = next
+            .map(|value| value.try_into().map(|value: DecimalU64| value.0).map_err(super::lww::error))
+            .unwrap_or(Ok(1))?;
+        if next != publication.seq.0 {
+            return Err(super::lww::error("detached-publication-integrity"));
+        }
+        let seen: Option<String> = tx
+            .query_row(
+                "SELECT sha256 FROM external_lww_seen WHERE target=?1 AND writer=?2 AND seq=?3",
+                params![publication.target, publication.writer, seq],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if landed {
+            if seen.as_deref().is_some_and(|hash| hash != publication.sha256) {
+                return Err(super::lww::error("writer-sequence-integrity"));
+            }
+            stored.complete = true;
+            let following = publication
+                .seq
+                .0
+                .checked_add(1)
+                .ok_or_else(|| super::lww::error("sequence-overflow"))?;
+            tx.execute(
+                "UPDATE external_lww_segments SET metadata=?4,complete=1 WHERE target=?1 AND writer=?2 AND seq=?3",
+                params![publication.target, publication.writer, seq, serde_json::to_string(&stored)?],
+            )?;
+            tx.execute(
+                "INSERT OR IGNORE INTO external_lww_seen(target,writer,seq,sha256) VALUES(?1,?2,?3,?4)",
+                params![publication.target, publication.writer, seq, publication.sha256],
+            )?;
+            tx.execute(
+                "INSERT INTO external_lww_sequences(target,writer,next_seq) VALUES(?1,?2,?3)
+                ON CONFLICT(target,writer) DO UPDATE SET next_seq=excluded.next_seq",
+                params![publication.target, publication.writer, following.to_string()],
+            )?;
+        } else {
+            // A sequence some segment already used is never given to another.
+            if seen.is_some() {
+                return Err(super::lww::error("writer-sequence-integrity"));
+            }
+            tx.execute(
+                "DELETE FROM external_lww_segments WHERE target=?1 AND writer=?2 AND seq=?3",
+                params![publication.target, publication.writer, seq],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+    /// Whether the current binding has a segment this device sent that no
+    /// answer has confirmed.
+    pub(crate) fn external_lww_unconfirmed_dispatch(&self) -> StoreResult<bool> {
+        let authority = self.lww_binding_authority()?;
+        let writer = self.lww_clock_state()?.writer_id;
+        let device = self.device_store()?;
+        let mut statement = device.connection().prepare(
+            "SELECT metadata FROM external_lww_segments WHERE complete=0 AND authority=?1 AND writer=?2",
+        )?;
+        let rows = statement.query_map(params![authority.0.to_string(), writer], |row| row.get::<_, String>(0))?;
+        for row in rows {
+            let publication: SealedPublication = serde_json::from_str(&row?)?;
+            if publication.dispatched {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
     pub(crate) fn external_lww_stable_receive(
         &self,
         request: super::lww::StageReceive,
@@ -320,11 +450,16 @@ impl PersistentStore {
         )
     }
     pub(crate) fn external_lww_object_is_control(&self, hash: &str) -> StoreResult<bool> {
-        Ok(self.connection.query_row(
-            "SELECT EXISTS(SELECT 1 FROM message_page_objects WHERE hash=?1)",
-            [hash],
-            |r| r.get(0),
-        )?)
+        for connection in [&self.connection, self.device_store()?.connection()] {
+            if connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM message_page_objects WHERE hash=?1)",
+                [hash],
+                |r| r.get(0),
+            )? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
     pub(crate) fn external_lww_witness_object(&self, target: &str, hash: &str) -> StoreResult<()> {
         self.device_store()?.connection().execute(
@@ -393,8 +528,10 @@ impl PersistentStore {
     }
     pub(crate) fn external_lww_verified_control_size(&self, hash:&str) -> StoreResult<Option<u64>> {
         risunest_sync_wire::validate_hash(hash).map_err(super::lww::error)?;
+        // A marked control may be collected, so it is fetched again instead.
         let size:Option<i64>=self.connection.query_row("SELECT length(o.body) FROM message_page_objects o
-            JOIN message_page_verified_objects v ON v.hash=o.hash WHERE o.hash=?1",[hash],|row|row.get(0)).optional()?;
+            JOIN message_page_verified_objects v ON v.hash=o.hash WHERE o.hash=?1
+            AND NOT EXISTS(SELECT 1 FROM message_page_object_marks m WHERE m.hash=o.hash)",[hash],|row|row.get(0)).optional()?;
         size.map(|size|u64::try_from(size).map_err(super::lww::error)).transpose()
     }
     fn external_lww_store_data_catalog_witness(&self,target:&str,witness:&DataCatalogWitness) -> StoreResult<()> {

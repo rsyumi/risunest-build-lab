@@ -344,8 +344,6 @@ mod tests {
                 point_observation: None,
                 confirm_other_device: None,
                 confirm_last_retained: None,
-                conflict_id: None,
-                choice: None,
                 restore_areas: None,
                 target_revision: None,
                 session: None,

@@ -29,10 +29,13 @@
     let cache = $state<ServerSyncCacheUsage | undefined>()
     let dispose = () => {}
     let inboxDispose = () => {}
+    const writerRecoveryCodes = ['writer-collision', 'equal-stamp-integrity']
+    let writerRecovery = $derived(writerRecoveryCodes.includes(view.error))
     const message = (error: unknown) => {
         const token = typeof error === 'object' && error && 'code' in error ? String(error.code) : ''
         if (['clock-skew', 'incoming-clock-skew', 'accepted-clock-correction-required'].includes(token)) return language.lwwSync.clockBlocked
-        if (['writer-collision', 'equal-stamp-integrity'].includes(token)) return language.lwwSync.writerCollision
+        if (writerRecoveryCodes.includes(token)) return language.lwwSync.writerCollision
+        if (token === 'unit-too-large') return language.lwwSync.unitTooLarge
         if (token.startsWith('credential-')) return copy.credentialUnavailable
         if (token.startsWith('qr-')) return token.includes('permission') ? copy.cameraDenied : copy.cameraUnavailable
         return copy.errorHelp
@@ -77,7 +80,7 @@
             <SettingRow label={copy.libraryId}><span class="break-all">{candidate.libraryId}</span></SettingRow>
             <div class="flex flex-wrap gap-2">
                 <SettingButton onclick={() => void run(() => connect())} disabled={busy}>{copy.connect}</SettingButton>
-                <SettingButton onclick={() => void run(() => connect(true))} disabled={busy}>{language.lwwSync.newDeviceAction}</SettingButton>
+                {#if writerRecovery}<SettingButton onclick={() => void run(() => connect(true))} disabled={busy}>{language.lwwSync.newDeviceAction}</SettingButton>{/if}
                 <SettingButton onclick={() => { candidate = undefined }} disabled={busy}>{copy.discardRegistration}</SettingButton>
             </div>
         {/if}

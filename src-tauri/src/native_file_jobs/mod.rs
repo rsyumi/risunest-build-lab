@@ -3079,7 +3079,7 @@ impl restore::ReplacementSink for PersistentReplacementSink {
         staging_id: &str,
         expected_revision: i64,
     ) -> crate::persistent_store::StoreResult<crate::persistent_store::RevisionResult> {
-        crate::persistent_store::commands::replace_commit_with_snapshot(
+        crate::persistent_store::commands::commit_staged_replacement(
             &self.app,
             staging_id,
             Some(expected_revision),

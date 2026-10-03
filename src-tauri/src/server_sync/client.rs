@@ -289,32 +289,17 @@ pub(crate) enum RequestAttempt {
 struct Identity {
     head: risunest_sync_wire::RemoteHead,
     device_id: String,
-    operation_watermark: risunest_sync_wire::Sequence,
-    operation_pending: bool,
     protocol_id: String,
 }
 impl ServerClient {
     /// Resolve only at an identity GET boundary. Never replay a mutation on a new URL.
-    pub fn resolve_identity(&self, new_registration: bool) -> Result<RemoteHead> {
-        let verify = |client: &Self| -> Result<RemoteHead> {
-            let identity = client.identity()?;
-            if new_registration
-                && (identity.operation_watermark != 0.into() || identity.operation_pending)
-            {
-                return Err(SyncError::new("new-device-registration-required", 409));
-            }
-            Ok(identity.head)
-        };
+    pub fn resolve_identity(&self) -> Result<RemoteHead> {
+        let verify = |client: &Self| -> Result<RemoteHead> { Ok(client.identity()?.head) };
         let original = match verify(self) {
             Ok(head) => return Ok(head),
             Err(error) => error,
         };
-        if matches!(original.status, 401 | 403 | 409)
-            || matches!(
-                original.code.as_str(),
-                "cancelled" | "new-device-registration-required"
-            )
-        {
+        if matches!(original.status, 401 | 403 | 409) || original.code == "cancelled" {
             return Err(original);
         }
         let current = self.config();
@@ -601,7 +586,7 @@ impl ServerClient {
                             Some("server-unreachable")
                         });
                         if !maintenance {
-                            let _ = self.resolve_identity(false);
+                            let _ = self.resolve_identity();
                         }
                         recovering = true;
                         self.retry_budget.wait(
@@ -617,7 +602,7 @@ impl ServerClient {
                 }
                 Err(error) if retry_generic && replay_safe && is_ambiguous_transient(&error) => {
                     self.report_retryable_failure(Some(&error.code));
-                    let _ = self.resolve_identity(false);
+                    let _ = self.resolve_identity();
                     recovering = true;
                     self.retry_budget.wait(
                         None,
@@ -1044,7 +1029,7 @@ mod tests {
                         .unwrap()
                 })
                 .unwrap();
-                let body = serde_json::json!({"head":head,"deviceId":"device","operationWatermark":"0","operationPending":false,"protocolId":"risunest-sync/v0"}).to_string();
+                let body = serde_json::json!({"head":head,"deviceId":"device","protocolId":"risunest-sync/v0"}).to_string();
                 write!(
                     stream,
                     "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -1055,16 +1040,13 @@ mod tests {
             }
         });
         let client = ServerClient::new(config(&endpoint)).unwrap();
-        // Registration and the start of a cycle answer the same way, and neither
-        // goes on to ask the peer for anything else.
-        for new_registration in [true, false] {
-            let error = client.resolve_identity(new_registration).unwrap_err();
-            assert_eq!(error.code, "server-incompatible");
-            assert_eq!(error.status, 409);
-            assert!(!error.retryable);
-        }
+        // The peer is not asked for anything else.
+        let error = client.resolve_identity().unwrap_err();
+        assert_eq!(error.code, "server-incompatible");
+        assert_eq!(error.status, 409);
+        assert!(!error.retryable);
         let seen = seen.lock().unwrap();
-        assert_eq!(seen.len(), 2);
+        assert_eq!(seen.len(), 1);
         assert!(seen.iter().all(|line| line.starts_with("GET /session ")));
     }
 

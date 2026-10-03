@@ -15,9 +15,12 @@ pub(crate) mod hash_metrics;
 mod binding;
 #[cfg(test)]
 pub(crate) use binding::{first_binding_cycle, hydrate_binding_bodies};
+pub(crate) use binding::carry_operation_log;
 pub(crate) mod notification;
 #[cfg(test)]
 pub(crate) mod lww_tests;
+#[cfg(test)]
+mod lww_large_unit_tests;
 #[cfg(test)]
 mod media_admission_tests;
 #[cfg(test)]
@@ -224,7 +227,6 @@ mod classification_tests {
             ("unexpected-content-encoding", 502),
             ("response-too-large", 502),
             ("epoch-reconciliation-required", 409),
-            ("new-device-registration-required", 409),
             ("device-credential-unavailable", 409),
         ] {
             assert!(

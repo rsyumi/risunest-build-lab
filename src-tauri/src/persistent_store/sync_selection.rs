@@ -7,6 +7,7 @@ pub(super) const SCHEMA: &str = r#"
 CREATE TABLE library_sync_selection(singleton INTEGER PRIMARY KEY CHECK(singleton=1),target TEXT NOT NULL CHECK(target IN ('none','server','external')),connection_id TEXT,selection_epoch TEXT NOT NULL,paused INTEGER NOT NULL CHECK(paused IN (0,1)),decision_required INTEGER NOT NULL CHECK(decision_required IN (0,1)),CHECK((target='none' AND connection_id IS NULL) OR (target!='none' AND length(connection_id)>0)));
 CREATE TABLE local_library_identity(singleton INTEGER PRIMARY KEY CHECK(singleton=1),store_id TEXT NOT NULL,library_epoch TEXT NOT NULL);
 CREATE TABLE lww_binding_switch_requests(request_id TEXT PRIMARY KEY,body TEXT NOT NULL,change TEXT NOT NULL);
+CREATE TABLE lww_binding_switch_retained(request_id TEXT PRIMARY KEY);
 CREATE TABLE lww_binding_identity(singleton INTEGER PRIMARY KEY CHECK(singleton=1),library_id TEXT,target_id TEXT);
 CREATE TABLE lww_binding_inspections(inspection_id TEXT PRIMARY KEY,target TEXT NOT NULL,target_id TEXT NOT NULL,library_id TEXT NOT NULL,source_authority TEXT NOT NULL,source_epoch TEXT NOT NULL);
 CREATE TABLE lww_binding_stages(staging_id TEXT PRIMARY KEY,inspection_id TEXT NOT NULL,receive_id TEXT NOT NULL UNIQUE,changes TEXT NOT NULL,activation_epoch TEXT,library_digest TEXT NOT NULL);
@@ -184,24 +185,6 @@ fn require_publish_with_pause(
     Ok(())
 }
 
-pub(super) fn replaced(tx: &Transaction<'_>) -> StoreResult<()> {
-    require_no_pending_publication(tx)?;
-    tx.execute("UPDATE lww_binding_identity SET library_id=NULL,target_id=NULL WHERE EXISTS(SELECT 1 FROM library_sync_selection WHERE target='none')", [])?;
-    tx.execute(
-        "UPDATE local_library_identity SET library_epoch=?1 WHERE singleton=1",
-        [uuid::Uuid::new_v4().to_string()],
-    )?;
-    tx.execute(
-        "UPDATE library_sync_selection SET decision_required=1 WHERE target='external'",
-        [],
-    )?;
-    tx.execute(
-        "UPDATE external_storage_jobs SET phase='stale' WHERE role!='backup' AND phase IN ('preparing','ready')",
-        [],
-    )?;
-    Ok(())
-}
-
 pub(crate) fn require_server(db: &Connection) -> StoreResult<()> {
     let selected = read(db)?;
     if !matches!(selected.target, SyncTarget::Server(_)) || selected.paused {
@@ -236,6 +219,7 @@ pub(crate) struct BindingContent {
     pub ordinary_plugin_value_count: risunest_sync_wire::stamp::DecimalU64,
     pub hypa_value_count: risunest_sync_wire::stamp::DecimalU64,
     pub plugin_local_value_count: risunest_sync_wire::stamp::DecimalU64,
+    pub plugin_local_participating: bool,
 }
 
 impl super::PersistentStore {
@@ -267,7 +251,7 @@ impl super::PersistentStore {
             let key:risunest_sync_wire::unit::UnitKey = key.try_into().map_err(|e:risunest_sync_wire::WireError| invalid(&e.to_string()))?;
             if key.components()[0] == "preset-protected" {
                 let value:risunest_sync_wire::unit::UnitValue = serde_json::from_str(&value)?;
-                if let Some(value) = super::lww::json_value(&value)? { protected.insert(key.components()[1].clone(),value); }
+                if let Some(value) = super::lww::json_value_resolved(&self.connection,&value)? { protected.insert(key.components()[1].clone(),value); }
             }
         }
         Ok(BindingContent {
@@ -279,6 +263,7 @@ impl super::PersistentStore {
             ordinary_plugin_value_count: (ordinary as u64).into(),
             hypa_value_count: device.hypa_embedding_usage()?.0.into(),
             plugin_local_value_count: (plugin_local as u64).into(),
+            plugin_local_participating: device.connection().query_row("SELECT participating FROM device_sections WHERE section='local-plugins'", [], |r| r.get(0))?,
         })
     }
 }
@@ -339,7 +324,8 @@ mod binding_tests {
         let encoded = serde_json::json!({
             "library":{},"sharedVariables":{},"protectedValues":{},
             "opaqueSharedUnitCount":"0","managedAliasCount":"18446744073709551615",
-            "ordinaryPluginValueCount":"9007199254740993","hypaValueCount":"1","pluginLocalValueCount":"2"
+            "ordinaryPluginValueCount":"9007199254740993","hypaValueCount":"1","pluginLocalValueCount":"2",
+            "pluginLocalParticipating":false
         });
         let decoded:BindingContent = serde_json::from_value(encoded.clone()).unwrap();
         assert_eq!(decoded.managed_alias_count.0,u64::MAX);
@@ -374,6 +360,7 @@ mod binding_tests {
         assert!(!participation);
         let content = store.lww_binding_content().unwrap();
         assert_eq!(content.plugin_local_value_count.0, 2);
+        assert!(!content.plugin_local_participating);
         assert_eq!(content.hypa_value_count.0, 0);
         assert_eq!(content.ordinary_plugin_value_count.0, 0);
     }
@@ -384,7 +371,24 @@ mod binding_tests {
         (staging,receive)
     }
     fn inspect(store: &super::super::PersistentStore, target: &SyncTarget) -> String {
-        store.register_lww_binding_inspection(store.lww_binding_authority().unwrap(),target,"remote-target","remote-library").unwrap()
+        inspect_as(store,target,"remote-target","remote-library")
+    }
+    fn inspect_as(store: &super::super::PersistentStore, target: &SyncTarget, target_id: &str, library_id: &str) -> String {
+        store.register_lww_binding_inspection(store.lww_binding_authority().unwrap(),target,target_id,library_id).unwrap()
+    }
+    fn unbind(store: &mut super::super::PersistentStore) -> BindingState {
+        let before = store.lww_binding_state().unwrap();
+        store.switch_lww_binding(&SwitchBindingRequest { header:super::super::lww::Header{binding_authority:before.target_authority,request_id:uuid::Uuid::new_v4().to_string()},expected_selection_epoch:before.selection_epoch,target:SyncTarget::None,inspection_id:None }).unwrap()
+    }
+    fn outbox_keys(store: &super::super::PersistentStore, authority: risunest_sync_wire::stamp::DecimalU64) -> Vec<String> {
+        store.lww_read_outbox(authority,100).unwrap().entries.into_iter().map(|entry|entry.key.as_str().to_string()).collect()
+    }
+    fn pending_plugin_value(store: &mut super::super::PersistentStore, key: &str) {
+        use super::super::device_store::plugin_values::PluginDeviceMutation;
+        store.device_store_mut().unwrap().write_plugin_device_values("owner",&[PluginDeviceMutation::Set{space:"string".into(),key:key.into(),value:"local".into()}]).unwrap();
+    }
+    fn pending_root_value(store: &mut super::super::PersistentStore, value: &str) {
+        store.commit(&super::super::WorkingSetCommit { expected_revision:current_revision(&store.connection).unwrap(),unit_mutations:Some(vec![super::super::lww::UnitMutation::Set{key:risunest_sync_wire::unit::UnitKey::new(&["root","language"]).unwrap(),value:serde_json::json!(value)}]),..Default::default() }).unwrap();
     }
     fn switch(store: &mut super::super::PersistentStore, inspection: &str, target: &SyncTarget) -> BindingState {
         let before = store.lww_binding_state().unwrap();
@@ -473,11 +477,12 @@ mod binding_tests {
             let opaque:i64=store.device_store().unwrap().connection().query_row("SELECT COUNT(*) FROM lww_units",[],|r|r.get(0)).unwrap();
             assert_eq!(opaque,1);
             assert_eq!(store.lww_binding_content().unwrap().plugin_local_value_count.0,1);
+            assert_eq!(store.lww_binding_content().unwrap().plugin_local_participating,enabled);
         }
     }
 
     #[test]
-    fn unbinding_retains_library_for_rebind_but_unbound_replacement_clears_association() {
+    fn unbinding_retains_library_for_rebind() {
         let mut db=database();let initial=change(&db);let tx=db.transaction().unwrap();
         apply_binding_selection(&tx,&initial).unwrap();
         let unbind=BindingSelectionChange {expected_epoch:initial.new_epoch,new_epoch:"unbound".into(),target:SyncTarget::None,library_id:None,target_id:None,inspection_id:None};
@@ -485,9 +490,6 @@ mod binding_tests {
         apply_binding_selection(&tx,&unbind).unwrap();
         let library:Option<String>=tx.query_row("SELECT library_id FROM lww_binding_identity WHERE singleton=1",[],|r|r.get(0)).unwrap();
         assert_eq!(library,Some("library".into()));
-        replaced(&tx).unwrap();
-        let library:Option<String>=tx.query_row("SELECT library_id FROM lww_binding_identity WHERE singleton=1",[],|r|r.get(0)).unwrap();
-        assert_eq!(library,None);
     }
 
     #[test]
@@ -498,13 +500,61 @@ mod binding_tests {
         let first=SyncTarget::Server("first".into());let first_inspection=inspect(&store,&first);let old=switch(&mut store,&first_inspection,&first);
         store.device_store_mut().unwrap().write_plugin_device_values("owner",&[PluginDeviceMutation::Set{space:"string".into(),key:"pending".into(),value:"local".into()}]).unwrap();
         assert!(!store.lww_read_outbox(old.target_authority,100).unwrap().entries.is_empty());
-        let second=SyncTarget::External("second".into());let second_inspection=inspect(&store,&second);let next=switch(&mut store,&second_inspection,&second);
+        let second=SyncTarget::External("second".into());let second_inspection=inspect_as(&store,&second,"second-target","remote-library");let next=switch(&mut store,&second_inspection,&second);
         assert!(store.lww_read_outbox(old.target_authority,100).is_err());
         assert!(store.lww_read_outbox(next.target_authority,100).unwrap().entries.is_empty());
         let device_value=store.device_store().unwrap().read_plugin_device_value("owner","string","pending").unwrap();
         assert_eq!(device_value,Some("local".into()));
     }
 
+    #[test]
+    fn unbinding_and_rebinding_the_same_target_keeps_unpublished_versions_and_progress() {
+        let dir=tempfile::tempdir().unwrap();let mut store=super::super::PersistentStore::open(dir.path()).unwrap();
+        store.device_store().unwrap().connection().execute("UPDATE device_sections SET participating=1 WHERE section='local-plugins'",[]).unwrap();
+        let target=SyncTarget::Server("server".into());let inspection=inspect(&store,&target);let bound=switch(&mut store,&inspection,&target);
+        pending_plugin_value(&mut store,"bound");pending_root_value(&mut store,"bound");
+        store.device_store().unwrap().connection().execute("INSERT INTO lww_progress VALUES('server','',?1,?2)",["7".to_string(),bound.target_authority.0.to_string()]).unwrap();
+        let bound_keys=outbox_keys(&store,bound.target_authority);
+        assert_eq!(bound_keys.len(),2);
+        let unbound=unbind(&mut store);
+        assert_eq!(outbox_keys(&store,unbound.target_authority),bound_keys);
+        pending_plugin_value(&mut store,"offline");
+        let inspection=inspect(&store,&target);let rebound=switch(&mut store,&inspection,&target);
+        let keys=outbox_keys(&store,rebound.target_authority);
+        assert_eq!(keys.len(),3);
+        for key in &bound_keys { assert!(keys.contains(key)); }
+        assert_eq!(rebound.progress,serde_json::json!([{"kind":"server","writerId":"","cursor":"7"}]));
+        assert!(store.lww_read_outbox(bound.target_authority,100).is_err());
+    }
+    #[test]
+    fn rebinding_a_different_target_or_a_replacement_stage_after_unbinding_drops_old_versions() {
+        for staged_replacement in [false,true] {
+            let dir=tempfile::tempdir().unwrap();let mut store=super::super::PersistentStore::open(dir.path()).unwrap();
+            let target=SyncTarget::Server("server".into());let inspection=inspect(&store,&target);let bound=switch(&mut store,&inspection,&target);
+            pending_root_value(&mut store,"bound");
+            store.device_store().unwrap().connection().execute("INSERT INTO lww_progress VALUES('server','',?1,?2)",["7".to_string(),bound.target_authority.0.to_string()]).unwrap();
+            unbind(&mut store);
+            pending_root_value(&mut store,"offline");
+            let (next,inspection)=if staged_replacement {
+                let inspection=inspect(&store,&target);staged(&mut store,&inspection,&[]);(target.clone(),inspection)
+            } else {
+                let next=SyncTarget::External("other".into());let inspection=inspect_as(&store,&next,"other-target","remote-library");(next,inspection)
+            };
+            let rebound=switch(&mut store,&inspection,&next);
+            assert!(outbox_keys(&store,rebound.target_authority).is_empty());
+            assert_eq!(rebound.progress,serde_json::json!([]));
+        }
+    }
+    #[test]
+    fn the_same_target_needs_both_the_retained_library_and_target_identity() {
+        let dir=tempfile::tempdir().unwrap();let mut store=super::super::PersistentStore::open(dir.path()).unwrap();
+        assert!(!store.lww_previously_bound("remote-library","remote-target").unwrap());
+        let target=SyncTarget::Server("server".into());let inspection=inspect(&store,&target);switch(&mut store,&inspection,&target);
+        unbind(&mut store);
+        assert!(store.lww_previously_bound("remote-library","remote-target").unwrap());
+        assert!(!store.lww_previously_bound("remote-library","other-target").unwrap());
+        assert!(!store.lww_previously_bound("other-library","remote-target").unwrap());
+    }
     #[test]
     fn binding_selection_replays_exactly_and_preserves_backup_jobs() {
         let mut db = database(); let change = change(&db);
@@ -575,6 +625,11 @@ impl super::PersistentStore {
         Ok(BindingState { target: selection.target, target_authority: self.lww_binding_authority()?, selection_epoch: selection.epoch, library_id, progress: serde_json::Value::Array(progress) })
     }
 
+    pub(crate) fn lww_previously_bound(&self, library_id: &str, target_id: &str) -> StoreResult<bool> {
+        let (library,target):(Option<String>,Option<String>) = self.connection.query_row("SELECT library_id,target_id FROM lww_binding_identity WHERE singleton=1", [], |r| Ok((r.get(0)?,r.get(1)?)))?;
+        Ok(library.as_deref() == Some(library_id) && target.as_deref() == Some(target_id))
+    }
+
     // Native transport adapters record verified remote identities before returning an inspection token.
     pub(crate) fn register_lww_binding_inspection(&self, source_authority: risunest_sync_wire::stamp::DecimalU64, target: &SyncTarget, target_id: &str, library_id: &str) -> StoreResult<String> {
         if self.lww_binding_authority()? != source_authority || matches!(target, SyncTarget::None) || target_id.is_empty() || library_id.is_empty() {
@@ -631,18 +686,25 @@ impl super::PersistentStore {
         }
         let state = self.lww_binding_state()?;
         if state.target_authority != request.header.binding_authority || state.selection_epoch != request.expected_selection_epoch { return Err(invalid("Sync binding changed")); }
-        let (library_id,target_id) = if matches!(request.target, SyncTarget::None) {
+        // Unbinding, and returning to the target this library was last bound to without replacing it,
+        // carry unpublished versions, receive progress and pending publications to the new authority.
+        let (library_id,target_id,retain) = if matches!(request.target, SyncTarget::None) {
             if request.inspection_id.is_some() { return Err(invalid("Unbinding has no target inspection")); }
-            (None,None)
+            (None,None,true)
         } else {
             let inspection = request.inspection_id.as_deref().ok_or_else(|| invalid("Missing binding inspection"))?;
             let (target,library,target_id,authority,epoch):(String,String,String,String,String) = self.connection.query_row("SELECT target,library_id,target_id,source_authority,source_epoch FROM lww_binding_inspections WHERE inspection_id=?1", [inspection], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
             if serde_json::from_str::<SyncTarget>(&target)? != request.target || authority != request.header.binding_authority.0.to_string() || epoch != request.expected_selection_epoch { return Err(invalid("Wrong target binding inspection")); }
             validate_binding_inspection_stages(self,inspection,request.header.binding_authority)?;
-            (Some(library),Some(target_id))
+            let staged:bool = self.connection.query_row("SELECT EXISTS(SELECT 1 FROM lww_binding_stages WHERE inspection_id=?1)", [inspection], |r| r.get(0))?;
+            let retain = !staged && self.lww_previously_bound(&library,&target_id)?;
+            (Some(library),Some(target_id),retain)
         };
         let change = BindingSelectionChange { expected_epoch: request.expected_selection_epoch.clone(),new_epoch:uuid::Uuid::new_v4().to_string(),target:request.target.clone(),library_id,target_id,inspection_id:request.inspection_id.clone() };
-        self.connection.execute("INSERT INTO lww_binding_switch_requests VALUES(?1,?2,?3)", params![request.header.request_id,body,serde_json::to_string(&change)?])?;
+        let tx = self.connection.transaction()?;
+        tx.execute("INSERT INTO lww_binding_switch_requests VALUES(?1,?2,?3)", params![request.header.request_id,body,serde_json::to_string(&change)?])?;
+        if retain { tx.execute("INSERT INTO lww_binding_switch_retained VALUES(?1)", [&request.header.request_id])?; }
+        tx.commit()?;
         self.lww_switch_target(&request.header,&change)?;
         self.lww_binding_state()
     }
@@ -663,6 +725,10 @@ impl super::PersistentStore {
         }
         self.lww_replace_target(&request.header,&request.staging_id,&changes)
     }
+}
+
+pub(super) fn switch_retains_binding_state(db: &Connection, request_id: &str) -> StoreResult<bool> {
+    Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM lww_binding_switch_retained WHERE request_id=?1)", [request_id], |r| r.get(0))?)
 }
 
 fn validate_binding_inspection_stages(store: &super::PersistentStore, inspection: &str, authority: risunest_sync_wire::stamp::DecimalU64) -> StoreResult<()> {
@@ -691,15 +757,7 @@ pub(crate) fn pds_lww_replace_from_target(state: tauri::State<'_, super::command
 }
 
 pub(crate) fn binding_stage_digest(db: &Connection, staging_id: &str) -> StoreResult<String> {
-    use sha2::{Digest, Sha256};
-    let target = super::ReadTarget { generation: staging_id.into(), revision: current_revision(db)? };
-    let value = super::query::materialize_target(db, &target)?;
-    let aliases = super::query::list_asset_aliases(db, &target)?.value;
-    let owners = super::query::list_asset_owner_heads(db, &target)?.value;
-    let bytes = serde_json::to_vec(&(value,aliases,owners))?;
-    #[cfg(test)]
-    crate::persistent_store::hash_work::observe("binding_stage_proof", bytes.len());
-    Ok(hex::encode(Sha256::digest(&bytes)))
+    super::lww::catalog_digest(db, staging_id)
 }
 
 pub(crate) fn validate_binding_stage_content(db: &Connection, staging_id: &str) -> StoreResult<()> {

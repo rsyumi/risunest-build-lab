@@ -293,6 +293,46 @@ describe('production server LWW composition', () => {
         expect(pushes).toHaveLength(1); expect(pushes[0][1]).toMatchObject({ generating: f.generating })
         expect(f.invoke.mock.calls.some(([command]) => command === 'server_sync_lww_pull' || command === 'server_sync_notify_start')).toBe(false)
     })
+    it('clears an old block and its error when a different binding authority is installed, and keeps it for the same authority', async () => {
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        let collide = true
+        f.invoke.mockImplementation(async command => {
+            if (command === 'server_sync_lww_push' && collide) { collide = false; throw { code: 'writer-collision', retryable: false } }
+            return command === 'server_sync_lww_pull' ? emptyReceive() : null
+        })
+        const pushes = () => f.invoke.mock.calls.filter(([command]) => command === 'server_sync_lww_push').length
+        visible(true); const first = bindingContext(); await f.transport!.resumeBinding(first); await settle()
+        expect(production.getServerSyncController().snapshot()).toMatchObject({ paused: true, error: 'writer-collision' })
+        await f.transport!.fenceOldJobs(first); await f.transport!.resumeBinding(bindingContext()); await settle()
+        expect(production.getServerSyncController().snapshot()).toMatchObject({ paused: true, error: 'writer-collision' })
+        expect(pushes()).toBe(1)
+        const other = bindingContext(); other.state = { ...other.state, targetAuthority: '1', selectionEpoch: '1' }
+        await f.transport!.fenceOldJobs(bindingContext()); await f.transport!.resumeBinding(other); await settle()
+        expect(production.getServerSyncController().snapshot()).toMatchObject({ paused: false, error: '' })
+        expect(pushes()).toBe(2)
+    })
+    it('clears a transient sync error once publication and receive succeed again', async () => {
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        let offline = true
+        f.invoke.mockImplementation(async command => {
+            if ((command === 'server_sync_lww_push' || command === 'server_sync_lww_pull') && offline) throw { code: 'server-unreachable', retryable: true }
+            return command === 'server_sync_lww_pull' ? emptyReceive() : null
+        })
+        visible(true); await f.transport!.resumeBinding(bindingContext()); await settle()
+        expect(production.getServerSyncController().snapshot().error).toBe('server-unreachable')
+        offline = false
+        await vi.advanceTimersByTimeAsync(5000); await settle()
+        expect(production.getServerSyncController().snapshot()).toMatchObject({ paused: false, error: '' })
+    })
+    it('never reports a cancelled publication as a sync error', async () => {
+        production.initializeNativeSyncBindings(); await production.installServerSyncProduction()
+        f.invoke.mockImplementation(async command => {
+            if (command === 'server_sync_lww_push') throw { code: 'cancelled', retryable: true }
+            return command === 'server_sync_lww_pull' ? emptyReceive() : null
+        })
+        visible(true); await f.transport!.resumeBinding(bindingContext()); await settle()
+        expect(production.getServerSyncController().snapshot()).toMatchObject({ paused: false, error: '' })
+    })
     it('guards native initialization and transport registration on the web', async () => {
         f.native = false
         production.initializeNativeSyncBindings(); await production.installServerSyncProduction()

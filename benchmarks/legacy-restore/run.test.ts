@@ -4,9 +4,10 @@ vi.hoisted(() => { vi.stubGlobal('Buffer', undefined) })
 import { gunzipSync } from 'fflate'
 import { unpack } from 'msgpackr/index-no-eval'
 import { fixtureCharacter, planFixture } from './fixture'
-import { runLegacyRestoreMeasurement } from './run'
+import { runLegacyRestoreMeasurement, type ReadbackProgress } from './run'
 
-const native = vi.hoisted(() => ({ invoke: vi.fn(), remove: vi.fn(), bytes: new Uint8Array(3_000_000), offset: 0, length: 0 }))
+const native = vi.hoisted(() => ({ invoke: vi.fn(), remove: vi.fn(), bytes: new Uint8Array(3_000_000), offset: 0, length: 0,
+    retireActive: () => {}, activeIds: [] as string[] }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke: native.invoke }))
 vi.mock('@tauri-apps/api/path', () => ({ join: async (...parts: string[]) => parts.join('/') }))
 vi.mock('../../src/ts/storage/nativePaths', () => ({ nativeDataPath: async () => '/synthetic' }))
@@ -26,7 +27,7 @@ vi.mock('@tauri-apps/plugin-fs', () => ({
 }))
 vi.mock('./fixture', async importOriginal => {
     const actual = await importOriginal<typeof import('./fixture')>()
-    return { ...actual, planFixture: () => actual.planFixture(2_500_000) }
+    return { ...actual, planFixture: (_bytes: number, prefix?: string) => actual.planFixture(2_500_000, prefix) }
 })
 
 beforeEach(() => {
@@ -38,16 +39,42 @@ beforeEach(() => {
 function installNative(corrupt = false) {
     const plan = planFixture(2_500_000)
     let finalized = false
+    let revision = 7
+    const active = new Map<string, ReturnType<typeof fixtureCharacter>>()
+    const retired = new Set<string>()
+    native.retireActive = () => {
+        for (const character of active.values()) retired.add(character.chaId)
+        active.clear()
+        native.activeIds = []
+        revision++
+    }
     native.invoke.mockImplementation(async (command: string, args: any) => {
-        if (command === 'pds_open') return { revision: 7 }
-        if (command === 'native_file_job_start') return { jobId: 'synthetic-job' }
-        if (command === 'native_file_job_finalize') { finalized = true; return true }
+        if (command === 'pds_open') return { revision }
+        if (command === 'native_file_job_start') { finalized = false; return { jobId: 'synthetic-job' } }
+        if (command === 'native_file_job_finalize') {
+            expect(args.expectedRevision).toBe(revision)
+            const frame = native.bytes.subarray(0, native.length)
+            const nameBytes = new DataView(frame.buffer).getUint32(0, true)
+            const database = frame.subarray(8 + nameBytes)
+            const decoded = database[10] === 8 ? gunzipSync(database.subarray(11)) : database.subarray(11)
+            for (const character of unpack(decoded).characters as ReturnType<typeof fixtureCharacter>[]) {
+                if (retired.has(character.chaId)) {
+                    character.chaId += '-remapped'
+                    for (const chat of character.chats) chat.id += '-remapped'
+                }
+                active.set(character.chaId, character)
+            }
+            native.activeIds = [...active.keys()]
+            revision++
+            finalized = true
+            return true
+        }
         if (command === 'native_file_job_status') return finalized
-            ? { state: 'succeeded', phase: 'complete', result: { characterCount: plan.characterCount, sourceBytes: native.length } }
+            ? { state: 'succeeded', phase: 'complete', result: { characterCount: active.size, sourceBytes: native.length } }
             : { state: 'running', phase: 'awaiting-activation' }
         if (command === 'pds_read_conversation') {
-            const index = Number(args.characterId.slice('synthetic-'.length))
-            const value = fixtureCharacter(plan, index).chats[0]
+            const value = active.get(args.characterId)?.chats.find(chat => chat.id === args.conversationId)
+            if (!value) return null
             if (corrupt) value.message[0].data = 'synthetic corruption'
             return { value }
         }
@@ -58,12 +85,26 @@ function installNative(corrupt = false) {
 }
 
 describe('isolated legacy restore measurement', () => {
+    it.each(['raw', 'gzip'] as const)('verifies %s warmup and measured imports after the reset permanently retires earlier parent IDs', async encoding => {
+        installNative()
+        const options = { megabytes: 100 as const, encoding,
+            assertIsolatedHarness: async () => {}, report: async () => {} }
+        expect(await runLegacyRestoreMeasurement(options)).toMatchObject({ phase: 'verified' })
+        const warmupIds = [...native.activeIds]
+        native.retireActive()
+        native.bytes.fill(0)
+        native.offset = native.length = 0
+        expect(await runLegacyRestoreMeasurement(options)).toMatchObject({ phase: 'verified' })
+        expect(native.activeIds.filter(id => warmupIds.includes(id))).toEqual([])
+    })
     it.each(['raw', 'gzip'] as const)('writes upstream %s bytes and validates bounded native readback', async encoding => {
         const plan = installNative()
         const report = vi.fn(async () => {})
+        const progress: ReadbackProgress[] = []
         const result = await runLegacyRestoreMeasurement({ megabytes: 100, encoding,
             assertIsolatedHarness: async () => {}, report,
             sampleMemory: async () => ({ peakRssBytes: 6_000_000, source: 'synthetic-test' }),
+            onReadbackProgress: event => { progress.push(event) },
         })
         const frame = native.bytes.subarray(0, native.length)
         const view = new DataView(frame.buffer)
@@ -77,9 +118,12 @@ describe('isolated legacy restore measurement', () => {
         expect(unpack(decoded).characters).toHaveLength(plan.characterCount)
         expect(result).toMatchObject({ phase: 'verified', verifiedMessageCount: plan.messageCount,
             verifiedCharacterCount: plan.characterCount, aboveTwiceDecoded: true })
+        expect(native.activeIds[0]).toBe(`${result.runId}-000000`)
         expect(native.invoke.mock.calls.filter(([command]) => command === 'pds_read_conversation')).toHaveLength(plan.characterCount)
         expect(native.invoke).toHaveBeenCalledWith('native_file_job_finalize', { jobId: 'synthetic-job', expectedRevision: 7 })
         expect(native.remove).toHaveBeenCalledTimes(2)
+        expect(progress.at(-1)).toEqual({ stage: 14, index: plan.characterCount,
+            readReturned: plan.characterCount, hashVerified: plan.characterCount, messageCount: plan.messageCount })
     })
     it('gates native restore after preparation and readback after the terminal interval', async () => {
         installNative()
@@ -89,10 +133,23 @@ describe('isolated legacy restore measurement', () => {
         let releaseReadback!: () => void
         const restoreGate = new Promise<void>(resolve => { releaseRestore = resolve })
         const readbackGate = new Promise<void>(resolve => { releaseReadback = resolve })
+        let releaseNativeRead!: () => void
+        const nativeReadGate = new Promise<void>(resolve => { releaseNativeRead = resolve })
+        const invoke = native.invoke.getMockImplementation()!
+        let firstRead = true
+        native.invoke.mockImplementation(async (command, args) => {
+            if (command === 'pds_read_conversation' && firstRead) {
+                firstRead = false
+                await nativeReadGate
+            }
+            return invoke(command, args)
+        })
+        const progress: ReadbackProgress[] = []
         const measurement = runLegacyRestoreMeasurement({ megabytes: 100, encoding: 'raw',
             assertIsolatedHarness: async () => {}, report: async () => {},
             beforeRestore: async event => { prepared = event; await restoreGate },
             afterRestore: async event => { terminal = event; await readbackGate },
+            onReadbackProgress: event => { progress.push(event) },
         })
         await vi.waitFor(() => expect(prepared?.phase).toBe('prepared'), { timeout: 10_000 })
         expect(native.length).toBeGreaterThan(2_500_000)
@@ -102,19 +159,28 @@ describe('isolated legacy restore measurement', () => {
         expect(terminal?.outcome).toBe('succeeded')
         expect(native.invoke.mock.calls.some(([command]) => command === 'pds_read_conversation')).toBe(false)
         expect(native.remove).not.toHaveBeenCalled()
+        expect(progress).toEqual([])
         releaseReadback()
+        await vi.waitFor(() => expect(progress.at(-1)).toMatchObject({ stage: 4, index: 0 }), { timeout: 10_000 })
+        expect(progress).toEqual([{ stage: 4, index: 0, readReturned: 0, hashVerified: 0, messageCount: 0 }])
+        expect(native.remove).not.toHaveBeenCalled()
+        releaseNativeRead()
         expect(await measurement).toMatchObject({ phase: 'verified' })
+        expect(progress.slice(0, 3).map(event => event.stage)).toEqual([4, 5, 6])
         expect(native.invoke.mock.calls.some(([command]) => command === 'pds_read_conversation')).toBe(true)
         expect(native.remove).toHaveBeenCalledTimes(2)
     })
     it('rejects incorrect readback without reporting verification', async () => {
         installNative(true)
         const events: Record<string, unknown>[] = []
+        const progress: ReadbackProgress[] = []
         await expect(runLegacyRestoreMeasurement({ megabytes: 100, encoding: 'raw',
             assertIsolatedHarness: async () => {}, report: async event => { events.push(event) },
+            onReadbackProgress: event => { progress.push(event) },
         })).rejects.toThrow('message hash mismatch')
         expect(events.some(event => event.phase === 'verified')).toBe(false)
         expect(native.remove).not.toHaveBeenCalled()
+        expect(progress.at(-1)).toEqual({ stage: 5, index: 0, readReturned: 1, hashVerified: 0, messageCount: 0 })
     })
     it('requires isolation before writing or invoking native commands', async () => {
         await expect(runLegacyRestoreMeasurement({ megabytes: 100, encoding: 'raw',

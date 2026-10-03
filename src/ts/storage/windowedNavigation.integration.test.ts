@@ -21,6 +21,7 @@ import { IndexedDbPersistentDataStore } from './indexedDbPersistentDataStore'
 import { createPersistentDataRuntime } from './persistentDataRuntime'
 import { createProductionStateAdapter } from './persistentDataRuntime.svelte'
 import { workingSetResidency } from './workingSetResidency'
+import { indexSideChatListRows } from '../../lib/SideBars/sideChatListRows'
 import { observePersistentSaveChanges } from './persistentSaveObserver.svelte'
 
 afterEach(() => {
@@ -541,6 +542,61 @@ describe('windowed navigation integration', () => {
         } finally {
             dispose()
         }
+    })
+
+    it.each<{folders: character['chatFolders'] | undefined}>([{folders: undefined}, {folders: []}, {folders: [{id: 'folder', name: 'Folder', folded: false}]}])(
+        'projects ordinary empty conversation folders into the windowed compatibility view ($folders)', async ({folders}) => {
+            const database = syntheticLibrary('character')
+            const owner = database.characters[0]
+            if (folders === undefined) delete (owner as Partial<character>).chatFolders
+            else owner.chatFolders = folders
+            const store = new IndexedDbPersistentDataStore(`received-folder-view-${JSON.stringify(folders)}`, new IDBFactory(), IDBKeyRange)
+            await store.open()
+            const {revision} = await store.replaceFromDatabase(database)
+            setDatabaseLite(structuredClone(database))
+            selectedCharID.set(-1)
+            workingSetResidency.setEvictionAllowed(true)
+            const runtime = createPersistentDataRuntime({store, state: createProductionStateAdapter(), prepareDatabase: async (value) => value})
+            await runtime.initializeActiveWorkingSet(getDatabase())
+            const commit = vi.spyOn(store, 'commit')
+            expect(await runtime.activateCharacter(owner.chaId)).toBe(true)
+            expect(runtime.getSelectedConversationMode()).toBe('windowed')
+            const live = getDatabase().characters[0]
+            expect(live.chatFolders).toEqual(folders ?? [])
+            expect(indexSideChatListRows(live.chats, live.chatFolders).folders).toHaveLength(folders?.length ?? 0)
+            await runtime.flushPendingDataLocally('received-folder-view-no-op')
+            expect(commit).not.toHaveBeenCalled()
+            expect((await store.readRoot()).revision).toBe(revision)
+            const stored = (await store.readCharacter(owner.chaId))!.value
+            if (folders === undefined) expect(Object.hasOwn(stored, 'chatFolders')).toBe(false)
+            else expect(stored.chatFolders).toEqual(folders)
+            const target = runtime.captureSelectedConversationTarget()!
+            const added = {id: 'added-folder', name: 'Added folder', folded: false}
+            expect(runtime.editWindowedChatList(target, (candidate) => {
+                candidate.chatFolders.push(added)
+                return null
+            }).kind).toBe('applied')
+            await runtime.flushPendingDataLocally('explicit-folder-edit')
+            expect(commit).toHaveBeenCalledOnce()
+            expect((await store.readCharacter(owner.chaId))!.value.chatFolders).toEqual([...(folders ?? []), added])
+        },
+    )
+
+    it.each([null, {invalid: true}])('rejects a non-array folder projection without defaulting it (%j)', async (folders) => {
+        const database = syntheticLibrary('character')
+        database.characters[0].chatFolders = folders as unknown as character['chatFolders']
+        const store = new IndexedDbPersistentDataStore(`invalid-folder-view-${JSON.stringify(folders)}`, new IDBFactory(), IDBKeyRange)
+        await store.open()
+        await store.replaceFromDatabase(database)
+        setDatabaseLite(structuredClone(database))
+        selectedCharID.set(-1)
+        workingSetResidency.setEvictionAllowed(true)
+        const runtime = createPersistentDataRuntime({store, state: createProductionStateAdapter(), prepareDatabase: async (value) => value})
+        await runtime.initializeActiveWorkingSet(getDatabase())
+        const commit = vi.spyOn(store, 'commit')
+        await expect(runtime.activateCharacter(database.characters[0].chaId)).rejects.toThrow('returned invalid conversation folders')
+        expect(commit).not.toHaveBeenCalled()
+        expect((await store.readCharacter(database.characters[0].chaId))!.value.chatFolders).toEqual(folders)
     })
 
     it('normalizes through the production Svelte adapter and survives immediate promotion and restart', async () => {

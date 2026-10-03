@@ -80,6 +80,13 @@ fn every_live_device_table_is_listed_here() {
         "lww_retired",
         "lww_units",
         "lww_unpublished_proofs",
+        "message_page_indexes",
+        "message_page_manifests",
+        "message_page_object_marks",
+        "message_page_objects",
+        "message_page_proofs",
+        "message_page_sweep_cursor",
+        "message_page_verified_objects",
         "plugin_claim_sessions",
         "plugin_device_storage",
         "plugin_gc_state",
@@ -1154,7 +1161,7 @@ mod section_exchange {
     }
 
     use super::super::sections::{
-        PublishedRows, SectionApplyOutcome, SectionCursor, SectionRow, SectionSpoolBuilder,
+        PublishedRows, SectionCursor, SectionRow, SectionSpoolBuilder,
         SectionValueRow, TombstonePublication, LOCAL_SETTING_KEYS,
     };
     use std::collections::BTreeMap;
@@ -1174,25 +1181,6 @@ mod section_exchange {
             write_clock: Sequence::from(clock),
             writer_id: writer.into(),
         }
-    }
-
-    fn rejoin(store: &mut DeviceStore, observed: u64, remote: &[SectionRow]) -> SectionApplyOutcome {
-        use risunest_external_storage_format::{content_identity::hash, format::fingerprint, section::SectionKind};
-        store.set_section_participating(Section::LocalPlugins, true).unwrap();
-        let token = store.section_state(Section::LocalPlugins).unwrap().participation_generation;
-        let mut spool = SectionSpoolBuilder::new(Section::LocalPlugins).unwrap();
-        let mut fingerprints = BTreeMap::new();
-        for row in remote {
-            let entry = row.to_entry(SectionKind::LocalPlugins, true).unwrap();
-            let digest = hash(&entry.encode().unwrap());
-            spool.push(row.clone(), &entry.key, &digest).unwrap();
-            fingerprints.insert(entry.key, digest);
-        }
-        let prepared = spool.finish(&fingerprint(&SectionKind::LocalPlugins.fingerprint_domain(), &fingerprints)).unwrap();
-        store.apply_prepared_section_rows("connection", "library", &token, &prepared, &SectionCursor {
-            applied_generation: Sequence::from(1u64), applied_gc_floor: Sequence::from(0u64),
-            observed_max_write_clock: Sequence::from(observed),
-        }, true).unwrap()
     }
 
     fn marker(generation: u64, at_ms: u64) -> TombstonePublication {
@@ -1374,54 +1362,6 @@ mod section_exchange {
                 .unwrap()
                 .max_write_clock,
             Sequence::from(31u64)
-        );
-    }
-
-    /// Rejoining a remote lineage records this device's values and removals
-    /// above every version that lineage carries, so the merge that follows
-    /// keeps them. A row the remote already holds unchanged needs no new
-    /// version, and neither does a retried attempt.
-    #[test]
-    fn a_reissued_section_keeps_local_values_and_removals_above_the_remote() {
-        let (_directory, mut store) = open();
-        set(&mut store, "kept", "local");
-        set(&mut store, "gone", "local");
-        store
-            .write_plugin_device_values(
-                "plugin-a",
-                &[PluginDeviceMutation::Delete {
-                    space: "string".to_owned(),
-                    key: "gone".to_owned(),
-                }],
-            )
-            .expect("delete a plugin value");
-        let remote = [
-            plugin_row("kept", "from-b", 40, "writer-b"),
-            plugin_row("gone", "from-b", 41, "writer-b"),
-            plugin_row("theirs", "from-b", 42, "writer-b"),
-        ];
-        assert_eq!(rejoin(&mut store, 42, &remote).applied, 1);
-        assert_eq!(
-            live(&mut store),
-            vec![
-                ("gone".to_owned(), None),
-                ("kept".to_owned(), Some("local".to_owned())),
-                ("theirs".to_owned(), Some("from-b".to_owned())),
-            ]
-        );
-
-        let settled = store
-            .section_state(Section::LocalPlugins)
-            .expect("read section state")
-            .max_write_clock;
-        assert!(settled > Sequence::from(42u64));
-        assert_eq!(rejoin(&mut store, 42, &remote).applied, 0);
-        assert_eq!(
-            store
-                .section_state(Section::LocalPlugins)
-                .expect("read section state")
-                .max_write_clock,
-            settled
         );
     }
 
@@ -1854,56 +1794,6 @@ mod section_exchange {
             .unwrap());
     }
 
-    /// A row rewritten above the version it was published at owes another
-    /// publication, and the stale mark is not mistaken for a current one.
-    #[test]
-    fn a_reissued_row_owes_another_publication() {
-        let (_directory, mut store) = open();
-        store
-            .set_section_participating(Section::LocalPlugins, true)
-            .unwrap();
-        set(&mut store, "mine", "local");
-        let captured: PublishedRows = store
-            .read_section_rows(Section::LocalPlugins)
-            .unwrap()
-            .into_iter()
-            .map(|row| (row.key(), row.version()))
-            .collect();
-        store
-            .note_section_published(
-                Section::LocalPlugins,
-                &captured,
-                &[],
-                &marker(7, 1_760_000_000_000),
-                &BTreeMap::new(),
-                &Sequence::from(0u64),
-                None,
-            )
-            .unwrap();
-        store
-            .write_section_cursor(
-                "connection",
-                "library",
-                Section::LocalPlugins,
-                &SectionCursor {
-                    applied_generation: Sequence::from(1u64),
-                    applied_gc_floor: Sequence::from(0u64),
-                    observed_max_write_clock: Sequence::from(1u64),
-                },
-            )
-            .unwrap();
-        assert!(!store
-            .sections_await_publication("connection", "library")
-            .unwrap());
-
-        // Rebinding makes previously published rows local proposals again.
-        store.forget_section_publications().unwrap();
-        rejoin(&mut store, 42, &[]);
-        assert!(store.read_section_rows(Section::LocalPlugins).unwrap()[0].write_clock > Sequence::from(42u64));
-        assert!(store
-            .sections_await_publication("connection", "library")
-            .unwrap());
-    }
 }
 
 /// Synchronisation subscribes to the device counter the way it subscribes to

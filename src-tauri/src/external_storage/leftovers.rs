@@ -5,10 +5,10 @@ use super::{
     connection_store::ConnectionStore,
     contract::Result,
     job_store::{JobCommandState, JobStore},
-    receive_artifacts::{managed_directory, remove_tree},
     runtime::{connection_directory, job_directory, local_error},
     runtime_restore::discard_finished_staging,
 };
+use crate::trust_boundary::is_link_like;
 use tauri::{AppHandle, Manager};
 use std::{
     collections::BTreeSet,
@@ -32,6 +32,56 @@ fn connection_directories(root: &Path) -> io::Result<Vec<(String, PathBuf)>> {
         }
     }
     Ok(found)
+}
+
+fn linked() -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, "external storage path is redirected")
+}
+
+/// Every directory from the external storage root down to `directory` must
+/// be a real directory. `false` when it was never created.
+pub(super) fn managed_directory(root: &Path, directory: &Path) -> io::Result<bool> {
+    let base = root.join("external-storage");
+    if !directory.starts_with(&base) {
+        return Err(linked());
+    }
+    let chain: Vec<PathBuf> = directory
+        .ancestors()
+        .take_while(|path| path.starts_with(&base))
+        .map(Path::to_path_buf)
+        .collect();
+    for path in chain.iter().rev() {
+        match fs::symlink_metadata(path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+            Ok(metadata) if is_link_like(&metadata) || !metadata.is_dir() => return Err(linked()),
+            Ok(_) => {}
+        }
+    }
+    Ok(true)
+}
+
+/// Deletes without ever following a link; a link stops the removal instead.
+pub(super) fn remove_tree(path: &Path) -> io::Result<()> {
+    let metadata = match fs::symlink_metadata(path) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        other => other?,
+    };
+    if is_link_like(&metadata) {
+        return Err(linked());
+    }
+    let removed = if metadata.is_dir() {
+        for entry in fs::read_dir(path)? {
+            remove_tree(&entry?.path())?;
+        }
+        fs::remove_dir(path)
+    } else {
+        fs::remove_file(path)
+    };
+    match removed {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        other => other,
+    }
 }
 
 fn remove_managed(root: &Path, directory: &Path) -> io::Result<()> {
@@ -324,6 +374,16 @@ mod tests {
         link_directory(outside.path(), &directory);
         assert!(remove_connection_directory(root, "connection").is_err());
         assert!(outside.path().join("kept").is_file());
+    }
+    #[test]
+    fn a_path_outside_or_a_file_inside_external_storage_is_never_managed() {
+        let root = tempfile::tempdir().unwrap();
+        assert!(managed_directory(root.path(), &root.path().join("outside")).is_err());
+        let directory = connection_directory(root.path(), "connection");
+        write(&directory);
+        assert!(managed_directory(root.path(), &directory).is_err());
+        assert!(remove_connection_directory(root.path(), "connection").is_err());
+        assert_eq!(fs::read(&directory).unwrap(), b"synthetic");
     }
     #[test]
     fn startup_removes_only_managed_abandoned_scratch() {

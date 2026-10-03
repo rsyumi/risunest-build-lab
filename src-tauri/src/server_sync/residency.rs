@@ -498,7 +498,7 @@ pub(crate) fn open_transient_server_proof_with_check(
     let client = super::client::ServerClient::new(proof.config.resolve(root)?)?;
     #[cfg(test)]
     let client = { let mut client = client; super::client::attach_test_io(root, &mut client); client };
-    client.resolve_identity(false)?;
+    client.resolve_identity()?;
     check()?;
     let directory = tempfile::Builder::new().prefix("asset-transient-").tempdir_in(scratch_root)?;
     let cache = super::cache::Cache::open(directory.path())?;
@@ -617,7 +617,7 @@ impl HydrationSession {
                         let client = super::client::ServerClient::with_cancellation(objects[0].config.resolve(&self.root)?, self.cancellation.clone())?;
                         #[cfg(test)]
                         let client = { let mut client = client; super::client::attach_test_io(&self.root, &mut client); client };
-                        client.resolve_identity(false)?;
+                        client.resolve_identity()?;
                         self.clients.insert(key.clone(), client);
                     }
                     if self.cache.is_none() {
