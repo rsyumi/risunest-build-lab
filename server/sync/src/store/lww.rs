@@ -491,14 +491,12 @@ impl Store {
         let mut db = self.db()?;
         let tx = db.transaction()?;
         Self::require_device(&tx, device)?;
-        let count: i64 = tx.query_row(
-            "SELECT count(*) FROM state_pins WHERE device=?1 AND expires>unixepoch()",
+        // A device reads one state at a time, so pins beyond its newest three were left behind
+        // by a read that never finished. They give way to the new read instead of refusing it.
+        tx.execute(
+            "DELETE FROM state_pins WHERE id IN (SELECT id FROM state_pins WHERE device=?1 AND expires>unixepoch() ORDER BY rowid DESC LIMIT -1 OFFSET 3)",
             [&device.id],
-            |r| r.get(0),
         )?;
-        if count >= 4 {
-            return Err(Error::new("too-many-pins", 429));
-        }
         let head = Self::read_head(&tx)?;
         let expires = super::uploads::now()?
             .checked_add(3600)

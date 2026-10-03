@@ -689,14 +689,28 @@ impl LwwClient {
                 self.prepare_bodies(store, &changes, upper)?;
                 Ok((cursor, changes))
             })();
-            let _ = self.client.request(
-                reqwest::Method::DELETE,
-                &format!("state/pins/{}", pin.pin_id),
-                &[],
-                None,
-                &[],
-                MAX_METADATA_BYTES,
-            );
+            let release = format!("state/pins/{}", pin.pin_id);
+            if result.as_ref().is_err_and(|error| error.code == "cancelled") {
+                // A cancelled read still frees its pin, with one attempt.
+                if let Ok(client) = self.client.uncancelled() {
+                    let _ = client.request_ambiguous_mutation(
+                        reqwest::Method::DELETE,
+                        &release,
+                        None,
+                        &[],
+                        MAX_METADATA_BYTES,
+                    );
+                }
+            } else {
+                let _ = self.client.request(
+                    reqwest::Method::DELETE,
+                    &release,
+                    &[],
+                    None,
+                    &[],
+                    MAX_METADATA_BYTES,
+                );
+            }
             match result {
                 Err(error)
                     if matches!(error.code.as_str(), "state-pin-expired" | "journal-floor") =>

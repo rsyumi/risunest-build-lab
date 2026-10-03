@@ -544,6 +544,28 @@ impl DurableCasJob {
     }
 }
 
+/// The IDs of the journals present now, without reading them.
+pub(crate) fn durable_cas_job_ids(repository_root: &Path) -> io::Result<Vec<String>> {
+    let Some((_, directory)) = job_pin_directory(repository_root, false)? else {
+        return Ok(Vec::new());
+    };
+    let mut ids = Vec::new();
+    for entry in fs::read_dir(directory)?.take(MAX_DURABLE_CAS_JOB_JOURNALS) {
+        let name = entry?.file_name();
+        let Some(job_id) = name
+            .to_str()
+            .and_then(|name| name.strip_prefix("job-"))
+            .and_then(|name| name.strip_suffix(".journal"))
+        else {
+            continue;
+        };
+        if validate_job_id(job_id).is_ok() {
+            ids.push(job_id.to_owned());
+        }
+    }
+    Ok(ids)
+}
+
 pub(crate) fn collect_durable_cas_job_roots(repository_root: &Path) -> AssetRootSet {
     collect_durable_cas_job_roots_inner(repository_root, false)
 }
