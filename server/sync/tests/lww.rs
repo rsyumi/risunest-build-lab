@@ -838,6 +838,48 @@ fn sql_failure_rolls_back_state_journal_writer_identity_and_receipt_together() {
 }
 
 #[test]
+fn a_replayed_rejection_reports_the_original_error_after_restart() {
+    let root = tempfile::tempdir().unwrap();
+    let store = Store::init(root.path()).unwrap();
+    let a = device(&store);
+    let future = request(
+        &store,
+        WRITER_A,
+        "future",
+        vec![inline("time", WRITER_A, 4_000_000_000_000, "future")],
+    );
+    let noncanonical = request(
+        &store,
+        WRITER_A,
+        "noncanonical",
+        vec![unit(
+            &["root", "shape"],
+            WRITER_A,
+            1,
+            UnitValue::Inline {
+                bytes: "eyB9".into(),
+            },
+        )],
+    );
+    let expected = [
+        ("clock-skew", 409, Some(r#"["root","time"]"#.to_owned())),
+        ("noncanonical-inline-value", 400, None),
+    ];
+    for (operation, expected) in [&future, &noncanonical].into_iter().zip(&expected) {
+        let first = store.push(&a, operation).unwrap_err();
+        assert_eq!(&(first.code, first.status, first.key), expected);
+        let replay = store.push(&a, operation).unwrap_err();
+        assert_eq!(&(replay.code, replay.status, replay.key), expected);
+    }
+    drop(store);
+    let store = Store::open(root.path()).unwrap();
+    for (operation, expected) in [&future, &noncanonical].into_iter().zip(&expected) {
+        let replay = store.push(&a, operation).unwrap_err();
+        assert_eq!(&(replay.code, replay.status, replay.key), expected);
+    }
+}
+
+#[test]
 fn acknowledgements_are_device_scoped_and_monotonic() {
     let root = tempfile::tempdir().unwrap();
     let store = Store::init(root.path()).unwrap();

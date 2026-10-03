@@ -120,11 +120,12 @@ pub(crate) struct RemoteLocator {
     pub collection: Option<String>,
     pub object: String,
 }
+pub(crate) const MAX_LOCATOR_OBJECT_BYTES: usize = 8192;
 impl RemoteLocator {
     pub fn validate_for(&self, repository: &RepositoryHandle) -> Result<()> {
         if self.connection_identity != repository.connection_identity
             || self.object.is_empty()
-            || self.object.len() > 8192
+            || self.object.len() > MAX_LOCATOR_OBJECT_BYTES
             || self.object.contains('\0')
         {
             return Err(ProviderError::new(ErrorKind::Corrupt));

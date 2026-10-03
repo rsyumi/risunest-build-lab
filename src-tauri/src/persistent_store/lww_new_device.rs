@@ -321,6 +321,7 @@ impl PersistentStore {
             Some(selection_change),
             None,
         )?;
+        self.copy_device_unit_bodies(changes)?;
         let tx = self.device_store_mut()?.transaction()?;
         verify(&tx, header.binding_authority)?;
         let current_writer: String = tx.query_row(

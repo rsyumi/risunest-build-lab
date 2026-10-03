@@ -465,18 +465,31 @@ describe('plugin unit writes with read provenance', () => {
         expect(harness.compatibilityDatabase.plugins).toEqual([original])
     })
 
-    it('commits a single-baseline copy but rejects an ambiguous copy without writes', async () => {
+    it('commits a copy against the newest database read of the same keys', async () => {
         const harness = createHarness({ unitIntent: true })
         const read = await harness.access.getDatabaseSnapshot(['username'], ['username'])
         const copy = JSON.parse(JSON.stringify(read))
         copy.username = 'Copy edit'
         await harness.access.setDatabase(copy, ['username'])
-        expect(harness.commitPersistentUnitIntent).toHaveBeenCalledOnce()
+        expect(harness.commitPersistentUnitIntent).toHaveBeenLastCalledWith('plugin-setDatabase', [{ key: '["root","username"]', type: 'set', value: 'Copy edit' }], [], [])
         harness.compatibilityDatabase.username = 'Copy edit'
         await harness.access.getDatabaseSnapshot(['username'], ['username'])
-        harness.commitPersistentUnitIntent.mockClear()
-        await expect(harness.access.setDatabase(copy, ['username'])).rejects.toThrow('ambiguous')
-        expect(harness.commitPersistentUnitIntent).not.toHaveBeenCalled()
+        await harness.access.setDatabase(copy, ['username'])
+        expect(harness.commitPersistentUnitIntent).toHaveBeenLastCalledWith('plugin-setDatabase', [], [], [])
+    })
+
+    it.each([
+        ['an edited', (data: string) => `${data} edited`, [{ role: 'user', data: 'a edited' }]],
+        ['an unchanged', (data: string) => data, null],
+    ] as const)('commits %s message map spread over the newest chat read after its metadata changed', async (_name, edit, messages) => {
+        const harness = createHarness({ unitIntent: true })
+        const database = makeFullObjectDatabase()
+        harness.pinnedDatabases.push(database)
+        await harness.access.getChatFromIndex(0, 0, callContext())
+        Object.assign(database.characters[0].chats[0], { lastMemory: 'Remote memory' })
+        const fresh = (await harness.access.getChatFromIndex(0, 0, callContext()))!
+        await harness.access.setChatToIndex(0, 0, { ...fresh, message: fresh.message.map(message => ({ ...message, data: edit(message.data) })) }, callContext())
+        expect(harness.commitPersistentUnitIntent).toHaveBeenCalledWith('plugin-setChatToIndex', [], [], messages ? [{ characterId: 'active', conversationId: 'active-chat-a', messages }] : [])
     })
 
     it('rejects an expired JSON clone and a delayed exact object after authority replacement', async () => {

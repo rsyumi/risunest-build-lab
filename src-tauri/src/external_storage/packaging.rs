@@ -4685,36 +4685,39 @@ mod tests {
         source: &CapturedSection,
         versioned: bool,
     ) -> Vec<SectionRow> {
+        if versioned {
+            let entries = source
+                .sources
+                .iter()
+                .map(|file| {
+                    (
+                        file.kind,
+                        file.key.clone(),
+                        crate::external_storage::sections::read_source_bytes(file, &Cancellation::default())
+                            .unwrap(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            return crate::external_storage::sections::decode_section(
+                source.kind,
+                &entries,
+                &source.content_fingerprint,
+            )
+            .unwrap();
+        }
         let directory = tempfile::tempdir().unwrap();
         let mut store = PersistentStore::open(directory.path()).unwrap();
         let section = crate::external_storage::sections::section_of(source.kind).unwrap();
-        if versioned {
-            store
-                .device_store_mut()
-                .unwrap()
-                .set_section_participating(section, true)
-                .unwrap();
-            crate::external_storage::sections::apply_received_section(
-                &mut store,
-                "connection",
-                "library",
-                crate::external_storage::sections::SectionArrival::Continuing,
-                source,
-                &Cancellation::default(),
-            )
+        let mut prepared = crate::external_storage::sections::prepare_received_backup_sections(
+            std::slice::from_ref(source),
+            &Cancellation::default(),
+        )
+        .unwrap();
+        store
+            .device_store_mut()
+            .unwrap()
+            .restore_prepared_backup_section(&prepared.remove(0))
             .unwrap();
-        } else {
-            let mut prepared = crate::external_storage::sections::prepare_received_backup_sections(
-                std::slice::from_ref(source),
-                &Cancellation::default(),
-            )
-            .unwrap();
-            store
-                .device_store_mut()
-                .unwrap()
-                .restore_prepared_backup_section(&prepared.remove(0))
-                .unwrap();
-        }
         store
             .device_store_mut()
             .unwrap()

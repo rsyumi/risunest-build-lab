@@ -26,7 +26,7 @@ pub use transfers::TransferRequest;
 pub use uploads::{UploadManifest, UploadProgress, UPLOAD_CHUNK_BYTES};
 
 use crate::{Error, Result};
-use risunest_sync_wire::{canonical, hash, validate_id, RemoteHead, Sequence};
+use risunest_sync_wire::{canonical, hash, validate_id, RemoteHead};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::{
@@ -103,8 +103,6 @@ pub struct Device {
 pub struct DeviceSession {
     pub head: RemoteHead,
     pub device_id: String,
-    pub operation_watermark: Sequence,
-    pub operation_pending: bool,
     pub protocol_id: &'static str,
 }
 
@@ -366,8 +364,6 @@ impl Store {
         Ok(DeviceSession {
             head: Self::read_head(&db)?,
             device_id: device.id.clone(),
-            operation_watermark: 0.into(),
-            operation_pending: false,
             protocol_id: crate::PROTOCOL_ID,
         })
     }

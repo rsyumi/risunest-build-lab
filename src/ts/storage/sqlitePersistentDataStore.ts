@@ -46,7 +46,7 @@ import {
     type Versioned,
     type WorkingSetCommit,
     type LwwStageReceive,
-    type LwwOutboxRequest, type LwwOutboxPage, type LwwAcknowledgeRequest, type LwwClockState, type LwwRetryRequest, type LwwReplacementRequest,
+    type LwwOutboxRequest, type LwwOutboxPage, type LwwReplacementRequest,
     type LwwApplyReceive,
     type LwwApplyResult,
     type LwwReceiveHeader,
@@ -297,9 +297,6 @@ export class SqlitePersistentDataStore implements PersistentDataStore {
 
     lwwBindingState(): Promise<{ targetAuthority: string }> { return invokeStore('pds_lww_binding_state', {}) }
     lwwReadOutbox(request: LwwOutboxRequest): Promise<LwwOutboxPage> { return invokeStore('pds_lww_read_outbox', { request }) }
-    lwwAckOutbox(request: LwwAcknowledgeRequest): Promise<void> { return invokeStore('pds_lww_ack_outbox', { request }) }
-    lwwClockState(request: LwwReceiveHeader): Promise<LwwClockState> { return invokeStore('pds_lww_clock_state', { request }) }
-    lwwRetryUnpublished(request: LwwRetryRequest): Promise<{ revision: DataRevision }> { return invokeStore('pds_lww_retry_unpublished', { request }) }
     lwwCommitReplacement(request: LwwReplacementRequest): Promise<{ revision: DataRevision }> { return invokeStore('pds_lww_commit_replacement', { request }) }
 
     lwwStageReceive(request: LwwStageReceive): Promise<void> {

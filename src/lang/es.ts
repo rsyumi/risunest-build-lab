@@ -19,7 +19,6 @@ export const languageSpanish = {
         "pluginDataDeletion": "Eliminar datos del plugin",
         "lorebookDeletion": "Eliminar carpeta y entradas del lorebook",
         "partialBackup": "Copia sin otros recursos",
-        "incompleteRestore": "Restaurar sin los datos ausentes",
         "onlySelectedMessage": "Eliminar solo este mensaje"
     },
 
@@ -1500,12 +1499,12 @@ export const languageSpanish = {
         cancelAction: "Cancelar",
         clockBlocked: "La sincronización se detuvo porque la hora del dispositivo y la remota son distintas. Corrija la hora y vuelva a intentarlo.",
         writerCollision: "La sincronización se detuvo por una identidad de dispositivo duplicada. Vuelva a conectarse como un dispositivo nuevo.",
+        unitTooLarge: "La sincronización se detuvo porque un elemento de este dispositivo es demasiado grande para enviarlo al servidor. Reduzca el tamaño del elemento grande y vuelva a intentarlo.",
         newDeviceAction: "Conectar como dispositivo nuevo",
         restoreTitle: "¿Restaurar la copia de seguridad?",
         restoreDescriptionBound: "Se borrarán los datos actuales y se restaurará la copia seleccionada. Los datos restaurados se sincronizarán. Si necesita una copia de seguridad, créela manualmente.",
         restoreDescription: "Se borrarán los datos actuales y se restaurará la copia seleccionada. Si necesita una copia de seguridad, créela manualmente.",
         restoreAcknowledge: "Borrar los datos actuales",
         restoreAction: "Restaurar",
-        myboxSyncUnavailable: "MYBOX no se puede usar para sincronizar.",
     },
 } satisfies DeepPartial<typeof import('./en').languageEnglish>;

@@ -1,5 +1,4 @@
 use super::{PersistentStore, StoreResult};
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use risunest_sync_wire::unit::{UnitKey, UnitValue};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -466,19 +465,21 @@ fn remap_source(
                     let mut archive = super::lww::archive_metadata(db, &value)?;
                     archive.identity_remap.push(map.clone());
                     value = super::lww::archive_value(db, &archive)?;
-                } else if let UnitValue::Inline { bytes } = &value {
-                    let mut payload: Value =
-                        serde_json::from_slice(&URL_SAFE_NO_PAD.decode(bytes).map_err(|e| {
-                            super::StoreError::Validation {
-                                message: e.to_string(),
-                            }
-                        })?)?;
+                } else if matches!(value, UnitValue::Inline { .. })
+                    || (matches!(value, UnitValue::Object { .. })
+                        && super::external_capture::is_large_unit(key))
+                {
+                    let original = super::lww::json_value_resolved(db, &value)?
+                        .ok_or_else(|| super::StoreError::Validation {
+                            message: "remapped unit value is missing".into(),
+                        })?;
+                    let mut payload = original.clone();
                     map.unit(key, &mut payload);
-                    value = UnitValue::inline(&serde_json::to_vec(&payload)?).map_err(|e| {
-                        super::StoreError::Validation {
-                            message: e.to_string(),
-                        }
-                    })?;
+                    // Remapped identities change the value's length, so its
+                    // inline or large form follows the new bytes.
+                    if payload != original {
+                        value = super::lww::unit_value(db, &payload)?;
+                    }
                 }
                 result.insert(map.key(key)?, value);
             }
@@ -774,6 +775,67 @@ mod tests {
         assert_eq!(
             db["characters"][0]["chats"][0]["bookmarks"],
             json!(["message"])
+        );
+    }
+    // A character order whose canonical JSON is exactly `size` bytes.
+    fn sized_order(id: &str, size: usize) -> Value {
+        let overhead = risunest_sync_wire::payload_value::encode(&json!([{"data": [id], "name": ""}]))
+            .unwrap()
+            .len();
+        json!([{"data": [id], "name": "x".repeat(size - overhead)}])
+    }
+    // Remaps one character order unit and checks that the result holds the
+    // remapped value in the form its canonical length requires.
+    fn assert_order_remap(db: &Connection, before: Value) {
+        use super::super::lww::{unit_value, validate_large_unit};
+        use risunest_sync_wire::unit::MAX_INLINE_UNIT_BYTES;
+        let map = IdentityRemap {
+            records: BTreeMap::from([(
+                "character".to_owned(),
+                BTreeMap::from([
+                    ("char".to_owned(), "r".repeat(40)),
+                    ("l".repeat(64), "s".to_owned()),
+                ]),
+            )]),
+            conversations: BTreeMap::new(),
+        };
+        let mut expected = before.clone();
+        expected[0]["data"][0] = json!(map.id("character", before[0]["data"][0].as_str().unwrap()));
+        let order_key = key(&["order", "characters"]);
+        let original = unit_value(db, &before).unwrap();
+        let source = BTreeMap::from([(order_key.clone(), original.clone())]);
+        let remapped = remap_source(db, &map, Some(&source)).unwrap().unwrap();
+        let value = &remapped[&order_key];
+        let large = risunest_sync_wire::payload_value::encode(&expected).unwrap().len() > MAX_INLINE_UNIT_BYTES;
+        assert_eq!(matches!(value, UnitValue::Object { .. }), large);
+        assert!(validate_large_unit(db, value).unwrap() == Some(expected.clone()));
+        if before == expected {
+            assert!(*value == original);
+        }
+    }
+    #[test]
+    fn remapped_inline_units_become_large_when_they_outgrow_the_inline_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = PersistentStore::open(dir.path()).unwrap();
+        let bound = risunest_sync_wire::unit::MAX_INLINE_UNIT_BYTES;
+        assert_order_remap(&store.connection, sized_order("char", bound));
+    }
+    #[test]
+    fn remapped_large_units_rewrite_their_bodies_and_keep_the_inline_bound() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = PersistentStore::open(dir.path()).unwrap();
+        let bound = risunest_sync_wire::unit::MAX_INLINE_UNIT_BYTES;
+        assert_order_remap(&store.connection, sized_order("char", bound + 4096));
+        assert_order_remap(&store.connection, sized_order(&"l".repeat(64), bound + 16));
+        assert_order_remap(&store.connection, sized_order("kept", bound + 4096));
+        // An opaque unit is passed through without reading a body.
+        let opaque = BTreeMap::from([(
+            key(&["future-unit", "order"]),
+            UnitValue::object(risunest_sync_wire::descriptor::RecordDescriptor::content("a".repeat(64))).unwrap(),
+        )]);
+        assert_eq!(
+            remap_source(&store.connection, &IdentityRemap::default(), Some(&opaque)).unwrap().unwrap(),
+            opaque
         );
     }
 }

@@ -1,4 +1,5 @@
 use std::io::Write;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tauri::Manager;
 mod network_probe;
 mod legacy_restore_memory;
@@ -103,12 +104,26 @@ pub extern "C" fn ios_bench_start() {
     let result = std::panic::catch_unwind(|| {
         let product = risunest_lib::invoke_handler();
         let benchmark = benchmark_handler();
+        let readback_received = AtomicU64::new(0);
         let app = risunest_lib::builder()
             .invoke_handler(move |invoke| {
                 if invoke.message.command().starts_with("ios_bench_") {
                     benchmark(invoke)
                 } else {
-                    product(invoke)
+                    let readback = invoke.message.command() == "pds_read_conversation"
+                        && ios_bench_phase().starts_with("legacy-restore-");
+                    let received = if readback {
+                        let count = readback_received.fetch_add(1, Ordering::Relaxed) + 1;
+                        println!("RISUNEST_CR228_NATIVE stage=received count={count}");
+                        Some(count)
+                    } else {
+                        None
+                    };
+                    let handled = product(invoke);
+                    if let Some(count) = received {
+                        println!("RISUNEST_CR228_NATIVE stage=dispatched count={count} handled={}", u8::from(handled));
+                    }
+                    handled
                 }
             })
             .build(tauri::generate_context!())

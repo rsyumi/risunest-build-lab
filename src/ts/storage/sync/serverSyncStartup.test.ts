@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SyncBindingState } from './bindingFlow'
 
 const f = vi.hoisted(() => ({
-    invoke: vi.fn(), offline: true, repairError: undefined as unknown, activationError: undefined as unknown,
+    invoke: vi.fn(), offline: true, repairError: undefined as unknown, activationError: undefined as unknown, fenceError: undefined as unknown,
     binding: undefined as unknown as SyncBindingState,
     runtime: { revision: 0, getStorageAuthorityEpoch: () => 'storage', subscribeActiveConversationViewportSource: () => () => {}, setActivatedLibraryRecoveryLifecycle() {}, markCommittedWorkingSetRefreshRequired() {} },
 }))
@@ -38,7 +38,7 @@ const settle = async () => { for (let i = 0; i < 40; i++) await Promise.resolve(
 const commands = () => f.invoke.mock.calls.map(([command]) => command)
 const button = (text: string) => [...document.querySelectorAll('button')].find(value => value.textContent?.trim() === text)
 beforeEach(async () => {
-    vi.resetModules(); f.invoke.mockReset(); f.offline = true; f.repairError = undefined; f.activationError = undefined
+    vi.resetModules(); f.invoke.mockReset(); f.offline = true; f.repairError = undefined; f.activationError = undefined; f.fenceError = undefined
     f.binding = { target: { kind: 'server', connectionId: 'server' }, targetAuthority: '4', selectionEpoch: 'persisted', libraryId: 'library', progress: null }
     Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true })
     f.invoke.mockImplementation(async (command, args) => {
@@ -47,6 +47,7 @@ beforeEach(async () => {
         if (command === 'server_sync_lww_activate' && f.activationError) throw f.activationError
         if (command === 'server_sync_lww_activate' && f.offline) throw { code: 'server-unreachable', status: 503, retryable: true }
         if (command === 'server_sync_lww_retry' && f.repairError) throw f.repairError
+        if (command === 'server_sync_lww_fence' && f.fenceError) throw f.fenceError
         if (command === 'pds_lww_switch_target') {
             expect(args.request).toMatchObject({ bindingAuthority: f.binding.targetAuthority, expectedSelectionEpoch: f.binding.selectionEpoch })
             f.binding = { ...f.binding, target: args.request.target, targetAuthority: String(Number(f.binding.targetAuthority) + 1), selectionEpoch: 'disconnected' }
@@ -113,8 +114,45 @@ describe('persisted server offline startup', () => {
         expect(commands()).not.toContain('server_sync_notify_start')
     })
     it.each([
+        { code: 'server-timeout', status: 503, retryable: true },
+        { code: 'directory-unreachable', status: 503, retryable: true },
+        { code: 'server-response-error', status: 502, retryable: true },
+        { code: 'sync-retry-budget-exhausted', status: 503, retryable: true },
+    ])('keeps the fenced binding paused and opens the library when activation fails with transient $code', async failure => {
+        f.activationError = failure
+        await expect(production.installServerSyncProduction()).resolves.toBeUndefined()
+        expect(commands()).toContain('server_sync_lww_fence')
+        expect(commands()).not.toContain('server_sync_notify_start'); expect(commands()).not.toContain('pds_lww_switch_target')
+        expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { bound: true }, running: false, paused: true, error: failure.code })
+        f.activationError = undefined; f.offline = false
+        await production.retryServerSync()
+        expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { bound: true }, paused: false, error: '' })
+    })
+    it('keeps the binding paused when the startup fence cannot reach the server either', async () => {
+        f.fenceError = { code: 'server-unreachable', status: 503, retryable: true }
+        await expect(production.installServerSyncProduction()).resolves.toBeUndefined()
+        expect(commands()).not.toContain('server_sync_notify_start'); expect(commands()).not.toContain('pds_lww_switch_target')
+        expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { bound: true }, running: false, paused: true, error: 'server-unreachable' })
+        f.fenceError = undefined; f.offline = false
+        await production.retryServerSync()
+        expect(production.getServerSyncController().snapshot()).toMatchObject({ status: { bound: true }, paused: false, error: '' })
+    })
+    it.each([
+        { code: 'equal-stamp-integrity', retryable: false },
+        { code: 'binding-authority-stale', retryable: false },
+    ])('rejects startup when the fence after an offline activation fails with $code', async fenceError => {
+        f.fenceError = fenceError
+        const before = structuredClone(f.binding)
+        await expect(production.installServerSyncProduction()).rejects.toBeInstanceOf(AggregateError)
+        expect(commands()).not.toContain('server_sync_notify_start')
+        expect(f.binding).toEqual(before)
+    })
+    it.each([
         { code: 'binding-authority-stale', retryable: false },
         { code: 'server-unreachable', retryable: false },
+        { code: 'equal-stamp-integrity', retryable: false },
+        { code: 'unauthorized', status: 401, retryable: false },
+        { code: 'local-metadata', status: 503, retryable: true },
         new Error('Local activation state is invalid'),
     ])('rejects non-recoverable or unknown activation failures after fencing startup jobs (%j)', async failure => {
         f.activationError = failure

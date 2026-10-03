@@ -4,7 +4,7 @@ import { createServerSyncScheduler } from './serverSyncScheduler'
 afterEach(() => vi.useRealTimers())
 function fixture() {
     vi.useFakeTimers()
-    const dependencies = { push: vi.fn(async () => {}), pull: vi.fn(async () => {}), connect: vi.fn(async () => {}), disconnect: vi.fn(async () => {}), retryClock: vi.fn(async () => {}), failed: vi.fn() }
+    const dependencies = { push: vi.fn(async () => {}), pull: vi.fn(async () => {}), connect: vi.fn(async () => {}), disconnect: vi.fn(async () => {}), retryClock: vi.fn(async () => {}), failed: vi.fn(), recovered: vi.fn() }
     return { ...dependencies, scheduler: createServerSyncScheduler(dependencies) }
 }
 describe('server LWW foreground scheduler', () => {
@@ -114,6 +114,57 @@ describe('server LWW foreground scheduler', () => {
         await vi.advanceTimersByTimeAsync(120_000)
         expect(f.retryClock).not.toHaveBeenCalled(); expect(f.scheduler.isBlocked()).toBe(true)
         expect(f.push).toHaveBeenCalledTimes(1)
+        f.scheduler.dispose()
+    })
+    it('does not report the fence complete until an in-flight notification start has settled and been stopped', async () => {
+        const f = fixture(); const order: string[] = []; let started!: () => void
+        f.connect.mockImplementationOnce(() => new Promise<void>(resolve => { started = () => { order.push('started'); resolve() } }))
+        f.disconnect.mockImplementation(async () => { order.push('stopped') })
+        await f.scheduler.foreground(true); await vi.advanceTimersByTimeAsync(0)
+        expect(f.connect).toHaveBeenCalledOnce()
+        let fenced = false; const fence = f.scheduler.fence().then(() => { fenced = true })
+        await vi.advanceTimersByTimeAsync(0); expect(fenced).toBe(false)
+        started(); await fence
+        expect(order.indexOf('started')).toBeLessThan(order.lastIndexOf('stopped'))
+        f.connect.mockClear(); await vi.advanceTimersByTimeAsync(120_000); expect(f.connect).not.toHaveBeenCalled()
+        f.scheduler.dispose()
+    })
+    it('never reports a cancelled lane or connection start', async () => {
+        const f = fixture()
+        f.push.mockRejectedValueOnce({ code: 'cancelled', retryable: true })
+        f.pull.mockRejectedValueOnce({ code: 'cancelled', retryable: true })
+        f.connect.mockRejectedValueOnce({ code: 'cancelled', retryable: true })
+        await f.scheduler.foreground(true); await vi.advanceTimersByTimeAsync(0)
+        expect(f.failed).not.toHaveBeenCalled(); expect(f.scheduler.isBlocked()).toBe(false)
+        f.scheduler.dispose()
+    })
+    it('reports recovery only after every failed lane succeeds again', async () => {
+        const f = fixture()
+        f.push.mockRejectedValueOnce({ code: 'server-unreachable', retryable: true })
+        f.pull.mockRejectedValueOnce({ code: 'server-unreachable', retryable: true })
+        await f.scheduler.foreground(true); await vi.advanceTimersByTimeAsync(0)
+        expect(f.failed).toHaveBeenCalledTimes(2); expect(f.recovered).not.toHaveBeenCalled()
+        await vi.advanceTimersByTimeAsync(1000); expect(f.push).toHaveBeenCalledTimes(2); expect(f.recovered).not.toHaveBeenCalled()
+        await vi.advanceTimersByTimeAsync(4000); expect(f.pull).toHaveBeenCalledTimes(2); expect(f.recovered).toHaveBeenCalledOnce()
+        f.scheduler.dispose()
+    })
+    it('never reports recovery while an integrity block holds', async () => {
+        const f = fixture(); let finishPull!: () => void
+        f.pull.mockImplementationOnce(() => new Promise<void>(resolve => { finishPull = resolve }))
+        f.push.mockRejectedValueOnce({ code: 'writer-collision', retryable: false })
+        await f.scheduler.foreground(true); await vi.advanceTimersByTimeAsync(0)
+        expect(f.scheduler.isBlocked()).toBe(true)
+        finishPull(); await vi.advanceTimersByTimeAsync(0)
+        expect(f.recovered).not.toHaveBeenCalled()
+        f.scheduler.dispose()
+    })
+    it('resets a block for a newly installed binding', async () => {
+        const f = fixture(); f.push.mockRejectedValueOnce({ code: 'writer-collision', retryable: false })
+        await f.scheduler.foreground(true); await vi.advanceTimersByTimeAsync(0)
+        expect(f.scheduler.isBlocked()).toBe(true)
+        await f.scheduler.fence(); f.scheduler.reset(); f.push.mockClear()
+        await f.scheduler.foreground(true); await vi.advanceTimersByTimeAsync(0)
+        expect(f.scheduler.isBlocked()).toBe(false); expect(f.push).toHaveBeenCalledOnce()
         f.scheduler.dispose()
     })
     it('retains an incoming integrity block when an already running push later fails clock admission', async () => {

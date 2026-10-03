@@ -335,7 +335,6 @@ export interface PersistentDataRuntimeStateAdapter {
     /** Host caches outside the working set that a remote change invalidates. */
     onPluginStorageChanged?(owner: string, key: string): void
     getGeneratingConversations?(): readonly GeneratingConversation[]
-    getGeneratingConversation?(): { characterId: string; conversationId: string } | null
     conversationViewportRowBudget?: number
     canActivateWorkingSet?(): boolean
     canDeactivateWorkingSet?(): boolean
@@ -803,9 +802,12 @@ export function createPersistentDataRuntime(
                         ? (changeSet.wholeLibrary ? null : [])
                         : await readWorkingSetChangeWindow(lease)
                     if (keys) {
-                        const generating =
+                        // Only the selected conversation can be held by a targeted pass.
+                        const deferredConversation =
                             dependencies.state.isConversationOperationActive?.() === true
-                                ? dependencies.state.getGeneratingConversation?.() ?? null
+                                ? generating().find((target) =>
+                                    target.characterId === pinned.selectedCharacterId &&
+                                    target.conversationId === pinned.selectedConversationId) ?? null
                                 : null
                         const targeted = await applyTargetedWorkingSetInvalidation(
                             previous,
@@ -815,7 +817,7 @@ export function createPersistentDataRuntime(
                                 ...pinned,
                                 keepConversation,
                                 changeSet,
-                                deferredConversation: generating,
+                                deferredConversation,
                                 onPluginStorageChanged:
                                     dependencies.state.onPluginStorageChanged,
                             },
@@ -1001,6 +1003,16 @@ export function createPersistentDataRuntime(
         baseline ??= captureLwwWorkingSetBaseline(database, coordinator.capturePersistentBaselineRoot(), dependencies.state.capturePresets?.() ?? null, coordinator.captureMaterializedBaseline(), coordinator.capturePresetRecordBaseline())
         const selectedTarget = workingSet.captureSelectedConversationTarget()
         const selectedSession = workingSet.activeConversationSession
+        // Remote values are patched into the live conversation in place; the
+        // session that renders it is told through its own version instead.
+        const selectedOwner = selectedTarget ? database.characters.find((value) => value.chaId === selectedTarget.characterId) : undefined
+        const selectedChat = selectedOwner?.chats.find((value) => value.id === selectedTarget!.conversationId)
+        const selectedFields = selectedChat && selectedSession?.matchesConversation(selectedTarget!.characterId, selectedChat)
+            ? new Map(result.affectedKeys.map((key) => JSON.parse(key) as string[])
+                .filter(([kind, characterId, conversationId]) => (kind === 'conversation' || kind === 'messages') && characterId === selectedTarget!.characterId && conversationId === selectedTarget!.conversationId)
+                .map(([kind, , , field]) => kind === 'messages' ? 'message' : field)
+                .map((field) => [field, (selectedChat as unknown as Record<string, unknown>)[field]] as const))
+            : undefined
         const authorityEpoch = coordinator.storageAuthorityEpoch
         const lease = await dependencies.store.acquireRevision(result.revision)
         const projectionBaseline = baseline
@@ -1026,6 +1038,13 @@ export function createPersistentDataRuntime(
             })
         } finally { await releasePersistentRevisionLease(lease) }
         coordinator.adoptAppliedUnitState(result.revision, applied.root, applied.presets, applied.characters, applied.presetRecords)
+        if (selectedFields && [...selectedFields].some(([field, value]) => (selectedChat as unknown as Record<string, unknown>)[field] !== value) &&
+            selectedSession!.matchesConversation(selectedTarget!.characterId, selectedChat!) &&
+            !selectedSession!.adoptPersistedMetadata(selectedChat!, result.revision)) {
+            // A session that cannot adopt the change is republished from a new object.
+            const index = selectedOwner!.chats.indexOf(selectedChat!)
+            if (index >= 0) selectedOwner!.chats[index] = { ...selectedChat! }
+        }
         if (selectedTarget && selectedSession) workingSet.refreshSelectedConversationAfterReplacement(selectedTarget, selectedSession)
         for (const key of result.affectedKeys) {
             const [kind, owner, name] = JSON.parse(key)
@@ -1121,6 +1140,9 @@ export function createPersistentDataRuntime(
         },
         drainLwwDeferred,
         async commitPersistentUnitIntent(reason, mutations, conversations, wholeMessages) {
+            // Translation reads the effective identity records, so unsaved mirror
+            // edits reach them first.
+            dependencies.state.beforeCapture?.()
             const translated = translatePersistentRootUnitIntents(mutations)
             const affectedKeys = translated.map((value) => value.key)
             for (const value of wholeMessages ?? []) affectedKeys.push(JSON.stringify(['messages', value.characterId, value.conversationId]))
@@ -1280,7 +1302,7 @@ export function createPersistentDataRuntime(
                 const {prepareBoundLibraryReplacement} = await import('./sync/bindingRegistry')
                 const binding = await prepareBoundLibraryReplacement()
                 const {acquireUpstreamImportPause, confirmUpstreamLibraryReplacement} = await import('./upstreamReplacement')
-                if (!(await confirmUpstreamLibraryReplacement(binding.bound, options.upstreamImportWarnings))) throw new Error('Import cancelled')
+                if (!(await confirmUpstreamLibraryReplacement(binding.bound, options.upstreamImportWarnings))) throw new DOMException('Import cancelled', 'AbortError')
                 const plugins = await import('../plugins/apiV3/v3.svelte')
                 let pause: Awaited<ReturnType<typeof acquireUpstreamImportPause>>
                 try {

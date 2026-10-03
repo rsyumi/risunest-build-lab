@@ -4,6 +4,9 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 
 pub const MAX_UNIT_KEY_BYTES: usize = 64 * 1024;
+/// Largest decoded canonical JSON payload an inline value may carry. Larger
+/// values travel as content objects so every page and push stays bounded.
+pub const MAX_INLINE_UNIT_BYTES: usize = 262_144;
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct UnitKey(String);
@@ -30,19 +33,26 @@ impl TryFrom<String> for UnitKey {
             "root" | "toggle" | "variable" | "preset-protected" | "archive" | "asset" | "inlay" | "hypa" | "group-members" => n == 2,
             "character" | "preset" | "persona" | "messages" | "record" | "plugin" => n == 3,
             "conversation" | "plugin-local" => n == 4,
+            // Record kinds and order scopes this build does not know stay opaque.
             "exists" => match components.get(1).map(String::as_str) {
                 Some("conversation") => n == 4,
                 Some("character" | "preset" | "persona" | "modules" | "loadouts" | "customModels") => n == 3,
-                _ => false,
+                Some("plugins" | "") | None => false,
+                Some(_) => n >= 3,
             },
             "order" => match components.get(1).map(String::as_str) {
                 Some("conversations" | "plugin-storage") => n == 3,
                 Some("characters" | "presets" | "personas" | "modules" | "plugins" | "loadouts" | "customModels") => n == 2,
-                _ => false,
+                Some("") | None => false,
+                Some(_) => true,
             },
             _ => true,
         };
-        if !valid || (kind == "record" && !matches!(components[1].as_str(), "modules" | "plugins" | "loadouts" | "customModels")) {
+        if !valid
+            || (kind == "record" && !matches!(components[1].as_str(), "modules" | "plugins" | "loadouts" | "customModels"))
+            // Every `toggle_*` global variable is a toggle unit and no other is.
+            || (matches!(kind, "toggle" | "variable") && (kind == "toggle") != components[1].starts_with("toggle_"))
+        {
             return Err(WireError("invalid-unit-key-shape"));
         }
         let structural_ids = match kind {
@@ -84,7 +94,9 @@ impl<'de> Deserialize<'de> for UnitValue {
 }
 impl UnitValue {
     pub fn inline(bytes: &[u8]) -> Result<Self> {
-        Ok(Self::Inline { bytes: URL_SAFE_NO_PAD.encode(payload_value::canonicalize(bytes)?) })
+        let canonical = payload_value::canonicalize(bytes)?;
+        if canonical.len() > MAX_INLINE_UNIT_BYTES { return Err(WireError("inline-unit-too-large")); }
+        Ok(Self::Inline { bytes: URL_SAFE_NO_PAD.encode(canonical) })
     }
     pub fn object(descriptor: RecordDescriptor) -> Result<Self> {
         Ok(Self::Object { descriptor_hash: descriptor.hash()?, descriptor })
@@ -93,6 +105,7 @@ impl UnitValue {
         match self {
             Self::Inline { bytes } => {
                 let decoded = URL_SAFE_NO_PAD.decode(bytes).map_err(|_| WireError("invalid-inline-value"))?;
+                if decoded.len() > MAX_INLINE_UNIT_BYTES { return Err(WireError("inline-unit-too-large")); }
                 if URL_SAFE_NO_PAD.encode(&decoded) != *bytes || payload_value::canonicalize(&decoded)? != decoded { return Err(WireError("noncanonical-inline-value")); }
             }
             Self::Object { descriptor_hash, descriptor } => {

@@ -3,7 +3,8 @@ vi.mock('../platform',()=>({isTauri:true}))
 const plugins=vi.hoisted(()=>({fencePluginExecutionForAuthorityReplacement:vi.fn(async()=>{}),invalidatePluginCachesAfterAuthorityReplacement:vi.fn(async()=>{}),restartPluginsAfterAuthorityReplacement:vi.fn(async()=>{})}))
 const binding=vi.hoisted(()=>({bound:true,state:{targetAuthority:'9007199254740993'},fence:vi.fn(async()=>{}),assertAuthority:vi.fn(async()=>{}),resume:vi.fn(async()=>{})}))
 vi.mock('./sync/bindingRegistry',()=>({prepareBoundLibraryReplacement:async()=>binding}))
-vi.mock('../alert',()=>({alertCheckboxConfirm:async()=>({confirmed:true,checked:true})}))
+const alerts=vi.hoisted(()=>({checkbox:vi.fn(async()=>({confirmed:true,checked:true}))}))
+vi.mock('../alert',()=>({alertCheckboxConfirm:alerts.checkbox}))
 vi.mock('../plugins/apiV3/v3.svelte',()=>plugins)
 import type {Database} from './database.svelte'
 import type {PersistentDataStore,PersistentRevisionLease} from './persistentDataStore'
@@ -148,6 +149,16 @@ describe('direct native upstream import publication',()=>{
         expect(h.store.replaceFromDatabase).toHaveBeenCalledOnce()
         expect(h.database.username).toBe(incoming.username)
         await expect(retryCommittedWorkingSetRefreshWithContinuation(h.runtime)).resolves.toBeNull()
+    })
+
+    it('cancels a declined upstream replacement as an abort before fencing the sync binding',async()=>{
+        const h=await createHarness()
+        alerts.checkbox.mockResolvedValueOnce({confirmed:false,checked:false})
+        await expect(h.runtime.replacePersistentDatabase({...makeDatabase(),username:'Declined'},'declined',{upstreamImport:true})).rejects.toMatchObject({name:'AbortError'})
+        expect(alerts.checkbox).toHaveBeenCalledOnce()
+        expect(binding.fence).not.toHaveBeenCalled()
+        expect(h.store.replaceFromDatabase).not.toHaveBeenCalled()
+        expect(h.database.username).not.toBe('Declined')
     })
 
     it('emits the operation restart receipt only after the required native restart succeeds',async()=>{

@@ -592,8 +592,8 @@ export async function loadData() {
             window.addEventListener('pagehide', disposeNativeSyncBindings, { once: true })
         }
         if (isTauri && !excluded('sync')) {
-            await installServerSyncProduction()
             await transition('drive-sync', language.risuNest.startup.account)
+            await installServerSyncProduction()
             try {
                 const { installExternalStorageProduction } = await import(
                     './storage/sync/external/production'

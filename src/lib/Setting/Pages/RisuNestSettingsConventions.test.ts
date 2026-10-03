@@ -11,7 +11,6 @@ const dataHealthSource = readFileSync('src/lib/Setting/Pages/RisuNestDataHealth.
 const updateSource = readFileSync('src/lib/Setting/Pages/RisuNestUpdateSettings.svelte', 'utf8')
 const appImageSource = readFileSync('src/lib/Setting/Pages/RisuNestAppImage.svelte', 'utf8')
 const pluginDataSource = readFileSync('src/lib/Setting/RisuNest/PluginDataManager.svelte', 'utf8')
-const portableSource = readFileSync('src/lib/Setting/PortableBackupSelection.svelte', 'utf8')
 const assignDialogSource = readFileSync('src/lib/Setting/RisuNest/PluginValueAssignDialog.svelte', 'utf8')
 const segmentedSource = readFileSync('src/lib/Setting/RisuNest/SegmentedButtons.svelte', 'utf8')
 const groupSource = readFileSync('src/lib/Setting/RisuNest/SettingGroup.svelte', 'utf8')
@@ -41,19 +40,14 @@ describe('RisuNest settings theme and layout conventions', () => {
     })
 
     it('builds every choice from the shared RisuNest controls', () => {
-        for (const source of [dataHealthSource, pluginDataSource, portableSource, assignDialogSource]) {
+        for (const source of [dataHealthSource, pluginDataSource, assignDialogSource]) {
             expect(source).toContain('SettingToggle')
             expect(source).not.toContain('<Check ')
         }
         for (const source of [dataHealthSource, pluginDataSource, assignDialogSource]) {
             expect(source).not.toMatch(/<input\b/)
         }
-        const portableInputs = portableSource.match(/<input\b[^>]*>/g) ?? []
-        expect(portableInputs).toHaveLength(1)
-        expect(portableInputs[0]).toContain('aria-label={text.searchItems}')
-        expect(portableInputs[0]).toContain('bind:value={search}')
-        expect(portableInputs[0]).not.toMatch(/\btype\s*=/)
-        for (const source of [updateSource, appImageSource, portableSource]) {
+        for (const source of [updateSource, appImageSource]) {
             expect(source).toContain('SettingButton')
             expect(source).not.toMatch(/import Button from/)
         }

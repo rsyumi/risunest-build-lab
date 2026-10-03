@@ -108,6 +108,20 @@ describe('RisuSave persistent store adapter', () => {
         expect((await store.readRoot()).value).toMatchObject({temperature:999,username:'stale'})
     })
 
+    it('exports a selection of a missing preset as no preset without another preset\'s mirrors', async () => {
+        const database = structuredClone(risuSaveFixtureDatabase)
+        const store = new IndexedDbPersistentDataStore('dangling-preset-export', new IDBFactory(), IDBKeyRange)
+        await store.open()
+        const imported = await store.replaceFromDatabase(database)
+        const root = await store.readRoot()
+        const committed = await store.commit({ expectedRevision: imported.revision,
+            root: { ...root.value, botPresetsId: 'missing-preset', mainPrompt: 'stored root' } })
+        const decoded = await decodeRisuSave(await concatenate(streamRisuSaveFromStore(store, committed.revision)))
+        expect(decoded.botPresetsId).toBe(-1)
+        expect(decoded.mainPrompt).toBe('stored root')
+        expect(decoded.botPresets.map((preset: { id: string }) => preset.id)).toEqual(database.botPresets.map((preset) => preset['id']))
+    })
+
     it('preserves the existing raw block framing bytes', async () => {
         await expect(
             encodeRisuSaveBlock({

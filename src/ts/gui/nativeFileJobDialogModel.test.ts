@@ -135,6 +135,12 @@ describe('nativeFileJobDialogModel', () => {
         expect(model.terminal?.details).toBe(`[${code}] synthetic detail`)
     })
 
+    it('asks to connect sync when a bound restore cannot reach its sync target', () => {
+        const model = buildNativeFileJobDialogModel(null, outcome({ state: 'failed', error: { code: 'sync-unavailable', message: 'synthetic detail', recoveryRequired: false } }), 0)
+        expect(model.terminal?.reason).toBe(languageEnglish.risuNest.backup.syncUnavailable)
+        expect(model.terminal?.reason).not.toBe(copy.reasonRevisionConflict)
+    })
+
     it.each(['revision-conflict', 'store-error'])('uses export wording for %s', code => {
         expect(failureReason(code, 'export')).not.toBe(failureReason(code, 'import'))
         expect(failureReason(code, 'export')).toMatch(/export/i)

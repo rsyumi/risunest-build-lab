@@ -110,13 +110,14 @@ impl PersistentStore {
         }
         let reader = self.revision_leases.get(lease)
             .ok_or_else(|| invalid("Backup dependency lease is unavailable"))?;
+        let large = large_unit_body_hashes(units);
         let load = |hash: &str| -> StoreResult<Option<Vec<u8>>> {
             check(probe)?;
             let length: Option<i64> = reader.connection.query_row(
                 "SELECT length(body) FROM message_page_objects WHERE hash=?1", [hash], |row| row.get(0),
             ).optional()?;
             if length.is_some_and(|size| size < 0) {return Err(invalid("Backup control length is invalid"));}
-            if let Some(size)=length.filter(|size|*size as u64>risunest_sync_wire::MAX_METADATA_BYTES as u64) {
+            if let Some(size)=length.filter(|size|*size as u64>risunest_sync_wire::MAX_METADATA_BYTES as u64 && !large.contains(hash)) {
                 let page=original_unit_message_page(units,hash,&|manifest| {
                     let size:Option<i64>=reader.connection.query_row("SELECT length(body) FROM message_page_objects WHERE hash=?1",[manifest],|row|row.get(0)).optional()?;
                     if size.is_some_and(|size|size<0 || size as u64>risunest_sync_wire::MAX_METADATA_BYTES as u64) {return Err(invalid("Backup manifest exceeds its bound"));}
@@ -170,12 +171,45 @@ pub(crate) fn hash_backup_body(bytes:&[u8], domain:&'static str) -> String {
 pub(crate) fn published_json_asset_roots(bytes:&[u8])->StoreResult<crate::asset_repository::migration_gc::AssetRootSet> {
     let mut roots=crate::asset_repository::migration_gc::AssetRootSet::default();
     if bytes.len()>risunest_sync_wire::MAX_METADATA_BYTES {
-        for value in verified_large_message_page(bytes)? {super::snapshot::observe_json_value(&value,None,&mut roots);}
-    } else {
-        let value:serde_json::Value=serde_json::from_slice(bytes)?;
-        super::snapshot::observe_json_value(&value,None,&mut roots);
+        if let Ok(messages)=verified_large_message_page(bytes) {
+            for value in messages {super::snapshot::observe_json_value(&value,None,&mut roots);}
+            return Ok(roots);
+        }
+        verified_large_unit_body(bytes)?;
     }
+    let value:serde_json::Value=serde_json::from_slice(bytes)?;
+    super::snapshot::observe_json_value(&value,None,&mut roots);
     Ok(roots)
+}
+
+/// A large unit body is the canonical JSON of the value its unit names.
+pub(crate) fn verified_large_unit_body(bytes:&[u8])->StoreResult<()> {
+    if risunest_sync_wire::payload_value::canonicalize(bytes).ok().as_deref()!=Some(bytes) {
+        return Err(invalid("Large unit body is not canonical JSON"));
+    }
+    Ok(())
+}
+
+/// A control above the metadata bound is either one indivisible message page
+/// or a large unit body.
+pub(crate) fn verified_oversized_control(bytes:&[u8])->StoreResult<()> {
+    if verified_large_message_page(bytes).is_ok() {return Ok(());}
+    verified_large_unit_body(bytes)
+}
+
+/// Known kinds other than messages and archive carry Object values only as
+/// large units. Unknown kinds stay opaque.
+pub(crate) fn is_large_unit(key:&risunest_sync_wire::unit::UnitKey)->bool {
+    super::lww::lww_known_unit_key(key) && !matches!(key.components()[0].as_str(),"messages"|"archive")
+}
+
+/// The body hashes of the large units in `units`, the only controls besides
+/// indivisible message pages that may exceed the metadata bound.
+pub(crate) fn large_unit_body_hashes(units:&BTreeMap<risunest_sync_wire::unit::UnitKey,risunest_sync_wire::unit::UnitValue>)->BTreeSet<String> {
+    units.iter().filter_map(|(key,value)| match value {
+        risunest_sync_wire::unit::UnitValue::Object{descriptor,..} if is_large_unit(key) => Some(descriptor.object_hash.clone()),
+        _ => None,
+    }).collect()
 }
 
 pub(crate) fn verified_large_message_page(bytes:&[u8])->StoreResult<Vec<serde_json::Value>> {
@@ -243,7 +277,13 @@ pub(crate) fn original_unit_dependency_inventory(
         if hash_backup_body(&bytes,"native_backup_dependency_descriptor") != *descriptor_hash {return Err(invalid("Original backup descriptor identity differs"))}
         control(&mut inventory,emit,descriptor_hash,&bytes)?;
         let kind = key.components();
-        if super::lww::lww_known_unit_key(key) && matches!(kind[0].as_str(),"messages"|"archive") {
+        if is_large_unit(key) {
+            check(probe)?;
+            let body = read_body(&descriptor.object_hash)?.ok_or_else(|| invalid("Pinned backup large unit body is unavailable"))?;
+            if hash_backup_body(&body,"native_backup_large_unit_source") != descriptor.object_hash {return Err(invalid("Pinned backup large unit body identity differs"))}
+            verified_large_unit_body(&body)?;
+            control(&mut inventory,emit,&descriptor.object_hash,&body)?;
+        } else if super::lww::lww_known_unit_key(key) {
             let body = load(&descriptor.object_hash)?.ok_or_else(|| invalid("Pinned backup control is unavailable"))?;
             if kind[0] == "messages" {
                 let result = risunest_external_storage_format::message_pages::MessageManifest::decode(&body);

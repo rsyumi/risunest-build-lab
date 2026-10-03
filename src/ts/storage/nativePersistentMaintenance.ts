@@ -304,11 +304,20 @@ export async function createPeriodicNativeSnapshotIfDue(
     return createNativePersistentSnapshot('periodic')
 }
 
+export function sweepNativeMessageObjects(): Promise<void> {
+    return invoke('pds_message_object_sweep')
+}
+
 export function schedulePeriodicNativeSnapshot(): void {
     const run = () => {
-        void createPeriodicNativeSnapshotIfDue().catch((error) => {
-            console.error('Periodic native snapshot failed', error)
-        })
+        void createPeriodicNativeSnapshotIfDue()
+            .catch((error) => {
+                console.error('Periodic native snapshot failed', error)
+            })
+            .then(() => sweepNativeMessageObjects())
+            .catch((error) => {
+                console.error('Periodic native object sweep failed', error)
+            })
     }
     if (typeof globalThis.requestIdleCallback === 'function') {
         globalThis.requestIdleCallback(run)

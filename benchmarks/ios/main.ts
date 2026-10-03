@@ -16,12 +16,13 @@ import { PersistentBenchmarkMarker } from "./persistentMarker";
 
 const report = (stage: string, result: unknown) =>
   invoke("ios_bench_report", { stage, result });
-async function userStart(label: string) {
+async function userStart(label: string, onStart?: () => void) {
   await new Promise<void>((resolve) => {
     const button = document.createElement("button");
     button.textContent = label;
     button.style.cssText = "display:block;padding:24px;margin:16px";
     button.onclick = () => {
+      onStart?.();
       button.remove();
       resolve();
     };
@@ -111,6 +112,17 @@ async function main() {
     const [, size, encoding] = /^legacy-restore-(100|300|600)-(raw|gzip)$/.exec(phase)!;
     const reset = await resetLegacyMeasurementProfile();
     const { runLegacyRestoreMeasurement } = await import('../legacy-restore/run');
+    const readbackStage = document.createElement('pre');
+    document.body.append(readbackStage);
+    const readbackStarted = performance.now();
+    const showReadbackStage = (progress: { stage: number; index: number; readReturned: number; hashVerified: number; messageCount: number }) => {
+      readbackStage.textContent = 'legacy-readback-stage:' + JSON.stringify({
+        ...progress, elapsedMs: Math.floor(performance.now() - readbackStarted),
+      });
+    };
+    const showVerifyStage = (stage: 1 | 2 | 3) => showReadbackStage({
+      stage, index: 0, readReturned: 0, hashVerified: 0, messageCount: 0,
+    });
     const result = await runLegacyRestoreMeasurement({
       megabytes: Number(size) as 100 | 300 | 600,
       encoding: encoding as 'raw' | 'gzip',
@@ -126,7 +138,12 @@ async function main() {
         document.getElementById('benchmark')!.textContent = 'legacy-restore-ready:' + JSON.stringify(ready);
         await userStart('Start synthetic restore');
       },
-      afterRestore: async () => { await userStart('Verify synthetic restore'); },
+      afterRestore: async () => {
+        showVerifyStage(1);
+        await userStart('Verify synthetic restore', () => showVerifyStage(2));
+        showVerifyStage(3);
+      },
+      onReadbackProgress: showReadbackStage,
     });
     document.getElementById('benchmark')!.textContent = 'legacy-restore-result:' + JSON.stringify(result);
     check(result.phase === 'verified', 'Legacy restore did not verify');

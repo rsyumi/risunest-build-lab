@@ -568,6 +568,8 @@ export function failureReason(code: string, direction: 'import' | 'export' = 'im
             return copy.reasonPendingOperation
         case 'server-status-unavailable':
             return copy.reasonServerStatus
+        case 'sync-unavailable':
+            return language.risuNest.backup.syncUnavailable
         default:
             return copy.reasonUnknown
     }

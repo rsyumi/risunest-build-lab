@@ -82,8 +82,16 @@ impl Iterator for NativeShards {
         }).collect::<Vec<_>>();
         let character = json!({"chaId":format!("synthetic-character-{index}"), "type":"character",
             "name":format!("Synthetic {index}"), "chatPage":0,
+            "notes":"", "bias":[], "emotionImages":[], "globalLore":[],
+            "sdData":[["always","solo, 1girl"],["negative",""],["|character's appearance",""],
+                ["current situation",""],["$character's pose",""],["$character's emotion",""],["current location",""]],
+            "utilityBot":false, "exampleMessage":"", "creatorNotes":"", "systemPrompt":"",
+            "postHistoryInstructions":"", "alternateGreetings":[], "tags":[], "creator":"",
+            "characterVersion":"", "personality":"", "scenario":"", "firstMsgIndex":-1,
+            "replaceGlobalNote":"", "additionalText":"",
             "additionalAssets":owner_entries.iter().map(|entry| entry.tuple.clone()).collect::<Vec<_>>(),
-            "chats":[{"id":format!("synthetic-conversation-{index}"), "name":"Synthetic", "message":messages}]});
+            "chats":[{"id":format!("synthetic-conversation-{index}"), "name":"Synthetic",
+                "note":"", "localLore":[], "message":messages}]});
         let bytes = serde_json::to_vec(&character).expect("synthetic JSON is serializable");
         if bytes.len() > MAX_SHARD_BYTES {
             self.exhausted = true;
@@ -113,6 +121,20 @@ mod tests {
             assert!(left.serialized_character_bytes <= MAX_SHARD_BYTES as u64);
             assert_eq!(left.assets.len(), [2,1,0][index as usize]);
             assert_eq!(left.owner_entries.len(),left.assets.len());
+            for key in ["notes","exampleMessage","creatorNotes","systemPrompt","postHistoryInstructions",
+                "creator","characterVersion","personality","scenario","replaceGlobalNote","additionalText"] {
+                assert_eq!(left.character[key],json!(""));
+            }
+            for key in ["bias","emotionImages","globalLore","alternateGreetings","tags"] {
+                assert_eq!(left.character[key],json!([]));
+            }
+            assert_eq!(left.character["sdData"],json!([["always","solo, 1girl"],["negative",""],
+                ["|character's appearance",""],["current situation",""],["$character's pose",""],
+                ["$character's emotion",""],["current location",""]]));
+            assert_eq!(left.character["utilityBot"],json!(false));
+            assert_eq!(left.character["firstMsgIndex"],json!(-1));
+            assert_eq!(left.character["chats"][0]["note"],json!(""));
+            assert_eq!(left.character["chats"][0]["localLore"],json!([]));
             let messages = left.character["chats"][0]["message"].as_array().unwrap();
             assert_eq!(messages.len(),if index==0 {4096} else {2});
             assert_eq!(messages.iter().map(|m|m["chatId"].as_str().unwrap())

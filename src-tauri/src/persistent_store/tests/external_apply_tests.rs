@@ -7,7 +7,7 @@ use crate::{
         encode_message_page, LogicalAssetAliasMetadata, LogicalOwnerHead, LogicalOwnerLocator,
         LogicalRecordEnvelope, LogicalRecordLocator,
     },
-    persistent_store::{external_storage_state, sync_selection},
+    persistent_store::sync_selection,
 };
 use risunest_external_storage_format::format::{fingerprint, library_fingerprint_domain};
 use serde_json::json;
@@ -281,72 +281,6 @@ fn external_snapshot_restores_archived_character_state_and_payload_references() 
     assert_eq!(archived.asset_hashes.len(), 1);
     store.finish_prepared_replace(prepared).unwrap();
     assert!(store.read_character("character", None).is_err());
-}
-
-#[test]
-fn external_snapshot_stage_feeds_atomic_normal_receive_activation() {
-    let (directory, mut store) = open_store();
-    let staging = directory.path().join("download");
-    fs::create_dir(&staging).unwrap();
-    let epoch = sync_selection::read(&store.connection).unwrap().epoch;
-    let tx = store.connection.transaction().unwrap();
-    sync_selection::select(
-        &tx,
-        &epoch,
-        &sync_selection::SyncTarget::External("connection".into()),
-    )
-    .unwrap();
-    tx.commit().unwrap();
-    let identity = sync_selection::identity(&store.connection).unwrap();
-    let tx = store.connection.transaction().unwrap();
-    external_storage_state::prepare_receive(
-        &tx,
-        &external_storage_state::ReceiveIntent {
-            job_id: "receive",
-            connection_id: "connection",
-            repository_id: "repository",
-            snapshot_id: "snapshot",
-            commit_id: "commit",
-            authenticated_head: "head-token",
-            identity: &identity,
-        },
-    )
-    .unwrap();
-    tx.commit().unwrap();
-
-    let (root, root_hash) = root_record(&staging, "remote-sync");
-    let hashes = BTreeMap::from([(root.key.clone(), root_hash)]);
-    let scope_id = library_fingerprint_domain();
-    let fingerprint = fingerprint(&scope_id, &hashes);
-    let prepared = store
-        .prepare_external_snapshot_application(
-            &application(&staging, &scope_id, &fingerprint, identity.revision),
-            [Ok(root)],
-            std::iter::empty(),
-        )
-        .unwrap();
-    store.finish_external_receive(prepared, "receive", &Default::default()).unwrap();
-
-    let after = sync_selection::identity(&store.connection).unwrap();
-    assert_eq!(after.revision, identity.revision + 1);
-    assert_eq!(after.library_epoch, identity.library_epoch);
-    assert!(
-        !sync_selection::read(&store.connection)
-            .unwrap()
-            .decision_required
-    );
-    let (snapshot, phase): (String, String) = store
-        .connection
-        .query_row(
-            "SELECT snapshot_id,(SELECT phase FROM external_storage_jobs WHERE id='receive') FROM external_storage_bases",
-            [],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )
-        .unwrap();
-    assert_eq!(
-        (snapshot.as_str(), phase.as_str()),
-        ("snapshot", "complete")
-    );
 }
 
 /// A local body that was changed under its own name is not silently accepted
@@ -778,86 +712,6 @@ fn a_capture_of_a_received_library_renames_every_record_holding_a_local_view_fie
     let character = "r1:character:WyJjaGFyYWN0ZXIiXQ";
     assert_ne!(captured["r1:root"], named["r1:root"]);
     assert_ne!(captured[character], named[character]);
-}
-
-fn prepare_receive_intent(store: &mut PersistentStore) -> sync_selection::CaptureIdentity {
-    let epoch = sync_selection::read(&store.connection).unwrap().epoch;
-    let tx = store.connection.transaction().unwrap();
-    sync_selection::select(
-        &tx,
-        &epoch,
-        &sync_selection::SyncTarget::External("connection".into()),
-    )
-    .unwrap();
-    tx.commit().unwrap();
-    let identity = sync_selection::identity(&store.connection).unwrap();
-    let tx = store.connection.transaction().unwrap();
-    external_storage_state::prepare_receive(
-        &tx,
-        &external_storage_state::ReceiveIntent {
-            job_id: "receive",
-            connection_id: "connection",
-            repository_id: "repository",
-            snapshot_id: "snapshot",
-            commit_id: "commit",
-            authenticated_head: "head-token",
-            identity: &identity,
-        },
-    )
-    .unwrap();
-    tx.commit().unwrap();
-    identity
-}
-
-fn receive_root(store: &mut PersistentStore, staging: &Path, marker: &str) -> BTreeMap<String, String> {
-    let identity = prepare_receive_intent(store);
-    let (root, root_hash) = root_record(staging, marker);
-    let hashes = BTreeMap::from([(root.key.clone(), root_hash)]);
-    let scope_id = library_fingerprint_domain();
-    let expected = fingerprint(&scope_id, &hashes);
-    let map: BTreeMap<String, String> = hashes
-        .iter()
-        .map(|(key, hash)| (key.clone(), hex::encode(hash)))
-        .collect();
-    let prepared = store
-        .prepare_external_snapshot_application(
-            &application(staging, &scope_id, &expected, identity.revision),
-            [Ok(root)],
-            std::iter::empty(),
-        )
-        .unwrap();
-    store
-        .finish_external_receive(prepared, "receive", &map)
-        .unwrap();
-    map
-}
-
-#[test]
-fn a_receive_leaves_behind_what_the_snapshot_named_under_each_key() {
-    let (directory, mut store) = open_store();
-    let staging = directory.path().join("download");
-    fs::create_dir(&staging).unwrap();
-    let map = receive_root(&mut store, &staging, "remote-sync");
-    assert_eq!(store.external_base_records("connection").unwrap(), Some(map));
-    // A view is a view of one connection's base, not of the library at large.
-    assert_eq!(store.external_base_records("other").unwrap(), None);
-}
-
-/// The library no longer holds what the base names once the user changes it,
-/// so the rows stop being a view of it and have to read as absent.
-#[test]
-fn a_local_edit_after_a_receive_leaves_no_view() {
-    let (directory, mut store) = open_store();
-    let staging = directory.path().join("download");
-    fs::create_dir(&staging).unwrap();
-    receive_root(&mut store, &staging, "remote-sync");
-    let revision = store.revision().unwrap();
-    let commit = serde_json::from_value(
-        json!({"expectedRevision": revision, "root": {"marker":"newer-local"}}),
-    )
-    .unwrap();
-    store.commit(&commit).unwrap();
-    assert_eq!(store.external_base_records("connection").unwrap(), None);
 }
 
 /// A snapshot of `characters` characters, each with one conversation of one

@@ -28,6 +28,14 @@ export interface MeasurementOptions {
     sampleMemory?(): Promise<{ peakRssBytes: number; source: string }>
     beforeRestore?(prepared: Record<string, unknown>): Promise<void>
     afterRestore?(terminal: Record<string, unknown>): Promise<void>
+    onReadbackProgress?(progress: ReadbackProgress): void
+}
+export interface ReadbackProgress {
+    stage: 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14
+    index: number
+    readReturned: number
+    hashVerified: number
+    messageCount: number
 }
 export async function runLegacyRestoreMeasurement(options: MeasurementOptions) {
     await options.assertIsolatedHarness()
@@ -113,20 +121,37 @@ export async function runLegacyRestoreMeasurement(options: MeasurementOptions) {
         throw new Error('Restore result counts differ from the generated fixture')
     // Read one bounded conversation at a time, after the measurement interval ends.
     let messages = 0
+    let readReturned = 0
+    let hashVerified = 0
+    const progress = (stage: ReadbackProgress['stage'], index: number) =>
+        options.onReadbackProgress?.({ stage, index, readReturned, hashVerified, messageCount: messages })
     for (let index = 0; index < plan.characterCount; index++) {
         const expected = fixtureCharacter(plan, index)
+        progress(4, index)
         const read = await invoke<{ value: { message: LegacyMessage[] } }>('pds_read_conversation', {
             characterId: expected.chaId, conversationId: expected.chats[0].id,
         })
+        readReturned++
+        progress(5, index)
         if (!read || await hash(messageProjection(read.value.message)) !== hashes[index])
             throw new Error('Restored synthetic message hash mismatch')
         messages += read.value.message.length
+        hashVerified++
+        progress(6, index)
     }
     if (messages !== plan.messageCount) throw new Error('Restored synthetic message count mismatch')
+    progress(7, plan.characterCount)
     await invoke('native_file_job_forget', { jobId: job.jobId })
+    progress(8, plan.characterCount)
     const complete = { ...measurement, phase: 'verified', verifiedMessageCount: messages, verifiedCharacterCount: hashes.length }
+    progress(9, plan.characterCount)
     await options.report(complete)
+    progress(10, plan.characterCount)
+    progress(11, plan.characterCount)
     await remove(path)
+    progress(12, plan.characterCount)
+    progress(13, plan.characterCount)
     await remove(root)
+    progress(14, plan.characterCount)
     return complete
 }

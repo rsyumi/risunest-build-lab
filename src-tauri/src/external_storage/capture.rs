@@ -113,7 +113,7 @@ impl BackupDependencySpool {
         }
         let role = match role {
             crate::persistent_store::external_capture::BackupBodyRole::Control if bytes.len()>risunest_sync_wire::MAX_METADATA_BYTES => {
-                crate::persistent_store::external_capture::verified_large_message_page(bytes)?;3
+                crate::persistent_store::external_capture::verified_oversized_control(bytes)?;3
             },
             crate::persistent_store::external_capture::BackupBodyRole::Control => 1,
             crate::persistent_store::external_capture::BackupBodyRole::Payload => 2,
@@ -146,7 +146,7 @@ impl BackupDependencySpool {
         let bytes:Vec<u8>=self.db.query_row("SELECT body FROM bodies WHERE hash=?1",[hash],|row|row.get(0))?;
         let domain=if expected_role==1 {"native_backup_spool_control_read"}else{"native_backup_spool_payload_read"};
         if bytes.len() as i64!=length || crate::persistent_store::external_capture::hash_backup_body(&bytes,domain)!=hash {return Err(invalid("Backup dependency spool integrity failed"))}
-        if role==3 {crate::persistent_store::external_capture::verified_large_message_page(&bytes)?;}
+        if role==3 {crate::persistent_store::external_capture::verified_oversized_control(&bytes)?;}
         Ok(Some(bytes))
     }
     pub(crate) fn visit(&self,visitor:&mut dyn FnMut(&str,&[u8],crate::persistent_store::external_capture::BackupBodyRole)->Result<()>) -> Result<()> {
@@ -167,7 +167,7 @@ impl BackupDependencySpool {
                 _ => return Err(invalid("Backup dependency role is invalid")),
             };
             if bytes.len() as i64!=length || crate::persistent_store::external_capture::hash_backup_body(&bytes,"native_backup_spool_read") != hash {return Err(invalid("Backup dependency spool integrity failed"))}
-            if stored_role==3 {crate::persistent_store::external_capture::verified_large_message_page(&bytes)?;}
+            if stored_role==3 {crate::persistent_store::external_capture::verified_oversized_control(&bytes)?;}
             visitor(&hash,&bytes,role)?;
         }
         Ok(())
